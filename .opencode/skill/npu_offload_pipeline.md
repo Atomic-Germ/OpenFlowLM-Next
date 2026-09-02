@@ -517,6 +517,58 @@ output backend for safetensors manifests and generated kernel/build metadata.
 
 ---
 
+## Repository-Wide Binary Inventory (2026-09-02)
+
+Use the checked-in inventory utility instead of ad hoc shell pipelines:
+
+```bash
+python utilities/binary-inventory/inventory.py
+python utilities/binary-inventory/inventory.py \
+  --all --output docs/precompiled_artifacts_all.json
+```
+
+The shipping surface (`src/lib`, `src/xclbins`) contains 386 artifacts totaling
+480,732,285 bytes:
+
+- 222 XCLBINs in 38 model directories, but only 106 unique XCLBIN payloads.
+- 139 closed engine/primitive artifacts across ELF, PE DLL, and COFF library
+  forms.
+- 23 third-party Windows runtime artifacts.
+- 2 AIEBU runtime-support archives.
+
+All 222 shipping XCLBINs lack `BUILD_METADATA`; they expose only the standard
+AIE partition/connectivity sections. Do not assume exact original shapes or
+compile flags can be recovered from them. Derive replacements from public
+model configs and architecture, host API/symbol evidence, controlled shape
+experiments, and CPU/binary-oracle validation.
+
+Seven groups of complete XCLBIN directories are byte-identical. Fine-tunes and
+derivatives must link to family/shape bundles rather than ship copied kernels.
+See `docs/precompiled_replacement_map.md` for the exact groups and the 18
+recommended shipping bundle boundaries. The raw evidence is in
+`docs/precompiled_artifacts.json`.
+
+Host-library findings:
+
+- `q4_npu_eXpress`/`SafeTensors` is the highest-fan-out closed dependency.
+- `mha` is the largest source-interface gap because no public header exists.
+- Normal model engines implement `causal_lm`; Qwen Omni and Whisper require
+  distinct contracts.
+- XRT has 24 ELF files and HRX has 23; HRX lacks Gemma4-12B and includes an
+  extra `libdequant_new.so`, so backend directories are not symmetric.
+- HRX ELF files retain absolute build-machine RUNPATHs; never treat those paths
+  as source or deployment requirements.
+- An engine is not fully removed until installer and standalone-test files are
+  checked. The current embedding cleanup still has `gemma_embedding.dll`
+  references in Wix/Inno and closed source/link references in
+  `src/test/gemma_embedding/{CMakeLists.txt,Makefile}`.
+
+New model builders extend `utilities/q4nx-build`. Reuse its architecture
+detection, tensor mappings, and layout handling; add open output backends rather
+than creating a separate converter.
+
+---
+
 ## References
 
 - mlir-aie v1.3.4 whole_array: `programming_examples/basic/matrix_multiplication/whole_array/whole_array.py`
