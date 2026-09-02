@@ -1,0 +1,54 @@
+---
+layout: default
+---
+
+<section class="section section--docs">
+  <div class="section__inner docs-layout">
+    <aside class="docs-sidebar" aria-label="Documentation navigation">
+      <div class="docs-sidebar__header">
+        <p class="kicker">Docs</p>
+        <h1 class="headline-sm">{{ page.title | default: "Documentation" }}</h1>
+        <div class="docs-search">
+          <label class="visually-hidden" for="docs-search-input">Search docs</label>
+          <input
+            id="docs-search-input"
+            type="search"
+            placeholder="Search docs"
+            autocomplete="off"
+            spellcheck="false"
+            class="docs-search__input"
+            data-docs-search-input
+          />
+          <div class="docs-search__results" data-docs-search-results aria-label="Search results"></div>
+        </div>
+      </div>
+      <nav class="docs-nav">
+        {% for entry in site.docs_nav %}
+        <div class="docs-nav__group">
+          {% if entry.url %}
+          <a href="{{ entry.url | relative_url }}" class="docs-nav__link{% if entry.url == page.url %} is-active{% endif %}">
+            {{ entry.label }}
+          </a>
+          {% else %}
+          <p class="docs-nav__label">{{ entry.label }}</p>
+          {% endif %}
+          {% if entry.children %}
+          <div class="docs-nav__children">
+            {% for child in entry.children %}
+            <a href="{{ child.url | relative_url }}"
+              class="docs-nav__sublink{% if child.url == page.url %} is-active{% endif %}">
+              {{ child.label }}
+            </a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </nav>
+    </aside>
+    <article class="docs-content">
+      {{ content }}
+    </article>
+  </div>
+</section>
+

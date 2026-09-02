@@ -1,0 +1,11 @@
+out
+build
+.vscode
+.vs/
+include/.model_list.hpp.un~
+
+include/model_list.hpp~
+
+inno/.flm.iss.un~
+
+*.csv

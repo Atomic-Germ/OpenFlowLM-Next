@@ -1,0 +1,12 @@
+[submodule "third_party/tokenizers-cpp"]
+	path = third_party/tokenizers-cpp
+	url = https://github.com/mlc-ai/tokenizers-cpp
+[submodule "utilities/flm-add"]
+	path = utilities/flm-add
+	url = https://github.com/Atomic-Germ/flm-add
+[submodule "utilities/q4nx-build"]
+	path = utilities/q4nx-build
+	url = https://github.com/Atomic-Germ/q4nx-build
+[submodule "utilities/flm-test"]
+	path = utilities/flm-test
+	url = https://github.com/Atomic-Germ/flm-test

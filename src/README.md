@@ -1,0 +1,177 @@
+# FastFlowLM Release
+
+Public version.
+
+## Installation & Deployment
+
+### Prerequisites
+This application requires the **Microsoft Visual C++ Redistributable for Visual Studio 2015-2022** to run on target computers.
+
+### Quick Installation
+1. **Download Visual C++ Redistributable:**
+   - x64: https://aka.ms/vs/17/release/vc_redist.x64.exe
+   - x86: https://aka.ms/vs/17/release/vc_redist.x86.exe
+
+2. **Install as Administrator:**
+   - Run the downloaded installer as Administrator
+   - Restart computer if prompted
+
+3. **Alternative installation methods:**
+   ```powershell
+   # Using Windows Package Manager
+   winget install Microsoft.VCRedist.2015+.x64
+   
+   # Using Chocolatey
+   choco install vcredist140
+   ```
+
+
+### Building with Static Linking (Recommended)
+To avoid the MSVCP140.dll dependency entirely, build with static linking:
+
+```bash
+# Download submodule (tokenizer)
+git submodule update --init --recursive
+
+# Clean previous build
+rm -rf build/
+
+# Configure with static linking
+cmake -B build -S . -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+# Build
+cmake --build build --config Release
+```
+
+**Comprehensive Static Linking (New):**
+The CMakeLists.txt now includes comprehensive static linking that attempts to statically link:
+- Visual C++ Runtime libraries
+- Windows system libraries (kernel32, user32, etc.)
+- Network libraries (ws2_32, wininet, etc.)
+- Cryptography libraries (crypt32, bcrypt, etc.)
+
+```bash
+# Build with comprehensive static linking
+cmake -B build -S .
+cmake --build build --config Release
+
+# Check remaining DLL dependencies
+cmake --build build --target check_dependencies
+```
+
+**Note:** Some custom libraries (XRT, NPU libraries) may still require DLLs if static versions aren't available.
+
+### Static Build (Portable Binary)
+
+FastFlowLM can be built as a portable static binary with XRT and FFmpeg bundled in. This eliminates the need for system dependencies and creates a truly self-contained executable.
+
+**Simple static build:**
+
+```bash
+# Use the linux-static preset
+cmake --preset linux-static
+cmake --build build -j$(nproc)
+```
+
+This will:
+1. Check if XRT and FFmpeg are installed via pkg-config
+2. If not found, automatically fetch from source:
+   - XRT (v2.21.75)
+   - FFmpeg (v7.1)
+3. Build both as static libraries
+4. Link them into the flm binary
+
+**What gets statically linked:**
+- ✅ XRT (Xilinx Runtime)
+- ✅ FFmpeg (libavformat, libavcodec, libavutil, libswscale, libswresample)
+
+**What remains dynamic:**
+- XDNA driver plugin (runtime plugin - see below)
+- Model-specific libraries (llama_npu, qwen_npu, etc.)
+- System libraries (libc, libm, etc.)
+
+**Manual options:**
+
+```bash
+# Enable static build manually
+cmake --preset linux-default -DFLM_STATIC_BUILD=ON
+cmake --build build -j$(nproc)
+```
+
+**Customizing source versions:**
+
+```bash
+cmake --preset linux-static \
+  -DXRT_GIT_TAG=2.21.75 \
+  -DFFMPEG_GIT_TAG=n7.1
+cmake --build build -j$(nproc)
+```
+
+**Benefits:**
+- ✅ Maximum portability - fewer system dependencies
+- ✅ No system XRT or FFmpeg installation required
+- ✅ Reproducible builds with pinned versions
+- ✅ Simpler deployment
+- ✅ Works across different Linux distributions
+
+**Notes:**
+- First build takes longer (~10-15 minutes) as dependencies are compiled
+- Subsequent builds are much faster (dependencies are cached)
+- Binary size increases by ~20MB due to embedded libraries
+- Requires build tools (git, gcc, cmake, make) during build
+- When static build is disabled, uses system packages
+
+**XDNA Driver Plugin:**
+The XDNA userspace plugin (`libxrt_driver_xdna.so.2`) is a runtime plugin that XRT loads dynamically. It is NOT statically linked. You need to either:
+- Install from system packages: `sudo apt install libxrt-npu2` (Ubuntu/Debian)
+- Have the plugin in `/usr/lib/` or alongside the binary in `lib/`
+- XRT will automatically discover and load the plugin at runtime
+
+### Creating Deployment Package
+Use the provided deployment script:
+
+```powershell
+# Create deployment package
+.\deploy.ps1
+
+# Or specify custom directories
+.\deploy.ps1 -BuildDir "build" -OutputDir "deploy"
+```
+
+The deployment package will include:
+- `flm.exe` - Main executable
+- All required DLLs from `lib/` directory
+- `model_list.json` - Model configuration
+- `INSTALLATION.md` - Installation instructions
+- `run_flm.bat` - Easy execution script
+
+### Troubleshooting
+
+**"MSVCP140.dll not found" error:**
+1. Install the Visual C++ Redistributable (see Prerequisites above)
+2. Ensure you're using the correct architecture (x64/x86)
+3. Try running as Administrator
+4. Check if antivirus is blocking DLL files
+
+**Other common issues:**
+- If you get "VCRUNTIME140.dll not found", install the same Visual C++ Redistributable
+- For "libcurl.dll not found", ensure all DLLs from the `lib/` directory are present
+- For AMD XDNA/GPU related errors, ensure proper drivers are installed
+
+**Finding Static Library Alternatives:**
+Use the provided script to identify static library alternatives:
+```powershell
+.\find_static_libs.ps1
+```
+
+This will help you find static versions of your custom libraries to further reduce DLL dependencies.
+
+### Development
+```bash
+# Build for development
+cmake -B build -S .
+cmake --build build --config Debug
+
+# Run tests (if available)
+ctest --test-dir build
+```

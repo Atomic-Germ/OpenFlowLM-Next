@@ -1,0 +1,58 @@
+---
+layout: page
+title: "Benchmarks"
+permalink: /benchmarks/
+description: "Transparent Ryzen AI telemetry for chat, multimodal, and agent workloads."
+sections:
+  - type: hero
+    kicker: "Benchmarks"
+    title: "Measured on real laptops."
+    body: |
+      Every FastFlowLM release is validated on Ryzen™ AI NPUs.
+      We publish the results in `docs/benchmarks` so teams can compare apples-to-apples.
+      
+      The runtime extends AMD’s native 2K context limit to 256K tokens for long-context LLMs and VLMs and, in power
+      efficiency tests, consumes 67.2× less energy per token than the integrated GPU and 222.9× less energy per token than the CPU on the same
+      chip while holding higher throughput.
+    ctas:
+      - label: "View benchmark docs"
+        href: "/docs/benchmarks/"
+        style: primary
+    right:
+      metrics:
+        - label: "GPT-OSS 20B"
+          value: "19 tps"
+          desc: "AMD Ryzen™ AI 7 350 with 32 GB DRAM"
+        - label: "Qwen 3 0.6B"
+          value: "80 tps"
+          desc: "Prefill speed: 1,356 tps with 2K prompt"
+        - label: "Gemma3 1B"
+          value: "66 tps"
+          desc: "Prefill speed: 1,657 tps with 16K prompt"
+
+  # - type: media
+  #   variant: alt
+  #   kicker: "Llama 3.2 on Ryzen™ AI"
+  #   title: "Prefill + decoding throughput across 256K tokens"
+  #   gallery:
+  #     - src: "/assets/bench/llama3-2-3b.png"
+  #       alt: "Llama 3.2 3B prefill throughput on the Ryzen AI NPU"
+  #     - src: "/assets/bench/llama3-2-3b-decoding.png"
+  #       alt: "Llama 3.2 3B decoding throughput chart"
+  #   items:
+  #     - heading: "Long-context ready"
+  #       body: "Screenshots are taken straight from the long-context regression run in `docs/benchmarks`."
+  #     - heading: "Laptop-verified"
+  #       body: "Instrumentation overlays remain visible from the Ryzen™ AI 9 HX 370 Halo reference design capture."
+
+  - type: media
+    variant: alt
+    kicker: "Gemma3 4B Vision"
+    title: "On-device power efficiency (Tokens/s/Watt or Tokens/Joule)"
+    media:
+      src: "/assets/bench/gemma3-4b.png"
+      alt: "Gemma3 4B benchmark overview of power efficiency (TPS/W) for both prefill and decoding"
+      title: "Ultra-high power efficiency"
+
+---
+

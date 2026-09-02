@@ -1,0 +1,120 @@
+<section{% if section.id %} id="{{ section.id }}"{% endif %}
+    class="section{% if section.variant %} section--{{ section.variant }}{% endif %}">
+    <div class="section__inner">
+        <div class="section-block{% if section.panel %} section-block--panel{% endif %}">
+            {% if section.kicker %}
+            <p class="kicker">{{ section.kicker }}</p>
+            {% endif %}
+
+            {% if section.title %}
+            <h2 class="headline-md">{{ section.title }}</h2>
+            {% endif %}
+
+            {% if section.body %}
+            <div class="copy-md">
+                {{ section.body | markdownify }}
+            </div>
+            {% endif %}
+
+            {% if section.items %}
+            <ul class="feature-list">
+                {% for item in section.items %}
+                <li class="feature-list__item">
+                    <span class="feature-list__bullet"></span>
+                    <div>
+                        {% if item.heading %}
+                        <strong>{{ item.heading }}</strong>
+                        {% endif %}
+                        {% if item.body %}
+                        <div class="copy-md">
+                            {{ item.body | markdownify }}
+                        </div>
+                        {% endif %}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if section.stats %}
+            <ul class="stat-list">
+                {% for stat in section.stats %}
+                <li>
+                    {% if stat.label %}
+                    <p class="stat-list__label">{{ stat.label }}</p>
+                    {% endif %}
+                    {% if stat.value %}
+                    <p class="stat-list__value">{{ stat.value }}</p>
+                    {% endif %}
+                    {% if stat.body %}
+                    <p class="copy-md">{{ stat.body }}</p>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if section.pills %}
+            <div class="pill-list">
+                {% for pill in section.pills %}
+                {% assign pill_label = pill.label | default: pill %}
+                {% assign pill_href = pill.href %}
+                {% if pill_href %}
+                <a class="pill-list__item"
+                    href="{% if pill_href contains '://' %}{{ pill_href }}{% else %}{{ pill_href | relative_url }}{% endif %}"
+                    {% if pill.external %}target="_blank" rel="noreferrer" {% endif %}>
+                    {{ pill_label }}
+                </a>
+                {% else %}
+                <span class="pill-list__item">{{ pill_label }}</span>
+                {% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if section.metric_cards %}
+            {% for metric in section.metric_cards %}
+            <div class="metric-card">
+                {% if metric.label %}
+                <p class="metric-card__label">{{ metric.label }}</p>
+                {% endif %}
+                {% if metric.value %}
+                <p class="metric-card__value">{{ metric.value }}</p>
+                {% endif %}
+                {% if metric.desc %}
+                <p class="metric-card__desc">{{ metric.desc }}</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            {% if section.code_blocks %}
+            {% for code in section.code_blocks %}
+            <div class="code-card">
+                <div class="code-card__header">
+                    <span class="code-card__dot"></span>
+                    <span class="code-card__dot"></span>
+                    <span class="code-card__dot"></span>
+                    {% if code.title %}
+                    <span class="code-card__title">{{ code.title }}</span>
+                    {% endif %}
+                </div>
+                <pre><code>{{ code.content | strip | escape }}</code></pre>
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            {% if section.ctas %}
+            <div class="btn-row">
+                {% for cta in section.ctas %}
+                <a class="btn {% if cta.style == 'primary' %}btn--primary{% else %}btn--ghost{% endif %}"
+                    href="{% if cta.href contains '://' or cta.external %}{{ cta.href }}{% else %}{{ cta.href | relative_url }}{% endif %}"
+                    {% if cta.external %}target="_blank" rel="noreferrer" {% endif %}>
+                    {{ cta.label }}
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>

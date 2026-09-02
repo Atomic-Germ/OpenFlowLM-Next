@@ -1,0 +1,104 @@
+<section{% if section.id %} id="{{ section.id }}"{% endif %} class="section{% if section.variant %} section--{{ section.variant }}{% endif %}">
+  <div class="section__inner">
+    {% if section.kicker or section.title or section.body %}
+      <div class="section-header">
+        {% if section.kicker %}
+          <p class="kicker">{{ section.kicker }}</p>
+        {% endif %}
+        {% if section.title %}
+          <h2 class="headline-md">{{ section.title }}</h2>
+        {% endif %}
+        {% if section.body %}
+          <div class="copy-md">
+            {{ section.body | markdownify }}
+          </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <article class="demo-panel">
+      {% if section.media and section.media.src %}
+        <div class="demo-panel__media">
+          {% if section.media.href %}
+            <a href="{{ section.media.href }}" target="_blank" rel="noopener noreferrer" class="demo-panel__media-link">
+              <img src="{% if section.media.src contains '://' %}{{ section.media.src }}{% else %}{{ section.media.src | relative_url }}{% endif %}"
+                alt="{{ section.media.alt | default: section.title | default: 'Demo preview' }}" loading="lazy" />
+            </a>
+          {% else %}
+            <img src="{% if section.media.src contains '://' %}{{ section.media.src }}{% else %}{{ section.media.src | relative_url }}{% endif %}"
+              alt="{{ section.media.alt | default: section.title | default: 'Demo preview' }}" loading="lazy" />
+          {% endif %}
+        </div>
+      {% endif %}
+
+      <div class="demo-panel__meta">
+        {% if section.media and section.media.kicker %}
+          <p class="kicker">{{ section.media.kicker }}</p>
+        {% endif %}
+
+        {% if section.media and section.media.title %}
+          <h3 class="headline-sm">{{ section.media.title }}</h3>
+        {% endif %}
+
+        {% if section.media and section.media.body %}
+          <div class="copy-md">
+            {{ section.media.body | markdownify }}
+          </div>
+        {% endif %}
+
+        {% if section.media and section.media.items %}
+          <ul class="feature-list">
+            {% for item in section.media.items %}
+              <li class="feature-list__item">
+                <span class="feature-list__bullet"></span>
+                <div>
+                  {% if item.heading %}
+                    <strong>{{ item.heading }}</strong>
+                  {% endif %}
+                  {% if item.body %}
+                    <div class="copy-md">
+                      {{ item.body | markdownify }}
+                    </div>
+                  {% endif %}
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    </article>
+
+    {% if section.gallery %}
+      {% assign carousel_classes = section.gallery_class %}
+      <div class="media-carousel{% if carousel_classes %} {{ carousel_classes }}{% endif %}" data-carousel>
+        <button class="media-carousel__nav media-carousel__nav--prev" type="button" aria-label="Previous image" data-carousel-prev>
+          <span aria-hidden="true">&lsaquo;</span>
+        </button>
+        <div class="media-carousel__viewport" data-carousel-viewport>
+          <div class="media-carousel__track" data-carousel-track>
+            {% for image in section.gallery %}
+              <figure class="media-carousel__slide" data-carousel-slide>
+                <img
+                  src="{% if image.src contains '://' %}{{ image.src }}{% else %}{{ image.src | relative_url }}{% endif %}"
+                  alt="{{ image.alt | default: section.title | default: 'Benchmark capture' }}"
+                  loading="lazy" />
+                {% if image.caption %}
+                  <figcaption>{{ image.caption }}</figcaption>
+                {% endif %}
+              </figure>
+            {% endfor %}
+          </div>
+        </div>
+        <button class="media-carousel__nav media-carousel__nav--next" type="button" aria-label="Next image" data-carousel-next>
+          <span aria-hidden="true">&rsaquo;</span>
+        </button>
+        <div class="media-carousel__dots" data-carousel-dots>
+          {% for image in section.gallery %}
+            <button class="media-carousel__dot{% if forloop.first %} is-active{% endif %}" type="button" aria-label="Show slide {{ forloop.index }}" data-carousel-dot="{{ forloop.index0 }}"></button>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</section>
+
