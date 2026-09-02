@@ -15,10 +15,15 @@ The default inventory covers `src/lib` and `src/xclbins`:
 | Category | Count | Replacement policy |
 |---|---:|---|
 | XCLBIN NPU kernels | 222 | Recompile from open Iron/mlir-aie designs |
-| Closed engine/primitive binaries | 139 | Replace host implementation and both XRT/HRX builds |
+| Closed engine/primitive binaries | 133 | Replace host implementation and both XRT/HRX builds |
 | Third-party runtime binaries | 23 | Build or package from upstream open source |
 | Runtime support archives | 2 | Rebuild AIEBU from upstream source |
-| **Total** | **386** | **270 unique payloads, 480,732,285 bytes** |
+| **Total** | **380** | **264 unique payloads, 471,016,747 bytes** |
+
+EmbeddingGemma is now fully closed-binary removed: the `gemma_embedding`
+library and its XRT/HRX/Linux/Windows copies are gone, and installers and the
+standalone test use the open engine. This section reflects that post-cleanup
+state.
 
 `docs/precompiled_artifacts_all.json` additionally inventories archived copies
 and development instruction streams outside the shipping surface. Excluding
@@ -64,7 +69,7 @@ largest source gap because the repository has no declaration for its exported
 
 | Library | Models/components | Rough open replacement |
 |---|---|---|
-| `gemma_embedding` | EmbeddingGemma | Replaced by `src/open_embedding`; remove residual XRT/HRX/Windows binary copies after packaging no longer references them. |
+| `gemma_embedding` | EmbeddingGemma | Replaced by `src/open_embedding`; removed, including residual XRT/HRX/Windows binary copies and installer/test references. |
 | `gemma_text_npu` | Gemma3 text | First causal engine. Reuse Gemma3 math from open embedding; add causal masks, KV cache, prefill/decode, and LM head. |
 | `gemma_npu` | Gemma3 vision-language | Build on open Gemma3 text, then add SigLIP/vision encoder, projector, image payload, and multimodal RoPE/token placement. |
 | `llama_npu` | Llama3 1B/3B/8B and DeepSeek-Llama 8B | Implement standard GQA decoder with RoPE and KV cache; compile per hidden/intermediate/head shape. |
@@ -132,23 +137,37 @@ the family-bundle compiler.
 `Qwen3.5-OMNI-NPU2` has local XCLBINs but no `model_list.json` entry.
 EmbeddingGemma has a model entry but no closed XCLBIN directory.
 
-## Immediate Residual References
+## Completed: EmbeddingGemma Binary Removal
 
-The open EmbeddingGemma engine builds, but closed packaging/test references
-still prevent declaring the binary fully removed:
+The open EmbeddingGemma engine builds and the residual closed references are
+now removed:
 
-- `src/wix/flm.wxs` installs `gemma_embedding.dll`.
-- `src/inno/flm.iss` installs `gemma_embedding.dll`.
-- `src/test/gemma_embedding/CMakeLists.txt` links `gemma_embedding` and names
-  the deleted `modeling_gemma_embedding.cpp` source.
-- `src/test/gemma_embedding/Makefile` has the same deleted source/header and
-  `-lgemma_embedding` dependency.
-- XRT and HRX `.so`/`.dll`/`.lib` copies remain under `src/lib` even though the
-  main CMake target no longer links the library.
+- `src/wix/flm.wxs`: removed the `gemma_embedding.dll` component.
+- `src/inno/flm.iss`: removed the `gemma_embedding.dll` source entry.
+- `src/test/gemma_embedding/CMakeLists.txt`: no longer links `gemma_embedding`
+  or compiles the deleted `modeling_gemma_embedding.cpp`. It is now a
+  standalone open-engine target that links only Boost, threads, tokenizers-cpp,
+  and XRT.
+- `src/test/gemma_embedding/Makefile`: replaced the legacy closed-engine build
+  with a thin CMake wrapper.
+- `src/lib/xrt` and `src/lib/hrx`: removed all six residual
+  `gemma_embedding`/`libgemma_embedding` Linux and Windows binaries.
+- `src/test/gemma_embedding/test.cpp`: uses `open_embedding::Engine` directly.
 
-Remove these references and artifacts as a focused packaging/test cleanup,
-then verify both Windows installers and the standalone embedding test use the
-open engine before marking the replacement complete.
+Verified after removal:
+
+- Main XRT build succeeds: `cmake --build src/build -j4`.
+- Standalone embedding test builds: `/tmp/opencode/open-embedding-test3`.
+- `readelf -d` on the standalone test shows only
+  `libxrt_coreutil`, Boost, and system libraries. No closed engine library
+  appears in `NEEDED`.
+- Shipping inventory dropped from 386 to 380 artifacts and from 139 to 133
+  closed engine/primitive binaries.
+
+The shared test helper, `src/test/CMakeLists.txt`, still unconditionally links
+`q4_npu_eXpress`, `lm_head`, `dequant`, `gemm`, and `mha` for other model
+tests. Any future open-engine test must not use that helper until it is
+refactored to link those primitives conditionally.
 
 ## Third-Party Precompiled Files
 

@@ -14,22 +14,22 @@
     "xclbinutil": true
   },
   "summary": {
-    "artifact_count": 386,
-    "total_bytes": 480732285,
+    "artifact_count": 380,
+    "total_bytes": 471016747,
     "by_kind": {
-      "coff_import_or_static_library": 50,
-      "elf_shared_library": 47,
-      "pe_dll": 66,
+      "coff_import_or_static_library": 48,
+      "elf_shared_library": 45,
+      "pe_dll": 64,
       "static_archive": 1,
       "xclbin": 222
     },
     "by_ownership": {
-      "closed_engine_or_primitive": 139,
+      "closed_engine_or_primitive": 133,
       "closed_npu_kernel": 222,
       "runtime_support": 2,
       "third_party_runtime": 23
     },
-    "unique_payloads": 270,
+    "unique_payloads": 264,
     "duplicate_payload_groups": 37,
     "xclbin_bundle_count": 38,
     "identical_xclbin_bundle_groups": 7
@@ -145,22 +145,6 @@
       "ownership": "closed_engine_or_primitive",
       "size": 4817012,
       "sha256": "9c436e9d2cc1220a5ad249b62abff51ed83e82880a064aa0e939cdfbf9559ea4",
-      "file_description": "current ar archive"
-    },
-    {
-      "path": "src/lib/hrx/gemma_embedding.dll",
-      "kind": "pe_dll",
-      "ownership": "closed_engine_or_primitive",
-      "size": 836608,
-      "sha256": "914c11ef3494dffd3ebbca7d4fc1e24b209ae93b9f7d1e572f1d4915dcda89c9",
-      "file_description": "PE32+ executable for MS Windows 6.00 (DLL), x86-64, 6 sections"
-    },
-    {
-      "path": "src/lib/hrx/gemma_embedding.lib",
-      "kind": "coff_import_or_static_library",
-      "ownership": "closed_engine_or_primitive",
-      "size": 2813540,
-      "sha256": "79f382fdc2db6cf5b8f4a55a6c1416abda40a344f25ab941d69fc59d86120b49",
       "file_description": "current ar archive"
     },
     {
@@ -318,29 +302,6 @@
         "runpath": "/work/hrx-integration/.hrx-release/hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64/lib:/work/hrx-integration/.hrx-release/hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64/lib/rocm_sysdeps/lib",
         "defined_dynamic_symbols": 592,
         "undefined_dynamic_symbols": 190
-      }
-    },
-    {
-      "path": "src/lib/hrx/libgemma_embedding.so",
-      "kind": "elf_shared_library",
-      "ownership": "closed_engine_or_primitive",
-      "size": 377000,
-      "sha256": "0f33a9373308f2bb3b73c75ab66891a81a0c77208fec94bbc672b4027625ef1a",
-      "file_description": "ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=cfe82352bbfd4e5e6160cbc7c3cd1a104c1d06b7, not stripped",
-      "elf": {
-        "soname": null,
-        "needed": [
-          "libc.so.6",
-          "libgcc_s.so.1",
-          "libgomp.so.1",
-          "libhrx.so.0",
-          "libm.so.6",
-          "libpthread.so.0",
-          "libstdc++.so.6"
-        ],
-        "runpath": "/work/hrx-integration/.hrx-release/hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64/lib:/work/hrx-integration/.hrx-release/hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64/lib/rocm_sysdeps/lib",
-        "defined_dynamic_symbols": 363,
-        "undefined_dynamic_symbols": 144
       }
     },
     {
@@ -1186,22 +1147,6 @@
       "file_description": "current ar archive"
     },
     {
-      "path": "src/lib/xrt/gemma_embedding.dll",
-      "kind": "pe_dll",
-      "ownership": "closed_engine_or_primitive",
-      "size": 1556992,
-      "sha256": "85a29be0360832b78736566a60f733966810ba0320ebb4a5ba1a3ebbd9ec1c3c",
-      "file_description": "PE32+ executable for MS Windows 6.00 (DLL), x86-64, 6 sections"
-    },
-    {
-      "path": "src/lib/xrt/gemma_embedding.lib",
-      "kind": "coff_import_or_static_library",
-      "ownership": "closed_engine_or_primitive",
-      "size": 2081686,
-      "sha256": "8b6066435e0ba218053337c0d21349a6af18c8ce39abf96a3c04fad1efefb722",
-      "file_description": "current ar archive"
-    },
-    {
       "path": "src/lib/xrt/gemma_npu.dll",
       "kind": "pe_dll",
       "ownership": "closed_engine_or_primitive",
@@ -1357,28 +1302,6 @@
         "runpath": null,
         "defined_dynamic_symbols": 600,
         "undefined_dynamic_symbols": 279
-      }
-    },
-    {
-      "path": "src/lib/xrt/libgemma_embedding.so",
-      "kind": "elf_shared_library",
-      "ownership": "closed_engine_or_primitive",
-      "size": 2049712,
-      "sha256": "d1db797b2f0afba61049b37aacc57582f14bb1e584c6b1fa8df8cdfd02120694",
-      "file_description": "ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=b55a2ed9711bd5831edf59445730c4c24d8baf9d, not stripped",
-      "elf": {
-        "soname": null,
-        "needed": [
-          "ld-linux-x86-64.so.2",
-          "libc.so.6",
-          "libgcc_s.so.1",
-          "libm.so.6",
-          "libstdc++.so.6",
-          "libxrt_coreutil.so.2"
-        ],
-        "runpath": null,
-        "defined_dynamic_symbols": 398,
-        "undefined_dynamic_symbols": 259
       }
     },
     {

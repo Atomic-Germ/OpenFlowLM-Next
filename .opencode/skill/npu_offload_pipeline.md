@@ -558,10 +558,18 @@ Host-library findings:
   extra `libdequant_new.so`, so backend directories are not symmetric.
 - HRX ELF files retain absolute build-machine RUNPATHs; never treat those paths
   as source or deployment requirements.
-- An engine is not fully removed until installer and standalone-test files are
-  checked. The current embedding cleanup still has `gemma_embedding.dll`
-  references in Wix/Inno and closed source/link references in
-  `src/test/gemma_embedding/{CMakeLists.txt,Makefile}`.
+- An engine is not fully removed until installer, standalone test, and `src/lib`
+  binaries are checked. The EmbeddingGemma cleanup is now complete: installer
+  entries removed, the standalone test links only Boost/threads/tokenizers/XRT,
+  and all six `gemma_embedding` binaries are gone.
+- `src/test/CMakeLists.txt` unconditionally links `q4_npu_eXpress`, `lm_head`,
+  `dequant`, `gemm`, and `mha`. Do not use that helper for open-engine tests;
+  copy the standalone pattern from
+  `src/test/gemma_embedding/CMakeLists.txt` instead.
+- Shared typed buffers still depend on XRT types through `device_runtime.hpp`
+  and `buffer.hpp`, so even CPU-only open-engine tests currently need XRT
+  headers plus `xrt_coreutil` at link time. That is a header/runtime
+  dependency, not a closed engine dependency.
 
 New model builders extend `utilities/q4nx-build`. Reuse its architecture
 detection, tensor mappings, and layout handling; add open output backends rather
