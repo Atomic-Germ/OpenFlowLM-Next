@@ -17,6 +17,14 @@
 #include "npu_utils/npu_utils_matmul.hpp"
 #endif
 
+// Declared at global scope rather than including utils/utils.hpp: that header
+// pulls in the XRT-dependent buffer/typedef chain, and the engine only needs
+// this one resolver. Both the flm target and the standalone test link
+// common/utils.cpp.
+namespace utils {
+std::string find_xclbin_path();
+}
+
 namespace open_embedding {
 
 using json = nlohmann::json;
@@ -104,11 +112,64 @@ bool Engine::load(const std::string& model_dir) {
     return true;
 }
 
+// Two-tier NPU asset lookup.
+//
+// Established model families ship their compiled kernels with the application
+// (src/xclbins/<family>/npu_matmul_f32, installed under <xclbin_prefix>/xclbins),
+// exactly like the closed-source kernels, and are rebuilt at build time.
+//
+// A brand-new model may instead ship its own kernels inside its model directory.
+// That keeps the ability to distribute a prototype end to end before it is
+// promoted to a maintained family. The model-local copy wins when present.
+std::string Engine::pick_npu_asset_dir() const {
+    namespace fs = std::filesystem;
+
+    auto has_kernels = [](const fs::path& dir) {
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) return false;
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->path().extension() == ".xclbin") return true;
+        }
+        return false;
+    };
+
+    const fs::path local = fs::path(model_dir_) / "npu_matmul_f32";
+    if (has_kernels(local)) {
+        std::fprintf(stderr, "open_embedding: using model-local NPU kernels\n");
+        return local.string();
+    }
+
+    // find_xclbin_path() throws when no xclbin tree is installed. The open
+    // engine must not hard-require one: no kernels simply means CPU-only.
+    std::string prefix;
+    try {
+        prefix = utils::find_xclbin_path();
+    } catch (const std::exception&) {
+        prefix.clear();
+    }
+    if (!prefix.empty()) {
+        for (const char* family : {"Embedding-Gemma-300M-OpenNPU2", "embed-gemma"}) {
+            const fs::path cand = fs::path(prefix) / "xclbins" / family / "npu_matmul_f32";
+            if (has_kernels(cand)) {
+                std::fprintf(stderr, "open_embedding: using app family NPU kernels (%s)\n",
+                             family);
+                return cand.string();
+            }
+        }
+    }
+
+    std::fprintf(stderr, "open_embedding: no NPU matmul assets found\n");
+    return {};
+}
+
 bool Engine::load_npu() {
 #ifdef FLM_USE_OPEN_EMBEDDING_NPU
     if (std::getenv("FLM_NPU_DISABLE")) return false;
-    const std::string asset_dir =
-        (std::filesystem::path(model_dir_) / "npu_matmul_f32").string();
+    const std::string asset_dir = pick_npu_asset_dir();
+    if (asset_dir.empty()) {
+        std::fprintf(stderr, "open_embedding: running CPU-only\n");
+        return false;
+    }
     const char* dev_id = std::getenv("FLM_NPU_DEVICE_ID");
     npu_ = std::make_shared<NpuMatmul>();
     if (!npu_->init(asset_dir, dev_id ? dev_id : "")) {

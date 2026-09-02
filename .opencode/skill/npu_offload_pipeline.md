@@ -542,6 +542,59 @@ Remaining manual step: uploading the built directory to HuggingFace is not
 automated; a human creates the repo and pushes (`git lfs` or `huggingface-cli
 upload`). `ms_url` is intentionally empty until a ModelScope mirror exists.
 
+### NPU Kernel Distribution Policy (2026-09-02)
+
+Compiled kernels use the same two locations as the closed-source stack, but
+with an explicit escape hatch for new models.
+
+**Established families ship kernels with the application.**
+
+- Source of truth: `src/xclbins/<Model-Dir>/npu_matmul_f32/`, installed to
+  `<xclbin_prefix>/xclbins/<Model-Dir>/npu_matmul_f32/`.
+- These are built at build time from open Iron/mlir-aie designs, not
+  downloaded, and are not listed in the model's `files` list or
+  `model_info.json`. Model repos for established families contain weights and
+  configuration only.
+- `src/CMakeLists.txt` installs the whole `xclbins` tree, so adding a family
+  directory is enough; no install-rule change is needed.
+
+**New or prototype models may ship their own kernels.**
+
+- `q4nx-build --open-embedding --npu-assets <dir>` places kernels in the model
+  directory's `npu_matmul_f32/`, so a brand-new model works end to end before
+  it is promoted to a maintained family. Promote it later by moving the
+  kernels into `src/xclbins/`.
+
+**Lookup order in `Engine::pick_npu_asset_dir()`**
+
+1. `<model_dir>/npu_matmul_f32` — model-local override wins.
+2. `<xclbin_prefix>/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32`.
+3. `<xclbin_prefix>/xclbins/embed-gemma/npu_matmul_f32` — family fallback.
+
+`utils::find_xclbin_path()` **throws** when no xclbin tree is installed. The
+engine wraps that call in `try/catch` and degrades to CPU-only, because the
+open engine must never hard-require the xclbin tree. `find_xclbin_path()` is
+forward-declared in `engine.cpp` rather than pulling in `utils/utils.hpp`,
+which drags in the XRT-dependent buffer/typedef chain.
+
+Verified paths (cosine against the bf16 reference array in
+`src/test/gemma_embedding/test.cpp`):
+
+| Scenario | Result |
+|---|---|
+| App-installed family kernels | NPU enabled, 6 shapes, cosine 0.99775 |
+| Model-local kernels | NPU enabled, cosine 0.99775 |
+| No xclbin tree | graceful CPU-only, cosine 0.997711 |
+| `FLM_NPU_DISABLE=1` | CPU-only, cosine 0.997711 |
+
+The standalone embedding test defines `FLM_USE_OPEN_EMBEDDING_NPU=1` and
+compiles `open_embedding/npu_matmul.cpp` so the NPU path is actually exercised.
+Set `FLM_XCLBIN_PATH` to exercise app-family discovery without installing.
+
+Inventory classifiers treat `npu_matmul_f32` kernels as `open_npu_kernel`
+distinct from `closed_npu_kernel`, so our own built kernels are never counted
+as pending replacement work.
+
 ### Ambiguous/Generalized Parts (User Questions)
 
 > **Q1: Weight layout** — Are your projection weights stored as `[N,K]` (out-major, needs transpose) or `[K,N]` (row-major, direct use)?

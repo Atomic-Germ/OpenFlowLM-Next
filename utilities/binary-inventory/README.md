@@ -10,6 +10,9 @@ python utilities/binary-inventory/inventory.py
 The default output is `docs/precompiled_artifacts.json`. It includes:
 
 - path, size, SHA-256, format, and ownership classification;
+  `ownership` distinguishes `closed_npu_kernel` (pending replacement) from
+  `open_npu_kernel` (kernels we build and ship ourselves, under a family
+  directory's `npu_matmul_f32/`);
 - ELF SONAME, NEEDED entries, RUNPATH, and dynamic-symbol counts;
 - XCLBIN UUID, format version, sections, and BUILD_METADATA availability;
 - duplicate payload groups;

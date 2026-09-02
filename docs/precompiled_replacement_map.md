@@ -14,11 +14,16 @@ The default inventory covers `src/lib` and `src/xclbins`:
 
 | Category | Count | Replacement policy |
 |---|---:|---|
-| XCLBIN NPU kernels | 222 | Recompile from open Iron/mlir-aie designs |
+| Closed XCLBIN NPU kernels | 222 | Recompile from open Iron/mlir-aie designs |
+| Open XCLBIN NPU kernels | 24 | Already ours; shipped with the app, rebuilt at build time |
 | Closed engine/primitive binaries | 133 | Replace host implementation and both XRT/HRX builds |
 | Third-party runtime binaries | 23 | Build or package from upstream open source |
 | Runtime support archives | 2 | Rebuild AIEBU from upstream source |
-| **Total** | **380** | **264 unique payloads, 471,016,747 bytes** |
+| **Total** | **404** | **288 unique payloads, 472,115,761 bytes** |
+
+The 24 open kernels are the EmbeddingGemma `npu_matmul_f32` designs (6 shapes
+× 2 M pads, plus instruction streams). They are counted separately by the
+inventory tool so work we have already done is never listed as pending.
 
 EmbeddingGemma is now fully closed-binary removed: the `gemma_embedding`
 library and its XRT/HRX/Linux/Windows copies are gone, and installers and the
@@ -136,6 +141,28 @@ the family-bundle compiler.
 
 `Qwen3.5-OMNI-NPU2` has local XCLBINs but no `model_list.json` entry.
 EmbeddingGemma has a model entry but no closed XCLBIN directory.
+
+## NPU Kernel Distribution
+
+Compiled kernels follow the same two locations as the closed-source stack, with
+an escape hatch for new models.
+
+**Established families ship kernels with the application.** They live in
+`src/xclbins/<Model-Dir>/npu_matmul_f32/`, install to
+`<xclbin_prefix>/xclbins/<Model-Dir>/npu_matmul_f32/`, are built at build time,
+and are deliberately absent from a model's `files` list and `model_info.json`.
+Model repos carry weights and configuration only. `src/CMakeLists.txt` installs
+the whole `xclbins` tree, so promoting a family is just adding a directory.
+
+**New or prototype models may ship their own kernels** in the model directory's
+`npu_matmul_f32/` via `q4nx-build --open-embedding --npu-assets <dir>`, so a
+brand-new model works end to end before promotion. Promote it later by moving
+the kernels into `src/xclbins/`.
+
+Lookup order is model-local first, then the app family directory, then a
+`embed-gemma` family fallback. `utils::find_xclbin_path()` throws when no xclbin
+tree exists; the engine catches that and degrades to CPU-only, so the open
+engine never hard-requires the xclbin tree.
 
 ## Completed: EmbeddingGemma Binary Removal
 

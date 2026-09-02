@@ -14,24 +14,26 @@
     "xclbinutil": true
   },
   "summary": {
-    "artifact_count": 380,
-    "total_bytes": 471016747,
+    "artifact_count": 404,
+    "total_bytes": 472115761,
     "by_kind": {
       "coff_import_or_static_library": 48,
       "elf_shared_library": 45,
+      "instruction_stream": 12,
       "pe_dll": 64,
       "static_archive": 1,
-      "xclbin": 222
+      "xclbin": 234
     },
     "by_ownership": {
       "closed_engine_or_primitive": 133,
       "closed_npu_kernel": 222,
+      "open_npu_kernel": 24,
       "runtime_support": 2,
       "third_party_runtime": 23
     },
-    "unique_payloads": 264,
+    "unique_payloads": 288,
     "duplicate_payload_groups": 37,
-    "xclbin_bundle_count": 38,
+    "xclbin_bundle_count": 39,
     "identical_xclbin_bundle_groups": 7
   },
   "artifacts": [
@@ -2137,6 +2139,390 @@
       "xclbin": {
         "uuid": "65194040-8645-399f-f2a2-c9df5668e584",
         "version": "2.21.75",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_1152x768.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 10320,
+      "sha256": "89d1899b189ed45d58b51c7db980e4214cab744caee2bc1e0cb0a90cc26e4851",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_1152x768.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 68825,
+      "sha256": "de7cd96c77af415a20aece4d448fd81e7d92023f934c598ec33dc8e453ffe95a",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 68825 bytes, created Mon Aug 31 18:59:40 2026, uuid 5af6290b-2e76-07e2-a14f-a2f7fbe09457, 7 sections",
+      "xclbin": {
+        "uuid": "5af6290b-2e76-07e2-a14f-a2f7fbe09457",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_3072x768.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 10320,
+      "sha256": "86a66779de254b30a9ae598a70d0d5b3b522c282c685b1762edd5f068bcd46dc",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_3072x768.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 71390,
+      "sha256": "f52dbf345f4e9296c071cb52ab9c3d9c8c6ead4aae891b62bd0943a787a627c0",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 71390 bytes, created Mon Aug 31 18:59:40 2026, uuid f3b58640-c789-4228-15c9-e2a5fef9b659, 7 sections",
+      "xclbin": {
+        "uuid": "f3b58640-c789-4228-15c9-e2a5fef9b659",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x1152.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 10320,
+      "sha256": "ccdddcc69ad6b8fcc39378603eefd51582a60ace061061b6aa7ef4fde9acfd2f",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x1152.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "2791236422778dc67cab9b1ef69efeeb5a4a1194f425ca1509fe65749b40bf22",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:40 2026, uuid 6705381d-59c2-8e8c-832b-b4ce6f778832, 7 sections",
+      "xclbin": {
+        "uuid": "6705381d-59c2-8e8c-832b-b4ce6f778832",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x256.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 10320,
+      "sha256": "2b6eaa05364827f4661cc8ceccd080539d3e4e14b4a85df03f48514e3832eefd",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x256.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "da23a86bd733196b01ca6310bf8a0065efeae8c64d40f4c4b951037d54edfac6",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:40 2026, uuid 00fe17fb-da39-040c-191b-6cf8c3c567a9, 7 sections",
+      "xclbin": {
+        "uuid": "00fe17fb-da39-040c-191b-6cf8c3c567a9",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x3072.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 10320,
+      "sha256": "dd0021d5d7c5644071259ebd5305f1b31c47201cbe82253edd4a2a011dba9453",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x3072.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "105f16dbb80f16ecab566296bc692b1d503ac23183988ca100aeb5dad6b0523c",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:40 2026, uuid 02766960-bdfa-eb76-92c7-8cf714a0b433, 7 sections",
+      "xclbin": {
+        "uuid": "02766960-bdfa-eb76-92c7-8cf714a0b433",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x768.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 10320,
+      "sha256": "b05b7de726653248ce15ffc43d22de814f57d0e113129b53eb6427770ffcbb8d",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m2048_768x768.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "8b3d36505a3ee6a262606dc67a31234a7a1546224166cfdeb7d0ad90389d5792",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:41 2026, uuid fbb9382e-8ad6-4aa4-3c83-c9a8ccb70bf6, 7 sections",
+      "xclbin": {
+        "uuid": "fbb9382e-8ad6-4aa4-3c83-c9a8ccb70bf6",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_1152x768.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 2592,
+      "sha256": "855c01c13fc2172535063f817225768efd33987a053b54117d6c27ef6d75cd93",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_1152x768.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 68825,
+      "sha256": "ff3f9f703995add52d5ddaa15bc7b5c8eb321957ca8e4c1ea0dde049a5511dca",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 68825 bytes, created Mon Aug 31 18:59:34 2026, uuid fcf7f9ae-0c8c-c0b9-c265-cc25791bc274, 7 sections",
+      "xclbin": {
+        "uuid": "fcf7f9ae-0c8c-c0b9-c265-cc25791bc274",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_3072x768.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 2592,
+      "sha256": "873a21625e2e8a657387d8ebaf26c70aa382d5a02914490e6ee5d74f5ea3b23b",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_3072x768.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 71390,
+      "sha256": "1bab4ffaba09d5c6cf368dccc9593d5a7f500210d4a860d65e44a9e355285f93",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 71390 bytes, created Mon Aug 31 18:59:34 2026, uuid c8b6d0cb-8d58-324d-ee00-c6401343f76d, 7 sections",
+      "xclbin": {
+        "uuid": "c8b6d0cb-8d58-324d-ee00-c6401343f76d",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x1152.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 2592,
+      "sha256": "d1e97486d2793ac9ee9fa57d3a31c334f992abd88dc0083141e1b4311f930b6b",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x1152.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "8c31e6e5b89590dbcdb632f51fa5ceaf750a4c04e9c8db08d1315efd59884716",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:33 2026, uuid 6807d765-2579-c3f6-d75e-5659bbeb28a5, 7 sections",
+      "xclbin": {
+        "uuid": "6807d765-2579-c3f6-d75e-5659bbeb28a5",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x256.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 2592,
+      "sha256": "18ab8cf97363295bb952e3e04adab999bc408e95aaa0c5cc494dd3d68697bc8f",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x256.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "1eadff02a0f3f19057fdfb0b82304e98036c5867593666cd1db3dcfe9d55be3f",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:34 2026, uuid 17481b08-c632-6f71-015e-ab299951d8ef, 7 sections",
+      "xclbin": {
+        "uuid": "17481b08-c632-6f71-015e-ab299951d8ef",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x3072.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 2592,
+      "sha256": "94315a50efd771fe7f98e22b6000453b7fb41a98eaf49acc6be5628144249721",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x3072.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "fcc0ec8365b9196a69f1d0a47f7bedb8f2c0b43d4c45ff70e45a54b6e0b4fd9b",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:34 2026, uuid 6d9f4e16-b822-2023-c505-8650500809dd, 7 sections",
+      "xclbin": {
+        "uuid": "6d9f4e16-b822-2023-c505-8650500809dd",
+        "version": "2.26.0",
+        "generated_by": "<unknown>",
+        "kernels": "<unknown>",
+        "sections": [
+          "MEM_TOPOLOGY",
+          "AIE_PARTITION",
+          "EMBEDDED_METADATA",
+          "IP_LAYOUT",
+          "CONNECTIVITY",
+          "GROUP_CONNECTIVITY",
+          "GROUP_TOPOLOGY"
+        ],
+        "has_build_metadata": false
+      }
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x768.insts",
+      "kind": "instruction_stream",
+      "ownership": "open_npu_kernel",
+      "size": 2592,
+      "sha256": "f74ceb7e83a43419cf4f56612b95cece8d2e2fd6ebe28755113c43f0be953d7e",
+      "file_description": "data"
+    },
+    {
+      "path": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32/m512_768x768.xclbin",
+      "kind": "xclbin",
+      "ownership": "open_npu_kernel",
+      "size": 92639,
+      "sha256": "57f86a63cf264b7689812b1a788d54e6856f5d2701afa8c77bac82988e7d204b",
+      "file_description": "AMD/Xilinx accelerator AXLF (xclbin) file, 92639 bytes, created Mon Aug 31 18:59:34 2026, uuid 4d6fc5b6-3cf0-eabe-6057-939c24ecc7e9, 7 sections",
+      "xclbin": {
+        "uuid": "4d6fc5b6-3cf0-eabe-6057-939c24ecc7e9",
+        "version": "2.26.0",
         "generated_by": "<unknown>",
         "kernels": "<unknown>",
         "sections": [
@@ -7660,6 +8046,27 @@
         "mm.xclbin"
       ],
       "manifest_sha256": "db99cdea3b560ed2a2b29855476ecb15e295a7689a11d137259d8aecff99606a"
+    },
+    {
+      "directory": "src/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32",
+      "model_name": "npu_matmul_f32",
+      "model": null,
+      "file_count": 12,
+      "filenames": [
+        "m2048_1152x768.xclbin",
+        "m2048_3072x768.xclbin",
+        "m2048_768x1152.xclbin",
+        "m2048_768x256.xclbin",
+        "m2048_768x3072.xclbin",
+        "m2048_768x768.xclbin",
+        "m512_1152x768.xclbin",
+        "m512_3072x768.xclbin",
+        "m512_768x1152.xclbin",
+        "m512_768x256.xclbin",
+        "m512_768x3072.xclbin",
+        "m512_768x768.xclbin"
+      ],
+      "manifest_sha256": "257e08acc8756f9db2f9b1b84f8552d3610fd8435e92bdcb395cc8d512bd948c"
     },
     {
       "directory": "src/xclbins/GPT-OSS-20B-NPU2",

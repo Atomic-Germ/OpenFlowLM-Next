@@ -93,6 +93,11 @@ def ownership(path: Path) -> str:
     parts = path.parts
     name = path.name.lower()
     if path.suffix.lower() == ".xclbin" or "xclbins" in parts:
+        # The open embedding's own compiled kernels ship under a family dir's
+        # npu_matmul_f32/ subdirectory. They are open artifacts we build, not
+        # closed-source kernels awaiting replacement.
+        if "npu_matmul_f32" in parts:
+            return "open_npu_kernel"
         return "closed_npu_kernel"
     if "xrt" in parts or "hrx" in parts:
         if any(token in name for token in ("_npu", "gemm", "dequant", "lm_head", "mha", "q4_npu")):

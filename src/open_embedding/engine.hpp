@@ -89,6 +89,8 @@ private:
     std::string resolve_path(const std::string& p) const;
     /// Build weights_manifest.json when missing or incomplete (dense heads).
     bool ensure_manifest();
+    /// Locate npu_matmul_f32 assets: model-local first, then app family dir.
+    std::string pick_npu_asset_dir() const;
     bool load_weights();
     bool load_npu();
     const std::vector<float>& weight(const std::string& name) const;
