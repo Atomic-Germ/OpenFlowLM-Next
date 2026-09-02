@@ -13,6 +13,12 @@ As you encounter closed-source requirements, note them and replace with "not imp
 
 When investigating pre-compiled xclbins and libraries, save any useful tools you may create to the `utilities/` directory rather than leaving them in a temp folder.
 
+Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
+      system clang/clang++. It can be found in:
+      ./ironvenv/lib/python3.12/site-packages/llvm-aie/bin
+
+Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setup.sh also *if needed*
+
 <available_skills>
   <skill>
     <name>npu_offload_pipeline</name>

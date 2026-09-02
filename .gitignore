@@ -1,0 +1,9 @@
+build
+build_*/
+.vscode
+__pycache__
+_site
+.jekyll-metadata
+*.csv
+utilities/mlir-aie
+ironvenv
