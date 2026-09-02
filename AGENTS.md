@@ -17,6 +17,8 @@ The `flm-test` tool at `utilities/flm-test` is capable of running a full test su
 
 The `q4nx-build` tool at `utilities/q4nx-build` should always be in-sync with the expected formats of the models as each gains support, there should be no manual steps left. If unavoidable, the user should always recieve instruction for it.
 
+For each successfully packed model, create or update a skill to ensure the next agent does not need to reproduce research for the next addition.
+
 Note: Peano (llvm-aie) has not been added to PATH to avoid conflict with
       system clang/clang++. It can be found in:
       ./ironvenv/lib/python3.12/site-packages/llvm-aie/bin
