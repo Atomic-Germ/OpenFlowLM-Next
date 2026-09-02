@@ -491,6 +491,57 @@ instead of creating an independent converter. Reuse its architecture
 detection, tensor-name mapping, and tensor-layout knowledge, then add an open
 output backend for safetensors manifests and generated kernel/build metadata.
 
+### Open Embedding Distributable Route (2026-09-02)
+
+EmbeddingGemma is distributed as an **open, unquantized HF repo**
+(`Atomic-Germ/Embedding-Gemma-300M-OpenNPU2`), not as Q4NX. Rationale:
+embedding needs no quantization, and the distributable route is the same
+pipeline future open families will use, so it stays extensible. Pointing
+`flm pull` at the upstream `google/embeddinggemma-300m` repo is not viable: it
+is gated, `flm pull` uses plain curl with no HF token, and it lacks
+`weights_manifest.json`.
+
+One-shot reproducible build:
+
+```bash
+q4nx-build --open-embedding -i google/embeddinggemma-300m \
+  -o ~/Embedding-Gemma-300M-OpenNPU2 \
+  --npu-assets <dir of m{M}_{K}x{N}.{xclbin,insts}>
+```
+
+Registry wiring is mandatory and easy to miss:
+
+- `src/model_list.json` supplies `files`, `url`, and `name` (the `name` field
+  is the on-disk directory name under `<models_root>/models/`).
+- `src/model_info.json` is the authoritative manifest for `flm pull`.
+  `build_download_list` **silently skips** any file absent from it, then
+  reports success. Always merge the builder's `model_info_entry.json` into
+  `src/model_info.json`, or the pull downloads nothing and the engine fails
+  later at load time.
+- Subdirectory paths such as `2_Dense/model.safetensors` download correctly;
+  `download_file` creates parent directories.
+
+Engine portability requirements for any distributable:
+
+- `weights_manifest.json` records paths **relative to the model dir**.
+  `Engine::resolve_path()` joins them against `model_dir_`, and absolute
+  legacy manifests still work.
+- `Engine::ensure_manifest()` regenerates the manifest when missing or when
+  the dense heads are absent, scanning `model.safetensors` plus
+  `weights/<head>.safetensors`, `<head>/model.safetensors`, or
+  `<head>.safetensors`. Shipping the manifest is optional.
+- Dense-head tensor names are `2_Dense.linear.weight` and
+  `3_Dense.linear.weight` (the head files contain a single `linear.weight`).
+
+Verified end to end: built repo loads through the real `src/model_list.json`
+entry, and deleting `weights_manifest.json` reproduces identical embeddings
+(cosine 0.997711 against the bf16 reference array in
+`src/test/gemma_embedding/test.cpp`).
+
+Remaining manual step: uploading the built directory to HuggingFace is not
+automated; a human creates the repo and pushes (`git lfs` or `huggingface-cli
+upload`). `ms_url` is intentionally empty until a ModelScope mirror exists.
+
 ### Ambiguous/Generalized Parts (User Questions)
 
 > **Q1: Weight layout** — Are your projection weights stored as `[N,K]` (out-major, needs transpose) or `[K,N]` (row-major, direct use)?

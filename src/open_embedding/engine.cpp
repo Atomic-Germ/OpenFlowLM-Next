@@ -140,20 +140,135 @@ bool Engine::load_npu() {
     return true;
 }
 
-bool Engine::load_weights() {
-    std::string mpath = (std::filesystem::path(model_dir_) / "weights_manifest.json").string();
+// Resolve a manifest-recorded path against the model directory. Distributable
+// packages record portable relative paths; hand-built manifests from older
+// tooling record absolute builder paths. Both must work.
+std::string Engine::resolve_path(const std::string& p) const {
+    if (p.empty()) return p;
+    std::filesystem::path path(p);
+    if (path.is_absolute()) return path.string();
+    return (std::filesystem::path(model_dir_) / path).string();
+}
+
+// Minimal safetensors header parser.
+// Layout: [u64 header_len][header JSON][tensor data...].
+// Header entries: {"name": {"dtype":"F32","shape":[...],"data_offsets":[s,e]}}.
+// data_offsets are relative to the start of the data section.
+static bool safetensors_index(const std::string& path,
+                              std::map<std::string, std::pair<size_t, std::vector<size_t>>>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    uint64_t hdr_len = 0;
+    f.read(reinterpret_cast<char*>(&hdr_len), 8);
+    if (!f) return false;
+    if (hdr_len == 0 || hdr_len > (1u << 28)) return false;
+    std::string hdr(static_cast<size_t>(hdr_len), '\0');
+    f.read(&hdr[0], static_cast<std::streamsize>(hdr_len));
+    if (!f) return false;
+    auto j = nlohmann::json::parse(hdr, nullptr, false);
+    if (!j.is_object()) return false;
+    const size_t base = 8 + static_cast<size_t>(hdr_len);
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (it.key() == "__metadata__") continue;
+        const auto& meta = it.value();
+        if (!meta.is_object() || !meta.contains("data_offsets") || !meta.contains("shape")) continue;
+        auto offs = meta["data_offsets"].get<std::vector<size_t>>();
+        if (offs.size() != 2) continue;
+        out[it.key()] = {base + offs[0], meta["shape"].get<std::vector<size_t>>()};
+    }
+    return true;
+}
+
+// Build weights_manifest.json when it is missing or incomplete, so a shipped
+// package never needs the builder's absolute paths.
+bool Engine::ensure_manifest() {
+    namespace fs = std::filesystem;
+    const fs::path dir(model_dir_);
+    const fs::path mpath = dir / "weights_manifest.json";
+
     std::string mtext;
-    if (!read_file(mpath, mtext) || !(manifest_ = json::parse(mtext, nullptr, false)).is_object()) {
-        std::fprintf(stderr, "open_embedding: missing weights_manifest.json (run "
-                             "src/open_embedding/tools/make_manifest.py)\n");
+    if (read_file(mpath.string(), mtext)) manifest_ = json::parse(mtext, nullptr, false);
+
+    auto complete = [&]() {
+        if (!manifest_.is_object() || !manifest_.contains("tensors")) return false;
+        const auto& t = manifest_.at("tensors");
+        return t.contains("2_Dense.linear.weight") && t.contains("3_Dense.linear.weight");
+    };
+    if (complete()) return true;
+
+    try {
+        struct Found {
+            std::string file;
+            size_t offset;
+            std::vector<size_t> shape;
+        };
+        std::map<std::string, Found> tensors;
+
+        std::map<std::string, std::pair<size_t, std::vector<size_t>>> body;
+        if (!safetensors_index((dir / "model.safetensors").string(), body)) {
+            std::fprintf(stderr, "open_embedding: cannot read model.safetensors in %s\n",
+                         model_dir_.c_str());
+            return false;
+        }
+        for (const auto& [name, info] : body)
+            tensors[name] = Found{"model.safetensors", info.first, info.second};
+
+        // Dense heads ship in one of several layouts; probe in a fixed order so
+        // generation is deterministic.
+        for (const char* head : {"2_Dense", "3_Dense"}) {
+            const std::string h(head);
+            const std::vector<fs::path> candidates = {
+                dir / "weights" / (h + ".safetensors"),
+                dir / h / "model.safetensors",
+                dir / (h + ".safetensors"),
+            };
+            bool found = false;
+            for (const auto& cand : candidates) {
+                std::map<std::string, std::pair<size_t, std::vector<size_t>>> head_tensors;
+                if (!fs::exists(cand)) continue;
+                if (!safetensors_index(cand.string(), head_tensors)) continue;
+                const std::string rel = fs::relative(cand, dir).generic_string();
+                for (const auto& [name, info] : head_tensors)
+                    tensors[h + "." + name] = Found{rel, info.first, info.second};
+                found = true;
+                break;
+            }
+            if (!found) {
+                std::fprintf(stderr, "open_embedding: missing dense head weights for %s\n", h.c_str());
+                return false;
+            }
+        }
+
+        json out = json::object();
+        out["format"] = "flm-open-embedding-manifest-v1";
+        out["config"] = "config.json";
+        out["tokenizer"] = "tokenizer.json";
+        auto& jt = out["tensors"] = json::object();
+        for (const auto& [name, info] : tensors)
+            jt[name] = {{"file", info.file}, {"offset", info.offset}, {"shape", info.shape}};
+
+        manifest_ = std::move(out);
+        std::ofstream(mpath) << manifest_.dump(1) << "\n";
+        std::fprintf(stderr, "open_embedding: generated weights_manifest.json (%zu tensors)\n",
+                     tensors.size());
+        return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "open_embedding: manifest generation failed: %s\n", e.what());
         return false;
     }
-    if ((std::filesystem::path(manifest_.value("config", "")) !=
-         std::filesystem::path(model_dir_) / "config.json")) {
+}
+
+bool Engine::load_weights() {
+    if (!ensure_manifest()) return false;
+
+    const std::string cfg_path = resolve_path(manifest_.value("config", "config.json"));
+    if (std::filesystem::weakly_canonical(std::filesystem::path(cfg_path)) !=
+        std::filesystem::weakly_canonical(std::filesystem::path(model_dir_) / "config.json")) {
         std::fprintf(stderr, "open_embedding: manifest config path mismatch\n");
         return false;
     }
-    std::string tok_path = manifest_.value("tokenizer", "");
+
+    std::string tok_path = resolve_path(manifest_.value("tokenizer", "tokenizer.json"));
     std::string tok_blob;
     if (tok_path.empty() || !read_file(tok_path, tok_blob)) {
         std::fprintf(stderr, "open_embedding: cannot read tokenizer.json\n");
@@ -168,7 +283,7 @@ bool Engine::load_weights() {
     for (auto it = manifest_.at("tensors").begin(); it != manifest_.at("tensors").end(); ++it) {
         const auto& meta = it.value();
         Tensor t;
-        t.file   = meta.at("file").get<std::string>();
+        t.file   = resolve_path(meta.at("file").get<std::string>());
         t.offset = meta.at("offset").get<size_t>();
         t.shape  = meta.at("shape").get<std::vector<size_t>>();
         tensors_[it.key()] = t;

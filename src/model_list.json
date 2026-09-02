@@ -506,10 +506,10 @@
         },
         "embed-gemma": {
             "300m": {
-                "name": "Embedding-Gemma-300M-NPU2",
-                "url": "https://huggingface.co/FastFlowLM/Embedding-Gemma-300M-NPU2",
-                "file_url": "https://huggingface.co/api/models/FastFlowLM/Embedding-Gemma-300M-NPU2/tree/main",
-                "ms_url": "https://modelscope.cn/models/amd/Embedding-Gemma-300M-NPU2",
+                "name": "Embedding-Gemma-300M-OpenNPU2",
+                "url": "https://huggingface.co/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
+                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2/tree/main",
+                "ms_url": "",
                 "size": 300000000,
                 "flm_min_version": "0.9.15",
                 "files": [
@@ -517,9 +517,9 @@
                     "model.safetensors",
                     "tokenizer.json",
                     "tokenizer_config.json",
-                    "weights_manifest.json",
-                    "weights/2_Dense.safetensors",
-                    "weights/3_Dense.safetensors"
+                    "2_Dense/model.safetensors",
+                    "3_Dense/model.safetensors",
+                    "weights_manifest.json"
                 ],
                 "default_context_length": 2048,
                 "details": {

@@ -83,6 +83,12 @@ private:
     /// NPU2 BF16 matmul backend (null when off or unavailable).
     std::shared_ptr<NpuMatmul> npu_;
 
+    /// Resolve a manifest-recorded path. Distributable packages record paths
+    /// relative to the model directory; older manifests carry absolute builder
+    /// paths. Both must resolve to the same file.
+    std::string resolve_path(const std::string& p) const;
+    /// Build weights_manifest.json when missing or incomplete (dense heads).
+    bool ensure_manifest();
     bool load_weights();
     bool load_npu();
     const std::vector<float>& weight(const std::string& name) const;
