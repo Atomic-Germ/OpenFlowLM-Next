@@ -514,9 +514,12 @@
                 "flm_min_version": "0.9.15",
                 "files": [
                     "config.json",
+                    "model.safetensors",
                     "tokenizer.json",
                     "tokenizer_config.json",
-                    "model.q4nx"
+                    "weights_manifest.json",
+                    "weights/2_Dense.safetensors",
+                    "weights/3_Dense.safetensors"
                 ],
                 "default_context_length": 2048,
                 "details": {

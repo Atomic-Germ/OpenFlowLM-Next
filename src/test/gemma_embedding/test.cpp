@@ -3,8 +3,8 @@
 #include "utils/utils.hpp"
 #include "utils/vm_args.hpp"
 #include "AutoEmbeddingModel/auto_embedding_model.hpp"
+#include "AutoEmbeddingModel/open_gemma_embedding.hpp"
 #include "model_list.hpp"
-#include "AutoEmbeddingModel/modeling_gemma_embedding.hpp"
 #include "metrices.hpp"
 
 static float reference[] = {
@@ -67,10 +67,10 @@ inline std::pair<std::string, std::unique_ptr<AutoEmbeddingModel>> get_gemma_emb
     std::string new_model_tag = model_tag;
     
     if (gemma_embedding_Tags.count(model_tag))
-        auto_embedding_engine = std::make_unique<Gemma_Embedding>(npu_device_inst);
+        auto_embedding_engine = std::make_unique<OpenGemma_Embedding>(npu_device_inst);
     else {
         new_model_tag = "embed-gemma:300m"; // Default to text-only model
-        auto_embedding_engine = std::make_unique<Gemma_Embedding>(npu_device_inst);
+        auto_embedding_engine = std::make_unique<OpenGemma_Embedding>(npu_device_inst);
     }
   
     return std::make_pair(new_model_tag, std::move(auto_embedding_engine));

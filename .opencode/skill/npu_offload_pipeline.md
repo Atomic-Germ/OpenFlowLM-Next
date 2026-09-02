@@ -422,6 +422,75 @@ When merging open embedding into the main flm repo:
 - [ ] Verify auto-manifest generation handles both FLM layout and HF cache layout
 - [ ] Test: `./flm serve -e 1` → embedding endpoint returns valid vectors
 
+### Correct Open-Only Adapter Boundary
+
+Keep model loading and text tokenization inside `open_embedding::Engine`. Do
+not partially reuse the closed embedding shared loader: `_shared_load_model()`
+constructs Q4NX, `npu_xclbin_manager`, and `gemma_embedding`, so merely leaving
+that function compiled retains closed link dependencies even if no factory
+calls it.
+
+For an open-only replacement:
+
+1. Reduce `AutoEmbeddingModel` to shared identity/state (`model_path`,
+   `is_model_loaded`, `current_model`, device pointer) and its virtual API.
+2. Remove the closed Q4NX/tokenizer/NPU-manager fields and `_shared_*` methods;
+   never replace `_shared_embed()` with a dummy result.
+3. Use the known-good header-only `OpenGemma_Embedding` adapter from
+   `docs/ExampleNPU/src/include/AutoEmbeddingModel/open_gemma_embedding.hpp`.
+   It calls `engine_.load(model_path)` and `engine_.embed_with_prefix(...)`
+   directly, preserving every official task prefix.
+4. Instantiate only `OpenGemma_Embedding` in `all_embedding_model.hpp` and
+   remove `gemma_embedding` from `target_link_libraries`.
+
+The engine enum is namespace-level (`open_embedding::task_type_t`), not nested
+under `Engine`. Prefer `embed_with_prefix()` in the adapter because it also
+preserves clustering, classification, code retrieval, similarity, and
+summarization prompts that cannot be represented by the engine's two-value
+query/document enum.
+
+### Correct CMake Wiring
+
+Use explicit sources rather than extending broad globs:
+
+```cmake
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
+if(NOT FLM_USE_HRX)
+    list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
+endif()
+
+target_include_directories(flm PUBLIC
+    ${CMAKE_SOURCE_DIR}          # resolves open_embedding/engine.hpp
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING=1)
+if(NOT FLM_USE_HRX)
+    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
+endif()
+```
+
+`npu_matmul.cpp` includes XRT directly and must not be compiled for HRX. The
+CPU engine remains available in HRX builds.
+
+Verification used for this integration:
+
+```bash
+cmake -S src -B src/build \
+  -DFLM_VERSION=0.9.24 -DNPU_VERSION=1 -DFLM_USE_HRX=OFF
+cmake --build src/build -j4
+```
+
+This completed successfully on 2026-09-02. Existing AVX512 and deprecated
+`wstring_convert` warnings are unrelated to the open embedding integration.
+
+### Builder Reuse Rule
+
+New model conversion/build support should extend `utilities/q4nx-build`
+instead of creating an independent converter. Reuse its architecture
+detection, tensor-name mapping, and tensor-layout knowledge, then add an open
+output backend for safetensors manifests and generated kernel/build metadata.
+
 ### Ambiguous/Generalized Parts (User Questions)
 
 > **Q1: Weight layout** — Are your projection weights stored as `[N,K]` (out-major, needs transpose) or `[K,N]` (row-major, direct use)?

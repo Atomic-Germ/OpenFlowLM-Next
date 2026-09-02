@@ -235,8 +235,13 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp
 # ———————————————————————————————————————————————
 # Gather your sources
 # ———————————————————————————————————————————————
-file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp" )
+file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
+
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
+if(NOT FLM_USE_HRX)
+    list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
+endif()
 
 # Exclude files that depend on missing libraries for Linux
 if(NOT WIN32)
@@ -318,6 +323,7 @@ endif()
 # Library specific settings
 # ———————————————————————————————————————————————
 target_include_directories(flm PUBLIC
+    ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/runner
     ${CMAKE_SOURCE_DIR}/server
@@ -348,11 +354,17 @@ target_compile_definitions(flm PUBLIC
     CMAKE_XCLBIN_PREFIX="${CMAKE_XCLBIN_PREFIX}"
     __FLM_VERSION__=\"${FLM_VERSION}\"
     __NPU_VERSION__=\"${NPU_VERSION}\"
+    FLM_USE_OPEN_EMBEDDING=1
 )
 
 # Select the NPU runtime backend seen by the sources (device_runtime.hpp et al.).
 if(FLM_USE_HRX)
     target_compile_definitions(flm PUBLIC FLM_USE_HRX=1)
+endif()
+
+# The open embedding NPU backend uses XRT directly. HRX retains the CPU path.
+if(NOT FLM_USE_HRX)
+    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
 endif()
 
 if(WIN32)
@@ -420,7 +432,6 @@ target_link_libraries(flm PUBLIC
     gemma4_12b_npu
     gpt_oss_npu
     whisper_npu
-    gemma_embedding
     lfm2_npu
     phi4_npu
     nanbeige_npu
