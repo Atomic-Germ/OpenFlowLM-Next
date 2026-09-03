@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "q4nx-build"
+version = "0.3.0"
+description = "Convert GGUF or HF-safetensors model files into the Q4NX format for FLM."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Q4NX" }]
+dependencies = [
+    "numpy",
+    "torch",
+    "einops",
+    "matplotlib",
+    "safetensors",
+    "gguf",
+    "huggingface-hub",
+    "transformers",
+    "accelerate",
+    "modelscope",
+]
+
+[project.optional-dependencies]
+dev = ["build", "twine"]
+
+[project.scripts]
+q4nx-build = "q4nx.cli:main"
+
+[tool.setuptools]
+packages = ["q4nx", "q4nx.models"]
+
+[tool.setuptools.package-data]
+q4nx = ["../configs/*.json"]

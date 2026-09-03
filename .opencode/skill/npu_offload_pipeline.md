@@ -422,6 +422,292 @@ When merging open embedding into the main flm repo:
 - [ ] Verify auto-manifest generation handles both FLM layout and HF cache layout
 - [ ] Test: `./flm serve -e 1` → embedding endpoint returns valid vectors
 
+### Correct Open-Only Adapter Boundary
+
+Keep model loading and text tokenization inside `open_embedding::Engine`. Do
+not partially reuse the closed embedding shared loader: `_shared_load_model()`
+constructs Q4NX, `npu_xclbin_manager`, and `gemma_embedding`, so merely leaving
+that function compiled retains closed link dependencies even if no factory
+calls it.
+
+For an open-only replacement:
+
+1. Reduce `AutoEmbeddingModel` to shared identity/state (`model_path`,
+   `is_model_loaded`, `current_model`, device pointer) and its virtual API.
+2. Remove the closed Q4NX/tokenizer/NPU-manager fields and `_shared_*` methods;
+   never replace `_shared_embed()` with a dummy result.
+3. Use the known-good header-only `OpenGemma_Embedding` adapter from
+   `docs/ExampleNPU/src/include/AutoEmbeddingModel/open_gemma_embedding.hpp`.
+   It calls `engine_.load(model_path)` and `engine_.embed_with_prefix(...)`
+   directly, preserving every official task prefix.
+4. Instantiate only `OpenGemma_Embedding` in `all_embedding_model.hpp` and
+   remove `gemma_embedding` from `target_link_libraries`.
+
+The engine enum is namespace-level (`open_embedding::task_type_t`), not nested
+under `Engine`. Prefer `embed_with_prefix()` in the adapter because it also
+preserves clustering, classification, code retrieval, similarity, and
+summarization prompts that cannot be represented by the engine's two-value
+query/document enum.
+
+### Correct CMake Wiring
+
+Use explicit sources rather than extending broad globs:
+
+```cmake
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
+if(NOT FLM_USE_HRX)
+    list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
+endif()
+
+target_include_directories(flm PUBLIC
+    ${CMAKE_SOURCE_DIR}          # resolves open_embedding/engine.hpp
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING=1)
+if(NOT FLM_USE_HRX)
+    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
+endif()
+```
+
+`npu_matmul.cpp` includes XRT directly and must not be compiled for HRX. The
+CPU engine remains available in HRX builds.
+
+Verification used for this integration:
+
+```bash
+cmake -S src -B src/build \
+  -DFLM_VERSION=0.9.24 -DNPU_VERSION=1 -DFLM_USE_HRX=OFF
+cmake --build src/build -j4
+```
+
+This completed successfully on 2026-09-02. Existing AVX512 and deprecated
+`wstring_convert` warnings are unrelated to the open embedding integration.
+
+### Builder Reuse Rule
+
+New model conversion/build support should extend `utilities/q4nx-build`
+instead of creating an independent converter. Reuse its architecture
+detection, tensor-name mapping, and tensor-layout knowledge, then add an open
+output backend for safetensors manifests and generated kernel/build metadata.
+
+### Open Embedding Distributable Route (2026-09-02)
+
+EmbeddingGemma is distributed as an **open, unquantized HF repo**
+(`Atomic-Germ/Embedding-Gemma-300M-OpenNPU2`), not as Q4NX. Rationale:
+embedding needs no quantization, and the distributable route is the same
+pipeline future open families will use, so it stays extensible. Pointing
+`flm pull` at the upstream `google/embeddinggemma-300m` repo is not viable: it
+is gated, `flm pull` uses plain curl with no HF token, and it lacks
+`weights_manifest.json`.
+
+One-shot reproducible build:
+
+```bash
+q4nx-build --open-embedding -i google/embeddinggemma-300m \
+  -o ~/Embedding-Gemma-300M-OpenNPU2 \
+  --npu-assets <dir of m{M}_{K}x{N}.{xclbin,insts}>
+```
+
+Registry wiring is mandatory and easy to miss:
+
+- `src/model_list.json` supplies `files`, `url`, and `name` (the `name` field
+  is the on-disk directory name under `<models_root>/models/`).
+- `src/model_info.json` is the authoritative manifest for `flm pull`.
+  `build_download_list` **silently skips** any file absent from it, then
+  reports success. Always merge the builder's `model_info_entry.json` into
+  `src/model_info.json`, or the pull downloads nothing and the engine fails
+  later at load time.
+- Subdirectory paths such as `2_Dense/model.safetensors` download correctly;
+  `download_file` creates parent directories.
+
+Engine portability requirements for any distributable:
+
+- `weights_manifest.json` records paths **relative to the model dir**.
+  `Engine::resolve_path()` joins them against `model_dir_`, and absolute
+  legacy manifests still work.
+- `Engine::ensure_manifest()` regenerates the manifest when missing or when
+  the dense heads are absent, scanning `model.safetensors` plus
+  `weights/<head>.safetensors`, `<head>/model.safetensors`, or
+  `<head>.safetensors`. Shipping the manifest is optional.
+- Dense-head tensor names are `2_Dense.linear.weight` and
+  `3_Dense.linear.weight` (the head files contain a single `linear.weight`).
+
+Verified end to end: built repo loads through the real `src/model_list.json`
+entry, and deleting `weights_manifest.json` reproduces identical embeddings
+(cosine 0.997711 against the bf16 reference array in
+`src/test/gemma_embedding/test.cpp`).
+
+Remaining manual step: uploading the built directory to HuggingFace is not
+automated; a human creates the repo and pushes (`git lfs` or `huggingface-cli
+upload`). `ms_url` is intentionally empty until a ModelScope mirror exists.
+
+### NPU Kernel Distribution Policy (2026-09-02)
+
+Compiled kernels use the same two locations as the closed-source stack, but
+with an explicit escape hatch for new models.
+
+**Established families ship kernels with the application.**
+
+- Source of truth: `src/xclbins/<Model-Dir>/npu_matmul_f32/`, installed to
+  `<xclbin_prefix>/xclbins/<Model-Dir>/npu_matmul_f32/`.
+- These are built at build time from open Iron/mlir-aie designs, not
+  downloaded, and are not listed in the model's `files` list or
+  `model_info.json`. Model repos for established families contain weights and
+  configuration only.
+- `src/CMakeLists.txt` installs the whole `xclbins` tree, so adding a family
+  directory is enough; no install-rule change is needed.
+
+**New or prototype models may ship their own kernels.**
+
+- `q4nx-build --open-embedding --npu-assets <dir>` places kernels in the model
+  directory's `npu_matmul_f32/`, so a brand-new model works end to end before
+  it is promoted to a maintained family. Promote it later by moving the
+  kernels into `src/xclbins/`.
+
+**Lookup order in `Engine::pick_npu_asset_dir()`**
+
+1. `<model_dir>/npu_matmul_f32` — model-local override wins.
+2. `<xclbin_prefix>/xclbins/Embedding-Gemma-300M-OpenNPU2/npu_matmul_f32`.
+3. `<xclbin_prefix>/xclbins/embed-gemma/npu_matmul_f32` — family fallback.
+
+`utils::find_xclbin_path()` **throws** when no xclbin tree is installed. The
+engine wraps that call in `try/catch` and degrades to CPU-only, because the
+open engine must never hard-require the xclbin tree. `find_xclbin_path()` is
+forward-declared in `engine.cpp` rather than pulling in `utils/utils.hpp`,
+which drags in the XRT-dependent buffer/typedef chain.
+
+Verified paths (cosine against the bf16 reference array in
+`src/test/gemma_embedding/test.cpp`):
+
+| Scenario | Result |
+|---|---|
+| App-installed family kernels | NPU enabled, 6 shapes, cosine 0.99775 |
+| Model-local kernels | NPU enabled, cosine 0.99775 |
+| No xclbin tree | graceful CPU-only, cosine 0.997711 |
+| `FLM_NPU_DISABLE=1` | CPU-only, cosine 0.997711 |
+
+The standalone embedding test defines `FLM_USE_OPEN_EMBEDDING_NPU=1` and
+compiles `open_embedding/npu_matmul.cpp` so the NPU path is actually exercised.
+Set `FLM_XCLBIN_PATH` to exercise app-family discovery without installing.
+
+Inventory classifiers treat `npu_matmul_f32` kernels as `open_npu_kernel`
+distinct from `closed_npu_kernel`, so our own built kernels are never counted
+as pending replacement work.
+
+## Gemma3 Text Engine: Phase 0 Complete (2026-09-02)
+
+Planning, decisions, and progress live in
+`docs/plans/open_gemma3_text_plan.md`. This section records only what the next
+agent must not have to rediscover.
+
+**Phase 0 shipped** (built at `Models/Gemma-3-1B-OpenNPU2`, git-ignored):
+340 BF16 tensors, 2.0 GB, byte-reproducible, tied embeddings, and 6 reference
+fixtures (`[6, 10, 7, 7, 11, 2282]` tokens).
+
+Builder: `q4nx-build --open-causal-lm -i <source> -o <dir>`
+Oracle: `q4nx-build -i <dir> --make-reference <dir>/reference_v1.json`
+
+**Gemma3 text facts confirmed by a working oracle:**
+
+- Embeddings **are** scaled by `sqrt(hidden_size)` = 33.9411 for hidden 1152.
+  An earlier analysis claimed otherwise; the oracle's coherent output settles
+  it. Verify against the oracle, never assume.
+- Global (full-attention) layers are `[5, 11, 17, 23]`, derived from
+  `sliding_window_pattern: 6` as `(L+1) % 6 == 0`. `config.json` has **no**
+  `layer_types` key — it must be derived.
+- `attn_scale = 1/sqrt(query_pre_attn_scalar)` = 0.0625 (head_dim 256 gives the
+  same number, so don't conflate the two sources).
+- Tied embeddings: no `lm_head.weight` tensor; reuse
+  `model.embed_tokens.weight` (262144 x 1152, ~302 M params, largest tensor).
+
+**AMD environment constraints (this workspace):**
+
+| Constraint | Consequence |
+|---|---|
+| `transformers` + ROCm torch segfaults in `from_pretrained`, even with the GPU hidden | Do not plan to use HF as the oracle generator here. |
+| NumPy has no bfloat16; `safetensors.numpy` raises `data type 'bfloat16' not understood` | Decode bf16 via `uint16 << 16` viewed as `float32`. This is also what the C++ engine does, so oracle and engine agree bit for bit. |
+| `/tmp` is a RAM-backed tmpfs with limited free space | Put large model artifacts on real disk; use the git-ignored `Models/` directory. |
+
+**Decisions already made** (do not relitigate): ship bf16 (lossless, the weights
+are natively bf16); embedding stays at the highest practical precision; own both
+ends of the format rather than inheriting the closed Q4NX geometry; decode on CPU
+first and only add a dedicated small-M kernel if simpler than padding the GEMM;
+replace the closed path and its remnants entirely once understood.
+
+## Download Verification Policy (2026-09-02)
+
+**Hash checks are advisory, never fatal.** A pull must not be blocked by an oid
+comparison.
+
+Rationale: registry oids legitimately disagree with what a repo serves — LFS
+files hash as sha256 while plain git blobs hash as sha1, and re-uploaded,
+re-quantized, or mirrored files all change the expected value. A genuinely
+broken download is self-evident when the model fails to load or emits garbage.
+
+Changed behaviour:
+
+- `src/pull/download_model.cpp` — a mismatch logs `[WARN] Hash mismatch ...;
+  continuing` and the download still succeeds. It no longer consumes retries on
+  an unfixable comparison.
+- `src/pull/model_downloader.cpp` (`verify_and_clean_files`) — a mismatch logs a
+  warning and keeps the file. It no longer deletes the file or reports an error,
+  which previously forced endless re-downloads.
+- A missing file is still a real error and still triggers a re-pull.
+
+**Related: never abort on a missing xclbin tree for work that doesn't need
+kernels.** `utils::find_xclbin_path()` throws when no tree is installed, which
+broke both the open engine's CPU path and `flm pull` itself.
+
+- `src/open_embedding/engine.cpp` catches it around the app-family kernel lookup
+  and falls back to CPU-only.
+- `src/include/lm_config.hpp::_resolve_paths()` catches it and leaves
+  `exec_path` empty, so reading `config.json` during `flm pull` / `flm list`
+  works without any xclbins installed.
+
+Verified end to end against the live repo: `flm pull embed-gemma:300m` downloads
+all 7 files, warns on advisory hash differences, reports success, and the pulled
+model then loads and runs on NPU (cosine 0.99775).
+
+## Validated: Full E-Suite Pass (2026-09-02)
+
+`flm pull embed-gemma:300m` → `flm serve -e 1` → `flm-test --embed` gives a
+clean sweep, **8/8 PASS, 0 FAIL**:
+
+| Check | Result |
+|---|---|
+| E1 Response Structure | valid 768-dim embedding |
+| E2 Repeatability | worst cosine 1.000000 |
+| E3 Batch & Index Integrity | 3 embeddings returned in order |
+| E4 Dimensionality | consistent 768-dim across batch |
+| E5 Semantic Ordering | related 0.8434 > unrelated 0.5862 |
+| E6 Cross-Path Consistency | cosine 1.000000 |
+| E7 Batch Reference Consistency | 30 draws, worst cosine 1.000000 |
+| E8 Reference Agreement | **worst cosine 0.999993** (threshold 0.999) |
+
+E8 at 0.999993 reproduces the original proven value exactly, which pins the
+whole path — task prefix, tokenizer, forward pass, pooling, dense projection,
+and L2 normalisation — to the validated numpy oracle.
+
+**Two cosine numbers, do not confuse them.**
+
+- **0.999993** — vs the fp32 numpy oracle (E8). This is the real accuracy
+  result.
+- **0.99775 / 0.997711** — vs the bf16-quantized reference array hard-coded in
+  `src/test/gemma_embedding/test.cpp`, inherited from the old closed engine.
+  That array only has bf16 precision, so ~0.998 is expected and is *not* a
+  regression. NPU (0.99775) and CPU (0.997711) agree with each other.
+
+**Gotcha: run the repo's `flm-test`, not a system-installed one.** A stale
+system copy predating E8 silently produced a CSV with only E1–E7 and no error,
+which looks like E8 was skipped or crashed. Always invoke
+`utilities/flm-test` explicitly (for example
+`python -m flm_test --embed`) so the bundled
+`test_files/embedding_reference.json` oracle and current checks are used.
+
+Results are written next to the model as
+`embedding_results_<version>.csv` (the working model directory, git-ignored).
+
 ### Ambiguous/Generalized Parts (User Questions)
 
 > **Q1: Weight layout** — Are your projection weights stored as `[N,K]` (out-major, needs transpose) or `[K,N]` (row-major, direct use)?
@@ -445,6 +731,66 @@ When merging open embedding into the main flm repo:
 - [ ] Weight transpose logic verified (`[N,K]` → `[K,N]`)
 - [ ] E-suite passes (E8 cosine ≥ 0.999)
 - [ ] `FLM_NPU_DISABLE=1` tested for CPU fallback
+
+---
+
+## Repository-Wide Binary Inventory (2026-09-02)
+
+Use the checked-in inventory utility instead of ad hoc shell pipelines:
+
+```bash
+python utilities/binary-inventory/inventory.py
+python utilities/binary-inventory/inventory.py \
+  --all --output docs/precompiled_artifacts_all.json
+```
+
+The shipping surface (`src/lib`, `src/xclbins`) contains 386 artifacts totaling
+480,732,285 bytes:
+
+- 222 XCLBINs in 38 model directories, but only 106 unique XCLBIN payloads.
+- 139 closed engine/primitive artifacts across ELF, PE DLL, and COFF library
+  forms.
+- 23 third-party Windows runtime artifacts.
+- 2 AIEBU runtime-support archives.
+
+All 222 shipping XCLBINs lack `BUILD_METADATA`; they expose only the standard
+AIE partition/connectivity sections. Do not assume exact original shapes or
+compile flags can be recovered from them. Derive replacements from public
+model configs and architecture, host API/symbol evidence, controlled shape
+experiments, and CPU/binary-oracle validation.
+
+Seven groups of complete XCLBIN directories are byte-identical. Fine-tunes and
+derivatives must link to family/shape bundles rather than ship copied kernels.
+See `docs/precompiled_replacement_map.md` for the exact groups and the 18
+recommended shipping bundle boundaries. The raw evidence is in
+`docs/precompiled_artifacts.json`.
+
+Host-library findings:
+
+- `q4_npu_eXpress`/`SafeTensors` is the highest-fan-out closed dependency.
+- `mha` is the largest source-interface gap because no public header exists.
+- Normal model engines implement `causal_lm`; Qwen Omni and Whisper require
+  distinct contracts.
+- XRT has 24 ELF files and HRX has 23; HRX lacks Gemma4-12B and includes an
+  extra `libdequant_new.so`, so backend directories are not symmetric.
+- HRX ELF files retain absolute build-machine RUNPATHs; never treat those paths
+  as source or deployment requirements.
+- An engine is not fully removed until installer, standalone test, and `src/lib`
+  binaries are checked. The EmbeddingGemma cleanup is now complete: installer
+  entries removed, the standalone test links only Boost/threads/tokenizers/XRT,
+  and all six `gemma_embedding` binaries are gone.
+- `src/test/CMakeLists.txt` unconditionally links `q4_npu_eXpress`, `lm_head`,
+  `dequant`, `gemm`, and `mha`. Do not use that helper for open-engine tests;
+  copy the standalone pattern from
+  `src/test/gemma_embedding/CMakeLists.txt` instead.
+- Shared typed buffers still depend on XRT types through `device_runtime.hpp`
+  and `buffer.hpp`, so even CPU-only open-engine tests currently need XRT
+  headers plus `xrt_coreutil` at link time. That is a header/runtime
+  dependency, not a closed engine dependency.
+
+New model builders extend `utilities/q4nx-build`. Reuse its architecture
+detection, tensor mappings, and layout handling; add open output backends rather
+than creating a separate converter.
 
 ---
 

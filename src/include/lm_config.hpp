@@ -91,7 +91,16 @@ class LM_Config{
                 this->exec_path = "../../../";
             #endif
             #else
-                this->exec_path = utils::find_xclbin_path();
+                // Reading config.json must not require an xclbin tree: the open
+                // embedding model ships no closed kernels, and a missing tree
+                // must never abort `flm pull`, `flm list`, or model loading.
+                // Leave exec_path empty and let kernel lookup fail later, only
+                // if a model actually needs kernels from there.
+                try {
+                    this->exec_path = utils::find_xclbin_path();
+                } catch (const std::exception&) {
+                    this->exec_path.clear();
+                }
             #endif
             this->model_path = model_name;
             this->model_name = std::filesystem::path(model_name).filename().string();

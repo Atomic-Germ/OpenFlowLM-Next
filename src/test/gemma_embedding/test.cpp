@@ -2,10 +2,9 @@
 #include <cmath>
 #include "utils/utils.hpp"
 #include "utils/vm_args.hpp"
-#include "AutoEmbeddingModel/auto_embedding_model.hpp"
 #include "model_list.hpp"
-#include "AutoEmbeddingModel/modeling_gemma_embedding.hpp"
 #include "metrices.hpp"
+#include "open_embedding/engine.hpp"
 
 static float reference[] = {
     -6.835938e-02,  9.423828e-02,   4.516602e-02,   3.015137e-02,   -6.347656e-02,  -1.531982e-02,  -3.564453e-02,  -1.507568e-02,  2.282715e-02,   4.003906e-02,   8.117676e-03,   -3.540039e-02,  9.399414e-03,   2.770996e-02,   7.110596e-03,   1.202393e-02,
@@ -57,25 +56,6 @@ static float reference[] = {
     -3.637695e-02,  -1.239014e-02,  4.638672e-02,   -7.519531e-02,  -2.709961e-02,  7.781982e-03,   3.784180e-02,   3.204346e-04,   -3.320312e-02,  -6.298828e-02,  -4.956055e-02,  6.225586e-02,   -1.379395e-02,  4.174805e-02,   3.588867e-02,   5.554199e-03,
     4.077148e-02,   1.806641e-02,   1.843262e-02,   -2.661133e-02,  7.446289e-03,   3.768921e-03,   5.566406e-02,   -4.687500e-02,  -4.174805e-02,  1.531982e-02,   9.765625e-03,   2.343750e-02,   2.905273e-02,   2.246094e-02,   2.160645e-02,   5.859375e-03
 };
-// Model-specific factory function for Gemma3 Text family only
-inline std::pair<std::string, std::unique_ptr<AutoEmbeddingModel>> get_gemma_embedding_model(const std::string& model_tag, flm_rt::device* npu_device_inst) {
-    static std::unordered_set<std::string> gemma_embedding_Tags = {
-        "embed-gemma", "embed-gemma:300m"
-    };
-
-    std::unique_ptr<AutoEmbeddingModel> auto_embedding_engine = nullptr;
-    std::string new_model_tag = model_tag;
-    
-    if (gemma_embedding_Tags.count(model_tag))
-        auto_embedding_engine = std::make_unique<Gemma_Embedding>(npu_device_inst);
-    else {
-        new_model_tag = "embed-gemma:300m"; // Default to text-only model
-        auto_embedding_engine = std::make_unique<Gemma_Embedding>(npu_device_inst);
-    }
-  
-    return std::make_pair(new_model_tag, std::move(auto_embedding_engine));
-}
-
 int main(int argc, char* argv[]) {
     arg_utils::po::options_description desc("Allowed options");
     arg_utils::po::variables_map vm;
@@ -101,19 +81,17 @@ int main(int argc, char* argv[]) {
     std::cout << "Model path: " << model_path << std::endl;
     std::cout << "Model info: " << model_info.dump() << std::endl;
 
-    auto npu_device_global = flm_rt::device(0);
-
-    // Use model-specific factory
-    std::unique_ptr<AutoEmbeddingModel> embedding = std::make_unique<Gemma_Embedding>(&npu_device_global);
-    model_path = model_list.get_model_path(tag);
-    model_info = model_list.get_model_info(tag);
-
-    embedding->load_model(model_path, model_info, preemption);
+    (void)preemption;
+    open_embedding::Engine embedding;
+    if (!embedding.load(model_path)) {
+        std::cerr << "Failed to load open embedding model: " << model_path << std::endl;
+        return 1;
+    }
 
     std::string text = "Alice's Adventures in Wonderland ALICE'S ADVENTURES IN WONDERLAND Lewis Carroll THE MILLENNIUM FULCRUM EDITION 3.0 CHAPTER I Down the Rabbit-HoleAlice was beginning to get very tired of sitting by her sister on the bank, and of having nothing to do:  once or twice she had peeped into the book her sister was reading, but it had no pictures or conversations in it, and what is the use of a book,'thought Alice without pictures or conversation?' So she was considering in her own mind (as well as she could, for the hot day made her feel very sleepy and stupid), whether the pleasure of making a daisy-chain would be worth the trouble of getting up and picking the daisies, when suddenly a White Rabbit with pink eyes ran close by her. There was nothing so VERY remarkable in that; nor did Alice think it so VERY much out of the way to hear the Rabbit say to itself, `Oh dear!  Oh dear!  I shall be late!'";
 
     time_utils::time_point start_time = time_utils::now();
-    auto y = embedding->embed(text, task_query);
+    auto y = embedding.embed(text, open_embedding::task_type_t::task_query);
     buffer<bf16> y_bf16(y.size());
     for (int i = 0; i < y.size(); i++){
         y_bf16[i] = (bf16)y[i];

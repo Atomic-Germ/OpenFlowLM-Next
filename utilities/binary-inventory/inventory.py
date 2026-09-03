@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Inventory precompiled artifacts shipped by OpenFlowLM."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_ROOTS = ("src/lib", "src/xclbins")
+EXCLUDED_DIRS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "build_tmp",
+    "ironvenv",
+    "node_modules",
+    "reference_venv",
+    "venv",
+}
+ARTIFACT_SUFFIXES = {".a", ".dll", ".elf", ".insts", ".lib", ".o", ".xclbin"}
+
+
+def run_tool(argv: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            argv,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError:
+        return ""
+    return result.stdout
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def is_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    return path.is_file() and (".so" in name or path.suffix.lower() in ARTIFACT_SUFFIXES)
+
+
+def iter_artifacts(root: Path, scan_all: bool) -> list[Path]:
+    scan_roots = [root] if scan_all else [root / relative for relative in DEFAULT_ROOTS]
+    artifacts: list[Path] = []
+    for scan_root in scan_roots:
+        if not scan_root.exists():
+            continue
+        for current, dirs, files in os.walk(scan_root):
+            dirs[:] = sorted(directory for directory in dirs if directory not in EXCLUDED_DIRS)
+            base = Path(current)
+            artifacts.extend(base / name for name in sorted(files) if is_artifact(base / name))
+    return sorted(set(artifacts))
+
+
+def classify(path: Path, description: str) -> str:
+    name = path.name.lower()
+    if path.suffix.lower() == ".xclbin":
+        return "xclbin"
+    if path.suffix.lower() == ".insts":
+        return "instruction_stream"
+    if "elf" in description.lower() and "shared object" in description.lower():
+        return "elf_shared_library"
+    if path.suffix.lower() == ".dll":
+        return "pe_dll"
+    if path.suffix.lower() == ".lib":
+        return "coff_import_or_static_library"
+    if path.suffix.lower() == ".a":
+        return "static_archive"
+    if ".so" in name:
+        return "shared_library"
+    return "binary"
+
+
+def ownership(path: Path) -> str:
+    parts = path.parts
+    name = path.name.lower()
+    if path.suffix.lower() == ".xclbin" or "xclbins" in parts:
+        # The open embedding's own compiled kernels ship under a family dir's
+        # npu_matmul_f32/ subdirectory. They are open artifacts we build, not
+        # closed-source kernels awaiting replacement.
+        if "npu_matmul_f32" in parts:
+            return "open_npu_kernel"
+        return "closed_npu_kernel"
+    if "xrt" in parts or "hrx" in parts:
+        if any(token in name for token in ("_npu", "gemm", "dequant", "lm_head", "mha", "q4_npu")):
+            return "closed_engine_or_primitive"
+        return "runtime_support"
+    return "third_party_runtime"
+
+
+def parse_elf(path: Path) -> dict[str, Any]:
+    dynamic = run_tool(["readelf", "-d", str(path)])
+    needed = re.findall(r"\(NEEDED\).*?\[(.*?)\]", dynamic)
+    soname_match = re.search(r"\(SONAME\).*?\[(.*?)\]", dynamic)
+    runpath_match = re.search(r"\((?:RUNPATH|RPATH)\).*?\[(.*?)\]", dynamic)
+
+    symbols = run_tool(["readelf", "--dyn-syms", "--wide", str(path)])
+    defined = 0
+    undefined = 0
+    for line in symbols.splitlines():
+        columns = line.split()
+        if len(columns) < 8 or not columns[0].rstrip(":").isdigit():
+            continue
+        if columns[6] == "UND":
+            undefined += 1
+        else:
+            defined += 1
+
+    return {
+        "soname": soname_match.group(1) if soname_match else None,
+        "needed": sorted(set(needed)),
+        "runpath": runpath_match.group(1) if runpath_match else None,
+        "defined_dynamic_symbols": defined,
+        "undefined_dynamic_symbols": undefined,
+    }
+
+
+def parse_xclbin_info(text: str) -> dict[str, Any]:
+    def value(label: str) -> str | None:
+        match = re.search(rf"^\s*{re.escape(label)}:\s*(.*?)\s*$", text, re.MULTILINE)
+        return match.group(1) or None if match else None
+
+    sections_match = re.search(
+        r"^\s*Sections:\s*(.*?)(?=^={5,}|^\S.*\n-+)", text, re.MULTILINE | re.DOTALL
+    )
+    sections: list[str] = []
+    if sections_match:
+        sections = [item.strip() for item in sections_match.group(1).replace("\n", " ").split(",")]
+        sections = [item for item in sections if item]
+    return {
+        "uuid": value("UUID (xclbin)"),
+        "version": value("Version"),
+        "generated_by": value("Generated by"),
+        "kernels": value("Kernels"),
+        "sections": sections,
+        "has_build_metadata": "BUILD_METADATA section is not present" not in text,
+    }
+
+
+def model_entries(root: Path) -> dict[str, dict[str, Any]]:
+    path = root / "src/model_list.json"
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entries: dict[str, dict[str, Any]] = {}
+    for tag, variants in data.get("models", {}).items():
+        for size, model in variants.items():
+            entries[model["name"]] = {
+                "tag": f"{tag}:{size}",
+                "family": model.get("details", {}).get("family"),
+            }
+    return entries
+
+
+def xclbin_bundles(root: Path, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for artifact in artifacts:
+        if artifact["kind"] != "xclbin":
+            continue
+        parent = str(Path(artifact["path"]).parent)
+        grouped[parent].append(artifact)
+
+    models = model_entries(root)
+    bundles = []
+    for directory, members in sorted(grouped.items()):
+        payload = "\n".join(
+            f"{Path(member['path']).name}:{member['sha256']}" for member in sorted(members, key=lambda item: item["path"])
+        )
+        model_name = Path(directory).name
+        bundles.append(
+            {
+                "directory": directory,
+                "model_name": model_name,
+                "model": models.get(model_name),
+                "file_count": len(members),
+                "filenames": sorted(Path(member["path"]).name for member in members),
+                "manifest_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            }
+        )
+    return bundles
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Scan the whole repository instead of only src/lib and src/xclbins.",
+    )
+    args = parser.parse_args()
+    root = args.root.resolve()
+    output = args.output or root / "docs/precompiled_artifacts.json"
+
+    tool_paths = {
+        name: shutil.which(name)
+        for name in ("file", "readelf", "nm", "objdump", "strings", "xclbinutil")
+    }
+    paths = iter_artifacts(root, args.all)
+    records: list[dict[str, Any]] = []
+    xclbin_info_by_hash: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        relative = path.relative_to(root)
+        description = run_tool(["file", "-b", str(path)]).strip() if tool_paths["file"] else ""
+        digest = sha256(path)
+        record: dict[str, Any] = {
+            "path": relative.as_posix(),
+            "kind": classify(path, description),
+            "ownership": ownership(relative),
+            "size": path.stat().st_size,
+            "sha256": digest,
+            "file_description": description,
+        }
+        if record["kind"] == "elf_shared_library" and tool_paths["readelf"]:
+            record["elf"] = parse_elf(path)
+        elif record["kind"] == "xclbin" and tool_paths["xclbinutil"]:
+            if digest not in xclbin_info_by_hash:
+                info = run_tool([tool_paths["xclbinutil"], "--info", "--input", str(path)])
+                xclbin_info_by_hash[digest] = parse_xclbin_info(info)
+            record["xclbin"] = xclbin_info_by_hash[digest]
+        records.append(record)
+
+    duplicate_hashes = defaultdict(list)
+    for record in records:
+        duplicate_hashes[record["sha256"]].append(record["path"])
+    duplicate_groups = [
+        {"sha256": digest, "paths": paths}
+        for digest, paths in sorted(duplicate_hashes.items())
+        if len(paths) > 1
+    ]
+
+    bundles = xclbin_bundles(root, records)
+    bundle_groups = defaultdict(list)
+    for bundle in bundles:
+        bundle_groups[bundle["manifest_sha256"]].append(bundle["directory"])
+
+    manifest = {
+        "schema_version": 1,
+        "root": ".",
+        "scope": "whole_repository" if args.all else list(DEFAULT_ROOTS),
+        "tools": {name: path is not None for name, path in tool_paths.items()},
+        "summary": {
+            "artifact_count": len(records),
+            "total_bytes": sum(record["size"] for record in records),
+            "by_kind": dict(sorted(Counter(record["kind"] for record in records).items())),
+            "by_ownership": dict(sorted(Counter(record["ownership"] for record in records).items())),
+            "unique_payloads": len(duplicate_hashes),
+            "duplicate_payload_groups": len(duplicate_groups),
+            "xclbin_bundle_count": len(bundles),
+            "identical_xclbin_bundle_groups": sum(1 for paths in bundle_groups.values() if len(paths) > 1),
+        },
+        "artifacts": records,
+        "duplicate_payloads": duplicate_groups,
+        "xclbin_bundles": bundles,
+        "identical_xclbin_bundles": [
+            {"manifest_sha256": digest, "directories": paths}
+            for digest, paths in sorted(bundle_groups.items())
+            if len(paths) > 1
+        ],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(manifest["summary"], indent=2))
+    print(f"Wrote {output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

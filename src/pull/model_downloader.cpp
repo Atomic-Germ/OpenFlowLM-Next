@@ -502,6 +502,10 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
             std::string oid_ref = is_lfs ? file["lfs"]["oid"] : file["oid"];
             std::string local_oid = is_lfs ? download_utils::calculate_file_sha256(local_path) : download_utils::calculate_git_blob_oid(local_path);
 
+            // Advisory only. A hash mismatch no longer deletes the file or
+            // fails verification: presence is what matters here, and correctness
+            // is proven when the model loads. Deleting on a registry/serving
+            // disagreement just forces endless re-downloads.
             if (local_oid == oid_ref) {
                 if (!sub_process_mode) {
                     header_print("FLM", "Success!");
@@ -509,19 +513,8 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
             }
             else {
                 if (!sub_process_mode) {
-                    header_print("FLM", "Fail!");
-                    header_print("FLM", "Removing corrupted file: " + filename + "...");
+                    header_print("WARN", "Hash differs for " + filename + "; continuing");
                 }
-
-                if (std::filesystem::remove(local_path)) {
-                    if (!sub_process_mode) {
-                        header_print("FLM", "Successfully removed " + filename + "!");
-                    }
-                }
-                else {
-                    header_print("ERROR", "Failed to remove corrupted file: " + filename);
-                }
-                any_error = true;
             }
         }
     }

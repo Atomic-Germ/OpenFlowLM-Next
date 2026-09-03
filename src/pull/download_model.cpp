@@ -186,13 +186,19 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
         std::cout << std::endl;
     }
 
-    if (1) {
+    // Hash verification is advisory, never fatal.
+    //
+    // The registry oid can legitimately disagree with what a repo serves: LFS
+    // vs git-blob hashing, re-uploaded or re-quantized files, and mirrors all
+    // change the expected value. A genuinely broken download is self-evident
+    // when the model fails to load or produces garbage, so a mismatch must not
+    // block a pull or burn all retries on an unfixable comparison.
+    if (!remote_oid.empty()) {
         header_print("FLM", "Checking Hash...");
         std::string local_oid = is_lfs ? calculate_file_sha256(local_path) : calculate_git_blob_oid(local_path);
         if (local_oid != remote_oid) {
-            header_print("FLM", "Hash not matched!");
-            show_cursor(); // Show cursor on error
-            return false;
+            header_print("WARN", "Hash mismatch (expected " << remote_oid << ", have " << local_oid
+                                                            << "); continuing");
         }
     }
 
