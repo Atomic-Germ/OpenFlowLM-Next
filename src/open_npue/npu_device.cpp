@@ -29,6 +29,12 @@
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_kernel.h"
 
+// INSIDE npue, not at global scope. A host application can
+// legitimately have its own `npu` -- OpenFlowLM-Next does,
+// and MSVC refuses this declaration outright there (C2757).
+// A three-letter top-level namespace from a library is a
+// name nobody else can use. tasks/0156 B2.
+namespace npue {
 namespace npu {
 namespace {
 
@@ -534,3 +540,4 @@ void Design::run(const std::vector<const void *> &inputs, void *output) {
 }
 
 }  // namespace npu
+}  // namespace npue

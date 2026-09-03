@@ -5,7 +5,7 @@ This directory is a **copy**, written by `tools/sync_openflowlm.py` in
 not here: the accuracy gates that make these numbers mean anything live in
 that repository, and a local edit here silently detaches this code from them.
 
-- **Source commit** `513cd7150482a8694b7b14d195aa6a05ff7d0529`
+- **Source commit** `92f7bc765f97d1d5e0ab726b8e93b64db02a1902`
 - **Synced** 2026-09-03
 - **Licence** MIT (relicensed on copy by the sole copyright holder; upstream is Apache-2.0)
 
@@ -34,7 +34,7 @@ that repository, and a local edit here silently detaches this code from them.
 | `npue.cpp` | `ef1b43b9781a3b43` | 9,822 |
 | `tokenizer.cpp` | `57a928dd7adafdd6` | 14,509 |
 | `npue_pack.cpp` | `3ab5019c54b37ae6` | 86,868 |
-| `npu_device.cpp` | `fefdd7d4edcf917b` | 21,338 |
+| `npu_device.cpp` | `40d1ede49ed314aa` | 21,123 |
 | `tokenizer_gemma.cpp` | `c3c9066568a365dc` | 14,498 |
 | `gemma_kernels.cpp` | `5c244b39d7cd16b2` | 7,618 |
 | `gemma_encode.cpp` | `474d12ff118f317f` | 15,522 |
@@ -47,7 +47,7 @@ that repository, and a local edit here silently detaches this code from them.
 | `npue_encoder.hpp` | `5bf7f4c91da9f735` | 222,615 |
 | `npue.hpp` | `4baa92b756164cf1` | 4,832 |
 | `npue_pack.hpp` | `13a78c8557829591` | 7,855 |
-| `npu_device.hpp` | `c71471e43ee78ff2` | 15,337 |
+| `npu_device.hpp` | `28f1b733993b038b` | 15,342 |
 | `json_min.hpp` | `d347b46053a1f4ba` | 4,506 |
 | `tokenizer.hpp` | `70577f60c4f1c31a` | 3,950 |
 | `bert_unicode_tables.hpp` | `fe423605b27a69d1` | 622,130 |

@@ -275,6 +275,12 @@ if(NOT FLM_USE_HRX)
         "${CMAKE_SOURCE_DIR}/open_npue/bbpe_tokenizer_gen.cpp"
         "${CMAKE_SOURCE_DIR}/open_npue/gemma_kernels.cpp"
         "${CMAKE_SOURCE_DIR}/open_npue/gemma_encode.cpp"
+        # Fork-owned, not synced: the ONLY translation unit that includes the
+        # engine's header. It is in this list rather than in the glob because
+        # it must carry the engine's flags -- see the /arch:AVX2 note below and
+        # the long comment in npue_embedding.hpp, which records what a host TU
+        # instantiating those inline functions at a different ISA level costs.
+        "${CMAKE_SOURCE_DIR}/open_npue_adapter/npue_embedding.cpp"
     )
     list(APPEND SOURCES ${OPEN_NPUE_SOURCES})
 
