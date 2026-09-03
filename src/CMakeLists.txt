@@ -243,6 +243,78 @@ if(NOT FLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
 endif()
 
+# ———————————————————————————————————————————————
+# open_npue: a second embedding backend (NpuEmbeddings)
+# ———————————————————————————————————————————————
+#
+# ADDITIVE. open_embedding above stays exactly where it is and keeps serving
+# embed-gemma:300m; this adds encoders for models the tree does not have.
+# It is a synced copy -- see open_npue/SYNCED.md for the source commit and
+# per-file hashes. Edit it upstream, not here: the accuracy gates that make
+# its numbers mean anything (a HuggingFace golden gate, cross-lane bitwise
+# agreement, an MTEB bridge, a p99 tail gate and four per-tokenizer
+# byte-exactness harnesses) live in that repository and want an NPU.
+#
+# Sources are listed EXPLICITLY, not globbed, per AGENTS.md.
+#
+# NOT FLM_USE_HRX, exactly like npu_matmul.cpp above: open_npue/npu_device.cpp
+# talks to XRT directly, and the encoders are unusable without it.
+if(NOT FLM_USE_HRX)
+    set(OPEN_NPUE_SOURCES
+        "${CMAKE_SOURCE_DIR}/open_npue/npue_encoder.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/npue.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/npue_pack.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/npu_device.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/json_min.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_gemma.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/gemma_tokenizer_gen.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_xlmr.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/xlmr_tokenizer_gen.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_bbpe.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/bbpe_tokenizer_gen.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/gemma_kernels.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/gemma_encode.cpp"
+    )
+    list(APPEND SOURCES ${OPEN_NPUE_SOURCES})
+
+    # THE INCLUDE PATH IS PER-SOURCE, NOT GLOBAL, AND THAT IS DELIBERATE.
+    # open_npue/tokenizer.hpp and src/include/tokenizer/tokenizer.hpp are
+    # different files with the same basename. Putting open_npue on the global
+    # include path would let the wrong one win for some translation unit
+    # depending on directory order -- a failure that shows up as a confusing
+    # compile error at best and as the wrong tokenizer at worst. Scoping it to
+    # these fourteen files means nothing else in the tree can even see them.
+    set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/open_npue")
+
+    # /arch:AVX2 IS LOAD-BEARING AND IS LOST IN SILENCE.
+    #
+    # Roughly half of an encode is host-side AVX2 intrinsics, every one of them
+    # behind `#if defined(__AVX2__)` with a correct scalar `#else`. Without the
+    # flag this compiles, runs, returns the right vectors and is 2.1-2.6x
+    # slower -- measured upstream on three models, with every accuracy gate
+    # still green. MSVC x64 defaults to the SSE2 baseline and defines no
+    # __AVX2__, so the flag is not optional here.
+    #
+    # Same precedent as the AVX-512 image/audio sources below: per-source
+    # options, so raising the ISA for these files does not raise it for the
+    # whole binary.
+    #
+    # One consequence worth knowing before writing a comparison test: THE
+    # EMBEDDING BYTES MOVE WITH THE HOST ISA. The scalar and AVX2 paths reduce
+    # in different orders, so any check comparing vectors against an upstream
+    # binary must fix the /arch: level on both sides or it fails for a reason
+    # that has nothing to do with the port.
+    if(MSVC)
+        set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "-mavx2;-mfma")
+    endif()
+endif()
+
 # Exclude files that depend on missing libraries for Linux
 if(NOT WIN32)
     # list(FILTER SOURCES EXCLUDE REGEX ".*modeling_gemma3\\.cpp$")
