@@ -635,6 +635,35 @@ ends of the format rather than inheriting the closed Q4NX geometry; decode on CP
 first and only add a dedicated small-M kernel if simpler than padding the GEMM;
 replace the closed path and its remnants entirely once understood.
 
+**Phase 1 forward pass validated (2026-09-02).** `src/open_gemma3/engine.cpp`
+reproduces the NumPy oracle exactly: 6/6 prompts, top-100 logits all matching,
+worst deviation 0.0002, greedy continuation 16/16. The 2282-token prompt passes,
+so hybrid sliding/global attention is confirmed.
+
+Build and run the validation (scratch dir `tmp/` is git-ignored and on disk):
+
+```
+cmake -S src/test/gemma3_text_open -B tmp/gemma3-test -DCMAKE_BUILD_TYPE=Release
+cmake --build tmp/gemma3-test -j4
+./tmp/gemma3-test/test_gemma3_text_open -m Models/Gemma-3-1B-OpenNPU2 \
+  -r Models/Gemma-3-1B-OpenNPU2/reference_v1.json
+```
+
+Standalone-target rules learned here (reuse for every new open engine):
+
+- Do **not** use `src/test/CMakeLists.txt`; it unconditionally links the closed
+  `q4_npu_eXpress`/`mha`/`dequant`/`gemm`/`lm_head` stack.
+- Including `utils/utils.hpp` still drags in XRT types via
+  `typedef.hpp -> buffer.hpp -> device_runtime.hpp`, so the XRT **headers** are
+  needed even for a CPU-only target. No XRT library is linked.
+- `common/utils.cpp` requires the `CMAKE_XCLBIN_PREFIX` compile definition
+  (`find_xclbin_path`), even when the engine never touches xclbins.
+- `arg_utils` lives in `utils/vm_args.hpp`, not `arg_utils.hpp`.
+
+The engine currently re-forwards the whole sequence per decode step (no KV
+cache). That is correct and validated; the KV cache and true M=1 decode path are
+the next piece of Phase 1.
+
 ## Download Verification Policy (2026-09-02)
 
 **Hash checks are advisory, never fatal.** A pull must not be blocked by an oid

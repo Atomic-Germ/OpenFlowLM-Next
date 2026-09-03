@@ -3314,5 +3314,55 @@
             "xetHash": "7c4d2da22b3de2ed3f3eae66c7034386df6a3c5d81039ad4a1c8067e7eaf0069",
             "path": "vision_weights.q4nx"
         }
+    ],
+    "gemma3-text-open:1b": [
+        {
+            "type": "file",
+            "oid": "50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946",
+            "size": 35,
+            "path": "added_tokens.json"
+        },
+        {
+            "type": "file",
+            "oid": "19cb5d28c97778271ba2b3c3df47bf76bdd6706724777a2318b3522230afe91e",
+            "size": 899,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fd9324becc53c4be610db39e13a613006f09fd6ef71a95fb6320dc33157490a3",
+            "size": 215,
+            "path": "generation_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6",
+            "size": 1999811208,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
+            "size": 662,
+            "path": "special_tokens_map.json"
+        },
+        {
+            "type": "file",
+            "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+            "size": 33384568,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "bfe25c2735e395407beb78456ea9a6984a1f00d8c16fa04a8b75f2a614cf53e1",
+            "size": 1156999,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "6a4083277265804cda5317aa797ec2de80535b97790868cb1155e07bb022dfae",
+            "size": 55416,
+            "path": "weights_manifest.json"
+        }
     ]
 }

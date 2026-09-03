@@ -509,7 +509,7 @@
                 "name": "Embedding-Gemma-300M-OpenNPU2",
                 "url": "https://huggingface.co/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
                 "file_url": "https://huggingface.co/api/models/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2/tree/main",
-                "ms_url": "",
+                "ms_url": "https://www.modelscope.ai/models/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
                 "size": 300000000,
                 "flm_min_version": "0.9.15",
                 "files": [
@@ -533,6 +533,37 @@
                     "embeddings"
                 ],
                 "footprint": 0.62
+            }
+        },
+        "gemma3-text-open": {
+            "1b": {
+                "name": "Gemma3-1B-OpenNPU2",
+                "url": "https://huggingface.co/Atomic-Germ/Gemma3-1B-OpenNPU2",
+                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Gemma3-1B-OpenNPU2/tree/main",
+                "ms_url": "https://www.modelscope.ai/models/Atomic-Germ/Gemma3-1B-OpenNPU2",
+                "size": 1000000000,
+                "flm_min_version": "0.9.20",
+                "default_context_length": 32768,
+                "max_prefill_len": 4096,
+                "files": [
+                    "config.json",
+                    "generation_config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "special_tokens_map.json",
+                    "added_tokens.json",
+                    "weights_manifest.json"
+                ],
+                "details": {
+                    "format": "NPU2",
+                    "family": "gemma3-text-open",
+                    "think": false,
+                    "think_toggleable": false,
+                    "parameter_size": "1B",
+                    "quantization_level": "bf16"
+                },
+                "footprint": 2.0
             }
         },
         "whisper-v3": {

@@ -147,9 +147,45 @@ go on real disk; use the git-ignored `Models/` directory.
 Next validation step: cross-check the NumPy oracle against the closed
 `gemma_text_npu` engine (still functional) to confirm both agree.
 
-### Phase 1 — CPU causal engine from bf16 safetensors
+### Phase 1 — CPU causal engine from bf16 safetensors — **FORWARD PASS VALIDATED**
 
-New `src/open_gemma3/engine.{hpp,cpp}` implementing `causal_lm`'s 11 virtuals.
+New `src/open_gemma3/engine.{hpp,cpp}`; the forward pass is complete and matches
+the oracle exactly. Remaining: the `causal_lm` adapter (KV cache, incremental
+decode), wiring into `AutoModel`, and removing the closed path.
+
+**Validated result** — `src/test/gemma3_text_open/`, a standalone target (it
+does not use `src/test/CMakeLists.txt`, which unconditionally links the closed
+`q4_npu_eXpress`/`mha`/`dequant`/`gemm`/`lm_head` stack):
+
+```
+open_gemma3: loaded 340 tensors (hidden=1152 layers=26 heads=4 kv=1
+             head_dim=256 vocab=262144, global layers: 5 11 17 23)
+[PASS] prompt 0 (6 tok):    argmax ok  top-100 100/100  worst|diff| 0.0001  greedy 16/16
+[PASS] prompt 1 (10 tok):   argmax ok  top-100 100/100  worst|diff| 0.0000  greedy 16/16
+[PASS] prompt 2 (7 tok):    argmax ok  top-100 100/100  worst|diff| 0.0001  greedy 16/16
+[PASS] prompt 3 (7 tok):    argmax ok  top-100 100/100  worst|diff| 0.0000  greedy 16/16
+[PASS] prompt 4 (11 tok):   argmax ok  top-100 100/100  worst|diff| 0.0001  greedy 16/16
+[PASS] prompt 5 (2282 tok): argmax ok  top-100 100/100  worst|diff| 0.0002
+6/6 prompts matched the NumPy oracle
+```
+
+The worst logit deviation is 0.0002 — fp32 rounding noise. Crucially, the
+**2282-token prompt passes**, which exercises the hybrid sliding/global attention
+path, and **greedy continuation is 16/16**, validating multi-step decode.
+
+Because the oracle is an independent implementation, this is strong evidence that
+embedding scaling, dual-base RoPE, GQA with a single KV head, the tied LM head,
+bf16 decoding, and the sliding-window mask are all correct.
+
+**Still to do in Phase 1:**
+
+| Item | Note |
+|---|---|
+| `causal_lm` adapter | The engine currently exposes `prefill()` returning `vector<float>`; it needs the 11 virtuals, `buffer<bf16>` logits, and `Q4NX&`-free weight loading. |
+| KV cache | `prefill()` recomputes full `T x T` attention and all projections each call. Needs `[26][2][MAX_L][256]` bf16 with two fill policies (ring at 512 for sliding, append for global). ~872 MB at 32768 ctx. |
+| Incremental decode | Currently validated by *re-forwarding* (correct, slow). Replace with a true M=1 path once the cache exists. |
+| Wire into `AutoModel` | Swap `modeling_gemma3_text.cpp`, add `src/open_gemma3/engine.cpp` to `CMakeLists.txt`, and drop `gemma_text_npu` from the link list. |
+| Remove closed remnants | `gemma_text_npu` XRT/HRX/Windows binaries, installer entries, standalone-test wiring. |
 
 Reuse from `src/open_embedding` (validated): rmsnorm (`x*scale*(1+w)`), GQA
 reduction, dual-base RoPE, `rotate_half`, fp32 max-subtracted softmax,
