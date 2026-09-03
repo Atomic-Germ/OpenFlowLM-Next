@@ -26,6 +26,7 @@
 
 #include "utils/utils.hpp"
 #include "npue_encoder.hpp"
+#include "npue_pack.hpp"
 
 namespace {
 
@@ -95,14 +96,17 @@ int int_or(const json& j, const char* key, int fallback) {
 
 /// The `.npue` container: the checkpoint's weights, pre-tiled for the array.
 ///
-/// IT IS NOT PACKED HERE YET, and the refusal says so rather than pretending.
-/// The packer is in this tree (open_npue/npue_pack.cpp) and is byte-identical
-/// to the Python one, but the DRIVER that chooses which per-architecture entry
-/// point to call, with which tile width and layout hash, is still ~190 lines
-/// inside the upstream CLI. Reproducing that here would be a second copy of a
-/// decision that has to agree exactly, which is the one thing the sync design
-/// forbids. Upstream owes a one-call driver; until then this names the command
-/// that produces the file.
+/// PACKED ON FIRST RUN when it is absent, from the model author's own files in
+/// the same directory. NOTHING IS RE-HOSTED: the weights a user gets are the
+/// author's bytes with the author's hash, and the container -- those same
+/// weights pre-tiled for the array -- is produced locally from them.
+///
+/// The packing DECISION (which architecture, which tile width, which pooling,
+/// which source repository) is npue::prepare_model_auto() in the engine and not
+/// here. That separation is the point: a second copy of that decision in this
+/// repository would have to agree byte for byte with upstream's, and upstream's
+/// byte-identity gate would stop being evidence about these containers the
+/// moment the two diverged. So this calls one function and chooses nothing.
 std::string find_container(const std::filesystem::path& dir, const json& info) {
     namespace fs = std::filesystem;
     if (info.contains("npue_container") && info["npue_container"].is_string()) {
@@ -130,13 +134,45 @@ std::string find_container(const std::filesystem::path& dir, const json& info) {
             "they differ in datapath or sequence length. Name one with "
             "\"npue_container\" in the model entry.");
     }
-    throw std::runtime_error(
-        "NpueEmbedding: no .npue container in " + dir.string() + ".\n"
-        "The container is the checkpoint's weights pre-tiled for the array; it "
-        "is packed from the model author's own files and is not downloaded. "
-        "Produce it with:\n"
-        "    npuembeddings --prepare-model \"" + dir.string() + "\"\n"
-        "from the NpuEmbeddings tree, then re-run.");
+    // Nothing packed yet: do it now, once, from the checkpoint beside us. A
+    // first run therefore costs a pack -- tens of seconds for a 100M model --
+    // and every run after it mmaps the result.
+    if (!fs::is_regular_file(dir / "config.json"))
+        throw std::runtime_error(
+            "NpueEmbedding: " + dir.string() + " has neither a .npue container "
+            "nor a config.json to pack one from. The container is the "
+            "checkpoint's weights pre-tiled for the array; it is produced "
+            "locally from the model author's own files, which means those "
+            "files have to be here.");
+    header_print("NPUE", "no container yet -- packing one from the checkpoint "
+                         "in " + dir.string() + " (first run only)");
+    npue::PrepareOptions po;
+    po.checkpoint_dir = dir.string();
+    // WHICH REPOSITORY THESE WEIGHTS CAME FROM, and this tree is the
+    // authority on it: ModelDownloader fetched them from the entry's own
+    // `url`. Upstream's packer falls back to a CHECKPOINT.json side-car, which
+    // is a file NpuEmbeddings writes and a HuggingFace checkpoint does not
+    // have -- so without this, packing a model fetched by `flm pull` refuses.
+    // It refuses rather than guessing because a container that misattributes
+    // its own weights is a licensing statement, and the fix is to tell it,
+    // not to loosen it.
+    if (info.contains("npue_source_repo") &&
+        info["npue_source_repo"].is_string()) {
+        po.source_repo = info["npue_source_repo"].get<std::string>();
+    } else if (info.contains("url") && info["url"].is_string()) {
+        const std::string url = info["url"].get<std::string>();
+        const std::string host = "huggingface.co/";
+        const size_t i = url.find(host);
+        if (i != std::string::npos) po.source_repo = url.substr(i + host.size());
+    }
+    // tile_n is a property of the MODEL's widths, not a preference: the design
+    // asserts N % (tile_n * n_cols) == 0, so bge-large's N in {1024,3072,4096}
+    // needs 32 where hidden-768 models take 48. The model entry names it when
+    // it is not the default.
+    if (info.contains("npue_tile_n") && info["npue_tile_n"].is_number_integer())
+        po.tile_n = info["npue_tile_n"].get<int>();
+    po.log = [](const std::string& s) { header_print("NPUE", s); };
+    return npue::prepare_model_auto(po);
 }
 
 /// The compiled design set. Same two-tier convention open_embedding uses: a

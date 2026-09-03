@@ -138,4 +138,66 @@ void prepare_model_gte(const std::string &model_dir,
                        int64_t tile_k, int64_t tile_n, int64_t max_seq,
                        void (*log)(const std::string &) = nullptr);
 
+// ONE CALL THAT PACKS A CHECKPOINT (tasks/0156, T63).
+//
+// The four prepare_model_* entry points above each need the right arguments,
+// and choosing them is a real decision: which architecture the checkpoint is,
+// which tile width is legal for its widths, which pooling its own
+// 1_Pooling/config.json declares, which repository the weights came from, and
+// which max_seq the container should record. That decision lived in ~200 lines
+// inside `--prepare-model` in main.cpp, which means it lived somewhere a host
+// application cannot reach.
+//
+// WHY THAT MATTERED ENOUGH TO MOVE. OpenFlowLM-Next fetches the model author's
+// OWN HuggingFace checkpoint and packs the container locally -- nothing is
+// re-hosted, so the weights a user gets are the author's bytes with the
+// author's hash. The alternative to this function was a second copy of the
+// decision over there, and a second copy of a decision that has to agree
+// EXACTLY is the one thing the sync design forbids: the moment the two differ,
+// this repository's byte-identity gate stops being evidence about the fork's
+// containers.
+//
+// EVERY DISPATCH IS ON THE CHECKPOINT'S OWN config.json, never on a directory
+// name. `model_type` is the field; gemma3_text, nomic_bert and "new" route to
+// their own packers and everything else is BERT. tools/pack_npue.py's main()
+// makes the same decision from the same field, and tools/verify_pack_parity.py
+// is the standing gate that they agree byte for byte.
+//
+// It REFUSES rather than guessing, in three places, and each refusal is a
+// statement someone would otherwise have had to make up:
+//   * no 1_Pooling/config.json -- there is no way to tell whether the
+//     checkpoint pools by mean or by CLS, and the two are different models.
+//   * no source_repo and no CHECKPOINT.json -- a container that misattributes
+//     its own weights is a licensing statement.
+//   * an architecture whose model_type is recognised but whose packer this
+//     build does not carry -- not applicable today, and the BERT fallback is
+//     deliberately the last branch rather than a catch-all guess.
+struct PrepareOptions {
+  // The checkpoint directory: model.safetensors, config.json, and (for the
+  // BERT family) vocab.txt and 1_Pooling/config.json, as downloaded.
+  std::string checkpoint_dir;
+  // Where to write. Empty means <checkpoint_dir>/<directory name>.npue --
+  // named after the checkpoint, not after a model, which was a literal until
+  // a second model made it visible.
+  std::string out_path;
+  // Which repository the weights came from. Empty means read it out of
+  // CHECKPOINT.json's repo_id, and refuse if there is none.
+  std::string source_repo;
+  // Tile size is A PROPERTY OF THE MODEL, not a constant: the design asserts
+  // N % (tile_n * n_cols) == 0, and bge-large's N in {1024, 3072, 4096} makes
+  // 48 illegal -- its legal set is {8, 16, 32, 64} and 64 does not fit L1
+  // (65,536 B against the 63 KB budget), so it must be 32.
+  int64_t tile_k = 64;
+  int64_t tile_n = 48;
+  // arch=1 escape hatch (tasks/0074). The default is the production geometry,
+  // so a cold clone self-produces a container the ARRAY can run -- before that
+  // default existed it self-produced a host-only container and quietly ran at
+  // 0.2 seq/s.
+  bool gemma_host_only = false;
+  void (*log)(const std::string &) = nullptr;
+};
+
+// Returns the path written. Throws on anything it will not guess.
+std::string prepare_model_auto(const PrepareOptions &opt);
+
 }  // namespace npue

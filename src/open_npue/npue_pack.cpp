@@ -37,6 +37,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 // <memory> for std::shared_ptr below. MSVC pulls it in transitively and
@@ -1896,6 +1897,155 @@ void prepare_model_gte(const std::string &model_dir,
       << "\n  source     : " << sha.substr(0, 16) << "...";
     log(s.str());
   }
+}
+
+namespace {
+
+// Read one top-level string field, through the real JSON parser rather than a
+// scan. main.cpp used http.hpp's json_field_string() for this, which is a
+// string scanner and is not in the library subset (http.hpp brings winsock).
+// A DOM parse is also strictly harder to fool: a scanner finds `"model_type"`
+// wherever it appears, including nested one level down.
+std::string json_string_field(const std::string &path, const std::string &key) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return std::string();
+  std::stringstream ss;
+  ss << f.rdbuf();
+  try {
+    const npue::json::Value v = npue::json::parse(ss.str());
+    const npue::json::Value *f = v.find(key);
+    if (!f || !f->is_string()) return std::string();
+    return f->as_string();
+  } catch (const std::exception &) {
+    return std::string();
+  }
+}
+
+bool json_bool_field(const npue::json::Value &v, const char *key) {
+  const npue::json::Value *f = v.find(key);
+  return f && f->is_bool() && f->as_bool();
+}
+
+void say(const PrepareOptions &opt, const std::string &s) {
+  if (opt.log) opt.log(s);
+}
+
+std::string resolve_source_repo(const PrepareOptions &opt) {
+  if (!opt.source_repo.empty()) return opt.source_repo;
+  const std::string repo =
+      json_string_field(opt.checkpoint_dir + "/CHECKPOINT.json", "repo_id");
+  if (repo.empty())
+    throw std::runtime_error(
+        "no CHECKPOINT.json with a repo_id under " + opt.checkpoint_dir +
+        " and no source_repo given -- refusing to guess which repository "
+        "these weights came from. A container that misattributes its own "
+        "weights is a licensing statement.");
+  return repo;
+}
+
+// Pooling comes from the checkpoint's own 1_Pooling/config.json, the same
+// source tools/pack_npue.py reads. Both packers must agree or
+// verify_pack_parity fails, which is the point of having the gate.
+std::string resolve_pooling(const PrepareOptions &opt) {
+  const std::string path = opt.checkpoint_dir + "/1_Pooling/config.json";
+  std::ifstream pf(path, std::ios::binary);
+  if (!pf)
+    throw std::runtime_error(
+        "no 1_Pooling/config.json under " + opt.checkpoint_dir +
+        " -- cannot tell whether this checkpoint pools by mean or by CLS, and "
+        "the two are different models");
+  std::stringstream ps;
+  ps << pf.rdbuf();
+  const npue::json::Value v = npue::json::parse(ps.str());
+  const bool cls = json_bool_field(v, "pooling_mode_cls_token");
+  const bool mean = json_bool_field(v, "pooling_mode_mean_tokens");
+  if (cls == mean)
+    throw std::runtime_error(
+        "1_Pooling/config.json asks for neither or both of cls and mean; this "
+        "runtime implements exactly those two");
+  return cls ? "cls" : "mean";
+}
+
+}  // namespace
+
+std::string prepare_model_auto(const PrepareOptions &opt) {
+  namespace fs = std::filesystem;
+  if (opt.checkpoint_dir.empty())
+    throw std::runtime_error("prepare_model_auto: no checkpoint directory");
+
+  std::string out = opt.out_path;
+  if (out.empty())
+    out = opt.checkpoint_dir + "/" +
+          fs::path(opt.checkpoint_dir).filename().string() + ".npue";
+
+  const std::string model_type =
+      json_string_field(opt.checkpoint_dir + "/config.json", "model_type");
+
+  // arch=1 (EmbeddingGemma / Gemma3 family): a completely different tensor
+  // shape and container, routed to its own packer rather than threaded through
+  // the BERT logic below. It resolves source_repo and the two tile knobs and
+  // nothing else -- no pooling (its own is fixed) and no layout hash.
+  // tasks/0065.
+  if (model_type == "gemma3_text") {
+    const std::string repo = resolve_source_repo(opt);
+    say(opt, "  source     " + repo);
+    say(opt, "NpuEmbeddings -- preparing " + out);
+    prepare_model_gemma(opt.checkpoint_dir, out, repo, opt.log,
+                        opt.tile_k, opt.tile_n, opt.gemma_host_only);
+    say(opt, "  wrote " + out);
+    return out;
+  }
+
+  // Everything below shares tile size, layout, pooling and source_repo; only
+  // the packer differs. That is why they are resolved once, here, rather than
+  // per branch.
+  const Layout lay = gemm_b_layout(opt.tile_k, opt.tile_n);
+  say(opt, "  layout     tile (" + std::to_string(opt.tile_k) + ", " +
+               std::to_string(opt.tile_n) + "), hash " +
+               lay.hash.substr(0, 16) + "...");
+  const std::string pooling = resolve_pooling(opt);
+  say(opt, "  pooling    " + pooling + " (from 1_Pooling/config.json)");
+  const std::string repo = resolve_source_repo(opt);
+  say(opt, "  source     " + repo);
+
+  // arch=2 (nomic-embed-text-v1.5): RoPE + gated SwiGLU rather than BERT's
+  // absolute-position + GELU. tasks/0071.
+  if (model_type == "nomic_bert") {
+    say(opt, "NpuEmbeddings -- preparing " + out +
+                 " (arch=nomic_bert_rope_swiglu)");
+    prepare_model_nomic(opt.checkpoint_dir, pooling, repo, out, lay.json,
+                        lay.hash, opt.tile_k, opt.tile_n, 256, opt.log);
+    say(opt, "  wrote " + out);
+    return out;
+  }
+
+  // arch=3 (gte-multilingual-base): model_type "new". max_seq 64 matches the
+  // Python-packed container this mirror is held byte-identical to (tasks/0135
+  // packed --max-seq 64; under RoPE the position table is zeros, so max_seq
+  // only caps request length). tasks/0138.
+  if (model_type == "new") {
+    say(opt, "NpuEmbeddings -- preparing " + out +
+                 " (arch=gte_new_rope_geglu)");
+    prepare_model_gte(opt.checkpoint_dir, pooling, repo, out, lay.json,
+                      lay.hash, opt.tile_k, opt.tile_n, 64, opt.log);
+    say(opt, "  wrote " + out);
+    return out;
+  }
+
+  // arch=0 (BERT family) is the LAST branch rather than a catch-all guess: an
+  // unrecognised model_type reaching here is packed as BERT, which is correct
+  // for the family (bert, xlm-roberta and the sentence-transformers forks all
+  // report their own names) and is where a genuinely new architecture will
+  // first show up as a wrong answer rather than an error. The container's
+  // `arch` field is what the runtime later refuses on, which is the guard that
+  // catches it.
+  say(opt, "NpuEmbeddings -- preparing " + out);
+  prepare_model(opt.checkpoint_dir + "/model.safetensors",
+                opt.checkpoint_dir + "/vocab.txt",
+                opt.checkpoint_dir + "/config.json", pooling, repo, out, "",
+                lay.json, lay.hash, opt.tile_k, opt.tile_n, 256, opt.log);
+  say(opt, "  wrote " + out);
+  return out;
 }
 
 }  // namespace npue

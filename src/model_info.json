@@ -3314,5 +3314,46 @@
             "xetHash": "7c4d2da22b3de2ed3f3eae66c7034386df6a3c5d81039ad4a1c8067e7eaf0069",
             "path": "vision_weights.q4nx"
         }
+    ],
+    "bge-base:en-v1.5": [
+        {
+            "type": "file",
+            "oid": "09a8200d8a549a3b9dba53b67156ca26810cc720",
+            "size": 777,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
+                "size": 437955512
+            },
+            "size": 437955512,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "688882a79f44442ddc1f60d70334a7ff5df0fb47",
+            "size": 711396,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "37fca74771bc76a8e01178ce3a6055a0995f8093",
+            "size": 366,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size": 231508,
+            "path": "vocab.txt"
+        },
+        {
+            "type": "file",
+            "oid": "da5bfd57e34ca45582e4bdbaa3e6deb9efffa08d",
+            "size": 190,
+            "path": "1_Pooling/config.json"
+        }
     ]
 }
