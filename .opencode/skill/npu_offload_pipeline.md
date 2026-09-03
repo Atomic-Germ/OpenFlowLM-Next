@@ -595,6 +595,40 @@ Inventory classifiers treat `npu_matmul_f32` kernels as `open_npu_kernel`
 distinct from `closed_npu_kernel`, so our own built kernels are never counted
 as pending replacement work.
 
+## Download Verification Policy (2026-09-02)
+
+**Hash checks are advisory, never fatal.** A pull must not be blocked by an oid
+comparison.
+
+Rationale: registry oids legitimately disagree with what a repo serves — LFS
+files hash as sha256 while plain git blobs hash as sha1, and re-uploaded,
+re-quantized, or mirrored files all change the expected value. A genuinely
+broken download is self-evident when the model fails to load or emits garbage.
+
+Changed behaviour:
+
+- `src/pull/download_model.cpp` — a mismatch logs `[WARN] Hash mismatch ...;
+  continuing` and the download still succeeds. It no longer consumes retries on
+  an unfixable comparison.
+- `src/pull/model_downloader.cpp` (`verify_and_clean_files`) — a mismatch logs a
+  warning and keeps the file. It no longer deletes the file or reports an error,
+  which previously forced endless re-downloads.
+- A missing file is still a real error and still triggers a re-pull.
+
+**Related: never abort on a missing xclbin tree for work that doesn't need
+kernels.** `utils::find_xclbin_path()` throws when no tree is installed, which
+broke both the open engine's CPU path and `flm pull` itself.
+
+- `src/open_embedding/engine.cpp` catches it around the app-family kernel lookup
+  and falls back to CPU-only.
+- `src/include/lm_config.hpp::_resolve_paths()` catches it and leaves
+  `exec_path` empty, so reading `config.json` during `flm pull` / `flm list`
+  works without any xclbins installed.
+
+Verified end to end against the live repo: `flm pull embed-gemma:300m` downloads
+all 7 files, warns on advisory hash differences, reports success, and the pulled
+model then loads and runs on NPU (cosine 0.99775).
+
 ### Ambiguous/Generalized Parts (User Questions)
 
 > **Q1: Weight layout** — Are your projection weights stored as `[N,K]` (out-major, needs transpose) or `[K,N]` (row-major, direct use)?
