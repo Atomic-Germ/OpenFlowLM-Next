@@ -59,7 +59,11 @@ ModelArchNames: dict[ModelArch, list[str]] = {
     ModelArch.QWEN2VL: ["qwen2.5-Vl"],
     ModelArch.QWEN2:   ["qwen2"],
     ModelArch.QWEN3:   ["qwen3"],
-    ModelArch.GEMMA3:  ["gemma3", "Medgemma", "Gemma-3"],
+    # `gemma3_text` / `gemma3_text_only` are the HF `model_type` values used by
+    # the text-only Gemma3 checkpoints (for example google/gemma-3-1b-it) and by
+    # the FLM NPU configs. Without them, HF-sourced Gemma3 builds fail
+    # architecture detection and are rejected.
+    ModelArch.GEMMA3:  ["gemma3", "gemma3_text", "gemma3_text_only", "Medgemma", "Gemma-3"],
     ModelArch.GEMMA4:  ["gemma4", "Gemma-4"],
     ModelArch.LLAMA:   ["llama"],
     ModelArch.LFM2:    ["lfm2"],

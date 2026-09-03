@@ -12,6 +12,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
 find_package(Threads REQUIRED)
 
+# Match the main build so the parallel code paths are actually exercised.
+find_package(OpenMP)
+
 # utils.hpp -> typedef.hpp -> buffer.hpp -> device_runtime.hpp pulls in XRT
 # types, so even this CPU-only target needs the XRT headers to compile the
 # shared utility code. No XRT library is linked and no NPU is used.
@@ -71,3 +74,6 @@ target_link_libraries(test_gemma3_text_open PRIVATE
     tokenizers_cpp
     "${XRT_COREUTIL_LIBRARY}"
 )
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_gemma3_text_open PRIVATE OpenMP::OpenMP_CXX)
+endif()

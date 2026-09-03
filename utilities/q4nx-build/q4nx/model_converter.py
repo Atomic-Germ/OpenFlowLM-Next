@@ -35,9 +35,14 @@ class __Q4NX_Converter(ABC):
     gguf_reader: GGUFReader
     gguf_tensors: Dict[str, GGUFTensor]
     q4nx_tensors: Dict[str, torch.Tensor]
-    hidden_size: int
-    num_layers: int
-    embed_length:int
+    # Defaults matter: the GGUF path overwrites these from metadata, but the HF
+    # path has no metadata to read, and several converters (Gemma3, Gemma4)
+    # dereference them unconditionally. Without defaults that raised
+    # `AttributeError: 'Gemma3' object has no attribute 'hidden_size'`.
+    hidden_size: int = 0
+    intermediate_size: int = 0
+    num_layers: int = 0
+    embed_length: int = 0
     q4nx_config: Dict
 
     row_block_size: int
@@ -76,6 +81,32 @@ class __Q4NX_Converter(ABC):
         else:
             self._read_hf_index()
         self._load_config()
+        if self.gguf_reader is None:
+            self._ensure_dims_from_hf_config()
+
+    def _ensure_dims_from_hf_config(self):
+        """Fill the dimensions GGUF metadata would have supplied.
+
+        Nothing on the HF path populates hidden/intermediate/layer counts, yet
+        converters dereference them, which previously raised AttributeError.
+        Read them from the source model's own config.json.
+        """
+        hf_dir = getattr(self, "hf_dir", None)
+        if hf_dir is None:
+            return
+        cfg_path = Path(hf_dir) / "config.json"
+        if not cfg_path.is_file():
+            print(f"[WARN] No {cfg_path}; cannot infer model dimensions")
+            return
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not self.hidden_size:
+            self.hidden_size = cfg.get("hidden_size", 0)
+        if not self.intermediate_size:
+            self.intermediate_size = cfg.get("intermediate_size", 0)
+        if not self.num_layers:
+            self.num_layers = cfg.get("num_hidden_layers", 0)
+        print(f"[INFO] Model dims from config.json: hidden={self.hidden_size} "
+              f"intermediate={self.intermediate_size} layers={self.num_layers}")
 
     @abstractmethod
     def convert(self, q4nx_path: str, weights_type: str = 'language'):

@@ -258,15 +258,21 @@ void Engine::rmsnorm(const float* x, const float* w, size_t rows, size_t dim, fl
 void Engine::matmul_t(const std::vector<float>& x, const std::vector<float>& w, size_t M,
                       size_t K, size_t N, std::vector<float>& y) {
     // y[M,N] = sum_k x[M,K] * w[N,K]  (weights stored out-major)
+    //
+    // Every output element is an independent dot product, so this parallelizes
+    // over M*N. Collapsing both loops keeps the per-thread work reasonable even
+    // for decode, where M == 1 and all the parallelism is in N.
     y.assign(M * N, 0.0f);
-    for (size_t m = 0; m < M; ++m) {
-        const float* xr = x.data() + m * K;
-        float* yr = y.data() + m * N;
-        for (size_t n = 0; n < N; ++n) {
-            const float* wr = w.data() + n * K;
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+    for (int64_t m = 0; m < static_cast<int64_t>(M); ++m) {
+        for (int64_t n = 0; n < static_cast<int64_t>(N); ++n) {
+            const float* xr = x.data() + m * static_cast<int64_t>(K);
+            const float* wr = w.data() + n * static_cast<int64_t>(K);
             float acc = 0.0f;
             for (size_t k = 0; k < K; ++k) acc += xr[k] * wr[k];
-            yr[n] = acc;
+            y[static_cast<size_t>(m) * N + static_cast<size_t>(n)] = acc;
         }
     }
 }
@@ -456,35 +462,50 @@ std::vector<float> Engine::forward_impl(const std::vector<int32_t>& ids, size_t 
 
         o.assign(T * QD, 0.0f);
         scores.assign(n_heads_ * T * n_src, 0.0f);
-        for (size_t hh = 0; hh < n_heads_; ++hh) {
-            const size_t kv_id = hh / gqa_groups_;
-            float* srow_base = scores.data() + hh * T * n_src;
-            for (size_t t = 0; t < T; ++t) {
-                const size_t P = start_pos + t;  // absolute query position
-                const float* qp = q.data() + (t * n_heads_ + hh) * head_dim_;
-                float* srow = srow_base + t * n_src;
 
+        // Three separate parallel passes, each over (head, row). They must stay
+        // separate: softmax reads every score in a row, and the output pass
+        // reads the normalized row, so neither can run inside pass 1.
+        //
+        // Pass 1: raw scores.
+        const auto kv_id_of = [this](size_t hh) { return hh / gqa_groups_; };
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+        for (int64_t hh = 0; hh < static_cast<int64_t>(n_heads_); ++hh) {
+            for (int64_t t = 0; t < static_cast<int64_t>(T); ++t) {
+                const size_t P = start_pos + static_cast<size_t>(t);
+                const float* qp = q.data() + (static_cast<size_t>(t) * n_heads_ +
+                                              static_cast<size_t>(hh)) * head_dim_;
+                float* srow = scores.data() + (static_cast<size_t>(hh) * T +
+                                               static_cast<size_t>(t)) * n_src;
                 // Lowest cached position this query may attend to.
                 size_t lo = 0;
                 if (!is_global && P + 1 > sliding_window_) lo = P + 1 - sliding_window_;
-
                 for (size_t kp = 0; kp < n_src; ++kp) {
                     if (kp < lo || kp > P) {
                         srow[kp] = kNegInf;
                         continue;
                     }
-                    const float* kpv = k_src + (kp * n_kv_ + kv_id) * head_dim_;
+                    const float* kpv = k_src + (kp * n_kv_ + kv_id_of(hh)) * head_dim_;
                     float acc = 0.0f;
                     for (size_t d = 0; d < head_dim_; ++d) acc += qp[d] * kpv[d];
                     srow[kp] = acc * attn_scale_;
                 }
             }
-            // Softmax per row over the allowed range.
-            for (size_t t = 0; t < T; ++t) {
-                const size_t P = start_pos + t;
+        }
+
+        // Pass 2: softmax, one row at a time.
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+        for (int64_t hh = 0; hh < static_cast<int64_t>(n_heads_); ++hh) {
+            for (int64_t t = 0; t < static_cast<int64_t>(T); ++t) {
+                const size_t P = start_pos + static_cast<size_t>(t);
                 size_t lo = 0;
                 if (!is_global && P + 1 > sliding_window_) lo = P + 1 - sliding_window_;
-                float* srow = srow_base + t * n_src;
+                float* srow = scores.data() + (static_cast<size_t>(hh) * T +
+                                               static_cast<size_t>(t)) * n_src;
                 float mx = -std::numeric_limits<float>::infinity();
                 for (size_t kp = lo; kp <= P; ++kp) mx = std::max(mx, srow[kp]);
                 float denom = 0.0f;
@@ -496,17 +517,25 @@ std::vector<float> Engine::forward_impl(const std::vector<int32_t>& ids, size_t 
                     for (size_t kp = lo; kp <= P; ++kp) srow[kp] /= denom;
                 }
             }
-            // o = att @ v
-            for (size_t t = 0; t < T; ++t) {
-                const size_t P = start_pos + t;
+        }
+
+        // Pass 3: o = att @ v. Each (head, row) writes its own slice of o.
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+        for (int64_t hh = 0; hh < static_cast<int64_t>(n_heads_); ++hh) {
+            for (int64_t t = 0; t < static_cast<int64_t>(T); ++t) {
+                const size_t P = start_pos + static_cast<size_t>(t);
                 size_t lo = 0;
                 if (!is_global && P + 1 > sliding_window_) lo = P + 1 - sliding_window_;
-                const float* srow = srow_base + t * n_src;
-                float* orow = o.data() + (t * n_heads_ + hh) * head_dim_;
+                const float* srow = scores.data() + (static_cast<size_t>(hh) * T +
+                                                     static_cast<size_t>(t)) * n_src;
+                float* orow = o.data() + (static_cast<size_t>(t) * n_heads_ +
+                                          static_cast<size_t>(hh)) * head_dim_;
                 for (size_t kp = lo; kp <= P; ++kp) {
                     const float a = srow[kp];
                     if (a == 0.0f) continue;
-                    const float* vv = v_src + (kp * n_kv_ + kv_id) * head_dim_;
+                    const float* vv = v_src + (kp * n_kv_ + kv_id_of(hh)) * head_dim_;
                     for (size_t d = 0; d < head_dim_; ++d) orow[d] += a * vv[d];
                 }
             }

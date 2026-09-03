@@ -276,6 +276,15 @@ endif()
 
 add_executable(flm ${SOURCES} ${HEADERS})
 
+# Shared-memory parallelism for the open CPU engines. Before NPU offload lands
+# the naive matmuls dominate decode cost, and they parallelize cleanly over
+# output elements. Optional: the engines compile and run single-threaded without
+# it (guarded by _OPENMP in the sources).
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(flm PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
 if(WIN32)
     if(VCPKG_TOOLCHAIN)
         # A vcpkg toolchain is active (e.g. the rocm-npu-staging dev.py build or
