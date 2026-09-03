@@ -98,6 +98,76 @@ def _shard_files(src: Path) -> List[Path]:
     raise FileNotFoundError(f"no {SINGLE_SHARD} or {SHARD_INDEX} in {src}")
 
 
+def _token_id_map(tokenizer_json: Path) -> Dict[str, int]:
+    """Map token text -> id from tokenizer.json (added tokens win over vocab)."""
+    data = json.loads(tokenizer_json.read_text(encoding="utf-8"))
+    out: Dict[str, int] = {}
+    for token, idx in data.get("model", {}).get("vocab", {}).items():
+        out.setdefault(token, int(idx))
+    for entry in data.get("added_tokens", []):
+        out[entry["content"]] = int(entry["id"])
+    return out
+
+
+def _token_text(cfg: dict, key: str) -> Optional[str]:
+    value = cfg.get(key)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("content")
+    return None
+
+
+def ensure_runtime_tokenizer_ids(out_dir: Path, config: dict) -> bool:
+    """Backfill bos/eos/pad ids into tokenizer_config.json.
+
+    The FLM runtime requires numeric ids: ``bos_token_id`` must be an integer
+    whenever ``bos_token`` is present, and ``eos_token_id`` must be an array
+    (generation stops only on ids in that array). Official HF checkpoints often
+    ship only the token strings, which makes the runtime refuse to load.
+
+    Ids come from the model config.json first, then from tokenizer.json by
+    resolving the token text. Returns True when the file was changed.
+    """
+    path = out_dir / "tokenizer_config.json"
+    tokenizer_json = out_dir / "tokenizer.json"
+    if not path.is_file():
+        return False
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    ids = _token_id_map(tokenizer_json) if tokenizer_json.is_file() else {}
+    changed = False
+
+    for id_key, token_key in (("bos_token_id", "bos_token"), ("pad_token_id", "pad_token")):
+        if cfg.get(id_key) is None:
+            value = config.get(id_key)
+            if value is None:
+                text = _token_text(cfg, token_key)
+                value = ids.get(text) if text else None
+            if value is not None:
+                cfg[id_key] = int(value)
+                changed = True
+
+    if cfg.get("eos_token_id") is None:
+        value = config.get("eos_token_id")
+        if value is None:
+            text = _token_text(cfg, "eos_token")
+            value = ids.get(text) if text else None
+        if value is not None:
+            cfg["eos_token_id"] = list(value) if isinstance(value, list) else [int(value)]
+            changed = True
+
+    # The runtime indexes eos_token_id as an array; normalize regardless.
+    eos = cfg.get("eos_token_id")
+    if eos is not None and not isinstance(eos, list):
+        cfg["eos_token_id"] = [int(eos)]
+        changed = True
+
+    if changed:
+        path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print("[INFO] Patched tokenizer_config.json with runtime token ids")
+    return changed
+
+
 def build_open_causal_repo(
     source: str,
     output_dir: str,
@@ -126,6 +196,14 @@ def build_open_causal_repo(
         if src_file.is_file():
             shutil.copyfile(src_file, out / name)
             produced.append(name)
+
+    # The FLM runtime needs numeric bos/eos/pad ids; HF checkpoints often only
+    # ship the token strings.
+    model_cfg = {}
+    cfg_file = out / "config.json"
+    if cfg_file.is_file():
+        model_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    ensure_runtime_tokenizer_ids(out, model_cfg)
 
     shards = _shard_files(src)
     tensors: Dict[str, dict] = {}

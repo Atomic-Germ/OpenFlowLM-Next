@@ -535,37 +535,6 @@
                 "footprint": 0.62
             }
         },
-        "gemma3-text-open": {
-            "1b": {
-                "name": "Gemma3-1B-OpenNPU2",
-                "url": "https://huggingface.co/Atomic-Germ/Gemma3-1B-OpenNPU2",
-                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Gemma3-1B-OpenNPU2/tree/main",
-                "ms_url": "https://www.modelscope.ai/models/Atomic-Germ/Gemma3-1B-OpenNPU2",
-                "size": 1000000000,
-                "flm_min_version": "0.9.20",
-                "default_context_length": 32768,
-                "max_prefill_len": 4096,
-                "files": [
-                    "config.json",
-                    "generation_config.json",
-                    "model.safetensors",
-                    "tokenizer.json",
-                    "tokenizer_config.json",
-                    "special_tokens_map.json",
-                    "added_tokens.json",
-                    "weights_manifest.json"
-                ],
-                "details": {
-                    "format": "NPU2",
-                    "family": "gemma3-text-open",
-                    "think": false,
-                    "think_toggleable": false,
-                    "parameter_size": "1B",
-                    "quantization_level": "bf16"
-                },
-                "footprint": 2.0
-            }
-        },
         "whisper-v3": {
             "turbo": {
                 "name": "Whisper-V3-Turbo-NPU2",
@@ -599,10 +568,10 @@
         },
         "gemma3": {
             "1b": {
-                "name": "Gemma3-1B-NPU2",
-                "url": "https://huggingface.co/FastFlowLM/Gemma3-1B-NPU2",
-                "file_url": "https://huggingface.co/api/models/FastFlowLM/Gemma3-1B-NPU2/tree/main",
-                "ms_url": "https://modelscope.cn/models/amd/Gemma3-1B-NPU2",
+                "name": "Gemma3-1B-OpenNPU2",
+                "url": "https://huggingface.co/Atomic-Germ/Gemma3-1B-OpenNPU2",
+                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Gemma3-1B-OpenNPU2/tree/main",
+                "ms_url": "https://www.modelscope.ai/models/Atomic-Germ/Gemma3-1B-OpenNPU2",
                 "modified_at": "2025-05-30T00:00:00Z",
                 "size": 1000000000,
                 "default_context_length": 32768,
@@ -610,18 +579,22 @@
                 "flm_min_version": "0.9.20",
                 "files": [
                     "config.json",
-                    "model.q4nx",
+                    "generation_config.json",
+                    "model.safetensors",
                     "tokenizer.json",
-                    "tokenizer_config.json"
+                    "tokenizer_config.json",
+                    "special_tokens_map.json",
+                    "added_tokens.json",
+                    "weights_manifest.json"
                 ],
                 "details": {
                     "family": "gemma3-text",
                     "think": false,
                     "think_toggleable": false,
                     "parameter_size": "1B",
-                    "quantization_level": "Q4_1"
+                    "quantization_level": "bf16"
                 },
-                "footprint": 1.2
+                "footprint": 2.0
             },
             "4b": {
                 "name": "Gemma3-4B-NPU2",

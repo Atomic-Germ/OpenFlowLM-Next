@@ -239,6 +239,8 @@ file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "se
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_gemma3/engine.cpp")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_gemma3/gemma3_text_open.cpp")
 if(NOT FLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
 endif()
@@ -427,7 +429,6 @@ target_link_libraries(flm PUBLIC
     qwen3_5_omni_npu
     qwen3_6_moe_npu
     gemma_npu
-    gemma_text_npu
     gemma4e_npu
     gemma4_12b_npu
     gpt_oss_npu

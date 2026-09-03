@@ -660,9 +660,35 @@ Standalone-target rules learned here (reuse for every new open engine):
   (`find_xclbin_path`), even when the engine never touches xclbins.
 - `arg_utils` lives in `utils/vm_args.hpp`, not `arg_utils.hpp`.
 
-The engine currently re-forwards the whole sequence per decode step (no KV
-cache). That is correct and validated; the KV cache and true M=1 decode path are
-the next piece of Phase 1.
+The engine now has a validated KV cache (`enable_cache` / `step` /
+`clear_context`) and a `causal_lm` adapter (`Gemma3TextOpen`) wired into
+`Gemma3_Text_Only`. Incremental decode matches the full-recompute path exactly
+(cosine 1.000000), and CLI generation works.
+
+**Hard-won gotchas for the next open engine (each cost real debugging):**
+
+- **`buffer(std::vector&&)` is a shallow mapping that takes NO ownership.**
+  Returning `buffer<bf16>` constructed from a local `std::vector` leaves it
+  pointing at freed memory. Symptom: logits are garbage, argmax constant across
+  prompts. Allocate an owning `buffer<T>(n)` and fill it in place.
+- **HTTP status was never checked.** curl returns `CURLE_OK` for 401/404, so an
+  error page (for example `Invalid username or password.`) was written to disk
+  as the model file and reported as a successful pull. Now `CURLINFO_RESPONSE_CODE`
+  is checked; non-2xx fails and removes the partial file.
+- **The runtime requires numeric tokenizer ids**: `bos_token_id` as an integer
+  whenever `bos_token` is present, and `eos_token_id` as an **array**. Official
+  HF checkpoints ship only the token strings and will be rejected at load.
+  `q4nx.open_causal.ensure_runtime_tokenizer_ids` backfills them.
+- **New family strings must exist in the dispatch table** (`all_models.hpp
+  modelFamilyMap`), or `map::at` throws with an unhelpful `Error: map::at`.
+  Reusing the existing `gemma3-text` family and repointing `gemma3:1b` at the
+  open model keeps existing user tags working.
+- **`buffer<bf16>` needs XRT coreutils at link time** (its destructor frees an
+  `xrt::bo`), even for a CPU-only engine. XRT *headers* are needed too, because
+  `utils.hpp -> typedef.hpp -> buffer.hpp -> device_runtime.hpp`.
+- **Missing-BOS changes output materially.** The runtime `Tokenizer::encode`
+  does not prepend BOS; the chat template supplies it. Compare against oracle
+  ids that include BOS, not re-encoded text.
 
 ## Download Verification Policy (2026-09-02)
 

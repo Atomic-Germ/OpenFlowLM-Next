@@ -168,7 +168,13 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     }
 
     CURLcode res = curl_easy_perform(curl);
-    
+
+    // Read the HTTP status before the handle is destroyed.
+    long http_code = 0;
+    if (res == CURLE_OK) {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    }
+
     fclose(fp);
     curl_easy_cleanup(curl);
 
@@ -178,6 +184,16 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     if (res != CURLE_OK) {
         std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
         std::filesystem::remove(local_path); // Remove partial download
+        return false;
+    }
+
+    // HTTP-level failures are genuine download failures, not hash quirks. A
+    // 401/403/404/5xx body is an error page (for example an auth challenge for a
+    // gated repo), never model data. Failing here is what keeps an error page
+    // from being written to disk and later reported as a successful pull.
+    if (http_code < 200 || http_code >= 300) {
+        std::cerr << "HTTP error " << http_code << " for " << url << std::endl;
+        std::filesystem::remove(local_path);
         return false;
     }
 

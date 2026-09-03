@@ -11,6 +11,8 @@
 
 #include "nlohmann/json.hpp"
 #include "open_gemma3/engine.hpp"
+#include "open_gemma3/gemma3_text_open.hpp"
+#include "tokenizer/tokenizer.hpp"
 #include "utils/utils.hpp"
 #include "utils/vm_args.hpp"
 
@@ -53,9 +55,13 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "failed to allocate KV cache\n");
         return 1;
     }
-    std::printf("KV cache: %zu layers x %zu positions x %zu (%.1f MB)\n", engine.num_layers(),
-                engine.cache_capacity(), engine.num_layers() ? 0 : 0,
-                engine.num_layers() * engine.cache_capacity() * 256.0 * 2.0 * 4.0 / (1024 * 1024));
+    {
+        // 2 tensors (K and V) x layers x positions x (num_key_value_heads*head_dim) floats.
+        const double bytes = 2.0 * static_cast<double>(engine.num_layers()) *
+                             static_cast<double>(engine.cache_capacity()) * 256.0 * sizeof(float);
+        std::printf("KV cache: %zu layers x %zu positions (%.1f MB fp32)\n", engine.num_layers(),
+                    engine.cache_capacity(), bytes / (1024.0 * 1024.0));
+    }
     if (engine.vocab() == 0) {
         std::fprintf(stderr, "engine reports zero vocab\n");
         return 1;
@@ -63,6 +69,68 @@ int main(int argc, char* argv[]) {
 
     int failures = 0;
     const auto& prompts = ref.at("prompts");
+
+    // End-to-end check through the causal_lm adapter and the runtime tokenizer:
+    // tokenize -> prefill -> greedy decode -> decode back to text. This is what
+    // exercises the buffer<bf16> logit conversion the engine itself never sees.
+    {
+        Tokenizer tok(model_dir);
+        Gemma3TextOpen adapter(*(new LM_Config()), nullptr, 512);
+        if (!adapter.load_model_dir(model_dir)) {
+            std::fprintf(stderr, "adapter load failed\n");
+            return 1;
+        }
+        for (int pi = 0; pi < 2; ++pi) {
+            // Use the oracle's token ids (which include BOS). The runtime
+            // Tokenizer::encode does not prepend BOS itself; AutoModel supplies
+            // it via the chat template, and the oracle records the full id list.
+            std::vector<int> ids;
+            for (const auto& id : prompts[pi].at("token_ids")) ids.push_back(id.get<int>());
+            adapter.clear_context();
+
+            buffer<bf16> logits = adapter.prefill(ids);
+            std::printf("       [dbg] ids=");
+            for (int v : ids) std::printf("%d ", v);
+            std::printf("\n       [dbg] buffer size=%zu vocab=%zu\n", logits.size(),
+                        open_gemma3::Engine().vocab());
+            std::printf("       [dbg] buffer[0..4]=");
+            for (size_t i = 0; i < 5 && i < logits.size(); ++i) {
+                std::printf("%.4f ", static_cast<float>(logits[i]));
+            }
+            std::printf("\n       [dbg] buffer[9079]=%.4f\n",
+                        static_cast<float>(logits[9079]));
+            int first = 0;
+            float best = -1e30f;
+            for (size_t i = 0; i < logits.size(); ++i) {
+                if (static_cast<float>(logits[i]) > best) {
+                    best = static_cast<float>(logits[i]);
+                    first = static_cast<int>(i);
+                }
+            }
+
+            std::vector<int> gen;
+            gen.push_back(first);
+            for (int s = 0; s < 15; ++s) {
+                buffer<bf16> step = adapter.forward(gen.back());
+                int arg = 0;
+                float b = -1e30f;
+                for (size_t i = 0; i < step.size(); ++i) {
+                    if (static_cast<float>(step[i]) > b) {
+                        b = static_cast<float>(step[i]);
+                        arg = static_cast<int>(i);
+                    }
+                }
+                gen.push_back(arg);
+            }
+
+            const int expected = prompts[pi].at("argmax_token_id").get<int>();
+            std::printf("[%s] adapter prompt %zu: first argmax %d (expected %d)\n",
+                        first == expected ? "PASS" : "FAIL", static_cast<size_t>(pi), first,
+                        expected);
+            std::printf("       continuation: %s\n", tok.decode(gen).c_str());
+            if (first != expected) ++failures;
+        }
+    }
 
     // Self-consistency: incremental decode through the KV cache must reproduce
     // the validated full-recompute path. This is what actually tests the cache,

@@ -21,6 +21,14 @@ find_path(XRT_HEADER_DIR xrt/xrt_bo.h
     PATH_SUFFIXES include
     REQUIRED
 )
+# buffer<bf16> holds an xrt::bo, so destroying one needs XRT coreutils even
+# though this engine never touches the NPU.
+find_library(XRT_COREUTIL_LIBRARY NAMES xrt_coreutil
+    HINTS "$ENV{XILINX_XRT}"
+    PATHS /opt/xilinx/xrt
+    PATH_SUFFIXES lib lib64
+    REQUIRED
+)
 
 add_subdirectory(
     "${CMAKE_CURRENT_LIST_DIR}/../../../third_party/tokenizers-cpp"
@@ -31,7 +39,9 @@ add_subdirectory(
 add_executable(test_gemma3_text_open
     test.cpp
     "${CMAKE_CURRENT_LIST_DIR}/../../open_gemma3/engine.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../open_gemma3/gemma3_text_open.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../common/utils.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../common/tokenizer/tokenizer.cpp"
 )
 
 target_include_directories(test_gemma3_text_open PRIVATE
@@ -59,4 +69,5 @@ target_link_libraries(test_gemma3_text_open PRIVATE
     Boost::program_options
     Threads::Threads
     tokenizers_cpp
+    "${XRT_COREUTIL_LIBRARY}"
 )

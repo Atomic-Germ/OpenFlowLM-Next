@@ -1490,111 +1490,51 @@
     "gemma3:1b": [
         {
             "type": "file",
-            "oid": "d9168db29a2f255f097ebd2b3347bdd66ad73e26",
-            "size": 1862,
-            "path": ".gitattributes"
+            "oid": "50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946",
+            "size": 35,
+            "path": "added_tokens.json"
         },
         {
             "type": "file",
-            "oid": "6cefb48309be7614e106ad8927a5968f7aa50677",
-            "size": 21893,
-            "path": "README.md"
-        },
-        {
-            "type": "file",
-            "oid": "fb29ead777da0d1429a95033c3cc2136a0e60046",
-            "size": 456971,
-            "lfs": {
-                "oid": "3aeebce88b8e03235090892244c446071c9035d804664227a164377a8042bf72",
-                "size": 456971,
-                "pointerSize": 131
-            },
-            "xetHash": "20edf4621d52ddc2cc5ce930e03cb1ac423a9a1c9d066b5c74c4bdde8c91df74",
-            "path": "attn.xclbin"
-        },
-        {
-            "type": "file",
-            "oid": "6c0e7d29189736388193421860fe9ffac0526128",
-            "size": 990,
+            "oid": "19cb5d28c97778271ba2b3c3df47bf76bdd6706724777a2318b3522230afe91e",
+            "size": 899,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "5ae026ae8a6d248944b474c8d9d733ffcd631c3d",
-            "size": 103915,
-            "lfs": {
-                "oid": "5b529e9c91b0d9def4c5394a21920c0ba01f3d83568dde40f04e4f27034cc714",
-                "size": 103915,
-                "pointerSize": 131
-            },
-            "xetHash": "7f499637200450191afc10a9ff1575f5c129e6793ef316a2f4b19af0e023164e",
-            "path": "dequant.xclbin"
+            "oid": "fd9324becc53c4be610db39e13a613006f09fd6ef71a95fb6320dc33157490a3",
+            "size": 215,
+            "path": "generation_config.json"
         },
         {
             "type": "file",
-            "oid": "dd2a8503eeb5b4b976713b6bd6756ecf94b86476",
-            "size": 220811,
-            "lfs": {
-                "oid": "0b171d034ff667277ba3da376f78e93b87de8c26eb32eb21faec2975e6af35df",
-                "size": 220811,
-                "pointerSize": 131
-            },
-            "xetHash": "a33fdb808eab9055fe8a9a4dcde15d7ea7f0bcf3fecba5b05d2cbf8f1e21d38e",
-            "path": "layer.xclbin"
+            "oid": "3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6",
+            "size": 1999811208,
+            "path": "model.safetensors"
         },
         {
             "type": "file",
-            "oid": "51e38e80690025e5b8db0147bec79a206659ddd0",
-            "size": 230667,
-            "lfs": {
-                "oid": "849fc83823442b4e872846d18f54c7340853373dd917930c8c889412ff23d0f4",
-                "size": 230667,
-                "pointerSize": 131
-            },
-            "xetHash": "88b6cbc6f64adf17e506b4ad6872c9a90e836f6243105e74bd3ddcb95605fa6b",
-            "path": "lm_head.xclbin"
+            "oid": "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
+            "size": 662,
+            "path": "special_tokens_map.json"
         },
         {
             "type": "file",
-            "oid": "927f5d82cd8f4ae57683023e3a5678438e28396a",
-            "size": 218699,
-            "lfs": {
-                "oid": "2962eefe324053f9a3dac247d1ec7f27737a76eeb9e346fc1296ca1269a22ccb",
-                "size": 218699,
-                "pointerSize": 131
-            },
-            "xetHash": "d41299d2afdc300f6b54824e4a72663067941abeee5cdcbe368b0ffa97a273e2",
-            "path": "mm.xclbin"
-        },
-        {
-            "type": "file",
-            "oid": "54006b3cbd4ab1e9b8a6bfd4831b0696683f3ede",
-            "size": 1229131768,
-            "lfs": {
-                "oid": "c55853849301739de816f8c8ed411c1025a2a2c01d08c30b99eb277db1951b58",
-                "size": 1229131768,
-                "pointerSize": 135
-            },
-            "xetHash": "d18e1d18eb0f505374a6a59e1ca9b017203ce034e4345c01d798ec6db0b9d62d",
-            "path": "model.q4nx"
-        },
-        {
-            "type": "file",
-            "oid": "29401f984828a18bb09a6128d437c6766785eb66",
+            "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
             "size": 33384568,
-            "lfs": {
-                "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
-                "size": 33384568,
-                "pointerSize": 133
-            },
-            "xetHash": "fa66c8c017ade193f7cc37a2b421a1fc461563e803f179a496f7bdda2ec42c21",
             "path": "tokenizer.json"
         },
         {
             "type": "file",
-            "oid": "c00872478f9f653c1e1de43b87eae52dca6537e7",
-            "size": 1157193,
+            "oid": "bfe25c2735e395407beb78456ea9a6984a1f00d8c16fa04a8b75f2a614cf53e1",
+            "size": 1156999,
             "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "6a4083277265804cda5317aa797ec2de80535b97790868cb1155e07bb022dfae",
+            "size": 55416,
+            "path": "weights_manifest.json"
         }
     ],
     "gemma3:4b": [
@@ -3313,56 +3253,6 @@
             },
             "xetHash": "7c4d2da22b3de2ed3f3eae66c7034386df6a3c5d81039ad4a1c8067e7eaf0069",
             "path": "vision_weights.q4nx"
-        }
-    ],
-    "gemma3-text-open:1b": [
-        {
-            "type": "file",
-            "oid": "50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946",
-            "size": 35,
-            "path": "added_tokens.json"
-        },
-        {
-            "type": "file",
-            "oid": "19cb5d28c97778271ba2b3c3df47bf76bdd6706724777a2318b3522230afe91e",
-            "size": 899,
-            "path": "config.json"
-        },
-        {
-            "type": "file",
-            "oid": "fd9324becc53c4be610db39e13a613006f09fd6ef71a95fb6320dc33157490a3",
-            "size": 215,
-            "path": "generation_config.json"
-        },
-        {
-            "type": "file",
-            "oid": "3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6",
-            "size": 1999811208,
-            "path": "model.safetensors"
-        },
-        {
-            "type": "file",
-            "oid": "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
-            "size": 662,
-            "path": "special_tokens_map.json"
-        },
-        {
-            "type": "file",
-            "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
-            "size": 33384568,
-            "path": "tokenizer.json"
-        },
-        {
-            "type": "file",
-            "oid": "bfe25c2735e395407beb78456ea9a6984a1f00d8c16fa04a8b75f2a614cf53e1",
-            "size": 1156999,
-            "path": "tokenizer_config.json"
-        },
-        {
-            "type": "file",
-            "oid": "6a4083277265804cda5317aa797ec2de80535b97790868cb1155e07bb022dfae",
-            "size": 55416,
-            "path": "weights_manifest.json"
         }
     ]
 }
