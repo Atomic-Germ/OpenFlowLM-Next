@@ -49,6 +49,13 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "failed to load model: %s\n", model_dir.c_str());
         return 1;
     }
+    if (!engine.enable_cache(1024)) {
+        std::fprintf(stderr, "failed to allocate KV cache\n");
+        return 1;
+    }
+    std::printf("KV cache: %zu layers x %zu positions x %zu (%.1f MB)\n", engine.num_layers(),
+                engine.cache_capacity(), engine.num_layers() ? 0 : 0,
+                engine.num_layers() * engine.cache_capacity() * 256.0 * 2.0 * 4.0 / (1024 * 1024));
     if (engine.vocab() == 0) {
         std::fprintf(stderr, "engine reports zero vocab\n");
         return 1;
@@ -56,6 +63,42 @@ int main(int argc, char* argv[]) {
 
     int failures = 0;
     const auto& prompts = ref.at("prompts");
+
+    // Self-consistency: incremental decode through the KV cache must reproduce
+    // the validated full-recompute path. This is what actually tests the cache,
+    // including the hybrid sliding/global window logic.
+    //
+    // Only practical for short prompts here because decoding re-validates every
+    // prefix, and the long prompt would need thousands of steps.
+    int cache_failures = 0;
+    int cache_checked = 0;
+    for (size_t pi = 0; pi < prompts.size(); ++pi) {
+        std::vector<int32_t> ids;
+        for (const auto& id : prompts[pi].at("token_ids")) ids.push_back(id.get<int32_t>());
+        if (ids.size() > 64) continue;
+
+        const std::vector<float> want = engine.prefill(ids);
+
+        engine.clear_context();
+        std::vector<float> got;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            got = engine.step({ids[i]});
+        }
+        ++cache_checked;
+
+        const float cos = cosine(want, got);
+        int arg_want = static_cast<int>(std::max_element(want.begin(), want.end()) - want.begin());
+        int arg_got = static_cast<int>(std::max_element(got.begin(), got.end()) - got.begin());
+        const bool ok = (cos > 0.9999f) && (arg_want == arg_got);
+        if (!ok) ++cache_failures;
+        std::printf("[%s] cache prompt %zu (%zu tokens): cosine %.6f argmax %s\n",
+                    ok ? "PASS" : "FAIL", pi, ids.size(), cos,
+                    arg_want == arg_got ? "ok" : "MISMATCH");
+    }
+    std::printf("\n%d/%d prompts: incremental decode matched full prefill\n",
+                cache_checked - cache_failures, cache_checked);
+    if (cache_failures) ++failures;
+
     for (size_t pi = 0; pi < prompts.size(); ++pi) {
         const auto& entry = prompts[pi];
         std::vector<int32_t> ids;

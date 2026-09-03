@@ -280,20 +280,25 @@ void Engine::gelu_tanh(std::vector<float>& x) {
 
 void Engine::rope_tables(size_t T, double theta, std::vector<float>& cos,
                          std::vector<float>& sin) const {
+    rope_tables_range(0, T, theta, cos, sin);
+}
+
+void Engine::rope_tables_range(size_t p0, size_t T, double theta, std::vector<float>& cos,
+                               std::vector<float>& sin) const {
     cos.assign(T * head_dim_, 0.0f);
     sin.assign(T * head_dim_, 0.0f);
     const size_t half = head_dim_ / 2;
     for (size_t i = 0; i < half; ++i) {
         const double inv = 1.0 / std::pow(theta, (2.0 * static_cast<double>(i)) /
                                                      static_cast<double>(head_dim_));
-        for (size_t p = 0; p < T; ++p) {
-            const double freq = static_cast<double>(p) * inv;
+        for (size_t t = 0; t < T; ++t) {
+            const double freq = static_cast<double>(p0 + t) * inv;
             const float c = static_cast<float>(std::cos(freq));
             const float s = static_cast<float>(std::sin(freq));
-            cos[p * head_dim_ + i] = c;
-            cos[p * head_dim_ + i + half] = c;
-            sin[p * head_dim_ + i] = s;
-            sin[p * head_dim_ + i + half] = s;
+            cos[t * head_dim_ + i] = c;
+            cos[t * head_dim_ + i + half] = c;
+            sin[t * head_dim_ + i] = s;
+            sin[t * head_dim_ + i + half] = s;
         }
     }
 }
@@ -318,11 +323,66 @@ void Engine::apply_rope(std::vector<float>& x, size_t T, size_t heads, size_t he
 
 // -------------------------------------------------------------------- forward
 
+bool Engine::enable_cache(size_t max_len) {
+    if (max_len == 0) return false;
+    if (!n_kv_ || !head_dim_ || !num_layers_) {
+        std::fprintf(stderr, "open_gemma3: cannot allocate cache before load\n");
+        return false;
+    }
+    kv_dim_ = n_kv_ * head_dim_;
+    if (cache_len_ >= max_len && k_cache_.size() >= num_layers_ * cache_len_ * kv_dim_) {
+        return true;  // already large enough
+    }
+    try {
+        k_cache_.assign(num_layers_ * max_len * kv_dim_, 0.0f);
+        v_cache_.assign(num_layers_ * max_len * kv_dim_, 0.0f);
+    } catch (const std::bad_alloc&) {
+        std::fprintf(stderr, "open_gemma3: KV cache allocation failed (%zu layers x %zu "
+                             "positions x %zu)\n", num_layers_, max_len, kv_dim_);
+        k_cache_.clear();
+        v_cache_.clear();
+        cache_len_ = 0;
+        return false;
+    }
+    cache_len_ = max_len;
+    pos_ = 0;
+    return true;
+}
+
+void Engine::clear_context() {
+    if (!k_cache_.empty()) std::fill(k_cache_.begin(), k_cache_.end(), 0.0f);
+    if (!v_cache_.empty()) std::fill(v_cache_.begin(), v_cache_.end(), 0.0f);
+    pos_ = 0;
+}
+
 std::vector<float> Engine::prefill(const std::vector<int32_t>& ids) {
+    // Full recompute, no cache. This is the validated reference path.
+    return forward_impl(ids, 0, false);
+}
+
+std::vector<float> Engine::step(const std::vector<int32_t>& ids) {
+    if (!cache_enabled()) {
+        std::fprintf(stderr, "open_gemma3: step() requires enable_cache()\n");
+        return {};
+    }
+    if (pos_ + ids.size() > cache_len_) {
+        std::fprintf(stderr, "open_gemma3: context overflow (%zu + %zu > %zu)\n", pos_,
+                     ids.size(), cache_len_);
+        return {};
+    }
+    std::vector<float> logits = forward_impl(ids, pos_, true);
+    pos_ += ids.size();
+    return logits;
+}
+
+std::vector<float> Engine::forward_impl(const std::vector<int32_t>& ids, size_t start_pos,
+                                        bool use_cache) {
     const size_t T = ids.size();
+    if (T == 0) return std::vector<float>(vocab_, 0.0f);
     const size_t HD = hidden_;
     const size_t QD = n_heads_ * head_dim_;
     const size_t ND = n_kv_ * head_dim_;
+    const size_t KVD = kv_dim_ ? kv_dim_ : ND;
 
     std::vector<float> h(T * HD);
     {
@@ -335,8 +395,8 @@ std::vector<float> Engine::prefill(const std::vector<int32_t>& ids) {
     }
 
     std::vector<float> cos_g, sin_g, cos_l, sin_l;
-    rope_tables(T, rope_theta_, cos_g, sin_g);
-    rope_tables(T, rope_local_, cos_l, sin_l);
+    rope_tables_range(start_pos, T, rope_theta_, cos_g, sin_g);
+    rope_tables_range(start_pos, T, rope_local_, cos_l, sin_l);
 
     std::vector<float> x, q, k, v, o, scores, gate, up, mlp;
     for (size_t L = 0; L < num_layers_; ++L) {
@@ -376,53 +436,77 @@ std::vector<float> Engine::prefill(const std::vector<int32_t>& ids) {
         apply_rope(q, T, n_heads_, head_dim_, cos, sin);
         apply_rope(k, T, n_kv_, head_dim_, cos, sin);
 
-        // Attention over T positions, GQA: query head -> kv head h/groups.
+        // Append this batch's keys/values to the cache when it is enabled.
+        if (use_cache) {
+            float* kdst = k_cache_.data() + (L * cache_len_ + start_pos) * KVD;
+            float* vdst = v_cache_.data() + (L * cache_len_ + start_pos) * KVD;
+            std::memcpy(kdst, k.data(), T * KVD * sizeof(float));
+            std::memcpy(vdst, v.data(), T * KVD * sizeof(float));
+        }
+
+        // Attention; GQA maps query head -> kv head h/groups.
+        //
+        // Without the cache the batch attends to itself (the reference path).
+        // With the cache, query at absolute position P attends over the cached
+        // range: [0, P] for global layers, and the last `sliding_window`
+        // positions for sliding layers.
+        const size_t n_src = use_cache ? start_pos + T : T;
+        const float* k_src = use_cache ? (k_cache_.data() + L * cache_len_ * KVD) : k.data();
+        const float* v_src = use_cache ? (v_cache_.data() + L * cache_len_ * KVD) : v.data();
+
         o.assign(T * QD, 0.0f);
-        scores.assign(n_heads_ * T * T, 0.0f);
+        scores.assign(n_heads_ * T * n_src, 0.0f);
         for (size_t hh = 0; hh < n_heads_; ++hh) {
             const size_t kv_id = hh / gqa_groups_;
-            float* srow_base = scores.data() + hh * T * T;
+            float* srow_base = scores.data() + hh * T * n_src;
             for (size_t t = 0; t < T; ++t) {
+                const size_t P = start_pos + t;  // absolute query position
                 const float* qp = q.data() + (t * n_heads_ + hh) * head_dim_;
-                float* srow = srow_base + t * T;
-                for (size_t kp = 0; kp < T; ++kp) {
-                    // Causal; sliding layers additionally restrict to the window.
-                    if (kp > t) {
+                float* srow = srow_base + t * n_src;
+
+                // Lowest cached position this query may attend to.
+                size_t lo = 0;
+                if (!is_global && P + 1 > sliding_window_) lo = P + 1 - sliding_window_;
+
+                for (size_t kp = 0; kp < n_src; ++kp) {
+                    if (kp < lo || kp > P) {
                         srow[kp] = kNegInf;
                         continue;
                     }
-                    if (!is_global && (t - kp) >= sliding_window_) {
-                        srow[kp] = kNegInf;
-                        continue;
-                    }
-                    const float* kpv = k.data() + (kp * n_kv_ + kv_id) * head_dim_;
+                    const float* kpv = k_src + (kp * n_kv_ + kv_id) * head_dim_;
                     float acc = 0.0f;
                     for (size_t d = 0; d < head_dim_; ++d) acc += qp[d] * kpv[d];
                     srow[kp] = acc * attn_scale_;
                 }
             }
-            // Softmax per row.
+            // Softmax per row over the allowed range.
             for (size_t t = 0; t < T; ++t) {
-                float* srow = srow_base + t * T;
+                const size_t P = start_pos + t;
+                size_t lo = 0;
+                if (!is_global && P + 1 > sliding_window_) lo = P + 1 - sliding_window_;
+                float* srow = srow_base + t * n_src;
                 float mx = -std::numeric_limits<float>::infinity();
-                for (size_t kp = 0; kp <= t; ++kp) mx = std::max(mx, srow[kp]);
+                for (size_t kp = lo; kp <= P; ++kp) mx = std::max(mx, srow[kp]);
                 float denom = 0.0f;
-                for (size_t kp = 0; kp <= t; ++kp) {
+                for (size_t kp = lo; kp <= P; ++kp) {
                     srow[kp] = std::exp(srow[kp] - mx);
                     denom += srow[kp];
                 }
                 if (denom > 0.0f) {
-                    for (size_t kp = 0; kp <= t; ++kp) srow[kp] /= denom;
+                    for (size_t kp = lo; kp <= P; ++kp) srow[kp] /= denom;
                 }
             }
             // o = att @ v
             for (size_t t = 0; t < T; ++t) {
-                const float* srow = srow_base + t * T;
+                const size_t P = start_pos + t;
+                size_t lo = 0;
+                if (!is_global && P + 1 > sliding_window_) lo = P + 1 - sliding_window_;
+                const float* srow = srow_base + t * n_src;
                 float* orow = o.data() + (t * n_heads_ + hh) * head_dim_;
-                for (size_t kp = 0; kp <= t; ++kp) {
+                for (size_t kp = lo; kp <= P; ++kp) {
                     const float a = srow[kp];
                     if (a == 0.0f) continue;
-                    const float* vv = v.data() + (kp * n_kv_ + kv_id) * head_dim_;
+                    const float* vv = v_src + (kp * n_kv_ + kv_id) * head_dim_;
                     for (size_t d = 0; d < head_dim_; ++d) orow[d] += a * vv[d];
                 }
             }

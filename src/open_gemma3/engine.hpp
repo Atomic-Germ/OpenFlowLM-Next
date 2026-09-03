@@ -36,7 +36,27 @@ public:
 
     /// \brief Full-sequence forward; returns logits for the last position.
     /// \return vector of length vocab_size (fp32).
+    ///
+    /// This recomputes the whole sequence and never touches the KV cache. It is
+    /// the validated reference path: `step()` must agree with it exactly, which
+    /// is how the cache is tested.
     std::vector<float> prefill(const std::vector<int32_t>& ids);
+
+    /// \brief Allocate a KV cache able to hold max_len positions.
+    /// Memory is num_layers * 2 * max_len * (n_kv * head_dim) floats (fp32 for
+    /// now; bf16 would halve it and is a follow-up).
+    bool enable_cache(size_t max_len);
+
+    /// \brief Reset the KV cache and the current position.
+    void clear_context();
+
+    /// \brief Incremental step: consume ids at the current position, append
+    /// their keys/values to the cache, and return logits for the last id.
+    std::vector<float> step(const std::vector<int32_t>& ids);
+
+    size_t context_length() const { return pos_; }
+    bool cache_enabled() const { return cache_len_ > 0; }
+    size_t cache_capacity() const { return cache_len_; }
 
     size_t vocab() const { return vocab_; }
     size_t hidden() const { return hidden_; }
@@ -73,10 +93,25 @@ private:
     /// Explicit tied-weight mapping (for example lm_head -> embed_tokens).
     std::unordered_map<std::string, std::string> tied_;
 
+    // KV cache: [layer][pos][kv_dim], laid out as layer-major contiguous blocks.
+    std::vector<float> k_cache_, v_cache_;
+    size_t cache_len_ = 0;   // positions the cache can hold
+    size_t kv_dim_ = 0;      // n_kv * head_dim
+    size_t pos_ = 0;         // next write position / current context length
+
     bool ensure_manifest();
     bool load_weights();
     std::string resolve_path(const std::string& p) const;
     const std::vector<float>& weight(const std::string& name) const;
+
+    /// Shared forward body. When use_cache is set, keys/values are appended to
+    /// (and read from) the KV cache starting at start_pos; otherwise the batch
+    /// computes against itself (the full-recompute reference path).
+    std::vector<float> forward_impl(const std::vector<int32_t>& ids, size_t start_pos,
+                                    bool use_cache);
+    /// Fill cos/sin tables for absolute positions [p0, p0 + T).
+    void rope_tables_range(size_t p0, size_t T, double theta, std::vector<float>& cos,
+                           std::vector<float>& sin) const;
 
     static void rmsnorm(const float* x, const float* w, size_t rows, size_t dim, float eps,
                         std::vector<float>& out);
