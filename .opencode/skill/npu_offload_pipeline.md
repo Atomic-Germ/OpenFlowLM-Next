@@ -629,6 +629,45 @@ Verified end to end against the live repo: `flm pull embed-gemma:300m` downloads
 all 7 files, warns on advisory hash differences, reports success, and the pulled
 model then loads and runs on NPU (cosine 0.99775).
 
+## Validated: Full E-Suite Pass (2026-09-02)
+
+`flm pull embed-gemma:300m` → `flm serve -e 1` → `flm-test --embed` gives a
+clean sweep, **8/8 PASS, 0 FAIL**:
+
+| Check | Result |
+|---|---|
+| E1 Response Structure | valid 768-dim embedding |
+| E2 Repeatability | worst cosine 1.000000 |
+| E3 Batch & Index Integrity | 3 embeddings returned in order |
+| E4 Dimensionality | consistent 768-dim across batch |
+| E5 Semantic Ordering | related 0.8434 > unrelated 0.5862 |
+| E6 Cross-Path Consistency | cosine 1.000000 |
+| E7 Batch Reference Consistency | 30 draws, worst cosine 1.000000 |
+| E8 Reference Agreement | **worst cosine 0.999993** (threshold 0.999) |
+
+E8 at 0.999993 reproduces the original proven value exactly, which pins the
+whole path — task prefix, tokenizer, forward pass, pooling, dense projection,
+and L2 normalisation — to the validated numpy oracle.
+
+**Two cosine numbers, do not confuse them.**
+
+- **0.999993** — vs the fp32 numpy oracle (E8). This is the real accuracy
+  result.
+- **0.99775 / 0.997711** — vs the bf16-quantized reference array hard-coded in
+  `src/test/gemma_embedding/test.cpp`, inherited from the old closed engine.
+  That array only has bf16 precision, so ~0.998 is expected and is *not* a
+  regression. NPU (0.99775) and CPU (0.997711) agree with each other.
+
+**Gotcha: run the repo's `flm-test`, not a system-installed one.** A stale
+system copy predating E8 silently produced a CSV with only E1–E7 and no error,
+which looks like E8 was skipped or crashed. Always invoke
+`utilities/flm-test` explicitly (for example
+`python -m flm_test --embed`) so the bundled
+`test_files/embedding_reference.json` oracle and current checks are used.
+
+Results are written next to the model as
+`embedding_results_<version>.csv` (the working model directory, git-ignored).
+
 ### Ambiguous/Generalized Parts (User Questions)
 
 > **Q1: Weight layout** — Are your projection weights stored as `[N,K]` (out-major, needs transpose) or `[K,N]` (row-major, direct use)?
