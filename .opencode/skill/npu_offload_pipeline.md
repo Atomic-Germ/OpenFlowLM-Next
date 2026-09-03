@@ -595,6 +595,46 @@ Inventory classifiers treat `npu_matmul_f32` kernels as `open_npu_kernel`
 distinct from `closed_npu_kernel`, so our own built kernels are never counted
 as pending replacement work.
 
+## Gemma3 Text Engine: Phase 0 Complete (2026-09-02)
+
+Planning, decisions, and progress live in
+`docs/plans/open_gemma3_text_plan.md`. This section records only what the next
+agent must not have to rediscover.
+
+**Phase 0 shipped** (built at `Models/Gemma-3-1B-OpenNPU2`, git-ignored):
+340 BF16 tensors, 2.0 GB, byte-reproducible, tied embeddings, and 6 reference
+fixtures (`[6, 10, 7, 7, 11, 2282]` tokens).
+
+Builder: `q4nx-build --open-causal-lm -i <source> -o <dir>`
+Oracle: `q4nx-build -i <dir> --make-reference <dir>/reference_v1.json`
+
+**Gemma3 text facts confirmed by a working oracle:**
+
+- Embeddings **are** scaled by `sqrt(hidden_size)` = 33.9411 for hidden 1152.
+  An earlier analysis claimed otherwise; the oracle's coherent output settles
+  it. Verify against the oracle, never assume.
+- Global (full-attention) layers are `[5, 11, 17, 23]`, derived from
+  `sliding_window_pattern: 6` as `(L+1) % 6 == 0`. `config.json` has **no**
+  `layer_types` key — it must be derived.
+- `attn_scale = 1/sqrt(query_pre_attn_scalar)` = 0.0625 (head_dim 256 gives the
+  same number, so don't conflate the two sources).
+- Tied embeddings: no `lm_head.weight` tensor; reuse
+  `model.embed_tokens.weight` (262144 x 1152, ~302 M params, largest tensor).
+
+**AMD environment constraints (this workspace):**
+
+| Constraint | Consequence |
+|---|---|
+| `transformers` + ROCm torch segfaults in `from_pretrained`, even with the GPU hidden | Do not plan to use HF as the oracle generator here. |
+| NumPy has no bfloat16; `safetensors.numpy` raises `data type 'bfloat16' not understood` | Decode bf16 via `uint16 << 16` viewed as `float32`. This is also what the C++ engine does, so oracle and engine agree bit for bit. |
+| `/tmp` is a RAM-backed tmpfs with limited free space | Put large model artifacts on real disk; use the git-ignored `Models/` directory. |
+
+**Decisions already made** (do not relitigate): ship bf16 (lossless, the weights
+are natively bf16); embedding stays at the highest practical precision; own both
+ends of the format rather than inheriting the closed Q4NX geometry; decode on CPU
+first and only add a dedicated small-M kernel if simpler than padding the GEMM;
+replace the closed path and its remnants entirely once understood.
+
 ## Download Verification Policy (2026-09-02)
 
 **Hash checks are advisory, never fatal.** A pull must not be blocked by an oid
