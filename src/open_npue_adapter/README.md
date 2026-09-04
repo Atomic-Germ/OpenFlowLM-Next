@@ -226,6 +226,40 @@ be included by a host translation unit compiled at a different ISA level.*
 
 ---
 
+## The xclbins ship as binaries in this PR, and the generator follows
+
+Stating it plainly because it cuts against the point of #690, and because the
+inventory in this tree already says *"all 222 xclbins lack BUILD_METADATA"*.
+
+**What is source here:** all of it except the AIE kernels. `src/open_npue/` is
+the complete engine — encoders, four tokenizers, container format, packer — and
+`src/open_npue_adapter/` is the glue. Nothing in the C++ path is opaque.
+
+**What is binary here:** `src/xclbins/BERT-*/`, 2.83 MB across five design
+families. Each one carries a `toolchain.json` recording the mlir-aie version,
+the Peano version and the mlir-aie git HEAD that produced it — so they are at
+least *identified*, which the existing 222 are not. But identified is not the
+same as buildable, and a fingerprint is not a source tree.
+
+**The generator is ~1,800 lines of IRON** (`gemm_pretiled.py` plus the export
+driver, and the two container helpers they need) and belongs in
+`npu_offload/gemm_rtp/`, next to `npu_offload/matmul/` and following its
+convention: the design scripts and a README with the exact command per shape.
+It is a follow-up, not a promise with nothing behind it — the scripts exist and
+built the five sets in this PR.
+
+**Why it is not in this one.** This PR is asking a different question:
+*do the vectors come out right, through the real OpenAI client, on a real
+server?* That is answerable now, and answered — six models, bit-identical to an
+independent build, with two harnesses anyone can run. Bundling a kernel-build
+pipeline into the same review would make both harder to judge, and the
+generator needs its own environment section (mlir-aie, Peano, `iron_env.ps1`)
+that has nothing to do with using the engine.
+
+So: **review this PR for whether the embeddings are correct and the integration
+is sound.** Do not merge it expecting to rebuild the kernels from this tree yet.
+
+
 ## Adding a model
 
 Two entries and, once, a design set.
