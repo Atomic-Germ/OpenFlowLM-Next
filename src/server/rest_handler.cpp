@@ -882,6 +882,41 @@ void RestHandler::handle_embeddings(const json& request,
                                    StreamResponseCallback send_streaming_response) {
     try {
         std::string model = request["model"];
+
+        // THE `model` FIELD USED TO BE ECHOED AND OTHERWISE IGNORED, which is
+        // the worst version of a wrong answer: the response ASSERTED it was
+        // something it was not.
+        //
+        // One embedding model is loaded per server (the engine's geometry is
+        // process-wide). A request naming any other one was served by the
+        // loaded model anyway, and the reply came back labelled with the tag
+        // that had been ASKED for -- so a client comparing response.model to
+        // its request saw agreement. Measured on a server started with
+        // --embeddingmodel bge-base:en-v1.5: asking for gte-multilingual:base
+        // returned bge-base's vectors, byte for byte, under the name
+        // "gte-multilingual:base". A RAG deployment embedding documents with
+        // one model and queries with another, against one flm, would retrieve
+        // nonsense with no signal anywhere.
+        //
+        // It refuses now, and names what IS loaded. An unknown model is an
+        // error every OpenAI client already understands.
+        if (this->auto_embedding_engine) {
+            const std::string loaded = this->auto_embedding_engine->get_current_model();
+            if (!model.empty() && !loaded.empty() && model != loaded) {
+                json err = { {"error", {
+                    {"message", "this server has '" + loaded + "' loaded, not '" +
+                                model + "'. One embedding model is loaded per "
+                                "server; start another with --embeddingmodel " +
+                                model + " to serve it."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "model_not_found"}
+                }} };
+                send_response(err);
+                return;
+            }
+        }
+
         std::vector<std::string> inputs;
 
         if (request["input"].is_string()) {
