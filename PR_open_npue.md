@@ -605,11 +605,44 @@ one that was validated.
    warns; the numbers just change. Fixed: no `--c-bf16` there, and the README
    now says the command differs from the other four in *two* places.
 2. **`BERT-h1024-bfp16` was documented with four batch tiers and shipped with
-   one.** Four build cleanly and are very likely better — `use_tier()` rounds
-   up, so every short bge-large request is padded to batch 128 today — but that
-   has not been through the accuracy gates. The README builds what was
-   *measured*; the improvement is written down as a question, not shipped as a
-   fact.
+   one.** This one turned out to be the README being right and the artifact
+   being under-provisioned, which took a measurement to establish rather than a
+   guess — see below.
+
+### bge-large was shipping one batch tier, and it cost 18.3x
+
+`use_tier()` picks the smallest tier that fits, so a design with only
+`tiers: [128]` pads **every** request to batch 128 — 8192 rows through the
+array where a four-tier design uses 256, with the host buffers sized from the
+tier too, so bias, norm and attention run over the padding as well.
+
+Both design sets built, identical in every other parameter, and swept:
+
+| texts | `[128]` | `[4,16,32,128]` | ratio | |
+|---:|---:|---:|---:|---|
+| 1 | 1.650 s | 0.090 s | **18.3x** | 4-tier picks 4 |
+| 4 | 1.630 s | 0.090 s | **18.1x** | picks 4 |
+| 16 | 1.660 s | 0.250 s | **6.6x** | picks 16 |
+| 32 | 1.620 s | 0.480 s | **3.4x** | picks 32 |
+| 128 | 1.640 s | 1.630 s | **1.006x** | **control — both pick 128** |
+
+Median of three runs after a discarded warm-up; encode wall clock, i.e.
+end-to-end request latency and **not** an NPU kernel claim. The n=128 row is
+the control that validates the method — both designs select tier 128 there, so
+it must come out ~1.00 or nothing else in the table means anything. And the
+one-tier design sitting flat at ~1.64 s whatever the request size is the
+signature of padding.
+
+**The vectors are bit-identical** at n = 1, 4, 32 and 128 — 0.000e+00 delta,
+compared in float64 because a float32 cosine over 1024 terms drifts from 1 for
+identical inputs. A tier is a padding choice, not an arithmetic one, so the
+accuracy gates pass by construction: these are the bytes that already passed
+them. That is what makes adopting it here safe rather than brave.
+
+So this PR builds four tiers. **Upstream still ships one** — replacing a
+validated artifact there means re-running the whole release sweep, which is a
+release decision and not this PR's to take. It is filed as T66 in that
+repository's register with this table in it.
 
 Now that the sets are built rather than committed, **the README is the
 artifact**, so `check_readme.py` compares its commands against the

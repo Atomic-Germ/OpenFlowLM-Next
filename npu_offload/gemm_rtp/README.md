@@ -96,14 +96,10 @@ python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
 #   -n 32, not 48: the design asserts N % (tile_n * n_cols) == 0 and
 #   bge-large's N is in {1024, 3072, 4096}, so 48 is illegal. 64 divides them
 #   but needs 65,536 B of a 63 KB L1 budget, so 32 it is.
-#   --batches 128, NOT 4,16,32,128: this is the one family that ships a
-#   single batch tier, matching the validated upstream artifact. The four-tier
-#   version builds cleanly and is very likely better -- use_tier() rounds up,
-#   so today every short bge-large request is padded to batch 128 -- but it has
-#   not been through the accuracy gates, and this README builds what was
-#   measured, not what ought to work.
+#   Four tiers, where the upstream artifact ships ONE. That is a deliberate
+#   divergence and it is measured: see "bge-large and its batch tiers" below.
 python export_gemm_rtp.py --hidden 1024 --intermediate 4096 --qkv-n 3072 `
-    --emulate-bfp16 --c-bf16 -n 32 --batches 128 `
+    --emulate-bfp16 --c-bf16 -n 32 --batches 4,16,32,128 `
     --tg-depth 2 --tb-rows 4 --out <dst>/BERT-h1024-bfp16
 ```
 
@@ -142,6 +138,40 @@ The sets were then **run**, not just compared: `utilities/test_open_npue.ps1
 to the upstream binary"* -- every component of every model, against a binary
 built from the other repository. Reproducing bytes and producing correct
 vectors are different claims; this is the second one.
+
+## bge-large and its batch tiers
+
+One xclbin carries an instruction stream per (operation, batch tier), and
+`use_tier()` picks the smallest tier that fits -- falling back to the largest
+when nothing does. The upstream `bge-large` artifact ships `tiers: [128]`, so
+**every** request is padded to batch 128: `rows = 128 x 64 = 8192` where a
+four-tier design would use `4 x 64 = 256`. `chunk()` sizes the host buffers
+from the tier too, so bias, norm and attention run over the padded rows as
+well.
+
+Measured here, both design sets identical in every other parameter:
+
+| texts | `[128]` | `[4,16,32,128]` | ratio | |
+|---:|---:|---:|---:|---|
+| 1 | 1.650 s | 0.090 s | **18.3x** | 4-tier picks 4 |
+| 4 | 1.630 s | 0.090 s | **18.1x** | picks 4 |
+| 16 | 1.660 s | 0.250 s | **6.6x** | picks 16 |
+| 32 | 1.620 s | 0.480 s | **3.4x** | picks 32 |
+| 128 | 1.640 s | 1.630 s | **1.006x** | **control -- both pick 128** |
+
+Median of three runs after a discarded warm-up. Encode wall clock: end-to-end
+request latency, **not** an NPU kernel claim. The n=128 row is the control that
+validates the method, and the one-tier design being flat at ~1.64 s whatever
+the request size is the signature of the padding.
+
+**The vectors are bit-identical** at n = 1, 4, 32 and 128 -- 0.000e+00 delta,
+compared in float64. A tier is a padding choice, not an arithmetic one, so the
+accuracy gates pass by construction: the bytes are the ones that already
+passed them.
+
+Hence four tiers here. Upstream still ships one, because replacing a shipped
+artifact there means re-running the whole release sweep; it is filed as
+[T66](https://github.com/vegardberget/NpuEmbeddings/blob/main/research/OPEN-THREADS.md).
 
 ## Check the README against what it builds
 
