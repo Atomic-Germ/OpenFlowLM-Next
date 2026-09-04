@@ -63,6 +63,43 @@ upstream's golden gate reads `1-cos 2.284e-04` for bge-base on this datapath.
 (`open_embedding`'s own validation reports E8 cosine 0.999993; that is its
 claim, not a measurement made here.)
 
+### Same model, both engines
+
+The table above pairs each engine with the model it ships with, which conflates
+engine and model. This isolates them: **EmbeddingGemma-300M through both.**
+
+`open_task_prefix(task_query)` returns `"task: search result | query: "`, and
+that is *exactly* what the NpuEmbeddings container's own `query` prompt is — so
+the same model, the same prompt and the same text go through both.
+
+| | `open_embedding` | NpuEmbeddings' arch=1 path |
+|---|---:|---:|
+| 1 text | 1195.7 ms (HTTP round trip) | **105 ms** (encode only) |
+| 16 texts | 1202.6 ms/text | **9.4 ms/text** |
+| agreement | — | `1-cos` **1.430e-04** vs the other |
+
+The two are not measured the same way — one is an HTTP round trip and one is an
+encode — so the per-request overhead has to be bounded before the ratio means
+anything. It is small: a 16-text bge-base request costs 405 ms through the
+endpoint against 70 ms of encode, i.e. **≈21 ms per request** of HTTP, JSON and
+loop. Against 1196 ms that is under 2%.
+
+So, on the same model: **≈11× at one text and ≈128× at sixteen**, the gap
+widening because one engine batches and the other cannot.
+
+**And the accuracy result is the more interesting half.** Two engines written
+independently — a CPU fp32 forward pass with five per-layer projections
+offloaded, against four whole-layer GEMM dispatches over a resident xclbin with
+bfp16-emulated MACs — agree on the same input to **`1-cos` 1.430e-04**. Neither
+was written against the other. That is mutual validation of both, and it is
+measured here rather than cited from either project's own claims.
+
+> **This comparison is engine-to-engine, not what this PR wires up.**
+> EmbeddingGemma is arch=1 in NpuEmbeddings and runs through a code path that
+> lives in its CLI rather than in the library, so `NpueEmbedding` cannot serve
+> it today. `embed-gemma:300m` stays with `open_embedding`, which is the right
+> outcome regardless: it is live, validated code and this PR is additive.
+
 **~5.8× is still on the table.** `AutoEmbeddingModel::embed()` takes one text,
 so `handle_embeddings` loops. Sixteen texts cost 405 ms through the endpoint and
 **70 ms** as one batched call to the same engine. `NpueEmbedding::embed_batch()`
