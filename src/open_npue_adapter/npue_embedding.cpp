@@ -212,7 +212,10 @@ std::string find_artifacts(const std::filesystem::path& dir, const json& info) {
         "A design set is four instruction streams over one xclbin, compiled "
         "for this model's GEMM geometry -- one set serves every model whose "
         "shapes match, which is why it is keyed by geometry rather than by "
-        "model name.");
+        "model name.\n"
+        "The design sets are BUILT, not checked in: see "
+        "npu_offload/gemm_rtp/README.md for the one command that builds this "
+        "family. They ship pre-built in the distributed package only.");
 }
 
 }  // namespace

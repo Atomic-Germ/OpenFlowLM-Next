@@ -69,7 +69,7 @@ the **datapath**, so two models share a set only when all four agree:
 | `BERT-h768-gated-bfp16` | 768 / 3072 | **yes** | bfp16 | nomic **and** gte-multilingual |
 | `BERT-h1024-bfp16` | 1024 / 4096 | no | bfp16 | bge-large (`tile_n` 32) |
 
-**2.83 MB for five sets covering six models**, and the sharing is real but
+**Five sets covering six models**, and the sharing is real but
 narrower than width alone suggests. Two of the distinctions are worth naming
 because they are easy to get wrong: nomic and gte have a **gated** FFN and
 bge-base does not, so they cannot share a 768 set; and `bge-small` runs on
@@ -226,13 +226,20 @@ be included by a host translation unit compiled at a different ISA level.*
 
 ---
 
-## Rebuilding the kernels
+## The design sets are BUILT, not checked in
 
-`npu_offload/gemm_rtp/` has the four IRON scripts that build
-`src/xclbins/BERT-*/`, and a README with one exact command per design family.
-A rebuild reproduces a shipped set to **19 files of 20**; the twentieth is the
-xclbin, differing by 80 bytes of 127,454 in its header and metadata — the UUID
-and build stamps.
+`src/xclbins/BERT-*/` is `.gitignore`d. Build it from `npu_offload/gemm_rtp/`,
+which has one exact command per design family and the three AIE kernel sources
+the generator compiles; `check_readme.py` there verifies the commands still
+describe the sets on disk.
+
+All five families rebuild from an empty tree to **88 of 96 files
+byte-identical**. The eight that differ are the five `final.xclbin`s, by 402
+bytes of 631,126 (0.064%) — UUIDs and build timestamps, in 5-6 tight clusters
+each, with the embedded AIE core ELFs identical.
+
+Without them `flm` still builds; an `open_npue` model refuses to load, naming
+the README and the command that fixes it.
 
 
 ## Adding a model

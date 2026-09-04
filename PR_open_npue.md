@@ -1,9 +1,12 @@
 # Add `open_npue`: a second embedding backend (draft)
 
-> This is a draft. The first version had the xclbins in as binary files; the
-> generator that builds them is now in the PR too (`npu_offload/gemm_rtp/`),
-> and a rebuild reproduces the shipped design set to 19 files of 20, the
-> twentieth differing only in the xclbin's build-stamped UUID.
+> This is a draft. The first version had the xclbins in as binary files. They
+> are **gone now** — `.gitignore`d and built from `npu_offload/gemm_rtp/`,
+> which is in the PR. Deleting them is what proved the generator was not
+> self-sufficient: three AIE kernel sources had never been copied, so this
+> repository could not build a single design family. Fixed, and all five now
+> rebuild from an empty tree to **88 of 96 files byte-identical**, the rest
+> being UUIDs and build timestamps inside the xclbins.
 >
 > **Linux is confirmed.** A second machine — Fedora Rawhide on a Framework 13
 > AI 340, no IDE — has built and run it. That retires the largest caveat this
@@ -99,7 +102,7 @@ the **datapath**, so two models share a set only when all four agree:
 | `BERT-h768-gated-bfp16` | 768 / 3072 | **yes** | bfp16 | nomic **and** gte-multilingual |
 | `BERT-h1024-bfp16` | 1024 / 4096 | no | bfp16 | bge-large (`tile_n` 32) |
 
-**2.83 MB for five sets covering six models**, and the sharing is real but
+**Five sets covering six models**, and the sharing is real but
 narrower than width alone suggests. Two of the distinctions are worth naming
 because they are easy to get wrong: nomic and gte have a **gated** FFN and
 bge-base does not, so they cannot share a 768 set; and `bge-small` runs on
@@ -495,12 +498,12 @@ vector** if it is allowed to guess. That is the whole reason they are errors.
 
 ---
 
-## The kernels are source now, and the source is checkable
+## The kernels are source, and the binaries are gone
 
-`npu_offload/gemm_rtp/` holds the four IRON scripts that build
-`src/xclbins/BERT-*/`, beside `npu_offload/matmul/` and following its
-convention: the design, the driver, and a README with **one exact command per
-design family**.
+`src/xclbins/BERT-*/` is **no longer in the repository**. It is `.gitignore`d
+and built from `npu_offload/gemm_rtp/`, which sits beside `npu_offload/matmul/`
+and follows its convention: the design, the driver, and a README with **one
+exact command per design family**.
 
 | file | what it is |
 |---|---|
@@ -508,30 +511,102 @@ design family**.
 | `export_gemm_rtp.py` | the driver: every (shape, batch tier) stream against one xclbin |
 | `npue.py` | the container format, for the B-tiling the packer must match |
 | `toolchain_provenance.py` | writes `toolchain.json` beside the design |
+| `check_readme.py` | checks this README against the design sets on disk |
 
-**Is the source really the source? Checked, not asserted.** Rebuilding
-`BERT-h768-gated-bfp16` from these scripts and comparing against the set shipped
-in this PR:
+plus three AIE kernel sources at `npu_offload/m5-eltwise/kernels/`, the path
+`gemm_pretiled.py` computes for them: `narrow_f32_bf16.cc` (`--c-bf16`, so four
+of the five families), `narrow_i32_bf16.cc` (`--int8`) and `gelu_poly.cc`
+(`--epilogue gelu`).
 
-> **19 of 20 files byte-identical** — all sixteen instruction streams,
-> `design.json` and `toolchain.json`. Only `final.xclbin` differs, by **80 bytes
-> of 127,454 (0.06%) in 9 short runs**, all in the header and metadata regions:
-> the UUID and build stamps every xclbin link writes fresh.
+`mm.cc` is deliberately **not** vendored: it is mlir-aie's own, taken from the
+installed toolchain so it always matches the compiler that builds it.
 
-About three minutes per family.
+### Deleting the binaries is what proved the source was not sufficient
 
-The README carries the flag sets because **every flag is load-bearing** — a set
-is selected at load time by `hidden`, `intermediate`, `gated_ffn` *and the
-datapath*, and a mismatched pair is refused rather than read as garbage. The
-easiest one to forget is `--c-bf16`: omit it and you get a design that is
-correct, complete and identical in every other respect, which no model in the
-catalogue will load. That is not hypothetical — it is how the reproduction
-above failed on its first attempt, and it is why `design.json` records the
-parameters.
+The first version of this PR shipped the xclbins and claimed the generator
+reproduced them — *"19 of 20 files byte-identical"*. That measurement was real
+and the claim it supported was not, because **the reproduction was run from the
+upstream tree**, where a file this repository did not have still existed. It
+demonstrated that the generator is deterministic. It never tested whether this
+repository could build anything, which is the claim that was made.
 
-`mm.cc`, the vectorised AIE kernel the design invokes, is mlir-aie's own from
-`aie_kernels/aie2p/`, unmodified and not vendored: taking it from the toolchain
-guarantees it matches the version that compiles it.
+Deleting all five sets and building from an empty tree answered that in eleven
+seconds:
+
+```
+FileNotFoundError: ExternalFunction 'narrow_3072_f32_bf16':
+  source file not found: npu_offload/m5-eltwise/kernels/narrow_f32_bf16.cc
+```
+
+**No family could be built.** The three `.cc` sources above had never been
+copied. What hid it is worth naming: `gemm_pretiled.py` computes that path
+relative to itself, and the relative layout is identical in both trees — so the
+code was correct, the file was absent, and nothing said so until someone
+compiled.
+
+### What the rebuild says now
+
+All five families, built from an empty `src/xclbins/`, using only this
+repository and the mlir-aie toolchain:
+
+| family | files | byte-identical | `final.xclbin` delta |
+|---|---:|---:|---|
+| `BERT-h384-bfp16` | 20 | **19** | 82 / 127,454 |
+| `BERT-h384-bf16` | 20 | **19** | 77 / 122,334 |
+| `BERT-h768-bfp16` | 20 | **19** | 79 / 127,454 |
+| `BERT-h768-gated-bfp16` | 20 | **19** | 82 / 127,454 |
+| `BERT-h1024-bfp16` | 8 | **7** | 82 / 126,430 |
+
+**88 of 96 files byte-identical.** The eight that differ are the five xclbins,
+by **402 bytes of 631,126 — 0.064%** — and not scattered: 5 to 6 tight clusters
+each, holding the binary UUID, the UUID again as hex in the metadata JSON, and
+`"TimeStamp"`. The embedded AIE core ELFs are identical, which is the part that
+matters and is what a scattered diff would have disproved.
+
+About three minutes per family on a Ryzen AI 9 HX 370.
+
+### It also found two wrong commands, and both were the silent kind
+
+Neither is detectable by building. Both produce a valid design that is not the
+one that was validated.
+
+1. **`BERT-h384-bf16` was documented with `--c-bf16`; the set that shipped has
+   `c_dtype: f32`.** It is the one family without that flag. bge-small is also
+   the one model held back from the bfp16 datapath — it failed the MTEB gate,
+   bit-reproducibly — so following the README put precisely the conservative
+   model on a narrower accumulator than it was validated for. The runtime reads
+   `c_dtype` from `design.json` and adapts, so nothing crashes and nothing
+   warns; the numbers just change. Fixed: no `--c-bf16` there, and the README
+   now says the command differs from the other four in *two* places.
+2. **`BERT-h1024-bfp16` was documented with four batch tiers and shipped with
+   one.** Four build cleanly and are very likely better — `use_tier()` rounds
+   up, so every short bge-large request is padded to batch 128 today — but that
+   has not been through the accuracy gates. The README builds what was
+   *measured*; the improvement is written down as a question, not shipped as a
+   fact.
+
+Now that the sets are built rather than committed, **the README is the
+artifact**, so `check_readme.py` compares its commands against the
+`design.json` each produces — eleven fields per family, non-zero exit on any
+disagreement. It catches both defects above.
+
+```
+$ python npu_offload/gemm_rtp/check_readme.py
+ok       BERT-h1024-bfp16
+ok       BERT-h384-bf16
+ok       BERT-h384-bfp16
+ok       BERT-h768-bfp16
+ok       BERT-h768-gated-bfp16
+```
+
+### The cost, stated plainly
+
+**A reviewer without mlir-aie and Peano can build `flm` but cannot run an
+`open_npue` model.** That is a real regression in reviewability, taken
+deliberately: the sets ship pre-built in the distributed package, and a binary
+sitting in a repository beside the source that allegedly produces it is a claim
+nobody checks — as this PR has now demonstrated about itself. `NpueEmbedding`'s
+missing-design error names the README and the one command that fixes it.
 
 
 ## Provenance
@@ -547,10 +622,10 @@ touch it.
 The synced sources are **MIT**, relicensed on copy by their sole author;
 upstream is Apache-2.0.
 
-`src/xclbins/BERT-*/` is 2.83 MB of xclbin and instruction streams across the
-five design families, built from IRON source, each with a `toolchain.json`
-recording the mlir-aie version, the Peano version and the git HEAD that
-produced it.
+`src/xclbins/BERT-*/` is **not in the repository**: it is `.gitignore`d and
+built from `npu_offload/gemm_rtp/`, about three minutes per family. Each built
+set carries a `toolchain.json` recording the mlir-aie version, the Peano
+version and the git HEAD that produced it.
 
 ---
 

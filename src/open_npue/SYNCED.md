@@ -5,7 +5,7 @@ This directory is a **copy**, written by `tools/sync_openflowlm.py` in
 not here: the accuracy gates that make these numbers mean anything live in
 that repository, and a local edit here silently detaches this code from them.
 
-- **Source commit** `c3925e87170d32753572d54a6f271dca2869178b`
+- **Source commit** `b082eb1e6645f129b3caf95e60146a8bffe9b239`
 - **Synced** 2026-09-04
 - **Licence** MIT (relicensed on copy by the sole copyright holder; upstream is Apache-2.0)
 
@@ -65,3 +65,6 @@ that repository, and a local edit here silently detaches this code from them.
 | `npu_offload/gemm_rtp/export_gemm_rtp.py` | `77410e1ef053b5f3` | 32,238 |
 | `npu_offload/gemm_rtp/npue.py` | `10b61d4d839bb2ae` | 22,377 |
 | `npu_offload/gemm_rtp/toolchain_provenance.py` | `ab9c09572307d3ef` | 3,419 |
+| `npu_offload/m5-eltwise/kernels/narrow_f32_bf16.cc` | `e70669eb7a91fc5a` | 4,947 |
+| `npu_offload/m5-eltwise/kernels/narrow_i32_bf16.cc` | `843fd9964f007403` | 5,705 |
+| `npu_offload/m5-eltwise/kernels/gelu_poly.cc` | `62f40e41c923f601` | 28,293 |
