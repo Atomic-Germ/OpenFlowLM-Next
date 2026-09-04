@@ -137,6 +137,12 @@ every `toolchain.json`. The five xclbins differ by **402 bytes of 631,126 —
 in the metadata JSON, and `"TimeStamp"`. The embedded AIE core ELFs are
 identical, which a scattered diff would have disproved.
 
+The sets were then **run**, not just compared: `utilities/test_open_npue.ps1
+-Upstream <NpuEmbeddings>` reports *"all 6 models pass, and are bit-identical
+to the upstream binary"* -- every component of every model, against a binary
+built from the other repository. Reproducing bytes and producing correct
+vectors are different claims; this is the second one.
+
 ## Check the README against what it builds
 
     python check_readme.py

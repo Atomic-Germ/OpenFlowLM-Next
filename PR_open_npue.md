@@ -565,6 +565,32 @@ matters and is what a scattered diff would have disproved.
 
 About three minutes per family on a Ryzen AI 9 HX 370.
 
+### And the rebuilt sets were then run
+
+Reproduction is not correctness, so the catalogue harness was run against them
+with `-Upstream`, which compares every component against `npuembed --embed`
+from an independent NpuEmbeddings build:
+
+```
+all 6 models pass, and are bit-identical to the upstream binary
+```
+
+Per model: 384, 384, 768, 1024, 768, 768 components, **all exact**. The five
+sets the fork's `flm` can reach are the five it just built -- there is no
+upstream artifact directory anywhere in this tree -- so these are vectors from
+design sets compiled here, matching a binary that was never told about them.
+
+The line that matters most is `bge-small`:
+
+```
+[NPUE] loaded BAAI-bge-small-en-v1.5, hidden 384, seq 64, bf16 MMAC, C as fp32
+       384/384 components exact -- BIT-IDENTICAL to the upstream binary
+```
+
+`C as fp32` is the corrected `BERT-h384-bf16`, built without `--c-bf16`. It is
+a **new** artifact -- its predecessor in this PR was built with the wrong flag
+-- and it lands byte for byte on the validated one.
+
 ### It also found two wrong commands, and both were the silent kind
 
 Neither is detectable by building. Both produce a valid design that is not the
