@@ -5,20 +5,24 @@
 > and a rebuild reproduces the shipped design set to 19 files of 20, the
 > twentieth differing only in the xclbin's build-stamped UUID.
 >
-> **If someone can test this on Linux before it goes further, that would be
-> very welcome.**
+> **Linux is confirmed.** A second machine — Fedora Rawhide on a Framework 13
+> AI 340, no IDE — has built and run it. That retires the largest caveat this
+> PR opened with; the remaining ones are listed below and are unchanged.
+>
+> **The endpoint tests now live in `utilities/flm-test`**, not in a script of
+> their own. See *Testing it* below.
 
-> ### Depends on #<PR-1> — *"Fix the submodule metadata: a fresh clone cannot build"*
+> ### Depended on #3 — *"Fix the submodule metadata: a fresh clone cannot build"* — **now merged**
 >
-> **Merge that one first.** Not for tidiness: without it this tree does not
-> configure, so a reviewer cannot build this branch to look at it.
-> `git submodule update --init` fails outright on a dangling `docs/ExampleNPU`
-> gitlink, and `third_party/tokenizers-cpp` — which `src/CMakeLists.txt`
-> `add_subdirectory()`s and links into `flm` — does not exist.
+> Without it this tree did not configure, so a reviewer could not build this
+> branch to look at it: `git submodule update --init` failed outright on a
+> dangling `docs/ExampleNPU` gitlink, and `third_party/tokenizers-cpp` — which
+> `src/CMakeLists.txt` `add_subdirectory()`s and links into `flm` — did not
+> exist.
 >
-> Those two commits are the base of this branch, so they appear in this diff
-> too until the other PR lands. After it lands, rebasing drops them and this[PR_open_npue.md](PR_open_npue.md)
-> becomes ten commits of embedding backend and nothing else.[PR_open_npue.md](PR_open_npue.md)
+> Those two commits are the base of this branch, so they still appear in this
+> diff until it is rebased on the merged `main`; after that this is ten commits
+> of embedding backend and nothing else.
 
 > ## ⚠️ DRAFT — needs testing on other machines
 >
@@ -36,9 +40,10 @@
 >   different host ISA levels — that is measured and documented below — so a
 >   mismatch is informative rather than automatically a bug. `1-cos` against
 >   sentence-transformers is the check that should hold anywhere.
-> * **Linux is unverified for `flm`.** The engine's platform-independent subset
->   compiles there at C++17 and C++20, but the binary was only built and run on
->   Windows.
+> * ~~**Linux is unverified for `flm`.**~~ **Verified** — built and run on
+>   Fedora Rawhide (Framework 13 AI 340). The engine's platform-independent
+>   subset also compiles there at C++17 and C++20, which is the check upstream
+>   runs on every change.
 > * **The two co-resident `hw_context` objects are unmeasured**, because the
 >   LLM never loaded here for want of its own xclbins. A real
 >   `serve <llm> --embed 1` on a machine with a full xclbin tree is the test
@@ -294,7 +299,7 @@ review them alone.
 
 ---
 
-## The two repository fixes this depends on (see #<PR-1>)
+## The two repository fixes this depended on (#3, merged)
 
 `git submodule update --init` — the first thing a new contributor runs —
 **failed outright**:
@@ -361,7 +366,8 @@ the DLL problem above disguised itself.
 ## Testing it
 
 Two harnesses, both in `utilities/`, and neither needs anything outside this
-repository.
+repository. The first is specific to this backend; the second is the
+repository's existing suite, extended.
 
 **`test_open_npue.ps1`** — the whole catalogue, end to end. It starts a server
 per model (one embedding model per process: the geometry is process-wide and a
@@ -374,32 +380,55 @@ Given `-Upstream <path-to-NpuEmbeddings>` it also compares every vector against
 `npuembed --embed`. That mode is why the ODR bug was caught: every
 self-contained check passed on the wrong vectors.
 
-**`test_embeddings_endpoint.py`** — a client test of a **running** server,
-through the official `openai` package rather than hand-rolled HTTP, so it
-exercises the real client's request shaping and response parsing. It starts and
-manages nothing.
+**`utilities/flm-test`** — the repository's own suite, which is where the
+client-side endpoint checks for this backend now live. This started as a
+separate script; it was folded in on review, because two suites testing the same
+endpoint is how they drift apart.
 
 ```
-python utilities/test_embeddings_endpoint.py --model bge-base:en-v1.5
+flm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+flm-test --embedding --model bge-base:en-v1.5
 ```
 
-Four properties, and only one of them needs a threshold:
+Three changes went in, all of them in `flm_test/tasks.py`:
 
-0. **The server honours `model`** — checked first, because everything else is
-   meaningless if it does not. This is the check that found fix 5 above.
-1. **Five identical texts give byte-identical vectors.** Not "close": the
-   encode is deterministic, so any difference is a per-row bug — lane aliasing,
-   tier misindexing, shared scratch. Upstream has hit two of those and both
-   produced plausible vectors that differed only between rows.
-2. **Similar and unrelated text separate**, tested as one property with no
-   magic number: `min(cosine within similar) > max(cosine among unrelated)`,
-   with all 25 cross-group pairs counted on the unrelated side. A fixed
-   `> 0.7` would bake one machine's model into the test; separation asks the
-   question that actually matters. bge-base: margin **+0.2798**.
+**E9 Model Identity, a new check.** A request naming a model the server cannot
+have loaded must be **refused**, not answered; and an accepted request must
+report the model that was asked for. This is the check that found fix 5 above,
+and it is the one failure the other eight cannot see — a substituted model's
+vector is correctly shaped, correctly normed, deterministic, batch-consistent
+and semantically sensible, so E1–E7 all pass on it. E8 makes it *worse*: if the
+model substituted in is the one the bundled reference was made from, E8 passes
+too, and the whole suite reports success on an answer for a model nobody asked
+for.
 
-Verified in both directions — it fails at margin **−0.6630** when the "similar"
-group is replaced by unrelated sentences. *A test that has never failed is not
-known to work.*
+**E8 now SKIPs instead of failing** for a model its bundled vectors are not for.
+The reference is `google/embeddinggemma-300m`; two models embed the same text
+into different spaces by design, so a cosine between them carries no information
+about either. Without this, every model in this PR failed E8 for a reason that
+said nothing about them. `REFERENCE_MODELS` is the set to extend when reference
+vectors for another model are added.
+
+**The six tags are in `EMBED_MODELS`**, so the suite runs against them without
+an explicit `--model` filter.
+
+Also: **E2 now reports whether the draws were bit-identical** or merely inside
+`STABILITY_THRESHOLD`. Same verdict either way — some backends are legitimately
+non-exact — but the distinction belongs in the record. This backend is
+bit-identical, and that matters: the encode is deterministic, so any difference
+between draws is a per-row bug (lane aliasing, tier misindexing, shared
+scratch). Upstream has hit two of those and both produced plausible vectors that
+differed only between rows.
+
+Unit tests for all of it are in `utilities/flm-test/tests/test_embedding_checks.py`
+— 51 tests, no server required:
+
+```
+python tests/test_embedding_checks.py
+```
+
+The separation property the standalone script tested is E5, which the suite
+already had.
 
 
 ## Building
@@ -545,9 +574,11 @@ produced it.
   holds the LLM's context and the engine's at once, which is the same shape,
   and it has **not** been exercised here because the LLM never loaded for want
   of its own xclbins.
-* **Linux is unverified.** The engine's platform-independent subset compiles
-  there at C++17 and C++20 (upstream runs that check), but `flm` itself was only
-  built and run on Windows for this PR.
+* ~~**Linux is unverified.**~~ **Verified after this PR was opened**: a second
+  machine built and ran `flm` on Fedora Rawhide (Framework 13 AI 340, no IDE).
+  The engine's platform-independent subset also compiles there at C++17 and
+  C++20, which is the check upstream runs on every change. The numbers in this
+  PR are still one machine's; the *build* is now two.
 
 [upstream]: https://github.com/vegardberget/NpuEmbeddings
 
