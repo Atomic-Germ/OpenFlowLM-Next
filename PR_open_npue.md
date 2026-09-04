@@ -197,7 +197,7 @@ The whole cold path was exercised for this PR: download → pack → serve →
 
 ---
 
-## Four fixes to the shared paths
+## Five fixes to the shared paths
 
 Each was found by *using* the thing, not by reading it, and each is the same
 shape: something goes wrong and the tool carries on as though it had not.
@@ -249,6 +249,26 @@ shape: something goes wrong and the tool carries on as though it had not.
    It is not specific to this PR's backend — it is in the shared request path
    and affects `open_embedding` identically.
 
+5. **`/v1/embeddings` ignored the `model` field**, and this is the worst of the
+   five because the answer did not merely go wrong — it **asserted it was
+   right**. One embedding model is loaded per server, and a request naming any
+   other one was served by the loaded model with the reply labelled with the
+   tag that had been *asked for*. So a client comparing `response.model`
+   against its own request saw agreement. On a server holding bge-base:
+
+   ```
+   request model=bge-base:en-v1.5      -> response.model = bge-base:en-v1.5
+   request model=not-a-model:v9        -> response.model = not-a-model:v9
+   request model=gte-multilingual:base -> response.model = gte-multilingual:base
+   ```
+
+   All three vectors byte-identical. A RAG deployment embedding documents with
+   one model and queries with another, against one `flm`, would retrieve
+   nonsense with no signal anywhere. It refuses now, naming what *is* loaded, as
+   `invalid_request_error` / `model_not_found`.
+
+   Found by writing the client test below and expecting a refusal.
+
 These are separable from the backend and can be split out if you would rather
 review them alone.
 
@@ -277,6 +297,88 @@ have reported it was already refusing to run.
 Both are separate commits at the base of this branch.
 
 ---
+
+## And a freshly built `flm.exe` now runs
+
+It could not, and the way it failed sent you looking in the wrong place. Two
+things were missing beside the executable:
+
+* **The 22 engine DLLs** (`src/lib/<backend>/*.dll`). They are load-time
+  imports, so without them the process dies at `0xC0000135` **before `main()`**,
+  printing nothing at all. Windows then falls through to the next PATH entry —
+  which on a machine with FastFlowLM installed is
+  `C:\Program Files\flm\flm.exe`. So running
+  `flm.exe serve ... --embeddingmodel x` from the build directory reported
+  *"unrecognised option '--embeddingmodel'"*, **from a completely different
+  binary than the one just built.** The symptom named a flag; the cause was a
+  missing DLL two steps earlier with a silent fallback in between.
+* **The xclbin tree.** `find_xclbin_path()` already looks for
+  `<exe_dir>/xclbins` and calls it *"the portable development-tree location"* —
+  but nothing ever put one there, so every model failed with *"no design set"*
+  until `FLM_XCLBIN_PATH` was set by hand.
+
+The DLLs are copied (into the build dir and `src/out`, both gitignored, so
+nothing enters the repository); the xclbin tree is a **junction**, because it is
+hundreds of megabytes and because a rebuilt kernel should be visible
+immediately. `mklink /J` needs no privileges; if it fails the build warns and
+names `FLM_XCLBIN_PATH` rather than erroring.
+
+From a clean shell in `src/build`, with nothing set:
+
+```
+.\flm.exe serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+```
+
+Note the `.\`. Where the current directory is not searched for executables
+(`NoDefaultCurrentDirectoryInExePath`), a bare `flm.exe` resolves to an
+installed `flm` and never to your build. That is a Windows setting, not
+something this repository can fix — but it is worth knowing, because it is how
+the DLL problem above disguised itself.
+
+
+## Testing it
+
+Two harnesses, both in `utilities/`, and neither needs anything outside this
+repository.
+
+**`test_open_npue.ps1`** — the whole catalogue, end to end. It starts a server
+per model (one embedding model per process: the geometry is process-wide and a
+`ShapeLease` refuses a second), checks the OpenAI response shape, unit norms,
+that a paraphrase is nearer than an unrelated sentence, that
+`gte-multilingual` is actually multilingual, and that a malformed request does
+not take the server down. **All six models pass in 1.7 minutes.**
+
+Given `-Upstream <path-to-NpuEmbeddings>` it also compares every vector against
+`npuembed --embed`. That mode is why the ODR bug was caught: every
+self-contained check passed on the wrong vectors.
+
+**`test_embeddings_endpoint.py`** — a client test of a **running** server,
+through the official `openai` package rather than hand-rolled HTTP, so it
+exercises the real client's request shaping and response parsing. It starts and
+manages nothing.
+
+```
+python utilities/test_embeddings_endpoint.py --model bge-base:en-v1.5
+```
+
+Four properties, and only one of them needs a threshold:
+
+0. **The server honours `model`** — checked first, because everything else is
+   meaningless if it does not. This is the check that found fix 5 above.
+1. **Five identical texts give byte-identical vectors.** Not "close": the
+   encode is deterministic, so any difference is a per-row bug — lane aliasing,
+   tier misindexing, shared scratch. Upstream has hit two of those and both
+   produced plausible vectors that differed only between rows.
+2. **Similar and unrelated text separate**, tested as one property with no
+   magic number: `min(cosine within similar) > max(cosine among unrelated)`,
+   with all 25 cross-group pairs counted on the unrelated side. A fixed
+   `> 0.7` would bake one machine's model into the test; separation asks the
+   question that actually matters. bge-base: margin **+0.2798**.
+
+Verified in both directions — it fails at margin **−0.6630** when the "similar"
+group is replaced by unrelated sentences. *A test that has never failed is not
+known to work.*
+
 
 ## Building
 
@@ -337,6 +439,8 @@ vector** if it is allowed to guess. That is the whole reason they are errors.
 | second model in one process | — | the engine's `ShapeLease` refuses |
 | `model_list.json` names a file the manifest lacks | skipped, "success" | error |
 | truncated download | "verified successfully" | treated as missing |
+| a request naming a model that is not loaded | served, **labelled with the requested tag** | error naming what is loaded |
+| a malformed request body | wedged the server permanently | clean JSON error, server survives |
 
 ---
 
@@ -365,6 +469,10 @@ produced it.
 * **The seventh model is not here.** `embed-gemma:300m` stays with
   `open_embedding`, deliberately: NpuEmbeddings' arch=1 path lives in its CLI
   rather than its library, so this backend cannot serve it.
+* **`embed_batch()` exists and is unused.** `AutoEmbeddingModel::embed()` takes
+  one text, so `handle_embeddings` loops — worth ~5.8× on a 16-text request,
+  measured. Widening the base class is one line plus a default that loops, and
+  it deserves its own PR.
 * **`usage` in the response is still `{0, 0}`** — hardcoded in
   `handle_embeddings` for both backends, untouched here.
 * **Two co-resident `hw_context` objects are a real hazard, and only half
@@ -381,3 +489,7 @@ produced it.
   built and run on Windows for this PR.
 
 [upstream]: https://github.com/vegardberget/NpuEmbeddings
+
+<!-- NOTE before posting: check the [upstream] URL above. It was inferred from
+     a git identity, not read off the remote, and provenance is the one section
+     that has to be verifiable. -->
