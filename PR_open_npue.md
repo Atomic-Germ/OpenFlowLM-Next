@@ -1,5 +1,13 @@
 # Add `open_npue`: a second embedding backend (draft)
 
+> This is a draft. The first version had the xclbins in as binary files; the
+> generator that builds them is now in the PR too (`npu_offload/gemm_rtp/`),
+> and a rebuild reproduces the shipped design set to 19 files of 20, the
+> twentieth differing only in the xclbin's build-stamped UUID.
+>
+> **If someone can test this on Linux before it goes further, that would be
+> very welcome.**
+
 > ### Depends on #<PR-1> — *"Fix the submodule metadata: a fresh clone cannot build"*
 >
 > **Merge that one first.** Not for tidiness: without it this tree does not
@@ -9,8 +17,8 @@
 > `add_subdirectory()`s and links into `flm` — does not exist.
 >
 > Those two commits are the base of this branch, so they appear in this diff
-> too until the other PR lands. After it lands, rebasing drops them and this
-> becomes ten commits of embedding backend and nothing else.
+> too until the other PR lands. After it lands, rebasing drops them and this[PR_open_npue.md](PR_open_npue.md)
+> becomes ten commits of embedding backend and nothing else.[PR_open_npue.md](PR_open_npue.md)
 
 > ## ⚠️ DRAFT — needs testing on other machines
 >
@@ -458,38 +466,43 @@ vector** if it is allowed to guess. That is the whole reason they are errors.
 
 ---
 
-## The xclbins ship as binaries in this PR, and the generator follows
+## The kernels are source now, and the source is checkable
 
-Stating it plainly because it cuts against the point of #690, and because the
-inventory in this tree already says *"all 222 xclbins lack BUILD_METADATA"*.
+`npu_offload/gemm_rtp/` holds the four IRON scripts that build
+`src/xclbins/BERT-*/`, beside `npu_offload/matmul/` and following its
+convention: the design, the driver, and a README with **one exact command per
+design family**.
 
-**What is source here:** all of it except the AIE kernels. `src/open_npue/` is
-the complete engine — encoders, four tokenizers, container format, packer — and
-`src/open_npue_adapter/` is the glue. Nothing in the C++ path is opaque.
+| file | what it is |
+|---|---|
+| `gemm_pretiled.py` | the IRON design — whole-array pre-tiled GEMM, its ObjectFifo dataflow, the `mm.cc` invocation |
+| `export_gemm_rtp.py` | the driver: every (shape, batch tier) stream against one xclbin |
+| `npue.py` | the container format, for the B-tiling the packer must match |
+| `toolchain_provenance.py` | writes `toolchain.json` beside the design |
 
-**What is binary here:** `src/xclbins/BERT-*/`, 2.83 MB across five design
-families. Each one carries a `toolchain.json` recording the mlir-aie version,
-the Peano version and the mlir-aie git HEAD that produced it — so they are at
-least *identified*, which the existing 222 are not. But identified is not the
-same as buildable, and a fingerprint is not a source tree.
+**Is the source really the source? Checked, not asserted.** Rebuilding
+`BERT-h768-gated-bfp16` from these scripts and comparing against the set shipped
+in this PR:
 
-**The generator is ~1,800 lines of IRON** (`gemm_pretiled.py` plus the export
-driver, and the two container helpers they need) and belongs in
-`npu_offload/gemm_rtp/`, next to `npu_offload/matmul/` and following its
-convention: the design scripts and a README with the exact command per shape.
-It is a follow-up, not a promise with nothing behind it — the scripts exist and
-built the five sets in this PR.
+> **19 of 20 files byte-identical** — all sixteen instruction streams,
+> `design.json` and `toolchain.json`. Only `final.xclbin` differs, by **80 bytes
+> of 127,454 (0.06%) in 9 short runs**, all in the header and metadata regions:
+> the UUID and build stamps every xclbin link writes fresh.
 
-**Why it is not in this one.** This PR is asking a different question:
-*do the vectors come out right, through the real OpenAI client, on a real
-server?* That is answerable now, and answered — six models, bit-identical to an
-independent build, with two harnesses anyone can run. Bundling a kernel-build
-pipeline into the same review would make both harder to judge, and the
-generator needs its own environment section (mlir-aie, Peano, `iron_env.ps1`)
-that has nothing to do with using the engine.
+About three minutes per family.
 
-So: **review this PR for whether the embeddings are correct and the integration
-is sound.** Do not merge it expecting to rebuild the kernels from this tree yet.
+The README carries the flag sets because **every flag is load-bearing** — a set
+is selected at load time by `hidden`, `intermediate`, `gated_ffn` *and the
+datapath*, and a mismatched pair is refused rather than read as garbage. The
+easiest one to forget is `--c-bf16`: omit it and you get a design that is
+correct, complete and identical in every other respect, which no model in the
+catalogue will load. That is not hypothetical — it is how the reproduction
+above failed on its first attempt, and it is why `design.json` records the
+parameters.
+
+`mm.cc`, the vectorised AIE kernel the design invokes, is mlir-aie's own from
+`aie_kernels/aie2p/`, unmodified and not vendored: taking it from the toolchain
+guarantees it matches the version that compiles it.
 
 
 ## Provenance
@@ -514,9 +527,6 @@ produced it.
 
 ## Not done, and not pretended
 
-* **The kernel generator is not here** — see the section above. The xclbins
-  ship as binaries with a toolchain fingerprint; the ~1,800 lines of IRON that
-  build them go to `npu_offload/gemm_rtp/` in a follow-up.
 * **The seventh model is not here.** `embed-gemma:300m` stays with
   `open_embedding`, deliberately: NpuEmbeddings' arch=1 path lives in its CLI
   rather than its library, so this backend cannot serve it.

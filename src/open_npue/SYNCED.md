@@ -5,7 +5,7 @@ This directory is a **copy**, written by `tools/sync_openflowlm.py` in
 not here: the accuracy gates that make these numbers mean anything live in
 that repository, and a local edit here silently detaches this code from them.
 
-- **Source commit** `4a99a6e911a768196502b270a0de7666c9cad5ee`
+- **Source commit** `c3925e87170d32753572d54a6f271dca2869178b`
 - **Synced** 2026-09-04
 - **Licence** MIT (relicensed on copy by the sole copyright holder; upstream is Apache-2.0)
 
@@ -61,3 +61,7 @@ that repository, and a local edit here silently detaches this code from them.
 | `tokenizer_bbpe.hpp` | `6f0ca8d98f0db46a` | 5,233 |
 | `bbpe_tokenizer_gen.hpp` | `834d93faac885b9e` | 1,971 |
 | `bbpe_unicode_tables.hpp` | `0072df934f77ed43` | 114,763 |
+| `npu_offload/gemm_rtp/gemm_pretiled.py` | `8cbcbc8f9cbe7979` | 63,839 |
+| `npu_offload/gemm_rtp/export_gemm_rtp.py` | `77410e1ef053b5f3` | 32,238 |
+| `npu_offload/gemm_rtp/npue.py` | `10b61d4d839bb2ae` | 22,377 |
+| `npu_offload/gemm_rtp/toolchain_provenance.py` | `ab9c09572307d3ef` | 3,419 |
