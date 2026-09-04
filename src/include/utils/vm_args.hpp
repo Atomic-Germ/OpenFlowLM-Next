@@ -76,6 +76,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "If load asr model")
             ("embed,e", po::value<bool>(&parsed_args.embed)->default_value(0),
             "If load embed model")
+            ("embeddingmodel", po::value<std::string>(&parsed_args.embedding_model)->default_value(""),
+             "Which embedding model to serve with --embed 1 "
+             "(default: embed-gemma:300m)")
             ("host", po::value<std::string>(&parsed_args.host)->default_value("127.0.0.1"), 
              "Set the server address (for serve command)")
             ("port,p", po::value<int>(&parsed_args.port)->default_value(-1), 

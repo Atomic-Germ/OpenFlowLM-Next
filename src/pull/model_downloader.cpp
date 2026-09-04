@@ -53,6 +53,27 @@ ModelDownloader::ModelStatus ModelDownloader::check_model_compatibility(const st
     config.from_pretrained(this->supported_models.get_model_path(new_model_tag));
     std::string flm_version = config.flm_version;
     std::string flm_min_version = model_info["flm_min_version"];
+
+    // A CHECKPOINT THAT IS NOT AN FLM ARTIFACT HAS NO VERSION TO COMPARE.
+    //
+    // LM_Config defaults flm_version to "0.0.0" when config.json has no such
+    // key -- and no upstream HuggingFace checkpoint has one, because it is a
+    // field this project writes. So every model listed with the author's OWN
+    // files reads as version 0, compares below the entry's flm_min_version,
+    // and is reported Outdated forever: `flm list` shows a warning triangle
+    // and ensure_*_model_loaded() re-pulls a complete, correct download on
+    // every start.
+    //
+    // embed-gemma:300m is in exactly that state today, on a freshly pulled
+    // tree: min 0.9.15 against a checkpoint that declares nothing.
+    //
+    // "absent" and "0.0.0" are already indistinguishable here, so treating the
+    // default as "not versioned" changes nothing for any artifact that really
+    // carries a version -- it only stops the check firing on models it was
+    // never about.
+    if (flm_version == "0.0.0") {
+        return ModelStatus::Ready;
+    }
     int l_l, m_l, r_l; //left, middle, right on local version
     int l_r, m_r, r_r; //left, middle, right on requried version
     int l_f, m_f, r_f; //left, middle, right on flm version
@@ -209,12 +230,56 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
 
         // Check if this is a VLM model (default to false if key doesn't exist)
 
+        // The manifest, for the expected sizes below. Absent or unreadable is
+        // not an error here -- build_download_list() is where that is
+        // reported; this only means the size check is skipped.
+        nlohmann::json manifest;
+        try {
+            std::ifstream mf(utils::find_model_info());
+            manifest = nlohmann::json::parse(mf).at(new_model_tag);
+        } catch (const std::exception&) {}
+
         // Check each required model file
         for (int i = 0; i < model_files.size(); ++i) {
             std::string filename = model_files[i];
             std::string file_path = get_model_file_path(model_path, filename);
             if (!file_exists(file_path)) {
                 missing_files.push_back(filename);
+                continue;
+            }
+            // PRESENT IS NOT THE SAME AS COMPLETE. Existence was the only
+            // check, so an interrupted download left a truncated file that
+            // every later run treated as done: the next `pull` skipped it
+            // (build_download_list only downloads what does not exist) and
+            // pull_model went on to print "All files verified successfully",
+            // which is this predicate's answer. Observed for real: a 50 MB
+            // model.safetensors where the manifest says 417 MB, reported as
+            // verified.
+            //
+            // The manifest already carries every file's size, so comparing it
+            // turns "exists" into "is the file we asked for" -- which is what
+            // a caller deciding whether to re-pull actually needs to know. A
+            // hash would be stronger and costs a full read of every file on
+            // every status check; size catches truncation, which is what
+            // interruption produces.
+            if (manifest.is_array()) {
+                for (const auto& f : manifest) {
+                    if (!f.contains("path") || f["path"] != filename) continue;
+                    if (!f.contains("size")) break;
+                    std::error_code ec;
+                    const auto on_disk =
+                        std::filesystem::file_size(file_path, ec);
+                    const auto expect =
+                        static_cast<std::uintmax_t>(f["size"].get<double>());
+                    if (!ec && on_disk != expect) {
+                        header_print("WARNING", filename + " is " +
+                                     std::to_string(on_disk) + " bytes, the "
+                                     "manifest says " + std::to_string(expect) +
+                                     " -- treating it as missing");
+                        missing_files.push_back(filename);
+                    }
+                    break;
+                }
             }
         }
     } catch (const std::exception& e) {
@@ -289,6 +354,9 @@ std::pair<nlohmann::json, float> ModelDownloader::build_download_list(const std:
     
     nlohmann::json downloads = nlohmann::json::array();
     float sum_file_size = 0;
+    // Files model_list.json requires that model_info.json does not describe.
+    // Collected rather than skipped -- see where they are reported below.
+    std::vector<std::string> missing_from_manifest;
 
     try {
         auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
@@ -358,6 +426,30 @@ std::pair<nlohmann::json, float> ModelDownloader::build_download_list(const std:
     } 
     catch (const std::exception& e) {
         header_print("ERROR", "Error building download list: " + std::string(e.what()));
+    }
+
+    // A FILE THE MODEL ENTRY REQUIRES AND THE MANIFEST DOES NOT LIST is a
+    // model that cannot be downloaded, and it used to be silent: the loop
+    // above simply `continue`d, so pull_model() fetched nothing and reported
+    // success. The omission then surfaced much later, as a missing-file error
+    // from whatever tried to load the model -- naming the file rather than the
+    // reason, and pointing at the download rather than at model_info.json.
+    //
+    // Adding a model needs an entry in BOTH files: model_list.json says which
+    // files the model consists of, model_info.json says where each one is and
+    // how big it is. (The HuggingFace API path that would have made the second
+    // one unnecessary is commented out just above.)
+    if (!missing_from_manifest.empty()) {
+        std::string names;
+        for (const auto& n : missing_from_manifest)
+            names += (names.empty() ? "" : ", ") + n;
+        header_print("ERROR", "model_info.json describes none of these files "
+                              "required by model_list.json, so they cannot be "
+                              "downloaded: " + names);
+        header_print("ERROR", "Adding a model needs an entry in BOTH files. "
+                              "Refusing to report a partial download as "
+                              "success.");
+        return std::make_pair(nlohmann::json::array(), 0.0f);
     }
 
     return std::make_pair(downloads, sum_file_size);

@@ -322,7 +322,7 @@ static json convert_tool_responses_gemma4(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), embed(args.embed), embedding_model_tag(args.embedding_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
     this->npu_device_inst = flm_rt::device(0);
 
     if (args.ctx_length != -1) {
@@ -344,7 +344,15 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
         ensure_asr_model_loaded(whisper_tag);
     }
     if (this->embed) {
-        std::string embed_tag = "embed-gemma:300m";
+        // --embeddingmodel, defaulting to the historical tag so an
+        // existing `--embed 1` command line is unchanged. An unknown
+        // tag is an error from get_auto_embedding_model(), not a
+        // silent fallback: serving one model's embeddings under
+        // another's name produces a correctly shaped, correctly normed
+        // vector that nothing downstream can tell is wrong.
+        std::string embed_tag = this->embedding_model_tag.empty()
+                                    ? std::string("embed-gemma:300m")
+                                    : this->embedding_model_tag;
         ensure_embed_model_loaded(embed_tag);
     }
 #else
@@ -468,9 +476,12 @@ void RestHandler::ensure_embed_model_loaded(const std::string& model_tag) {
             this->embed = false;
             return;
     }
-    auto [embedding_model_tag, auto_embedding_engine] = get_auto_embedding_model(ensure_tag, &this->npu_device_inst);
+    // `resolved_tag` rather than `embedding_model_tag`: the latter is now a
+    // member (the --embeddingmodel value), and shadowing it here would compile
+    // fine while making the two impossible to tell apart at a glance.
+    auto [resolved_tag, auto_embedding_engine] = get_auto_embedding_model(ensure_tag, &this->npu_device_inst);
     this->auto_embedding_engine = std::move(auto_embedding_engine);
-    auto [new_embedding_model_tag, embedding_model_info] = this->supported_models.get_model_info(embedding_model_tag);
+    auto [new_embedding_model_tag, embedding_model_info] = this->supported_models.get_model_info(resolved_tag);
     std::string embedding_model_path = this->supported_models.get_model_path(new_embedding_model_tag);
     try {
         this->auto_embedding_engine->load_model(embedding_model_path, embedding_model_info, this->preemption);
@@ -871,6 +882,41 @@ void RestHandler::handle_embeddings(const json& request,
                                    StreamResponseCallback send_streaming_response) {
     try {
         std::string model = request["model"];
+
+        // THE `model` FIELD USED TO BE ECHOED AND OTHERWISE IGNORED, which is
+        // the worst version of a wrong answer: the response ASSERTED it was
+        // something it was not.
+        //
+        // One embedding model is loaded per server (the engine's geometry is
+        // process-wide). A request naming any other one was served by the
+        // loaded model anyway, and the reply came back labelled with the tag
+        // that had been ASKED for -- so a client comparing response.model to
+        // its request saw agreement. Measured on a server started with
+        // --embeddingmodel bge-base:en-v1.5: asking for gte-multilingual:base
+        // returned bge-base's vectors, byte for byte, under the name
+        // "gte-multilingual:base". A RAG deployment embedding documents with
+        // one model and queries with another, against one flm, would retrieve
+        // nonsense with no signal anywhere.
+        //
+        // It refuses now, and names what IS loaded. An unknown model is an
+        // error every OpenAI client already understands.
+        if (this->auto_embedding_engine) {
+            const std::string loaded = this->auto_embedding_engine->get_current_model();
+            if (!model.empty() && !loaded.empty() && model != loaded) {
+                json err = { {"error", {
+                    {"message", "this server has '" + loaded + "' loaded, not '" +
+                                model + "'. One embedding model is loaded per "
+                                "server; start another with --embeddingmodel " +
+                                model + " to serve it."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "model_not_found"}
+                }} };
+                send_response(err);
+                return;
+            }
+        }
+
         std::vector<std::string> inputs;
 
         if (request["input"].is_string()) {

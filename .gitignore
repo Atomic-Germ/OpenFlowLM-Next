@@ -10,3 +10,14 @@ ironvenv
 Models
 tmp
 tmp
+
+# open_npue AIE design sets -- BUILT, not checked in.
+#
+# These are the output of npu_offload/gemm_rtp/, which is the source. A binary
+# in a repository beside the source that produces it is a claim nobody checks;
+# ignoring them makes the rebuild the only way to get them, so the source
+# cannot silently stop being the source.
+#
+# Build them with the commands in npu_offload/gemm_rtp/README.md. They are
+# shipped pre-built in the distributed package only.
+src/xclbins/BERT-h*/

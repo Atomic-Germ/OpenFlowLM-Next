@@ -130,6 +130,29 @@ void brief_print_message_response(nlohmann::json request) {
 }
 
 // NPU Access Manager implementation
+// A ONE-BYTE MALFORMED REQUEST BODY USED TO WEDGE THE SERVER PERMANENTLY, and
+// the mechanism is worth stating because it is not where anyone would look.
+//
+//   1. A route handler calls json::parse(req.body()); invalid UTF-8 throws
+//      json::parse_error.101.
+//   2. The catch below builds {"error": "Handler exception: " + e.what()} --
+//      and nlohmann puts the OFFENDING BYTES into e.what() ("last read: ...").
+//   3. .dump() on that object throws json::type_error.316, "invalid UTF-8
+//      byte", because the string it is asked to serialise is the invalid one.
+//   4. That second exception escapes the catch block, so
+//      process_next_npu_request() is never reached, the NPU access lock taken
+//      before the handler ran is never released, and EVERY LATER REQUEST HANGS
+//      -- valid ones included. Reproduced: one request with a lone 0xE5 byte,
+//      then a well-formed request that never returns.
+//
+// The error handler was broken by exactly the input it was reporting. Dumping
+// with error_handler_t::replace substitutes U+FFFD for anything invalid rather
+// than throwing, which is what an error path needs: it must not be able to
+// fail on the thing that made it run.
+static std::string safe_dump(const json& j) {
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
 bool NPUAccessManager::try_acquire_npu_access() {
     std::lock_guard<std::mutex> lock(g_npu_access_mutex);
     if (g_npu_in_use.load()) {
@@ -667,7 +690,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
     if (it == routes.end()) {
         // No route: respond 404 synchronously.
         res.result(http::status::not_found);
-        res.body() = json{ {"error", "Not Found"} }.dump();
+        res.body() = safe_dump(json{ {"error", "Not Found"} });
         res.set(http::field::content_type, is_json ? "application/json" : "multipart/form-data");
         res.prepare_payload();
         return false; 
@@ -698,7 +721,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         }
         catch (const std::exception& e) {
             res_ref.result(http::status::bad_request);
-            res_ref.body() = json{ {"error", "Invalid JSON"} }.dump();
+            res_ref.body() = safe_dump(json{ {"error", "Invalid JSON"} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
 
@@ -784,7 +807,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             unregister_active_request(request_id);
 
             res_ref.result(http::status::internal_server_error);
-            res_ref.body() = json{ {"error", std::string("Handler exception: ") + e.what()} }.dump();
+            res_ref.body() = safe_dump(json{ {"error", std::string("Handler exception: ") + e.what()} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
 
@@ -801,7 +824,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             unregister_active_request(request_id);
 
             res_ref.result(http::status::internal_server_error);
-            res_ref.body() = json{ {"error", "Unknown handler exception"} }.dump();
+            res_ref.body() = safe_dump(json{ {"error", "Unknown handler exception"} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
 
@@ -836,9 +859,9 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
 
     if (npu_request_queue_.size() >= max_npu_queue_) {
         res.result(http::status::service_unavailable);
-        res.body() = json{
+        res.body() = safe_dump(json{
             {"error", "NPU is in use and request queue is full (limit: " + std::to_string(max_npu_queue_) + "). Please try again later."}
-        }.dump();
+        });
         res.set(http::field::content_type, "application/json");
         res.prepare_payload();
         header_print("🚫 ", "NPU busy and queue full, request denied: " + key);

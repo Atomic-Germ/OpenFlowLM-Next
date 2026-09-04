@@ -24,7 +24,7 @@
                     "parameter_size": "3B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 3.1
@@ -267,7 +267,7 @@
                 ],
                 "footprint": 5.0
             },
-            "9b":{
+            "9b": {
                 "name": "Qwen3.5-9B-NPU2",
                 "url": "https://huggingface.co/FastFlowLM/Qwen3.5-9B-NPU2/resolve/flm_q4k_high_precision",
                 "file_url": "https://huggingface.co/api/models/FastFlowLM/Qwen3.5-9B-NPU2/tree/flm_q4k_high_precision",
@@ -300,7 +300,6 @@
                 "footprint": 8.7
             }
         },
-
         "qwen3.6-moe": {
             "35b-a3b": {
                 "name": "Qwen3.6-35B-A3B-NPU2",
@@ -471,7 +470,7 @@
                     "tokenizer_config.json",
                     "chat_template.jinja"
                 ],
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 0.96
@@ -529,7 +528,7 @@
                     "parameter_size": "300M",
                     "quantization_level": "none"
                 },
-                "label":[
+                "label": [
                     "embeddings"
                 ],
                 "footprint": 0.62
@@ -558,7 +557,7 @@
                     "parameter_size": "1B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "audio",
                     "realtime-transcription",
                     "transcription"
@@ -617,7 +616,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "vision"
                 ],
                 "footprint": 4.5
@@ -649,7 +648,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "vision"
                 ],
                 "footprint": 4.5
@@ -681,7 +680,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "vision"
                 ],
                 "footprint": 4.5
@@ -713,7 +712,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "vision"
                 ],
                 "footprint": 4.5
@@ -818,7 +817,7 @@
                     "parameter_size": "8B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 5.4
@@ -848,7 +847,7 @@
                     "parameter_size": "8B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 5.6
@@ -878,7 +877,7 @@
                     "parameter_size": "0.6B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 0.66
@@ -906,7 +905,7 @@
                     "parameter_size": "1.7B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 1.6
@@ -934,7 +933,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning",
                     "tool-calling"
                 ],
@@ -963,7 +962,7 @@
                     "parameter_size": "8B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning",
                     "tool-calling"
                 ],
@@ -994,7 +993,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning",
                     "tool-calling"
                 ],
@@ -1025,7 +1024,7 @@
                     "parameter_size": "4B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "tool-calling"
                 ],
                 "footprint": 3.1
@@ -1055,7 +1054,7 @@
                     "parameter_size": "20B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 14.0
@@ -1085,7 +1084,7 @@
                     "parameter_size": "20B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "reasoning"
                 ],
                 "footprint": 14.0
@@ -1144,10 +1143,196 @@
                     "parameter_size": "3B",
                     "quantization_level": "Q4_1"
                 },
-                "label":[
+                "label": [
                     "vision"
                 ],
                 "footprint": 3.8
+            }
+        },
+        "bge-base": {
+            "en-v1.5": {
+                "name": "BAAI-bge-base-en-v1.5",
+                "url": "https://huggingface.co/BAAI/bge-base-en-v1.5",
+                "file_url": "https://huggingface.co/api/models/BAAI/bge-base-en-v1.5/tree/main",
+                "ms_url": "",
+                "size": 438000000,
+                "flm_min_version": "0.0.0",
+                "files": [
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "vocab.txt",
+                    "1_Pooling/config.json"
+                ],
+                "default_context_length": 512,
+                "details": {
+                    "format": "NPU2",
+                    "family": "bge",
+                    "think": false,
+                    "parameter_size": "109M",
+                    "quantization_level": "bf16"
+                },
+                "label": [
+                    "embeddings"
+                ],
+                "footprint": 0.44,
+                "npue_design_family": "BERT-h768-bfp16"
+            }
+        },
+        "all-minilm": {
+            "l6-v2": {
+                "name": "ST-all-MiniLM-L6-v2",
+                "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+                "file_url": "https://huggingface.co/api/models/sentence-transformers/all-MiniLM-L6-v2/tree/main",
+                "ms_url": "",
+                "size": 91567283,
+                "flm_min_version": "0.0.0",
+                "files": [
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "vocab.txt",
+                    "1_Pooling/config.json"
+                ],
+                "default_context_length": 512,
+                "details": {
+                    "format": "NPU2",
+                    "family": "minilm",
+                    "think": false,
+                    "parameter_size": "22M",
+                    "quantization_level": "bf16"
+                },
+                "label": [
+                    "embeddings"
+                ],
+                "footprint": 0.09,
+                "npue_design_family": "BERT-h384-bfp16"
+            }
+        },
+        "bge-small": {
+            "en-v1.5": {
+                "name": "BAAI-bge-small-en-v1.5",
+                "url": "https://huggingface.co/BAAI/bge-small-en-v1.5",
+                "file_url": "https://huggingface.co/api/models/BAAI/bge-small-en-v1.5/tree/main",
+                "ms_url": "",
+                "size": 134410507,
+                "flm_min_version": "0.0.0",
+                "files": [
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "vocab.txt",
+                    "1_Pooling/config.json"
+                ],
+                "default_context_length": 512,
+                "details": {
+                    "format": "NPU2",
+                    "family": "bge",
+                    "think": false,
+                    "parameter_size": "33M",
+                    "quantization_level": "bf16"
+                },
+                "label": [
+                    "embeddings"
+                ],
+                "footprint": 0.13,
+                "npue_design_family": "BERT-h384-bf16"
+            }
+        },
+        "bge-large": {
+            "en-v1.5": {
+                "name": "BAAI-bge-large-en-v1.5",
+                "url": "https://huggingface.co/BAAI/bge-large-en-v1.5",
+                "file_url": "https://huggingface.co/api/models/BAAI/bge-large-en-v1.5/tree/main",
+                "ms_url": "",
+                "size": 1341560856,
+                "flm_min_version": "0.0.0",
+                "files": [
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "vocab.txt",
+                    "1_Pooling/config.json"
+                ],
+                "default_context_length": 512,
+                "details": {
+                    "format": "NPU2",
+                    "family": "bge",
+                    "think": false,
+                    "parameter_size": "335M",
+                    "quantization_level": "bf16"
+                },
+                "label": [
+                    "embeddings"
+                ],
+                "footprint": 1.34,
+                "npue_design_family": "BERT-h1024-bfp16",
+                "npue_tile_n": 32
+            }
+        },
+        "nomic-embed-text": {
+            "v1.5": {
+                "name": "nomic-embed-text-v1.5",
+                "url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5",
+                "file_url": "https://huggingface.co/api/models/nomic-ai/nomic-embed-text-v1.5/tree/main",
+                "ms_url": "",
+                "size": 547885087,
+                "flm_min_version": "0.0.0",
+                "files": [
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "vocab.txt",
+                    "1_Pooling/config.json"
+                ],
+                "default_context_length": 512,
+                "details": {
+                    "format": "NPU2",
+                    "family": "nomic",
+                    "think": false,
+                    "parameter_size": "137M",
+                    "quantization_level": "bf16"
+                },
+                "label": [
+                    "embeddings"
+                ],
+                "footprint": 0.55,
+                "npue_design_family": "BERT-h768-gated-bfp16"
+            }
+        },
+        "gte-multilingual": {
+            "base": {
+                "name": "Alibaba-gte-multilingual-base",
+                "url": "https://huggingface.co/Alibaba-NLP/gte-multilingual-base",
+                "file_url": "https://huggingface.co/api/models/Alibaba-NLP/gte-multilingual-base/tree/main",
+                "ms_url": "",
+                "size": 627838862,
+                "flm_min_version": "0.0.0",
+                "files": [
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "1_Pooling/config.json"
+                ],
+                "default_context_length": 512,
+                "details": {
+                    "format": "NPU2",
+                    "family": "gte",
+                    "think": false,
+                    "parameter_size": "305M",
+                    "quantization_level": "bf16"
+                },
+                "label": [
+                    "embeddings"
+                ],
+                "footprint": 0.63,
+                "npue_design_family": "BERT-h768-gated-bfp16"
             }
         }
     }
