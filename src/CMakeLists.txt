@@ -651,6 +651,63 @@ if(WIN32)
             $<TARGET_FILE:flm>
             ${CMAKE_SOURCE_DIR}/out/flm.exe
     )
+
+    # AND THE ENGINE DLLs BESIDE IT, or a freshly built flm.exe cannot start
+    # -- and fails in a way that sends you looking in the wrong place.
+    #
+    # The 22 *_npu.dll / q4_npu_eXpress.dll / gemm.dll / dequant.dll live in
+    # src/lib/<backend>/ and are load-time imports, so without them the process
+    # dies at 0xC0000135 (DLL not found) BEFORE main(), printing nothing.
+    # Windows then falls through to the next PATH entry -- which on a machine
+    # with FastFlowLM installed is C:\Program Fileslmlm.exe. So
+    # `flm.exe serve ... --embeddingmodel x` run from the build directory
+    # reports "unrecognised option", from a completely different binary than
+    # the one you just built. The symptom names a flag; the cause is a
+    # missing DLL two steps earlier.
+    #
+    # Both destinations are gitignored build trees, so this copies nothing
+    # into the repository and redistributes nothing: it puts the files this
+    # checkout already has next to the executable that needs them.
+    file(GLOB FLM_RUNTIME_DLLS "${CMAKE_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
+    if(FLM_RUNTIME_DLLS)
+        add_custom_command(TARGET flm POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${FLM_RUNTIME_DLLS} $<TARGET_FILE_DIR:flm>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${FLM_RUNTIME_DLLS} ${CMAKE_SOURCE_DIR}/out
+            COMMENT "Copying ${FLM_RUNTIME_NAME} engine DLLs beside flm.exe"
+        )
+    endif()
+
+    # AND THE XCLBIN TREE, as a junction rather than a copy.
+    #
+    # find_xclbin_path() already looks for "<exe_dir>/xclbins" -- it calls that
+    # the "portable development-tree location" -- but nothing puts one there,
+    # so a freshly built flm finds no kernels and every model fails with "no
+    # design set" until FLM_XCLBIN_PATH is set by hand.
+    #
+    # A JUNCTION, not a copy: src/xclbins is hundreds of megabytes, and a
+    # junction also means a rebuilt kernel is visible immediately rather than
+    # after the next build. mklink /J needs no privileges (unlike a symlink,
+    # which needs Developer Mode), and if it fails this is a warning rather
+    # than an error -- FLM_XCLBIN_PATH still works.
+    if(NOT EXISTS "${CMAKE_BINARY_DIR}/xclbins")
+        # NATIVE paths: mklink is a cmd builtin and rejects the forward slashes
+        # CMake uses internally, silently enough that the first version of this
+        # produced no junction and no message.
+        file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/xclbins" FLM_XCLBIN_LINK)
+        file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/xclbins" FLM_XCLBIN_TARGET)
+        execute_process(
+            COMMAND cmd /c mklink /J "${FLM_XCLBIN_LINK}" "${FLM_XCLBIN_TARGET}"
+            RESULT_VARIABLE FLM_XCLBIN_LINK_RC
+            OUTPUT_QUIET ERROR_QUIET)
+        if(FLM_XCLBIN_LINK_RC EQUAL 0)
+            message(STATUS "xclbins: junction ${CMAKE_BINARY_DIR}/xclbins -> ${CMAKE_SOURCE_DIR}/xclbins")
+        else()
+            message(WARNING "could not link xclbins next to the executable; "
+                            "set FLM_XCLBIN_PATH=${CMAKE_SOURCE_DIR} to run from the build tree")
+        endif()
+    endif()
 endif()
 
 # Default install location for model_list.json / xclbins (matches the app's
