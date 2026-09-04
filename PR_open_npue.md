@@ -1,5 +1,17 @@
 # Add `open_npue`: a second embedding backend (draft)
 
+> ### Depends on #<PR-1> — *"Fix the submodule metadata: a fresh clone cannot build"*
+>
+> **Merge that one first.** Not for tidiness: without it this tree does not
+> configure, so a reviewer cannot build this branch to look at it.
+> `git submodule update --init` fails outright on a dangling `docs/ExampleNPU`
+> gitlink, and `third_party/tokenizers-cpp` — which `src/CMakeLists.txt`
+> `add_subdirectory()`s and links into `flm` — does not exist.
+>
+> Those two commits are the base of this branch, so they appear in this diff
+> too until the other PR lands. After it lands, rebasing drops them and this
+> becomes ten commits of embedding backend and nothing else.
+
 > ## ⚠️ DRAFT — needs testing on other machines
 >
 > **This is a first cut, not a finished change.** Everything below was measured,
@@ -274,7 +286,7 @@ review them alone.
 
 ---
 
-## Two repository fixes, which came first because nothing built
+## The two repository fixes this depends on (see #<PR-1>)
 
 `git submodule update --init` — the first thing a new contributor runs —
 **failed outright**:
@@ -294,7 +306,9 @@ vendored (6, 51 and 15 tracked blobs), and `third_party/tokenizers-cpp`, which
 exist**. The second was invisible because of the first: the command that would
 have reported it was already refusing to run.
 
-Both are separate commits at the base of this branch.
+Both are **split out into their own PR** — they have nothing to do with
+embeddings and should go in on their own merit. They are at the base of this
+branch, so they appear in this diff until that one lands.
 
 ---
 
