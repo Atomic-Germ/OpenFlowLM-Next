@@ -1,4 +1,32 @@
-# Add `open_npue`: a second embedding backend, six new models
+# Add `open_npue`: a second embedding backend (draft)
+
+> ## ⚠️ DRAFT — needs testing on other machines
+>
+> **This is a first cut, not a finished change.** Everything below was measured,
+> but all of it on **one machine**: one Ryzen AI 9 HX 370 (Strix Point), one
+> XRT, one MSVC, one vcpkg tree. Nothing here has been run by anyone else.
+>
+> What most needs a second pair of eyes and a second machine:
+>
+> * **Does it build for you at all?** The CMake changes are small but they
+>   touch the shared source list, and the vcpkg/Boost path this was built
+>   through may not be the one you use.
+> * **Do you get the same vectors?** They are bit-identical to the upstream
+>   binary *here*. They are **not** expected to be bit-identical across
+>   different host ISA levels — that is measured and documented below — so a
+>   mismatch is informative rather than automatically a bug. `1-cos` against
+>   sentence-transformers is the check that should hold anywhere.
+> * **Linux is unverified for `flm`.** The engine's platform-independent subset
+>   compiles there at C++17 and C++20, but the binary was only built and run on
+>   Windows.
+> * **The two co-resident `hw_context` objects are unmeasured**, because the
+>   LLM never loaded here for want of its own xclbins. A real
+>   `serve <llm> --embed 1` on a machine with a full xclbin tree is the test
+>   that has not happened.
+> * **The downloader fixes touch shared code.** They are separable and should
+>   probably be reviewed on their own.
+>
+> Treat the numbers as *what one machine did*, and the design as a proposal.
 
 Adds the [NpuEmbeddings][upstream] engine as a second `AutoEmbeddingModel`, and
 turns `--embed` into something you can point at a model.
@@ -34,8 +62,26 @@ The two backends are genuinely complementary and both are worth having:
 *Generality by default; a fast path where a design exists.*
 
 Design sets are keyed by **GEMM geometry, not fine-tune name** — this tree's own
-kernel policy falling out for free. One `BERT-768-NPUE` set serves bge-base,
-gte-multilingual **and** nomic. Four sets cover seven models.
+kernel policy falling out for free -- but "geometry" means more than width.
+`design_fits()` checks hidden, intermediate, **whether the FFN is gated**, and
+the **datapath**, so two models share a set only when all four agree:
+
+| family | hidden / inter | gated | datapath | serves |
+|---|---|---|---|---|
+| `BERT-h384-bfp16` | 384 / 1536 | no | bfp16 | all-MiniLM-L6-v2 |
+| `BERT-h384-bf16` | 384 / 1536 | no | **bf16** | bge-small-en-v1.5 |
+| `BERT-h768-bfp16` | 768 / 3072 | no | bfp16 | bge-base-en-v1.5 |
+| `BERT-h768-gated-bfp16` | 768 / 3072 | **yes** | bfp16 | nomic **and** gte-multilingual |
+| `BERT-h1024-bfp16` | 1024 / 4096 | no | bfp16 | bge-large (`tile_n` 32) |
+
+**2.83 MB for five sets covering six models**, and the sharing is real but
+narrower than width alone suggests. Two of the distinctions are worth naming
+because they are easy to get wrong: nomic and gte have a **gated** FFN and
+bge-base does not, so they cannot share a 768 set; and `bge-small` runs on
+**plain bf16** rather than bfp16, because it is the one model that failed
+upstream's MTEB gate on the emulated datapath. The container and the design
+each record their datapath and a mismatched pair is refused rather than read as
+garbage.
 
 ---
 
@@ -62,6 +108,29 @@ container this tree downloaded and packed itself. Against sentence-transformers,
 upstream's golden gate reads `1-cos 2.284e-04` for bge-base on this datapath.
 (`open_embedding`'s own validation reports E8 cosine 0.999993; that is its
 claim, not a measurement made here.)
+
+**All six models verified end to end**, each `flm pull` → pack → `serve` →
+`POST /v1/embeddings`, each compared against the same engine in its own binary:
+
+| tag | dims | datapath the design records | vs `npuembed --embed` |
+|---|---:|---|---|
+| `all-minilm:l6-v2` | 384 | bfp16-emulated MMAC, C as bf16 | **384/384 exact** |
+| `bge-small:en-v1.5` | 384 | **bf16 MMAC, C as fp32** | **384/384 exact** |
+| `bge-base:en-v1.5` | 768 | bfp16-emulated MMAC, C as bf16 | **768/768 exact** |
+| `bge-large:en-v1.5` | 1024 | bfp16-emulated MMAC, C as bf16 | **1024/1024 exact** |
+| `nomic-embed-text:v1.5` | 768 | bfp16-emulated MMAC, C as bf16 | **768/768 exact** |
+| `gte-multilingual:base` | 768 | bfp16-emulated MMAC, C as bf16 | **768/768 exact** |
+
+`bge-small` is the row worth looking at twice: it is the one model that runs on
+**plain bf16**, because it failed upstream's MTEB gate on the emulated datapath.
+The container and the design each record their datapath and a mismatched pair is
+refused — so the fact that it loaded, and loaded on the right one, is the guard
+working through this tree.
+
+And `gte-multilingual` does what it is for: English and French sentences with the
+same meaning score **cos 0.9144**, unrelated Norwegian and Chinese 0.36 and 0.30.
+
+`utilities/test_open_npue.ps1` is the harness; it takes `-Upstream <path>`.
 
 ### Same model, both engines
 
@@ -128,10 +197,10 @@ The whole cold path was exercised for this PR: download → pack → serve →
 
 ---
 
-## Three downloader fixes
+## Four fixes to the shared paths
 
-Each was found by *using* the downloader, not by reading it, and each is the
-same shape: something goes wrong and the tool reports success.
+Each was found by *using* the thing, not by reading it, and each is the same
+shape: something goes wrong and the tool carries on as though it had not.
 
 1. **`build_download_list()` silently skipped files.** A file that
    `model_list.json` requires and `model_info.json` does not describe hit a bare
@@ -155,6 +224,30 @@ same shape: something goes wrong and the tool reports success.
    indistinguishable, treating the default as *"not an FLM artifact"* changes
    nothing for anything that really carries a version. Both embedding models
    read `✅` now; `embed-gemma` did not before.
+
+4. **One malformed byte wedged the whole server, permanently.** This is the
+   one to look at, because the mechanism is not where anyone would look:
+
+   1. A route handler calls `json::parse(req.body())`; invalid UTF-8 throws
+      `parse_error.101`.
+   2. The catch builds `{"error": "Handler exception: " + e.what()}` — and
+      nlohmann puts **the offending bytes** into `e.what()` (`last read: ...`).
+   3. `.dump()` on that throws `type_error.316`, *"invalid UTF-8 byte"*,
+      because the string it is asked to serialise is the invalid one.
+   4. That second exception escapes the catch, so `process_next_npu_request()`
+      never runs, the NPU access lock taken **before** the handler is never
+      released, and every later request hangs — valid ones included.
+
+   **The error handler was broken by exactly the input it was reporting.**
+   Reproduced with a single lone `0xE5` byte followed by a well-formed request
+   that never returned. Error paths now dump with
+   `json::error_handler_t::replace`, which substitutes U+FFFD instead of
+   throwing: an error path must not be able to fail on the thing that made it
+   run. After the fix the malformed request gets a clean JSON error and the
+   next valid one answers in 0.5 s.
+
+   It is not specific to this PR's backend — it is in the shared request path
+   and affects `open_embedding` identically.
 
 These are separable from the backend and can be split out if you would rather
 review them alone.
@@ -260,22 +353,29 @@ touch it.
 The synced sources are **MIT**, relicensed on copy by their sole author;
 upstream is Apache-2.0.
 
-`src/xclbins/BERT-768-NPUE/` is 604 KB of xclbin and instruction streams built
-from IRON source, with a `toolchain.json` recording the mlir-aie version, the
-Peano version and the git HEAD that produced it.
+`src/xclbins/BERT-*/` is 2.83 MB of xclbin and instruction streams across the
+five design families, built from IRON source, each with a `toolchain.json`
+recording the mlir-aie version, the Peano version and the git HEAD that
+produced it.
 
 ---
 
 ## Not done, and not pretended
 
-* **Only `bge-base:en-v1.5` is wired.** The other five need a `model_list.json`
-  entry, a `model_info.json` manifest and one registry line each; two of them
-  need no new design set at all.
+* **The seventh model is not here.** `embed-gemma:300m` stays with
+  `open_embedding`, deliberately: NpuEmbeddings' arch=1 path lives in its CLI
+  rather than its library, so this backend cannot serve it.
 * **`usage` in the response is still `{0, 0}`** — hardcoded in
   `handle_embeddings` for both backends, untouched here.
-* **Two co-resident `hw_context` objects are unmeasured.** `flm` holds the LLM's
-  and the engine holds its own. They were never actually exercised together
-  here, because the LLM could not load for want of its own xclbins.
+* **Two co-resident `hw_context` objects are a real hazard, and only half
+  measured.** The test harness reproduced it by accident: it left one model's
+  server running while starting the next model's reference process, and the
+  reference **hung indefinitely** — no output, no progress, no error. Killing
+  the server made it complete instantly. So two processes each holding a
+  context on this NPU do not queue, they block. `flm serve <llm> --embed 1`
+  holds the LLM's context and the engine's at once, which is the same shape,
+  and it has **not** been exercised here because the LLM never loaded for want
+  of its own xclbins.
 * **Linux is unverified.** The engine's platform-independent subset compiles
   there at C++17 and C++20 (upstream runs that check), but `flm` itself was only
   built and run on Windows for this PR.

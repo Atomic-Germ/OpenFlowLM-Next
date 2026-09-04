@@ -1,0 +1,5 @@
+{
+  "mlir_aie_version": "1.4.2.dev16+g7e00b57",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "7e00b57955e108fe9d8e9419f5828a0c7e650858"
+}

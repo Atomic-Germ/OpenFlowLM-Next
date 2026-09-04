@@ -1,5 +1,33 @@
 # `open_npue` — a second embedding backend
 
+> ## ⚠️ DRAFT — needs testing on other machines
+>
+> **This is a first cut, not a finished change.** Everything below was measured,
+> but all of it on **one machine**: one Ryzen AI 9 HX 370 (Strix Point), one
+> XRT, one MSVC, one vcpkg tree. Nothing here has been run by anyone else.
+>
+> What most needs a second pair of eyes and a second machine:
+>
+> * **Does it build for you at all?** The CMake changes are small but they
+>   touch the shared source list, and the vcpkg/Boost path this was built
+>   through may not be the one you use.
+> * **Do you get the same vectors?** They are bit-identical to the upstream
+>   binary *here*. They are **not** expected to be bit-identical across
+>   different host ISA levels — that is measured and documented below — so a
+>   mismatch is informative rather than automatically a bug. `1-cos` against
+>   sentence-transformers is the check that should hold anywhere.
+> * **Linux is unverified for `flm`.** The engine's platform-independent subset
+>   compiles there at C++17 and C++20, but the binary was only built and run on
+>   Windows.
+> * **The two co-resident `hw_context` objects are unmeasured**, because the
+>   LLM never loaded here for want of its own xclbins. A real
+>   `serve <llm> --embed 1` on a machine with a full xclbin tree is the test
+>   that has not happened.
+> * **The downloader fixes touch shared code.** They are separable and should
+>   probably be reviewed on their own.
+>
+> Treat the numbers as *what one machine did*, and the design as a proposal.
+
 `src/open_npue/` is a synced copy of the [NpuEmbeddings][upstream] engine.
 `src/open_npue_adapter/` is the fork-owned glue that makes it an
 `AutoEmbeddingModel`.
@@ -29,9 +57,26 @@ The two are genuinely complementary and both are worth having.
 | models | EmbeddingGemma-300M | bge-{small,base,large}, all-MiniLM, nomic, gte-multilingual |
 
 Design sets are keyed by **GEMM geometry, not by fine-tune name** — which is
-this tree's own kernel policy falling out for free. One BERT-768 set serves
-bge-base, gte-multilingual **and** nomic, because their shapes match bit for
-bit. Four sets cover seven models.
+kernel policy falling out for free -- but "geometry" means more than width.
+`design_fits()` checks hidden, intermediate, **whether the FFN is gated**, and
+the **datapath**, so two models share a set only when all four agree:
+
+| family | hidden / inter | gated | datapath | serves |
+|---|---|---|---|---|
+| `BERT-h384-bfp16` | 384 / 1536 | no | bfp16 | all-MiniLM-L6-v2 |
+| `BERT-h384-bf16` | 384 / 1536 | no | **bf16** | bge-small-en-v1.5 |
+| `BERT-h768-bfp16` | 768 / 3072 | no | bfp16 | bge-base-en-v1.5 |
+| `BERT-h768-gated-bfp16` | 768 / 3072 | **yes** | bfp16 | nomic **and** gte-multilingual |
+| `BERT-h1024-bfp16` | 1024 / 4096 | no | bfp16 | bge-large (`tile_n` 32) |
+
+**2.83 MB for five sets covering six models**, and the sharing is real but
+narrower than width alone suggests. Two of the distinctions are worth naming
+because they are easy to get wrong: nomic and gte have a **gated** FFN and
+bge-base does not, so they cannot share a 768 set; and `bge-small` runs on
+**plain bf16** rather than bfp16, because it is the one model that failed
+upstream's MTEB gate on the emulated datapath. The container and the design
+each record their datapath and a mismatched pair is refused rather than read as
+garbage.
 
 *Generality by default; a fast path where a design exists.*
 
@@ -61,6 +106,29 @@ container this tree packed itself from BAAI's own files. Against
 sentence-transformers, upstream's golden gate reads `1-cos 2.284e-04` for
 bge-base on this datapath. (`open_embedding`'s own validation reports E8 cosine
 0.999993; that is its claim, not a measurement made here.)
+
+**All six models verified end to end**, each `flm pull` → pack → `serve` →
+`POST /v1/embeddings`, each compared against the same engine in its own binary:
+
+| tag | dims | datapath the design records | vs `npuembed --embed` |
+|---|---:|---|---|
+| `all-minilm:l6-v2` | 384 | bfp16-emulated MMAC, C as bf16 | **384/384 exact** |
+| `bge-small:en-v1.5` | 384 | **bf16 MMAC, C as fp32** | **384/384 exact** |
+| `bge-base:en-v1.5` | 768 | bfp16-emulated MMAC, C as bf16 | **768/768 exact** |
+| `bge-large:en-v1.5` | 1024 | bfp16-emulated MMAC, C as bf16 | **1024/1024 exact** |
+| `nomic-embed-text:v1.5` | 768 | bfp16-emulated MMAC, C as bf16 | **768/768 exact** |
+| `gte-multilingual:base` | 768 | bfp16-emulated MMAC, C as bf16 | **768/768 exact** |
+
+`bge-small` is the row worth looking at twice: it is the one model that runs on
+**plain bf16**, because it failed upstream's MTEB gate on the emulated datapath.
+The container and the design each record their datapath and a mismatched pair is
+refused — so the fact that it loaded, and loaded on the right one, is the guard
+working through this tree.
+
+And `gte-multilingual` does what it is for: English and French sentences with the
+same meaning score **cos 0.9144**, unrelated Norwegian and Chinese 0.36 and 0.30.
+
+`utilities/test_open_npue.ps1` is the harness; it takes `-Upstream <path>`.
 
 ### Same model, both engines
 

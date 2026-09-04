@@ -1,0 +1,84 @@
+{
+  "name": "gemm_rtp",
+  "kind": "gemm_rtp",
+  "kernel": "MLIR_AIE",
+  "M": 8192,
+  "buffers": [
+    67108864,
+    8388608,
+    67108864
+  ],
+  "c_dtype": "bf16",
+  "a_dtype": "bf16",
+  "emulate_bfp16": true,
+  "b_layout_hash": "f2ab7b0d310c935eba027bd5c3132cb1a36561e211196580c539acb94036e5cd",
+  "b_layout": {
+    "kind": "block_panel",
+    "tile_k": 64,
+    "tile_n": 32,
+    "order": "k,n,kt,nt",
+    "inner": "s,t",
+    "mac_s": 8,
+    "mac_t": 8,
+    "dtype": "BF16"
+  },
+  "cols": 8,
+  "batch": 128,
+  "tiers": [
+    128
+  ],
+  "seq": 64,
+  "hidden": 1024,
+  "intermediate": 4096,
+  "gated_ffn": false,
+  "qkv_n": 3072,
+  "tile": {
+    "m": 64,
+    "k": 64,
+    "n": 32
+  },
+  "tb_max_n_rows": 4,
+  "tg_depth": 2,
+  "streams": [
+    {
+      "op": "qkv",
+      "batch": 128,
+      "slot": 1,
+      "file": "insts_qkv_b128.bin",
+      "M": 8192,
+      "K": 1024,
+      "N": 3072,
+      "src": "34838cfe39350e3c57dd7cfe"
+    },
+    {
+      "op": "attn_out",
+      "batch": 128,
+      "slot": 2,
+      "file": "insts_attn_out_b128.bin",
+      "M": 8192,
+      "K": 1024,
+      "N": 1024,
+      "src": "064d1af7593fc5fdc31f3b11"
+    },
+    {
+      "op": "ffn_up",
+      "batch": 128,
+      "slot": 3,
+      "file": "insts_ffn_up_b128.bin",
+      "M": 8192,
+      "K": 1024,
+      "N": 4096,
+      "src": "35cb40bbceaf80e7891547d4"
+    },
+    {
+      "op": "ffn_down",
+      "batch": 128,
+      "slot": 4,
+      "file": "insts_ffn_down_b128.bin",
+      "M": 8192,
+      "K": 4096,
+      "N": 1024,
+      "src": "f2689114b03388e9595bb1b7"
+    }
+  ]
+}
