@@ -241,6 +241,14 @@ file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp"
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT FLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
+    # The open Qwen3.6-MoE engine (open_qwen36/, open XDNA2 kernels under
+    # xclbins/<model>/open_kernels). XRT only: it drives the kernels through
+    # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
+    list(APPEND SOURCES
+        "${CMAKE_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
+        "${CMAKE_SOURCE_DIR}/open_qwen36/pools.cpp"
+        "${CMAKE_SOURCE_DIR}/open_qwen36/core.cpp"
+        "${CMAKE_SOURCE_DIR}/open_qwen36/engine.cpp")
 endif()
 
 # Exclude files that depend on missing libraries for Linux
@@ -365,6 +373,10 @@ endif()
 # The open embedding NPU backend uses XRT directly. HRX retains the CPU path.
 if(NOT FLM_USE_HRX)
     target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
+    # Qwen3.6-MoE on the open kernels (open_qwen36/); the closed engine stays
+    # reachable with FLM_QWEN36_ENGINE=closed.
+    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_QWEN36=1)
+    target_include_directories(flm PUBLIC "${CMAKE_SOURCE_DIR}/../open_kernels/harness")
 endif()
 
 if(WIN32)
@@ -891,3 +903,12 @@ install(FILES model_info.json DESTINATION "${FLM_SHARE_DESTINATION}")
 # xclbins, which are loaded by shared libraries need to be in location
 # relative to the executable, so we install them relative to the binary.
 install(DIRECTORY xclbins DESTINATION "${FLM_SHARE_DESTINATION}")
+
+# Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3
+# runner for IRON designs, driven by the same .cfg language phlegm's driver
+# speaks. A developer tool, not part of flm; off by default.
+option(FLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" OFF)
+if(FLM_BUILD_OPEN_KERNELS_HARNESS)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/../open_kernels/harness"
+                     "${CMAKE_BINARY_DIR}/open_kernels_harness")
+endif()

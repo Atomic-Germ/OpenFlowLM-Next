@@ -106,3 +106,35 @@ All steps in Win11 (powershell where needed).
 2. Go to the FastFlowLM dir
 
 3. Type `make run` 
+## Building with vcpkg instead (the path that worked on a bare box, 2026-09-05)
+
+`build-windows-vcpkg.cmd` configures and builds `flm.exe` with every native
+dependency from vcpkg's classic mode — no standalone Boost b2 build, no
+hand-copied import libs — and stages a runnable tree in `out\`. What it needs
+and what bit on the way:
+
+- **vcpkg** at `C:\dev\vcpkg` (`VCPKG_ROOT` overrides) with
+  `boost-program-options boost-asio boost-beast curl ffmpeg fftw3` for
+  `x64-windows` (~25 min, ffmpeg dominates). The `VCPKG_TOOLCHAIN` branch of
+  `CMakeLists.txt` then resolves Boost / CURL / FFMPEG / FFTW3 via
+  `find_package(CONFIG)`.
+- **tokenizers-cpp** cloned into `third_party\tokenizers-cpp`
+  (`--recurse-submodules`; `.gitmodules` lists it but the gitlink is not in the
+  index, so `git submodule update` finds nothing) and **cargo** on PATH — it
+  builds a Rust crate. sentencepiece's CMake creates a symlink, which an
+  ordinary console lacks the privilege for; the script makes a directory
+  junction instead.
+- **A Visual Studio instance with the C++ toolset.** VS 2022 Community without
+  "Desktop development with C++" is found first by the generator and fails;
+  point `CMAKE_GENERATOR_INSTANCE` (`VS_INSTANCE` in the script) at BuildTools.
+- **XRT**: headers and `xrt_coreutil.lib` as in the section above
+  (`XRT_INCLUDE_DIR` / `XRT_LIB_DIR`).
+
+Running the result: from a non-interactive shell the app resolves its home to
+the *system* profile and fails on `C:\Windows\system32\config\systemprofile\.flm`;
+set `FLM_MODEL_PATH=%USERPROFILE%\.flm` (the base directory — `models\` is
+appended). And note `flm serve`/`run` verify a model against the registry
+entry's `flm_min_version` and **delete files that fail the check before
+re-downloading**; a local 1.0.2 container with a 1.0.3 registry entry needs
+the staged `out\model_list.json` edited (`flm_min_version`) or it will be
+wiped and re-pulled.
