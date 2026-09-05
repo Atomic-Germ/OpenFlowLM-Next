@@ -1,13 +1,26 @@
+# IRON / mlir-aie toolchain for building the NPU kernels (npu_offload/, open_kernels/).
+#   python -m venv ironvenv && . ironvenv/bin/activate && pip install -r ironvenv-requirements.txt
+#
+# mlir-aie 1.4.2 release wheel (cp311..cp314, linux + windows). It bundles
+# aie.extras, so the separate eudsl-python-extras package is not needed — and must
+# not be installed: its top-level `aie/` directory shadows mlir_aie's and
+# `import aie.iron` fails with "No module named 'aie.extras.util'".
+# All IRON designs in this tree use the 1.4.2 runtime API (free-standing
+# TaskGroup, fill/drain on fifo handles); they do not run on 1.3.4.
+-f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.4.2
+mlir_aie==1.4.2
+# Peano (llvm-aie): the nightly mlir-aie 1.4.2 pins in utils/peano-requirements.txt.
+-f https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
+llvm-aie==21.0.0.2026080301+c9c5ecb7
 numpy
-psutil 
-pytest 
-pyyaml 
+ml_dtypes
+psutil
+pytest
+pyyaml
 reuse[charset-normalizer]==6.2.0
 matplotlib
-ml_dtypes
 cloudpickle
 rich
 gurobipy
 networkx[default]
 ortools
-#-f https://llvm.github.io/eudsl eudsl-python-extras==0.1.0.20260801.905+68a0d7a --config-settings=EUDSL_PYTHON_EXTRAS_HOST_PACKAGE_PREFIX=aie

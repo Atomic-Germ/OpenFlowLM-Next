@@ -16,6 +16,9 @@
 #include "image_process_utils/imageprocAVX512.hpp"
 #include "tensor_utils/q4_npu_eXpress.hpp"
 #include "base64.hpp"
+#ifdef FLM_USE_OPEN_QWEN36
+#include "open_qwen36/engine.hpp"
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>

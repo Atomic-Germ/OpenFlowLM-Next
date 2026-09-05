@@ -10,3 +10,20 @@ ironvenv
 Models
 tmp
 tmp
+
+# Claude Code planning docs
+.claude/plans/
+
+# open_kernels build outputs and generated fixtures
+open_kernels/designs/*/build*/
+open_kernels/designs/*/*.bin
+open_kernels/designs/*/*.cfg
+open_kernels/designs/*/*.log
+open_kernels/harness/out/
+open_kernels/model/out*/
+
+# npu_offload/matmul generated fixtures (make_test.py) and run configs
+npu_offload/matmul/[abyr]_m*.bin
+npu_offload/matmul/ref_m*.bin
+npu_offload/matmul/run_m*.cfg
+src/open_qwen36/out/
