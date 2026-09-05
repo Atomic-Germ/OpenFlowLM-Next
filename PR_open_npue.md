@@ -447,6 +447,19 @@ cmake -S src -B src/build -G Ninja `
 cmake --build src/build --target flm
 ```
 
+### `clean_build.bat`
+
+```
+clean_build.bat [vcpkg-root]
+```
+
+At the repo root, for a plain `cmd` prompt. It loads the MSVC environment via
+`vswhere`, **deletes `srcuild`**, configures, retries once, builds, and then
+says where the binary is and whether the AIE design sets exist.
+
+Deleting the build tree is the whole point rather than tidiness — see *A failed
+configure poisons the tree* below.
+
 ### A fresh clone on Windows used to die before reaching any of this
 
 Found by testing from an empty directory rather than an existing tree, which is
@@ -482,6 +495,35 @@ rather than leaving the reader to guess.
 
 Verified by deleting the junction from a fresh clone and re-running: created,
 exit 0.
+
+### A failed configure poisons the tree, and that is the worse half
+
+The junction fix above makes the *second* configure succeed. It is not enough
+on its own, because of what the first failure leaves behind:
+
+CMake writes `CMAKE_TOOLCHAIN_FILE` into the cache but **does not re-apply a
+toolchain file to an existing cache**. So after a configure that died partway,
+every later configure of that directory runs with `VCPKG_TOOLCHAIN` false — and
+`src/CMakeLists.txt` then takes its *"bare self-hosted CI runner"* branch, which
+hardcodes `C:/dev/boost_1_88_0` and links
+`libboost_program_options-vc143-mt-x64-1_88` by raw name. That file does not
+exist on a normal machine: vcpkg installs `boost_program_options-vc145-mt-x64-1_91.lib`,
+shared rather than static.
+
+The result is 332 files compiling for ten minutes and then
+
+```
+LINK : fatal error LNK1181: cannot open input file
+       'libboost_program_options-vc143-mt-x64-1_88.lib'
+```
+
+— an error naming a Boost version nobody asked for, from a branch meant for a
+CI runner, because of a symlink failure several minutes earlier. Nothing in the
+message connects those.
+
+**So a failed configure does not cost a retry, it silently changes which
+dependencies the build uses.** `clean_build.bat` deletes the build tree
+unconditionally, which is cheaper than explaining when to.
 
 Three CMake choices are load-bearing rather than stylistic, and
 `src/open_npue_adapter/README.md` explains each:
