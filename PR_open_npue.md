@@ -447,6 +447,42 @@ cmake -S src -B src/build -G Ninja `
 cmake --build src/build --target flm
 ```
 
+### A fresh clone on Windows used to die before reaching any of this
+
+Found by testing from an empty directory rather than an existing tree, which is
+the only way this class of thing shows up:
+
+```
+CMake Error at third_party/tokenizers-cpp/sentencepiece/CMakeLists.txt:196:
+  file failed to create symbolic link '.../sentencepiece/third_party/absl':
+  A required privilege is not held by the client.
+```
+
+Windows grants `SeCreateSymbolicLinkPrivilege` only under Developer Mode or
+elevation, and neither is a reasonable thing to require to build a program. The
+message also points at a third-party `CMakeLists.txt`, so it reads as somebody
+else's bug — and it is, but it is not fixable there, because that is an
+upstream submodule.
+
+It is avoidable here. sentencepiece guards the call with
+`if(NOT EXISTS .../third_party/absl)`, and a **directory junction** satisfies
+that guard while needing no privileges at all — `mklink /J`, the same trick
+this PR already uses to put the xclbin tree beside the executable. `src/CMakeLists.txt`
+creates it before `add_subdirectory(tokenizers-cpp)`.
+
+**One honest limitation, stated in the code as well.** abseil-cpp is fetched by
+`FetchContent` *inside* sentencepiece's own CMakeLists, so on a genuinely fresh
+clone the junction target does not exist yet when this runs. That first
+configure fetches abseil and then still fails; **the second one succeeds**, and
+prints `sentencepiece: junction third_party/absl -> abseil-cpp/absl`. Making
+the first pass work would mean cloning abseil here and copying sentencepiece's
+`GIT_TAG` into this file — a duplicated version pin, which is a worse problem
+than one repeated command. The configure says so when it is in that state
+rather than leaving the reader to guess.
+
+Verified by deleting the junction from a fresh clone and re-running: created,
+exit 0.
+
 Three CMake choices are load-bearing rather than stylistic, and
 `src/open_npue_adapter/README.md` explains each:
 

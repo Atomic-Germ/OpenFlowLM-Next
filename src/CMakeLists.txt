@@ -228,6 +228,57 @@ if(CMAKE_CXX_STANDARD LESS 17)
     set(CMAKE_CXX_STANDARD 17)
 endif()
 
+# sentencepiece links third_party/absl -> third_party/abseil-cpp/absl with
+# file(CREATE_LINK ... SYMBOLIC), and on Windows a symbolic link needs either
+# Developer Mode or an elevated shell. On a stock box a FRESH CLONE therefore
+# dies at configure with
+#
+#   file failed to create symbolic link '.../sentencepiece/third_party/absl':
+#   A required privilege is not held by the client.
+#
+# and the message points at a third-party CMakeLists, so it reads as somebody
+# else's bug. It is not fixable there -- that is an upstream submodule -- but
+# it is avoidable here: sentencepiece guards the call with
+# `if(NOT EXISTS .../third_party/absl)`, and a DIRECTORY JUNCTION satisfies
+# that guard while needing no privileges at all. Same trick as the xclbins
+# junction further down.
+#
+# NATIVE paths: mklink is a cmd builtin and silently rejects the forward
+# slashes CMake uses internally.
+if(WIN32)
+    set(FLM_SPM_TP
+        "${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
+    if(EXISTS "${FLM_SPM_TP}/abseil-cpp/absl" AND NOT EXISTS "${FLM_SPM_TP}/absl")
+        file(TO_NATIVE_PATH "${FLM_SPM_TP}/absl" FLM_SPM_LINK)
+        file(TO_NATIVE_PATH "${FLM_SPM_TP}/abseil-cpp/absl" FLM_SPM_TARGET)
+        execute_process(
+            COMMAND cmd /c mklink /J "${FLM_SPM_LINK}" "${FLM_SPM_TARGET}"
+            RESULT_VARIABLE FLM_SPM_RC
+            OUTPUT_QUIET ERROR_QUIET)
+        if(FLM_SPM_RC EQUAL 0)
+            message(STATUS "sentencepiece: junction third_party/absl -> abseil-cpp/absl")
+        endif()
+        # No else(): if the junction fails, sentencepiece's own symlink attempt
+        # runs next and produces the real diagnostic. Do not mask it.
+    elseif(NOT EXISTS "${FLM_SPM_TP}/absl")
+        # HONEST LIMITATION: abseil-cpp is fetched by FetchContent INSIDE
+        # sentencepiece's own CMakeLists, i.e. during the add_subdirectory()
+        # below -- so on a genuinely fresh clone the target does not exist yet
+        # when this runs, and there is nothing to point a junction at. This
+        # configure will fetch abseil and then fail on the symlink; the NEXT
+        # one takes the branch above and succeeds.
+        #
+        # Fixing the first pass would mean cloning abseil here ourselves, which
+        # means copying sentencepiece's GIT_TAG into this file -- a duplicated
+        # version pin, which is a worse problem than one repeated command.
+        message(STATUS
+            "sentencepiece: abseil-cpp not fetched yet. If this configure "
+            "fails with 'failed to create symbolic link', simply run it again: "
+            "abseil will be present by then and a junction is used instead of "
+            "a symlink (no Developer Mode or elevation needed).")
+    endif()
+endif()
+
 add_subdirectory(${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp
                  ${CMAKE_BINARY_DIR}/tokenizers-cpp
                  EXCLUDE_FROM_ALL)
