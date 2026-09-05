@@ -24,6 +24,11 @@ export PATH=~/xrt-tools/bin:$PATH                # xclbinutil + aiebu-asm from a
 python open_kernels/export_qwen36_kernels.py     # ~4 min; -> src/xclbins/<model>/open_kernels/
 ```
 
+In this tree `open_kernels/build.sh` wraps that command (venv resolution,
+XRT setup, toolchain preflights, skip-if-built; `--only/--dst/--force/
+--ironvenv`), and `./clean_build.sh --ironbuild` runs it together with the
+BERT design-set build.
+
 Knobs per set are in the script's `SETS` table (`LX_PART`, `AX_PART`,
 `LMHEAD_N`, `LMHEAD_CORES`); it clears them from the caller's shell first.
 `--only`, `--out`, `--no-build`, `--check DIR`. `toolchain.json` beside the
@@ -35,6 +40,13 @@ output records versions, this tree's commit and sha256s.
   may differ only in build stamps (axlf unique id / timestamp / UUID, PDI UUID,
   boot-image header unique id + checksum, the mirror-JSON tail). Anything else
   is a real change — find out why before shipping.
+- Rebuild record (2026-09-05, OpenFLMN `b5c8c7d`): full six-set export on
+  mlir-aie 1.4.2 + Peano 22.0.0.2026090201 (ironvenv, Python 3.11) into
+  `src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/`; `lx0` rebuilt a second
+  time and `--check`ed against the first: `insts.bin` byte-identical,
+  `final.xclbin` 78 bytes differ, all build stamps. Note the Peano is newer
+  than PROVENANCE.md's 21.0.0 — same stamp-only result, so the pin bump is
+  codegen-neutral for these designs.
 - One design on the NPU: `(cd open_kernels/designs/ln && python make_test.py)`
   then on Windows `..\..\harness\out\run_kernel.exe run.cfg && python compare.py`.
 - Whole decode step vs the fp64 oracle: `open_kernels/model/README.md`

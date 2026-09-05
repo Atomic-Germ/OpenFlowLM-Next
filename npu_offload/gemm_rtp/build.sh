@@ -29,11 +29,10 @@
 # is no second copy to drift. (--dev/--dst select the target and the
 # destination, not the design, so they live here, like build.ps1's -Dst.)
 #
-# Environment: the IRON toolchain must be importable (mlir-aie + Peano), i.e.
-# the same environment as npu_offload/matmul/. This script sets it up itself:
-# it activates the iron venv and loads the XRT userspace
-# (/opt/xilinx/xrt/setup.sh) when pyxrt is not yet importable -- the manual
-# equivalent is:
+# Environment: the IRON toolchain (mlir-aie + Peano) plus the XRT userspace.
+# This script sets it up itself via npu_offload/iron_env.sh -- activating
+# the iron venv and loading /opt/xilinx/xrt/setup.sh when pyxrt is not yet
+# importable -- the manual equivalent being:
 #
 #   source ironvenv/bin/activate
 #   source /opt/xilinx/xrt/setup.sh
@@ -82,102 +81,13 @@ done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# ---------------------------------------------------------------- IRON python
-if [[ -n "$IRONVENV" ]]; then
-    VENV="$IRONVENV"
-    PY="$VENV/bin/python"
-    [[ -x "$PY" ]] || die "no python at $PY (--ironvenv $IRONVENV)."
-else
-    if [[ -x "$REPO/ironvenv/bin/python" ]]; then
-        VENV="$REPO/ironvenv"
-        PY="$VENV/bin/python"
-    else
-        VENV=""
-        PY="python3"
-    fi
-fi
-command -v "$PY" >/dev/null 2>&1 || die "python '$PY' not found."
-
-# Activate the venv in this shell so the export below inherits its PATH
-# (aiecc et al.) and Python context. Sourcing twice (user already
-# activated + this script) only duplicates PATH entries.
-if [[ -n "$VENV" && -f "$VENV/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$VENV/bin/activate"
-fi
-
-# The IRON toolchain, checked before four minutes of work rather than after.
-# Without it the failure is `ModuleNotFoundError: No module named 'aie'`,
-# which reads as a broken checkout rather than a shell that was never set up.
-if ! IRON_ERR="$("$PY" -c "import aie.iron" 2>&1)"; then
-    echo "ERROR: the IRON toolchain is not importable by '$PY'." >&2
-    echo "$IRON_ERR" | tail -n 4 | sed 's/^/  | /' >&2
-    echo "" >&2
-    echo "    source $REPO/ironvenv/bin/activate" >&2
-    echo "    # only if the build then complains about missing tools:" >&2
-    echo "    source $REPO/third_party/mlir-aie/utils/env_setup.sh" >&2
-    echo "" >&2
-    echo "Or pass the venv explicitly:  ./build.sh --ironvenv <dir>" >&2
-    exit 1
-fi
-
-# The XRT userspace, loaded the same way as by hand
-# (`source /opt/xilinx/xrt/setup.sh`) when pyxrt is not yet importable.
-# LOAD-BEARING: the export allocates device="npu" tensors, which need
-# mlir_aie's XRTTensor backend. Without pyxrt it degrades to CPUOnlyTensor
-# and every family fails with "ValueError: Unsupported device: npu".
-# NPU_RUNTIME=hrx/hsa opts out: those backends probe for themselves.
-if [[ "${NPU_RUNTIME:-auto}" == auto || "${NPU_RUNTIME:-auto}" == xrt ]]; then
-    if ! "$PY" -c "import pyxrt" 2>/dev/null; then
-        if [[ -z "${XILINX_XRT:-}" && -f /opt/xilinx/xrt/setup.sh ]]; then
-            export XILINX_XRT=/opt/xilinx/xrt
-        fi
-        if [[ -n "${XILINX_XRT:-}" && -f "$XILINX_XRT/setup.sh" ]]; then
-            echo "(loading XRT userspace: source $XILINX_XRT/setup.sh)"
-            source "$XILINX_XRT/setup.sh" >/dev/null 2>&1 || true
-        fi
-    fi
-    if ! "$PY" -c "import pyxrt" 2>/dev/null; then
-        # Tailor the message: XRT's bindings are per-Python-version .so
-        # files, so "installed but invisible" usually means the running
-        # python is not the version they were built for.
-        WANT="$("$PY" -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))" 2>/dev/null)"
-        HAVE_DIRS=()
-        if [[ -n "${XILINX_XRT:-}" ]]; then HAVE_DIRS+=("$XILINX_XRT/python"); fi
-        HAVE_DIRS+=(/usr/lib/python3/dist-packages /usr/lib/python3*/dist-packages)
-        HAVE="$(find "${HAVE_DIRS[@]}" -maxdepth 1 -name 'pyxrt*.so' 2>/dev/null | head -3 || true)"
-        echo "ERROR: pyxrt is not importable by '$PY', so mlir_aie would fall" >&2
-        echo "back to CPU-only tensors and the export cannot run." >&2
-        if [[ -n "$HAVE" ]]; then
-            echo "" >&2
-            echo "XRT bindings found on disk but not for this python:" >&2
-            echo "$HAVE" | sed 's/^/    /' >&2
-            echo "this python wants extension suffix: ${WANT:-unknown}" >&2
-            echo "Rebuild the iron venv on the matching Python (e.g. python3.11" >&2
-            echo "if the bindings are cpython-311), or install XRT bindings for" >&2
-            echo "$("$PY" -c "import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)." >&2
-        else
-            echo "Install the XRT userspace (it provides pyxrt) and make sure" >&2
-            echo "$XILINX_XRT/setup.sh (or XILINX_XRT) points at it." >&2
-        fi
-        exit 1
-    fi
-fi
-
-# Peano (llvm-aie), checked the same way before any compile time is spent:
-# without it the export dies inside the first build with "RuntimeError:
-# Invalid Peano install directory: peano_not_found". It must be installed
-# into the SAME venv python that runs the export:
-#   <venv>/bin/pip install -r third_party/mlir-aie/utils/peano-requirements.txt
-# (or: uv pip install --python <venv>/bin/python -r ...).
-# PEANO_INSTALL_DIR overrides discovery when it points at a valid install.
-if ! "$PY" -c "from aie.utils.config import peano_install_dir; peano_install_dir()" 2>/dev/null; then
-    die "no Peano (llvm-aie) visible to '$PY'.
-Install the pinned nightly into that venv first:
-    $PY -m pip install -r third_party/mlir-aie/utils/peano-requirements.txt
-(or: uv pip install --python $PY -r third_party/mlir-aie/utils/peano-requirements.txt)
-or point PEANO_INSTALL_DIR at an existing install."
-fi
+# -------------------------------- IRON toolchain
+# Shared setup (venv resolution + activation, XRT userspace, preflights).
+# See npu_offload/iron_env.sh. Sets PY on success, exits otherwise.
+IRONVENV="${IRONVENV:-}"
+# shellcheck disable=SC1091
+source "$HERE/../iron_env.sh"
+iron_env_setup || exit 1
 
 # ---------------------------------------------------------------- spec
 [[ -f "$HERE/families.json" ]] || die "no families.json beside $0."

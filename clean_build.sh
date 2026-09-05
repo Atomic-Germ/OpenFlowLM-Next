@@ -18,24 +18,30 @@
 #                   selection on the next run. See clean_build.bat header.)
 #   --ironbuild [VENV]
 #                   Also build the AIE design sets (kernels) with the IRON
-#                   toolchain after flm links: runs
-#                   npu_offload/gemm_rtp/build.sh, which builds the five
-#                   families from families.json (~20 min, skipping sets that
-#                   are already built). VENV is the iron venv dir holding
-#                   bin/python (default: ./ironvenv). Example:
+#                   toolchain after flm links: the five BERT families via
+#                   npu_offload/gemm_rtp/build.sh (~20 min) AND the six
+#                   Qwen3.6-MoE sets via open_kernels/build.sh (~6 min),
+#                   each skipping sets that are already built. VENV is the
+#                   iron venv dir holding bin/python (default: ./ironvenv).
+#                   Example:
 #                     ./clean_build.sh --ironbuild ./ironvenv
 #   --iron-only NAME
-#                   With --ironbuild: build one design family only.
-#   --iron-dev NAME With --ironbuild: IRON device family for the design sets
+#                   With --ironbuild: build one BERT family only.
+#   --iron-dev NAME With --ironbuild: IRON device family for the BERT sets
 #                   (default: npu2). Forwarded to npu_offload/gemm_rtp/build.sh.
-#   --iron-force    With --ironbuild: rebuild design sets even if present.
+#   --iron-force    With --ironbuild: rebuild BERT sets even if present.
+#   --qwen-only LIST
+#                   With --ironbuild: build a comma-separated subset of the
+#                   Qwen sets only (lx0,lx1,ax0,ax1,ln,lm_head_q8).
+#   --qwen-force    With --ironbuild: rebuild Qwen sets even if present.
 #   -h, --help      Show this help.
 #
 # Documented Linux procedure (README.md, docs/linux-getting-started.md) is:
 #   cmake --preset linux-default && cmake --build build && sudo cmake --install .
 # This script wraps exactly that, plus the clean-tree + retry + report steps
 # from the .bat. Without --ironbuild it does NOT build the AIE design sets
-# (IRON toolchain, ~20 min) and only reports whether they are present.
+# (IRON toolchain: ~20 min BERT + ~6 min Qwen) and only reports whether they
+# are present.
 #
 set -euo pipefail
 
@@ -53,6 +59,8 @@ IRONVENV=""
 IRON_ONLY=""
 IRON_DEV=""
 IRON_FORCE=0
+QWEN_ONLY=""
+QWEN_FORCE=0
 EXTRA_CMAKE_ARGS+=("-DXRT_DIR=/opt/xilinx/xrt/share/cmake/XRT")
 EXTRA_CMAKE_ARGS+=("-DPKG_CONFIG_PATH=/opt/xilinx/xrt/share/pkgconfig")
 
@@ -78,14 +86,17 @@ while [[ $# -gt 0 ]]; do
         --iron-dev=*) IRON_DEV="${1#--iron-dev=}"; shift ;;
         --iron-dev) needval "$@"; IRON_DEV="$2"; shift 2 ;;
         --iron-force) IRON_FORCE=1; shift ;;
+        --qwen-only=*) QWEN_ONLY="${1#--qwen-only=}"; shift ;;
+        --qwen-only) needval "$@"; QWEN_ONLY="$2"; shift 2 ;;
+        --qwen-force) QWEN_FORCE=1; shift ;;
         -h|--help)
             awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
             exit 0 ;;
         *) echo "ERROR: unknown argument: $1 (try --help)" >&2; exit 1 ;;
     esac
 done
-if [[ "$IRONBUILD" -eq 0 && ( -n "$IRON_ONLY" || -n "$IRON_DEV" || "$IRON_FORCE" -eq 1 ) ]]; then
-    echo "WARNING: --iron-only/--iron-dev/--iron-force have no effect without --ironbuild." >&2
+if [[ "$IRONBUILD" -eq 0 && ( -n "$IRON_ONLY" || -n "$IRON_DEV" || "$IRON_FORCE" -eq 1 || -n "$QWEN_ONLY" || "$QWEN_FORCE" -eq 1 ) ]]; then
+    echo "WARNING: --iron-only/--iron-dev/--iron-force/--qwen-only/--qwen-force have no effect without --ironbuild." >&2
 fi
 
 # ---------------------------------------------------------------- prerequisites
@@ -183,16 +194,40 @@ if [[ "$IRONBUILD" -eq 1 ]]; then
     if [[ -n "$IRON_DEV" ]]; then IRON_ARGS+=(--dev "$IRON_DEV"); fi
     if [[ "$IRON_FORCE" -eq 1 ]]; then IRON_ARGS+=(--force); fi
     "$REPO/npu_offload/gemm_rtp/build.sh" "${IRON_ARGS[@]}" \
-        || die "design-set build failed. The output above is the real diagnostic."
+        || die "BERT design-set build failed. The output above is the real diagnostic."
     echo
-    echo "flm and all requested AIE design sets are built."
+    echo "=== kernels [IRON] ==="
+    QWEN_ARGS=()
+    if [[ -n "$IRONVENV" ]]; then QWEN_ARGS+=(--ironvenv "$IRONVENV"); fi
+    if [[ -n "$QWEN_ONLY" ]]; then QWEN_ARGS+=(--only "$QWEN_ONLY"); fi
+    if [[ "$QWEN_FORCE" -eq 1 ]]; then QWEN_ARGS+=(--force); fi
+    "$REPO/open_kernels/build.sh" "${QWEN_ARGS[@]}" \
+        || die "Qwen kernel build failed. The output above is the real diagnostic."
+    echo
+    echo "flm and all requested AIE design sets and kernels are built."
 elif [[ -n "$MISSING" ]]; then
     echo "The AIE design sets are NOT built:$MISSING"
     echo "An open_npue model will refuse to load until they are. Either re-run"
-    echo "with --ironbuild to build them now (IRON toolchain, ~20 min):"
+    echo "with --ironbuild to build them now (IRON toolchain, ~20 min BERT +"
+    echo "~6 min Qwen):"
     echo "    ./clean_build.sh --ironbuild ./ironvenv"
     echo "or build them directly per npu_offload/gemm_rtp/README.md:"
     echo "    npu_offload/gemm_rtp/build.sh --ironvenv ./ironvenv"
 else
     echo "All five AIE design sets are present."
+fi
+
+QWEN_MISSING=""
+for s in lx0 lx1 ax0 ax1 ln lm_head_q8; do
+    if [[ ! -f "$REPO/src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/$s/final.xclbin" || \
+          ! -f "$REPO/src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/$s/insts.bin" ]]; then
+        QWEN_MISSING="$QWEN_MISSING $s"
+    fi
+done
+if [[ -n "$QWEN_MISSING" ]]; then
+    echo "The Qwen3.6-MoE open kernels are NOT built:$QWEN_MISSING"
+    echo "The open_qwen36 engine will refuse to load until they are:"
+    echo "    open_kernels/build.sh --ironvenv ./ironvenv"
+else
+    echo "All six Qwen3.6-MoE open kernels are present."
 fi

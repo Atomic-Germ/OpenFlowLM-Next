@@ -35,6 +35,12 @@ python open_kernels/export_qwen36_kernels.py
 #   -> src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/{lx0,lx1,ax0,ax1,ln,lm_head_q8}/ + toolchain.json
 ```
 
+`open_kernels/build.sh` is the wrapper around that command: it resolves the
+iron venv, loads the XRT userspace itself, checks the toolchain up front,
+and skips sets that are already built (`--only`, `--out` via `--dst`,
+`--force`; `./clean_build.sh --ironbuild` runs it together with the BERT
+design-set build).
+
 | set | design | knobs | what it is |
 |---|---|---|---|
 | `lx0` | `layer_x/lx.py` | `LX_PART=0` | linear-attention layer, dispatch 0 (norm → qkv/z → glue → DeltaNet → post → out → norm → router) |
