@@ -68,8 +68,7 @@ Two traps that cost an hour each if you meet them cold:
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1        # MUST be dot-sourced
-cd <repo>; .
-pu_offload\gemm_rtpuild.ps1
+cd <repo>; .\npu_offload\gemm_rtp\build.ps1
 ```
 
 That is the whole thing: five families, in order, ~20 minutes, skipping any
