@@ -64,6 +64,28 @@ Two traps that cost an hour each if you meet them cold:
   `(4,8,8)`, and the bfp16 emulation becomes a **no-op**. No error.
   `iron.get_current_device()` still says NPU2.
 
+## Building them
+
+```powershell
+cd C:\dev\mlir-aie; . .\iron_env.ps1        # MUST be dot-sourced
+cd <repo>; .
+pu_offload\gemm_rtpuild.ps1
+```
+
+That is the whole thing: five families, in order, ~20 minutes, skipping any
+that are already built (`-Force` to rebuild, `-Only <name>` for one). It ends
+by running `check_readme.py`, so a green run means the sets exist **and** match
+what this file says builds them.
+
+Use it rather than pasting the commands below. Three ways of getting the paste
+wrong have already happened to real people: a `<dst>` placeholder that
+PowerShell rejects as a reserved operator before mentioning the placeholder;
+copying the shell's own `>>` continuation prompts along with the text, which it
+then reads as a redirect; and running two in parallel, which corrupts both.
+
+The commands are documented anyway, because a build script that nobody can read
+is the same problem one layer down.
+
 ## Rebuilding a design family
 
 **Every flag below is load-bearing.** A design set is selected at load time by
@@ -78,6 +100,18 @@ to load. **But `BERT-h384-bf16` is supposed to omit it**: bge-small runs with C
 as fp32, and adding the flag there is the same mistake in the other direction.
 Neither is a slower design; each is one the wrong model loads or no model
 loads. `check_readme.py` below is what keeps the two straight.
+
+**Run these ONE AT A TIME.** Not a style preference: `purge()` deletes matching
+entries from the **shared** `~/.npu/cache`, and it matches on content markers --
+`M*K`, `K*N`, `M*N` and the dtypes. `qkv` and `attn_out` depend on neither
+`--gated-ffn` nor `--intermediate`, so `BERT-h768-bfp16` and
+`BERT-h768-gated-bfp16` carry **identical markers for 8 of their 16 entries**,
+and run together each deletes the other's freshly built xclbins. The symptom
+arrives minutes later as a `FileNotFoundError` on a cache hash that tells the
+reader nothing.
+
+`export_gemm_rtp.py` takes a lock and refuses in under a second, naming the
+other process. If a previous run was killed the lock is stale: `--force-unlock`.
 
 Set the destination once. It is a **variable, not a `<placeholder>`**, and
 deliberately so: PowerShell rejects `<` as a reserved operator, so a pasted
