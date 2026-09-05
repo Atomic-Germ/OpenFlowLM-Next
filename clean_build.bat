@@ -5,13 +5,14 @@ setlocal enabledelayedexpansion
 ::
 ::   clean_build.bat [vcpkg-root] [--ironbuild]
 ::
-:: --ironbuild also builds the AIE design sets (kernels) with the IRON
-:: toolchain after flm links, by running npu_offload\gemm_rtp\build.ps1
-:: (five families from families.json, ~20 min, skipping sets that are
-:: already built). Same flag as clean_build.sh --ironbuild on Linux.
-:: build.ps1 needs `import aie.iron` to work in the PowerShell it runs
-:: under -- i.e. the iron_env.ps1 environment -- and checks that itself
-:: before spending any build time.
+:: --ironbuild also builds the NPU kernels with the IRON toolchain after flm
+:: links: the five BERT design sets via npu_offload\gemm_rtp\build.ps1
+:: (~20 min, skipping sets that are already built) and the six Qwen3.6-MoE
+:: sets via open_kernels\build.ps1. Same flag as clean_build.sh --ironbuild
+:: on Linux. build.ps1 needs `import aie.iron` to work in the PowerShell it
+:: runs under -- i.e. the iron_env.ps1 environment -- and checks that itself
+:: before spending any build time. The Qwen sets additionally need aiebu-asm
+:: on PATH (XRT tool; the BERT sets never ask for it).
 ::
 :: WHY "CLEAN" IS THE WHOLE POINT. If a configure fails partway -- and on a
 :: fresh clone the first one does, see below -- CMake leaves a cache behind
@@ -219,7 +220,18 @@ if defined IRONBUILD (
         exit /b 1
     )
     echo.
-    echo flm.exe and all five AIE design sets are built.
+    echo === kernels [IRON] ===
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\open_kernels\build.ps1"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Qwen kernel build failed. The output above is the real
+        echo        diagnostic -- if it names aiebu-asm, that XRT tool is not
+        echo        on PATH (the BERT sets never ask for it, so a box that
+        echo        builds those can still miss it).
+        exit /b 1
+    )
+    echo.
+    echo flm.exe, all five AIE design sets and all six Qwen kernels are built.
 ) else (
     set "MISSING="
     for %%F in (BERT-h384-bfp16 BERT-h384-bf16 BERT-h768-bfp16 BERT-h768-gated-bfp16 BERT-h1024-bfp16) do (

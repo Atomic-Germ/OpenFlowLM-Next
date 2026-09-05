@@ -39,7 +39,9 @@ python open_kernels/export_qwen36_kernels.py
 iron venv, loads the XRT userspace itself, checks the toolchain up front,
 and skips sets that are already built (`--only`, `--out` via `--dst`,
 `--force`; `./clean_build.sh --ironbuild` runs it together with the BERT
-design-set build).
+design-set build). On Windows `open_kernels/build.ps1` is the same wrapper
+(`-Only/-Dst/-Force`; needs `aiebu-asm` on PATH besides the iron env --
+`clean_build.bat --ironbuild` runs it).
 
 | set | design | knobs | what it is |
 |---|---|---|---|
