@@ -32,6 +32,15 @@ them:
 own, taken from `aie_kernels/aie2p/` in the installed toolchain so that it
 always matches the compiler that builds it.
 
+**Where the authoritative commands are.** These five build the sets THIS
+repository serves. Upstream builds six (it has an EmbeddingGemma set this fork
+does not use) and keeps them in `tools/export_shipped_designs.ps1`, checked by
+`tools/check_design_sets.py` -- the same discipline as `check_readme.py` here.
+The two command lists differ in destination and in that one extra set; the
+flags per geometry are the same, and both repositories check their own list
+against their own artifacts. If they ever disagree on a flag, upstream is the
+source of truth.
+
 They are a **synced copy**; upstream is
 [NpuEmbeddings](https://github.com/vegardberget/NpuEmbeddings), MIT here and
 Apache-2.0 there. Edit them upstream.
