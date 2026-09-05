@@ -3,7 +3,15 @@ setlocal enabledelayedexpansion
 ::
 :: Build flm from a clean CMake cache, on Windows, from a plain cmd prompt.
 ::
-::   clean_build.bat [vcpkg-root]
+::   clean_build.bat [vcpkg-root] [--ironbuild]
+::
+:: --ironbuild also builds the AIE design sets (kernels) with the IRON
+:: toolchain after flm links, by running npu_offload\gemm_rtp\build.ps1
+:: (five families from families.json, ~20 min, skipping sets that are
+:: already built). Same flag as clean_build.sh --ironbuild on Linux.
+:: build.ps1 needs `import aie.iron` to work in the PowerShell it runs
+:: under -- i.e. the iron_env.ps1 environment -- and checks that itself
+:: before spending any build time.
 ::
 :: WHY "CLEAN" IS THE WHOLE POINT. If a configure fails partway -- and on a
 :: fresh clone the first one does, see below -- CMake leaves a cache behind
@@ -34,16 +42,33 @@ setlocal enabledelayedexpansion
 ::     "unrecognised option '--embeddingmodel'" -- an error about a flag, which
 ::     sends you looking for the flag rather than for the binary.
 ::
-:: It does NOT build the AIE design sets. Those need the IRON toolchain, a
-:: different environment entirely, and about twenty minutes:
+:: Without --ironbuild this script does NOT build the AIE design sets. Those
+:: need the IRON toolchain, a different environment entirely, and about
+:: twenty minutes:
 ::     cd C:\dev\mlir-aie ^& . .\iron_env.ps1        (PowerShell, dot-sourced)
 ::     npu_offload\gemm_rtp\build.ps1
-:: This script checks whether they are there and says so at the end.
+:: With --ironbuild it runs that build.ps1 itself after flm links, and skips
+:: the presence report below (build.ps1 ends by checking the sets itself).
+:: Without the flag it checks whether the sets are there and says so.
 
 set "REPO=%~dp0"
 if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
 
-set "VCPKG=%~1"
+:: First non-flag argument is the vcpkg root, so --ironbuild may come first
+:: or last. A shift loop rather than `for %%A in (%*)`: empty-safe when no
+:: arguments are given, and quote-safe for vcpkg paths containing spaces.
+:: Flag comparisons only below: no ')' anywhere in here, per the note above
+:: about %ProgramFiles(x86)% and parenthesised blocks.
+set "VCPKG="
+set "IRONBUILD="
+:parse_args
+if "%~1"=="" goto parse_done
+if /i "%~1"=="--ironbuild" set "IRONBUILD=1"
+if /i "%~1"=="/ironbuild" set "IRONBUILD=1"
+if /i not "%~1"=="--ironbuild" if /i not "%~1"=="/ironbuild" if not defined VCPKG set "VCPKG=%~1"
+shift
+goto parse_args
+:parse_done
 if "%VCPKG%"=="" set "VCPKG=%VCPKG_ROOT%"
 if "%VCPKG%"=="" set "VCPKG=C:\dev\vcpkg"
 if not exist "%VCPKG%\scripts\buildsystems\vcpkg.cmake" (
@@ -150,17 +175,34 @@ echo "unrecognised option '--embeddingmodel'", an error about a flag rather
 echo than about the binary.
 echo.
 
-set "MISSING="
-for %%F in (BERT-h384-bfp16 BERT-h384-bf16 BERT-h768-bfp16 BERT-h768-gated-bfp16 BERT-h1024-bfp16) do (
-    if not exist "%REPO%\src\xclbins\%%F\gemm_rtp\design.json" set "MISSING=!MISSING! %%F"
-)
-if defined MISSING (
-    echo The AIE design sets are NOT built:!MISSING!
-    echo An open_npue model will refuse to load until they are. In a PowerShell
-    echo with the IRON toolchain dot-sourced:
-    echo     cd C:\dev\mlir-aie; . .\iron_env.ps1
-    echo     %REPO%\npu_offload\gemm_rtp\build.ps1
+if defined IRONBUILD (
+    echo.
+    echo === design sets [IRON] ===
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\npu_offload\gemm_rtp\build.ps1"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: design-set build failed. The output above is the real
+        echo        diagnostic -- if it says the IRON toolchain is not on the
+        echo        shell's path, dot-source iron_env.ps1 first, see above.
+        exit /b 1
+    )
+    echo.
+    echo flm.exe and all five AIE design sets are built.
 ) else (
-    echo All five AIE design sets are present.
+    set "MISSING="
+    for %%F in (BERT-h384-bfp16 BERT-h384-bf16 BERT-h768-bfp16 BERT-h768-gated-bfp16 BERT-h1024-bfp16) do (
+        if not exist "%REPO%\src\xclbins\%%F\gemm_rtp\design.json" set "MISSING=!MISSING! %%F"
+    )
+    if defined MISSING (
+        echo The AIE design sets are NOT built:!MISSING!
+        echo An open_npue model will refuse to load until they are. Either
+        echo re-run with --ironbuild to build them now ^(IRON toolchain,
+        echo ~20 minutes^), or in a PowerShell with the IRON toolchain
+        echo dot-sourced:
+        echo     cd C:\dev\mlir-aie; . .\iron_env.ps1
+        echo     %REPO%\npu_offload\gemm_rtp\build.ps1
+    ) else (
+        echo All five AIE design sets are present.
+    )
 )
 endlocal

@@ -120,7 +120,8 @@ def main() -> int:
     if bad:
         print(f"\n{bad} famil{'y' if bad == 1 else 'ies'} disagree with "
               f"{Path(args.spec).name}.")
-        print("Either the set is stale -- rebuild it with build.ps1 -Force -- or "
+        print("Either the set is stale -- rebuild it (build.sh --force on "
+              "Linux, build.ps1 -Force on Windows) -- or "
               "families.json is wrong, in which case fix it there and nowhere "
               "else: it is the only place these flags are written down.")
     return 1 if bad else 0

@@ -291,6 +291,14 @@ def main() -> int:
                     help="comma-separated batch tiers, e.g. 4,16,32,128. "
                          "Defaults to just --batch.")
     ap.add_argument("--cols", type=int, default=8)
+    ap.add_argument("--dev", default="npu2",
+                    help="IRON device family to build for, resolved via "
+                         "aie.iron.device.from_name (npu1 = Phoenix/Hawk "
+                         "Point, npu2 = Strix/Krackan). Explicit because the "
+                         "toolchain default is n_cols=1 (single column) and "
+                         "bare 'npu' means NPU1, not NPU2; n_cols=None below "
+                         "is the family-agnostic max-cols sentinel (8 for "
+                         "npu2, 4 for npu1).")
     ap.add_argument("--hidden", type=int, default=384)
     ap.add_argument("--intermediate", type=int, default=None,
                     help="FFN width. Defaults to 4*hidden, which every "
@@ -405,7 +413,7 @@ def main() -> int:
               "measurement above seq 64. Treat this design's throughput as "
               "unknown until it is traced (CLAUDE.md rules 1 and 6).")
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name(args.dev, n_cols=None))
 
     # Build every (shape, tier). The identity check then covers BOTH axes:
     # if any of them diverged, the whole one-context story is false and the

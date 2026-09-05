@@ -31,6 +31,10 @@ param(
     [string] $Only = "",
     # Where the sets go. Defaults to the tree this script lives in.
     [string] $Dst = "",
+    # IRON device family to build for (npu2 = Strix/Krackan, the default;
+    # npu1 = Phoenix/Hawk Point). Explicit because the toolchain default is
+    # n_cols=1 (single column) and bare "npu" means NPU1, not NPU2.
+    [string] $Dev = "npu2",
     # Rebuild even if the set is already there.
     [switch] $Force
 )
@@ -90,7 +94,7 @@ foreach ($f in $families) {
     # native command's stderr in ErrorRecords, which under -ErrorActionPreference
     # Stop aborts the whole script on a build that merely printed a warning.
     $ErrorActionPreference = 'Continue'
-    $log = & python export_gemm_rtp.py @($f.args + $common) --out $out 2>&1 | Out-String
+    $log = & python export_gemm_rtp.py --dev $Dev @($f.args + $common) --out $out 2>&1 | Out-String
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     Pop-Location

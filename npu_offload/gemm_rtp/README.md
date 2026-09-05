@@ -75,6 +75,15 @@ cd C:\dev\mlir-aie; . .\iron_env.ps1        # MUST be dot-sourced
 cd <repo>; .\npu_offload\gemm_rtp\build.ps1
 ```
 
+On Linux the same build is `npu_offload/gemm_rtp/build.sh` (same `--only` /
+`--dst` / `--force`, plus `--ironvenv` for the venv holding the IRON
+toolchain -- default `<repo>/ironvenv` -- and `--dev` for the device family,
+default `npu2`), and `./clean_build.sh --ironbuild` runs the C++ build and
+the design-set build back to back. `build.sh` activates the venv and loads
+the XRT userspace (`/opt/xilinx/xrt/setup.sh`) itself when `pyxrt` is not
+yet importable; without `pyxrt` the export cannot run (mlir_aie degrades to
+CPU-only tensors).
+
 That is the whole thing. Five families in order, ~20 minutes, skipping any that
 are already built. `-Force` rebuilds, `-Only <name>` does one, `-Dst <dir>`
 builds elsewhere. It checks the IRON toolchain is on the path *before* spending
