@@ -12,7 +12,7 @@ same way they drive the closed DLL. Below the seam it is:
 | [core.cpp](core.cpp) | device, contexts, kernels, 21 GB of resident pools, per-layer state; one `step()` per token |
 | [engine.cpp](engine.cpp) | the `causal_lm` adapter: forward / prefill / checkpoint / restore / KV accessors |
 | [cli.cpp](cli.cpp), [chat.py](chat.py) | drive the engine without the app (ids in, tokens out; `chat.py` tokenizes) |
-| `../xclbins/<model>/open_kernels/` | the six kernels (`lx0 lx1 ax0 ax1 ln lm_head_q8`), built from `open_kernels/designs` |
+| `../xclbins/<model>/open_kernels/` | the six kernels (`lx0 lx1 ax0 ax1 ln lm_head_q8`), **built, not checked in** — see below |
 
 The kernels are `open_kernels/designs/layer_x` (+ `ln`, `lm_head_q8`): one xclbin
 context per layer type, two dispatches per layer (everything up to the router;
@@ -20,6 +20,51 @@ then the MoE block once the host has re-pointed the expert fills at the
 router's top-8), plus the final norm and the q8 lm_head. Per-token instruction
 patching (`open_kernels/harness/stream_patch.hpp`) is what lets one compiled
 program serve every layer and every position.
+
+## Building the kernels
+
+The compiled kernels are not in the repository (`.gitignore`), the same rule
+as the BERT design sets: the source is `open_kernels/designs/`, and one
+command produces the six `final.xclbin` + `insts.bin` pairs the engine loads,
+in the directory it loads them from:
+
+```
+source ~/ironenv142/bin/activate            # mlir-aie 1.4.2 + Peano (ironvenv-requirements.txt)
+export PATH=~/xrt-tools/bin:$PATH           # xclbinutil, aiebu-asm (from an XRT build)
+python open_kernels/export_qwen36_kernels.py
+#   -> src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/{lx0,lx1,ax0,ax1,ln,lm_head_q8}/ + toolchain.json
+```
+
+| set | design | knobs | what it is |
+|---|---|---|---|
+| `lx0` | `layer_x/lx.py` | `LX_PART=0` | linear-attention layer, dispatch 0 (norm → qkv/z → glue → DeltaNet → post → out → norm → router) |
+| `lx1` | `layer_x/lx.py` | `LX_PART=1` | its MoE block (same xclbin as `lx0`, second instruction stream) |
+| `ax0` | `layer_x/ax.py` | `AX_PART=0` | full-attention layer, dispatch 0 |
+| `ax1` | `layer_x/ax.py` | `AX_PART=1` | its MoE block |
+| `ln` | `ln/ln.py` | — | final RMSNorm |
+| `lm_head_q8` | `lm_head_q8/lm_head_q8.py` | `LMHEAD_N=248320 LMHEAD_CORES=8` | q8 lm_head, full vocab |
+
+About 6 minutes for all six on a Ryzen AI 9 HX 370 (WSL; ~90 s per layer_x set). `--only lx0,lx1`
+rebuilds a subset, `--out DIR` redirects (a model directory's `open_kernels/`
+and `FLM_OPEN_KERNELS_DIR` are the engine's other two lookup locations).
+`toolchain.json` records the mlir-aie and Peano versions, this tree's commit,
+and every file's sha256. The distributed package ships the built kernels; a
+source checkout builds them. In WSL the kernels are built and on Windows they
+run: the export writes into the shared checkout, so nothing needs copying.
+
+**Is the source really the source?** `--check DIR` compares a fresh build with
+a previous one. Checked here (2026-09-05) against the binaries this PR
+originally shipped, built 2026-09-04 on the same toolchain:
+
+| | result |
+|---|---|
+| 6 × `insts.bin` (the instruction streams) | **byte-identical** |
+| 6 × `final.xclbin` | identical apart from **78–82 bytes each**: the axlf header's unique id, timestamp and UUID, the PDI's UUID in `AIE_PARTITION`, the boot-image header's unique id and the checksum that covers it, and xclbinutil's `XCLBIN_MIRROR_DATA` JSON tail that repeats the header |
+
+Every CDO and every AIE core ELF matched; `--check` masks exactly those stamp
+fields (parsing the axlf and partition structs, not by offset guesswork) and
+fails on any other byte. A rebuilt `ln` was also run on the NPU through the
+harness: `y maxrel 5.4e-8`, `xn` bit-exact, same as the shipped one.
 
 ## Selecting it
 

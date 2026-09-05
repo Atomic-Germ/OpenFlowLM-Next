@@ -1,10 +1,11 @@
 r"""Test vectors for dn_step: S_in from a real captured GDN state (prefill->decode
-boundary of layer 0, C:/caps/pf_t11_full, state buffer layout: conv bf16[3,8192]
-@0, S fp32[32,128,128] @49152), random unit k/q, random v, decay/beta in (0,1);
-fp64 reference of decode_step.py's per-head recurrence.
+boundary of layer 0, $OPEN_KERNELS_CAPS/pf_t11_full, state buffer layout: conv
+bf16[3,8192] @0, S fp32[32,128,128] @49152), random unit k/q, random v, decay/beta
+in (0,1); fp64 reference of decode_step.py's per-head recurrence.
 
     python make_test.py [--state FILE] [--seed 0]
-Writes s_in.bin, vec.bin, ref_s.bin, ref_o.bin, run.cfg.
+Writes s_in.bin, vec.bin, ref_s.bin, ref_o.bin, run.cfg (paths relative to this
+directory). --state FILE takes any state buffer instead of the capture.
 """
 from __future__ import annotations
 
@@ -15,8 +16,10 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).parent
-CAP = Path("/mnt/c/caps/pf_t11_full")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
+
 D, HEADS, VEC = 128, 32, 512
 
 
@@ -44,9 +47,9 @@ def main() -> int:
     if a.state:
         S = load_state(Path(a.state))
     else:
-        man = json.loads((CAP / "boundary_manifest.json").read_text())
+        man = json.loads(FX.caps("pf_t11_full/boundary_manifest.json").read_text())
         sync = man["boundary_state_syncs"][0]["sync"]
-        S = load_state(CAP / f"{sync}.bo")
+        S = load_state(FX.caps(f"pf_t11_full/{sync}.bo"))
     rng = np.random.default_rng(a.seed)
     k = rng.standard_normal((HEADS, D)); k /= np.linalg.norm(k, axis=1, keepdims=True)
     q = rng.standard_normal((HEADS, D)); q /= np.linalg.norm(q, axis=1, keepdims=True)
@@ -70,19 +73,18 @@ def main() -> int:
     (HERE / "vec.bin").write_bytes(vec.tobytes())
     (HERE / "ref_s.bin").write_bytes(S_ref.tobytes())
     (HERE / "ref_o.bin").write_bytes(o_ref.tobytes())
-    d = "C:/code/phlegm/tools/open-kernels/designs/deltanet"
     cfg = "\n".join([
         "device",
-        f"xclbin G {d}/build/final.xclbin",
-        f"kernelx k G {d}/build/insts.bin",
-        f"buf s {S.nbytes} {d}/s_in.bin",
-        f"buf v {vec.nbytes} {d}/vec.bin",
+        "xclbin G build/final.xclbin",
+        "kernelx k G build/insts.bin",
+        f"buf s {S.nbytes} s_in.bin",
+        f"buf v {vec.nbytes} vec.bin",
         f"buf so {S.nbytes}",
         f"buf o {o_ref.nbytes}",
         "run k s v so o",
         "run k s v so o",
-        f"dump so {d}/y_s.bin {S.nbytes}",
-        f"dump o {d}/y_o.bin {o_ref.nbytes}",
+        f"dump so y_s.bin {S.nbytes}",
+        f"dump o y_o.bin {o_ref.nbytes}",
         "",
     ])
     (HERE / "run.cfg").write_text(cfg, newline="\n")

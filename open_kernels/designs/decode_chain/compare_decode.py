@@ -1,15 +1,17 @@
-"""Compare the open-kernel decode step with FLM's captured logits and the CPU replica."""
+"""Compare the open-kernel decode step with FLM's captured logits
+($OPEN_KERNELS_CAPS/m0c/000905.bo) and the CPU replica."""
 import sys
 from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).parent
-CAP = Path("/mnt/c/caps/m0c/000905.bo")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
 
 ours_all = np.fromfile(HERE / "y_logits.bin", np.float32)
 ours = ours_all[1::2][:124160].astype(np.float64)              # FLM's buffer holds the odd vocab rows
-cap = np.fromfile(CAP, np.float32)[:124160].astype(np.float64)
+cap = np.fromfile(FX.caps("m0c/000905.bo"), np.float32)[:124160].astype(np.float64)
 rep = np.fromfile(HERE / "ref_logits_replica.bin", np.float32).astype(np.float64)
 
 

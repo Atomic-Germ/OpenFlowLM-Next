@@ -1,7 +1,10 @@
 > **Vendored from phlegm** (`tools/open-kernels/`, see `PROVENANCE.md`). This file is
 > phlegm's status log and trap catalogue, kept verbatim; its paths (`C:/code/phlegm`,
-> `C:/caps`, `open-qwen-npu npu`) are phlegm's. For building and running the designs
-> from THIS tree use `harness/README.md` (`run_kernel`, synthetic fixtures, 1.4.2 pin).
+> `C:/caps`, `open-qwen-npu npu`) are phlegm's. In this tree the generators take the
+> capture directory from `OPEN_KERNELS_CAPS` and write relative paths
+> (`fixture_paths.py`). For building and running the designs from THIS tree use
+> `harness/README.md` (`run_kernel`, synthetic fixtures, 1.4.2 pin); for the six
+> kernel sets the engine loads, `export_qwen36_kernels.py` (`src/open_qwen36/README.md`).
 
 # open-kernels — our own NPU kernels (IRON / mlir-aie), driven by phlegm
 

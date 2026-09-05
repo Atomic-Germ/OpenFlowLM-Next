@@ -19,22 +19,25 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-KI = Path("/mnt/c/code/phlegm/tools/kernel-interp")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402  (PHLEGM_KERNEL_INTERP, MODEL_Q4NX, OPEN_KERNELS_CAPS)
+
+KI = FX.kernel_interp()                    # phlegm's chain harness; in-repo successor: open_kernels/model/
 sys.path.insert(0, str(KI))
-os.environ.setdefault("MODEL_Q4NX", "/mnt/c/Users/josha/.flm/models/Qwen3.6-35B-A3B-NPU2/model_3LiF.q4nx")
+os.environ["MODEL_Q4NX"] = FX.model_q4nx()
 os.chdir(KI)
 import decode_step as DS  # noqa: E402
 from q4nx import bf16_to_f32  # noqa: E402
 
-CAPC = Path("/mnt/c/caps/m0c")
-CAPD = Path("/mnt/c/caps/m0d")
+CAPC = FX.caps("m0c/000905.bo").parent
+CAPD = FX.caps("m0d/000118.bo").parent
 POOLF = {0: CAPD / "blob_536870912_836fd8e49f35a0b6.bin", 1: CAPD / "000120.bo", 2: CAPD / "000123.bo"}
 PACKF = {0: CAPD / "000118.bo", 1: CAPD / "000121.bo", 2: CAPD / "000124.bo"}
 SIDEF = {0: CAPD / "000119.bo", 1: CAPD / "000122.bo", 2: CAPD / "000125.bo"}
 STATEF = {0: CAPC / "000898.bo", 1: CAPC / "000900.bo"}
-D = "C:/code/phlegm/tools/open-kernels/designs"
-OUT = f"{D}/decode_chain"
+D = ".."                                   # designs/, relative to this cfg
+OUT = "."
 TOK, POS = 248068, 11
 S = 163_840
 NE = 8
@@ -160,7 +163,7 @@ def main() -> int:
     for tag, kn, path in X:
         cfg += [f"xclbin {tag} {D}/{path}/final.xclbin", f"kernelx {kn} {tag} {D}/{path}/insts.bin"]
     cfg += [f"buf xres0 8192 {OUT}/xres0.bin", f"buf zero 8192 {OUT}/zero.bin", f"buf normw 4096 {OUT}/normw.bin",
-            "buf accA 8192", "buf accB 8192", f"buf lmpool 542113792 C:/caps/m0d/000127.bo",
+            "buf accA 8192", "buf accB 8192", f"buf lmpool 542113792 {FX.caps_cfg('m0d/000127.bo')}",
             "buf xresf 8192", "buf hn 4096", "buf logits 993280"]
     cfg += [f"buf e{k} 4096 {OUT}/e{k}.bin" for k in range(NE)]
     runs = []

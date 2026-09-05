@@ -10,7 +10,10 @@ needed; runs on Windows):
   ref_out.bin = moe_chain/ref_out.bin: xres + acc + sigmoid(xm.sgw) * shared -- the
                 block output the kernel emits
 
-    python make_test.py ; open-qwen-npu npu designs/moe_experts/run.cfg ; python compare.py
+    python make_test.py ; run_kernel run.cfg ; python compare.py
+
+No captured buffers are read directly (moe_chain's outputs are); paths in
+run.cfg are relative to this directory.
 """
 from __future__ import annotations
 
@@ -21,9 +24,8 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 MC = HERE.parent / "moe_chain"
-D = "C:/code/phlegm/tools/open-kernels/designs"
 NE = 8
 
 spec = importlib.util.spec_from_file_location("gemv_make_test", HERE.parent / "gemv_q4" / "make_test.py")
@@ -65,15 +67,15 @@ def main() -> int:
     (HERE / "ref_out.bin").write_bytes((MC / "ref_out.bin").read_bytes())
     cfg = "\n".join([
         "device",
-        f"xclbin E {D}/moe_experts/build/final.xclbin",
-        f"kernelx me E {D}/moe_experts/build/insts.bin",
-        f"buf wexp {(NE + 1) * 1_966_080} {D}/moe_experts/wexp.bin",
-        f"buf hdr 20480 {D}/moe_experts/hdr.bin",
+        "xclbin E build/final.xclbin",
+        "kernelx me E build/insts.bin",
+        f"buf wexp {(NE + 1) * 1_966_080} wexp.bin",
+        "buf hdr 20480 hdr.bin",
         "buf out 8192",
         "run me wexp hdr out",
         "run me wexp hdr out",
         "run me wexp hdr out",
-        f"dump out {D}/moe_experts/y_out.bin 8192",
+        "dump out y_out.bin 8192",
         "",
     ])
     (HERE / "run.cfg").write_text(cfg, newline="\n")

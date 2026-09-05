@@ -20,17 +20,20 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-KI = Path("/mnt/c/code/phlegm/tools/kernel-interp")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402  (PHLEGM_KERNEL_INTERP, MODEL_Q4NX, OPEN_KERNELS_CAPS)
+
+KI = FX.kernel_interp()                    # phlegm's chain harness; in-repo successor: open_kernels/model/
 sys.path.insert(0, str(KI))
-os.environ.setdefault("MODEL_Q4NX", "/mnt/c/Users/josha/.flm/models/Qwen3.6-35B-A3B-NPU2/model_3LiF.q4nx")
+os.environ["MODEL_Q4NX"] = FX.model_q4nx()
 os.chdir(KI)
 import decode_step as DS  # noqa: E402
 
-POOL = Path("/mnt/c/caps/m0d/blob_536870912_836fd8e49f35a0b6.bin")
-PACK = Path("/mnt/c/caps/m0d/000118.bo")
-D = "C:/code/phlegm/tools/open-kernels/designs"
-OUT = f"{D}/moe_chain"
+POOL = FX.caps("m0d/blob_536870912_836fd8e49f35a0b6.bin")
+PACK = FX.caps("m0d/000118.bo")
+D = ".."                                   # designs/, relative to this cfg
+OUT = "."
 S = 163_840
 CH = 5120
 NE = 8

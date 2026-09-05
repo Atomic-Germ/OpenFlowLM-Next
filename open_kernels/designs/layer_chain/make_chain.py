@@ -18,28 +18,31 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-KI = Path("/mnt/c/code/phlegm/tools/kernel-interp")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402  (PHLEGM_KERNEL_INTERP, MODEL_Q4NX, OPEN_KERNELS_CAPS)
+
+KI = FX.kernel_interp()                    # phlegm's chain harness; in-repo successor: open_kernels/model/
 sys.path.insert(0, str(KI))
-os.environ.setdefault("MODEL_Q4NX", "/mnt/c/Users/josha/.flm/models/Qwen3.6-35B-A3B-NPU2/model_3LiF.q4nx")
+os.environ["MODEL_Q4NX"] = FX.model_q4nx()
 # full_forward.py loads prompt_token_ids.npy from the cwd at import; it is the
 # captured prompt (boundary_manifest.json). Create it if missing and run from there.
 _ids = KI / "prompt_token_ids.npy"
 if not _ids.is_file():
     import json
-    _man = json.load(open("/mnt/c/caps/pf_t11_full/boundary_manifest.json"))
+    _man = json.load(open(FX.caps("pf_t11_full/boundary_manifest.json")))
     np.save(_ids, np.array(_man["prefill_token_ids"], dtype=np.int64))
 os.chdir(KI)
 import decode_step as DS  # noqa: E402  (loads the model)
 from q4nx import bf16_to_f32  # noqa: E402
 
-POOL = Path("/mnt/c/caps/m0d/blob_536870912_836fd8e49f35a0b6.bin")
-PACK = Path("/mnt/c/caps/m0d/000118.bo")
-SIDE = Path("/mnt/c/caps/m0d/000119.bo")
-STATE = Path("/mnt/c/caps/m0c/000898.bo")
+POOL = FX.caps("m0d/blob_536870912_836fd8e49f35a0b6.bin")
+PACK = FX.caps("m0d/000118.bo")
+SIDE = FX.caps("m0d/000119.bo")
+STATE = FX.caps("m0c/000898.bo")
 TOK = 248068
-D = "C:/code/phlegm/tools/open-kernels/designs"
-OUT = f"{D}/layer_chain"
+D = ".."                                   # designs/, relative to this cfg
+OUT = "."
 
 
 def wr(name: str, arr: np.ndarray) -> int:

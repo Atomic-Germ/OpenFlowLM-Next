@@ -13,8 +13,11 @@ pool's experts with the captured pack's router W / sgw, and its routing is only
 checked for sanity. The layer runs three times (xres and kv reloaded) to check
 that the patched stream replays cleanly; the outputs must be identical.
 
-    python make_test_ax.py ; open-qwen-npu npu designs/layer_x/run_ax.cfg ; python compare_ax.py
+    python make_test_ax.py ; run_kernel run_ax.cfg ; python compare_ax.py
 (build: for p in 0 1: AX_PART=$p python build_design.py designs/layer_x/ax.py designs/layer_x/build_ax$p)
+
+Captured layer-2 buffers come from $OPEN_KERNELS_CAPS; paths in run_ax.cfg are
+relative to this directory.
 """
 from __future__ import annotations
 
@@ -23,23 +26,25 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 AC = HERE.parent / "attn_chain"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
 from layout import (AA_BYTES, AA_ROUT, CA_BYTES, CA_LNW, CA_META, CA_POSTLN, CA_RW, CA_SGW, KV_BYTES, KV_ROW,  # noqa: E402
                     POOL_BYTES, PTAB_BYTES, ptab)
 
-D = "C:/code/phlegm/tools/open-kernels/designs"
-POOL = "C:/caps/m0d/000123.bo"          # the captured layer-2 pool (q/k/v/gate/o, experts)
-PACK = "C:/caps/m0d/000124.bo"          # [lnw | postln | sgw | router W ...]
-SIDE = "C:/caps/m0d/000125.bo"          # q_norm / k_norm (effective) at 128 / 640
+D = ".."                                # designs/, relative to this cfg
+POOL = "m0d/000123.bo"                  # the captured layer-2 pool (q/k/v/gate/o, experts)
+PACK = "m0d/000124.bo"                  # [lnw | postln | sgw | router W ...]
+SIDE = "m0d/000125.bo"                  # q_norm / k_norm (effective) at 128 / 640
 POS = 11
 CAP_V_OFF = 1_073_152                   # FLM's 3 MB pack: K rows @0, V rows here, 1 KB per row
 
 
 def main() -> int:
-    pack = np.fromfile(PACK, np.uint8)
-    side = np.fromfile(SIDE, np.uint8)
+    pack = np.fromfile(FX.caps(PACK), np.uint8)
+    side = np.fromfile(FX.caps(SIDE), np.uint8)
     consts = np.zeros(CA_BYTES, np.uint8)
     consts[CA_LNW:CA_LNW + 4096] = np.fromfile(AC / "lnw.bin", np.uint8)
     consts[CA_POSTLN:CA_POSTLN + 4096] = np.fromfile(AC / "postln.bin", np.uint8)
@@ -55,28 +60,27 @@ def main() -> int:
         kv[t, 1024:] = cap[CAP_V_OFF + t * 1024:CAP_V_OFF + (t + 1) * 1024]
     (HERE / "kv_ax.bin").write_bytes(kv.tobytes())
     (HERE / "ptab.bin").write_bytes(ptab().tobytes())
-    d = f"{D}/layer_x"
     runs = [f"attnpos ax0 {POS}",
             "run ax0 pool xres consts kv act ptab",
             f"moeroute2 ax1 act {AA_ROUT + 1024}",
             "run ax1 pool xres consts kv act ptab"]
-    reload = [f"load xres {D}/attn_chain/xres.bin", f"load kv {d}/kv_ax.bin"]
+    reload = [f"load xres {D}/attn_chain/xres.bin", "load kv kv_ax.bin"]
 
     def dumps(sfx):
-        return [f"dump act {d}/y_ax_act{sfx}.bin {AA_BYTES}",
-                f"dump kv {d}/y_ax_kvnew{sfx}.bin {KV_ROW} {POS * KV_ROW}",
-                f"dump xres {d}/y_ax_xres{sfx}.bin 8192"]
+        return [f"dump act y_ax_act{sfx}.bin {AA_BYTES}",
+                f"dump kv y_ax_kvnew{sfx}.bin {KV_ROW} {POS * KV_ROW}",
+                f"dump xres y_ax_xres{sfx}.bin 8192"]
 
     cfg = [
         "device",
-        f"xclbin Y {d}/build_ax0/final.xclbin",
-        f"kernelx ax0 Y {d}/build_ax0/insts.bin", f"kernelx ax1 Y {d}/build_ax1/insts.bin",
-        f"buf pool {POOL_BYTES} {POOL}",
+        "xclbin Y build_ax0/final.xclbin",
+        "kernelx ax0 Y build_ax0/insts.bin", "kernelx ax1 Y build_ax1/insts.bin",
+        f"buf pool {POOL_BYTES} {FX.caps_cfg(POOL)}",
         f"buf xres 8192 {D}/attn_chain/xres.bin",
-        f"buf consts {CA_BYTES} {d}/consts_ax.bin",
-        f"buf kv {KV_BYTES} {d}/kv_ax.bin",
+        f"buf consts {CA_BYTES} consts_ax.bin",
+        f"buf kv {KV_BYTES} kv_ax.bin",
         f"buf act {AA_BYTES}",
-        f"buf ptab {PTAB_BYTES} {d}/ptab.bin",
+        f"buf ptab {PTAB_BYTES} ptab.bin",
         *runs, *dumps(""),
         *reload, *runs,
         *reload, *runs, *dumps("_r3"),

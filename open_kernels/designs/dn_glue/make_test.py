@@ -1,10 +1,10 @@
 r"""Test vectors for dn_glue from captured buffers: layer-0 side pool
-(C:/caps/m0d/000119.bo: convw @0, ssm_a @65792, dt_bias @65920, Wa @66048,
-Wb @197120) and the layer-0 decode conv state (C:/caps/m0c/000898.bo rows
+($OPEN_KERNELS_CAPS/m0d/000119.bo: convw @0, ssm_a @65792, dt_bias @65920,
+Wa @66048, Wb @197120) and the layer-0 decode conv state (m0c/000898.bo rows
 [3][8192] bf16). xn and qkv are random (N(0,1)); fp64 reference of the glue math.
 
 Writes side.bin (our packed layout), qkv.bin, state.bin, ref_nstate.bin,
-ref_vec.bin, run.cfg.
+ref_vec.bin, run.cfg (paths relative to this directory).
 """
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-SIDE = Path("/mnt/c/caps/m0d/000119.bo")
-STATE = Path("/mnt/c/caps/m0c/000898.bo")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
+
 NCH, HID, NHEAD, HD = 8192, 2048, 32, 128
 
 
@@ -25,6 +26,8 @@ def silu(x):
 
 
 def main() -> int:
+    SIDE = FX.caps("m0d/000119.bo")
+    STATE = FX.caps("m0c/000898.bo")
     raw = np.fromfile(SIDE, np.uint8)
     convw = raw[0:65536].view(bfloat16).reshape(4, NCH)
     A = raw[65792:65792 + 128].view(np.float32).copy()
@@ -77,20 +80,19 @@ def main() -> int:
     (HERE / "state.bin").write_bytes(st.tobytes())
     (HERE / "ref_nstate.bin").write_bytes(nstate.tobytes())
     (HERE / "ref_vec.bin").write_bytes(vec.tobytes())
-    d = "C:/code/phlegm/tools/open-kernels/designs/dn_glue"
     cfg = "\n".join([
         "device",
-        f"xclbin G {d}/build/final.xclbin",
-        f"kernelx k G {d}/build/insts.bin",
-        f"buf side {side.nbytes} {d}/side.bin",
-        f"buf qkv {qkv.nbytes} {d}/qkv.bin",
-        f"buf state {st.nbytes} {d}/state.bin",
+        "xclbin G build/final.xclbin",
+        "kernelx k G build/insts.bin",
+        f"buf side {side.nbytes} side.bin",
+        f"buf qkv {qkv.nbytes} qkv.bin",
+        f"buf state {st.nbytes} state.bin",
         f"buf nstate {st.nbytes}",
         f"buf vec {vec.nbytes}",
         "run k side qkv state nstate vec",
         "run k side qkv state nstate vec",
-        f"dump nstate {d}/y_nstate.bin {st.nbytes}",
-        f"dump vec {d}/y_vec.bin {vec.nbytes}",
+        f"dump nstate y_nstate.bin {st.nbytes}",
+        f"dump vec y_vec.bin {vec.nbytes}",
         "",
     ])
     (HERE / "run.cfg").write_text(cfg, newline="\n")

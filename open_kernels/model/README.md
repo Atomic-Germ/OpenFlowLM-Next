@@ -22,6 +22,12 @@ open_kernels\harness\out\run_kernel.exe open_kernels\model\out\run_decode.cfg
 python open_kernels/model/compare_decode.py --tokens 1
 ```
 
+The program names the kernels at `../designs/layer_x/build_lx0` … `build_ax1`,
+`../designs/ln/build` and `../designs/lm_head_q8/build_full`, which is where
+`../export_qwen36_kernels.py` builds them (it also copies them to
+`src/xclbins/<model>/open_kernels/` for the engine). The model directory comes
+from `FLM_MODEL_DIR` (default `~/.flm/models/Qwen3.6-35B-A3B-NPU2`).
+
 `make_decode.py` writes into `out/` (small per-layer blobs, the reference, the
 `.cfg`) and `out/pools/` (the 512 MB-per-layer weight pools and the 542 MB
 lm_head pool — budget 512 MB × layers of disk AND of RAM, since every pool is a

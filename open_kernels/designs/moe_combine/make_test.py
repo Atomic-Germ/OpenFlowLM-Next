@@ -1,6 +1,7 @@
 """Test vectors for moe_axpy (x8) + moe_fin: random y_e/xres/shared/xm, real
-shared_expert_gate weight from the captured L0 pack (C:/caps/m0d/000118.bo @8192,
-bf16[2048]), router weights from designs/router/ref_out.bin if present; fp64 reference."""
+shared_expert_gate weight from the captured L0 pack ($OPEN_KERNELS_CAPS/m0d/000118.bo
+@8192, bf16[2048]), router weights from designs/router/ref_out.bin if present; fp64
+reference. Paths in run.cfg are relative to this directory."""
 from __future__ import annotations
 
 import sys
@@ -9,15 +10,17 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-PACK = Path("/mnt/c/caps/m0d/000118.bo")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
+
 ROUT = HERE.parent / "router" / "ref_out.bin"
 N, NE = 2048, 8
 
 
 def main() -> int:
     rng = np.random.default_rng(0)
-    sgw = np.fromfile(PACK, np.uint8)[8192:8192 + N * 2].view(bfloat16).copy()
+    sgw = np.fromfile(FX.caps("m0d/000118.bo"), np.uint8)[8192:8192 + N * 2].view(bfloat16).copy()
     if ROUT.is_file():
         rout = np.fromfile(ROUT, np.float32)
     else:
@@ -38,19 +41,18 @@ def main() -> int:
         eb = np.zeros(1024, np.int32); eb[0] = e
         (HERE / f"e{e}.bin").write_bytes(eb.tobytes())
     (HERE / "ref_out.bin").write_bytes(out.astype(np.float32).tobytes())
-    d = "C:/code/phlegm/tools/open-kernels/designs/moe_combine"
     cfg = [
         "device",
-        f"xclbin A {d}/build_axpy/final.xclbin", f"kernelx ax A {d}/build_axpy/insts.bin",
-        f"xclbin F {d}/build_fin/final.xclbin", f"kernelx fin F {d}/build_fin/insts.bin",
-        f"buf rout 4096 {d}/rout.bin",
-        *[f"buf y{e} 8192 {d}/y{e}.bin" for e in range(NE)],
-        *[f"buf e{e} 4096 {d}/e{e}.bin" for e in range(NE)],
+        "xclbin A build_axpy/final.xclbin", "kernelx ax A build_axpy/insts.bin",
+        "xclbin F build_fin/final.xclbin", "kernelx fin F build_fin/insts.bin",
+        "buf rout 4096 rout.bin",
+        *[f"buf y{e} 8192 y{e}.bin" for e in range(NE)],
+        *[f"buf e{e} 4096 e{e}.bin" for e in range(NE)],
         "buf accA 8192", "buf accB 8192",
-        f"buf xres {xres.nbytes} {d}/xres.bin",
-        f"buf shared {shared.nbytes} {d}/shared.bin",
-        f"buf xm {xm.nbytes} {d}/xm.bin",
-        f"buf sgw {sgw.nbytes} {d}/sgw.bin",
+        f"buf xres {xres.nbytes} xres.bin",
+        f"buf shared {shared.nbytes} shared.bin",
+        f"buf xm {xm.nbytes} xm.bin",
+        f"buf sgw {sgw.nbytes} sgw.bin",
         f"buf out {xres.nbytes}",
     ]
     # ping-pong the accumulator between two buffers (in-place in/out on one BO is not guaranteed safe)
@@ -58,7 +60,7 @@ def main() -> int:
         src, dst = ("accA", "accB") if e % 2 == 0 else ("accB", "accA")
         cfg.append(f"run ax rout y{e} {src} e{e} {dst}")
     last = "accB" if (NE - 1) % 2 == 0 else "accA"
-    cfg += [f"run fin {last} xres shared xm sgw out", f"dump out {d}/y_out.bin {xres.nbytes}", ""]
+    cfg += [f"run fin {last} xres shared xm sgw out", f"dump out y_out.bin {xres.nbytes}", ""]
     (HERE / "run.cfg").write_text("\n".join(cfg), newline="\n")
     print(f"sg={sg:.5f} out[:4]={out[:4]}")
     return 0

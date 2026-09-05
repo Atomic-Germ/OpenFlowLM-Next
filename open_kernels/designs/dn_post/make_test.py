@@ -1,5 +1,6 @@
 """Test vectors for dn_post: random o/z, real ssm_norm weight from the captured L0
-side pool (C:/caps/m0d/000119.bo @65536, bf16[128]); fp64 reference."""
+side pool ($OPEN_KERNELS_CAPS/m0d/000119.bo @65536, bf16[128]); fp64 reference.
+Paths in run.cfg are relative to this directory."""
 from __future__ import annotations
 
 import sys
@@ -8,13 +9,15 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-SIDE = Path("/mnt/c/caps/m0d/000119.bo")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
+
 D, HD = 4096, 128
 
 
 def main() -> int:
-    raw = np.fromfile(SIDE, np.uint8)
+    raw = np.fromfile(FX.caps("m0d/000119.bo"), np.uint8)
     nw = raw[65536:65536 + 256].view(bfloat16).copy()
     nwp = np.zeros(2048, bfloat16)
     nwp[:HD] = nw
@@ -29,18 +32,17 @@ def main() -> int:
     (HERE / "z.bin").write_bytes(z.tobytes())
     (HERE / "nw.bin").write_bytes(nwp.tobytes())
     (HERE / "ref_og.bin").write_bytes(og.tobytes())
-    d = "C:/code/phlegm/tools/open-kernels/designs/dn_post"
     cfg = "\n".join([
         "device",
-        f"xclbin G {d}/build/final.xclbin",
-        f"kernelx k G {d}/build/insts.bin",
-        f"buf o {o.nbytes} {d}/o.bin",
-        f"buf z {z.nbytes} {d}/z.bin",
-        f"buf nw {nwp.nbytes} {d}/nw.bin",
+        "xclbin G build/final.xclbin",
+        "kernelx k G build/insts.bin",
+        f"buf o {o.nbytes} o.bin",
+        f"buf z {z.nbytes} z.bin",
+        f"buf nw {nwp.nbytes} nw.bin",
         f"buf og {og.nbytes}",
         "run k o z nw og",
         "run k o z nw og",
-        f"dump og {d}/y_og.bin {og.nbytes}",
+        f"dump og y_og.bin {og.nbytes}",
         "",
     ])
     (HERE / "run.cfg").write_text(cfg, newline="\n")

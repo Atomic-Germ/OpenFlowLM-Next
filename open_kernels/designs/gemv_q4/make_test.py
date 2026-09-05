@@ -80,7 +80,9 @@ def main() -> int:
 
     _, n, k, rs = REGIONS[a.region]
     if a.source == "captured":
-        pool = Path(os.environ.get("GEMV_POOL", "/mnt/c/caps/m0d/blob_536870912_836fd8e49f35a0b6.bin"))
+        sys.path.insert(0, str(HERE.parents[1]))
+        import fixture_paths as FX
+        pool = Path(os.environ["GEMV_POOL"]) if os.environ.get("GEMV_POOL") else FX.caps("m0d/blob_536870912_836fd8e49f35a0b6.bin")
         with pool.open("rb") as f:
             w, n = captured_bytes(f, a.region, a.expert, a.bands)
     else:

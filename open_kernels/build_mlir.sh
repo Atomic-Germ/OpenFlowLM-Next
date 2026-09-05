@@ -8,7 +8,7 @@
 #   source ~/mlir-aie/utils/env_setup.sh
 #   export PATH=~/xrt-tools/bin:$PATH LD_LIBRARY_PATH=~/xrt-tools/lib
 #   bash build_mlir.sh designs/expert_fetch/ctrlpkt_shim_bd.mlir [outdir]
-set -eu
+set -euo pipefail
 SRC="$1"
 OUT="${2:-$(dirname "$SRC")/build}"
 mkdir -p "$OUT"

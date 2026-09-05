@@ -1,10 +1,12 @@
-r"""Test vectors for lm_head_q8 from FLM's captured lm_head pool (C:/caps/m0d/000127.bo,
-verified byte-exact against our builder in pools.rs).
+r"""Test vectors for lm_head_q8 from FLM's captured lm_head pool
+($OPEN_KERNELS_CAPS/m0d/000127.bo, or LMHEAD_POOL=<file>; verified byte-exact
+against our builder in pools.rs).
 
     python make_test.py [--bands B] [--x random|ones|onehot:K|act:FILE]
 
 Writes w_<tag>.bin (first B bands of pool-order q8 chunks), x_<tag>.bin,
-ref_<tag>.bin (f32, fp64 reference from the same bytes), run_<tag>.cfg.
+ref_<tag>.bin (f32, fp64 reference from the same bytes), run_<tag>.cfg (paths
+relative to this directory).
 """
 from __future__ import annotations
 
@@ -16,8 +18,9 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-POOL = Path(os.environ.get("LMHEAD_POOL", "/mnt/c/caps/m0d/000127.bo"))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
 CH = 8704
 K = 2048
 PER_BAND = 32
@@ -63,7 +66,8 @@ def main() -> int:
     n = bands * BAND_ROWS
     nbytes = bands * PER_BAND * CH
     tag = "full" if not a.bands else f"b{bands}"
-    with POOL.open("rb") as f:
+    pool = Path(os.environ["LMHEAD_POOL"]) if os.environ.get("LMHEAD_POOL") else FX.caps("m0d/000127.bo")
+    with pool.open("rb") as f:
         w = np.frombuffer(f.read(nbytes), np.uint8)
     assert len(w) == nbytes
 

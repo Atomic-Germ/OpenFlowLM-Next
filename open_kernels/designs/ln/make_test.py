@@ -3,8 +3,8 @@
     python make_test.py [--captured] [--runs N]
 
 `--captured` takes the norm weight from FLM's captured L0 pack instead
-(phlegm's original fixture; LN_PACK=path, bf16[2048] at offset 0). Paths in
-run.cfg are relative to this directory.
+(phlegm's original fixture; $OPEN_KERNELS_CAPS/m0d/000118.bo or LN_PACK=path,
+bf16[2048] at offset 0). Paths in run.cfg are relative to this directory.
 """
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
+
 N = 2048
 
 
@@ -29,7 +32,7 @@ def main() -> int:
 
     rng = np.random.default_rng(a.seed)
     if a.captured:
-        pack = Path(os.environ.get("LN_PACK", "/mnt/c/caps/m0d/000118.bo"))
+        pack = Path(os.environ["LN_PACK"]) if os.environ.get("LN_PACK") else FX.caps("m0d/000118.bo")
         w = np.fromfile(pack, np.uint8)[:N * 2].view(bfloat16).copy()
     else:
         w = (1.0 + rng.standard_normal(N) * 0.1).astype(np.float32).astype(bfloat16)

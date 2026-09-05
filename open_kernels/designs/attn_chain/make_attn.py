@@ -6,8 +6,13 @@ KV cache = the captured C:/caps/m0c/000902.bo (11 prefill rows).
 Reference: fp64 mirror of decode_step.py attn_decode with the kernels' bf16
 roundings (xn, k'/v' cache rows, og). Run from tools/kernel-interp (model).
 
-    cd tools/kernel-interp && python .../attn_chain/make_attn.py
-    open-qwen-npu npu designs/attn_chain/run.cfg ; python compare_attn.py
+    PHLEGM_KERNEL_INTERP=<phlegm>/tools/kernel-interp MODEL_Q4NX=<model_3LiF.q4nx> \
+    OPEN_KERNELS_CAPS=<captures> python make_attn.py
+    run_kernel run.cfg ; python compare_attn.py
+
+This is phlegm's step-by-step chain harness (it imports phlegm's kernel-interp);
+the in-repo successor is open_kernels/model/. Paths in run.cfg are relative to
+this directory.
 """
 from __future__ import annotations
 
@@ -18,20 +23,23 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-KI = Path("/mnt/c/code/phlegm/tools/kernel-interp")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
+
+KI = FX.kernel_interp()
 sys.path.insert(0, str(KI))
-os.environ.setdefault("MODEL_Q4NX", "/mnt/c/Users/josha/.flm/models/Qwen3.6-35B-A3B-NPU2/model_3LiF.q4nx")
+os.environ["MODEL_Q4NX"] = FX.model_q4nx()
 os.chdir(KI)
 import decode_step as DS  # noqa: E402
 from q4nx import bf16_to_f32  # noqa: E402
 
-CAP = Path("/mnt/c/caps/m0c")
-POOL2 = Path("/mnt/c/caps/m0d/000123.bo")
-PACK2 = Path("/mnt/c/caps/m0d/000124.bo")
-SIDE2 = Path("/mnt/c/caps/m0d/000125.bo")
-D = "C:/code/phlegm/tools/open-kernels/designs"
-OUT = f"{D}/attn_chain"
+CAP = FX.caps("m0c/000902.bo").parent
+POOL2 = FX.caps("m0d/000123.bo")
+PACK2 = FX.caps("m0d/000124.bo")
+SIDE2 = FX.caps("m0d/000125.bo")
+D = ".."                                   # designs/, relative to this cfg
+OUT = "."
 TOK, POS, LAYER = 248068, 11, 2
 NH, KVH, HD = 16, 2, 256
 

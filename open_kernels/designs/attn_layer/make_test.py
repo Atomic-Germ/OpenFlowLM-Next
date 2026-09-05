@@ -1,8 +1,9 @@
 r"""Test vectors for attn_l from designs/attn_chain's layer-2 inputs and references
 (position 11 of the captured 3LiF decode step; no model needed, runs on Windows).
-The weight arg is the captured layer-2 pool itself (C:/caps/m0d/000123.bo).
+The weight arg is the captured layer-2 pool itself ($OPEN_KERNELS_CAPS/m0d/000123.bo).
+Paths in run.cfg are relative to this directory.
 
-    python make_test.py ; open-qwen-npu npu designs/attn_layer/run.cfg ; python compare.py
+    python make_test.py ; run_kernel run.cfg ; python compare.py
 (build: ATTN_POS=11 python build_design.py designs/attn_layer/attn_l.py designs/attn_layer/build_pos11)
 """
 from __future__ import annotations
@@ -12,13 +13,14 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 AC = HERE.parent / "attn_chain"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
 from layout import AA_BYTES, CA_BYTES, CA_LNW, CA_META, CA_POSTLN, KV_BYTES  # noqa: E402
 
-D = "C:/code/phlegm/tools/open-kernels/designs"
-POOL = "C:/caps/m0d/000123.bo"
+D = ".."                                   # designs/, relative to this cfg
 
 
 def main() -> int:
@@ -29,18 +31,17 @@ def main() -> int:
     (HERE / "consts.bin").write_bytes(consts.tobytes())
     for n in ("ref_knew", "ref_vnew", "ref_og", "ref_xres", "ref_xm", "ref_xres_replica"):
         (HERE / f"{n}.bin").write_bytes((AC / f"{n}.bin").read_bytes())
-    d = f"{D}/attn_layer"
     cfg = [
         "device",
-        f"xclbin A {d}/build_pos11/final.xclbin", f"kernelx al A {d}/build_pos11/insts.bin",
-        f"buf pool 536870912 {POOL}",
+        "xclbin A build_pos11/final.xclbin", "kernelx al A build_pos11/insts.bin",
+        f"buf pool 536870912 {FX.caps_cfg('m0d/000123.bo')}",
         f"buf xres 8192 {D}/attn_chain/xres.bin",
-        f"buf consts {CA_BYTES} {d}/consts.bin",
+        f"buf consts {CA_BYTES} consts.bin",
         f"buf kv {KV_BYTES} {D}/attn_chain/kv.bin",
         f"buf act {AA_BYTES}", "buf hdr 20480",
         "run al pool xres consts kv act hdr",
-        f"dump act {d}/y_act.bin {AA_BYTES}",
-        f"dump hdr {d}/y_hdr.bin 20480",
+        f"dump act y_act.bin {AA_BYTES}",
+        "dump hdr y_hdr.bin 20480",
         "run al pool xres consts kv act hdr",
         "run al pool xres consts kv act hdr",
         "",

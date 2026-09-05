@@ -39,8 +39,11 @@ program that uses them.
 ## Build
 
 - **Windows (MSVC):** `build.cmd` → `out\run_kernel.exe`. Needs XRT headers and
-  an import lib for `xrt_coreutil.dll`; set `XRT_INCLUDE_DIR` / `XRT_LIB_DIR`
-  (defaults point at a phlegm checkout, which has both — see the script).
+  an import lib for `xrt_coreutil.dll`, neither of which ships here: set
+  `XRT_INCLUDE_DIR` (a Xilinx/XRT checkout's `src/runtime_src/core/include`)
+  and `XRT_LIB_DIR` (the directory holding `xrt_coreutil.lib`, made from the
+  system DLL — `src/WinSetup.md`); the script stops with that message if
+  either is unset.
 - **Linux:** `cmake -S . -B build && cmake --build build` with XRT at
   `$XILINX_XRT` or `/opt/xilinx/xrt`. Or `-DFLM_BUILD_OPEN_KERNELS_HARNESS=ON`
   from `src/`.
@@ -58,6 +61,14 @@ GEMV_N=8192 GEMV_K=2048 GEMV_RS=2 GEMV_CORES=8 \
 # Windows (NPU), from the design dir:
 ..\..\harness\out\run_kernel.exe run.cfg && python compare.py
 ```
+
+Generated cfgs name every path relative to the design directory, so the same
+`run.cfg` works from WSL and from Windows. Fixtures that slice weights out of
+captured FLM buffers (`router`, `dn_glue`, `dn_post`, `moe_combine`,
+`deltanet`, the fused-layer tests) read them from `$OPEN_KERNELS_CAPS` and say
+so when it is unset — see `../fixture_paths.py`. The six kernel sets the
+engine loads are built by `../export_qwen36_kernels.py`
+(`src/open_qwen36/README.md`).
 
 `bench.py <cfg> --driver <exe...> [--driver ...]` runs a cfg through one or more
 drivers and prints min / median / max per kernel.

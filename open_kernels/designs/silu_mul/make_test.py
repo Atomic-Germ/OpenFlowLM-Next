@@ -1,4 +1,5 @@
-"""Test vectors for silu_mul: random g/u (fp32[512]); fp64 reference h = bf16(silu(g)*u)."""
+"""Test vectors for silu_mul: random g/u (fp32[512]); fp64 reference h = bf16(silu(g)*u).
+No captured buffers needed. Paths in run.cfg are relative to this directory."""
 from __future__ import annotations
 
 import sys
@@ -7,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 N = 512
 
 
@@ -20,17 +21,16 @@ def main() -> int:
     (HERE / "g.bin").write_bytes(g.tobytes())
     (HERE / "u.bin").write_bytes(u.tobytes())
     (HERE / "ref_h.bin").write_bytes(h.tobytes())
-    d = "C:/code/phlegm/tools/open-kernels/designs/silu_mul"
     cfg = "\n".join([
         "device",
-        f"xclbin G {d}/build/final.xclbin",
-        f"kernelx k G {d}/build/insts.bin",
-        f"buf g {g.nbytes} {d}/g.bin",
-        f"buf u {u.nbytes} {d}/u.bin",
+        "xclbin G build/final.xclbin",
+        "kernelx k G build/insts.bin",
+        f"buf g {g.nbytes} g.bin",
+        f"buf u {u.nbytes} u.bin",
         f"buf h {h.nbytes}",
         "run k g u h",
         "run k g u h",
-        f"dump h {d}/y_h.bin {h.nbytes}",
+        f"dump h y_h.bin {h.nbytes}",
         "",
     ])
     (HERE / "run.cfg").write_text(cfg, newline="\n")

@@ -28,11 +28,14 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-HERE = Path(__file__).parent
-KI = Path("/mnt/c/code/phlegm/tools/kernel-interp")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402  (PHLEGM_KERNEL_INTERP, MODEL_Q4NX, OPEN_KERNELS_POOLS_27B)
+
+KI = FX.kernel_interp()                    # phlegm's chain harness; in-repo successor: open_kernels/model/
 sys.path.insert(0, str(KI))
-MODEL_DIR = "/mnt/c/Users/josha/.flm/models/Qwen3.6-27B-A2.8B-open"
-os.environ.setdefault("MODEL_Q4NX", f"{MODEL_DIR}/model.q4nx")
+os.environ["MODEL_Q4NX"] = FX.model_q4nx()          # the pruned 27B's model.q4nx
+MODEL_DIR = str(Path(os.environ["MODEL_Q4NX"]).parent)
 os.chdir(KI)
 import decode_step as DS  # noqa: E402
 import build_pools as BP  # noqa: E402
@@ -51,9 +54,9 @@ LL = _load("lin_layout", HERE.parent / "lin_layer" / "layout.py")      # lin_a /
 AL = _load("attn_layout", HERE.parent / "attn_layer" / "layout.py")    # attn_l byte layouts
 XL = _load("x_layout", HERE.parent / "layer_x" / "layout.py")          # lx / ax (whole-layer) byte layouts
 
-D = "C:/code/phlegm/tools/open-kernels/designs"
-OUT = f"{D}/decode_chain/w27"
-POOLS = "C:/code/FastFlowLM/npu-engine/m3out/l30_27b"      # `open-qwen-npu l30-build` output (pools.rs layout)
+D = ".."                                   # designs/, relative to this cfg (decode_chain/)
+OUT = "w27"
+POOLS = FX.env_dir("OPEN_KERNELS_POOLS_27B", "`open-qwen-npu l30-build` output dir (pool_L*.bin, pools.rs layout)")
 WDIR = HERE / "w27"
 S = 163_840
 NE = 8

@@ -10,7 +10,10 @@ out projection, router W and sgw are in consts. References: layer_chain's fp64
 replica (xn, xres after attention, xm, S, conv state), moe_chain's routing and
 block output (the layer output).
 
-    python make_test.py ; open-qwen-npu npu designs/layer_x/run.cfg ; python compare.py
+    python make_test.py ; run_kernel run.cfg ; python compare.py
+
+The pool is the captured layer-0 pool ($OPEN_KERNELS_CAPS/m0d/blob_536870912_*.bin);
+paths in run.cfg are relative to this directory.
 """
 from __future__ import annotations
 
@@ -19,15 +22,16 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 LC = HERE.parent / "layer_chain"
 MC = HERE.parent / "moe_chain"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parents[1]))
+import fixture_paths as FX  # noqa: E402
 from layout import (A_BYTES, A_ROUT, C_BYTES, C_LNW, C_NW, C_POSTLN, C_RW, C_SGW, C_SIDE, C_WOUT,  # noqa: E402
                     GLUE_SIDE_BYTES, POOL_BYTES, S_HEAD_BYTES, STATE_BYTES, STATE_S_OFF)
 
-D = "C:/code/phlegm/tools/open-kernels/designs"
-POOL = "C:/caps/m0d/blob_536870912_836fd8e49f35a0b6.bin"
+POOL_CAP = "m0d/blob_536870912_836fd8e49f35a0b6.bin"
 
 
 def main() -> int:
@@ -55,26 +59,25 @@ def main() -> int:
         (HERE / f"{n}.bin").write_bytes((LC / f"{n}.bin").read_bytes())
     (HERE / "ref_out.bin").write_bytes((MC / "ref_out.bin").read_bytes())
     (HERE / "ref_rout.bin").write_bytes((MC / "y_rout.bin").read_bytes())
-    d = f"{D}/layer_x"
     runs = [
         "run lx0 pool xres consts state act",
         f"moeroute2 lx1 act {A_ROUT + 1024}",
         "run lx1 pool xres consts state act",
     ]
-    reload = [f"load xres {d}/xres.bin", f"load state {d}/state.bin"]
+    reload = ["load xres xres.bin", "load state state.bin"]
     cfg = [
         "device",
-        f"xclbin X {d}/build_lx0/final.xclbin",
-        f"kernelx lx0 X {d}/build_lx0/insts.bin", f"kernelx lx1 X {d}/build_lx1/insts.bin",
-        f"buf pool {POOL_BYTES} {POOL}",
-        f"buf xres 8192 {d}/xres.bin",
-        f"buf consts {C_BYTES} {d}/consts.bin",
-        f"buf state {STATE_BYTES} {d}/state.bin",
+        "xclbin X build_lx0/final.xclbin",
+        "kernelx lx0 X build_lx0/insts.bin", "kernelx lx1 X build_lx1/insts.bin",
+        f"buf pool {POOL_BYTES} {FX.caps_cfg(POOL_CAP)}",
+        "buf xres 8192 xres.bin",
+        f"buf consts {C_BYTES} consts.bin",
+        f"buf state {STATE_BYTES} state.bin",
         f"buf act {A_BYTES}",
         *runs,
-        f"dump act {d}/y_act.bin {A_BYTES}",
-        f"dump xres {d}/y_xres.bin 8192",
-        f"dump state {d}/y_state.bin {STATE_BYTES}",
+        f"dump act y_act.bin {A_BYTES}",
+        "dump xres y_xres.bin 8192",
+        f"dump state y_state.bin {STATE_BYTES}",
         *reload, *runs, *reload, *runs,
         "",
     ]
