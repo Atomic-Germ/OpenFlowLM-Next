@@ -710,7 +710,7 @@ if(WIN32)
     # src/lib/<backend>/ and are load-time imports, so without them the process
     # dies at 0xC0000135 (DLL not found) BEFORE main(), printing nothing.
     # Windows then falls through to the next PATH entry -- which on a machine
-    # with FastFlowLM installed is C:\Program Fileslmlm.exe. So
+    # with FastFlowLM installed is C:/Program Files/flm/flm.exe. So
     # `flm.exe serve ... --embeddingmodel x` run from the build directory
     # reports "unrecognised option", from a completely different binary than
     # the one you just built. The symptom names a flag; the cause is a
@@ -719,6 +719,30 @@ if(WIN32)
     # Both destinations are gitignored build trees, so this copies nothing
     # into the repository and redistributes nothing: it puts the files this
     # checkout already has next to the executable that needs them.
+
+    # AND THE MODEL CATALOGUE, for the same reason. utils.cpp looks for
+    # model_list.json next to the executable (after FLM_CONFIG_PATH), and
+    # nothing put one there, so a freshly built flm.exe stops at
+    #
+    #   model_list.json not found. Please set FLM_CONFIG_PATH or place it
+    #   next to the executable.
+    #
+    # before it can do anything at all. copy_if_different rather than a
+    # configure-time copy, so editing the catalogue -- which adding a model
+    # means doing -- takes effect on the next build instead of the next
+    # configure.
+    add_custom_command(TARGET flm POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/model_list.json
+            ${CMAKE_SOURCE_DIR}/model_info.json
+            $<TARGET_FILE_DIR:flm>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/model_list.json
+            ${CMAKE_SOURCE_DIR}/model_info.json
+            ${CMAKE_SOURCE_DIR}/out
+        COMMENT "Copying model_list.json / model_info.json beside flm.exe"
+    )
+
     file(GLOB FLM_RUNTIME_DLLS "${CMAKE_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
     if(FLM_RUNTIME_DLLS)
         add_custom_command(TARGET flm POST_BUILD
