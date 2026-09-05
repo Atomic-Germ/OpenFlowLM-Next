@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "The design families, and the ONLY place their flags are written down.",
+    "",
+    "build.ps1 builds from this file and check_design_sets.py verifies the",
+    "built sets against it, so there is no second copy to drift. It used to be",
+    "five pasteable commands in README.md, which cost three separate people a",
+    "session: a <dst> placeholder PowerShell rejects as a reserved operator, a",
+    "$dst variable it silently expands to nothing (building to the DRIVE ROOT),",
+    "and two pasted in parallel, which corrupt each other's cache entries.",
+    "",
+    "EVERY FLAG IS LOAD-BEARING. A set is selected at load time by hidden,",
+    "intermediate, gated_ffn AND the datapath, so a set built with the wrong",
+    "flags is not a slower design -- it is one the wrong model loads, or none.",
+    "Both directions of that have already shipped wrong once."
+  ],
+
+  "common": ["--batches", "4,16,32,128", "--tg-depth", "2", "--tb-rows", "4"],
+  "_common_note": [
+    "--tg-depth 2 software-pipelines the runtime sequence's task groups: worth",
+    "1.034-1.141x of array time, bit-identical. --tg-depth 3 compiles clean and",
+    "then TIMES OUT on hardware, reproducibly. 2 is the maximum that runs.",
+    "",
+    "Four batch tiers, because use_tier() picks the smallest that fits and",
+    "falls back to the largest. A single tier pads every request to batch 128:",
+    "measured at 18.3x on a single text, with the four-tier design",
+    "bit-identical. Upstream's bge-large still ships one tier -- see T66."
+  ],
+
+  "families": [
+    {
+      "name": "BERT-h384-bfp16",
+      "serves": ["all-minilm:l6-v2"],
+      "note": "",
+      "args": ["--hidden", "384", "--intermediate", "1536", "--qkv-n", "1152",
+               "--emulate-bfp16", "--c-bf16", "-n", "48"]
+    },
+    {
+      "name": "BERT-h384-bf16",
+      "serves": ["bge-small:en-v1.5"],
+      "note": "THE ONE FAMILY WITH NEITHER --emulate-bfp16 NOR --c-bf16. bge-small failed the bfp16 MTEB gate at -0.5010 bit-reproducibly, so it stays on the plain datapath, and its C stays fp32. Adding --c-bf16 here builds a design that loads and is not the one that passed the gates -- which shipped once.",
+      "args": ["--hidden", "384", "--intermediate", "1536", "--qkv-n", "1152",
+               "-n", "48"]
+    },
+    {
+      "name": "BERT-h768-bfp16",
+      "serves": ["bge-base:en-v1.5"],
+      "note": "",
+      "args": ["--hidden", "768", "--intermediate", "3072", "--qkv-n", "2304",
+               "--emulate-bfp16", "--c-bf16", "-n", "48"]
+    },
+    {
+      "name": "BERT-h768-gated-bfp16",
+      "serves": ["nomic-embed-text:v1.5", "gte-multilingual:base"],
+      "note": "One set for two models: their GEMM geometry matches bit for bit. Note also that qkv and attn_out here are IDENTICAL to BERT-h768-bfp16's -- neither depends on --gated-ffn or --intermediate -- so these two families share 8 of their 16 cache markers and must never be built concurrently.",
+      "args": ["--hidden", "768", "--intermediate", "3072", "--qkv-n", "2304",
+               "--gated-ffn", "--emulate-bfp16", "--c-bf16", "-n", "48"]
+    },
+    {
+      "name": "BERT-h1024-bfp16",
+      "serves": ["bge-large:en-v1.5"],
+      "note": "-n 32, not 48: the design asserts N % (tile_n * n_cols) == 0 and bge-large's N is in {1024, 3072, 4096}. 64 divides them but needs 65,536 B of a 63 KB L1 budget.",
+      "args": ["--hidden", "1024", "--intermediate", "4096", "--qkv-n", "3072",
+               "--emulate-bfp16", "--c-bf16", "-n", "32"]
+    }
+  ]
+}

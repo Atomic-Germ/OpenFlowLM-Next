@@ -17,6 +17,9 @@ it.
 | `export_gemm_rtp.py` | the driver — builds every (shape, tier) stream against one xclbin and writes the design set |
 | `npue.py` | the container format, for `gemm_b_layout()` / `layout_hash()` and the B-tiling the packer must match |
 | `toolchain_provenance.py` | writes `toolchain.json` beside the design |
+| `families.json` | the five design families and their flags — the ONLY place those are written down |
+| `build.ps1` | builds all five in order, skipping what is already built, then checks them |
+| `check_design_sets.py` | checks the built sets against `families.json` |
 
 And **three AIE kernel sources**, one directory over, at
 `npu_offload/m5-eltwise/kernels/` — the path `gemm_pretiled.py` computes for
@@ -35,7 +38,8 @@ always matches the compiler that builds it.
 **Where the authoritative commands are.** These five build the sets THIS
 repository serves. Upstream builds six (it has an EmbeddingGemma set this fork
 does not use) and keeps them in `tools/export_shipped_designs.ps1`, checked by
-`tools/check_design_sets.py` -- the same discipline as `check_readme.py` here.
+`tools/check_design_sets.py` -- the same discipline, and the same file name,
+as the one here.
 The two command lists differ in destination and in that one extra set; the
 flags per geometry are the same, and both repositories check their own list
 against their own artifacts. If they ever disagree on a flag, upstream is the
@@ -71,103 +75,56 @@ cd C:\dev\mlir-aie; . .\iron_env.ps1        # MUST be dot-sourced
 cd <repo>; .\npu_offload\gemm_rtp\build.ps1
 ```
 
-That is the whole thing: five families, in order, ~20 minutes, skipping any
-that are already built (`-Force` to rebuild, `-Only <name>` for one). It ends
-by running `check_readme.py`, so a green run means the sets exist **and** match
-what this file says builds them.
+That is the whole thing. Five families in order, ~20 minutes, skipping any that
+are already built. `-Force` rebuilds, `-Only <name>` does one, `-Dst <dir>`
+builds elsewhere. It checks the IRON toolchain is on the path *before* spending
+four minutes discovering it is not, and it ends by running
+`check_design_sets.py`, so a green run means the sets exist **and** match the
+flags they were supposed to be built with.
 
-Use it rather than pasting the commands below. Three ways of getting the paste
-wrong have already happened to real people: a `<dst>` placeholder that
-PowerShell rejects as a reserved operator before mentioning the placeholder;
-copying the shell's own `>>` continuation prompts along with the text, which it
-then reads as a redirect; and running two in parallel, which corrupts both.
+**There are deliberately no commands to copy in this file.** Every one of the
+three ways to get them wrong has now cost somebody a session:
 
-The commands are documented anyway, because a build script that nobody can read
-is the same problem one layer down.
+| what was pasted | what happened |
+|---|---|
+| `--out <dst>/BERT-...` | PowerShell rejects `<` as a reserved operator *during parsing* — `The '<' operator is reserved for future use`, naming neither the placeholder nor the substitution that was forgotten |
+| `--out $dst\BERT-...` | PowerShell does **not** error on an undefined variable, it expands it to nothing — so this became `--out \BERT-...` and built to the **drive root**. Successfully. Four times. |
+| two families at once | `purge()` deletes matching entries from the shared `~/.npu/cache` on content markers, and `qkv`/`attn_out` depend on neither `--gated-ffn` nor `--intermediate`, so the two hidden-768 families own identical markers for 8 of their 16 entries and each deletes the other's builds |
 
-## Rebuilding a design family
+The third now refuses in under a second (`export_gemm_rtp.py` holds a lock);
+the first two are gone because the commands are.
 
-**Every flag below is load-bearing.** A design set is selected at load time by
-`hidden`, `intermediate`, `gated_ffn` **and the datapath** — the runtime refuses
-a mismatched pair rather than reading it as garbage — so a set built with the
-wrong flags is not a slower design, it is one no model will load.
+## The families, and what makes each one different
 
-The flag that is easiest to forget is `--c-bf16`, which narrows C to bf16 on
-the core. Omitting it builds a design that is correct, complete and identical
-in every other respect -- and that the four models wanting bf16 C will refuse
-to load. **But `BERT-h384-bf16` is supposed to omit it**: bge-small runs with C
-as fp32, and adding the flag there is the same mistake in the other direction.
-Neither is a slower design; each is one the wrong model loads or no model
-loads. `check_readme.py` below is what keeps the two straight.
+The flags live in **`families.json`**, which is the only place they are written
+down: `build.ps1` builds from it and `check_design_sets.py` verifies the built
+sets against it, so there is no second copy to drift. This table is prose about
+that file, not a second source.
 
-**Run these ONE AT A TIME.** Not a style preference: `purge()` deletes matching
-entries from the **shared** `~/.npu/cache`, and it matches on content markers --
-`M*K`, `K*N`, `M*N` and the dtypes. `qkv` and `attn_out` depend on neither
-`--gated-ffn` nor `--intermediate`, so `BERT-h768-bfp16` and
-`BERT-h768-gated-bfp16` carry **identical markers for 8 of their 16 entries**,
-and run together each deletes the other's freshly built xclbins. The symptom
-arrives minutes later as a `FileNotFoundError` on a cache hash that tells the
-reader nothing.
+| family | serves | hidden / ffn | gated | datapath | `tile_n` |
+|---|---|---|---|---|---|
+| `BERT-h384-bfp16` | all-minilm:l6-v2 | 384 / 1536 | no | bfp16, C bf16 | 48 |
+| `BERT-h384-bf16` | bge-small:en-v1.5 | 384 / 1536 | no | **plain bf16, C fp32** | 48 |
+| `BERT-h768-bfp16` | bge-base:en-v1.5 | 768 / 3072 | no | bfp16, C bf16 | 48 |
+| `BERT-h768-gated-bfp16` | nomic-embed-text:v1.5 **and** gte-multilingual:base | 768 / 3072 | **yes** | bfp16, C bf16 | 48 |
+| `BERT-h1024-bfp16` | bge-large:en-v1.5 | 1024 / 4096 | no | bfp16, C bf16 | **32** |
 
-`export_gemm_rtp.py` takes a lock and refuses in under a second, naming the
-other process. If a previous run was killed the lock is stale: `--force-unlock`.
+**Every one of those columns is load-bearing.** A set is selected at load time
+by `hidden`, `intermediate`, `gated_ffn` *and* the datapath, so a set built
+with the wrong flags is not a slower design — it is one the wrong model loads,
+or none does. Three of the rows are worth reading twice:
 
-The paths below are **literal and relative to this directory**, with no
-placeholder and no variable. Both alternatives have already cost someone a
-session:
-
-* `<dst>` -- PowerShell rejects `<` as a reserved operator during parsing, so
-  the command dies with `The '<' operator is reserved for future use`, naming
-  neither the placeholder nor the substitution that was forgotten.
-* `$dst` -- PowerShell does **not** error on an undefined variable, it expands
-  it to nothing. In a shell where `$dst` was never set, `--out $dst\BERT-...`
-  becomes `--out \BERT-...`, which resolves to the **drive root**. It builds
-  fine, takes three minutes, and puts the design set somewhere nothing will
-  ever look for it. That is worse than the placeholder, which at least failed.
-
-```powershell
-# hidden 384, plain FFN, bfp16  ->  all-minilm:l6-v2
-python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
-    --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h384-bfp16
-
-# hidden 384, plain FFN, PLAIN bf16  ->  bge-small:en-v1.5
-#   bge-small is the one model that stayed on the unemulated datapath: it
-#   failed upstream's MTEB gate on bfp16, bit-reproducibly. It is ALSO the one
-#   family with no --c-bf16: C stays fp32. Note that BOTH flags are missing,
-#   and that this command therefore differs from the other four in two places,
-#   not one.
-python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
-    -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h384-bf16
-
-# hidden 768, plain FFN, bfp16  ->  bge-base:en-v1.5
-python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
-    --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h768-bfp16
-
-# hidden 768, GATED FFN, bfp16  ->  nomic-embed-text:v1.5 AND gte-multilingual:base
-python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
-    --gated-ffn --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h768-gated-bfp16
-
-# hidden 1024, plain FFN, bfp16, TILE 32  ->  bge-large:en-v1.5
-#   -n 32, not 48: the design asserts N % (tile_n * n_cols) == 0 and
-#   bge-large's N is in {1024, 3072, 4096}, so 48 is illegal. 64 divides them
-#   but needs 65,536 B of a 63 KB L1 budget, so 32 it is.
-#   Four tiers, where the upstream artifact ships ONE. That is a deliberate
-#   divergence and it is measured: see "bge-large and its batch tiers" below.
-python export_gemm_rtp.py --hidden 1024 --intermediate 4096 --qkv-n 3072 `
-    --emulate-bfp16 --c-bf16 -n 32 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h1024-bfp16
-```
-
-About three minutes per family on a Ryzen AI 9 HX 370.
-
-`--tg-depth 2` software-pipelines the runtime sequence's task groups and is
-worth 1.034–1.141× of array time, bit-identical. **`--tg-depth 3` compiles
-clean and then times out on hardware**, reproducibly — 2 is the maximum that
-runs.
+* **`BERT-h384-bf16` is the only family with neither `--emulate-bfp16` nor
+  `--c-bf16`.** bge-small failed the bfp16 MTEB gate at −0.5010,
+  bit-reproducibly, so it stays on the plain datapath — and its C stays fp32.
+  This README once documented it *with* `--c-bf16`, which builds a design that
+  loads happily and is not the one that passed the gates.
+* **`BERT-h1024-bfp16` uses `tile_n` 32, not 48.** The design asserts
+  `N % (tile_n * n_cols) == 0` and bge-large's N is in {1024, 3072, 4096}. 64
+  divides them but needs 65,536 B of a 63 KB L1 budget.
+* **`BERT-h768-bfp16` and `BERT-h768-gated-bfp16` share their `qkv` and
+  `attn_out` shapes exactly** — neither depends on `--gated-ffn` or
+  `--intermediate` — which is why they must never be built concurrently.
 
 ## Is the source really the source?
 
@@ -232,21 +189,21 @@ Hence four tiers here. Upstream still ships one, because replacing a shipped
 artifact there means re-running the whole release sweep; it is filed as
 [T66](https://github.com/vegardberget/NpuEmbeddings/blob/main/research/OPEN-THREADS.md).
 
-## Check the README against what it builds
+## Checking the sets against their spec
 
-    python check_readme.py
+```powershell
+python check_design_sets.py
+```
 
-The design sets are not in git, so this README is not documentation about the
-artifacts — it **is** the artifacts. A wrong flag here does not fail to build,
-it builds something else. `check_readme.py` derives the `design.json` each
-command must produce and compares, eleven fields per family, non-zero exit on
-disagreement.
+`build.ps1` runs this at the end, and it is worth running alone after editing
+`families.json`. It reads that file, derives the `design.json` each family must
+produce, and compares eleven fields per set; non-zero exit on any disagreement.
 
-It exists because two commands here were wrong, and neither was visible from a
-successful build: `BERT-h384-bf16` was documented with `--c-bf16` against a
-shipped set with `c_dtype: f32` (putting the one model held back from the
-aggressive datapath on a narrower accumulator than it was validated for), and
-`BERT-h1024-bfp16` was documented with four batch tiers against a set with one.
+It used to parse this README, which was a *transcript* of the commands rather
+than the commands themselves — the same prose-versus-artifact gap one level up,
+and the gap both shipped defects came through. Verified in both directions
+rather than assumed: give `BERT-h384-bf16` a `--c-bf16` in `families.json` and
+it fails with *"c_dtype: families.json says 'bf16', design.json says 'f32'"*.
 
 ## What is not here yet
 

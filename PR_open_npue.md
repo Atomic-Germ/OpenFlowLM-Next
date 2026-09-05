@@ -511,7 +511,9 @@ exact command per design family**.
 | `export_gemm_rtp.py` | the driver: every (shape, batch tier) stream against one xclbin |
 | `npue.py` | the container format, for the B-tiling the packer must match |
 | `toolchain_provenance.py` | writes `toolchain.json` beside the design |
-| `check_readme.py` | checks this README against the design sets on disk |
+| `families.json` | the five families and their flags — the only place those are written down |
+| `build.ps1` | builds all five, skipping what is already built, then checks them |
+| `check_design_sets.py` | checks the built sets against `families.json` |
 
 plus three AIE kernel sources at `npu_offload/m5-eltwise/kernels/`, the path
 `gemm_pretiled.py` computes for them: `narrow_f32_bf16.cc` (`--c-bf16`, so four
@@ -645,12 +647,12 @@ release decision and not this PR's to take. It is filed as T66 in that
 repository's register with this table in it.
 
 Now that the sets are built rather than committed, **the README is the
-artifact**, so `check_readme.py` compares its commands against the
+artifact**, so `check_design_sets.py` compares `families.json` against the
 `design.json` each produces — eleven fields per family, non-zero exit on any
 disagreement. It catches both defects above.
 
 ```
-$ python npu_offload/gemm_rtp/check_readme.py
+$ python npu_offload/gemm_rtp/check_design_sets.py
 ok       BERT-h1024-bfp16
 ok       BERT-h384-bf16
 ok       BERT-h384-bfp16

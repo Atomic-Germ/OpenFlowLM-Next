@@ -230,7 +230,7 @@ be included by a host translation unit compiled at a different ISA level.*
 
 `src/xclbins/BERT-*/` is `.gitignore`d. Build it from `npu_offload/gemm_rtp/`,
 which has one exact command per design family and the three AIE kernel sources
-the generator compiles; `check_readme.py` there verifies the commands still
+the generator compiles; `check_design_sets.py` there verifies the flags still
 describe the sets on disk.
 
 All five families rebuild from an empty tree to **88 of 96 files
