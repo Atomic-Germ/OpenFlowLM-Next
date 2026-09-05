@@ -1,9 +1,14 @@
 @echo off
 setlocal enabledelayedexpansion
 ::
-:: Build flm from a clean CMake cache, on Windows, from a plain cmd prompt.
+:: Build flm from a clean CMake cache, on Windows.
 ::
-::   clean_build.bat [vcpkg-root]
+::   Open "x64 Native Tools Command Prompt for VS", then:
+::       clean_build.bat [vcpkg-root]
+::
+:: It does NOT set up the MSVC environment -- the Developer Command Prompt has
+:: already done that, and a script that re-derives it is liability rather than
+:: convenience. If cl, cmake or ninja are missing it says which and stops.
 ::
 :: WHY "CLEAN" IS THE WHOLE POINT. If a configure fails partway -- and on a
 :: fresh clone the first one does, see below -- CMake leaves a cache behind
@@ -21,9 +26,11 @@ setlocal enabledelayedexpansion
 ::
 :: The other traps this exists to absorb:
 ::
-::   * vcvars64.bat. Without it the compile fails with "Cannot open include
-::     file: 'cstdint'", which reads as a broken checkout rather than a shell
-::     that was never set up. Located via vswhere, not hardcoded.
+::   * The wrong vcpkg. Visual Studio ships its own under VC\vcpkg and sets
+::     VCPKG_ROOT to it; that tree has the toolchain file and none of the
+::     packages, so trusting the variable picks the broken one on exactly the
+::     machines that have VS. Candidates are checked for boost_program_options,
+::     not merely for vcpkg.cmake.
 ::   * sentencepiece links third_party/absl with a SYMBOLIC link, which Windows
 ::     allows only under Developer Mode or elevation. src\CMakeLists.txt makes a
 ::     junction instead -- but abseil is fetched inside that same add_subdirectory,
@@ -43,53 +50,69 @@ setlocal enabledelayedexpansion
 set "REPO=%~dp0"
 if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
 
-set "VCPKG=%~1"
-if "%VCPKG%"=="" set "VCPKG=%VCPKG_ROOT%"
-if "%VCPKG%"=="" set "VCPKG=C:\dev\vcpkg"
-if not exist "%VCPKG%\scripts\buildsystems\vcpkg.cmake" (
-    echo ERROR: no vcpkg toolchain at "%VCPKG%\scripts\buildsystems\vcpkg.cmake"
-    echo        Pass the vcpkg root as the first argument, or set VCPKG_ROOT.
+:: ---------------------------------------------------------------- vcpkg
+::
+:: DO NOT simply trust %VCPKG_ROOT%. Visual Studio ships its own vcpkg at
+:: ...\VC\vcpkg and sets VCPKG_ROOT to it, and that tree has
+:: scripts\buildsystems\vcpkg.cmake but none of the packages this build needs.
+:: Preferring the variable therefore picks the WRONG vcpkg on exactly the
+:: machines that have Visual Studio -- which is all of them.
+::
+:: So each candidate is checked for the package we actually need, not merely
+:: for the toolchain file. A vcpkg without boost_program_options fails here, at
+:: second zero, instead of as LNK1181 ten minutes into a build.
+set "VCPKG="
+if not "%~1"=="" (
+    call :try_vcpkg "%~1"
+    if not defined VCPKG (
+        echo ERROR: "%~1" is not a usable vcpkg root.
+        echo        It needs installed\x64-windows\share\boost_program_options,
+        echo        i.e. `vcpkg install boost-program-options:x64-windows`.
+        exit /b 1
+    )
+)
+if not defined VCPKG call :try_vcpkg "C:\dev\vcpkg"
+if not defined VCPKG if defined VCPKG_ROOT call :try_vcpkg "%VCPKG_ROOT%"
+if not defined VCPKG (
+    echo ERROR: no vcpkg tree found with boost_program_options installed for
+    echo        x64-windows. Looked at C:\dev\vcpkg and %%VCPKG_ROOT%%
+    echo        ^(currently "%VCPKG_ROOT%"^).
+    echo.
+    echo        Note that Visual Studio's bundled vcpkg under VC\vcpkg sets
+    echo        VCPKG_ROOT but ships none of the packages, so it will not do.
+    echo        Pass a usable root as the first argument.
     exit /b 1
 )
+echo Using vcpkg at %VCPKG%
 
-:: ---------------------------------------------------------------- MSVC
+:: ---------------------------------------------------------------- toolchain
 ::
-:: VSWHERE is set OUTSIDE the if-block on purpose. %ProgramFiles(x86)% contains
-:: a literal ')' and cmd parses a parenthesised block by scanning for the first
-:: unescaped ')', so setting it inside one closes the block early -- which
-:: showed up as a spurious "'vswhere.exe' is not recognized" while the script
-:: otherwise worked.
-set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-
-where cl.exe >nul 2>&1
-if errorlevel 1 (
-    if not exist "!VSWHERE!" (
-        echo ERROR: vswhere.exe not found, and cl.exe is not on PATH.
-        echo        Open a "Developer Command Prompt for VS" and re-run.
-        exit /b 1
-    )
-    :: Via a temp file rather than `for /f "usebackq"`. Backquoting a command
-    :: whose executable path is quoted makes cmd print
-    :: "'vswhere.exe' is not recognized" even when it resolves the path
-    :: correctly -- noise that reads like a real failure in an otherwise
-    :: working script.
-    "!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > "%TEMP%\flm_vspath.txt" 2>nul
-    set "VSPATH="
-    if exist "%TEMP%\flm_vspath.txt" set /p VSPATH=<"%TEMP%\flm_vspath.txt"
-    del "%TEMP%\flm_vspath.txt" 2>nul
-    if not exist "!VSPATH!\VC\Auxiliary\Build\vcvars64.bat" (
-        echo ERROR: no vcvars64.bat under "!VSPATH!"
-        exit /b 1
-    )
-    echo Loading MSVC environment from !VSPATH!
-    call "!VSPATH!\VC\Auxiliary\Build\vcvars64.bat" >nul
-    if errorlevel 1 ( echo ERROR: vcvars64.bat failed & exit /b 1 )
+:: RUN THIS FROM A DEVELOPER COMMAND PROMPT. It does not call vcvars64.bat and
+:: deliberately does not go looking for one: the Developer Command Prompt
+:: already puts cl, cmake and ninja on PATH, and an earlier version of this
+:: script that located and called vcvars itself was pure liability -- it bought
+:: nothing the shell does not already provide, and vcvars64.bat prints
+:: "'vswhere.exe' is not recognized" on this machine all by itself, which then
+:: looked like a fault in this script.
+::
+:: So: check, name what is missing, and stop.
+set "MISSINGTOOL="
+where cl.exe    >nul 2>&1 || set "MISSINGTOOL=!MISSINGTOOL! cl"
+where cmake.exe >nul 2>&1 || set "MISSINGTOOL=!MISSINGTOOL! cmake"
+where ninja.exe >nul 2>&1 || set "MISSINGTOOL=!MISSINGTOOL! ninja"
+if defined MISSINGTOOL (
+    echo ERROR: not on PATH:!MISSINGTOOL!
+    echo.
+    echo        Run this from "x64 Native Tools Command Prompt for VS"
+    echo        ^(Start menu, under Visual Studio^). A plain cmd will not do:
+    echo        without the MSVC environment the compile fails with
+    echo        "Cannot open include file: 'cstdint'", which reads as a broken
+    echo        checkout rather than a shell that was never set up.
+    echo.
+    echo        If ninja alone is missing, install the Visual Studio component
+    echo        "C++ CMake tools for Windows".
+    exit /b 1
 )
-
-where cmake.exe >nul 2>&1
-if errorlevel 1 ( echo ERROR: cmake.exe is not on PATH. & exit /b 1 )
-where ninja.exe >nul 2>&1
-if errorlevel 1 ( echo ERROR: ninja.exe is not on PATH ^(it ships with the VS "C++ CMake tools" component^). & exit /b 1 )
 
 :: ---------------------------------------------------------------- configure
 if exist "%REPO%\src\build" (
@@ -97,28 +120,27 @@ if exist "%REPO%\src\build" (
     rmdir /s /q "%REPO%\src\build"
 )
 
-set "CFG=-S "%REPO%\src" -B "%REPO%\src\build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 -DFLM_USE_HRX=OFF -DCMAKE_TOOLCHAIN_FILE=%VCPKG:\=/%/scripts/buildsystems/vcpkg.cmake"
+echo.
+echo === configure, pass 1 ===
+call :configure
+if not errorlevel 1 goto :configured
 
 echo.
-echo === configure (pass 1) ===
-cmake %CFG%
+echo Pass 1 failed. On a fresh clone this is expected once: sentencepiece
+echo fetches abseil-cpp during configure and only then links third_party\absl,
+echo so the junction has nothing to point at yet. Retrying now that abseil
+echo is present.
+echo.
+echo === configure, pass 2 ===
+rmdir /s /q "%REPO%\src\build" 2>nul
+call :configure
 if errorlevel 1 (
     echo.
-    echo Pass 1 failed. On a fresh clone this is expected once: sentencepiece
-    echo fetches abseil-cpp during configure and only then tries to link
-    echo third_party\absl, so the junction has nothing to point at yet.
-    echo Retrying with abseil now present.
-    echo.
-    echo === configure (pass 2) ===
-    rmdir /s /q "%REPO%\src\build" 2>nul
-    cmake %CFG%
-    if errorlevel 1 (
-        echo.
-        echo ERROR: configure failed twice. The output above is the real
-        echo        diagnostic -- this script has nothing to add to it.
-        exit /b 1
-    )
+    echo ERROR: configure failed twice. The output above is the real
+    echo        diagnostic -- this script has nothing to add to it.
+    exit /b 1
 )
+:configured
 
 :: ---------------------------------------------------------------- build
 echo.
@@ -127,9 +149,8 @@ cmake --build "%REPO%\src\build" --target flm
 if errorlevel 1 (
     echo.
     echo ERROR: build failed. If the link asks for a Boost that is not
-    echo        installed ^(e.g. libboost_program_options-vc143-mt-x64-1_88^),
-    echo        the vcpkg toolchain did not take effect -- which this script
-    echo        exists to prevent, so please report it.
+    echo        installed, the vcpkg toolchain did not take effect -- which
+    echo        this script exists to prevent, so please report it.
     exit /b 1
 )
 
@@ -164,3 +185,27 @@ if defined MISSING (
     echo All five AIE design sets are present.
 )
 endlocal
+exit /b 0
+
+:: ---------------------------------------------------------------- subroutines
+::
+:: The cmake line lives here rather than in a variable. Building it as a string
+:: means quoting quotes, and the toolchain path routinely contains spaces --
+:: which produced `Could not find toolchain file: "C:/Program"` and a warning
+:: about an "extra path from command line".
+:configure
+cmake -S "%REPO%\src" -B "%REPO%\src\build" -G Ninja ^
+    -DCMAKE_BUILD_TYPE=Release ^
+    -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 ^
+    -DFLM_USE_HRX=OFF ^
+    -DCMAKE_TOOLCHAIN_FILE="%VCPKG%\scripts\buildsystems\vcpkg.cmake"
+exit /b %errorlevel%
+
+:: Accept a vcpkg root only if it has both the toolchain file AND the package
+:: this build actually needs. Sets VCPKG on success, leaves it undefined
+:: otherwise, so the caller can fall through to the next candidate.
+:try_vcpkg
+if not exist "%~1\scripts\buildsystems\vcpkg.cmake" exit /b 0
+if not exist "%~1\installed\x64-windows\share\boost_program_options" exit /b 0
+set "VCPKG=%~1"
+exit /b 0
