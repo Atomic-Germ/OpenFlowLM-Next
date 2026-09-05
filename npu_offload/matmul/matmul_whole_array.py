@@ -1,5 +1,7 @@
-# Whole-array bf16 matmul for NPU2, adapted from mlir-aie v1.3.4
-# programming_examples/basic/matrix_multiplication/whole_array/whole_array.py.
+# Whole-array bf16 matmul for NPU2, adapted from mlir-aie
+# programming_examples/basic/matrix_multiplication/whole_array/whole_array.py
+# (originally v1.3.4; the runtime sequence uses the 1.4.2 IRON API — free-standing
+# TaskGroup, fill/drain on the fifo handles, workers passed to Program).
 
 import argparse
 import sys
@@ -7,7 +9,7 @@ import sys
 import numpy as np
 
 import aie.iron as iron
-from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker, kernels
+from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import from_name
 from aie.helpers.taplib import TensorTiler2D
@@ -174,11 +176,13 @@ def whole_array_bf16(
         prune_step=False,
     )
 
-    c_index = 0
-    rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A_arg, B_arg, C_arg):
-        rt.start(*[worker for row in workers for worker in row])
-        tg = rt.task_group()
+    A_prods = [f.prod() for f in A_l3l2]
+    B_prods = [f.prod() for f in B_l3l2]
+    C_conses = [f.cons() for f in C_l2l3]
+
+    def sequence(A_arg, B_arg, C_arg, A_hs, B_hs, C_hs):
+        c_index = 0
+        tg = TaskGroup()
         for transfer_block in range(iron.ceildiv(M // m // n_aie_rows, 4)):
             for pingpong in (0, 1):
                 if c_index >= len(C_tiles):
@@ -186,37 +190,23 @@ def whole_array_bf16(
                 row_base = transfer_block * 4 + pingpong * 2
                 current_rows = min(2, M // m // n_aie_rows - row_base)
                 for col in range(n_aie_cols):
-                    rt.drain(
-                        C_l2l3[col].cons(),
-                        C_arg,
-                        tap=C_tiles[c_index],
-                        wait=True,
-                        task_group=tg,
-                    )
+                    C_hs[col].drain(C_arg, tap=C_tiles[c_index], wait=True, group=tg)
                     c_index += 1
                     for tile_row in range(current_rows):
                         tile_offset = (
                             (row_base + tile_row) * n_shim_mem_a + col
                         ) % len(A_tiles)
                         if col < n_aie_rows:
-                            rt.fill(
-                                A_l3l2[col].prod(),
-                                A_arg,
-                                tap=A_tiles[tile_offset],
-                                task_group=tg,
-                            )
-                        rt.fill(
-                            B_l3l2[col].prod(),
-                            B_arg,
-                            tap=B_tiles[col],
-                            task_group=tg,
-                        )
+                            A_hs[col].fill(A_arg, tap=A_tiles[tile_offset], group=tg)
+                        B_hs[col].fill(B_arg, tap=B_tiles[col], group=tg)
                 if transfer_block > 0 or pingpong > 0:
-                    rt.finish_task_group(tg)
-                    tg = rt.task_group()
-        rt.finish_task_group(tg)
+                    tg.finish()
+                    tg = TaskGroup()
+        tg.finish()
 
-    return Program(iron.get_current_device(), rt).resolve_program()
+    rt = Runtime(sequence, [A_ty, B_ty, C_ty, A_prods, B_prods, C_conses])
+    flat_workers = [worker for row in workers for worker in row]
+    return Program(iron.get_current_device(), rt, workers=flat_workers).resolve_program()
 
 
 def _compile_kwargs(opts):

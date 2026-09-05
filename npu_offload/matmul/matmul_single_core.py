@@ -1,6 +1,6 @@
 # single-core matmul (ported from Xilinx/mlir-aie
 # programming_examples/getting_started/03_matrix_multiplication_single_core)
-# adapted to the installed iron Runtime API (rt.sequence context manager).
+# adapted to the mlir-aie 1.4.2 IRON runtime API (TaskGroup, fill/drain on fifo handles).
 # Uses kernels.mm() (mm.cc) with DMA layout taps (r,s,t sub-tile streaming).
 
 import argparse
@@ -26,6 +26,7 @@ from aie.utils.hostruntime.argparse import (
     add_compile_args,
 )
 from aie.utils.hostruntime.cli import run_design_cli
+from aie.iron import TaskGroup
 from aie.utils.verify import assert_pass
 
 _TILE_M = _TILE_K = _TILE_N = 64
@@ -116,17 +117,16 @@ def matrix_multiplication_single_core(
     )[0]
     c_taps = TensorTiler2D.group_tiler((M, N), (m, n), (1, N // n))
 
-    rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
-        rt.start(worker)
+    def sequence(A, B, C, pa, pb, pc):
         for tile_row in range(M // m):
-            tg = rt.task_group()
-            rt.fill(fifo_A_L3L2.prod(), A, tap=a_taps[tile_row], task_group=tg)
-            rt.fill(fifo_B_L3L2.prod(), B, tap=b_tap, task_group=tg)
-            rt.drain(fifo_C_L2L3.cons(), C, tap=c_taps[tile_row], task_group=tg, wait=True)
-            rt.finish_task_group(tg)
+            tg = TaskGroup()
+            pa.fill(A, tap=a_taps[tile_row], group=tg)
+            pb.fill(B, tap=b_tap, group=tg)
+            pc.drain(C, tap=c_taps[tile_row], wait=True, group=tg)
+            tg.finish()
 
-    return Program(iron.get_current_device(), rt).resolve_program()
+    rt = Runtime(sequence, [A_ty, B_ty, C_ty, fifo_A_L3L2.prod(), fifo_B_L3L2.prod(), fifo_C_L2L3.cons()])
+    return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
 
 
 def _compile_kwargs(opts):

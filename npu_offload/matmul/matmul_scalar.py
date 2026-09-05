@@ -61,14 +61,13 @@ def matmul_bf16(a_in: In, b_in: In, c_out: Out):
 
     my_worker = Worker(core_fn, [of_a.cons(), of_b.cons(), of_c.prod(), mm_fn])
 
-    rt = Runtime()
-    with rt.sequence(tile_ty, tile_ty_b, tile_ty_c) as (ia, ib, ic):
-        rt.start(my_worker)
-        rt.fill(of_a.prod(), ia)
-        rt.fill(of_b.prod(), ib)
-        rt.drain(of_c.cons(), ic, wait=True)
+    def sequence(ia, ib, ic, pa, pb, pc):
+        pa.fill(ia)
+        pb.fill(ib)
+        pc.drain(ic, wait=True)
 
-    return Program(iron.get_current_device(), rt).resolve_program()
+    rt = Runtime(sequence, [tile_ty, tile_ty_b, tile_ty_c, of_a.prod(), of_b.prod(), of_c.cons()])
+    return Program(iron.get_current_device(), rt, workers=[my_worker]).resolve_program()
 
 
 def _make_inputs():
