@@ -112,20 +112,24 @@ reader nothing.
 `export_gemm_rtp.py` takes a lock and refuses in under a second, naming the
 other process. If a previous run was killed the lock is stale: `--force-unlock`.
 
-Set the destination once. It is a **variable, not a `<placeholder>`**, and
-deliberately so: PowerShell rejects `<` as a reserved operator, so a pasted
-placeholder dies with `The '<' operator is reserved for future use` and never
-mentions the thing you forgot to substitute.
+The paths below are **literal and relative to this directory**, with no
+placeholder and no variable. Both alternatives have already cost someone a
+session:
 
-```powershell
-$dst = "..\..\src\xclbins"    # relative to npu_offload/gemm_rtp/
-```
+* `<dst>` -- PowerShell rejects `<` as a reserved operator during parsing, so
+  the command dies with `The '<' operator is reserved for future use`, naming
+  neither the placeholder nor the substitution that was forgotten.
+* `$dst` -- PowerShell does **not** error on an undefined variable, it expands
+  it to nothing. In a shell where `$dst` was never set, `--out $dst\BERT-...`
+  becomes `--out \BERT-...`, which resolves to the **drive root**. It builds
+  fine, takes three minutes, and puts the design set somewhere nothing will
+  ever look for it. That is worse than the placeholder, which at least failed.
 
 ```powershell
 # hidden 384, plain FFN, bfp16  ->  all-minilm:l6-v2
 python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
     --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h384-bfp16
+    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h384-bfp16
 
 # hidden 384, plain FFN, PLAIN bf16  ->  bge-small:en-v1.5
 #   bge-small is the one model that stayed on the unemulated datapath: it
@@ -135,17 +139,17 @@ python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
 #   not one.
 python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
     -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h384-bf16
+    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h384-bf16
 
 # hidden 768, plain FFN, bfp16  ->  bge-base:en-v1.5
 python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
     --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h768-bfp16
+    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h768-bfp16
 
 # hidden 768, GATED FFN, bfp16  ->  nomic-embed-text:v1.5 AND gte-multilingual:base
 python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
     --gated-ffn --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h768-gated-bfp16
+    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h768-gated-bfp16
 
 # hidden 1024, plain FFN, bfp16, TILE 32  ->  bge-large:en-v1.5
 #   -n 32, not 48: the design asserts N % (tile_n * n_cols) == 0 and
@@ -155,7 +159,7 @@ python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
 #   divergence and it is measured: see "bge-large and its batch tiers" below.
 python export_gemm_rtp.py --hidden 1024 --intermediate 4096 --qkv-n 3072 `
     --emulate-bfp16 --c-bf16 -n 32 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h1024-bfp16
+    --tg-depth 2 --tb-rows 4 --out ..\..\src\xclbins\BERT-h1024-bfp16
 ```
 
 About three minutes per family on a Ryzen AI 9 HX 370.
