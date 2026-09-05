@@ -228,6 +228,57 @@ if(CMAKE_CXX_STANDARD LESS 17)
     set(CMAKE_CXX_STANDARD 17)
 endif()
 
+# sentencepiece links third_party/absl -> third_party/abseil-cpp/absl with
+# file(CREATE_LINK ... SYMBOLIC), and on Windows a symbolic link needs either
+# Developer Mode or an elevated shell. On a stock box a FRESH CLONE therefore
+# dies at configure with
+#
+#   file failed to create symbolic link '.../sentencepiece/third_party/absl':
+#   A required privilege is not held by the client.
+#
+# and the message points at a third-party CMakeLists, so it reads as somebody
+# else's bug. It is not fixable there -- that is an upstream submodule -- but
+# it is avoidable here: sentencepiece guards the call with
+# `if(NOT EXISTS .../third_party/absl)`, and a DIRECTORY JUNCTION satisfies
+# that guard while needing no privileges at all. Same trick as the xclbins
+# junction further down.
+#
+# NATIVE paths: mklink is a cmd builtin and silently rejects the forward
+# slashes CMake uses internally.
+if(WIN32)
+    set(FLM_SPM_TP
+        "${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
+    if(EXISTS "${FLM_SPM_TP}/abseil-cpp/absl" AND NOT EXISTS "${FLM_SPM_TP}/absl")
+        file(TO_NATIVE_PATH "${FLM_SPM_TP}/absl" FLM_SPM_LINK)
+        file(TO_NATIVE_PATH "${FLM_SPM_TP}/abseil-cpp/absl" FLM_SPM_TARGET)
+        execute_process(
+            COMMAND cmd /c mklink /J "${FLM_SPM_LINK}" "${FLM_SPM_TARGET}"
+            RESULT_VARIABLE FLM_SPM_RC
+            OUTPUT_QUIET ERROR_QUIET)
+        if(FLM_SPM_RC EQUAL 0)
+            message(STATUS "sentencepiece: junction third_party/absl -> abseil-cpp/absl")
+        endif()
+        # No else(): if the junction fails, sentencepiece's own symlink attempt
+        # runs next and produces the real diagnostic. Do not mask it.
+    elseif(NOT EXISTS "${FLM_SPM_TP}/absl")
+        # HONEST LIMITATION: abseil-cpp is fetched by FetchContent INSIDE
+        # sentencepiece's own CMakeLists, i.e. during the add_subdirectory()
+        # below -- so on a genuinely fresh clone the target does not exist yet
+        # when this runs, and there is nothing to point a junction at. This
+        # configure will fetch abseil and then fail on the symlink; the NEXT
+        # one takes the branch above and succeeds.
+        #
+        # Fixing the first pass would mean cloning abseil here ourselves, which
+        # means copying sentencepiece's GIT_TAG into this file -- a duplicated
+        # version pin, which is a worse problem than one repeated command.
+        message(STATUS
+            "sentencepiece: abseil-cpp not fetched yet. If this configure "
+            "fails with 'failed to create symbolic link', simply run it again: "
+            "abseil will be present by then and a junction is used instead of "
+            "a symlink (no Developer Mode or elevation needed).")
+    endif()
+endif()
+
 add_subdirectory(${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp
                  ${CMAKE_BINARY_DIR}/tokenizers-cpp
                  EXCLUDE_FROM_ALL)
@@ -249,6 +300,84 @@ if(NOT FLM_USE_HRX)
         "${CMAKE_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_SOURCE_DIR}/open_qwen36/core.cpp"
         "${CMAKE_SOURCE_DIR}/open_qwen36/engine.cpp")
+endif()
+
+# ———————————————————————————————————————————————
+# open_npue: a second embedding backend (NpuEmbeddings)
+# ———————————————————————————————————————————————
+#
+# ADDITIVE. open_embedding above stays exactly where it is and keeps serving
+# embed-gemma:300m; this adds encoders for models the tree does not have.
+# It is a synced copy -- see open_npue/SYNCED.md for the source commit and
+# per-file hashes. Edit it upstream, not here: the accuracy gates that make
+# its numbers mean anything (a HuggingFace golden gate, cross-lane bitwise
+# agreement, an MTEB bridge, a p99 tail gate and four per-tokenizer
+# byte-exactness harnesses) live in that repository and want an NPU.
+#
+# Sources are listed EXPLICITLY, not globbed, per AGENTS.md.
+#
+# NOT FLM_USE_HRX, exactly like npu_matmul.cpp above: open_npue/npu_device.cpp
+# talks to XRT directly, and the encoders are unusable without it.
+if(NOT FLM_USE_HRX)
+    set(OPEN_NPUE_SOURCES
+        "${CMAKE_SOURCE_DIR}/open_npue/npue_encoder.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/npue.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/npue_pack.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/npu_device.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/json_min.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_gemma.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/gemma_tokenizer_gen.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_xlmr.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/xlmr_tokenizer_gen.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_bbpe.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/bbpe_tokenizer_gen.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/gemma_kernels.cpp"
+        "${CMAKE_SOURCE_DIR}/open_npue/gemma_encode.cpp"
+        # Fork-owned, not synced: the ONLY translation unit that includes the
+        # engine's header. It is in this list rather than in the glob because
+        # it must carry the engine's flags -- see the /arch:AVX2 note below and
+        # the long comment in npue_embedding.hpp, which records what a host TU
+        # instantiating those inline functions at a different ISA level costs.
+        "${CMAKE_SOURCE_DIR}/open_npue_adapter/npue_embedding.cpp"
+    )
+    list(APPEND SOURCES ${OPEN_NPUE_SOURCES})
+
+    # THE INCLUDE PATH IS PER-SOURCE, NOT GLOBAL, AND THAT IS DELIBERATE.
+    # open_npue/tokenizer.hpp and src/include/tokenizer/tokenizer.hpp are
+    # different files with the same basename. Putting open_npue on the global
+    # include path would let the wrong one win for some translation unit
+    # depending on directory order -- a failure that shows up as a confusing
+    # compile error at best and as the wrong tokenizer at worst. Scoping it to
+    # these fourteen files means nothing else in the tree can even see them.
+    set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/open_npue")
+
+    # /arch:AVX2 IS LOAD-BEARING AND IS LOST IN SILENCE.
+    #
+    # Roughly half of an encode is host-side AVX2 intrinsics, every one of them
+    # behind `#if defined(__AVX2__)` with a correct scalar `#else`. Without the
+    # flag this compiles, runs, returns the right vectors and is 2.1-2.6x
+    # slower -- measured upstream on three models, with every accuracy gate
+    # still green. MSVC x64 defaults to the SSE2 baseline and defines no
+    # __AVX2__, so the flag is not optional here.
+    #
+    # Same precedent as the AVX-512 image/audio sources below: per-source
+    # options, so raising the ISA for these files does not raise it for the
+    # whole binary.
+    #
+    # One consequence worth knowing before writing a comparison test: THE
+    # EMBEDDING BYTES MOVE WITH THE HOST ISA. The scalar and AVX2 paths reduce
+    # in different orders, so any check comparing vectors against an upstream
+    # binary must fix the /arch: level on both sides or it fails for a reason
+    # that has nothing to do with the port.
+    if(MSVC)
+        set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "-mavx2;-mfma")
+    endif()
 endif()
 
 # Exclude files that depend on missing libraries for Linux
@@ -585,6 +714,87 @@ if(WIN32)
             $<TARGET_FILE:flm>
             ${CMAKE_SOURCE_DIR}/out/flm.exe
     )
+
+    # AND THE ENGINE DLLs BESIDE IT, or a freshly built flm.exe cannot start
+    # -- and fails in a way that sends you looking in the wrong place.
+    #
+    # The 22 *_npu.dll / q4_npu_eXpress.dll / gemm.dll / dequant.dll live in
+    # src/lib/<backend>/ and are load-time imports, so without them the process
+    # dies at 0xC0000135 (DLL not found) BEFORE main(), printing nothing.
+    # Windows then falls through to the next PATH entry -- which on a machine
+    # with FastFlowLM installed is C:/Program Files/flm/flm.exe. So
+    # `flm.exe serve ... --embeddingmodel x` run from the build directory
+    # reports "unrecognised option", from a completely different binary than
+    # the one you just built. The symptom names a flag; the cause is a
+    # missing DLL two steps earlier.
+    #
+    # Both destinations are gitignored build trees, so this copies nothing
+    # into the repository and redistributes nothing: it puts the files this
+    # checkout already has next to the executable that needs them.
+
+    # AND THE MODEL CATALOGUE, for the same reason. utils.cpp looks for
+    # model_list.json next to the executable (after FLM_CONFIG_PATH), and
+    # nothing put one there, so a freshly built flm.exe stops at
+    #
+    #   model_list.json not found. Please set FLM_CONFIG_PATH or place it
+    #   next to the executable.
+    #
+    # before it can do anything at all. copy_if_different rather than a
+    # configure-time copy, so editing the catalogue -- which adding a model
+    # means doing -- takes effect on the next build instead of the next
+    # configure.
+    add_custom_command(TARGET flm POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/model_list.json
+            ${CMAKE_SOURCE_DIR}/model_info.json
+            $<TARGET_FILE_DIR:flm>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/model_list.json
+            ${CMAKE_SOURCE_DIR}/model_info.json
+            ${CMAKE_SOURCE_DIR}/out
+        COMMENT "Copying model_list.json / model_info.json beside flm.exe"
+    )
+
+    file(GLOB FLM_RUNTIME_DLLS "${CMAKE_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
+    if(FLM_RUNTIME_DLLS)
+        add_custom_command(TARGET flm POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${FLM_RUNTIME_DLLS} $<TARGET_FILE_DIR:flm>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${FLM_RUNTIME_DLLS} ${CMAKE_SOURCE_DIR}/out
+            COMMENT "Copying ${FLM_RUNTIME_NAME} engine DLLs beside flm.exe"
+        )
+    endif()
+
+    # AND THE XCLBIN TREE, as a junction rather than a copy.
+    #
+    # find_xclbin_path() already looks for "<exe_dir>/xclbins" -- it calls that
+    # the "portable development-tree location" -- but nothing puts one there,
+    # so a freshly built flm finds no kernels and every model fails with "no
+    # design set" until FLM_XCLBIN_PATH is set by hand.
+    #
+    # A JUNCTION, not a copy: src/xclbins is hundreds of megabytes, and a
+    # junction also means a rebuilt kernel is visible immediately rather than
+    # after the next build. mklink /J needs no privileges (unlike a symlink,
+    # which needs Developer Mode), and if it fails this is a warning rather
+    # than an error -- FLM_XCLBIN_PATH still works.
+    if(NOT EXISTS "${CMAKE_BINARY_DIR}/xclbins")
+        # NATIVE paths: mklink is a cmd builtin and rejects the forward slashes
+        # CMake uses internally, silently enough that the first version of this
+        # produced no junction and no message.
+        file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/xclbins" FLM_XCLBIN_LINK)
+        file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/xclbins" FLM_XCLBIN_TARGET)
+        execute_process(
+            COMMAND cmd /c mklink /J "${FLM_XCLBIN_LINK}" "${FLM_XCLBIN_TARGET}"
+            RESULT_VARIABLE FLM_XCLBIN_LINK_RC
+            OUTPUT_QUIET ERROR_QUIET)
+        if(FLM_XCLBIN_LINK_RC EQUAL 0)
+            message(STATUS "xclbins: junction ${CMAKE_BINARY_DIR}/xclbins -> ${CMAKE_SOURCE_DIR}/xclbins")
+        else()
+            message(WARNING "could not link xclbins next to the executable; "
+                            "set FLM_XCLBIN_PATH=${CMAKE_SOURCE_DIR} to run from the build tree")
+        endif()
+    endif()
 endif()
 
 # Default install location for model_list.json / xclbins (matches the app's

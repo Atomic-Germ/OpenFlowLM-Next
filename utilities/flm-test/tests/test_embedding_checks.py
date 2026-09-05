@@ -1,5 +1,5 @@
 """
-Unit tests for EmbeddingTask — embedding checks E1-E7. All embedding API calls
+Unit tests for EmbeddingTask — embedding checks E1-E9. All embedding API calls
 are mocked so no FLM server is required.
 
 Run with:
@@ -43,13 +43,27 @@ class TestCheckNames(unittest.TestCase):
     def setUp(self):
         self.task = _make_task()
 
-    def test_eight_checks_defined(self):
-        self.assertEqual(len(self.task.CHECK_NAMES), 8)
+    def test_nine_checks_defined(self):
+        self.assertEqual(len(self.task.CHECK_NAMES), 9)
         for name in self.task.CHECK_NAMES:
-            self.assertIn(name[0], "E12345678")
+            self.assertIn(name[0], "E123456789")
 
     def test_embed_allowlist_present(self):
         self.assertIn("embed-gemma:300m", EmbeddingTask.EMBED_MODELS)
+
+    def test_open_npue_tags_in_allowlist(self):
+        # Without these the suite silently declines to test the models the
+        # open_npue backend serves: the allowlist filter drops them and the
+        # no-filter fallback substitutes DEFAULT_EMBED_MODEL.
+        for tag in ("bge-base:en-v1.5", "all-minilm:l6-v2",
+                    "gte-multilingual:base"):
+            self.assertIn(tag, EmbeddingTask.EMBED_MODELS)
+
+    def test_reference_models_is_a_subset_of_the_allowlist(self):
+        # E8 compares against vectors for ONE model; every tag it claims to
+        # cover must be a tag the suite can actually be pointed at.
+        for tag in EmbeddingTask.REFERENCE_MODELS:
+            self.assertIn(tag, EmbeddingTask.EMBED_MODELS)
 
 
 class TestCosineSimilarity(unittest.TestCase):
@@ -403,6 +417,134 @@ class TestRunCheckErrorHandling(unittest.TestCase):
         self.assertIn("PASS: three embeddings in order", rows[0][5])
         self.assertEqual(rows[0][3], 2)
 
+
+
+class TestModelIdentity(unittest.TestCase):
+    """E9 — the check that a substituted model cannot hide from.
+
+    Every other check in this suite passes on an embedding for the wrong
+    model: it is correctly shaped, correctly normed, deterministic, and
+    semantically sensible. E9 is the only one that asks whether the server
+    answered the question that was put to it.
+    """
+
+    def setUp(self):
+        self.task = _make_task()
+
+    def test_answering_an_impossible_model_fails(self):
+        # The regression this check was written for: the server ignored the
+        # `model` field and served whatever it had loaded, echoing the
+        # requested tag back so the response looked correct.
+        response = SimpleNamespace(
+            data=[_embedding_entry([0.1, 0.2, 0.3])],
+            object="list",
+            model=EmbeddingTask.IMPOSSIBLE_MODEL,
+        )
+        with patch.object(EmbeddingTask, "_embed_response", return_value=response):
+            (verdict, detail), vector = self.task._check_model_identity("bge-base:en-v1.5")
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn(EmbeddingTask.IMPOSSIBLE_MODEL, detail)
+        self.assertEqual(vector, [0.1, 0.2, 0.3])
+
+    def test_refusing_then_serving_passes(self):
+        calls = []
+
+        def fake(self_, model_id, input_text):
+            calls.append(model_id)
+            if model_id == EmbeddingTask.IMPOSSIBLE_MODEL:
+                raise RuntimeError("404 model not found")
+            return SimpleNamespace(
+                data=[_embedding_entry([1.0, 0.0])], object="list", model=model_id)
+
+        with patch.object(EmbeddingTask, "_embed_response", fake):
+            (verdict, detail), vector = self.task._check_model_identity("bge-base:en-v1.5")
+        self.assertEqual(verdict, "PASS")
+        self.assertEqual(calls, [EmbeddingTask.IMPOSSIBLE_MODEL, "bge-base:en-v1.5"])
+        self.assertEqual(vector, [1.0, 0.0])
+
+    def test_answering_with_an_empty_envelope_is_not_called_a_substitution(self):
+        # A 2xx carrying an error instead of data is a contract problem of its
+        # own, but it is not evidence of a substitution -- say the smaller
+        # thing that is actually supported.
+        response = SimpleNamespace(data=[], object="list", model=None)
+        with patch.object(EmbeddingTask, "_embed_response", return_value=response):
+            (verdict, detail), vector = self.task._check_model_identity("bge-base:en-v1.5")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("success envelope", detail)
+        self.assertIsNone(vector)
+
+    def test_response_naming_no_model_soft_fails(self):
+        def fake(self_, model_id, input_text):
+            if model_id == EmbeddingTask.IMPOSSIBLE_MODEL:
+                raise RuntimeError("refused")
+            return SimpleNamespace(data=[_embedding_entry([1.0])], object="list")
+
+        with patch.object(EmbeddingTask, "_embed_response", fake):
+            (verdict, _), _ = self.task._check_model_identity("bge-base:en-v1.5")
+        self.assertEqual(verdict, "SOFT-FAIL")
+
+    def test_response_naming_a_different_model_soft_fails(self):
+        def fake(self_, model_id, input_text):
+            if model_id == EmbeddingTask.IMPOSSIBLE_MODEL:
+                raise RuntimeError("refused")
+            return SimpleNamespace(data=[_embedding_entry([1.0])], object="list",
+                                   model="embed-gemma:300m")
+
+        with patch.object(EmbeddingTask, "_embed_response", fake):
+            (verdict, detail), _ = self.task._check_model_identity("bge-base:en-v1.5")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("embed-gemma:300m", detail)
+
+
+class TestReferenceAgreementScope(unittest.TestCase):
+    """E8 knows which model its bundled vectors belong to."""
+
+    def setUp(self):
+        self.task = _make_task()
+
+    def test_skips_for_a_model_with_no_bundled_reference(self):
+        # Two models embed the same text into different spaces by design, so a
+        # cosine between them says nothing about either. Reporting FAIL here
+        # would be reporting a conclusion the data does not support.
+        (verdict, detail), vector = self.task._check_reference_agreement("bge-base:en-v1.5")
+        self.assertEqual(verdict, "SKIP")
+        self.assertIn("bge-base:en-v1.5", detail)
+        self.assertIsNone(vector)
+
+    def test_still_runs_for_the_model_it_was_made_from(self):
+        entries = self.task._reference_entries
+        self.assertTrue(entries, "the bundled reference should not be empty")
+        with patch.object(EmbeddingTask, "_embed",
+                          side_effect=lambda m, t: dict(entries)[t]):
+            (verdict, _), _ = self.task._check_reference_agreement("embed-gemma:300m")
+        self.assertEqual(verdict, "PASS")
+
+
+class TestRepeatabilityExactness(unittest.TestCase):
+    """E2 reports whether a passing backend was bit-identical or merely close."""
+
+    def setUp(self):
+        self.task = _make_task()
+
+    def test_identical_draws_are_reported_as_bit_identical(self):
+        with patch.object(EmbeddingTask, "_embed",
+                          side_effect=lambda m, t: [1.0, 2.0, 3.0]):
+            (verdict, detail), _ = self.task._check_repeatability("m")
+        self.assertEqual(verdict, "PASS")
+        self.assertIn("bit-identical", detail)
+        self.assertNotIn("not bit-identical", detail)
+
+    def test_close_but_unequal_draws_still_pass_and_say_so(self):
+        seq = iter(range(1000))
+
+        def fake(self_, model_id, text):
+            # A tiny perturbation: well inside STABILITY_THRESHOLD, not equal.
+            return [1.0, 2.0, 3.0 + next(seq) * 1e-9]
+
+        with patch.object(EmbeddingTask, "_embed", fake):
+            (verdict, detail), _ = self.task._check_repeatability("m")
+        self.assertEqual(verdict, "PASS")
+        self.assertIn("not bit-identical", detail)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -128,6 +128,10 @@ private:
     bool modelscope;
     bool asr;
     bool embed;
+    // Which embedding model --embed loads, from --embeddingmodel.
+    // Empty means embed-gemma:300m, so an existing command line keeps
+    // its behaviour exactly.
+    std::string embedding_model_tag;
     int prefill_chunk_len;
     int generate_context_id;
     int chat_context_id;

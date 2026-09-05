@@ -216,7 +216,14 @@ E7 Batch Reference
        E8 Reference Agreement     Embeddings match the bundled reference vectors
                                   produced by the validated numpy pipeline for
                                   google/embeddinggemma-300m, pinning the API
-                                  path to a known-good implementation.
+                                  path to a known-good implementation. The
+                                  bundled vectors are for ONE model, so this
+                                  check SKIPs for any other -- see
+                                  REFERENCE_MODELS.
+      E9 Model Identity          The server serves the model it was asked for,
+                                 or refuses. The one failure the checks above
+                                 cannot see, because a substituted model's
+                                 vectors pass every one of them.
 
     Like the tool-calling suite, each check produces a PASS / SOFT-FAIL / FAIL
     verdict with a detail line, all written to CSV. Unlike the chat-based suites
@@ -224,7 +231,14 @@ E7 Batch Reference
     assumed to be running with only an embed model loaded (`flm serve -e 1`).
     """
 
-    EMBED_MODELS = ["embed-gemma:300m", "embed-gemma"]
+    EMBED_MODELS = [
+        "embed-gemma:300m", "embed-gemma",
+        # open_npue backend -- BERT-family encoders on the NPU. Listed here so
+        # the suite runs against them without an explicit --model filter; each
+        # is served by `flm serve <llm> --embed 1 --embeddingmodel <tag>`.
+        "bge-base:en-v1.5", "bge-small:en-v1.5", "bge-large:en-v1.5",
+        "all-minilm:l6-v2", "nomic-embed-text:v1.5", "gte-multilingual:base",
+    ]
     DEFAULT_EMBED_MODEL = "embed-gemma:300m"
 
     SAMPLE_TEXT = "The embedding model should capture the meaning of this sentence."
@@ -243,6 +257,14 @@ E7 Batch Reference
     REFERENCE_DRAW_COUNT = 30
     REFERENCE_AGREEMENT_THRESHOLD = 0.999
     REFERENCE_FILE = PACKAGE_DIR / "test_files" / "embedding_reference.json"
+    # The bundled oracle vectors are for ONE model. Comparing another model's
+    # embeddings against them is not a weaker test, it is a meaningless one:
+    # two models embed the same text into different spaces by design, so a
+    # cosine between them carries no information about either. E8 therefore
+    # SKIPs rather than reporting a failure it cannot substantiate.
+    REFERENCE_MODELS = {"embed-gemma:300m", "embed-gemma"}
+    # A tag no server can have loaded, for E9.
+    IMPOSSIBLE_MODEL = "flm-test-no-such-embedding-model"
     CHECK_NAMES = [
         "E1 Response Structure",
         "E2 Repeatability",
@@ -252,6 +274,7 @@ E7 Batch Reference
         "E6 Cross-Path Consistency",
         "E7 Batch Reference Consistency",
         "E8 Reference Agreement",
+        "E9 Model Identity",
     ]
 
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
@@ -270,6 +293,7 @@ E7 Batch Reference
         self._reference_draws: list[tuple[list[float], float]] = []
         # Bundled reference vectors from the validated numpy oracle (E8).
         reference = json.loads(self.REFERENCE_FILE.read_text(encoding="utf-8"))
+        self._reference_source = reference.get("reference", "an unnamed model")
         self._reference_entries = [
             (entry["text"], entry["embedding"]) for entry in reference["entries"].values()
         ]
@@ -365,8 +389,17 @@ E7 Batch Reference
                     bad_pairs += 1
         ratio = bad_pairs / total_pairs if total_pairs else 0.0
         if bad_pairs == 0:
+            # Report exactness as well as the threshold. A deterministic
+            # backend returns the same bytes every time; one that merely stays
+            # inside STABILITY_THRESHOLD is doing something non-deterministic
+            # that this check would otherwise pass in silence. The verdict is
+            # unchanged -- some backends are legitimately non-exact -- but the
+            # distinction belongs in the record.
+            exact = all(d == draws[0] for d in draws[1:])
+            how = ("bit-identical" if exact
+                   else f"not bit-identical, worst cosine {worst:.6f}")
             return ("PASS", f"all {self.REPEAT_COUNT} draws consistent "
-                            f"(worst cosine {worst:.6f})"), draws[0]
+                            f"({how})"), draws[0]
         if ratio >= self.INCONSISTENT_PAIR_RATIO_FAIL:
             return ("FAIL", f"{bad_pairs}/{total_pairs} draw pairs inconsistent "
                             f"(worst cosine {worst:.6f})"), draws[0]
@@ -483,6 +516,13 @@ E7 Batch Reference
         normalisation) to a known-good implementation rather than to another
         build of itself.
         """
+        if model_id not in self.REFERENCE_MODELS:
+            return ("SKIP", f"no bundled reference for '{model_id}' -- the "
+                            f"oracle vectors in {self.REFERENCE_FILE.name} are "
+                            f"for {self._reference_source}. A cosine between "
+                            f"two different models' spaces would mean nothing, "
+                            f"so this check reports nothing rather than a "
+                            f"failure it cannot substantiate."), None
         worst = 1.0
         worst_text = ""
         for text, expected in self._reference_entries:
@@ -495,6 +535,70 @@ E7 Batch Reference
                             f"oracle reference (worst cosine {worst:.6f})"), first
         return ("FAIL", f"'{worst_text}' deviates from the oracle reference "
                         f"(cosine {worst:.6f})"), self._embed(model_id, worst_text)
+
+    def _check_model_identity(self, model_id: str):
+        """E9: the server serves the model it was asked for, or refuses.
+
+        THIS IS THE ONE FAILURE THE CHECKS ABOVE CANNOT SEE. A server that
+        ignores the `model` field and answers every request from whichever
+        model it happens to have loaded returns a vector that is correctly
+        shaped, correctly normed, deterministic, batch-consistent and
+        semantically sensible -- so E1 through E7 all pass on it. E8 makes it
+        worse rather than better: if the substituted model is the one the
+        bundled reference was made from, E8 passes too, and the whole suite
+        goes green on an answer for the wrong model.
+
+        It is not hypothetical. This server echoed the requested tag back in
+        the response and otherwise ignored it, so a request naming any model
+        returned the loaded model vectors under the name that had been asked
+        for. Nothing downstream could tell.
+
+        Two halves, both answerable against a running server:
+          a) a request naming a model the server cannot have loaded must be
+             refused, not answered;
+          b) an accepted request must report a model, and it should be the one
+             that was asked for.
+        """
+        try:
+            response = self._embed_response(self.IMPOSSIBLE_MODEL, self.SAMPLE_TEXT)
+        except Exception:
+            pass                    # refused: the correct behaviour
+        else:
+            data = getattr(response, "data", None)
+            vector = getattr(data[0], "embedding", None) if data else None
+            if not vector:
+                # It did not raise, but it did not embed anything either --
+                # most likely an error reported inside a 2xx envelope. That is
+                # its own contract problem, but it is not a substitution, so
+                # do not accuse it of one.
+                return ("SOFT-FAIL", f"a request for "
+                                     f"'{self.IMPOSSIBLE_MODEL}' did not raise "
+                                     f"but returned no embedding data; the "
+                                     f"model was refused inside a success "
+                                     f"envelope rather than by an error "
+                                     f"status"), None
+            return ("FAIL", f"server answered a request for "
+                            f"'{self.IMPOSSIBLE_MODEL}', a model it cannot "
+                            f"have loaded, with a {len(vector)}-dim vector, "
+                            f"reporting it as "
+                            f"'{getattr(response, 'model', None)}'. It is "
+                            f"serving some other model's vectors under the "
+                            f"requested name, and every other check in this "
+                            f"suite would pass on them."), vector
+
+        response = self._embed_response(model_id, self.SAMPLE_TEXT)
+        data = getattr(response, "data", None)
+        vector = getattr(data[0], "embedding", None) if data else None
+        reported = getattr(response, "model", None)
+        if not reported:
+            return ("SOFT-FAIL", "unknown models are refused, but the response "
+                                 "names no model, so a client cannot confirm "
+                                 "which one answered"), vector
+        if reported != model_id:
+            return ("SOFT-FAIL", f"requested '{model_id}', response reports "
+                                 f"'{reported}'"), vector
+        return ("PASS", f"unknown model refused; '{model_id}' served and "
+                        f"reported as itself"), vector
 
     def _reference_draw_rows(self, model_id: str, check_name: str):
         """One CSV row per E7 draw, carrying the full raw vector for diffing."""
@@ -547,6 +651,9 @@ E7 Batch Reference
                 self._run_check(writer, model_id, self.CHECK_NAMES[7],
                                 "bundle: oracle reference texts",
                                 lambda: self._check_reference_agreement(model_id))
+                self._run_check(writer, model_id, self.CHECK_NAMES[8],
+                                self.IMPOSSIBLE_MODEL,
+                                lambda: self._check_model_identity(model_id))
                 print(f"Finished testing model: {model_id}")
         print(f"\nEmbedding tests complete. Saved to {self.csv_filename}")
 

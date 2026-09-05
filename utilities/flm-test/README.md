@@ -7,7 +7,7 @@ A comprehensive testing framework *intended* for  **[FastFlowLM (FLM)](https://f
 flm-test is designed to thoroughly test FastFlowLM's API compatibility and model functionality across multiple modalities:
 
 - **LLM Tests**: Language model inference with both streaming and non-streaming modes
-- **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`flm serve -e 1`).
+- **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`flm serve -e 1`, or `flm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
 - **Audio Tests**: Audio understanding via chat completions, with a bundled music clip
 - **Vision Tests**: Vision-Language Model (VLM) tests with multi-image support and automated response checking
 - **Tool Calling Tests**: Function/tool-calling across five escalating complexity levels, in streaming and non-streaming modes
@@ -205,6 +205,7 @@ Tests text embedding models through the OpenAI-compatible `embeddings.create` AP
 - Cross-path consistency: the same input through the single-input and batch delivery paths in the same run
 - Batch-reference stability: a larger sample of draws compared per-draw against the batch reference, so intermittent outliers surface even when a small sample misses them; the raw draw vectors are dumped to the CSV for cross-build comparison
 - Reference agreement: embeddings matched against bundled oracle vectors from the validated numpy implementation of the official model (E8)
+- Model identity: the server serves the model it was asked for, or refuses (E9)
 
 **Automated Checks:**
 | Check | Verdict | Description |
@@ -216,7 +217,32 @@ Tests text embedding models through the OpenAI-compatible `embeddings.create` AP
 | E5 Semantic Ordering | PASS / FAIL | Mean similarity of related pairs (`cat`/`kitten`, `ocean`/`sea`) exceeds that of unrelated pairs (`cat`/`car`, `ocean`/`desert`) |
 | E6 Cross-Path Consistency | PASS / FAIL | The same weights reached via a single-input request and a one-item batch request agree (cosine ≥ 0.999), distinguishing a bad number from a bad machine |
 | E7 Batch Reference Consistency | PASS / SOFT-FAIL / FAIL | `SAMPLE_TEXT` drawn 30×, each draw compared to the batch-path reference in the same run; PASS when all agree, SOFT-FAIL on sparse flicker (≤ 25% deviating), FAIL when the outlier rate is a property of the build |
-| E8 Reference Agreement | PASS / FAIL | A corpus of 8 texts is compared against bundled reference vectors from the validated numpy implementation of the official google/embeddinggemma-300m pipeline (worst cosine ≥ 0.999), pinning the API path to a known-good implementation |
+| E8 Reference Agreement | PASS / FAIL / SKIP | A corpus of 8 texts is compared against bundled reference vectors from the validated numpy implementation of the official google/embeddinggemma-300m pipeline (worst cosine ≥ 0.999), pinning the API path to a known-good implementation. **SKIP** for any model the bundled vectors are not for — see below |
+| E9 Model Identity | PASS / SOFT-FAIL / FAIL | A request naming a model the server cannot have loaded must be refused, not answered; and an accepted request must report the model that was asked for |
+
+#### E8 covers one model, and says so
+
+The bundled reference vectors are for `google/embeddinggemma-300m`. Two models
+embed the same text into *different spaces* by design, so a cosine between them
+carries no information about either — comparing another model's output against
+these vectors is not a weaker test, it is a meaningless one. E8 therefore
+reports **SKIP** for any model outside `EmbeddingTask.REFERENCE_MODELS`, rather
+than a failure it cannot substantiate. To enable it for another model, add its
+oracle vectors and its tag to that set.
+
+#### Why E9 exists
+
+Every other check in this suite passes on an embedding for the **wrong model**.
+A substituted vector is correctly shaped, correctly normed, deterministic,
+batch-consistent and semantically sensible, so E1–E7 all go green on it. E8
+makes it worse rather than better: if the model that was substituted *in* is the
+one the bundled reference was made *from*, E8 passes too, and the entire suite
+reports success on an answer for a model nobody asked for.
+
+That is not hypothetical. A server in this tree ignored the `model` field and
+answered every request from whichever model it had loaded, echoing the requested
+tag back so the response looked correct. E9 is the check that catches it: it
+asks for a tag no server can have loaded and requires a refusal.
 
 For E7 the CSV also carries one row per draw (`E7 … (draw N/30)`) with the **full raw 768-dim vector** in the Vector Preview column and its cosine to the batch reference, so embeddings can be diffed directly across builds. Only E7's rows carry full vectors; other checks keep the compact preview. E8's reference vectors ship with the package in `flm_test/test_files/embedding_reference.json`.
 
@@ -300,7 +326,7 @@ results/{timestamp}/{backend_os}/{test_type}_results_v{flm_version}.csv
 | Column | Description |
 |--------|-------------|
 | Model | Embedding model ID |
-| Check | E1–E7 check name |
+| Check | E1–E9 check name |
 | Input | The text (or batch/JSON of texts) embedded |
 | Embedding Dim | Vector dimensionality (or N/A on error) |
 | Vector Preview | First few values plus total length |

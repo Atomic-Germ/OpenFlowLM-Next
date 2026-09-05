@@ -17,6 +17,10 @@ struct program_args_t {
     bool preemption = false;
     bool asr = false;
     bool embed = false;
+    // Which embedding model --embed loads. Empty means the historical
+    // default, embed-gemma:300m, so an existing command line is
+    // unchanged. See all_embedding_model.hpp for the registry.
+    std::string embedding_model = "";
     bool json_output = false;
     int ctx_length = -1; // let model decide
     int prefill_chunk_len = -1; // let model decide

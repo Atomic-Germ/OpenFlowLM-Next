@@ -3314,5 +3314,248 @@
             "xetHash": "7c4d2da22b3de2ed3f3eae66c7034386df6a3c5d81039ad4a1c8067e7eaf0069",
             "path": "vision_weights.q4nx"
         }
+    ],
+    "bge-base:en-v1.5": [
+        {
+            "type": "file",
+            "oid": "09a8200d8a549a3b9dba53b67156ca26810cc720",
+            "size": 777,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
+                "size": 437955512
+            },
+            "size": 437955512,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "688882a79f44442ddc1f60d70334a7ff5df0fb47",
+            "size": 711396,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "37fca74771bc76a8e01178ce3a6055a0995f8093",
+            "size": 366,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size": 231508,
+            "path": "vocab.txt"
+        },
+        {
+            "type": "file",
+            "oid": "da5bfd57e34ca45582e4bdbaa3e6deb9efffa08d",
+            "size": 190,
+            "path": "1_Pooling/config.json"
+        }
+    ],
+    "all-minilm:l6-v2": [
+        {
+            "type": "file",
+            "oid": "72b987fd805cfa2b58c4c8c952b274a11bfd5a00",
+            "size": 612,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+                "size": 90868376
+            },
+            "size": 90868376,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "cb202bfe2e3c98645018a6d12f182a434c9d3e02",
+            "size": 466247,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "c79f2b6a0cea6f4b564fed1938984bace9d30ff0",
+            "size": 350,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size": 231508,
+            "path": "vocab.txt"
+        },
+        {
+            "type": "file",
+            "oid": "d1514c3162bbe87b343f565fadc62e6c06f04f03",
+            "size": 190,
+            "path": "1_Pooling/config.json"
+        }
+    ],
+    "bge-small:en-v1.5": [
+        {
+            "type": "file",
+            "oid": "3992bf890728a92476c700e6e657fd696eb94160",
+            "size": 743,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+                "size": 133466304
+            },
+            "size": 133466304,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "688882a79f44442ddc1f60d70334a7ff5df0fb47",
+            "size": 711396,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "37fca74771bc76a8e01178ce3a6055a0995f8093",
+            "size": 366,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size": 231508,
+            "path": "vocab.txt"
+        },
+        {
+            "type": "file",
+            "oid": "1da070f0993788c8851a652170ff013aa54dd519",
+            "size": 190,
+            "path": "1_Pooling/config.json"
+        }
+    ],
+    "bge-large:en-v1.5": [
+        {
+            "type": "file",
+            "oid": "ab101ed8d012df683ef32f92cea51e97615ad07c",
+            "size": 779,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
+                "size": 1340616616
+            },
+            "size": 1340616616,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "688882a79f44442ddc1f60d70334a7ff5df0fb47",
+            "size": 711396,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "37fca74771bc76a8e01178ce3a6055a0995f8093",
+            "size": 366,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size": 231508,
+            "path": "vocab.txt"
+        },
+        {
+            "type": "file",
+            "oid": "9bd85925f325e25246d94c4918dc02ab98f2a1b7",
+            "size": 191,
+            "path": "1_Pooling/config.json"
+        }
+    ],
+    "nomic-embed-text:v1.5": [
+        {
+            "type": "file",
+            "oid": "785a8d58b3e2c47f9709d7ac87759a6ac96a106f",
+            "size": 2538,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "9e7d262b1fe5ea350782829496efa831901b77486bbde1cea54a4c822d010d5c",
+                "size": 546938168
+            },
+            "size": 546938168,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "oid": "688882a79f44442ddc1f60d70334a7ff5df0fb47",
+            "size": 711396,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "99ada2882080d1e1f5333a2584c433ded174795c",
+            "size": 1191,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size": 231508,
+            "path": "vocab.txt"
+        },
+        {
+            "type": "file",
+            "oid": "9472f065b9b87e268dad290b6aaceb2f205c2135",
+            "size": 286,
+            "path": "1_Pooling/config.json"
+        }
+    ],
+    "gte-multilingual:base": [
+        {
+            "type": "file",
+            "oid": "9f640b05ee684e9680fdc90000de85559061c5ef",
+            "size": 1429,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "f5a35a10faa54da7717870af1517c9b41e9bd8e3880bc5a8e9363d4c3c63e9b0",
+                "size": 610753338
+            },
+            "size": 610753338,
+            "path": "model.safetensors"
+        },
+        {
+            "type": "file",
+            "lfs": {
+                "oid": "f59925fcb90c92b894cb93e51bb9b4a6105c5c249fe54ce1c704420ac39b81af",
+                "size": 17082756
+            },
+            "size": 17082756,
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "9b34bdaff958c3af7ffd359f71ee05fe7651e3fa",
+            "size": 1149,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "da5bfd57e34ca45582e4bdbaa3e6deb9efffa08d",
+            "size": 190,
+            "path": "1_Pooling/config.json"
+        }
     ]
 }
