@@ -21,3 +21,5 @@ tmp
 # Build them with the commands in npu_offload/gemm_rtp/README.md. They are
 # shipped pre-built in the distributed package only.
 src/xclbins/BERT-h*/
+third_party/Peano
+third_party/mlir-aie

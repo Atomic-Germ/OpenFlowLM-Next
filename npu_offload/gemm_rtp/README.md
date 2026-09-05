@@ -150,9 +150,20 @@ All five families, rebuilt with the commands above:
 | `BERT-h384-bf16` | 20 | 19 | 77 / 122,334 |
 | `BERT-h768-bfp16` | 20 | 19 | 79 / 127,454 |
 | `BERT-h768-gated-bfp16` | 20 | 19 | 82 / 127,454 |
-| `BERT-h1024-bfp16` | 8 | 7 | 82 / 126,430 |
+| `BERT-h1024-bfp16` | 20 | 7 of the old 8* | 82 / 126,430* |
 
-**88 of 96 byte-identical.** Every instruction stream, every `design.json`,
+\* The h1024 identical/delta figures were measured on the earlier ONE-TIER
+artifact -- 8 files, because `--batches` was omitted for it (the padding bug
+documented under "bge-large and its batch tiers" below). The current
+exporter emits the same 20-file layout for every family (`final.xclbin` +
+`insts.bin` + 4 shapes x 4 tiers + `design.json` + `toolchain.json`), so a
+fresh h1024 set has 20 files; the old 8-file set it was compared against is
+gone. Its figures stand as the determinism record for the streams it had,
+not as a description of what the exporter produces now.
+
+**88 of 96 byte-identical** -- measured against the then-shipped sets, when
+h1024 was still the 8-file one-tier artifact (see the table footnote).
+Every instruction stream, every `design.json`,
 every `toolchain.json`. The five xclbins differ by **402 bytes of 631,126 —
 0.064%** — in 5 to 6 tight clusters each: the binary UUID, the same UUID as hex
 in the metadata JSON, and `"TimeStamp"`. The embedded AIE core ELFs are
