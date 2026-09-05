@@ -62,15 +62,28 @@ Two traps that cost an hour each if you meet them cold:
 a mismatched pair rather than reading it as garbage — so a set built with the
 wrong flags is not a slower design, it is one no model will load.
 
-The flag that is easiest to forget is `--c-bf16`. Omitting it builds a design
-that is correct, complete, and identical in every other respect; it simply
-narrows C to fp32 instead of bf16, and no model in the catalogue will accept it.
+The flag that is easiest to forget is `--c-bf16`, which narrows C to bf16 on
+the core. Omitting it builds a design that is correct, complete and identical
+in every other respect -- and that the four models wanting bf16 C will refuse
+to load. **But `BERT-h384-bf16` is supposed to omit it**: bge-small runs with C
+as fp32, and adding the flag there is the same mistake in the other direction.
+Neither is a slower design; each is one the wrong model loads or no model
+loads. `check_readme.py` below is what keeps the two straight.
+
+Set the destination once. It is a **variable, not a `<placeholder>`**, and
+deliberately so: PowerShell rejects `<` as a reserved operator, so a pasted
+placeholder dies with `The '<' operator is reserved for future use` and never
+mentions the thing you forgot to substitute.
+
+```powershell
+$dst = "..\..\src\xclbins"    # relative to npu_offload/gemm_rtp/
+```
 
 ```powershell
 # hidden 384, plain FFN, bfp16  ->  all-minilm:l6-v2
 python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
     --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out <dst>/BERT-h384-bfp16
+    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h384-bfp16
 
 # hidden 384, plain FFN, PLAIN bf16  ->  bge-small:en-v1.5
 #   bge-small is the one model that stayed on the unemulated datapath: it
@@ -80,17 +93,17 @@ python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
 #   not one.
 python export_gemm_rtp.py --hidden 384 --intermediate 1536 --qkv-n 1152 `
     -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out <dst>/BERT-h384-bf16
+    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h384-bf16
 
 # hidden 768, plain FFN, bfp16  ->  bge-base:en-v1.5
 python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
     --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out <dst>/BERT-h768-bfp16
+    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h768-bfp16
 
 # hidden 768, GATED FFN, bfp16  ->  nomic-embed-text:v1.5 AND gte-multilingual:base
 python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
     --gated-ffn --emulate-bfp16 --c-bf16 -n 48 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out <dst>/BERT-h768-gated-bfp16
+    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h768-gated-bfp16
 
 # hidden 1024, plain FFN, bfp16, TILE 32  ->  bge-large:en-v1.5
 #   -n 32, not 48: the design asserts N % (tile_n * n_cols) == 0 and
@@ -100,7 +113,7 @@ python export_gemm_rtp.py --hidden 768 --intermediate 3072 --qkv-n 2304 `
 #   divergence and it is measured: see "bge-large and its batch tiers" below.
 python export_gemm_rtp.py --hidden 1024 --intermediate 4096 --qkv-n 3072 `
     --emulate-bfp16 --c-bf16 -n 32 --batches 4,16,32,128 `
-    --tg-depth 2 --tb-rows 4 --out <dst>/BERT-h1024-bfp16
+    --tg-depth 2 --tb-rows 4 --out $dst\BERT-h1024-bfp16
 ```
 
 About three minutes per family on a Ryzen AI 9 HX 370.
