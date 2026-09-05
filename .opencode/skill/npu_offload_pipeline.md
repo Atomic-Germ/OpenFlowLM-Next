@@ -24,9 +24,14 @@ This skill captures the end-to-end pipeline proven on `google/embeddinggemma-300
 
 - AMD NPU2 (Strix) at PCI `0000:c2:00.1`, `/dev/accel/accel0`
 - XRT at `/opt/xilinx/xrt`, `export XILINX_XRT=/opt/xilinx/xrt`
-- ironvenv: Python 3.13, mlir-aie 1.3.4, aiecc LLVM 23, Peano toolchain
-  - Wheel: `llvm_aie-21.0.0.2026080301+c9c5ecb7` from Xilinx/llvm-aie nightly
-  - Install: `python3 -m zipfile -e wheel.whl ironvenv/lib/python3.13/site-packages/`
+- ironvenv: Python 3.11–3.13, **mlir-aie 1.4.2**, Peano `llvm-aie 21.0.0.2026080301+c9c5ecb7`
+  - `pip install -r ironvenv-requirements.txt` (release wheels; no eudsl-python-extras — it
+    shadows mlir_aie's `aie/` package and breaks `import aie.iron`)
+  - Runtime API is 1.4.2's: `tg = TaskGroup()`, `fifo.prod().fill(src, tap=, group=tg)`,
+    `fifo.cons().drain(dst, tap=, wait=True, group=tg)`, `tg.finish()`,
+    `Runtime(sequence_fn, [types..., handles...])`, `Program(dev, rt, workers=[...])`.
+    The 1.3.4 form (`rt.task_group()`, `rt.fill(fifo, …)`, `with rt.sequence(...)`) is gone.
+  - Also needs `xclbinutil` and `aiebu-asm` on PATH (from an XRT install).
 - Model weights in FP32 safetensors + weights_manifest.json
 
 ---

@@ -29,9 +29,15 @@ setlocal enabledelayedexpansion
 ::
 :: The other traps this exists to absorb:
 ::
+::   * The wrong vcpkg. Visual Studio ships its own under VC\vcpkg and sets
+::     VCPKG_ROOT to it; that tree has the toolchain file and none of the
+::     packages, so trusting the variable picks the broken one on exactly the
+::     machines that have VS. Candidates are checked for boost_program_options,
+::     not merely for vcpkg.cmake.
 ::   * vcvars64.bat. Without it the compile fails with "Cannot open include
 ::     file: 'cstdint'", which reads as a broken checkout rather than a shell
-::     that was never set up. Located via vswhere, not hardcoded.
+::     that was never set up. Located via vswhere and loaded automatically,
+::     so a plain cmd prompt works -- no Developer Command Prompt needed.
 ::   * sentencepiece links third_party/absl with a SYMBOLIC link, which Windows
 ::     allows only under Developer Mode or elevation. src\CMakeLists.txt makes a
 ::     junction instead -- but abseil is fetched inside that same add_subdirectory,
@@ -55,27 +61,55 @@ set "REPO=%~dp0"
 if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
 
 :: First non-flag argument is the vcpkg root, so --ironbuild may come first
-:: or last. A shift loop rather than `for %%A in (%*)`: empty-safe when no
-:: arguments are given, and quote-safe for vcpkg paths containing spaces.
-:: Flag comparisons only below: no ')' anywhere in here, per the note above
+:: or last. A shift loop rather than `%~1`: empty-safe when no arguments are
+:: given, and quote-safe for vcpkg paths containing spaces. Flag comparisons
+:: only below: no ')' anywhere in here, per the note in the MSVC section
 :: about %ProgramFiles(x86)% and parenthesised blocks.
-set "VCPKG="
+set "VCPKG_ARG="
 set "IRONBUILD="
 :parse_args
 if "%~1"=="" goto parse_done
 if /i "%~1"=="--ironbuild" set "IRONBUILD=1"
 if /i "%~1"=="/ironbuild" set "IRONBUILD=1"
-if /i not "%~1"=="--ironbuild" if /i not "%~1"=="/ironbuild" if not defined VCPKG set "VCPKG=%~1"
+if /i not "%~1"=="--ironbuild" if /i not "%~1"=="/ironbuild" if not defined VCPKG_ARG set "VCPKG_ARG=%~1"
 shift
 goto parse_args
 :parse_done
-if "%VCPKG%"=="" set "VCPKG=%VCPKG_ROOT%"
-if "%VCPKG%"=="" set "VCPKG=C:\dev\vcpkg"
-if not exist "%VCPKG%\scripts\buildsystems\vcpkg.cmake" (
-    echo ERROR: no vcpkg toolchain at "%VCPKG%\scripts\buildsystems\vcpkg.cmake"
-    echo        Pass the vcpkg root as the first argument, or set VCPKG_ROOT.
+
+:: ---------------------------------------------------------------- vcpkg
+::
+:: DO NOT simply trust %VCPKG_ROOT%. Visual Studio ships its own vcpkg at
+:: ...\VC\vcpkg and sets VCPKG_ROOT to it, and that tree has
+:: scripts\buildsystems\vcpkg.cmake but none of the packages this build needs.
+:: Preferring the variable therefore picks the WRONG vcpkg on exactly the
+:: machines that have Visual Studio -- which is all of them.
+::
+:: So each candidate is checked for the package we actually need, not merely
+:: for the toolchain file. A vcpkg without boost_program_options fails here, at
+:: second zero, instead of as LNK1181 ten minutes into a build.
+set "VCPKG="
+if not "%VCPKG_ARG%"=="" (
+    call :try_vcpkg "%VCPKG_ARG%"
+    if not defined VCPKG (
+        echo ERROR: "%VCPKG_ARG%" is not a usable vcpkg root.
+        echo        It needs installed\x64-windows\share\boost_program_options,
+        echo        i.e. `vcpkg install boost-program-options:x64-windows`.
+        exit /b 1
+    )
+)
+if not defined VCPKG call :try_vcpkg "C:\dev\vcpkg"
+if not defined VCPKG if defined VCPKG_ROOT call :try_vcpkg "%VCPKG_ROOT%"
+if not defined VCPKG (
+    echo ERROR: no vcpkg tree found with boost_program_options installed for
+    echo        x64-windows. Looked at C:\dev\vcpkg and %%VCPKG_ROOT%%
+    echo        ^(currently "%VCPKG_ROOT%"^).
+    echo.
+    echo        Note that Visual Studio's bundled vcpkg under VC\vcpkg sets
+    echo        VCPKG_ROOT but ships none of the packages, so it will not do.
+    echo        Pass a usable root as the first argument.
     exit /b 1
 )
+echo Using vcpkg at %VCPKG%
 
 :: ---------------------------------------------------------------- MSVC
 ::
@@ -122,28 +156,27 @@ if exist "%REPO%\src\build" (
     rmdir /s /q "%REPO%\src\build"
 )
 
-set "CFG=-S "%REPO%\src" -B "%REPO%\src\build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 -DFLM_USE_HRX=OFF -DCMAKE_TOOLCHAIN_FILE=%VCPKG:\=/%/scripts/buildsystems/vcpkg.cmake"
+echo.
+echo === configure, pass 1 ===
+call :configure
+if not errorlevel 1 goto :configured
 
 echo.
-echo === configure (pass 1) ===
-cmake %CFG%
+echo Pass 1 failed. On a fresh clone this is expected once: sentencepiece
+echo fetches abseil-cpp during configure and only then links third_party\absl,
+echo so the junction has nothing to point at yet. Retrying now that abseil
+echo is present.
+echo.
+echo === configure, pass 2 ===
+rmdir /s /q "%REPO%\src\build" 2>nul
+call :configure
 if errorlevel 1 (
     echo.
-    echo Pass 1 failed. On a fresh clone this is expected once: sentencepiece
-    echo fetches abseil-cpp during configure and only then tries to link
-    echo third_party\absl, so the junction has nothing to point at yet.
-    echo Retrying with abseil now present.
-    echo.
-    echo === configure (pass 2) ===
-    rmdir /s /q "%REPO%\src\build" 2>nul
-    cmake %CFG%
-    if errorlevel 1 (
-        echo.
-        echo ERROR: configure failed twice. The output above is the real
-        echo        diagnostic -- this script has nothing to add to it.
-        exit /b 1
-    )
+    echo ERROR: configure failed twice. The output above is the real
+    echo        diagnostic -- this script has nothing to add to it.
+    exit /b 1
 )
+:configured
 
 :: ---------------------------------------------------------------- build
 echo.
@@ -152,9 +185,8 @@ cmake --build "%REPO%\src\build" --target flm
 if errorlevel 1 (
     echo.
     echo ERROR: build failed. If the link asks for a Boost that is not
-    echo        installed ^(e.g. libboost_program_options-vc143-mt-x64-1_88^),
-    echo        the vcpkg toolchain did not take effect -- which this script
-    echo        exists to prevent, so please report it.
+    echo        installed, the vcpkg toolchain did not take effect -- which
+    echo        this script exists to prevent, so please report it.
     exit /b 1
 )
 
@@ -206,3 +238,27 @@ if defined IRONBUILD (
     )
 )
 endlocal
+exit /b 0
+
+:: ---------------------------------------------------------------- subroutines
+::
+:: The cmake line lives here rather than in a variable. Building it as a string
+:: means quoting quotes, and the toolchain path routinely contains spaces --
+:: which produced `Could not find toolchain file: "C:/Program"` and a warning
+:: about an "extra path from command line".
+:configure
+cmake -S "%REPO%\src" -B "%REPO%\src\build" -G Ninja ^
+    -DCMAKE_BUILD_TYPE=Release ^
+    -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 ^
+    -DFLM_USE_HRX=OFF ^
+    -DCMAKE_TOOLCHAIN_FILE="%VCPKG%\scripts\buildsystems\vcpkg.cmake"
+exit /b %errorlevel%
+
+:: Accept a vcpkg root only if it has both the toolchain file AND the package
+:: this build actually needs. Sets VCPKG on success, leaves it undefined
+:: otherwise, so the caller can fall through to the next candidate.
+:try_vcpkg
+if not exist "%~1\scripts\buildsystems\vcpkg.cmake" exit /b 0
+if not exist "%~1\installed\x64-windows\share\boost_program_options" exit /b 0
+set "VCPKG=%~1"
+exit /b 0

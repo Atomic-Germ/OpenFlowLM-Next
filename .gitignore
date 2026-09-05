@@ -9,7 +9,6 @@ utilities/mlir-aie
 ironvenv
 Models
 tmp
-tmp
 
 # open_npue AIE design sets -- BUILT, not checked in.
 #
@@ -23,3 +22,30 @@ tmp
 src/xclbins/BERT-h*/
 third_party/Peano
 third_party/mlir-aie
+
+# Claude Code planning docs
+.claude/plans/
+
+# open_kernels build outputs and generated fixtures
+open_kernels/designs/*/build*/
+open_kernels/designs/*/*.bin
+open_kernels/designs/*/*.cfg
+open_kernels/designs/*/*.log
+open_kernels/harness/out/
+open_kernels/model/out*/
+
+# npu_offload/matmul generated fixtures (make_test.py) and run configs
+npu_offload/matmul/[abyr]_m*.bin
+npu_offload/matmul/ref_m*.bin
+npu_offload/matmul/run_m*.cfg
+src/open_qwen36/out/
+
+# Open Qwen3.6-MoE kernel sets -- BUILT, not checked in.
+#
+# The source is open_kernels/designs/ (layer_x, ln, lm_head_q8) and
+# open_kernels/export_qwen36_kernels.py is the one command that produces these
+# six xclbin/insts pairs plus a toolchain.json. Same rule as the BERT design
+# sets: a binary beside the source that claims to produce it is a claim nobody
+# checks, so the rebuild is the only way to get one. Shipped pre-built in the
+# distributed package only.
+src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/
