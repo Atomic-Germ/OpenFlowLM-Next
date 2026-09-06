@@ -77,7 +77,7 @@ def bt(total, off, n):
 
 ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
               f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
-              f"-DATTN_EPS={G.EPS:g}f"]
+              f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}"]
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 
 
@@ -103,7 +103,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
     fq = np.ndarray[(QW,), np.dtype[np.float32]]
-    fml = np.ndarray[(2 * G.NH,), np.dtype[np.float32]]
+    fml = np.ndarray[(2 * G.MLS,), np.dtype[np.float32]]   # [m | l], stride MLS (padded when ATTN_VEXP)
     i32 = np.int32
 
     inc = include_dirs() + [str(GEMV), str(ATTN), str(LN), str(LINL)]

@@ -57,6 +57,9 @@
 #if ATTN_QKNORM_POST && !ATTN_QKNORM
 #error "ATTN_QKNORM_POST needs ATTN_QKNORM"
 #endif
+#ifndef ATTN_VEXP
+#define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
+#endif
 static constexpr unsigned kNH = ATTN_NH;
 static constexpr unsigned kKVH = ATTN_KVH;
 static constexpr unsigned kHD = ATTN_HD;
@@ -70,6 +73,14 @@ static_assert(kHD % kV == 0 && kRot % (2 * kV) == 0 && kRot <= kHD && kKVH % 2 =
 static constexpr float kScale = kHD == 256 ? 0.0625f : kHD == 128 ? 0.08838834764831845f
                                 : kHD == 64 ? 0.125f : 0.0f;   // 1/sqrt(HD); a new HD adds its constant here
 static_assert(kScale > 0.0f, "attn.h: no 1/sqrt(HD) for this head dim");
+// ml stride: [m: kMLS][l: kMLS]. With ATTN_VEXP the head count is rounded up to
+// a whole vector so BOTH halves are aligned for a 32-float load; without it the
+// halves are packed and ml is 2 * NH as before.
+#if ATTN_VEXP
+static constexpr unsigned kMLS = ((kNH + kV - 1) / kV) * kV;
+#else
+static constexpr unsigned kMLS = kNH;
+#endif
 
 static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1,
                                   bfloat16 *__restrict qn, bfloat16 *__restrict kn,
@@ -167,9 +178,79 @@ static inline void attn_v_impl(const float *__restrict ve, bfloat16 *__restrict 
 
 static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) {
   for (unsigned j = 0; j < kNH * kHD; j += kV) aie::store_v(oacc + j, aie::zeros<float, kV>());
-  for (unsigned h = 0; h < kNH; ++h) { ml[h] = -1e30f; ml[kNH + h] = 0.f; }
+  for (unsigned h = 0; h < kNH; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
+#if ATTN_VEXP
+  // The padding lanes are exponentiated with the rest; -1e30 keeps them at
+  // exp(-inf) = 0 rather than whatever the stack held.
+  for (unsigned h = kNH; h < kMLS; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
+#endif
 }
 
+#if ATTN_VEXP
+// one position, heads batched through the vector unit.
+//
+// The straight loop below spends two sexp() per head per position, and sexp is
+// SOFTWARE FLOAT ON THE SCALAR UNIT -- vecmath.h says so where it is defined
+// ("slow, use for a few dozen values per call"). At NH heads over a context of
+// P positions that is 2 * NH * P of them per layer per token: 6.5 million for
+// Granite at position 2048 over 40 layers, and it dominates the step.
+//
+// Same arithmetic, three phases: score every head, do the online-softmax
+// update for all of them in one vector pass (vexpN, ~1e-7 relative, the same
+// accuracy class as sexp), then accumulate the outputs. Two exponentials per
+// vector of 32 heads instead of two per head.
+//
+// ml is [m: kMLS][l: kMLS] with kMLS the head count rounded up to a vector, so
+// both halves stay aligned for a 32-float load: at NH 40 the l half would
+// otherwise start 160 bytes in, and attn.h's own trap catalogue has that
+// mistake in it already.
+__attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
+                                  const float *__restrict qs, float *__restrict oacc,
+                                  float *__restrict ml) {
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  alignas(128) float sv[kMLS], av[kMLS], bv[kMLS];
+
+  for (unsigned h = 0; h < kNH; ++h) {
+    const unsigned kvh = h / (kNH / kKVH);
+    const float *q = qs + h * kHD;
+    const bfloat16 *k = Kt + kvh * kHD;
+    accf32 d = aie::zeros<accfloat, kV>();
+    for (unsigned j = 0; j < kHD; j += kV)
+      d = mac_vv(d, aie::load_v<kV>(q + j), aie::load_v<kV>(k + j));
+    sv[h] = aie::reduce_add(d.template to_vector<float>()) * kScale;   // / sqrt(HD)
+  }
+  for (unsigned h = kNH; h < kMLS; ++h) sv[h] = -1e30f;
+
+  for (unsigned v = 0; v < kMLS; v += kV) {
+    const vfN<kV> s = aie::load_v<kV>(sv + v);
+    const vfN<kV> m = aie::load_v<kV>(ml + v);
+    const vfN<kV> mn = aie::max(m, s);
+    const vfN<kV> a = vexpN<kV>(fsubN<kV>(m, mn));
+    const vfN<kV> b = vexpN<kV>(fsubN<kV>(s, mn));
+    const vfN<kV> l = aie::load_v<kV>(ml + kMLS + v);
+    aie::store_v(ml + v, mn);
+    aie::store_v(ml + kMLS + v, faddN<kV>(fmulN<kV>(l, a), b));
+    aie::store_v(av + v, a);
+    aie::store_v(bv + v, b);
+  }
+
+  for (unsigned h = 0; h < kNH; ++h) {
+    const unsigned kvh = h / (kNH / kKVH);
+    const bfloat16 *v = Vt + kvh * kHD;
+    const float a = av[h], b = bv[h];
+    const bfloat16 bh = (bfloat16)b;
+    const bfloat16 bl = (bfloat16)(b - (float)bh);
+    float *o = oacc + h * kHD;
+    for (unsigned j = 0; j < kHD; j += kV) {
+      accf32 acc;
+      acc.from_vector(fscaleN<32>(aie::load_v<kV>(o + j), a));
+      acc = aie::mac(acc, aie::load_v<kV>(v + j), bh);
+      acc = aie::mac(acc, aie::load_v<kV>(v + j), bl);
+      aie::store_v(o + j, acc.template to_vector<float>());
+    }
+  }
+}
+#else
 // one position: K_t, V_t bf16[KVH * HD]
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
                                   const float *__restrict qs, float *__restrict oacc,
@@ -189,7 +270,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
     const float a = sexp(m_old - m_new);
     const float b = sexp(s - m_new);
     ml[h] = m_new;
-    ml[kNH + h] = ml[kNH + h] * a + b;
+    ml[kMLS + h] = ml[kMLS + h] * a + b;
     const bfloat16 bh = (bfloat16)b;
     const bfloat16 bl = (bfloat16)(b - (float)bh);
     float *o = oacc + h * kHD;
@@ -202,6 +283,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
     }
   }
 }
+#endif
 
 // cached row number pb[2] of the nf streamed: rows t >= pos are the position-0 dummy
 static inline void attn_step_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
@@ -221,7 +303,7 @@ __attribute__((noinline)) inline void attn_fin_impl(const float *__restrict oacc
   aie::set_rounding(aie::rounding_mode::conv_even);
   for (unsigned i = 0; i < kHPO; ++i) {
     const unsigned h = kHPO * hp + i;
-    const float inv = 1.0f / ml[kNH + h];
+    const float inv = 1.0f / ml[kMLS + h];
     const float *o = oacc + h * kHD;
 #if ATTN_GATE
     const float *g = (i < kHPE) ? (g0 + i * kHD) : (g1 + (i - kHPE) * kHD);
