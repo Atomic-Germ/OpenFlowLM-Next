@@ -78,11 +78,13 @@ def bt(total, off, n):
 ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
               f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
               f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
+if G.RB > 1:                                           # attn.h defaults it to 1; adding the flag
+    ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")             # would change every other family's build line
 if os.environ.get("ATTN_NULL") == "1":                 # probe: see attn.h's ATTN_NULL
     ATTN_FLAGS.append("-DATTN_NULL=1")
 if os.environ.get("ATTN_ABL"):                         # probe: see attn.h's ATTN_ABL
     ATTN_FLAGS.append(f"-DATTN_ABL={os.environ['ATTN_ABL']}")
-ACORES, NHL = G.ACORES, G.NHL
+ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 
 
@@ -102,7 +104,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     kv_ty = np.ndarray[(L.KV_BYTES,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(L.AD_BYTES,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(L.PTAB_BYTES,), np.dtype[np.uint8]]
-    i32_4 = np.ndarray[(4,), np.dtype[np.int32]]
+    i32_4 = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]   # +[blocks, remainder] when blocked
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
@@ -135,6 +137,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     h0_arg = [i32] if ACORES > 1 else []                       # only a split needs the head offset
     f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, i32_4] + h0_arg, ATTN_FLAGS)
     f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
+    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, i32_4] + h0_arg,
+                  ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, brow, i32], ATTN_FLAGS)
 
     # ---- fifos
@@ -143,7 +147,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)      # one output element at a time (8 KB elements at 4096 wide)
-    of_ain = ObjectFifo(u8_a, name="ain", depth=4)
+    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2))   # a block is acquired at once
     # Attention over ACORES cores: heads are independent, so each core owns NHL of
     # them and drains its own og element. Separate fifos + separate drains at
     # offsets is the pattern the GEMV cores already use below; a memtile join()
@@ -256,7 +260,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     N_OG = NHL // G.HPO          # og elements this core emits (all of them when ACORES == 1)
 
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, h0):
+              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0):
         e = ain.acquire(2)                                      # [qn | kn], the position record
         f_meta(e[0], e[1], qn, kn, cs, pb)
         ain.release(2)
@@ -282,26 +286,51 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 o[j] = vout[j]
             aout.release(1)
         f_init(oacc, ml)
-        for _ in range_(pb[1]):                                 # nf cached rows (K_t, V_t)
-            e = ain.acquire(2)
-            f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
-            ain.release(2)
+        if RB > 1:
+            for _ in range_(pb[4]):                             # whole blocks of RB rows
+                e = ain.acquire(2 * RB)
+                args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
+                f_stepb(*args)
+                ain.release(2 * RB)
+            for _ in range_(pb[5]):                             # what did not fill a block
+                e = ain.acquire(2)
+                f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
+                ain.release(2)
+        else:
+            for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
+                e = ain.acquire(2)
+                f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
+                ain.release(2)
         f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
         for hp in range_(N_OG):
             o = ogout.acquire(1)
             f_fin(oacc, ml, o, hp)
             ogout.release(1)
 
-    def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
-        _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, 0)
+    # Two shapes of worker body, not one with a defaulted argument: a family that
+    # does not block must present IRON the exact function it presented before.
+    if RB > 1:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0)
 
-    def make_attn_body(c):
-        h0 = c * NHL
-        def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
-            _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, h0)
-        return body
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0)
+            return body
+    else:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, 0)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, h0)
+            return body
 
     workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx] + ([f_nr32] if G.SANDWICH else []),
                       tile=Tile(0, 3), stack_size=0x1800)]
@@ -317,7 +346,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 Buffer(brow, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
                 Buffer(i32_4, name=f"pb{s}")]
 
-    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin]
+    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
     workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
                           tile=Tile(2, 3), stack_size=0x1800))
     # The rest of the attention cores: same broadcast stream in, their own og out.

@@ -31,6 +31,8 @@ the 27B these rules give the sizes ax.py uses (4096 / 4096 / 1024).
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
@@ -71,7 +73,7 @@ class DenseGeometry:
     TAB_BYTES: int; KWIDE: int
     MS_U: int; MS_G: int; MS_FLOATS: int                            # the up / gate band scratch
     VEXP: int; MLS: int                                             # batched softmax exponentials; ml stride
-    ACORES: int; NHL: int                                           # attention cores; heads each owns
+    ACORES: int; NHL: int; RB: int                                  # attention cores; heads each owns; rows per call
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,14 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         acores = og_elems if og_elems > 1 else 1
     nhl = nh // acores
     mls = ((nhl + 31) // 32) * 32 if vexp else nhl
+    # Rows per kernel call. One row per call reloads q for every head and reloads,
+    # rescales and stores the whole output accumulator, at every position; a block
+    # pays those once for RB rows and exponentiates the whole block in one vector
+    # (RB * NHL lanes) instead of one per row. RB * NHL must be a whole vector.
+    rb = 1
+    if vexp:
+        rb = max((r for r in (4, 2, 1) if (r * nhl) in (8, 16, 32)), default=1)
+        rb = int(os.environ.get("ATTN_RB", rb))       # probe: block size
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
@@ -186,7 +196,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         HPE=hpe, HPO=hpo, Q_AIN_ELEMS=nh // hpe, K_AIN_ELEMS=kvh // hpe, OG_AOUT_ELEMS=nh // hpo,
         TAB_BYTES=tab_bytes(wide), KWIDE=wide,
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=2 * BAND_ROWS,
-        VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl,
+        VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb,
     )
 
 
