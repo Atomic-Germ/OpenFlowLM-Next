@@ -81,6 +81,45 @@ buffer arguments on a dispatch is likewise refused.
 - The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN and `head_dim=64` with OPEN-FAMILY-GRANITE, both on 2026-09-06; `head_dim=32` is still refused.
 - Nine buffer arguments → `9 buffer arguments`.
 
+### OPEN-ATTN-CONTEXT: decode cost grows linearly with position, on every family
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`)
+**Test category:** manual (`open_kernels/model/sweep_positions.ps1`, needs the NPU and two model containers)
+
+**This is an observation, not yet a requirement** — it is written down because
+it was measured, it is large, and nothing else in this spec records it.
+
+A decode step's cost is dominated by a term linear in context position.
+Measured 2026-09-06 on one box, one step per point, `--at-position`:
+
+| position | Qwen3-4B `part0` (36 layers) | Granite-3B `part0` (40 layers) |
+|---:|---:|---:|
+| 0 | 56.7 ms | 60.0 ms |
+| 256 | 442.6 ms | 578.6 ms |
+| 1024 | 1585.3 ms | 2103.2 ms |
+| 2048 | 3120.6 ms | 4121.6 ms |
+
+Linear in both: **1.496 ms/position** (Qwen3-4B) and **1.983 ms/position**
+(Granite), i.e. **41.6 µs and 49.6 µs per layer per position**. `lm_head` stays
+flat at 4–6 ms throughout, so it is attention, not the GEMVs. At position 2048
+a single token costs 3–4 seconds.
+
+**The cost is not bandwidth and not arithmetic.** Granite reads *half* the KV
+bytes per position per layer (KV_ROW 2048 against 4096) and does fewer MACs
+(40×64 = 2560 against 32×128 = 4096), yet its slope is 19% steeper. Qwen3-4B
+additionally carries `qk_norm`, which Granite does not — more work for the
+faster one.
+
+What does track is **head count**: 40/32 = 1.25 against a measured 1.19. The
+hypothesis that fits is a fixed per-head cost in the position loop that does
+not shrink when `head_dim` halves — i.e. `attn.h` not saturating the vector
+unit at hd 64. Suggestive, not proven: two families is two points, and a third
+(Llama 3.1 8B is 32 heads at hd 128, Gemma 3 4B is 8 at 256) would separate
+head count from head width properly.
+
+Consequence for anything quoting a tok/s number: **say the position.** Granite
+measured 5.92 tok/s over 63 tokens and 1500 µs/layer at position 0; both are
+true and they are not the same measurement.
+
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
 **Test category:** unit
@@ -294,17 +333,10 @@ sets `think: true`, but `Granite` implements no `parse_stream_content` /
 `parse_nstream_content`, so the chain of thought is printed raw and only the
 closing tag appears. Cosmetic, and separate from the kernel path.
 
-**And the performance is the finding, not the correctness.** Decode is
-**5.92 tok/s** averaged over 63 tokens, and the per-step cost grows steadily
-with position — `part0` 91.9 ms at position 18, 235.4 ms at position 80, about
-**+2.3 ms per position** (~58 µs per layer per position), while `lm_head` stays
-flat at 4.1 ms. So the growth is the KV scan in attention, not the GEMVs.
+**At zero context `dx` beats the hand-written kernels**: `part0` 60.0 ms over
+40 layers is **1500 µs/layer**, against those kernels' 1744.7 µs at four
+dispatches — 1.16×, the direction one dispatch per layer was expected to give.
 
-Against the hand-written four-dispatch kernels' 1744.7 µs/layer, `dx` costs
-**2300 µs/layer at position 18** and 5900 µs at position 80. One dispatch per
-layer did **not** beat four here, and past roughly position 40 this path is
-slower than the CPU host engine's 8.7 tok/s as well. Granite is the first
-family measured at head_dim 64 / 40 heads, so whether that is the geometry, the
-attention kernel's behaviour at 40 heads over 8 kv heads, or something the
-other families would show too at long context, is not yet established — none of
-the other three has a published position-swept number to compare against.
+Everything above that is the context term, and it is **not** Granite's: see
+OPEN-ATTN-CONTEXT below. Decode measured 5.92 tok/s over 63 tokens because the
+context grew underneath it, not because the family is slow.

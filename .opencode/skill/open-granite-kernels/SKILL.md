@@ -113,51 +113,31 @@ Correctness, 4-layer slice: logits corr **0.999998 / 0.999990**, same argmax
 0.999990–0.999999 in every layer. A coherent two-sentence answer through
 `chat.py`, ending on `<|end_of_text|>` at token 52.
 
-**Performance is the open question.** Decode **5.92 tok/s** over 63 tokens, and
-the per-step cost grows with position:
+**Performance: at zero context `dx` wins; past that, context dominates and it
+is not Granite's fault.** `part0` 60.0 ms over 40 layers at position 0 is
+**1500 µs/layer**, against the hand-written four-dispatch Granite kernels in
+`vegah/FastFlowLM@feat/kernels` at **1744.7 µs/layer** — 1.16×, the direction
+one dispatch per layer was expected to give.
 
-| position | `part0` (40 layers) | `lm_head` | per layer |
-|---:|---:|---:|---:|
-| 18 | 91.9 ms | 4.0 ms | 2300 µs |
-| 80 | 235.4 ms | 4.1 ms | 5900 µs |
+Everything above that is a term linear in position, and it is the **dense
+recipe's**, not this family's. Measured the same evening with
+`open_kernels/model/sweep_positions.ps1`:
 
-About **+2.3 ms per position** (~58 µs per layer per position) while `lm_head`
-stays flat, so the growth is the KV scan in attention, not the GEMVs.
+| | at position 0 | per layer per position |
+|---|---:|---:|
+| Qwen3-4B (36 layers, 32 heads @ hd 128) | 1.58 ms/layer | 41.6 µs |
+| Granite-3B (40 layers, 40 heads @ hd 64) | 1.50 ms/layer | 49.6 µs |
 
-Against the hand-written four-dispatch Granite kernels in
-`vegah/FastFlowLM@feat/kernels` (**1744.7 µs/layer, 13.6 tok/s device time**),
-one `dx` dispatch per layer did **not** win, and past roughly position 40 this
-path is slower than that branch's CPU host engine (8.7 tok/s) too.
+At position 2048 one token costs 3–4 seconds on either. See
+**OPEN-ATTN-CONTEXT** in `specs/open-engine/spec.md` for the full table and for
+what the cost is *not*: Granite reads half the KV bytes per position per layer
+and does fewer MACs, yet its slope is 19% steeper, so neither bandwidth nor
+arithmetic explains it. Head count (40/32 = 1.25 against a measured 1.19) is
+what tracks.
 
-**Do not attribute this to the geometry without evidence.** Granite is the
-first family measured at head_dim 64 / 40 heads, *and* the first measured with
-a per-position breakdown at all — none of Qwen3-4B, Llama-3.1-8B or Gemma3-4B
-has a published number at more than one position. The way to settle it is to
-run the same breakdown on one of those (see below); until then the cause is
-unknown.
-
-## How to settle the context-growth question
-
-Take one already-validated family, run a single decode step at several
-positions, and record `part0`. `open_qwen36_cli --at-position P` seeks the KV
-cache to P without decoding P tokens, so a sweep is cheap:
-
-```powershell
-foreach ($p in 0, 256, 1024, 2048) {
-    src\open_qwen36\out\open_qwen36_cli.exe --model <model dir> --kernels <kernels> `
-        --ids <family's first token> --max-tokens 1 --at-position $p
-}
-```
-
-If `part0` grows the same way for Qwen3-4B or Llama-3.1-8B, the behaviour is
-the dense recipe's attention at long context and Granite is merely the first
-family anyone measured. If it stays flat there and grows here, it is specific
-to 40 heads over 8 kv heads at head_dim 64. Either answer is worth having; the
-current state is that nobody has looked.
-
-Neither model is on this machine — `Granite-4.2-3B-NPU2` is the only one in
-`~/.flm/models` — so the sweep costs one container download (Qwen3-4B is the
-smaller at ~2.5 GB).
+**So do not quote a Granite tok/s number without the position.** 5.92 tok/s
+over 63 tokens and 1500 µs/layer at position 0 are both true and are not the
+same measurement.
 
 ## Rules
 
