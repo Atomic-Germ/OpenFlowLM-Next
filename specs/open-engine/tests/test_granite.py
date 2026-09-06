@@ -66,16 +66,14 @@ def test_scaling_and_tied_embeddings_are_refused():
         ModelSpec.from_hf_config(dict(HF_GRANITE_42_3B, tie_word_embeddings=True))
 
 
-def test_head_dim_64_needs_blessing():
-    """Granite is the first head_dim-64 point. Without the escape hatch the
-    catalogue refuses it by name -- that gate is the feature, not an obstacle."""
-    spec = ModelSpec.from_hf_config(HF_GRANITE_42_3B)
-    with pytest.raises(Exception, match=r"head_dim=64 is outside the validated set"):
-        DR.recipe(spec)
+def test_the_3b_is_inside_every_validated_set():
+    """head_dim 64, num_heads 40 and gemv_q4 K 8192 entered the catalogue with
+    OPEN-FAMILY-GRANITE on 2026-09-06, so the recipe now builds with no escape
+    hatch. Before that run it refused, by name, on all three."""
+    DR.recipe(ModelSpec.from_hf_config(HF_GRANITE_42_3B))
 
 
-def test_3b_layout_and_manifest(monkeypatch):
-    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+def test_3b_layout_and_manifest():
     spec = ModelSpec.from_hf_config(HF_GRANITE_42_3B)
     R = DR.recipe(spec)
     L, G = R.layout, R.geo
@@ -99,11 +97,10 @@ def test_3b_layout_and_manifest(monkeypatch):
     assert m["builds"]["dx"]["build_dir"] == "dense/build_granite_h2560"
 
 
-def test_one_dispatch_per_layer(monkeypatch):
+def test_one_dispatch_per_layer():
     """Our own tuned Granite kernels ran a layer in four dispatches at
     1744.7 us; the dense recipe's program is one step per layer plus a
     per-token ln + lm_head tail."""
-    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
     prog = DR.programs(ModelSpec.from_hf_config(HF_GRANITE_42_3B))
     assert [s["kernel"] for s in prog["layer_types"][DENSE]["program"]] == ["dx"]
     assert [s["kernel"] for s in prog["tail"]] == ["ln", "lm"]

@@ -77,8 +77,8 @@ buffer arguments on a dispatch is likewise refused.
 
 **Acceptance criteria:**
 - The 27B spec passes every check.
-- `head_dim=64` → `attn: head_dim=64 is outside the validated set {128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → names `{2048, 2560, 4096, 9728, 10240, 14336}`; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05.)
-- The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN on 2026-09-06, and `head_dim=64` is still refused.
+- `head_dim=32` → `attn: head_dim=32 is outside the validated set {64, 128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → refused by name; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05; head_dim 64, num_heads 40 and K 8192 with OPEN-FAMILY-GRANITE on 2026-09-06. A test that spells out a set'''s membership fails on the one event that is never a regression, so the tests assert the refusal and not the contents.)
+- The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN and `head_dim=64` with OPEN-FAMILY-GRANITE, both on 2026-09-06; `head_dim=32` is still refused.
 - Nine buffer arguments → `9 buffer arguments`.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
@@ -266,9 +266,8 @@ originals under `q4nx_folded_multipliers`.
 - An unfolded `attention_multiplier`, or any of the other three unequal to 1.0, is refused by name and names q4nx-build as the fix — from HF `config.json` and from GGUF metadata alike.
 - `hf_config_check` carries `attention_multiplier`, so the **engine** refuses an unfolded container at load, not only the recipe at generation.
 - The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `ln` + `lm` tail.
-- Without `OPEN_KERNELS_UNVALIDATED` the catalogue refuses `head_dim=64` by name.
 
-**Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Granite-4.2-3B-NPU2`, `out_gr`, prompt id 100283 (`<|start_of_role|>`). Three catalogue points enter with it: `attn.head_dim 64`, `attn.num_heads 40`, `gemv_q4.K 8192`.
+**Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Granite-4.2-3B-NPU2`, `out_gr`, prompt id 100264 (`<|start_of_role|>` — *not* `config.json`'s `bos_token_id` 100283, which is `</documents>` and disagrees with `tokenizer_config.json`'s own bos). Three catalogue points entered with it: `attn.head_dim 64`, `attn.num_heads 40`, `gemv_q4.K 8192`.
 
 **Prior evidence (2026-09-02, a different design):** these shapes have been run
 and compared on this hardware before, by hand-written Granite kernels in
@@ -279,4 +278,23 @@ baseline the one-dispatch `dx` program should beat, and the reason head_dim 64
 at hidden 2560 was expected to work at all. It is prior evidence for the
 catalogue points, not a substitute for validating them on `dx`.
 
-**Result:** pending.
+**Result 2026-09-06 (Granite-4.2-3B):** slice logits corr 0.999998 / 0.999990,
+same argmax (38457) and an **identical top-5** at both positions, residual corr
+0.999990–0.999999 in every layer; a coherent two-sentence answer through
+`chat.py`, ending on `<|end_of_text|>` at token 52. Built on mlir-aie
+1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301, natively on Windows.
+
+**And the performance is the finding, not the correctness.** Decode is
+**5.92 tok/s** averaged over 63 tokens, and the per-step cost grows steadily
+with position — `part0` 91.9 ms at position 18, 235.4 ms at position 80, about
+**+2.3 ms per position** (~58 µs per layer per position), while `lm_head` stays
+flat at 4.1 ms. So the growth is the KV scan in attention, not the GEMVs.
+
+Against the hand-written four-dispatch kernels' 1744.7 µs/layer, `dx` costs
+**2300 µs/layer at position 18** and 5900 µs at position 80. One dispatch per
+layer did **not** beat four here, and past roughly position 40 this path is
+slower than the CPU host engine's 8.7 tok/s as well. Granite is the first
+family measured at head_dim 64 / 40 heads, so whether that is the geometry, the
+attention kernel's behaviour at 40 heads over 8 kv heads, or something the
+other families would show too at long context, is not yet established — none of
+the other three has a published position-swept number to compare against.
