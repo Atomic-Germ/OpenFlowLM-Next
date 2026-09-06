@@ -70,6 +70,15 @@ def main() -> int:
         prompt = f"<|startoftext|>{a.message}<|extra_0|>"
         ids = tk.encode(prompt, add_special_tokens=False).ids
         IM_END, EOT = ids_of("<|eos|>", "<|endoftext|>")
+    elif tk.token_to_id("<|start_of_role|>") is not None:
+        # Granite: <|start_of_role|>user<|end_of_role|>...<|end_of_text|><|start_of_role|>assistant<|end_of_role|>
+        # Both roles close with <|end_of_text|>, so it is the turn end AND the
+        # eos -- unlike the families above, which have a separate pair.
+        prompt = (f"<|start_of_role|>user<|end_of_role|>{a.message}<|end_of_text|>"
+                  f"<|start_of_role|>assistant<|end_of_role|>")
+        ids = tk.encode(prompt, add_special_tokens=False).ids
+        IM_END, = ids_of("<|end_of_text|>")
+        EOT = IM_END
     else:
         prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
         IM_START, IM_END, EOT, THINK, END_THINK, NL, NLNL = special_ids(tk)
