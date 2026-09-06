@@ -71,6 +71,7 @@ class DenseGeometry:
     TAB_BYTES: int; KWIDE: int
     MS_U: int; MS_G: int; MS_FLOATS: int                            # the up / gate band scratch
     VEXP: int; MLS: int                                             # batched softmax exponentials; ml stride
+    ACORES: int; NHL: int                                           # attention cores; heads each owns
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,16 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     # and every other family's artifacts must stay byte-identical until each has
     # been measured the same way.
     vexp = 1 if spec.family == "granite" else 0
-    mls = ((nh + 31) // 32) * 32 if vexp else nh
+    # Attention runs on ONE core while ~22 of the array's 32 sit idle, and after
+    # ATTN_VEXP it is still the whole decode step. Heads are independent, so the
+    # work splits cleanly -- but an og output element carries HPO heads, so the
+    # core count has to divide the og element count exactly.
+    acores = 1
+    if spec.family == "granite":
+        og_elems = nh // hpo
+        acores = og_elems if og_elems > 1 else 1
+    nhl = nh // acores
+    mls = ((nhl + 31) // 32) * 32 if vexp else nhl
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
@@ -176,7 +186,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         HPE=hpe, HPO=hpo, Q_AIN_ELEMS=nh // hpe, K_AIN_ELEMS=kvh // hpe, OG_AOUT_ELEMS=nh // hpo,
         TAB_BYTES=tab_bytes(wide), KWIDE=wide,
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=2 * BAND_ROWS,
-        VEXP=vexp, MLS=mls,
+        VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl,
     )
 
 

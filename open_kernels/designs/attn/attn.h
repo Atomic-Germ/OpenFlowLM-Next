@@ -60,7 +60,11 @@
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
+#ifndef ATTN_NHL
+#define ATTN_NHL ATTN_NH     // heads THIS core owns; < ATTN_NH splits attention over several cores
+#endif
 static constexpr unsigned kNH = ATTN_NH;
+static constexpr unsigned kNHL = ATTN_NHL;   // local head count; oacc / ml / og are indexed by it
 static constexpr unsigned kKVH = ATTN_KVH;
 static constexpr unsigned kHD = ATTN_HD;
 static constexpr unsigned kRot = ATTN_ROT;
@@ -77,10 +81,25 @@ static_assert(kScale > 0.0f, "attn.h: no 1/sqrt(HD) for this head dim");
 // a whole vector so BOTH halves are aligned for a 32-float load; without it the
 // halves are packed and ml is 2 * NH as before.
 #if ATTN_VEXP
-static constexpr unsigned kMLS = ((kNH + kV - 1) / kV) * kV;
+static constexpr unsigned kMLS = ((kNHL + kV - 1) / kV) * kV;
 #else
-static constexpr unsigned kMLS = kNH;
+static constexpr unsigned kMLS = kNHL;
 #endif
+static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmetic on the single-core path
+// The head offset is a kernel ARGUMENT only when attention is actually split.
+// Leaving an unused one in the signature is not free: it perturbs codegen, and
+// the single-core families must keep compiling byte-for-byte what they did.
+#if ATTN_NHL == ATTN_NH
+#define ATTN_H0_PARM
+#define ATTN_H0_DECL const int h0 = 0; (void)h0;
+#define ATTN_H0_ARG
+#else
+#define ATTN_H0_PARM , int h0
+#define ATTN_H0_DECL
+#define ATTN_H0_ARG , h0
+#endif
+static_assert(kNH % kNHL == 0 && kNHL % kHPO == 0,
+              "attn.h: the local head count must divide NH and be a whole number of og elements");
 
 static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1,
                                   bfloat16 *__restrict qn, bfloat16 *__restrict kn,
@@ -177,12 +196,12 @@ static inline void attn_v_impl(const float *__restrict ve, bfloat16 *__restrict 
 }
 
 static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) {
-  for (unsigned j = 0; j < kNH * kHD; j += kV) aie::store_v(oacc + j, aie::zeros<float, kV>());
-  for (unsigned h = 0; h < kNH; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
+  for (unsigned j = 0; j < kNHL * kHD; j += kV) aie::store_v(oacc + j, aie::zeros<float, kV>());
+  for (unsigned h = 0; h < kNHL; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
 #if ATTN_VEXP
   // The padding lanes are exponentiated with the rest; -1e30 keeps them at
   // exp(-inf) = 0 rather than whatever the stack held.
-  for (unsigned h = kNH; h < kMLS; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
+  for (unsigned h = kNHL; h < kMLS; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
 #endif
 }
 
@@ -206,20 +225,22 @@ static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) 
 // mistake in it already.
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
                                   const float *__restrict qs, float *__restrict oacc,
-                                  float *__restrict ml) {
+                                  float *__restrict ml ATTN_H0_PARM) {
+  ATTN_H0_DECL
   aie::set_rounding(aie::rounding_mode::conv_even);
   alignas(128) float sv[kMLS], av[kMLS], bv[kMLS];
 
-  for (unsigned h = 0; h < kNH; ++h) {
+  for (unsigned hl = 0; hl < kNHL; ++hl) {
+    const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
     const unsigned kvh = h / (kNH / kKVH);
     const float *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     accf32 d = aie::zeros<accfloat, kV>();
     for (unsigned j = 0; j < kHD; j += kV)
       d = mac_vv(d, aie::load_v<kV>(q + j), aie::load_v<kV>(k + j));
-    sv[h] = aie::reduce_add(d.template to_vector<float>()) * kScale;   // / sqrt(HD)
+    sv[hl] = aie::reduce_add(d.template to_vector<float>()) * kScale;   // / sqrt(HD)
   }
-  for (unsigned h = kNH; h < kMLS; ++h) sv[h] = -1e30f;
+  for (unsigned h = kNHL; h < kMLS; ++h) sv[h] = -1e30f;
 
   for (unsigned v = 0; v < kMLS; v += kV) {
     const vfN<kV> s = aie::load_v<kV>(sv + v);
@@ -234,13 +255,13 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
     aie::store_v(bv + v, b);
   }
 
-  for (unsigned h = 0; h < kNH; ++h) {
-    const unsigned kvh = h / (kNH / kKVH);
+  for (unsigned hl = 0; hl < kNHL; ++hl) {
+    const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
     const bfloat16 *v = Vt + kvh * kHD;
-    const float a = av[h], b = bv[h];
+    const float a = av[hl], b = bv[hl];
     const bfloat16 bh = (bfloat16)b;
     const bfloat16 bl = (bfloat16)(b - (float)bh);
-    float *o = oacc + h * kHD;
+    float *o = oacc + hl * kHD;
     for (unsigned j = 0; j < kHD; j += kV) {
       accf32 acc;
       acc.from_vector(fscaleN<32>(aie::load_v<kV>(o + j), a));
@@ -254,9 +275,11 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 // one position: K_t, V_t bf16[KVH * HD]
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
                                   const float *__restrict qs, float *__restrict oacc,
-                                  float *__restrict ml) {
+                                  float *__restrict ml ATTN_H0_PARM) {
+  ATTN_H0_DECL
   aie::set_rounding(aie::rounding_mode::conv_even);
-  for (unsigned h = 0; h < kNH; ++h) {
+  for (unsigned hl = 0; hl < kNHL; ++hl) {
+    const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all
     const unsigned kvh = h / (kNH / kKVH);
     const float *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
@@ -265,15 +288,15 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
     for (unsigned j = 0; j < kHD; j += kV)
       d = mac_vv(d, aie::load_v<kV>(q + j), aie::load_v<kV>(k + j));
     const float s = aie::reduce_add(d.template to_vector<float>()) * kScale;   // / sqrt(HD)
-    const float m_old = ml[h];
+    const float m_old = ml[hl];
     const float m_new = (s > m_old) ? s : m_old;
     const float a = sexp(m_old - m_new);
     const float b = sexp(s - m_new);
-    ml[h] = m_new;
-    ml[kMLS + h] = ml[kMLS + h] * a + b;
+    ml[hl] = m_new;
+    ml[kMLS + hl] = ml[kMLS + hl] * a + b;
     const bfloat16 bh = (bfloat16)b;
     const bfloat16 bl = (bfloat16)(b - (float)bh);
-    float *o = oacc + h * kHD;
+    float *o = oacc + hl * kHD;
     for (unsigned j = 0; j < kHD; j += kV) {
       accf32 acc;
       acc.from_vector(fscaleN<32>(aie::load_v<kV>(o + j), a));
@@ -288,11 +311,11 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 // cached row number pb[2] of the nf streamed: rows t >= pos are the position-0 dummy
 static inline void attn_step_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
                                   const float *__restrict qs, float *__restrict oacc,
-                                  float *__restrict ml, int32_t *__restrict pb) {
+                                  float *__restrict ml, int32_t *__restrict pb ATTN_H0_PARM) {
   const int32_t t = pb[2];
   pb[2] = t + 1;
   if (t >= pb[0]) return;
-  attn_row_impl(Kt, Vt, qs, oacc, ml);
+  attn_row_impl(Kt, Vt, qs, oacc, ml ATTN_H0_ARG);
 }
 
 // kHPO heads -> one output element: og = o/l [* sigmoid(gate)]; with the gate, g0 holds the
