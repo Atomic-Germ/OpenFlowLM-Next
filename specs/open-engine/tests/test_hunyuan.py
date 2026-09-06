@@ -110,6 +110,8 @@ def test_the_post_rope_point_is_in_the_catalogue():
 
 
 def test_the_head_rounds_an_unpadded_vocabulary_up_to_whole_bands(unvalidated):
+    # tokenizer.json defines ids 0..128165, so its id count is 128166; config.json's 128167
+    # is the embedding table's row count -- one row no token maps to
     spec = ModelSpec.from_hf_config(HF_HY_MT2_7B, real_vocab=128166)
     assert spec.vocab == 128167 and DR.lm_rows(spec) == 128192
     m = manifest(spec)
