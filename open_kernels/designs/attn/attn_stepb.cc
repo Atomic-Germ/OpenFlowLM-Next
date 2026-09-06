@@ -22,6 +22,10 @@ void attn_stepb(const bfloat16 *__restrict K0, const bfloat16 *__restrict V0,
 #error "attn_stepb.cc: ATTN_RB must be 2 or 4"
 #endif
   pb[2] += (int32_t)kRB;
+#if !ATTN_NULL
   attn_rowb_impl(K, V, qs, oacc, ml ATTN_H0_ARG);
+#else
+  (void)K; (void)V; (void)qs; (void)oacc; (void)ml;   // the probe covers the block path too
+#endif
 }
 }
