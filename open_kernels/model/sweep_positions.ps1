@@ -56,9 +56,18 @@ foreach ($m in $models) {
     }
     Write-Host "`n=== $($m.name) ===" -ForegroundColor Cyan
     foreach ($p in $Positions) {
-        # stderr carries the timings; 2>&1 merges it so we can parse.
+        # stderr carries the timings, so it has to be merged in -- but PowerShell
+        # 5.1 wraps a native command's stderr in ErrorRecords and sets $? false
+        # even on exit 0, which under 'Stop' aborts the script on a program that
+        # merely printed a line. npu_offload/gemm_rtp/build.ps1 documents the
+        # same trap and the same workaround: drop to Continue across the call.
+        $ErrorActionPreference = 'Continue'
+        # --max-tokens 2, not 1: the first token comes out of prefill and prints
+        # no "step @" line. Two tokens give exactly one decode step, which is
+        # the thing being measured.
         $out = & $Cli --model $m.dir --kernels $m.kernels --ids $m.id `
-                      --max-tokens 1 --max-ctx $MaxCtx --at-position $p 2>&1 | Out-String
+                      --max-tokens 2 --max-ctx $MaxCtx --at-position $p 2>&1 | Out-String
+        $ErrorActionPreference = 'Stop'
         # "  step @123: 96.1 ms (part0 91.9, route 0.00, part1 0.0, lm_head 4.0)"
         $hit = [regex]::Match($out, 'step @\d+:\s*([\d.]+) ms \(part0 ([\d.]+).*?lm_head ([\d.]+)')
         if ($hit.Success) {
