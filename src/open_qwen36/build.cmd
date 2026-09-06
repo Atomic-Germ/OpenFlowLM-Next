@@ -21,7 +21,7 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
    manifest_test.cpp manifest.cpp /Fe:out\manifest_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
-out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json
+out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_hy_mt2_7b.json
 if errorlevel 1 goto :testfail
 echo [open_qwen36] XRT_INCLUDE_DIR=%XRT_INCLUDE_DIR%
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^

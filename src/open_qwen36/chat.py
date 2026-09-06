@@ -65,6 +65,11 @@ def main() -> int:
                   f"<|start_header_id|>assistant<|end_header_id|>\n\n")
         ids = tk.encode(prompt, add_special_tokens=False).ids
         IM_END, EOT = ids_of("<|eot_id|>", "<|end_of_text|>")
+    elif tk.token_to_id("<|startoftext|>") is not None and tk.token_to_id("<|extra_0|>") is not None:
+        # HunYuan (chat_template.jinja): a user turn is <|startoftext|>...<|extra_0|>, the reply ends <|eos|>
+        prompt = f"<|startoftext|>{a.message}<|extra_0|>"
+        ids = tk.encode(prompt, add_special_tokens=False).ids
+        IM_END, EOT = ids_of("<|eos|>", "<|endoftext|>")
     else:
         prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
         IM_START, IM_END, EOT, THINK, END_THINK, NL, NLNL = special_ids(tk)

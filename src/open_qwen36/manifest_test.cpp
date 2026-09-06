@@ -192,6 +192,25 @@ int main(int argc, char** argv) {
             check(false, std::string("gemma3 fixture: ") + e.what());
         }
     }
+    // ---- HunYuan dense: a vocabulary that is not a whole number of head bands
+    if (argc >= 5) {
+        try {
+            Manifest h = Manifest::load(argv[4]);
+            check(h.family == "hunyuan" && h.layers.size() == 32 && h.layers[0] == "dense", "hunyuan: 32 dense layers");
+            check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
+            // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
+            check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
+            check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
+            json ok = matching_config(h);
+            check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");
+            h.check_model(ok, "hunyuan");
+            check(true, "hunyuan: a matching config.json is accepted");
+            json bad = ok; bad["vocab_size"] = 128192;
+            refused(h, bad, "vocab_size", "hunyuan: the padded count is refused as a config.json vocab_size");
+        } catch (const std::exception& e) {
+            check(false, std::string("hunyuan fixture: ") + e.what());
+        }
+    }
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

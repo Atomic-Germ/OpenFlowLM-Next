@@ -1,4 +1,4 @@
-# open-engine: the open engine (Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3) and its model recipes
+# open-engine: the open engine (Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense) and its model recipes
 
 Prefix `OPEN`. Home repo: openflowlm-next. Covers `src/open_qwen36/` (the
 resident engine behind the app's `causal_lm` seam) and `open_kernels/recipes/`
@@ -61,6 +61,7 @@ missing key is an error naming it.
 **Acceptance criteria:**
 - The 27B's `config.json` fields (+ the tokenizer's 248070 ids) → a spec equal to `recipes/specs/qwen36-35b-a3b.json`; `layer_types` from the list when present, else from `full_attention_interval`.
 - GGUF metadata for arch `qwen35moe` (or `qwen3next`) → the same hyperparameters (`real_vocab` = `vocab_size`, GGUF has no tokenizer-side count).
+- HunYuan's `rope_scaling` (`type: dynamic`, an alpha) folds into ONE static base, `rope_theta * alpha^(d/(d-2))`, which is what a `hunyuan-dense` GGUF already carries in `rope.freq_base`; a `yarn` type, a factor or an mscale other than 1, `use_cla`, a bias or a MoE variant is refused by name.
 - `model_type: llama` → `SpecError` naming `model_type 'llama'`; `general.architecture: gemma3` likewise; a missing `linear_num_value_heads` / `qwen35moe.expert_count` → `SpecError` naming the key.
 - JSON round trip preserves the spec and its hash; an unknown field is refused.
 
@@ -77,6 +78,7 @@ buffer arguments on a dispatch is likewise refused.
 **Acceptance criteria:**
 - The 27B spec passes every check.
 - `head_dim=64` → `attn: head_dim=64 is outside the validated set {128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → names `{2048, 2560, 4096, 9728, 10240, 14336}`; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05.)
+- The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN on 2026-09-06, and `head_dim=64` is still refused.
 - Nine buffer arguments → `9 buffer arguments`.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
@@ -192,3 +194,46 @@ stored.
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Gemma3-4B-NPU2`, `out_g3`, 6 layers (five local, one global), prompt id 2; then `open_qwen36_cli --at-position 1100 --layers 6` (finite logits through the window path); then `chat.py` (the Gemma template when the tokenizer has `<start_of_turn>`).
 
 **Result 2026-09-05 (Gemma3-4B):** slice logits corr 0.999998 / 0.999998, same argmax and top-5, residual corr 1.000000 every layer; identical through the engine; a finite step at position 1103; a coherent two-sentence answer ending in `<end_of_turn>` at token 43 (96 ms/token). Details: `.claude/plans/open-kernels-phase-d-gemma3.md`.
+
+### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`)
+**Test category:** manual (needs the NPU and a converted `Hy-MT2-7B-NPU2`); the derivation, the folded RoPE base, the post-RoPE norm order and the 7B layout are unit-tested in `tests/test_hunyuan.py`
+
+A HunYuan V1 dense model (Hy-MT2-7B and the Hunyuan-{1.8,4,7}B dense line:
+Llama 3.1 8B's GQA shape, eps 1e-5, silu FFN, a tied head) shall run on the
+open kernels from its `config.json` alone through the dense recipe. Two
+things are new, and neither is a ModelSpec field:
+
+- **The q/k RMSNorm weight multiplies AFTER RoPE** (`query_layernorm(apply_rotary_pos_emb(q))`),
+  where every other family norms first. RoPE is orthogonal and the rotary dim
+  is the whole head, so the RMS is unchanged by the rotation; what moves is the
+  per-dim weight, which does not commute with the pair rotation. It is
+  `attn.h`'s `ATTN_QKNORM_POST`, set from `recipes.dense.QKNORM_POST_ROPE`.
+- **The vocabulary is not a whole number of head bands** (128167). The lm_head
+  is built, packed and read at the rounded count (`dense.lm_rows`, 128192) with
+  the converter zero-padding the tensor, while `hf_config_check` still holds the
+  model's own `vocab_size` and `real_vocab` bounds the argmax.
+
+The NTK-alpha RoPE scaling is folded into one static base by the spec builder
+(OPEN-SPEC-DERIVE), so the position tables need nothing new.
+
+**Acceptance criteria (unit):**
+- HF and GGUF derivations agree; `rope_theta` is `1e4 * 1000^(128/126)` from either source; the layout equals Llama 3.1 8B's (`PER_CALL 1`, `TAB_BYTES 32256`, 8 KB norm elements) with `LMHEAD_BANDS 2003`.
+- `QKNORM_POST` is True for `hunyuan` and False for `qwen3` / `llama3`; `qk_norm_post_rope=True` is refused by the catalogue until this requirement's procedure has run.
+- The manifest carries `vocab 128192` / `real_vocab 128166` while `hf_config_check.vocab_size` is 128167; a config.json carrying the padded count is refused by name (`manifest_test`, fixture 4).
+
+**Procedure (manual):**
+1. Convert: `q4nx-build -i tencent/Hy-MT2-7B-GGUF` (the Q8_0 file requantizes to q4_1 with the least loss), then copy the HF repo's `config.json` beside the resulting `model.q4nx` / `tokenizer.json`.
+2. The ONE new kernel point (HD 128, 32/8 heads, full RoPE, qk-norm AFTER RoPE) has no standalone fixture -- `designs/attn` is gated through the whole layer -- so step 3's per-layer residual correlation against `replica_dense.py` IS its compare. Build it with `OPEN_KERNELS_UNVALIDATED=1` until that passes, then add `True` to the `attn` template's `qk_norm_post_rope` set in `recipes/catalogue.py` (done 2026-09-06).
+3. Then as OPEN-FAMILY-QWEN3 with `Hy-MT2-7B-NPU2`, `out_hy`, prompt id 127958, and `chat.py` (which switches to the HunYuan turn format when the tokenizer has `<|extra_0|>`).
+4. The chat check is a translation instruction, not a chat question -- Hy-MT2 is a translation model: `python src/open_qwen36/chat.py "Translate the following text into French. Note that you should only output the translated result without any additional explanation: The neural processing unit runs the model on the laptop."` -> the French sentence, ending in `<|eos|>`.
+
+**Result 2026-09-06 (Hy-MT2-7B, Strix, Windows + XRT):** 4-layer slice, 2 greedy
+tokens from id 127958 -- logits corr 1.000000 / 0.999996, same argmax (101773)
+and top-5 at both positions, every layer's residual corr >= 0.999996 (maxrel
+<= 3.9e-3); identical through the engine, request 2 reproduced request 1, and
+the head's padded rows 128167..128191 came back exactly zero. All 32 layers,
+a French translation instruction: a correct sentence ending in `<|eos|>` at
+token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
+catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
+

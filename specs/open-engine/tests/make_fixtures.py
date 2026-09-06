@@ -3,6 +3,8 @@ sources, which would churn the fixtures on every edit):
 
     fixtures/manifest_qwen36.json     the 27B (Qwen3.6-35B-A3B, the qwen36moe recipe)
     fixtures/manifest_qwen3_4b.json   Qwen3-4B (the qwen3 dense recipe)
+    fixtures/manifest_gemma3_4b.json  Gemma3-4B (two layer types, a sliding window)
+    fixtures/manifest_hy_mt2_7b.json  Hy-MT2-7B (post-RoPE q/k norm, a padded head)
 
     python specs/open-engine/tests/make_fixtures.py
 """
@@ -22,6 +24,8 @@ FIXTURE_Q3 = HERE / "fixtures" / "manifest_qwen3_4b.json"
 SPEC_Q3 = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "qwen3-4b.json"
 FIXTURE_G3 = HERE / "fixtures" / "manifest_gemma3_4b.json"
 SPEC_G3 = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "gemma3-4b.json"
+FIXTURE_HY = HERE / "fixtures" / "manifest_hy_mt2_7b.json"
+SPEC_HY = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "hy-mt2-7b.json"
 
 
 def fixture_manifest() -> dict:
@@ -36,8 +40,13 @@ def fixture_manifest_g3() -> dict:
     return manifest(load_spec(SPEC_G3), key="sha256:fixture")
 
 
+def fixture_manifest_hy() -> dict:
+    return manifest(load_spec(SPEC_HY), key="sha256:fixture")
+
+
 if __name__ == "__main__":
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
-    for f, m in ((FIXTURE, fixture_manifest()), (FIXTURE_Q3, fixture_manifest_q3()), (FIXTURE_G3, fixture_manifest_g3())):
+    for f, m in ((FIXTURE, fixture_manifest()), (FIXTURE_Q3, fixture_manifest_q3()),
+                 (FIXTURE_G3, fixture_manifest_g3()), (FIXTURE_HY, fixture_manifest_hy())):
         f.write_text(json.dumps(m, indent=1) + "\n", encoding="utf-8", newline="\n")
         print(f"wrote {f}")

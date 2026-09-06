@@ -97,10 +97,12 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("attn", "designs/attn/attn.h",
              {"head_dim": values(256, 128), "num_heads": values(16, 32, 8), "num_kv_heads": values(2, 8, 4),
               "rotary_dim": values(64, 128, 256), "rope_theta": any_positive(),
-              "qk_norm": values(True, False), "attn_gate": values(True, False)},
+              "qk_norm": values(True, False), "qk_norm_post_rope": values(False, True),
+              "attn_gate": values(True, False)},
              note="ATTN_* are compile-time macros; compared at (256, 16, 2, 64, gate, qk-norm) on the 27B, "
-                  "(128, 32, 8, 128, no gate, qk-norm) on Qwen3-4B, (128, 32, 8, 128, no gate, no qk-norm) on Llama 3.1 8B "
-                  "and (256, 8, 4, 256, no gate, qk-norm, a 1024-row window) on Gemma 3 4B"),
+                  "(128, 32, 8, 128, no gate, qk-norm) on Qwen3-4B, (128, 32, 8, 128, no gate, no qk-norm) on Llama 3.1 8B, "
+                  "(256, 8, 4, 256, no gate, qk-norm, a 1024-row window) on Gemma 3 4B and "
+                  "(128, 32, 8, 128, no gate, qk-norm AFTER RoPE) on Hy-MT2-7B"),
     Template("deltanet", "designs/layer_x/dnx.h",
              {"heads": values(32), "dim": values(128), "key_heads": values(16), "conv_kernel": values(4)},
              note="Qwen3-Next / 3.5 / 3.6 families only"),

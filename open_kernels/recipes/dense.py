@@ -1,4 +1,4 @@
-"""The dense recipe (Qwen3 dense, Llama 3, Gemma 3): ModelSpec -> everything
+"""The dense recipe (Qwen3 dense, Llama 3, Gemma 3, HunYuan dense): ModelSpec -> everything
 designs/dense/dx.py, the packers and the driver need for a GQA + gated-FFN
 decoder layer.
 
@@ -13,6 +13,9 @@ has GeGLU-tanh, the sandwich norms in brackets above, and two layer types --
 `dense_local` (a 1024-row sliding window, its own RoPE theta) and `dense`
 (global, linearly scaled RoPE) -- served by ONE design: the window is a
 per-token patch of the KV fill (attnpos), the tables are two `ptab` globals.
+HunYuan dense is Llama 3's shape with q/k RMSNorm applied AFTER RoPE, which is
+a family property (`QKNORM_POST_ROPE`), not a spec field, and one static RoPE
+theta the spec builder folds the NTK alpha into.
 
 One xclbin, ONE instruction stream per layer (no routing read, so no part
 split). Same 8 main cores as the MoE designs (w / x / y streams), the ln
@@ -56,6 +59,7 @@ class DenseLayout:
 @dataclass(frozen=True)
 class DenseGeometry:
     N_CORES: int; HID: int; FF: int; NH: int; KVH: int; HD: int; ROT: int; GATE: bool; QKNORM: bool
+    QKNORM_POST: bool                                               # the norm weight multiplies after RoPE (HunYuan)
     EPS: float; ACT: str; SANDWICH: bool; WINDOW: int
     PER_CALL: int; CALL_BYTES: int                                  # chunks per weight element (1 when the table is wide)
     QW: int; KVW: int
@@ -76,9 +80,23 @@ class DenseRecipe:
     max_ctx: int = 4096
 
 
+# families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
+# query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
+QKNORM_POST_ROPE = ("hunyuan",)
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan")
+
+
+def lm_rows(spec: ModelSpec) -> int:
+    """lm_head rows: the vocabulary rounded up to a whole 64-row band. Every family
+    but HunYuan already publishes a padded vocab_size; HunYuan's 128167 is not one,
+    and the head's bands (and the logits buffer) are sized by the rounded count while
+    `real_vocab` still bounds the ids."""
+    return roundup(spec.vocab, BAND_ROWS)
+
+
 def _check(spec: ModelSpec) -> None:
     n = LIMITS["n_cols"]
-    if spec.family not in ("qwen3", "llama3", "gemma3"):
+    if spec.family not in DENSE_FAMILIES:
         raise OpRangeError(f"dense recipe given a {spec.family!r} spec")
     if spec.activation not in ("silu", "gelu_tanh"):
         raise OpRangeError(f"dense: activation {spec.activation!r} (silu | gelu_tanh)")
@@ -100,13 +118,14 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError("qwen3: an odd kv-head count does not split into ain elements")
     require("ln", width=spec.hidden)
     require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
-            rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate)
+            rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
+            qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE)
     pc = per_call(spec)
     require("gemv_q4", K=spec.hidden, rs=2, rows_per_core=spec.attn_q_width // n, per_call=pc)
     require("gemv_q4", K=spec.attn_q_width, rs=2, rows_per_core=spec.hidden // n, per_call=pc)
     require("gemv_q4", K=spec.hidden, rs=2, rows_per_core=spec.intermediate // n, per_call=pc)
     require("gemv_q4", K=spec.intermediate, rs=2, rows_per_core=spec.hidden // n, per_call=pc)
-    require("lm_head_q4", K=spec.hidden, vocab=spec.vocab)
+    require("lm_head_q4", K=spec.hidden, vocab=lm_rows(spec))
 
 
 L1_BUDGET = 60 * 1024      # a main core's 64 KB data memory less IRON's own bookkeeping
@@ -135,7 +154,8 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     pc = per_call(spec)
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
-        QKNORM=spec.qk_norm, EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
+        QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
+        EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
         WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * CHUNK,
         QW=qw, KVW=kvw,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=hid // BAND_ROWS // n,
@@ -180,7 +200,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     kv_row = 2 * e_a
     ptab_row = max(1024, e_a)
     band = band_bytes(hid)
-    bands = spec.vocab // BAND_ROWS
+    bands = lm_rows(spec) // BAND_ROWS
     return DenseLayout(
         CD_LNW=c["lnw"], CD_POSTLN=c["postln"], CD_META=c["meta"], CD_PREFFN=c["preffn"], CD_POSTFFN=c["postffn"],
         CD_BYTES=cd_bytes,
@@ -228,7 +248,8 @@ def pack_plan(spec: ModelSpec) -> dict:
         "pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK,
         "layer_types": {lt: one for lt in sorted(set(spec.layer_types))},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm", "tensor": "lm_head.weight", "dst": 0, "nch": q4_chunks(spec.vocab, hid), "in_dim": hid}]},
+                    "ops": [{"op": "std_perm", "tensor": "lm_head.weight", "dst": 0,
+                             "nch": q4_chunks(lm_rows(spec), hid), "in_dim": hid}]},
         "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
         "norm": {"tensor": "model.norm.weight", "bytes": hid * 2},
     }
@@ -247,7 +268,7 @@ def programs(spec: ModelSpec) -> dict:
         "tail": [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
         "globals": {"xres": spec.hidden * 4, "zero": spec.hidden * 4, "normw": spec.hidden * 2,
-                    "xresf": spec.hidden * 4, "hn": spec.hidden * 2, "logits": spec.vocab * 4,
+                    "xresf": spec.hidden * 4, "hn": spec.hidden * 2, "logits": lm_rows(spec) * 4,
                     "lmpool": L.LMHEAD_POOL_BYTES},
     }
     types = sorted(set(spec.layer_types))
@@ -272,14 +293,14 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     return {
         "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}", "env": {}},
         "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
-        "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{spec.vocab}",
-                       "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
+        "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
+                       "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
     }
 
 
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L = layout(spec, max_ctx)
-    return {"hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
+    return {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
             "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES, "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
             "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
             "rope_inv_freq": spec.rope_inv_freq()}     # the global table's; each ptab global carries its own
@@ -289,7 +310,7 @@ def hf_config_check(spec: ModelSpec) -> dict:
     d = {"hidden_size": spec.hidden, "num_hidden_layers": spec.num_layers, "vocab_size": spec.vocab,
          "num_attention_heads": spec.num_heads, "num_key_value_heads": spec.num_kv_heads,
          "intermediate_size": spec.intermediate}
-    if spec.family in ("qwen3", "gemma3"):
+    if spec.family in ("qwen3", "gemma3", "hunyuan"):
         d["head_dim"] = spec.head_dim          # Llama configs may omit it (hidden / heads)
     if spec.family == "gemma3":
         d["sliding_window"] = spec.sliding_window

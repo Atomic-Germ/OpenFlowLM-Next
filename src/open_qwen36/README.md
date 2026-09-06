@@ -1,4 +1,4 @@
-# open_qwen36 — Qwen3.6-MoE, Qwen3 dense, Llama 3 and Gemma 3 on open XDNA2 kernels
+# open_qwen36 — Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3 and HunYuan dense on open XDNA2 kernels
 
 The open replacement for the closed `qwen3_6_moe_npu` engine. It sits behind
 the app's `causal_lm` seam ([engine.hpp](engine.hpp)), so the tokenizer, chat
@@ -196,6 +196,47 @@ python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --mode
 
 Images still route through the closed engine — the open one refuses an image
 payload with a clear error rather than silently ignoring it.
+
+## A fifth family: HunYuan dense (2026-09-06)
+
+Hy-MT2-7B (`hunyuan_v1_dense`, Tencent's translation model) is Llama 3.1 8B's
+geometry exactly -- 4096 hidden, 32 layers, 32/8 heads at 128, 14336 FFN -- so
+the dense recipe composes it from validated kernel points with no new GEMV K,
+`ln` width or band split. Three things are new and none of them is a shape:
+
+* the q/k RMSNorm weight multiplies **after** RoPE (`query_layernorm(rope(q))`),
+  which is `attn.h`'s `ATTN_QKNORM_POST`. RoPE is orthogonal, so the RMS itself
+  is unchanged by the rotation; what moves is the per-dim weight, which does not
+  commute with the pair rotation. The order is a family property of the recipe
+  (`dense.QKNORM_POST_ROPE`), not a `ModelSpec` field;
+* the NTK-alpha RoPE scaling folds into one static base,
+  `1e4 * 1000^(128/126)`, exactly as llama.cpp's converter does, so the position
+  tables need nothing new;
+* the vocabulary (128167) is not a whole number of 64-row head bands, so
+  `dense.lm_rows` rounds the head up to 128192 while `hf_config_check` keeps the
+  model's own count and `real_vocab` bounds the argmax.
+
+FLM ships no NPU2 container for it: convert `tencent/Hy-MT2-7B-GGUF` with
+`utilities/q4nx-build` (`ModelArch.HUNYUAN_DENSE`), which zero-pads the tied
+head and applies no rotary permutation (llama.cpp's HunYuan converter adds
+none, unlike its Llama one).
+
+```
+python utilities/q4nx-build/convert.py -i HY-MT2-7B-Q8_0.gguf -o %USERPROFILE%\.flm\models\Hy-MT2-7B-NPU2 -s tencent/Hy-MT2-7B
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Hy-MT2-7B-NPU2     # WSL
+python src\open_qwen36\chat.py "Translate the following text into French. Note that you should only output the translated result without any additional explanation: The neural processing unit runs the model directly on the laptop, without sending anything to a server." --model %USERPROFILE%\.flm\models\Hy-MT2-7B-NPU2 --kernels src\xclbins\Hy-MT2-7B-NPU2\open_kernels
+```
+
+| check (Hy-MT2-7B, Strix, Windows + XRT) | result |
+|---|---|
+| 4-layer slice, 2 greedy tokens, harness vs the fp64 replica | logits corr 1.000000 / 0.999996, same argmax and top-5, every layer's residual corr >= 0.999996 (maxrel <= 3.9e-3) |
+| the same through the engine | identical numbers; request 2 reproduces request 1; the head's padded rows 128167..128191 come back exactly zero |
+| all 32 layers, a French translation instruction, greedy | *L'unite de traitement neuronal execute le modele directement sur l'ordinateur portable, sans envoyer quoi que ce soit a un serveur.* then `<\|eos\|>` at token 33 |
+| speed | decode 231 ms/token (4.3 tok/s) -- the 8B's 203 ms for the same per-layer geometry |
+
+Translation quality under q4_1 is a separate question from kernel correctness:
+the correlations above prove the kernels, not the quantization. Score real
+FLORES pairs before trusting the model for work.
 
 ## Standalone
 
