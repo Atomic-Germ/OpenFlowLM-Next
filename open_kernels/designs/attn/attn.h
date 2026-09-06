@@ -60,6 +60,13 @@
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
+#ifndef ATTN_NULL
+#define ATTN_NULL 0          // PROBE ONLY: consume the cached rows without computing. Wrong answers,
+#endif                       // but it prices the fifo traffic against the arithmetic on top of it.
+#ifndef ATTN_ABL
+#define ATTN_ABL 3           // PROBE ONLY: 1 = score only, 2 = score + softmax, 3 = the real thing.
+#endif
+
 #ifndef ATTN_NHL
 #define ATTN_NHL ATTN_NH     // heads THIS core owns; < ATTN_NH splits attention over several cores
 #endif
@@ -69,6 +76,14 @@ static constexpr unsigned kKVH = ATTN_KVH;
 static constexpr unsigned kHD = ATTN_HD;
 static constexpr unsigned kRot = ATTN_ROT;
 static constexpr unsigned kV = 32;
+static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW] | lo bf16[QW]]
+// ATTN_VEXP stores q as that bf16 pair; without it q stays the fp32 vector it always was,
+// so a family that does not take this path compiles byte-for-byte what it compiled before.
+#if ATTN_VEXP
+#define ATTN_QT bfloat16
+#else
+#define ATTN_QT float
+#endif
 static constexpr unsigned kHPE = kKVH / 2;    // fp32 heads per element
 static constexpr unsigned kHPO = kKVH;        // bf16 og heads per element
 static_assert(kHD % kV == 0 && kRot % (2 * kV) == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
@@ -85,6 +100,13 @@ static constexpr unsigned kMLS = ((kNHL + kV - 1) / kV) * kV;
 #else
 static constexpr unsigned kMLS = kNHL;
 #endif
+// The exponential is batched over heads, so its vector is as wide as the head
+// count -- NOT as wide as kV. A core owning 8 heads ran vexpN<32> and threw
+// three quarters of the lanes away; fp32 is 8 lanes native here, so those
+// quarters are real cycles. kMLS (the ml STRIDE) stays at kV so the l half
+// keeps its 128-byte alignment; only the number of lanes touched narrows.
+static constexpr unsigned kVE = kNHL >= 32 ? 32 : (kNHL >= 16 ? 16 : 8);
+static constexpr unsigned kMLU = ((kNHL + kVE - 1) / kVE) * kVE;
 static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmetic on the single-core path
 // The head offset is a kernel ARGUMENT only when attention is actually split.
 // Leaving an unused one in the signature is not free: it perturbs codegen, and
@@ -174,11 +196,40 @@ static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict 
   }
 }
 
-// q element e (kHPE heads) -> qs[e*kHPE ..]
+// q element e (kHPE heads) -> qs[e*kHPE ..], as the bf16 (hi, lo) pair the scores want.
+//
+// The dot product is q(fp32) . k(bf16), and mac_vv's way to do that is to split q into two
+// bf16 halves and mac twice. q does not change over the context, so that split was being
+// recomputed for every cached row: NH * P times per token instead of NH. Hoisting it here
+// leaves the inner loop two macs and no split, and the arithmetic is bit-identical.
 static inline void attn_q_impl(const float *__restrict qe, const bfloat16 *__restrict qn,
-                               const float *__restrict cs, float *__restrict qs, int e) {
+                               const float *__restrict cs, ATTN_QT *__restrict qs, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
-  for (unsigned i = 0; i < kHPE; ++i) norm_rope(qe + i * kHD, qn, cs, qs + (e * kHPE + i) * kHD);
+#if !ATTN_VEXP
+  for (unsigned i = 0; i < kHPE; ++i) norm_rope(qe + i * kHD, qn, cs, qs + ((unsigned)e * kHPE + i) * kHD);
+#else
+  alignas(128) float t[kHD];
+  for (unsigned i = 0; i < kHPE; ++i) {
+    norm_rope(qe + i * kHD, qn, cs, t);
+    bfloat16 *qh = qs + ((unsigned)e * kHPE + i) * kHD;
+    for (unsigned j = 0; j < kHD; j += kV) {
+      vbN<kV> h, l;
+      splitN<kV>(aie::load_v<kV>(t + j), h, l);
+      // ...and carry 1/sqrt(HD) here too. It used to be a scalar float multiply on
+      // every head's score at every position, and scalar float on this core is a
+      // software call: that one operation measured 25 ms of a 185 ms decode step at
+      // position 2048. kScale is a power of two at every head dim this path serves,
+      // so scaling each bf16 half is a pure exponent shift and the scores come out
+      // bit-identical.
+      static_assert(kHD == 64 || kHD == 256, "attn.h: ATTN_VEXP folds kScale into q, which "
+                                             "is only exact when 1/sqrt(HD) is a power of two");
+      h = aie::mul(h, (bfloat16)kScale).template to_vector<bfloat16>();
+      l = aie::mul(l, (bfloat16)kScale).template to_vector<bfloat16>();
+      aie::store_v(qh + j, h);
+      aie::store_v(qh + kQW + j, l);
+    }
+  }
+#endif
 }
 // k element e -> bf16 kout (the cache row half); v element e -> bf16 vout
 static inline void attn_k_impl(const float *__restrict ke, const bfloat16 *__restrict kn,
@@ -224,57 +275,107 @@ static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) 
 // otherwise start 160 bytes in, and attn.h's own trap catalogue has that
 // mistake in it already.
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
-                                  const float *__restrict qs, float *__restrict oacc,
+                                  const ATTN_QT *__restrict qs, float *__restrict oacc,
                                   float *__restrict ml ATTN_H0_PARM) {
   ATTN_H0_DECL
   aie::set_rounding(aie::rounding_mode::conv_even);
-  alignas(128) float sv[kMLS], av[kMLS], bv[kMLS];
+  alignas(128) float sv[kMLS];
+  // The rescale factors leave phase 2 already split into the bf16 (hi, lo) pairs the
+  // macs want, and with an INTEGER flag saying which of the two is one. Doing that
+  // per head in phase 3 meant a scalar float subtract and a scalar float compare per
+  // head per position, and scalar float on this core is a software call.
+  alignas(128) bfloat16 ah[kMLS], al[kMLS], bh[kMLS], bl[kMLS];
+  alignas(128) int32_t grew_i[kMLS];
 
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
     const unsigned kvh = h / (kNH / kKVH);
-    const float *q = qs + h * kHD;
+    const bfloat16 *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     accf32 d = aie::zeros<accfloat, kV>();
-    for (unsigned j = 0; j < kHD; j += kV)
-      d = mac_vv(d, aie::load_v<kV>(q + j), aie::load_v<kV>(k + j));
-    sv[hl] = aie::reduce_add(d.template to_vector<float>()) * kScale;   // / sqrt(HD)
+    for (unsigned j = 0; j < kHD; j += kV) {
+      const vbN<kV> kj = aie::load_v<kV>(k + j);
+      d = aie::mac(d, aie::load_v<kV>(q + j), kj);          // hi
+      d = aie::mac(d, aie::load_v<kV>(q + kQW + j), kj);    // lo
+    }
+    sv[hl] = aie::reduce_add(d.template to_vector<float>());   // 1/sqrt(HD) is already in q
   }
-  for (unsigned h = kNHL; h < kMLS; ++h) sv[h] = -1e30f;
+  for (unsigned h = kNHL; h < kMLU; ++h) sv[h] = -1e30f;
+#if ATTN_ABL < 2
+  for (unsigned h = 0; h < kNHL; ++h) ml[h] = sv[h];   // sink, so the scores are not dead code
+  return;
+#endif
 
-  for (unsigned v = 0; v < kMLS; v += kV) {
-    const vfN<kV> s = aie::load_v<kV>(sv + v);
-    const vfN<kV> m = aie::load_v<kV>(ml + v);
-    const vfN<kV> mn = aie::max(m, s);
-    const vfN<kV> a = vexpN<kV>(fsubN<kV>(m, mn));
-    const vfN<kV> b = vexpN<kV>(fsubN<kV>(s, mn));
-    const vfN<kV> l = aie::load_v<kV>(ml + kMLS + v);
+  for (unsigned v = 0; v < kMLU; v += kVE) {
+    const vfN<kVE> s = aie::load_v<kVE>(sv + v);
+    const vfN<kVE> m = aie::load_v<kVE>(ml + v);
+    const vfN<kVE> mn = aie::max(m, s);
+    // mn is m or s, so exactly one of (m - mn), (s - mn) is zero and its exp is
+    // exactly 1. One exponential of their SUM therefore carries both: the sum is
+    // m - s when s wins and s - m when m does, and the loser's 1.0 is a select
+    // rather than a second polynomial.
+    const vfN<kVE> e = vexpN<kVE>(faddN<kVE>(fsubN<kVE>(m, mn), fsubN<kVE>(s, mn)));
+    const vfN<kVE> one = aie::broadcast<float, kVE>(1.0f);
+    const auto grew = aie::gt(s, m);
+    const vfN<kVE> a = aie::select(one, e, grew);
+    const vfN<kVE> b = aie::select(e, one, grew);
+    const vfN<kVE> l = aie::load_v<kVE>(ml + kMLS + v);
     aie::store_v(ml + v, mn);
-    aie::store_v(ml + kMLS + v, faddN<kV>(fmulN<kV>(l, a), b));
-    aie::store_v(av + v, a);
-    aie::store_v(bv + v, b);
+    aie::store_v(ml + kMLS + v, faddN<kVE>(fmulN<kVE>(l, a), b));
+    vbN<kVE> t0, t1;
+    splitN<kVE>(a, t0, t1);
+    aie::store_v(ah + v, t0);
+    aie::store_v(al + v, t1);
+    splitN<kVE>(b, t0, t1);
+    aie::store_v(bh + v, t0);
+    aie::store_v(bl + v, t1);
+    aie::store_v(grew_i + v, aie::select(aie::zeros<int32_t, kVE>(),
+                                         aie::broadcast<int32_t, kVE>(1), grew));
   }
 
+#if ATTN_ABL < 3
+  return;
+#endif
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
     const bfloat16 *v = Vt + kvh * kHD;
-    const float a = av[hl], b = bv[hl];
-    const bfloat16 bh = (bfloat16)b;
-    const bfloat16 bl = (bfloat16)(b - (float)bh);
+    const bfloat16 bhh = bh[hl], bll = bl[hl];
     float *o = oacc + hl * kHD;
-    for (unsigned j = 0; j < kHD; j += kV) {
-      accf32 acc;
-      acc.from_vector(fscaleN<32>(aie::load_v<kV>(o + j), a));
-      acc = aie::mac(acc, aie::load_v<kV>(v + j), bh);
-      acc = aie::mac(acc, aie::load_v<kV>(v + j), bl);
-      aie::store_v(o + j, acc.template to_vector<float>());
+    // a is exp(m_old - m_new), so it is exactly 1 unless THIS position raised the
+    // head's running max -- which over a long context happens O(log P) times, not
+    // P. The rescale is not merely a multiply by one either: fscaleN splits o into
+    // a bf16 pair and remultiplies, so skipping it is both faster and closer to the
+    // fp32 accumulator it is meant to leave alone.
+    if (grew_i[hl] == 0) {
+      // a is exactly 1: this position did not raise the head's running max, which
+      // over a long context is the overwhelming majority. Skipping the rescale is
+      // not just a multiply by one saved -- it also leaves the fp32 accumulator
+      // alone instead of round-tripping it through a bf16 pair.
+      for (unsigned j = 0; j < kHD; j += kV) {
+        accf32 acc;
+        acc.from_vector(aie::load_v<kV>(o + j));
+        const vbN<kV> vj = aie::load_v<kV>(v + j);
+        acc = aie::mac(acc, vj, bhh);
+        acc = aie::mac(acc, vj, bll);
+        aie::store_v(o + j, acc.template to_vector<float>());
+      }
+    } else {
+      const bfloat16 ahh = ah[hl], all = al[hl];
+      for (unsigned j = 0; j < kHD; j += kV) {
+        accf32 acc = aie::zeros<accfloat, kV>();
+        acc = mac_vs<kV>(acc, aie::load_v<kV>(o + j), ahh, all);
+        const vbN<kV> vj = aie::load_v<kV>(v + j);
+        acc = aie::mac(acc, vj, bhh);
+        acc = aie::mac(acc, vj, bll);
+        aie::store_v(o + j, acc.template to_vector<float>());
+      }
     }
   }
 }
 #else
 // one position: K_t, V_t bf16[KVH * HD]
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
-                                  const float *__restrict qs, float *__restrict oacc,
+                                  const ATTN_QT *__restrict qs, float *__restrict oacc,
                                   float *__restrict ml ATTN_H0_PARM) {
   ATTN_H0_DECL
   aie::set_rounding(aie::rounding_mode::conv_even);
@@ -310,12 +411,16 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 
 // cached row number pb[2] of the nf streamed: rows t >= pos are the position-0 dummy
 static inline void attn_step_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
-                                  const float *__restrict qs, float *__restrict oacc,
+                                  const ATTN_QT *__restrict qs, float *__restrict oacc,
                                   float *__restrict ml, int32_t *__restrict pb ATTN_H0_PARM) {
   const int32_t t = pb[2];
   pb[2] = t + 1;
   if (t >= pb[0]) return;
+#if !ATTN_NULL
   attn_row_impl(Kt, Vt, qs, oacc, ml ATTN_H0_ARG);
+#else
+  (void)Kt; (void)Vt; (void)qs; (void)oacc; (void)ml;
+#endif
 }
 
 // kHPO heads -> one output element: og = o/l [* sigmoid(gate)]; with the gate, g0 holds the

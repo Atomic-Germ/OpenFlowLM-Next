@@ -78,6 +78,10 @@ def bt(total, off, n):
 ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
               f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
               f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
+if os.environ.get("ATTN_NULL") == "1":                 # probe: see attn.h's ATTN_NULL
+    ATTN_FLAGS.append("-DATTN_NULL=1")
+if os.environ.get("ATTN_ABL"):                         # probe: see attn.h's ATTN_ABL
+    ATTN_FLAGS.append(f"-DATTN_ABL={os.environ['ATTN_ABL']}")
 ACORES, NHL = G.ACORES, G.NHL
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 
@@ -103,7 +107,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
-    fq = np.ndarray[(QW,), np.dtype[np.float32]]
+    fq = (np.ndarray[(2 * QW,), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
+          if G.VEXP else np.ndarray[(QW,), np.dtype[np.float32]])
     fml = np.ndarray[(2 * G.MLS,), np.dtype[np.float32]]   # [m | l], stride MLS (padded when ATTN_VEXP)
     foacc = np.ndarray[(NHL * G.HD,), np.dtype[np.float32]]   # this core's heads only
     i32 = np.int32
