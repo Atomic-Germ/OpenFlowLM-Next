@@ -247,6 +247,7 @@ static inline void attn_v_impl(const float *__restrict ve, bfloat16 *__restrict 
 }
 
 static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) {
+  aie::set_rounding(aie::rounding_mode::conv_even);   // for every row of this token
   for (unsigned j = 0; j < kNHL * kHD; j += kV) aie::store_v(oacc + j, aie::zeros<float, kV>());
   for (unsigned h = 0; h < kNHL; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
 #if ATTN_VEXP
@@ -278,7 +279,9 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
                                   const ATTN_QT *__restrict qs, float *__restrict oacc,
                                   float *__restrict ml ATTN_H0_PARM) {
   ATTN_H0_DECL
-  aie::set_rounding(aie::rounding_mode::conv_even);
+  // No set_rounding here: it is core-wide state, attn_init_impl sets it once per
+  // token, and nothing between that and the last row touches it. It was being
+  // written once per position per layer -- 82k times a token, for one value.
   alignas(128) float sv[kMLS];
   // The rescale factors leave phase 2 already split into the bf16 (hi, lo) pairs the
   // macs want, and with an INTEGER flag saying which of the two is one. Doing that
@@ -287,18 +290,25 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   alignas(128) bfloat16 ah[kMLS], al[kMLS], bh[kMLS], bl[kMLS];
   alignas(128) int32_t grew_i[kMLS];
 
+  AIE_LOOP_UNROLL_FULL
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
     const unsigned kvh = h / (kNH / kKVH);
     const bfloat16 *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
-    accf32 d = aie::zeros<accfloat, kV>();
+    // Two accumulators, not one: the hi and lo terms are independent, so this is
+    // twice the distance between dependent macs for the scheduler to fill.
+    // (aie::reduce_add_v reduces four of these in one call, which is strictly less
+    // arithmetic and measured 116.6 -> 141.2 ms: holding four heads' vectors live
+    // to feed it spills, and the spill costs more than the reduction saves.)
+    accf32 d0 = aie::zeros<accfloat, kV>(), d1 = aie::zeros<accfloat, kV>();
+    AIE_LOOP_UNROLL_FULL
     for (unsigned j = 0; j < kHD; j += kV) {
       const vbN<kV> kj = aie::load_v<kV>(k + j);
-      d = aie::mac(d, aie::load_v<kV>(q + j), kj);          // hi
-      d = aie::mac(d, aie::load_v<kV>(q + kQW + j), kj);    // lo
+      d0 = aie::mac(d0, aie::load_v<kV>(q + j), kj);          // hi
+      d1 = aie::mac(d1, aie::load_v<kV>(q + kQW + j), kj);    // lo
     }
-    sv[hl] = aie::reduce_add(d.template to_vector<float>());   // 1/sqrt(HD) is already in q
+    sv[hl] = aie::reduce_add(aie::add(d0, d1).template to_vector<float>());   // 1/sqrt(HD) is in q
   }
   for (unsigned h = kNHL; h < kMLU; ++h) sv[h] = -1e30f;
 #if ATTN_ABL < 2
@@ -336,6 +346,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 #if ATTN_ABL < 3
   return;
 #endif
+  AIE_LOOP_UNROLL_FULL
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
     const bfloat16 *v = Vt + kvh * kHD;
@@ -351,6 +362,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
       // over a long context is the overwhelming majority. Skipping the rescale is
       // not just a multiply by one saved -- it also leaves the fp32 accumulator
       // alone instead of round-tripping it through a bf16 pair.
+      AIE_LOOP_UNROLL_FULL
       for (unsigned j = 0; j < kHD; j += kV) {
         accf32 acc;
         acc.from_vector(aie::load_v<kV>(o + j));
@@ -361,6 +373,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
       }
     } else {
       const bfloat16 ahh = ah[hl], all = al[hl];
+      AIE_LOOP_UNROLL_FULL
       for (unsigned j = 0; j < kHD; j += kV) {
         accf32 acc = aie::zeros<accfloat, kV>();
         acc = mac_vs<kV>(acc, aie::load_v<kV>(o + j), ahh, all);
