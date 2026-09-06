@@ -193,10 +193,27 @@ exit /b 0
 :: means quoting quotes, and the toolchain path routinely contains spaces --
 :: which produced `Could not find toolchain file: "C:/Program"` and a warning
 :: about an "extra path from command line".
+:: FLM_VERSION gates which models will load; NPU_VERSION is the minimum NPU
+:: DRIVER version. Two different things, and both were wrong here.
+::
+:: 0.9.25 as FLM_VERSION refuses the two newest models in this repo's own
+:: catalogue: model_downloader.cpp compares a container's config.json
+:: "flm_version" against it and reports Incompatible when the container is
+:: newer. granite:3b (container 1.0.0) and qwen3.6-moe:35b-a3b (min 1.0.3)
+:: both land there. src\build-windows-vcpkg.cmd already passes 1.0.4.
+::
+:: 0.9.25 as NPU_VERSION is worse, because it fails NON-DETERMINISTICALLY:
+:: main.cpp parses it with sscanf("%d.%d.%d.%d") and compares only the FOURTH
+:: field, so a three-field string leaves mver_3 uninitialised and the driver
+:: check reads whatever is on the stack. 32.0.203.304 is the real minimum
+:: driver build, and the value build-windows-vcpkg.cmd uses.
+::
+:: (These must stay ABOVE the cmake line: a `::` comment between two
+:: caret-continued lines terminates the command.)
 :configure
 cmake -S "%REPO%\src" -B "%REPO%\src\build" -G Ninja ^
     -DCMAKE_BUILD_TYPE=Release ^
-    -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 ^
+    -DFLM_VERSION=1.0.4 -DNPU_VERSION=32.0.203.304 ^
     -DFLM_USE_HRX=OFF ^
     -DCMAKE_TOOLCHAIN_FILE="%VCPKG%\scripts\buildsystems\vcpkg.cmake"
 exit /b %errorlevel%
