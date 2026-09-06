@@ -284,6 +284,16 @@ same argmax (38457) and an **identical top-5** at both positions, residual corr
 `chat.py`, ending on `<|end_of_text|>` at token 52. Built on mlir-aie
 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301, natively on Windows.
 
+Through the app: `flm run granite:3b` logs *"Granite on the open kernels"*,
+loads 40/40 layers at context capacity 8192 (weights resident in 11 s) and
+answers a Norwegian prompt coherently, reasoning first.
+
+**Known rough edge:** the reasoning block is not parsed. Granite carries
+`<think>` / `</think>` as real tokens (100274 / 100275) and its catalogue entry
+sets `think: true`, but `Granite` implements no `parse_stream_content` /
+`parse_nstream_content`, so the chain of thought is printed raw and only the
+closing tag appears. Cosmetic, and separate from the kernel path.
+
 **And the performance is the finding, not the correctness.** Decode is
 **5.92 tok/s** averaged over 63 tokens, and the per-step cost grows steadily
 with position — `part0` 91.9 ms at position 18, 235.4 ms at position 80, about
