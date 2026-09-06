@@ -71,7 +71,12 @@ FAMILY_ALIASES = [
     ("gemma3", "gemma3"),
     ("llama3", "llama3"),
     ("llama", "llama3"),
-    ("granite", "llama3"),
+    # Granite is its own family now (the dense recipe, head_dim 64 at hidden
+    # 2560). It aliased onto llama3 because nothing served it; leaving that
+    # would route a Granite directory to the Llama 3 AutoModel, whose sampler
+    # defaults and chat-template probe are the wrong ones -- and the closed
+    # llama_npu refuses hidden_size 2560 outright.
+    ("granite", "granite"),
     ("crow", "qwen3.5"),
     ("huihui", "qwen3.5"),
     ("qwythos", "qwen3.5"),
