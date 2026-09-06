@@ -31,4 +31,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>End-to-end workflow for offloading dense GEMM operations to AMD NPU2 via mlir-aie/iron. Use when: compiling NPU xclbins, integrating NPU backends into embedding/LLM engines, validating NPU vs CPU reference, debugging XRT dispatch issues, or extending to new model architectures.</description>
     <location>.opencode/skill/npu_offload_pipeline.md</location>
   </skill>
+  <skill>
+    <name>open-granite-kernels</name>
+    <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
+    <location>.opencode/skill/open-granite-kernels/SKILL.md</location>
+  </skill>
 </available_skills>
