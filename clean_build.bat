@@ -196,11 +196,12 @@ exit /b 0
 :: FLM_VERSION gates which models will load; NPU_VERSION is the minimum NPU
 :: DRIVER version. Two different things, and both were wrong here.
 ::
-:: 0.9.25 as FLM_VERSION refuses the two newest models in this repo's own
-:: catalogue: model_downloader.cpp compares a container's config.json
-:: "flm_version" against it and reports Incompatible when the container is
-:: newer. granite:3b (container 1.0.0) and qwen3.6-moe:35b-a3b (min 1.0.3)
-:: both land there. src\build-windows-vcpkg.cmd already passes 1.0.4.
+:: 0.9.25 as FLM_VERSION refuses newer containers outright:
+:: model_downloader.cpp compares a container's config.json "flm_version"
+:: against it and reports Incompatible when the container is newer.
+:: qwen3.6-moe:35b-a3b (min 1.0.3) is in this repo's own catalogue and lands
+:: there; a Granite 4.2 container (flm_version 1.0.0) does too, whether it
+:: arrives through the catalogue or through flm-add. src\build-windows-vcpkg.cmd already passes 1.0.4.
 ::
 :: 0.9.25 as NPU_VERSION is worse, because it fails NON-DETERMINISTICALLY:
 :: main.cpp parses it with sscanf("%d.%d.%d.%d") and compares only the FOURTH

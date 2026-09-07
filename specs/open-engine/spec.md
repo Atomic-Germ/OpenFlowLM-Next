@@ -323,9 +323,14 @@ same argmax (38457) and an **identical top-5** at both positions, residual corr
 `chat.py`, ending on `<|end_of_text|>` at token 52. Built on mlir-aie
 1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301, natively on Windows.
 
-Through the app: `flm run granite:3b` logs *"Granite on the open kernels"*,
-loads 40/40 layers at context capacity 8192 (weights resident in 11 s) and
-answers a Norwegian prompt coherently, reasoning first.
+Through the app: the model loads 40/40 layers at context capacity 8192
+(weights resident in 11 s), logs *"Granite on the open kernels"* and answers a
+Norwegian prompt coherently, reasoning first. **That run used a catalogue entry
+this PR no longer ships** -- per AGENTS.md the container belongs on
+`Atomic-Germ/*-OpenNPU2` and installs through `flm-add`
+(`flm-add <repo-or-directory> --family granite`), which is the supported path
+until it is hosted there. The measurement above is what was run; the flm-add
+install has not been re-verified end to end.
 
 **Known rough edge:** the reasoning block is not parsed. Granite carries
 `<think>` / `</think>` as real tokens (100274 / 100275) and its catalogue entry
