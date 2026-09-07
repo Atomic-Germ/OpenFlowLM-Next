@@ -237,3 +237,46 @@ a French translation instruction: a correct sentence ending in `<|eos|>` at
 token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
+### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`)
+**Test category:** manual (needs the NPU and `vegahyo/Granite-4.2-3B-NPU2`); the derivation, the multiplier fold and the 3B layout are unit-tested in `tests/test_granite.py`
+
+An IBM Granite dense model (GQA without q/k norms, unscaled RoPE, eps 1e-5,
+silu FFN, untied q4_1 head) shall run on the open kernels from its
+`config.json` alone through the dense recipe. **Granite is the first
+`head_dim = 64` point**, and the first at `num_heads = 40`; nothing in the
+design changes for it, because `ATTN_HD` / `ATTN_NH` are compile-time macros
+and `attn.h` already carries HD 64's `kScale = 0.125f`.
+
+Granite is Llama plus four scalar multipliers — `attention_multiplier`
+(replacing the implicit `hd**-0.5`), `embedding_multiplier`,
+`residual_multiplier`, `logits_scaling`. `ModelSpec` expresses none of them and
+`attn.h` hard-codes `1/sqrt(HD)`, so the recipe **requires a container whose
+multipliers have been folded into the weights** by q4nx-build
+(`q_proj *= attention_multiplier * sqrt(hd)`, `o_proj`/`down_proj *=
+residual_multiplier`, `embed_tokens *= embedding_multiplier`,
+`lm_head /= logits_scaling`). For 4.2-3B the only non-unit factor is
+`attention_multiplier = 0.015625` at hd 64, so the fold is `q_proj *= 0.125`
+and the folded config reads `attention_multiplier = 0.125 = 64**-0.5` exactly —
+a power of two, so the fold is exact in bf16. The container records the
+originals under `q4nx_folded_multipliers`.
+
+**Acceptance criteria (unit):**
+- HF and GGUF derivations agree; the RoPE table is the plain unscaled `1e7^(-2i/64)`; `rope_scaling` and tied embeddings are refused by name.
+- An unfolded `attention_multiplier`, or any of the other three unequal to 1.0, is refused by name and names q4nx-build as the fix — from HF `config.json` and from GGUF metadata alike.
+- `hf_config_check` carries `attention_multiplier`, so the **engine** refuses an unfolded container at load, not only the recipe at generation.
+- The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `ln` + `lm` tail.
+- Without `OPEN_KERNELS_UNVALIDATED` the catalogue refuses `head_dim=64` by name.
+
+**Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Granite-4.2-3B-NPU2`, `out_gr`, prompt id 100283 (`<|start_of_role|>`). Three catalogue points enter with it: `attn.head_dim 64`, `attn.num_heads 40`, `gemv_q4.K 8192`.
+
+**Prior evidence (2026-09-02, a different design):** these shapes have been run
+and compared on this hardware before, by hand-written Granite kernels in
+`vegah/FastFlowLM@feat/kernels` — all eight projection shapes cosine
+1.00000000 under a one-hot activation, GQA attention 0.9993–0.9998, and a whole
+layer in **four** dispatches at 1744.7 µs (13.6 tok/s device time). That is the
+baseline the one-dispatch `dx` program should beat, and the reason head_dim 64
+at hidden 2560 was expected to work at all. It is prior evidence for the
+catalogue points, not a substitute for validating them on `dx`.
+
+**Result:** pending.

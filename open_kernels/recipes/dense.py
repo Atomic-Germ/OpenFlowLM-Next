@@ -83,7 +83,7 @@ class DenseRecipe:
 # families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
 # query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
 QKNORM_POST_ROPE = ("hunyuan",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan")
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite")
 
 
 def lm_rows(spec: ModelSpec) -> int:
@@ -310,10 +310,18 @@ def hf_config_check(spec: ModelSpec) -> dict:
     d = {"hidden_size": spec.hidden, "num_hidden_layers": spec.num_layers, "vocab_size": spec.vocab,
          "num_attention_heads": spec.num_heads, "num_key_value_heads": spec.num_kv_heads,
          "intermediate_size": spec.intermediate}
-    if spec.family in ("qwen3", "gemma3", "hunyuan"):
+    if spec.family in ("qwen3", "gemma3", "hunyuan", "granite"):
         d["head_dim"] = spec.head_dim          # Llama configs may omit it (hidden / heads)
     if spec.family == "gemma3":
         d["sliding_window"] = spec.sliding_window
+    if spec.family == "granite":
+        # The engine refuses an UNFOLDED container at load, not just at spec
+        # derivation: Granite's attention_multiplier replaces 1/sqrt(HD), and
+        # attn.h hard-codes the latter. A folded config reads head_dim**-0.5
+        # exactly (0.125 at hd 64, a power of two). Swapping an unfolded
+        # model.q4nx under a built kernel set would otherwise run and return
+        # plausible garbage. See spec.py's _granite_scale_check.
+        d["attention_multiplier"] = spec.head_dim ** -0.5
     return d
 
 

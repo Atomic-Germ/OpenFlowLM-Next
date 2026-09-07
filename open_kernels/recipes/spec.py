@@ -671,13 +671,245 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     )
 
 
+
+# Granite's four scalar multipliers, and why the recipe can ignore them.
+#
+# IBM Granite is Llama plus four scalars that transformers applies at run time:
+#
+#     attention_multiplier   replaces llama's implicit hd**-0.5 attention scale
+#     embedding_multiplier   inputs_embeds = embed(ids) * embedding_multiplier
+#     residual_multiplier    h = residual + h * residual_multiplier, both blocks
+#     logits_scaling         logits = lm_head(h) / logits_scaling
+#
+# ModelSpec cannot express any of them and designs/attn/attn.h hard-codes
+# kScale = 1/sqrt(HD), so a model that needs them cannot run on this recipe --
+# the same wall Gemma 3 hits with query_pre_attn_scalar, and handled the same
+# way: refuse rather than approximate.
+#
+# They do not need expressing, because all four FOLD LOSSLESSLY into the
+# quantised weights at conversion time (q4nx-build's granite builder):
+# q_proj *= attention_multiplier * sqrt(hd); embed_tokens *= embedding_
+# multiplier; o_proj and down_proj *= residual_multiplier; lm_head /=
+# logits_scaling. The container's config.json then describes the FOLDED model
+# and keeps the originals under "q4nx_folded_multipliers".
+#
+# For granite-4.2-3b the only non-unit factor is attention_multiplier =
+# 0.015625 at hd 64, so the fold is q_proj *= 0.125 and the folded config reads
+# attention_multiplier = 0.125 = 64**-0.5 exactly. 0.125 is a power of two, so
+# it is exact in bf16.
+#
+# Hence the checks below: this recipe accepts a folded Granite and refuses an
+# unfolded one by name, rather than running it and returning plausible garbage.
+def _granite_scale_check(where: str, attn_mult: float | None, hd: int,
+                         others: Mapping[str, Any]) -> None:
+    want = hd ** -0.5
+    if attn_mult is not None and abs(float(attn_mult) - want) > 1e-9:
+        raise SpecError(
+            f"granite: attention_multiplier {attn_mult} != head_dim**-0.5 {want} "
+            f"(attn.h scales by 1/sqrt(HD)). This container looks UNFOLDED; convert it "
+            f"with q4nx-build, which folds the multiplier into q_proj -- see {where}.")
+    for name, v in others.items():
+        if v is not None and abs(float(v) - 1.0) > 1e-9:
+            raise SpecError(
+                f"granite: {name} {v} != 1.0, so it was not folded into the weights "
+                f"(the recipe has nowhere to apply it) -- convert with q4nx-build.")
+
+
+def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """IBM Granite dense: Llama geometry with the four multipliers folded into the weights."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hd = cfg.get("head_dim") or _need(cfg, "hidden_size") // heads
+    vocab = _need(cfg, "vocab_size")
+    if cfg.get("rope_scaling"):
+        raise SpecError("granite: rope_scaling is not supported (only the unscaled RoPE is validated)")
+    if cfg.get("tie_word_embeddings"):
+        raise SpecError("granite: tied embeddings are not supported (the head must be its own q4 tensor)")
+    _granite_scale_check(
+        "config.json's q4nx_folded_multipliers", cfg.get("attention_multiplier"), hd,
+        {"embedding_multiplier": cfg.get("embedding_multiplier"),
+         "residual_multiplier": cfg.get("residual_multiplier"),
+         "logits_scaling": cfg.get("logits_scaling")})
+    return ModelSpec(
+        family="granite",
+        hidden=_need(cfg, "hidden_size"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_scaling=None,
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+def _granite_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    heads = k("attention.head_count")
+    hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    if f"{a}.rope.scaling.factor" in md:
+        raise SpecError("granite: rope_scaling is not supported (only the unscaled RoPE is validated)")
+    # A raw Granite GGUF is UNFOLDED, so these are the real multipliers and this
+    # is where that is caught -- the q4nx container is the folded artefact.
+    _granite_scale_check(
+        f"'{a}.attention.scale' in the GGUF", md.get(f"{a}.attention.scale"), hd,
+        {"embedding_scale": md.get(f"{a}.embedding_scale"),
+         "residual_scale": md.get(f"{a}.residual_scale"),
+         "logit_scale": md.get(f"{a}.logit_scale")})
+    return ModelSpec(
+        family="granite",
+        hidden=k("embedding_length"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=k("attention.head_count_kv"),
+        head_dim=hd,
+        rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
+        rope_theta=float(k("rope.freq_base")),
+        rope_scaling=None,
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-5)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
+def _gemma3_layer_types(n: int, cfg: Mapping[str, Any]) -> tuple[str, ...]:
+    if "layer_types" in cfg:
+        m = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
+        bad = sorted({t for t in cfg["layer_types"] if t not in m})
+        if bad:
+            raise SpecError(f"gemma3: unknown layer type(s) {bad}")
+        lt = tuple(m[t] for t in cfg["layer_types"])
+    else:
+        pat = int(cfg.get("sliding_window_pattern", 6))
+        lt = tuple(DENSE if (l + 1) % pat == 0 else DENSE_LOCAL for l in range(n))
+    if len(lt) != n:
+        raise SpecError(f"gemma3: layer_types has {len(lt)} entries, num_hidden_layers is {n}")
+    return lt
+
+
+def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Gemma 3 (text): GQA with q/k RMSNorm, GeGLU-tanh FFN, sandwich norms, 5:1 sliding / global layers,
+    a local RoPE theta and a linearly scaled global one. The container stores the norms' 1 + w and the
+    sqrt(hidden)-scaled embeddings, so neither is a recipe transform."""
+    tc = cfg.get("text_config", cfg)
+    n = _need(tc, "num_hidden_layers")
+    hd = _need(tc, "head_dim")
+    vocab = _need(tc, "vocab_size")
+    if tc.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
+        raise SpecError(f"gemma3: hidden_activation {tc.get('hidden_activation')!r} is not gelu_pytorch_tanh")
+    if tc.get("final_logit_softcapping") or tc.get("attn_logit_softcapping"):
+        raise SpecError("gemma3: logit softcapping is not supported (Gemma 3 has none)")
+    qps = tc.get("query_pre_attn_scalar", hd)
+    if abs(float(qps) - hd) > 1e-6:
+        raise SpecError(f"gemma3: query_pre_attn_scalar {qps} != head_dim {hd} (attn.h scales by 1/sqrt(HD))")
+    sc = tc.get("rope_scaling")
+    scaling = None
+    if sc:
+        if sc.get("rope_type", sc.get("type")) != "linear":
+            raise SpecError(f"gemma3: rope_scaling type {sc.get('rope_type')!r} is not supported (linear only)")
+        scaling = {"rope_type": "linear", "factor": float(sc["factor"])}
+    return ModelSpec(
+        family="gemma3",
+        hidden=_need(tc, "hidden_size"),
+        num_layers=n,
+        layer_types=_gemma3_layer_types(n, tc),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=_need(tc, "num_attention_heads"),
+        num_kv_heads=_need(tc, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(tc, "rope_theta")),
+        rope_scaling=scaling,
+        rope_local_theta=float(tc.get("rope_local_base_freq", 10000.0)),
+        sliding_window=int(_need(tc, "sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=_need(tc, "intermediate_size"),
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        norm_eps=float(tc.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg.get("model_type", tc.get("model_type")), "source": "hf_config"},
+    )
+
+
+def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    hd = k("attention.key_length")
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    pat = int(md.get(f"{a}.attention.sliding_window_pattern", 6))
+    factor = md.get(f"{a}.rope.scaling.factor")
+    return ModelSpec(
+        family="gemma3",
+        hidden=k("embedding_length"),
+        num_layers=n,
+        layer_types=tuple(DENSE if (l + 1) % pat == 0 else DENSE_LOCAL for l in range(n)),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=k("attention.head_count"),
+        num_kv_heads=k("attention.head_count_kv"),
+        head_dim=hd,
+        rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
+        rope_theta=float(k("rope.freq_base")),
+        rope_scaling={"rope_type": "linear", "factor": float(factor)} if factor else None,
+        rope_local_theta=float(md.get(f"{a}.rope.local_freq_base", 10000.0)),
+        sliding_window=int(k("attention.sliding_window")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        activation="gelu_tanh",
+        sandwich_norms=True,
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
 HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_next": _qwen36moe_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
-               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf}
+               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
+               "granite": _granite_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
-                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf}
+                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
-              _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan"}
+              _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
+              _granite_hf: "granite", _granite_gguf: "granite"}
 
 
 def hf_model_types(family: str) -> list[str]:
