@@ -147,6 +147,11 @@ protected:
 	std::unique_ptr<npu_xclbin_manager> npu = nullptr;
 	bool enable_preemption = false;
     std::vector<int> checkpoint_his;
+	/// \brief run one more forward on the eos token once a turn ends
+	/// \note this keeps the kv cache aligned with token_history so a following
+	///       turn can append to it. Models that rewind or clear between turns
+	///       throw that state away anyway, so for them it is a wasted step.
+	bool forward_on_eos = true;
 
 
 	uint32_t MAX_L = 0;
@@ -257,6 +262,22 @@ public:
 		time_utils::time_with_unit ttft_in_second = time_utils::cast_to_s(ttft_time);
 		return ttft_in_second.first;
 	}
+
+	/// \brief total time held by one profiler slot, in ms
+	/// \param slot index into profiler_list, see profiler_slot_t
+	float get_profiler_ms(int slot){
+		time_utils::time_with_unit t = this->profiler_list[slot].get_total_time();
+		return time_utils::cast_to_s(t).first * 1000.0f;
+	}
+
+	/// \brief profiler slot ids, so a harness can break a turn down by phase
+	enum profiler_slot_t {
+		SLOT_PREFILL = PREFILL_TIME,
+		SLOT_DECODING = DECODING_TIME,
+		SLOT_SAMPLING = SAMPLING_TIME,
+		SLOT_ENCODE = TKOEN_ENCODE_TIME,
+		SLOT_DECODE = TKOEN_DECODE_TIME,
+	};
 
 	/// \brief Set the topk
 	/// \param topk the topk
