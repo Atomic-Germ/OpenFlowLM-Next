@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -145,9 +146,17 @@ def main() -> int:
     ap.add_argument("--max-ctx", type=int, default=4096)
     ap.add_argument("--reuse-pools", action="store_true", help="keep pool files that already exist")
     ap.add_argument("--cfg-only", action="store_true", help="only rewrite the .cfg")
+    ap.add_argument("--requant", action="store_true",
+                    help="force the whole run -- spec, packing plan, pools and reference -- onto the "
+                         "re-quantising fallback: every q8 projection becomes q4_1 on the way into the "
+                         "pool, as it did before OPEN-QUANT-Q8. Run it beside the default (q8 projections "
+                         "streamed at q8) for the A/B that says what the q8 GEMV buys. The KERNELS must "
+                         "have been exported the same way (OPEN_KERNELS_FORCE_Q4_1=1)")
     ap.add_argument("--strict-routing", action="store_true",
                     help="MoE: keep the reference's own top-8 even where a previous run shows the NPU picked differently")
     a = ap.parse_args()
+    if a.requant:
+        os.environ["OPEN_KERNELS_FORCE_Q4_1"] = "1"      # read before the spec is derived
 
     out = Path(a.out).resolve()
     pool_dir = Path(a.pool_dir).resolve() if a.pool_dir else out / "pools"
@@ -164,12 +173,22 @@ def main() -> int:
     nl = min(a.layers, spec.num_layers)
     types = list(spec.layer_types[:nl])
     q = Q4NX(md / "model.q4nx")
+    # The reference reads what the NPU holds, tensor by tensor: a projection the plan
+    # streams at q8 (`q8_perm`) as the container's own q8, every other q8 tensor through
+    # the packer's q4_1 (OPEN-QUANT-Q8). So the comparison always measures the kernels.
+    q8_pat = [re.compile(re.escape(op["tensor"]).replace(r"\{l\}", r"\d+"))
+              for d in plan["layer_types"].values() for op in d["pool"] + d["consts"]
+              if op.get("op") == "q8_perm"]
+    q.native_q8 = lambda n: any(p.fullmatch(n) for p in q8_pat)
+    if q8_pat:
+        print(f"  {len(q8_pat)} projection(s) streamed at q8: {sorted(spec.q8_roles)}")
     q.hidden = spec.hidden
     # granite: <|start_of_role|>, the token every turn of its template opens
     # with -- NOT config.json's bos_token_id, which is 100283 = '</documents>'
     # and disagrees with tokenizer_config.json's own bos (<|end_of_text|>).
-    tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen3": 151644, "llama3": 128000,
-                                                "gemma3": 2, "hunyuan": 127958, "granite": 100264}[spec.family]
+    tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen35": 248045, "qwen3": 151644,
+                                                "llama3": 128000, "gemma3": 2, "hunyuan": 127958,
+                                                "granite": 100264}[spec.family]
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:
@@ -197,10 +216,13 @@ def main() -> int:
         # ---- the reference: the same token sequence, in fp64, on CPU
         if spec.family == "qwen36moe":
             import replica as R
-            conv = {l: np.zeros((spec.conv_kernel - 1, spec.lin_qkv_dim)) for l in range(nl)}
-            S = {l: np.zeros((spec.lin_value_heads, spec.lin_value_dim, spec.lin_value_dim)) for l in range(nl)}
+        elif spec.family == "qwen35":
+            import replica_qwen35 as R35
         else:
             import replica_dense as RD
+        if spec.family in ("qwen36moe", "qwen35"):
+            conv = {l: np.zeros((spec.conv_kernel - 1, spec.lin_qkv_dim)) for l in range(nl)}
+            S = {l: np.zeros((spec.lin_value_heads, spec.lin_value_dim, spec.lin_value_dim)) for l in range(nl)}
         K = {l: np.zeros((0, spec.num_kv_heads, spec.head_dim)) for l in range(nl)}
         V = {l: np.zeros((0, spec.num_kv_heads, spec.head_dim)) for l in range(nl)}
         tok = tok0
@@ -222,12 +244,18 @@ def main() -> int:
                         mine = got
                     xr = R.moe_decode(q, l, xa, top=mine)
                     print(f"  token {t} layer {l} {lt} top8={mine.tolist()}", flush=True)
+                elif spec.family == "qwen35":
+                    xr, conv[l], S[l], K[l], V[l] = R35.layer_decode(q, spec, l, xr.copy(), conv[l], S[l],
+                                                                    K[l], V[l], t)
+                    print(f"  token {t} layer {l} {lt}: |res| {np.abs(xr).max():.3f}", flush=True)
                 else:
                     xr, K[l], V[l] = RD.dense_decode(q, spec, l, xr.copy(), K[l], V[l], t)
                     print(f"  token {t} layer {l} {lt}: |res| {np.abs(xr).max():.3f}", flush=True)
                 write(out / f"ref_res{l}{sfx(t)}.bin", xr.astype(np.float32))
             if spec.family == "qwen36moe":
                 _, logits = R.final_logits(q, xr)
+            elif spec.family == "qwen35":
+                _, logits = R35.final_logits(q, spec, xr)
             else:
                 _, logits = RD.final_logits(q, spec, xr)
             write(out / f"ref_logits{sfx(t)}.bin", logits.astype(np.float32))

@@ -75,11 +75,22 @@ A recipe requesting another point shall raise `OpRangeError` naming the
 template, the parameter and the validated set, before any build; more than 8
 buffer arguments on a dispatch is likewise refused.
 
+The `attn` template's geometry is validated as a WHOLE TUPLE, not one
+parameter at a time: `(head_dim, num_heads, num_kv_heads, rotary_dim, qk_norm,
+attn_gate, qk_norm_post_rope)`, one entry per configuration a family procedure
+has actually compared. Checking the parameters independently passed a
+combination nobody had ever run -- (128, 16, 8), a GQA group of 2 at head dim
+128 -- because each of 128, 16 and 8 had entered its own set from a different
+model. A call site that does not pass `qk_norm_post_rope` is read as `False`.
+
 **Acceptance criteria:**
 - The 27B spec passes every check.
-- `head_dim=32` → `attn: head_dim=32 is outside the validated set {64, 128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → refused by name; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05; head_dim 64, num_heads 40 and K 8192 with OPEN-FAMILY-GRANITE on 2026-09-06. A test that spells out a set's membership fails on the one event that is never a regression, so the tests assert the refusal and not the contents.)
-- The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN and `head_dim=64` with OPEN-FAMILY-GRANITE, both on 2026-09-06; `head_dim=32` is still refused.
+- `head_dim=64` on the 27B → `attn: ('head_dim', ..., 'qk_norm_post_rope') = (64, 16, 2, 64, True, True, False) is outside the validated combinations {...}` — head dim 64 is validated at Llama 3.2 1B's and Granite 4.2 3B's geometries only, so it is the COMBINATION that is refused here, not the value; `hidden=5120` → `ln: width=5120 is outside the validated set {1024, 2048, 2560, 3072, 4096}`; `gemv_q4 K=5120` → names `{1024, 2048, 2560, 3072, 3584, 4096, 6144, 8192, 9216, 9728, 10240, 12288, 14336}`; `quant='q4_k'` → refused.
+- A combination of individually validated values that no procedure has run is refused: `(128, 16, 4, 128, True, False, False)` names itself, not one parameter, even though 128, 16 and 4 are each in a validated tuple.
+- Points enter only after a compare. 128 / 2560 / 9728 entered with OPEN-FAMILY-QWEN3 on 2026-09-05; the post-RoPE tuple `(128, 32, 8, 128, True, False, True)` with OPEN-FAMILY-HUNYUAN on 2026-09-06; and on 2026-09-06 OPEN-FAMILY-QWEN3 added `gemv_q4` K 1024 / 3072 / 6144 / 12288, `ln` width 1024, `lm_head_q4` K 1024 / 2048 and the tuple `(128, 16, 8, 128, True, False, False)`, while OPEN-FAMILY-LLAMA3 added `gemv_q4` K 8192, `ln` width 3072, `lm_head_q4` K 3072 and the tuples `(128, 24, 8, 128, False, False, False)` and `(64, 32, 8, 64, False, False, False)`. On 2026-09-06 OPEN-FAMILY-QWEN35's 4B pass added `gemv_q4` K 9216, `lm_head_q8` K 2560 and the tuple `(256, 16, 4, 64, True, True, False)`; `deltanet heads=16` (Qwen3.5 2B / 0.8B) and `lm_head_q8 K=4096` (the 9B) stayed out because those runs did not pass. On 2026-09-07 OPEN-QUANT-Q8's pass added `gemv_q8` K 2048 and 4096 (Ornith-1.0-35B-A3B and five sibling containers); the Qwen3.5 4B's q8 variant added nothing, its `lx` build having overflowed program memory. OPEN-FAMILY-GRANITE added the tuple `(64, 40, 8, 64, False, False, False)` and `gemv_q4` K 8192 on 2026-09-06 -- the first entry at 40 heads. On 2026-09-07 OPEN-FAMILY-QWEN35's remaining three sizes passed and added `deltanet heads=16`, the tuple `(256, 8, 2, 64, True, True, False)` (the 2B / 0.8B), `lm_head_q8` K 1024 and 4096, and `gemv_q4` K 3584 -- the two points that had been held out since 2026-09-06 among them.
 - Nine buffer arguments → `9 buffer arguments`.
+- The `gemv_q8` template's validated `K` set holds 2048 and 4096, entered by OPEN-QUANT-Q8's hardware pass on 2026-09-07 (Ornith-1.0-35B-A3B); `gemv_q8 K=3072` names that set. Before that pass the set was empty and every q8 export needed `OPEN_KERNELS_UNVALIDATED=1`. The Qwen3.5 family's native-q8 pass on 2026-09-07 added nothing to it: its q8 `linear_out` GEMV reduces over `lin_value_width` (4096 on the 9B / 4B, 2048 on the 2B / 0.8B), not over `hidden`, so all four sizes compose at q8 with no override.
+- `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: `recipes.load` narrows the container's q8 role away at an unlisted width and says so, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`.
 
 ### OPEN-ATTN-CONTEXT: decode cost grows linearly with position, on every family
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`)
@@ -206,6 +217,22 @@ is unchanged. The kernel points the family needs (K = 2560 / 9728 GEMVs, HD 128
 attention with 32/8 heads and full RoPE, the 2560-wide norm, the q4 head) are
 in the catalogue's validated sets only once this procedure has passed.
 
+The same recipe composes the other three published Qwen3 dense shapes. All
+three have now run this procedure (2026-09-06, results below) and their points
+are in the catalogue:
+
+| shape | points it added |
+|---|---|
+| 8B (4096 / 36 / 12288; also DynaGuard-8B, DeepSeek-R1-0528-Qwen3-8B) | `gemv_q4` K = 12288 only; `PER_CALL` drops to 1 |
+| 1.7B (2048 / 28 / 6144, 16 heads) | `gemv_q4` K = 6144, `lm_head_q4` K = 2048, and the `attn` TUPLE (128, 16, 8) -- a GQA group of 2 that the catalogue's per-parameter check had been passing silently, which is why OPEN-OP-RANGE now validates the attention geometry as a whole tuple |
+| 0.6B (1024 / 28 / 3072, 16 heads) | `ln` width 1024, `gemv_q4` K = 1024 and 3072, `lm_head_q4` K = 1024; the (128, 16, 8) `attn` tuple is the 1.7B's |
+
+**Acceptance criteria (unit):**
+- The 4B layout and manifest as `tests/test_qwen3_dense.py` asserts them.
+- 8B: `PER_CALL 1`, `TAB_BYTES 27648`, `ELN 8192`, band split `(8, 2, 8, 24, 8)`, `LMHEAD_BAND_BYTES 163840`.
+- 1.7B: `PER_CALL 2`, `TAB_BYTES 13824`, `ELN 4096`, band split `(4, 2, 4, 12, 4)`, head K 2048, `num_heads // num_kv_heads == 2`.
+- 0.6B: `ELN 2048` (half an x-stream element), `TAB_BYTES 6912`, band split `(4, 2, 2, 6, 2)`, `attn_q_width == 2 * hidden`, `ln` built at 1024.
+
 **Procedure:**
 1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3-4B-NPU2` (WSL) → `src/xclbins/Qwen3-4B-NPU2/open_kernels/{dx,ln,lm_head_q4}` + `manifest.json`.
 2. `python open_kernels/model/make_decode.py --model-dir ~/.flm/models/Qwen3-4B-NPU2 --layers 4 --tokens 2 --out open_kernels/model/out_q3`, then `open_kernels/harness/out/run_kernel.exe open_kernels/model/out_q3/run_decode.cfg` and `python open_kernels/model/compare_decode.py --tokens 2 --out open_kernels/model/out_q3`: every layer's residual corr > 0.9999, logits corr > 0.9999, same argmax at both positions.
@@ -226,9 +253,21 @@ computed host side (`ModelSpec.rope_inv_freq`, in the manifest, used by both
 position-table builders), and widths that overflow a core's memory are handled
 by the recipe (one chunk per weight element; one norm output element per call).
 
+`tie_word_embeddings` is not a refusal. Llama 3.2 (1B / 3B) ties the head to
+the embedding table in `config.json`, but every container the recipe packs from
+materialises `lm_head.weight` as its own q4 tensor -- FLM's `.q4nx` does it for
+`Llama-3.2-{1,3}B-NPU2` (I8 `[32064, 5120]` / `[48096, 5120]`, the whole
+128256-row head), and `utilities/q4nx-build` does it for a tied GGUF
+(OPEN-FAMILY-HUNYUAN's converter). The derivation sees only `config.json`, so
+the invariant is enforced where it is observable: `recipes/pack.py` refuses a
+container that lacks the tensor, naming it.
+
 **Acceptance criteria (unit):**
-- HF and GGUF derivations agree; `rope_inv_freq()` equals transformers' `_compute_llama3_parameters` for the 8B's parameters; a non-llama3 `rope_scaling` and tied embeddings are refused.
+- HF and GGUF derivations agree; `rope_inv_freq()` equals transformers' `_compute_llama3_parameters` for the 8B's parameters; a non-llama3 `rope_scaling` is refused.
+- `tie_word_embeddings: true` derives the SAME spec as `false` (the flag is not a spec field), the pack plan still names `lm_head.weight`, and a container without that tensor is refused by `pack.apply_op` naming `lm_head.weight`.
 - The 8B layout: 8 KB norm elements, one chunk per weight element (`TAB_BYTES 32256`), `PER_CALL 1`; Qwen3-4B keeps two.
+- Llama 3.2 3B (3072 / 28 / 8192, 24 heads): `PER_CALL 2`, `TAB_BYTES 18432`, `ELN 6144`, band split `(6, 2, 6, 16, 6)`, `OG_AOUT_ELEMS 3`, `LMHEAD_BANDS 2004`, `ln` built at 3072 and the head at K = 3072.
+- Llama 3.2 1B (2048 / 16 / 8192, head_dim 64): `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024` (the RoPE record is 768 B at `rotary_dim` 64), `KV_PC 1`, 32 inverse frequencies.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Llama-3.1-8B-NPU2`, `out_l3`, prompt id 128000, and `chat.py` (which switches to the Llama 3 template when the tokenizer has `<|start_header_id|>`).
 

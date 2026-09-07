@@ -85,6 +85,7 @@
  "hf_config_check": {
   "model_type": [
    "qwen3_5_moe",
+   "qwen3_5_moe_text",
    "qwen3_next"
   ],
   "hidden_size": 2048,
@@ -680,6 +681,7 @@
    "build_dir": "lm_head_q8/build_full",
    "env": {
     "LMHEAD_N": "248320",
+    "LMHEAD_K": "2048",
     "LMHEAD_CORES": "8"
    }
   }
@@ -694,6 +696,7 @@
      "op": "lmhead_q8",
      "tensor": "lm_head.weight",
      "chunk_bytes": 8704,
+     "in_dim": 2048,
      "dst": 0
     }
    ]

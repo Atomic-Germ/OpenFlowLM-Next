@@ -36,7 +36,8 @@ import os
 from dataclasses import dataclass
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .qwen36moe import BAND_ROWS, CHUNK, ELEM, MB, band_bytes, q4_bytes, q4_chunks, roundup, tab_bytes
+from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, MB, band_bytes, proj_op, q4_chunks,
+                        mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
 
@@ -106,8 +107,10 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError(f"dense: activation {spec.activation!r} (silu | gelu_tanh)")
     if spec.has_local and spec.sliding_window <= 0:
         raise OpRangeError("dense: dense_local layers need a positive sliding_window")
-    if spec.quant != "q4_1":
-        raise OpRangeError(f"dense: quant={spec.quant!r}; the gemv_q4 template reads q4_1 chunks only")
+    quant_check(spec, "dense")
+    mixed_check(spec, "dense", ("attn", "ffn"))
+    if spec.quant_of("experts") == "q8" or spec.quant_of("shared") == "q8" or spec.quant_of("linear") == "q8":
+        raise OpRangeError("dense: this family has only the 'attn' and 'ffn' roles")
     if not spec.has_dense or spec.has_linear or spec.has_full or spec.intermediate == 0:
         raise OpRangeError("dense: every layer must be a dense layer with an FFN")
     if spec.attn_gate:
@@ -125,10 +128,10 @@ def _check(spec: ModelSpec) -> None:
             rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
             qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE)
     pc = per_call(spec)
-    require("gemv_q4", K=spec.hidden, rs=2, rows_per_core=spec.attn_q_width // n, per_call=pc)
-    require("gemv_q4", K=spec.attn_q_width, rs=2, rows_per_core=spec.hidden // n, per_call=pc)
-    require("gemv_q4", K=spec.hidden, rs=2, rows_per_core=spec.intermediate // n, per_call=pc)
-    require("gemv_q4", K=spec.intermediate, rs=2, rows_per_core=spec.hidden // n, per_call=pc)
+    require_gemv(spec, "attn", spec.hidden, spec.attn_q_width // n, pc)
+    require_gemv(spec, "attn", spec.attn_q_width, spec.hidden // n, pc)
+    require_gemv(spec, "ffn", spec.hidden, spec.intermediate // n, pc)
+    require_gemv(spec, "ffn", spec.intermediate, spec.hidden // n, pc)
     require("lm_head_q4", K=spec.hidden, vocab=lm_rows(spec))
 
 
@@ -262,10 +265,12 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     # pool
     p: dict[str, int] = {}
     off = 0
-    for name, rows, cols in (("q", G.QW, hid), ("k", G.KVW, hid), ("v", G.KVW, hid), ("o", hid, G.QW),
-                             ("up", ff, hid), ("gate", ff, hid), ("down", hid, ff)):
+    for name, role, rows, cols in (("q", "attn", G.QW, hid), ("k", "attn", G.KVW, hid),
+                                   ("v", "attn", G.KVW, hid), ("o", "attn", hid, G.QW),
+                                   ("up", "ffn", ff, hid), ("gate", "ffn", ff, hid),
+                                   ("down", "ffn", hid, ff)):
         p[name] = off
-        off += q4_bytes(rows, cols)
+        off += role_bytes(spec, role, rows, cols)
     pool_bytes = roundup(off, MB)
     kv_row = 2 * e_a
     ptab_row = max(1024, e_a)
@@ -295,13 +300,13 @@ def pack_plan(spec: ModelSpec) -> dict:
     pre = "model.layers.{l}."
     one = {
             "pool": [
-                {"op": "std_perm", "tensor": pre + "self_attn.q_proj.weight", "dst": L.POOL_Q, "nch": q4_chunks(G.QW, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "self_attn.k_proj.weight", "dst": L.POOL_K, "nch": q4_chunks(G.KVW, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "self_attn.v_proj.weight", "dst": L.POOL_V, "nch": q4_chunks(G.KVW, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "self_attn.o_proj.weight", "dst": L.POOL_O, "nch": q4_chunks(hid, G.QW), "in_dim": G.QW},
-                {"op": "std_perm", "tensor": pre + "mlp.up_proj.weight", "dst": L.POOL_UP, "nch": q4_chunks(ff, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "mlp.gate_proj.weight", "dst": L.POOL_GATE, "nch": q4_chunks(ff, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "mlp.down_proj.weight", "dst": L.POOL_DOWN, "nch": q4_chunks(hid, ff), "in_dim": ff},
+                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, hid),
+                proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, hid),
+                proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, hid),
+                proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, G.QW, G.QW),
+                proj_op(spec, "ffn", pre + "mlp.up_proj.weight", L.POOL_UP, ff, hid, hid),
+                proj_op(spec, "ffn", pre + "mlp.gate_proj.weight", L.POOL_GATE, ff, hid, hid),
+                proj_op(spec, "ffn", pre + "mlp.down_proj.weight", L.POOL_DOWN, hid, ff, ff),
             ],
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.CD_LNW, "cap": L.ELN},
@@ -360,8 +365,10 @@ def programs(spec: ModelSpec) -> dict:
 
 def builds(spec: ModelSpec) -> dict[str, dict]:
     n = LIMITS["n_cols"]
+    qh = spec.quant_hash()
+    sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
     return {
-        "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}", "env": {}},
+        "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}", "env": {}},
         "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
@@ -405,3 +412,5 @@ KERNEL_SOURCES = [
     "designs/lm_head_q4/*.py", "designs/lm_head_q4/*.cc",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
+KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
+Q8_ROLES = frozenset({"attn", "ffn"})     # the only two roles a dense layer has

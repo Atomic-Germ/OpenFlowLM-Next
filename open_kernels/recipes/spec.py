@@ -12,11 +12,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
 LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL)      # dense_local: a dense layer with sliding-window attention
+
+# ---- the per-role weight format (OPEN-QUANT-Q8). A container stores each tensor at
+# q4_1 (5120-byte chunks) or q8 (8704), and which of the two a projection is decides
+# whether the kernels stream it at q8 or the packer re-quantizes it. Roles, not tensor
+# names, so the recipes stay readable; the deriver maps the names once.
+#
+# `lm_head` is deliberately NOT a role: the family already fixes the head's format (the
+# MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
+# putting it in the map would move every shipped model's spec_hash for no kernel change.
+QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
+QUANT_FORMATS = ("q4_1", "q8")
+DEFAULT_QUANT = "q4_1"
+CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
 
 
 class SpecError(ValueError):
@@ -59,7 +73,9 @@ class ModelSpec:
     moe_intermediate: int = 0
     shared_expert_intermediate: int = 0   # 0 = no shared expert
     norm_eps: float = 1e-6
-    quant: str = "q4_1"
+    # the weight format: the string every role is at ("q4_1"), or a role -> format map
+    # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
+    quant: str | dict = DEFAULT_QUANT
     extra: dict = field(default_factory=dict)   # informational (model name, source)
 
     # ---- derived
@@ -95,6 +111,43 @@ class ModelSpec:
     @property
     def has_local(self) -> bool:
         return DENSE_LOCAL in self.layer_types
+
+    # ---- the weight format, per role
+    @property
+    def quant_map(self) -> dict[str, str]:
+        """role -> format, every role present."""
+        if isinstance(self.quant, str):
+            return {r: self.quant for r in QUANT_ROLES}
+        return {r: self.quant.get(r, DEFAULT_QUANT) for r in QUANT_ROLES}
+
+    def quant_of(self, role: str) -> str:
+        if role not in QUANT_ROLES:
+            raise SpecError(f"no quant role {role!r} (have {list(QUANT_ROLES)})")
+        return self.quant_map[role]
+
+    @property
+    def q8_roles(self) -> frozenset:
+        return frozenset(r for r, f in self.quant_map.items() if f == "q8")
+
+    def canonical_quant(self):
+        """The form that goes on disk and into the hashes: the bare string when every role
+        is at the default, else only the roles that differ. This is what keeps a model with
+        no q8 projection hashing, and serialising, exactly as it did before roles existed."""
+        m = self.quant_map
+        if all(f == DEFAULT_QUANT for f in m.values()):
+            return DEFAULT_QUANT
+        if isinstance(self.quant, str):
+            return self.quant
+        return {r: m[r] for r in QUANT_ROLES if m[r] != DEFAULT_QUANT}
+
+    def quant_hash(self) -> str:
+        """A short stable hash of the quant map; "" when nothing is at q8. Build directory
+        names carry it so a q8 variant is a different kernel set without renaming the
+        directories every shipped model already builds into."""
+        if not self.q8_roles:
+            return ""
+        q = self.canonical_quant()
+        return hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:8]
 
     def rope_inv_freq(self, local: bool = False) -> list[float]:
         """The inverse frequency of each rotary pair i < rotary_dim/2: theta^(-2i/rot), with Llama 3's
@@ -164,6 +217,7 @@ class ModelSpec:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["layer_types"] = list(self.layer_types)
+        d["quant"] = self.canonical_quant()
         return d
 
     def to_json(self) -> str:
@@ -177,6 +231,14 @@ class ModelSpec:
             raise SpecError(f"unknown ModelSpec field(s): {unknown}")
         kw = dict(d)
         kw["layer_types"] = tuple(kw["layer_types"])
+        q = kw.get("quant", DEFAULT_QUANT)
+        if isinstance(q, Mapping):
+            bad = sorted(set(q) - set(QUANT_ROLES))
+            if bad:
+                raise SpecError(f"quant: unknown role(s) {bad} (have {list(QUANT_ROLES)})")
+            kw["quant"] = {r: v for r, v in q.items() if v != DEFAULT_QUANT}
+        elif not isinstance(q, str):
+            raise SpecError("quant must be a format name or a role -> format map")
         for t in kw["layer_types"]:
             if t not in LAYER_TYPES:
                 raise SpecError(f"layer_types: unknown layer type {t!r}")
@@ -327,6 +389,51 @@ def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
     )
 
 
+def _qwen35_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen3.5 dense: the Qwen3.6-MoE layer with the MoE block replaced by a silu-gated
+    dense FFN. Every other field is the MoE's -- `layer_types` (3 linear : 1 full),
+    `attn_output_gate`, head_dim 256, partial RoPE 0.25, 16 linear key heads of 128,
+    conv kernel 4 -- so the field reads are `_qwen36moe_hf`'s.
+
+    Qwen publishes the tower inside a `text_config` (`model_type: qwen3_5_text`) under a
+    `qwen3_5` VLM wrapper; FLM's containers flatten it. Both are read here.
+    Images always route to the closed engine (the open one has no vision path)."""
+    tc = cfg.get("text_config", cfg)
+    if tc.get("num_experts") or tc.get("moe_intermediate_size"):
+        raise SpecError("qwen3_5: num_experts / moe_intermediate_size say this is the MoE "
+                        "variant (model_type qwen3_5_moe), not the dense one")
+    s = _qwen36moe_hf(dict(tc, num_experts=0, num_experts_per_tok=0, moe_intermediate_size=0,
+                           shared_expert_intermediate_size=0, model_type=tc.get("model_type", "qwen3_5")),
+                      real_vocab)
+    d = s.to_dict()
+    d.update(family="qwen35", intermediate=_need(tc, "intermediate_size"),
+             activation="silu" if tc.get("hidden_act", "silu") == "silu" else tc["hidden_act"])
+    d["extra"] = {"model_type": cfg.get("model_type", tc.get("model_type")), "source": "hf_config"}
+    spec = ModelSpec.from_dict(d)
+    if spec.activation != "silu":
+        raise SpecError(f"qwen3_5: hidden_act {spec.activation!r} is not silu")
+    return spec
+
+
+def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    """arch `qwen35` (the dense line; the MoE is `qwen35moe`). llama.cpp writes the same
+    ssm.* / full_attention_interval keys as the MoE plus `feed_forward_length`, and no
+    expert keys -- read off Qwen3.8-9B-Distill-Q8_0.gguf, 2026-09-06."""
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    for bad in ("expert_count", "expert_feed_forward_length"):
+        if md.get(f"{a}.{bad}"):
+            raise SpecError(f"{a}: {bad} says this is the MoE variant (architecture qwen35moe)")
+    base = _qwen36moe_gguf({**md, f"{a}.expert_count": 0, f"{a}.expert_used_count": 0,
+                            f"{a}.expert_feed_forward_length": 0})
+    d = base.to_dict()
+    d.update(family="qwen35", intermediate=k("feed_forward_length"))
+    return ModelSpec.from_dict(d)
+
+
 def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     """Qwen3 dense: GQA with q/k RMSNorm, full RoPE, no attention gate, silu-gated FFN."""
     n = _need(cfg, "num_hidden_layers")
@@ -391,7 +498,17 @@ def _qwen3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 
 
 def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
-    """Llama 3: GQA without q/k norms, full RoPE with the llama3 frequency scaling, no gate, silu FFN."""
+    """Llama 3: GQA without q/k norms, full RoPE with the llama3 frequency scaling, no gate, silu FFN.
+
+    `tie_word_embeddings` is NOT a refusal. Llama 3.2 (1B / 3B) ties the head to the
+    embedding table, but every container the recipe packs from materialises
+    `lm_head.weight` as its own q4 tensor -- FLM's `.q4nx` does it for
+    `Llama-3.2-{1,3}B-NPU2` (I8 [32064, 5120] / [48096, 5120], the whole 128256-row
+    head), and utilities/q4nx-build does it for a tied GGUF (the HunYuan converter's
+    zero-padded head). The derivation sees only config.json, never the container, so
+    the invariant is enforced where it is observable: `pack.apply_op` refuses a
+    container that lacks the tensor, by name.
+    """
     n = _need(cfg, "num_hidden_layers")
     heads = _need(cfg, "num_attention_heads")
     hd = cfg.get("head_dim") or _need(cfg, "hidden_size") // heads
@@ -402,8 +519,6 @@ def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         if sc.get("rope_type", sc.get("type")) != "llama3":
             raise SpecError(f"llama: rope_scaling type {sc.get('rope_type', sc.get('type'))!r} is not supported (llama3 only)")
         scaling = {k: sc[k] for k in ("factor", "low_freq_factor", "high_freq_factor", "original_max_position_embeddings")}
-    if cfg.get("tie_word_embeddings"):
-        raise SpecError("llama: tied embeddings are not supported (the head must be its own q4 tensor)")
     return ModelSpec(
         family="llama3",
         hidden=_need(cfg, "hidden_size"),
@@ -920,12 +1035,20 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         extra={"architecture": a, "source": "gguf"},
     )
 
-HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_next": _qwen36moe_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
+# `qwen3_5_moe_text` is the text-only derivative of the VLM `qwen3_5_moe` (Ornith-1.0-35B-A3B
+# and friends: `Qwen3_5MoeForCausalLM`, no vision_config). Every field the recipe and the
+# config check read is identical to the VLM's, so it derives through the same builder --
+# exactly as `gemma3_text` and `qwen3_5_text` do for their towers.
+HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
+               "qwen3_next": _qwen36moe_hf, "qwen3_5": _qwen35_hf,
+               "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf}
-GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
+GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
-_FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
+_FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
+              _qwen35_gguf: "qwen35",
+              _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite"}
@@ -938,3 +1061,87 @@ def hf_model_types(family: str) -> list[str]:
 
 def gguf_architectures(family: str) -> list[str]:
     return sorted(k for k, f in GGUF_FAMILIES.items() if _FAMILY_OF[f] == family)
+
+
+# ---- the per-role weight format, derived from what the model file actually holds
+# (OPEN-QUANT-Q8). `config.json` does not say; the container's tensor shapes do, and so
+# do a GGUF's tensor types. The tables below are the one place tensor names meet roles.
+_LAYER_PREFIX = re.compile(r"^model\.layers?\.\d+\.")
+_ATTN_HF = {"self_attn.q_proj.weight": "attn", "self_attn.k_proj.weight": "attn",
+            "self_attn.v_proj.weight": "attn", "self_attn.o_proj.weight": "attn"}
+_FFN_HF = {"mlp.up_proj.weight": "ffn", "mlp.gate_proj.weight": "ffn", "mlp.down_proj.weight": "ffn"}
+# `self_attn.gate_proj` is the LINEAR layer's z projection, not an attention tensor: a
+# full-attention layer's gate is the second half of the fused `q_proj`.
+_LIN_HF = {"linear_attn.qkv_proj.weight": "linear", "self_attn.gate_proj.weight": "linear",
+           "linear_attn.ssm_out_proj.weight": "linear_out"}
+_MOE_HF = {"mlp.up_exps_proj.weight": "experts", "mlp.gate_exps_proj.weight": "experts",
+           "mlp.down_exps_proj.weight": "experts",
+           "mlp.share_up_exps_proj.weight": "shared", "mlp.share_gate_exps_proj.weight": "shared",
+           "mlp.share_down_exps_proj.weight": "shared"}
+ROLE_TENSORS: dict[str, dict[str, str]] = {
+    "qwen36moe": {**_ATTN_HF, **_LIN_HF, **_MOE_HF},
+    "qwen35": {**_ATTN_HF, **_LIN_HF, **_FFN_HF},
+}
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan"):
+    ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
+
+_GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
+_GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",
+              "attn_output.weight": "attn",
+              "ffn_up.weight": "ffn", "ffn_gate.weight": "ffn", "ffn_down.weight": "ffn",
+              "ffn_up_exps.weight": "experts", "ffn_gate_exps.weight": "experts",
+              "ffn_down_exps.weight": "experts",
+              "ffn_up_shexp.weight": "shared", "ffn_gate_shexp.weight": "shared",
+              "ffn_down_shexp.weight": "shared",
+              "ssm_in.weight": "linear", "attn_gate.weight": "linear", "ssm_out.weight": "linear_out"}
+GGUF_TYPE_FORMAT = {"Q8_0": "q8", "Q4_1": "q4_1", "Q4_0": "q4_1"}
+
+
+def _collapse(found: dict[str, tuple[str, str]]) -> dict[str, str]:
+    """Only the roles that are not at the default; sorted, so the map is canonical."""
+    return {r: f for r, (f, _) in sorted(found.items()) if f != DEFAULT_QUANT}
+
+
+def quant_map_from_chunk_sizes(family: str, chunk_bytes: Mapping[str, int]) -> dict[str, str]:
+    """tensor name -> quantized chunk size (5120 = q4_1, 8704 = q8) -> the role map.
+
+    Only the roles that are NOT q4_1 come back, so a stock container derives `{}` and the
+    spec keeps hashing as the bare string. A role whose tensors disagree is refused naming
+    the tensor that broke it -- half a projection at q8 is not something to guess about."""
+    table = ROLE_TENSORS.get(family)
+    if table is None:
+        raise SpecError(f"no tensor-role table for family {family!r} (have {sorted(ROLE_TENSORS)})")
+    found: dict[str, tuple[str, str]] = {}
+    for name, ch in chunk_bytes.items():
+        role = table.get(_LAYER_PREFIX.sub("", name))
+        fmt = CHUNK_FORMAT.get(int(ch))
+        if role is None or fmt is None:
+            continue                      # not a projection we place, or a size the packer will refuse
+        prev = found.get(role)
+        if prev is None:
+            found[role] = (fmt, name)
+        elif prev[0] != fmt:
+            raise SpecError(f"{name} is {fmt} but {prev[1]} is {prev[0]}: the {role!r} role must be "
+                            f"one format across the model")
+    return _collapse(found)
+
+
+def quant_map_from_gguf_types(family: str, tensor_types: Mapping[str, str]) -> dict[str, str]:
+    """GGUF tensor name -> ggml type name -> the role map (the same rules)."""
+    table = ROLE_TENSORS.get(family)
+    if table is None:
+        raise SpecError(f"no tensor-role table for family {family!r} (have {sorted(ROLE_TENSORS)})")
+    roles = set(table.values())
+    found: dict[str, tuple[str, str]] = {}
+    for name, ty in tensor_types.items():
+        role = _GGUF_ROLE.get(_GGUF_BLOCK.sub("", name))
+        fmt = GGUF_TYPE_FORMAT.get(str(ty).upper())
+        if role is None or role not in roles or fmt is None:
+            continue
+        prev = found.get(role)
+        if prev is None:
+            found[role] = (fmt, name)
+        elif prev[0] != fmt:
+            raise SpecError(f"{name} is {fmt} but {prev[1]} is {prev[0]}: the {role!r} role must be "
+                            f"one format across the model")
+    return _collapse(found)

@@ -1,4 +1,4 @@
-#define GEMV_PER_CALL 1
+#define GEMV_PER_CALL 2
 #include "gemv_q4.h"
 // A 64-row band into the silu scratch at ms + dst (the up band at 0, the gate band at 64).
 extern "C" {

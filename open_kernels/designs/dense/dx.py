@@ -63,12 +63,63 @@ STOP = int(os.environ.get("DX_STOP", 99))     # debug: 1 = after q/k/v, 2 = afte
 assert not G.GATE, "dx.py: the Qwen3 dense recipe has no attention gate"
 
 
+Q8 = SPEC.q8_roles              # the roles the container stores at q8 (OPEN-QUANT-Q8); usually empty
+
+
 def per_band(K):
     return band_bytes(K) // 5120
 
 
 def n_groups(K):
     return band_bytes(K) // CALL_BYTES
+
+
+# A q8 projection's band is the same 64 rows and twice the bytes: four 16-row half-tiles
+# per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h). A q4_1 role gets exactly
+# today's numbers, so a model with no q8 role builds the design it always built.
+def role_band_bytes(role, K):
+    return 2 * band_bytes(K) if role in Q8 else band_bytes(K)
+
+
+def role_per_band(role, K):
+    return role_band_bytes(role, K) // 5120
+
+
+def role_groups(role, K):
+    return role_band_bytes(role, K) // CALL_BYTES
+
+
+def role_rs(role):
+    return 4 if role in Q8 else 2
+
+
+NEED_Q4_GY = any(r not in Q8 for r in ("attn", "ffn"))
+NEED_Q4_GMS = "ffn" not in Q8
+
+# A container that MIXES formats needs BOTH GEMV bodies on the main core, and 16 KB of
+# program memory does not hold three entries (.claude/plans/q8-hw-results.md section 2).
+# On a mixed spec ONLY, the q4_1 pair folds into one `gemv_q4_gyms` with a runtime
+# destination (dst < 0 -> the band's y element, dst >= 0 -> ms + dst) and the GEMV TUs are
+# compiled -Oz. An all-q4_1 or an all-q8 spec keeps today's entries, flags and call order.
+MIXED = bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
+GEMV_OS = ["-Oz"] if MIXED else OS
+
+
+# The kernels a main core holds, in a fixed order. A q4_1 entry goes in only while some
+# projection still needs it (dead code costs 16 KB program memory); the order for a model
+# with no q8 role is the one the design always had.
+def _knames():
+    ns = ["gyms"] if MIXED else [n for n in ("gy", "gms")
+                                 if (n == "gy" and NEED_Q4_GY) or (n == "gms" and NEED_Q4_GMS)]
+    ns += ["act", "prep", "prepf"]
+    if Q8:
+        ns.append("gy8")
+    if "ffn" in Q8:
+        ns.append("gms8")
+    return tuple(ns)
+
+
+KN = _knames()
 
 
 def bt(total, off, n):
@@ -120,11 +171,19 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     def ef(sym, src, args, flags=OS):
         return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
 
-    f_gy = ef("gemv_q4_gy", HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32])
-    f_gms = ef("gemv_q4_gms", HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32])
-    f_silu = ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty])
-    f_prep = ef("dense_prep", HERE / "dense_prep.cc", [x_ty, tab_ty, i32, i32])
-    f_prepf = ef("dense_prep_f32", HERE / "dense_prep_f32.cc", [x_ty, tab_ty, i32, i32])
+    # One ExternalFunction per name in KN, in that order: a q4_1 entry only while a
+    # projection still uses it, a q8 one only when a role is q8 -- an ExternalFunction that
+    # exists changes the build, so a q4_1 model must see exactly the set it always saw.
+    mk = {"gy": lambda: ef("gemv_q4_gy", HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32]),
+          "gms": lambda: ef("gemv_q4_gms", HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32]),
+          "gyms": lambda: ef("gemv_q4_gyms", HERE / "gemv_q4_gyms.cc",
+                             [elem, tab_ty, y_ty, ms_ty, i32, i32, i32], GEMV_OS),
+          "act": lambda: ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty]),
+          "prep": lambda: ef("dense_prep", HERE / "dense_prep.cc", [x_ty, tab_ty, i32, i32]),
+          "prepf": lambda: ef("dense_prep_f32", HERE / "dense_prep_f32.cc", [x_ty, tab_ty, i32, i32]),
+          "gy8": lambda: ef("gemv_q8_gy", HERE / "gemv_q8_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], GEMV_OS),
+          "gms8": lambda: ef("gemv_q8_gms", HERE / "gemv_q8_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], GEMV_OS)}
+    KF = [mk[n]() for n in KN]
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
@@ -159,25 +218,54 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     PB_Q, NG_Q = per_band(QW), n_groups(QW)
     PB_F, NG_F = per_band(FF), n_groups(FF)
 
-    def gemv_bands(win, yout, tab, f_gy, nbands, ngroups, pb):
+    def gemv_bands(win, yout, tab, f_gy, nbands, ngroups, pb, rs=2, ms=None):
+        """`ms` is passed only by the folded mixed-format entry, which takes both
+        destinations and picks between them with dst (-1 = this band's y element)."""
         for _ in range_(nbands):
             ye = yout.acquire(1)
             for g in range_(ngroups):
                 we = win.acquire(1)
-                f_gy(we, tab, ye, g, pb, 2)
+                if ms is None:
+                    f_gy(we, tab, ye, g, pb, rs)
+                else:
+                    f_gy(we, tab, ye, ms, g, pb, -1)
                 win.release(1)
             yout.release(1)
+
+    def role_bands(win, yout, tab, K, role, nbands, KK, ms=None):
+        """`nbands` bands of a KK-wide projection of `role`, at that role's weight format."""
+        if role in Q8:
+            gemv_bands(win, yout, tab, K["gy8"], nbands, role_groups(role, KK), role_per_band(role, KK), 4)
+        elif MIXED:
+            gemv_bands(win, yout, tab, K["gyms"], nbands, n_groups(KK), per_band(KK), 2, ms)
+        else:
+            gemv_bands(win, yout, tab, K["gy"], nbands, n_groups(KK), per_band(KK), 2)
 
     def acq(fifo, n):
         e = fifo.acquire(n)
         return [e] if n == 1 else e            # acquire(1) yields the element itself
 
-    def main_body(win, xin, yout, tab, ms, f_gy, f_gms, f_silu, f_prep, f_prepf):
+    def main_body(win, xin, yout, tab, ms, *fns):
+        K = dict(zip(KN, fns))
+        f_prep, f_prepf, f_silu = K["prep"], K["prepf"], K["act"]
+        if "ffn" in Q8:
+            gms, pb_u, ng_u = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
+        else:
+            gms, pb_u, ng_u = (K["gyms"] if MIXED else K["gms"]), PB_H, NG_H
+
+        def band(we, ye, g, dst):
+            """One up | gate band into ms + dst. The folded entry takes the y pointer too,
+            so on a mixed core the band's y element is acquired first -- the shape
+            `gemv_bands` already runs (acquire y, stream the w elements, release)."""
+            if MIXED:
+                gms(we, tab, ye, ms, g, pb_u, dst)
+            else:
+                gms(we, tab, ms, g, pb_u, dst)
         # q | k | v against xn (K = HID; XN_ELEMS elements)
         xe = acq(xin, G.XN_ELEMS)
         for i in range(G.XN_ELEMS):
             f_prep(xe[i], tab, HID, i)
-        gemv_bands(win, yout, tab, f_gy, G.Q_PC + 2 * G.KV_PC, NG_H, PB_H)
+        role_bands(win, yout, tab, K, "attn", G.Q_PC + 2 * G.KV_PC, HID, ms)
         xin.release(G.XN_ELEMS)
         if stop == 1:
             return
@@ -185,7 +273,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         oe = acq(xin, G.OG_ELEMS)
         for i in range(G.OG_ELEMS):
             f_prep(oe[i], tab, QW, i)
-        gemv_bands(win, yout, tab, f_gy, G.O_PC, NG_Q, PB_Q)
+        role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
         xin.release(G.OG_ELEMS)
         if stop == 2:
             return
@@ -194,15 +282,17 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         for i in range(G.XM_ELEMS):
             f_prep(me[i], tab, HID, i)
         for _ in range_(G.UP_PC):
-            for g in range_(NG_H):
+            ye = yout.acquire(1) if MIXED else None
+            for g in range_(ng_u):
                 we = win.acquire(1)
-                f_gms(we, tab, ms, g, PB_H, G.MS_U)
+                band(we, ye, g, G.MS_U)
                 win.release(1)
-            for g in range_(NG_H):
+            for g in range_(ng_u):
                 we = win.acquire(1)
-                f_gms(we, tab, ms, g, PB_H, G.MS_G)
+                band(we, ye, g, G.MS_G)
                 win.release(1)
-            ye = yout.acquire(1)
+            if not MIXED:
+                ye = yout.acquire(1)
             f_silu(ms, ye)
             yout.release(1)
         xin.release(G.XM_ELEMS)
@@ -213,7 +303,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             he = xin.acquire(1)
             f_prepf(he, tab, FF, i)
             xin.release(1)
-        gemv_bands(win, yout, tab, f_gy, G.DOWN_PC, NG_F, PB_F)
+        role_bands(win, yout, tab, K, "ffn", G.DOWN_PC, FF, ms)
 
     def ln_body(ain, aout, f_nr, f_lny, f_lnx, *rest):
         # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]
@@ -336,8 +426,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
-                                                  Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}"),
-                                                  f_gy, f_gms, f_silu, f_prep, f_prepf],
+                                                  Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
                               tile=Tile(c, 2), stack_size=0x1800))
     def abufs(c):
         s = "" if c == 0 else str(c)
@@ -354,7 +443,9 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, 3), stack_size=0x1800))
 
-    BB_H, BB_Q, BB_F = band_bytes(HID), band_bytes(QW), band_bytes(FF)
+    BB_H, BB_Q, BB_F = (role_band_bytes("attn", HID), role_band_bytes("attn", QW),
+                        role_band_bytes("ffn", FF))
+    BB_UG = role_band_bytes("ffn", HID)          # the FFN's up | gate bands (K = HID)
     YB = BAND_ROWS * 4
 
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
@@ -437,8 +528,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_H + c * G.UP_PC * YB, G.UP_PC * YB))
         for j in range(G.UP_PC):
             for c in range(N_CORES):
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_UP + (c * G.UP_PC + j) * BB_H, BB_H))
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_GATE + (c * G.UP_PC + j) * BB_H, BB_H))
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_UP + (c * G.UP_PC + j) * BB_UG, BB_UG))
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_GATE + (c * G.UP_PC + j) * BB_UG, BB_UG))
         py.finish()                                               # h is in DDR
         if stop == 3:
             pw.finish()
