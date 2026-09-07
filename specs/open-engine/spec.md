@@ -120,6 +120,30 @@ Consequence for anything quoting a tok/s number: **say the position.** Granite
 measured 5.92 tok/s over 63 tokens and 1500 µs/layer at position 0; both are
 true and they are not the same measurement.
 
+**Mechanism found, and the guess above was wrong (2026-09-07).** It is not the
+vector unit failing to saturate. It is **scalar float on the scalar unit**,
+inside a loop that runs `heads x positions` times per layer: two `sexp()` per
+head per position for the online softmax, one `* 1/sqrt(HD)` per head, and a
+bf16 split and compare in the output accumulation. The ablation is the evidence,
+one build, one session: dropping q's low bf16 half -- which HALVES the score
+MACs -- moved a 185.3 ms step to 185.2, while dropping the single `* kScale`
+beside it moved it to 160.1. The head-count correlation the paragraph above
+found real (1.25 against 1.19) is explained by it: the cost is per head, and it
+is not arithmetic.
+
+Fixed for Granite in `attn.h` behind `ATTN_VEXP` / `ATTN_NHL` / `ATTN_RB`; the
+slope goes **2.289 -> 0.0247 ms/position, 92x flatter**, measured end to end
+through `flm bench` at 20.6x TTFT and 32.1x decode on a 1005-token prompt.
+Every other family compiles byte-identically, so the observation above still
+holds for them and this section stays an observation rather than a requirement
+until a second family has been measured the same way.
+
+**And prefill is the larger half.** Prefill costs about what a decode step costs
+at that position, so it is **quadratic in the prompt length** -- 1005 tokens
+took 1216 s before the fix. On a short prompt it reads as a flat per-token cost
+and is invisible. Nothing here batches a prompt; that is untouched, and it is
+now the dominant term for any document-shaped input.
+
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
 **Test category:** unit

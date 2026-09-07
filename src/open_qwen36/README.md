@@ -293,6 +293,59 @@ python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --mode
 of thought prints raw and only the closing tag appears. Cosmetic, and separate
 from the kernel path.
 
+## The context term (2026-09-07)
+
+`OPEN-ATTN-CONTEXT` recorded that a decode step's cost is dominated by a term
+linear in context position -- 1.5 ms/position on Qwen3-4B, 2.0 on Granite -- so
+that a single token at position 2048 cost 3-4 seconds. It also guessed the
+mechanism: a fixed per-head cost in the position loop, `attn.h` "not saturating
+the vector unit at hd 64".
+
+The direction was right and the mechanism was not. It is **scalar float**, on
+the scalar unit, inside a loop that runs `heads x positions` times per layer:
+two `sexp()` per head per position for the online softmax, plus one
+`* 1/sqrt(HD)` per head, plus a bf16 split and a compare in the accumulation.
+The ablation that settles it, same build, same session:
+
+| ablation | decode step @ 2048 |
+|---|---:|
+| baseline | 185.3 ms |
+| drop q's low bf16 half -- **halves the score MACs** | 185.2 ms |
+| drop the single `* kScale` beside it | **160.1 ms** |
+
+Halving the arithmetic was free; deleting one scalar operation was 18% of the
+context term. What followed from that reading: the exponentials batch over heads
+through the vector unit (`ATTN_VEXP`), `1/sqrt(HD)` folds into q as an exponent
+shift, the remaining scalars move into the vector phase, the heads split across
+five cores (`ATTN_NHL`), the head loops unroll, and four cached rows are
+processed per call (`ATTN_RB`) so one 32-lane exponential covers the block.
+
+Measured through `flm bench` on Granite 4.2 3B, `utilities/bench-configs/bench-1k.json`,
+1005 prompt tokens, two builds differing only in these kernels:
+
+| | TTFT | prefill | decode |
+|---|---:|---:|---:|
+| before | 1216.24 s | 0.826 tok/s | 0.415 tok/s |
+| after | **58.93 s** | **17.05 tok/s** | **13.33 tok/s** |
+| | 20.6x | 20.6x | 32.1x |
+
+Twenty minutes to first token on a thousand-token prompt, down to under one.
+The per-position slope goes 2.289 -> 0.0247 ms, 92x flatter.
+
+**Prefill moves for the same reason decode does**, which is worth stating
+because it is not obvious: prefill costs about what a decode step costs *at that
+position*, so it is quadratic in the prompt length. On a short prompt that reads
+as a flat per-token cost and hides completely.
+`utilities/bench-configs/README.md` has the arithmetic and a two-measurement
+recipe for predicting it on any model.
+
+Only Granite takes this path today (`recipes/dense.py` sets `VEXP` for it
+alone). Every other family compiles what it compiled before, byte for byte:
+Qwen3-4B rebuilt on these kernels gives identical `insts.bin` for all three sets
+and xclbins differing only in build stamps. The knobs are per-geometry, not
+per-family, so another family joins by measuring the same way -- not by
+declaring itself.
+
 ## Standalone
 
 ```
