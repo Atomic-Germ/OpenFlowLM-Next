@@ -138,3 +138,36 @@ entry's `flm_min_version` and **delete files that fail the check before
 re-downloading**; a local 1.0.2 container with a 1.0.3 registry entry needs
 the staged `out\model_list.json` edited (`flm_min_version`) or it will be
 wiped and re-pulled.
+
+## The standalone open-engine CLI: what XRT actually has to supply
+
+`src\open_qwen36uild.cmd` builds two unit tests that need no XRT, then the
+CLI, which does. It reads `XRT_INCLUDE_DIR` and `XRT_LIB_DIR` from the
+environment. Three things bite on a box that has only the driver (verified
+2026-09-07 on a bare checkout):
+
+- **The import library can be made without WSL.** The section above routes it
+  through `gendef` from mingw-w64-tools. `dumpbin /exports xrt_coreutil.dll`
+  from any VS command prompt lists the same symbols; turn its output into a
+  `.def` (a `LIBRARY` line, `EXPORTS`, then one name per line -- 541 of them on
+  the 32.00.20102 driver) and run the same `lib /def:... /machine:x64` command.
+  Nothing else in the WSL setup is needed just to build this CLI.
+
+- **Only the headers are needed, so clone only those.** `git clone --depth 1
+  --filter=blob:none --sparse https://github.com/Xilinx/XRT.git` followed by
+  `git sparse-checkout set src/runtime_src/core/include src/CMake/config`
+  is seconds instead of a full history.
+
+- **`xrt/detail/version-slim.h` does not exist in a checkout and has to be
+  generated.** `xrt/detail/abi.h` includes it, so every translation unit that
+  touches an XRT header dies with `C1083: Cannot open include file` until it is
+  there. XRT's own CMake writes it at configure time from
+  `src/CMake/config/version-slim.h.in`; building only the headers skips that
+  step. Substitute the three placeholders by hand with the tag you checked out
+  (`2.21.75` -> major `2`, minor `21`, string `2.21.75`) and drop the result at
+  `src/runtime_src/core/include/xrt/detail/version-slim.h`. It only captures the
+  compile-time version for the ABI check; `-DDISABLE_ABI_CHECK` also compiles,
+  but it removes a guard rather than satisfying it.
+
+`2.21.75` is the tag `CMakeLists.txt` already pins for portable builds, which
+is why it is the one to check out.
