@@ -165,8 +165,11 @@ def main() -> int:
     types = list(spec.layer_types[:nl])
     q = Q4NX(md / "model.q4nx")
     q.hidden = spec.hidden
+    # granite: <|start_of_role|>, the token every turn of its template opens
+    # with -- NOT config.json's bos_token_id, which is 100283 = '</documents>'
+    # and disagrees with tokenizer_config.json's own bos (<|end_of_text|>).
     tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen3": 151644, "llama3": 128000,
-                                               "gemma3": 2, "hunyuan": 127958}[spec.family]
+                                                "gemma3": 2, "hunyuan": 127958, "granite": 100264}[spec.family]
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:

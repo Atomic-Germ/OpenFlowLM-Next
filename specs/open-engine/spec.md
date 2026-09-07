@@ -77,9 +77,48 @@ buffer arguments on a dispatch is likewise refused.
 
 **Acceptance criteria:**
 - The 27B spec passes every check.
-- `head_dim=64` → `attn: head_dim=64 is outside the validated set {128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → names `{2048, 2560, 4096, 9728, 10240, 14336}`; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05.)
-- The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN on 2026-09-06, and `head_dim=64` is still refused.
+- `head_dim=32` → `attn: head_dim=32 is outside the validated set {64, 128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → refused by name; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05; head_dim 64, num_heads 40 and K 8192 with OPEN-FAMILY-GRANITE on 2026-09-06. A test that spells out a set's membership fails on the one event that is never a regression, so the tests assert the refusal and not the contents.)
+- The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN and `head_dim=64` with OPEN-FAMILY-GRANITE, both on 2026-09-06; `head_dim=32` is still refused.
 - Nine buffer arguments → `9 buffer arguments`.
+
+### OPEN-ATTN-CONTEXT: decode cost grows linearly with position, on every family
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`)
+**Test category:** manual (`open_kernels/model/sweep_positions.ps1`, needs the NPU and two model containers)
+
+**This is an observation, not yet a requirement** — it is written down because
+it was measured, it is large, and nothing else in this spec records it.
+
+A decode step's cost is dominated by a term linear in context position.
+Measured 2026-09-06 on one box, one step per point, `--at-position`:
+
+| position | Qwen3-4B `part0` (36 layers) | Granite-3B `part0` (40 layers) |
+|---:|---:|---:|
+| 0 | 56.7 ms | 60.0 ms |
+| 256 | 442.6 ms | 578.6 ms |
+| 1024 | 1585.3 ms | 2103.2 ms |
+| 2048 | 3120.6 ms | 4121.6 ms |
+
+Linear in both: **1.496 ms/position** (Qwen3-4B) and **1.983 ms/position**
+(Granite), i.e. **41.6 µs and 49.6 µs per layer per position**. `lm_head` stays
+flat at 4–6 ms throughout, so it is attention, not the GEMVs. At position 2048
+a single token costs 3–4 seconds.
+
+**The cost is not bandwidth and not arithmetic.** Granite reads *half* the KV
+bytes per position per layer (KV_ROW 2048 against 4096) and does fewer MACs
+(40×64 = 2560 against 32×128 = 4096), yet its slope is 19% steeper. Qwen3-4B
+additionally carries `qk_norm`, which Granite does not — more work for the
+faster one.
+
+What does track is **head count**: 40/32 = 1.25 against a measured 1.19. The
+hypothesis that fits is a fixed per-head cost in the position loop that does
+not shrink when `head_dim` halves — i.e. `attn.h` not saturating the vector
+unit at hd 64. Suggestive, not proven: two families is two points, and a third
+(Llama 3.1 8B is 32 heads at hd 128, Gemma 3 4B is 8 at 256) would separate
+head count from head width properly.
+
+Consequence for anything quoting a tok/s number: **say the position.** Granite
+measured 5.92 tok/s over 63 tokens and 1500 µs/layer at position 0; both are
+true and they are not the same measurement.
 
 ### OPEN-BUILD-CACHE: the build key covers every build input
 **Applies to:** openflowlm-next (`open_kernels/recipes/cache.py`, `export_qwen36_kernels.py`)
@@ -237,3 +276,72 @@ a French translation instruction: a correct sentence ending in `<|eos|>` at
 token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
+### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
+**Test category:** manual (needs the NPU and `vegahyo/Granite-4.2-3B-NPU2`); the derivation, the multiplier fold and the 3B layout are unit-tested in `tests/test_granite.py`
+
+An IBM Granite dense model (GQA without q/k norms, unscaled RoPE, eps 1e-5,
+silu FFN, untied q4_1 head) shall run on the open kernels from its
+`config.json` alone through the dense recipe. **Granite is the first
+`head_dim = 64` point**, and the first at `num_heads = 40`; nothing in the
+design changes for it, because `ATTN_HD` / `ATTN_NH` are compile-time macros
+and `attn.h` already carries HD 64's `kScale = 0.125f`.
+
+Granite is Llama plus four scalar multipliers — `attention_multiplier`
+(replacing the implicit `hd**-0.5`), `embedding_multiplier`,
+`residual_multiplier`, `logits_scaling`. `ModelSpec` expresses none of them and
+`attn.h` hard-codes `1/sqrt(HD)`, so the recipe **requires a container whose
+multipliers have been folded into the weights** by q4nx-build
+(`q_proj *= attention_multiplier * sqrt(hd)`, `o_proj`/`down_proj *=
+residual_multiplier`, `embed_tokens *= embedding_multiplier`,
+`lm_head /= logits_scaling`). For 4.2-3B the only non-unit factor is
+`attention_multiplier = 0.015625` at hd 64, so the fold is `q_proj *= 0.125`
+and the folded config reads `attention_multiplier = 0.125 = 64**-0.5` exactly —
+a power of two, so the fold is exact in bf16. The container records the
+originals under `q4nx_folded_multipliers`.
+
+**Acceptance criteria (unit):**
+- HF and GGUF derivations agree; the RoPE table is the plain unscaled `1e7^(-2i/64)`; `rope_scaling` and tied embeddings are refused by name.
+- An unfolded `attention_multiplier`, or any of the other three unequal to 1.0, is refused by name and names q4nx-build as the fix — from HF `config.json` and from GGUF metadata alike.
+- `hf_config_check` carries `attention_multiplier`, so the **engine** refuses an unfolded container at load, not only the recipe at generation.
+- The 3B layout: `PER_CALL 2`, `TAB_BYTES 18432` (the K = 8192 table), `ELN 5120`, `E_A 1024`, `KV_ROW 2048`, `PTAB_ROW 1024`, `LMHEAD_BANDS 1568`; one `dx` step per layer plus the `ln` + `lm` tail.
+
+**Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Granite-4.2-3B-NPU2`, `out_gr`, prompt id 100264 (`<|start_of_role|>` — *not* `config.json`'s `bos_token_id` 100283, which is `</documents>` and disagrees with `tokenizer_config.json`'s own bos). Three catalogue points entered with it: `attn.head_dim 64`, `attn.num_heads 40`, `gemv_q4.K 8192`.
+
+**Prior evidence (2026-09-02, a different design):** these shapes have been run
+and compared on this hardware before, by hand-written Granite kernels in
+`vegah/FastFlowLM@feat/kernels` — all eight projection shapes cosine
+1.00000000 under a one-hot activation, GQA attention 0.9993–0.9998, and a whole
+layer in **four** dispatches at 1744.7 µs (13.6 tok/s device time). That is the
+baseline the one-dispatch `dx` program should beat, and the reason head_dim 64
+at hidden 2560 was expected to work at all. It is prior evidence for the
+catalogue points, not a substitute for validating them on `dx`.
+
+**Result 2026-09-06 (Granite-4.2-3B):** slice logits corr 0.999998 / 0.999990,
+same argmax (38457) and an **identical top-5** at both positions, residual corr
+0.999990–0.999999 in every layer; a coherent two-sentence answer through
+`chat.py`, ending on `<|end_of_text|>` at token 52. Built on mlir-aie
+1.4.2.dev16+g7e00b57 / Peano 21.0.0.2026080301, natively on Windows.
+
+Through the app: the model loads 40/40 layers at context capacity 8192
+(weights resident in 11 s), logs *"Granite on the open kernels"* and answers a
+Norwegian prompt coherently, reasoning first. **That run used a catalogue entry
+this PR no longer ships** -- per AGENTS.md the container belongs on
+`Atomic-Germ/*-OpenNPU2` and installs through `flm-add`
+(`flm-add <repo-or-directory> --family granite`), which is the supported path
+until it is hosted there. The measurement above is what was run; the flm-add
+install has not been re-verified end to end.
+
+**Known rough edge:** the reasoning block is not parsed. Granite carries
+`<think>` / `</think>` as real tokens (100274 / 100275) and its catalogue entry
+sets `think: true`, but `Granite` implements no `parse_stream_content` /
+`parse_nstream_content`, so the chain of thought is printed raw and only the
+closing tag appears. Cosmetic, and separate from the kernel path.
+
+**At zero context `dx` beats the hand-written kernels**: `part0` 60.0 ms over
+40 layers is **1500 µs/layer**, against those kernels' 1744.7 µs at four
+dispatches — 1.16×, the direction one dispatch per layer was expected to give.
+
+Everything above that is the context term, and it is **not** Granite's: see
+OPEN-ATTN-CONTEXT below. Decode measured 5.92 tok/s over 63 tokens because the
+context grew underneath it, not because the family is slow.

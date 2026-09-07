@@ -16,9 +16,13 @@ def test_the_27b_is_inside_every_validated_set():
     Q.recipe(default_spec())
 
 
-def test_head_dim_64_is_refused_by_name():
-    spec = dataclasses.replace(default_spec(), head_dim=64, rotary_dim=64)
-    with pytest.raises(OpRangeError, match=r"attn: head_dim=64 is outside the validated set \{128, 256\}"):
+def test_an_unvalidated_head_dim_is_refused_by_name():
+    # head_dim 64 used to be this test's example. It entered the set with
+    # OPEN-FAMILY-GRANITE on 2026-09-06, which is the point of the catalogue:
+    # a value leaves it by being run and compared, not by being wanted. 32 is
+    # the next one nothing has validated.
+    spec = dataclasses.replace(default_spec(), head_dim=32, rotary_dim=32)
+    with pytest.raises(OpRangeError, match=r"attn: head_dim=32 is outside the validated set"):
         Q.recipe(spec)
 
 
@@ -29,7 +33,11 @@ def test_hidden_3072_is_refused_by_the_first_template_that_cannot_take_it():
 
 
 def test_an_unvalidated_gemv_k_is_refused():
-    with pytest.raises(OpRangeError, match=r"gemv_q4: K=3072 is outside the validated set \{2048, 2560, 4096, 9728, 10240, 14336\}"):
+    # The assertion is that an unvalidated K is refused BY NAME, not what the
+    # set currently holds: it gains a member with every family that validates
+    # one (8192 with OPEN-FAMILY-GRANITE), and spelling the membership out here
+    # made this test fail for the one reason that is never a regression.
+    with pytest.raises(OpRangeError, match=r"gemv_q4: K=3072 is outside the validated set \{"):
         require("gemv_q4", K=3072)
 
 

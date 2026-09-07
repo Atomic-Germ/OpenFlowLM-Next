@@ -103,10 +103,15 @@ def test_qk_norm_is_a_post_rope_family(unvalidated):
 
 def test_the_post_rope_point_is_in_the_catalogue():
     """It entered the set when OPEN-FAMILY-HUNYUAN's compare passed on hardware
-    (2026-09-06); an unvalidated neighbour is still refused by name."""
+    (2026-09-06); an unvalidated neighbour is still refused by name.
+
+    The neighbour was head_dim 64 until OPEN-FAMILY-GRANITE validated that point
+    later the same day, which is the hazard of naming a member: the assertion
+    fails on a set GROWING, which is never a regression. 32 is the neighbour
+    now, and this comment is the reason it may have to move again."""
     DR.recipe(ModelSpec.from_hf_config(HF_HY_MT2_7B))              # no env override needed
-    with pytest.raises(OpRangeError, match="head_dim=64 is outside the validated set"):
-        DR.recipe(ModelSpec.from_hf_config(dict(HF_HY_MT2_7B, head_dim=64, attention_head_dim=64)))
+    with pytest.raises(OpRangeError, match="head_dim=192 is outside the validated set"):
+        DR.recipe(ModelSpec.from_hf_config(dict(HF_HY_MT2_7B, head_dim=192, attention_head_dim=192)))
 
 
 def test_the_head_rounds_an_unpadded_vocabulary_up_to_whole_bands(unvalidated):
