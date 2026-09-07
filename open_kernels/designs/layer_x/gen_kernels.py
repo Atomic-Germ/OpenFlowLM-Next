@@ -18,7 +18,217 @@ from recipes.load import current_recipe  # noqa: E402
 from recipes import qwen36moe as Q  # noqa: E402
 
 
+
+def q8_gy(pc: int) -> str:
+    """The q8 projection entry: the q4 `gemv_q4_gy` with the half-tile band law
+    (OPEN-QUANT-Q8). One symbol, one TU, generated only when a role is q8."""
+    return f'''#define GEMV_PER_CALL {pc}
+#include "gemv_q8.h"
+// A q8 projection band into its y element: runtime band law (per_band half-tiles, rs = 4).
+extern "C" {{
+void gemv_q8_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
+                int32_t group, int32_t per_band, int32_t rs) {{
+  gemv_q8_pool_group_rt(t, tab, (unsigned)group, y, (unsigned)per_band, (unsigned)rs);
+}}
+}}
+'''
+
+
+def q8_gms(pc: int, ms_u: int, ms_g: int) -> str:
+    """The q8 twin of `gemv_q4_gms`: a 64-row band into the act scratch at ms + dst."""
+    return f'''#define GEMV_PER_CALL {pc}
+#include "gemv_q8.h"
+// A q8 64-row band into the act scratch at ms + dst (the up band at {ms_u}, the gate band at {ms_g}).
+extern "C" {{
+void gemv_q8_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
+                 int32_t group, int32_t per_band, int32_t dst) {{
+  gemv_q8_pool_group_rt(t, tab, (unsigned)group, ms + dst, (unsigned)per_band, 4);
+}}
+}}
+'''
+
+
+def q4_gyms(pc: int, ms_u: int, ms_g: int) -> str:
+    """`gemv_q4_gy` and `gemv_q4_gms` folded into ONE entry point, for a main core that
+    also carries the q8 GEMV (OPEN-QUANT-Q8). The destination is a runtime argument:
+    dst < 0 writes the band into its y element, dst >= 0 into the act scratch at ms + dst.
+    The row split is the literal 2 `gemv_q4_gms` already hard-codes: every q4_1 band in a
+    dense tail is a 64-row std_perm band, so the band walk's index arithmetic folds away.
+
+    Why fold: `gemv_q4_pool_group_rt` is `static inline`, so each entry point carries its
+    own copy of the band walk -- two entries are two bodies, and a container that MIXES
+    formats needs the q8 body on the same 16 KB core (the Qwen3.5 4B's `lx` overflowed
+    program memory, .claude/plans/q8-hw-results.md section 2). Generated ONLY for such a
+    spec: an all-q4_1 or an all-q8 spec keeps today's entries and does not move."""
+    return f'''#define GEMV_PER_CALL {pc}
+#include "gemv_q4.h"
+// The folded q4_1 band entry (mixed-format cores only): dst < 0 -> the band's y element,
+// dst >= 0 -> the act scratch at ms + dst (the up band at {ms_u}, the gate band at {ms_g}).
+extern "C" {{
+void gemv_q4_gyms(const uint8_t *__restrict t, const uint8_t *__restrict tab,
+                  float *__restrict y, float *__restrict ms,
+                  int32_t group, int32_t per_band, int32_t dst) {{
+  float *__restrict d = (dst < 0) ? y : ms + dst;
+  gemv_q4_pool_group_rt(t, tab, (unsigned)group, d, (unsigned)per_band, 2);
+}}
+}}
+'''
+
+
+# The projection roles the dense tail's main core runs a GEMV for, and the two conditions
+# xcommon.py reads off them: a q4_1 entry is instantiated only while some role still needs
+# it, and the fold applies only when BOTH formats are on the core.
+PROJ_ROLES = ("attn", "linear", "linear_out", "ffn")
+
+
+def mixed(R) -> bool:
+    """The spec's roles mix formats on one main core: something is q8, something is still
+    q4_1, and the q4_1 side is the `gy` + `gms` pair the fold replaces."""
+    q8 = R.q8
+    return bool(q8) and "ffn" not in q8 and any(r not in q8 for r in PROJ_ROLES)
+
+
+# Generated only for a spec that needs them; removed again when it does not, so a family's
+# translation-unit set (and its build key) never gains a file it does not compile.
+Q8_FILES = ("gemv_q8_gy.cc", "gemv_q8_gms.cc")
+FOLD_FILES = ("gemv_q4_gyms.cc",)
+
+
+DNX = {
+    "dnx_vcopy.cc": '''#include "dnx.h"
+extern "C" {
+void dnx_vcopy(const float *__restrict e, float *__restrict ds) {
+#pragma clang loop unroll(disable)
+  for (unsigned j = 0; j < 512; j += kV)
+    aie::store_v(ds + DS_VEC + j, aie::load_v<kV>(e + j));
+}
+}
+''',
+    "dnx_pass1.cc": '''#include "dnx.h"
+extern "C" {
+void dnx_pass1(const float *__restrict S, float *__restrict ds, int32_t blk) {
+  dnx_pass1_slice(S, ds, (unsigned)blk);
+}
+}
+''',
+    "dnx_delta.cc": '''#include "dnx.h"
+extern "C" {
+void dnx_delta(float *__restrict ds) {
+  dnx_delta_head(ds);
+}
+}
+''',
+    "dnx_row.cc": '''#include "dnx.h"
+extern "C" {
+void dnx_row(const float *__restrict S, float *__restrict ds, float *__restrict ye, int32_t blk, int32_t j) {
+  dnx_row_half(S, ds, ye, (unsigned)blk, (unsigned)(j >> 1), (unsigned)(j & 1));
+}
+}
+''',
+    "dnx_ofin.cc": '''#include "dnx.h"
+extern "C" {
+void dnx_ofin(const float *__restrict ds, float *__restrict ye, int32_t hf) {
+  dnx_ofin_half(ds, ye, (unsigned)hf);
+}
+}
+''',
+}
+
+
+def q8_files(R) -> dict[str, str]:
+    """The q8 GEMV TUs this recipe needs: `gy` wherever a projection is q8, plus `gms`
+    when the dense FFN's up | gate bands are (they go into the act scratch, not a y
+    element). Empty for every recipe whose roles are all q4_1."""
+    C, q8 = R.common, R.q8
+    out: dict[str, str] = {}
+    if q8:
+        out["gemv_q8_gy.cc"] = q8_gy(C.PER_CALL)
+    if "ffn" in q8 and R.ffn is not None:
+        out["gemv_q8_gms.cc"] = q8_gms(C.PER_CALL, R.ffn.MS_U, R.ffn.MS_G)
+    return out
+
+
+def dense_files(R) -> dict[str, str]:
+    """The FFN tail's TUs for the layer_x fabric (ffn="dense", recipes/qwen35.py).
+
+    They are designs/dense's kernels, generated HERE rather than included from there:
+    the two designs both define `gemv_q4_gy`, so compiling one against the other's
+    directory is a duplicate-symbol trap. One extern "C" entry per file, as everywhere.
+    """
+    C, F = R.common, R.ffn
+    hdr = f'''#define GEMV_PER_CALL {C.PER_CALL}
+#include "gemv_q4.h"
+'''
+    out = {
+        "gemv_q4_gy.cc": hdr + '''// A band into its y element: runtime band law (per_band chunks, row split rs).
+extern "C" {
+void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
+                int32_t group, int32_t per_band, int32_t rs) {
+  gemv_q4_pool_group_rt(t, tab, (unsigned)group, y, (unsigned)per_band, (unsigned)rs);
+}
+}
+''',
+        "gemv_q4_gms.cc": hdr + f'''// A 64-row band into the act scratch at ms + dst (the up band at {F.MS_U}, the gate band at {F.MS_G}).
+extern "C" {{
+void gemv_q4_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
+                 int32_t group, int32_t per_band, int32_t dst) {{
+  gemv_q4_pool_group_rt(t, tab, (unsigned)group, ms + dst, (unsigned)per_band, 2);
+}}
+}}
+''',
+        "dense_act.cc": f'''// h band = silu(g) * u for one 64-row band (ms: u @{F.MS_U}, g @{F.MS_G}) -> one f32 y element.
+// silu(x) = x sigmoid(x). Vector ops only (no scalar float on this core).
+#include "vecmath.h"
+
+extern "C" {{
+void dense_act(const float *__restrict ms, float *__restrict h) {{
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  const float *__restrict u = ms + {F.MS_U};
+  const float *__restrict g = ms + {F.MS_G};
+#pragma clang loop unroll(disable)
+  for (unsigned j = 0; j < 64; j += 32)
+    aie::store_v(h + j, fmul32(vsiluN<32>(aie::load_v<32>(g + j)), aie::load_v<32>(u + j)));
+}}
+}}
+''',
+        "dense_prep.cc": '''// Element i of a bf16 activation of K values (2048 per 4 KB element) into the table: blocks
+// [64 i, min(64 i + 64, K/32)).
+#include "gemv_q4.h"
+
+extern "C" {
+void dense_prep(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {
+  const unsigned total = (unsigned)K / 32, b0 = 64u * (unsigned)i;
+  const unsigned nb = (b0 + 64u <= total) ? 64u : total - b0;
+  gemv_q4_prep_blocks(e, tab, (unsigned)K, b0, nb);
+}
+}
+''',
+        "dense_prep_f32.cc": '''// Element i of an fp32 activation of K values (1024 per 4 KB element; the fifo types it as bf16)
+// into the table: blocks [32 i, min(32 i + 32, K/32)).
+#include "gemv_q4.h"
+
+extern "C" {
+void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {
+  const unsigned total = (unsigned)K / 32, b0 = 32u * (unsigned)i;
+  const unsigned nb = (b0 + 32u <= total) ? 32u : total - b0;
+  gemv_q4_prep_f32_blocks((const float *)e, tab, (unsigned)K, b0, nb);
+}
+}
+''',
+    }
+    if mixed(R):
+        # The mixed-format core cannot hold both q4_1 entries beside the q8 body, so the
+        # pair becomes one folded entry with a runtime destination. Nothing else moves.
+        out = {"gemv_q4_gyms.cc": q4_gyms(C.PER_CALL, F.MS_U, F.MS_G),
+               **{k: v for k, v in out.items() if k not in ("gemv_q4_gy.cc", "gemv_q4_gms.cc")}}
+    out.update(DNX)
+    out.update(q8_files(R))
+    return out
+
+
 def files(R) -> dict[str, str]:
+    if getattr(R, "kind", "moe") == "dense":
+        return dense_files(R)
     C, L = R.common, R.layout
     hid, ff, ne = C.HID, C.FF, C.NE
     kw = C.KWIDE
@@ -32,7 +242,7 @@ def files(R) -> dict[str, str]:
     gemv_hdr = f'''#define GEMV_PER_CALL {C.PER_CALL}
 #include "gemv_q4.h"
 '''
-    return {
+    out = {
         # ---- q4 GEMV entry points: runtime group / band law, PER_CALL chunks per element
         "gemv_q4_gy.cc": gemv_hdr + f'''// A projection band into its y element: (per_band, rs) = ({pb_hid}, 2) K={hid}, ({pb_wide}, 2) K={kw}.
 extern "C" {{
@@ -179,45 +389,10 @@ void moe_out(const float *__restrict ms, float *__restrict y, int32_t j) {{
 }}
 }}
 ''',
-        # ---- DeltaNet (dnx.h; ds layout in its header)
-        "dnx_vcopy.cc": '''#include "dnx.h"
-extern "C" {
-void dnx_vcopy(const float *__restrict e, float *__restrict ds) {
-#pragma clang loop unroll(disable)
-  for (unsigned j = 0; j < 512; j += kV)
-    aie::store_v(ds + DS_VEC + j, aie::load_v<kV>(e + j));
-}
-}
-''',
-        "dnx_pass1.cc": '''#include "dnx.h"
-extern "C" {
-void dnx_pass1(const float *__restrict S, float *__restrict ds, int32_t blk) {
-  dnx_pass1_slice(S, ds, (unsigned)blk);
-}
-}
-''',
-        "dnx_delta.cc": '''#include "dnx.h"
-extern "C" {
-void dnx_delta(float *__restrict ds) {
-  dnx_delta_head(ds);
-}
-}
-''',
-        "dnx_row.cc": '''#include "dnx.h"
-extern "C" {
-void dnx_row(const float *__restrict S, float *__restrict ds, float *__restrict ye, int32_t blk, int32_t j) {
-  dnx_row_half(S, ds, ye, (unsigned)blk, (unsigned)(j >> 1), (unsigned)(j & 1));
-}
-}
-''',
-        "dnx_ofin.cc": '''#include "dnx.h"
-extern "C" {
-void dnx_ofin(const float *__restrict ds, float *__restrict ye, int32_t hf) {
-  dnx_ofin_half(ds, ye, (unsigned)hf);
-}
-}
-''',
     }
+    out.update(DNX)
+    out.update(q8_files(R))
+    return out
 
 
 STALE = ["gemv_q4_p2b16r2_g.cc", "gemv_q4_p2b16r2_gu.cc", "gemv_q4_p2b32r2_g.cc", "gemv_q4_p2b8r4_g.cc",
@@ -231,7 +406,10 @@ def generate(R, out: Path = HERE) -> int:
         p = out / name
         if not p.is_file() or p.read_text(encoding="utf-8") != src:
             p.write_text(src, encoding="utf-8", newline="\n")
-    for name in STALE:
+    gone = list(STALE) + [n for n in Q8_FILES + FOLD_FILES if n not in fs]
+    if mixed(R):                      # the folded entry replaces the pair on disk too
+        gone += [n for n in ("gemv_q4_gy.cc", "gemv_q4_gms.cc") if n not in fs]
+    for name in gone:
         p = out / name
         if p.is_file():
             p.unlink()

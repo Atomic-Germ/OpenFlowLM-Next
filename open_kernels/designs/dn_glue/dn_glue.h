@@ -23,9 +23,28 @@
 #include <stdint.h>
 
 static constexpr unsigned kHid = 2048;
-static constexpr unsigned kNHead = 32;
+
+// Linear value heads. A knob, the way DNX_ROWS is one in dnx.h: the default IS the 27B's
+// 32, so the shipped MoE kernels preprocess to exactly the text they always did and their
+// compile commands stay byte-identical (lx.py passes -DDNGLUE_NHEAD only when it differs).
+// The type and constness are unchanged on purpose -- that is what the DNX_PAD attempt got
+// wrong and it moved every object in the shipped xclbin.
+#ifndef DNGLUE_NHEAD
+#define DNGLUE_NHEAD 32
+#endif
+static constexpr unsigned kNHead = DNGLUE_NHEAD;
 static constexpr unsigned kHD = 128;
 static constexpr unsigned kTile = 1024;      // conv channels per tile
+static constexpr unsigned kKeyWidth = 2048;  // q (and k) channels: kKeyHeads x kHD, 2048 in every
+static constexpr unsigned kKeyHeads = kKeyWidth / kHD;      // model the deltanet template validates
+static constexpr unsigned kKeyTiles = 2 * kKeyWidth / kTile;  // conv tiles holding q then k (4)
+// Value heads that share one key head: 2 for a 32-head model over 16 key heads, 1 for a
+// 16-head one. `grp` in model/replica_qwen35.py's linear_decode.
+static constexpr unsigned kGrp = kNHead / kKeyHeads;
+// Vector lanes. ALSO the lane count of the alpha/beta accumulator and of a W element's
+// row: it stays 32 for a 16-head model (the packer writes [hid, 32] with columns 16..31
+// zero), because a narrower vector type would change every load's alignment in
+// glue_ab_tile. The upper lanes then accumulate zeros and nothing reads them.
 static constexpr unsigned kV = 32;
 
 #include "vecmath.h"   // fp32 vector math on bf16 MACs (split32, fmul32, vexp32, vsigmoid32, srsqrt)
@@ -50,11 +69,13 @@ static inline void glue_ab_tile(const bfloat16 *__restrict W, const bfloat16 *__
 // (scalar sexp/slog/ssoftplus/ssigmoid live in vecmath.h)
 
 // ---- decay/beta from the two projections
-static inline void glue_small(const float *__restrict small /* A[32] @0, dt_bias[32] @32 */,
+// `small` is [A f32[kNHead] | dt_bias f32[kNHead] | pad] -- the packer writes dt_bias at
+// kNHead floats, not at a fixed 32 (recipes/qwen35.py's `put` caps are heads * 4).
+static inline void glue_small(const float *__restrict small /* A[kNHead] @0, dt_bias[kNHead] */,
                               const float *__restrict acc_a, const float *__restrict acc_b,
                               float *__restrict decay, float *__restrict beta) {
   for (unsigned h = 0; h < kNHead; ++h) {
-    decay[h] = sexp(small[h] * ssoftplus(acc_a[h] + small[32 + h]));
+    decay[h] = sexp(small[h] * ssoftplus(acc_a[h] + small[kNHead + h]));
     beta[h] = ssigmoid(acc_b[h]);
   }
 }
@@ -73,7 +94,7 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
   (void)w2;
   const v32b half = aie::broadcast<bfloat16, kV>((bfloat16)0.5f);
   const v32b one = aie::broadcast<bfloat16, kV>((bfloat16)1.0f);
-  float *__restrict dst = (t < 4) ? (qk + t * kTile) : vt;
+  float *__restrict dst = (t < kKeyTiles) ? (qk + t * kTile) : vt;
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < kTile; j += kV) {
     const float *qp = (j < 512) ? (q0 + j) : (q1 + (j - 512));
@@ -95,8 +116,8 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
     split32(x, xh, xl);
     aie::store_v(ns2 + j, xh);
   }
-  if (t < 4) {
-    // L2-normalise the 8 heads of this tile in place
+  if (t < kKeyTiles) {
+    // L2-normalise the kTile / kHD heads of this tile in place
 #pragma clang loop unroll(disable)
     for (unsigned hh = 0; hh < kTile / kHD; ++hh) {
       float *__restrict hp = dst + hh * kHD;
@@ -128,8 +149,8 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
 static inline void glue_emit(const float *__restrict qk, const float *__restrict vt,
                              const float *__restrict decay, const float *__restrict beta,
                              float *__restrict rec, unsigned h) {
-  const unsigned kh = h / 2;
-  const float *kp = qk + 2048 + kh * kHD;
+  const unsigned kh = h / kGrp;
+  const float *kp = qk + kKeyWidth + kh * kHD;
   const float *qp = qk + kh * kHD;
   const float *vp = vt + (h % 8) * kHD;
 #pragma clang loop unroll(disable)
