@@ -873,6 +873,56 @@ def ensure_hf_tokenizer_ids(output_dir: Path) -> None:
         print(f"[INFO] Patched {path.name} with EOS/BOS/PAD token ids from HF tokenizer")
 
 
+def apply_granite_fold_to_config(config: dict, reader) -> dict:
+    """Record Granite's multipliers as they are AFTER `models/granite.py` folds them.
+
+    The builder folds all four into the weights, so a container it produces no
+    longer has a per-model attention scale: it uses exactly the `1/sqrt(head_dim)`
+    the open kernels' `attn.h` hard-codes. The deployed config.json has to say so,
+    because `open_kernels/recipes/spec.py` refuses a Granite container whose
+    `attention_multiplier` is not `head_dim ** -0.5` -- and refuses one that does
+    not state it at all, since transformers defaults the key to 1.0 and an absent
+    key is therefore indistinguishable from an unfolded model.
+
+    The pre-fold values are kept under `q4nx_folded_multipliers` so the container
+    still says what it came from; nothing reads them at run time.
+    """
+    def meta(suffix):
+        for prefix in ("granite", "llama"):
+            field = reader.fields.get(f"{prefix}.{suffix}")
+            if field is not None:
+                return field.contents()
+        return None
+
+    heads = meta("attention.head_count")
+    embedding_length = meta("embedding_length")
+    head_dim = meta("rope.dimension_count")
+    if head_dim is None and heads and embedding_length:
+        head_dim = embedding_length // heads
+    if head_dim is None:
+        head_dim = config.get("head_dim")
+    if not head_dim:
+        raise ValueError("granite: cannot determine head_dim for the folded config.json")
+
+    before = {
+        "attention_multiplier": meta("attention.scale"),
+        "embedding_multiplier": meta("embedding_scale"),
+        "residual_multiplier": meta("residual_scale"),
+        "logits_scaling": meta("logit_scale"),
+    }
+    config["q4nx_folded_multipliers"] = {
+        k: (None if v is None else float(v)) for k, v in before.items()
+    }
+    config["attention_multiplier"] = float(int(head_dim) ** -0.5)
+    config["embedding_multiplier"] = 1.0
+    config["residual_multiplier"] = 1.0
+    config["logits_scaling"] = 1.0
+    config["head_dim"] = int(head_dim)
+    print(f"[INFO] Granite: config.json records the post-fold multipliers "
+          f"(attention_multiplier={config['attention_multiplier']}, the other three 1.0)")
+    return config
+
+
 def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_version: Optional[str]):
     """Restructure a source HF config.json into the shape the FLM runtime expects.
 
@@ -1032,6 +1082,8 @@ def assemble_model_assets_hf(
         config = {}
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
+    if model_arch is ModelArch.GRANITE:
+        apply_granite_fold_to_config(config, reader)
     inject_flm_keys(config, q4nx_config, output_dir, flm_version)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:

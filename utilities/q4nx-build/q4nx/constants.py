@@ -22,6 +22,7 @@ class ModelArch(IntEnum):
     GPT_OSS = auto()
     NANBEIGE = auto()
     HUNYUAN_DENSE = auto()
+    GRANITE = auto()
 
 
 # Qwen3.5 variant detection: llama.cpp GGUFs expose general.architecture ==
@@ -67,7 +68,8 @@ ModelArchNames: dict[ModelArch, list[str]] = {
     ModelArch.PHI4:    ["phi3"],
     ModelArch.GPT_OSS: ["gpt-oss"],
     ModelArch.NANBEIGE: ["nanbeige"],
-    ModelArch.HUNYUAN_DENSE: ["hunyuan-dense", "hunyuan_v1_dense", "hy-mt2", "hy_mt2"]
+    ModelArch.HUNYUAN_DENSE: ["hunyuan-dense", "hunyuan_v1_dense", "hy-mt2", "hy_mt2"],
+    ModelArch.GRANITE: ["granite", "granitemoe"]
 }
 
 ModelArchConfigs: dict[ModelArch, str] = {
@@ -87,5 +89,6 @@ ModelArchConfigs: dict[ModelArch, str] = {
     ModelArch.PHI4:    "phi4.json",
     ModelArch.GPT_OSS: "gpt-oss.json",
     ModelArch.NANBEIGE: "nanbeige.json",
-    ModelArch.HUNYUAN_DENSE: "hunyuan.json"
+    ModelArch.HUNYUAN_DENSE: "hunyuan.json",
+    ModelArch.GRANITE: "granite.json"
 }

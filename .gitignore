@@ -10,6 +10,12 @@ _site
 utilities/mlir-aie
 ironvenv
 Models
+# ...but not the q4nx-build converters, which live in a directory called
+# models/ and are the one file every new family has to add. core.ignorecase is
+# on by default on Windows, so "Models" matches it; the existing builders are
+# tracked and unaffected, and a NEW one is silently not added.
+!utilities/q4nx-build/q4nx/models/
+!utilities/q4nx-build/q4nx/models/**
 tmp
 
 # open_npue AIE design sets -- BUILT, not checked in.

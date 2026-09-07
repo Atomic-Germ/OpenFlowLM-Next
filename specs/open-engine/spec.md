@@ -77,7 +77,7 @@ buffer arguments on a dispatch is likewise refused.
 
 **Acceptance criteria:**
 - The 27B spec passes every check.
-- `head_dim=32` → `attn: head_dim=32 is outside the validated set {64, 128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → refused by name; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05; head_dim 64, num_heads 40 and K 8192 with OPEN-FAMILY-GRANITE on 2026-09-06. A test that spells out a set'''s membership fails on the one event that is never a regression, so the tests assert the refusal and not the contents.)
+- `head_dim=32` → `attn: head_dim=32 is outside the validated set {64, 128, 256}`; `hidden=3072` → `ln: width=3072 is outside the validated set {2048, 2560, 4096}`; `gemv_q4 K=3072` → refused by name; `quant='q4_k'` → refused. (The 128 / 2560 / 9728 points entered the sets with OPEN-FAMILY-QWEN3 on 2026-09-05; head_dim 64, num_heads 40 and K 8192 with OPEN-FAMILY-GRANITE on 2026-09-06. A test that spells out a set's membership fails on the one event that is never a regression, so the tests assert the refusal and not the contents.)
 - The `attn` set grows only after a compare: `qk_norm_post_rope=True` entered it with OPEN-FAMILY-HUNYUAN and `head_dim=64` with OPEN-FAMILY-GRANITE, both on 2026-09-06; `head_dim=32` is still refused.
 - Nine buffer arguments → `9 buffer arguments`.
 
@@ -277,7 +277,7 @@ token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
 **Test category:** manual (needs the NPU and `vegahyo/Granite-4.2-3B-NPU2`); the derivation, the multiplier fold and the 3B layout are unit-tested in `tests/test_granite.py`
 
 An IBM Granite dense model (GQA without q/k norms, unscaled RoPE, eps 1e-5,
