@@ -45,28 +45,36 @@ Prefill costs roughly what a decode step costs *at that position*, so it is
 `step(n) = base + s*n`, prefilling N tokens costs about `N * (base + s*N/2)`.
 
 That is measured, not assumed. Granite 4.2 3B on this machine, `bench-1k.json`,
-one stage, 1005 prompt tokens:
+one stage, 1005 prompt tokens, on two builds of the same model that differ only
+in the attention kernels:
 
-```
-TTFT: 1216.24s, Prefill Speed: 0.82632 tokens/s, Decoding Speed: 0.41529 tokens/s
-```
+| | TTFT | prefill | decode |
+|---|---:|---:|---:|
+| before | 1216.24 s | 0.826 tok/s | 0.415 tok/s |
+| after | **58.93 s** | **17.05 tok/s** | **13.33 tok/s** |
+| | 20.6x | 20.6x | 32.1x |
 
-Fitting `s` from the **prefill** alone gives 2.289 ms/position, which predicts a
-decode rate of **0.41719 tok/s** against the **0.41529** measured in the same
-run -- a 0.5% error on an independent series. A flat 52 ms/token prefill, which
-is what the per-token cost looks like on a short prompt, would have put those
-1005 tokens at 52 seconds rather than 1216.
+The quadratic model is what connects those two rows, and it was checked twice
+before the second one existed. On the `before` run, fitting the slope from the
+**prefill** alone gives 2.289 ms/position, which predicts a decode rate of
+0.41719 tok/s against the 0.41529 measured on that independent series -- 0.5%
+apart. Carrying the same arithmetic to the second build predicted TTFT ~58 s,
+prefill ~17.3 tok/s and decode ~14.3 tok/s, written down before the run;
+measured 58.93, 17.05 and 13.33, i.e. within 1.6%, 1.4% and 7%.
 
-Projected from that fit, and from the same fit taken on a build whose attention
-work is done (0.023 ms/position):
+A flat 52 ms/token prefill -- which is what the per-token cost looks like on a
+short prompt -- would have put those 1005 tokens at 52 seconds rather than 1216.
+That is the trap this section exists for.
 
-| decode slope | step @ 1k | step @ 32k | 1k stage | 32k stage |
-|---:|---:|---:|---:|---:|
-| 2.289 ms/position | 2.40 s | 75 s | 20 min *(measured)* | **~342 h** |
-| 0.023 ms/position | 0.070 s | 0.81 s | ~1 min | ~3.9 h |
+Fitted slopes, and what they project for the larger files:
 
-A 32k run on the first was ~1% into its first stage after three hours, NPU at
-100% throughout. It was not hung.
+| | slope | step @ 1k | 1k stage | 8k stage | 32k stage |
+|---|---:|---:|---:|---:|---:|
+| before | 2.289 ms/pos | 2.40 s | 20 min *(measured)* | ~28 h | **~342 h** |
+| after | 0.0247 ms/pos | 0.075 s | 59 s *(measured)* | ~20 min | ~4.1 h |
+
+92x flatter. A 32k run on the first was ~1% into its first stage after three
+hours, NPU at 100% throughout. It was not hung.
 
 ## Estimating it for your own model
 
@@ -80,13 +88,13 @@ stage(N)   ~= prefill(N) + 32 * step(N)
 
 Rough cost of each file at the two slopes above:
 
-| file | stages | at 2.289 ms/pos | at 0.023 ms/pos |
+| file | stages | at 2.289 ms/pos | at 0.0247 ms/pos |
 |---|---|---:|---:|
-| `bench-1k.json` | 1k | 20 min | ~1 min |
+| `bench-1k.json` | 1k | 20 min *(measured)* | 59 s *(measured)* |
 | `bench-2k.json` | 2k, 1k | ~1.7 h | ~4 min |
-| `bench-4k.json` | 4k, 2k, 1k | ~7 h | ~11 min |
-| `bench-8k.json` | 8k … 1k | ~28 h | ~40 min |
-| `bench-32k.json` | 32k … 1k | ~14 days | ~5 h |
+| `bench-4k.json` | 4k, 2k, 1k | ~7 h | ~9 min |
+| `bench-8k.json` | 8k … 1k | ~28 h | ~30 min |
+| `bench-32k.json` | 32k … 1k | ~14 days | ~4.5 h |
 | `bench-1k-x5.json` | 1k, five times | ~1.7 h | ~5 min |
 
 ## Reading the result
