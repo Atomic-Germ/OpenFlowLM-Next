@@ -147,6 +147,46 @@ def per_call(spec: ModelSpec) -> int:
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")
 
 
+# ---- probe knobs, and why they are in the build key
+#
+# ATTN_NULL, ATTN_ABL and ATTN_RB change the COMPILED kernel, and cache.build_key
+# hashes sources + spec + quant, which cannot see an environment variable. Two
+# exports that differ only in a probe would therefore share a key, and
+# export_qwen36_kernels.py skips a build whose key the destination already has
+# -- so a probe build could be shipped as a real one, silently. `probe_env()`
+# is what cache.py folds in to stop that; it returns {} when nothing is set, so
+# an ordinary build's key is unchanged.
+PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB")
+
+RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
+
+
+def probe_env() -> dict[str, str]:
+    """The probe variables that are actually set, for the build key."""
+    return {k: os.environ[k] for k in PROBE_VARS if os.environ.get(k)}
+
+
+def _probe_rb(default: int, nhl: int) -> int:
+    """ATTN_RB, validated. Rejected rather than passed on to fail at compile time."""
+    raw = os.environ.get("ATTN_RB")
+    if raw is None:
+        return default
+    try:
+        rb = int(raw)
+    except ValueError:
+        raise OpRangeError(f"ATTN_RB={raw!r} is not an integer (expected one of {RB_SUPPORTED})")
+    if rb not in RB_SUPPORTED:
+        raise OpRangeError(
+            f"ATTN_RB={rb} is not supported: attn_stepb.cc has a body for 2 and 4, and 1 is the "
+            f"unblocked path. Anything else compiles to `#error` after a full design build.")
+    if rb > 1 and (rb * nhl) not in (8, 16, 32):
+        raise OpRangeError(
+            f"ATTN_RB={rb} with {nhl} heads per core gives a {rb * nhl}-lane score block, and the "
+            f"block exponential needs 8, 16 or 32. Legal here: "
+            f"{[r for r in RB_SUPPORTED if r == 1 or (r * nhl) in (8, 16, 32)]}.")
+    return rb
+
+
 def geometry(spec: ModelSpec) -> DenseGeometry:
     n = LIMITS["n_cols"]
     hid, ff, nh, kvh, hd = spec.hidden, spec.intermediate, spec.num_heads, spec.num_kv_heads, spec.head_dim
@@ -180,7 +220,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     rb = 1
     if vexp:
         rb = max((r for r in (4, 2, 1) if (r * nhl) in (8, 16, 32)), default=1)
-        rb = int(os.environ.get("ATTN_RB", rb))       # probe: block size
+        rb = _probe_rb(rb, nhl)
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,

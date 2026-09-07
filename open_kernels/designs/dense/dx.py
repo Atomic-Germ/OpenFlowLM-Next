@@ -80,10 +80,9 @@ ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f
               f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
 if G.RB > 1:                                           # attn.h defaults it to 1; adding the flag
     ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")             # would change every other family's build line
-if os.environ.get("ATTN_NULL") == "1":                 # probe: see attn.h's ATTN_NULL
-    ATTN_FLAGS.append("-DATTN_NULL=1")
-if os.environ.get("ATTN_ABL"):                         # probe: see attn.h's ATTN_ABL
-    ATTN_FLAGS.append(f"-DATTN_ABL={os.environ['ATTN_ABL']}")
+for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
+    if _k != "ATTN_RB":                                # RB is already in the flags above, via G.RB.
+        ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 
@@ -104,7 +103,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     kv_ty = np.ndarray[(L.KV_BYTES,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(L.AD_BYTES,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(L.PTAB_BYTES,), np.dtype[np.uint8]]
-    i32_4 = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]   # +[blocks, remainder] when blocked
+    pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]   # the attention parameter block:
+                                                                    # [pos, nf, seen, -] + [blocks, remainder] when blocked
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
@@ -129,15 +129,15 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
     f_nr32 = ef("ln_nr32", LN / "ln_nr32.cc", [u8_ln] * 4 + [i32], LN_FLAGS) if G.SANDWICH else None
-    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a, bhd, bhd, fcs, i32_4], ATTN_FLAGS)
+    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a, bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
     f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a, bhd, fcs, fq, i32], ATTN_FLAGS)
     f_k = ef("attn_k", ATTN / "attn_k.cc", [u8_a, bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
     f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a, brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []                       # only a split needs the head offset
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, i32_4] + h0_arg, ATTN_FLAGS)
+    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
     f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
-    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, i32_4] + h0_arg,
+    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
                   ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, brow, i32], ATTN_FLAGS)
 
@@ -344,7 +344,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),
                 Buffer(fq, name=f"qs{s}"), Buffer(fhd, name=f"tmp{s}"), Buffer(brow, name=f"kout{s}"),
                 Buffer(brow, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
-                Buffer(i32_4, name=f"pb{s}")]
+                Buffer(pb_ty, name=f"pb{s}")]
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
     workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,

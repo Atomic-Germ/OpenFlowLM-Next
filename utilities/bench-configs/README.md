@@ -31,6 +31,12 @@ per stage n = prefill (input_text repeated 2^n times), then generate EXACTLY 32 
 order       = hardest first: 32k, 16k, ... 1k
 ```
 
+**`max_length` does not size the KV allocation.** `run_benchmarks` clamps the
+value it passes to `load_model` -- `if (max_len < 8192) max_len = 8192;` -- so
+`bench-1k.json` and `bench-2k.json` still load an **8k** context. Startup time
+and resident memory are the same for every file here; only the work per stage
+differs. A small config makes the benchmark shorter, not lighter.
+
 Two consequences worth knowing before you start one:
 
 - `max_length` picks the **largest** stage and every smaller power of two runs

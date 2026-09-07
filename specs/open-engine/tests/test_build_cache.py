@@ -56,3 +56,53 @@ def test_spec_and_quant_change_the_key_but_extra_does_not():
     assert build_key(dataclasses.replace(spec, rope_theta=1e6)) != k
     assert build_key(dataclasses.replace(spec, quant="q4_k")) != k
     assert build_key(dataclasses.replace(spec, extra={"model": "another-name"})) == k
+
+# ---- the probe environment, which the key could not see until 2026-09-07
+
+def _granite_spec():
+    """A DENSE spec: probe_env() lives on the dense recipe, so the MoE default
+    spec would exercise the getattr fallback instead of the thing under test."""
+    from recipes.load import load_spec
+    return load_spec(ROOT / "recipes" / "specs" / "granite42-3b.json")
+
+
+def test_a_probe_build_does_not_share_a_key_with_a_real_one(monkeypatch):
+    """ATTN_NULL / ATTN_ABL / ATTN_RB change the compiled kernel, and build_key
+    hashes sources + spec + quant -- which cannot see an environment variable.
+    Without them in the key, exporting a probe and then a real build reuses the
+    probe's artifacts, because export_qwen36_kernels.py skips a build whose key
+    the destination already carries. That ships a kernel set computing nothing,
+    silently."""
+    for var in ("ATTN_NULL", "ATTN_ABL", "ATTN_RB"):
+        monkeypatch.delenv(var, raising=False)
+    spec = _granite_spec()
+    clean = build_key(spec)
+
+    keys = {clean}
+    for var, value in (("ATTN_NULL", "1"), ("ATTN_ABL", "1"), ("ATTN_RB", "2")):
+        monkeypatch.setenv(var, value)
+        keys.add(build_key(spec))
+        monkeypatch.delenv(var)
+    assert len(keys) == 4, "each probe must give the key a value of its own"
+
+    # ...and with nothing set the key must be exactly where it was, so adding
+    # this did not invalidate every already-built set in the tree.
+    assert build_key(spec) == clean
+
+
+def test_attn_rb_is_refused_rather_than_left_to_the_compiler(monkeypatch):
+    """An unsupported ATTN_RB used to reach attn_stepb.cc's `#error` after a full
+    design build, or to produce a score block the block exponential has no width
+    for. Both are minutes away from the mistake."""
+    import pytest
+
+    from recipes.catalogue import OpRangeError
+    import recipes.dense as DR
+
+    spec = _granite_spec()
+    for bad, expect in (("banan", "not an integer"), ("3", "not supported"), ("0", "not supported")):
+        monkeypatch.setenv("ATTN_RB", bad)
+        with pytest.raises(OpRangeError, match=expect):
+            DR.geometry(spec)
+    monkeypatch.setenv("ATTN_RB", "4")
+    assert DR.geometry(spec).RB == 4

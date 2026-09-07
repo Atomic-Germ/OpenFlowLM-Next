@@ -2,7 +2,10 @@
 
 Covers the recipe package's sources, every kernel source the family's designs
 include (the family module's KERNEL_SOURCES), the ModelSpec (without its
-informational `extra`) and the quant format. The KV / ptab capacity is NOT in
+informational `extra`) and the quant format, plus any PROBE environment
+variable the family exposes (`probe_env()`) -- those change the compiled kernel
+and nothing else in the key can see them, so without this a probe build and a
+real one share a key and the second is skipped. The KV / ptab capacity is NOT in
 it: in this tree every position-dependent word of the attention stream is
 patched per token, so the capacity is a runtime buffer size, not a kernel
 input.
@@ -45,4 +48,8 @@ def build_key(spec: ModelSpec, root: Path = ROOT) -> str:
     d.pop("extra", None)
     h.update(json.dumps(d, sort_keys=True).encode())
     h.update(b"\0quant=" + spec.quant.encode())
+    # Only when something is set, so an ordinary build's key is untouched.
+    probes = getattr(for_spec(spec), "probe_env", dict)()
+    if probes:
+        h.update(b"\0probes=" + json.dumps(probes, sort_keys=True).encode())
     return "sha256:" + h.hexdigest()
