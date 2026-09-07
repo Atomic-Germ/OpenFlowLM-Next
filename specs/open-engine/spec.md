@@ -47,6 +47,10 @@ kernels that shipped.
 **Acceptance criteria:**
 - `recipe(default_spec()).layout.constants()` equals the frozen `LAYOUT_27B` dict (every consts / act / state / pool / KV offset, `LMHEAD_POOL_BYTES 542113792`); `Common`, `Linear`, `Attn` equal their frozen dicts.
 - Manual: `python open_kernels/export_qwen36_kernels.py --out <new> --check <previous export>` reports every `insts.bin` byte-identical and every `final.xclbin` identical apart from build stamps. Done 2026-09-05 against the kernels built from the hand-written sources: 6/6 streams identical, xclbins 75–82 stamp bytes each.
+- Re-run 2026-09-06 on the qwen35 working tree: 6/6 streams still identical, but `lx0` / `lx1` were 2688 B smaller because `xcommon.DN_FLAGS` passed `-DDNX_PAD=Common.DN_PAD` (140, the padded S row count) where `dnx.h`'s `kPad` is the hi/lo record stride (160). Fixed by removing the `DNX_PAD` knob (`.claude/plans/q-qwen35-handoff.md`, "the lx xclbin size").
+- **Result 2026-09-06 (the confirming rebuild):** `--force` re-export of the 35B spec against the shipped set -- 6/6 `insts.bin` byte-identical and 6/6 `final.xclbin` stamps-only (76-83 bytes each), `lx0` / `lx1` back at 176 399 B. `manifest.json` differs only in `build_key` / `spec_hash`, the new `builds.lm_head_q8.env.LMHEAD_K`, the `qwen3_5_moe_text` alias in `hf_config_check.model_type` and four `spec` fields the dense families added -- no layout, kernel, program or packing-plan field moves. Log: `.claude/plans/q-hw-results.md`.
+- **Result 2026-09-07 (after the native-q8 merge):** the same `--force` re-export, run as the gate for OPEN-QUANT-Q8 after eleven recipe files and every design changed -- 6/6 `insts.bin` byte-identical, 6/6 `final.xclbin` stamps-only (77-83 bytes), `lx0` / `lx1` at 176 399 B, `manifest.json` equal apart from `build_key`. A per-role quant map that is all q4_1 moves nothing. Log: `.claude/plans/q8-hw-results.md`.
+- **Result 2026-09-07 (the gate for the Qwen3.5 sizes):** the same `--force` re-export, run before any of the 16-head DeltaNet work touched hardware -- `dn_glue.h` gained the `DNGLUE_NHEAD` knob and `lx.py` a per-half projection walk, both gated so a 32-head MoE spec passes the same flags and the same call sequence. 6/6 `insts.bin` byte-identical, 6/6 `final.xclbin` stamps-only (73-83 bytes), `manifest.json` equal apart from `build_key`. Log: `.claude/plans/q35-hw-results.md`.
 
 ### OPEN-SPEC-DERIVE: ModelSpec from a model's own metadata
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
@@ -58,12 +62,28 @@ kernels that shipped.
 hyperparameter tuple for every supported family; an unknown family or a
 missing key is an error naming it.
 
+**The weight format is per role, and only the model FILE says what it is.**
+`config.json` does not record whether a projection is stored at q4_1 or q8, so
+`ModelSpec.quant` is a map over the roles `attn`, `linear`, `linear_out`,
+`shared`, `ffn`, `experts`, derived by `spec_from_model_dir` from the
+container's safetensors header (8704-byte chunks = q8, 5120 = q4_1) or, on that
+path, from a GGUF's tensor types -- and then narrowed to the roles the family's
+designs can actually stream at q8 (`Q8_ROLES`), because the rest run on the
+packer's re-quantizing fallback. `lm_head` is not a role: the family already
+fixes the head's format. A role whose tensors disagree with each other is
+refused naming the tensor that broke it. When every role is at the default the
+map serialises, hashes and reads back as the bare string `"q4_1"`, so a model
+with no q8 projection derives byte for byte what it derived before roles
+existed. `OPEN_KERNELS_FORCE_Q4_1=1` forces the fallback for an A/B.
+
 **Acceptance criteria:**
 - The 27B's `config.json` fields (+ the tokenizer's 248070 ids) → a spec equal to `recipes/specs/qwen36-35b-a3b.json`; `layer_types` from the list when present, else from `full_attention_interval`.
 - GGUF metadata for arch `qwen35moe` (or `qwen3next`) → the same hyperparameters (`real_vocab` = `vocab_size`, GGUF has no tokenizer-side count).
 - HunYuan's `rope_scaling` (`type: dynamic`, an alpha) folds into ONE static base, `rope_theta * alpha^(d/(d-2))`, which is what a `hunyuan-dense` GGUF already carries in `rope.freq_base`; a `yarn` type, a factor or an mscale other than 1, `use_cla`, a bias or a MoE variant is refused by name.
 - `model_type: llama` → `SpecError` naming `model_type 'llama'`; `general.architecture: gemma3` likewise; a missing `linear_num_value_heads` / `qwen35moe.expert_count` → `SpecError` naming the key.
 - JSON round trip preserves the spec and its hash; an unknown field is refused.
+- A container header with q8 attention / linear / out / shared projections and q4_1 routed experts gives `{"attn": "q8", "linear": "q8", "linear_out": "q8", "shared": "q8"}`; a stock container (only the head at q8) gives `{}`; a Qwen3.5 container gives `{"linear_out": "q8"}`. A role at two formats is refused naming the second tensor. An unknown quant role in a spec JSON is refused naming it.
+- An all-`q4_1` map serialises as `"q4_1"`, hashes as `"q4_1"` and round-trips to it; a map with a q8 role changes `spec_hash` and round-trips unchanged. Every checked-in spec under `recipes/specs/` still reads `"quant": "q4_1"`, and the 27B's manifest fixture is byte-identical.
 
 ### OPEN-OP-RANGE: a recipe fails at generation outside a template's validated set
 **Applies to:** openflowlm-next (`open_kernels/recipes/catalogue.py`, `qwen36moe.py`)
@@ -170,22 +190,180 @@ not a build input, and is not in the key.
 **Acceptance criteria:**
 - The key is stable across calls and covers `recipes/qwen36moe.py`, `designs/layer_x/lx.py`, `designs/attn/attn.h`, `designs/gemv_q4/gemv_q4.h`, `designs/lm_head_q8/lm_head_q8.py`, `include/vecmath.h` (among others).
 - Appending a comment to `attn.h` or to `qwen36moe.py` changes the key; changing `rope_theta` or `quant` changes it; changing `extra` does not.
+- `designs/gemv_q4/gemv_q8.h` enters the key only for a spec with a q8 role (`KERNEL_SOURCES_Q8`): it is compiled by nothing else, so listing it unconditionally would move every shipped kernel set's key for a file none of them include.
+- The key takes `quant` in its canonical form, so a role map hashes (a q8 role changes the key) and an all-`q4_1` map hashes the bare string, byte for byte what the key hashed before roles existed.
 
 ### OPEN-PACK-PLAN: the packing plan reproduces the verified pool laws
 **Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`)
 **Test category:** unit (Python interpreter) + integration (C++, through OPEN-FAMILY-QWEN36MOE)
 **Tests:** `tests/test_pack_plan.py`, `tests/legacy_pools.py` (the frozen originals)
 
-The recipe's plan (`expert_stripes`, `expert_down`, `std_perm`, `put`,
-`conv_transpose`, the lm_head supertile order, the position table) applied
-by `recipes/pack.py` shall produce, for a container with the 27B's tensor
-shapes, exactly the bytes the hand-written packers produced (the ones
-verified against pools captured from FLM's engine). `pools.cpp` interprets
-the same plan and is verified by the hardware run.
+The recipe's plan (`expert_stripes`, `expert_down`, `std_perm`, `q8_perm`,
+`put`, `conv_transpose`, `transpose`, the lm_head supertile order, the position
+table) applied by `recipes/pack.py` shall produce, for a container with the
+27B's tensor shapes, exactly the bytes the hand-written packers produced (the
+ones verified against pools captured from FLM's engine). `pools.cpp`
+interprets the same plan and is verified by the hardware run.
+
+**The q8 band law (`q8_perm`).** Where the recipe's quant map says a projection
+runs at q8 (OPEN-QUANT-Q8), the plan carries `q8_perm` instead of `std_perm`
+and the pool holds the container's own q8 values: each 8704-byte chunk is split
+into two 16-row half-tiles of 5120 bytes -- `scales[128]` bf16 at `[0, 256)`
+indexed `kb*16 + r`, `codes[4096]` int8 at `[256, 4352)` indexed `k*16 + r`,
+zero pad -- and half-tile `c` of a 64-row band covers rows `16*(c%4)` and
+k-tile `c/4`, so its source is file chunk `2*band + (c%4)/2` at half `(c%4)%2`.
+A band is `K/64` half-tiles, twice the q4_1 bytes. The split is a byte
+permutation, not arithmetic: the container's row-block stride is exactly 4096
+codes, so a half-tile's codes are a verbatim slice. `nch` on a `q8_perm` op
+counts POOL half-tiles; `chunk0` counts SOURCE file chunks, as it does for
+`std_perm`. A `q8_perm` over a tensor the container does not store at q8 is
+refused naming the tensor -- that is the check that a container agrees with the
+kernel set it is being packed for.
+
+**q8 sources.** The quantized chunk format is a property of the TENSOR, not of
+the container: the stock 35B keeps only its lm_head at q8, its fine-tunes pack
+attention, linear-attention and shared-expert projections at q8 and only the
+routed experts at q4_1, and a Qwen3.5 container stores `ssm_out_proj` and
+alpha / beta at q8. The three chunk ops (`std_perm`, `expert_stripes`,
+`expert_down`) shall therefore read a q8 source (8704-byte chunks)
+transparently and re-quantize it to q4_1 (5120-byte chunks) on the way into the
+pool, and refuse any other chunk size naming the tensor. A q8 chunk and a q4_1
+chunk hold the same 32-row x 256-column tile, so the chunk index laws, the
+plan, the manifest and the kernels are unchanged; the packer is the only place
+that knows. There is no separate re-quantizing op.
 
 **Acceptance criteria:**
 - Layer pool, consts blob (linear and attention), lm_head pool and ptab are byte-equal to `legacy_pools.py` on random-byte tensors of the right sizes.
 - A small weight larger than its slot is refused (`does not fit its 4096 B slot`).
+- On a synthetic container mixing one q8 and one q4_1 tensor: the q8 tensor's pool bytes equal `requant_q4_1` of its chunks put through the same `std_perm` order; the q4_1 tensor's are the verbatim chunk copy they were before q8 sources existed; and the whole pool has the same FNV-1a in NumPy and in C++ (`tests/test_pack_plan.py`, `src/open_qwen36/pools_test.cpp`, which writes the container as a real `.q4nx`).
+- A container that cannot report a tensor's chunk size is read as q4_1, so the frozen pools above are unaffected.
+- A tensor with 1280-byte chunks is refused by both packers, the message naming the tensor and `1280`; it says what the count probably is (8704 = q8, 4736 = Q4_K, 1280 / 2560 = a smaller chunk geometry) rather than guessing "FLM 1.0.3 / Q4_K?".
+- `requant_q4_1` (q8 chunks -> q4_1 chunks) and `transpose` (`[rows, cols]` -> `[cols, rows]`) produce identical bytes in NumPy and C++: both sides build the same synthetic q8 chunks and assert the same FNV-1a of the output (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
+- Every value of a re-quantized block lands within `d/2` of its q4_1 reading, `d` being the block's stored scale: `m` is the minimum rounded toward -inf in bf16 and `d = (max - m)/15` rounded toward +inf, so `[m, m + 15d]` covers the block whatever bf16 did to either end.
+**The q8 lm_head's supertile order is a function of K.** A band is 128 output rows = 4 row
+quarters x `nk = K / 256` k-tiles, and the container holds chunk (rowblock32, ktile) at
+`rowblock32 * nk + ktile`, so the pool order is
+`pool k <- file (4 * (k // per_band) + k % 4) * nk + (k % per_band) // 4`, `per_band = 4 * nk`.
+Both packers took `nk = 8` (K = 2048) as a constant until OPEN-FAMILY-QWEN35's 4B run.
+The `lmhead_q8` op therefore carries `in_dim` (the hidden width) and an op without it is
+refused at load rather than falling back to 2048.
+
+**Acceptance criteria (continued):**
+- The `lmhead_q8` order at K = 2048 / 2560 / 4096 is the law above, and at K = 2048 it is byte for byte the shipped 27B one (`tests/test_pack_plan.py`); an `lmhead_q8` op without `in_dim` is refused by both the NumPy packer and the manifest parser, naming the field.
+- A `std_perm` without `nch` / `in_dim`, or a `transpose` without `rows` / `cols` / `elem`, is refused by the manifest parser naming the field.
+- `transpose` takes an optional `dst_rows`: the destination row is widened to that many values and the tail zeroed (`[16, hid] -> [hid, 32]` with columns 16..31 zero, the 16-head DeltaNet's alpha / beta). It appears in a plan ONLY when it differs from `rows`, so a 32-head family's plan, manifest and build key do not move; `dst_rows` narrower than `rows` is refused by both packers. Both produce the same bytes (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
+- `model/q4nx.py` reads each q8 tensor the way the POOL holds it: as the container's own q8 when `native_q8(name)` (the projections the plan streams with `q8_perm`), else as the packer's q4_1. So a slice comparison measures the kernels whichever path a projection is on. `make_decode.py --requant` swings the whole run -- spec, plan, pools and reference -- onto the fallback for the A/B.
+- A `q8_perm` half-tile round-trips exactly: dequantizing the two half-tiles of a chunk gives the same values as dequantizing the chunk, value for value. The band law matches a brute-force placement against the dequantized source matrix, and a q8 projection occupies exactly twice the q4_1 bytes.
+- The NumPy and C++ packers produce the same `q8_perm` pool bytes (the same FNV-1a in `tests/test_quant_q8.py` and `src/open_qwen36/pools_test.cpp`), and a `q8_perm` without `nch` / `in_dim` is refused by the manifest parser naming the field.
+
+### OPEN-QUANT-Q8: q8 projections run at q8
+**Applies to:** openflowlm-next (`designs/gemv_q4/gemv_q8.h`, `designs/layer_x/`,
+`designs/dense/`, `recipes/{spec,cache,catalogue,load,qwen36moe,qwen35,dense,pack}.py`,
+`src/open_qwen36/{pools,manifest}.*`, `model/{q4nx,replica_qwen35,make_decode}.py`)
+**Test category:** manual (needs the NPU and a q8-variant container); the half-tile
+split, the band law, the quant-map derivation and the two packers' agreement are
+unit-tested in `tests/test_quant_q8.py` and `src/open_qwen36/pools_test.cpp`
+
+A weight projection the container stores at q8 shall be streamed to the main cores at
+q8 -- 16-row half-tiles of the container's chunks in the `q8_perm` band law -- and
+consumed by `gemv_q8_half_tile`, not re-quantized, whenever the design's core memory
+allows. The recipe derives which projections those are from the container (or GGUF)
+into `ModelSpec.quant` (OPEN-SPEC-DERIVE), the manifest carries it as `q8_perm` plan
+entries, and the packer refuses a container whose tensor formats disagree with it,
+naming the tensor. The re-quantizing fallback of OPEN-PACK-PLAN stays for every role a
+family cannot stream at q8 -- the routed experts (their own stripe laws) and the MoE's
+shared expert (it rides the routed experts' call sites, one nine-slot loop, for program
+memory) -- and for the whole model under `OPEN_KERNELS_FORCE_Q4_1=1`.
+
+Because a q8 variant bakes different pool offsets and fill sizes into its instruction
+streams, it is a DIFFERENT kernel set: the quant map is in `spec_hash` and `build_key`,
+and build directories carry its short hash -- but only when a role is q8, so every
+shipped kernel set keeps the directory name it already builds into. "Kernels belong to
+families": the family is shape plus quant map.
+
+**Acceptance criteria (unit):** as OPEN-PACK-PLAN's q8 lines and OPEN-SPEC-DERIVE's
+quant-map lines, plus:
+- A q8 role doubles exactly its own pool region and nothing else; the shipped 27B's `POOL_BYTES` stays 536870912 byte for byte, and a q8 variant of the same shape rounds up to the next MB.
+- The MoE's out-projection region is already twice the tensor, so a q8 `linear_out` moves no consts offset there; the qwen35 composition's is the tensor, so it doubles.
+- `qwen36moe` refuses a q8 routed expert and a q8 shared expert by name; `dense` and `qwen35` refuse the roles they do not have; a quant the GEMVs cannot read (`q4_k`) is still refused naming it.
+- Build directory names gain `_q<hash>` only when a role is q8; `ln` and the lm_head, which read no layer weights, keep theirs either way.
+- With no q8 role the designs emit exactly what they emitted before: the same fifos, the same `ExternalFunction` set (no `gemv_q8_*` instantiated), the same core call sequence and the same host fills, for all six checked-in specs, and the generated `.cc` files are byte-identical.
+- A spec whose GEMV roles MIX formats -- some q8, some still q4_1 -- generates the folded entry `gemv_q4_gyms` (one entry point, the destination chosen at runtime: below zero the band's y element, otherwise the act scratch at that offset) and NOT `gemv_q4_gy` / `gemv_q4_gms`; an all-q4_1 or an all-q8 spec generates the pair and no folded entry. Both `designs/layer_x` and `designs/dense` take the same switch.
+- A mixed spec that also puts `ffn` at q8 is refused by name (`qwen35`, `dense`): the fold covers the q4_1 side only, and a second fold does not fit. Every role at q8 is not refused.
+- **A derived quant map is narrowed to a mixed core that has been built.** Whether both formats' GEMV bodies fit in a core's 16 KB is not derivable -- only `aiecc` can measure it, and it does not print the shortfall -- so `catalogue.MIXED_CORE_FITS` is a validated set like any other, keyed by `(family, hidden)`: `(qwen35, 4096)`, `(qwen35, 2048)`, `(qwen35, 1024)`, the three widths whose mixed `lx` built and passed on 2026-09-07. At any other width `recipes.load.narrow_to_buildable` puts a q8 `linear_out` back to q4_1, so the packer re-quantizes it as it did before this requirement, and prints ONE line naming the width, program memory as the reason, `.claude/plans/q8m-hw-results.md`, and the fallback's measured cost (logits corr 0.999682). An all-q8 map is left alone -- one format on the core is not a mixed core -- and `OPEN_KERNELS_FORCE_Q4_1=1` still wins. Concretely: the Qwen3.5 4B (hidden 2560) derives `q4_1` and hashes as its shipped kernel set (`sha256:06e3163f...`); the 9B / 2B / 0.8B keep `{"linear_out": "q8"}`. `tests/test_quant_mixed.py`.
+
+The fold exists because a mixed-format main core carries both formats' GEMV bodies and
+16 KB of program memory does not hold three entry points; it is gated on the mix so that
+no all-q4_1 and no all-q8 kernel set's object code moves (OPEN-LAYOUT-FREEZE).
+
+**Procedure (manual):** Ornith-1.0-35B-A3B (q8 attention / linear / out projections):
+export with `OPEN_KERNELS_UNVALIDATED=1`, then the 8-layer / 3-token slice against
+`replica.py` fed the q8 values -- logits corr >= 0.99999, same argmax and top-5,
+residual corr >= 0.9999 every layer (the 27B's bar, now against the shipped weights);
+the engine CLI bit-identical to the harness; `chat.py`; ms/token beside the
+re-quantized path's number. Then Qwen3.8-Distilled-9B with `linear_out` at q8 (its only
+q8 projection): the same, and the logits correlation against the q8 reference must now
+be >= 0.99999 where the re-quantized path scored 0.999682.
+
+**Result 2026-09-07 (Ornith-1.0-35B-A3B and six sibling containers): PASS on the MoE family,
+BLOCKED on Qwen3.5.** Log: `.claude/plans/q8-hw-results.md`.
+
+The MoE half is done. Ornith-1.0 derives `{attn, linear, linear_out} = q8`, builds its own
+kernel set (`build_*_q663fca7b`, `spec_hash sha256:640d27a72d49`) with `gemv_q8_gy` in
+`gemv_q4_gy`'s place, and its 8-layer / 3-token slice against the replica fed the container's
+own q8 values gives logits corr **0.999996 / 0.999998 / 0.999988**, argmax and top-5 identical
+at every position, residual corr >= **0.999992** in every layer. The engine reproduced the
+harness **bit for bit** (0.000e+00 over 248 320 logits) -- the C++ `q8_perm` packer against the
+real container -- and `chat.py` answered coherently over all 40 layers at **155 ms/token
+(6.46 tok/s)**. Six more containers (Ornith-1.5, Darwin-36B-Opus, Grug, BigBang 1.0,
+Aquila-mini, and Atomic-Germ's own `Qwen3.6-35B-A3B-NPU2` mirror) derive the identical q8 spec
+and pass on Ornith's kernels: corr **0.999988 to 0.999998**, argmax matching everywhere, worst
+residual 0.999990, every engine run bit-identical.
+
+**The A/B, at position 0 (the only like-for-like one -- the paths pick different second
+tokens):** against the weights the author shipped, native q8 scores corr **0.999996** with an
+identical top-5; the re-quantizing fallback scores **0.997631** and puts the wrong token 5th.
+By the second token the fallback's greedy pick diverges. Speed: 155-170 ms/token at q8 against
+140-162 re-quantized on the same six models, i.e. **~+9 % of wall time**, not the ~+50 % the
+plan budgeted from weight bytes -- decode is not bound by the non-expert projections' DMA.
+
+**Result 2026-09-07 (the mixed-format fold on hardware): PASS on three of the four Qwen3.5
+sizes; the 4B alone is still over program memory.** Log: `.claude/plans/q8m-hw-results.md`.
+
+Every Qwen3.5 container derives `linear_out: q8` while its other projections stay q4_1, so
+the `lx` main core must hold BOTH GEMV bodies. The fold applies only to such a spec: the
+core holds `gemv_q4_gyms` + `gemv_q8_gy` instead of `gemv_q4_gy` + `gemv_q4_gms` +
+`gemv_q8_gy`, and its two GEMV translation units are compiled `-Oz`. `gemv_q4_gyms` went
+through Peano for the first time here and compiled clean, and the 9B, 2B and 0.8B built,
+ran and passed. The gate held on both formats before any of it: the shipped 35B re-exported
+6/6 `insts.bin` byte-identical (xclbins stamps only, `lx0` / `lx1` at 176 399 B), and the
+all-q4_1 Qwen3.5 4B 4/4 byte-identical -- so neither an all-q4_1 nor an all-q8 kernel set
+moved.
+
+**The second acceptance criterion is met.** Against the replica fed the container's own q8
+`ssm_out_proj`, the 9B's 8-layer / 3-token slice gives logits corr **0.999999 / 0.999991 /
+0.999993** with identical argmax and top-5 at every position and residual corr >= 0.999994
+in every layer -- above the 0.99999 bar, where the re-quantizing fallback scored 0.999682.
+The 2B gives 0.999998 / 0.999989 / 0.999986 (better than its own q4_1 run's 0.999979 /
+0.999980) and the 0.8B 0.999993 / 0.999992 / 0.999990, both with argmax and top-5 matching
+everywhere. Each engine run reproduced its harness **bit for bit** (0.000e+00 over 248 320
+logits x 3) and answered the chat prompt coherently over all layers. Speed: 191 / 70 / 54
+ms/token against the q4_1 path's 181 / 69 / 53, i.e. **+5.5 % on the 9B and about 1 ms on
+the two small ones** -- the same "no measurable cost" the MoE found.
+
+**The 4B still overflows**, in the same place and with the same message, and neither flag
+lever recovers it: the fold plus `-Oz` on the two GEMV TUs is not enough, and `-Oz` on every
+TU of the mixed core (the handoff's next lever, applied and then reverted to the byte)
+changes nothing. The 4B is the only size whose hidden width is not a multiple of the 4 KB
+element, so its glue side channel walks two unequal halves and its all-q4_1 `lx` is already
+the largest of the four (178 239 B against the 9B's 156 623). What is left is a design
+change -- splitting the FFN tail off that core -- or leaving the 4B on the re-quantizing
+fallback its three siblings no longer need. `.claude/plans/q8m-hw-results.md` §2.
+
+**No catalogue point was earned, and none was needed.** The q8 out projection's GEMV
+reduces over `lin_value_width` -- 4096 on the 9B and 4B, 2048 on the 2B and 0.8B -- not over
+`hidden`, so both K were already validated by the 35B pass and all four sizes compose with
+no `OPEN_KERNELS_UNVALIDATED`.
 
 ### OPEN-FAMILY-QWEN36MOE: greedy agreement with the fp64 reference on the 27B
 **Applies to:** openflowlm-next (`src/open_qwen36/`)
@@ -203,6 +381,38 @@ coherently.
 4. `python src/open_qwen36/chat.py "Explain what an NPU is in two sentences."` → a coherent two-sentence answer ending in `<|im_end|>`.
 
 **Result 2026-09-05:** corr 0.999998 / 0.999996 / 0.999991, argmax and top-5 identical at every position, request 2 reproduced request 1 (8 layers, 35 ms/step). Full model: see the plan's "Phase A result".
+
+**Result 2026-09-06 (the six q8 fine-tunes): all six PASS on the reference kernels, no rebuild.**
+Ornith-1.0-35B-A3B, Darwin-36B-Opus, Grug-35B-A3B, BigBang1.0-35B-A3B, Aquila-mini-35B-A3B and
+Ornith-1.5-35B-A3B each derive the reference 35B's ModelSpec exactly (`spec_hash
+sha256:32e980528551`) and run on `src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels`. Acceptance
+(the replica fed the q4_1 the packer writes -- OPEN-PACK-PLAN's q8-source path): logits corr
+**0.999987 to 0.999998** at both positions of an 8-layer / 2-token slice, **argmax and top-5
+identical everywhere**, worst residual corr 0.999995, request 2 reproduced request 1 in every
+fast proof, and all six answered the chat prompt coherently over 40 layers at 6.2-7.1 tok/s.
+
+**Result 2026-09-07 (the same containers at native q8, OPEN-QUANT-Q8):** with the projections
+streamed at q8 the seven q8 containers (the six above plus Atomic-Germ's 35B mirror) pass on a
+q8 kernel set built from Ornith-1.0's spec -- corr 0.999988 to 0.999998 over an 8-layer /
+3-token slice, argmax matching at every position, worst residual 0.999990, every engine run
+bit-identical to the harness, chat coherent at 153-170 ms/token. `.claude/plans/q8-hw-results.md`.
+Ornith-1.0's own export reports all six `insts.bin` byte-identical and all six `final.xclbin`
+stamps-only.
+
+Two earlier findings are corrected by this run: **Ornith-1.5 is a drop-in**, not a 41-layer
+model needing its own kernel set -- its container carries a 41st layer's tensors but its
+`config.json` says `num_hidden_layers: 40` with `mtp_num_hidden_layers: 1`, and the extra set is
+the multi-token-prediction head this engine does not read; and **Ornith-1.0 is unblocked** by the
+`qwen3_5_moe_text` alias, though a `manifest.json` generated before 2026-09-06 still refuses it
+by name until it is regenerated.
+
+**Quality, reported separately** (the same NPU run against the replica fed the container's own q8
+weights, `make_decode --q8-weights`): logits corr **0.9966-0.9981** at position 0 and
+**0.985-0.991** at position 1, and on Ornith-1.0 and BigBang the greedy pick at position 1 flips
+between the top two candidates. Re-quantizing 251 q8 tensors to q4_1 costs about 1e-2 of logits
+correlation -- three orders of magnitude more than the kernels' own 1e-5 -- and is enough to
+change generated text. That is the evidence for a main-core q8 GEMV. Log:
+`.claude/plans/q-hw-results.md`.
 
 ### OPEN-FAMILY-QWEN3: Qwen3 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen3.py`, `designs/dense/dx.py`, `designs/lm_head_q4`, `src/open_qwen36/`)
