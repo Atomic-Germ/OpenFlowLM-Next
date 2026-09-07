@@ -6,6 +6,7 @@
 /// 
 /// \note This file contains some utility functions for the FastFlowLM project.
 #include "utils/utils.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <cstdlib>
 
@@ -117,51 +118,78 @@ std::string find_model_info() {
     throw std::runtime_error("model_info.json not found. Please set FLM_MODELINFO_PATH or place it next to the executable.");
 }
 
-std::string find_xclbin_path() {
-    std::string xclbin_prefix = CMAKE_XCLBIN_PREFIX;
+namespace {
 
-    // Check FLM_CONFIG_PATH environment variable
+/// A configured root may be given with or without its trailing "xclbins"
+/// component; the callers of `find_xclbin_path` always append it themselves.
+std::string strip_xclbins(std::string path) {
+    std::filesystem::path p(path);
+    if (p.filename().empty()) p = p.parent_path();   // a trailing separator
+    if (p.filename() == "xclbins") return p.parent_path().string();
+    return path;
+}
+
+/// The user-level flm directory flm-add writes into: ~/.config/flm on POSIX
+/// (get_user_directory() already ends in .config there) and <profile>/.config/flm
+/// on Windows, which is where flm-add's `Path.home() / ".config" / "flm"` lands.
+std::string user_flm_directory() {
+#ifdef _WIN32
+    return (std::filesystem::path(get_user_directory()) / ".config" / "flm").string();
+#else
+    return get_user_directory() + "/flm";
+#endif
+}
+
+/// The roots `find_xclbin_path` has always walked, in its order. Kept separate so that
+/// widening the OPEN path's search (xclbin_roots below) cannot move which root the CLOSED
+/// path picks: it returns exactly one, and every closed kernel is loaded relative to it.
+std::vector<std::string> closed_path_roots() {
+    std::vector<std::string> c;
     const char* env_path = std::getenv("FLM_XCLBIN_PATH");
-    if (env_path && *env_path) {
-        // Remove possible "/xclbins" or "/xclbins/" from the end of the path
-        std::string path(env_path);
-        if (path.size() > 9 && path.substr(path.size() - 9) == "/xclbins/") {
-            path = path.substr(0, path.size() - 9);
-        } else if (path.size() > 9 && path.substr(path.size() - 9) == "\\xclbins\\") {
-            path = path.substr(0, path.size() - 9);
-        } else if (path.size() > 8 && path.substr(path.size() - 8) == "/xclbins") {
-            path = path.substr(0, path.size() - 8);
-        } else if (path.size() > 8 && path.substr(path.size() - 8) == "\\xclbins") {
-            path = path.substr(0, path.size() - 8);
-        }
-
-        if (std::filesystem::exists(path + "/xclbins")) {
-            return path;
-        }
-    }
-
-    // Portable development-tree location (next to the executable, then CWD).
+    if (env_path && *env_path) c.push_back(strip_xclbins(env_path));
     std::string exe_dir = get_executable_directory();
-    if (std::filesystem::exists(exe_dir + "/xclbins")) {
-        return exe_dir;
-    }
-    if (std::filesystem::exists("xclbins")) {
-        return ".";
-    }
+    c.push_back(exe_dir);                       // portable development tree
+    c.push_back(".");                           // then the CWD
+    c.push_back(exe_dir + "/../share/flm");     // relocatable installed bundle
+    c.push_back(CMAKE_XCLBIN_PREFIX);           // legacy configured prefix
+    return c;
+}
 
-    // Relocatable installed bundle. The caller appends /xclbins.
-    std::string bundle_path = exe_dir + "/../share/flm";
-    if (std::filesystem::exists(bundle_path + "/xclbins")) {
-        return bundle_path;
-    }
+} // namespace
 
-    // Legacy configured prefix.
-    std::string installed_path = xclbin_prefix;
-    if (std::filesystem::exists(installed_path + "/xclbins")) {
-        return installed_path;
-    }
+std::vector<std::string> xclbin_roots() {
+    std::vector<std::string> candidates;
 
-    // If not found, throw an error
+    // The user-level roots first: flm-add installs a model's kernels under one of these,
+    // and the shipped sets live in the install tree below. A lookup that stops at the
+    // first root (find_xclbin_path) can only ever see one of the two.
+    const char* env_path = std::getenv("FLM_XCLBIN_PATH");
+    if (env_path && *env_path) candidates.push_back(strip_xclbins(env_path));
+    // Beside an explicitly configured model_list.json, the way find_model_info stays
+    // beside it: a user registry and its kernels live in one directory.
+    const char* config_path = std::getenv("FLM_CONFIG_PATH");
+    if (config_path && *config_path) {
+        candidates.push_back(std::filesystem::path(config_path).parent_path().string());
+    }
+    // The directory flm-add uses when neither variable is exported.
+    candidates.push_back(user_flm_directory());
+
+    for (const std::string& c : closed_path_roots()) candidates.push_back(c);
+
+    std::vector<std::string> roots;
+    for (const std::string& c : candidates) {
+        if (c.empty()) continue;
+        std::error_code ec;
+        if (!std::filesystem::exists(c + "/xclbins", ec)) continue;
+        if (std::find(roots.begin(), roots.end(), c) == roots.end()) roots.push_back(c);
+    }
+    return roots;
+}
+
+std::string find_xclbin_path() {
+    for (const std::string& c : closed_path_roots()) {
+        if (!c.empty() && std::filesystem::exists(c + "/xclbins")) return c;
+    }
     throw std::runtime_error("xclbins not found. Please set FLM_XCLBIN_PATH or place it next to the executable.");
 }
 

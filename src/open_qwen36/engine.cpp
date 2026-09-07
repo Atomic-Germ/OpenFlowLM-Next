@@ -2,12 +2,15 @@
 /// \brief The open Qwen3.6-MoE engine behind the app's causal_lm seam (see engine.hpp).
 #include "open_qwen36/engine.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "utils/utils.hpp"
 
@@ -37,12 +40,19 @@ std::string Engine::find_kernels(const LM_Config& config) {
     }
     fs::path local = fs::path(config.model_path) / "open_kernels";
     if (complete(local, &why)) return local.string();
-    std::string prefix = config.exec_path;
-    if (prefix.empty()) {
-        try { prefix = utils::find_xclbin_path(); } catch (const std::exception&) { prefix.clear(); }
+    // Every xclbins root the closed path would consider, not just the first one
+    // find_xclbin_path() happens to return: flm-add links a set under the user
+    // root ($FLM_XCLBIN_PATH / ~/.config/flm) while the shipped sets live in the
+    // install tree, and whichever root wins there would otherwise hide the other.
+    std::vector<std::string> roots = utils::xclbin_roots();
+    // config.exec_path is find_xclbin_path()'s single winner, already in the list above --
+    // except under DEV_BUILD, where LM_Config hard-codes a relative tree.
+    if (!config.exec_path.empty() &&
+        std::find(roots.begin(), roots.end(), config.exec_path) == roots.end()) {
+        roots.push_back(config.exec_path);
     }
-    if (!prefix.empty()) {
-        fs::path cand = fs::path(prefix) / "xclbins" / config.model_name / "open_kernels";
+    for (const std::string& r : roots) {
+        fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
         if (complete(cand, &why)) return cand.string();
     }
     return {};

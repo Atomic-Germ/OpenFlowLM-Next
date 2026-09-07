@@ -15,27 +15,13 @@ Qwen3::Qwen3(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen
 void Qwen3::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
 
-    // The engine: the open one (open_qwen36/, the dense recipe's kernel set
-    // under xclbins/<model>/open_kernels) whenever it is installed for this
-    // model, the closed qwen3_npu DLL otherwise. FLM_QWEN3_ENGINE=open|closed
-    // overrides the choice.
-    bool use_open = false;
-#ifdef FLM_USE_OPEN_QWEN36
-    {
-        const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
-        const char* sel = std::getenv("FLM_QWEN3_ENGINE");
-        use_open = sel ? std::string(sel) == "open" : !kernels.empty();
-        if (use_open && kernels.empty())
-            throw std::runtime_error("FLM_QWEN3_ENGINE=open but no open kernels were found for " + this->lm_config->model_name);
-        if (use_open) {
-            header_print("FLM", "Qwen3 on the open kernels (" + kernels + ")");
-            auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
-            eng->load_open_weights();
-            this->lm_engine = std::move(eng);
-        }
+    // The engine: the open kernels when installed for this model, the closed
+    // qwen3_npu DLL otherwise (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "Qwen3");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
     }
-#endif
-    if (!use_open) {
+    else {
         this->q4nx = std::make_unique<Q4NX>(this->model_path);
         // lm_config->get<std::string>("model_type", "") == qwen3
         this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
@@ -330,16 +316,22 @@ Qwen3_IT::Qwen3_IT(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst)
 
 void Qwen3_IT::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
 
-    // lm_config->get<std::string>("model_type", "") == qwen3
-    this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-
-    this->lm_engine->load_weights(*this->q4nx);
-
-    //free the q4nx
-    this->q4nx.reset();
+    // Qwen3 dense, same as Qwen3: the open kernels when installed for this
+    // model, the closed qwen3_npu DLL otherwise
+    // (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "Qwen3-IT");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        // lm_config->get<std::string>("model_type", "") == qwen3
+        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        //free the q4nx
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
@@ -480,16 +472,22 @@ Qwen3_TK::Qwen3_TK(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst)
 
 void Qwen3_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
 
-    // lm_config->get<std::string>("model_type", "") == qwen3
-    this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-
-    this->lm_engine->load_weights(*this->q4nx);
-
-    //free the q4nx
-    this->q4nx.reset();
+    // Qwen3 dense, same as Qwen3: the open kernels when installed for this
+    // model, the closed qwen3_npu DLL otherwise
+    // (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "Qwen3-TK");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        // lm_config->get<std::string>("model_type", "") == qwen3
+        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        //free the q4nx
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();
@@ -701,15 +699,22 @@ DeepSeek_r1_0528_8b::DeepSeek_r1_0528_8b(flm_rt::device* npu_device_inst) : Auto
 
 void DeepSeek_r1_0528_8b::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    // model_type == llama
-    this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
-
-    //free the q4nx
-    this->q4nx.reset();
+    // A Qwen3 dense distill, so the same choice as Qwen3: the open kernels when
+    // installed for this model, the closed qwen3_npu DLL otherwise
+    // (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "DeepSeek-R1-0528");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        // model_type == llama
+        this->lm_engine = std::make_unique<qwen3_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        //free the q4nx
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();

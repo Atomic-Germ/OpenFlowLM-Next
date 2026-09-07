@@ -44,9 +44,14 @@ public:
     int restore() override;
 
     /// Where this model's open kernels are: FLM_OPEN_KERNELS_DIR, else
-    /// <model>/open_kernels, else <xclbin prefix>/xclbins/<model name>/open_kernels.
-    /// A kernel set is a manifest.json plus the files it names. Empty when
-    /// none is found — the caller then keeps the closed engine.
+    /// <model>/open_kernels, else <root>/xclbins/<model name>/open_kernels over
+    /// EVERY root the closed path would consider (utils::xclbin_roots(): the
+    /// configured root, the user-level flm directory, the exe dir, the CWD, the
+    /// installed bundle, the configured prefix) — a set under the user root and
+    /// one shipped in the install tree are both reachable, whichever of the two
+    /// find_xclbin_path() happens to return first. A kernel set is a manifest.json
+    /// plus the files it names. Empty when none is found — the caller then keeps
+    /// the closed engine.
     static std::string find_kernels(const LM_Config& config);
 
     const Core& core() const { return *core_; }

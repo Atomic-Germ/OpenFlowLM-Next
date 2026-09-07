@@ -16,27 +16,14 @@ Qwen3_6_MOE::Qwen3_6_MOE(flm_rt::device* npu_device_inst) : AutoModel(npu_device
 void Qwen3_6_MOE::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
 
-    // The engine: the open one (open_qwen36/, open XDNA2 kernels) whenever its
-    // kernels are installed for this model, the closed qwen3_6_moe_npu DLL
-    // otherwise. FLM_QWEN36_ENGINE=open|closed overrides the choice; images
-    // still need the closed engine (the open one has no vision path).
-    bool use_open = false;
-#ifdef FLM_USE_OPEN_QWEN36
-    {
-        const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
-        const char* sel = std::getenv("FLM_QWEN36_ENGINE");
-        use_open = sel ? std::string(sel) == "open" : !kernels.empty();
-        if (use_open && kernels.empty())
-            throw std::runtime_error("FLM_QWEN36_ENGINE=open but no open kernels were found for " + this->lm_config->model_name);
-        if (use_open) {
-            header_print("FLM", "Qwen3.6-MoE on the open kernels (" + kernels + ")");
-            auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
-            eng->load_open_weights();
-            this->lm_engine = std::move(eng);
-        }
+    // The engine: the open kernels when installed for this model, the closed
+    // qwen3_6_moe_npu DLL otherwise; images still need the closed engine (the
+    // open one has no vision path). See AutoModel::_shared_select_open_engine.
+    auto open_engine = this->_shared_select_open_engine("FLM_QWEN36_ENGINE", "Qwen3.6-MoE");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
     }
-#endif
-    if (!use_open) {
+    else {
         this->q4nx = std::make_unique<Q4NX>(this->model_path);
         this->lm_engine = std::make_unique<qwen3_6_moe_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
         this->lm_engine->load_weights(*this->q4nx);

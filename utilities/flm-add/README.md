@@ -59,6 +59,40 @@ flm-add . --tag qwen3.5-claude:9b
 2. Validates that all required files exist (`model.q4nx`, `tokenizer.json`, etc.).
 3. Writes a user-level registry at `$FLM_CONFIG_PATH/model_list.json` (default: `~/.config/flm/model_list.json`).
 4. Adds a symlink into `$FLM_XCLBIN_PATH/xclbins/` pointing to the model's kernel folder (`model.q4nx.xbin`). The xclbin directory name is taken from the matching official FastFlowLM entry, keyed by family and size (e.g., `Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2`). Custom FLM models never ship xclbins because they are closed source binaries; the kernel symlink always comes from the official model it matches.
+5. Links the **open kernel set** that matches the model, if one is installed (step 4's rule does not apply to it — see below).
+
+### Open kernels are matched by spec, not by model name
+
+Closed kernels are built for one official model, so they are linked by name. Open
+kernels are built for a *spec*: the model's shape (layers, widths, heads, RoPE, vocab)
+plus the weight format each projection is stored at. Every shape-identical model — a
+fine-tune, a distill, a re-upload — can drive the same set, and no rebuild is needed to
+add one.
+
+So `flm-add` derives the model's spec from what it just installed (`config.json`, the
+real vocabulary from `tokenizer.json`, and the per-tensor format read out of the
+`model.q4nx` header — no weight byte is touched), hashes it, and looks for an installed
+set whose `open_kernels/manifest.json` carries the same `spec_hash`. It searches the
+user xclbins directory first, then the system one, and prefers a set filed under the
+model's own name. Deriving the spec needs an `open_kernels/` checkout; `flm-add` finds
+one beside itself in the repo, or at `$OPEN_KERNELS_DIR`.
+
+On a match it links the set at `<model dir>/open_kernels`, which is the second place
+the engine looks (`FLM_OPEN_KERNELS_DIR`, then `<model dir>/open_kernels`, then
+`<xclbins root>/<model name>/open_kernels`) and the one that does not depend on how
+`FLM_XCLBIN_PATH` is set. On Windows a plain symlink needs developer mode, so a
+directory junction is used as the fallback; if neither works, `flm-add` prints the
+`FLM_OPEN_KERNELS_DIR=...` line to use instead.
+
+With no match, nothing changes — the model runs on the closed kernels — and `flm-add`
+prints the exact command that would build a set for it:
+
+```bash
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/<Model>
+```
+
+`--open-kernels DIR` uses a set you name outright and skips the search. `--no-xclbin`
+still skips both links.
 
 ## What This Project Is (and Isn't)
 

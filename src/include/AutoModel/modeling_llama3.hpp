@@ -7,9 +7,6 @@
 
 #pragma once
 #include "AutoModel/automodel.hpp"
-#ifdef FLM_USE_OPEN_QWEN36
-#include "open_qwen36/engine.hpp"
-#endif
 
 /************              llama family            **************/
 class Llama3 : public AutoModel {
