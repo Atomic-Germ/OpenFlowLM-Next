@@ -59,6 +59,32 @@ def test_unfolded_multipliers_are_refused_by_name():
             ModelSpec.from_hf_config(dict(HF_GRANITE_42_3B, **{name: 2.0}))
 
 
+def test_a_missing_attention_multiplier_is_refused_here_not_at_load():
+    """Absent is not unknown. transformers defaults GraniteConfig's four
+    multipliers to 1.0, so a config that omits attention_multiplier describes a
+    model scaling attention by 1.0 against attn.h's 1/sqrt(64) = 0.125 -- a
+    factor of 8 on every score, silently. It is also indistinguishable from a
+    folded container that failed to record the fold. dense.py's hf_config_check
+    requires the key at ENGINE LOAD; refusing it here is what turns a
+    'config.json lacks a field' into a diagnostic that names the fold."""
+    cfg = dict(HF_GRANITE_42_3B)
+    cfg.pop("attention_multiplier")
+    with pytest.raises(SpecError, match="does not state the attention multiplier"):
+        ModelSpec.from_hf_config(cfg)
+
+    gguf = dict(GGUF_GRANITE_42_3B)
+    gguf.pop("granite.attention.scale")
+    with pytest.raises(SpecError, match="does not state the attention multiplier"):
+        ModelSpec.from_gguf_metadata(gguf)
+
+    # ...and the other three stay optional, because for THEM the 1.0 default is
+    # exactly what the recipe needs.
+    for name in ("embedding_multiplier", "residual_multiplier", "logits_scaling"):
+        thin = dict(HF_GRANITE_42_3B)
+        thin.pop(name)
+        assert ModelSpec.from_hf_config(thin).family == "granite"
+
+
 def test_scaling_and_tied_embeddings_are_refused():
     with pytest.raises(SpecError, match="rope_scaling is not supported"):
         ModelSpec.from_hf_config(dict(HF_GRANITE_42_3B, rope_scaling={"rope_type": "linear", "factor": 2}))

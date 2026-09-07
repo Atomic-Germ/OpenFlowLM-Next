@@ -703,7 +703,26 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 def _granite_scale_check(where: str, attn_mult: float | None, hd: int,
                          others: Mapping[str, Any]) -> None:
     want = hd ** -0.5
-    if attn_mult is not None and abs(float(attn_mult) - want) > 1e-9:
+    # The attention multiplier is REQUIRED, and the other three are not, which
+    # looks inconsistent until you ask what an absent key means. All four default
+    # to 1.0 in transformers' GraniteConfig. For the other three that default IS
+    # what the recipe needs, so absence is the good case. For this one it is not:
+    # 1.0 against attn.h's 1/sqrt(HD) is a factor of 8 at head_dim 64, applied
+    # silently to every score. And an absent key cannot be told apart from a
+    # folded container that simply failed to record the fold -- so it is refused
+    # here rather than passed on to fail at load, where the manifest check
+    # (dense.py's hf_config_check, which requires this key) can only report that
+    # a field is missing.
+    if attn_mult is None:
+        raise SpecError(
+            f"granite: {where} does not state the attention multiplier, and it is not "
+            f"optional. attn.h hard-codes 1/sqrt(HD) = {want}; transformers defaults "
+            f"GraniteConfig.attention_multiplier to 1.0, so a config that omits it "
+            f"describes a model scaling attention by 1.0 -- a silent factor of "
+            f"{1.0 / want:g} on every score at head_dim {hd}. A container converted by "
+            f"q4nx-build records the post-fold value ({want}) explicitly; convert it, "
+            f"or state the multiplier if you know it.")
+    if abs(float(attn_mult) - want) > 1e-9:
         raise SpecError(
             f"granite: attention_multiplier {attn_mult} != head_dim**-0.5 {want} "
             f"(attn.h scales by 1/sqrt(HD)). This container looks UNFOLDED; convert it "
