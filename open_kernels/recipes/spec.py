@@ -25,7 +25,7 @@ class SpecError(ValueError):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    family: str                       # the recipe: "qwen36moe" | "qwen3" | "llama3" | "gemma3"
+    family: str                       # the recipe: "qwen36moe" | "qwen3" | "llama3" | "gemma3" | "hunyuan"
     hidden: int
     num_layers: int
     layer_types: tuple[str, ...]      # per layer: LINEAR | FULL | DENSE
@@ -469,6 +469,104 @@ def _llama3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     )
 
 
+def _ntk_alpha_base(base: float, alpha: float, head_dim: int) -> float:
+    """HunYuan's NTK-aware alpha scaling, applied once at load: the RoPE base is stretched
+    to `base * alpha^(d/(d-2))` and the frequencies are otherwise the plain ones. Same
+    formula as transformers' HunYuanDenseV1 rotary embedding and llama.cpp's converter
+    (conversion/hunyuan.py `scaled_base`), so a GGUF's `rope.freq_base` is already this."""
+    return base * (alpha ** (head_dim / (head_dim - 2)))
+
+
+def _hunyuan_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """HunYuan V1 dense (Hy-MT2-7B, Hunyuan-{1.8,4,7}B): Llama 3's GQA shape with q/k
+    RMSNorm applied AFTER RoPE, one static NTK-alpha RoPE base, silu FFN, a tied head.
+    The post-rope norm order is a family property of the recipe, not a spec field."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hd = cfg.get("head_dim") or cfg.get("attention_head_dim") or _need(cfg, "hidden_size") // heads
+    vocab = _need(cfg, "vocab_size")
+    if cfg.get("norm_type", "rms") != "rms":
+        raise SpecError(f"hunyuan: norm_type {cfg.get('norm_type')!r} is not 'rms'")
+    if cfg.get("use_cla"):
+        raise SpecError("hunyuan: use_cla (cross-layer attention shares KV between layers) is not supported")
+    if cfg.get("num_experts") or cfg.get("moe_topk"):
+        raise SpecError("hunyuan: the MoE variants are not supported by the dense recipe")
+    if cfg.get("attention_bias") or cfg.get("mlp_bias"):
+        raise SpecError("hunyuan: attention_bias / mlp_bias are not supported (the GEMVs have no bias)")
+    theta = float(_need(cfg, "rope_theta"))
+    sc = cfg.get("rope_scaling")
+    if sc:
+        kind = sc.get("rope_type", sc.get("type"))
+        if kind != "dynamic":
+            raise SpecError(f"hunyuan: rope_scaling type {kind!r} is not supported (dynamic/alpha only)")
+        if float(sc.get("factor", 1.0)) != 1.0:
+            raise SpecError(f"hunyuan: rope_scaling factor {sc.get('factor')} is not 1 (only the NTK alpha is folded in)")
+        for k in ("mscale", "mscale_all_dim"):
+            if float(sc.get(k, 1.0)) != 1.0:
+                raise SpecError(f"hunyuan: rope_scaling {k} {sc[k]} is not 1 (attn.h has no logit rescale)")
+        theta = _ntk_alpha_base(theta, float(sc.get("alpha", 1000.0)), hd)
+    return ModelSpec(
+        family="hunyuan",
+        hidden=_need(cfg, "hidden_size"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=theta,
+        qk_norm=bool(cfg.get("use_qk_norm", True)),
+        attn_gate=False,
+        intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+def _hunyuan_gguf(md: Mapping[str, Any]) -> ModelSpec:
+    a = md["general.architecture"]
+
+    def k(name: str):
+        return _need(md, f"{a}.{name}", "GGUF metadata")
+
+    n = k("block_count")
+    heads = k("attention.head_count")
+    hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
+    vocab = md.get(f"{a}.vocab_size")
+    if vocab is None:
+        toks = md.get("tokenizer.ggml.tokens")
+        if toks is None:
+            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
+        vocab = len(toks)
+    # llama.cpp folds the NTK alpha into rope.freq_base and writes scaling type NONE, so the
+    # base is already the stretched one -- a scaling factor other than 1 would be something new.
+    factor = float(md.get(f"{a}.rope.scaling.factor", 1.0))
+    if factor != 1.0:
+        raise SpecError(f"hunyuan: {a}.rope.scaling.factor {factor} is not 1 (the alpha is folded into freq_base)")
+    return ModelSpec(
+        family="hunyuan",
+        hidden=k("embedding_length"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=vocab,
+        num_heads=heads,
+        num_kv_heads=k("attention.head_count_kv"),
+        head_dim=hd,
+        rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
+        rope_theta=float(k("rope.freq_base")),
+        qk_norm=True,
+        attn_gate=False,
+        intermediate=k("feed_forward_length"),
+        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-5)),
+        quant="q4_1",
+        extra={"architecture": a, "source": "gguf"},
+    )
+
+
 def _gemma3_layer_types(n: int, cfg: Mapping[str, Any]) -> tuple[str, ...]:
     if "layer_types" in cfg:
         m = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
@@ -574,11 +672,12 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 
 
 HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_next": _qwen36moe_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
-               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf}
+               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
-                 "gemma3": _gemma3_gguf}
+                 "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
-              _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3"}
+              _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
+              _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan"}
 
 
 def hf_model_types(family: str) -> list[str]:

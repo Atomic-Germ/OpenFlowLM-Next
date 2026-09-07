@@ -4,6 +4,10 @@
 // Full-attention decode step (one token, one core), after the q/k/v (and gate) GEMVs:
 //   q' = rope( rms_HD(q_h) * qn )     NH heads x HD   (qn = effective norm weight)
 //   k' = rope( rms_HD(k_h) * kn )     KVH heads x HD, v as is; k', v -> bf16 cache rows
+// ATTN_QKNORM_POST swaps the last two steps -- q' = rope( rms_HD(q_h) ) * qn -- which is
+// HunYuan's order (query_layernorm AFTER apply_rotary_pos_emb). RoPE is orthogonal and the
+// rotary dim is the whole head there, so the RMS is the same either way; what moves is the
+// per-dim weight, which does not commute with the pair rotation.
 //   for head h (kv head h / (NH/KVH)): s_t = q'_h . K_t / sqrt(HD) over t in [0, pos] (cache rows + new)
 //   o_h = softmax(s) V  (online softmax, fp32 accumulators), og_h = o_h [* sigmoid(gate_h)]
 // RoPE over the first ROT dims of each head, half-split pairs (i, i + ROT/2); cos/sin for
@@ -13,7 +17,7 @@
 // Compile-time knobs (the whole-layer designs pass them from the ModelSpec; the defaults are
 // the Qwen3.6-27B point, recipes/catalogue.py's `attn` set): ATTN_NH, ATTN_KVH, ATTN_HD,
 // ATTN_ROT, ATTN_GATE (1: a sigmoid output gate arrives with the q heads, as in Qwen3.5/3.6;
-// 0: no gate, as in Qwen3 dense / Llama).
+// 0: no gate, as in Qwen3 dense / Llama), ATTN_QKNORM, ATTN_QKNORM_POST, ATTN_EPS.
 //
 // Elements: the attention core's fifo element is ONE cache-row half, E_A = KVH * HD bf16
 // bytes (1 KB for the 27B, 2 KB for Qwen3-4B). So a q / k / v / gate element of fp32 heads
@@ -42,7 +46,16 @@
 #define ATTN_GATE 1
 #endif
 #ifndef ATTN_QKNORM
-#define ATTN_QKNORM 1        // 1: rms over the head * qn / kn before RoPE (Qwen3); 0: RoPE only (Llama)
+#define ATTN_QKNORM 1        // 1: rms over the head * qn / kn (Qwen3); 0: RoPE only (Llama)
+#endif
+#ifndef ATTN_QKNORM_POST
+#define ATTN_QKNORM_POST 0   // 1: the norm weight multiplies AFTER RoPE (HunYuan); 0: before (Qwen3)
+#endif
+#ifndef ATTN_EPS
+#define ATTN_EPS 1e-6f       // the qk RMSNorm's epsilon (the model's rms_norm_eps)
+#endif
+#if ATTN_QKNORM_POST && !ATTN_QKNORM
+#error "ATTN_QKNORM_POST needs ATTN_QKNORM"
 #endif
 static constexpr unsigned kNH = ATTN_NH;
 static constexpr unsigned kKVH = ATTN_KVH;
@@ -74,7 +87,8 @@ static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *_
   pb[3] = 0;
 }
 
-// x (fp32[HD]) -> [rms_HD * w] -> rope over [0, ROT) -> dst (fp32[HD])
+// x (fp32[HD]) -> [rms_HD * w] -> rope over [0, ROT) -> dst (fp32[HD]); with ATTN_QKNORM_POST
+// the * w moves after the rotation.
 __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const bfloat16 *__restrict w,
                              const float *__restrict cs, float *__restrict dst) {
 #if !ATTN_QKNORM
@@ -88,15 +102,19 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
   }
-  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + 1e-6f);
+  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + ATTN_EPS);
   const bfloat16 ih = (bfloat16)inv;
   const bfloat16 il = (bfloat16)(inv - (float)ih);
   for (unsigned j = 0; j < kHD; j += kV) {
     accf32 t = aie::zeros<accfloat, kV>();
     t = mac_vs(t, aie::load_v<kV>(x + j), ih, il);
+#if ATTN_QKNORM_POST
+    aie::store_v(dst + j, t.template to_vector<float>());
+#else
     accf32 u = aie::zeros<accfloat, kV>();
     u = mac_vv(u, t.template to_vector<float>(), aie::load_v<kV>(w + j));
     aie::store_v(dst + j, u.template to_vector<float>());
+#endif
   }
 #endif
   // rope on dims [0, ROT): pairs (a = dst[j], b = dst[j + ROT/2]); cs = [cos ROT/2 | sin ROT/2]
@@ -108,6 +126,14 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
     aie::store_v(dst + j, fsub32(fmul32(a, c), fmul32(b, s)));
     aie::store_v(dst + kRot / 2 + j, fadd32(fmul32(b, c), fmul32(a, s)));
   }
+#if ATTN_QKNORM_POST
+  // the whole head, not just [0, ROT): the unrotated tail is scaled too
+  for (unsigned j = 0; j < kHD; j += kV) {
+    accf32 u = aie::zeros<accfloat, kV>();
+    u = mac_vv(u, aie::load_v<kV>(dst + j), aie::load_v<kV>(w + j));
+    aie::store_v(dst + j, u.template to_vector<float>());
+  }
+#endif
 }
 
 static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict dst) {

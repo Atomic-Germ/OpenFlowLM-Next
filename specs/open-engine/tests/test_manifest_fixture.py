@@ -7,7 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from make_fixtures import FIXTURE, FIXTURE_G3, FIXTURE_Q3, fixture_manifest, fixture_manifest_g3, fixture_manifest_q3
+from make_fixtures import (FIXTURE, FIXTURE_G3, FIXTURE_HY, FIXTURE_Q3, fixture_manifest,
+                           fixture_manifest_g3, fixture_manifest_hy, fixture_manifest_q3)
 
 
 def test_fixture_is_current():
@@ -25,3 +26,8 @@ def test_gemma_fixture_is_current(monkeypatch):
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")      # until OPEN-FAMILY-GEMMA3's points are in the catalogue
     assert FIXTURE_G3.is_file(), "run make_fixtures.py"
     assert json.loads(FIXTURE_G3.read_text(encoding="utf-8")) == fixture_manifest_g3(), "fixtures/manifest_gemma3_4b.json is stale"
+
+
+def test_hunyuan_fixture_is_current():
+    assert FIXTURE_HY.is_file(), "run make_fixtures.py"
+    assert json.loads(FIXTURE_HY.read_text(encoding="utf-8")) == fixture_manifest_hy(), "fixtures/manifest_hy_mt2_7b.json is stale"

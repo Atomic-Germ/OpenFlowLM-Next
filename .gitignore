@@ -1,6 +1,8 @@
 build
 build_*/
 .vscode
+.codegraph/
+*.egg-info/
 __pycache__
 _site
 .jekyll-metadata
@@ -21,8 +23,9 @@ tmp
 # shipped pre-built in the distributed package only.
 src/xclbins/BERT-h*/
 
-# Claude Code planning docs
-.claude/plans/
+# Claude Code: personal, not shared guidance (AGENTS.md is the shared doc)
+.claude/
+CLAUDE.md
 
 # open_kernels build outputs and generated fixtures
 open_kernels/designs/*/build*/

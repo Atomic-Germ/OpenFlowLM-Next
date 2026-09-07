@@ -165,7 +165,8 @@ def main() -> int:
     types = list(spec.layer_types[:nl])
     q = Q4NX(md / "model.q4nx")
     q.hidden = spec.hidden
-    tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen3": 151644, "llama3": 128000, "gemma3": 2}[spec.family]
+    tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen3": 151644, "llama3": 128000,
+                                               "gemma3": 2, "hunyuan": 127958}[spec.family]
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:

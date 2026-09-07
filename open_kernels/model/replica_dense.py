@@ -7,7 +7,9 @@ or the packing's, not a difference of source weights:
 
   * x = rms(res) * ln_w; q k v projections; q/k RMSNorm over the head with the
     stored weights; full RoPE (rotary dim = head dim, half-split pairs, the
-    model's theta); GQA softmax attention over the KV cache; o_proj; residual
+    model's theta); GQA softmax attention over the KV cache; o_proj; residual.
+    HunYuan norms after the rotation instead (recipes.dense.QKNORM_POST_ROPE),
+    which is attn.h's ATTN_QKNORM_POST
   * post-attention norm; silu(gate) * up @ down; residual
   * final norm, then the q4_1 lm_head
 
@@ -47,6 +49,7 @@ def rope(t, p, rot, theta, inv_freq=None):
 
 def dense_decode(m, spec, layer, x_res, K, V, pos):
     """One token through a dense layer. Returns (residual, K, V)."""
+    from recipes.dense import QKNORM_POST_ROPE
     from recipes.spec import DENSE_LOCAL
     pre = f"model.layers.{layer}."
     hid, nh, kvh, hd, ff = spec.hidden, spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.intermediate
@@ -58,16 +61,19 @@ def dense_decode(m, spec, layer, x_res, K, V, pos):
     Wk = m.matmul_w(pre + "self_attn.k_proj.weight", kvh * hd, hid)
     Wv = m.matmul_w(pre + "self_attn.v_proj.weight", kvh * hd, hid)
     Wo = m.matmul_w(pre + "self_attn.o_proj.weight", hid, nh * hd)
+    post = spec.family in QKNORM_POST_ROPE          # the norm weight multiplies after RoPE
+    q = (x @ Wq.T).reshape(nh, hd).astype(np.float64)
+    k = (x @ Wk.T).reshape(kvh, hd).astype(np.float64)
     if spec.qk_norm:
         qn = m.bf16(pre + "self_attn.q_norm.weight")
         kn = m.bf16(pre + "self_attn.k_norm.weight")
-        q = (rms((x @ Wq.T).reshape(nh, hd), eps) * qn).astype(np.float64)
-        k = (rms((x @ Wk.T).reshape(kvh, hd), eps) * kn).astype(np.float64)
-    else:
-        q = (x @ Wq.T).reshape(nh, hd).astype(np.float64)
-        k = (x @ Wk.T).reshape(kvh, hd).astype(np.float64)
+        q, k = rms(q, eps), rms(k, eps)
+        if not post:
+            q, k = q * qn, k * kn
     v = (x @ Wv.T).reshape(kvh, hd).astype(np.float64)
     q, k = rope(q, pos, spec.rotary_dim, spec.rope_theta, inv), rope(k, pos, spec.rotary_dim, spec.rope_theta, inv)
+    if spec.qk_norm and post:
+        q, k = q * qn, k * kn
     K = np.concatenate([K, k[None]], 0)
     V = np.concatenate([V, v[None]], 0)
     o = np.zeros((nh, hd))
