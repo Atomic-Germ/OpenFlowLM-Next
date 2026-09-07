@@ -1,4 +1,5 @@
-# open_qwen36 — Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3 and HunYuan dense on open XDNA2 kernels
+# open_qwen36 — Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense
+# and IBM Granite on open XDNA2 kernels
 
 The open replacement for the closed `qwen3_6_moe_npu` engine. It sits behind
 the app's `causal_lm` seam ([engine.hpp](engine.hpp)), so the tokenizer, chat
@@ -237,6 +238,60 @@ python src\open_qwen36\chat.py "Translate the following text into French. Note t
 Translation quality under q4_1 is a separate question from kernel correctness:
 the correlations above prove the kernels, not the quantization. Score real
 FLORES pairs before trusting the model for work.
+
+## A sixth family: IBM Granite (2026-09-06)
+
+`granite-4.2-3b` is Llama geometry at **head_dim 64 / hidden 2560** -- the point
+every shipped FastFlowLM design refuses, because head_dim is intrinsic to RoPE
+and cannot be padded. Nothing in the design changes for it: `ATTN_HD` / `ATTN_NH`
+are compile-time macros and `attn.h` already carried hd 64's
+`kScale = 0.125f`. So the family is `spec.py`, `families.py`, a spec JSON and a
+test.
+
+What is new is arithmetic that lives outside `ModelSpec`. Granite is Llama plus
+four scalar multipliers -- `attention_multiplier` (which replaces the implicit
+`hd**-0.5`), `embedding_multiplier`, `residual_multiplier` and `logits_scaling`
+-- and the recipe expresses none of them. It does not have to, because **all
+four fold exactly into the weights at conversion time**, and folding into an
+already-quantized tensor is lossless: a Q4_1 block is `w = code*d + m`, so
+scaling by `c` scales `d` and `m` and leaves every 4-bit code untouched. For the
+3B the one non-unit factor is `attention_multiplier = 0.015625` at hd 64, giving
+`q_proj *= 0.125` -- a power of two, so even the `d`/`m` scaling is an exponent
+shift.
+
+After that fold the model uses exactly the `1/sqrt(HD)` `attn.h` hard-codes,
+which is the whole reason the dense recipe is legal for it. So the fold is not
+optional and the recipe refuses without it, twice: `spec.py` rejects a
+container whose `attention_multiplier` is not `head_dim ** -0.5`, and rejects
+one that does not state it at all (transformers defaults the key to 1.0, so an
+absent key is indistinguishable from an unfolded model, and 1.0 against 0.125 is
+a silent factor of eight on every score). `dense.hf_config_check` repeats the
+check at engine load, which is what catches a `model.q4nx` swapped under an
+already-built kernel set.
+
+FLM ships no NPU2 container for it. Convert `ibm-granite/granite-4.2-3b-GGUF`
+with `utilities/q4nx-build` (`ModelArch.GRANITE`), which applies the four folds
+and writes the post-fold multipliers into the deployed `config.json`; install it
+with `flm-add ... --family granite`.
+
+```
+python utilities/q4nx-build/convert.py -i granite-4.2-3b-Q8_0.gguf -o %USERPROFILE%\.flm\models\Granite-4.2-3B-NPU2 -s ibm-granite/granite-4.2-3b
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Granite-4.2-3B-NPU2     # WSL
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Granite-4.2-3B-NPU2 --kernels src\xclbins\Granite-4.2-3B-NPU2\open_kernels
+```
+
+| check (Granite-4.2-3B, Strix, Windows + XRT) | result |
+|---|---|
+| 4-layer slice, 2 greedy tokens, harness vs the fp64 replica | logits corr 0.999998 / 0.999990, same argmax (38457) and top-5, every layer's residual corr 0.999990-0.999999 |
+| the same through the engine | identical numbers; request 2 reproduces request 1 |
+| all 40 layers, a Norwegian prompt, through the app | coherent, reasoning first, 40/40 layers resident in 11 s |
+| speed | see the next section -- for Granite the honest answer needs a context position attached |
+
+**Known rough edge:** the reasoning block is not parsed. Granite carries
+`<think>` / `</think>` as real tokens (100274 / 100275) and its metadata sets
+`think: true`, but `Granite` implements no `parse_stream_content`, so the chain
+of thought prints raw and only the closing tag appears. Cosmetic, and separate
+from the kernel path.
 
 ## Standalone
 
