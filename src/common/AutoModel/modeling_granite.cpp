@@ -67,6 +67,12 @@ std::string Granite::apply_chat_template(nlohmann::ordered_json& messages,
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
+    // granite-4.2's own chat_template.jinja branches on `tools` (it emits a
+    // <tools> block and changes the system turn when the list is non-empty), so
+    // dropping the argument here would not fail -- it would silently produce a
+    // prompt that never tells the model the tools exist.
+    if (!tools.empty())
+        inputs.tools = tools;
     return this->chat_tmpl->apply(inputs);
 }
 
@@ -78,8 +84,8 @@ bool Granite::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
         header_print("WARNING", "No messages or prompt provided");
         return false;
     }
-    if (!input.messages.empty()) {
-        templated_text = this->apply_chat_template(input.messages);
+    if (!input.messages.empty()) {   // already formatted messages, usually from the REST API
+        templated_text = this->apply_chat_template(input.messages, input.tools);
     }
     else if (!input.prompt.empty()) {
         nlohmann::ordered_json messages;
