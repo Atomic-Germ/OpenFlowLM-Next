@@ -41,30 +41,53 @@ Two consequences worth knowing before you start one:
 ## Why the default (32k) may not finish
 
 Prefill costs roughly what a decode step costs *at that position*, so it is
-**quadratic in the prompt length**, not linear. On a design whose decode step
-grows by `s` ms per position, prefilling N tokens costs about `N * (base + s*N/2)`.
+**quadratic in the prompt length**, not linear. On a design whose decode step is
+`step(n) = base + s*n`, prefilling N tokens costs about `N * (base + s*N/2)`.
 
-Worked example, measured on Granite 4.2 3B on this machine:
-
-| decode slope | step @ 32k | 32k prefill | the 32 generated tokens |
-|---:|---:|---:|---:|
-| 1.98 ms/position | 65 s | **~295 h** | 35 min |
-| 0.023 ms/position | 0.81 s | ~3.9 h | 26 s |
-
-A 32k run on the first of those was ~1% into its first stage after three hours,
-with the NPU at 100% throughout. It was not hung; it was doing what it was told.
-
-**Measure your model's slope before picking a file.** Two decode steps at two
-positions give it: `s = (step(P) - step(0)) / P`. Then
+That is measured, not assumed. Granite 4.2 3B on this machine, `bench-1k.json`,
+one stage, 1005 prompt tokens:
 
 ```
+TTFT: 1216.24s, Prefill Speed: 0.82632 tokens/s, Decoding Speed: 0.41529 tokens/s
+```
+
+Fitting `s` from the **prefill** alone gives 2.289 ms/position, which predicts a
+decode rate of **0.41719 tok/s** against the **0.41529** measured in the same
+run -- a 0.5% error on an independent series. A flat 52 ms/token prefill, which
+is what the per-token cost looks like on a short prompt, would have put those
+1005 tokens at 52 seconds rather than 1216.
+
+Projected from that fit, and from the same fit taken on a build whose attention
+work is done (0.023 ms/position):
+
+| decode slope | step @ 1k | step @ 32k | 1k stage | 32k stage |
+|---:|---:|---:|---:|---:|
+| 2.289 ms/position | 2.40 s | 75 s | 20 min *(measured)* | **~342 h** |
+| 0.023 ms/position | 0.070 s | 0.81 s | ~1 min | ~3.9 h |
+
+A 32k run on the first was ~1% into its first stage after three hours, NPU at
+100% throughout. It was not hung.
+
+## Estimating it for your own model
+
+Two decode steps at two positions give the slope, and the rest follows:
+
+```
+s          = (step(P) - step(0)) / P
 prefill(N) ~= N * (step(0) + s*N/2)
 stage(N)   ~= prefill(N) + 32 * step(N)
 ```
 
-For the 1.98 ms/position case above that puts `bench-1k` at ~18 minutes and
-`bench-8k` at about a day; for the 0.023 ms/position case, ~1 minute and
-~35 minutes.
+Rough cost of each file at the two slopes above:
+
+| file | stages | at 2.289 ms/pos | at 0.023 ms/pos |
+|---|---|---:|---:|
+| `bench-1k.json` | 1k | 20 min | ~1 min |
+| `bench-2k.json` | 2k, 1k | ~1.7 h | ~4 min |
+| `bench-4k.json` | 4k, 2k, 1k | ~7 h | ~11 min |
+| `bench-8k.json` | 8k … 1k | ~28 h | ~40 min |
+| `bench-32k.json` | 32k … 1k | ~14 days | ~5 h |
+| `bench-1k-x5.json` | 1k, five times | ~1.7 h | ~5 min |
 
 ## Reading the result
 
