@@ -194,8 +194,9 @@ def test_an_all_q8_spec_is_not_caught_by_that_refusal(unvalidated):
 # is the one that overflows 16 KB of program memory with both flag levers spent
 # (.claude/plans/q8m-hw-results.md section 2). The recipe layer encodes that hardware fact:
 # `catalogue.MIXED_CORE_FITS` lists the (family, hidden) widths whose mixed core has been
-# built, and `load.narrow_to_buildable` puts `linear_out` back to q4_1 at any other width
-# rather than handing the user an export that dies 60 s into aiecc.
+# built, and `load.narrow_to_buildable` warns that q8 is not implemented yet at any other
+# width and puts `linear_out` back to q4_1 there, rather than handing the user an export
+# that dies 60 s into aiecc.
 
 Q35_CHUNKS = {"self_attn.q_proj.weight": 5120, "self_attn.k_proj.weight": 5120,
               "self_attn.v_proj.weight": 5120, "self_attn.o_proj.weight": 5120,
@@ -242,17 +243,19 @@ def test_the_9b_2b_and_0p8b_keep_the_containers_q8_out_projection(tmp_path):
         assert spec.quant == {"linear_out": "q8"}, size
 
 
-def test_the_narrowing_note_names_the_width_the_reason_and_the_fallbacks_cost(tmp_path, capsys):
-    """A silent downgrade is worse than no downgrade: the note has to say which width, why
-    (program memory), and what it costs (0.999682, OPEN-QUANT-Q8's re-quantizing fallback)."""
+def test_the_narrowing_warns_that_native_q8_is_not_implemented_yet_at_this_width(tmp_path, capsys):
+    """A silent downgrade is worse than no downgrade, and a permanent-sounding one is worse than
+    an honest one: this width is missing a kernel nobody has built yet, not one that cannot
+    exist. One short line says so, and names the width, the reason and what it fell back to.
+    What the fallback costs (0.999682) is a spec fact, not something to spend a warning on."""
     from recipes.load import spec_from_model_dir
     spec_from_model_dir(_container(tmp_path, "4b"))
     note = capsys.readouterr().err
-    assert "hidden 2560" in note
-    assert "linear_out narrowed to q4_1" in note
+    assert "warning" in note
+    assert "not implemented yet" in note
+    assert "2560" in note
+    assert "q4_1" in note
     assert "program memory" in note
-    assert "0.999682" in note
-    assert "q8m-hw-results.md" in note
     assert len([line for line in note.strip().split("\n") if line.strip()]) == 1
 
 
