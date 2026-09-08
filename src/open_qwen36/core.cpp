@@ -51,6 +51,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     auto j = nlohmann::json::parse(cf, nullptr, false);
     if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
     man_.check_model(j, md.filename().string());
+    // The VLM bits: the image token the app expands per merged patch, and how the
+    // rotary pairs split over (t, h, w). Absent on text-only models.
+    image_token_id_ = j.value("image_token_id", -1);
+    if (j.contains("rope_parameters") && j["rope_parameters"].is_object()) {
+        const auto& rp = j["rope_parameters"];
+        if (rp.contains("mrope_section") && rp["mrope_section"].is_array() && rp["mrope_section"].size() == 3) {
+            size_t sum = 0;
+            for (const auto& v : rp["mrope_section"]) { mrope_section_.push_back(v.get<int>()); sum += v.get<int>(); }
+            mrope_interleaved_ = rp.value("mrope_interleaved", false);
+            if (sum != man_.rotary_dim / 2)
+                throw std::runtime_error("open_qwen36: mrope_section sums to " + std::to_string(sum) + ", not the " +
+                                         std::to_string(man_.rotary_dim / 2) + " rotary pairs");
+        }
+    }
     int total = static_cast<int>(man_.layers.size());
     nl_ = cfg_.num_layers > 0 && cfg_.num_layers < total ? cfg_.num_layers : total;
     types_.resize(nl_);
@@ -185,6 +199,18 @@ void Core::reset() {
         std::memset(state_[l].map<uint8_t*>(), 0, lt.state_bytes);
         state_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
     }
+    // A request with an image rewrote the position records of the rows it used
+    // (write_record); the next request expects row p to say position p again.
+    if (ptab_dirty_) {
+        for (const auto& [name, rg] : man_.per_row_globals) {
+            xrt::bo& bo = globals_.at(name);
+            pools::build_ptab(man_, rg, ptab_dirty_, bo.map<uint8_t*>());
+            bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, ptab_dirty_ * rg.per_row, 0);
+        }
+        ptab_dirty_ = 0;
+    }
+    mrope_on_ = false;
+    mrope_pos_ = 0;
     pos_ = 0;
 }
 
@@ -230,18 +256,52 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     timing_.route_ms += ms_since(t0);
 }
 
-void Core::step(int token, bool want_logits) {
+void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
+
+void Core::step_embed(const float* x, bool want_logits, const int64_t mpos[3]) {
+    if (!has_mrope()) throw std::runtime_error("open_qwen36: step_embed on a model without M-RoPE");
+    step_impl(-1, x, want_logits, mpos);
+}
+
+void Core::mrope_begin() {
+    if (mrope_on_) return;
+    mrope_on_ = true;
+    mrope_pos_ = pos_;
+}
+
+void Core::write_record(size_t row, const double pos[3]) {
+    for (const auto& [name, rg] : man_.per_row_globals) {
+        xrt::bo& bo = globals_.at(name);
+        uint8_t* r = bo.map<uint8_t*>() + row * rg.per_row;
+        pools::build_ptab_record(man_, rg, row, pos, mrope_section_, mrope_interleaved_, r);
+        bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, rg.per_row, row * rg.per_row);
+    }
+    if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
+}
+
+void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
     if (static_cast<size_t>(pos_) >= cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
                                  std::to_string(cfg_.max_ctx));
-    if (token < 0 || static_cast<size_t>(token) >= man_.vocab) throw std::runtime_error("open_qwen36: token id out of range");
+    if (!x && (token < 0 || static_cast<size_t>(token) >= man_.vocab)) throw std::runtime_error("open_qwen36: token id out of range");
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
 
     xrt::bo& xres = buffer("xres", 0);
-    file_->bf16_row(man_.embed_tensor, static_cast<size_t>(token), man_.hidden, xres.map<float*>());
+    if (x)
+        std::memcpy(xres.map<float*>(), x, man_.hidden * 4);
+    else
+        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(token), man_.hidden, xres.map<float*>());
     xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
+    if (mpos) {
+        const double p3[3] = {static_cast<double>(mpos[0]), static_cast<double>(mpos[1]), static_cast<double>(mpos[2])};
+        write_record(static_cast<size_t>(pos_), p3);
+    } else if (mrope_on_) {
+        const double cpos = static_cast<double>(mrope_pos_);
+        const double p3[3] = {cpos, cpos, cpos};
+        write_record(static_cast<size_t>(pos_), p3);
+    }
     for (auto& [name, k] : kerns_) {
         if (k.patch != "attnpos") continue;
         stream_patch::attn_apply(k.iw(), k.attn, static_cast<uint64_t>(pos_), k.geom);
@@ -268,6 +328,7 @@ void Core::step(int token, bool want_logits) {
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
+    if (!mpos && mrope_on_) ++mrope_pos_;      // a text token after an image: (c, c, c), then c + 1
     timing_.total_ms = ms_since(t0);
 }
 
@@ -279,6 +340,8 @@ void Core::seek(int pos) {
 Snapshot Core::checkpoint() const {
     Snapshot s;
     s.pos = pos_;
+    s.mrope_pos = mrope_pos_;
+    s.mrope_on = mrope_on_;
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
         xrt::bo& bo = const_cast<xrt::bo&>(state_[l]);
@@ -318,6 +381,8 @@ void Core::restore(const Snapshot& s) {
         }
     }
     pos_ = s.pos;
+    mrope_pos_ = s.mrope_pos;
+    mrope_on_ = s.mrope_on;
 }
 
 void Core::kv_row(int layer, int row, bool value, uint16_t* out) {

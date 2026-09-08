@@ -988,3 +988,51 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
+
+### OPEN-VISION-VIT-REF: the vision tower, reference and host port
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
+
+The shipped `vision_weight.q4nx` -- every linear pre-tiled for the closed
+engine's `vision_mm` as `[n/64][k/256][64][256]` bf16, zero-padded -- shall be
+un-tiled and run as Qwen3-VL's vision tower: patch embed + bilinearly
+interpolated positions, 2-D RoPE attention over the whole image, GELU-tanh
+MLP, the 2x2 merger. The numpy forward matches transformers'
+`Qwen3VLVisionModel` loaded with the same weights; the host C++ port matches the
+numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
+
+**Acceptance criteria:**
+- numpy vs transformers on a random 8 x 8 (unit) / 16 x 16 grid: corr > 0.99999, max error < 1e-3 of max.
+- The patch order is merge-block-major; a 48 x 48 grid samples the position table exactly.
+- `vit_test.exe <model_dir> <fixture>`: corr > 0.99999, max error < 1e-3 of max against `replica_vit.py --fixture`.
+
+**Result 2026-09-08 (35B tower, 27 blocks):** numpy vs transformers corr
+1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
+patches in 1.02 s (numpy 11.5 s).
+
+### OPEN-VISION-EMBED: the open engine takes an image payload
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
+**Test category:** e2e (`utilities/flm-test --vision --model <vlm>` through `flm serve` with the open engine)
+
+`Engine::prefill(ids, payload)` with an image payload shall run the vision
+tower on each image and step each merged patch's row through the model as a
+hidden vector (`Core::step_embed`) at its M-RoPE position (t, h, w) = (c, c +
+row, c + col), text tokens after an image continuing from the same counter
+(`rope_parameters.mrope_section`, interleaved), later prefill chunks and
+generated tokens inheriting it; a request without images is the unchanged
+text path. The model classes read their preprocessing constants from
+`config.json` and no longer require the closed engine for images.
+
+**Acceptance criteria (e2e):**
+- `flm-test --vision --model qwen3.6-moe:35b` (and a Qwen3.5 VL size) passes on the open engine with the answer on the fixed test image matching the closed engine's.
+- A text-only request after an image request answers as before (the position records are restored on `clear_context`).
+
+**Result 2026-09-08:** runs end to end through `flm serve` on Qwen3.5-0.8B and
+on the 35B (tower resident in 2.2 s, a 30 x 44-patch image -> 330 tokens in
+14.8 s on the CPU, prefill 516 tokens, the answer describes the image
+correctly, follow-up turns continue from the same (t, h, w) counter). The
+suite's other two images are dropped by the app's own reader before either
+engine. **The closed-engine comparison did not run**: the closed 1.0.4 DLL
+segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
+so on this box only the open engine can serve these files. Log:
+`.claude/plans/issue-16-hw-results.md`.

@@ -547,7 +547,12 @@ on a memory-starved box, not the kernels.
   position 2048 costs about what a step at position 0 does (Qwen3-4B: 5050 ->
   258 ms). A family joins by measurement (`recipes/attnknobs.py`); the 35B's
   kernels at the default knobs are byte-identical to what shipped.
-- **Vision.** The model is a VLM; images still need the closed engine.
+- **Vision -- coded, not yet run end to end.** The vision tower runs on the host
+  (`vision/vit.cpp`, checked against transformers with the shipped weights to
+  4e-6) and its rows enter the model as embedding vectors at their M-RoPE
+  positions (`Core::step_embed`). The app's Qwen3.6 and Qwen3.5 model classes no
+  longer need the closed engine for images. `flm-test --vision` on the open
+  engine is the acceptance (OPEN-VISION-EMBED).
 - **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
   of work; this reader is ~150 lines and will go with it. The chunk format is read
   per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes

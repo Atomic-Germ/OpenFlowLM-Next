@@ -37,6 +37,13 @@ private:
     
     int image_pre_resize = 0;
 
+    /// The image preprocessing constants (config.json vision_config), read at
+    /// load_model so preprocess_image is the same code on either engine.
+    struct {
+        unsigned patch = 0, merge = 0, spatial_merge = 0, shortest_edge = 0, longest_edge = 0, temporal = 0;
+        float rescale = 0, mean = 0, stdv = 0;
+    } vision_;
+
     int debug_count= 0;
     void smart_resize(
     int height, int width,

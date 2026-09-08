@@ -42,7 +42,15 @@ target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
 add_executable(manifest_test manifest_test.cpp manifest.cpp)
 target_include_directories(manifest_test PRIVATE ${_inc})
 
-foreach(t open_qwen36_cli manifest_test)
+# vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
+add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
+target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+foreach(t open_qwen36_cli manifest_test vit_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)

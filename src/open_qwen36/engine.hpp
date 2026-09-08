@@ -3,10 +3,11 @@
 ///        `causal_lm` seam, backed by open_qwen36::Core (the open kernels).
 /// \note Everything above this seam — tokenizer, chat template, sampler,
 ///       server, prompt cache — is the app's own open code and drives this
-///       exactly as it drives the closed engine. What the closed engine still
-///       does that this does not: the vision encoder (an image payload is
-///       refused), and batched prefill (prompts are decoded one token at a
-///       time, which is exact but ~0.3 s per prompt token on the full model).
+///       exactly as it drives the closed engine. Images go through the vision
+///       tower on the host CPU (vision/vit.hpp) and enter the model as embedding
+///       vectors at their M-RoPE positions; what the closed engine still does
+///       that this does not is batched prefill (prompts are decoded one token at
+///       a time, which is exact but ~0.12 s per prompt token on the full model).
 #pragma once
 
 #include <memory>
@@ -18,6 +19,7 @@
 #include "device_runtime.hpp"
 #include "lm_config.hpp"
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/vision/vit.hpp"
 
 namespace open_qwen36 {
 
@@ -64,6 +66,10 @@ private:
     bool has_snapshot_ = false;
     std::vector<bf16> logits_;
     bool poisoned_ = false;
+    vision::VitConfig vcfg_;
+    std::unique_ptr<vision::VitWeights> vit_;   ///< loaded on the first image (~0.85 GB, ~3 s)
+    void ensure_vit();
+    template <class Payload> buffer<bf16> prefill_images(std::vector<int>& ids, const Payload& p);
 
     buffer<bf16> logits_view();
     /// A kernel that timed out or aborted leaves the hardware context dead:

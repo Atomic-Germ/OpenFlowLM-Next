@@ -55,6 +55,8 @@ struct CoreConfig {
 /// Everything a request needs to be resumed later (the app's checkpoint/restore).
 struct Snapshot {
     int pos = 0;
+    int64_t mrope_pos = 0;                     ///< the (t, h, w) counter (M-RoPE, once a request has an image)
+    bool mrope_on = false;
     std::vector<std::vector<uint8_t>> states;  ///< per linear layer: the state BO
     std::vector<std::vector<uint8_t>> kv;      ///< per attention layer: rows [0, pos)
 };
@@ -82,7 +84,24 @@ public:
     /// One decode step for `token` at the current position. Logits (f32,
     /// vocab) are computed only when asked for; read them with logits().
     void step(int token, bool want_logits);
+    /// One step whose input is a hidden vector instead of a token -- an image token's
+    /// embedding from the vision tower -- at the M-RoPE position `mpos` = (t, h, w). The
+    /// (t, h, w) counter is not advanced; the caller does that per image (mrope_advance).
+    void step_embed(const float* x, bool want_logits, const int64_t mpos[3]);
     const std::vector<float>& logits() const { return logits_host_; }
+
+    /// M-RoPE (Qwen3-VL, config.json rope_parameters.mrope_section): once a request has
+    /// an image, every later token's rotary record is written from a (t, h, w) counter
+    /// rather than its KV row -- a text token takes (c, c, c) and advances c by one, an
+    /// image's tokens take (c, c + row, c + col) and the image advances c by
+    /// max(rows, cols). Until mrope_begin() the prebuilt records (row p at position p)
+    /// serve, which is the text-only path unchanged.
+    bool has_mrope() const { return mrope_section_.size() == 3; }
+    void mrope_begin();
+    void mrope_advance(int64_t n) { mrope_pos_ += n; }
+    int64_t mrope_pos() const { return mrope_pos_; }
+    /// config.json's image_token_id (-1 when the model has none).
+    int image_token_id() const { return image_token_id_; }
 
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
@@ -131,6 +150,12 @@ private:
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;
+    std::vector<int> mrope_section_;          ///< empty: no M-RoPE (every model but the VLMs)
+    bool mrope_interleaved_ = false;
+    int image_token_id_ = -1;
+    bool mrope_on_ = false;
+    int64_t mrope_pos_ = 0;
+    size_t ptab_dirty_ = 0;                    ///< rows [0, dirty) hold per-request records; reset() restores them
     std::vector<float> logits_host_;
     StepTiming timing_;
 
@@ -138,6 +163,9 @@ private:
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
+    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos);
+    /// Write KV row `row`'s position record from (t, h, w) into every position table.
+    void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);
     void route(Kern& k, int layer, uint64_t act_off);
     void log(const std::string& s) const;

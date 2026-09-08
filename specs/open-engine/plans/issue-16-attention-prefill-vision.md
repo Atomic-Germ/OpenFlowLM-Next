@@ -13,16 +13,15 @@ every family measured, a decode step's cost stays flat in the context position
 enters the fast path by measurement (`recipes/attnknobs.py: FAST_ATTENTION`).
 
 **New:**
-- OPEN-GEMM-Q4 -- a tiled bf16 matmul over q4_1 pool chunks dequantized on the
-  core (`designs/gemm_q4`), exact to the bf16-rounded reference; the prefill
-  experiment's kernel and the batched prefill's building block.
 - OPEN-VISION-VIT-REF -- the vision tower's reference (`model/replica_vit.py`,
   transformers' Qwen3VLVisionModel with the shipped weights) and the host C++
   port that matches it (`src/open_qwen36/vision`).
 - OPEN-VISION-EMBED -- the open engine takes an image payload: the tower's
   rows enter as embedding vectors at their M-RoPE positions.
-- OPEN-PREFILL-BATCH -- (not yet implemented) a multi-token prefill dispatch
-  producing the same logits as N sequential steps.
+
+**Not in this change:** batched prefill. PR #39 (vegah) carries it as a
+whole-array GEMM under issue #32; the gemm_q4 experiment that measured 1.2
+TFLOPS on Qwen3-4B's shapes stays on the fork branch as a reference.
 
 **Extended acceptance:** OPEN-BUILD-CACHE -- `ATTN_FAST` is a probe variable
 and every family module exposes `probe_env`.
