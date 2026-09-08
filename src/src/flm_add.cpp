@@ -600,6 +600,34 @@ static void register_entry(const fs::path& user_list, const std::string& tag,
     save_json(user_list, registry);
 }
 
+// The app's file verification (ModelDownloader::verify_and_clean_files) reads a
+// SEPARATE model_info.json keyed by tag (not model_list.json). Without an entry
+// here, `flm serve <tag>` throws "key '<tag>' not found" during verification.
+// Build a minimal but valid entry: one object per installed file with its path
+// and size, and the LFS sha256 so the advisory hash check agrees.
+static void register_model_info(const fs::path& user_list, const std::string& tag,
+                                const std::vector<std::string>& files, const fs::path& model_dir) {
+    fs::path info_path = user_list.parent_path() / "model_info.json";
+    nlohmann::json info;
+    if (fs::is_regular_file(info_path)) info = load_json(info_path);
+    nlohmann::json files_arr = nlohmann::json::array();
+    for (const auto& fname : files) {
+        fs::path p = model_dir / fname;
+        if (!fs::is_regular_file(p)) continue;
+        uint64_t sz = fs::file_size(p);
+        std::string sha = download_utils::calculate_file_sha256(p.string());
+        files_arr.push_back(nlohmann::json::object({
+            {"type", "file"},
+            {"oid", sha},
+            {"size", sz},
+            {"lfs", nlohmann::json::object({{"oid", sha}, {"size", sz}})},
+            {"path", fname},
+        }));
+    }
+    info[tag] = files_arr;
+    save_json(info_path, info);
+}
+
 // ------------------------------------------------------------------ open-kernel linking
 
 // Find the family open_kernels source directory shipped with the app.
@@ -739,6 +767,9 @@ int run(const program_args_t& a) {
 
     register_entry(user_list, tag, entry, system_reg);
     log_("[INFO] Registered tag '" + tag + "' in " + user_list.string());
+    register_model_info(user_list, tag, files, target);
+    log_("[INFO] Registered file metadata for '" + tag + "' in " +
+         user_list.parent_path().string() + "/model_info.json");
 
     if (!a.add_no_xclbin) {
         fs::path xroot = system_xclbin_root();
