@@ -11,6 +11,7 @@
 #include "open_qwen36/manifest.hpp"
 
 using open_qwen36::Manifest;
+using open_qwen36::PackOp;
 using nlohmann::json;
 
 namespace {
@@ -142,6 +143,35 @@ int main(int argc, char** argv) {
             for (auto& o : lt["pack"]["pool"])
                 if (o["op"] == "std_perm") o.erase("nch");
     });
+    // OPEN-QUANT-Q8: `q8_perm` is a plan entry like any other -- the parser takes it and
+    // holds it to the same fields, so a q8 projection needs no new manifest block.
+    {
+        std::ifstream qf(argv[1]);
+        json qj = json::parse(qf);
+        for (auto& lt : qj["layer_types"])
+            for (auto& o : lt["pack"]["pool"])
+                if (o["op"] == "std_perm") {
+                    o["op"] = "q8_perm";
+                    o["nch"] = 2 * o["nch"].get<uint64_t>();
+                }
+        try {
+            Manifest q = Manifest::parse(qj, "q8");
+            bool any = false;
+            for (const auto& kv : q.layer_types)
+                for (const auto& o : kv.second.pool) any = any || o.op == "q8_perm";
+            check(any, "a q8_perm pool op parses");
+        } catch (const std::exception& e) {
+            check(false, std::string("a q8_perm pool op parses: ") + e.what());
+        }
+    }
+    refused_manifest(argv[1], "in_dim", "a q8_perm without in_dim is refused at load", [](json& j) {
+        for (auto& lt : j["layer_types"])
+            for (auto& o : lt["pack"]["pool"])
+                if (o["op"] == "std_perm") {
+                    o["op"] = "q8_perm";
+                    o.erase("in_dim");
+                }
+    });
     refused_manifest(argv[1], "chunk_bytes", "an lm_head op without chunk_bytes is refused at load",
                      [](json& j) { j["pack"]["lm_head"]["ops"][0].erase("chunk_bytes"); });
     refused_manifest(argv[1], "moeroute2 on kernel", "a moeroute2 step on an unpatched kernel is refused at load",
@@ -210,6 +240,70 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             check(false, std::string("hunyuan fixture: ") + e.what());
         }
+    }
+    // ---- Qwen3.5 dense: linear-attention layers with a ONE-step program and no MoE block
+    if (argc >= 6) {
+        try {
+            Manifest q = Manifest::load(argv[5]);
+            check(q.family == "qwen35" && q.layers.size() == 32 && q.layers[0] == "linear_attention" &&
+                      q.layers[3] == "full_attention",
+                  "qwen35: 32 layers, attention every 4th");
+            check(!q.has_moe, "qwen35: no MoE geometry (the router is gone with the experts)");
+            check(q.hidden == 4096 && q.vocab == 248320 && q.real_vocab == 248070 && q.kv_row == 4096 &&
+                      q.ptab_row == 2048 && q.rotary_dim == 64 && q.lmhead_chunk_bytes == 8704,
+                  "qwen35: layout (4096 hidden, a 2048-byte position record, the q8 head)");
+            const auto& lin = q.layer_types.at("linear_attention");
+            const auto& full = q.layer_types.at("full_attention");
+            check(lin.program.size() == 1 && lin.program[0].op == "run" && lin.program[0].kernel == "lx" &&
+                      lin.program[0].args.size() == 5 && lin.state_kind == "linear",
+                  "qwen35: one run per linear layer, a fixed-size state BO");
+            check(full.program.size() == 1 && full.program[0].kernel == "ax" && full.program[0].args.size() == 6 &&
+                      full.program[0].args[5] == "ptab" && full.state_kind == "kv" && full.state_row == 4096,
+                  "qwen35: one run per attention layer, the KV cache");
+            check(q.kernels.at("ax").patch == "attnpos" && q.kernels.at("lx").patch.empty() &&
+                      q.contexts.size() == 4,
+                  "qwen35: attnpos on the attention stream only, four contexts");
+            // the out projection and the two transposes, with the sizes pools::apply needs.
+            // ssm_out_proj is q8 in this container and q4_1 in the 35B's; the plan is the SAME
+            // std_perm either way, because pools.cpp re-quantises a q8 source transparently.
+            const PackOp* rq = nullptr;
+            int transposes = 0;
+            for (const auto& o : lin.consts) {
+                if (o.op == "std_perm") rq = &o;
+                if (o.op == "transpose") ++transposes;
+            }
+            check(rq && rq->tensor == "model.layers.{l}.linear_attn.ssm_out_proj.weight" && rq->nch == 2048 &&
+                      rq->in_dim == 4096 && rq->chunk_bytes == 0,
+                  "qwen35: the q8 out projection goes through std_perm, with no source-format field");
+            check(transposes == 2, "qwen35: alpha and beta come from their bf16 copies through transpose");
+            check(lin.pool.size() == 5 && lin.pool[0].op == "std_perm" && lin.pool[0].in_dim == 4096 &&
+                      lin.pool[2].in_dim == 12288 && full.pool.size() == 8,
+                  "qwen35: the FFN's up | gate | down lead both layer types' pools");
+            bool routed = false;
+            for (const auto& s : lin.program) routed |= s.op == "moeroute2";
+            for (const auto& s : full.program) routed |= s.op == "moeroute2";
+            check(!routed, "qwen35: nothing is routed");
+            check(q.lmhead_ops.size() == 1 && q.lmhead_ops[0].op == "lmhead_q8", "qwen35: the q8 head");
+            json ok = matching_config(q);
+            check(ok["model_type"] == "qwen3_5" && ok["intermediate_size"] == 12288,
+                  "qwen35: the config check names the dense FFN");
+            q.check_model(ok, "qwen35");
+            check(true, "qwen35: a matching config.json is accepted");
+            json bad = ok;
+            bad["intermediate_size"] = 9216;
+            refused(q, bad, "intermediate_size", "qwen35: the 4B's FFN width is refused by name");
+        } catch (const std::exception& e) {
+            check(false, std::string("qwen35 fixture: ") + e.what());
+        }
+        // the out projection's std_perm without nch, and a transpose without rows: named at load
+        refused_manifest(argv[5], "nch", "qwen35: the out projection without nch is refused at load", [](json& j) {
+            for (auto& o : j["layer_types"]["linear_attention"]["pack"]["consts"])
+                if (o["op"] == "std_perm") o.erase("nch");
+        });
+        refused_manifest(argv[5], "rows", "qwen35: a transpose without rows is refused at load", [](json& j) {
+            for (auto& o : j["layer_types"]["linear_attention"]["pack"]["consts"])
+                if (o["op"] == "transpose") o.erase("rows");
+        });
     }
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

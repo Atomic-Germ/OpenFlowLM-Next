@@ -43,6 +43,13 @@ static constexpr unsigned kRowSplit = 4;     // 32-row quarters per 128-row band
 #endif
 static constexpr unsigned kPerCall = LMHEAD_PER_CALL;
 
+// The hidden width. It sizes the activation table this kernel indexes into (gemv_tab.h:
+// 2K bytes of int16 x, then the per-block shifts at +2K), so it is a compile-time knob,
+// not a runtime one. The default is the Qwen3.6-27B's; Qwen3.5 dense passes 4096.
+#ifndef LMHEAD_K
+#define LMHEAD_K 2048
+#endif
+
 // Phase 2 item 5 (2026-09-02): the inner product on the integer matrix unit,
 // like gemv_q4.h. vegah's form (int8 -> bf16 through the accumulator, bf16 x
 // scalar MACs) ran at ~3 GB/s per core against a ~4 GB/s stream; this one is
@@ -53,7 +60,7 @@ static constexpr unsigned kPerCall = LMHEAD_PER_CALL;
 // permutation, unlike the q4 kernel), and per K block:
 //   y[r] += scale[kb][r] * 2^-s[kb] * part[r]   (bf16 hi/lo split)
 // Runtime kt/first, noinline + inline (COMDAT): one body in program memory.
-static constexpr unsigned kK = 2048;
+static constexpr unsigned kK = LMHEAD_K;
 __attribute__((noinline)) inline void gemv_q8_tile(const uint8_t *__restrict tile,
                                                    const uint8_t *__restrict tab,
                                                    unsigned kt, bool first,

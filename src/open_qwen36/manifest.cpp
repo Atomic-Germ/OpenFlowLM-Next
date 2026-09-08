@@ -50,24 +50,30 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.groups = j.value("groups", 0ull);
     p.width = j.value("width", 0ull);
     p.chunk_bytes = j.value("chunk_bytes", 0ull);
+    p.rows = j.value("rows", 0ull);
+    p.cols = j.value("cols", 0ull);
+    p.elem = j.value("elem", 0ull);
+    p.dst_rows = j.value("dst_rows", 0ull);
     // The same fields pools::apply needs, checked here so a bad manifest is named
     // at load rather than surfacing as a "pools:" error part-way through packing.
     auto need_all = [&](std::initializer_list<std::pair<const char*, uint64_t>> fs) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "put" || p.op == "expert_down" || p.op == "conv_transpose" || p.op == "lmhead_q8") {
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
+        p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
         if (p.up.empty() || p.gate.empty()) fail(where, "expert_stripes without up / gate");
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    else if (p.op == "transpose") need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
     else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
     else if (p.op == "expert_down") need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
     else if (p.op == "put") need_all({{"cap", p.cap}});
-    else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}});
+    else if (p.op == "lmhead_q8") need_all({{"chunk_bytes", p.chunk_bytes}, {"in_dim", p.in_dim}});
     else if (p.op == "conv_transpose") need_all({{"taps", p.taps}, {"groups", p.groups}, {"width", p.width}});
     return p;
 }
