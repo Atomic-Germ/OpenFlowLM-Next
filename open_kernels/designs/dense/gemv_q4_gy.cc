@@ -1,4 +1,4 @@
-#define GEMV_PER_CALL 1
+#define GEMV_PER_CALL 2
 #include "gemv_q4.h"
 // A band into its y element: runtime band law (per_band chunks, row split rs).
 // The entry name carries GEMV_Q4_PREFIX: the f32-scale build (GEMV_SCALES_F32=1,

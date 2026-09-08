@@ -1,5 +1,5 @@
 // h band = act(g) * u for one 64-row band (ms: u @0, g @64) -> one f32 y element.
-// act = silu: silu(x) = x sigmoid(x); gelu_tanh(x) = 0.5 x (1 + tanh(z)) = x sigmoid(2z),
+// act = gelu_tanh: silu(x) = x sigmoid(x); gelu_tanh(x) = 0.5 x (1 + tanh(z)) = x sigmoid(2z),
 // z = sqrt(2/pi) (x + 0.044715 x^3). Vector ops only (no scalar float on this core).
 #include "vecmath.h"
 
@@ -11,7 +11,7 @@ void dense_act(const float *__restrict ms, float *__restrict h) {
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < 64; j += 32) {
     const v32f x = aie::load_v<32>(g + j);
-#if 0
+#if 1
     const v32f x3 = fmul32(fmul32(x, x), x);
     const v32f z2 = fscaleN<32>(fadd32(x, fscaleN<32>(x3, 0.044715f)), 2.0f * 0.7978845608028654f);
     const v32f a = fmul32(x, vsigmoidN<32>(z2));
