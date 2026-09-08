@@ -31,7 +31,13 @@ HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 LX = HERE.parent / "layer_x"
 
-TILE_BYTES = 5120
+# GGUF-direct pool chunks (f32 scales, 6144 B) vs the q4nx ones (bf16, 5120 B).
+# The kernel is gemv_q4_gy (layer_x), compiled with the f32-scale define and the
+# gemv_q4s32 symbol prefix in the f32 build.
+SCALES_F32 = int(os.environ.get("LMHEAD_SCALES_F32", 0))
+TILE_BYTES = 6144 if SCALES_F32 else 5120
+KERNEL_SYM = "gemv_q4s32_gy" if SCALES_F32 else "gemv_q4_gy"
+KERNEL_FLAGS = ["-Os"] + (["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if SCALES_F32 else [])
 BAND_ROWS = 64
 PER_CALL = 2
 CALL_BYTES = PER_CALL * TILE_BYTES
@@ -79,8 +85,9 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
     i32 = np.int32
 
     inc = _include_dirs()
-    kernel = ExternalFunction("gemv_q4_gy", source_file=str(LX / "gemv_q4_gy.cc"),
-                              arg_types=[elem_ty, tab_ty, acc_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
+    kernel = ExternalFunction(KERNEL_SYM, source_file=str(LX / "gemv_q4_gy.cc"),
+                              arg_types=[elem_ty, tab_ty, acc_ty, i32, i32, i32], include_dirs=inc,
+                              compile_flags=KERNEL_FLAGS)
     prep = ExternalFunction("gemv_q4_prep_rt", source_file=str(GEMV / "gemv_q4_prep_rt.cc"),
                             arg_types=[x_ty, tab_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
 
@@ -134,5 +141,6 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
 
 DESIGN = lm_head_q4
 _src = b"".join([(GEMV / f).read_bytes() for f in ("gemv_q4.h", "gemv_tab.h", "gemv_q4_prep_rt.cc")]
-                + [(LX / "gemv_q4_gy.cc").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+                + [(LX / "gemv_q4_gy.cc").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()]
+                + [str(SCALES_F32).encode()])
 SPECIALIZE = {"n": N, "k": K, "n_cores": N_CORES, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

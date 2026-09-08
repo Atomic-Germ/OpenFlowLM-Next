@@ -31,10 +31,10 @@ the 27B these rules give the sizes ax.py uses (4096 / 4096 / 1024).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .qwen36moe import BAND_ROWS, CHUNK, ELEM, MB, band_bytes, q4_bytes, q4_chunks, roundup, tab_bytes
+from .qwen36moe import BAND_ROWS, CHUNK, ELEM, MB, band_bytes, chunk_bytes, q4_bytes, q4_chunks, roundup, tab_bytes
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
 
@@ -102,8 +102,9 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError(f"dense: activation {spec.activation!r} (silu | gelu_tanh)")
     if spec.has_local and spec.sliding_window <= 0:
         raise OpRangeError("dense: dense_local layers need a positive sliding_window")
-    if spec.quant != "q4_1":
-        raise OpRangeError(f"dense: quant={spec.quant!r}; the gemv_q4 template reads q4_1 chunks only")
+    if spec.quant not in ("q4_1", "q4_1_f32"):
+        raise OpRangeError(f"dense: quant={spec.quant!r}; the gemv_q4 template reads q4_1 chunks "
+                           f"(bf16 scales, q4nx) or q4_1_f32 chunks (f32 scales, GGUF-direct)")
     if not spec.has_dense or spec.has_linear or spec.has_full or spec.intermediate == 0:
         raise OpRangeError("dense: every layer must be a dense layer with an FFN")
     if spec.attn_gate:
@@ -137,7 +138,8 @@ def per_call(spec: ModelSpec) -> int:
     leaves no room for two of them beside the x elements -- then 1 (Llama 3 8B: K = 14336 -> 32 KB)."""
     wide = max(spec.hidden, spec.attn_q_width, spec.intermediate)
     for pc in (2, 1):
-        l1 = tab_bytes(wide) + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + STACK
+        ch = chunk_bytes(spec.quant)
+        l1 = tab_bytes(wide) + 2 * pc * ch + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + STACK
         if l1 <= L1_BUDGET:
             return pc
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")
@@ -152,11 +154,12 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     hpo = e_a // (hd * 2)                     # og heads (bf16) per aout element = KVH
     wide = max(hid, qw, ff)
     pc = per_call(spec)
+    ch = chunk_bytes(spec.quant)
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
-        WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * CHUNK,
+        WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * ch,
         QW=qw, KVW=kvw,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=hid // BAND_ROWS // n,
         UP_PC=ff // BAND_ROWS // n, DOWN_PC=hid // BAND_ROWS // n,
@@ -195,11 +198,11 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     for name, rows, cols in (("q", G.QW, hid), ("k", G.KVW, hid), ("v", G.KVW, hid), ("o", hid, G.QW),
                              ("up", ff, hid), ("gate", ff, hid), ("down", hid, ff)):
         p[name] = off
-        off += q4_bytes(rows, cols)
+        off += q4_bytes(rows, cols, spec.quant)
     pool_bytes = roundup(off, MB)
     kv_row = 2 * e_a
     ptab_row = max(1024, e_a)
-    band = band_bytes(hid)
+    band = band_bytes(hid, spec.quant)
     bands = lm_rows(spec) // BAND_ROWS
     return DenseLayout(
         CD_LNW=c["lnw"], CD_POSTLN=c["postln"], CD_META=c["meta"], CD_PREFFN=c["preffn"], CD_POSTFFN=c["postffn"],
@@ -225,13 +228,20 @@ def pack_plan(spec: ModelSpec) -> dict:
     pre = "model.layers.{l}."
     one = {
             "pool": [
-                {"op": "std_perm", "tensor": pre + "self_attn.q_proj.weight", "dst": L.POOL_Q, "nch": q4_chunks(G.QW, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "self_attn.k_proj.weight", "dst": L.POOL_K, "nch": q4_chunks(G.KVW, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "self_attn.v_proj.weight", "dst": L.POOL_V, "nch": q4_chunks(G.KVW, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "self_attn.o_proj.weight", "dst": L.POOL_O, "nch": q4_chunks(hid, G.QW), "in_dim": G.QW},
-                {"op": "std_perm", "tensor": pre + "mlp.up_proj.weight", "dst": L.POOL_UP, "nch": q4_chunks(ff, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "mlp.gate_proj.weight", "dst": L.POOL_GATE, "nch": q4_chunks(ff, hid), "in_dim": hid},
-                {"op": "std_perm", "tensor": pre + "mlp.down_proj.weight", "dst": L.POOL_DOWN, "nch": q4_chunks(hid, ff), "in_dim": ff},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "self_attn.q_proj.weight", "dst": L.POOL_Q, "nch": q4_chunks(G.QW, hid, spec.quant), "in_dim": hid},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "self_attn.k_proj.weight", "dst": L.POOL_K, "nch": q4_chunks(G.KVW, hid, spec.quant), "in_dim": hid},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "self_attn.v_proj.weight", "dst": L.POOL_V, "nch": q4_chunks(G.KVW, hid, spec.quant), "in_dim": hid},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "self_attn.o_proj.weight", "dst": L.POOL_O, "nch": q4_chunks(hid, G.QW, spec.quant), "in_dim": G.QW},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "mlp.up_proj.weight", "dst": L.POOL_UP, "nch": q4_chunks(ff, hid, spec.quant), "in_dim": hid},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "mlp.gate_proj.weight", "dst": L.POOL_GATE, "nch": q4_chunks(ff, hid, spec.quant), "in_dim": hid},
+                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                 "tensor": pre + "mlp.down_proj.weight", "dst": L.POOL_DOWN, "nch": q4_chunks(hid, ff, spec.quant), "in_dim": ff},
             ],
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.CD_LNW, "cap": L.ELN},
@@ -245,25 +255,29 @@ def pack_plan(spec: ModelSpec) -> dict:
             ] if spec.sandwich_norms else []),
     }
     return {
-        "pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK,
+        "pool_bytes": L.POOL_BYTES, "chunk_bytes": chunk_bytes(spec.quant),
         "layer_types": {lt: one for lt in sorted(set(spec.layer_types))},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm", "tensor": "lm_head.weight", "dst": 0,
-                             "nch": q4_chunks(lm_rows(spec), hid), "in_dim": hid}]},
+                    "ops": [{"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                             "tensor": "lm_head.weight", "dst": 0,
+                             "nch": q4_chunks(lm_rows(spec), hid, spec.quant), "in_dim": hid}]},
         "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
         "norm": {"tensor": "model.norm.weight", "bytes": hid * 2},
     }
 
 
-def programs(spec: ModelSpec) -> dict:
+def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     """One design serves every dense layer type; a layer type with a sliding window gets its own
     kernel entry (the same instruction stream, its own instruction BO, patched with its window)
     and its own position table (its RoPE frequencies, its window's row counts)."""
     L, G = layout(spec), geometry(spec)
+    f32 = spec.quant == "q4_1_f32"
+    dx_set = "dx_f32" if f32 else "dx"
+    lm_set = "lm_head_q4_f32" if f32 else "lm_head_q4"
     out = {
-        "contexts": {"dx": "dx/final.xclbin", "ln": "ln/final.xclbin", "lm": "lm_head_q4/final.xclbin"},
+        "contexts": {"dx": f"{dx_set}/final.xclbin", "ln": "ln/final.xclbin", "lm": f"{lm_set}/final.xclbin"},
         "kernels": {"ln": {"context": "ln", "insts": "ln/insts.bin", "build": "ln"},
-                    "lm": {"context": "lm", "insts": "lm_head_q4/insts.bin", "build": "lm_head_q4"}},
+                    "lm": {"context": "lm", "insts": f"{lm_set}/insts.bin", "build": lm_set}},
         "layer_types": {},
         "tail": [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
@@ -279,29 +293,44 @@ def programs(spec: ModelSpec) -> dict:
         window = spec.sliding_window if local else 0
         args = ["pool", "xres", "consts", "state", "act", tab]
         check_buffer_args(kn, args)
-        out["kernels"][kn] = {"context": "dx", "insts": "dx/insts.bin", "patch": "attnpos", "build": "dx", "window": window}
+        out["kernels"][kn] = {"context": "dx", "insts": f"{dx_set}/insts.bin", "patch": "attnpos", "build": dx_set, "window": window}
         out["globals"][tab] = {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq(local=local), "window": window}
         out["layer_types"][lt] = {
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": kn, "args": args}],
         }
+    if spec.quant == "q4_1":
+        # the export also builds the f32-scale twins (dx_f32, lm_head_q4_f32); the engine
+        # swaps this section in for GGUF-direct models (same weight file family, f32-scale
+        # pool chunks, open_kernels/gguf_pool.py)
+        f32 = programs(replace(spec, quant="q4_1_f32"), max_ctx)
+        out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
+                       "layer_types": f32["layer_types"], "tail": f32["tail"], "globals": f32["globals"]}
     return out
 
 
 def builds(spec: ModelSpec) -> dict[str, dict]:
+    """Every kernel set the recipe ships: the q4nx build of each weight-consuming
+    design AND its GGUF-direct f32-scale twin (`*_f32`, see programs())."""
     n = LIMITS["n_cols"]
     return {
         "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}", "env": {}},
         "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
+        "dx_f32": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}_f32",
+                   "env": {"GEMV_SCALES_F32": "1"}},
+        "lm_head_q4_f32": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}_f32",
+                           "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden),
+                                   "LMHEAD_CORES": str(n), "LMHEAD_SCALES_F32": "1"}},
     }
 
 
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L = layout(spec, max_ctx)
     return {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
-            "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES, "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
+            "chunk_bytes": chunk_bytes(spec.quant), "pool_bytes": L.POOL_BYTES,
+            "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
             "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
             "rope_inv_freq": spec.rope_inv_freq()}     # the global table's; each ptab global carries its own
 

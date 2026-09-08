@@ -52,6 +52,10 @@ from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
+if int(os.environ.get("GEMV_SCALES_F32", 0)) and SPEC.quant != "q4_1_f32":
+    # the export builds this design twice: q4nx chunks and GGUF-direct f32-scale chunks
+    from dataclasses import replace
+    SPEC = replace(SPEC, quant="q4_1_f32")
 R = QR.recipe(SPEC)
 L, G = R.layout, R.geo
 HID, FF, N_CORES = G.HID, G.FF, G.N_CORES
@@ -62,9 +66,17 @@ OS = ["-Os"]
 STOP = int(os.environ.get("DX_STOP", 99))     # debug: 1 = after q/k/v, 2 = after attention, 3 = after the o proj + norm
 assert not G.GATE, "dx.py: the Qwen3 dense recipe has no attention gate"
 
+# GGUF-direct pools (spec.quant == "q4_1_f32"): f32-scale chunks, the gemv
+# wrappers compiled with the f32-scale define and the gemv_q4s32 symbol prefix.
+F32 = SPEC.quant == "q4_1_f32"
+CH = QR.chunk_bytes(SPEC.quant)
+GEMV_DEF = ["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if F32 else []
+GYSYM = "gemv_q4s32_gy" if F32 else "gemv_q4_gy"
+GMSYM = "gemv_q4s32_gms" if F32 else "gemv_q4_gms"
+
 
 def per_band(K):
-    return band_bytes(K) // 5120
+    return QR.band_bytes(K, SPEC.quant) // CH
 
 
 def n_groups(K):
@@ -111,8 +123,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     def ef(sym, src, args, flags=OS):
         return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
 
-    f_gy = ef("gemv_q4_gy", HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32])
-    f_gms = ef("gemv_q4_gms", HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32])
+    f_gy = ef(GYSYM, HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], OS + GEMV_DEF)
+    f_gms = ef(GMSYM, HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], OS + GEMV_DEF)
     f_silu = ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty])
     f_prep = ef("dense_prep", HERE / "dense_prep.cc", [x_ty, tab_ty, i32, i32])
     f_prepf = ef("dense_prep_f32", HERE / "dense_prep_f32.cc", [x_ty, tab_ty, i32, i32])

@@ -42,6 +42,45 @@ REQUIRED_FILES = ["config.json", "model.q4nx", "tokenizer.json", "tokenizer_conf
 OPTIONAL_FILES = ["chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4nx"]
 ALL_FILES = REQUIRED_FILES + OPTIONAL_FILES
 
+# The GGUF-direct path: a repo that carries llama.cpp-style quantized weights
+# (e.g. mradermacher/*-i1-GGUF, Atomic-Germ/*-GGUF) can install one compatible
+# file as model.gguf beside the tokenizer files -- no q4nx conversion needed.
+# The open kernel sets ship an f32-scale build for this (see
+# open_kernels/gguf_pool.py); incompatible quants are refused here, pointing
+# at q4nx-build.
+GGUF_FILES = ["config.json", "model.gguf", "tokenizer.json", "tokenizer_config.json"]
+GGUF_OPTIONAL = ["chat_template.jinja"]
+# preference order: 4.5-bit fits the NPU pools best, Q8_0 is the fallback
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q8_0"]
+GGUF_QUANT_RE = re.compile(r"(?:^|[.\-_ ])(I?Q[0-9](?:_[0-9A-Za-z]+)?)")
+
+def gguf_quant_of(name):
+    """The quant specifier in a llama.cpp-style weight file name, e.g.
+    'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked)."""
+    m = GGUF_QUANT_RE.search(name)
+    return m.group(1) if m else None
+
+def choose_gguf_file(names):
+    """Pick the best compatible *.gguf from a repo's root file names.
+    Returns (chosen, refused) -- refused maps every other gguf to why."""
+    refused = {}
+    cands = []
+    for n in names:
+        if not n.endswith(".gguf"):
+            continue
+        if re.search(r"-\d+-of-\d+\.gguf$", n):
+            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
+            continue
+        q = gguf_quant_of(n)
+        if q not in GGUF_QUANT_PREFERENCE:
+            refused[n] = f"quant {q or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
+            continue
+        cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
+    cands.sort()
+    if not cands:
+        return None, refused
+    return cands[0][1], refused
+
 SYSTEM_LIST_CANDIDATES = [
     "/opt/fastflowlm/share/flm/model_list.json",
     "/usr/share/flm/model_list.json",
@@ -476,13 +515,20 @@ def download_file(url, dest, expected_size=None, expected_sha=None, verify=True,
     os.replace(tmp, dest)
 
 
-def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False):
-    """Populate target/ with the model files; returns the list of files present."""
+def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False, gguf_name=None):
+    """Populate target/ with the model files; returns the list of files present.
+
+    With gguf_name set (the GGUF-direct path) the wanted set is the tokenizer
+    files plus that one GGUF, stored canonically as model.gguf."""
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
+    if gguf_name:
+        want = GGUF_FILES + GGUF_OPTIONAL
+    else:
+        want = ALL_FILES
     if modelscope:
         domain, entries = ms_file_tree(repo_id)
-        for fname in ALL_FILES:
+        for fname in want:
             if fname not in entries:
                 continue
             dest = target / fname
@@ -495,8 +541,16 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
             if not quiet:
                 gb = f" ({expected_size / 1e9:.2f} GB)" if expected_size else ""
                 log(f"Downloading {fname}{gb} from ModelScope ({domain})...")
+            remote = gguf_name if fname == "model.gguf" else fname
+            meta = entries.get(remote) or {}
+            expected_size = meta.get("Size") or None
+            expected_sha = (meta.get("Sha256") or "").lower() or None
+            if not quiet:
+                gb = f" ({expected_size / 1e9:.2f} GB)" if expected_size else ""
+                label = remote if remote != fname else fname
+                log(f"Downloading {label}{gb} from ModelScope ({domain})...")
             download_file(
-                f"https://{domain}/models/{repo_id}/resolve/master/{fname}",
+                f"https://{domain}/models/{repo_id}/resolve/master/{remote}",
                 dest,
                 expected_size=expected_size,
                 expected_sha=expected_sha,
@@ -513,19 +567,21 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
         p = e.get("path")
         if p and "/" not in p:
             entries[p] = e
-    for fname in ALL_FILES:
-        if fname not in entries:
+    for fname in want:
+        remote = gguf_name if fname == "model.gguf" else fname
+        if remote not in entries:
             continue
         dest = target / fname
         if dest.is_file() and not force:
             obtained.append(fname)
             continue
-        lfs = entries[fname].get("lfs") or {}
+        lfs = entries[remote].get("lfs") or {}
         expected_sha = lfs.get("oid")
-        expected_size = lfs.get("size") or entries[fname].get("size")
-        log(f"Downloading {fname} ({expected_size/1e9:.2f} GB)...")
+        expected_size = lfs.get("size") or entries[remote].get("size")
+        label = remote if remote != fname else fname
+        log(f"Downloading {label} ({expected_size/1e9:.2f} GB)...")
         download_file(
-            f"https://huggingface.co/{repo_id}/resolve/main/{fname}",
+            f"https://huggingface.co/{repo_id}/resolve/main/{remote}",
             dest,
             expected_size=expected_size,
             expected_sha=expected_sha,
@@ -536,10 +592,11 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     return obtained
 
 
-def copy_from_dir(src_dir, target, force=False):
+def copy_from_dir(src_dir, target, force=False, gguf_name=None):
     obtained = []
-    for fname in ALL_FILES:
-        src = src_dir / fname
+    want = GGUF_FILES + GGUF_OPTIONAL if gguf_name else ALL_FILES
+    for fname in want:
+        src = src_dir / (gguf_name if fname == "model.gguf" else fname)
         if src.is_file():
             dest = target / fname
             if dest.is_file() and not force:
@@ -676,6 +733,23 @@ def main():
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
 
+    # ---- scan the repo for a compatible GGUF (the GGUF-direct path): a repo
+    # that carries llama.cpp-style weights installs one of them as model.gguf;
+    # repos that ship model.q4nx take the NPU2 path even if a gguf also sits
+    # there (the converted container is the curated one).
+    gguf_names = []
+    if local_dir:
+        gguf_names = [e.name for e in local_dir.iterdir() if e.is_file() and e.suffix == ".gguf"]
+    else:
+        try:
+            tree = ms_file_tree(repo)[1] if (args.modelscope or split_remote_repo(repo_arg)[0] == "modelscope") else hf_file_tree(repo)
+            gguf_names = [e.get("path") for e in tree if e.get("path") and "/" not in e["path"] and e["path"].endswith(".gguf")]
+        except Exception as ex:
+            log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
+    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    have_q4nx = (local_dir / "model.q4nx").is_file() if local_dir else False
+    gguf_mode = gguf_name is not None and not have_q4nx
+
     system_list = find_system_model_list()
     system_registry = load_json(system_list)
     user_list = user_registry_path(args.config)
@@ -705,37 +779,56 @@ def main():
         print(f"details.family : {family}")
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
+        if gguf_mode:
+            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
+            for n, why in sorted(gguf_refused.items()):
+                print(f"  skipped      : {n} ({why})")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return
 
     # --- acquire model files ---
+    if gguf_mode and not args.quiet:
+        log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
+        for n, why in sorted(gguf_refused.items()):
+            log(f"[INFO]   skipping {n}: {why}")
     if local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
         target.mkdir(parents=True, exist_ok=True)
-        files = copy_from_dir(local_dir, target, force=args.force)
+        files = copy_from_dir(local_dir, target, force=args.force, gguf_name=gguf_name if gguf_mode else None)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
             target.mkdir(parents=True, exist_ok=True)
-            files = copy_from_dir(snapshot, target, force=args.force)
+            files = copy_from_dir(snapshot, target, force=args.force, gguf_name=gguf_name if gguf_mode else None)
         else:
             if not args.quiet:
                 log(f"[INFO] Downloading model files from {'ModelScope' if args.modelscope else 'Hugging Face'}: {repo}")
             target.mkdir(parents=True, exist_ok=True)
-            files = fetch_assets(repo, target, args.modelscope, verify=not args.no_verify, force=args.force, quiet=args.quiet)
+            files = fetch_assets(repo, target, args.modelscope, verify=not args.no_verify, force=args.force,
+                                 quiet=args.quiet, gguf_name=gguf_name if gguf_mode else None)
 
-    missing = [f for f in REQUIRED_FILES if not (target / f).is_file()]
+    required = ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode else REQUIRED_FILES
+    missing = [f for f in required if not (target / f).is_file()]
     if missing:
-        raise SystemExit(f"Model is missing required files: {missing}")
+        if gguf_mode and missing == ["config.json"]:
+            missing = []
+        if missing:
+            raise SystemExit(f"Model is missing required files: {missing}")
+    if gguf_mode and not (target / "config.json").is_file():
+        log("[WARN] No config.json in the repo; the engine will derive the config from the GGUF "
+            "metadata (llama-family shapes only -- Granite etc. need a config.json).")
 
     if not size_value:
         size_value = estimate_size(target / "config.json")
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
+    if gguf_mode:
+        entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
+        entry.setdefault("flm_min_version", "0.9.45")
 
     register(user_list, tag, entry, system_registry)
     log(f"[INFO] Registered tag '{tag}' in {user_list}")

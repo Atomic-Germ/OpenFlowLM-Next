@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "open_qwen36/weight_file.hpp"
+
 namespace open_qwen36 {
 
 struct TensorMeta {
@@ -28,28 +30,31 @@ struct TensorMeta {
     size_t start = 0, end = 0;  // data_offsets, relative to the data section
 };
 
-class Q4nxFile {
+class Q4nxFile final : public WeightFile {
 public:
     explicit Q4nxFile(const std::string& path);
     ~Q4nxFile();
     Q4nxFile(const Q4nxFile&) = delete;
     Q4nxFile& operator=(const Q4nxFile&) = delete;
 
-    bool has(const std::string& name) const { return tensors_.count(name) != 0; }
+    bool has(const std::string& name) const override { return tensors_.count(name) != 0; }
     const TensorMeta& meta(const std::string& name) const;
     /// Raw bytes of a tensor (a view into the mapping).
-    const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const;
+    const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const override;
     /// A BF16 tensor decoded to f32.
     std::vector<float> bf16(const std::string& name) const;
     std::vector<float> f32(const std::string& name) const;
     /// One row of a BF16 [rows, dim] tensor as f32 (the embedding lookup).
     void bf16_row(const std::string& name, size_t row, size_t dim, float* out) const;
+    void embed_row(const std::string& name, size_t row, size_t dim, float* out) const override {
+        bf16_row(name, row, dim, out);
+    }
 
     /// Release the mapping's resident pages (unmap + map again). After the
     /// pools are packed, ~22 GB of file pages sit in the working set with no
     /// further use beyond the embedding rows; on a box holding 21 GB of NPU
     /// buffers that is the difference between fitting and paging.
-    void drop_pages();
+    void drop_pages() override;
 
     size_t chunk_bytes() const { return chunk_bytes_; }
     const std::string& path() const { return path_; }

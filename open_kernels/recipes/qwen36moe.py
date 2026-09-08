@@ -27,9 +27,12 @@ from .spec import FULL, LINEAR, ModelSpec
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
+CHUNK_F32 = 6144             # GGUF-direct (spec.quant "q4_1_f32"): the same tile, the fp16
+                             # block scales/mins widened EXACTLY to f32 (open_kernels/gguf_pool.py)
 CHUNK_VALUES = 8192
 CHUNK_ROWS = 32
 Q8_CHUNK = 8704              # lm_head q8: 8192 int8 + 256 bf16 scales
+Q8_CHUNK_F32 = 9216          # GGUF-direct: the same tile with f32 scales
 ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
 PER_CALL = 2                 # chunks per w element
@@ -42,20 +45,39 @@ ROUT_IDX_OFF = 1024          # int32 idx[topk] inside the router record (f32 pro
 DN_RECORD_FLOATS = 512       # the DeltaNet per-head record [k | q | v | decay | beta | pad] (dnx.h)
 
 
-def q4_bytes(rows: int, cols: int) -> int:
+def chunk_bytes(quant: str) -> int:
+    """The q4 pool chunk bytes for a scale layout: q4nx bf16 (5120) or GGUF-direct f32 (6144)."""
+    if quant == "q4_1":
+        return CHUNK
+    if quant == "q4_1_f32":
+        return CHUNK_F32
+    raise OpRangeError(f"quant={quant!r}: no open q4 pool chunk layout "
+                       f"(have q4_1, q4_1_f32)")
+
+
+def q8_chunk_bytes(quant: str) -> int:
+    """The lm_head q8 chunk bytes: q4nx bf16 scales (8704) or GGUF-direct f32 (9216)."""
+    if quant in ("q4_1", "q4_1_f32", "q8_0"):
+        return Q8_CHUNK
+    if quant == "q8_0_f32":
+        return Q8_CHUNK_F32
+    raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
+
+
+def q4_bytes(rows: int, cols: int, quant: str = "q4_1") -> int:
     n = rows * cols
     if n % CHUNK_VALUES:
         raise OpRangeError(f"q4 tensor [{rows}, {cols}] is not a whole number of {CHUNK_VALUES}-value chunks")
-    return n // CHUNK_VALUES * CHUNK
+    return n // CHUNK_VALUES * chunk_bytes(quant)
 
 
-def q4_chunks(rows: int, cols: int) -> int:
-    return q4_bytes(rows, cols) // CHUNK
+def q4_chunks(rows: int, cols: int, quant: str = "q4_1") -> int:
+    return q4_bytes(rows, cols, quant) // chunk_bytes(quant)
 
 
-def band_bytes(K: int) -> int:
+def band_bytes(K: int, quant: str = "q4_1") -> int:
     """One 64-row band of a K-wide standard-layout matrix: K/128 chunks."""
-    return q4_bytes(BAND_ROWS, K)
+    return q4_bytes(BAND_ROWS, K, quant)
 
 
 def tab_bytes(K: int) -> int:

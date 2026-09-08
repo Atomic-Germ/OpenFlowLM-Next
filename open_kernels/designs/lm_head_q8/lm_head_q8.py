@@ -28,7 +28,12 @@ from aie.utils import config
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"          # gemv_tab.h + the activation prep entry point
 
-TILE_BYTES = 8704
+# GGUF-direct pool chunks (f32 scales, 9216 B) vs the q4nx ones (bf16, 8704 B);
+# see lm_head_q8.h. The entry point is lm_head_q8s32_group in the f32 build.
+SCALES_F32 = int(os.environ.get("LMHEAD_SCALES_F32", 0))
+TILE_BYTES = 9216 if SCALES_F32 else 8704
+KERNEL_SYM = "lm_head_q8s32_group" if SCALES_F32 else "lm_head_q8_group"
+EXTRA_FLAGS = ["-DLMHEAD_SCALES_F32=1", "-DLMHEAD_Q8_PREFIX=lm_head_q8s32"] if SCALES_F32 else []
 K = 2048
 PER_BAND = 32           # chunks per band: 8 k-tiles x 4 row quarters
 BAND_ROWS = 128
@@ -72,11 +77,11 @@ def lm_head_q8(w: In, x: In, y: Out, *, n: CompileTime[int],
     y_ty = np.ndarray[(n,), np.dtype[np.float32]]
 
     kernel = ExternalFunction(
-        "lm_head_q8_group",
+        KERNEL_SYM,
         source_file=str(HERE / "lm_head_q8.cc"),
         arg_types=[elem_ty, tab_ty, acc_ty, np.int32],
         include_dirs=_include_dirs(),
-        compile_flags=[f"-DLMHEAD_PER_CALL={per_call}"],
+        compile_flags=[f"-DLMHEAD_PER_CALL={per_call}"] + EXTRA_FLAGS,
     )
     prep = ExternalFunction("gemv_q4_prep_k2048", source_file=str(GEMV / "gemv_q4_prep_k2048.cc"),
                             arg_types=[x_ty, tab_ty], include_dirs=_include_dirs())
@@ -133,4 +138,5 @@ def lm_head_q8(w: In, x: In, y: Out, *, n: CompileTime[int],
 
 DESIGN = lm_head_q8
 _src = b"".join((HERE / f).read_bytes() for f in ("lm_head_q8.h", "lm_head_q8.cc")) + (GEMV / "gemv_tab.h").read_bytes()
-SPECIALIZE = {"n": N, "n_cores": N_CORES, "per_call": PER_CALL, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
+SPECIALIZE = {"n": N, "n_cores": N_CORES, "per_call": PER_CALL,
+              "srchash": int(hashlib.sha1(_src + str(SCALES_F32).encode()).hexdigest()[:8], 16)}
