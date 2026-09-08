@@ -52,6 +52,11 @@ GGUF_FILES = ["config.json", "model.gguf", "tokenizer.json", "tokenizer_config.j
 GGUF_OPTIONAL = ["chat_template.jinja"]
 # preference order: 4.5-bit fits the NPU pools best, Q8_0 is the fallback
 GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q8_0"]
+# Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
+# manifest section + f32-scale kernel sets only ship for these). qwen3.5
+# (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
+# installs as plain safetensors instead.
+GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
 GGUF_QUANT_RE = re.compile(r"(?:^|[.\-_ ])(I?Q[0-9](?:_[0-9A-Za-z]+)?)")
 
 def gguf_quant_of(name):
@@ -478,6 +483,83 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def readme_base_model(repo_id, modelscope=False):
+    """The base model id(s) from the repo's README.md YAML frontmatter.
+
+    GGUF-quant repos (mradermacher etc.) carry no tokenizer/config files, but
+    their model card names the original model, whose repo has everything. The
+    field is `base_model:` either inline (`[[Org/Name]]` wikilink form or
+    plain) or a `- Org/Name` list (merge lineages; the first entry is the
+    closest to the quantized checkpoint).
+    """
+    url = (f"https://www.modelscope.ai/models/{repo_id}/resolve/master/README.md" if modelscope
+           else f"https://huggingface.co/{repo_id}/raw/main/README.md")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=_hf_headers()), timeout=60) as r:
+            text = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    lines = text.splitlines()
+    # the frontmatter: the first "---" ... "---" block at the top
+    if not lines or lines[0].strip() != "---":
+        return []
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        return []
+    bases = []
+    in_base = False
+    for line in lines[1:end]:
+        s = line.strip()
+        if s.startswith("base_model:"):
+            in_base = True
+            v = s[len("base_model:"):].strip()
+            if v:
+                bases.append(v)
+        elif in_base and s.startswith("- "):
+            bases.append(s[2:].strip())
+        elif in_base and s and not s.startswith("-"):
+            in_base = False
+    out = []
+    for b in bases:
+        b = re.sub(r"^\[\[|\]\]$", "", b).strip("\"' ")
+        # "org/name (size)" style suffixes occasionally appear
+        b = re.sub(r"\s*\(.*$", "", b).strip()
+        if b and "/" in b and b not in out:
+            out.append(b)
+    return out
+
+
+def fetch_from_repo(repo_id, fname, dest, modelscope=False, force=False):
+    """One auxiliary file from another repo (local HF cache first, then remote).
+
+    Returns the local path, or None if the file is not available."""
+    if dest.is_file() and not force:
+        return dest
+    snapshot = ms_cache_snapshot(repo_id) if modelscope else hf_cache_snapshot(repo_id)
+    src = (snapshot / fname) if snapshot else None
+    if src and src.is_file():
+        shutil.copyfile(src, dest)
+        return dest
+    if modelscope:
+        tree = ms_file_tree(repo_id)[1]
+        if fname not in tree:
+            return None
+        meta = tree[fname]
+        url = f"https://www.modelscope.ai/models/{repo_id}/resolve/master/{fname}"
+        headers, sha, size = _ms_headers(), (meta.get("Sha256") or "").lower() or None, meta.get("Size") or None
+    else:
+        entries = {e.get("path"): e for e in hf_file_tree(repo_id)}
+        if fname not in entries:
+            return None
+        lfs = entries[fname].get("lfs") or {}
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{fname}"
+        headers, sha, size = None, lfs.get("oid"), lfs.get("size") or entries[fname].get("size")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    download_file(url, dest, expected_size=size, expected_sha=sha, verify=True)
+    return dest
+
+
 def download_file(url, dest, expected_size=None, expected_sha=None, verify=True, quiet=False,
                   headers=None):
     req = urllib.request.Request(url, headers=headers if headers is not None else _hf_headers())
@@ -766,6 +848,37 @@ def main():
     base_entry = official[3] if official else None
     src_tag = f"{official[1]}:{official[2]}" if official else None
     xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
+
+    # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
+    # xclbins must actually carry the GGUF-direct kernel builds (the nested
+    # "gguf" manifest section, produced by the *_f32 sets in utilities/
+    # build-all.sh). Otherwise fall back to the normal safetensors install.
+    gguf_skip = None
+    if gguf_mode:
+        if family not in GGUF_CAPABLE_FAMILIES:
+            gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
+                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
+                         + "); installing the safetensors weights instead")
+        else:
+            xk = None
+            sys_xcl = find_system_xclbin_root()
+            if xclbin_source and sys_xcl:
+                mj = sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
+                if mj.is_file():
+                    try:
+                        xk = json.loads(mj.read_text(encoding="utf-8"))
+                    except Exception:
+                        xk = None
+            if xk is None or "gguf" not in xk:
+                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
+                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
+                             "rebuild them with utilities/build-all.sh -- "
+                             "installing the safetensors weights instead")
+        if gguf_skip:
+            gguf_refused[gguf_name] = gguf_skip
+            log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
+            gguf_name, gguf_mode = None, False
+
     if not args.dry_run:
         if official:
             note = f" ({official_note})" if official_note else ""
@@ -783,6 +896,9 @@ def main():
             print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
+        elif gguf_refused:
+            print(f"weights        : safetensors (GGUF present but not usable: "
+                  + "; ".join(sorted(set(gguf_refused.values()))) + ")")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return
@@ -813,9 +929,39 @@ def main():
 
     required = ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode else REQUIRED_FILES
     missing = [f for f in required if not (target / f).is_file()]
+    if gguf_mode:
+        # GGUF-quant repos (mradermacher etc.) often ship only the GGUF: take the
+        # tokenizer/config files from the original model the README names.
+        # config.json too: the curated config beats the GGUF-derived one (and
+        # Granite's folded multipliers exist only there).
+        aux_missing = [f for f in missing if f != "model.gguf"]
+        if not (target / "config.json").is_file():
+            aux_missing.append("config.json")
+        if aux_missing:
+            bases = readme_base_model(repo, modelscope)
+            if bases:
+                log(f"[INFO] base model(s) from README.md: {', '.join(bases)}")
+                for f in aux_missing:
+                    got = None
+                    for b in bases:
+                        try:
+                            got = fetch_from_repo(b, f, target / f, modelscope=modelscope)
+                        except Exception as ex:
+                            log(f"[WARN] fetching {f} from {b} failed: {ex}")
+                            got = None
+                        if got:
+                            log(f"[INFO]   {f} <- {b}")
+                            break
+                missing = [f for f in required if not (target / f).is_file()]
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []
+        if missing and not gguf_mode and gguf_refused and "model.safetensors" in missing:
+            raise SystemExit(
+                f"Model is missing required files: {missing}\n"
+                "The repo carries only GGUF weights and they cannot be used directly: "
+                + "; ".join(sorted(set(gguf_refused.values())))
+                + "\nConvert one to model.q4nx with q4nx-build, or pick a GGUF-capable family (--family).")
         if missing:
             raise SystemExit(f"Model is missing required files: {missing}")
     if gguf_mode and not (target / "config.json").is_file():
