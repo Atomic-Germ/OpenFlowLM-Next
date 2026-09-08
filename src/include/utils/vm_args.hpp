@@ -55,6 +55,9 @@ inline void print_help(po::options_description& general) {
     std::cout << "\tflm list" << std::endl;
     std::cout << "\tflm list --quiet" << std::endl;
     std::cout << "\tflm list --filter installed" << std::endl;
+    std::cout << "\tflm add Atomic-Germ/Phi4-mini-Instruct-NPU2 --tag phi4-mini:1b --thinking" << std::endl;
+    std::cout << "\tflm add . --tag qwen3.5-claude:9b --family qwen3.5 --thinking" << std::endl;
+    std::cout << "\tflm add --list-families" << std::endl;
     std::cout << std::endl;
 }
 
@@ -131,7 +134,23 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("no-verify", po::bool_switch(&parsed_args.add_no_verify),
              "Skip sha256 verification of downloads for `add`")
             ("dry-run", po::bool_switch(&parsed_args.add_dry_run),
-             "Print the install plan and exit for `add`");
+             "Print the install plan and exit for `add`")
+            ("thinking", po::bool_switch(&parsed_args.add_thinking),
+             "Set details.think=true for `add` (reasoning model)")
+            ("think-toggleable", po::bool_switch(&parsed_args.add_think_toggleable),
+             "Set details.think_toggleable=true for `add`")
+            ("parameter-size", po::value<std::string>(&parsed_args.add_parameter_size)->default_value(""),
+             "details.parameter_size for `add` (e.g. 9B)")
+            ("quantization", po::value<std::string>(&parsed_args.add_quantization)->default_value(""),
+             "details.quantization_level for `add` (e.g. Q4_K)")
+            ("context-length", po::value<int>(&parsed_args.add_context_length)->default_value(-1),
+             "default_context_length for `add` (tokens)")
+            ("max-prefill", po::value<int>(&parsed_args.add_max_prefill)->default_value(-1),
+             "max_prefill_len for `add` (tokens)")
+            ("label", po::value<std::string>(&parsed_args.add_label)->default_value(""),
+             "Comma-separated label tags for `add` (e.g. reasoning,vision)")
+            ("list-families", po::bool_switch(&parsed_args.add_list_families),
+             "List the family open_kernels shipped with the app and exit (for `add`)");
 
         // Define positional arguments
         po::positional_options_description pos_desc;

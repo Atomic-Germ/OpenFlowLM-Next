@@ -53,6 +53,16 @@ struct program_args_t {
     bool add_no_verify = false;          // --no-verify
     bool add_dry_run = false;            // --dry-run
 
+    // configurable model_list entry fields (override the official defaults)
+    bool add_thinking = false;           // --thinking  -> details.think
+    bool add_think_toggleable = false;   // --think-toggleable -> details.think_toggleable
+    std::string add_parameter_size = ""; // --parameter-size -> details.parameter_size
+    std::string add_quantization = "";   // --quantization -> details.quantization_level
+    int add_context_length = -1;         // --context-length -> default_context_length
+    int add_max_prefill = -1;            // --max-prefill -> max_prefill_len
+    std::string add_label = "";          // --label (comma-separated) -> label[]
+    bool add_list_families = false;      // --list-families -> list available family open_kernels
+
     // for serve command
     std::string host = "127.0.0.1";
     size_t max_socket_connections = 10;

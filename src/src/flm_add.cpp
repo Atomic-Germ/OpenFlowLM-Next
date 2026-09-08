@@ -486,13 +486,12 @@ static std::vector<std::string> fetch_assets(const std::string& repo_id, fs::pat
     fs::create_directories(target);
     if (modelscope) {
         auto [domain, entries] = ms_file_tree(repo_id);
-        for (const auto& fname : ALL_FILES) {
-            auto it = entries.find(fname);
-            if (it == entries.end()) continue;
+        for (const auto& kv : entries) {
+            const std::string& fname = kv.first;
             fs::path dest = target / fname;
             if (fs::is_regular_file(dest) && !force) { obtained.push_back(fname); continue; }
-            uint64_t size = it->second.value("Size", uint64_t(0));
-            std::string sha = it->second.value("Sha256", std::string(""));
+            uint64_t size = kv.second.value("Size", uint64_t(0));
+            std::string sha = kv.second.value("Sha256", std::string(""));
             std::transform(sha.begin(), sha.end(), sha.begin(), ::tolower);
             if (!quiet) log_("[INFO] Downloading " + fname + " from ModelScope (" + domain + ")...");
             if (!download_to("https://" + domain + "/models/" + repo_id + "/resolve/master/" + fname,
@@ -503,18 +502,17 @@ static std::vector<std::string> fetch_assets(const std::string& repo_id, fs::pat
         return obtained;
     }
     auto entries = hf_file_tree(repo_id);
-    for (const auto& fname : ALL_FILES) {
-        auto it = entries.find(fname);
-        if (it == entries.end()) continue;
+    for (const auto& kv : entries) {
+        const std::string& fname = kv.first;
         fs::path dest = target / fname;
         if (fs::is_regular_file(dest) && !force) { obtained.push_back(fname); continue; }
         uint64_t size = 0;
         std::string sha;
-        if (it->second.contains("lfs")) {
-            size = it->second["lfs"].value("size", uint64_t(0));
-            sha = it->second["lfs"].value("oid", std::string(""));
+        if (kv.second.contains("lfs")) {
+            size = kv.second["lfs"].value("size", uint64_t(0));
+            sha = kv.second["lfs"].value("oid", std::string(""));
         } else {
-            size = it->second.value("size", uint64_t(0));
+            size = kv.second.value("size", uint64_t(0));
         }
         if (!quiet) log_("[INFO] Downloading " + fname + "...");
         if (!download_to("https://huggingface.co/" + repo_id + "/resolve/main/" + fname,
@@ -528,12 +526,15 @@ static std::vector<std::string> fetch_assets(const std::string& repo_id, fs::pat
 static std::vector<std::string> copy_from_dir(const fs::path& src_dir, const fs::path& target, bool force) {
     std::vector<std::string> obtained;
     fs::create_directories(target);
-    for (const auto& fname : ALL_FILES) {
-        fs::path src = src_dir / fname;
-        if (!fs::is_regular_file(src)) continue;
+    // Copy every regular file the model directory ships (e.g. layer.xclbin that
+    // travels with the repo), not just a fixed allow-list.
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(src_dir, ec)) {
+        if (!e.is_regular_file()) continue;
+        std::string fname = e.path().filename().string();
         fs::path dest = target / fname;
         if (fs::is_regular_file(dest) && !force) { obtained.push_back(fname); continue; }
-        fs::copy_file(src, dest, fs::copy_options::overwrite_existing);
+        fs::copy_file(e.path(), dest, fs::copy_options::overwrite_existing);
         obtained.push_back(fname);
     }
     return obtained;
@@ -630,21 +631,65 @@ static void register_model_info(const fs::path& user_list, const std::string& ta
 
 // ------------------------------------------------------------------ open-kernel linking
 
-// Find the family open_kernels source directory shipped with the app.
-static fs::path resolve_family_open_kernels(const fs::path& xclbin_root,
-                                            [[maybe_unused]] const std::string& family,
-                                            const std::string& source_name) {
-    if (!xclbin_root.empty() && !source_name.empty()) {
-        fs::path cand = xclbin_root / source_name / "open_kernels";
-        if (fs::is_regular_file(cand / "manifest.json")) return cand;
-    }
-    if (xclbin_root.empty()) return {};
+struct FamilyKernel {
+    std::string family;  // manifest `family` (e.g. qwen3.6-moe)
+    std::string name;    // official model dir name (e.g. Qwen3.6-35B-A3B-NPU2)
+    fs::path path;       // <xclbin_root>/<name>/open_kernels
+};
+
+// Scan the app's xclbin root for family open_kernels sets. Each set is a
+// manifest.json whose `family` identifies the model family it serves. This is
+// self-updating: shipping a new family's open_kernels makes it appear here with
+// no code change (powers `flm add --list-families`).
+static std::vector<FamilyKernel> list_family_open_kernels(const fs::path& xclbin_root) {
+    std::vector<FamilyKernel> out;
+    if (xclbin_root.empty()) return out;
     std::error_code ec;
     for (const auto& d : fs::directory_iterator(xclbin_root, ec)) {
         if (!d.is_directory()) continue;
-        fs::path ok = d.path() / "open_kernels";
-        if (fs::is_regular_file(ok / "manifest.json")) return ok;
+        fs::path manifest = d.path() / "open_kernels" / "manifest.json";
+        if (!fs::is_regular_file(manifest)) continue;
+        try {
+            auto j = load_json(manifest);
+            FamilyKernel k;
+            k.family = j.value("family", std::string(""));
+            k.name = d.path().filename().string();
+            k.path = d.path() / "open_kernels";
+            if (!k.family.empty()) out.push_back(k);
+        } catch (...) {}
     }
+    std::sort(out.begin(), out.end(),
+              [](const FamilyKernel& a, const FamilyKernel& b) { return a.family < b.family; });
+    return out;
+}
+
+static int list_families(const fs::path& xclbin_root) {
+    auto kernels = list_family_open_kernels(xclbin_root);
+    if (kernels.empty()) {
+        std::cout << "No family open_kernels found under: " << xclbin_root.string() << std::endl;
+        std::cout << "(Build/install the open kernels for a family; see open_kernels/export_*_kernels.py)" << std::endl;
+        return 0;
+    }
+    std::cout << "Available family open_kernels (shipped with the app):" << std::endl;
+    for (const auto& k : kernels)
+        std::cout << "  " << k.family << "  <-  " << k.name << "  (" << k.path.string() << ")" << std::endl;
+    return 0;
+}
+
+// Resolve the open_kernels set for a given family. With --xclbin-from (a model
+// dir name) that set is honoured; otherwise the set whose manifest family
+// matches is used. Never falls back to a *different* family (that would load the
+// wrong engine), so a missing family simply yields no link.
+static fs::path find_family_open_kernels(const fs::path& xclbin_root, const std::string& family,
+                                          const std::string& source_name) {
+    auto kernels = list_family_open_kernels(xclbin_root);
+    if (!source_name.empty()) {
+        for (const auto& k : kernels)
+            if (k.name == source_name) return k.path;
+        return {};
+    }
+    for (const auto& k : kernels)
+        if (k.family == family) return k.path;
     return {};
 }
 
@@ -677,6 +722,10 @@ static void link_open_kernels(const fs::path& models_root, const std::string& di
 // ------------------------------------------------------------------ entry point
 
 int run(const program_args_t& a) {
+    if (a.add_list_families) {
+        return list_families(system_xclbin_root());
+    }
+
     std::string repo = a.model_tag;
     if (repo.empty()) {
         err_("`flm add` requires a repo argument (HF/ModelScope id, URL, or local directory).");
@@ -765,6 +814,26 @@ int run(const program_args_t& a) {
     nlohmann::json entry = build_entry(official, dir_name, files, size_value);
     entry["details"]["family"] = family;
 
+    // Apply user-supplied configurable fields (override the official defaults).
+    if (a.add_thinking) entry["details"]["think"] = true;
+    if (a.add_think_toggleable) entry["details"]["think_toggleable"] = true;
+    if (!a.add_parameter_size.empty()) entry["details"]["parameter_size"] = a.add_parameter_size;
+    if (!a.add_quantization.empty()) entry["details"]["quantization_level"] = a.add_quantization;
+    if (a.add_context_length >= 0) entry["default_context_length"] = a.add_context_length;
+    if (a.add_max_prefill >= 0) entry["max_prefill_len"] = a.add_max_prefill;
+    if (!a.add_label.empty()) {
+        nlohmann::json labels = nlohmann::json::array();
+        std::stringstream ss(a.add_label);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            auto b = item.find_first_not_of(" \t");
+            auto e = item.find_last_not_of(" \t");
+            if (b == std::string::npos) continue;
+            labels.push_back(item.substr(b, e - b + 1));
+        }
+        if (!labels.empty()) entry["label"] = labels;
+    }
+
     register_entry(user_list, tag, entry, system_reg);
     log_("[INFO] Registered tag '" + tag + "' in " + user_list.string());
     register_model_info(user_list, tag, files, target);
@@ -773,7 +842,9 @@ int run(const program_args_t& a) {
 
     if (!a.add_no_xclbin) {
         fs::path xroot = system_xclbin_root();
-        fs::path source = resolve_family_open_kernels(xroot, family, xclbin_source);
+        fs::path source = find_family_open_kernels(xroot, family, xclbin_source);
+        if (source.empty() && !xclbin_source.empty())
+            log_("[WARN] --xclbin-from '" + xclbin_source + "' has no open_kernels; skipping link.");
         link_open_kernels(models_root, dir_name, source, a.force_redownload, a.sub_process_mode);
     }
 
