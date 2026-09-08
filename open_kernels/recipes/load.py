@@ -73,7 +73,9 @@ def narrow_to_buildable(spec: ModelSpec, m: dict[str, str], can: frozenset) -> d
     built; at any other width `linear_out` goes back to q4_1 and the packer re-quantizes the
     container's q8 out projection, exactly as it did before OPEN-QUANT-Q8. Encoding the
     hardware fact here is the difference between a slightly worse model and an export that
-    dies 60 s into aiecc with `Overflow of program memory`."""
+    dies 60 s into aiecc with `Overflow of program memory`. The warning says NOT IMPLEMENTED
+    YET rather than announcing a limit: an unlisted width wants a mixed core small enough to
+    fit, and one may yet be built -- listing the width here is all it would take."""
     from .catalogue import mixed_core_fits
     if m.get("linear_out") != "q8":
         return m
@@ -81,10 +83,8 @@ def narrow_to_buildable(spec: ModelSpec, m: dict[str, str], can: frozenset) -> d
         return m                        # every role is q8: one format on the core, no fold
     if mixed_core_fits(spec.family, spec.hidden):
         return m
-    print(f"open_kernels: {spec.family} hidden {spec.hidden}: linear_out narrowed to q4_1 -- "
-          f"no mixed-format main core has been built at this width (16 KB of program memory; "
-          f"see .claude/plans/q8m-hw-results.md), so the packer re-quantizes this container's "
-          f"q8 out projection at a measured logits corr of 0.999682 against its own q8 values.",
+    print(f"open_kernels: warning: q8 (8-bit) weights are not implemented yet for {spec.family} "
+          f"hidden {spec.hidden} -- the kernel does not fit in program memory. Falling back to q4_1.",
           file=sys.stderr)
     return {r: f for r, f in m.items() if r != "linear_out"}
 

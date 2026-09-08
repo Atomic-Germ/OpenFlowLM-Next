@@ -23,6 +23,7 @@ act 6x2 + out 4x2 = ~60 KB).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -40,23 +41,35 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 
-HID, NHEAD, HD = 2048, 32, 128
-NCH = 8192
+# DNGLUE_NHEAD=16 builds the Qwen3.5 2B / 0.8B point: 16 linear value heads over the same
+# 16 key heads (so one value head per key head, not two), 6144 conv channels, and an alpha /
+# beta projection zero-padded out to the accumulator's 32 lanes. make_test.py slices the
+# captured 32-head fixture down to it; compare.py reads the same knob.
+NHEAD = int(os.environ.get("DNGLUE_NHEAD", 32))
+HID, HD = 2048, 128
+KEY_WIDTH = 2048
+NCH = 2 * KEY_WIDTH + NHEAD * HD             # 8192 at 32 heads, 6144 at 16
 TILE = 1024
 NT = NCH // TILE
+KEY_TILES = 2 * KEY_WIDTH // TILE            # 4
+VALUE_TILES = NT - KEY_TILES                 # 4 at 32 heads, 2 at 16
+HEADS_PER_TILE = TILE // HD                  # 8
 SIDE_ELEM = 4096
 ACT_ELEM = 2048
-AB_ELEMS = 32                                # 64 rows x 32 bf16 per element
+AB_LANES = 32                                # dn_glue.h's kV: a W element is 64 rows x 32 bf16
+AB_ELEMS = HID * AB_LANES * 2 // SIDE_ELEM   # 32, whatever the head count
 SIDE_ELEMS = 1 + AB_ELEMS + AB_ELEMS + 1 + 2 * NT    # xn, Wa, Wb, small, convw
-SIDE_BYTES = SIDE_ELEMS * SIDE_ELEM          # 335872
+SIDE_BYTES = SIDE_ELEMS * SIDE_ELEM          # 335872 at 32 heads, 319488 at 16
+# dn_glue.h's default IS 32, so the 32-head build's compile command is unchanged.
+GLUE_FLAGS = {} if NHEAD == 32 else {"compile_flags": [f"-DDNGLUE_NHEAD={NHEAD}"]}
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
 def dn_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out, *, dummy: CompileTime[int] = 0):
     u8s = np.ndarray[(SIDE_ELEM,), np.dtype[np.uint8]]
     u8a = np.ndarray[(ACT_ELEM,), np.dtype[np.uint8]]
-    f32 = np.ndarray[(32,), np.dtype[np.float32]]
-    fqk = np.ndarray[(4096,), np.dtype[np.float32]]
+    f32 = np.ndarray[(AB_LANES,), np.dtype[np.float32]]
+    fqk = np.ndarray[(2 * KEY_WIDTH,), np.dtype[np.float32]]
     fvt = np.ndarray[(TILE,), np.dtype[np.float32]]
     fxn = np.ndarray[(HID,), np.dtype[bfloat16]]
     side_ty = np.ndarray[(SIDE_BYTES,), np.dtype[np.uint8]]
@@ -66,16 +79,16 @@ def dn_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out, *, dummy: Compi
 
     inc = include_dirs()
     f_ab = ExternalFunction("glue_ab", source_file=str(HERE / "glue_ab.cc"),
-                            arg_types=[u8s, fxn, f32, np.int32], include_dirs=inc)
+                            arg_types=[u8s, fxn, f32, np.int32], include_dirs=inc, **GLUE_FLAGS)
     f_small = ExternalFunction("glue_small_fn", source_file=str(HERE / "glue_small.cc"),
-                               arg_types=[u8s, f32, f32, f32, f32], include_dirs=inc)
+                               arg_types=[u8s, f32, f32, f32, f32], include_dirs=inc, **GLUE_FLAGS)
     f_conv = ExternalFunction("glue_conv", source_file=str(HERE / "glue_conv.cc"),
                               arg_types=[u8a, u8a, u8a, u8a, u8a, u8s, u8s, u8a, u8a, u8a, fqk, fvt, np.int32, np.int32],
-                              include_dirs=inc)
+                              include_dirs=inc, **GLUE_FLAGS)
     f_emit = ExternalFunction("glue_emit_fn", source_file=str(HERE / "glue_emit.cc"),
-                              arg_types=[fqk, fvt, f32, f32, u8a, np.int32, np.int32], include_dirs=inc)
+                              arg_types=[fqk, fvt, f32, f32, u8a, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS)
     f_copy = ExternalFunction("glue_copy_xn", source_file=str(HERE / "glue_copy.cc"),
-                              arg_types=[u8s, fxn], include_dirs=inc)
+                              arg_types=[u8s, fxn], include_dirs=inc, **GLUE_FLAGS)
 
     of_side = ObjectFifo(u8s, name="side", depth=2)
     of_act = ObjectFifo(u8a, name="act", depth=5)
@@ -104,8 +117,8 @@ def dn_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out, *, dummy: Compi
         sm = sin.acquire(1)
         fsmall(sm, acc_a, acc_b, decay, beta)
         sin.release(1)
-        for base in (0, 4):
-            for t in range_(4):
+        for base, ntiles in ((0, KEY_TILES), (KEY_TILES, VALUE_TILES)):
+            for t in range_(ntiles):
                 w = sin.acquire(2)
                 e = ain.acquire(5)
                 o = oout.acquire(3)
@@ -113,8 +126,8 @@ def dn_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out, *, dummy: Compi
                 oout.release(3)
                 ain.release(5)
                 sin.release(2)
-                if base == 4:
-                    for i in range_(8):
+                if base == KEY_TILES:
+                    for i in range_(HEADS_PER_TILE):
                         r = oout.acquire(1)
                         femit(qk, vt, decay, beta, r, t, i)
                         oout.release(1)
@@ -129,9 +142,9 @@ def dn_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out, *, dummy: Compi
         pipe.fill(side_p, a_side, TensorAccessPattern((1, SIDE_BYTES), 0, [1, 1, 1, SIDE_BYTES], [0, 0, 0, 1]))
         for t in range(NT):
             pipe.drain(out_c, c_nstate, TensorAccessPattern((3, NCH), t * TILE, [1, 1, 3, TILE], [0, 0, NCH, 1]))
-            if t >= 4:
-                pipe.drain(out_c, c_vec, TensorAccessPattern((1, NHEAD * 512), (t - 4) * 8 * 512,
-                                                             [1, 1, 1, 8 * 512], [0, 0, 0, 1]))
+            if t >= KEY_TILES:
+                pipe.drain(out_c, c_vec, TensorAccessPattern((1, NHEAD * 512), (t - KEY_TILES) * HEADS_PER_TILE * 512,
+                                                             [1, 1, 1, HEADS_PER_TILE * 512], [0, 0, 0, 1]))
             pipe.fill(act_p, a_qkv, TensorAccessPattern((1, NCH), t * TILE, [1, 1, 1, TILE], [0, 0, 0, 1]))
             pipe.fill(act_p, a_state, TensorAccessPattern((3, NCH), t * TILE, [1, 1, 3, TILE], [0, 0, NCH, 1]))
         pipe.finish()
@@ -147,4 +160,4 @@ DESIGN = dn_glue
 # old xclbin. Pass a hash of every source file in this directory.
 import hashlib as _h
 _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.read_bytes() for f in HERE.glob("*.h")))
-SPECIALIZE = {"dummy": int(_h.sha1(_src).hexdigest()[:8], 16)}
+SPECIALIZE = {"dummy": int(_h.sha1(_src + str(NHEAD).encode()).hexdigest()[:8], 16)}

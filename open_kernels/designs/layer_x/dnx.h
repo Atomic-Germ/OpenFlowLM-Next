@@ -25,9 +25,26 @@
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
+// Rows of S per streamed weight element: a property of the element size the recipe chose --
+// 10 KB elements (the 27B) give 10240 / (128*4) = 20 rows, 5 KB ones (Qwen3.5 dense, whose
+// 12288-wide down table leaves no room for 10 KB) give 10. The default is the 27B's, so its
+// kernels preprocess identically to the shipped ones; xcommon.py passes -DDNX_ROWS from
+// `Common.DN_ROWS` only when it differs.
+#ifndef DNX_ROWS
+#define DNX_ROWS 20
+#endif
 static constexpr unsigned kD = 128;          // head dim
-static constexpr unsigned kRowsX = 20;       // rows of S per streamed element
-static constexpr unsigned kPad = 160;        // hi/lo record stride (7 slices x 20)
+static constexpr unsigned kRowsX = DNX_ROWS; // rows of S per streamed element
+// kPad is NOT the slice count times kRowsX (that is `Common.DN_PAD`, the padded S row count
+// of the state buffer: 140 at 20 rows, 130 at 10). It is the hi/lo RECORD STRIDE inside ds,
+// fixed by the ds slot geometry below -- k_hl at DS_KHL and q_hl at DS_QHL are 160 floats
+// apart, so hi[0..kPad) and lo[kPad..2*kPad) as bf16 fit exactly at kPad = 160 -- and the
+// same 160 serves every row count. Wiring it to DN_PAD instead moved every dnx_* object in
+// the shipped 27B kernels (see .claude/plans/q-qwen35-handoff.md, "the lx xclbin size").
+static constexpr unsigned kPad = 160;        // hi/lo record stride inside ds (DS_KHL / DS_QHL)
+static_assert(kPad >= kD && kPad % 16 == 0, "dnx.h: the record stride must cover a head and be a vector multiple");
+static_assert(((kD + kRowsX - 1) / kRowsX) * kRowsX <= kPad,
+              "dnx.h: DNX_ROWS gives a padded row count past the ds hi/lo slot");
 static constexpr unsigned kV = 16;
 static constexpr unsigned kHalf = 64;        // columns per result element
 

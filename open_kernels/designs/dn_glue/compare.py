@@ -1,5 +1,7 @@
 """Compare dn_glue outputs: new conv state (bit-exact expected) and per-head records
-(fp32 throughout: k/q/v ~1e-5, decay/beta ~1e-7)."""
+(fp32 throughout: k/q/v ~1e-5, decay/beta ~1e-7). DNGLUE_NHEAD picks the head count the
+design and make_test.py were run at (32, or 16 for the Qwen3.5 2B / 0.8B point)."""
+import os
 import sys
 from pathlib import Path
 
@@ -7,6 +9,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 HERE = Path(__file__).parent
+NHEAD = int(os.environ.get("DNGLUE_NHEAD", 32))
 ok = True
 
 got = np.fromfile(HERE / "y_nstate.bin", np.uint8).view(bfloat16)
@@ -15,8 +18,8 @@ neq = int((got.view(np.uint16) != ref.view(np.uint16)).sum())
 print(f"{'PASS' if neq == 0 else 'FAIL'} nstate bit-exact: {neq} of {len(ref)} differ")
 ok &= neq == 0
 
-gv = np.fromfile(HERE / "y_vec.bin", np.float32).reshape(32, 512).astype(np.float64)
-rv = np.fromfile(HERE / "ref_vec.bin", np.float32).reshape(32, 512).astype(np.float64)
+gv = np.fromfile(HERE / "y_vec.bin", np.float32).reshape(NHEAD, 512).astype(np.float64)
+rv = np.fromfile(HERE / "ref_vec.bin", np.float32).reshape(NHEAD, 512).astype(np.float64)
 
 
 def field(name, g, r, tol):

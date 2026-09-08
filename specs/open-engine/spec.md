@@ -1,4 +1,4 @@
-# open-engine: the open engine (Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense) and its model recipes
+# open-engine: the open engine (Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense) and its model recipes
 
 Prefix `OPEN`. Home repo: openflowlm-next. Covers `src/open_qwen36/` (the
 resident engine behind the app's `causal_lm` seam) and `open_kernels/recipes/`
@@ -90,7 +90,7 @@ model. A call site that does not pass `qk_norm_post_rope` is read as `False`.
 - Points enter only after a compare. 128 / 2560 / 9728 entered with OPEN-FAMILY-QWEN3 on 2026-09-05; the post-RoPE tuple `(128, 32, 8, 128, True, False, True)` with OPEN-FAMILY-HUNYUAN on 2026-09-06; and on 2026-09-06 OPEN-FAMILY-QWEN3 added `gemv_q4` K 1024 / 3072 / 6144 / 12288, `ln` width 1024, `lm_head_q4` K 1024 / 2048 and the tuple `(128, 16, 8, 128, True, False, False)`, while OPEN-FAMILY-LLAMA3 added `gemv_q4` K 8192, `ln` width 3072, `lm_head_q4` K 3072 and the tuples `(128, 24, 8, 128, False, False, False)` and `(64, 32, 8, 64, False, False, False)`. On 2026-09-06 OPEN-FAMILY-QWEN35's 4B pass added `gemv_q4` K 9216, `lm_head_q8` K 2560 and the tuple `(256, 16, 4, 64, True, True, False)`; `deltanet heads=16` (Qwen3.5 2B / 0.8B) and `lm_head_q8 K=4096` (the 9B) stayed out because those runs did not pass. On 2026-09-07 OPEN-QUANT-Q8's pass added `gemv_q8` K 2048 and 4096 (Ornith-1.0-35B-A3B and five sibling containers); the Qwen3.5 4B's q8 variant added nothing, its `lx` build having overflowed program memory. OPEN-FAMILY-GRANITE added the tuple `(64, 40, 8, 64, False, False, False)` and `gemv_q4` K 8192 on 2026-09-06 -- the first entry at 40 heads. On 2026-09-07 OPEN-FAMILY-QWEN35's remaining three sizes passed and added `deltanet heads=16`, the tuple `(256, 8, 2, 64, True, True, False)` (the 2B / 0.8B), `lm_head_q8` K 1024 and 4096, and `gemv_q4` K 3584 -- the two points that had been held out since 2026-09-06 among them.
 - Nine buffer arguments → `9 buffer arguments`.
 - The `gemv_q8` template's validated `K` set holds 2048 and 4096, entered by OPEN-QUANT-Q8's hardware pass on 2026-09-07 (Ornith-1.0-35B-A3B); `gemv_q8 K=3072` names that set. Before that pass the set was empty and every q8 export needed `OPEN_KERNELS_UNVALIDATED=1`. The Qwen3.5 family's native-q8 pass on 2026-09-07 added nothing to it: its q8 `linear_out` GEMV reduces over `lin_value_width` (4096 on the 9B / 4B, 2048 on the 2B / 0.8B), not over `hidden`, so all four sizes compose at q8 with no override.
-- `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: `recipes.load` narrows the container's q8 role away at an unlisted width and says so, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`.
+- `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: at an unlisted width `recipes.load` warns in one short line that q8 is NOT IMPLEMENTED YET there and narrows the container's q8 role away, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`. The line names the width, the reason (program memory) and the format it fell back to; what the fallback costs (0.999682) is recorded here rather than spent on a warning. The warning is worded as a gap in what has been built rather than a permanent limit -- the width wants a mixed core small enough to fit and nobody has built one yet (the maintainer's call on PR #26).
 
 ### OPEN-ATTN-CONTEXT: decode cost grows linearly with position, on every family
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`)
@@ -408,3 +408,169 @@ dispatches — 1.16×, the direction one dispatch per layer was expected to give
 Everything above that is the context term, and it is **not** Granite's: see
 OPEN-ATTN-CONTEXT below. Decode measured 5.92 tok/s over 63 tokens because the
 context grew underneath it, not because the family is slow.
+
+### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
+**Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
+`designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,
+`designs/lm_head_q8`, `recipes/pack.py`, `src/open_qwen36/pools.cpp`, `manifest.cpp`,
+`model/replica_qwen35.py`)
+**Test category:** manual (needs the NPU and a Qwen3.5 container); the derivation, the
+composed layout and the pack ops are unit-tested in `tests/test_qwen35.py`,
+`tests/test_pack_plan.py` and `src/open_qwen36/{manifest_test,pools_test}.cpp`
+
+A Qwen3.5 dense model (gated DeltaNet linear-attention layers with a gated
+full-attention layer every fourth, a silu-gated dense FFN, q8 lm_head, `model_type`
+`qwen3_5` or `qwen3_5_text`) shall run on the open kernels from its `config.json`
+alone: the `qwen35` recipe composes the qwen36moe recipe's attention half (Layout /
+Common / Linear / Attn with `ffn="dense"`, so the DeltaNet and attention constants are
+the MoE's and not a re-derivation) with the dense recipe's FFN half, and `lx.py` /
+`ax.py` build with the FFN tail and the plain norm helper selected by `R.kind`, ONE
+instruction stream per layer type -- nothing is routed, so there is no part split. The
+q8 `ssm_out_proj` is streamed at q8 where the derived quant map says so (`q8_perm`,
+OPEN-QUANT-Q8) and re-quantized to q4_1 by the ordinary `std_perm` op otherwise -- the
+plan the 35B uses for its q4_1 copy of that tensor; alpha and beta are read from
+their bf16 `[heads, hidden]` copies through `transpose` into the `[hidden, heads]`
+layout `glue_ab` reads. Images are refused as on the other VLM families.
+
+**Acceptance criteria (unit):**
+- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the nested `text_config` (`qwen3_5_text`) and FLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
+- Swapping only the FFN moves nothing in the attention half: the 27B spec and a dense twin of it (an FFN narrow enough to keep 10 KB weight elements) give identical DeltaNet / attention / state / KV / lm_head constants, and `qwen35.layout` is `qwen36moe.layout(..., ffn="dense")`, not a copy.
+- The 9B layout: `PER_CALL 1` (a 12288-wide activation table leaves no room for two 10 KB weight elements beside the streams), `DN_ROWS 10 / DN_SLICES 13 / DN_PAD 130`, `S_ROWS 130`, `ELN 8192` (so the split `ln_y` / `ln_xn` norm entries), `E_A 2048` with 2 f32 heads per attention element and 4 og heads, `KV_ROW 4096`, `PTAB_ROW 2048`; the pool holds q4-sized `up | gate | down` first, at the same offsets for both layer types.
+- No `moe` block, no `rout_idx_off`, no router or shared-expert tensor anywhere in the manifest; each layer type's program is one `run`, with `attnpos` on the full-attention kernel only.
+- The manifest fixture parses in `manifest_test.cpp` (a linear-attention layer type with a one-step program and no `moe`); `ssm_out_proj` is a plain `std_perm` with no source-format field, and the two `transpose` ops carry the sizes `pools::apply` needs.
+- **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. The value head's key head is `h / (lin_value_heads / lin_key_heads)` -- 2 value heads per key head at 32, one at 16.
+- **The alpha / beta projection is padded to the accumulator's 32 lanes**, not narrowed: a W element stays 64 rows x 32 bf16 = 4 KB, `AB_ELEMS` is `hidden / 64` whatever the head count, and a 16-head model's `transpose` op carries `dst_rows` so columns 16..31 are zero. `dt_bias` sits at `lin_value_heads` floats inside `small`, not at a fixed 32.
+- **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048) / 64` weight tiles, which is 32 and 8 at HID 2560. The side channel's fills are `2 + 4 * ceil(hidden*2 / 4096)` and the recipe refuses a hidden width whose count exceeds `LIMITS["shim_fills"]`, naming the number.
+
+**Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
+`out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
+then the engine CLI, then `chat.py` (the Qwen template). The same procedure runs each
+published size: 4B (passed 2026-09-06), 9B, 2B and 0.8B. The new kernel points (K 12288
+GEMVs, `lm_head_q8` at K 4096, a 16/4-head gated attention at HD 256, `deltanet
+heads=16`, an 8/2-head gated attention at HD 256) are built with
+`OPEN_KERNELS_UNVALIDATED=1` until this passes, then added to `recipes/catalogue.py`.
+The 4B is also the DENSE path's regression whenever the glue's projection walk changes:
+its logits must reproduce byte for byte.
+Thresholds as the 35B: logits corr >= 0.99999 against the replica **fed the same
+re-quantized out_proj** (`replica_qwen35.py`'s default), same argmax and top-5, residual
+corr >= 0.9999 every layer. Reported separately: the same slice against the replica fed
+the q8 out_proj -- the quality cost of the re-quantization decision.
+
+**Adapters (manual):** the Qwen3.5 adapter class selects the open engine when a kernel set
+is installed for its model, and honours `FLM_QWEN35_ENGINE=open|closed`: `Qwen3_5VL`
+(`model_list.json` family `qwen3.5`, e.g. `qwen3.5:4b`). Verify with `flm serve <tag>` on a
+model that has `open_kernels/` installed: the load logs
+`Qwen3.5 on the open kernels (<dir>)`, and `FLM_QWEN35_ENGINE=closed` restores the
+`qwen3_5vl_npu` DLL. Images always need the closed engine -- the open one has no vision
+path, and an image payload is refused with
+`images need the closed Qwen3.5 engine (FLM_QWEN35_ENGINE=closed)`.
+
+**Result 2026-09-06 (Qwen3.8-Distilled-4B-NPU2, HID 2560 / 32 layers / FFN 9216): PASS.**
+Slice (8 layers, 3 tokens from `[248045]`, six linear and two full): logits corr **0.999999 /
+0.999992 / 0.999989** against the replica fed the re-quantized weights, **argmax and top-5
+identical at all three positions**, residual corr >= **0.999991** in every layer, maxrel <=
+3.1e-03. The engine reproduced the harness **bit for bit** (max abs difference 0.000e+00 over
+248 320 logits at every position) and request 2 reproduced request 1; every step trace shows
+`route 0.00 / part1 0.0`, i.e. one instruction stream per layer type. All 32 layers answered the
+chat prompt coherently, `[eos]` at token 85, 150 ms/token (6.66 tok/s). Points added to
+`recipes/catalogue.py`: `gemv_q4 K=9216`, `lm_head_q8 K=2560`, `attn (256, 16, 4, 64, True, True,
+False)`. Two bugs were fixed to get here, both outside this requirement's own code:
+`lm_head_q8.py` never generated its `gemv_q4_prep_k{K}` TU, and the q8 head's pool order was
+hardcoded to K = 2048 in both packers (OPEN-PACK-PLAN).
+
+**Result 2026-09-07 (the 4B at native q8): the recipe narrows it.** The 4B's container stores
+`ssm_out_proj` at q8 like its three siblings, so its `lx` main core would carry `gemv_q8_gy`
+beside the q4_1 `gemv_q4_gy` and `gemv_q4_gms`; the build dies in `aiecc` with
+`_XAie_LoadProgMemSection: Overflow of program memory`, and both flag levers (`-Oz` on the two
+GEMV translation units, then on the whole core) were spent without recovering it. Hidden 2560
+is therefore NOT in `catalogue.MIXED_CORE_FITS`, and the recipe derives `q4_1` for this size
+with a one-line warning -- native q8 not implemented yet at this width -- rather than composing
+an export that cannot build (OPEN-QUANT-Q8). The other three sizes keep their container's q8
+role. The q4_1 path is unaffected and still passes: the shipped
+kernel set (its manifest regenerated with `OPEN_KERNELS_FORCE_Q4_1=1`) answered the chat prompt
+over all 32 layers at 124 ms/token (8.06 tok/s) after the native-q8 merge.
+`.claude/plans/q8-hw-results.md` §2.
+
+**Result 2026-09-06 (Qwen3.8-Distilled-9B-NPU2, HID 4096): NOT RUN -- the `lx` build does not
+fit.** `ax`, `ln` (ELN 8192, the split norm entries) and `lm_head_q8` at K 4096 all build; `lx`
+fails in aiecc with `'aie.tile' op allocated buffers exceeded available memory` on tile (2, 3),
+the DeltaNet glue core, which sums to 68 096 B against 65 536. Everything on that core is
+HID-independent except `xnb`, the private bf16[HID] copy of the layer-entry norm output that
+`glue_ab_tile` walks tile by tile: 59 904 B of fixed allocations leave it **5 632 B, i.e.
+HID <= 2816**. R5 in the handoff covered the norm helper's elements and the glue's *copy*
+(`glue_copy_xn_e`) but never added up the glue core's L1. A fix means re-streaming the xn per
+half (a `glue_ab_e.cc` with the accumulator reset passed in, a DENSE branch in `glue_body`, and
+an interleaved `tg_s` fill sequence). Log: `.claude/plans/q-hw-results.md`.
+
+**Result 2026-09-06 (Qwen3.8-Distilled-2B-NPU2 and Qwen3.5-0.8B-NPU2): NOT RUN -- both hang.**
+All four kernel sets build for each, and both then time out on the first `lx` dispatch (ERT state
+8) in the harness and the engine alike. Both have `linear_num_value_heads` 16 -- the
+`deltanet: heads=16 is outside the validated set {32}` point -- and
+`designs/dn_glue/dn_glue.h` carries `kNHead = 32` as a `static constexpr` that no recipe value
+reaches. Making it a knob (as `DNX_ROWS` is) plus sizing the glue core's `acc_a` / `acc_b` /
+`decay` / `beta` from it is a separate piece of work with its own compare.
+
+**Result 2026-09-07 (all four sizes on the q4_1 path): PASS -- the family is complete.** The two
+blockers above are fixed and every published size now runs the whole procedure. Every export used
+`OPEN_KERNELS_FORCE_Q4_1=1`, because a Qwen3.5 container derives `linear_out: q8` and the
+mixed-format `lx` core still overflows program memory (the q8 Result above); the native-q8 run
+waits on that lever.
+
+Before the models, the standalone `dn_glue` design was built at `DNGLUE_NHEAD=16` and compared
+against the fp64 reference for a 16-head record set: **new conv state bit-exact (0 of 18 432 bf16
+differ)** and cos 1.00000000 on k / q / v / decay / beta (maxrel <= 1.1e-05). Rebuilt at the
+default 32 heads it gives what it always gave (0 of 24 576 differ, the same cosines), so the knob
+costs the validated point nothing.
+
+| size | HID / layers / FFN | slice logits corr (3 tokens) | argmax + top-5 | worst residual | engine vs harness | chat |
+|---|---|---|---|---|---|---|
+| 9B | 4096 / 32 / 12288 | 0.999999 / 0.999987 / 0.999992 | match | 0.999991 | 0.000e+00 | `[eos]` @54, 181 ms/tok (5.53 tok/s) |
+| 4B | 2560 / 32 / 9216 | 0.999999 / 0.999992 / 0.999989 | match | 0.999991 | 0.000e+00 | `[eos]` @60, 138 ms/tok (7.25 tok/s) |
+| 2B | 2048 / 24 / 6144 | 0.999998 / 0.999979 / 0.999980 | match | 0.999978 | 0.000e+00 | `[eos]` @63, 69 ms/tok (14.5 tok/s) |
+| 0.8B | 1024 / 24 / 3584 | 0.999982 / 0.999993 / 0.999992 | match | 0.999984 | 0.000e+00 | `[eos]` @74, 53 ms/tok (18.7 tok/s) |
+
+Each slice is 8 layers (six linear, two full), 3 greedy tokens from `[248045]`, against the
+replica fed the re-quantized out_proj; maxrel <= 1.2e-02 in every layer of every run. `route 0.00
+/ part1 0.0` in every step trace, i.e. one instruction stream per layer type. The 2B's positions 1
+and 2 and the 0.8B's position 0 sit just under the 0.99999 logits bar (0.999979 / 0.999980 /
+0.999982) while their argmax and whole top-5 match and every layer residual is >= 0.999978 --
+the same fp32-vs-fp64 noise the 4B's 0.999989 is, wider because the residual is narrower.
+
+**The 4B reproduced its 2026-09-06 numbers exactly** -- 0.999999 / 0.999992 / 0.999989, argmax
+228793 / 695 / 3966, top-5 identical, residual corr >= 0.999991, and the same chat answer word for
+word -- which is the DENSE-path regression for the per-half projection walk. Its `--check` against
+the pre-fix export differs in `lx` alone (`insts.bin` 96 448 B against 95 136); `ax`, `ln` and
+`lm_head_q8` are byte-identical and the manifest differs only in `build_key`.
+
+**The 9B's glue core fits with 1 536 B to spare.** `xnb` is now one 4 KB element
+(`memref<2048xbf16>` in the built design) whatever the hidden width, and the core allocates
+64 000 B of its 65 536: stack 6 144, `qk` 16 384, `side` 3 x 4 096, `gact` 6 x 2 048, `gout`
+4 x 2 048, `vt` 4 096, `xnb` 4 096, and the four f32[32] accumulators 512.
+
+Points added to `recipes/catalogue.py`: `deltanet heads=16`, the `attn` tuple
+`(256, 8, 2, 64, True, True, False)`, `lm_head_q8` K 1024 and 4096, `gemv_q4` K 3584. With those
+in, all four sizes compose with no `OPEN_KERNELS_UNVALIDATED`. Log:
+`.claude/plans/q35-hw-results.md`.
+
+**Result 2026-09-07 (the same four sizes at native q8, OPEN-QUANT-Q8): 9B, 2B and 0.8B PASS;
+the 4B has no kernels.** Each container stores `ssm_out_proj` at q8, so this is the family
+running its own weights rather than a re-quantized copy of them. Against the replica fed
+those q8 values, the same 8-layer / 3-token slice gives:
+
+| size | slice logits corr | argmax + top-5 | worst residual | engine vs harness | chat |
+|---|---|---|---|---|---|
+| 9B | 0.999999 / 0.999991 / 0.999993 | match | 0.999994 | 0.000e+00 | `[eos]` @74, 191 ms/tok (5.25 tok/s) |
+| 2B | 0.999998 / 0.999989 / 0.999986 | match | 0.999986 | 0.000e+00 | `[eos]` @61, 70 ms/tok (14.35 tok/s) |
+| 0.8B | 0.999993 / 0.999992 / 0.999990 | match | 0.999991 | 0.000e+00 | `[eos]` @47, 54 ms/tok (18.36 tok/s) |
+
+`routing None` and ERT state 4 on every dispatch -- the mixed core's earlier y acquire does
+not disturb the fifos. The 2B is the one size whose q8 slice beats its own q4_1 slice
+(0.999989 / 0.999986 against 0.999979 / 0.999980). The two paths diverge from the second
+token: the 9B picks 220 / 248045 / 82 re-quantized and 220 / 3966 / 3966 at q8.
+
+The **4B**'s `lx` still overflows program memory, so it stays on the re-quantizing fallback and
+the recipe now narrows its derived map to q4_1 rather than offering an export that cannot
+build; see OPEN-QUANT-Q8. The kernel sets went to
+`src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
+`recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
+2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
