@@ -45,6 +45,16 @@ extending to MoE, or changing the pack ops.
 
 ## Build + verify (this machine)
 
+**`utilities/build-all.sh` does all of it**: toolchain venv check -> export
+every spec (all 6 build, both layouts, ~10 min total) -> `cmake --preset
+linux-default` build of flm -> `cmake --install` into a prefix (default
+`/opt/fastflowlm` if writable, else `./install`). Logs per spec in
+`build-logs/`. Flags: `--prefix`, `--specs a,b`, `--skip-kernels`,
+`--skip-app`, `--harness` (adds FLM_BUILD_OPEN_KERNELS_HARNESS=ON),
+`--force`. Verified end-to-end 2026-09-07: 6/6 specs export, install tree
+runs (`install/bin/flm --version` -> FLM v1.0.4 with open_kernels sets
+present for every dense family).
+
 ```
 uv venv --python 3.13 ironvenv && source ironvenv/bin/activate
 pip install -r ironvenv-requirements.txt          # mlir_aie 1.4.2 + llvm-aie wheel
@@ -86,6 +96,16 @@ cd open_kernels/designs/gemv_q4 && /tmp/opencode/harness/run_kernel run_qkv_gguf
   qwen3/gemma3); full pytest suite 65 passed.
 
 ## Gotchas learned here
+
+- **designs/dense/gen_kernels.py regenerates gemv_q4_gy.cc / gemv_q4_gms.cc
+  on every export** — hand-editing those two files is silently undone at the
+  next export (cost an hour; looks like a mysterious file revert). The
+  symbol-prefix fix lives in the GENERATOR templates now
+  (GEMV_Q4_WRAP(GEMV_Q4_PREFIX, y/ms)). NOTE: designs/layer_x/gen_kernels.py
+  still emits UNPREFIXED names — correct for today's MoE recipe (no f32
+  twins yet), but the MoE f32 phase MUST add the macro to those templates
+  or lx/ax f32 builds will fail with undefined gemv_q4s32_* exactly like
+  the dense ones did.
 
 - `##` in a macro suppresses expansion of its operands: symbol prefixes need
   the two-level `WRAP(PFX, NAME) -> WRAP__(PFX, NAME)` pattern (see
