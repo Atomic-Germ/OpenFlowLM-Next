@@ -5,12 +5,14 @@ sources, which would churn the fixtures on every edit):
     fixtures/manifest_qwen3_4b.json   Qwen3-4B (the qwen3 dense recipe)
     fixtures/manifest_gemma3_4b.json  Gemma3-4B (two layer types, a sliding window)
     fixtures/manifest_hy_mt2_7b.json  Hy-MT2-7B (post-RoPE q/k norm, a padded head)
+    fixtures/manifest_qwen35_9b.json  Qwen3.8-Distilled-9B (the qwen35 composition)
 
     python specs/open-engine/tests/make_fixtures.py
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +28,8 @@ FIXTURE_G3 = HERE / "fixtures" / "manifest_gemma3_4b.json"
 SPEC_G3 = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "gemma3-4b.json"
 FIXTURE_HY = HERE / "fixtures" / "manifest_hy_mt2_7b.json"
 SPEC_HY = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "hy-mt2-7b.json"
+FIXTURE_Q35 = HERE / "fixtures" / "manifest_qwen35_9b.json"
+SPEC_Q35 = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "qwen35-9b.json"
 
 
 def fixture_manifest() -> dict:
@@ -44,9 +48,17 @@ def fixture_manifest_hy() -> dict:
     return manifest(load_spec(SPEC_HY), key="sha256:fixture")
 
 
+def fixture_manifest_q35() -> dict:
+    """OPEN_KERNELS_UNVALIDATED: the qwen35 points (K 12288 GEMVs, lm_head_q8 at K 4096)
+    enter the catalogue only after OPEN-FAMILY-QWEN35's hardware pass."""
+    os.environ["OPEN_KERNELS_UNVALIDATED"] = "1"
+    return manifest(load_spec(SPEC_Q35), key="sha256:fixture")
+
+
 if __name__ == "__main__":
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     for f, m in ((FIXTURE, fixture_manifest()), (FIXTURE_Q3, fixture_manifest_q3()),
-                 (FIXTURE_G3, fixture_manifest_g3()), (FIXTURE_HY, fixture_manifest_hy())):
+                 (FIXTURE_G3, fixture_manifest_g3()), (FIXTURE_HY, fixture_manifest_hy()),
+                 (FIXTURE_Q35, fixture_manifest_q35())):
         f.write_text(json.dumps(m, indent=1) + "\n", encoding="utf-8", newline="\n")
         print(f"wrote {f}")
