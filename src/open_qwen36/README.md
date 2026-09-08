@@ -540,11 +540,13 @@ on a memory-starved box, not the kernels.
   Exact, but 124 ms each: a 500-token prompt is a minute. The closed engine
   has batch kernels; nobody has written open ones (phlegm's plan called it
   "weeks, gated on one experiment").
-- **Long-context attention cost.** The attention kernel is one core walking the
-  cache: ~24 µs per cached row per attention layer, so a 4096-token context
-  adds ~1 s per token across the 10 attention layers. Capacity is no longer
-  capped (KV buffers are sized from the app's context length); speed at long
-  context is a kernel item.
+- **Long-context attention cost -- closed on the dense families and Qwen3.5,
+  the 35B in progress** (2026-09-08, spec OPEN-ATTN-CONTEXT). The attention
+  kernel now batches its softmax exponentials on the vector unit, splits the
+  heads over up to six cores and blocks the cached rows per call; a step at
+  position 2048 costs about what a step at position 0 does (Qwen3-4B: 5050 ->
+  258 ms). A family joins by measurement (`recipes/attnknobs.py`); the 35B's
+  kernels at the default knobs are byte-identical to what shipped.
 - **Vision.** The model is a VLM; images still need the closed engine.
 - **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
   of work; this reader is ~150 lines and will go with it. The chunk format is read

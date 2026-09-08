@@ -134,12 +134,55 @@ model. A call site that does not pass `qk_norm_post_rope` is read as `False`.
 - The `gemv_q8` template's validated `K` set holds 2048 and 4096, entered by OPEN-QUANT-Q8's hardware pass on 2026-09-07 (Ornith-1.0-35B-A3B); `gemv_q8 K=3072` names that set. Before that pass the set was empty and every q8 export needed `OPEN_KERNELS_UNVALIDATED=1`. The Qwen3.5 family's native-q8 pass on 2026-09-07 added nothing to it: its q8 `linear_out` GEMV reduces over `lin_value_width` (4096 on the 9B / 4B, 2048 on the 2B / 0.8B), not over `hidden`, so all four sizes compose at q8 with no override.
 - `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: at an unlisted width `recipes.load` warns in one short line that q8 is NOT IMPLEMENTED YET there and narrows the container's q8 role away, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`. The line names the width, the reason (program memory) and the format it fell back to; what the fallback costs (0.999682) is recorded here rather than spent on a warning. The warning is worded as a gap in what has been built rather than a permanent limit -- the width wants a mixed core small enough to fit and nobody has built one yet (the maintainer's call on PR #26).
 
-### OPEN-ATTN-CONTEXT: decode cost grows linearly with position, on every family
-**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`)
-**Test category:** manual (`open_kernels/model/sweep_positions.ps1`, needs the NPU and two model containers)
+### OPEN-ATTN-CONTEXT: decode cost stays flat in the context position, on every family
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `recipes/attnknobs.py`, `designs/dense/dx.py`, `designs/layer_x/ax.py`)
+**Test category:** manual (the sweep below, needs the NPU and the model container); the geometry each family gets is unit-tested in `tests/test_attn_geometry.py`
 
-**This is an observation, not yet a requirement** — it is written down because
-it was measured, it is large, and nothing else in this spec records it.
+A decode step's attention cost shall not grow with the context position beyond
+a small per-position term: on the fast attention path -- the online softmax's
+exponentials batched on the vector unit (`ATTN_VEXP`), the heads split over
+`ACORES` cores (`ATTN_NHL`), cached rows blocked per kernel call (`ATTN_RB`) --
+a step at position 2048 costs within 2x of a step at position 0 on the
+families below. `1/sqrt(HD)` folds into q as an exponent shift at HD 64 / 256
+and multiplies the scores on the vector unit at HD 128 (`ATTN_SCALE_IN_Q`).
+
+A family enters the path by measurement, never by declaration:
+`recipes/attnknobs.py: FAST_ATTENTION` lists the measured families; every
+other family compiles the single-core attention it compiled before, byte for
+byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
+measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
+
+**Acceptance criteria (unit, `test_attn_geometry.py`):**
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 2 x 4, RB 2; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. Every core's heads are whole og elements; RB x max(NHL, 8) is 8, 16 or 32.
+- Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
+- `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+
+**Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
+directory; one decode step at positions 0 / 256 / 1024 / 2048 through
+`open_qwen36_cli --at-position` on the shipped set and the probe set; then
+200-300 greedy tokens from the same prompt on both, logits dumped
+(`--dump-logits`) and compared position by position until the first token
+that differs. A near-tie flip (the two kernels' top-2 within ~0.05 logits,
+corr > 0.9999 at that position) is not a defect. Passing: flat part0 across
+the sweep, argmax agreement at every comparable position. Then list the family
+in `FAST_ATTENTION`, export without the probe and install the set.
+
+**Measured (2026-09-07/08, `.claude/plans/issue-16-hw-results.md`):**
+
+| family | geometry | step @ 2048, shipped -> fast | greedy agreement |
+|---|---|---|---|
+| Granite-4.2-3B (hd 64) | 5 x 8, RB 4 | 1216 s TTFT -> 59 s on 1005 tokens | fp64 replica, coherent chat |
+| Qwen3-4B (hd 128) | 4 x 8, RB 4 | 5050 -> 258 ms (19.6x) | 300/300, corr min 0.99993 |
+| Llama-3.1-8B (hd 128) | 4 x 8, RB 4 | 4024 -> 427 ms (loaded box) | 54, then a 0.008-logit near-tie |
+| Hy-MT2-7B (hd 128) | 4 x 8, RB 4 | 3395 -> 165 ms (20.6x) | 43, then a 0.05-logit near-tie |
+| Gemma3-4B (hd 256) | 2 x 4, RB 2 | 512 -> 96 ms (5.3x; the local layers never grew) | 41, then a 0.06-logit near-tie |
+| Qwen3.5-0.8B (hd 256, gated; `ax`) | 4 x 2, RB 1 | 176 -> 70 ms (6 attention layers of 24) | 200/200, corr min 0.99993 |
+| Qwen3.6-35B (hd 256, gated; `ax`), 16-layer prefix | 4 x 4, RB 1 | 217 -> 43 ms part0 (four attention layers) | 85 (100 tokens; corr spread from expert flips) |
+
+The 35B's `ax` kernels rebuilt at the default knobs after the split was
+plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Where the requirement came from (the observation, 2026-09-06):**
 
 A decode step's cost is dominated by a term linear in context position.
 Measured 2026-09-06 on one box, one step per point, `--at-position`:

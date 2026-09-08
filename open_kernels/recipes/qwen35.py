@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
+from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, Q8_CHUNK, Recipe, ab_lanes, ffn_geometry, mixed_check,
                         per_call, proj_op, q4_chunks, quant_check, require_gemv, roundup)
 from .spec import FULL, LINEAR, ModelSpec
