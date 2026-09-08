@@ -26,6 +26,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
+    std::cout << "  add <repo>          - Install a pre-converted model (HF/ModelScope id, URL, or local dir)" << std::endl;
     std::cout << "  list                - List all available models" << std::endl;
     std::cout << "  version             - Show version information" << std::endl;
     std::cout << "  help                - Show this help message" << std::endl;
@@ -110,7 +111,27 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prompt,i", po::value<std::string>(&parsed_args.input_file_name)->default_value(""),
              "Direct file input")
             ("bench-iterations", po::value<int>(&parsed_args.iterations)->default_value(2),
-             "Iterations for bench");
+              "Iterations for bench")
+            ("tag", po::value<std::string>(&parsed_args.add_tag)->default_value(""),
+             "Registry tag for `add` (default: derived from repo name, e.g. qwen3.5-claude:9b)")
+            ("family", po::value<std::string>(&parsed_args.add_family)->default_value(""),
+             "details.family for engine dispatch (default: from matching official entry)")
+            ("config", po::value<std::string>(&parsed_args.add_config)->default_value(""),
+             "user model_list.json to update for `add` (default: $FLM_CONFIG_PATH or ~/.config/flm/model_list.json)")
+            ("system-list", po::value<std::string>(&parsed_args.add_system_list)->default_value(""),
+             "official model_list.json used for `add` defaults (default: auto-detect)")
+            ("models-root", po::value<std::string>(&parsed_args.add_models_root)->default_value(""),
+             "models directory for `add` (default: $FLM_MODEL_PATH or ~/.config/flm/models)")
+            ("xclbin-dir", po::value<std::string>(&parsed_args.add_xclbin_dir)->default_value(""),
+             "user xclbins directory for `add` (default: $FLM_XCLBIN_PATH or ~/.config/flm/xclbins)")
+            ("xclbin-from", po::value<std::string>(&parsed_args.add_xclbin_from)->default_value(""),
+             "official model dir to link open_kernels from for `add` (default: best match)")
+            ("no-xclbin", po::bool_switch(&parsed_args.add_no_xclbin),
+             "Do not create the open_kernels symlink for `add`")
+            ("no-verify", po::bool_switch(&parsed_args.add_no_verify),
+             "Skip sha256 verification of downloads for `add`")
+            ("dry-run", po::bool_switch(&parsed_args.add_dry_run),
+             "Print the install plan and exit for `add`");
 
         // Define positional arguments
         po::positional_options_description pos_desc;

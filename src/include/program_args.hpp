@@ -41,6 +41,18 @@ struct program_args_t {
     // for download related command
     bool modelscope = false;
 
+    // for add command (flm add: install a pre-converted Q4NX model)
+    std::string add_tag = "";            // --tag (default: derived from repo name)
+    std::string add_family = "";         // --family (details.family for engine dispatch)
+    std::string add_config = "";         // --config (user model_list.json to update)
+    std::string add_system_list = "";    // --system-list (official model_list.json for defaults)
+    std::string add_models_root = "";    // --models-root (models directory)
+    std::string add_xclbin_dir = "";     // --xclbin-dir (user xclbins directory)
+    std::string add_xclbin_from = "";    // --xclbin-from (official model dir to link open_kernels from)
+    bool add_no_xclbin = false;          // --no-xclbin
+    bool add_no_verify = false;          // --no-verify
+    bool add_dry_run = false;            // --dry-run
+
     // for serve command
     std::string host = "127.0.0.1";
     size_t max_socket_connections = 10;
