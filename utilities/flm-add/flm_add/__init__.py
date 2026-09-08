@@ -483,6 +483,45 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def normalize_tokenizer_config(target, repo, bases, modelscope=False):
+    """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
+    stock HF repos keep them in generation_config.json -- merge them over."""
+    tc = target / "tokenizer_config.json"
+    if not tc.is_file():
+        return
+    cfg = json.loads(tc.read_text(encoding="utf-8"))
+    need_eos = "eos_token_id" not in cfg or not isinstance(cfg.get("eos_token_id"), list)
+    need_bos = cfg.get("bos_token") is not None and "bos_token_id" not in cfg
+    if not (need_eos or need_bos):
+        return
+    g = None
+    gc = target / "generation_config.json"
+    for cand in [gc, fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)] + \
+                [fetch_from_repo(b, "generation_config.json", gc, modelscope=modelscope) for b in bases]:
+        if cand and Path(cand).is_file():
+            try:
+                g = json.loads(Path(cand).read_text(encoding="utf-8"))
+            except Exception:
+                g = None
+            if g and (need_eos and isinstance(g.get("eos_token_id"), list) or
+                      need_bos and isinstance(g.get("bos_token_id"), int)):
+                break
+    if not g:
+        log("[WARN] no generation_config.json; the model may fail at load if the engine "
+            "needs eos_token_id in tokenizer_config.json")
+        return
+    changed = False
+    if need_eos and isinstance(g.get("eos_token_id"), list):
+        cfg["eos_token_id"] = g["eos_token_id"]
+        changed = True
+    if need_bos and isinstance(g.get("bos_token_id"), int):
+        cfg["bos_token_id"] = g["bos_token_id"]
+        changed = True
+    if changed:
+        tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        log("[INFO] merged eos/bos ids from generation_config.json into tokenizer_config.json")
+
+
 def readme_base_model(repo_id, modelscope=False):
     """The base model id(s) from the repo's README.md YAML frontmatter.
 
@@ -953,6 +992,7 @@ def main():
                             log(f"[INFO]   {f} <- {b}")
                             break
                 missing = [f for f in required if not (target / f).is_file()]
+    normalize_tokenizer_config(target, repo, readme_base_model(repo, modelscope), modelscope)
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []

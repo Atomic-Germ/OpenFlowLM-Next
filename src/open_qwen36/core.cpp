@@ -3,6 +3,7 @@
 #include "open_qwen36/core.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -127,7 +128,7 @@ Core::~Core() = default;
 xrt::hw_context& Core::context(const std::string& name) {
     auto it = ctxs_.find(name);
     if (it != ctxs_.end()) return *it->second;
-    fs::path p = fs::path(cfg_.kernel_dir) / man_.contexts.at(name);
+    fs::path p = fs::path(cfg_.kernel_dir) / w_->contexts.at(name);
     if (!fs::exists(p)) throw std::runtime_error("open_qwen36: missing kernel " + p.string());
     xrt::xclbin xcl(p.string());
     auto uuid = dev_->register_xclbin(xcl);
@@ -149,10 +150,10 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     k.instr = std::make_unique<xrt::bo>(*dev_, insts.size(), xrt::bo::flags::cacheable, k.k->group_id(1));
     std::memcpy(k.instr->map<void*>(), insts.data(), insts.size());
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, man_.moe);
+    if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, w_->moe);
     else if (d.patch == "attnpos") {
-        k.attn = stream_patch::attn_table(k.words, name, man_.attn);
-        k.geom = man_.attn;
+        k.attn = stream_patch::attn_table(k.words, name, w_->attn);
+        k.geom = w_->attn;
         k.geom.window = d.window;
     }
 }
@@ -207,7 +208,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     }
     for (const auto& [name, rg] : w_->per_row_globals) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
-        pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
+        pools::build_ptab(*w_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
     }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
@@ -285,7 +286,17 @@ void Core::step(int token, bool want_logits) {
 
     xrt::bo& xres = buffer("xres", 0);
     file_->embed_row(w_->embed_tensor, static_cast<size_t>(token), w_->hidden, xres.map<float*>());
-    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
+    if (cfg_.verbose) {
+        const float* x = xres.map<float*>();
+        int nnan = 0;
+        float mx = 0.f;
+        for (size_t i = 0; i < w_->hidden; ++i) {
+            if (!std::isfinite(x[i])) ++nnan;
+            else mx = std::max(mx, std::fabs(x[i]));
+        }
+        log("embed t=" + std::to_string(token) + " nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
+    }
+    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
     for (auto& [name, k] : kerns_) {
         if (k.patch != "attnpos") continue;
         stream_patch::attn_apply(k.iw(), k.attn, static_cast<uint64_t>(pos_), k.geom);
@@ -304,6 +315,17 @@ void Core::step(int token, bool want_logits) {
         }
     }
     if (want_logits) {
+        if (cfg_.verbose) {
+            xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+            const float* x = xres.map<float*>();
+            int nnan = 0;
+            float mx = 0.f;
+            for (size_t i = 0; i < w_->hidden; ++i) {
+                if (!std::isfinite(x[i])) ++nnan;
+                else mx = std::max(mx, std::fabs(x[i]));
+            }
+            log("xres after layers nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
+        }
         auto t1 = std::chrono::steady_clock::now();
         for (const Step& s : w_->tail) run(kerns_.at(s.kernel), s.args, 0);
         xrt::bo& lg = buffer("logits", 0);

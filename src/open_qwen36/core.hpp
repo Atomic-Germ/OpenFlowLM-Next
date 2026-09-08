@@ -103,8 +103,8 @@ public:
     /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
     const Manifest& weights() const { return w_ ? *w_ : man_; }
     bool is_gguf() const { return gguf_; }
-    size_t vocab() const { return man_.vocab; }
-    size_t real_vocab() const { return man_.real_vocab; }
+    size_t vocab() const { return weights().vocab; }
+    size_t real_vocab() const { return weights().real_vocab; }
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);

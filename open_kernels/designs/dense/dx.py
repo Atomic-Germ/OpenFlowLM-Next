@@ -48,7 +48,7 @@ sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes import dense as QR  # noqa: E402
-from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
+from recipes.qwen36moe import BAND_ROWS, ELEM  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
@@ -80,7 +80,7 @@ def per_band(K):
 
 
 def n_groups(K):
-    return band_bytes(K) // CALL_BYTES
+    return QR.band_bytes(K, SPEC.quant) // CALL_BYTES
 
 
 def bt(total, off, n):
@@ -302,7 +302,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                                    Buffer(i32_4, name="pb"), f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin],
                           tile=Tile(2, 3), stack_size=0x1800))
 
-    BB_H, BB_Q, BB_F = band_bytes(HID), band_bytes(QW), band_bytes(FF)
+    BB_H, BB_Q, BB_F = QR.band_bytes(HID, SPEC.quant), QR.band_bytes(QW, SPEC.quant), QR.band_bytes(FF, SPEC.quant)
     YB = BAND_ROWS * 4
 
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c):
