@@ -33,6 +33,28 @@ the offending key named.
 - `manifest_version: 2` → refused by the parser.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
+- `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `FLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$FLM_XCLBIN_PATH`, the directory holding `$FLM_CONFIG_PATH`, the user-level flm directory `flm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/flm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `flm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
+
+### OPEN-ADD-KERNEL-LINK: `flm-add` links a model to the kernel set matching its spec
+**Applies to:** openflowlm-next (`utilities/flm-add/flm_add/__init__.py`)
+**Test category:** unit
+**Tests:** `utilities/flm-add/tests/test_open_kernels_link.py`
+
+Open kernel sets belong to a `ModelSpec`, not to an official model name. When
+installing a model, `flm-add` shall derive that model's spec the way the recipes
+do (`recipes.load.spec_from_model_dir`: config.json, the tokenizer's real vocab,
+and the per-role weight format read from the `model.q4nx` safetensors header) and
+link the installed set whose `open_kernels/manifest.json` carries the same
+`spec_hash`, at `<model dir>/open_kernels` — the candidate `Engine::find_kernels`
+checks before any xclbins root. With no matching set installed, the model's
+closed-kernel install is unchanged and the command that would build one is printed.
+
+**Acceptance criteria:**
+- Given two installed sets, one whose manifest `spec_hash` equals the model's and one whose does not, the matching one is chosen regardless of directory name ordering.
+- When several sets match, the one filed under the model's own directory name wins.
+- With no match, nothing is linked and the message names `export_qwen36_kernels.py --model-dir <model dir>`.
+- `--open-kernels DIR` uses `DIR` without searching, and is refused when `DIR` has no `manifest.json`.
+- `--xclbin-from` and `--no-xclbin` keep their existing behaviour.
 
 ### OPEN-LAYOUT-FREEZE: the recipe reproduces the shipped 27B kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`, `designs/layer_x/`)
@@ -449,14 +471,33 @@ are in the catalogue:
 3. `src\open_qwen36\out\open_qwen36_cli.exe --model <model dir> --kernels src/xclbins/Qwen3-4B-NPU2/open_kernels --ids 151644 --max-tokens 3 --layers 4 --dump-logits <dir>/y` matches step 2's reference logits (the engine's packer, manifest path and attnpos on the dense stream).
 4. `python src/open_qwen36/chat.py "Explain what an NPU is in two sentences." --model <model dir> --kernels src/xclbins/Qwen3-4B-NPU2/open_kernels` → a coherent answer ending in `<|im_end|>`.
 
+**Adapters (manual):** every Qwen3-dense adapter class selects the open engine when a
+kernel set is installed for its model, and honours `FLM_QWEN3_ENGINE=open|closed`:
+`Qwen3`, `Qwen3_IT`, `Qwen3_TK` and `DeepSeek_r1_0528_8b` (`model_list.json`
+families `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528`). Verify with
+`flm serve <tag>` on a model that has `open_kernels/` installed: the load logs
+`<Family> on the open kernels (<dir>)` -- `Qwen3`, `Qwen3-IT`, `Qwen3-TK`,
+`DeepSeek-R1-0528` respectively -- and `FLM_QWEN3_ENGINE=closed` restores the
+`qwen3_npu` DLL for all four.
+
 **Result 2026-09-05 (Qwen3-4B):** step 2 logits corr 0.999997 / 0.999994, same argmax and top-5, residual corr ≥ 0.999996 in every layer at both positions; step 3 identical through the engine, request 2 reproduced request 1; step 4 a coherent two-sentence answer ending in `<|im_end|>` at token 58 (272 ms/token). Details: `.claude/plans/open-kernels-phase-b-qwen3-dense.md`.
+
+**Result 2026-09-06 (DynaGuard-4B-NPU2):** a fine-tune whose spec is identical to Qwen3-4B's in every field but `extra` -- step 2 logits corr 0.999999 / 0.999992, same argmax (11619) and top-5, residual corr >= 0.999996 every layer (maxrel <= 1.6e-3); step 3 identical through the engine, request 2 reproduced request 1; step 4 a coherent two-sentence answer ending in `<|im_end|>` at token 62. The SAME check ran first against `src/xclbins/Qwen3-4B-NPU2/open_kernels` with the same numbers, and its own export is byte-identical to that set (3/3 `insts.bin`, xclbins stamps only). Details: `.claude/plans/p0-p1-results.md`.
+
+**Result 2026-09-06 (Qwen3-4B-Thinking-2507-NPU2):** same spec hash as Qwen3-4B (`sha256:602fa1836b21`) -- step 2 logits corr 0.999998 / 0.999994, same argmax (50179) and top-5, residual corr >= 0.999997 every layer; step 3 identical through the engine, request 2 reproduced request 1; step 4 (`--think`) a reasoning chain closed with `</think>` then a coherent two-sentence answer ending in `<|im_end|>` at token 285. Its `--no-build` export is byte-identical to `src/xclbins/Qwen3-4B-NPU2/open_kernels` (3/3 `insts.bin`), and the same slice passed against that directory directly. Details: `.claude/plans/p0-p1-results.md`.
+
+**Result 2026-09-06 (Qwen3-8B-NPU2, and DynaGuard-8B / DeepSeek-R1-0528-Qwen3-8B on its kernels):** the 8B shape's first hardware run. Step 2 logits corr 0.999998 / 0.999997, argmax 104222 / 118063 matching the fp64 replica with identical top-5, residual corr 1.000000 (t0) / >= 0.999998 (t1) in all four layers, maxrel <= 1.1e-3; step 3 through the engine is BIT-IDENTICAL to step 2 (0.000e+00 over all 151936 logits) and request 2 reproduced request 1; step 4 a coherent two-sentence answer ending in `<|im_end|>` at token 63 (540 ms/token, 36 layers, a loaded box). This admits `gemv_q4` K = 12288 to the catalogue; the 4096 norm, the (128, 32, 8, 128, qk-norm, no gate) attention tuple and the K = 4096 q4 head were already in it. DynaGuard-8B (spec hash identical, `sha256:04374f23aede`) passed the same procedure on its own `--no-build` export, byte-identical to Qwen3-8B's in all six artefacts: corr 0.999997 / 0.999997, same argmax and top-5, `<|im_end|>` at token 59. DeepSeek-R1-0528-Qwen3-8B (the same shape, `real_vocab` 151671 instead of 151669) passed on correlation and residuals -- corr 0.999993 / 0.999996, residual corr >= 0.999997 every layer -- but its position-1 ARGMAX differs: the fp64 top two, 102188 and 108204, are 0.004 logits apart on a 14.5-logit scale and the NPU's ~0.015 per-logit deviation flips them, with slots 3-6 unchanged. Harness and engine agree bit for bit, so this is a tie inside q4_1 noise rather than a kernel disagreement, but it is the first time it has crossed `compare_decode`'s "same argmax" bar. `chat.py` handles this tokenizer now (the `<｜Assistant｜>` branch landed this session), answering coherently after a `</think>` chain. Details: `.claude/plans/k-new-points-results.md`.
+
+**Result 2026-09-06 (Qwen3-1.7B-NPU2, and Qwen3-1.7B-NPU2-BASE on its kernels):** the 16/8-head shape's first hardware run, and the first run of the attention TUPLE (128, 16, 8, 128, qk-norm, no gate, pre-RoPE) -- a GQA group of 2 at head dim 128, which the catalogue's per-parameter check had been passing silently and now names. Step 2 logits corr 1.000000 / 0.999993, argmax 1121 / 17764 matching the fp64 replica, top-5 identical at t0 and slots 1-4 identical at t1 (slot 5 differs, 36976 against 78200), residual corr >= 0.999992 in every layer at both positions, maxrel <= 3.9e-3; step 3 through the engine BIT-IDENTICAL to step 2 and request 2 reproduced request 1 (4-layer slice 10-11 ms/token); step 4 a coherent answer ending in `<|im_end|>` at token 50 (139 ms/token, 28 layers). This admits `gemv_q4` K = 6144, `lm_head_q4` K = 2048 and the (128, 16, 8, 128, True, False, False) attention combination. Qwen3-1.7B-NPU2-BASE passed the same procedure identically on a `--no-build` export byte-identical in all six artefacts -- because it IS the same container: its `model.q4nx`, `config.json` and `tokenizer_config.json` have the same sha256 as `FastFlowLM/Qwen3-1.7B-NPU2`'s, chat template included, so it is the instruct model published under a `-BASE` name rather than a base checkpoint. Details: `.claude/plans/k-new-points-results.md`.
+
+**Result 2026-09-06 (Qwen3-0.6B-NPU2):** the narrowest shape the recipe has produced. Step 2 logits corr 0.999999 / 0.999986, argmax 1121 / 460 matching the fp64 replica with top-5 identical at BOTH positions, residual corr >= 0.999982 in every layer at both positions (the loosest number in the batch, on the narrowest residual in the tree), maxrel <= 4.4e-3; step 3 through the engine bit-identical to step 2 and reproduced; step 4 a fluent answer ending in `<|im_end|>` at token 36 (57 ms/token, 28 layers -- the fastest model in this batch; the answer is factually wrong about NPUs, which is a 0.6B model being a 0.6B model, not a kernel result). This admits `ln` width 1024 -- the first width other than 2048 to take the fused single-core path -- plus `gemv_q4` K = 1024 and K = 3072 and `lm_head_q4` K = 1024. The three geometry firsts the handoff flagged all behaved: the half-used x-stream element (`ELN` 2048 against a 4096-byte element) is read correctly, with no position-independent offset on the first residual; the o-projection GEMV being wider than the layer's own residual (q width 2048, hidden 1024) changes nothing. Details: `.claude/plans/k-new-points-results.md`.
 
 ### OPEN-FAMILY-LLAMA3: Llama 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `src/open_qwen36/`)
-**Test category:** manual (needs the NPU and `FastFlowLM/Llama-3.1-8B-NPU2`); the derivation, the RoPE scaling and the 8B layout are unit-tested in `tests/test_llama3.py`
+**Test category:** manual (needs the NPU and `FastFlowLM/Llama-3.1-8B-NPU2`); the derivation, the RoPE scaling and the 8B / 3.2-3B / 3.2-1B layouts are unit-tested in `tests/test_llama3.py`
 
 A Llama 3 model (GQA without q/k norms, full RoPE with the llama3 frequency
-scaling, eps 1e-5, silu FFN, untied q4_1 head) shall run on the open kernels
+scaling, eps 1e-5, silu FFN, a q4_1 head) shall run on the open kernels
 from its `config.json` alone through the dense recipe: `qk_norm` / `norm_eps`
 become the `ATTN_QKNORM` / `LN_EPS` knobs, the scaled inverse frequencies are
 computed host side (`ModelSpec.rope_inv_freq`, in the manifest, used by both
@@ -481,7 +522,19 @@ container that lacks the tensor, naming it.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Llama-3.1-8B-NPU2`, `out_l3`, prompt id 128000, and `chat.py` (which switches to the Llama 3 template when the tokenizer has `<|start_header_id|>`).
 
+**Adapters (manual):** both Llama-3 adapter classes select the open engine when a
+kernel set is installed for their model, and honour `FLM_LLAMA_ENGINE=open|closed`:
+`Llama3` (`model_list.json` families `llama3.1`, `llama3.2`) and `DeepSeek_r1_8b`
+(family `deepseek-r1`, a Llama-3.1-8B distill). Verify with `flm serve <tag>` on a
+model that has `open_kernels/` installed: the load logs `Llama 3 on the open kernels (<dir>)`
+or `DeepSeek-R1 on the open kernels (<dir>)`, and `FLM_LLAMA_ENGINE=closed` restores
+the `llama_npu` DLL for both.
+
 **Result 2026-09-05 (Llama-3.1-8B):** slice logits corr 1.000000 / 0.999993, same argmax and top-5, residual corr ≥ 0.999994 every layer; identical through the engine; a coherent two-sentence answer ending in `<|eot_id|>` at token 79 (203 ms/token). Details: `.claude/plans/open-kernels-phase-c-llama3.md`.
+
+**Result 2026-09-06 (Deepseek-R1-Distill-Llama-8B-NPU2):** spec identical to Llama-3.1-8B's in every field but `extra` -- step 2 logits corr 0.999999 / 0.999987, same argmax (12451 / 37533), residual corr 1.000000 / >= 0.999987 every layer; top-5 identical at position 0 and slots 5-6 swapped at position 1 on a 0.025-logit tie; step 3 identical through the engine, request 2 reproduced request 1; step 4 a coherent answer ending in `<|end_of_sentence|>` at token 429. Its own export is byte-identical to `src/xclbins/Llama-3.1-8B-NPU2/open_kernels` (3/3 `insts.bin`), and the same slice passed against that directory directly. Caveat: `chat.py`'s template probe refuses this tokenizer (`tokenizer lacks ['<|end_of_text|>']`) because R1-Distill keeps Llama 3's `<|start_header_id|>` but renames the EOS tokens -- an engine-external gap, driven through `open_qwen36_cli` with DeepSeek's own template instead. Details: `.claude/plans/p0-p1-results.md`.
+
+**Result 2026-09-06 (Llama-3.2-3B-NPU2 and Llama-3.2-1B-NPU2):** both 3.2 shapes' first hardware run, and both containers materialise `lm_head.weight` despite `tie_word_embeddings: true`, as the acceptance criteria above assume. **3B** (3072 / 28 / 8192, 24 query heads over 8 kv heads -- GQA group 3, the first odd group, `OG_AOUT_ELEMS` 3): step 2 logits corr 0.999998 / 0.999995, argmax 2 / 2 matching the fp64 replica with top-5 identical at both positions, residual corr 1.000000 in all four layers at t0 and >= 0.999996 at t1, maxrel <= 5.3e-3; step 3 through the engine bit-identical to step 2 and reproduced; step 4 a coherent answer ending in `<|eot_id|>` at token 72 (334 ms/token). **1B** (2048 / 16 / 8192, head_dim 64 -- `E_A` 1024, `KV_ROW` 2048, `PTAB_ROW` 1024, one KV band per core, a 768-byte RoPE record in a 1024-byte position row): step 2 logits corr 0.999999 / 0.999994, argmax 1757 / 1757 matching, top-5 identical at both positions, residual corr 1.000000 in all four layers at t0 and >= 0.999996 at t1, maxrel <= 2.4e-3; step 3 bit-identical and reproduced; step 4 `<|eot_id|>` at token 92 (262 ms/token). The 1B is the run that decides head dim 64, since a wrong q/k rotation there gives fluent nonsense rather than a crash: position 0 does not rotate and position 1 does, and both are clean in every layer, so the rotation is right. Together these admit `gemv_q4` K = 3072 and K = 8192, `ln` width 3072, `lm_head_q4` K = 3072 and the attention combinations (128, 24, 8, 128, False, False, False) and (64, 32, 8, 64, False, False, False). Note `chat.py`'s default `--max-tokens 64` truncates both models mid-sentence; 200 is enough. Details: `.claude/plans/k-new-points-results.md`.
 
 ### OPEN-FAMILY-GEMMA3: Gemma 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`)
@@ -505,7 +558,18 @@ stored.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Gemma3-4B-NPU2`, `out_g3`, 6 layers (five local, one global), prompt id 2; then `open_qwen36_cli --at-position 1100 --layers 6` (finite logits through the window path); then `chat.py` (the Gemma template when the tokenizer has `<start_of_turn>`).
 
+**Adapters (manual):** both Gemma-3 adapter classes select the open engine when a
+kernel set is installed for their model, and honour `FLM_GEMMA_ENGINE=open|closed`:
+`Gemma3` (`model_list.json` family `gemma3`, e.g. `gemma3:4b`) and `Gemma3_Text_Only`
+(family `gemma3-text`, e.g. `gemma3:1b`). Verify with `flm serve <tag>` on a model
+that has `open_kernels/` installed: the load logs `Gemma 3 on the open kernels (<dir>)`
+or `Gemma 3 (text) on the open kernels (<dir>)`, and `FLM_GEMMA_ENGINE=closed`
+restores the `gemma_npu` / `gemma_text_npu` DLL. Images always need the closed
+engine -- the open one has no vision path.
+
 **Result 2026-09-05 (Gemma3-4B):** slice logits corr 0.999998 / 0.999998, same argmax and top-5, residual corr 1.000000 every layer; identical through the engine; a finite step at position 1103; a coherent two-sentence answer ending in `<end_of_turn>` at token 43 (96 ms/token). Details: `.claude/plans/open-kernels-phase-d-gemma3.md`.
+
+**Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`)

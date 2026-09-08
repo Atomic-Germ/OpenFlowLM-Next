@@ -1,5 +1,5 @@
-# open_qwen36 — Qwen3.6-MoE, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense
-# and IBM Granite on open XDNA2 kernels
+# open_qwen36 — Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3,
+# HunYuan dense and IBM Granite on open XDNA2 kernels
 
 The open replacement for the closed `qwen3_6_moe_npu` engine. It sits behind
 the app's `causal_lm` seam ([engine.hpp](engine.hpp)), so the tokenizer, chat
@@ -8,7 +8,7 @@ same way they drive the closed DLL. Below the seam it is:
 
 | file | what |
 |---|---|
-| [q4nx_file.cpp](q4nx_file.cpp) | reads FLM's `.q4nx` container (mmap; the 1.0.2 q4_1 format, refuses others) — replaces `q4_npu_eXpress.dll` on this path |
+| [q4nx_file.cpp](q4nx_file.cpp) | reads FLM's `.q4nx` container (mmap; q4_1 and q8 chunks, classified per tensor) — replaces `q4_npu_eXpress.dll` on this path |
 | [manifest.cpp](manifest.cpp) | reads the kernel set's `manifest.json`: layouts, contexts, kernels, per-layer programs, the packing plan, and the model check |
 | [pools.cpp](pools.cpp) | interprets the manifest's packing plan: each layer's weights into the byte order the kernels stream, straight into resident device buffers (the same plan `open_kernels/recipes/pack.py` runs in NumPy) |
 | [core.cpp](core.cpp) | device, contexts, kernels, 21 GB of resident pools, per-layer state; runs the manifest's program per layer, one `step()` per token |
@@ -102,10 +102,23 @@ The app uses the open engine for `qwen3.6-moe` whenever the kernels are
 installed for the model (`xclbins/<model name>/open_kernels/`, or
 `<model dir>/open_kernels/`, or `FLM_OPEN_KERNELS_DIR`); `FLM_QWEN36_ENGINE=closed`
 forces the closed DLL, `=open` fails loudly if the kernels are missing. XRT
-builds only (`FLM_USE_HRX=OFF`), like the open embedding NPU backend. The
-same holds for the `qwen3` dense models (`FLM_QWEN3_ENGINE`), for `llama`
-(`FLM_LLAMA_ENGINE`) and for Gemma 3 text models: the engine is the same code,
-the manifest is a different recipe's.
+builds only (`FLM_USE_HRX=OFF`), like the open embedding NPU backend. The engine
+is the same code for every family; only the manifest is a different recipe's.
+
+One `AutoModel` adapter class per model family makes the choice, all through
+`AutoModel::_shared_select_open_engine` (`src/common/AutoModel/automodel.cpp`),
+so an architecture's variants behave identically:
+
+| Env var | `model_list.json` families | Adapter classes |
+| --- | --- | --- |
+| `FLM_QWEN36_ENGINE` | `qwen3.6-moe` | `Qwen3_6_MOE` |
+| `FLM_QWEN3_ENGINE` | `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528` | `Qwen3`, `Qwen3_IT`, `Qwen3_TK`, `DeepSeek_r1_0528_8b` |
+| `FLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1` | `Llama3`, `DeepSeek_r1_8b` |
+| `FLM_GEMMA_ENGINE` | `gemma3`, `gemma3-text` | `Gemma3`, `Gemma3_Text_Only` |
+
+Kernels are per model directory, so a family entry only means the adapter will
+use whatever set is installed for that particular model. Images always go to the
+closed engine -- the open one has no vision path.
 
 ## A second family: Qwen3 dense (2026-09-05)
 
@@ -345,6 +358,152 @@ Qwen3-4B rebuilt on these kernels gives identical `insts.bin` for all three sets
 and xclbins differing only in build stamps. The knobs are per-geometry, not
 per-family, so another family joins by measuring the same way -- not by
 declaring itself.
+## A seventh family: Qwen3.5 dense (2026-09-06)
+
+A Qwen3.5 dense layer is a Qwen3.6-MoE layer with the MoE block replaced by a
+silu-gated dense FFN. Everything else -- the 3 linear : 1 full layer pattern, the
+gated DeltaNet, the attention output gate, head dim 256 with a partial RoPE of 64,
+16 linear key heads of 128, conv kernel 4, the q8 head -- is the 35B's, which we
+already run. So there is no third recipe: `recipes/qwen35.py` calls
+`qwen36moe.layout(..., ffn="dense")` for the whole attention half and adds the dense
+recipe's FFN arithmetic on top. This matters because it is the biggest item on the
+model census -- 19 published models and about 23.5 k downloads a month, including
+the single most-downloaded model on Atomic-Germ's Hugging Face.
+
+Four things are new, and only one of them is a shape:
+
+* **One instruction stream per layer type instead of two.** The MoE needs a part
+  split only because the router's output patches the second stream; nothing is
+  routed here, so `lx` and `ax` each run the whole layer in one dispatch.
+* **5 KB weight elements.** The 9B's down GEMV reads a 12288-wide activation table
+  (27 648 B), which leaves no room in a core's 60 KB for two 10 KB weight elements
+  beside the x stream and the DeltaNet scratch. `PER_CALL` drops to 1, as Llama 3.1
+  8B's does, and the DeltaNet's S slices -- which ride the same weight fifo -- become
+  10 rows over 13 slices instead of 20 over 7. That row count was hardwired in
+  `dnx.h`; it is now the `DNX_ROWS` macro, default 20, so the shipped kernels
+  preprocess identically. (`kPad`, the hi/lo record stride inside `ds`, is a fixed
+  160 either way and is deliberately NOT wired to the recipe -- doing so rebuilt every
+  `dnx_*` object in the shipped 27B kernels; see the handoff.)
+* **8 KB norm elements.** At 4096 hidden the fused `ln_fn` wants the norm core's whole
+  memory for its five inputs and three outputs, so the composition uses the split
+  `ln_y` / `ln_xn` entries the dense design already introduced for Llama 3.1 8B.
+* **q8 weights.** This container stores `ssm_out_proj` as q8 (the 35B stores it q4_1)
+  and `ssm_{alpha,beta}_proj` with a bf16 `[heads, hidden]` copy (the 35B stores
+  `[hidden, heads]`). Alpha and beta come through a `transpose` op; the out projection
+  now has two paths, below. Both packers (NumPy and C++) are checked byte-identical.
+
+```
+OPEN_KERNELS_UNVALIDATED=1 python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.8-Distilled-4B-NPU2   # WSL
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Qwen3.8-Distilled-4B-NPU2 --kernels src\xclbins\Qwen3.8-Distilled-4B-NPU2\open_kernels
+```
+
+| check (Qwen3.8-Distilled-4B, HID 2560, Strix, Windows + XRT) | result |
+|---|---|
+| 8-layer slice (six linear, two full), 3 greedy tokens, harness vs the fp64 replica | logits corr 0.999999 / 0.999992 / 0.999989, same argmax and top-5 at all three, every layer's residual corr >= 0.999991 (maxrel <= 3.1e-3) |
+| the same through the engine | **bit-identical** -- max abs difference 0.000e+00 over 248 320 logits at every position; request 2 reproduces request 1; `route 0.00 / part1 0.0` in every step, i.e. one dispatch per layer |
+| all 32 layers, the NPU prompt, greedy | *An NPU (Neural Processing Unit) is a specialized hardware accelerator designed to perform artificial intelligence and machine learning workloads with significantly higher efficiency than general-purpose processors...* then `[eos]` at token 85 |
+| speed | decode 150 ms/token (6.66 tok/s) |
+
+**All four sizes now run (2026-09-07).** Two fixes got the other three there. The glue core
+kept a private bf16[HID] copy of the layer-entry norm output, which fits only up to HID 2816,
+so the 9B was 2 560 B over; it now holds ONE 4 KB element and the alpha/beta projection is
+re-streamed per half (`glue_ab_e.cc` takes the accumulator reset as an argument), which leaves
+1 536 B free at any width. And the 2B / 0.8B, which have 16 linear value heads rather than 32,
+hung on the first dispatch for two reasons, not one: `lx.py` ran the value conv tiles as many
+times as the key tiles, so the core emitted 32 records where the host drained 16; and
+`dn_glue.h` mapped each value head to key head `h / 2`, the right ratio only at 32 heads.
+`kNHead` is now the `DNGLUE_NHEAD` knob, passed only when it differs from 32, so the shipped
+27B's compile commands and object code do not move.
+
+| size (Strix, Windows + XRT, q4_1 path) | 8-layer slice, 3 tokens | engine | all layers, the NPU prompt |
+|---|---|---|---|
+| 9B (4096 / 32 / 12288) | corr 0.999999 / 0.999987 / 0.999992, argmax + top-5 match, residual >= 0.999991 | bit-identical | `[eos]` @54, 181 ms/tok (5.53 tok/s) |
+| 4B (2560 / 32 / 9216) | corr 0.999999 / 0.999992 / 0.999989 -- the 2026-09-06 numbers reproduced | bit-identical | `[eos]` @60, 138 ms/tok (7.25 tok/s) |
+| 2B (2048 / 24 / 6144) | corr 0.999998 / 0.999979 / 0.999980, argmax + top-5 match, residual >= 0.999978 | bit-identical | `[eos]` @63, 69 ms/tok (14.5 tok/s) |
+| 0.8B (1024 / 24 / 3584) | corr 0.999982 / 0.999993 / 0.999992, argmax + top-5 match, residual >= 0.999984 | bit-identical | `[eos]` @74, 53 ms/tok (18.7 tok/s) |
+
+Those are the q4_1 numbers: the export ran with `OPEN_KERNELS_FORCE_Q4_1=1`, so the q8
+`ssm_out_proj` was re-quantized on the way into the pool. Details and the standalone 16-head
+glue compare: `.claude/plans/q35-hw-results.md`.
+
+**Three of the four also run at native q8 (2026-09-07).** A Qwen3.5 container stores
+`ssm_out_proj` at q8 while everything else is q4_1, so its main core has to carry both GEMV
+bodies -- which did not fit in 16 KB of program memory. It fits now for every size but the
+4B: on a spec whose roles mix formats, and only there, the two q4_1 entry points fold into
+one whose destination is a runtime argument. Export without the force flag, into a
+directory beside the q4_1 one:
+
+```
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.8-Distilled-9B-NPU2 \
+    --out src/xclbins/Qwen3.8-Distilled-9B-NPU2/open_kernels_q8                                  # WSL
+```
+
+| size, native q8 | 8-layer slice vs the replica fed the container's own q8 | engine | all layers | vs q4_1 |
+|---|---|---|---|---|
+| 9B | corr 0.999999 / 0.999991 / 0.999993, argmax + top-5 match, residual >= 0.999994 | bit-identical | `[eos]` @74, 191 ms/tok (5.25 tok/s) | 181 ms/tok |
+| 4B | **no kernels** -- `lx` still overflows program memory | -- | -- | -- |
+| 2B | corr 0.999998 / 0.999989 / 0.999986, argmax + top-5 match, residual >= 0.999986 | bit-identical | `[eos]` @61, 70 ms/tok (14.35 tok/s) | 69 ms/tok |
+| 0.8B | corr 0.999993 / 0.999992 / 0.999990, argmax + top-5 match, residual >= 0.999991 | bit-identical | `[eos]` @47, 54 ms/tok (18.36 tok/s) | 53 ms/tok |
+
+So native q8 costs about 5 % of wall time on the 9B and roughly nothing on the two small
+ones, and it is what the model author shipped rather than a re-quantized copy of it. No
+catalogue point was needed: the q8 out projection reduces over the DeltaNet value width
+(4096 or 2048), both already validated by the 35B. The 4B is the one size whose hidden width
+is not a multiple of the 4 KB activation element, so its glue walks two unequal halves and
+its main core is already the largest of the four -- it stays on the re-quantizing fallback
+until the FFN tail moves off that core. `.claude/plans/q8m-hw-results.md`.
+
+## q8 weights: run them at q8, or re-quantize them
+
+FLM's newer converter stores the non-expert projections of the 35B-A3B fine-tunes --
+attention q/k/v/o, the linear-attention qkv/z and out projections, the shared expert --
+and Qwen3.5's `ssm_out_proj` at **q8** rather than q4_1. There are two ways to serve
+that, and the engine has both.
+
+**Run them at q8** (the default where the design can). A container q8 chunk is 8704
+bytes and the main cores stream 5120-byte weight elements, so the host splits each chunk
+into two 16-row half-tiles that each fill one element -- a byte permutation, no
+arithmetic -- and `designs/gemv_q4/gemv_q8.h` consumes them with the same 64-row band and
+the same y element the q4 GEMV uses. The pool holds the author's own values; nothing
+downstream of the band changes. A q8 projection streams twice the bytes, so a Qwen3.6-MoE
+linear layer's per-token weight traffic rises about 60 % (the routed experts, which dominate
+it, stay q4_1) -- but measured on seven 35B containers that costs only about **9 % of decode
+time** (155-170 ms/token against 140-162 re-quantized), so the projections are not what
+decode waits on.
+
+**Re-quantize them** (the fallback, and what every role the designs cannot stream at q8
+still gets -- the routed experts and the MoE's shared expert). The packer dequantizes
+each q8 chunk and writes the optimal q4_1 of it into the pool. A q8 chunk and a q4_1
+chunk hold the same 32 x 256 tile, so the ordinary `std_perm` reads either and the plan,
+the manifest and the kernels never learn there was a second format. This is not free:
+on the 9B's first layer the q4_1 reading of `ssm_out_proj` tracks the q8 one at
+correlation 0.9968 over random inputs, and across a 4-layer slice the logits correlate
+0.999682 with the same argmax and the same top 5.
+
+Which projections take which path is not a switch someone sets: `recipes/load.py` reads
+the container's safetensors header and writes a per-role weight format into the
+`ModelSpec`, so a model asks for what it actually holds. That map is part of the spec
+hash, which means **a q8 variant of a shape is a different kernel set** (its instruction
+streams bake in the doubled pool offsets and fill sizes) -- its build directories carry
+the map's short hash, and a model with no q8 role keeps the directory, the hash and the
+manifest it always had. `OPEN_KERNELS_FORCE_Q4_1=1` on the export, with
+`make_decode.py --requant` on the reference, puts a whole model back on the fallback,
+which is the A/B. `specs/open-engine/spec.md`, OPEN-QUANT-Q8.
+
+**Measured, 2026-09-07** (`.claude/plans/q8-hw-results.md`). Ornith-1.0-35B-A3B at native
+q8 -- an 8-layer / 3-token slice against the replica fed the container's own q8 values --
+scores logits corr 0.999996 / 0.999998 / 0.999988 with the same argmax and top-5 and every
+residual >= 0.999992; the engine reproduces the harness bit for bit (0.000e+00 over 248 320
+logits). Six sibling containers, including Atomic-Germ's own `Qwen3.6-35B-A3B-NPU2` mirror,
+derive the identical q8 spec and pass on the same kernels. Against the weights the author
+shipped, native q8 holds 0.999996 where the re-quantizing fallback holds 0.997631 -- and the
+fallback's greedy pick already differs by the second token.
+
+**Qwen3.5 takes this path for every size but the 4B (2026-09-07).** Its containers hold ONE
+q8 projection among q4_1 ones, so the main core has to carry both GEMV bodies; folding the
+two q4_1 entry points into one -- on a mixed spec only, so no shipped kernel set moves --
+made room on the 9B, 2B and 0.8B. The 4B is still over and stays on the fallback. Numbers in
+the Qwen3.5 section above; log `.claude/plans/q8m-hw-results.md`.
 
 ## Standalone
 
@@ -388,7 +547,12 @@ on a memory-starved box, not the kernels.
   context is a kernel item.
 - **Vision.** The model is a VLM; images still need the closed engine.
 - **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
-  of work; this reader is ~150 lines and will go with it.
+  of work; this reader is ~150 lines and will go with it. The chunk format is read
+  per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes
+  ship, q8 attention and shared experts over q4_1 routed experts -- loads and packs;
+  the q8 projections the kernel set was built for go into the pool at q8, the rest are
+  re-quantized to q4_1 (above). Anything that is neither (Q4_K's 4736-byte chunks, the
+  1280 / 2560-byte geometries) is refused, naming the tensor.
 - **Memory.** The engine holds 21.6 GB of NPU buffers, and on Windows those
   are managed by the video memory manager and can be evicted under pressure —
   the first server run on a 47 GB box with 0.6 GB free hung a kernel (ERT

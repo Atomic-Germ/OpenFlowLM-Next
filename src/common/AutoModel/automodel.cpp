@@ -6,6 +6,9 @@
 /// \note This is a source file for the auto_model class
 
 #include "AutoModel/automodel.hpp"
+#ifdef FLM_USE_OPEN_QWEN36
+#include "open_qwen36/engine.hpp"
+#endif
 
 
 AutoModel::AutoModel(flm_rt::device* npu_device_inst, std::string current_model) {
@@ -23,6 +26,32 @@ AutoModel::AutoModel(flm_rt::device* npu_device_inst, std::string current_model)
 
 std::string AutoModel::get_current_model() {
     return this->current_model;
+}
+
+/// \brief Pick the engine: the open kernels when a set is installed for this
+///        model, the family's closed DLL otherwise
+/// \note One implementation for every adapter class that has an open path
+///       (see the declaration for the contract). Callers keep their own closed
+///       branch -- which DLL, which sampler -- and differ only in the override
+///       variable and the label.
+std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env_var, const std::string& family_label) {
+#ifdef FLM_USE_OPEN_QWEN36
+    const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
+    const char* sel = std::getenv(env_var);
+    const bool use_open = sel ? std::string(sel) == "open" : !kernels.empty();
+    if (use_open && kernels.empty())
+        throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
+    if (!use_open)
+        return nullptr;
+    header_print("FLM", family_label + " on the open kernels (" + kernels + ")");
+    auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
+    eng->load_open_weights();
+    return eng;
+#else
+    (void)env_var;
+    (void)family_label;
+    return nullptr;
+#endif
 }
 
 /// \brief Setup the tokenizer

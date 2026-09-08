@@ -13,6 +13,8 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <string>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
@@ -370,6 +372,13 @@ std::string find_model_list();
 
 std::string find_model_info();
 
+
+///@brief every directory that may hold an `xclbins/` tree, most specific first
+///@return the roots whose <root>/xclbins exists: $FLM_XCLBIN_PATH, the directory
+///        holding $FLM_CONFIG_PATH, the user-level flm config directory, the
+///        executable's directory, the CWD, <exe>/../share/flm, then the configured
+///        prefix. `find_xclbin_path` is the first entry of this list.
+std::vector<std::string> xclbin_roots();
 
 ///@brief get the path to the xclbin directory
 ///@return path to the xclbin directory

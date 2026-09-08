@@ -196,6 +196,19 @@ protected:
 	void _shared_load_model(std::string model_path, json model_info, int default_context_length = -1, bool enable_preemption = false);
 	nlohmann::json _shared_setup_tokenizer(std::string model_path);
 
+	/// \brief Pick the engine for this model: the open one (open_qwen36/, the
+	///        open XDNA2 kernel set under xclbins/<model>/open_kernels) whenever
+	///        it is installed for this model, the family's closed DLL otherwise.
+	///        `env_var`=open|closed overrides the choice; =open with no kernels
+	///        installed is an error rather than a silent fall back to the DLL.
+	///        The open engine is text only -- images still need the closed one.
+	/// \param env_var name of the environment variable that overrides the choice
+	///        (FLM_QWEN3_ENGINE, FLM_LLAMA_ENGINE, ... -- one per architecture)
+	/// \param family_label the family name printed in the "on the open kernels" line
+	/// \return the loaded open engine, or nullptr when the caller should build
+	///         its own closed engine
+	std::unique_ptr<causal_lm> _shared_select_open_engine(const char* env_var, const std::string& family_label);
+
 	/// \brief Insert tokens into the model
 	/// \param meta_info the meta information of the chat
 	/// \param tokens the tokens to insert
