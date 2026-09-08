@@ -257,7 +257,14 @@ std::string GgufFile::gguf_name(const std::string& name) {
 }
 
 const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
-    auto it = tensors_.find(gguf_name(name));
+    std::string n = gguf_name(name);
+    auto it = tensors_.find(n);
+    if (it == tensors_.end() && n == "output.weight") {
+        // tied embeddings: the GGUF has no output.weight; the (untied) rows
+        // of token_embd serve as the lm head (same vocab x hidden shape)
+        n = "token_embd.weight";
+        it = tensors_.find(n);
+    }
     if (it == tensors_.end()) fail("no tensor " + name + " in " + path_);
     return it->second;
 }

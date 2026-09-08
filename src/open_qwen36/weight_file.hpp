@@ -36,6 +36,25 @@ inline float fp16_to_f32(uint16_t h) {
     return f;
 }
 
+/// f32 -> fp16, round-to-nearest-even. Used by the host requant of K-quant /
+/// Q8_0 matmul tensors into the pool's fp16-scale q4 layout (pools.cpp).
+/// Scales are normal-range values; subnormals and NaNs are not exercised.
+inline uint16_t f32_to_fp16(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const uint32_t sign = (x >> 16) & 0x8000;
+    int32_t exp = static_cast<int32_t>((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t man = x & 0x7FFFFF;
+    if (exp <= 0) return static_cast<uint16_t>(sign);                    // flush to zero
+    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);         // inf
+    man += 0x0FFFu + ((man >> 13) & 1);                                  // RNE
+    if (man & 0x800000u) {
+        man = 0;
+        if (++exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | ((man >> 13) & 0x3FF));
+}
+
 class WeightFile {
 public:
     virtual ~WeightFile() = default;

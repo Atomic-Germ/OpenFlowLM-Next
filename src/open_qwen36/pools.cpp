@@ -2,6 +2,7 @@
 /// \brief The packing-plan interpreter (see pools.hpp).
 #include "open_qwen36/pools.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -117,21 +118,29 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (op.nch == 0 || op.in_dim == 0) fail("std_perm_gguf " + name + " without nch / in_dim");
         const GgufFile& g = dynamic_cast<const GgufFile&>(m);
         const GgufFile::TensorInfo& t = g.tensor(name);
-        if (t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
-            fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 only "
-                 "(convert K-quants with q4nx-build)");
-        const bool has_min = t.type == GgufFile::Type::Q4_1;
+        // Q8_0 / K-quant tensors (typical GGUF lm_head / tied embeddings) are
+        // dequantized per row and re-quantized here to the pool's q4 layout
+        // with fp16 scales -- the same conversion q4nx-build does offline. The
+        // matmul body of the repo stays untouched (Q4_1 etc. go through the
+        // byte-exact path below).
+        const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K_S ||
+                        t.type == GgufFile::Type::Q4_K_M || t.type == GgufFile::Type::Q6_K;
+        if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
+            fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
+                 "requantizes Q8_0/Q4_K/Q6_K (convert K-quants with q4nx-build otherwise)");
+        const bool has_min = t.type == GgufFile::Type::Q4_1 || kq;
         const size_t blk = has_min ? 20 : 18;
         const size_t nb = op.in_dim / 32;                        // k blocks per row
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
         const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
-        if (n < static_cast<size_t>(out_dim) * nb * blk)
+        if (!kq && n < static_cast<size_t>(out_dim) * nb * blk)
             fail(name + " is " + std::to_string(n) + " B, the plan needs " +
                  std::to_string(static_cast<uint64_t>(out_dim) * nb * blk));
         bounds(op, op.nch * ch, dst_bytes);
         auto perm = std_perm(op.nch, op.in_dim);
         const size_t ncol = op.in_dim / 256;
+        std::vector<float> rd(kq ? op.in_dim : 0);
         for (size_t c = 0; c < op.nch; ++c) {
             uint8_t* d = dst + op.dst + c * ch;
             const size_t row0 = 32 * (perm[c] / ncol);           // rows
@@ -141,11 +150,44 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                 if (row >= out_dim) break;                       // padded rows: zeroed scales/codes
                 const uint8_t* srow = src + row * nb * blk;
                 const uint8_t rb = static_cast<uint8_t>(r / 16), rl = static_cast<uint8_t>(r % 16);
+                if (kq) g.embed_row(name, row, op.in_dim, rd.data());   // exact f32 row, once
                 for (size_t kb = 0; kb < 8; ++kb) {
                     if (blk0 + kb >= nb) break;                  // padded columns stay zero
                     const uint8_t* b = srow + (blk0 + kb) * blk;
                     // scales: fp16 d (and m) -> f32, plane index j = kb*32 + r
                     uint16_t ud, um = 0;
+                    if (kq) {
+                        // re-quantize the block to the pool's q4_1 law (fp16 d/m, 4-bit codes)
+                        const float* v = rd.data() + (blk0 + kb) * 32;
+                        float lo = v[0], hi = v[0];
+                        for (size_t i = 0; i < 32; ++i) {
+                            lo = std::min(lo, v[i]);
+                            hi = std::max(hi, v[i]);
+                        }
+                        const float mraw = lo, draw = (hi - lo) / 15.f;
+                        ud = f32_to_fp16(draw);
+                        um = f32_to_fp16(mraw);
+                        const float df = fp16_to_f32(ud), mf = fp16_to_f32(um);
+                        const float inv = df > 0.f ? 1.f / df : 0.f;
+                        std::memcpy(d + 4 * (kb * 32 + r), &df, 4);
+                        std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
+                        // codes: value i at nibble (kb*32+i, r), i+16 at (p0+256)
+                        uint8_t nib[16];
+                        for (size_t i = 0; i < 16; ++i) {
+                            const int q0 = std::lround((v[i] - mf) * inv);
+                            const int q1 = std::lround((v[i + 16] - mf) * inv);
+                            nib[i] = static_cast<uint8_t>(((q1 < 0 ? 0 : q1 > 15 ? 15 : q1) << 4) |
+                                                          (q0 < 0 ? 0 : q0 > 15 ? 15 : q0));
+                        }
+                        for (size_t i = 0; i < 16; ++i) {
+                            const size_t p0 = rb * 4096 + (kb * 32 + i) * 16 + rl;
+                            d[2048 + (p0 >> 1)] |= (p0 & 1) ? static_cast<uint8_t>(nib[i] << 4)
+                                                            : (nib[i] & 0xF);
+                            const size_t p1 = p0 + 256;              // i + 16: the block's high half
+                            d[2048 + (p1 >> 1)] |= (p1 & 1) ? (nib[i] & 0xF0) : (nib[i] >> 4);
+                        }
+                        continue;
+                    }
                     std::memcpy(&ud, b, 2);
                     if (has_min) std::memcpy(&um, b + 2, 2);
                     const float df = fp16_to_f32(ud), mf = has_min ? fp16_to_f32(um) : 0.f;

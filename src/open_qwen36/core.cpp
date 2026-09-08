@@ -91,7 +91,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
     w_->check_model(j, md.filename().string());
-    if (!file_) file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    if (gguf_) {
+        if (!file_) file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
+    } else if (!file_) {
+        file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    }
     int total = static_cast<int>(w_->layers.size());
     nl_ = cfg_.num_layers > 0 && cfg_.num_layers < total ? cfg_.num_layers : total;
     types_.resize(nl_);
