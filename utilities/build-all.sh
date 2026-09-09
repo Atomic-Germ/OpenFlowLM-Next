@@ -62,21 +62,23 @@ echo "== build-all: repo $REPO"
 
 # ---- 0. heal root-owned build artifacts --------------------------------------
 # A past sudo'd build can leave root-owned files (e.g. fetched third_party
-# deps); plain user cmake then fails with "Error removing directory". Ask for
-# root ONCE here (this is the only other privileged moment besides install).
-_roots=$(find "$REPO/third_party" "$REPO/src/build" "$REPO/install" -user root 2>/dev/null | head -1)
+# deps, or the kernel-export step's final.prj trees under open_kernels/designs),
+# and then plain-user cmake / build_design.py fails with "Permission denied" on
+# the .lock file. Ask for root ONCE here (this is the only other privileged
+# moment besides install).
+_roots=$(find "$REPO/third_party" "$REPO/src/build" "$REPO/install" "$REPO/open_kernels" -user root 2>/dev/null | head -1)
 if [ -n "$_roots" ]; then
   echo "-- found root-owned build artifacts (from a past sudo'd build); fixing"
   if command -v sudo >/dev/null 2>&1; then
-    sudo -n chown -R "$(id -un):$(id -gn)" "$REPO/third_party" "$REPO/src/build" "$REPO/install" 2>/dev/null \
-      || sudo chown -R "$(id -un):$(id -gn)" "$REPO/third_party" "$REPO/src/build" "$REPO/install" || {
+    sudo -n chown -R "$(id -un):$(id -gn)" "$REPO/third_party" "$REPO/src/build" "$REPO/install" "$REPO/open_kernels" 2>/dev/null \
+      || sudo chown -R "$(id -un):$(id -gn)" "$REPO/third_party" "$REPO/src/build" "$REPO/install" "$REPO/open_kernels" || {
         echo "   FATAL: could not chown root-owned artifacts; run manually:" >&2
-        echo "     sudo chown -R $(id -un):$(id -gn) $REPO/third_party $REPO/src/build $REPO/install" >&2
+        echo "     sudo chown -R $(id -un):$(id -gn) $REPO/third_party $REPO/src/build $REPO/install $REPO/open_kernels" >&2
         exit 1
       }
   else
     echo "   FATAL: no sudo; run manually:" >&2
-    echo "     sudo chown -R $(id -un):$(id -gn) $REPO/third_party $REPO/src/build $REPO/install" >&2
+    echo "     sudo chown -R $(id -un):$(id -gn) $REPO/third_party $REPO/src/build $REPO/install $REPO/open_kernels" >&2
     exit 1
   fi
 fi
