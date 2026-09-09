@@ -455,20 +455,34 @@ out mirrored about each block's minimum and nothing downstream notices.
 - `--quant Q4_K` on the HF-safetensors path is refused: `_store_q` quantizes with its own fixed per-role targets, so it would write a q4_1 container while claiming Q4_K.
 
 **Procedure (manual):** convert a GGUF for a validated shape twice, `--quant Q4_K` and
-`--quant Q4_1`, and run both through `src/open_qwen36/` on the same kernel set. The two
-containers hold the same source weights, so the only variable is the format.
+`--quant Q4_1`, and run both through `src/open_qwen36/` on the same kernel set. Then serve
+each with `flm serve` on the open engine and run `utilities/flm-test --llm --tools` against
+it. The two containers hold the same source weights, so the only variable is the format.
 
 **Result 2026-09-08 (Qwen3.5-0.8B, condB fine-tune, 24 layers, Strix): PASS.** The Q4_K
 container -- 108 tensors at 4736 B beside 79 at 8704 -- is the first one that exists
 anywhere; no model on Atomic-Germ's Hugging Face or in FLM's registry ships the format
 yet. It loads, packs and decodes at **21.6 tok/s**, and its greedy output agrees with the
 q4_1 twin's for **36 of 37 tokens**, diverging only where a sentence-final `.` and `,`
-were a near-tie. Both continuations are coherent and say the same thing. Not yet done:
-`flm serve` / `utilities/flm-test`, and the fp64 slice comparison -- `make_decode.py`
-derives a spec from the container and this one puts `ffn` at q8 (the converter config
-pins `ffn_up`), which `recipes/qwen35.py` refuses for an unrelated reason (a mixed-format
-main core does not fit 16 KB). The kernels are unchanged by this requirement, so their
-correlation is the one OPEN-FAMILY-QWEN35 already records.
+were a near-tie. Both continuations are coherent and say the same thing.
+
+**Result 2026-09-09, through `flm serve` (same model, same box): PASS.** `flm-add` registers
+the container and the engine loads it on the open kernels, 24 of 24 layers resident, at the
+same spec hash the q4_1 twin derives -- the transcode is invisible above the packer, which is
+the point. `flm-test --llm` returns coherent, on-topic answers in stream mode. At temperature
+0 the two containers agree for the first 148 of 215 characters on a fixed prompt and then
+pick different phrasing for the same claim, at 16.67 tok/s against the twin's 16.86.
+`flm-test --tools` fails 5 of its 6 checks (no tool call issued), but the q4_1 twin fails the
+same 5 identically, so that is the 0.8B model and not the format.
+
+Getting there needed one converter fix, in this commit: `configs/qwen3.5_0.8b.json` pinned
+`up_proj` to Q8_0 while the shipped container stores it at q4_1, and the other three qwen3.5
+sizes never pinned it. A mixed `ffn` role is refused during spec derivation, so every
+container this converter built for the 0.8B was unusable by the open kernels, at q4_1 as much
+as at Q4_K. Unpinning it matches the shipped model and the sibling configs.
+
+Still open: the fp64 slice comparison, whose kernels are unchanged by this requirement, so
+their correlation is the one OPEN-FAMILY-QWEN35 already records.
 
 ### OPEN-FAMILY-QWEN36MOE: greedy agreement with the fp64 reference on the 27B
 **Applies to:** openflowlm-next (`src/open_qwen36/`)

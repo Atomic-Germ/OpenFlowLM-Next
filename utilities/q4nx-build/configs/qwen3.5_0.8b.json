@@ -62,8 +62,7 @@
     },
     "up_proj": {
       "gguf_name": "blk.{bid}.ffn_up.weight",
-      "q4nx_name": "model.layers.{bid}.mlp.up_proj.weight",
-      "default_tensor_type": "Q8_0"
+      "q4nx_name": "model.layers.{bid}.mlp.up_proj.weight"
     },
     "gate_proj": {
       "gguf_name": "blk.{bid}.ffn_gate.weight",
