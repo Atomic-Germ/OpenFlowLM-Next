@@ -140,14 +140,22 @@ No model rewrites, no tuning — it just works.
 
 ## 🛠️ Building from Source
 
-For developers who want to build FastFlowLM from source, we provide CMake presets for a convenient and consistent build experience.
+For developers who want to build FastFlowLM from source, we provide CMake presets for a convenient and consistent build experience. From a clean recursive clone you can configure, build, test, install and package the whole distribution with a handful of preset-based commands run from the **repository root**.
 
 ### Prerequisites
 
 - Git
-- CMake (version 3.22 or higher)
+- CMake (version 3.25 or higher)
 - A C++20 compatible compiler (e.g., GCC, Clang, MSVC)
 - Ninja (recommended)
+
+The full Linux build also compiles the open NPU kernel xclbins, which needs:
+
+- **XRT** installed on the host (the AMD NPU runtime; `/opt/xilinx/xrt`).
+- The kernel toolchain (`ironvenv` with `mlir-aie` + Peano) — **created automatically** by the build if absent.
+- `third_party/mlir-aie` and `third_party/Peano` — **cloned automatically** by the build if absent (best-effort; only used for `toolchain.json` metadata).
+
+On Windows the engine builds, but the NPU kernel export is Linux-only (it requires the XRT/Peano toolchain).
 
 ### Build Instructions
 
@@ -157,41 +165,53 @@ More details on the exact procedure, with dependencies to be installed, for Linu
 
     ```bash
     git clone --recursive https://github.com/ROCm/FastFlowLM.git
-    cd FastFlowLM/src
+    cd FastFlowLM
     ```
 
-2.  **Configure CMake using presets:**
-
-    -   **For Linux:**
-
-        ```bash
-        cmake --preset linux-default
-        ```
-
-        This will configure the build to install to `/opt/fastflowlm`.
-
-    -   **For Windows (in a developer command prompt):**
-
-        ```bash
-        cmake --preset windows-default
-        ```
-
-3.  **Build the project:**
+2.  **Configure (Linux, full distribution — engine + open NPU kernels):**
 
     ```bash
-    cmake --build build
+    cmake --preset linux-default
     ```
 
-4.  **Install the project (optional):**
+    This configures a Release build that installs to `/opt/fastflowlm`. The default `linux-default` preset builds the NPU kernel xclbins during the build step below.
 
-    -   **For Linux:**
+    -   **Windows (developer command prompt):** `cmake --preset windows-default`
+    -   **Engine-only / fast debug iteration:** `cmake --preset linux-debug` (sets `FLM_BUILD_KERNELS=OFF`, skipping the long kernel compile).
+    -   **Portable bundle (bundled XRT/XDNA libs):** `cmake --preset linux-portable`
 
-        ```bash
-        sudo cmake --install build
-        ```
+3.  **Build:**
 
-    -   **For Windows (with administrator privileges):**
+    ```bash
+    cmake --build --preset linux-default
+    ```
 
-        ```bash
-        cmake --install build
-        ```
+    This compiles the `flm` engine and exports every open NPU kernel set into `src/xclbins`. To build only a subset of kernel specs, configure with `-DFLM_KERNEL_SPECS=qwen3-4b,gemma3-4b` (comma-separated; empty = all).
+
+4.  **Test (optional):**
+
+    ```bash
+    ctest --preset linux-default
+    ```
+
+    Runs the smoke test (`flm list`), which verifies the binary, its engine shared libraries, and the model registry all load.
+
+5.  **Install:**
+
+    -   **Linux:** `sudo cmake --install build` (or `cmake --install build --prefix "$HOME/flm"` to stage without root).
+    -   **Windows (admin):** `cmake --install build`
+
+    The install tree is `bin/flm`, `lib*/`, and `share/flm/` (`model_list.json`, `model_info.json`, and the `xclbins/` tree the engine loads at runtime).
+
+6.  **Package (optional):**
+
+    ```bash
+    cpack --preset linux-package-tgz     # .tar.gz
+    cpack --preset linux-package-deb     # .deb  (needs dpkg)
+    cpack --preset linux-package-rpm     # .rpm  (needs rpmbuild)
+    ```
+
+    Run `cpack` from the repository root (where `CMakePresets.json` lives). Each package bundles the full install tree under the install prefix.
+
+> **Tip:** the one-shot `linux-default` workflow preset also chains configure + build + test:
+> `cmake --workflow --preset linux-default`
