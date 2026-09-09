@@ -50,6 +50,13 @@ std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
 }
 
 const uint8_t* raw(const WeightFile& m, const std::string& name, size_t need, size_t* got = nullptr) {
+    size_t n = 0;
+    const uint8_t* p = m.raw(name, &n);
+    if (n < need) fail(name + " is " + std::to_string(n) + " B, the plan needs " + std::to_string(need));
+    if (got) *got = n;
+    return p;
+}
+
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
 constexpr size_t Q8H_SCALES = 256;   // a half-tile's 128 bf16 scales
@@ -98,12 +105,6 @@ uint16_t bf16_ceil(float x) {
 /// Code index of (row, block, lane) inside a chunk: the raster both formats use.
 inline unsigned code_index(unsigned r, unsigned b, unsigned i) {
     return (r / 16) * 4096 + b * 512 + i * 16 + (r % 16);
-}
-    size_t n = 0;
-    const uint8_t* p = m.raw(name, &n);
-    if (n < need) fail(name + " is " + std::to_string(n) + " B, the plan needs " + std::to_string(need));
-    if (got) *got = n;
-    return p;
 }
 
 /// What a chunk size that is neither 5120 nor 8704 probably is, for the refusal message.
