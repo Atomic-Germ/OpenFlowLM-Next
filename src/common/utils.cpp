@@ -174,6 +174,11 @@ std::vector<std::string> xclbin_roots() {
     // The directory flm-add uses when neither variable is exported.
     candidates.push_back(user_flm_directory());
 
+    // The embedding design sets (BERT-*/gemm_rtp) ship here, separately from the
+    // chat-model xclbin tree that CMAKE_XCLBIN_PREFIX points at. Listing it makes
+    // the pre-built sets discoverable by geometry/family with no manual symlink.
+    candidates.push_back("/usr/local/share/flm");
+
     for (const std::string& c : closed_path_roots()) candidates.push_back(c);
 
     std::vector<std::string> roots;

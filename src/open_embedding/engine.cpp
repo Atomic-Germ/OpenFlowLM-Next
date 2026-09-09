@@ -23,6 +23,7 @@
 // common/utils.cpp.
 namespace utils {
 std::string find_xclbin_path();
+std::vector<std::string> xclbin_roots();
 }
 
 namespace open_embedding {
@@ -231,20 +232,16 @@ std::string Engine::pick_npu_asset_dir() const {
         return local.string();
     }
 
-    // find_xclbin_path() throws when no xclbin tree is installed. The open
-    // engine must not hard-require one: no kernels simply means CPU-only.
-    std::string prefix;
-    try {
-        prefix = utils::find_xclbin_path();
-    } catch (const std::exception&) {
-        prefix.clear();
-    }
-    if (!prefix.empty()) {
+    // Scan every known xclbin root (the user tree, the install prefix, and the
+    // separately-shipped embedding design tree) rather than a single prefix: the
+    // open-kernel family may live in any of them. No kernels anywhere simply
+    // means CPU-only.
+    for (const std::string& root : utils::xclbin_roots()) {
         for (const char* family : {"Embedding-Gemma-300M-OpenNPU2", "embed-gemma"}) {
-            const fs::path cand = fs::path(prefix) / "xclbins" / family / "npu_matmul_f32";
+            const fs::path cand = fs::path(root) / "xclbins" / family / "npu_matmul_f32";
             if (has_kernels(cand)) {
                 std::fprintf(stderr, "open_embedding: using app family NPU kernels (%s)\n",
-                             family);
+                              family);
                 return cand.string();
             }
         }
