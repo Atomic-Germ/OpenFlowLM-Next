@@ -75,6 +75,9 @@ GYSYM = "gemv_q4s32_gy" if F32 else "gemv_q4_gy"
 GMSYM = "gemv_q4s32_gms" if F32 else "gemv_q4_gms"
 
 
+Q8 = SPEC.q8_roles              # the roles the container stores at q8 (OPEN-QUANT-Q8); usually empty
+
+
 def per_band(K):
     return QR.band_bytes(K, SPEC.quant) // CH
 
@@ -83,13 +86,70 @@ def n_groups(K):
     return QR.band_bytes(K, SPEC.quant) // CALL_BYTES
 
 
+# A q8 projection's band is the same 64 rows and twice the bytes: four 16-row half-tiles
+# per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h). A q4_1 role gets exactly
+# today's numbers, so a model with no q8 role builds the design it always built.
+def role_band_bytes(role, K):
+    # The q4_1 side is F32-aware: the GGUF-direct f32-scale build (SPEC.quant ==
+    # "q4_1_f32") uses 6144-byte chunks rather than q4nx's 5120.
+    b = QR.band_bytes(K, SPEC.quant)
+    return 2 * b if role in Q8 else b
+
+
+def role_per_band(role, K):
+    return role_band_bytes(role, K) // CH
+
+
+def role_groups(role, K):
+    return role_band_bytes(role, K) // CALL_BYTES
+
+
+def role_rs(role):
+    return 4 if role in Q8 else 2
+
+
+NEED_Q4_GY = any(r not in Q8 for r in ("attn", "ffn"))
+NEED_Q4_GMS = "ffn" not in Q8
+
+# A container that MIXES formats needs BOTH GEMV bodies on the main core, and 16 KB of
+# program memory does not hold three entries (.claude/plans/q8-hw-results.md section 2).
+# On a mixed spec ONLY, the q4_1 pair folds into one `gemv_q4_gyms` with a runtime
+# destination (dst < 0 -> the band's y element, dst >= 0 -> ms + dst) and the GEMV TUs are
+# compiled -Oz. An all-q4_1 or an all-q8 spec keeps today's entries, flags and call order.
+MIXED = bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
+GEMV_OS = ["-Oz"] if MIXED else OS
+
+
+# The kernels a main core holds, in a fixed order. A q4_1 entry goes in only while some
+# projection still needs it (dead code costs 16 KB program memory); the order for a model
+# with no q8 role is the one the design always had.
+def _knames():
+    ns = ["gyms"] if MIXED else [n for n in ("gy", "gms")
+                                 if (n == "gy" and NEED_Q4_GY) or (n == "gms" and NEED_Q4_GMS)]
+    ns += ["act", "prep", "prepf"]
+    if Q8:
+        ns.append("gy8")
+    if "ffn" in Q8:
+        ns.append("gms8")
+    return tuple(ns)
+
+
+KN = _knames()
+
+
 def bt(total, off, n):
     return TensorAccessPattern((1, total), off, [1, 1, 1, n], [0, 0, 0, 1])
 
 
 ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
               f"-DATTN_QKNORM={1 if G.QKNORM else 0}", f"-DATTN_QKNORM_POST={1 if G.QKNORM_POST else 0}",
-              f"-DATTN_EPS={G.EPS:g}f"]
+              f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
+if G.RB > 1:                                           # attn.h defaults it to 1; adding the flag
+    ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")             # would change every other family's build line
+for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
+    if _k != "ATTN_RB":                                # RB is already in the flags above, via G.RB.
+        ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
+ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 
 
@@ -109,13 +169,16 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     kv_ty = np.ndarray[(L.KV_BYTES,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(L.AD_BYTES,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(L.PTAB_BYTES,), np.dtype[np.uint8]]
-    i32_4 = np.ndarray[(4,), np.dtype[np.int32]]
+    pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]   # the attention parameter block:
+                                                                    # [pos, nf, seen, -] + [blocks, remainder] when blocked
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
-    fq = np.ndarray[(QW,), np.dtype[np.float32]]
-    fml = np.ndarray[(2 * G.NH,), np.dtype[np.float32]]
+    fq = (np.ndarray[(2 * QW,), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
+          if G.VEXP else np.ndarray[(QW,), np.dtype[np.float32]])
+    fml = np.ndarray[(2 * G.MLS,), np.dtype[np.float32]]   # [m | l], stride MLS (padded when ATTN_VEXP)
+    foacc = np.ndarray[(NHL * G.HD,), np.dtype[np.float32]]   # this core's heads only
     i32 = np.int32
 
     inc = include_dirs() + [str(GEMV), str(ATTN), str(LN), str(LINL)]
@@ -123,23 +186,36 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     def ef(sym, src, args, flags=OS):
         return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
 
-    f_gy = ef(GYSYM, HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], OS + GEMV_DEF)
-    f_gms = ef(GMSYM, HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], OS + GEMV_DEF)
-    f_silu = ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty])
-    f_prep = ef("dense_prep", HERE / "dense_prep.cc", [x_ty, tab_ty, i32, i32])
-    f_prepf = ef("dense_prep_f32", HERE / "dense_prep_f32.cc", [x_ty, tab_ty, i32, i32])
+    # One ExternalFunction per name in KN, in that order: a q4_1 entry only while a
+    # projection still uses it, a q8 one only when a role is q8 -- an ExternalFunction that
+    # exists changes the build, so a q4_1 model must see exactly the set it always saw.
+    # The q4_1 entries use GYSYM/GMSYM so the GGUF-direct f32-scale build (SPEC.quant ==
+    # "q4_1_f32") picks the gemv_q4s32 wrappers and the f32-scale compile defines.
+    mk = {"gy": lambda: ef(GYSYM, HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], GEMV_OS + GEMV_DEF),
+          "gms": lambda: ef(GMSYM, HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], GEMV_OS + GEMV_DEF),
+          "gyms": lambda: ef("gemv_q4_gyms", HERE / "gemv_q4_gyms.cc",
+                             [elem, tab_ty, y_ty, ms_ty, i32, i32, i32], GEMV_OS),
+          "act": lambda: ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty]),
+          "prep": lambda: ef("dense_prep", HERE / "dense_prep.cc", [x_ty, tab_ty, i32, i32]),
+          "prepf": lambda: ef("dense_prep_f32", HERE / "dense_prep_f32.cc", [x_ty, tab_ty, i32, i32]),
+          "gy8": lambda: ef("gemv_q8_gy", HERE / "gemv_q8_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], GEMV_OS),
+          "gms8": lambda: ef("gemv_q8_gms", HERE / "gemv_q8_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], GEMV_OS)}
+    KF = [mk[n]() for n in KN]
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
     f_nr32 = ef("ln_nr32", LN / "ln_nr32.cc", [u8_ln] * 4 + [i32], LN_FLAGS) if G.SANDWICH else None
-    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a, bhd, bhd, fcs, i32_4], ATTN_FLAGS)
+    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a, bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
     f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a, bhd, fcs, fq, i32], ATTN_FLAGS)
     f_k = ef("attn_k", ATTN / "attn_k.cc", [u8_a, bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
     f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a, brow, i32], ATTN_FLAGS)
-    f_init = ef("attn_init", ATTN / "attn_init.cc", [fq, fml], ATTN_FLAGS)
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, fq, fml, i32_4], ATTN_FLAGS)
-    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, fq, fml], ATTN_FLAGS)
-    f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [fq, fml, brow, i32], ATTN_FLAGS)
+    f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
+    h0_arg = [i32] if ACORES > 1 else []                       # only a split needs the head offset
+    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
+    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
+    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
+                  ATTN_FLAGS) if RB > 1 else None)
+    f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, brow, i32], ATTN_FLAGS)
 
     # ---- fifos
     of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
@@ -147,32 +223,66 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)      # one output element at a time (8 KB elements at 4096 wide)
-    of_ain = ObjectFifo(u8_a, name="ain", depth=4)
+    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2))   # a block is acquired at once
+    # Attention over ACORES cores: heads are independent, so each core owns NHL of
+    # them and drains its own og element. Separate fifos + separate drains at
+    # offsets is the pattern the GEMV cores already use below; a memtile join()
+    # would do it in one stream, but nothing in this tree uses join yet.
     of_aout = ObjectFifo(brow, name="aout", depth=2)
+    of_og = [ObjectFifo(brow, name=f"og{c}", depth=2) for c in range(1, ACORES)]
 
     PB_H, NG_H = per_band(HID), n_groups(HID)
     PB_Q, NG_Q = per_band(QW), n_groups(QW)
     PB_F, NG_F = per_band(FF), n_groups(FF)
 
-    def gemv_bands(win, yout, tab, f_gy, nbands, ngroups, pb):
+    def gemv_bands(win, yout, tab, f_gy, nbands, ngroups, pb, rs=2, ms=None):
+        """`ms` is passed only by the folded mixed-format entry, which takes both
+        destinations and picks between them with dst (-1 = this band's y element)."""
         for _ in range_(nbands):
             ye = yout.acquire(1)
             for g in range_(ngroups):
                 we = win.acquire(1)
-                f_gy(we, tab, ye, g, pb, 2)
+                if ms is None:
+                    f_gy(we, tab, ye, g, pb, rs)
+                else:
+                    f_gy(we, tab, ye, ms, g, pb, -1)
                 win.release(1)
             yout.release(1)
+
+    def role_bands(win, yout, tab, K, role, nbands, KK, ms=None):
+        """`nbands` bands of a KK-wide projection of `role`, at that role's weight format."""
+        if role in Q8:
+            gemv_bands(win, yout, tab, K["gy8"], nbands, role_groups(role, KK), role_per_band(role, KK), 4)
+        elif MIXED:
+            gemv_bands(win, yout, tab, K["gyms"], nbands, n_groups(KK), per_band(KK), 2, ms)
+        else:
+            gemv_bands(win, yout, tab, K["gy"], nbands, n_groups(KK), per_band(KK), 2)
 
     def acq(fifo, n):
         e = fifo.acquire(n)
         return [e] if n == 1 else e            # acquire(1) yields the element itself
 
-    def main_body(win, xin, yout, tab, ms, f_gy, f_gms, f_silu, f_prep, f_prepf):
+    def main_body(win, xin, yout, tab, ms, *fns):
+        K = dict(zip(KN, fns))
+        f_prep, f_prepf, f_silu = K["prep"], K["prepf"], K["act"]
+        if "ffn" in Q8:
+            gms, pb_u, ng_u = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
+        else:
+            gms, pb_u, ng_u = (K["gyms"] if MIXED else K["gms"]), PB_H, NG_H
+
+        def band(we, ye, g, dst):
+            """One up | gate band into ms + dst. The folded entry takes the y pointer too,
+            so on a mixed core the band's y element is acquired first -- the shape
+            `gemv_bands` already runs (acquire y, stream the w elements, release)."""
+            if MIXED:
+                gms(we, tab, ye, ms, g, pb_u, dst)
+            else:
+                gms(we, tab, ms, g, pb_u, dst)
         # q | k | v against xn (K = HID; XN_ELEMS elements)
         xe = acq(xin, G.XN_ELEMS)
         for i in range(G.XN_ELEMS):
             f_prep(xe[i], tab, HID, i)
-        gemv_bands(win, yout, tab, f_gy, G.Q_PC + 2 * G.KV_PC, NG_H, PB_H)
+        role_bands(win, yout, tab, K, "attn", G.Q_PC + 2 * G.KV_PC, HID, ms)
         xin.release(G.XN_ELEMS)
         if stop == 1:
             return
@@ -180,7 +290,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         oe = acq(xin, G.OG_ELEMS)
         for i in range(G.OG_ELEMS):
             f_prep(oe[i], tab, QW, i)
-        gemv_bands(win, yout, tab, f_gy, G.O_PC, NG_Q, PB_Q)
+        role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
         xin.release(G.OG_ELEMS)
         if stop == 2:
             return
@@ -189,15 +299,17 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         for i in range(G.XM_ELEMS):
             f_prep(me[i], tab, HID, i)
         for _ in range_(G.UP_PC):
-            for g in range_(NG_H):
+            ye = yout.acquire(1) if MIXED else None
+            for g in range_(ng_u):
                 we = win.acquire(1)
-                f_gms(we, tab, ms, g, PB_H, G.MS_U)
+                band(we, ye, g, G.MS_U)
                 win.release(1)
-            for g in range_(NG_H):
+            for g in range_(ng_u):
                 we = win.acquire(1)
-                f_gms(we, tab, ms, g, PB_H, G.MS_G)
+                band(we, ye, g, G.MS_G)
                 win.release(1)
-            ye = yout.acquire(1)
+            if not MIXED:
+                ye = yout.acquire(1)
             f_silu(ms, ye)
             yout.release(1)
         xin.release(G.XM_ELEMS)
@@ -208,7 +320,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             he = xin.acquire(1)
             f_prepf(he, tab, FF, i)
             xin.release(1)
-        gemv_bands(win, yout, tab, f_gy, G.DOWN_PC, NG_F, PB_F)
+        role_bands(win, yout, tab, K, "ffn", G.DOWN_PC, FF, ms)
 
     def ln_body(ain, aout, f_nr, f_lny, f_lnx, *rest):
         # 1. the layer-entry norm: [x0 x1 lnw] -> [xn]
@@ -252,7 +364,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             if stop >= 3:
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
 
-    def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+    N_OG = NHL // G.HPO          # og elements this core emits (all of them when ACORES == 1)
+
+    def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0):
         e = ain.acquire(2)                                      # [qn | kn], the position record
         f_meta(e[0], e[1], qn, kn, cs, pb)
         ain.release(2)
@@ -268,44 +383,89 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             e = ain.acquire(1)
             f_v(e, vout, h)
             ain.release(1)
-        o = aout.acquire(1)
-        for j in range_(KVW):
-            o[j] = kout[j]
-        aout.release(1)
-        o = aout.acquire(1)
-        for j in range_(KVW):
-            o[j] = vout[j]
-        aout.release(1)
-        f_init(oacc, ml)
-        for _ in range_(pb[1]):                                 # nf cached rows (K_t, V_t)
-            e = ain.acquire(2)
-            f_step(e[0], e[1], qs, oacc, ml, pb)
-            ain.release(2)
-        f_stepn(kout, vout, qs, oacc, ml)
-        for hp in range_(G.OG_AOUT_ELEMS):
+        if aout is not None:                                    # core 0 owns the cache row
             o = aout.acquire(1)
-            f_fin(oacc, ml, o, hp)
+            for j in range_(KVW):
+                o[j] = kout[j]
             aout.release(1)
+            o = aout.acquire(1)
+            for j in range_(KVW):
+                o[j] = vout[j]
+            aout.release(1)
+        f_init(oacc, ml)
+        if RB > 1:
+            for _ in range_(pb[4]):                             # whole blocks of RB rows
+                e = ain.acquire(2 * RB)
+                args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
+                f_stepb(*args)
+                ain.release(2 * RB)
+            for _ in range_(pb[5]):                             # what did not fill a block
+                e = ain.acquire(2)
+                f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
+                ain.release(2)
+        else:
+            for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
+                e = ain.acquire(2)
+                f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
+                ain.release(2)
+        f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
+        for hp in range_(N_OG):
+            o = ogout.acquire(1)
+            f_fin(oacc, ml, o, hp)
+            ogout.release(1)
+
+    # Two shapes of worker body, not one with a defaulted argument: a family that
+    # does not block must present IRON the exact function it presented before.
+    if RB > 1:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0)
+            return body
+    else:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, 0)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, h0)
+            return body
 
     workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx] + ([f_nr32] if G.SANDWICH else []),
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
-                                                  Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}"),
-                                                  f_gy, f_gms, f_silu, f_prep, f_prepf],
+                                                  Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
                               tile=Tile(c, 2), stack_size=0x1800))
-    workers.append(Worker(attn_body,
-                          fn_args=[of_ain.cons(), of_aout.prod(),
-                                   Buffer(bhd, name="qn"), Buffer(bhd, name="kn"), Buffer(fcs, name="cs"),
-                                   Buffer(fq, name="qs"), Buffer(fhd, name="tmp"), Buffer(brow, name="kout"),
-                                   Buffer(brow, name="vout"), Buffer(fq, name="oacc"), Buffer(fml, name="ml"),
-                                   Buffer(i32_4, name="pb"), f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin],
-                          tile=Tile(2, 3), stack_size=0x1800))
+    def abufs(c):
+        s = "" if c == 0 else str(c)
+        return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),
+                Buffer(fq, name=f"qs{s}"), Buffer(fhd, name=f"tmp{s}"), Buffer(brow, name=f"kout{s}"),
+                Buffer(brow, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
+                Buffer(pb_ty, name=f"pb{s}")]
 
-    BB_H, BB_Q, BB_F = QR.band_bytes(HID, SPEC.quant), QR.band_bytes(QW, SPEC.quant), QR.band_bytes(FF, SPEC.quant)
+    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+    workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
+                          tile=Tile(2, 3), stack_size=0x1800))
+    # The rest of the attention cores: same broadcast stream in, their own og out.
+    for c in range(1, ACORES):
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
+                              tile=Tile(2 + c, 3), stack_size=0x1800))
+
+    BB_H, BB_Q, BB_F = (role_band_bytes("attn", HID), role_band_bytes("attn", QW),
+                        role_band_bytes("ffn", FF))
+    BB_UG = role_band_bytes("ffn", HID)          # the FFN's up | gate bands (K = HID)
     YB = BAND_ROWS * 4
 
-    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c):
+    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
         # 1. layer-entry norm: xn -> act
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -331,7 +491,9 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         # 3. attention: meta + record now, q / k / v after the GEMVs, the window, the new row out
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
-        pa_out.drain(aout_c, a_act, bt(L.AD_BYTES, L.AD_OG, QW * 2))
+        pa_out.drain(aout_c, a_act, bt(L.AD_BYTES, L.AD_OG, NHL * G.HD * 2))
+        for c in range(1, ACORES):                                          # heads NHL*c ..
+            pa_out.drain(og_cs[c - 1], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
         pa_in.fill(ain_p, a_consts, bt(L.CD_BYTES, L.CD_META, E_A))            # [qn | kn]
         pa_in.fill(ain_p, a_ptab, bt(L.PTAB_BYTES, L.PTAB_ROW, L.PTAB_ROW))    # the position record (attnpos)
         py.finish(*y_conss)                                       # q, k, v are in DDR
@@ -383,8 +545,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_H + c * G.UP_PC * YB, G.UP_PC * YB))
         for j in range(G.UP_PC):
             for c in range(N_CORES):
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_UP + (c * G.UP_PC + j) * BB_H, BB_H))
-                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_GATE + (c * G.UP_PC + j) * BB_H, BB_H))
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_UP + (c * G.UP_PC + j) * BB_UG, BB_UG))
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_GATE + (c * G.UP_PC + j) * BB_UG, BB_UG))
         py.finish()                                               # h is in DDR
         if stop == 3:
             pw.finish()
@@ -425,7 +587,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                             [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0))])
+                            of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
+                            [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

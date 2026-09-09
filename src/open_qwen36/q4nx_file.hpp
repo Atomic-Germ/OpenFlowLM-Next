@@ -5,8 +5,17 @@
 /// The container is a safetensors file: an 8-byte header length, a JSON header
 /// of tensor name -> {dtype, shape, data_offsets}, then the data. BF16 / F32
 /// tensors are plain row-major. Quantized tensors are packed 8192-value chunks
-/// (5120 B q4_1 with bf16 scale + min per 32-block; 8704 B q8 for lm_head),
-/// stored in the file's raster order — the NPU pools reorder them (pools.hpp).
+/// (5120 B q4_1 with bf16 scale + min per 32-block; 8704 B q8), stored in the
+/// file's raster order — the NPU pools reorder them (pools.hpp).
+///
+/// The chunk format is PER TENSOR, not per file: the stock Qwen3.6-35B keeps
+/// only its lm_head at q8, while its fine-tunes (Darwin, Grug, BigBang,
+/// Aquila-mini, Ornith 1.5, and Atomic-Germ's own NPU2 mirror) pack attention,
+/// linear-attention and shared-expert projections at q8 and only the routed
+/// experts at q4_1. So this reader classifies each tensor from its own shape
+/// and refuses nothing at open; the packer re-quantizes a q8 source to q4_1 on
+/// the way into the pool and names the tensor if its chunks are neither
+/// (OPEN-PACK-PLAN).
 ///
 /// The file is memory-mapped and read on demand: the whole 22 GB is never
 /// resident on the host, only what the packers touch while filling device
@@ -56,7 +65,11 @@ public:
     /// buffers that is the difference between fitting and paging.
     void drop_pages() override;
 
+    /// The POOL's q4_1 chunk (5120 B) — what the packing plan's offsets are in.
     size_t chunk_bytes() const { return chunk_bytes_; }
+    /// The quantized chunk size `name` is stored in: its last shape dimension for an
+    /// I8 tensor (5120 = q4_1, 8704 = q8), 0 when the tensor is not quantized.
+    size_t chunk_bytes(const std::string& name) const;
     const std::string& path() const { return path_; }
 
 private:
@@ -64,7 +77,7 @@ private:
     const uint8_t* map_ = nullptr;
     size_t map_size_ = 0;
     size_t data_base_ = 0;
-    size_t chunk_bytes_ = 5120;
+    static constexpr size_t chunk_bytes_ = 5120;   ///< the pool's q4_1 chunk (a constant, not a guess)
     std::unordered_map<std::string, TensorMeta> tensors_;
 #ifdef _WIN32
     void* file_ = nullptr;

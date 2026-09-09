@@ -53,9 +53,10 @@ ATTN = HERE.parent / "attn"
 sys.path.insert(0, str(HERE.parent.parent))
 sys.path.insert(0, str(HERE))
 from ironutil import Pipeline, include_dirs  # noqa: E402
-from layout import (AA_BYTES, AA_HP, AA_KVN, AA_OG, AA_OUT, AA_QG, AA_RES, AA_ROUT, AA_XM, AA_XN,  # noqa: E402
-                    CA_BYTES, CA_LNW, CA_META, CA_POSTLN, CA_RW, CA_SGW, KV_BYTES, KV_ROW, POOL_BYTES,
-                    POOL_GATE, POOL_K, POOL_O, POOL_Q, POOL_V, PTAB_BYTES, PTAB_ROW, R, SPEC)
+from layout import (AA_BYTES, AA_H, AA_HP, AA_KVN, AA_OG, AA_OUT, AA_OUT2, AA_QG, AA_RES, AA_ROUT,  # noqa: E402
+                    AA_XM, AA_XN, CA_BYTES, CA_LNW, CA_META, CA_POSTLN, CA_RW, CA_SGW, ELN, KV_BYTES,
+                    KV_ROW, POOL_BYTES, POOL_FFN_DOWN, POOL_FFN_GATE, POOL_FFN_UP, POOL_GATE, POOL_K,
+                    POOL_O, POOL_Q, POOL_V, PTAB_BYTES, PTAB_ROW, R, SPEC)
 import xcommon as X  # noqa: E402
 
 D = R.attn
@@ -67,7 +68,12 @@ N_CORES = X.N_CORES
 ELEM = X.ELEM
 Q_PC, KV_PC, O_PC = D.Q_PC, D.KV_PC, D.O_PC             # bands per core: q (and gate), k (and v), o
 QW, KVW, O_K = D.QW, D.KVW, D.O_K
+DENSE = X.KIND == "dense"                               # the Qwen3.5 composition: a dense FFN tail
 PART = int(os.environ.get("AX_PART", 0))
+if DENSE and PART:
+    sys.exit("ax.py: the dense tail is one instruction stream; AX_PART must be 0")
+XN_ELEMS = X.FFN.XN_ELEMS if DENSE else 1               # 4 KB x elements the xn arrives in
+OG_ELEMS = D.OG_ELEMS
 ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={D.ROT}", "-DATTN_GATE=1"]
 
 
@@ -76,8 +82,9 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
        srchash: CompileTime[int] = 0):
     t = X.types()
     tl = X.ln_types()
-    u8_4k = tl["u8_4k"]
-    u8_1k = np.ndarray[(D.HEAD_BYTES,), np.dtype[np.uint8]]
+    u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
+    u8_ln = tl["u8_ln"] if DENSE else u8_4k             # the norm helper's element (ELN bytes)
+    u8_1k = np.ndarray[(D.E_A,), np.dtype[np.uint8]]    # one cache-row half: HPE f32 heads in, HPO bf16 og out
     pool_ty = np.ndarray[(POOL_BYTES,), np.dtype[np.uint8]]
     xres_ty = np.ndarray[(HID,), np.dtype[np.float32]]
     consts_ty = np.ndarray[(CA_BYTES,), np.dtype[np.uint8]]
@@ -112,22 +119,28 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=2) for c in range(N_CORES)]
     of_y = [ObjectFifo(t["y"], name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(t["x"], name="x", depth=2)
-    of_lni = ObjectFifo(u8_4k, name="lni", depth=5)
-    of_lno = ObjectFifo(u8_4k, name="lno", depth=3)
+    of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
+    of_lno = ObjectFifo(u8_ln, name="lno", depth=1 if DENSE else 3)
     of_ain = ObjectFifo(u8_1k, name="ain", depth=4)
     of_aout = ObjectFifo(b512, name="aout", depth=2)
 
     def main_body(win, xin, yout, *args):
         B, K = X.unpack_args(args)
         tab = B["tab"]
+        if DENSE:
+            # ONE stream: q | gate | k | v, the o projection, then the dense FFN tail.
+            X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, 2 * Q_PC + 2 * KV_PC, "attn")
+            X.prep_bands(win, xin, yout, B, K, O_K, OG_ELEMS, O_PC, "attn")
+            X.ffn_body(win, xin, yout, B, K)
+            return
         xe = xin.acquire(1)                                     # xn
         K["prep2048"](xe, tab)
-        X.gemv_bands(win, yout, tab, K["gy"], 2 * Q_PC + 2 * KV_PC, X.n_groups(HID), X.per_band(HID), 2)   # q | gate | k | v
+        X.role_gemv_bands(win, yout, B, K, "attn", 2 * Q_PC + 2 * KV_PC, HID)   # q | gate | k | v
         xin.release(1)
         oe = xin.acquire(2)                                     # og, K = QW
         K["prep4096a"](oe[0], tab)
         K["prep4096b"](oe[1], tab)
-        X.gemv_bands(win, yout, tab, K["gy"], O_PC, X.n_groups(O_K), X.per_band(O_K), 2)
+        X.role_gemv_bands(win, yout, B, K, "attn", O_PC, O_K)
         xin.release(2)
         X.moe_body(win, xin, yout, B, K)
 
@@ -135,15 +148,15 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         e = ain.acquire(2)                                      # [qn | kn], the position record
         fm(e[0], e[1], qn, kn, cs, pb)
         ain.release(2)
-        for h in range_(NH):
+        for h in range_(D.Q_AIN_ELEMS):
             e = ain.acquire(1)
             fq(e, qn, cs, qs, h)
             ain.release(1)
-        for h in range_(KVH):
+        for h in range_(D.K_AIN_ELEMS):
             e = ain.acquire(1)
             fk(e, kn, cs, tmp, kout, h)
             ain.release(1)
-        for h in range_(KVH):
+        for h in range_(D.K_AIN_ELEMS):
             e = ain.acquire(1)
             fv(e, vout, h)
             ain.release(1)
@@ -161,14 +174,17 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             fs(e[0], e[1], qs, oacc, ml, pb)
             ain.release(2)
         fsn(kout, vout, qs, oacc, ml)
-        for hp in range_(NH // 2):
+        for hp in range_(D.OG_AOUT_ELEMS):
             g = ain.acquire(2)
             o = aout.acquire(1)
             ff(oacc, ml, g[0], g[1], o, hp)
             aout.release(1)
             ain.release(2)
 
-    workers = [Worker(X.ln_router_body,
+    workers = [Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
+                      tile=Tile(0, 3), stack_size=0x1800)
+               if DENSE else
+               Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
                                L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]],
                       tile=Tile(0, 3), stack_size=0x1800)]
@@ -185,7 +201,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                           tile=Tile(2, 3), stack_size=0x1800))
 
     bt = X.bt
-    BB_HID, BB_O = X.band_bytes(HID), X.band_bytes(O_K)
+    BB_HID, BB_O = X.role_band_bytes("attn", HID), X.role_band_bytes("attn", O_K)
     YB = X.BAND_ROWS * 4
 
     def w_regions(c):
@@ -199,8 +215,69 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 (AA_KVN + c * kb, kb), (AA_KVN + KVW * 4 + c * kb, kb),
                 (AA_OUT + c * O_PC * YB, O_PC * YB)]
 
+    def dense_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
+                       ain_p, aout_c):
+        """ONE instruction stream: the MoE stream's attention half with the router dropped,
+        then designs/dense/dx.py's steps 5-7 (residual + norm, the FFN, the output residual)."""
+        tg_ln = TaskGroup()
+        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
+        lni.fill(a_consts, tap=bt(CA_BYTES, CA_LNW, ELN), wait=True, group=tg_ln)
+        lno.drain(a_act, tap=bt(AA_BYTES, AA_XN, ELN), wait=True, group=tg_ln)
+        pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
+        for c in range(N_CORES):
+            for off, n in w_regions(c)[:3]:
+                pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, off, n))
+            for off, n in y_regions(c)[:3]:
+                py.drain(y_conss[c], a_act, bt(AA_BYTES, off, n))
+        tg_ln.finish()                                            # xn is in DDR
+        px.fill(x_prod, a_act, bt(AA_BYTES, AA_XN, XN_ELEMS * ELEM))
+        for c in range(N_CORES):
+            pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[3]))
+            py.drain(y_conss[c], a_act, bt(AA_BYTES, *y_regions(c)[3]))
+        pa_out, pa_in = Pipeline(3), Pipeline(3)
+        pa_out.drain(aout_c, a_kv, bt(KV_BYTES, KV_ROW, KV_ROW))        # the new row [k' | v'] (attnpos)
+        pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, QW * 2))
+        pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.E_A))       # [qn | kn]
+        pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, PTAB_ROW, PTAB_ROW))   # the position record (attnpos)
+        py.finish(*y_conss)                                       # q, gate, k, v are in DDR
+        pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_QG, QW * 4))
+        pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_KVN, KVW * 4))
+        pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_KVN + KVW * 4, KVW * 4))
+        pa_in.fill(ain_p, a_kv, bt(KV_BYTES, 0, KV_ROW))                # the window: rows [0, nf) (attnpos)
+        pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_QG + QW * 4, QW * 4))
+        for c in range(N_CORES):
+            pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[4]))
+            py.drain(y_conss[c], a_act, bt(AA_BYTES, *y_regions(c)[4]))
+        pa_out.finish()                                           # og (and the new cache rows) are in DDR
+        px.fill(x_prod, a_act, bt(AA_BYTES, AA_OG, OG_ELEMS * ELEM))
+        py.finish()                                               # out is in DDR
+        # res = xres + out; xm = post_attention_norm(res)
+        tg_ln2 = TaskGroup()
+        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
+        lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln2)
+        lno.drain(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln2)
+        lno.drain(a_act, tap=bt(AA_BYTES, AA_XM, ELN), wait=True, group=tg_ln2)
+        lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
+        tg_ln2.finish()                                           # res, xm are in DDR
+        X.ffn_sequence(pw, px, py, a_pool, a_act, w_prods, x_prod, y_conss,
+                       AA_BYTES, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN)
+        tg_ln3 = TaskGroup()
+        lni.fill(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln3)
+        lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln3)    # unused w
+        lno.drain(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln3)
+        lno.drain(a_act, tap=bt(AA_BYTES, AA_XN, ELN), wait=True, group=tg_ln3)   # the junk xn, over spent AA_XN
+        py.finish()                                               # out2 is in DDR
+        lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT2, HID * 4), wait=True, group=tg_ln3)
+        tg_ln3.finish()
+        pw.finish()
+        px.finish()
+        pa_in.finish()
+
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c):
-        if part == 0:
+        if DENSE:
+            dense_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
+                           ain_p, aout_c)
+        elif part == 0:
             tg_ln = TaskGroup()
             lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
             lni.fill(a_consts, tap=bt(CA_BYTES, CA_LNW, ELEM), wait=True, group=tg_ln)
@@ -220,7 +297,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             pa_out, pa_in = Pipeline(3), Pipeline(3)
             pa_out.drain(aout_c, a_kv, bt(KV_BYTES, KV_ROW, KV_ROW))        # the new row [k' | v'] -> row pos (attnpos)
             pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, QW * 2))
-            pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.META_BYTES))   # [qn | kn]
+            pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.E_A))          # [qn | kn], one element
             pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, PTAB_ROW, PTAB_ROW))   # the position record (attnpos)
             py.finish(*y_conss)                                       # q, gate, k, v are in DDR
             pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_QG, QW * 4))

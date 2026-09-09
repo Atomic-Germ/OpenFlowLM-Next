@@ -343,6 +343,9 @@ public:
     hrx_executable_t exe_ = nullptr;
     uint32_t ord_ = 0;
     std::vector<hrx_buffer_ref_t> binds_;
+    // set when start() didn't actually get a dispatch onto the stream, so
+    // wait() doesn't synchronize on (and report success for) a no-op.
+    bool dispatch_failed_ = false;
 
     run() = default;
     explicit run(hrx_executable_t exe, uint32_t ord) : exe_(exe), ord_(ord) {}
@@ -352,23 +355,33 @@ public:
     }
 
     // Record the dispatch on the stream (no synchronize); wait() flushes.
-    void start() {
+    // Returns false on failure -- a caller that ignores it still gets a
+    // correct wait(), which now knows nothing was actually dispatched.
+    bool start() {
+        dispatch_failed_ = false;
         if (!exe_) {
             std::fprintf(stderr, "[hrx][ERROR] run::start with null executable\n");
-            return;
+            dispatch_failed_ = true;
+            return false;
         }
         if (binds_.empty()) {
             std::fprintf(stderr, "[hrx][ERROR] run::start with no bindings\n");
-            return;
+            dispatch_failed_ = true;
+            return false;
         }
         hrx_dispatch_config_t cfg = {{1, 1, 1}, {1, 1, 1}, 0};
         hrx_status_t s = hrx_stream_dispatch(rt().stream, exe_, ord_, &cfg,
                                              nullptr, 0, binds_.data(),
                                              binds_.size(), HRX_DISPATCH_FLAG_NONE);
-        hrx_report(s, "run::start hrx_stream_dispatch");
+        if (hrx_report(s, "run::start hrx_stream_dispatch")) {
+            dispatch_failed_ = true;
+            return false;
+        }
+        return true;
     }
 
     ert_cmd_state wait() {
+        if (dispatch_failed_) return ERT_CMD_STATE_ERROR;
         hrx_status_t s = hrx_stream_synchronize(rt().stream);
         return hrx_report(s, "run::wait hrx_stream_synchronize")
                    ? ERT_CMD_STATE_ERROR
@@ -379,20 +392,29 @@ public:
 class runlist {
 public:
     std::vector<run> runs_;
+    // true if any run in the list failed to dispatch.
+    bool dispatch_failed_ = false;
 
     runlist() = default;
     explicit runlist(const hw_context& /*ctx*/) {}
 
     void add(const run& r) { runs_.push_back(r); }
     void add(run&& r) { runs_.push_back(std::move(r)); }
-    void reset() { runs_.clear(); }
+    void reset() {
+        runs_.clear();
+        dispatch_failed_ = false;
+    }
 
     // Record every dispatch (no per-run synchronize) so HRX submits them as a
     // batch; wait() runs one synchronize for the whole list.
     void execute() {
-        for (auto& r : runs_) r.start();
+        dispatch_failed_ = false;
+        for (auto& r : runs_) {
+            if (!r.start()) dispatch_failed_ = true;
+        }
     }
     ert_cmd_state wait() {
+        if (dispatch_failed_) return ERT_CMD_STATE_ERROR;
         hrx_status_t s = hrx_stream_synchronize(rt().stream);
         return hrx_report(s, "runlist::wait hrx_stream_synchronize")
                    ? ERT_CMD_STATE_ERROR

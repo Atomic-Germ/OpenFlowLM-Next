@@ -25,14 +25,22 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8
+    std::string op;                          ///< std_perm | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity
-    uint64_t nch = 0, in_dim = 0, chunk0 = 0;                          ///< std_perm
+    uint64_t nch = 0, in_dim = 0, chunk0 = 0;                          ///< std_perm / q8_perm; in_dim also:
+                                                                       ///< lmhead_q8, the hidden width
+                                                                       ///< (q8_perm: nch counts POOL half-tiles,
+                                                                       ///<  chunk0 counts SOURCE file chunks)
     uint64_t experts = 0, stripes = 0, stripe_bytes = 0, expert_bytes = 0;   ///< expert_stripes / expert_down
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
-    uint64_t chunk_bytes = 0;                                           ///< lmhead_q8
+    uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)
+    uint64_t rows = 0, cols = 0, elem = 0;                              ///< transpose
+    uint64_t dst_rows = 0;                                              ///< transpose: pad the
+                                                                        ///< destination row to this
+                                                                        ///< many values, tail zeroed
+                                                                        ///< (0 = rows, no padding)
 };
 
 /// One verb of a layer type's (or the tail's) program.

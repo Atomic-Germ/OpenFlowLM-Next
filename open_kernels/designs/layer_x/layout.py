@@ -52,6 +52,15 @@ AA_XN, AA_QG, AA_KVN, AA_OG, AA_OUT = _L.AA_XN, _L.AA_QG, _L.AA_KVN, _L.AA_OG, _
 AA_RES, AA_XM, AA_ROUT, AA_HP = _L.AA_RES, _L.AA_XM, _L.AA_ROUT, _L.AA_HP
 AA_BYTES = _L.AA_BYTES
 
+# ffn="dense" (the Qwen3.5 composition, recipes/qwen35.py): the FFN's two extra act stages
+# (h = act(gate) * up, out2 = the block output) and its pool block, shared by both layer
+# types; and the norm / attention helpers' element sizes, which at HID 2048 are ELEM and
+# HEAD_BYTES -- the MoE designs' hardwired ones.
+A_H, A_OUT2 = _L.A_H, _L.A_OUT2
+AA_H, AA_OUT2 = _L.AA_H, _L.AA_OUT2
+POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN = _L.POOL_FFN_UP, _L.POOL_FFN_GATE, _L.POOL_FFN_DOWN
+ELN, E_A = _L.ELN, _L.E_A
+
 # state BO (linear layers): [conv state bf16 (taps-1) x NCH][S: heads x S_ROWS rows x dim f32,
 # rows dim..S_ROWS-1 zero]; S is updated in place by the layer (DeltaNet on the main cores, dnx.h).
 S_ROWS, S_HEAD_BYTES = _L.S_ROWS, _L.S_HEAD_BYTES

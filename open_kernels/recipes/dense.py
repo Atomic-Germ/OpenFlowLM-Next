@@ -31,10 +31,14 @@ the 27B these rules give the sizes ax.py uses (4096 / 4096 / 1024).
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, replace
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .qwen36moe import BAND_ROWS, CHUNK, ELEM, MB, band_bytes, chunk_bytes, q4_bytes, q4_chunks, roundup, tab_bytes
+from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, MB, band_bytes, chunk_bytes, q4_bytes,
+                        q4_chunks, proj_op, mixed_check, quant_check, require_gemv,
+                        role_bytes, roundup, tab_bytes)
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
 
@@ -70,6 +74,8 @@ class DenseGeometry:
     Q_AIN_ELEMS: int; K_AIN_ELEMS: int; OG_AOUT_ELEMS: int
     TAB_BYTES: int; KWIDE: int
     MS_U: int; MS_G: int; MS_FLOATS: int                            # the up / gate band scratch
+    VEXP: int; MLS: int                                             # batched softmax exponentials; ml stride
+    ACORES: int; NHL: int; RB: int                                  # attention cores; heads each owns; rows per call
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,10 @@ def _check(spec: ModelSpec) -> None:
     if spec.quant not in ("q4_1", "q4_1_f32"):
         raise OpRangeError(f"dense: quant={spec.quant!r}; the gemv_q4 template reads q4_1 chunks "
                            f"(bf16 scales, q4nx) or q4_1_f32 chunks (f32 scales, GGUF-direct)")
+    quant_check(spec, "dense")
+    mixed_check(spec, "dense", ("attn", "ffn"))
+    if spec.quant_of("experts") == "q8" or spec.quant_of("shared") == "q8" or spec.quant_of("linear") == "q8":
+        raise OpRangeError("dense: this family has only the 'attn' and 'ffn' roles")
     if not spec.has_dense or spec.has_linear or spec.has_full or spec.intermediate == 0:
         raise OpRangeError("dense: every layer must be a dense layer with an FFN")
     if spec.attn_gate:
@@ -122,10 +132,10 @@ def _check(spec: ModelSpec) -> None:
             rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
             qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE)
     pc = per_call(spec)
-    require("gemv_q4", K=spec.hidden, rs=2, rows_per_core=spec.attn_q_width // n, per_call=pc)
-    require("gemv_q4", K=spec.attn_q_width, rs=2, rows_per_core=spec.hidden // n, per_call=pc)
-    require("gemv_q4", K=spec.hidden, rs=2, rows_per_core=spec.intermediate // n, per_call=pc)
-    require("gemv_q4", K=spec.intermediate, rs=2, rows_per_core=spec.hidden // n, per_call=pc)
+    require_gemv(spec, "attn", spec.hidden, spec.attn_q_width // n, pc)
+    require_gemv(spec, "attn", spec.attn_q_width, spec.hidden // n, pc)
+    require_gemv(spec, "ffn", spec.hidden, spec.intermediate // n, pc)
+    require_gemv(spec, "ffn", spec.intermediate, spec.hidden // n, pc)
     require("lm_head_q4", K=spec.hidden, vocab=lm_rows(spec))
 
 
@@ -145,6 +155,46 @@ def per_call(spec: ModelSpec) -> int:
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")
 
 
+# ---- probe knobs, and why they are in the build key
+#
+# ATTN_NULL, ATTN_ABL and ATTN_RB change the COMPILED kernel, and cache.build_key
+# hashes sources + spec + quant, which cannot see an environment variable. Two
+# exports that differ only in a probe would therefore share a key, and
+# export_qwen36_kernels.py skips a build whose key the destination already has
+# -- so a probe build could be shipped as a real one, silently. `probe_env()`
+# is what cache.py folds in to stop that; it returns {} when nothing is set, so
+# an ordinary build's key is unchanged.
+PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB")
+
+RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
+
+
+def probe_env() -> dict[str, str]:
+    """The probe variables that are actually set, for the build key."""
+    return {k: os.environ[k] for k in PROBE_VARS if os.environ.get(k)}
+
+
+def _probe_rb(default: int, nhl: int) -> int:
+    """ATTN_RB, validated. Rejected rather than passed on to fail at compile time."""
+    raw = os.environ.get("ATTN_RB")
+    if raw is None:
+        return default
+    try:
+        rb = int(raw)
+    except ValueError:
+        raise OpRangeError(f"ATTN_RB={raw!r} is not an integer (expected one of {RB_SUPPORTED})")
+    if rb not in RB_SUPPORTED:
+        raise OpRangeError(
+            f"ATTN_RB={rb} is not supported: attn_stepb.cc has a body for 2 and 4, and 1 is the "
+            f"unblocked path. Anything else compiles to `#error` after a full design build.")
+    if rb > 1 and (rb * nhl) not in (8, 16, 32):
+        raise OpRangeError(
+            f"ATTN_RB={rb} with {nhl} heads per core gives a {rb * nhl}-lane score block, and the "
+            f"block exponential needs 8, 16 or 32. Legal here: "
+            f"{[r for r in RB_SUPPORTED if r == 1 or (r * nhl) in (8, 16, 32)]}.")
+    return rb
+
+
 def geometry(spec: ModelSpec) -> DenseGeometry:
     n = LIMITS["n_cols"]
     hid, ff, nh, kvh, hd = spec.hidden, spec.intermediate, spec.num_heads, spec.num_kv_heads, spec.head_dim
@@ -155,6 +205,31 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     wide = max(hid, qw, ff)
     pc = per_call(spec)
     ch = chunk_bytes(spec.quant)
+    # attn.h's online softmax spends two sexp() per head per position, and sexp
+    # is software float on the scalar unit. ATTN_VEXP batches them through the
+    # vector unit instead -- same arithmetic, ~1e-7 either way. Granite only for
+    # now: it is the family whose measurement motivated it (OPEN-ATTN-CONTEXT),
+    # and every other family's artifacts must stay byte-identical until each has
+    # been measured the same way.
+    vexp = 1 if spec.family == "granite" else 0
+    # Attention runs on ONE core while ~22 of the array's 32 sit idle, and after
+    # ATTN_VEXP it is still the whole decode step. Heads are independent, so the
+    # work splits cleanly -- but an og output element carries HPO heads, so the
+    # core count has to divide the og element count exactly.
+    acores = 1
+    if spec.family == "granite":
+        og_elems = nh // hpo
+        acores = og_elems if og_elems > 1 else 1
+    nhl = nh // acores
+    mls = ((nhl + 31) // 32) * 32 if vexp else nhl
+    # Rows per kernel call. One row per call reloads q for every head and reloads,
+    # rescales and stores the whole output accumulator, at every position; a block
+    # pays those once for RB rows and exponentiates the whole block in one vector
+    # (RB * NHL lanes) instead of one per row. RB * NHL must be a whole vector.
+    rb = 1
+    if vexp:
+        rb = max((r for r in (4, 2, 1) if (r * nhl) in (8, 16, 32)), default=1)
+        rb = _probe_rb(rb, nhl)
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
@@ -170,6 +245,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         HPE=hpe, HPO=hpo, Q_AIN_ELEMS=nh // hpe, K_AIN_ELEMS=kvh // hpe, OG_AOUT_ELEMS=nh // hpo,
         TAB_BYTES=tab_bytes(wide), KWIDE=wide,
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=2 * BAND_ROWS,
+        VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb,
     )
 
 
@@ -195,10 +271,12 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     # pool
     p: dict[str, int] = {}
     off = 0
-    for name, rows, cols in (("q", G.QW, hid), ("k", G.KVW, hid), ("v", G.KVW, hid), ("o", hid, G.QW),
-                             ("up", ff, hid), ("gate", ff, hid), ("down", hid, ff)):
+    for name, role, rows, cols in (("q", "attn", G.QW, hid), ("k", "attn", G.KVW, hid),
+                                   ("v", "attn", G.KVW, hid), ("o", "attn", hid, G.QW),
+                                   ("up", "ffn", ff, hid), ("gate", "ffn", ff, hid),
+                                   ("down", "ffn", hid, ff)):
         p[name] = off
-        off += q4_bytes(rows, cols, spec.quant)
+        off += role_bytes(spec, role, rows, cols)
     pool_bytes = roundup(off, MB)
     kv_row = 2 * e_a
     ptab_row = max(1024, e_a)
@@ -228,20 +306,13 @@ def pack_plan(spec: ModelSpec) -> dict:
     pre = "model.layers.{l}."
     one = {
             "pool": [
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "self_attn.q_proj.weight", "dst": L.POOL_Q, "nch": q4_chunks(G.QW, hid, spec.quant), "in_dim": hid},
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "self_attn.k_proj.weight", "dst": L.POOL_K, "nch": q4_chunks(G.KVW, hid, spec.quant), "in_dim": hid},
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "self_attn.v_proj.weight", "dst": L.POOL_V, "nch": q4_chunks(G.KVW, hid, spec.quant), "in_dim": hid},
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "self_attn.o_proj.weight", "dst": L.POOL_O, "nch": q4_chunks(hid, G.QW, spec.quant), "in_dim": G.QW},
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "mlp.up_proj.weight", "dst": L.POOL_UP, "nch": q4_chunks(ff, hid, spec.quant), "in_dim": hid},
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "mlp.gate_proj.weight", "dst": L.POOL_GATE, "nch": q4_chunks(ff, hid, spec.quant), "in_dim": hid},
-                {"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                 "tensor": pre + "mlp.down_proj.weight", "dst": L.POOL_DOWN, "nch": q4_chunks(hid, ff, spec.quant), "in_dim": ff},
+                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, hid),
+                proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, hid),
+                proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, hid),
+                proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, G.QW, G.QW),
+                proj_op(spec, "ffn", pre + "mlp.up_proj.weight", L.POOL_UP, ff, hid, hid),
+                proj_op(spec, "ffn", pre + "mlp.gate_proj.weight", L.POOL_GATE, ff, hid, hid),
+                proj_op(spec, "ffn", pre + "mlp.down_proj.weight", L.POOL_DOWN, hid, ff, ff),
             ],
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.CD_LNW, "cap": L.ELN},
@@ -313,8 +384,10 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     """Every kernel set the recipe ships: the q4nx build of each weight-consuming
     design AND its GGUF-direct f32-scale twin (`*_f32`, see programs())."""
     n = LIMITS["n_cols"]
+    qh = spec.quant_hash()
+    sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
     return {
-        "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}", "env": {}},
+        "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}", "env": {}},
         "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
@@ -364,3 +437,5 @@ KERNEL_SOURCES = [
     "designs/lm_head_q4/*.py", "designs/lm_head_q4/*.cc",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
+KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
+Q8_ROLES = frozenset({"attn", "ffn"})     # the only two roles a dense layer has

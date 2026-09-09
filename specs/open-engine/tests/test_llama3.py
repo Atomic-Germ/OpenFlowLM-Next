@@ -1,7 +1,8 @@
 # Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-LLAMA3 (canonical spec: specs/open-engine/spec.md)
 """Llama 3 on the dense recipe: spec derivation (HF and GGUF), the llama3 RoPE
 frequency scaling, the 8B's layout (8 KB norm elements, one chunk per weight
-element because of the 32 KB table), and the manifest."""
+element because of the 32 KB table), the two Llama 3.2 shapes (tied heads that
+the container materialises; head_dim 64 on the 1B), and the manifest."""
 from __future__ import annotations
 
 import math
@@ -28,6 +29,23 @@ GGUF_LLAMA31_8B = {
     "llama.attention.layer_norm_rms_epsilon": 1e-05, "llama.rope.scaling.type": "llama3",
     "llama.rope.scaling.factor": 8.0, "llama.rope.scaling.low_freq_factor": 1.0,
     "llama.rope.scaling.high_freq_factor": 4.0, "llama.rope.scaling.original_context_length": 8192,
+}
+# FastFlowLM/Llama-3.2-{3,1}B-NPU2 config.json, verbatim apart from FLM's addr_* keys.
+# Both set tie_word_embeddings; both containers carry lm_head.weight as its own q4
+# tensor (I8 [48096, 5120] / [32064, 5120] = the whole 128256-row head).
+HF_LLAMA32_3B = {
+    "model_type": "llama", "hidden_size": 3072, "intermediate_size": 8192, "num_hidden_layers": 28,
+    "num_attention_heads": 24, "num_key_value_heads": 8, "head_dim": 128, "rms_norm_eps": 1e-05,
+    "rope_theta": 500000.0, "vocab_size": 128256, "tie_word_embeddings": True,
+    "rope_scaling": {"factor": 32.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0,
+                     "original_max_position_embeddings": 8192, "rope_type": "llama3"},
+}
+HF_LLAMA32_1B = {
+    "model_type": "llama", "hidden_size": 2048, "intermediate_size": 8192, "num_hidden_layers": 16,
+    "num_attention_heads": 32, "num_key_value_heads": 8, "head_dim": 64, "rms_norm_eps": 1e-05,
+    "rope_theta": 500000.0, "vocab_size": 128256, "tie_word_embeddings": True,
+    "rope_scaling": {"factor": 32.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0,
+                     "original_max_position_embeddings": 8192, "rope_type": "llama3"},
 }
 
 
@@ -66,11 +84,82 @@ def test_llama3_rope_scaling_matches_transformers():
     assert np.allclose(plain, 500000.0 ** (-np.arange(64) / 64))
 
 
-def test_unsupported_scaling_and_tied_embeddings_are_refused():
+def test_unsupported_scaling_is_refused():
     with pytest.raises(SpecError, match="rope_scaling type 'yarn'"):
         ModelSpec.from_hf_config(dict(HF_LLAMA31_8B, rope_scaling={"rope_type": "yarn", "factor": 2}))
-    with pytest.raises(SpecError, match="tied embeddings"):
-        ModelSpec.from_hf_config(dict(HF_LLAMA31_8B, tie_word_embeddings=True))
+
+
+def test_tied_embeddings_are_accepted_and_the_head_is_still_its_own_tensor():
+    """Llama 3.2 ties the head to the embedding table; the containers we pack from
+    materialise `lm_head.weight` anyway, so the derivation accepts the flag and the
+    packer -- not the spec builder -- is what refuses a container that really is tied."""
+    tied = ModelSpec.from_hf_config(dict(HF_LLAMA31_8B, tie_word_embeddings=True))
+    untied = ModelSpec.from_hf_config(HF_LLAMA31_8B)
+    assert tied.to_dict() == untied.to_dict()          # the flag is not a spec field
+    plan = DR.pack_plan(tied)
+    assert plan["lm_head"]["ops"][0]["tensor"] == "lm_head.weight"
+    assert plan["embed"]["tensor"] == "model.embed_tokens.weight"
+
+    class NoHead:
+        def raw(self, name):
+            raise KeyError(name)
+
+    op = plan["lm_head"]["ops"][0]
+    with pytest.raises(KeyError, match="no tensor 'lm_head.weight'"):
+        pack.apply_op(op, NoHead(), 0, np.zeros(op["nch"] * 5120, dtype=np.uint8))
+
+
+def test_llama32_3b_layout(monkeypatch):
+    """3072 hidden / 8192 FF / 24 query heads: a new norm width, two new GEMV K, a new
+    lm_head K and -- the one the catalogue catches by itself -- a 24-head attention point."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    spec = ModelSpec.from_hf_config(HF_LLAMA32_3B)
+    assert (spec.hidden, spec.num_layers, spec.intermediate) == (3072, 28, 8192)
+    assert (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (24, 8, 128, 128)
+    assert spec.attn_q_width == 3072 and spec.attn_kv_width == 1024 and spec.qk_norm is False
+    assert spec.rope_scaling["factor"] == 32.0 and spec.norm_eps == 1e-5
+    R = DR.recipe(spec)
+    L, G = R.layout, R.geo
+    assert (G.Q_PC, G.KV_PC, G.O_PC, G.UP_PC, G.DOWN_PC) == (6, 2, 6, 16, 6)
+    assert (G.HPE, G.HPO, G.Q_AIN_ELEMS, G.K_AIN_ELEMS, G.OG_AOUT_ELEMS) == (4, 8, 6, 2, 3)
+    assert (G.XN_ELEMS, G.OG_ELEMS, G.XM_ELEMS, G.H_ELEMS) == (2, 2, 2, 8)
+    assert (L.ELN, L.E_A, L.KV_ROW, L.PTAB_ROW) == (6144, 2048, 4096, 2048)
+    assert G.PER_CALL == 2 and G.CALL_BYTES == 10240 and G.TAB_BYTES == 18432 and G.KWIDE == 8192
+    assert (L.CD_BYTES, L.AD_BYTES) == (16384, 143360)
+    assert L.LMHEAD_BANDS == 2004 and L.LMHEAD_BAND_BYTES == 122880
+    assert DR.lm_rows(spec) == 128256 == spec.vocab
+    m = manifest(spec)
+    assert m["family"] == "llama3" and m["layers"] == [DENSE] * 28
+    assert m["builds"]["dx"]["build_dir"] == "dense/build_llama3_h3072"
+    assert m["builds"]["ln"]["env"]["LN_N"] == "3072" and m["builds"]["lm_head_q4"]["env"]["LMHEAD_K"] == "3072"
+    assert len(m["layout"]["rope_inv_freq"]) == 64
+
+
+def test_llama32_1b_layout(monkeypatch):
+    """head_dim 64 -- half the smallest head the attention design has ever run. The
+    element sizes halve with it (E_A 1024, one KV band per core) and the RoPE record
+    still fits the 1 KB position row."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    spec = ModelSpec.from_hf_config(HF_LLAMA32_1B)
+    assert (spec.hidden, spec.num_layers, spec.intermediate) == (2048, 16, 8192)
+    assert (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (32, 8, 64, 64)
+    assert spec.attn_q_width == 2048 and spec.attn_kv_width == 512
+    R = DR.recipe(spec)
+    L, G = R.layout, R.geo
+    assert (G.Q_PC, G.KV_PC, G.O_PC, G.UP_PC, G.DOWN_PC) == (4, 1, 4, 16, 4)
+    assert (G.HPE, G.HPO, G.Q_AIN_ELEMS, G.K_AIN_ELEMS, G.OG_AOUT_ELEMS) == (4, 8, 8, 2, 4)
+    assert (G.XN_ELEMS, G.OG_ELEMS, G.XM_ELEMS, G.H_ELEMS) == (1, 1, 1, 8)
+    assert (L.ELN, L.E_A, L.KV_ROW, L.PTAB_ROW) == (4096, 1024, 2048, 1024)
+    assert 512 + 4 * spec.rotary_dim <= L.PTAB_ROW and 2 * spec.head_dim * 2 <= L.E_A
+    assert G.PER_CALL == 2 and G.TAB_BYTES == 18432 and G.KWIDE == 8192
+    assert (L.CD_BYTES, L.AD_BYTES) == (12288, 102400)
+    assert L.LMHEAD_BANDS == 2004 and L.LMHEAD_BAND_BYTES == 81920
+    assert len(spec.rope_inv_freq()) == 32           # rotary_dim / 2
+    m = manifest(spec)
+    assert m["builds"]["dx"]["build_dir"] == "dense/build_llama3_h2048"
+    assert m["builds"]["ln"]["env"] == {"LN_N": "2048", "LN_EPS": "1e-05"}
+    assert m["globals"]["ptab"]["per_row"] == 1024 and len(m["globals"]["ptab"]["inv_freq"]) == 32
+    assert "head_dim" not in m["hf_config_check"]    # Llama configs may omit it
 
 
 def test_8b_layout_and_manifest(monkeypatch):

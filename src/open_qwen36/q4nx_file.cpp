@@ -63,19 +63,15 @@ Q4nxFile::Q4nxFile(const std::string& path) : path_(path) {
         if (data_base_ + t.end > map_size_) throw std::runtime_error("q4nx: tensor " + it.key() + " past EOF");
         tensors_.emplace(it.key(), std::move(t));
     }
-    // 1.0.2 packs q4_1 in 5120 B chunks; 1.0.3 packs Q4_K in 4736 B ones and
-    // needs a different dequant. Nothing in the header records the version,
-    // so read it off a tensor — and refuse the format this reader can't do.
-    for (const auto& [k, t] : tensors_) {
-        if (t.dtype == "I8" && k != "lm_head.weight") {
-            chunk_bytes_ = t.shape.back();
-            if (chunk_bytes_ != 5120)
-                throw std::runtime_error("q4nx: " + path + " has " + std::to_string(chunk_bytes_) +
-                                         "-byte quant chunks (FLM 1.0.3 / Q4_K?); the open engine reads the "
-                                         "1.0.2 q4_1 container only");
-            break;
-        }
-    }
+    // No file-level quant check: the chunk format is per tensor (see the header), and
+    // a container that mixes q8 and q4_1 is normal. pools::apply refuses an individual
+    // tensor whose chunks are neither, naming it.
+}
+
+size_t Q4nxFile::chunk_bytes(const std::string& name) const {
+    const TensorMeta& t = meta(name);
+    if (t.dtype != "I8" || t.shape.empty()) return 0;
+    return t.shape.back();
 }
 
 Q4nxFile::~Q4nxFile() {

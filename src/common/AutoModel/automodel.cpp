@@ -6,6 +6,9 @@
 /// \note This is a source file for the auto_model class
 
 #include "AutoModel/automodel.hpp"
+#ifdef FLM_USE_OPEN_QWEN36
+#include "open_qwen36/engine.hpp"
+#endif
 
 
 AutoModel::AutoModel(flm_rt::device* npu_device_inst, std::string current_model) {
@@ -23,6 +26,32 @@ AutoModel::AutoModel(flm_rt::device* npu_device_inst, std::string current_model)
 
 std::string AutoModel::get_current_model() {
     return this->current_model;
+}
+
+/// \brief Pick the engine: the open kernels when a set is installed for this
+///        model, the family's closed DLL otherwise
+/// \note One implementation for every adapter class that has an open path
+///       (see the declaration for the contract). Callers keep their own closed
+///       branch -- which DLL, which sampler -- and differ only in the override
+///       variable and the label.
+std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env_var, const std::string& family_label) {
+#ifdef FLM_USE_OPEN_QWEN36
+    const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
+    const char* sel = std::getenv(env_var);
+    const bool use_open = sel ? std::string(sel) == "open" : !kernels.empty();
+    if (use_open && kernels.empty())
+        throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
+    if (!use_open)
+        return nullptr;
+    header_print("FLM", family_label + " on the open kernels (" + kernels + ")");
+    auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
+    eng->load_open_weights();
+    return eng;
+#else
+    (void)env_var;
+    (void)family_label;
+    return nullptr;
+#endif
 }
 
 /// \brief Setup the tokenizer
@@ -223,8 +252,12 @@ bool AutoModel::_shared_insert(chat_meta_info_t& meta_info, std::vector<int>& to
 
 buffer<bf16> AutoModel::_chunked_insert(chat_meta_info_t& meta_info, std::vector<int>& tokens, std::function<bool()> is_cancelled, void* payload, int first_len_run) {
     int max_prefill_len = meta_info.max_prefill_len;
-    // make max_prefill_len a 2^n
-    max_prefill_len = 1 << static_cast<int>(std::ceil(std::log2(max_prefill_len)));
+    // log2 of a non-positive length is not a number to shift by; an unset or
+    // degenerate limit means "no chunking", which the < 512 branch below already means.
+    if (max_prefill_len > 0) {
+        // make max_prefill_len a 2^n
+        max_prefill_len = 1 << static_cast<int>(std::ceil(std::log2(max_prefill_len)));
+    }
     buffer<bf16> y;
     if (max_prefill_len < 512) {
         y = this->lm_engine->prefill(tokens, payload);
@@ -320,7 +353,9 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         this->token_history.push_back(sampled_token);
         if (this->is_eos(sampled_token)){
             meta_info.generated_tokens++;
-            this->lm_engine->forward(last_sampled_token);
+            if (this->forward_on_eos) {
+                this->lm_engine->forward(last_sampled_token);
+            }
             break;
         }
         meta_info.generated_tokens++;

@@ -54,7 +54,19 @@ def main() -> int:
             raise SystemExit(f"tokenizer lacks {missing}")
         return [got[n] for n in names]
 
-    if tk.token_to_id("<start_of_turn>") is not None:
+    if tk.token_to_id("<｜User｜>") is not None and tk.token_to_id("<｜Assistant｜>") is not None:
+        # DeepSeek-R1 (distill checkpoints ship no separate chat_template.jinja;
+        # this follows the one baked into each tokenizer_config.json):
+        # <|begin_of_sentence|><|User|>...<|Assistant|>[\n]
+        # Neither shipped template opens a <think> block itself -- R1 models emit
+        # <think>...</think> on their own, so --think is a no-op for this family.
+        # The Llama-vocab distill's template appends a trailing "\n" after
+        # <|Assistant|> for the generation prompt; the Qwen-vocab distill's does not.
+        gen_nl = "\n" if tk.token_to_id("<|start_header_id|>") is not None else ""
+        prompt = f"<｜begin▁of▁sentence｜><｜User｜>{a.message}<｜Assistant｜>{gen_nl}"
+        ids = tk.encode(prompt, add_special_tokens=False).ids
+        IM_END, EOT = ids_of("<｜end▁of▁sentence｜>", "<｜end▁of▁sentence｜>")
+    elif tk.token_to_id("<start_of_turn>") is not None:
         # Gemma: <bos><start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
         prompt = f"<bos><start_of_turn>user\n{a.message}<end_of_turn>\n<start_of_turn>model\n"
         ids = tk.encode(prompt, add_special_tokens=False).ids

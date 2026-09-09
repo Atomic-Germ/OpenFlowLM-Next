@@ -55,4 +55,6 @@ src/open_qwen36/out/
 # sets: a binary beside the source that claims to produce it is a claim nobody
 # checks, so the rebuild is the only way to get one. Shipped pre-built in the
 # distributed package only.
-src/xclbins/*/open_kernels/
+# The trailing glob also covers the side-by-side variants an A/B leaves behind
+# (open_kernels_q4_1, open_kernels_q8): same binaries, same rule.
+src/xclbins/*/open_kernels*/

@@ -1,12 +1,14 @@
 r"""lm_head on the NPU from phlegm's pool-order q8 chunks:
-logits[N] = W[N, 2048] @ x[2048], N = 248320 (1940 bands of 128 rows).
+logits[N] = W[N, K] @ x[K], N = 248320 and K = 2048 for the 27B (1940 bands of
+128 rows). K is LMHEAD_K (a compile-time knob of lm_head_q8.h too, since it sizes
+the activation table the kernel indexes); Qwen3.5 dense builds it at K = 4096.
 
 Dataflow: n_cores workers, each with its own shim weight stream (elements of
 PER_CALL chunks, double-buffered), x broadcast once, one 128-float result per
 band. Bands split as evenly as possible over the cores (1940 is not a multiple
 of 8), so the taps are hand-built rather than simple_tiler's equal tiles.
 
-Build (WSL):  [LMHEAD_N=<rows>] python build_design.py designs/lm_head_q8/lm_head_q8.py [out]
+Build (WSL):  [LMHEAD_N=<rows>] [LMHEAD_K=<hidden>] python build_design.py designs/lm_head_q8/lm_head_q8.py [out]
 """
 
 from __future__ import annotations
@@ -34,10 +36,11 @@ SCALES_F32 = int(os.environ.get("LMHEAD_SCALES_F32", 0))
 TILE_BYTES = 9216 if SCALES_F32 else 8704
 KERNEL_SYM = "lm_head_q8s32_group" if SCALES_F32 else "lm_head_q8_group"
 EXTRA_FLAGS = ["-DLMHEAD_SCALES_F32=1", "-DLMHEAD_Q8_PREFIX=lm_head_q8s32"] if SCALES_F32 else []
-K = 2048
-PER_BAND = 32           # chunks per band: 8 k-tiles x 4 row quarters
 BAND_ROWS = 128
-BAND_BYTES = PER_BAND * TILE_BYTES   # 278528
+ROW_SPLIT = 4           # 32-row quarters per 128-row band (lm_head_q8.h's kRowSplit)
+K = int(os.environ.get("LMHEAD_K", 2048))      # the hidden width; 2048 for the 27B, 4096 for Qwen3.5 dense
+PER_BAND = ROW_SPLIT * (K // 256)              # chunks per band: K/256 k-tiles x 4 row quarters (32 at K=2048)
+BAND_BYTES = PER_BAND * TILE_BYTES             # 278528 at K = 2048
 
 N = int(os.environ.get("LMHEAD_N", 248320))
 N_CORES = int(os.environ.get("LMHEAD_CORES", 8))
@@ -81,9 +84,15 @@ def lm_head_q8(w: In, x: In, y: Out, *, n: CompileTime[int],
         source_file=str(HERE / "lm_head_q8.cc"),
         arg_types=[elem_ty, tab_ty, acc_ty, np.int32],
         include_dirs=_include_dirs(),
-        compile_flags=[f"-DLMHEAD_PER_CALL={per_call}"] + EXTRA_FLAGS,
+        compile_flags=[f"-DLMHEAD_PER_CALL={per_call}", f"-DLMHEAD_K={K}"] + EXTRA_FLAGS,
     )
-    prep = ExternalFunction("gemv_q4_prep_k2048", source_file=str(GEMV / "gemv_q4_prep_k2048.cc"),
+    # the prep TU is generated on demand (gemv_q4.ensure_prep_entry rewrites it only when the
+    # text differs, so the K values already checked in stay byte-identical)
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("_gemv_q4_gen", GEMV / "gemv_q4.py")
+    _gemv = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_gemv)
+    prep = ExternalFunction(f"gemv_q4_prep_k{K}", source_file=str(_gemv.ensure_prep_entry(K)),
                             arg_types=[x_ty, tab_ty], include_dirs=_include_dirs())
 
     of_w = [ObjectFifo(elem_ty, name=f"w{c}", depth=2) for c in range(n_cores)]
@@ -137,6 +146,7 @@ def lm_head_q8(w: In, x: In, y: Out, *, n: CompileTime[int],
 
 
 DESIGN = lm_head_q8
-_src = b"".join((HERE / f).read_bytes() for f in ("lm_head_q8.h", "lm_head_q8.cc")) + (GEMV / "gemv_tab.h").read_bytes()
+_src = (b"".join((HERE / f).read_bytes() for f in ("lm_head_q8.h", "lm_head_q8.cc"))
+        + (GEMV / "gemv_tab.h").read_bytes() + f"K={K}".encode())
 SPECIALIZE = {"n": N, "n_cores": N_CORES, "per_call": PER_CALL,
               "srchash": int(hashlib.sha1(_src + str(SCALES_F32).encode()).hexdigest()[:8], 16)}

@@ -10,8 +10,6 @@ REM   VCVARS64         vcvars64.bat (default: VS 2022 BuildTools)
 setlocal
 cd /d "%~dp0"
 if "%VCVARS64%"=="" set "VCVARS64=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-if "%XRT_INCLUDE_DIR%"=="" goto :noxrt
-if "%XRT_LIB_DIR%"=="" goto :noxrt
 set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"
 call "%VCVARS64%" >nul
 if errorlevel 1 goto :vcfail
@@ -21,8 +19,18 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
    manifest_test.cpp manifest.cpp /Fe:out\manifest_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
-out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_hy_mt2_7b.json
+out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_hy_mt2_7b.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen35_9b.json
 if errorlevel 1 goto :testfail
+echo [open_qwen36] pools_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
+   pools_test.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\pools_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+out\pools_test.exe
+if errorlevel 1 goto :testfail
+REM The two unit tests above need no XRT; the CLI does.
+if "%XRT_INCLUDE_DIR%"=="" goto :noxrt
+if "%XRT_LIB_DIR%"=="" goto :noxrt
 echo [open_qwen36] XRT_INCLUDE_DIR=%XRT_INCLUDE_DIR%
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^

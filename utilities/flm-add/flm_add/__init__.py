@@ -17,6 +17,14 @@ qwen3.5-claude:9b); override with --tag. Defaults for the registry entry
 (family, engine, size, context length) are copied from the matching official
 FastFlowLM entry.
 
+Open kernels are handled separately. They belong to a model's *spec* (its
+shape plus the per-role weight format), not to an official model name, so any
+installed set whose manifest.json carries the same spec_hash as this model
+drives it. flm-add derives the spec from the installed config.json (+
+tokenizer.json and the model.q4nx header) via the open_kernels/recipes
+checkout, finds the matching set, and links it at <model dir>/open_kernels --
+the second place open_qwen36::Engine::find_kernels looks.
+
 The script never rewrites the system model list or the system xclbins; it
 writes a user-level registry at ~/.config/flm/model_list.json and adds a single
 symlink into ~/.config/flm/xclbins/ for the new model directory. Custom FLM
@@ -104,6 +112,7 @@ FAMILY_ALIASES = [
     ("qwen3.5-omni", "qwen3.5-omni"),
     ("qwen3.6", "qwen3.6-moe"),
     ("qwen3.5-moe", "qwen3.6-moe"),
+    ("qwen3.8", "qwen3.5"),      # Qwen3.8-Distilled-*: the Qwen3.5 engine, not Qwen3
     ("qwen3.5", "qwen3.5"),
     ("qwen3", "qwen3"),
     ("qwen2.5vl", "qwen2.5vl"),
@@ -817,6 +826,173 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
         log(f"[INFO] Linked xclbins: {link} -> {target}")
 
 
+# -------------------------------------------------------------- open kernels
+#
+# Closed kernels are per official model; open kernel sets are per ModelSpec --
+# the shape plus the per-role weight format. Two shape-identical models (a
+# fine-tune, a distill) share one set. The engine finds a set at
+# FLM_OPEN_KERNELS_DIR, then <model dir>/open_kernels, then
+# <xclbins root>/<model name>/open_kernels (open_qwen36::Engine::find_kernels).
+# We link into the model directory: it is the one root that does not depend on
+# how FLM_XCLBIN_PATH happens to be set.
+
+def open_kernels_checkout():
+    """An `open_kernels/` directory holding recipes/spec.py, or None.
+
+    Looked for at $OPEN_KERNELS_DIR, then next to this checkout (flm-add lives
+    in <repo>/utilities/flm-add), then under the working directory.
+    """
+    candidates = []
+    env = os.environ.get("OPEN_KERNELS_DIR")
+    if env:
+        candidates.append(Path(env))
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / "open_kernels")
+    candidates.append(Path.cwd() / "open_kernels")
+    for c in candidates:
+        if (c / "recipes" / "spec.py").is_file():
+            return c
+    return None
+
+
+def model_spec_hash(model_dir):
+    """(spec_hash, note) for an installed model directory; (None, why) on failure.
+
+    Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
+    config.json, the tokenizer's real vocab, and the per-role weight format off
+    the model.q4nx safetensors header (no weight byte is read).
+    """
+    root = open_kernels_checkout()
+    if root is None:
+        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.load import spec_from_model_dir
+        spec = spec_from_model_dir(Path(model_dir))
+        return spec.spec_hash(), f"spec from {root}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def kernel_set_spec_hash(kernel_dir):
+    """The manifest's spec_hash for a kernel set directory, or None."""
+    try:
+        return load_json(Path(kernel_dir) / "manifest.json").get("spec_hash")
+    except Exception:
+        return None
+
+
+def find_open_kernels(spec_hash, roots, dir_name):
+    """The installed open kernel set whose manifest matches `spec_hash`.
+
+    Roots are xclbins directories (<root>/<model>/open_kernels). A set sitting
+    under this model's own name wins; otherwise the first match in root order.
+    Returns (Path, source model name) or (None, None).
+    """
+    if not spec_hash:
+        return None, None
+    matches = []
+    for root in roots:
+        if not root or not Path(root).is_dir():
+            continue
+        for model in sorted(Path(root).iterdir()):
+            k = model / "open_kernels"
+            if not (k / "manifest.json").is_file():
+                continue
+            if kernel_set_spec_hash(k) == spec_hash:
+                matches.append((k, model.name))
+    for k, name in matches:
+        if name == dir_name:
+            return k, name
+    return matches[0] if matches else (None, None)
+
+
+def _make_dir_link(link, target):
+    """Symlink `link` -> `target`; a junction where symlinks need a privilege
+    Windows only grants to admins / developer mode. True on success."""
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    try:
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+        return True
+    except Exception:
+        return False
+
+
+def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
+    """Put the chosen kernel set where find_kernels looks for this model.
+
+    True when <model dir>/open_kernels resolves to `kernel_dir`.
+    """
+    kernel_dir = Path(kernel_dir).resolve()
+    link = Path(model_dir) / "open_kernels"
+    if link.exists() and link.resolve() == kernel_dir:
+        if not quiet:
+            log(f"[INFO] open kernels already in place: {link}")
+        return True
+    if link.is_symlink() or link.exists():
+        if not (force or link.is_symlink()):
+            raise SystemExit(
+                f"{link} already exists and is not a link. Remove it or pass --force."
+            )
+        try:
+            if link.is_symlink() or link.is_file():
+                link.unlink()
+            else:
+                shutil.rmtree(link)
+        except OSError as e:
+            log(f"[WARN] could not replace {link}: {e}")
+            return False
+    if _make_dir_link(link, kernel_dir):
+        if not quiet:
+            log(f"[INFO] Linked open kernels: {link} -> {kernel_dir}")
+        return True
+    log(f"[WARN] Could not link {link} -> {kernel_dir} (a Windows symlink needs "
+        "developer mode or admin). Run flm with:")
+    log(f'           FLM_OPEN_KERNELS_DIR="{kernel_dir}"')
+    return False
+
+
+def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
+    """Find and link the open kernel set for this model; say which and why."""
+    if override:
+        kernel_dir = Path(override)
+        if not (kernel_dir / "manifest.json").is_file():
+            raise SystemExit(f"--open-kernels {kernel_dir} has no manifest.json")
+        log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
+        return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+
+    spec_hash, note = model_spec_hash(model_dir)
+    if not spec_hash:
+        if not quiet:
+            log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
+        return False
+    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
+    if kernel_dir:
+        log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
+            f"this model's ({spec_hash[:19]})")
+        return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
+    checkout = open_kernels_checkout()
+    script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
+    log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
+        "the closed kernels stay in charge. Build one with:")
+    log(f'           python "{script}" --model-dir "{model_dir}"')
+    return False
+
+
 # ---------------------------------------------------------------------- main
 
 def main():
@@ -832,7 +1008,8 @@ def main():
     ap.add_argument("--xclbin-from", help="official model directory name to link xclbins from (default: best match, e.g. Qwen3.6-35B-A3B-NPU2)")
     ap.add_argument("--system-list", help="official model_list.json used for defaults (default: auto-detect)")
     ap.add_argument("--modelscope", action="store_true", help="Treat REPO as a ModelScope repo id (implied by www.modelscope.ai/.cn URLs)")
-    ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink")
+    ap.add_argument("--open-kernels", help="open kernel set for this model (a directory holding manifest.json); default: the installed set whose manifest spec_hash matches")
+    ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and exit")
@@ -938,6 +1115,15 @@ def main():
         elif gguf_refused:
             print(f"weights        : safetensors (GGUF present but not usable: "
                   + "; ".join(sorted(set(gguf_refused.values()))) + ")")
+        probe = args.open_kernels or (local_dir if local_dir else None)
+        if args.open_kernels:
+            print(f"open kernels   : {args.open_kernels} (--open-kernels)")
+        elif local_dir:
+            sh, note = model_spec_hash(local_dir)
+            roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
+            found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
+            print(f"spec hash      : {sh or '(' + note + ')'}")
+            print(f"open kernels   : {found or '(none installed)'}")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return
@@ -1019,8 +1205,8 @@ def main():
     register(user_list, tag, entry, system_registry)
     log(f"[INFO] Registered tag '{tag}' in {user_list}")
 
+    system_root = find_system_xclbin_root()
     if not args.no_xclbin:
-        system_root = find_system_xclbin_root()
         if system_root is None:
             log("[WARN] Could not locate system xclbins; skipped symlink.")
         else:
@@ -1032,6 +1218,17 @@ def main():
                 force=args.force,
                 quiet=args.quiet,
             )
+
+    # Open kernels: keyed by this model's spec, not by an official model name.
+    if args.open_kernels or not args.no_xclbin:
+        setup_open_kernels(
+            target,
+            dir_name,
+            [user_xclbin_dir(args.xclbin_dir), system_root],
+            override=args.open_kernels,
+            force=args.force,
+            quiet=args.quiet,
+        )
 
     print()
     print(f"Done: {dir_name} installed to {target}")

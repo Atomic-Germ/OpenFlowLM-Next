@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from recipes.load import default_spec
-from recipes.spec import FULL, LINEAR, ModelSpec, SpecError
+from recipes.spec import FULL, LINEAR, ModelSpec, SpecError, hf_model_types
 
 # the fields of ~/.flm/models/Qwen3.6-35B-A3B-NPU2/config.json the derivation reads
 HF_QWEN36 = {
@@ -44,6 +44,17 @@ def test_hf_config_gives_the_checked_in_27b_spec():
     assert strip(s) == strip(default_spec())
     assert s.layer_types[3] == FULL and s.layer_types[0] == LINEAR and s.layer_types.count(FULL) == 10
     assert s.rotary_dim == 64 and s.lin_qkv_dim == 8192 and s.attn_q_width == 4096
+
+
+def test_the_text_only_moe_model_type_derives_the_same_spec():
+    """Ornith-1.0-35B-A3B is `Qwen3_5MoeForCausalLM` / `qwen3_5_moe_text`: the VLM
+    wrapper's text tower shipped on its own. Every field the recipe and the config check
+    read is the VLM's, so it derives through the same builder and lands on the same
+    kernels -- the alias `gemma3_text` and `qwen3_5_text` already have."""
+    s = ModelSpec.from_hf_config(dict(HF_QWEN36, model_type="qwen3_5_moe_text"), real_vocab=248070)
+    ref = ModelSpec.from_hf_config(HF_QWEN36, real_vocab=248070)
+    assert strip(s) == strip(ref) and s.family == "qwen36moe"
+    assert hf_model_types("qwen36moe") == ["qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"]
 
 
 def test_hf_layer_types_list_wins_over_the_interval():
