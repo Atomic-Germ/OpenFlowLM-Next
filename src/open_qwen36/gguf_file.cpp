@@ -302,7 +302,8 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
     const TensorInfo& t = tensor(name);
     const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
     if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
-    if (row >= t.dims[1]) fail("row " + std::to_string(row) + " past " + name);
+    const uint64_t nrows = t.dims.size() >= 2 ? t.dims[1] : 1u;  // 1-D tensors are a single row
+    if (row >= nrows) fail("row " + std::to_string(row) + " past " + name);
     const uint8_t* base = map_ + data_base_ + t.offset;
     switch (t.type) {
         case Type::F32: {

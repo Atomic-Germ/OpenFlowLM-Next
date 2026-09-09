@@ -65,6 +65,10 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q8_0"]
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
 # installs as plain safetensors instead.
 GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+# Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
+# not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
+# dequantizes, so no open_kernels "gguf" manifest section is required.
+EMBEDDING_FAMILIES = {"embed-gemma"}
 GGUF_QUANT_RE = re.compile(r"(?:^|[.\-_ ])(I?Q[0-9](?:_[0-9A-Za-z]+)?)")
 
 def gguf_quant_of(name):
@@ -147,6 +151,7 @@ FAMILY_ALIASES = [
     ("whisper-v3", "whisper-v3"),
     ("whisper", "whisper-v3"),
     ("embed-gemma", "embed-gemma"),
+    ("embeddinggemma", "embed-gemma"),
 ]
 
 
@@ -505,7 +510,16 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
         return
     g = None
     gc = target / "generation_config.json"
-    for cand in [gc, fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)] + \
+    repo_gen = None
+    # A local-directory install passes the directory path as `repo`; fetching
+    # generation_config.json from it as an HF id is meaningless (and raises),
+    # so only attempt it when `repo` is a remote id.
+    if not Path(repo).is_dir():
+        try:
+            repo_gen = fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)
+        except Exception:
+            repo_gen = None
+    for cand in [gc, repo_gen] + \
                 [fetch_from_repo(b, "generation_config.json", gc, modelscope=modelscope) for b in bases]:
         if cand and Path(cand).is_file():
             try:
@@ -531,22 +545,8 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
         log("[INFO] merged eos/bos ids from generation_config.json into tokenizer_config.json")
 
 
-def readme_base_model(repo_id, modelscope=False):
-    """The base model id(s) from the repo's README.md YAML frontmatter.
-
-    GGUF-quant repos (mradermacher etc.) carry no tokenizer/config files, but
-    their model card names the original model, whose repo has everything. The
-    field is `base_model:` either inline (`[[Org/Name]]` wikilink form or
-    plain) or a `- Org/Name` list (merge lineages; the first entry is the
-    closest to the quantized checkpoint).
-    """
-    url = (f"https://www.modelscope.ai/models/{repo_id}/resolve/master/README.md" if modelscope
-           else f"https://huggingface.co/{repo_id}/raw/main/README.md")
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=_hf_headers()), timeout=60) as r:
-            text = r.read().decode("utf-8", errors="replace")
-    except Exception:
-        return []
+def _parse_base_model_frontmatter(text):
+    """base_model id(s) from already-read README.md frontmatter text."""
     lines = text.splitlines()
     # the frontmatter: the first "---" ... "---" block at the top
     if not lines or lines[0].strip() != "---":
@@ -576,6 +576,36 @@ def readme_base_model(repo_id, modelscope=False):
         if b and "/" in b and b not in out:
             out.append(b)
     return out
+
+
+def readme_base_model(repo_id, modelscope=False):
+    """The base model id(s) from the repo's README.md YAML frontmatter.
+
+    GGUF-quant repos (mradermacher etc.) carry no tokenizer/config files, but
+    their model card names the original model, whose repo has everything. The
+    field is `base_model:` either inline (`[[Org/Name]]` wikilink form or
+    plain) or a `- Org/Name` list (merge lineages; the first entry is the
+    closest to the quantized checkpoint).
+
+    When ``repo_id`` is a local directory holding a README.md (a local-dir
+    install of a quantized model), the frontmatter is parsed from disk so the
+    same base_model crawl applies without touching the network.
+    """
+    local = Path(repo_id)
+    if local.is_dir() and (local / "README.md").is_file():
+        try:
+            return _parse_base_model_frontmatter(
+                (local / "README.md").read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return []
+    url = (f"https://www.modelscope.ai/models/{repo_id}/resolve/master/README.md" if modelscope
+           else f"https://huggingface.co/{repo_id}/raw/main/README.md")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=_hf_headers()), timeout=60) as r:
+            text = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    return _parse_base_model_frontmatter(text)
 
 
 def fetch_from_repo(repo_id, fname, dest, modelscope=False, force=False):
@@ -795,19 +825,9 @@ def register(user_list_path, tag, entry, system_registry):
 
 # ------------------------------------------------------------------- xclbins
 
-def link_xclbins(system_root, user_root, dir_name, source_name, force=False, quiet=False):
-    if not source_name:
-        if not quiet:
-            log("[WARN] No xclbin source; skipping symlink. Pass --xclbin-from NAME to link an official model's kernels.")
-        return
-    src = system_root / source_name
-    if not src.is_dir():
-        if not quiet:
-            log(f"[WARN] Official model has no xclbins directory: {source_name}")
-        return
-    user_root.mkdir(parents=True, exist_ok=True)
-    link = user_root / dir_name
-    target = str(src)
+def _link_one(user_root, name, target, force, quiet):
+    """Create symlink user_root/name -> target, reusing it when already correct."""
+    link = user_root / name
     if link.is_symlink():
         if os.readlink(link) == target:
             if not quiet:
@@ -824,6 +844,29 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
     os.symlink(target, link)
     if not quiet:
         log(f"[INFO] Linked xclbins: {link} -> {target}")
+
+
+def link_xclbins(system_root, user_root, dir_name, source_name, force=False, quiet=False):
+    if not source_name:
+        if not quiet:
+            log("[WARN] No xclbin source; skipping symlink. Pass --xclbin-from NAME to link an official model's kernels.")
+        return
+    src = system_root / source_name
+    if not src.is_dir():
+        if not quiet:
+            log(f"[WARN] Official model has no xclbins directory: {source_name}")
+        return
+    user_root.mkdir(parents=True, exist_ok=True)
+    target = str(src)
+    # Link under the installed model directory name (used by per-model engine
+    # lookups that resolve kernels by the model's directory).
+    _link_one(user_root, dir_name, target, force, quiet)
+    # Also link under the kernel family/source name. open_embedding's NPU matmul
+    # probe looks the matmul kernels up by the family directory (e.g.
+    # Embedding-Gemma-300M-OpenNPU2), not by the model directory name, so the
+    # family-named link is what makes the NPU path discoverable.
+    if source_name != dir_name:
+        _link_one(user_root, source_name, target, force, quiet)
 
 
 # -------------------------------------------------------------- open kernels
@@ -1071,7 +1114,12 @@ def main():
     # build-all.sh). Otherwise fall back to the normal safetensors install.
     gguf_skip = None
     if gguf_mode:
-        if family not in GGUF_CAPABLE_FAMILIES:
+        if family in EMBEDDING_FAMILIES:
+            # Embedding GGUF uses the existing bf16 matmul kernels (the engine
+            # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
+            # open_kernels manifest. Just confirm the family is recognized.
+            pass
+        elif family not in GGUF_CAPABLE_FAMILIES:
             gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
                          + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
                          + "); installing the safetensors weights instead")
@@ -1094,6 +1142,10 @@ def main():
             gguf_refused[gguf_name] = gguf_skip
             log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
             gguf_name, gguf_mode = None, False
+        elif family in EMBEDDING_FAMILIES and gguf_mode:
+            # Embedding GGUF loads the existing bf16 matmul kernels, whose
+            # directory is fixed by the engine; point the xclbin link there.
+            xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
 
     if not args.dry_run:
         if official:
