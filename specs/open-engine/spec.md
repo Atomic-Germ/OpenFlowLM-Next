@@ -242,7 +242,7 @@ counts POOL half-tiles; `chunk0` counts SOURCE file chunks, as it does for
 refused naming the tensor -- that is the check that a container agrees with the
 kernel set it is being packed for.
 
-**q8 sources.** The quantized chunk format is a property of the TENSOR, not of
+**Source forms.** The quantized chunk format is a property of the TENSOR, not of
 the container: the stock 35B keeps only its lm_head at q8, its fine-tunes pack
 attention, linear-attention and shared-expert projections at q8 and only the
 routed experts at q4_1, and a Qwen3.5 container stores `ssm_out_proj` and
@@ -254,12 +254,18 @@ chunk hold the same 32-row x 256-column tile, so the chunk index laws, the
 plan, the manifest and the kernels are unchanged; the packer is the only place
 that knows. There is no separate re-quantizing op.
 
+A Q4_K source (4736-byte chunks, what FLM 1.0.3+ writes) is accepted the same
+way and transcoded to q4_1 on the way in, for the same reason and through the
+same seam -- but nearly free, because Q4_K's scale and min already carry the
+pool's granularity and index (OPEN-QUANT-Q4K). So the three chunk ops read
+three source forms and refuse everything else by name.
+
 **Acceptance criteria:**
 - Layer pool, consts blob (linear and attention), lm_head pool and ptab are byte-equal to `legacy_pools.py` on random-byte tensors of the right sizes.
 - A small weight larger than its slot is refused (`does not fit its 4096 B slot`).
 - On a synthetic container mixing one q8 and one q4_1 tensor: the q8 tensor's pool bytes equal `requant_q4_1` of its chunks put through the same `std_perm` order; the q4_1 tensor's are the verbatim chunk copy they were before q8 sources existed; and the whole pool has the same FNV-1a in NumPy and in C++ (`tests/test_pack_plan.py`, `src/open_qwen36/pools_test.cpp`, which writes the container as a real `.q4nx`).
 - A container that cannot report a tensor's chunk size is read as q4_1, so the frozen pools above are unaffected.
-- A tensor with 1280-byte chunks is refused by both packers, the message naming the tensor and `1280`; it says what the count probably is (8704 = q8, 4736 = Q4_K, 1280 / 2560 = a smaller chunk geometry) rather than guessing "FLM 1.0.3 / Q4_K?".
+- A tensor with 1280-byte chunks is refused by both packers, the message naming the tensor, `1280`, the three widths that ARE read (5120 q4_1, 8704 q8, 4736 Q4_K) and what 1280 probably is -- rather than guessing "FLM 1.0.3 / Q4_K?", which is what it used to say about any unfamiliar width.
 - `requant_q4_1` (q8 chunks -> q4_1 chunks) and `transpose` (`[rows, cols]` -> `[cols, rows]`) produce identical bytes in NumPy and C++: both sides build the same synthetic q8 chunks and assert the same FNV-1a of the output (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
 - Every value of a re-quantized block lands within `d/2` of its q4_1 reading, `d` being the block's stored scale: `m` is the minimum rounded toward -inf in bf16 and `d = (max - m)/15` rounded toward +inf, so `[m, m + 15d]` covers the block whatever bf16 did to either end.
 **The q8 lm_head's supertile order is a function of K.** A band is 128 output rows = 4 row
@@ -386,6 +392,83 @@ fallback its three siblings no longer need. `.claude/plans/q8m-hw-results.md` §
 reduces over `lin_value_width` -- 4096 on the 9B and 4B, 2048 on the 2B and 0.8B -- not over
 `hidden`, so both K were already validated by the 35B pass and all four sizes compose with
 no `OPEN_KERNELS_UNVALIDATED`.
+
+### OPEN-QUANT-Q4K: the packers read Q4_K containers
+**Applies to:** openflowlm-next (`open_kernels/model/q4nx.py`,
+`open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`,
+`utilities/q4nx-build/q4nx/{gguf_tensor,model_converter,cli}.py`)
+**Test category:** unit (the transcode, both packers, the reference, the converter's
+writer) + manual (the hardware run: needs the NPU and a Q4_K container)
+**Tests:** `tests/test_quant_q4k.py`, `src/open_qwen36/pools_test.cpp`
+
+FLM 1.0.3+ writes a third quantized chunk form, `q4k_block_t`, 4736 B per 32-row x
+256-column tile. Packing the 35B MoE projections as q4_1 instead makes the closed runtime
+decode infinite `////` or segfault, so this is not a preference and the open engine cannot
+refuse it. Both packers shall accept it as a source for the three q4 chunk ops
+(`std_perm`, `expert_stripes`, `expert_down`) and transcode it to the pool's q4_1 chunk on
+the way in, exactly as a q8 source is re-quantized. `q8_perm` continues to demand q8: a
+kernel set built to stream a projection at q8 is not satisfied by Q4_K.
+`utilities/q4nx-build` shall also be able to WRITE the format (`--quant Q4_K`).
+
+The chunk, everything column-major over the tile:
+
+```
+scales[8][32] uint8 @ [0, 256)      index g*32 + r   (32-column group g, row r)
+mins  [8][32] uint8 @ [256, 512)    same index
+qs    [256][16]     @ [512, 4608)   byte k*16 + r/2, even row in the low nibble
+S     [32]    bf16  @ [4608, 4672)  index r          one super-block per chunk
+M     [32]    bf16  @ [4672, 4736)  index r          stored NEGATED
+value(r, k) = S[r] * scales[k/32][r] * nib + M[r] * mins[k/32][r]
+```
+
+**Nothing above the packer changes.** Q4_K's scale and min already have the pool's
+granularity AND its index, so the transcode is `d = bf16(S*scales)`, `m = bf16(M*mins)`
+in place, plus a byte de-interleave of the nibbles (Q4_K keeps a column's 32 rows in 16
+contiguous bytes; the pool splits rows 0-15 and 16-31 into two 2048-byte planes, so q4_1
+byte `h*2048 + k*8 + j` is Q4_K byte `k*16 + h*8 + j`, values and parity unchanged). No
+chunk index law, plan, manifest, kernel or build key moves, and no kernel point is
+needed.
+
+**What it costs.** The exact product of a bf16 `S` and a uint8 `scales` needs 16
+significand bits and the pool's `d` holds 8, so each group's scale and min take one bf16
+half-ulp -- `2^-8` relative each. Where the two terms cancel the error can exceed `2^-8`
+of the value, which is why the bound below is stated on `|scale term| + |min term|`.
+Measured over all 108 Q4_K tensors of a real container: **0.48% relative weight RMS**,
+against 8% for the q8 -> q4_1 re-quantization the packer already does.
+
+**A source that cannot be read as Q4_K.** ggml has no Q4_K encoder, so a q5 / q6 / float
+source under a Q4_K target is re-quantized onto q4_1's grid and then packed as Q4_K. The
+two disagree on the sign of the min -- q4_1 stores an added `m` (<= 0), Q4_K a subtracted
+magnitude (>= 0) -- so the converter's fallback negates it. Without that the weights come
+out mirrored about each block's minimum and nothing downstream notices.
+
+**Acceptance criteria:**
+- A synthetic Q4_K chunk transcoded to q4_1 and read back as `nib*d + m` equals `S*scales*q + M*mins` computed in f64 from the same bytes, every value within `2^-8 * (|S*scales*q| + |M*mins|)` and no more. Measured worst case: 0.99 of that bound in C++, so the bound is tight rather than slack.
+- The nibble de-interleave is exact: for every `(r, k)` the uint4 at q4_1 nibble `(r/16)*4096 + k*16 + (r%16)` equals the one at Q4_K byte `k*16 + r/2`, nibble `r%2`.
+- The 256 metadata slots do not move: `d[i]` comes from `S[i%32] * scales[i]`, `m[i]` from `M[i%32] * mins[i]`, and every `m` is <= 0.
+- NumPy and C++ produce the same transcoded chunks and the same `std_perm` pool (FNV-1a `0x685dc049ec1ca2d7` and `0xb02083912551d9d3` on the shared synthetic vector).
+- A Q4_K tensor put through `std_perm` lands at the pool chunk positions a q4_1 tensor of the same shape does; a q4_1 tensor beside it is still a verbatim chunk copy, and `tests/test_pack_plan.py`'s frozen pools are unchanged.
+- `q8_perm` over a Q4_K tensor is refused naming the tensor and both byte counts; a width that is none of 5120 / 8704 / 4736 is refused naming the width and what it probably is -- and the refusal no longer GUESSES Q4_K for an unfamiliar width, since 4736 is now read.
+- `model/q4nx.py`'s `dq_tile` reads a Q4_K tensor as the transcoded q4_1 the NPU holds by default (the convention q8 already follows, so a slice comparison measures the kernels) and as the container's own Q4_K values under `requant=False`, which is the transcode's quality number.
+- Writer and reader agree: chunks written by `q4nx-build`'s `pack_q4k` from known `(scale, min, quant)` triples read back through `dq_chunks_q4_k` with the quants bit-exact and the values within 1e-2 relative L2 (the super-block re-fit's own accuracy).
+- The re-quantize fallback under a Q4_K target returns a non-negative min, and packing it round-trips to the q4_1 reading it came from.
+- `--quant Q4_K` on the HF-safetensors path is refused: `_store_q` quantizes with its own fixed per-role targets, so it would write a q4_1 container while claiming Q4_K.
+
+**Procedure (manual):** convert a GGUF for a validated shape twice, `--quant Q4_K` and
+`--quant Q4_1`, and run both through `src/open_qwen36/` on the same kernel set. The two
+containers hold the same source weights, so the only variable is the format.
+
+**Result 2026-09-08 (Qwen3.5-0.8B, condB fine-tune, 24 layers, Strix): PASS.** The Q4_K
+container -- 108 tensors at 4736 B beside 79 at 8704 -- is the first one that exists
+anywhere; no model on Atomic-Germ's Hugging Face or in FLM's registry ships the format
+yet. It loads, packs and decodes at **21.6 tok/s**, and its greedy output agrees with the
+q4_1 twin's for **36 of 37 tokens**, diverging only where a sentence-final `.` and `,`
+were a near-tie. Both continuations are coherent and say the same thing. Not yet done:
+`flm serve` / `utilities/flm-test`, and the fp64 slice comparison -- `make_decode.py`
+derives a spec from the container and this one puts `ffn` at q8 (the converter config
+pins `ffn_up`), which `recipes/qwen35.py` refuses for an unrelated reason (a mixed-format
+main core does not fit 16 KB). The kernels are unchanged by this requirement, so their
+correlation is the one OPEN-FAMILY-QWEN35 already records.
 
 ### OPEN-FAMILY-QWEN36MOE: greedy agreement with the fp64 reference on the 27B
 **Applies to:** openflowlm-next (`src/open_qwen36/`)

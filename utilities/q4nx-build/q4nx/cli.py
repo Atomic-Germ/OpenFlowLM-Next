@@ -88,6 +88,12 @@ def _parse_args(argv):
         "--flm-version", dest="flm_version", default=None, help="flm_version to write into config.json"
     )
     parser.add_argument(
+        "--quant", dest="quant", default=None, choices=["Q4_0", "Q4_1", "Q8_0", "Q4_K"],
+        help="Override the family config's default weight format. Q4_K is the 4736-byte "
+             "super-block layout FLM 1.0.3+ requires for the 35B MoE projections; the "
+             "configs still default to what each family has shipped.",
+    )
+    parser.add_argument(
         "-d", "--deploy", dest="deploy_tag", default=None, metavar="NAME:SIZE",
         help="Deploy the converted model into flm's models dir and register it under this tag (e.g. 'qwen3.5-claude:9b')",
     )
@@ -270,6 +276,8 @@ def main(argv=None) -> int:
     if hf_input is not None:
         model = create_hf_converter(hf_input, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
+        if args.quant:
+            model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
             model.convert(q4nx_path=output_folder, weights_type="language")
             model.convert(q4nx_path=output_folder, weights_type="vision")
@@ -287,6 +295,8 @@ def main(argv=None) -> int:
     else:
         model = create_converter(input_path, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
+        if args.quant:
+            model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
             model.convert(q4nx_path=output_folder, weights_type="language")
             model.convert(q4nx_path=output_folder, weights_type="vision")

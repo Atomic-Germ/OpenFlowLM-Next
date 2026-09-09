@@ -17,7 +17,11 @@
 /// difference -- which is what lets the Qwen3.6-35B fine-tunes (q8 attention,
 /// linear-attention and shared experts; q4_1 routed experts) and Qwen3.5's q8
 /// `ssm_out_proj` run on kernels that only have a q4_1 GEMV (OPEN-PACK-PLAN).
-/// Any other chunk size is refused, naming the tensor.
+///
+/// A Q4_K source (4736-byte chunks, what FLM 1.0.3+ writes) is accepted the same way and
+/// transcoded to q4_1 (`q4k_to_q4_1_chunks`). That one is nearly free: Q4_K's scale and
+/// min already have the pool's granularity and index, so only the two bf16 products
+/// round (OPEN-QUANT-Q4K). Any other chunk size is refused, naming the tensor.
 ///
 /// A projection the kernel set streams AT q8 (the manifest carries `q8_perm` instead of
 /// `std_perm` for it) is not re-quantized at all: each 8704-byte container chunk is split
@@ -57,6 +61,19 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
 /// its reading. `recipes/pack.py requant_q4_1` is the same arithmetic in NumPy; pools_test
 /// and tests/test_qwen35.py check the two on the same vectors.
 void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
+/// `nch` Q4_K chunks (4736 B each) -> `nch` q4_1 chunks (5120 B each), in the SAME chunk
+/// order. Both formats hold a 32-row x 256-column tile with one (scale, min) pair per
+/// (row, 32-column group) at the SAME meta index `g*32 + r`, so nothing is re-quantized:
+///   scales[8][32] uint8 @ [0, 256)     mins[8][32] uint8 @ [256, 512)
+///   qs[256][16]         @ [512, 4608)  byte k*16 + r/2, even row in the low nibble
+///   S[32] bf16          @ [4608, 4672) M[32] bf16 @ [4672, 4736), M already negated
+///   value = S[r]*scales[g][r]*nib + M[r]*mins[g][r], which is the pool's nib*d + m
+/// The transcode is the two products rounded to bf16 -- the one place values move, by at
+/// most a half-ulp, 2^-8 relative -- plus a byte de-interleave of the nibbles, since the
+/// pool splits rows 0-15 and 16-31 into two 2048-byte planes. `recipes/pack.py
+/// q4k_to_q4_1` is the same in NumPy; pools_test and tests/test_quant_q4k.py hash the
+/// same vectors (OPEN-QUANT-Q4K).
+void q4k_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 /// One container q8 chunk (8704 B: scales[256] bf16 then codes[8192] int8, 32 rows x 256 K)
 /// -> its 16-row half-tile `half` (5120 B: scales[128] bf16 at [0, 256), codes[4096] int8 at
 /// [256, 4352), zero pad). Rows 16*half .. 16*half+15. The container's row-block stride is
