@@ -26,7 +26,7 @@ set(CMAKE_ERROR_DEPRECATED ON)
 
 
 # Set output directories
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build/)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 
 # Force output directories to be absolute
@@ -59,7 +59,7 @@ endif()
 
 # Prebuilt engine libraries live in a per-backend subdirectory so the XRT-built
 # and HRX-built .so/.dll/.lib never collide (see src/lib/xrt and src/lib/hrx).
-set(FLM_ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}")
+set(FLM_ENGINE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}")
 
 # ———————————————————————————————————————————————
 # NPU runtime discovery.
@@ -247,7 +247,7 @@ endif()
 # slashes CMake uses internally.
 if(WIN32)
     set(FLM_SPM_TP
-        "${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
+        "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
     if(EXISTS "${FLM_SPM_TP}/abseil-cpp/absl" AND NOT EXISTS "${FLM_SPM_TP}/absl")
         file(TO_NATIVE_PATH "${FLM_SPM_TP}/absl" FLM_SPM_LINK)
         file(TO_NATIVE_PATH "${FLM_SPM_TP}/abseil-cpp/absl" FLM_SPM_TARGET)
@@ -279,7 +279,7 @@ if(WIN32)
     endif()
 endif()
 
-add_subdirectory(${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
                  ${CMAKE_BINARY_DIR}/tokenizers-cpp
                  EXCLUDE_FROM_ALL)
 
@@ -289,19 +289,19 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/../third_party/tokenizers-cpp
 file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT FLM_USE_HRX)
-    list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
     # The open Qwen3.6-MoE engine (open_qwen36/, open XDNA2 kernels under
     # xclbins/<model>/open_kernels). XRT only: it drives the kernels through
     # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
     list(APPEND SOURCES
-        "${CMAKE_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
-        "${CMAKE_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
-        "${CMAKE_SOURCE_DIR}/open_qwen36/manifest.cpp"
-        "${CMAKE_SOURCE_DIR}/open_qwen36/pools.cpp"
-        "${CMAKE_SOURCE_DIR}/open_qwen36/core.cpp"
-        "${CMAKE_SOURCE_DIR}/open_qwen36/engine.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp")
 endif()
 
 # ———————————————————————————————————————————————
@@ -322,26 +322,26 @@ endif()
 # talks to XRT directly, and the encoders are unusable without it.
 if(NOT FLM_USE_HRX)
     set(OPEN_NPUE_SOURCES
-        "${CMAKE_SOURCE_DIR}/open_npue/npue_encoder.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/npue.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/npue_pack.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/npu_device.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/json_min.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_gemma.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/gemma_tokenizer_gen.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_xlmr.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/xlmr_tokenizer_gen.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/tokenizer_bbpe.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/bbpe_tokenizer_gen.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/gemma_kernels.cpp"
-        "${CMAKE_SOURCE_DIR}/open_npue/gemma_encode.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/npue_encoder.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/npue.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/npue_pack.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/npu_device.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/json_min.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/tokenizer.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/tokenizer_gemma.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/gemma_tokenizer_gen.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/tokenizer_xlmr.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/xlmr_tokenizer_gen.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/tokenizer_bbpe.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/bbpe_tokenizer_gen.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/gemma_kernels.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/gemma_encode.cpp"
         # Fork-owned, not synced: the ONLY translation unit that includes the
         # engine's header. It is in this list rather than in the glob because
         # it must carry the engine's flags -- see the /arch:AVX2 note below and
         # the long comment in npue_embedding.hpp, which records what a host TU
         # instantiating those inline functions at a different ISA level costs.
-        "${CMAKE_SOURCE_DIR}/open_npue_adapter/npue_embedding.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_npue_adapter/npue_embedding.cpp"
     )
     list(APPEND SOURCES ${OPEN_NPUE_SOURCES})
 
@@ -353,7 +353,7 @@ if(NOT FLM_USE_HRX)
     # compile error at best and as the wrong tokenizer at worst. Scoping it to
     # these fourteen files means nothing else in the tree can even see them.
     set_source_files_properties(${OPEN_NPUE_SOURCES} PROPERTIES
-        INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/open_npue")
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/open_npue")
 
     # /arch:AVX2 IS LOAD-BEARING AND IS LOST IN SILENCE.
     #
@@ -400,8 +400,8 @@ if(NOT WIN32)
     # list(FILTER SOURCES EXCLUDE REGEX ".*auto_embedding_model\\.cpp$")
 
     set_source_files_properties(
-        ${CMAKE_SOURCE_DIR}/common/image_process_utils/imageprocAVX512.cpp
-        ${CMAKE_SOURCE_DIR}/common/audio_process_utils/audioprocAVX512.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/common/image_process_utils/imageprocAVX512.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/common/audio_process_utils/audioprocAVX512.cpp
         PROPERTIES
         COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mfma"
     )
@@ -462,11 +462,11 @@ endif()
 # Library specific settings
 # ———————————————————————————————————————————————
 target_include_directories(flm PUBLIC
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/runner
-    ${CMAKE_SOURCE_DIR}/server
-    ${CMAKE_SOURCE_DIR}/pull
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/runner
+    ${CMAKE_CURRENT_SOURCE_DIR}/server
+    ${CMAKE_CURRENT_SOURCE_DIR}/pull
     ${FFMPEG_INCLUDE_DIRS}
 )
 
@@ -507,7 +507,7 @@ if(NOT FLM_USE_HRX)
     # Qwen3.6-MoE on the open kernels (open_qwen36/); the closed engine stays
     # reachable with FLM_QWEN36_ENGINE=closed.
     target_compile_definitions(flm PUBLIC FLM_USE_OPEN_QWEN36=1)
-    target_include_directories(flm PUBLIC "${CMAKE_SOURCE_DIR}/../open_kernels/harness")
+    target_include_directories(flm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
 endif()
 
 if(WIN32)
@@ -532,7 +532,7 @@ endif()
 
 target_link_directories(flm PUBLIC
     ${FLM_ENGINE_LIB_DIR}       # per-backend prebuilt engine libs (lib/xrt or lib/hrx)
-    ${CMAKE_SOURCE_DIR}/lib     # shared third-party runtime libs (ffmpeg/curl/fftw/... on Windows)
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib     # shared third-party runtime libs (ffmpeg/curl/fftw/... on Windows)
     ${FFMPEG_LIBRARY_DIRS}
 )
 
@@ -714,7 +714,7 @@ if(WIN32)
     add_custom_command(TARGET flm POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
             $<TARGET_FILE:flm>
-            ${CMAKE_SOURCE_DIR}/out/flm.exe
+            ${CMAKE_CURRENT_SOURCE_DIR}/out/flm.exe
     )
 
     # AND THE ENGINE DLLs BESIDE IT, or a freshly built flm.exe cannot start
@@ -747,23 +747,23 @@ if(WIN32)
     # configure.
     add_custom_command(TARGET flm POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/model_list.json
-            ${CMAKE_SOURCE_DIR}/model_info.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/model_list.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/model_info.json
             $<TARGET_FILE_DIR:flm>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/model_list.json
-            ${CMAKE_SOURCE_DIR}/model_info.json
-            ${CMAKE_SOURCE_DIR}/out
+            ${CMAKE_CURRENT_SOURCE_DIR}/model_list.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/model_info.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/out
         COMMENT "Copying model_list.json / model_info.json beside flm.exe"
     )
 
-    file(GLOB FLM_RUNTIME_DLLS "${CMAKE_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
+    file(GLOB FLM_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
     if(FLM_RUNTIME_DLLS)
         add_custom_command(TARGET flm POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${FLM_RUNTIME_DLLS} $<TARGET_FILE_DIR:flm>
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${FLM_RUNTIME_DLLS} ${CMAKE_SOURCE_DIR}/out
+                ${FLM_RUNTIME_DLLS} ${CMAKE_CURRENT_SOURCE_DIR}/out
             COMMENT "Copying ${FLM_RUNTIME_NAME} engine DLLs beside flm.exe"
         )
     endif()
@@ -780,21 +780,21 @@ if(WIN32)
     # after the next build. mklink /J needs no privileges (unlike a symlink,
     # which needs Developer Mode), and if it fails this is a warning rather
     # than an error -- FLM_XCLBIN_PATH still works.
-    if(NOT EXISTS "${CMAKE_BINARY_DIR}/xclbins")
+    if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/xclbins")
         # NATIVE paths: mklink is a cmd builtin and rejects the forward slashes
         # CMake uses internally, silently enough that the first version of this
         # produced no junction and no message.
-        file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/xclbins" FLM_XCLBIN_LINK)
-        file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/xclbins" FLM_XCLBIN_TARGET)
+        file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/xclbins" FLM_XCLBIN_LINK)
+        file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/xclbins" FLM_XCLBIN_TARGET)
         execute_process(
             COMMAND cmd /c mklink /J "${FLM_XCLBIN_LINK}" "${FLM_XCLBIN_TARGET}"
             RESULT_VARIABLE FLM_XCLBIN_LINK_RC
             OUTPUT_QUIET ERROR_QUIET)
         if(FLM_XCLBIN_LINK_RC EQUAL 0)
-            message(STATUS "xclbins: junction ${CMAKE_BINARY_DIR}/xclbins -> ${CMAKE_SOURCE_DIR}/xclbins")
+            message(STATUS "xclbins: junction ${CMAKE_CURRENT_BINARY_DIR}/xclbins -> ${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
         else()
             message(WARNING "could not link xclbins next to the executable; "
-                            "set FLM_XCLBIN_PATH=${CMAKE_SOURCE_DIR} to run from the build tree")
+                            "set FLM_XCLBIN_PATH=${CMAKE_CURRENT_SOURCE_DIR} to run from the build tree")
         endif()
     endif()
 endif()
@@ -893,7 +893,7 @@ else()
     # real binary to `flm-real` and this wrapper to `flm`.
     if(FLM_PORTABLE_BUILD)
         configure_file(
-            "${CMAKE_SOURCE_DIR}/flm-wrapper.sh.in"
+            "${CMAKE_CURRENT_SOURCE_DIR}/flm-wrapper.sh.in"
             "${CMAKE_BINARY_DIR}/flm-wrapper.sh"
             @ONLY)
         install(PROGRAMS "${CMAKE_BINARY_DIR}/flm-wrapper.sh" DESTINATION "${FLM_SHARE_DESTINATION}")
@@ -922,7 +922,7 @@ if(WIN32)
         DESTINATION bin
         DIRECTORIES
             "${FLM_ENGINE_LIB_DIR}"
-            "${CMAKE_SOURCE_DIR}/lib"
+            "${CMAKE_CURRENT_SOURCE_DIR}/lib"
             "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
             "${_flm_rt_dep_dir}"
         PRE_EXCLUDE_REGEXES "api-ms-.*" "ext-ms-.*"
@@ -1087,7 +1087,7 @@ else()
             UNRESOLVED_DEPENDENCIES_VAR _flm_unresolved
             DIRECTORIES
                 \"${FLM_ENGINE_LIB_DIR}\"
-                \"${CMAKE_SOURCE_DIR}/lib\"
+                \"${CMAKE_CURRENT_SOURCE_DIR}/lib\"
                 \"${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib\"
                 \"${_flm_rt_dep_dir}\"
             PRE_EXCLUDE_REGEXES
@@ -1114,13 +1114,63 @@ install(FILES model_info.json DESTINATION "${FLM_SHARE_DESTINATION}")
 
 # xclbins, which are loaded by shared libraries need to be in location
 # relative to the executable, so we install them relative to the binary.
-install(DIRECTORY xclbins DESTINATION "${FLM_SHARE_DESTINATION}")
+# Only present when the kernel export ran (FLM_BUILD_KERNELS=ON, or a manual
+# export); skip silently for engine-only builds.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
+    install(DIRECTORY xclbins DESTINATION "${FLM_SHARE_DESTINATION}")
+endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3
 # runner for IRON designs, driven by the same .cfg language phlegm's driver
 # speaks. A developer tool, not part of flm; off by default.
 option(FLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" OFF)
 if(FLM_BUILD_OPEN_KERNELS_HARNESS)
-    add_subdirectory("${CMAKE_SOURCE_DIR}/../open_kernels/harness"
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness"
                      "${CMAKE_BINARY_DIR}/open_kernels_harness")
 endif()
+
+# ———————————————————————————————————————————————
+# Open NPU kernel export (full distribution).
+#
+# The engine loads prebuilt xclbins at runtime; they are git-ignored and produced
+# by the Python toolchain (ironvenv: mlir-aie + Peano, with XRT on PATH). This
+# target drives that export into src/xclbins so `cmake --install` ships them.
+# Set FLM_BUILD_KERNELS=OFF (or build with the linux-debug preset) for an
+# engine-only dev build that skips the long kernel compile.
+# ———————————————————————————————————————————————
+option(FLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" ON)
+set(FLM_KERNEL_SPECS "" CACHE STRING "Comma-separated spec names to export (empty = all specs in open_kernels/recipes/specs)")
+if(FLM_BUILD_KERNELS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_export_script "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/export-kernels.sh")
+    add_custom_target(export_kernels ALL
+        COMMENT "Exporting open NPU kernel xclbins into src/xclbins"
+        COMMAND "${_export_script}" "--specs=${FLM_KERNEL_SPECS}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        BYPRODUCTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
+endif()
+
+# ———————————————————————————————————————————————
+# Tests — a testable development build.
+# ———————————————————————————————————————————————
+enable_testing()
+# Smoke test: `flm list` exits 0 and proves the binary, its engine shared
+# libraries, and the model registry (model_list.json) all load.
+add_test(NAME flm_smoke COMMAND $<TARGET_FILE:flm> list)
+
+# ———————————————————————————————————————————————
+# Packaging (CPack): produce an installable, full-distribution package.
+#   cmake --build --preset linux-package-rpm   # or -deb / -tgz
+# Generators are chosen by the packagePreset; defaults to TGZ.
+# ———————————————————————————————————————————————
+set(CPACK_PACKAGE_NAME "fastflowlm")
+set(CPACK_PACKAGE_VERSION "${FLM_VERSION}")
+set(CPACK_PACKAGE_VENDOR "Atomic-Germ")
+set(CPACK_PACKAGE_CONTACT "fastflowlm@atomic-germ")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "FastFlowLM — NPU-offloaded LLM inference engine")
+set(CPACK_PACKAGE_DESCRIPTION "FastFlowLM runs LLMs with dense GEMM offloaded to the AMD NPU2 via open XDNA2 kernels, with a CPU reference path.")
+set(CPACK_GENERATOR "TGZ")
+set(CPACK_SET_DESTDIR ON)
+set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+include(CPack)
+
