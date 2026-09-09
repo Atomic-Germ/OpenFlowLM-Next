@@ -551,8 +551,12 @@ on a memory-starved box, not the kernels.
   per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes
   ship, q8 attention and shared experts over q4_1 routed experts -- loads and packs;
   the q8 projections the kernel set was built for go into the pool at q8, the rest are
-  re-quantized to q4_1 (above). Anything that is neither (Q4_K's 4736-byte chunks, the
-  1280 / 2560-byte geometries) is refused, naming the tensor.
+  re-quantized to q4_1 (above). **Both weight formats are read:** a container written
+  by FLM 1.0.3+ stores Q4_K super-blocks (4736-byte chunks) where 1.0.2 stored q4_1,
+  and those are transcoded into the pool's q4_1 chunk on the way in -- nearly free,
+  since Q4_K's scale and min already have the pool's granularity, and no kernel,
+  manifest or build key changes (OPEN-QUANT-Q4K). Anything else (the 1280 / 2560-byte
+  geometries) is refused, naming the tensor.
 - **Memory.** The engine holds 21.6 GB of NPU buffers, and on Windows those
   are managed by the video memory manager and can be evicted under pressure —
   the first server run on a 47 GB box with 0.6 GB free hung a kernel (ERT

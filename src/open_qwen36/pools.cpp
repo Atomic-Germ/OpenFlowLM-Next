@@ -47,6 +47,7 @@ std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
 
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
+constexpr size_t Q4K_CHUNK = 4736;   // 256 uint8 scales, 256 uint8 mins, 4096 B of nibbles, 32 bf16 S, 32 bf16 M
 constexpr size_t Q8H_SCALES = 256;   // a half-tile's 128 bf16 scales
 constexpr size_t Q8H_CODES = 4096;   // a half-tile's 4096 int8 codes
 constexpr unsigned Q8H_ROWS = 16;
@@ -90,6 +91,14 @@ uint16_t bf16_ceil(float x) {
     return static_cast<uint16_t>((u >> 31) ? (u >> 16) : ((u + 0xFFFFu) >> 16));
 }
 
+/// f32 -> bf16, round to nearest even. The directed roundings above make a re-quantized
+/// block's range cover its source; a Q4_K scale is not a range end but a value being
+/// re-expressed, so it takes the nearest bf16.
+uint16_t bf16_rne(float x) {
+    const uint32_t u = bits(x);
+    return static_cast<uint16_t>((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+}
+
 /// Code index of (row, block, lane) inside a chunk: the raster both formats use.
 inline unsigned code_index(unsigned r, unsigned b, unsigned i) {
     return (r / 16) * 4096 + b * 512 + i * 16 + (r % 16);
@@ -103,9 +112,8 @@ const uint8_t* raw(const Q4nxFile& m, const std::string& name, size_t need, size
     return p;
 }
 
-/// What a chunk size that is neither 5120 nor 8704 probably is, for the refusal message.
+/// What a chunk size the packer does not read probably is, for the refusal message.
 std::string chunk_guess(size_t ch) {
-    if (ch == 4736) return "Q4_K (FLM 1.0.3), which needs a different dequant";
     if (ch == 1280 || ch == 2560) return "a smaller chunk geometry (" + std::to_string(ch * 8192 / Q4_CHUNK) +
                                          " values per chunk instead of 8192)";
     return "not a chunk format this packer knows";
@@ -125,9 +133,15 @@ const uint8_t* q4_source(const Q4nxFile& m, const std::string& name, size_t chun
         requant_q4_1_chunks(src, nch, tmp.data());
         return tmp.data();
     }
+    if (src_ch == Q4K_CHUNK && ch == Q4_CHUNK) {
+        const uint8_t* src = raw(m, name, (chunk0 + nch) * Q4K_CHUNK) + chunk0 * Q4K_CHUNK;
+        tmp.resize(nch * Q4_CHUNK);
+        q4k_to_q4_1_chunks(src, nch, tmp.data());
+        return tmp.data();
+    }
     fail(name + " has " + std::to_string(src_ch) + "-byte quant chunks; the packer reads " +
-         std::to_string(ch) + " (q4_1) and " + std::to_string(Q8_CHUNK) + " (q8); " + std::to_string(src_ch) +
-         " is " + chunk_guess(src_ch));
+         std::to_string(ch) + " (q4_1), " + std::to_string(Q8_CHUNK) + " (q8) and " +
+         std::to_string(Q4K_CHUNK) + " (Q4_K); " + std::to_string(src_ch) + " is " + chunk_guess(src_ch));
 }
 
 }  // namespace
@@ -173,6 +187,29 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
                 }
             }
         }
+    }
+}
+
+void q4k_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
+    for (size_t c = 0; c < nch; ++c) {
+        const uint8_t* s = src + c * Q4K_CHUNK;
+        uint8_t* o = dst + c * Q4_CHUNK;
+        // d[g*32 + r] = bf16(S[r] * scales[g*32 + r]), m likewise from M and mins -- the
+        // two formats already agree on the meta index, so this is a multiply in place.
+        for (unsigned i = 0; i < 256; ++i) {
+            uint16_t sh, mh;
+            std::memcpy(&sh, s + 4608 + 2 * (i % 32), 2);
+            std::memcpy(&mh, s + 4672 + 2 * (i % 32), 2);
+            const uint16_t d = bf16_rne(bf16_to_f32(sh) * static_cast<float>(s[i]));
+            const uint16_t mn = bf16_rne(bf16_to_f32(mh) * static_cast<float>(s[256 + i]));
+            std::memcpy(o + 2 * i, &d, 2);
+            std::memcpy(o + 512 + 2 * i, &mn, 2);
+        }
+        // Q4_K holds a column's 32 rows in 16 contiguous bytes; the pool splits rows 0-15
+        // and 16-31 into two 2048-byte planes. Nibble values and parity are unchanged.
+        for (unsigned k = 0; k < 256; ++k)
+            for (unsigned h = 0; h < 2; ++h)
+                std::memcpy(o + 1024 + h * 2048 + k * 8, s + 512 + k * 16 + h * 8, 8);
     }
 }
 

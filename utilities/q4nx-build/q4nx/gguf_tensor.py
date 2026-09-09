@@ -9,12 +9,102 @@ from dataclasses import dataclass
 from mpmath.libmp import int_types
 import numpy as np
 import torch
+import torch.nn.functional as F
+from einops import rearrange
+
+
+def _round_up(n: int, multiple: int) -> int:
+    """utils.round_up_to_multiple, inlined: this module is also loaded on its own, by
+    file path, so it must not reach into the package (specs/open-engine/tests)."""
+    return n if multiple == 0 else ((n + multiple - 1) // multiple) * multiple
+
+def _to_bf16_up(x: np.ndarray) -> np.ndarray:
+    """Round the magnitude of a non-negative float32 UP to a BF16 value."""
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
+    r = np.where(u & np.uint32(0xFFFF), np.uint32(0x10000), np.uint32(0))
+    return ((u + r) & np.uint32(0xFFFF0000)).view(np.float32)
+
+
+def _bf16_next_up(x: np.ndarray, n: int) -> np.ndarray:
+    """The n-th BF16 value above a BF16-representable, non-negative x (n=0 is x)."""
+    if n == 0:
+        return np.asarray(x, dtype=np.float32)
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
+    return (u + np.uint32(n) * np.uint32(0x10000)).view(np.float32)
+
+
+def _refit_one_side(t: np.ndarray, search: int = 3,
+                    cap: float = 255.0) -> Tuple[np.ndarray, np.ndarray]:
+    """Fit one metadata side of a super-block: exact per-group t_j -> (BF16 P', uint8 p'_j).
+
+    Direct port of the pseudocode in quant.md, "Re-fitting (uint6, FP16) into
+    (uint8, BF16)".  The kernel only ever uses the product t_j = P * p_j, so the
+    caller hands over exactly that -- Q4_K's (FP16 P, uint6 p_j) collapsed into a
+    single exact float32 -- and this preserves it directly.
+
+    The two extra bits of p'_j are spent *absorbing* P's rounding error rather
+    than as a plain x4 (which would be a no-op, since P/4 has P's significand):
+    P' is fixed first, rounded away from zero so p'_j can never overflow the cap,
+    then each p'_j is re-derived against the rounded P'.  Since t_j / P' runs up
+    to 255, the quotient can absorb up to 255 * 2^-8 ~ 1 integer step, which the
+    uint8 grid -- 4x finer than the uint6 grid it came from -- can represent.
+
+    `search` also tries that many BF16 values above the base P' and keeps
+    whichever minimizes sum_j (P' p'_j - t_j)^2.  A slightly larger P' often
+    aligns better with several t_j at once than the smallest admissible one, and
+    it is what removes the re-fit's sensitivity to how spread the t_j are; 3 is
+    the knee of the measured sweep.
+
+    Parameters
+    ----------
+    t : np.ndarray
+        Effective per-group scale (or min), shape (..., groups_per_super_block),
+        exact in float32.
+    search : int
+        Number of extra BF16 candidates above the base P' to score.
+    cap : float
+        Largest representable p'_j (255 for uint8).
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        P' (BF16-representable float32, shape t.shape[:-1]) and p'_j (float32
+        integers in [0, cap], shape of t).  Effective value: P' p'_j ~ t_j.
+    """
+    t = np.ascontiguousarray(t, dtype=np.float32)
+    tmax = np.abs(t).max(axis=-1)
+    # p'_j is unsigned, so the sign rides on P'; take it from the largest entry
+    # (Q4_K's d/dmin are non-negative, so every t_j in a group shares one sign).
+    lead = np.take_along_axis(t, np.argmax(np.abs(t), axis=-1)[..., None], axis=-1)[..., 0]
+    sigma = np.where(lead < 0, np.float32(-1.0), np.float32(1.0))
+    t = sigma[..., None] * t
+    live = tmax > 0                                              # dead super-block -> all zero
+    base = _to_bf16_up(tmax / np.float32(cap))
+
+    best_P = np.zeros_like(base)
+    best_p = np.zeros_like(t)
+    best_e = np.full(base.shape, np.inf, dtype=np.float64)
+    for c in range(search + 1):
+        Pc = np.where(live, _bf16_next_up(base, c), np.float32(0.0)).astype(np.float32)
+        inv = np.where(live, 1.0 / np.where(live, Pc, np.float32(1.0)), np.float32(0.0)).astype(np.float32)
+        pc = np.clip(np.rint(t * inv[..., None]), 0.0, cap).astype(np.float32)
+        err = np.sum((Pc[..., None] * pc - t).astype(np.float64) ** 2, axis=-1)
+        take = err < best_e
+        best_e = np.where(take, err, best_e)
+        best_P = np.where(take, Pc, best_P)
+        best_p = np.where(take[..., None], pc, best_p)
+
+    return (sigma * best_P).astype(np.float32), best_p
+
 
 class GGUFTensor:
     name: str
     shape: Tuple[int, ...]
     data: np.ndarray
     tensor_type: GGMLQuantizationType
+
+    # Q4_K shares one uint6 scale/min per 32 weights, 8 of them per 256-weight super-block.
+    Q4_K_GROUP_SIZE = 32
 
     def __init__(self, name: str, shape: Tuple[int, ...], data: np.ndarray, tensor_type: GGMLQuantizationType):
         self.name = name
@@ -74,6 +164,85 @@ class GGUFTensor:
 
         return d, m, qs
     
+    @staticmethod
+    def unpack_q4_k(tensor: np.ndarray, columns: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Unpack GGML Q4_K into per-group effective scale / min plus the raw uint4 quants.
+
+        A Q4_K block is 144 bytes covering 256 weights = 8 groups of 32:
+
+            2 B   d      FP16 super-block scale S
+            2 B   dmin   FP16 super-block min   M
+            12 B  scales 8 uint6 s_j + 8 uint6 m_j, bit-packed (get_scale_min_k4)
+            128 B qs     256 uint4 q, nibble-packed
+
+        and dequantizes as w^j_i = (S s_j) q^j_i - (M m_j): the min is an unsigned
+        magnitude that is *subtracted*, unlike Q4_1's signed +m.
+
+        What comes back here is the *factored-out* form t_j = S s_j and u_j = M m_j,
+        one pair per group of 32, held exactly in float32 (11-bit FP16 significand
+        times a 6-bit integer needs 17 bits, so the product is exact).  Nothing is
+        re-quantized and no super-block structure survives, which means the result
+        has the same shape and the same 32-column granularity as unpack_q4_1's
+        (d, m, qw) and can go through the model-specific row/column reorders
+        untouched.  The (BF16 S', uint8 s'_j) re-fit of quant.md happens later, in
+        _pack_q4k, over whichever 8 groups actually end up sharing a super-block
+        after those reorders.
+
+        Parameters
+        ----------
+        tensor : np.ndarray
+            Raw Q4_K tensor bytes.
+        columns : int
+            Row length K; must be a multiple of 256.
+
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            t (rows, K/32), u (rows, K/32), q (rows, K), all float32.  u is the
+            unsigned magnitude that is *subtracted*: w = t_j q - u_j.
+        """
+        block_size, type_size = GGML_QUANT_SIZES[GGMLQuantizationType.Q4_K]
+        assert columns % block_size == 0, "Columns must be divisible by the Q4_K super-block size"
+        data = tensor.view(np.uint8)
+        n_blocks = data.size // type_size
+        blocks = data.reshape((n_blocks, type_size))
+
+        d, rest = np.hsplit(blocks, [2])
+        dmin, rest = np.hsplit(rest, [2])
+        scales, qs = np.hsplit(rest, [12])
+
+        S = d.view(np.float16).astype(np.float32).reshape(n_blocks)
+        M = dmin.view(np.float16).astype(np.float32).reshape(n_blocks)
+
+        # get_scale_min_k4: groups 0..3 take a plain 6-bit field, groups 4..7 take
+        # a low nibble from scales[j+4] plus the two high bits of scales[j-4].
+        lo = scales[:, 0:4]      # j = 0..3
+        hi = scales[:, 4:8]      # j = 4..7 for the min side, high bits for j = 4..7
+        top = scales[:, 8:12]
+        s6 = np.concatenate([lo & np.uint8(0x3F),
+                             (top & np.uint8(0x0F)) | ((lo >> np.uint8(6)) << np.uint8(4))], axis=1)
+        m6 = np.concatenate([hi & np.uint8(0x3F),
+                             (top >> np.uint8(4)) | ((hi >> np.uint8(6)) << np.uint8(4))], axis=1)
+        s6 = s6.astype(np.float32)
+        m6 = m6.astype(np.float32)
+
+        # qs holds four runs of 32 bytes; within a run the low nibbles are the
+        # first group of 32 and the high nibbles the next one.
+        qb = qs.reshape((n_blocks, 4, 32))
+        q = np.stack([qb & np.uint8(0x0F), qb >> np.uint8(4)], axis=2)  # (nb, 4, 2, 32)
+        q = q.reshape((n_blocks, block_size)).astype(np.float32)
+
+        # Exact in float32: 11-bit significand x 6-bit integer fits in 24 bits.
+        t = (S[:, None] * s6).astype(np.float32)
+        u = (M[:, None] * m6).astype(np.float32)
+
+        n_groups = int(columns // GGUFTensor.Q4_K_GROUP_SIZE)
+        t = torch.from_numpy(t).contiguous().view(-1, n_groups)
+        u = torch.from_numpy(u).contiguous().view(-1, n_groups)
+        q = torch.from_numpy(q).contiguous().view(-1, int(columns))
+
+        return t, u, q
+
     @staticmethod
     def unpack_q8_0(tensors:np.ndarray, columns:int):
         """Split GGML Q8_0 data into scales and quantized values
@@ -251,6 +420,11 @@ class GGUFTensor:
             return self._requantize_to(default_tensor_type)
         elif self.tensor_type == GGMLQuantizationType.MXFP4:
             return self.unpack_mxfp4(self.data, self.shape[0])
+        elif self.tensor_type == GGMLQuantizationType.Q4_K:
+            # Read natively. Stacking a dequantize onto a re-quantize costs 0.240 bits of
+            # ENOB and 0.375 bpw against this path, and damages the tail far more than the
+            # mean; q5/q6 still take the fallback below.
+            return self.unpack_q4_k(self.data, self.shape[0])
         else:
             """
                 If the tensor type is not natively packable as-is (either a
@@ -277,6 +451,16 @@ class GGUFTensor:
     def _requantize_to(self, default_tensor_type: GGMLQuantizationType) -> np.ndarray:
         """Dequantize the source tensor and re-quantize it into the requested
         target format, returning a (d, m, qw) tuple ready for packing."""
+        # ggml has no Q4_K encoder, so a source that has to go through a re-quantize
+        # (q5/q6, or a float tensor) lands on Q4_1's grid. A real Q4_K source never
+        # reaches here -- `unpack` reads it natively. The caller still packs Q4_K, and
+        # the two disagree on the sign of the min: Q4_1 stores an added `m` (<= 0), Q4_K
+        # a subtracted magnitude `u` (>= 0). Negating it below is exact and keeps the
+        # tuple in the convention the packer the caller will use expects; without it the
+        # weights come out silently mirrored about the block minimum.
+        want_q4_k = default_tensor_type == GGMLQuantizationType.Q4_K
+        if want_q4_k:
+            default_tensor_type = GGMLQuantizationType.Q4_1
         try:
             w = dequantize(self.data, self.tensor_type)
             w = torch.from_numpy(w).contiguous().to(torch.bfloat16)
@@ -297,7 +481,7 @@ class GGUFTensor:
                 d, m, qw = self.unpack_q8_0(data_quantized, self.shape[0])
             else:
                 raise ValueError(f"Unsupported tensor type: {default_tensor_type.name}")
-            return d, m, qw
+            return (d, -m, qw) if want_q4_k else (d, m, qw)
         except Exception as e:
             print(
                 f"[WARN] Could not quantize {self.tensor_type.name} tensor "
@@ -312,3 +496,97 @@ class GGUFTensor:
                 return [w]
             except Exception:
                 return None, None, None
+
+
+def pack_q4k(t: torch.Tensor, u: torch.Tensor, q: torch.Tensor, row_block_size: int,
+             col_block_size: int, keep_block_in_2D: bool, search: int = 3) -> torch.Tensor:
+    """Pack the FLM q4_k format (uint8 s'/m' per group + bf16 S'/M' per super-block).
+
+    Input is what GGUFTensor.unpack_q4_k returns, *after* any model-specific
+    reorder: the effective per-group scale t_j and subtracted min u_j in exact
+    float32, shape (rows, cols // 32), plus the uint4 quants (rows, cols).  The
+    (BF16 P', uint8 p'_j) re-fit of quant.md is done here, per 256-column
+    super-block, so it always fits the 8 groups that really share a super-block
+    in the packed output -- a reorder that shuffles columns at a granularity
+    finer than 256 (ssm_out_proj moves 128-column chunks) would otherwise leave
+    the super-block metadata unrepresentable.
+
+    Upstream (ROCm FLM_Q4NX_Converter, `_Q4NX_Converter._pack_q4k`) reads the block
+    geometry off the converter; here it is three arguments, so the packer can be loaded
+    and checked on its own -- specs/open-engine/tests/test_quant_q4k.py holds it against
+    the engine's reader (OPEN-QUANT-Q4K).
+
+    Mirrors `q4k_block_t` in the decoding kernels' model_spec.h, one struct
+    per row_block_size x col_block_size chunk, everything column major over
+    the chunk (the whole row span is resident at once, so there is no
+    parallel-strided re-order):
+
+        uint8 scales[col_block_size // Q4_group_size][row_block_size]
+        uint8 mins  [col_block_size // Q4_group_size][row_block_size]
+        uint4 qs    [col_block_size][row_block_size // NUM_int4_in_byte]
+        bf16  S     [col_block_size // Q4K_super_block_size][row_block_size]
+        bf16  M     [col_block_size // Q4K_super_block_size][row_block_size]
+
+    With the shipping 32x256 chunk that is 256 + 256 + 4096 + 64 + 64 = 4736 B,
+    i.e. 4.625 bits per weight, matching get_quantization_byte_size().
+
+    GGUF's Q4_K subtracts the min (w = S' s'_j q - M' m'_j) while the kernel
+    adds both accumulators, so M' is stored negated here.
+    """
+    Q4_group_size = 32
+    Q4K_super_block_size = 256
+    NUM_int4_in_byte = 2
+
+    t = t.to(torch.float32).contiguous()
+    u = u.to(torch.float32).contiguous()
+    q = q.contiguous()
+
+    cols = q.shape[-1]
+    assert cols % Q4K_super_block_size == 0, "Q4_K needs a multiple of 256 columns"
+    assert col_block_size % Q4K_super_block_size == 0
+
+    if cols % col_block_size != 0:
+        cols_padded = _round_up(cols, col_block_size)
+        t = F.pad(t, (0, (cols_padded - cols) // Q4_group_size), "constant", 0)
+        u = F.pad(u, (0, (cols_padded - cols) // Q4_group_size), "constant", 0)
+        q = F.pad(q, (0, cols_padded - cols), "constant", 0)
+
+    # Re-fit each side onto (BF16 super-block value, uint8 per-group value).
+    groups_per_super = Q4K_super_block_size // Q4_group_size
+    S, s8 = _refit_one_side(t.numpy().reshape(-1, groups_per_super), search=search)
+    M, m8 = _refit_one_side(u.numpy().reshape(-1, groups_per_super), search=search)
+    S = torch.from_numpy(S).view(t.shape[0], -1)
+    M = torch.from_numpy(M).view(u.shape[0], -1)
+    s8 = torch.from_numpy(s8).view_as(t)
+    m8 = torch.from_numpy(m8).view_as(u)
+
+    # scales / mins: one group of 32 columns contributes row_block_size uint8,
+    # groups ascending -- the same block layout the bf16 scales use in q4nx.
+    s8 = rearrange(s8, '(p r) (u c) -> p u (c r)', r=row_block_size,
+                   c=col_block_size // Q4_group_size).contiguous()
+    m8 = rearrange(m8, '(p r) (u c) -> p u (c r)', r=row_block_size,
+                   c=col_block_size // Q4_group_size).contiguous()
+    # S / M: one entry per row per super-block; a 256-column chunk holds exactly one.
+    S = rearrange(S, '(p r) (u c) -> p u (c r)', r=row_block_size,
+                  c=col_block_size // Q4K_super_block_size).contiguous()
+    M = rearrange(M, '(p r) (u c) -> p u (c r)', r=row_block_size,
+                  c=col_block_size // Q4K_super_block_size).contiguous()
+
+    # quants: one column = row_block_size nibbles, rows paired into a byte with
+    # the even row in the low nibble, columns ascending.
+    q = rearrange(q, '(p r) (u c) -> p u r c', r=row_block_size, c=col_block_size)
+    q = rearrange(q, 'p u (r b) c -> p u c r b', b=NUM_int4_in_byte).contiguous().to(torch.int8)
+    q[..., 1] = torch.bitwise_and(torch.bitwise_left_shift(q[..., 1], 4), 0xF0)
+    q[..., 0] = torch.bitwise_or(torch.bitwise_and(q[..., 0], 0x0F), q[..., 1])
+    q = rearrange(q[..., 0].contiguous(), 'p u c r -> p u (c r)').contiguous()
+
+    s8 = s8.to(torch.uint8).view(torch.int8).numpy()
+    m8 = m8.to(torch.uint8).view(torch.int8).numpy()
+    S = S.to(torch.bfloat16).view(torch.int8).numpy()
+    M = (-M).to(torch.bfloat16).view(torch.int8).numpy()   # kernel adds the min path
+    q = q.view(torch.int8).numpy()
+
+    merged = torch.from_numpy(np.concatenate([s8, m8, q, S, M], axis=-1).copy())
+    if not keep_block_in_2D:
+        merged = merged.reshape(-1, merged.shape[-1])
+    return merged
