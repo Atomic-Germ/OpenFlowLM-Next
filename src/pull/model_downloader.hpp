@@ -1,6 +1,6 @@
 /// \file model_downloader.hpp
 /// \brief Model downloader class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to download models from the huggingface
@@ -26,7 +26,7 @@ public:
     // When fast_check is true, only the local presence + version compatibility
     // are checked; no HuggingFace metadata is fetched and no per-file hash
     // verification / cleanup is performed. Use this for cheap status queries
-    // such as `flm list`.
+    // such as `oflm list`.
     ModelStatus is_model_downloaded(const std::string& model_tag, bool sub_process_mode=0, bool fast_check=false);
     
     // Download model files if not present

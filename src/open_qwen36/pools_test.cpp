@@ -285,7 +285,7 @@ void mixed_container_tests() {
     std::filesystem::remove(path, ec);
 }
 
-// ---- OPEN-QUANT-Q4K: a Q4_K source (4736-byte chunks, what FLM 1.0.3+ writes)
+// ---- OPEN-QUANT-Q4K: a Q4_K source (4736-byte chunks, what OFLM 1.0.3+ writes)
 constexpr size_t Q4K_CH = 4736;
 const char* Q4K_NAME = "model.layers.0.mlp.gate_proj.weight";
 

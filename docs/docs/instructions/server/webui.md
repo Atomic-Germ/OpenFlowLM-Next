@@ -1,28 +1,28 @@
 ---
 layout: docs
-title: Open WebUI + FLM
+title: Open WebUI + OFLM
 nav_order: 2
 parent: Local Server (Server Mode)
 ---
 
 # 📑 Table of Contents
 
-- **[🧩 Run Open WebUI with FastFlowLM](#-run-open-webui-with-fastflowlm)**
+- **[🧩 Run Open WebUI with OpenFlowLM](#-run-open-webui-with-openflowlm)**
   - [ Option 1: Use Open WebUI Desktop](#option-1-use-open-webui-desktop)  
   - [ Option 2: Use Open WebUI in Docker](#option-2-use-open-webui-in-docker)  
 - **[🧪 More Examples](#-more-examples)**
-  - [ Example: Multi Models Comparison Enabled by FLM Queuing](#-example-multi-models-comparison-enabled-by-flm-queuing)  
-  - [ Example: Agentic AI Web Search with FastFlowLM](#-example-agentic-ai-web-search-with-fastflowlm)  
-  - [ Example: Local Private Database with RAG + FastFlowLM](#️-example-local-private-database-with-rag--fastflowlm)
-  - [ Example: Add FLM Custom Parameters](#️-example-add-flm-custom-parameters)
+  - [ Example: Multi Models Comparison Enabled by OFLM Queuing](#-example-multi-models-comparison-enabled-by-oflm-queuing)  
+  - [ Example: Agentic AI Web Search with OpenFlowLM](#-example-agentic-ai-web-search-with-openflowlm)  
+  - [ Example: Local Private Database with RAG + OpenFlowLM](#️-example-local-private-database-with-rag--openflowlm)
+  - [ Example: Add OFLM Custom Parameters](#️-example-add-oflm-custom-parameters)
 
 ---
 
-# 🧩 Run Open WebUI with FastFlowLM
+# 🧩 Run Open WebUI with OpenFlowLM
 
 ## Option 1: Use Open WebUI Desktop
 
-Set up **Open WebUI Desktop** to talk to a local **FastFlowLM** instance on Windows.
+Set up **Open WebUI Desktop** to talk to a local **OpenFlowLM** instance on Windows.
 
 ---
 
@@ -38,11 +38,11 @@ Enter **Name**, **Email**, and **Password** to create a local account.
 
 ---
 
-### 🔌 Step 3: Connect Open WebUI to FastFlowLM
+### 🔌 Step 3: Connect Open WebUI to OpenFlowLM
 1. In Open WebUI: **user icon → Admin Panel → Settings → Connections**.
 2. **Deactivate** the Ollama API.
 3. Under **Manage OpenAI API Connections**, click **+** and fill in:
-   - **Name:** FastFlowLM
+   - **Name:** OpenFlowLM
    - **Base URL:** `http://127.0.0.1:52625/v1`
    - **API Key:** `DUMMY` (any non-empty value)
 4. Click **Save**.
@@ -51,14 +51,14 @@ Enter **Name**, **Email**, and **Password** to create a local account.
 
 ---
 
-### 🚀 Step 4: Serve FastFlowLM with a Model
+### 🚀 Step 4: Serve OpenFlowLM with a Model
 Open **PowerShell** and start the server:
 
 ```shell
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
 
-You can now chat in Open WebUI using FastFlowLM.
+You can now chat in Open WebUI using OpenFlowLM.
 
 > Note: Switching models may take time while the new model loads into memory.
 
@@ -66,7 +66,7 @@ You can now chat in Open WebUI using FastFlowLM.
 
 ## Option 2: Use Open WebUI in Docker
 
-This guide walks you through using `docker-compose.yaml` to run Open WebUI connected to a local FastFlowLM instance on Windows.
+This guide walks you through using `docker-compose.yaml` to run Open WebUI connected to a local OpenFlowLM instance on Windows.
 
 ---
 
@@ -76,7 +76,7 @@ This guide walks you through using `docker-compose.yaml` to run Open WebUI conne
    - During installation, enable **WSL2 backend**
    - Reboot if prompted
 
-2. [FastFlowLM](https://fastflowlm.com/docs/install/)
+2. [OpenFlowLM](https://openflowlm.com/docs/install/)
 
 ---
 
@@ -112,7 +112,7 @@ services:
     volumes:
       - open-webui-data:/app/backend/data
     environment:
-      # Point WebUI to FLM's OpenAI-compatible server
+      # Point WebUI to OFLM's OpenAI-compatible server
       - OPENAI_API_BASE_URL=http://host.docker.internal:52625/v1
       - OPENAI_API_KEY=dummy-key
 
@@ -162,13 +162,13 @@ You should now see the Open WebUI interface.
 
 ---
 
-### 🧪 Step 5: Serve FastFlowLM with Model
+### 🧪 Step 5: Serve OpenFlowLM with Model
 
 ```shell
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
 
-You can now use `FastFlowLM` directly in Open WebUI.
+You can now use `OpenFlowLM` directly in Open WebUI.
 > When switching models, it may take a longer time to replace the model in memory.
 
 ---
@@ -208,7 +208,7 @@ docker compose pull
 ### 🧠 Notes
 
 - Want login? Set `WEBUI_AUTH=true`
-- You must keep FastFlowLM server running
+- You must keep OpenFlowLM server running
 - For persistent chat history, the volume `open-webui-data` stores user data
 
 ---
@@ -230,17 +230,17 @@ Well done 🎉 — now let’s explore more apps together!
 
 ---
 
-## 🤖 Example: Multi Models Comparison Enabled by FLM Queuing
+## 🤖 Example: Multi Models Comparison Enabled by OFLM Queuing
 
-A step-by-step guide to launching FastFlowLM and interacting with multiple models via Open WebUI.
+A step-by-step guide to launching OpenFlowLM and interacting with multiple models via Open WebUI.
 
 [🎬 Watch the Teaser Video](https://www.youtube.com/watch?v=vUyt2MZFDm0)
 
 ---
 
-### 🌐 Step 1: Run Open WebUI with FastFlowLM
+### 🌐 Step 1: Run Open WebUI with OpenFlowLM
 
-Follow the quick setup [here](https://fastflowlm.com/docs/instructions/server/webui/).
+Follow the quick setup [here](https://openflowlm.com/docs/instructions/server/webui/).
 
 ---
 
@@ -264,7 +264,7 @@ Type anything you're curious about in the input box.
 ⚠️ Please note:
 
 - Each model will reply in sequence (not all at once).
-- The flm server dynamically loads each model based on your selection.
+- The oflm server dynamically loads each model based on your selection.
 
 ---
 
@@ -280,9 +280,9 @@ After receiving replies from multiple models, choose how you'd like to continue:
 
 ---
 
-## 🌐 Example: Agentic AI Web Search with FastFlowLM
+## 🌐 Example: Agentic AI Web Search with OpenFlowLM
 
-Step-by-step guide to powering Agentic AI web search in Open WebUI — NPU-only, lightning-fast, with Google PSE + FLM.
+Step-by-step guide to powering Agentic AI web search in Open WebUI — NPU-only, lightning-fast, with Google PSE + OFLM.
 
 [🎬 Watch the Teaser Video](https://www.youtube.com/watch?v=wHO8ektTlik)
 
@@ -293,7 +293,7 @@ Step-by-step guide to powering Agentic AI web search in Open WebUI — NPU-only,
 1. Go to [Google Programmable Search Engine](https://developers.google.com/custom-search) and sign in or create an account. Click `create a search engine`. Review the *Overview* page.
 2. Visit the [Control Panel](https://programmablesearchengine.google.com/controlpanel/all) and click the `Add` button.
 3. Fill in:
-	- A **name** for your search engine (e.g., flm-search)
+	- A **name** for your search engine (e.g., oflm-search)
 	- **What to search?** (e.g., select `Search the entire web`)
 	- **Search settings** (e.g., enable `Image search`)
 	- Verify you’re not a robot
@@ -306,9 +306,9 @@ Step-by-step guide to powering Agentic AI web search in Open WebUI — NPU-only,
 
 ---
 
-### 🌐 Step 2: Run Open WebUI with FastFlowLM
+### 🌐 Step 2: Run Open WebUI with OpenFlowLM
 
-Follow the quick setup guide **[here](#-run-open-webui-with-fastflowlm)**.
+Follow the quick setup guide **[here](#-run-open-webui-with-openflowlm)**.
 
 ---
 ### 🧩 Step 3: Enable Web Search in Open WebUI
@@ -338,15 +338,15 @@ With your **API Key** and **Search Engine ID** from Step 1, follow these steps:
 
 ---
 
-## 🗄️ Example: Local Private Database with RAG + FastFlowLM  
+## 🗄️ Example: Local Private Database with RAG + OpenFlowLM  
 
-This example walks you through setting up a **local, private knowledge base** using **Retrieval-Augmented Generation (RAG)** powered by FastFlowLM.  
+This example walks you through setting up a **local, private knowledge base** using **Retrieval-Augmented Generation (RAG)** powered by OpenFlowLM.  
 
 RAG combines two steps:  
 1. **Retrieval** – fetch the most relevant information from your knowledge base (e.g., `.md` docs).  
 2. **Generation** – use an AI model to create accurate, context-aware answers based on that retrieved data.  
 
-In this example, the knowledge base is the **Open WebUI documentation**. With FastFlowLM running on the **NPU**, you get fast, efficient, and secure responses — all without sending your data to the cloud.  
+In this example, the knowledge base is the **Open WebUI documentation**. With OpenFlowLM running on the **NPU**, you get fast, efficient, and secure responses — all without sending your data to the cloud.  
 
 [🎬 Watch the Teaser Video](https://youtu.be/GAzPj6QbfKk?si=5FDkpjlVDI64oIol)
 
@@ -358,9 +358,9 @@ In this example, the knowledge base is the **Open WebUI documentation**. With Fa
 
 ---
 
-### 🌐 Step 2: Run Open WebUI with FastFlowLM 
+### 🌐 Step 2: Run Open WebUI with OpenFlowLM 
 
-Follow the quick setup guide **[here](#-run-open-webui-with-fastflowlm)**.
+Follow the quick setup guide **[here](#-run-open-webui-with-openflowlm)**.
 
 ---
 ### 🧠 Step 3: Create a Knowledge Base
@@ -377,7 +377,7 @@ Follow the quick setup guide **[here](#-run-open-webui-with-fastflowlm)**.
 
 1. Go to the **top-left** menu, navigate to **Workspace** > **Models** (top bar) > Click `+` symbol on the right side to **Add New Model**
 2. Configure the Model:
-	- **Model Name**: Enter a name, e.g. `FLM_RAG`
+	- **Model Name**: Enter a name, e.g. `OFLM_RAG`
 	- **Base Model**: Choose from the available list, e.g., gemma3:4b
 	- **Knowledge**: Select `Open WebUI Documentation` from the dropdown
 	- **Capabilities**: Check the options you need (e.g. enable **citation** to show sources)
@@ -388,7 +388,7 @@ Follow the quick setup guide **[here](#-run-open-webui-with-fastflowlm)**.
 ### 💬 Step 5: Examples and Usage
 
 1. Start a New Chat:
-    - Navigate to **New Chat** and select the `FLM_RAG` model.
+    - Navigate to **New Chat** and select the `OFLM_RAG` model.
 2. Example Queries:
 
 🧑 User: "Introduce Open WebUI."  
@@ -399,16 +399,16 @@ Follow the quick setup guide **[here](#-run-open-webui-with-fastflowlm)**.
 
 ---
 
-## 🛠️ Example: Add FLM Custom Parameters
+## 🛠️ Example: Add OFLM Custom Parameters
 
-This example shows how to add FastFlowLM custom parameters in Open WebUI. We use `gemma4-it:e4b` as the example model.
+This example shows how to add OpenFlowLM custom parameters in Open WebUI. We use `gemma4-it:e4b` as the example model.
 
-Gemma4 supports a configurable visual token budget, which controls how many tokens are used to represent an image. FLM uses a custom parameter `image-max-tokens` to support this feature. By passing this value through FLM, you can adjust the image token budget for each query in Open WebUI and balance image detail against response speed. For more details, see [Variable Image Resolution](https://huggingface.co/google/gemma-4-E4B-it#5-variable-image-resolution).
+Gemma4 supports a configurable visual token budget, which controls how many tokens are used to represent an image. OFLM uses a custom parameter `image-max-tokens` to support this feature. By passing this value through OFLM, you can adjust the image token budget for each query in Open WebUI and balance image detail against response speed. For more details, see [Variable Image Resolution](https://huggingface.co/google/gemma-4-E4B-it#5-variable-image-resolution).
 
 
-### 🌐 Step 1: Run Open WebUI with FastFlowLM
+### 🌐 Step 1: Run Open WebUI with OpenFlowLM
 
-Follow the quick setup guide **[here](#-run-open-webui-with-fastflowlm)** to start Open WebUI and connect it to FastFlowLM.
+Follow the quick setup guide **[here](#-run-open-webui-with-openflowlm)** to start Open WebUI and connect it to OpenFlowLM.
 
 ### ➕ Step 2: Add a Custom Parameter
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "q4nx-build"
 version = "0.3.0"
-description = "Convert GGUF or HF-safetensors model files into the Q4NX format for FLM."
+description = "Convert GGUF or HF-safetensors model files into the Q4NX format for OFLM."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

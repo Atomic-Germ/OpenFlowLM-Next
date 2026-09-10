@@ -45,7 +45,7 @@ SINGLE_SHARD = "model.safetensors"
 SHARD_INDEX = "model.safetensors.index.json"
 
 MANIFEST_NAME = "weights_manifest.json"
-MANIFEST_FORMAT = "flm-open-causal-manifest-v1"
+MANIFEST_FORMAT = "oflm-open-causal-manifest-v1"
 MODEL_INFO_ARTIFACT = "model_info_entry.json"
 
 # Tensors that must never be block-quantized later; recorded for Phase 3.

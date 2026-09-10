@@ -91,10 +91,10 @@ class FindSkeletonTest(unittest.TestCase):
 
         def probe(candidate):
             calls.append(candidate)
-            return candidate.startswith("FastFlowLM/")
+            return candidate.startswith("OpenFlowLM/")
 
         skeleton = find_skeleton(["Qwen/Qwen3-4B"], probe=probe)
-        self.assertEqual(skeleton, "FastFlowLM/Qwen3-4B-NPU2")
+        self.assertEqual(skeleton, "OpenFlowLM/Qwen3-4B-NPU2")
         self.assertEqual(calls[0], "Atomic-Germ/Qwen3-4B-NPU2")
 
     def test_no_mirror_anywhere(self):
@@ -212,7 +212,7 @@ class DeriveBuildPlanTest(unittest.TestCase):
 
     def test_lowercase_size_token_not_duplicated(self):
         cards = {"x/medgemma-1.5-4b-it": {}}
-        mirrors = {"FastFlowLM/medgemma-1.5-4b-it-NPU2"}
+        mirrors = {"OpenFlowLM/medgemma-1.5-4b-it-NPU2"}
         plan = derive_build_plan(
             "x/medgemma-1.5-4b-it",
             fetch=lambda r: cards.get(r, {}),

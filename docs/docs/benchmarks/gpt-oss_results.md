@@ -7,11 +7,11 @@ nav_order: 5
 
 ## ⚡ Performance and Efficiency Benchmarks
 
-This section reports the performance on NPU with FastFlowLM (FLM).
+This section reports the performance on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on FastFlowLM v0.9.32.
-> - Under FLM's default NPU power mode (Performance)  
+> - Results are based on OpenFlowLM v0.9.32.
+> - Under OFLM's default NPU power mode (Performance)  
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
@@ -32,7 +32,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |**64k** | **128k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|---------:|---------:|
-| **gpt-oss-20b**  | NPU (FLM)    | 18.2|	18.0|	17.4|	16.3|	14.5|	12.0|	8.7|	5.7|
+| **gpt-oss-20b**  | NPU (OFLM)    | 18.2|	18.0|	17.4|	16.3|	14.5|	12.0|	8.7|	5.7|
 
 ---
 
@@ -40,4 +40,4 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **gpt-oss-20b**  | NPU (FLM)    | 221|	326|	415|	477|	473|	391|
+| **gpt-oss-20b**  | NPU (OFLM)    | 221|	326|	415|	477|	473|	391|

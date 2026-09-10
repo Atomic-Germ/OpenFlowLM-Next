@@ -1,6 +1,6 @@
 /// \file modeling_Qwen3VL_image.cpp
 /// \brief Qwen3VL image processing implementation
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the Qwen3VL image processing functionality
@@ -52,7 +52,7 @@ qwen3vl_image_t Qwen3VL::load_image(const std::string& filename) {
             float ratio = static_cast<float>(max_height) / static_cast<float>(decoded.height);
             int target_width = static_cast<int>(static_cast<float>(decoded.width) * ratio);
             int target_height = max_height;
-            header_print_r("FLM", "Qwen3VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")\n");
+            header_print_r("OFLM", "Qwen3VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")\n");
             if (image_reader_.resize_image(decoded, target_width, target_height, resized_image)) {
                 image_reader_.recycle(decoded);
                 decoded = std::move(resized_image);
@@ -120,7 +120,7 @@ qwen3vl_image_t Qwen3VL::load_image_base64(const std::string& base64_string) {
             float ratio = static_cast<float>(max_height) / static_cast<float>(decoded.height);
             int target_width = static_cast<int>(static_cast<float>(decoded.width) * ratio);
             int target_height = max_height;
-            header_print_r("FLM", "Qwen3VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")");
+            header_print_r("OFLM", "Qwen3VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")");
             if (image_reader_.resize_image(decoded, target_width, target_height, resized_image)) {
                 image_reader_.recycle(decoded);
                 decoded = std::move(resized_image);

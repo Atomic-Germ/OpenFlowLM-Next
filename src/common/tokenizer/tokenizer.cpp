@@ -1,6 +1,6 @@
 /// \file tokenizer.cpp
 /// \brief Tokenizer implementation for text encoding/decoding
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.10
 #include "tokenizer/tokenizer.hpp"

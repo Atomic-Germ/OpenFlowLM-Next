@@ -33,8 +33,8 @@ class BaseTestTask(ABC):
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.base_url = base_url
-        self.client = OpenAI(base_url=base_url, api_key="flm")
-        self.version = self._get_flm_version()
+        self.client = OpenAI(base_url=base_url, api_key="oflm")
+        self.version = self._get_oflm_version()
         self.models = self._fetch_all_models()
         if model_filter:
             filtered = [m for m in self.models if m in model_filter]
@@ -45,7 +45,7 @@ class BaseTestTask(ABC):
         self.results_dir = os.path.join("results", self.timestamp, backend_os)
         os.makedirs(self.results_dir, exist_ok=True)
 
-    # FLM's OpenAI-compatible API accepts `reasoning_effort` with "low",
+    # OFLM's OpenAI-compatible API accepts `reasoning_effort` with "low",
     # "medium" or "high" (thinking enabled) and "none" (thinking disabled).
     REASONING_LEVELS = ("none", "low", "medium", "high")
 
@@ -59,17 +59,17 @@ class BaseTestTask(ABC):
     def get_csv_filename(self, task_name: str) -> str:
         return os.path.join(self.results_dir, f"{task_name}_results_v{self.version}.csv")
 
-    def _get_flm_version(self) -> str:
-        print("\nChecking flm version...")
+    def _get_oflm_version(self) -> str:
+        print("\nChecking oflm version...")
         try:
             response = urllib.request.urlopen(f"{self.base_url}/version", timeout=5)
             version_data = json.loads(response.read().decode('utf-8'))
-            flm_version = version_data.get("version", "unknown_version")
-            print(f"Detected flm version: {flm_version}")
+            oflm_version = version_data.get("version", "unknown_version")
+            print(f"Detected oflm version: {oflm_version}")
         except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as e:
-            print(f"Error fetching flm version: {e}")
-            flm_version = "unknown_version"
-        return flm_version
+            print(f"Error fetching oflm version: {e}")
+            oflm_version = "unknown_version"
+        return oflm_version
 
     def _fetch_all_models(self) -> list:
         print("\nFetching available models...")
@@ -206,7 +206,7 @@ class EmbeddingTask(BaseTestTask):
                                  in the embedding space than unrelated pairs.
       E6 Cross-Path Consistency  The same weights reached via two delivery paths
                                  (single-input and batched requests) in the same
-                                 run must agree, pinning any bad number on FLM
+                                 run must agree, pinning any bad number on OFLM
                                  rather than on a single bad machine draw.
 E7 Batch Reference
        Consistency                A larger set of draws of the same input is
@@ -228,14 +228,14 @@ E7 Batch Reference
     Like the tool-calling suite, each check produces a PASS / SOFT-FAIL / FAIL
     verdict with a detail line, all written to CSV. Unlike the chat-based suites
     there is no streaming mode, temperature or reasoning, and the server is
-    assumed to be running with only an embed model loaded (`flm serve -e 1`).
+    assumed to be running with only an embed model loaded (`oflm serve -e 1`).
     """
 
     EMBED_MODELS = [
         "embed-gemma:300m", "embed-gemma",
         # open_npue backend -- BERT-family encoders on the NPU. Listed here so
         # the suite runs against them without an explicit --model filter; each
-        # is served by `flm serve <llm> --embed 1 --embeddingmodel <tag>`.
+        # is served by `oflm serve <llm> --embed 1 --embeddingmodel <tag>`.
         "bge-base:en-v1.5", "bge-small:en-v1.5", "bge-large:en-v1.5",
         "all-minilm:l6-v2", "nomic-embed-text:v1.5", "gte-multilingual:base",
     ]
@@ -244,7 +244,7 @@ E7 Batch Reference
     SAMPLE_TEXT = "The embedding model should capture the meaning of this sentence."
     BATCH_INPUTS = [
         "Hello, world!",
-        "FastFlowLM is a local inference server.",
+        "OpenFlowLM is a local inference server.",
         "The quick brown fox jumps over the lazy dog.",
     ]
     RELATED_PAIRS = [("cat", "kitten"), ("ocean", "sea")]
@@ -264,7 +264,7 @@ E7 Batch Reference
     # SKIPs rather than reporting a failure it cannot substantiate.
     REFERENCE_MODELS = {"embed-gemma:300m", "embed-gemma"}
     # A tag no server can have loaded, for E9.
-    IMPOSSIBLE_MODEL = "flm-test-no-such-embedding-model"
+    IMPOSSIBLE_MODEL = "oflm-test-no-such-embedding-model"
     CHECK_NAMES = [
         "E1 Response Structure",
         "E2 Repeatability",
@@ -281,8 +281,8 @@ E7 Batch Reference
         super().__init__(base_url, backend_os, model_filter=model_filter)
         # Keep only recognised embedding models; honour any user-supplied filter.
         self.models = [m for m in self.models if m in self.EMBED_MODELS]
-        # FLM does not always advertise the embed model on /v1/models even when
-        # it is loaded (`flm serve -e 1`). Without an explicit --model filter,
+        # OFLM does not always advertise the embed model on /v1/models even when
+        # it is loaded (`oflm serve -e 1`). Without an explicit --model filter,
         # fall back to the standard embedding model so the suite still runs; if
         # it is not actually loaded, each check fails gracefully with an ERROR
         # row instead of silently skipping.
@@ -456,7 +456,7 @@ E7 Batch Reference
         """E6: same weights, two delivery paths in the same run must agree.
 
         If a bad number can be reproduced through a different API path in the
-        same run it is a statement about FLM, not about a single bad hardware
+        same run it is a statement about OFLM, not about a single bad hardware
         draw.
         """
         single = self._embed(model_id, self.SAMPLE_TEXT)
@@ -622,7 +622,7 @@ E7 Batch Reference
         print(f"Models found: {len(self.models)}")
         if not self.models:
             print("No embedding models found. Start the server with the embed model "
-                  "loaded, e.g. `flm serve -e 1`.")
+                  "loaded, e.g. `oflm serve -e 1`.")
             print(f"Embedding tests complete. Saved to {self.csv_filename}")
             return
 

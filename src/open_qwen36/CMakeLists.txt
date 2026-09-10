@@ -1,6 +1,6 @@
-# open_qwen36_cli — the open Qwen3.6-MoE engine driven without the FLM app
+# open_qwen36_cli — the open Qwen3.6-MoE engine driven without the OFLM app
 # (see cli.cpp). The engine's core (core.cpp, pools.cpp, manifest.cpp,
-# q4nx_file.cpp) is also compiled into flm by src/CMakeLists.txt; engine.cpp
+# q4nx_file.cpp) is also compiled into oflm by src/CMakeLists.txt; engine.cpp
 # (the causal_lm adapter) only there. manifest_test (no XRT) is the
 # OPEN-MANIFEST unit test: `ctest` runs it against the checked-in fixture.
 #

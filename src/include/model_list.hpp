@@ -1,6 +1,6 @@
 /// \file model_list.hpp
 /// \brief model_list class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to manage the model list.
@@ -201,7 +201,7 @@ class model_list {
                         {"id", model_type + ":" + size},
                         {"object", "model"},
                         {"created", static_cast<long long>(now)},
-                        {"owned_by", "FastFlowLM"}
+                        {"owned_by", "OpenFlowLM"}
                     };
                     response["data"].push_back(model_entry);
                 }

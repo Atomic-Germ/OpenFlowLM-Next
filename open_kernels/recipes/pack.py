@@ -2,7 +2,7 @@
 
 The plan (qwen36moe.pack_plan) says which tensor lands at which byte offset in
 which chunk order; the ops here are the chunk-permutation laws phlegm verified
-byte-for-byte against pools captured from FLM's own engine (they were
+byte-for-byte against pools captured from OFLM's own engine (they were
 open_kernels/model/pools.py's build_layer_pool / build_side / build_pack; the
 frozen originals live in specs/open-engine/tests/legacy_pools.py and the test
 there checks this interpreter reproduces them). src/open_qwen36/pools.cpp is
@@ -31,7 +31,7 @@ kernel set it is being packed for.
 
 **Source forms.** The three chunk ops above (std_perm, expert_stripes, expert_down)
 accept a q8 tensor transparently and re-quantize it to q4_1 chunk by chunk on the
-way into the pool (`requant_q4_1`), and a Q4_K tensor -- what FLM 1.0.3+ writes --
+way into the pool (`requant_q4_1`), and a Q4_K tensor -- what OFLM 1.0.3+ writes --
 by transcoding it (`q4k_to_q4_1`). All three forms hold the SAME 32-row x
 256-column tile, so no chunk index law changes and neither the plan, the manifest
 nor the kernels know the difference. That is what lets the Qwen3.6-35B fine-tunes
@@ -46,7 +46,7 @@ import numpy as np
 
 CH = 5120
 Q8 = 8704            # a q8 chunk: 256 bf16 scales then 8192 int8 codes
-Q4K = 4736           # a Q4_K chunk (FLM 1.0.3+): uint8 scales/mins, nibbles, one bf16 (S, M) per row
+Q4K = 4736           # a Q4_K chunk (OFLM 1.0.3+): uint8 scales/mins, nibbles, one bf16 (S, M) per row
 BLOCK = 32           # values per quantisation block, along the input dim
 NBLOCK = 8           # 32-blocks per chunk (8192 values = 32 rows x 256 K)
 
@@ -136,7 +136,7 @@ def q4k_to_q4_1(chunks) -> np.ndarray:
 
     Both formats hold a 32-row x 256-column tile with one (scale, min) pair per (row,
     32-column group), indexed `g*32 + r` in both, so nothing is re-quantized and no index
-    law moves. The Q4_K chunk (`q4k_block_t` in the FLM 1.0.3 decoding kernels) is
+    law moves. The Q4_K chunk (`q4k_block_t` in the OFLM 1.0.3 decoding kernels) is
 
         scales[8][32] uint8 @ [0, 256)      mins[8][32] uint8 @ [256, 512)
         qs[256][16]         @ [512, 4608)   byte k*16 + r/2, even row in the low nibble
@@ -234,7 +234,7 @@ def std_perm(nch: int, in_dim: int) -> np.ndarray:
     covers row half i % 2 and k-tile i // 2 (gemv_q4.h's band law, q4_1_pack.chunk_geometry);
     file chunk f covers rows 32*(f//ncol), cols 256*(f%ncol).
 
-    The law phlegm verified against FLM's captured pools was written as
+    The law phlegm verified against OFLM's captured pools was written as
     cols = 1024*((c//8) % (in//1024)) + 256*((c//2) % 4); for in_dim a multiple of 1024
     that is this same k-tile order (tests/test_pack_plan.py checks the two agree there);
     this form is the one that also holds for in_dim = 2560 or 9728."""
@@ -320,7 +320,7 @@ def _raw(m, name: str):
 
     This is where the head of a tied model is checked: a plan always names
     `lm_head.weight` (the recipes never fold the head into the embedding table),
-    and every container we pack from materialises it -- FLM's `.q4nx` even for
+    and every container we pack from materialises it -- OFLM's `.q4nx` even for
     Llama 3.2 and the small Qwen3 models, whose config.json says
     `tie_word_embeddings: true`. A container that really is tied fails here,
     naming the tensor, rather than producing a pool of zeros."""

@@ -5,7 +5,7 @@
 #include "AutoModel/modeling_gemma4_12b.hpp"
 #include "model_list.hpp"
 
-flm_rt::device npu_device_global;
+oflm_rt::device npu_device_global;
 
 int main(int argc, char* argv[]) {
     #ifdef __WINDOWS__
@@ -44,8 +44,8 @@ int main(int argc, char* argv[]) {
 
     std::unique_ptr<AutoModel> chat = std::make_unique<Gemma4_12B>(&npu_device_global);
     std::cout << "Chat model initialized" << std::endl;
-    npu_device_global = flm_rt::device(0);
-    std::cout << "NPU Device initialized: " << npu_device_global.get_info<flm_rt::info::device::name>() << std::endl;
+    npu_device_global = oflm_rt::device(0);
+    std::cout << "NPU Device initialized: " << npu_device_global.get_info<oflm_rt::info::device::name>() << std::endl;
     chat->load_model(model_path, model_info, -1, preemption);
     header_print("info", "Model loaded");
 

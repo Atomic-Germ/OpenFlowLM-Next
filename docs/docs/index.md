@@ -5,15 +5,15 @@ nav_order: 0
 has_children: false
 ---
 
-# ⚡ FastFlowLM (FLM)
+# ⚡ OpenFlowLM (OFLM)
 
-**FLM** is the only **NPU-first runtime** built for AMD Ryzen™ AI.  
+**OFLM** is the only **NPU-first runtime** built for AMD Ryzen™ AI.  
 
 Run **LLMs — now with Vision support — in minutes**: **no GPU required**, **over 10× more power-efficient**, and with **context lengths up to 256k tokens**.  
 
 A **familiar single-command CLI — laser-optimized for NPUs**.  
 
-From *idle silicon* to *instant power* — **FastFlowLM makes Ryzen™ AI shine.**
+From *idle silicon* to *instant power* — **OpenFlowLM makes Ryzen™ AI shine.**
 
 ---
 
@@ -26,7 +26,7 @@ Quick 5‑minute setup guide for Windows.
 Quick 5‑minute setup guide for Linux.
 
 ### 🛠️ [Instructions](instructions/)
-Run FastFlowLM using the CLI mode or server mode.
+Run OpenFlowLM using the CLI mode or server mode.
 
 ### 🧩 [Models](models/)
 Supported models, quantization formats, and compatibility details.

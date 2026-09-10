@@ -19,13 +19,13 @@ run:
 	@$(PWSH) "Copy-Item 'model_list.json' '$(OUT_DIR)' -Force"
 	@$(PWSH) "Copy-Item 'model_info.json' '$(OUT_DIR)' -Force"
 	@$(PWSH) "Copy-Item 'xclbins' '$(OUT_DIR)' -Recurse -Force"
-	@$(PWSH) "cd '$(OUT_DIR)'; .\\flm.exe run llama3.2:1b -a 0"
+	@$(PWSH) "cd '$(OUT_DIR)'; .\\oflm.exe run llama3.2:1b -a 0"
 
 serve:
 	@$(PWSH) "Copy-Item 'lib\\*.dll' '$(OUT_DIR)' -Force"
 	@$(PWSH) "Copy-Item 'model_list.json' '$(OUT_DIR)' -Force"
 	@$(PWSH) "Copy-Item 'xclbins' '$(OUT_DIR)' -Recurse -Force"
-	@$(PWSH) "cd '$(OUT_DIR)'; .\\flm.exe serve qwen2.5vl-it -c 32768" 
+	@$(PWSH) "cd '$(OUT_DIR)'; .\\oflm.exe serve qwen2.5vl-it -c 32768" 
 
 clean:
 	@$(PWSH) "Remove-Item -Recurse -Force '$(BUILD_DIR)'"
@@ -41,18 +41,18 @@ all:
 	@mkdir -p $(OUT_DIR)
 	@cmake --preset linux-default
 	@cmake --build build
-	@cp build/flm $(OUT_DIR)
+	@cp build/oflm $(OUT_DIR)
 
 run:
 	@cp lib/*.so $(OUT_DIR)
 	@cp model_list.json $(OUT_DIR)
 	@cp model_info.json $(OUT_DIR)
-	@cd $(OUT_DIR) && ./flm run gpt-oss -a 0
+	@cd $(OUT_DIR) && ./oflm run gpt-oss -a 0
 
 serve:
 	@cp lib/*.so $(OUT_DIR)
 	@cp model_list.json $(OUT_DIR)
-	@cd $(OUT_DIR) && ./flm serve -a 1 -e 1
+	@cd $(OUT_DIR) && ./oflm serve -a 1 -e 1
 
 clean:
 	@rm -rf $(BUILD_DIR)

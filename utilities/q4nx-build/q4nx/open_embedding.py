@@ -13,7 +13,7 @@ packaging discipline the runtime needs:
   (never absolute builder paths);
 * optional NPU matmul assets in `npu_matmul_f32/`;
 * a deterministic `model_info_entry.json` (path/size/oid per file) that can be
-  pasted into `src/model_info.json` so `flm pull` actually downloads the files.
+  pasted into `src/model_info.json` so `oflm pull` actually downloads the files.
 
 The output is byte-reproducible: file contents are copied verbatim, JSON is
 emitted with sorted keys, and no timestamps or host paths are recorded.
@@ -35,7 +35,7 @@ BODY_FILE = "model.safetensors"
 # Sentence-transformers dense heads shipped by the upstream embedding repos.
 HEADS = ("2_Dense", "3_Dense")
 MANIFEST_NAME = "weights_manifest.json"
-MANIFEST_FORMAT = "flm-open-embedding-manifest-v1"
+MANIFEST_FORMAT = "oflm-open-embedding-manifest-v1"
 # Side artifact carrying the registry metadata (not part of the uploaded repo).
 MODEL_INFO_ARTIFACT = "model_info_entry.json"
 

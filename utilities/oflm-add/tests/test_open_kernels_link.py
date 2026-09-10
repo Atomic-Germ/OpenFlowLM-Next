@@ -1,6 +1,6 @@
 # Traces: OPEN-ADD-KERNEL-LINK (canonical spec: specs/open-engine/spec.md)
 #
-# flm-add picks the open kernel set by ModelSpec, not by model name: the set
+# oflm-add picks the open kernel set by ModelSpec, not by model name: the set
 # whose manifest.json carries the same spec_hash the model derives. Two fake
 # kernel dirs (one matching, one not) and a synthetic model directory
 # (config.json + a model.q4nx safetensors header) pin that choice down.
@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-FLM_ADD = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(FLM_ADD))
+OFLM_ADD = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(OFLM_ADD))
 
-import flm_add  # noqa: E402
+import oflm_add  # noqa: E402
 
 # A Qwen3-dense config small enough to be obviously synthetic; every key the
 # recipes' HF deriver reads for model_type "qwen3".
@@ -70,50 +70,50 @@ def model_dir(tmp_path):
 
 def test_spec_hash_derives_from_the_model_directory(model_dir):
     """The spec comes off config.json + the container header, like the recipes."""
-    spec_hash, note = flm_add.model_spec_hash(model_dir)
+    spec_hash, note = oflm_add.model_spec_hash(model_dir)
     assert spec_hash, note
     assert spec_hash.startswith("sha256:")
     # Stable: the same directory derives the same hash.
-    assert flm_add.model_spec_hash(model_dir)[0] == spec_hash
+    assert oflm_add.model_spec_hash(model_dir)[0] == spec_hash
 
 
 def test_matching_spec_hash_wins_over_a_same_family_set(tmp_path, model_dir):
-    spec_hash, _ = flm_add.model_spec_hash(model_dir)
+    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
     xclbins = tmp_path / "xclbins"
     write_kernel_set(xclbins, "AAA-Wrong-Shape-NPU2", OTHER_HASH)
     right = write_kernel_set(xclbins, "ZZZ-Same-Shape-NPU2", spec_hash)
 
-    found, source = flm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name)
+    found, source = oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name)
     assert found == right
     assert source == "ZZZ-Same-Shape-NPU2"
 
 
 def test_the_models_own_directory_wins_when_several_match(tmp_path, model_dir):
-    spec_hash, _ = flm_add.model_spec_hash(model_dir)
+    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
     xclbins = tmp_path / "xclbins"
     write_kernel_set(xclbins, "AAA-Same-Shape-NPU2", spec_hash)
     mine = write_kernel_set(xclbins, model_dir.name, spec_hash)
 
-    found, source = flm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name)
+    found, source = oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name)
     assert found == mine
     assert source == model_dir.name
 
 
 def test_no_match_selects_nothing(tmp_path, model_dir):
-    spec_hash, _ = flm_add.model_spec_hash(model_dir)
+    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
     xclbins = tmp_path / "xclbins"
     write_kernel_set(xclbins, "Wrong-NPU2", OTHER_HASH)
 
-    assert flm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name) == (None, None)
+    assert oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name) == (None, None)
 
 
 def test_setup_links_the_match_where_find_kernels_looks(tmp_path, model_dir, capsys):
-    spec_hash, _ = flm_add.model_spec_hash(model_dir)
+    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
     xclbins = tmp_path / "xclbins"
     write_kernel_set(xclbins, "Wrong-NPU2", OTHER_HASH)
     right = write_kernel_set(xclbins, "Right-NPU2", spec_hash)
 
-    linked = flm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins])
+    linked = oflm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins])
     if not linked:  # Windows without developer mode: no symlink and no junction
         pytest.skip("this account cannot create a directory link")
     # Engine::find_kernels checks <model dir>/open_kernels before the xclbins root.
@@ -125,7 +125,7 @@ def test_setup_links_the_match_where_find_kernels_looks(tmp_path, model_dir, cap
 def test_no_match_prints_the_export_command(tmp_path, model_dir, capsys):
     xclbins = tmp_path / "xclbins"
     xclbins.mkdir()
-    assert flm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins]) is False
+    assert oflm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins]) is False
     err = capsys.readouterr().err
     assert "export_qwen36_kernels.py" in err
     assert f'--model-dir "{model_dir}"' in err
@@ -136,7 +136,7 @@ def test_override_takes_the_directory_as_given(tmp_path, model_dir):
     xclbins = tmp_path / "xclbins"
     other = write_kernel_set(xclbins, "Unrelated-NPU2", OTHER_HASH)
 
-    linked = flm_add.setup_open_kernels(
+    linked = oflm_add.setup_open_kernels(
         model_dir, model_dir.name, [xclbins], override=other
     )
     if not linked:
@@ -148,4 +148,4 @@ def test_override_without_a_manifest_is_refused(tmp_path, model_dir):
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(SystemExit):
-        flm_add.setup_open_kernels(model_dir, model_dir.name, [], override=empty)
+        oflm_add.setup_open_kernels(model_dir, model_dir.name, [], override=empty)

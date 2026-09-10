@@ -1,4 +1,4 @@
-r"""Test vectors for lm_head_q8 from FLM's captured lm_head pool
+r"""Test vectors for lm_head_q8 from OFLM's captured lm_head pool
 ($OPEN_KERNELS_CAPS/m0d/000127.bo, or LMHEAD_POOL=<file>; verified byte-exact
 against our builder in pools.rs).
 

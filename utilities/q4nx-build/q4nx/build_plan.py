@@ -1,6 +1,6 @@
 """Derive build parameters (-s skeleton, -o name, -t weights type) from HF metadata.
 
-Most converted builds need a "skeleton" source: an existing FLM NPU2 port of the
+Most converted builds need a "skeleton" source: an existing OFLM NPU2 port of the
 true base model that ships exactly the config/tokenizer/vision assets a build
 requires (e.g. Atomic-Germ/Qwen3.5-4B-NPU2). Instead of asking the user for
 -s/-o/-t, we follow the model card's ``base_model`` frontmatter chain upward and
@@ -20,7 +20,7 @@ from typing import Callable, Dict, List, Optional
 from .model_assets import _repo_id_from_url
 
 # Orgs searched (in order) for the {basename}-NPU2 skeleton repo.
-SKELETON_ORGS = ("Atomic-Germ", "FastFlowLM")
+SKELETON_ORGS = ("Atomic-Germ", "OpenFlowLM")
 SKELETON_SUFFIX = "-NPU2"
 MAX_CHAIN_DEPTH = 8
 

@@ -2,7 +2,7 @@
 *  Copyright (c) 2026 Advanced Micro Devices, Inc.
 *  \file update.hpp
 *  \brief Detect new version
-*  \author FastFlowLM Team
+*  \author OpenFlowLM Team
 *  \date 2025-09-24
 *  \version 0.9.21
 */
@@ -59,7 +59,7 @@ static int compare_semver(std::string a, std::string b) {
 static bool g_vercheck_warned_timeout = false;
 
 static bool version_check_disabled() {
-    const char* env = std::getenv("FLM_DISABLE_UPDATE_CHECK");
+    const char* env = std::getenv("OFLM_DISABLE_UPDATE_CHECK");
     if (!env) return false;
 
     std::string value(env);
@@ -107,7 +107,7 @@ static std::string fetch_path_with_timeout_flag(HINTERNET hSession,
         return body;
     }
 
-    WinHttpAddRequestHeaders(hRequest, L"User-Agent: flm/1.0\r\n", (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+    WinHttpAddRequestHeaders(hRequest, L"User-Agent: oflm/1.0\r\n", (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
 
     BOOL ok = WinHttpSendRequest(hRequest,
         WINHTTP_NO_ADDITIONAL_HEADERS, 0,
@@ -156,14 +156,14 @@ static std::string fetch_path_with_timeout_flag(HINTERNET hSession,
 
 
 
-// ROCm/FastFlowLM
+// ROCm/OpenFlowLM
 static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_out) {
     timed_out = false;
 
     const wchar_t* host = L"api.github.com";
     const INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
 
-    HINTERNET hSession = WinHttpOpen(L"FLM-Version-Check/1.0",
+    HINTERNET hSession = WinHttpOpen(L"OFLM-Version-Check/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
@@ -176,7 +176,7 @@ static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_ou
     {
         bool t = false;
         std::string body = fetch_path_with_timeout_flag(hSession, host, port,
-            L"/repos/ROCm/FastFlowLM/releases/latest", t);
+            L"/repos/ROCm/OpenFlowLM/releases/latest", t);
         timed_out = timed_out || t;
         if (!body.empty()) {
             try {
@@ -194,7 +194,7 @@ static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_ou
     {
         bool t = false;
         std::string body = fetch_path_with_timeout_flag(hSession, host, port,
-            L"/repos/ROCm/FastFlowLM/tags?per_page=1", t);
+            L"/repos/ROCm/OpenFlowLM/tags?per_page=1", t);
         timed_out = timed_out || t;
         if (!body.empty()) {
             try {
@@ -222,16 +222,16 @@ static void check_and_notify_new_version() {
     if (timed_out && !g_vercheck_warned_timeout) {
         g_vercheck_warned_timeout = true;
         header_print("Warning", "Version check timed out; continuing without update info.");
-        // std::cout << "[FLM] Warning: version check timed out; continuing without update info.\n";
+        // std::cout << "[OFLM] Warning: version check timed out; continuing without update info.\n";
     }
 
     if (!latest_opt.has_value()) return;
 
-    const std::string current = __FLM_VERSION__;
+    const std::string current = __OFLM_VERSION__;
     const std::string latest = latest_opt.value();
     if (compare_semver(latest, current) > 0) {
-        header_print("FLM", "New version detected! (current v" << current << ", latest " << latest << ")");
-        header_print("FLM", "Download link: https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi");
+        header_print("OFLM", "New version detected! (current v" << current << ", latest " << latest << ")");
+        header_print("OFLM", "Download link: https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi");
     }
 }
 #else
@@ -241,7 +241,7 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
     return size * nmemb;
 }
 
-// ROCm/FastFlowLM (non-Windows)
+// ROCm/OpenFlowLM (non-Windows)
 static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_out) {
     timed_out = false;
     auto fetch_url = [&](const char* url) -> std::optional<std::string> {
@@ -249,7 +249,7 @@ static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_ou
         if (!curl) return std::nullopt;
         std::string body;
         curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "flm/1.0");
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "oflm/1.0");
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 800L);
@@ -266,7 +266,7 @@ static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_ou
         return body;
     };
 
-    if (auto body = fetch_url("https://api.github.com/repos/ROCm/FastFlowLM/releases/latest")) {
+    if (auto body = fetch_url("https://api.github.com/repos/ROCm/OpenFlowLM/releases/latest")) {
         try {
             auto j = nlohmann::json::parse(*body);
             if (j.contains("tag_name") && j["tag_name"].is_string()) {
@@ -275,7 +275,7 @@ static std::optional<std::string> http_get_latest_tag_from_github(bool& timed_ou
         } catch (...) {}
     }
 
-    if (auto body = fetch_url("https://api.github.com/repos/ROCm/FastFlowLM/tags?per_page=1")) {
+    if (auto body = fetch_url("https://api.github.com/repos/ROCm/OpenFlowLM/tags?per_page=1")) {
         try {
             auto j = nlohmann::json::parse(*body);
             if (j.is_array() && !j.empty() && j[0].contains("name") && j[0]["name"].is_string()) {
@@ -300,11 +300,11 @@ static void check_and_notify_new_version() {
 
     if (!latest_opt.has_value()) return;
 
-    const std::string current = __FLM_VERSION__;
+    const std::string current = __OFLM_VERSION__;
     const std::string latest = latest_opt.value();
     if (compare_semver(latest, current) > 0) {
-        header_print("FLM", "New version detected! (current v" << current << ", latest " << latest << ")");
-        header_print("FLM", "Download link: https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi");
+        header_print("OFLM", "New version detected! (current v" << current << ", latest " << latest << ")");
+        header_print("OFLM", "Download link: https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi");
     }
 }
 #endif

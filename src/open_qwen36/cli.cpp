@@ -1,5 +1,5 @@
 /// \file cli.cpp
-/// \brief Drive the open Qwen3.6 engine without the FLM app: token ids in,
+/// \brief Drive the open Qwen3.6 engine without the OFLM app: token ids in,
 ///        greedy token ids and logits out. The test surface for core.cpp and
 ///        the way to run the engine on a box where the app itself does not
 ///        build (this one: no Boost / vcpkg / tokenizers-cpp).
@@ -93,8 +93,8 @@ struct Args {
 
 Args parse(int argc, char** argv) {
     Args a;
-    a.cfg.model_dir = std::getenv("FLM_MODEL_DIR") ? std::getenv("FLM_MODEL_DIR") : "";
-    a.cfg.kernel_dir = std::getenv("FLM_OPEN_KERNELS_DIR") ? std::getenv("FLM_OPEN_KERNELS_DIR") : "";
+    a.cfg.model_dir = std::getenv("OFLM_MODEL_DIR") ? std::getenv("OFLM_MODEL_DIR") : "";
+    a.cfg.kernel_dir = std::getenv("OFLM_OPEN_KERNELS_DIR") ? std::getenv("OFLM_OPEN_KERNELS_DIR") : "";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {

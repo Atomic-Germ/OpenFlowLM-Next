@@ -1,6 +1,6 @@
 /// \file embedding.hpp
 /// \brief embedding class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.10
 /// \note This is a header file for the embedding class.

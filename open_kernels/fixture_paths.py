@@ -8,7 +8,7 @@ They now come from here:
   relative paths against the cfg's own directory, so `build/final.xclbin`,
   `x.bin` and `../deltanet/build/insts.bin` work from any checkout, on either
   side of a WSL/Windows split.
-- Captured FLM buffers (weights sliced out of the closed engine's device
+- Captured OFLM buffers (weights sliced out of the closed engine's device
   buffers) are not in this repo. `OPEN_KERNELS_CAPS` names the directory that
   holds them; a generator that needs one and can't find it stops with a
   message instead of a traceback. `OPEN_KERNELS_CAPS_HOST` is the same
@@ -40,10 +40,10 @@ def _fail(msg: str) -> "None":
 
 
 def caps(rel: str) -> Path:
-    """A captured FLM buffer, for reading by the generator."""
+    """A captured OFLM buffer, for reading by the generator."""
     root = os.environ.get("OPEN_KERNELS_CAPS")
     if not root:
-        _fail(f"needs the captured FLM buffer {rel!r}, which is not in this repo. "
+        _fail(f"needs the captured OFLM buffer {rel!r}, which is not in this repo. "
               "Set OPEN_KERNELS_CAPS to the directory holding the captures "
               "(phlegm's was C:/caps; /mnt/c/caps under WSL), or use a design with a "
               "synthetic fixture (gemv_q4, ln, silu_mul, npu_offload/matmul).")
@@ -79,8 +79,8 @@ def model_q4nx() -> str:
     """The .q4nx container the chain harnesses load through kernel-interp."""
     p = os.environ.get("MODEL_Q4NX")
     if not p or not Path(p).is_file():
-        _fail("needs MODEL_Q4NX=<path to the model's .q4nx> (FLM keeps models under "
-              "~/.flm/models/<model>/).")
+        _fail("needs MODEL_Q4NX=<path to the model's .q4nx> (OFLM keeps models under "
+              "~/.oflm/models/<model>/).")
     return p
 
 

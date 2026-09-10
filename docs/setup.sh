@@ -62,8 +62,8 @@ echo "    export PATH=\"$GEM_BIN_DIR:\$PATH\""
 echo
 
 # === Project-specific: point this to your Jekyll site ===
-# For your FastFlowLM repo, the Jekyll site is under docs/
-PROJECT_DIR="$HOME/flm/FastFlowLM"
+# For your OpenFlowLM repo, the Jekyll site is under docs/
+PROJECT_DIR="$HOME/oflm/OpenFlowLM"
 JEKYLL_DIR="$PROJECT_DIR/docs"
 
 if [ ! -d "$JEKYLL_DIR" ]; then

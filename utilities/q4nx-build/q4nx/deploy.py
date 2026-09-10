@@ -1,22 +1,22 @@
-"""Deploy converted models into the FLM runtime and register them.
+"""Deploy converted models into the OFLM runtime and register them.
 
-FLM resolves ``flm run <name>:<size>`` through ``model_list.json``: the tag maps to
+OFLM resolves ``oflm run <name>:<size>`` through ``model_list.json``: the tag maps to
 an entry whose ``name`` is the directory inside ``<models_root>/models/``, and whose
 ``details.family`` selects the runtime engine (``modelFamilyMap``). The weights are
 loaded from ``config.json`` in that directory.
 
-Because the system registry (``/opt/fastflowlm/share/flm/model_list.json``) is
+Because the system registry (``/opt/openflowlm/share/oflm/model_list.json``) is
 root-owned, we never write to it. Instead the converted model is copied into the
 user's models directory and registered in a user-level copy of the registry at
-``~/.config/flm/model_list.json``. Point ``FLM_CONFIG_PATH`` at that file so FLM
+``~/.config/oflm/model_list.json``. Point ``OFLM_CONFIG_PATH`` at that file so OFLM
 picks it up:
 
-    export FLM_CONFIG_PATH=$HOME/.config/flm/model_list.json
+    export OFLM_CONFIG_PATH=$HOME/.config/oflm/model_list.json
 
 The new entry is derived from the official entry for the source model (same
 ``details.family`` so the same engine is dispatched, same ``size`` for the memlock
 reservation, same ``max_prefill_len`` which the runner reads unconditionally) but with
-``url``/``file_url``/``ms_url`` left empty (it is a local model; several FLM code
+``url``/``file_url``/``ms_url`` left empty (it is a local model; several OFLM code
 paths read them as strings) and ``files`` set to exactly what was deployed so
 ``is_model_downloaded`` never triggers a download.
 """
@@ -60,15 +60,15 @@ MODEL_FILES = [
 ]
 
 _INSTALL_PREFIX_CANDIDATES = [
-    "/opt/fastflowlm/share/flm/model_list.json",
-    "/usr/share/flm/model_list.json",
-    "/usr/local/share/flm/model_list.json",
+    "/opt/openflowlm/share/oflm/model_list.json",
+    "/usr/share/oflm/model_list.json",
+    "/usr/local/share/oflm/model_list.json",
 ]
 
 _XCLBIN_PREFIX_CANDIDATES = [
-    Path("/opt/fastflowlm/share/flm"),
-    Path("/usr/share/flm"),
-    Path("/usr/local/share/flm"),
+    Path("/opt/openflowlm/share/oflm"),
+    Path("/usr/share/oflm"),
+    Path("/usr/local/share/oflm"),
 ]
 
 
@@ -81,16 +81,16 @@ def _tag_parts(tag: str) -> Tuple[str, str]:
     return name, size
 
 
-def find_flm_executable() -> Optional[str]:
-    return shutil.which("flm")
+def find_oflm_executable() -> Optional[str]:
+    return shutil.which("oflm")
 
 
 def find_system_model_list() -> Path:
-    """Locate the model_list.json FLM currently resolves (FLM_CONFIG_PATH first)."""
-    env = os.environ.get("FLM_CONFIG_PATH")
+    """Locate the model_list.json OFLM currently resolves (OFLM_CONFIG_PATH first)."""
+    env = os.environ.get("OFLM_CONFIG_PATH")
     if env and Path(env).is_file():
         return Path(env)
-    exe = find_flm_executable()
+    exe = find_oflm_executable()
     if exe:
         candidate = Path(exe).parent / "model_list.json"
         if candidate.is_file():
@@ -99,20 +99,20 @@ def find_system_model_list() -> Path:
         if Path(candidate).is_file():
             return Path(candidate)
     raise FileNotFoundError(
-        "Could not locate FLM's model_list.json. Set FLM_CONFIG_PATH to the file "
-        "FLM reads before deploying."
+        "Could not locate OFLM's model_list.json. Set OFLM_CONFIG_PATH to the file "
+        "OFLM reads before deploying."
     )
 
 
 def get_models_root() -> Path:
     """Directory holding per-model folders, mirroring utils::get_models_directory."""
-    base = Path(os.environ["FLM_MODEL_PATH"]) if os.environ.get("FLM_MODEL_PATH") else Path.home() / ".config" / "flm"
+    base = Path(os.environ["OFLM_MODEL_PATH"]) if os.environ.get("OFLM_MODEL_PATH") else Path.home() / ".config" / "oflm"
     return base / "models"
 
 
 def get_user_registry_path() -> Path:
-    """Where the user-level registry lives. Honors an already-set FLM_CONFIG_PATH."""
-    env = os.environ.get("FLM_CONFIG_PATH")
+    """Where the user-level registry lives. Honors an already-set OFLM_CONFIG_PATH."""
+    env = os.environ.get("OFLM_CONFIG_PATH")
     if env:
         return Path(env)
     return get_models_root().parent / "model_list.json"
@@ -121,17 +121,17 @@ def get_user_registry_path() -> Path:
 def find_system_xclbin_root() -> Optional[Path]:
     """The system ``<prefix>/xclbins`` directory, mirroring utils::find_xclbin_path.
 
-    FLM's model libraries resolve kernels as ``<xclbin_root>/<model_dir>/layer.xclbin``
+    OFLM's model libraries resolve kernels as ``<xclbin_root>/<model_dir>/layer.xclbin``
     where ``<xclbin_root>`` is the directory that contains an ``xclbins/`` folder.
     """
-    env = os.environ.get("FLM_XCLBIN_PATH")
+    env = os.environ.get("OFLM_XCLBIN_PATH")
     if env:
         path = Path(env)
         if path.name == "xclbins":
             path = path.parent
         if (path / "xclbins").is_dir():
             return path / "xclbins"
-    exe = find_flm_executable()
+    exe = find_oflm_executable()
     if exe and (Path(exe).parent / "xclbins").is_dir():
         return Path(exe).parent / "xclbins"
     for prefix in _XCLBIN_PREFIX_CANDIDATES:
@@ -156,8 +156,8 @@ def link_model_xclbins(model_dir_name: str, source_dir_name: str) -> Optional[Pa
 
     The runtime derives the xclbin folder from the model's directory name, so a
     finetune deployed under its own name needs ``<xclbin_root>/<model_dir_name>/``.
-    We maintain a user-level ``~/.config/flm/xclbins/`` that mirrors every system
-    model's xclbins (so official models keep working under the FLM_XCLBIN_PATH
+    We maintain a user-level ``~/.config/oflm/xclbins/`` that mirrors every system
+    model's xclbins (so official models keep working under the OFLM_XCLBIN_PATH
     override) and symlink the custom model's folder to its parent model's.
     """
     system_root = find_system_xclbin_root()
@@ -290,7 +290,7 @@ def deploy_model(
     model_dir_name: Optional[str] = None,
     deploy_from: Optional[str] = None,
 ) -> dict:
-    """Copy the assembled model into FLM's models dir and register the tag.
+    """Copy the assembled model into OFLM's models dir and register the tag.
 
     Returns a dict with the tag, target directory, source entry tag (if any) and
     the user registry path.
@@ -325,7 +325,7 @@ def deploy_model(
     if not base_entry:
         family = ARCH_TO_FAMILY.get(model_arch, "")
         entry.setdefault("details", {}).setdefault("family", family)
-        entry.setdefault("flm_min_version", "0.9.45")
+        entry.setdefault("oflm_min_version", "0.9.45")
 
     user_registry = get_user_registry_path()
     register_model(tag, entry, user_registry, system_list)
@@ -336,22 +336,22 @@ def deploy_model(
         print(f"[INFO] Registry defaults copied from official entry: {src_tag}")
     else:
         print("[WARN] No official registry entry found; wrote a minimal entry (family/size guesses).")
-    if os.environ.get("FLM_CONFIG_PATH") != str(user_registry):
-        print(f"[INFO] FLM does not read this registry yet. Add to your shell rc:\n"
-              f"        export FLM_CONFIG_PATH={user_registry}")
+    if os.environ.get("OFLM_CONFIG_PATH") != str(user_registry):
+        print(f"[INFO] OFLM does not read this registry yet. Add to your shell rc:\n"
+              f"        export OFLM_CONFIG_PATH={user_registry}")
     else:
-        print(f"[INFO] FLM_CONFIG_PATH already points at this registry. Ready to 'flm run {tag}'.")
+        print(f"[INFO] OFLM_CONFIG_PATH already points at this registry. Ready to 'oflm run {tag}'.")
 
     source_dir_name = base_entry.get("name") if base_entry else None
     if source_dir_name:
         user_xclbin_root = link_model_xclbins(model_dir_name, source_dir_name)
         if user_xclbin_root is not None:
             print(f"[INFO] Linked xclbins for '{model_dir_name}' -> '{source_dir_name}'")
-            if os.environ.get("FLM_XCLBIN_PATH") != str(user_xclbin_root.parent):
+            if os.environ.get("OFLM_XCLBIN_PATH") != str(user_xclbin_root.parent):
                 print(f"[INFO] The runtime needs to find these xclbins. Add to your shell rc:\n"
-                      f"        export FLM_XCLBIN_PATH={user_xclbin_root.parent}")
+                      f"        export OFLM_XCLBIN_PATH={user_xclbin_root.parent}")
             else:
-                print("[INFO] FLM_XCLBIN_PATH already points at the user xclbin tree.")
+                print("[INFO] OFLM_XCLBIN_PATH already points at the user xclbin tree.")
 
     return {
         "tag": tag,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build every open NPU kernel xclbin set so `cmake --install` ships a full
-distribution. Driven by the `export_kernels` CMake target (FLM_BUILD_KERNELS=ON).
+distribution. Driven by the `export_kernels` CMake target (OFLM_BUILD_KERNELS=ON).
 Safe to run repeatedly: each build's cache skips artifacts already exported on
 the same toolchain.
 

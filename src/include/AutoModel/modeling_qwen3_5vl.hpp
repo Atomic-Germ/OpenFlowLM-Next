@@ -1,6 +1,6 @@
 /// \file Qwen3_5VL.hpp
 /// \brief Qwen3_5VL class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-03
 /// \version 0.9.24
 /// \note This is a source file for the Qwen3_5VL class
@@ -48,7 +48,7 @@ private:
     void preprocess_image(qwen3_5vl_image_t& image,  std::vector<bf16> &pixel_values);
 
 public:
-    Qwen3_5VL(flm_rt::device* npu_device_inst);
+    Qwen3_5VL(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;
@@ -133,7 +133,7 @@ public:
                     target_size = 0;
                 }
                 if (this->image_pre_resize > 0) {
-                    header_print_r("FLM", "Qwen3.5 pre-resize image height to " + std::to_string(target_size) + " pixels if larger than that");
+                    header_print_r("OFLM", "Qwen3.5 pre-resize image height to " + std::to_string(target_size) + " pixels if larger than that");
                 }
                 return true;
             } catch (const std::bad_any_cast&) {

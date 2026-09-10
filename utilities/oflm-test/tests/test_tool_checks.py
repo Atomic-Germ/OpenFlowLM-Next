@@ -1,6 +1,6 @@
 """
 Unit tests for ToolCallingTask — tool-calling checks at every complexity
-level (L1-L5). All network/server calls are mocked so no FLM server is
+level (L1-L5). All network/server calls are mocked so no OFLM server is
 required.
 
 Run with:
@@ -20,12 +20,12 @@ from unittest.mock import patch
 # Make sure the package is importable from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from flm_test.tasks import ToolCallingTask
+from oflm_test.tasks import ToolCallingTask
 
 
 def _make_task():
     """Instantiate a ToolCallingTask with all server I/O patched away."""
-    with patch.object(ToolCallingTask, "_get_flm_version", return_value="0.9.99"), \
+    with patch.object(ToolCallingTask, "_get_oflm_version", return_value="0.9.99"), \
          patch.object(ToolCallingTask, "_fetch_all_models", return_value=[]), \
          patch("os.makedirs"):
         return ToolCallingTask(base_url="http://127.0.0.1:52625/v1", backend_os="linux")

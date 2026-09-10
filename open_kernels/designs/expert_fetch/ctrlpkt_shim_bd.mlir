@@ -4,7 +4,7 @@
 // descriptor and trigger it, so that a data-dependent slab of a large DDR
 // buffer streams into a core -- with no host round-trip per fetch?
 //
-// This is the mechanism FLM's fused decode layer kernel must be using for
+// This is the mechanism OFLM's fused decode layer kernel must be using for
 // routed MoE experts: its control code writes 32 shim BDs pointing at pool
 // offset 0 (8 experts x 4 gate/up stripes) and never enqueues them from the
 // txn stream; every task-queue write in the txn names the *static* weight BDs
@@ -16,7 +16,7 @@
 // to a core tile (aie.packet_source<%core, DMA:1>), which is the part that
 // actually removes the host from the loop.
 //
-// Register map (AIE-ML / AIE2P NOC module, confirmed against FLM's own txn):
+// Register map (AIE-ML / AIE2P NOC module, confirmed against OFLM's own txn):
 //   BD n:            0x1D000 + 0x20*n   word0 = length (32b)
 //                                       word1 = base_address_low  << 2
 //                                       word2 = base_address_high (bits 15:0)
@@ -92,7 +92,7 @@ module {
       // Slab DMA: CONFIGURED but deliberately NOT started. The compiler emits
       // the full BD setup (length, stride, lock, packet fields) pointing at
       // %big offset 0; the control packet then rewrites only the address words
-      // and pushes the task queue -- exactly the shape FLM's layer kernel uses
+      // and pushes the task queue -- exactly the shape OFLM's layer kernel uses
       // for its 32 routed-expert descriptors.
       %t_slab = aiex.dma_configure_task_for @slab {
         aie.dma_bd(%big : memref<1048576xi32> offset = 0 len = 4096)

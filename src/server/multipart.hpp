@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file multipart.hpp
  * \brief MultiPart/form-data Parser
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-10-16
  *  \version 0.9.24
  */

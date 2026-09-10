@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
-project(flm LANGUAGES CXX VERSION 0.1.0)
+project(oflm LANGUAGES CXX VERSION 0.1.0)
 
 if(POLICY CMP0207)
     cmake_policy(SET CMP0207 NEW)
 endif()
 
-if(NOT DEFINED FLM_VERSION)
-    message(FATAL_ERROR "FLM_VERSION must be specified externally. Use -DFLM_VERSION=<version> when running cmake.")
+if(NOT DEFINED OFLM_VERSION)
+    message(FATAL_ERROR "OFLM_VERSION must be specified externally. Use -DOFLM_VERSION=<version> when running cmake.")
 endif()
 
 if(NOT DEFINED NPU_VERSION)
@@ -35,31 +35,31 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 # ———————————————————————————————————————————————
 # NPU runtime backend selection.
 #
-# FLM ships two interchangeable NPU dispatch backends:
+# OFLM ships two interchangeable NPU dispatch backends:
 #   * XRT  — the Xilinx Run Time (the historical default), and
 #   * HRX  — the HRX amdxdna runtime.
 #
 # The reviewer-requested build flag selects between them (0 = XRT, 1 = HRX) with
 # XRT as the default, so the XRT build is unchanged and HRX is strictly opt-in.
-# FLM_USE_HRX=OFF selects XRT; FLM_USE_HRX=ON selects HRX. The choice drives:
-#   - which runtime headers/namespace alias the sources see (FLM_USE_HRX define),
+# OFLM_USE_HRX=OFF selects XRT; OFLM_USE_HRX=ON selects HRX. The choice drives:
+#   - which runtime headers/namespace alias the sources see (OFLM_USE_HRX define),
 #   - which prebuilt engine libs are consumed (lib/xrt vs lib/hrx), and
 #   - which runtime is discovered, linked and bundled below.
 # ———————————————————————————————————————————————
-option(FLM_USE_HRX "Use the HRX amdxdna NPU runtime instead of XRT (0=XRT default, 1=HRX)" OFF)
-option(FLM_PORTABLE_BUILD "Build portable distribution with bundled runtime libraries" OFF)
+option(OFLM_USE_HRX "Use the HRX amdxdna NPU runtime instead of XRT (0=XRT default, 1=HRX)" OFF)
+option(OFLM_PORTABLE_BUILD "Build portable distribution with bundled runtime libraries" OFF)
 
-if(FLM_USE_HRX)
-    set(FLM_RUNTIME_NAME "hrx")
-    message(STATUS "FLM NPU runtime backend: HRX (FLM_USE_HRX=ON)")
+if(OFLM_USE_HRX)
+    set(OFLM_RUNTIME_NAME "hrx")
+    message(STATUS "OFLM NPU runtime backend: HRX (OFLM_USE_HRX=ON)")
 else()
-    set(FLM_RUNTIME_NAME "xrt")
-    message(STATUS "FLM NPU runtime backend: XRT (FLM_USE_HRX=OFF, default)")
+    set(OFLM_RUNTIME_NAME "xrt")
+    message(STATUS "OFLM NPU runtime backend: XRT (OFLM_USE_HRX=OFF, default)")
 endif()
 
 # Prebuilt engine libraries live in a per-backend subdirectory so the XRT-built
 # and HRX-built .so/.dll/.lib never collide (see src/lib/xrt and src/lib/hrx).
-set(FLM_ENGINE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}")
+set(OFLM_ENGINE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/${OFLM_RUNTIME_NAME}")
 
 # ———————————————————————————————————————————————
 # NPU runtime discovery.
@@ -67,7 +67,7 @@ set(FLM_ENGINE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}")
 #   XRT: discovered via pkg-config (system install), a manual /opt/xilinx/xrt
 #        fallback, or fetched from source for a portable build.
 # ———————————————————————————————————————————————
-if(FLM_USE_HRX)
+if(OFLM_USE_HRX)
     find_package(hrx CONFIG REQUIRED)
 else()
     if(WIN32)
@@ -86,7 +86,7 @@ else()
         endif()
 
         # Portable build: fetch XRT from source if it is not installed on the host.
-        if(FLM_PORTABLE_BUILD AND NOT XRT_FOUND)
+        if(OFLM_PORTABLE_BUILD AND NOT XRT_FOUND)
             message(STATUS "XRT not found on system; fetching from source for portable build")
             include(FetchContent)
             set(XRT_GIT_REPO "https://github.com/Xilinx/XRT.git" CACHE STRING "XRT Git repository URL")
@@ -121,9 +121,9 @@ else()
         # Portable XRT build: statically link FFmpeg (and zlib) so the self-
         # contained tarball does not depend on the host having libavformat/
         # libavcodec/... installed. FFmpeg and zlib are fetched and built from
-        # source; the resulting .a archives are linked into flm below. Non-
+        # source; the resulting .a archives are linked into oflm below. Non-
         # portable builds keep using the system FFmpeg via pkg-config.
-        if(FLM_PORTABLE_BUILD)
+        if(OFLM_PORTABLE_BUILD)
             include(FetchContent)
             message(STATUS "Portable build: FFmpeg and zlib will be built statically")
 
@@ -246,21 +246,21 @@ endif()
 # NATIVE paths: mklink is a cmd builtin and silently rejects the forward
 # slashes CMake uses internally.
 if(WIN32)
-    set(FLM_SPM_TP
+    set(OFLM_SPM_TP
         "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp/sentencepiece/third_party")
-    if(EXISTS "${FLM_SPM_TP}/abseil-cpp/absl" AND NOT EXISTS "${FLM_SPM_TP}/absl")
-        file(TO_NATIVE_PATH "${FLM_SPM_TP}/absl" FLM_SPM_LINK)
-        file(TO_NATIVE_PATH "${FLM_SPM_TP}/abseil-cpp/absl" FLM_SPM_TARGET)
+    if(EXISTS "${OFLM_SPM_TP}/abseil-cpp/absl" AND NOT EXISTS "${OFLM_SPM_TP}/absl")
+        file(TO_NATIVE_PATH "${OFLM_SPM_TP}/absl" OFLM_SPM_LINK)
+        file(TO_NATIVE_PATH "${OFLM_SPM_TP}/abseil-cpp/absl" OFLM_SPM_TARGET)
         execute_process(
-            COMMAND cmd /c mklink /J "${FLM_SPM_LINK}" "${FLM_SPM_TARGET}"
-            RESULT_VARIABLE FLM_SPM_RC
+            COMMAND cmd /c mklink /J "${OFLM_SPM_LINK}" "${OFLM_SPM_TARGET}"
+            RESULT_VARIABLE OFLM_SPM_RC
             OUTPUT_QUIET ERROR_QUIET)
-        if(FLM_SPM_RC EQUAL 0)
+        if(OFLM_SPM_RC EQUAL 0)
             message(STATUS "sentencepiece: junction third_party/absl -> abseil-cpp/absl")
         endif()
         # No else(): if the junction fails, sentencepiece's own symlink attempt
         # runs next and produces the real diagnostic. Do not mask it.
-    elseif(NOT EXISTS "${FLM_SPM_TP}/absl")
+    elseif(NOT EXISTS "${OFLM_SPM_TP}/absl")
         # HONEST LIMITATION: abseil-cpp is fetched by FetchContent INSIDE
         # sentencepiece's own CMakeLists, i.e. during the add_subdirectory()
         # below -- so on a genuinely fresh clone the target does not exist yet
@@ -290,7 +290,7 @@ file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "se
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
-if(NOT FLM_USE_HRX)
+if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
     # The open Qwen3.6-MoE engine (open_qwen36/, open XDNA2 kernels under
     # xclbins/<model>/open_kernels). XRT only: it drives the kernels through
@@ -317,9 +317,9 @@ endif()
 #
 # Sources are listed EXPLICITLY, not globbed, per AGENTS.md.
 #
-# NOT FLM_USE_HRX, exactly like npu_matmul.cpp above: open_npue/npu_device.cpp
+# NOT OFLM_USE_HRX, exactly like npu_matmul.cpp above: open_npue/npu_device.cpp
 # talks to XRT directly, and the encoders are unusable without it.
-if(NOT FLM_USE_HRX)
+if(NOT OFLM_USE_HRX)
     set(OPEN_NPUE_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/npue_encoder.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_npue/npue.cpp"
@@ -410,7 +410,7 @@ if(NOT WIN32)
 endif()
 
 
-add_executable(flm ${SOURCES} ${HEADERS})
+add_executable(oflm ${SOURCES} ${HEADERS})
 
 if(WIN32)
     if(VCPKG_TOOLCHAIN)
@@ -451,7 +451,7 @@ else()
     # readline is GPL; skip it for portable builds (the CLI falls back to a
     # plain line reader via the FASTFLOWLM_USE_READLINE guard) so the portable
     # tarball carries no readline/ncurses runtime dependency.
-    if(NOT FLM_PORTABLE_BUILD)
+    if(NOT OFLM_PORTABLE_BUILD)
         pkg_check_modules(readline REQUIRED IMPORTED_TARGET readline)
         pkg_check_modules(ncurses REQUIRED IMPORTED_TARGET ncursesw)
     endif()
@@ -460,7 +460,7 @@ endif()
 # ———————————————————————————————————————————————
 # Library specific settings
 # ———————————————————————————————————————————————
-target_include_directories(flm PUBLIC
+target_include_directories(oflm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/runner
@@ -470,47 +470,47 @@ target_include_directories(flm PUBLIC
 )
 
 # XRT backend: add the XRT headers (HRX carries its own via the hrx::hrx target).
-if(NOT FLM_USE_HRX)
+if(NOT OFLM_USE_HRX)
     if(NOT WIN32 AND XRT_FOUND)
-        target_include_directories(flm PUBLIC ${XRT_INCLUDE_DIRS})
+        target_include_directories(oflm PUBLIC ${XRT_INCLUDE_DIRS})
     else()
-        target_include_directories(flm PUBLIC ${XRT_INCLUDE_DIR})
+        target_include_directories(oflm PUBLIC ${XRT_INCLUDE_DIR})
     endif()
 endif()
 
 if(WIN32 AND NOT VCPKG_TOOLCHAIN)
     # Bare CI runner: standalone Boost + vcpkg headers by absolute path.
-    target_include_directories(flm PUBLIC
+    target_include_directories(oflm PUBLIC
         C:/dev/boost_1_88_0
         C:/dev/vcpkg/installed/x64-windows/include/
     )
 endif()
 
-target_compile_definitions(flm PUBLIC
+target_compile_definitions(oflm PUBLIC
     DISABLE_ABI_CHECK=1
     CMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
     CMAKE_XCLBIN_PREFIX="${CMAKE_XCLBIN_PREFIX}"
-    __FLM_VERSION__=\"${FLM_VERSION}\"
+    __OFLM_VERSION__=\"${OFLM_VERSION}\"
     __NPU_VERSION__=\"${NPU_VERSION}\"
-    FLM_USE_OPEN_EMBEDDING=1
+    OFLM_USE_OPEN_EMBEDDING=1
 )
 
 # Select the NPU runtime backend seen by the sources (device_runtime.hpp et al.).
-if(FLM_USE_HRX)
-    target_compile_definitions(flm PUBLIC FLM_USE_HRX=1)
+if(OFLM_USE_HRX)
+    target_compile_definitions(oflm PUBLIC OFLM_USE_HRX=1)
 endif()
 
 # The open embedding NPU backend uses XRT directly. HRX retains the CPU path.
-if(NOT FLM_USE_HRX)
-    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
+if(NOT OFLM_USE_HRX)
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)
     # Qwen3.6-MoE on the open kernels (open_qwen36/); the closed engine stays
-    # reachable with FLM_QWEN36_ENGINE=closed.
-    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_QWEN36=1)
-    target_include_directories(flm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
+    # reachable with OFLM_QWEN36_ENGINE=closed.
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_QWEN36=1)
+    target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
 endif()
 
 if(WIN32)
-    target_compile_definitions(flm PUBLIC
+    target_compile_definitions(oflm PUBLIC
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         # Handle legacy stdio functions
@@ -522,31 +522,31 @@ endif()
 
 if(WIN32 AND NOT VCPKG_TOOLCHAIN)
     # Bare CI runner: statically link the standalone Boost + curl.
-    target_compile_definitions(flm PUBLIC
+    target_compile_definitions(oflm PUBLIC
         CURL_STATICLIB
         BOOST_ALL_NO_LIB
         BOOST_ALL_STATIC_LINK
     )
 endif()
 
-target_link_directories(flm PUBLIC
-    ${FLM_ENGINE_LIB_DIR}       # per-backend prebuilt engine libs (lib/xrt or lib/hrx)
+target_link_directories(oflm PUBLIC
+    ${OFLM_ENGINE_LIB_DIR}       # per-backend prebuilt engine libs (lib/xrt or lib/hrx)
     ${CMAKE_CURRENT_SOURCE_DIR}/lib     # shared third-party runtime libs (ffmpeg/curl/fftw/... on Windows)
     ${FFMPEG_LIBRARY_DIRS}
 )
 
 # XRT backend: add the XRT runtime library dir (aiebu ships in lib/<backend>).
-if(NOT FLM_USE_HRX)
+if(NOT OFLM_USE_HRX)
     if(NOT WIN32 AND XRT_FOUND)
-        target_link_directories(flm PUBLIC ${XRT_LIBRARY_DIRS})
+        target_link_directories(oflm PUBLIC ${XRT_LIBRARY_DIRS})
     else()
-        target_link_directories(flm PUBLIC ${XRT_LIB_DIR})
+        target_link_directories(oflm PUBLIC ${XRT_LIB_DIR})
     endif()
 endif()
 
 if(WIN32 AND NOT VCPKG_TOOLCHAIN)
     # Bare CI runner: standalone Boost stage libs + vcpkg import libs.
-    target_link_directories(flm PUBLIC
+    target_link_directories(oflm PUBLIC
         C:/dev/boost_1_88_0/stage/lib
         C:/dev/vcpkg/installed/x64-windows/lib
     )
@@ -554,11 +554,11 @@ endif()
 
 # Link static libraries first
 if(MSVC)
-    target_link_libraries(flm PUBLIC ${STATIC_LIBS})
+    target_link_libraries(oflm PUBLIC ${STATIC_LIBS})
 endif()
 
 # Link your custom libraries (these may still be DLLs if no static versions available)
-target_link_libraries(flm PUBLIC
+target_link_libraries(oflm PUBLIC
     q4_npu_eXpress
     llama_npu
     qwen2_npu
@@ -585,37 +585,37 @@ target_link_libraries(flm PUBLIC
 
 # Link the selected NPU runtime after the detail model libraries above so their
 # runtime references (libhrx / libxrt_coreutil) resolve.
-if(FLM_USE_HRX)
+if(OFLM_USE_HRX)
     # (Windows: hrx.lib import lib for hrx.dll; Linux: libhrx.so.)
-    target_link_libraries(flm PUBLIC hrx::hrx)
+    target_link_libraries(oflm PUBLIC hrx::hrx)
     if(NOT WIN32)
-        set_target_properties(flm PROPERTIES
-            BUILD_RPATH "$<TARGET_FILE_DIR:hrx::hrx>;${FLM_ENGINE_LIB_DIR}")
+        set_target_properties(oflm PROPERTIES
+            BUILD_RPATH "$<TARGET_FILE_DIR:hrx::hrx>;${OFLM_ENGINE_LIB_DIR}")
     endif()
 else()
     # XRT: link xrt_coreutil (+ aiebu for the ELF assembler used by npu_utils_xrt).
     if(XRT_BUILT_FROM_SOURCE AND TARGET xrt_coreutil)
-        target_link_libraries(flm PUBLIC xrt_coreutil)
+        target_link_libraries(oflm PUBLIC xrt_coreutil)
     elseif(NOT WIN32 AND XRT_FOUND)
-        target_link_libraries(flm PUBLIC ${XRT_LIBRARIES})
+        target_link_libraries(oflm PUBLIC ${XRT_LIBRARIES})
     else()
-        target_link_libraries(flm PUBLIC xrt_coreutil)
+        target_link_libraries(oflm PUBLIC xrt_coreutil)
     endif()
     if(WIN32)
-        target_link_libraries(flm PUBLIC aiebu_static)
+        target_link_libraries(oflm PUBLIC aiebu_static)
     else()
-        target_link_libraries(flm PUBLIC aiebu)
+        target_link_libraries(oflm PUBLIC aiebu)
     endif()
     if(NOT WIN32)
-        set_target_properties(flm PROPERTIES
-            BUILD_RPATH "${FLM_ENGINE_LIB_DIR}")
+        set_target_properties(oflm PROPERTIES
+            BUILD_RPATH "${OFLM_ENGINE_LIB_DIR}")
     endif()
 endif()
 
 if(WIN32 AND VCPKG_TOOLCHAIN)
     # Local/managed vcpkg: link the imported targets from the CONFIG packages
     # found above (versioned import-lib names resolved automatically).
-    target_link_libraries(flm PUBLIC
+    target_link_libraries(oflm PUBLIC
         ${FFMPEG_LIBRARIES}
         Boost::program_options
         CURL::libcurl
@@ -626,7 +626,7 @@ if(WIN32 AND VCPKG_TOOLCHAIN)
 elseif(WIN32)
     # Bare CI runner: link the native deps by raw name from the standalone Boost
     # + vcpkg lib dirs wired above (no CMake package configs there).
-    target_link_libraries(flm PUBLIC
+    target_link_libraries(oflm PUBLIC
         avformat
         avcodec
         avutil
@@ -640,19 +640,19 @@ elseif(WIN32)
     )
 elseif(FFMPEG_BUILT_FROM_SOURCE)
     # Portable Linux: link the static FFmpeg archives built above (plus zlib) so
-    # flm carries no libav*/libsw* runtime dependency.
+    # oflm carries no libav*/libsw* runtime dependency.
     if(ZLIB_BUILT_FROM_SOURCE)
-        set(_flm_zlib_lib ${ZLIB_STATIC_LIB})
+        set(_oflm_zlib_lib ${ZLIB_STATIC_LIB})
     else()
-        set(_flm_zlib_lib z)
+        set(_oflm_zlib_lib z)
     endif()
-    target_link_libraries(flm PUBLIC
+    target_link_libraries(oflm PUBLIC
         ${FFMPEG_LIBRARY_DIRS}/libavformat.a
         ${FFMPEG_LIBRARY_DIRS}/libavcodec.a
         ${FFMPEG_LIBRARY_DIRS}/libavutil.a
         ${FFMPEG_LIBRARY_DIRS}/libswscale.a
         ${FFMPEG_LIBRARY_DIRS}/libswresample.a
-        ${_flm_zlib_lib}
+        ${_oflm_zlib_lib}
         Boost::program_options
         CURL::libcurl
         PkgConfig::FFTW3
@@ -660,7 +660,7 @@ elseif(FFMPEG_BUILT_FROM_SOURCE)
         PkgConfig::FFTW3L
     )
 else()
-    target_link_libraries(flm PUBLIC
+    target_link_libraries(oflm PUBLIC
         ${FFMPEG_LIBRARIES}
         Boost::program_options
         CURL::libcurl
@@ -671,17 +671,17 @@ else()
 endif()
 
 if(NOT WIN32)
-    target_compile_options(flm PUBLIC -mavx -mavx2)
+    target_compile_options(oflm PUBLIC -mavx -mavx2)
 
     # readline is only linked for non-portable builds (see the discovery block);
     # the CLI compiles a plain line-reader fallback when the macro is undefined.
-    if(NOT FLM_PORTABLE_BUILD)
-        target_compile_definitions(flm PUBLIC FASTFLOWLM_USE_READLINE=1)
-        target_link_libraries(flm PUBLIC PkgConfig::readline PkgConfig::ncurses)
+    if(NOT OFLM_PORTABLE_BUILD)
+        target_compile_definitions(oflm PUBLIC FASTFLOWLM_USE_READLINE=1)
+        target_link_libraries(oflm PUBLIC PkgConfig::readline PkgConfig::ncurses)
     endif()
 
     # Link with dl library for dlopen() support (used for preloading bundled libraries)
-    target_link_libraries(flm PUBLIC dl)
+    target_link_libraries(oflm PUBLIC dl)
 endif()
 
 # ———————————————————————————————————————————————
@@ -691,40 +691,40 @@ endif()
 # - tokenizers_cpp: main tokenizers C++ library
 # - tokenizers_c: tokenizers C FFI bindings  
 # - sentencepiece: sentencepiece tokenizer library
-target_link_libraries(flm PRIVATE
+target_link_libraries(oflm PRIVATE
     tokenizers_cpp
 )
 
 if(WIN32)
-    target_link_libraries(flm PRIVATE
+    target_link_libraries(oflm PRIVATE
         ntdll wsock32 ws2_32 Bcrypt
         iphlpapi userenv psapi
         crypt32 secur32 advapi32 normaliz wldap32
     )
 else()
-    target_link_libraries(flm PRIVATE Threads::Threads)
+    target_link_libraries(oflm PRIVATE Threads::Threads)
 endif()
 
 
 # ———————————————————————————————————————————————
-# Copy the build flm.exe into the out directory (for local dev)
+# Copy the build oflm.exe into the out directory (for local dev)
 # ———————————————————————————————————————————————
 if(WIN32)
-    add_custom_command(TARGET flm POST_BUILD
+    add_custom_command(TARGET oflm POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
-            $<TARGET_FILE:flm>
-            ${CMAKE_CURRENT_SOURCE_DIR}/out/flm.exe
+            $<TARGET_FILE:oflm>
+            ${CMAKE_CURRENT_SOURCE_DIR}/out/oflm.exe
     )
 
-    # AND THE ENGINE DLLs BESIDE IT, or a freshly built flm.exe cannot start
+    # AND THE ENGINE DLLs BESIDE IT, or a freshly built oflm.exe cannot start
     # -- and fails in a way that sends you looking in the wrong place.
     #
     # The 22 *_npu.dll / q4_npu_eXpress.dll / gemm.dll / dequant.dll live in
     # src/lib/<backend>/ and are load-time imports, so without them the process
     # dies at 0xC0000135 (DLL not found) BEFORE main(), printing nothing.
     # Windows then falls through to the next PATH entry -- which on a machine
-    # with FastFlowLM installed is C:/Program Files/flm/flm.exe. So
-    # `flm.exe serve ... --embeddingmodel x` run from the build directory
+    # with OpenFlowLM installed is C:/Program Files/oflm/oflm.exe. So
+    # `oflm.exe serve ... --embeddingmodel x` run from the build directory
     # reports "unrecognised option", from a completely different binary than
     # the one you just built. The symptom names a flag; the cause is a
     # missing DLL two steps earlier.
@@ -734,36 +734,36 @@ if(WIN32)
     # checkout already has next to the executable that needs them.
 
     # AND THE MODEL CATALOGUE, for the same reason. utils.cpp looks for
-    # model_list.json next to the executable (after FLM_CONFIG_PATH), and
-    # nothing put one there, so a freshly built flm.exe stops at
+    # model_list.json next to the executable (after OFLM_CONFIG_PATH), and
+    # nothing put one there, so a freshly built oflm.exe stops at
     #
-    #   model_list.json not found. Please set FLM_CONFIG_PATH or place it
+    #   model_list.json not found. Please set OFLM_CONFIG_PATH or place it
     #   next to the executable.
     #
     # before it can do anything at all. copy_if_different rather than a
     # configure-time copy, so editing the catalogue -- which adding a model
     # means doing -- takes effect on the next build instead of the next
     # configure.
-    add_custom_command(TARGET flm POST_BUILD
+    add_custom_command(TARGET oflm POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/model_list.json
             ${CMAKE_CURRENT_SOURCE_DIR}/model_info.json
-            $<TARGET_FILE_DIR:flm>
+            $<TARGET_FILE_DIR:oflm>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/model_list.json
             ${CMAKE_CURRENT_SOURCE_DIR}/model_info.json
             ${CMAKE_CURRENT_SOURCE_DIR}/out
-        COMMENT "Copying model_list.json / model_info.json beside flm.exe"
+        COMMENT "Copying model_list.json / model_info.json beside oflm.exe"
     )
 
-    file(GLOB FLM_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
-    if(FLM_RUNTIME_DLLS)
-        add_custom_command(TARGET flm POST_BUILD
+    file(GLOB OFLM_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/lib/${OFLM_RUNTIME_NAME}/*.dll")
+    if(OFLM_RUNTIME_DLLS)
+        add_custom_command(TARGET oflm POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${FLM_RUNTIME_DLLS} $<TARGET_FILE_DIR:flm>
+                ${OFLM_RUNTIME_DLLS} $<TARGET_FILE_DIR:oflm>
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${FLM_RUNTIME_DLLS} ${CMAKE_CURRENT_SOURCE_DIR}/out
-            COMMENT "Copying ${FLM_RUNTIME_NAME} engine DLLs beside flm.exe"
+                ${OFLM_RUNTIME_DLLS} ${CMAKE_CURRENT_SOURCE_DIR}/out
+            COMMENT "Copying ${OFLM_RUNTIME_NAME} engine DLLs beside oflm.exe"
         )
     endif()
 
@@ -771,45 +771,45 @@ if(WIN32)
     #
     # find_xclbin_path() already looks for "<exe_dir>/xclbins" -- it calls that
     # the "portable development-tree location" -- but nothing puts one there,
-    # so a freshly built flm finds no kernels and every model fails with "no
-    # design set" until FLM_XCLBIN_PATH is set by hand.
+    # so a freshly built oflm finds no kernels and every model fails with "no
+    # design set" until OFLM_XCLBIN_PATH is set by hand.
     #
     # A JUNCTION, not a copy: src/xclbins is hundreds of megabytes, and a
     # junction also means a rebuilt kernel is visible immediately rather than
     # after the next build. mklink /J needs no privileges (unlike a symlink,
     # which needs Developer Mode), and if it fails this is a warning rather
-    # than an error -- FLM_XCLBIN_PATH still works.
+    # than an error -- OFLM_XCLBIN_PATH still works.
     if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/xclbins")
         # NATIVE paths: mklink is a cmd builtin and rejects the forward slashes
         # CMake uses internally, silently enough that the first version of this
         # produced no junction and no message.
-        file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/xclbins" FLM_XCLBIN_LINK)
-        file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/xclbins" FLM_XCLBIN_TARGET)
+        file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/xclbins" OFLM_XCLBIN_LINK)
+        file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/xclbins" OFLM_XCLBIN_TARGET)
         execute_process(
-            COMMAND cmd /c mklink /J "${FLM_XCLBIN_LINK}" "${FLM_XCLBIN_TARGET}"
-            RESULT_VARIABLE FLM_XCLBIN_LINK_RC
+            COMMAND cmd /c mklink /J "${OFLM_XCLBIN_LINK}" "${OFLM_XCLBIN_TARGET}"
+            RESULT_VARIABLE OFLM_XCLBIN_LINK_RC
             OUTPUT_QUIET ERROR_QUIET)
-        if(FLM_XCLBIN_LINK_RC EQUAL 0)
+        if(OFLM_XCLBIN_LINK_RC EQUAL 0)
             message(STATUS "xclbins: junction ${CMAKE_CURRENT_BINARY_DIR}/xclbins -> ${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
         else()
             message(WARNING "could not link xclbins next to the executable; "
-                            "set FLM_XCLBIN_PATH=${CMAKE_CURRENT_SOURCE_DIR} to run from the build tree")
+                            "set OFLM_XCLBIN_PATH=${CMAKE_CURRENT_SOURCE_DIR} to run from the build tree")
         endif()
     endif()
 endif()
 
 # Default install location for model_list.json / xclbins (matches the app's
-# relocatable "<exe_dir>/../share/flm" lookup). Overridden to the prefix root for
+# relocatable "<exe_dir>/../share/oflm" lookup). Overridden to the prefix root for
 # the flat portable layout below.
-set(FLM_SHARE_DESTINATION "share/flm")
+set(OFLM_SHARE_DESTINATION "share/oflm")
 
 # Add a custom target to check for remaining DLL dependencies
 if(WIN32)
     add_custom_target(check_dependencies ALL
         COMMAND ${CMAKE_COMMAND} -E echo "Checking for DLL dependencies..."
-        COMMAND dumpbin /dependents $<TARGET_FILE:flm> | findstr /i ".dll"
+        COMMAND dumpbin /dependents $<TARGET_FILE:oflm> | findstr /i ".dll"
         COMMENT "Checking for remaining DLL dependencies"
-        DEPENDS flm
+        DEPENDS oflm
     )
 else()
     if(NOT CMAKE_INSTALL_LIBDIR)
@@ -821,46 +821,46 @@ else()
     # prefix (consumed by the portable tarball workflow); otherwise an FHS layout
     # (bin/, lib/, share/) consumed by the .deb packaging.
     # ————————————————————————————————————————————————————————————
-    if(FLM_PORTABLE_BUILD)
-        set(FLM_BIN_DESTINATION ".")
-        set(FLM_ENGINE_LIB_DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-        set(FLM_SHARE_DESTINATION ".")
-        set(FLM_FLM_INSTALL_RPATH "$ORIGIN/${CMAKE_INSTALL_LIBDIR}")
+    if(OFLM_PORTABLE_BUILD)
+        set(OFLM_BIN_DESTINATION ".")
+        set(OFLM_ENGINE_LIB_DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+        set(OFLM_SHARE_DESTINATION ".")
+        set(OFLM_OFLM_INSTALL_RPATH "$ORIGIN/${CMAKE_INSTALL_LIBDIR}")
         # Engine libs sit next to libhrx in <root>/lib.
-        set(FLM_ENGINE_INSTALL_RPATH "$ORIGIN")
-    elseif(FLM_USE_HRX)
-        # HRX FHS layout: engine libs sit in <prefix>/lib/flm and the bundled NPU
+        set(OFLM_ENGINE_INSTALL_RPATH "$ORIGIN")
+    elseif(OFLM_USE_HRX)
+        # HRX FHS layout: engine libs sit in <prefix>/lib/oflm and the bundled NPU
         # runtime (libhrx) one level up in <prefix>/lib, so engines resolve it via
         # $ORIGIN/.. — this separation is what lets the HRX .deb ship libhrx.
-        set(FLM_BIN_DESTINATION "bin")
-        set(FLM_ENGINE_LIB_DESTINATION "${CMAKE_INSTALL_LIBDIR}/flm")
-        set(FLM_SHARE_DESTINATION "share/flm")
-        set(FLM_FLM_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/flm;$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
-        set(FLM_ENGINE_INSTALL_RPATH "$ORIGIN:$ORIGIN/..")
+        set(OFLM_BIN_DESTINATION "bin")
+        set(OFLM_ENGINE_LIB_DESTINATION "${CMAKE_INSTALL_LIBDIR}/oflm")
+        set(OFLM_SHARE_DESTINATION "share/oflm")
+        set(OFLM_OFLM_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/oflm;$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+        set(OFLM_ENGINE_INSTALL_RPATH "$ORIGIN:$ORIGIN/..")
     else()
         # XRT FHS layout: identical to upstream main — engine libs install directly
-        # into <prefix>/lib and flm resolves them via $ORIGIN/../lib. XRT itself is
+        # into <prefix>/lib and oflm resolves them via $ORIGIN/../lib. XRT itself is
         # an external dependency (libxrt-npu2) resolved from the system.
-        set(FLM_BIN_DESTINATION "bin")
-        set(FLM_ENGINE_LIB_DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-        set(FLM_SHARE_DESTINATION "share/flm")
-        set(FLM_FLM_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
-        set(FLM_ENGINE_INSTALL_RPATH "$ORIGIN")
+        set(OFLM_BIN_DESTINATION "bin")
+        set(OFLM_ENGINE_LIB_DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+        set(OFLM_SHARE_DESTINATION "share/oflm")
+        set(OFLM_OFLM_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+        set(OFLM_ENGINE_INSTALL_RPATH "$ORIGIN")
     endif()
 
-    file(GLOB so_libs "${FLM_ENGINE_LIB_DIR}/*.so*")
-    install(FILES ${so_libs} DESTINATION "${FLM_ENGINE_LIB_DESTINATION}")
-    set_target_properties(flm PROPERTIES INSTALL_RPATH "${FLM_FLM_INSTALL_RPATH}")
+    file(GLOB so_libs "${OFLM_ENGINE_LIB_DIR}/*.so*")
+    install(FILES ${so_libs} DESTINATION "${OFLM_ENGINE_LIB_DESTINATION}")
+    set_target_properties(oflm PROPERTIES INSTALL_RPATH "${OFLM_OFLM_INSTALL_RPATH}")
 
-    # Engine .so file names, used below to keep them out of the flm dependency
+    # Engine .so file names, used below to keep them out of the oflm dependency
     # closure (they are installed explicitly, above).
-    set(_flm_engine_names "")
-    set(_flm_engine_post_exclude "")
-    foreach(_flm_src ${so_libs})
-        get_filename_component(_flm_name "${_flm_src}" NAME)
-        list(APPEND _flm_engine_names "${_flm_name}")
-        string(REPLACE "." "[.]" _flm_name_re "${_flm_name}")
-        list(APPEND _flm_engine_post_exclude ".*/${_flm_name_re}$")
+    set(_oflm_engine_names "")
+    set(_oflm_engine_post_exclude "")
+    foreach(_oflm_src ${so_libs})
+        get_filename_component(_oflm_name "${_oflm_src}" NAME)
+        list(APPEND _oflm_engine_names "${_oflm_name}")
+        string(REPLACE "." "[.]" _oflm_name_re "${_oflm_name}")
+        list(APPEND _oflm_engine_post_exclude ".*/${_oflm_name_re}$")
     endforeach()
 
     # HRX only: the prebuilt HRX engine .so ship with an absolute build-machine
@@ -870,60 +870,60 @@ else()
     # are shipped unmodified: the portable wrapper makes ./lib discoverable via
     # LD_LIBRARY_PATH, and for the .deb XRT is an external dependency resolved
     # from the system.
-    if(FLM_USE_HRX)
+    if(OFLM_USE_HRX)
         find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
         install(CODE "
-            set(_flm_engine_names \"${_flm_engine_names}\")
-            foreach(_flm_name \${_flm_engine_names})
-                set(_flm_lib \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${FLM_ENGINE_LIB_DESTINATION}/\${_flm_name}\")
-                if(EXISTS \"\${_flm_lib}\" AND NOT IS_SYMLINK \"\${_flm_lib}\")
+            set(_oflm_engine_names \"${_oflm_engine_names}\")
+            foreach(_oflm_name \${_oflm_engine_names})
+                set(_oflm_lib \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${OFLM_ENGINE_LIB_DESTINATION}/\${_oflm_name}\")
+                if(EXISTS \"\${_oflm_lib}\" AND NOT IS_SYMLINK \"\${_oflm_lib}\")
                     execute_process(
-                        COMMAND \"${PATCHELF_EXECUTABLE}\" --set-rpath \"${FLM_ENGINE_INSTALL_RPATH}\" \"\${_flm_lib}\"
-                        RESULT_VARIABLE _flm_patchelf_rc)
-                    if(NOT _flm_patchelf_rc EQUAL 0)
-                        message(FATAL_ERROR \"patchelf --set-rpath failed for \${_flm_lib}\")
+                        COMMAND \"${PATCHELF_EXECUTABLE}\" --set-rpath \"${OFLM_ENGINE_INSTALL_RPATH}\" \"\${_oflm_lib}\"
+                        RESULT_VARIABLE _oflm_patchelf_rc)
+                    if(NOT _oflm_patchelf_rc EQUAL 0)
+                        message(FATAL_ERROR \"patchelf --set-rpath failed for \${_oflm_lib}\")
                     endif()
                 endif()
             endforeach()
         ")
     endif()
 
-    # Portable build ships a small wrapper as `flm`; the packaging step renames the
-    # real binary to `flm-real` and this wrapper to `flm`.
-    if(FLM_PORTABLE_BUILD)
+    # Portable build ships a small wrapper as `oflm`; the packaging step renames the
+    # real binary to `oflm-real` and this wrapper to `oflm`.
+    if(OFLM_PORTABLE_BUILD)
         configure_file(
-            "${CMAKE_CURRENT_SOURCE_DIR}/flm-wrapper.sh.in"
-            "${CMAKE_BINARY_DIR}/flm-wrapper.sh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/oflm-wrapper.sh.in"
+            "${CMAKE_BINARY_DIR}/oflm-wrapper.sh"
             @ONLY)
-        install(PROGRAMS "${CMAKE_BINARY_DIR}/flm-wrapper.sh" DESTINATION "${FLM_SHARE_DESTINATION}")
+        install(PROGRAMS "${CMAKE_BINARY_DIR}/oflm-wrapper.sh" DESTINATION "${OFLM_SHARE_DESTINATION}")
     endif()
 endif()
 
 # Directory holding the selected NPU runtime shared library, used by the Windows
 # dependency set, the portable XRT bundling, and the HRX dependency closure. HRX
 # ships libhrx via its imported target; XRT is a system/library-dir dependency.
-if(FLM_USE_HRX)
-    set(_flm_rt_dep_dir "$<TARGET_FILE_DIR:hrx::hrx>")
+if(OFLM_USE_HRX)
+    set(_oflm_rt_dep_dir "$<TARGET_FILE_DIR:hrx::hrx>")
     # Sentinel that never matches a real library name (an empty PRE_EXCLUDE regex
     # would match — and thus exclude — everything).
-    set(_flm_rt_pre_exclude "__flm_no_such_lib__")
+    set(_oflm_rt_pre_exclude "__oflm_no_such_lib__")
 elseif(NOT WIN32 AND XRT_FOUND)
-    set(_flm_rt_dep_dir "${XRT_LIBRARY_DIRS}")
+    set(_oflm_rt_dep_dir "${XRT_LIBRARY_DIRS}")
 else()
-    set(_flm_rt_dep_dir "${XRT_LIB_DIR}")
+    set(_oflm_rt_dep_dir "${XRT_LIB_DIR}")
 endif()
 
 if(WIN32)
-    install(TARGETS flm
-        RUNTIME_DEPENDENCY_SET fastflowlm_runtime_dependencies
+    install(TARGETS oflm
+        RUNTIME_DEPENDENCY_SET openflowlm_runtime_dependencies
         RUNTIME DESTINATION bin)
-    install(RUNTIME_DEPENDENCY_SET fastflowlm_runtime_dependencies
+    install(RUNTIME_DEPENDENCY_SET openflowlm_runtime_dependencies
         DESTINATION bin
         DIRECTORIES
-            "${FLM_ENGINE_LIB_DIR}"
+            "${OFLM_ENGINE_LIB_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/lib"
             "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
-            "${_flm_rt_dep_dir}"
+            "${_oflm_rt_dep_dir}"
         PRE_EXCLUDE_REGEXES "api-ms-.*" "ext-ms-.*"
             # Optional Windows feature-on-demand / attestation / lockdown DLLs
             # that are not present as files on all hosts, so the resolver would
@@ -934,9 +934,9 @@ if(WIN32)
             "[Pp][Dd][Mm][Uu][Tt][Ii][Ll][Ii][Tt][Ii][Ee][Ss].*"
             "[Ww][Pp][Aa][Xx][Hh][Oo][Ll][Dd][Ee][Rr].*"
         POST_EXCLUDE_REGEXES ".*[Ww]indows[/\\\\][Ss]ystem32[/\\\\].*")
-elseif(NOT FLM_USE_HRX AND FLM_PORTABLE_BUILD)
+elseif(NOT OFLM_USE_HRX AND OFLM_PORTABLE_BUILD)
     # Portable XRT: bundle the XRT runtime explicitly. XRT is deliberately
-    # handled here instead of via the dependency closure below: flm only lists
+    # handled here instead of via the dependency closure below: oflm only lists
     # libxrt_coreutil as a link-time NEEDED entry, while XRT dlopens libxrt_core,
     # the libxrt_driver_xdna plugin and others at run time via a path it builds
     # as $XILINX_XRT/lib/x86_64-linux-gnu/<lib>. Those are invisible to
@@ -945,54 +945,54 @@ elseif(NOT FLM_USE_HRX AND FLM_PORTABLE_BUILD)
     # under lib/x86_64-linux-gnu for XRT's internal lookup. FFTW is bundled the
     # same way just below. Other shared deps (libcurl, libgomp, ...) resolve from
     # the host.
-    install(TARGETS flm RUNTIME DESTINATION "${FLM_BIN_DESTINATION}")
+    install(TARGETS oflm RUNTIME DESTINATION "${OFLM_BIN_DESTINATION}")
     find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
     install(CODE "
         # Locate a directory that actually holds the XRT runtime libraries.
-        set(_flm_xrt_src \"\")
-        foreach(_cand \"${_flm_rt_dep_dir}\" \"/usr/lib/x86_64-linux-gnu\" \"/usr/lib\")
+        set(_oflm_xrt_src \"\")
+        foreach(_cand \"${_oflm_rt_dep_dir}\" \"/usr/lib/x86_64-linux-gnu\" \"/usr/lib\")
             if(_cand AND EXISTS \"\${_cand}/libxrt_coreutil.so.2\")
-                set(_flm_xrt_src \"\${_cand}\")
+                set(_oflm_xrt_src \"\${_cand}\")
                 break()
             endif()
         endforeach()
-        if(NOT _flm_xrt_src)
+        if(NOT _oflm_xrt_src)
             message(FATAL_ERROR
                 \"Portable XRT build: could not locate libxrt_coreutil.so.2 to bundle\")
         endif()
-        message(STATUS \"Bundling XRT runtime libraries from \${_flm_xrt_src}\")
+        message(STATUS \"Bundling XRT runtime libraries from \${_oflm_xrt_src}\")
 
-        set(_flm_libdir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
-        file(MAKE_DIRECTORY \"\${_flm_libdir}\")
+        set(_oflm_libdir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
+        file(MAKE_DIRECTORY \"\${_oflm_libdir}\")
 
         # Copy every libxrt*.so* (from the XRT dir) plus libboost_program_options.so*
         # (searched across the standard system dirs, since Boost may live apart
         # from XRT — e.g. XRT under /opt/xilinx but Boost in the multiarch dir),
         # preserving the symlink chain.
-        file(GLOB _flm_xrt_files \"\${_flm_xrt_src}/libxrt*.so*\")
-        foreach(_bdir \"\${_flm_xrt_src}\" \"/usr/lib/x86_64-linux-gnu\" \"/usr/lib\")
-            file(GLOB _flm_boost_files \"\${_bdir}/libboost_program_options.so*\")
-            if(_flm_boost_files)
-                list(APPEND _flm_xrt_files \${_flm_boost_files})
+        file(GLOB _oflm_xrt_files \"\${_oflm_xrt_src}/libxrt*.so*\")
+        foreach(_bdir \"\${_oflm_xrt_src}\" \"/usr/lib/x86_64-linux-gnu\" \"/usr/lib\")
+            file(GLOB _oflm_boost_files \"\${_bdir}/libboost_program_options.so*\")
+            if(_oflm_boost_files)
+                list(APPEND _oflm_xrt_files \${_oflm_boost_files})
                 break()
             endif()
         endforeach()
-        foreach(_f \${_flm_xrt_files})
+        foreach(_f \${_oflm_xrt_files})
             get_filename_component(_n \"\${_f}\" NAME)
             if(IS_SYMLINK \"\${_f}\")
                 file(READ_SYMLINK \"\${_f}\" _t)
                 execute_process(COMMAND \"\${CMAKE_COMMAND}\" -E create_symlink
-                    \"\${_t}\" \"\${_flm_libdir}/\${_n}\")
+                    \"\${_t}\" \"\${_oflm_libdir}/\${_n}\")
             else()
-                file(COPY \"\${_f}\" DESTINATION \"\${_flm_libdir}\"
+                file(COPY \"\${_f}\" DESTINATION \"\${_oflm_libdir}\"
                     FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
                                      GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
             endif()
         endforeach()
 
         # Re-root the real XRT libs at \$ORIGIN so they find each other in lib/.
-        file(GLOB _flm_xrt_real \"\${_flm_libdir}/libxrt*.so.*\")
-        foreach(_l \${_flm_xrt_real})
+        file(GLOB _oflm_xrt_real \"\${_oflm_libdir}/libxrt*.so.*\")
+        foreach(_l \${_oflm_xrt_real})
             if(NOT IS_SYMLINK \"\${_l}\")
                 execute_process(
                     COMMAND \"${PATCHELF_EXECUTABLE}\" --set-rpath \"\$ORIGIN\" \"\${_l}\"
@@ -1004,45 +1004,45 @@ elseif(NOT FLM_USE_HRX AND FLM_PORTABLE_BUILD)
         endforeach()
 
         # Mirror the bundled XRT libs under lib/x86_64-linux-gnu for XRT's lookup.
-        set(_flm_multiarch \"\${_flm_libdir}/x86_64-linux-gnu\")
-        file(MAKE_DIRECTORY \"\${_flm_multiarch}\")
-        file(GLOB _flm_xrt_all \"\${_flm_libdir}/libxrt*.so*\")
-        foreach(_l \${_flm_xrt_all})
+        set(_oflm_multiarch \"\${_oflm_libdir}/x86_64-linux-gnu\")
+        file(MAKE_DIRECTORY \"\${_oflm_multiarch}\")
+        file(GLOB _oflm_xrt_all \"\${_oflm_libdir}/libxrt*.so*\")
+        foreach(_l \${_oflm_xrt_all})
             get_filename_component(_n \"\${_l}\" NAME)
             if(IS_SYMLINK \"\${_l}\")
                 file(READ_SYMLINK \"\${_l}\" _t)
                 execute_process(COMMAND \"\${CMAKE_COMMAND}\" -E create_symlink
-                    \"../\${_t}\" \"\${_flm_multiarch}/\${_n}\")
+                    \"../\${_t}\" \"\${_oflm_multiarch}/\${_n}\")
             else()
                 execute_process(COMMAND \"\${CMAKE_COMMAND}\" -E create_symlink
-                    \"../\${_n}\" \"\${_flm_multiarch}/\${_n}\")
+                    \"../\${_n}\" \"\${_oflm_multiarch}/\${_n}\")
             endif()
         endforeach()
     ")
     # Bundle FFTW so the portable tree does not depend on libfftw3 on the host.
     install(CODE "
-        set(_flm_libdir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
-        set(_flm_fftw_files \"\")
-        foreach(_dir \"${_flm_rt_dep_dir}\" \"/usr/lib/x86_64-linux-gnu\" \"/usr/lib\")
+        set(_oflm_libdir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
+        set(_oflm_fftw_files \"\")
+        foreach(_dir \"${_oflm_rt_dep_dir}\" \"/usr/lib/x86_64-linux-gnu\" \"/usr/lib\")
             if(_dir)
                 file(GLOB _dir_fftw \"\${_dir}/libfftw3*.so*\")
-                list(APPEND _flm_fftw_files \${_dir_fftw})
+                list(APPEND _oflm_fftw_files \${_dir_fftw})
             endif()
         endforeach()
-        foreach(_f \${_flm_fftw_files})
+        foreach(_f \${_oflm_fftw_files})
             get_filename_component(_n \"\${_f}\" NAME)
             if(IS_SYMLINK \"\${_f}\")
                 file(READ_SYMLINK \"\${_f}\" _t)
                 execute_process(COMMAND \"\${CMAKE_COMMAND}\" -E create_symlink
-                    \"\${_t}\" \"\${_flm_libdir}/\${_n}\")
+                    \"\${_t}\" \"\${_oflm_libdir}/\${_n}\")
             else()
-                file(COPY \"\${_f}\" DESTINATION \"\${_flm_libdir}\"
+                file(COPY \"\${_f}\" DESTINATION \"\${_oflm_libdir}\"
                     FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
                                      GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
             endif()
         endforeach()
-        file(GLOB _flm_fftw_real \"\${_flm_libdir}/libfftw3*.so.*\")
-        foreach(_l \${_flm_fftw_real})
+        file(GLOB _oflm_fftw_real \"\${_oflm_libdir}/libfftw3*.so.*\")
+        foreach(_l \${_oflm_fftw_real})
             if(NOT IS_SYMLINK \"\${_l}\")
                 execute_process(
                     COMMAND \"${PATCHELF_EXECUTABLE}\" --set-rpath \"\$ORIGIN\" \"\${_l}\"
@@ -1050,80 +1050,80 @@ elseif(NOT FLM_USE_HRX AND FLM_PORTABLE_BUILD)
             endif()
         endforeach()
     ")
-elseif(NOT FLM_USE_HRX)
+elseif(NOT OFLM_USE_HRX)
     # System XRT (.deb): XRT is an external dependency (the libxrt-npu2 package)
-    # and flm's other shared libraries are resolved from the system via
+    # and oflm's other shared libraries are resolved from the system via
     # ${shlibs:Depends}. Nothing is bundled here.
-    install(TARGETS flm RUNTIME DESTINATION "${FLM_BIN_DESTINATION}")
+    install(TARGETS oflm RUNTIME DESTINATION "${OFLM_BIN_DESTINATION}")
 else()
-    # HRX: bundle flm's third-party runtime dependencies into
+    # HRX: bundle oflm's third-party runtime dependencies into
     # ${CMAKE_INSTALL_LIBDIR} (libhrx plus the engine .so private deps).
     #
     # Subtlety: some private dependencies (libgomp, libmvec, ...) are pulled in
-    # ONLY by the prebuilt engine .so, not by flm itself. The engine .so are
-    # installed and RUNPATH-patched explicitly into FLM_ENGINE_LIB_DESTINATION
+    # ONLY by the prebuilt engine .so, not by oflm itself. The engine .so are
+    # installed and RUNPATH-patched explicitly into OFLM_ENGINE_LIB_DESTINATION
     # above, so the resolver must NOT emit a second, unpatched copy of them
     # (which would retain the absolute build-machine RUNPATH) — but their private
     # deps DO need to be in the closure.
     #
-    # A RUNTIME_DEPENDENCY_SET rooted only at flm cannot express this: listing
+    # A RUNTIME_DEPENDENCY_SET rooted only at oflm cannot express this: listing
     # the engine .so in POST_EXCLUDE_REGEXES also stops traversal INTO them, so
     # their private deps silently drop out of the bundle (that is exactly how
-    # libgomp/libmvec went missing). Instead, scan flm together with the engine
+    # libgomp/libmvec went missing). Instead, scan oflm together with the engine
     # .so as ROOTS via file(GET_RUNTIME_DEPENDENCIES): roots are traversed for
     # their dependencies but are never themselves emitted, so libgomp/libmvec are
     # captured while the engine .so stay solely under the patched install above.
     # The engine names are still POST_EXCLUDEd as a belt-and-suspenders guard for
     # the case of one engine lib depending on another.
-    install(TARGETS flm RUNTIME DESTINATION "${FLM_BIN_DESTINATION}")
+    install(TARGETS oflm RUNTIME DESTINATION "${OFLM_BIN_DESTINATION}")
     install(CODE "
-        set(_flm_engine_libs \"${so_libs}\")
-        set(_flm_engine_post_exclude \"${_flm_engine_post_exclude}\")
+        set(_oflm_engine_libs \"${so_libs}\")
+        set(_oflm_engine_post_exclude \"${_oflm_engine_post_exclude}\")
         file(GET_RUNTIME_DEPENDENCIES
-            EXECUTABLES \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${FLM_BIN_DESTINATION}/flm\"
-            LIBRARIES \${_flm_engine_libs}
-            RESOLVED_DEPENDENCIES_VAR _flm_resolved
-            UNRESOLVED_DEPENDENCIES_VAR _flm_unresolved
+            EXECUTABLES \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${OFLM_BIN_DESTINATION}/oflm\"
+            LIBRARIES \${_oflm_engine_libs}
+            RESOLVED_DEPENDENCIES_VAR _oflm_resolved
+            UNRESOLVED_DEPENDENCIES_VAR _oflm_unresolved
             DIRECTORIES
-                \"${FLM_ENGINE_LIB_DIR}\"
+                \"${OFLM_ENGINE_LIB_DIR}\"
                 \"${CMAKE_CURRENT_SOURCE_DIR}/lib\"
                 \"${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib\"
-                \"${_flm_rt_dep_dir}\"
+                \"${_oflm_rt_dep_dir}\"
             PRE_EXCLUDE_REGEXES
                 \"linux-vdso\\\\.so.*\"
                 \"ld-linux.*\"
                 \"lib(c|dl|m|pthread|rt)\\\\.so.*\"
-                \"${_flm_rt_pre_exclude}\"
-            POST_EXCLUDE_REGEXES \${_flm_engine_post_exclude})
-        if(_flm_unresolved)
+                \"${_oflm_rt_pre_exclude}\"
+            POST_EXCLUDE_REGEXES \${_oflm_engine_post_exclude})
+        if(_oflm_unresolved)
             message(FATAL_ERROR
-                \"FastFlowLM runtime dependency closure is incomplete; unresolved: \${_flm_unresolved}\")
+                \"OpenFlowLM runtime dependency closure is incomplete; unresolved: \${_oflm_unresolved}\")
         endif()
         # file(INSTALL) prepends \$ENV{DESTDIR} itself, so DESTINATION must not.
         file(INSTALL
             DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"
             TYPE SHARED_LIBRARY
             FOLLOW_SYMLINK_CHAIN
-            FILES \${_flm_resolved})
+            FILES \${_oflm_resolved})
     ")
 endif()
 
-install(FILES model_list.json DESTINATION "${FLM_SHARE_DESTINATION}")
-install(FILES model_info.json DESTINATION "${FLM_SHARE_DESTINATION}")
+install(FILES model_list.json DESTINATION "${OFLM_SHARE_DESTINATION}")
+install(FILES model_info.json DESTINATION "${OFLM_SHARE_DESTINATION}")
 
 # xclbins, which are loaded by shared libraries need to be in location
 # relative to the executable, so we install them relative to the binary.
-# Only present when the kernel export ran (FLM_BUILD_KERNELS=ON, or a manual
+# Only present when the kernel export ran (OFLM_BUILD_KERNELS=ON, or a manual
 # export); skip silently for engine-only builds.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
-    install(DIRECTORY xclbins DESTINATION "${FLM_SHARE_DESTINATION}")
+    install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}")
 endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3
 # runner for IRON designs, driven by the same .cfg language phlegm's driver
-# speaks. A developer tool, not part of flm; off by default.
-option(FLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" OFF)
-if(FLM_BUILD_OPEN_KERNELS_HARNESS)
+# speaks. A developer tool, not part of oflm; off by default.
+option(OFLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" OFF)
+if(OFLM_BUILD_OPEN_KERNELS_HARNESS)
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness"
                      "${CMAKE_BINARY_DIR}/open_kernels_harness")
 endif()
@@ -1134,23 +1134,23 @@ endif()
 # The engine loads prebuilt xclbins at runtime; they are git-ignored and produced
 # by the Python toolchain (ironvenv: mlir-aie + Peano, with XRT on PATH). This
 # target drives that export into src/xclbins so `cmake --install` ships them.
-# Set FLM_BUILD_KERNELS=OFF (or build with the linux-debug preset) for an
+# Set OFLM_BUILD_KERNELS=OFF (or build with the linux-debug preset) for an
 # engine-only dev build that skips the long kernel compile. The export is
 # Linux-only: it needs the XRT/Peano toolchain, so Windows builds are
 # engine-only regardless.
 # ———————————————————————————————————————————————
 if(WIN32)
-    option(FLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" OFF)
+    option(OFLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" OFF)
 else()
-    option(FLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" ON)
+    option(OFLM_BUILD_KERNELS "Build the open NPU kernel xclbin sets during the build" ON)
 endif()
-set(FLM_KERNEL_SPECS "" CACHE STRING "Comma-separated spec names to export (empty = all specs in open_kernels/recipes/specs)")
-if(FLM_BUILD_KERNELS AND NOT WIN32)
+set(OFLM_KERNEL_SPECS "" CACHE STRING "Comma-separated spec names to export (empty = all specs in open_kernels/recipes/specs)")
+if(OFLM_BUILD_KERNELS AND NOT WIN32)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_export_script "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/export-kernels.py")
     add_custom_target(export_kernels ALL
         COMMENT "Exporting open NPU kernel xclbins into src/xclbins"
-        COMMAND "${Python3_EXECUTABLE}" "${_export_script}" "--specs=${FLM_KERNEL_SPECS}"
+        COMMAND "${Python3_EXECUTABLE}" "${_export_script}" "--specs=${OFLM_KERNEL_SPECS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
         VERBATIM)
 endif()
@@ -1159,21 +1159,24 @@ endif()
 # Tests — a testable development build.
 # ———————————————————————————————————————————————
 enable_testing()
-# Smoke test: `flm list` exits 0 and proves the binary, its engine shared
-# libraries, and the model registry (model_list.json) all load.
-add_test(NAME flm_smoke COMMAND $<TARGET_FILE:flm> list)
+# Smoke test: `oflm list` exits 0 and proves the binary, its engine shared
+# libraries, and the model registry (model_list.json) all load. Point it at the
+# in-tree registry, since a build-tree run has no installed share/oflm/.
+add_test(NAME oflm_smoke COMMAND $<TARGET_FILE:oflm> list)
+set_tests_properties(oflm_smoke PROPERTIES
+    ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.
 #   cmake --build --preset linux-package-rpm   # or -deb / -tgz
 # Generators are chosen by the packagePreset; defaults to TGZ.
 # ———————————————————————————————————————————————
-set(CPACK_PACKAGE_NAME "fastflowlm")
-set(CPACK_PACKAGE_VERSION "${FLM_VERSION}")
+set(CPACK_PACKAGE_NAME "openflowlm")
+set(CPACK_PACKAGE_VERSION "${OFLM_VERSION}")
 set(CPACK_PACKAGE_VENDOR "Atomic-Germ")
-set(CPACK_PACKAGE_CONTACT "fastflowlm@atomic-germ")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "FastFlowLM — NPU-offloaded LLM inference engine")
-set(CPACK_PACKAGE_DESCRIPTION "FastFlowLM runs LLMs with dense GEMM offloaded to the AMD NPU2 via open XDNA2 kernels, with a CPU reference path.")
+set(CPACK_PACKAGE_CONTACT "openflowlm@atomic-germ")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "OpenFlowLM — NPU-offloaded LLM inference engine")
+set(CPACK_PACKAGE_DESCRIPTION "OpenFlowLM runs LLMs with dense GEMM offloaded to the AMD NPU2 via open XDNA2 kernels, with a CPU reference path.")
 set(CPACK_GENERATOR "TGZ")
 set(CPACK_SET_DESTDIR ON)
 set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")

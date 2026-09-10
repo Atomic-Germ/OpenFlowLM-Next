@@ -1,6 +1,6 @@
 <p align="center">
-  <a href="https://www.fastflowlm.com" target="_blank">
-    <img src="assets/logo.png" alt="FastFlowLM Logo" width="200"/>
+  <a href="https://www.openflowlm.com" target="_blank">
+    <img src="assets/logo.png" alt="OpenFlowLM Logo" width="200"/>
   </a>
 </p>
 
@@ -8,32 +8,32 @@
   <img src="https://img.shields.io/badge/NPU-Optimized-red" />
 </p>
 
-## ⚡ FastFlowLM (FLM) — Unlock Ryzen™ AI NPUs
+## ⚡ OpenFlowLM (OFLM) — Unlock Ryzen™ AI NPUs
 
 Run large language models — now with **Vision**, **Audio**, **Embedding** and **MoE** support — on **AMD Ryzen™ AI NPUs** in minutes.  
 **No GPU required. Faster and over 10× more power-efficient. Supports context lengths up to 256k tokens. Ultra-Lightweight (17 MB). Installs within 20 seconds.**
 
 📦 **The only out-of-box, NPU-first runtime built exclusively for Ryzen™ AI.**  
 🤝 **A familiar single-command CLI — deeply optimized for NPUs.**  
-✨ **From Idle Silicon to Instant Power — FastFlowLM Makes Ryzen™ AI Shine.**
+✨ **From Idle Silicon to Instant Power — OpenFlowLM Makes Ryzen™ AI Shine.**
 
-> FastFlowLM (FLM) supports all Ryzen™ AI Series chips with XDNA2 NPUs (Strix, Strix Halo, Kraken, and Gorgon Point).
+> OpenFlowLM (OFLM) supports all Ryzen™ AI Series chips with XDNA2 NPUs (Strix, Strix Halo, Kraken, and Gorgon Point).
 
 ---
 
 ## 🔗 Quick Links
 
-  🔽 **[Download](https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi)** | 📊 **[Benchmarks](https://fastflowlm.com/docs/benchmarks/)** | 📦 **[Model List](https://fastflowlm.com/docs/models/)**  
+  🔽 **[Download](https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi)** | 📊 **[Benchmarks](https://openflowlm.com/docs/benchmarks/)** | 📦 **[Model List](https://openflowlm.com/docs/models/)**  
 
   🐧 **[Linux Getting Started Guide](./docs/linux-getting-started.md)**
 
-  📖 **[Docs](https://fastflowlm.com/docs)** | 📺 **[Demos](https://www.youtube.com/playlist?list=PLf87s9UUZrJoDdz639Yc6w1UTyJ4cFHZ1)** | 💬 **[Discord](https://discord.gg/z24t23HsHF)** 
+  📖 **[Docs](https://openflowlm.com/docs)** | 📺 **[Demos](https://www.youtube.com/playlist?list=PLf87s9UUZrJoDdz639Yc6w1UTyJ4cFHZ1)** | 💬 **[Discord](https://discord.gg/z24t23HsHF)** 
 
 ---
 
 ## 🚀 Quick Start
 
-A packaged FLM Windows installer is available here: [**flm-setup.msi**](https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi). For more details, see the [release notes](https://github.com/ROCm/FastFlowLM/releases/).
+A packaged OFLM Windows installer is available here: [**oflm-setup.msi**](https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi). For more details, see the [release notes](https://github.com/Atomic-Germ/OpenFlowLM/releases/).
 
 📺 [**Watch the quick start video (Windows)**](https://www.youtube.com/watch?v=mYOfDNkyBII)
 
@@ -46,55 +46,55 @@ A packaged FLM Windows installer is available here: [**flm-setup.msi**](https://
 
 After installation, open **PowerShell** (`Win + X → I`). To run a model in terminal (**CLI Mode**):
 ```powershell
-flm run llama3.2:1b
+oflm run llama3.2:1b
 ```
 > **Notes:**
 > - Internet access to HuggingFace is required to download the optimized model kernels.
-> - Sometimes downloads from HuggingFace may get corrupted. If this happens, run `flm pull <model_tag> --force` (e.g. `flm pull llama3.2:1b --force`) to re-download and fix them.
+> - Sometimes downloads from HuggingFace may get corrupted. If this happens, run `oflm pull <model_tag> --force` (e.g. `oflm pull llama3.2:1b --force`) to re-download and fix them.
 > - By default, models are stored in:
->   - **Windows**: `C:\Users\<USER>\.flm\models\`
->   - **Linux**: `~/.config/flm/`
-> - During installation on Windows, you can select a different base folder (e.g., if you choose `C:\Users\<USER>\flm`, models will be saved under `C:\Users\<USER>\flm\models\`).
-> - On Linux, you can override the default location by setting the `FLM_MODEL_PATH` environment variable.
-> - To disable the startup version check, set `FLM_DISABLE_UPDATE_CHECK=1`.
-> - ⚠️ If HuggingFace is not accessible in your region, manually download the model ([check this issue](https://github.com/ROCm/FastFlowLM/issues/2)) and place it in the chosen directory.   
+>   - **Windows**: `C:\Users\<USER>\.oflm\models\`
+>   - **Linux**: `~/.config/oflm/`
+> - During installation on Windows, you can select a different base folder (e.g., if you choose `C:\Users\<USER>\oflm`, models will be saved under `C:\Users\<USER>\oflm\models\`).
+> - On Linux, you can override the default location by setting the `OFLM_MODEL_PATH` environment variable.
+> - To disable the startup version check, set `OFLM_DISABLE_UPDATE_CHECK=1`.
+> - ⚠️ If HuggingFace is not accessible in your region, manually download the model ([check this issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/2)) and place it in the chosen directory.   
 
-🎉🚀 FastFlowLM (FLM) is ready — your NPU is unlocked and you can start chatting with models right away!
+🎉🚀 OpenFlowLM (OFLM) is ready — your NPU is unlocked and you can start chatting with models right away!
 
 Open **Task Manager** (`Ctrl + Shift + Esc`). Go to the **Performance** tab → click **NPU** to monitor usage.  
 
 > **⚡ Quick Tips:**  
 > - Use `/verbose` during a session to turn on performance reporting (toggle off with `/verbose` again).   
 > - Type `/bye` to exit a conversation.  
-> - Run `flm list` in PowerShell to show all available models.  
+> - Run `oflm list` in PowerShell to show all available models.  
 
 To start the local server (**Server Mode**):
 ```powershell
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
-> The model tag (e.g., `llama3.2:1b`) sets the initial model, which is optional. If another model is requested, FastFlowLM will automatically switch to it. The local server runs on port 52625 (default).  
+> The model tag (e.g., `llama3.2:1b`) sets the initial model, which is optional. If another model is requested, OpenFlowLM will automatically switch to it. The local server runs on port 52625 (default).  
 
-**[![FastFlowLM Docs](https://img.shields.io/badge/FastFlowLM-Detailed%20Instructions-red?style=flat&logo=readthedocs)](https://fastflowlm.com/docs/instructions/)**
+**[![OpenFlowLM Docs](https://img.shields.io/badge/OpenFlowLM-Detailed%20Instructions-red?style=flat&logo=readthedocs)](https://openflowlm.com/docs/instructions/)**
 
 ---
 
 ## 📰 In the News
 
-- 08/11/2026 🎉 FLM is now part of **[ROCm](https://github.com/ROCm/FastFlowLM)** (v1.0.0) — the repo has moved to AMD's open-source ROCm organization.
+- 08/11/2026 🎉 OFLM is now part of **[ROCm](https://github.com/Atomic-Germ/OpenFlowLM)** (v1.0.0) — the repo has moved to AMD's open-source ROCm organization.
 
-- 08/11/2026 🎉 FLM releases its first **SmolVLA** model (v1.0.0) — a Vision-Language-Action robotics policy running on the NPU. See the **[model card](https://fastflowlm.com/docs/models/smolvla/)** and **[benchmarks](https://fastflowlm.com/docs/benchmarks/smolvla_results/)**.
+- 08/11/2026 🎉 OFLM releases its first **SmolVLA** model (v1.0.0) — a Vision-Language-Action robotics policy running on the NPU. See the **[model card](https://openflowlm.com/docs/models/smolvla/)** and **[benchmarks](https://openflowlm.com/docs/benchmarks/smolvla_results/)**.
 
-- 07/17/2026 🎉 FLM is now part of AMD **[news](https://www.amd.com/en/blogs/2026/fastflowlm-joins-amd-to-advance-ai-inference.html)**. Read **[our story](./flm_story.md)** — from a 2025 university project to AMD.
+- 07/17/2026 🎉 OFLM is now part of AMD **[news](https://www.amd.com/en/blogs/2026/openflowlm-joins-amd-to-advance-ai-inference.html)**. Read **[our story](./flm_story.md)** — from a 2025 university project to AMD.
 
-- 03/11/2026 🎉 FLM now supports Linux 🐧 ! To get started, check out the **[quick start guide](https://fastflowlm.com/docs/install_lin/)** or the **[Lemonade Server docs](https://lemonade-server.ai/flm_npu_linux.html)**, and watch the **[short video](https://www.youtube.com/watch?v=tXRchP3sKA8)** for a quick walkthrough of FLM on Linux via Lemonade 🍋.
+- 03/11/2026 🎉 OFLM now supports Linux 🐧 ! To get started, check out the **[quick start guide](https://openflowlm.com/docs/install_lin/)** or the **[Lemonade Server docs](https://lemonade-server.ai/flm_npu_linux.html)**, and watch the **[short video](https://www.youtube.com/watch?v=tXRchP3sKA8)** for a quick walkthrough of OFLM on Linux via Lemonade 🍋.
 
-- 10/01/2025 🎉 FLM was integrated into AMD's **[Lemonade Server](https://lemonade-server.ai/)** 🍋. Watch this **[short demo](https://www.youtube.com/watch?v=w0Tb3h4WUnE)** about using FLM in Lemonade.
+- 10/01/2025 🎉 OFLM was integrated into AMD's **[Lemonade Server](https://lemonade-server.ai/)** 🍋. Watch this **[short demo](https://www.youtube.com/watch?v=w0Tb3h4WUnE)** about using OFLM in Lemonade.
 
 ---
 
 ## 🧠 Local AI on NPU
 
-FLM makes it easy to run cutting-edge **LLMs** (and now **VLMs**) locally with:
+OFLM makes it easy to run cutting-edge **LLMs** (and now **VLMs**) locally with:
 - ⚡ Fast and low power
 - 🧰 Simple CLI and API (REST and OpenAI API)
 - 🔐 Fully private and offline
@@ -117,14 +117,14 @@ No model rewrites, no tuning — it just works.
 
 - All orchestration code and CLI tools are open-source under the [MIT License](./LICENSE_RUNTIME.txt).  
 - These NPU-accelerated binary kernels are completely free for any use, including commercial use.
-- Please acknowledge FastFlowLM in your README/project page (or product) as follows:
+- Please acknowledge OpenFlowLM in your README/project page (or product) as follows:
   ```
-  Powered by [FastFlowLM](https://github.com/ROCm/FastFlowLM)
+  Powered by [OpenFlowLM](https://github.com/Atomic-Germ/OpenFlowLM)
   ```
   
 ---
 
-💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/ROCm/FastFlowLM/issues/new) or [Join our Discord community](https://discord.gg/z24t23HsHF)
+💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community](https://discord.gg/z24t23HsHF)
 
 ---
 
@@ -140,7 +140,7 @@ No model rewrites, no tuning — it just works.
 
 ## 🛠️ Building from Source
 
-For developers who want to build FastFlowLM from source, we provide CMake presets for a convenient and consistent build experience. From a clean recursive clone you can configure, build, test, install and package the whole distribution with a handful of preset-based commands run from the **repository root**.
+For developers who want to build OpenFlowLM from source, we provide CMake presets for a convenient and consistent build experience. From a clean recursive clone you can configure, build, test, install and package the whole distribution with a handful of preset-based commands run from the **repository root**.
 
 ### Prerequisites
 
@@ -173,8 +173,8 @@ More details on the exact procedure, with dependencies to be installed, for Linu
 1.  **Clone the repository:**
 
     ```bash
-    git clone --recursive https://github.com/ROCm/FastFlowLM.git
-    cd FastFlowLM
+    git clone --recursive https://github.com/Atomic-Germ/OpenFlowLM.git
+    cd OpenFlowLM
     ```
 
 2.  **Configure (Linux, full distribution — engine + open NPU kernels):**
@@ -183,10 +183,10 @@ More details on the exact procedure, with dependencies to be installed, for Linu
     cmake --preset linux-default
     ```
 
-    This configures a Release build that installs to `/opt/fastflowlm`. The default `linux-default` preset builds the NPU kernel xclbins during the build step below.
+    This configures a Release build that installs to `/opt/openflowlm`. The default `linux-default` preset builds the NPU kernel xclbins during the build step below.
 
     -   **Windows (developer command prompt):** `cmake --preset windows-default`
-    -   **Engine-only / fast debug iteration:** `cmake --preset linux-debug` (sets `FLM_BUILD_KERNELS=OFF`, skipping the long kernel compile).
+    -   **Engine-only / fast debug iteration:** `cmake --preset linux-debug` (sets `OFLM_BUILD_KERNELS=OFF`, skipping the long kernel compile).
     -   **Portable bundle (bundled XRT/XDNA libs):** `cmake --preset linux-portable`
 
 3.  **Build:**
@@ -195,7 +195,7 @@ More details on the exact procedure, with dependencies to be installed, for Linu
     cmake --build --preset linux-default
     ```
 
-    This compiles the `flm` engine and exports every open NPU kernel set into `src/xclbins`. To build only a subset of kernel specs, configure with `-DFLM_KERNEL_SPECS=qwen3-4b,gemma3-4b` (comma-separated; empty = all).
+    This compiles the `oflm` engine and exports every open NPU kernel set into `src/xclbins`. To build only a subset of kernel specs, configure with `-DOFLM_KERNEL_SPECS=qwen3-4b,gemma3-4b` (comma-separated; empty = all).
 
 4.  **Test (optional):**
 
@@ -203,14 +203,14 @@ More details on the exact procedure, with dependencies to be installed, for Linu
     ctest --preset linux-default
     ```
 
-    Runs the smoke test (`flm list`), which verifies the binary, its engine shared libraries, and the model registry all load.
+    Runs the smoke test (`oflm list`), which verifies the binary, its engine shared libraries, and the model registry all load.
 
 5.  **Install:**
 
-    -   **Linux:** `sudo cmake --install build` (or `cmake --install build --prefix "$HOME/flm"` to stage without root).
+    -   **Linux:** `sudo cmake --install build` (or `cmake --install build --prefix "$HOME/oflm"` to stage without root).
     -   **Windows (admin):** `cmake --install build`
 
-    The install tree is `bin/flm`, `lib*/`, and `share/flm/` (`model_list.json`, `model_info.json`, and the `xclbins/` tree the engine loads at runtime).
+    The install tree is `bin/oflm`, `lib*/`, and `share/oflm/` (`model_list.json`, `model_info.json`, and the `xclbins/` tree the engine loads at runtime).
 
 6.  **Package (optional):**
 

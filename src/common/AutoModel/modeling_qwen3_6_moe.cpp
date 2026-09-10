@@ -1,6 +1,6 @@
 /// \file modeling_qwen3_6_moe.cpp
 /// \brief Qwen3_6_MOE class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-01-23
 /// \version 0.9.28
 /// \note This is a source file for the Qwen3_6_MOE class
@@ -11,7 +11,7 @@
 
 
 /************              Qwen3_6_MOE family            **************/
-Qwen3_6_MOE::Qwen3_6_MOE(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen3_6_MOE") {}
+Qwen3_6_MOE::Qwen3_6_MOE(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen3_6_MOE") {}
 
 void Qwen3_6_MOE::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -19,7 +19,7 @@ void Qwen3_6_MOE::load_model(std::string model_path, json model_info, int defaul
     // The engine: the open kernels when installed for this model, the closed
     // qwen3_6_moe_npu DLL otherwise; images still need the closed engine (the
     // open one has no vision path). See AutoModel::_shared_select_open_engine.
-    auto open_engine = this->_shared_select_open_engine("FLM_QWEN36_ENGINE", "Qwen3.6-MoE");
+    auto open_engine = this->_shared_select_open_engine("OFLM_QWEN36_ENGINE", "Qwen3.6-MoE");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -154,7 +154,7 @@ bool Qwen3_6_MOE::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
             qwenvl_message.push_back(newItem);
         }
         templated_text = this->apply_chat_template(qwenvl_message, input.tools);
-        header_print("FLM", "Total images: " << total_images);
+        header_print("OFLM", "Total images: " << total_images);
     }
     else if (!input.prompt.empty()) { // a pure text, usually from the cli
         nlohmann::ordered_json messages;
@@ -237,7 +237,7 @@ bool Qwen3_6_MOE::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
             // Per-image bf16 footprint depends on runtime patch/temporal
             // config carried by the engine.
             auto* eng = dynamic_cast<qwen3_6_moe_npu*>(this->lm_engine.get());
-            if (!eng) throw std::runtime_error("images need the closed Qwen3.6 engine (FLM_QWEN36_ENGINE=closed)");
+            if (!eng) throw std::runtime_error("images need the closed Qwen3.6 engine (OFLM_QWEN36_ENGINE=closed)");
             const unsigned patch_size = eng->QWEN3_6_MOE_PATCH_SIZE;
             const unsigned temporal_patch = eng->QWEN3_6_MOE_TEMPORAL_PATCH_SIZE;
 
@@ -276,7 +276,7 @@ bool Qwen3_6_MOE::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
                         image_payload._data__processed.begin(),
                         image_payload._data__processed.begin() + bf16_to_drop);
                 }
-                header_print("FLM",
+                header_print("OFLM",
                     "Prompt-cache hit: dropped " << images_to_drop
                     << " cached image(s) from payload");
             }
@@ -435,7 +435,7 @@ std::string Qwen3_6_MOE::generate(chat_meta_info_t& meta_info, int length_limit,
     }
 
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
 
     return result;
 }
@@ -444,10 +444,10 @@ std::string Qwen3_6_MOE::generate_with_prompt(chat_meta_info_t& meta_info, lm_un
     if (!this->insert(meta_info, input)) {
         return "";
     }
-    header_print("FLM", "Prompt inserted, starting generation...");
+    header_print("OFLM", "Prompt inserted, starting generation...");
     int checkpoint_idx = this->lm_engine->checkpoint();
     int restore_idx = this->lm_engine->restore();
-    header_print_r("FLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
+    header_print_r("OFLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
     if (this->enable_think) {
         os << "<think>\n" << std::flush;
     }

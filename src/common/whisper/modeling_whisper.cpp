@@ -1,13 +1,13 @@
 /// \file whisper_npu.hpp
 /// \brief whisper_npu class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-17
 /// \version 0.9.24
 /// \note This is a source file for the modeling_whisper class
 #include "whisper/modeling_whisper.hpp"
 
 
-Whisper::Whisper(flm_rt::device* npu_device_inst){
+Whisper::Whisper(oflm_rt::device* npu_device_inst){
     this->device = npu_device_inst;
     
     time_stamp = 0;
@@ -23,7 +23,7 @@ Whisper::Whisper(flm_rt::device* npu_device_inst){
 }
 
 void Whisper::load_model(std::string model_path, nlohmann::ordered_json model_info, bool enable_preemption) {
-    header_print("FLM", "Loading model: " << model_path);
+    header_print("OFLM", "Loading model: " << model_path);
     this->npu = std::make_unique<npu_xclbin_manager>(npu_device::device_npu2, this->device, enable_preemption);
     this->enable_preemption = enable_preemption;
     this->model_path = model_path;

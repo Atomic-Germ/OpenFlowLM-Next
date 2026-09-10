@@ -8,7 +8,7 @@ same way they drive the closed DLL. Below the seam it is:
 
 | file | what |
 |---|---|
-| [q4nx_file.cpp](q4nx_file.cpp) | reads FLM's `.q4nx` container (mmap; q4_1 and q8 chunks, classified per tensor) — replaces `q4_npu_eXpress.dll` on this path |
+| [q4nx_file.cpp](q4nx_file.cpp) | reads OFLM's `.q4nx` container (mmap; q4_1 and q8 chunks, classified per tensor) — replaces `q4_npu_eXpress.dll` on this path |
 | [manifest.cpp](manifest.cpp) | reads the kernel set's `manifest.json`: layouts, contexts, kernels, per-layer programs, the packing plan, and the model check |
 | [pools.cpp](pools.cpp) | interprets the manifest's packing plan: each layer's weights into the byte order the kernels stream, straight into resident device buffers (the same plan `open_kernels/recipes/pack.py` runs in NumPy) |
 | [core.cpp](core.cpp) | device, contexts, kernels, 21 GB of resident pools, per-layer state; runs the manifest's program per layer, one `step()` per token |
@@ -47,7 +47,7 @@ directory it loads them from:
 ```
 source ~/ironenv142/bin/activate            # mlir-aie 1.4.2 + Peano (ironvenv-requirements.txt)
 export PATH=~/xrt-tools/bin:$PATH           # xclbinutil, aiebu-asm (from an XRT build)
-python open_kernels/export_qwen36_kernels.py [--model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2]
+python open_kernels/export_qwen36_kernels.py [--model-dir ~/.oflm/models/Qwen3.6-35B-A3B-NPU2]
 #   -> src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/{lx0,lx1,ax0,ax1,ln,lm_head_q8}/
 #      + manifest.json + spec.json + toolchain.json
 ```
@@ -71,7 +71,7 @@ without a manifest needs one before the engine will take it:
 
 About 6 minutes for all six on a Ryzen AI 9 HX 370 (WSL; ~90 s per layer_x set). `--only lx0,lx1`
 rebuilds a subset, `--out DIR` redirects (a model directory's `open_kernels/`
-and `FLM_OPEN_KERNELS_DIR` are the engine's other two lookup locations; each
+and `OFLM_OPEN_KERNELS_DIR` are the engine's other two lookup locations; each
 must hold a `manifest.json` naming files that exist).
 `toolchain.json` records the mlir-aie and Peano versions, this tree's commit,
 and every file's sha256. The distributed package ships the built kernels; a
@@ -100,9 +100,9 @@ every dimension from the recipe (all six streams byte-identical), and the
 
 The app uses the open engine for `qwen3.6-moe` whenever the kernels are
 installed for the model (`xclbins/<model name>/open_kernels/`, or
-`<model dir>/open_kernels/`, or `FLM_OPEN_KERNELS_DIR`); `FLM_QWEN36_ENGINE=closed`
+`<model dir>/open_kernels/`, or `OFLM_OPEN_KERNELS_DIR`); `OFLM_QWEN36_ENGINE=closed`
 forces the closed DLL, `=open` fails loudly if the kernels are missing. XRT
-builds only (`FLM_USE_HRX=OFF`), like the open embedding NPU backend. The engine
+builds only (`OFLM_USE_HRX=OFF`), like the open embedding NPU backend. The engine
 is the same code for every family; only the manifest is a different recipe's.
 
 One `AutoModel` adapter class per model family makes the choice, all through
@@ -111,10 +111,10 @@ so an architecture's variants behave identically:
 
 | Env var | `model_list.json` families | Adapter classes |
 | --- | --- | --- |
-| `FLM_QWEN36_ENGINE` | `qwen3.6-moe` | `Qwen3_6_MOE` |
-| `FLM_QWEN3_ENGINE` | `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528` | `Qwen3`, `Qwen3_IT`, `Qwen3_TK`, `DeepSeek_r1_0528_8b` |
-| `FLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1` | `Llama3`, `DeepSeek_r1_8b` |
-| `FLM_GEMMA_ENGINE` | `gemma3`, `gemma3-text` | `Gemma3`, `Gemma3_Text_Only` |
+| `OFLM_QWEN36_ENGINE` | `qwen3.6-moe` | `Qwen3_6_MOE` |
+| `OFLM_QWEN3_ENGINE` | `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528` | `Qwen3`, `Qwen3_IT`, `Qwen3_TK`, `DeepSeek_r1_0528_8b` |
+| `OFLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1` | `Llama3`, `DeepSeek_r1_8b` |
+| `OFLM_GEMMA_ENGINE` | `gemma3`, `gemma3-text` | `Gemma3`, `Gemma3_Text_Only` |
 
 Kernels are per model directory, so a family entry only means the adapter will
 use whatever set is installed for that particular model. Images always go to the
@@ -136,9 +136,9 @@ prepared by element index), HD 128 attention with 32/8 heads and full RoPE
 cos (the fixed offset the 27B used only fit 32 values).
 
 ```
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3-4B-NPU2     # WSL
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Qwen3-4B-NPU2     # WSL
 #   -> src/xclbins/Qwen3-4B-NPU2/open_kernels/{dx,ln,lm_head_q4}/ + manifest.json
-python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Qwen3-4B-NPU2 --kernels src\xclbins\Qwen3-4B-NPU2\open_kernels
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.oflm\models\Qwen3-4B-NPU2 --kernels src\xclbins\Qwen3-4B-NPU2\open_kernels
 ```
 
 | check (Qwen3-4B, Strix, Windows + XRT) | result |
@@ -168,8 +168,8 @@ leaves room for only one 5 KB weight chunk per element (`per_call` in the
 recipe, the GEMV entry generated with it).
 
 ```
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Llama-3.1-8B-NPU2     # WSL
-python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Llama-3.1-8B-NPU2 --kernels src\xclbins\Llama-3.1-8B-NPU2\open_kernels
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Llama-3.1-8B-NPU2     # WSL
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.oflm\models\Llama-3.1-8B-NPU2 --kernels src\xclbins\Llama-3.1-8B-NPU2\open_kernels
 ```
 
 | check (Llama-3.1-8B, Strix, Windows + XRT) | result |
@@ -196,8 +196,8 @@ sqrt(hidden)-scaled embeddings, so those two plan items are not transforms
 here (checked against the HF mirror by range requests).
 
 ```
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Gemma3-4B-NPU2     # WSL
-python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Gemma3-4B-NPU2 --kernels src\xclbins\Gemma3-4B-NPU2\open_kernels
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Gemma3-4B-NPU2     # WSL
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.oflm\models\Gemma3-4B-NPU2 --kernels src\xclbins\Gemma3-4B-NPU2\open_kernels
 ```
 
 | check (Gemma3-4B, Strix, Windows + XRT) | result |
@@ -230,15 +230,15 @@ the dense recipe composes it from validated kernel points with no new GEMV K,
   `dense.lm_rows` rounds the head up to 128192 while `hf_config_check` keeps the
   model's own count and `real_vocab` bounds the argmax.
 
-FLM ships no NPU2 container for it: convert `tencent/Hy-MT2-7B-GGUF` with
+OFLM ships no NPU2 container for it: convert `tencent/Hy-MT2-7B-GGUF` with
 `utilities/q4nx-build` (`ModelArch.HUNYUAN_DENSE`), which zero-pads the tied
 head and applies no rotary permutation (llama.cpp's HunYuan converter adds
 none, unlike its Llama one).
 
 ```
-python utilities/q4nx-build/convert.py -i HY-MT2-7B-Q8_0.gguf -o %USERPROFILE%\.flm\models\Hy-MT2-7B-NPU2 -s tencent/Hy-MT2-7B
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Hy-MT2-7B-NPU2     # WSL
-python src\open_qwen36\chat.py "Translate the following text into French. Note that you should only output the translated result without any additional explanation: The neural processing unit runs the model directly on the laptop, without sending anything to a server." --model %USERPROFILE%\.flm\models\Hy-MT2-7B-NPU2 --kernels src\xclbins\Hy-MT2-7B-NPU2\open_kernels
+python utilities/q4nx-build/convert.py -i HY-MT2-7B-Q8_0.gguf -o %USERPROFILE%\.oflm\models\Hy-MT2-7B-NPU2 -s tencent/Hy-MT2-7B
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Hy-MT2-7B-NPU2     # WSL
+python src\open_qwen36\chat.py "Translate the following text into French. Note that you should only output the translated result without any additional explanation: The neural processing unit runs the model directly on the laptop, without sending anything to a server." --model %USERPROFILE%\.oflm\models\Hy-MT2-7B-NPU2 --kernels src\xclbins\Hy-MT2-7B-NPU2\open_kernels
 ```
 
 | check (Hy-MT2-7B, Strix, Windows + XRT) | result |
@@ -255,7 +255,7 @@ FLORES pairs before trusting the model for work.
 ## A sixth family: IBM Granite (2026-09-06)
 
 `granite-4.2-3b` is Llama geometry at **head_dim 64 / hidden 2560** -- the point
-every shipped FastFlowLM design refuses, because head_dim is intrinsic to RoPE
+every shipped OpenFlowLM design refuses, because head_dim is intrinsic to RoPE
 and cannot be padded. Nothing in the design changes for it: `ATTN_HD` / `ATTN_NH`
 are compile-time macros and `attn.h` already carried hd 64's
 `kScale = 0.125f`. So the family is `spec.py`, `families.py`, a spec JSON and a
@@ -282,15 +282,15 @@ a silent factor of eight on every score). `dense.hf_config_check` repeats the
 check at engine load, which is what catches a `model.q4nx` swapped under an
 already-built kernel set.
 
-FLM ships no NPU2 container for it. Convert `ibm-granite/granite-4.2-3b-GGUF`
+OFLM ships no NPU2 container for it. Convert `ibm-granite/granite-4.2-3b-GGUF`
 with `utilities/q4nx-build` (`ModelArch.GRANITE`), which applies the four folds
 and writes the post-fold multipliers into the deployed `config.json`; install it
-with `flm-add ... --family granite`.
+with `oflm-add ... --family granite`.
 
 ```
-python utilities/q4nx-build/convert.py -i granite-4.2-3b-Q8_0.gguf -o %USERPROFILE%\.flm\models\Granite-4.2-3B-NPU2 -s ibm-granite/granite-4.2-3b
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Granite-4.2-3B-NPU2     # WSL
-python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Granite-4.2-3B-NPU2 --kernels src\xclbins\Granite-4.2-3B-NPU2\open_kernels
+python utilities/q4nx-build/convert.py -i granite-4.2-3b-Q8_0.gguf -o %USERPROFILE%\.oflm\models\Granite-4.2-3B-NPU2 -s ibm-granite/granite-4.2-3b
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Granite-4.2-3B-NPU2     # WSL
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.oflm\models\Granite-4.2-3B-NPU2 --kernels src\xclbins\Granite-4.2-3B-NPU2\open_kernels
 ```
 
 | check (Granite-4.2-3B, Strix, Windows + XRT) | result |
@@ -333,7 +333,7 @@ shift, the remaining scalars move into the vector phase, the heads split across
 five cores (`ATTN_NHL`), the head loops unroll, and four cached rows are
 processed per call (`ATTN_RB`) so one 32-lane exponential covers the block.
 
-Measured through `flm bench` on Granite 4.2 3B, `utilities/bench-configs/bench-1k.json`,
+Measured through `oflm bench` on Granite 4.2 3B, `utilities/bench-configs/bench-1k.json`,
 1005 prompt tokens, two builds differing only in these kernels:
 
 | | TTFT | prefill | decode |
@@ -393,8 +393,8 @@ Four things are new, and only one of them is a shape:
   now has two paths, below. Both packers (NumPy and C++) are checked byte-identical.
 
 ```
-OPEN_KERNELS_UNVALIDATED=1 python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.8-Distilled-4B-NPU2   # WSL
-python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Qwen3.8-Distilled-4B-NPU2 --kernels src\xclbins\Qwen3.8-Distilled-4B-NPU2\open_kernels
+OPEN_KERNELS_UNVALIDATED=1 python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Qwen3.8-Distilled-4B-NPU2   # WSL
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.oflm\models\Qwen3.8-Distilled-4B-NPU2 --kernels src\xclbins\Qwen3.8-Distilled-4B-NPU2\open_kernels
 ```
 
 | check (Qwen3.8-Distilled-4B, HID 2560, Strix, Windows + XRT) | result |
@@ -434,7 +434,7 @@ one whose destination is a runtime argument. Export without the force flag, into
 directory beside the q4_1 one:
 
 ```
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.8-Distilled-9B-NPU2 \
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Qwen3.8-Distilled-9B-NPU2 \
     --out src/xclbins/Qwen3.8-Distilled-9B-NPU2/open_kernels_q8                                  # WSL
 ```
 
@@ -455,7 +455,7 @@ until the FFN tail moves off that core. `.claude/plans/q8m-hw-results.md`.
 
 ## q8 weights: run them at q8, or re-quantize them
 
-FLM's newer converter stores the non-expert projections of the 35B-A3B fine-tunes --
+OFLM's newer converter stores the non-expert projections of the 35B-A3B fine-tunes --
 attention q/k/v/o, the linear-attention qkv/z and out projections, the shared expert --
 and Qwen3.5's `ssm_out_proj` at **q8** rather than q4_1. There are two ways to serve
 that, and the engine has both.
@@ -546,13 +546,13 @@ on a memory-starved box, not the kernels.
   capped (KV buffers are sized from the app's context length); speed at long
   context is a kernel item.
 - **Vision.** The model is a VLM; images still need the closed engine.
-- **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
+- **The weight file** is still OFLM's `.q4nx`. The GGUF path is a separate piece
   of work; this reader is ~150 lines and will go with it. The chunk format is read
   per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes
   ship, q8 attention and shared experts over q4_1 routed experts -- loads and packs;
   the q8 projections the kernel set was built for go into the pool at q8, the rest are
   re-quantized to q4_1 (above). **Both weight formats are read:** a container written
-  by FLM 1.0.3+ stores Q4_K super-blocks (4736-byte chunks) where 1.0.2 stored q4_1,
+  by OFLM 1.0.3+ stores Q4_K super-blocks (4736-byte chunks) where 1.0.2 stored q4_1,
   and those are transcoded into the pool's q4_1 chunk on the way in -- nearly free,
   since Q4_K's scale and min already have the pool's granularity, and no kernel,
   manifest or build key changes (OPEN-QUANT-Q4K). Anything else (the 1280 / 2560-byte
@@ -568,8 +568,8 @@ on a memory-starved box, not the kernels.
 
 ## Through the app (2026-09-05)
 
-`flm.exe` built on this box with the vcpkg route (`src/build-windows-vcpkg.cmd`,
-notes in `WinSetup.md`). `flm serve qwen3.6-moe:35b-a3b` picks the open engine
+`oflm.exe` built on this box with the vcpkg route (`src/build-windows-vcpkg.cmd`,
+notes in `WinSetup.md`). `oflm serve qwen3.6-moe:35b-a3b` picks the open engine
 (the log says so: *"Qwen3.6-MoE on the open kernels (...)"*) and answers
 OpenAI-style chat completions:
 

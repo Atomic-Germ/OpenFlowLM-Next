@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  WiX v5 source for the flm installer.
-  Ports src/inno/flm.iss (Inno Setup) to an MSI package.
+  WiX v5 source for the oflm installer.
+  Ports src/inno/oflm.iss (Inno Setup) to an MSI package.
 
   Build (from src/wix):
-    wix build Package.wxs -arch x64 -ext WixToolset.UI.wixext -out flm-setup.msi
+    wix build Package.wxs -arch x64 -ext WixToolset.UI.wixext -out oflm-setup.msi
 
-  Not ported 1:1 from flm.iss:
+  Not ported 1:1 from oflm.iss:
     - The interactive "model storage location" / "server port" wizard pages are
-      not reproduced. FLM_MODEL_PATH and FLM_SERVE_PORT are written with the
-      same defaults Inno used (%USERPROFILE%\.flm and 52625) but are not
+      not reproduced. OFLM_MODEL_PATH and OFLM_SERVE_PORT are written with the
+      same defaults Inno used (%USERPROFILE%\.oflm and 52625) but are not
       prompted for during install.
-    - The desktop shortcuts ("flm run" / "flm serve") are an opt-in MSI
+    - The desktop shortcuts ("oflm run" / "oflm serve") are an opt-in MSI
       feature (Level="1000", not installed by default) instead of an
       unchecked wizard checkbox, since there is no custom UI here to host one.
 -->
@@ -21,22 +21,22 @@
   <?define SourceDir = "..\inno"?>
   <?define XclbinsDir = "..\xclbins"?>
 
-  <Package Name="flm"
-           Manufacturer="FastFlowLM"
+  <Package Name="oflm"
+           Manufacturer="OpenFlowLM"
            Version="1.0.4"
            UpgradeCode="5A5B2872-1E63-4934-9F57-088554CF4959"
            Language="1033"
            Scope="perMachine"
            Compressed="yes">
 
-    <SummaryInformation Description="flm installer" Manufacturer="FastFlowLM" />
+    <SummaryInformation Description="oflm installer" Manufacturer="OpenFlowLM" />
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of flm is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of oflm is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="AppIcon.ico" SourceFile="$(SourceDir)\logo.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://www.fastflowlm.com" />
+    <Property Id="ARPURLINFOABOUT" Value="https://www.openflowlm.com" />
 
     <WixVariable Id="WixUILicenseRtf" Value="$(SourceDir)\terms.rtf" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
@@ -44,22 +44,22 @@
 
     <!-- Directory layout -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="flm">
+      <Directory Id="INSTALLFOLDER" Name="oflm">
         <Directory Id="XCLBINSFOLDER" Name="xclbins" />
       </Directory>
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="ApplicationProgramsFolder" Name="flm" />
+      <Directory Id="ApplicationProgramsFolder" Name="oflm" />
     </StandardDirectory>
 
     <StandardDirectory Id="DesktopFolder" />
 
-    <!-- Environment: FLM_MODEL_PATH, FLM_SERVE_PORT, PATH -->
+    <!-- Environment: OFLM_MODEL_PATH, OFLM_SERVE_PORT, PATH -->
     <!-- Attached to the main exe's component so it is set/removed with install/uninstall. -->
 
     <!-- Features -->
-    <Feature Id="MainFeature" Title="flm" Level="1">
+    <Feature Id="MainFeature" Title="oflm" Level="1">
       <ComponentGroupRef Id="MainComponents" />
       <ComponentGroupRef Id="XclbinsComponents" />
       <ComponentGroupRef Id="ApplicationShortcuts" />
@@ -71,11 +71,11 @@
 
     <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
 
-      <Component Id="Comp_flm.exe" Guid="*">
-        <File Id="File_flm.exe" Source="$(SourceDir)\flm.exe" KeyPath="yes" />
+      <Component Id="Comp_oflm.exe" Guid="*">
+        <File Id="File_oflm.exe" Source="$(SourceDir)\oflm.exe" KeyPath="yes" />
         <Environment Id="Env_Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" Permanent="no" />
-        <Environment Id="Env_ModelPath" Name="FLM_MODEL_PATH" Value="%USERPROFILE%\.flm" Action="set" System="yes" Permanent="no" />
-        <Environment Id="Env_ServePort" Name="FLM_SERVE_PORT" Value="52625" Action="set" System="yes" Permanent="no" />
+        <Environment Id="Env_ModelPath" Name="OFLM_MODEL_PATH" Value="%USERPROFILE%\.oflm" Action="set" System="yes" Permanent="no" />
+        <Environment Id="Env_ServePort" Name="OFLM_SERVE_PORT" Value="52625" Action="set" System="yes" Permanent="no" />
       </Component>
 
       <Component Id="Comp_libcurl.dll" Guid="*">
@@ -214,7 +214,7 @@
 
     </ComponentGroup>
 
-    <!-- xclbins\* recursively, mirrors flm.iss's recursesubdirs Source entry -->
+    <!-- xclbins\* recursively, mirrors oflm.iss's recursesubdirs Source entry -->
     <ComponentGroup Id="XclbinsComponents" Directory="XCLBINSFOLDER">
       <Files Include="$(XclbinsDir)\**" />
     </ComponentGroup>
@@ -223,13 +223,13 @@
     <ComponentGroup Id="ApplicationShortcuts" Directory="ApplicationProgramsFolder">
       <Component Id="Comp_StartMenuShortcut" Guid="*">
         <Shortcut Id="StartMenuShortcut"
-                  Name="flm"
-                  Description="Launch flm"
-                  Target="[INSTALLFOLDER]flm.exe"
+                  Name="oflm"
+                  Description="Launch oflm"
+                  Target="[INSTALLFOLDER]oflm.exe"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon.ico" />
         <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
-        <RegistryValue Root="HKLM" Key="Software\FastFlowLM\flm" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\OpenFlowLM\oflm" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
@@ -237,23 +237,23 @@
     <ComponentGroup Id="DesktopShortcuts" Directory="DesktopFolder">
       <Component Id="Comp_DesktopShortcutRun" Guid="*">
         <Shortcut Id="DesktopShortcutRun"
-                  Name="flm run"
-                  Description="Launch flm with llama3.2:1b model"
+                  Name="oflm run"
+                  Description="Launch oflm with llama3.2:1b model"
                   Target="[%ComSpec]"
-                  Arguments="/K &quot;[INSTALLFOLDER]flm.exe&quot; run llama3.2:1b"
+                  Arguments="/K &quot;[INSTALLFOLDER]oflm.exe&quot; run llama3.2:1b"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon.ico" />
-        <RegistryValue Root="HKLM" Key="Software\FastFlowLM\flm" Name="DesktopShortcutRun" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\OpenFlowLM\oflm" Name="DesktopShortcutRun" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="Comp_DesktopShortcutServe" Guid="*">
         <Shortcut Id="DesktopShortcutServe"
-                  Name="flm serve"
-                  Description="Launch flm in serve mode"
+                  Name="oflm serve"
+                  Description="Launch oflm in serve mode"
                   Target="[%ComSpec]"
-                  Arguments="/K &quot;[INSTALLFOLDER]flm.exe&quot; serve"
+                  Arguments="/K &quot;[INSTALLFOLDER]oflm.exe&quot; serve"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon.ico" />
-        <RegistryValue Root="HKLM" Key="Software\FastFlowLM\flm" Name="DesktopShortcutServe" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\OpenFlowLM\oflm" Name="DesktopShortcutServe" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

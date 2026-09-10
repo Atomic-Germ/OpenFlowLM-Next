@@ -1,6 +1,6 @@
 """
 Unit tests for EmbeddingTask — embedding checks E1-E9. All embedding API calls
-are mocked so no FLM server is required.
+are mocked so no OFLM server is required.
 
 Run with:
     python3 -m pytest tests/test_embedding_checks.py -v
@@ -19,12 +19,12 @@ from unittest.mock import patch
 # Make sure the package is importable from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from flm_test.tasks import EmbeddingTask
+from oflm_test.tasks import EmbeddingTask
 
 
 def _make_task():
     """Instantiate an EmbeddingTask with all server I/O patched away."""
-    with patch.object(EmbeddingTask, "_get_flm_version", return_value="0.9.99"), \
+    with patch.object(EmbeddingTask, "_get_oflm_version", return_value="0.9.99"), \
          patch.object(EmbeddingTask, "_fetch_all_models", return_value=[]), \
          patch("os.makedirs"):
         return EmbeddingTask(base_url="http://127.0.0.1:52625/v1", backend_os="linux")
@@ -395,7 +395,7 @@ class TestRunCheckErrorHandling(unittest.TestCase):
         def exploding_check():
             raise RuntimeError("boom")
 
-        with patch("flm_test.tasks.time.sleep"):
+        with patch("oflm_test.tasks.time.sleep"):
             task._run_check(FakeWriter(), "embed-gemma:300m", "E1 Response Structure",
                             "input text", exploding_check)
         self.assertEqual(len(rows), 1)
@@ -410,7 +410,7 @@ class TestRunCheckErrorHandling(unittest.TestCase):
             def writerow(self, values):
                 rows.append(values)
 
-        with patch("flm_test.tasks.time.sleep"):
+        with patch("oflm_test.tasks.time.sleep"):
             task._run_check(FakeWriter(), "embed-gemma:300m", "E3 Batch & Index Integrity",
                             json.dumps(task.BATCH_INPUTS),
                             lambda: (("PASS", "three embeddings in order"), [0.1, 0.2]))

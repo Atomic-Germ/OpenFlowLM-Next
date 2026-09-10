@@ -3,13 +3,13 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flm-test"
+name = "oflm-test"
 version = "0.6.2"
-description = "A comprehensive testing framework for FastFlowLM that validates the functionality of various AI model categories including Language, Embedding, Audio, and Vision models."
+description = "A comprehensive testing framework for OpenFlowLM that validates the functionality of various AI model categories including Language, Embedding, Audio, and Vision models."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-keywords = ["flm", "fastflowlm", "q4nx", "npu", "model-testing", "vision", "audio", "text"]
+keywords = ["oflm", "openflowlm", "q4nx", "npu", "model-testing", "vision", "audio", "text"]
 classifiers = [
     "Environment :: Console",
     "Operating System :: OS Independent",
@@ -32,10 +32,10 @@ dev = [
 ]
 
 [project.scripts]
-flm-test = "flm_test:main"
+oflm-test = "oflm_test:main"
 
 [tool.setuptools]
-packages = ["flm_test"]
+packages = ["oflm_test"]
 
 [tool.setuptools.package-data]
-flm_test = ["test_files/**/audio/*.mp3", "test_files/**/*.png", "test_files/**/*.jpg", "test_files/**/*.jpeg", "test_files/**/*.mp3", "test_files/*.json"]
+oflm_test = ["test_files/**/audio/*.mp3", "test_files/**/*.png", "test_files/**/*.jpg", "test_files/**/*.jpeg", "test_files/**/*.mp3", "test_files/*.json"]

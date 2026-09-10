@@ -1,6 +1,6 @@
 /// \file auto_embedding_model.hpp
 /// \brief AutoEmbeddingModel class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-23
 /// \version 0.9.24
 /// \note This is a header file for the AutoEmbeddingModel class
@@ -43,13 +43,13 @@ protected:
 	std::string model_path = "";
 	bool is_model_loaded = false;
 	std::string current_model = "";
-	flm_rt::device* npu_device_inst = nullptr;
+	oflm_rt::device* npu_device_inst = nullptr;
 
 public:
 	//************ Shared by all models *************/
 	virtual ~AutoEmbeddingModel() = default;
 
-	AutoEmbeddingModel(flm_rt::device* npu_device_inst, std::string current_model = "");
+	AutoEmbeddingModel(oflm_rt::device* npu_device_inst, std::string current_model = "");
 	/// \brief Get the current model
 	/// \return the current model
 	std::string get_current_model();

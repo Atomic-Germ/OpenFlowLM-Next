@@ -4,7 +4,7 @@ layout (the MoE recipe's attention half + the dense recipe's FFN half), the
 programs, and the two new pack ops.
 
 The config fixtures are the models' own `config.json`, unedited:
-`config_qwen35_9b.json` is FLM's flat container config for
+`config_qwen35_9b.json` is OFLM's flat container config for
 `Atomic-Germ/Qwen3.8-Distilled-9B-NPU2`; the 4B / 2B are the matching
 `Atomic-Germ` containers; the 0.8B is `Qwen/Qwen3.5-0.8B`, whose shape lives in
 a nested `text_config` with `model_type: qwen3_5_text`.
@@ -68,7 +68,7 @@ def test_the_four_published_shapes_derive():
 
 def test_the_nested_text_config_is_read():
     """Qwen's own repos wrap the text tower in `text_config` (model_type qwen3_5_text);
-    FLM's containers flatten it (model_type qwen3_5). Both derive the same tower."""
+    OFLM's containers flatten it (model_type qwen3_5). Both derive the same tower."""
     stock = cfg("0p8b")
     assert stock["model_type"] == "qwen3_5" and stock["text_config"]["model_type"] == "qwen3_5_text"
     a = ModelSpec.from_hf_config(stock)

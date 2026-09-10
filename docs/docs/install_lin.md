@@ -7,22 +7,22 @@ has_children: false
 
 # Linux NPU Support
 
-This article will teach you how to run LLMs on your **AMD XDNA2 NPU** on Linux using **FastFlowLM**.  
+This article will teach you how to run LLMs on your **AMD XDNA2 NPU** on Linux using **OpenFlowLM**.  
 Get set up and then show us what you build!
 
 **Date:** March 5, 2026  
-**Authors:** [Lemonade-server🍋](https://lemonade-server.ai/) and FastFlowLM contributors
+**Authors:** [Lemonade-server🍋](https://lemonade-server.ai/) and OpenFlowLM contributors
 
-## 📢 FastFlowLM Linux Support
+## 📢 OpenFlowLM Linux Support
 
-[FastFlowLM](https://github.com/ROCm/FastFlowLM) is a lightweight LLM runtime optimized for **AMD NPUs**.  
-Today, FastFlowLM is adding support for **Ubuntu, Arch, and other distros** to enable **fast, low-power LLMs** on **Ryzen™ AI PCs that run Linux**.
+[OpenFlowLM](https://github.com/Atomic-Germ/OpenFlowLM) is a lightweight LLM runtime optimized for **AMD NPUs**.  
+Today, OpenFlowLM is adding support for **Ubuntu, Arch, and other distros** to enable **fast, low-power LLMs** on **Ryzen™ AI PCs that run Linux**.
 
 This article will help you:
 
 - Understand **Linux NPU support status** and required platform versions
-- Install the **FLM + driver stack** for your distribution
-- Validate your setup with `flm validate`
+- Install the **OFLM + driver stack** for your distribution
+- Validate your setup with `oflm validate`
 - Fix common **firmware, driver, and memlock issues**
 
 ---
@@ -31,7 +31,7 @@ This article will help you:
 
 ### Supported processors
 
-FastFlowLM on Linux requires an **AMD XDNA2 NPU**.
+OpenFlowLM on Linux requires an **AMD XDNA2 NPU**.
 
 | Ryzen AI family | Codename | Status |
 |---|---|---|
@@ -55,7 +55,7 @@ The quickstart guide below will help you install these requirements.
 |---|---|
 | NPU firmware | Version 1.1.0.0 or later |
 | Kernel + driver | Kernel **7.0+** with `amdxdna`, or `amdxdna-dkms` |
-| Runtime | FastFlowLM installed |
+| Runtime | OpenFlowLM installed |
 | Memlock limit | Must be high enough for NPU execution |
 
 ---
@@ -101,11 +101,11 @@ sudo apt install libxrt-npu2 amdxdna-dkms
 sudo reboot
 ```
 
-#### 4. Install FastFlowLM
-- Download the latest `.deb` package from the [Releases page](https://github.com/ROCm/FastFlowLM/releases):
+#### 4. Install OpenFlowLM
+- Download the latest `.deb` package from the [Releases page](https://github.com/Atomic-Germ/OpenFlowLM/releases):
 
 ```sh
-sudo apt install ./fastflowlm*.deb
+sudo apt install ./openflowlm*.deb
 ```
 
 #### 5. (NPU) Check memlock limit
@@ -158,9 +158,9 @@ Then confirm XRT can see the NPU:
 xrt-smi examine
 ```
 
-If `flm validate` passes but `flm run` fails with `No such device with index '0'`, XRT does not see a device. Make sure `xrt-plugin-amdxdna` is installed and `xrt-smi examine` lists the NPU.
+If `oflm validate` passes but `oflm run` fails with `No such device with index '0'`, XRT does not see a device. Make sure `xrt-plugin-amdxdna` is installed and `xrt-smi examine` lists the NPU.
 
-> **Arch firmware note:** Some `linux-firmware-other` versions ship both 1.0 and 1.1 NPU firmware for `17f0_10`. On stock Linux 6.19, forcing `npu.sbin.zst` to 1.1 firmware can make the NPU disappear because the in-tree driver expects the older firmware protocol. Use `amdxdna-dkms` or a newer kernel that supports the protocol-7 firmware path, then verify `flm validate` reports firmware `1.1.x`.
+> **Arch firmware note:** Some `linux-firmware-other` versions ship both 1.0 and 1.1 NPU firmware for `17f0_10`. On stock Linux 6.19, forcing `npu.sbin.zst` to 1.1 firmware can make the NPU disappear because the in-tree driver expects the older firmware protocol. Use `amdxdna-dkms` or a newer kernel that supports the protocol-7 firmware path, then verify `oflm validate` reports firmware `1.1.x`.
 
 ---
 
@@ -168,8 +168,8 @@ If `flm validate` passes but `flm run` fails with `No such device with index '0'
 
 1. Clone the repository:
    ```sh
-   git clone https://github.com/ROCm/FastFlowLM.git
-   cd FastFlowLM
+   git clone https://github.com/Atomic-Germ/OpenFlowLM.git
+   cd OpenFlowLM
    ```
 2. Build:
    ```sh
@@ -200,7 +200,7 @@ This will automatically fetch and build XRT (v2.21.75) and the XDNA driver from 
 
 To validate your NPU setup, run:
 ```sh
-flm validate
+oflm validate
 ```
 You should see output similar to:
 ```
@@ -210,7 +210,7 @@ You should see output similar to:
 [Linux]  Memlock Limit: infinity
 ```
 
-On Linux, `flm validate` checks the kernel DRM path. `flm run` uses XRT. If validation succeeds but running a model fails with `No such device with index '0'`, run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution.
+On Linux, `oflm validate` checks the kernel DRM path. `oflm run` uses XRT. If validation succeeds but running a model fails with `No such device with index '0'`, run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution.
 
 ---
 

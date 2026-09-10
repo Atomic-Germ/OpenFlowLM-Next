@@ -1,13 +1,13 @@
-"""flm_add - install a pre-converted FLM (Q4NX) model and register it with FastFlowLM.
+"""oflm_add - install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.
 
-Installable as ``flm-add`` (e.g. ``uv tool install flm-add``) or runnable as a
-script (``python flm_add/__init__.py`` or the legacy ``flm-add.py`` shim).
+Installable as ``oflm-add`` (e.g. ``uv tool install oflm-add``) or runnable as a
+script (``python oflm_add/__init__.py`` or the legacy ``oflm-add.py`` shim).
 
 Python-3 stdlib only (no pip packages). Works with any repo that
 already contains the runtime-ready files (config.json, model.q4nx,
 tokenizer.json, tokenizer_config.json, optionally chat_template.jinja):
 
-    python3 flm-add.py Atomic-Germ/Qwen3.5-9B-Claude-4.8-Opus-NPU2
+    python3 oflm-add.py Atomic-Germ/Qwen3.5-9B-Claude-4.8-Opus-NPU2
 
 Repo can be a Hugging Face repo id, a ModelScope repo id (--modelscope), a full
 Hugging Face URL, a ModelScope URL (www.modelscope.ai/.cn -- implies ModelScope
@@ -15,25 +15,25 @@ without the flag), or a local directory holding the model files. The tag is
 derived from the repo name (e.g. Qwen3.5-9B-Claude-4.8-Opus-NPU2 ->
 qwen3.5-claude:9b); override with --tag. Defaults for the registry entry
 (family, engine, size, context length) are copied from the matching official
-FastFlowLM entry.
+OpenFlowLM entry.
 
 Open kernels are handled separately. They belong to a model's *spec* (its
 shape plus the per-role weight format), not to an official model name, so any
 installed set whose manifest.json carries the same spec_hash as this model
-drives it. flm-add derives the spec from the installed config.json (+
+drives it. oflm-add derives the spec from the installed config.json (+
 tokenizer.json and the model.q4nx header) via the open_kernels/recipes
 checkout, finds the matching set, and links it at <model dir>/open_kernels --
 the second place open_qwen36::Engine::find_kernels looks.
 
 The script never rewrites the system model list or the system xclbins; it
-writes a user-level registry at ~/.config/flm/model_list.json and adds a single
-symlink into ~/.config/flm/xclbins/ for the new model directory. Custom FLM
+writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
+symlink into ~/.config/oflm/xclbins/ for the new model directory. Custom OFLM
 models never ship xclbins (they are closed source), so the kernel symlink is
 always taken from the matching official model, keyed by family (engine) and
 size -- e.g. Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2. The only thing
 you need in your shell rc afterwards is:
 
-    FLM_CONFIG_PATH="$HOME/.config/flm/model_list.json" FLM_XCLBIN_PATH="$HOME/.config/flm"
+    OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json" OFLM_XCLBIN_PATH="$HOME/.config/oflm"
 """
 
 import argparse
@@ -51,15 +51,15 @@ OPTIONAL_FILES = ["chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4n
 ALL_FILES = REQUIRED_FILES + OPTIONAL_FILES
 
 SYSTEM_LIST_CANDIDATES = [
-    "/opt/fastflowlm/share/flm/model_list.json",
-    "/usr/share/flm/model_list.json",
-    "/usr/local/share/flm/model_list.json",
+    "/opt/openflowlm/share/oflm/model_list.json",
+    "/usr/share/oflm/model_list.json",
+    "/usr/local/share/oflm/model_list.json",
 ]
 
 SYSTEM_XCLBIN_PREFIXES = [
-    Path("/opt/fastflowlm/share/flm"),
-    Path("/usr/share/flm"),
-    Path("/usr/local/share/flm"),
+    Path("/opt/openflowlm/share/oflm"),
+    Path("/usr/share/oflm"),
+    Path("/usr/local/share/oflm"),
 ]
 
 # Dir-name prefix -> runtime details.family, used only when no official entry
@@ -126,7 +126,7 @@ def save_json(path, data):
 
 
 def find_system_model_list():
-    exe = shutil.which("flm")
+    exe = shutil.which("oflm")
     candidates = []
     if exe:
         candidates.append(Path(exe).parent / "model_list.json")
@@ -135,18 +135,18 @@ def find_system_model_list():
         if c.is_file():
             return c
     raise SystemExit(
-        "Could not locate the system model_list.json (looked next to `flm` and in "
-        "/opt,/usr,/usr/local share/flm). Pass --system-list."
+        "Could not locate the system model_list.json (looked next to `oflm` and in "
+        "/opt,/usr,/usr/local share/oflm). Pass --system-list."
     )
 
 
 def find_system_xclbin_root():
     """Directory whose <root>/xclbins/ holds the per-model kernel folders."""
-    exe = shutil.which("flm")
+    exe = shutil.which("oflm")
     candidates = []
     if exe:
         candidates.append(Path(exe).parent)
-        candidates.append((Path(exe).parent / ".." / "share" / "flm").resolve())
+        candidates.append((Path(exe).parent / ".." / "share" / "oflm").resolve())
     candidates += SYSTEM_XCLBIN_PREFIXES
     for c in candidates:
         if (c / "xclbins").is_dir():
@@ -159,27 +159,27 @@ def user_xclbin_dir(arg):
     if arg:
         base = Path(arg)
     else:
-        env = os.environ.get("FLM_XCLBIN_PATH")
-        base = Path(env) if env else Path.home() / ".config" / "flm"
+        env = os.environ.get("OFLM_XCLBIN_PATH")
+        base = Path(env) if env else Path.home() / ".config" / "oflm"
     return base if base.name == "xclbins" else base / "xclbins"
 
 
 def user_registry_path(arg):
     if arg:
         return Path(arg)
-    env = os.environ.get("FLM_CONFIG_PATH")
+    env = os.environ.get("OFLM_CONFIG_PATH")
     if env:
         return Path(env)
-    return Path.home() / ".config" / "flm" / "model_list.json"
+    return Path.home() / ".config" / "oflm" / "model_list.json"
 
 
 def models_root_dir(arg):
     if arg:
         return Path(arg)
-    env = os.environ.get("FLM_MODEL_PATH")
+    env = os.environ.get("OFLM_MODEL_PATH")
     if env:
         return Path(env) / "models"
-    return Path.home() / ".config" / "flm" / "models"
+    return Path.home() / ".config" / "oflm" / "models"
 
 
 # ---------------------------------------------------------------- tag derivation
@@ -266,7 +266,7 @@ def match_official_by_family_size(system_registry, family, size):
 def resolve_official(system_registry, dir_name, family, size):
     """Pick the official model that supplies the xclbins for this install.
 
-    Custom FLM models never ship xclbins (closed source), so the kernels must
+    Custom OFLM models never ship xclbins (closed source), so the kernels must
     be linked from the matching official model, keyed by family (engine) and
     size. Returns (official_4tuple, note) where note explains any size
     mismatch, or (None, None) when no official model matches.
@@ -315,7 +315,7 @@ def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
 # ------------------------------------------------------------------- asset fetch
 
 def _hf_headers():
-    headers = {"User-Agent": "flm-add/1.0"}
+    headers = {"User-Agent": "oflm-add/1.0"}
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -324,7 +324,7 @@ def _hf_headers():
 
 def _ms_headers():
     # Never forward Hugging Face credentials to ModelScope hosts.
-    return {"User-Agent": "flm-add/1.0"}
+    return {"User-Agent": "oflm-add/1.0"}
 
 
 def _http_get_json(url, headers=None):
@@ -596,7 +596,7 @@ def build_entry(base_entry, dir_name, files, size):
     entry["ms_url"] = ""
     entry.setdefault("max_prefill_len", 4096)
     entry.setdefault("default_context_length", 8192)
-    entry.setdefault("flm_min_version", "0.9.45")
+    entry.setdefault("oflm_min_version", "0.9.45")
     entry.setdefault("details", {}).setdefault("format", "NPU2")
     if size:
         entry["size"] = size
@@ -653,16 +653,16 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
 # Closed kernels are per official model; open kernel sets are per ModelSpec --
 # the shape plus the per-role weight format. Two shape-identical models (a
 # fine-tune, a distill) share one set. The engine finds a set at
-# FLM_OPEN_KERNELS_DIR, then <model dir>/open_kernels, then
+# OFLM_OPEN_KERNELS_DIR, then <model dir>/open_kernels, then
 # <xclbins root>/<model name>/open_kernels (open_qwen36::Engine::find_kernels).
 # We link into the model directory: it is the one root that does not depend on
-# how FLM_XCLBIN_PATH happens to be set.
+# how OFLM_XCLBIN_PATH happens to be set.
 
 def open_kernels_checkout():
     """An `open_kernels/` directory holding recipes/spec.py, or None.
 
-    Looked for at $OPEN_KERNELS_DIR, then next to this checkout (flm-add lives
-    in <repo>/utilities/flm-add), then under the working directory.
+    Looked for at $OPEN_KERNELS_DIR, then next to this checkout (oflm-add lives
+    in <repo>/utilities/oflm-add), then under the working directory.
     """
     candidates = []
     env = os.environ.get("OPEN_KERNELS_DIR")
@@ -783,8 +783,8 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
             log(f"[INFO] Linked open kernels: {link} -> {kernel_dir}")
         return True
     log(f"[WARN] Could not link {link} -> {kernel_dir} (a Windows symlink needs "
-        "developer mode or admin). Run flm with:")
-    log(f'           FLM_OPEN_KERNELS_DIR="{kernel_dir}"')
+        "developer mode or admin). Run oflm with:")
+    log(f'           OFLM_OPEN_KERNELS_DIR="{kernel_dir}"')
     return False
 
 
@@ -819,14 +819,14 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Install a pre-converted FLM (Q4NX) model and register it with FastFlowLM.",
+        description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
     )
     ap.add_argument("repo", help="Hugging Face repo id (Org/Name), ModelScope id (with --modelscope), URL, or local directory")
     ap.add_argument("--tag", help="Registry tag (default: derived from the repo name, e.g. qwen3.5-claude:9b)")
     ap.add_argument("--family", help="details.family for engine dispatch (default: from matching official entry)")
-    ap.add_argument("--config", help="model_list.json to update (default: $FLM_CONFIG_PATH or ~/.config/flm/model_list.json)")
-    ap.add_argument("--models-root", help="models directory (default: $FLM_MODEL_PATH or ~/.config/flm/models)")
-    ap.add_argument("--xclbin-dir", help="user xclbins directory (default: ~/.config/flm/xclbins)")
+    ap.add_argument("--config", help="model_list.json to update (default: $OFLM_CONFIG_PATH or ~/.config/oflm/model_list.json)")
+    ap.add_argument("--models-root", help="models directory (default: $OFLM_MODEL_PATH or ~/.config/oflm/models)")
+    ap.add_argument("--xclbin-dir", help="user xclbins directory (default: ~/.config/oflm/xclbins)")
     ap.add_argument("--xclbin-from", help="official model directory name to link xclbins from (default: best match, e.g. Qwen3.6-35B-A3B-NPU2)")
     ap.add_argument("--system-list", help="official model_list.json used for defaults (default: auto-detect)")
     ap.add_argument("--modelscope", action="store_true", help="Treat REPO as a ModelScope repo id (implied by www.modelscope.ai/.cn URLs)")
@@ -953,9 +953,9 @@ def main():
 
     print()
     print(f"Done: {dir_name} installed to {target}")
-    print(f"Run:  flm run {tag}   (or: flm serve {tag})")
+    print(f"Run:  oflm run {tag}   (or: oflm serve {tag})")
     print()
     print("Make sure your shell has these exports (add to ~/.bashrc):")
-    print('    export FLM_CONFIG_PATH="$HOME/.config/flm/model_list.json"')
-    print('    export FLM_XCLBIN_PATH="$HOME/.config/flm"')
+    print('    export OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json"')
+    print('    export OFLM_XCLBIN_PATH="$HOME/.config/oflm"')
 

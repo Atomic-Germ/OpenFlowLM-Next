@@ -6,13 +6,13 @@
         Run frontier LLMs directly on Ryzen™ AI NPUs
       </h1>
       <p class="copy-lg">
-        FastFlowLM delivers a familiar single-command developer experience that is tuned for AMD’s XDNA2 accelerators:
+        OpenFlowLM delivers a familiar single-command developer experience that is tuned for AMD’s XDNA2 accelerators:
         install in seconds, stream tokens instantly, and sustain up to 256k context windows with 10× better
         efficiency than GPU-first stacks.
       </p>
       <div class="btn-row">
-        <a class="btn btn--primary" href="https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi" target="_blank" rel="noreferrer">Download FastFlowLM</a>
-        <a class="btn btn--ghost" href="https://github.com/ROCm/FastFlowLM" target="_blank"
+        <a class="btn btn--primary" href="https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi" target="_blank" rel="noreferrer">Download OpenFlowLM</a>
+        <a class="btn btn--ghost" href="https://github.com/Atomic-Germ/OpenFlowLM" target="_blank"
           rel="noreferrer">GitHub</a>
         <a class="btn btn--ghost" href="{{ '/benchmarks/' | relative_url }}">Benchmarks</a>
         <a class="btn btn--ghost" href="{{ '/models/' | relative_url }}">Models</a>
@@ -42,13 +42,13 @@
           <span class="code-card__dot"></span>
           <span class="code-card__title">fastflow.ps1</span>
         </div>
-        <pre><code>Invoke-WebRequest https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi `
-  -OutFile flm-setup.msi
-Start-Process .\flm-setup.msi -Wait
+        <pre><code>Invoke-WebRequest https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi `
+  -OutFile oflm-setup.msi
+Start-Process .\oflm-setup.msi -Wait
 
-flm pull llama3.2:1b
-flm run llama3.2:1b
-flm serve gemma3:4b --vision</code></pre>
+oflm pull llama3.2:1b
+oflm run llama3.2:1b
+oflm serve gemma3:4b --vision</code></pre>
       </div>
       <div class="pill-list">
         <span class="pill-list__item">LLMs + VLMs</span>

@@ -6,7 +6,7 @@
 /// A q4_1 source is not dequantized or requantized: the 5120-byte chunks are
 /// copied verbatim, only their ORDER changes, because the AIE array streams a
 /// matrix band by band rather than in the file's raster order. The laws are the
-/// ones phlegm verified byte-for-byte against pools captured from FLM's own
+/// ones phlegm verified byte-for-byte against pools captured from OFLM's own
 /// engine; open_kernels/recipes/pack.py is the same interpreter in NumPy, and
 /// specs/open-engine/tests/test_pack_plan.py holds it to the frozen originals.
 ///
@@ -18,7 +18,7 @@
 /// linear-attention and shared experts; q4_1 routed experts) and Qwen3.5's q8
 /// `ssm_out_proj` run on kernels that only have a q4_1 GEMV (OPEN-PACK-PLAN).
 ///
-/// A Q4_K source (4736-byte chunks, what FLM 1.0.3+ writes) is accepted the same way and
+/// A Q4_K source (4736-byte chunks, what OFLM 1.0.3+ writes) is accepted the same way and
 /// transcoded to q4_1 (`q4k_to_q4_1_chunks`). That one is nearly free: Q4_K's scale and
 /// min already have the pool's granularity and index, so only the two bf16 products
 /// round (OPEN-QUANT-Q4K). Any other chunk size is refused, naming the tensor.

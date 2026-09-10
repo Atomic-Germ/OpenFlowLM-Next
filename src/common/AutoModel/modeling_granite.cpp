@@ -4,7 +4,7 @@
 #include "AutoModel/modeling_granite.hpp"
 
 /************              Granite family            **************/
-Granite::Granite(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") {}
+Granite::Granite(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Granite") {}
 
 void Granite::load_model(std::string model_path, json model_info, int default_context_length,
                          bool enable_preemption) {
@@ -15,26 +15,26 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
     // is NO closed granite engine to fall back to -- llama_npu whitelists
     // hidden_size to {2048, 3072, 4096} and refuses Granite's 2560 outright --
     // so a missing kernel set is a named refusal, not a quiet substitution.
-    // FLM_GRANITE_ENGINE=open is accepted (and is the only value that means
+    // OFLM_GRANITE_ENGINE=open is accepted (and is the only value that means
     // anything) so the variable behaves like the other families'.
-#ifdef FLM_USE_OPEN_QWEN36
+#ifdef OFLM_USE_OPEN_QWEN36
     const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
-    const char* sel = std::getenv("FLM_GRANITE_ENGINE");
+    const char* sel = std::getenv("OFLM_GRANITE_ENGINE");
     if (sel && std::string(sel) == "closed")
-        throw std::runtime_error("FLM_GRANITE_ENGINE=closed: not implemented -- Granite has no closed engine "
+        throw std::runtime_error("OFLM_GRANITE_ENGINE=closed: not implemented -- Granite has no closed engine "
                                  "(llama_npu refuses hidden_size 2560); build the open kernels instead");
     if (kernels.empty())
         throw std::runtime_error("no open kernels were found for " + this->lm_config->model_name +
                                  ". Granite runs on the open kernels only: build them with "
                                  "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
-                                 "FLM_OPEN_KERNELS_DIR at a built set.");
-    header_print("FLM", "Granite on the open kernels (" + kernels + ")");
+                                 "OFLM_OPEN_KERNELS_DIR at a built set.");
+    header_print("OFLM", "Granite on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
     this->lm_engine = std::move(eng);
 #else
     throw std::runtime_error("Granite needs the open engine, which this build does not have "
-                             "(FLM_USE_OPEN_QWEN36 is off -- it requires the XRT backend, not HRX)");
+                             "(OFLM_USE_OPEN_QWEN36 is off -- it requires the XRT backend, not HRX)");
 #endif
 
     this->lm_engine->clear_context();

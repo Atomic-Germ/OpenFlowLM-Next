@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
-project(fastflowlm LANGUAGES CXX VERSION 0.1.0)
+project(openflowlm LANGUAGES CXX VERSION 0.1.0)
 
 # Enable testing at the top level so `ctest` (run from the build root) discovers
 # the tests registered under src/. The src/ subproject also calls it so a direct
 # `cmake -S src` build remains testable.
 enable_testing()
 
-# The inference engine (its own project, "flm") lives under src/ and is built as
+# The inference engine (its own project, "oflm") lives under src/ and is built as
 # a subdirectory so a single `cmake --preset` from the repo root configures,
 # builds, tests and packages the whole distribution (engine + open NPU kernels).
 #

@@ -1,6 +1,6 @@
 """Qwen3.5 MoE (qwen35moe / qwen3.6-moe) converter: HF safetensors -> Q4NX.
 
-The target Q4NX layout mirrors the official FastFlowLM Qwen3.6-35B-A3B model.
+The target Q4NX layout mirrors the official OpenFlowLM Qwen3.6-35B-A3B model.
 Derived from the proven dense Qwen3.5 converter conventions and the official
 Q4NX header (733 tensors, dtype policy):
 

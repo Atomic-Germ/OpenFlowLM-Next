@@ -13,7 +13,7 @@
 #include "nlohmann/json.hpp"
 #include "tokenizers_cpp.h"
 
-#ifdef FLM_USE_OPEN_EMBEDDING_NPU
+#ifdef OFLM_USE_OPEN_EMBEDDING_NPU
 #include "npu_utils/npu_utils_matmul.hpp"
 #endif
 
@@ -105,11 +105,11 @@ bool Engine::load(const std::string& model_dir) {
 }
 
 bool Engine::load_npu() {
-#ifdef FLM_USE_OPEN_EMBEDDING_NPU
-    if (std::getenv("FLM_NPU_DISABLE")) return false;
+#ifdef OFLM_USE_OPEN_EMBEDDING_NPU
+    if (std::getenv("OFLM_NPU_DISABLE")) return false;
     const std::string asset_dir =
         (std::filesystem::path(model_dir_) / "npu_matmul_f32").string();
-    const char* dev_id = std::getenv("FLM_NPU_DEVICE_ID");
+    const char* dev_id = std::getenv("OFLM_NPU_DEVICE_ID");
     npu_ = std::make_shared<NpuMatmul>();
     if (!npu_->init(asset_dir, dev_id ? dev_id : "")) {
         npu_.reset();
@@ -243,7 +243,7 @@ void Engine::matmul_t(const std::vector<float>& x, const std::vector<float>& w, 
 void Engine::matmul_t_npu(const std::string& name, const std::vector<float>& x, size_t M, size_t K, size_t N,
                           std::vector<float>& y) {
     const std::vector<float>& w = weight(name);
-#ifdef FLM_USE_OPEN_EMBEDDING_NPU
+#ifdef OFLM_USE_OPEN_EMBEDDING_NPU
     if (npu_ && M > 0 && M <= 2048) {
         const int m_pad = npu_->m_pad_for(static_cast<int>(K), static_cast<int>(N),
                                           static_cast<int>(M));

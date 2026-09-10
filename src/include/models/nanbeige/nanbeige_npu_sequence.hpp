@@ -1,6 +1,6 @@
 /// \file nanbeige_npu_sequence.hpp
 /// \brief nanbeige_npu_sequence class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-03-24
 /// \version 0.9.36
 /// \note This is a header file for the nanbeige_npu_sequence class

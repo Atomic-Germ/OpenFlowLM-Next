@@ -1,6 +1,6 @@
 /// \file download_model.hpp
 /// \brief Download model class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class for curl download

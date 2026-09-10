@@ -1,13 +1,13 @@
-# flm-test
+# oflm-test
 
-A comprehensive testing framework *intended* for  **[FastFlowLM (FLM)](https://fastflowlm.com)** that validates the functionality of various AI model categories including Language, Embedding, Audio, and Vision models.
+A comprehensive testing framework *intended* for  **[OpenFlowLM (OFLM)](https://openflowlm.com)** that validates the functionality of various AI model categories including Language, Embedding, Audio, and Vision models.
 
 ## Overview
 
-flm-test is designed to thoroughly test FastFlowLM's API compatibility and model functionality across multiple modalities:
+oflm-test is designed to thoroughly test OpenFlowLM's API compatibility and model functionality across multiple modalities:
 
 - **LLM Tests**: Language model inference with both streaming and non-streaming modes
-- **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`flm serve -e 1`, or `flm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
+- **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`oflm serve -e 1`, or `oflm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
 - **Audio Tests**: Audio understanding via chat completions, with a bundled music clip
 - **Vision Tests**: Vision-Language Model (VLM) tests with multi-image support and automated response checking
 - **Tool Calling Tests**: Function/tool-calling across five escalating complexity levels, in streaming and non-streaming modes
@@ -15,7 +15,7 @@ flm-test is designed to thoroughly test FastFlowLM's API compatibility and model
 All test media is **bundled inside the package**, so no extra downloads or local paths are needed once installed.
 
 Each test suite automatically:
-- Detects the FLM server version
+- Detects the OFLM server version
 - Fetches available models
 - Runs standardized test prompts against the bundled media
 - Applies pass/fail response checks where applicable
@@ -24,7 +24,7 @@ Each test suite automatically:
 
 ## Prerequisites
 
-- **FastFlowLM server** running locally or remotely
+- **OpenFlowLM server** running locally or remotely
 - **`uv` or `pip`** (Python package manager)
 
 ## Quick Start
@@ -32,32 +32,32 @@ Each test suite automatically:
 ### 1. Install the package
 
 ```bash
-uv pip install git+https://github.com/Atomic-Germ/flm-test.git
+uv pip install git+https://github.com/Atomic-Germ/oflm-test.git
 ```
 ```bash
-pip install git+https://github.com/Atomic-Germ/flm-test.git
+pip install git+https://github.com/Atomic-Germ/oflm-test.git
 ```
 
 Or as an isolated tool with `uv`:
 
 ```bash
-uv tool install git+https://github.com/Atomic-Germ/flm-test.git
+uv tool install git+https://github.com/Atomic-Germ/oflm-test.git
 ```
 
 > Note: PyPI hosting is planned; until then, install directly from GitHub.
 
-### 2. Start FLM Server
+### 2. Start OFLM Server
 
-Ensure your FastFlowLM server is running before running tests. Start the server with appropriate flags based on the tests you plan to run:
+Ensure your OpenFlowLM server is running before running tests. Start the server with appropriate flags based on the tests you plan to run:
 
 **Basic local server:**
 ```bash
-flm serve
+oflm serve
 ```
 
 **Load embedding models (required for embedding tests):**
 ```bash
-flm serve -e 1
+oflm serve -e 1
 ```
 
 ### 3. Run Tests
@@ -66,47 +66,47 @@ Run tests with:
 
 ```bash
 # Run all tests (embedding suite excluded — see below)
-flm-test --all
+oflm-test --all
 
 # Run specific tests
-flm-test --llm                    # LLM tests only
-flm-test --embedding              # Embedding tests only
-flm-test --audio                  # Audio tests only
-flm-test --vision                 # Vision tests only
-flm-test --tools                  # Tool-calling tests only
+oflm-test --llm                    # LLM tests only
+oflm-test --embedding              # Embedding tests only
+oflm-test --audio                  # Audio tests only
+oflm-test --vision                 # Vision tests only
+oflm-test --tools                  # Tool-calling tests only
 
 # Target a specific model (instead of all available models)
-flm-test --llm --model gemma3:4b
-flm-test --vision --model gemma3:4b qwen3vl-it:4b   # space-separated list
-flm-test --audio --model whisper-v3:turbo
+oflm-test --llm --model gemma3:4b
+oflm-test --vision --model gemma3:4b qwen3vl-it:4b   # space-separated list
+oflm-test --audio --model whisper-v3:turbo
 
 # Configuration
-flm-test --llm --port 56354       # Set a custom port for LFM
-flm-test --llm --gen-lim 32       # Limit LLM output to 32 tokens
-flm-test --vision --temp 0.7      # Set sampling temperature (all chat-based tests; defaults to 0.3, a common tool-calling setting)
-flm-test --tools --reasoning high # Set reasoning effort for all chat-based tests
+oflm-test --llm --port 56354       # Set a custom port for LFM
+oflm-test --llm --gen-lim 32       # Limit LLM output to 32 tokens
+oflm-test --vision --temp 0.7      # Set sampling temperature (all chat-based tests; defaults to 0.3, a common tool-calling setting)
+oflm-test --tools --reasoning high # Set reasoning effort for all chat-based tests
 ```
 
 ### Embedding Test Exclusivity
 
-The embedding suite is **mutually exclusive** with every other suite. It assumes the FLM server was started with *only* an embed model loaded (`flm serve -e 1`), so it must never run alongside the chat-based suites — otherwise a full model would have to be loaded just to run embeddings.
+The embedding suite is **mutually exclusive** with every other suite. It assumes the OFLM server was started with *only* an embed model loaded (`oflm serve -e 1`), so it must never run alongside the chat-based suites — otherwise a full model would have to be loaded just to run embeddings.
 
 `--all` runs `--llm --audio --vision --tools` and intentionally excludes the embedding suite. Passing `--embedding` together with any other suite (or with `--all`) runs only the embedding suite, with a warning:
 
 ```bash
-flm-test --all                      # all suites EXCEPT embedding
-flm-test --embedding                # embeddings only
-flm-test --llm --embedding          # embeddings only (mutually exclusive warning)
+oflm-test --all                      # all suites EXCEPT embedding
+oflm-test --embedding                # embeddings only
+oflm-test --llm --embedding          # embeddings only (mutually exclusive warning)
 ```
 
 ### Reasoning Control
 
-Some models are trained to reason ("think") before answering and perform noticeably better with it enabled — especially on tool-calling tasks. FLM's OpenAI-compatible API exposes this via `reasoning_effort`, which flm-test forwards with every chat request when requested:
+Some models are trained to reason ("think") before answering and perform noticeably better with it enabled — especially on tool-calling tasks. OFLM's OpenAI-compatible API exposes this via `reasoning_effort`, which oflm-test forwards with every chat request when requested:
 
 ```bash
-flm-test --llm --reasoning high    # deep thinking enabled
-flm-test --tools --reasoning low   # light thinking enabled
-flm-test --tools --reasoning none  # thinking explicitly disabled
+oflm-test --llm --reasoning high    # deep thinking enabled
+oflm-test --tools --reasoning low   # light thinking enabled
+oflm-test --tools --reasoning none  # thinking explicitly disabled
 ```
 
 | Value | Effect |
@@ -244,9 +244,9 @@ answered every request from whichever model it had loaded, echoing the requested
 tag back so the response looked correct. E9 is the check that catches it: it
 asks for a tag no server can have loaded and requires a refusal.
 
-For E7 the CSV also carries one row per draw (`E7 … (draw N/30)`) with the **full raw 768-dim vector** in the Vector Preview column and its cosine to the batch reference, so embeddings can be diffed directly across builds. Only E7's rows carry full vectors; other checks keep the compact preview. E8's reference vectors ship with the package in `flm_test/test_files/embedding_reference.json`.
+For E7 the CSV also carries one row per draw (`E7 … (draw N/30)`) with the **full raw 768-dim vector** in the Vector Preview column and its cosine to the batch reference, so embeddings can be diffed directly across builds. Only E7's rows carry full vectors; other checks keep the compact preview. E8's reference vectors ship with the package in `oflm_test/test_files/embedding_reference.json`.
 
-Because this suite is exclusive, only an embedding model is loaded on the server (`flm serve -e 1`) — no full model is required.
+Because this suite is exclusive, only an embedding model is loaded on the server (`oflm serve -e 1`) — no full model is required.
 
 **Output:** `embedding_results_v{version}_{timestamp}.csv`
 
@@ -285,7 +285,7 @@ Tool results in L5 are produced by built-in mock implementations (deterministic 
 
 Test results are saved as CSV files under timestamped directories:
 ```
-results/{timestamp}/{backend_os}/{test_type}_results_v{flm_version}.csv
+results/{timestamp}/{backend_os}/{test_type}_results_v{oflm_version}.csv
 ```
 
 **Example filenames:**

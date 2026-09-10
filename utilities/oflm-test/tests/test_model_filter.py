@@ -1,7 +1,7 @@
 """
 Unit tests for the --model filter option (issue #1).
 
-All network/server calls are mocked so no FLM server is required.
+All network/server calls are mocked so no OFLM server is required.
 Run with:
     python3 -m pytest tests/test_model_filter.py -v
 or:
@@ -18,8 +18,8 @@ from unittest.mock import patch
 # Make sure the package is importable from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from flm_test.tasks import LLMTask, VisionTask, EmbeddingTask, AudioTask, BaseTestTask
-from flm_test import resolve_suites
+from oflm_test.tasks import LLMTask, VisionTask, EmbeddingTask, AudioTask, BaseTestTask
+from oflm_test import resolve_suites
 
 # Fake server model list — pretend the server has these three models loaded
 FAKE_SERVER_MODELS = ["gemma3:4b", "qwen3vl-it:4b", "some-llm:7b"]
@@ -27,7 +27,7 @@ FAKE_SERVER_MODELS = ["gemma3:4b", "qwen3vl-it:4b", "some-llm:7b"]
 
 def _make_task(task_cls, model_filter=None):
     """Instantiate a task with all server I/O patched away."""
-    with patch.object(task_cls, "_get_flm_version", return_value="0.9.99"), \
+    with patch.object(task_cls, "_get_oflm_version", return_value="0.9.99"), \
          patch.object(task_cls, "_fetch_all_models", return_value=FAKE_SERVER_MODELS), \
          patch("os.makedirs"):
         return task_cls(
@@ -111,7 +111,7 @@ class TestEmbeddingModelFilter(unittest.TestCase):
             self.assertIn(m, EmbeddingTask.EMBED_MODELS)
 
     def test_no_embed_models_on_server_falls_back_to_default(self):
-        """FLM does not advertise the embed model on /models (`flm serve -e 1`);
+        """OFLM does not advertise the embed model on /models (`oflm serve -e 1`);
         without any match (and no explicit filter) the suite defaults to the
         standard embedding model so it still runs."""
         task = _make_task(EmbeddingTask)

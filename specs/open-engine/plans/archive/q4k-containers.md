@@ -2,8 +2,8 @@
 
 **Status:** IMPLEMENTED 2026-09-08, merged into `spec.md` as `OPEN-QUANT-Q4K`.
 Steps 1-5 done and green (13 unit tests either side of the NumPy / C++ line); step 6
-done for the small model through the standalone engine, still open for `flm serve` /
-`flm-test` and the 27B's native-Q4_K source. Unblocks Phases 1-4 of
+done for the small model through the standalone engine, still open for `oflm serve` /
+`oflm-test` and the 27B's native-Q4_K source. Unblocks Phases 1-4 of
 `.claude/plans/open-engine-both-quants-and-distribution.md`, and corrects that
 plan on two points (see below).
 
@@ -19,8 +19,8 @@ Two things, and both make this smaller than it looked.
 **The 4736-byte layout is no longer unknown.** The both-quants plan says "32
 rows x 144 = 4608 -- 128 B short of 4736, and I don't yet know what they are.
 Pinning that down is step 1." It is pinned. ROCm merged `_pack_q4k` into
-`FLM_Q4NX_Converter` main -- the upstream of `utilities/q4nx-build` -- and its
-docstring gives `q4k_block_t` from the FLM 1.0.3 decoding kernels'
+`OFLM_Q4NX_Converter` main -- the upstream of `utilities/q4nx-build` -- and its
+docstring gives `q4k_block_t` from the OFLM 1.0.3 decoding kernels'
 `model_spec.h` field for field. The missing 128 bytes are two bf16 per-row
 super-block values, `S` and `M`, 64 bytes each. There is no llama.cpp
 `block_q4_K` in the file at all: the 12 packed 6-bit bytes are expanded to 8 + 8
@@ -49,7 +49,7 @@ the chunk. 4736 B = 256 + 256 + 4096 + 64 + 64:
 | `M` bf16[32] | 4672 : 4736 | `r` | **stored negated** |
 
 Value: `w[r][k] = S[r] * scales[g*32+r] * q + M[r] * mins[g*32+r]`, `g = k/32`.
-GGUF's Q4_K subtracts its min; the FLM kernel adds both accumulators, so the
+GGUF's Q4_K subtracts its min; the OFLM kernel adds both accumulators, so the
 converter negates `M` on the way out and the reading above is a plain add.
 
 The pool's q4_1 chunk is `d[256] bf16 | m[256] bf16 | 4096 nibble bytes`, `d`
@@ -99,7 +99,7 @@ chunk hold the same 32-row x 256-column tile, so no chunk index law, plan,
 manifest, kernel or build key changes. `q8_perm` continues to demand q8: a
 kernel set built to stream a projection at q8 is not satisfied by Q4_K.
 
-`utilities/q4nx-build` shall additionally be able to *write* Q4_K, because FLM
+`utilities/q4nx-build` shall additionally be able to *write* Q4_K, because OFLM
 1.0.3+ requires it for the 35B MoE projections -- packing those as q4_1 gives
 infinite `////` decoding or SIGSEGV in the closed runtime, so this is not a
 preference.
@@ -132,7 +132,7 @@ preference.
 - **Manual:** a Q4_K container built by `q4nx-build` for a validated shape scores
   >= 0.99999 logits correlation with the same argmax and top-5 against the fp64
   replica reading the container's own Q4_K values, then passes
-  `utilities/flm-test --llm` through `flm serve`.
+  `utilities/oflm-test --llm` through `oflm serve`.
 
 ## Changes
 
@@ -144,7 +144,7 @@ preference.
 | `src/open_qwen36/pools_test.cpp` | the C++ half of the agreement test. |
 | `utilities/q4nx-build/q4nx/gguf_tensor.py` | port `_refit_one_side` and `unpack_q4_k` from ROCm main; route `Q4_K` to the native path instead of dequantize-then-requantize (upstream measures that at 0.240 bits of ENOB and 0.375 bpw worse, with most of the damage in the tail). |
 | `utilities/q4nx-build/q4nx/model_converter.py` | port `_pack_q4k`; add `Q4_K` to `default_tensor_type` and `get_ggml_type`; dispatch in `_pack`. Bring the two fixes that ride with it: `_requantize_to` on 3D expert weights, and the tied-embedding fix for Qwen3.5 4B. |
-| `utilities/q4nx-build/configs/*.json` | `default_tensor_type: Q4_K` where FLM 1.0.3+ requires it (35B MoE projections first); leave everything else where it is. |
+| `utilities/q4nx-build/configs/*.json` | `default_tensor_type: Q4_K` where OFLM 1.0.3+ requires it (35B MoE projections first); leave everything else where it is. |
 | `specs/open-engine/spec.md` | `OPEN-QUANT-Q4K`; a Q4_K sentence in `OPEN-PACK-PLAN`'s "q8 sources" paragraph, which becomes "source forms". |
 | `specs/open-engine/tests/test_quant_q4k.py` | new: the unit criteria above. |
 | `src/open_qwen36/README.md` | both formats, one paragraph near the top -- after it is true. |
@@ -187,7 +187,7 @@ So step 6 builds them, and the source is already on disk:
   download. Budget ~17 GB of free disk for the second container.
 
 The honest limit: our reader is checked against our writer, both derived from
-the same upstream source. If FLM 1.0.4 moved the struct again, this catches
+the same upstream source. If OFLM 1.0.4 moved the struct again, this catches
 nothing. What it does guarantee is that a mismatch shows up as a **refusal
 naming the width**, never as silently wrong weights -- the reader dispatches on
 chunk width and knows exactly three.
@@ -199,6 +199,6 @@ chunk width and knows exactly three.
   lands, but it is a separate path -- issue #14.
 - q4_0 containers (`container-formats.md`, still proposed) and the 1280 / 2560
   geometries. Different problems that happen to live at the same seam.
-- Phases 5-8 of the both-quants plan: family-keyed kernel sets in `flm-add`,
-  release distribution, `flm-test` coverage of the dense families. This plan is
+- Phases 5-8 of the both-quants plan: family-keyed kernel sets in `oflm-add`,
+  release distribution, `oflm-test` coverage of the dense families. This plan is
   the reader and the writer, nothing else.

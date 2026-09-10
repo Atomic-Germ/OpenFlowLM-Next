@@ -1,6 +1,6 @@
 /// \file safe_tensors.hpp
 /// \brief SafeTensors class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to load weights from a safe-tensors file.

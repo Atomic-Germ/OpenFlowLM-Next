@@ -18,7 +18,7 @@ def resolve_suites(args):
       * Embedding is mutually exclusive with the chat-based suites: requesting
         it alongside any of them (or with ``--all``) runs only the embedding
         suite, because those tests assume a server started with only an embed
-        model loaded (``flm serve -e 1``) and must not require a full model.
+        model loaded (``oflm serve -e 1``) and must not require a full model.
 
     Returns ``(suites, note)`` where ``suites`` maps suite name -> bool and
     ``note`` is an (possibly empty) informational message for the user.
@@ -27,7 +27,7 @@ def resolve_suites(args):
     note = ""
     if args.all:
         suites = {name: name != "embedding" for name in SUITE_NAMES}
-        note = ("Note: --all excludes the embedding suite; run `flm-test --embedding` "
+        note = ("Note: --all excludes the embedding suite; run `oflm-test --embedding` "
                 "separately so only an embed model needs to be loaded.")
     else:
         suites = dict(explicit)
@@ -42,7 +42,7 @@ def resolve_suites(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test runner for FLM models.")
+    parser = argparse.ArgumentParser(description="Test runner for OFLM models.")
     parser.add_argument('--llm', action='store_true', help="Run LLM tests")
     parser.add_argument('--embedding', action='store_true', help="Run Embedding tests")
     parser.add_argument('--audio', action='store_true', help="Run Audio tests")
@@ -60,8 +60,8 @@ def main():
                         help="Reasoning effort sent as `reasoning_effort` with every chat request. "
                              "low/medium/high progressively enable thinking; none disables it. "
                              "Omit the flag to leave each model's own default behaviour untouched.")
-    parser.add_argument("--port", type=str, default="52625", help="Port your FLM instance is running on.")
-    parser.add_argument('--backend-os', type=str, default="linux", choices=["linux", "windows"], help="OS of the FLM backend (default: linux)")
+    parser.add_argument("--port", type=str, default="52625", help="Port your OFLM instance is running on.")
+    parser.add_argument('--backend-os', type=str, default="linux", choices=["linux", "windows"], help="OS of the OFLM backend (default: linux)")
     parser.add_argument('--model', type=str, nargs='+', metavar='MODEL_ID',
                         help="Only test the specified model(s). Can be repeated or space-separated. "
                              "Example: --model gemma3:4b  or  --model gemma3:4b qwen3vl-it:4b")
@@ -78,7 +78,7 @@ def main():
         return
 
     try:
-        print("Please ensure you have started the FLM server and have the correct URL and port. \n")
+        print("Please ensure you have started the OFLM server and have the correct URL and port. \n")
 
         host="http://127.0.0.1"
         port=str(args.port)

@@ -68,13 +68,13 @@ target_include_directories(test_gemma_embedding PRIVATE
 target_compile_definitions(test_gemma_embedding PRIVATE
     DISABLE_ABI_CHECK=1
     USEAVX2=1
-    FLM_USE_OPEN_EMBEDDING=1
+    OFLM_USE_OPEN_EMBEDDING=1
     # Exercise the NPU asset discovery/CPU-fallback path, as the main build does
-    # for the XRT backend. Set FLM_NPU_DISABLE=1 to force CPU only.
-    FLM_USE_OPEN_EMBEDDING_NPU=1
+    # for the XRT backend. Set OFLM_NPU_DISABLE=1 to force CPU only.
+    OFLM_USE_OPEN_EMBEDDING_NPU=1
     CMAKE_INSTALL_PREFIX="${CMAKE_BINARY_DIR}"
     CMAKE_XCLBIN_PREFIX="${CMAKE_CURRENT_LIST_DIR}/../../xclbins"
-    __FLM_VERSION__="test"
+    __OFLM_VERSION__="test"
     __NPU_VERSION__="test"
 )
 

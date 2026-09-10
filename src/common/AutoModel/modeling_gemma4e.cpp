@@ -1,6 +1,6 @@
 /// \file modeling_gemma4e.cpp
 /// \brief Gemma4e class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the Gemma4e class
@@ -410,7 +410,7 @@ std::pair<std::string, json> parse_gemma4e_tool_content(std::string tool_content
 
 
 /************              Gemma4e family            **************/
-Gemma4e::Gemma4e(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4e") {}
+Gemma4e::Gemma4e(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4e") {}
 
 void Gemma4e::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     
@@ -536,7 +536,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                     audio_data_list.insert(audio_data_list.end(), clipped_audio_data.begin(), clipped_audio_data.end());
                     total_audio_clips += clipped_audio_data.size();
                     if (clipped_audio_data.size() > 1) {
-                        header_print_g("FLM", "Audio in message is split into " + std::to_string(clipped_audio_data.size()) + " chunks for processing.");
+                        header_print_g("OFLM", "Audio in message is split into " + std::to_string(clipped_audio_data.size()) + " chunks for processing.");
                         std::cout << std::endl;
                     }
                     newContent.push_back({{"type", "audio"}, {"audio", aud}});
@@ -550,7 +550,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
             };
             gemma4_message.push_back(newItem);
         }
-        header_print("FLM", "Total images: " << total_images);
+        header_print("OFLM", "Total images: " << total_images);
     }
     else { // CLI Processing
         if (input.audios.size() > 0) {
@@ -570,7 +570,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                 total_audio_clips += clipped_audio_data.size();
                 
                 if (clipped_audio_data.size() > 1) {
-                    header_print_g("FLM", "Audio[" + std::to_string(i) + "] is split into " + std::to_string(clipped_audio_data.size()) + " chunks for processing.");
+                    header_print_g("OFLM", "Audio[" + std::to_string(i) + "] is split into " + std::to_string(clipped_audio_data.size()) + " chunks for processing.");
                     std::cout << std::endl;
                 }
             }
@@ -787,7 +787,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                 drop_front(image_payload.image_grid_pairs_per_image,     images_to_drop);
                 drop_front(image_payload.num_soft_tokens_per_image,      images_to_drop);
                 image_payload.num_images -= static_cast<unsigned>(images_to_drop);
-                header_print("FLM",
+                header_print("OFLM",
                     "Prompt-cache hit: dropped " << images_to_drop
                     << " cached image(s) from payload");
             }
@@ -798,7 +798,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                 drop_front(audio_payload.mel_spectrogram_bins_per_audio,   audios_to_drop);
                 drop_front(audio_payload.num_soft_tokens_per_audio,        audios_to_drop);
                 audio_payload.num_audios -= static_cast<unsigned>(audios_to_drop);
-                header_print("FLM",
+                header_print("OFLM",
                     "Prompt-cache hit: dropped " << audios_to_drop
                     << " cached audio(s) from payload");
             }
@@ -916,7 +916,7 @@ std::string Gemma4e::generate(chat_meta_info_t& meta_info, int length_limit, std
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     
     if (!this->enable_think) {
         gemma4e_npu *gemma4e_engine = dynamic_cast<gemma4e_npu*>(this->lm_engine.get());
@@ -940,7 +940,7 @@ std::string Gemma4e::generate_with_prompt(chat_meta_info_t& meta_info, lm_unifor
     gemma4e_npu *gemma4e_engine = dynamic_cast<gemma4e_npu*>(this->lm_engine.get());
     int checkpoint_idx = gemma4e_engine->checkpoint();
     int restore_idx = gemma4e_engine->restore();
-    header_print_r("FLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
+    header_print_r("OFLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
     return this->_shared_generate(meta_info, length_limit, os);
 }
 

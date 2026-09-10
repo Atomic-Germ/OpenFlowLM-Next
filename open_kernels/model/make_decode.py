@@ -49,7 +49,7 @@ from recipes.spec import FULL  # noqa: E402
 from q4nx import Q4NX, f32_to_bf16  # noqa: E402
 
 DEFAULT_MODEL_DIR = os.environ.get(
-    "FLM_MODEL_DIR", str(Path.home() / ".flm" / "models" / "Qwen3.6-35B-A3B-NPU2"))   # FLM's default model store
+    "OFLM_MODEL_DIR", str(Path.home() / ".oflm" / "models" / "Qwen3.6-35B-A3B-NPU2"))   # OFLM's default model store
 
 
 def sfx(t):

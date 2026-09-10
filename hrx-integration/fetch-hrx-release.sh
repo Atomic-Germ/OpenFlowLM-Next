@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetch and verify the pinned HRX amdxdna *public package* release artifact.
 #
-# After XADX removal, FLM consumes HRX via find_package(hrx CONFIG REQUIRED) from
+# After XADX removal, OFLM consumes HRX via find_package(hrx CONFIG REQUIRED) from
 # the public package (CMake package config + libhrx.so + public headers), not the
 # former HRX_DIR/HRX_BUILD source+build tree. This script downloads + verifies +
-# extracts the package and prints its CMake package prefix (feed it to the FLM
+# extracts the package and prints its CMake package prefix (feed it to the OFLM
 # build via -DCMAKE_PREFIX_PATH). The Linux agent owns finalizing this path.
 set -euo pipefail
 
@@ -109,7 +109,7 @@ fi
 echo "HRX_CMAKE_CONFIG=$config_file"
 echo "HRX_CMAKE_PREFIX=$prefix"
 echo ""
-echo "Configure FLM with: -DCMAKE_PREFIX_PATH=\"$prefix\""
+echo "Configure OFLM with: -DCMAKE_PREFIX_PATH=\"$prefix\""
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 fi

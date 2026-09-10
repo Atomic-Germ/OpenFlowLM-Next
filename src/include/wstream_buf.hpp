@@ -1,6 +1,6 @@
 /// \file wstream_buf.hpp
 /// \brief wstream_buf class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to write UTF-8 characters to a stream

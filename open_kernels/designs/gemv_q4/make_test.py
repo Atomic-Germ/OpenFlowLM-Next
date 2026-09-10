@@ -5,7 +5,7 @@ with the fp64 reference computed from the SAME bytes the kernel streams.
 
 Default source is `synthetic`: random GGUF-style Q4_1 blocks packed to pool
 order by ../../q4_1_pack.py (no model, no captured buffers). `captured` slices
-the region out of FLM's captured layer-0 pool (phlegm's original fixture; set
+the region out of OFLM's captured layer-0 pool (phlegm's original fixture; set
 GEMV_POOL to its path) — useful only as a cross-check that synthetic and real
 bytes exercise the kernel the same way.
 

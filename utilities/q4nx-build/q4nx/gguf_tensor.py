@@ -500,7 +500,7 @@ class GGUFTensor:
 
 def pack_q4k(t: torch.Tensor, u: torch.Tensor, q: torch.Tensor, row_block_size: int,
              col_block_size: int, keep_block_in_2D: bool, search: int = 3) -> torch.Tensor:
-    """Pack the FLM q4_k format (uint8 s'/m' per group + bf16 S'/M' per super-block).
+    """Pack the OFLM q4_k format (uint8 s'/m' per group + bf16 S'/M' per super-block).
 
     Input is what GGUFTensor.unpack_q4_k returns, *after* any model-specific
     reorder: the effective per-group scale t_j and subtracted min u_j in exact
@@ -511,7 +511,7 @@ def pack_q4k(t: torch.Tensor, u: torch.Tensor, q: torch.Tensor, row_block_size: 
     finer than 256 (ssm_out_proj moves 128-column chunks) would otherwise leave
     the super-block metadata unrepresentable.
 
-    Upstream (ROCm FLM_Q4NX_Converter, `_Q4NX_Converter._pack_q4k`) reads the block
+    Upstream (ROCm OFLM_Q4NX_Converter, `_Q4NX_Converter._pack_q4k`) reads the block
     geometry off the converter; here it is three arguments, so the packer can be loaded
     and checked on its own -- specs/open-engine/tests/test_quant_q4k.py holds it against
     the engine's reader (OPEN-QUANT-Q4K).

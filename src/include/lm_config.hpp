@@ -1,6 +1,6 @@
 /// \file lm_config.hpp
 /// \brief lm_config class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-08-05
 /// \version 0.9.10
 /// \note This class is used to store the model configuration.
@@ -40,14 +40,14 @@ inline const nlohmann::json& cfg_sub(const nlohmann::json& jc, const char* key){
 ///       model's config.json, so every consumer reads what it needs straight out
 ///       of _json_config with JSON_GET. from_pretrained() only locates the file
 ///       and normalizes it, so that all readers share one canonical key set.
-/// \note This class is passed by value across the FLM_DLL boundary. Its layout
-///       must stay identical to FLM_DLL/include/lm_config.hpp.
+/// \note This class is passed by value across the OFLM_DLL boundary. Its layout
+///       must stay identical to OFLM_DLL/include/lm_config.hpp.
 class LM_Config{
     public:
         std::string model_path;
         std::string model_name;
         std::string exec_path;
-        std::string flm_version;
+        std::string oflm_version;
 
         nlohmann::json _json_config;
 
@@ -72,7 +72,7 @@ class LM_Config{
             this->_resolve_paths(model_name);
             this->_load_json();
             this->_normalize_multi_modal();
-            JSON_GET(this->flm_version, this->_json_config, "flm_version", "0.0.0", std::string);
+            JSON_GET(this->oflm_version, this->_json_config, "oflm_version", "0.0.0", std::string);
         }
 
         std::string _str(){
@@ -93,7 +93,7 @@ class LM_Config{
             #else
                 // Reading config.json must not require an xclbin tree: the open
                 // embedding model ships no closed kernels, and a missing tree
-                // must never abort `flm pull`, `flm list`, or model loading.
+                // must never abort `oflm pull`, `oflm list`, or model loading.
                 // Leave exec_path empty and let kernel lookup fail later, only
                 // if a model actually needs kernels from there.
                 try {
@@ -184,7 +184,7 @@ class LM_Config{
             std::stringstream ss;
             ss << "  Model: "  << std::endl;
             ss << "    model_name:             " << this->model_name << std::endl;
-            ss << "    compatible_flm_version: >= " << this->flm_version << std::endl;
+            ss << "    compatible_oflm_version: >= " << this->oflm_version << std::endl;
             ss << "    head_dim:               " << head_dim << std::endl;
             ss << "    hidden_size:            " << hidden_size << std::endl;
             if (hidden_act != ""){
@@ -230,7 +230,7 @@ public:
         this->_json_config["is_vlm"] = false;
         this->_json_config["is_audio"] = false;
 
-        JSON_GET(this->flm_version, this->_json_config, "flm_version", "0.0.0", std::string);
+        JSON_GET(this->oflm_version, this->_json_config, "oflm_version", "0.0.0", std::string);
     }
     std::string _str(){
         return this->_str_from(this->_json_config);

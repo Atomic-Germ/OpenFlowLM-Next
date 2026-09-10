@@ -2,16 +2,16 @@
 layout: page
 title: "News"
 permalink: /news/
-description: "Latest updates, releases, and announcements from the FastFlowLM team."
+description: "Latest updates, releases, and announcements from the OpenFlowLM team."
 sections:
   - type: hero
     kicker: "News"
     title: "Updates and announcements"
     body: |
-      Stay up to date with FastFlowLM releases, community highlights, and technical deep dives.
+      Stay up to date with OpenFlowLM releases, community highlights, and technical deep dives.
     ctas:
       - label: "GitHub Releases"
-        href: "https://github.com/ROCm/FastFlowLM/releases"
+        href: "https://github.com/Atomic-Germ/OpenFlowLM/releases"
         style: primary
         external: true
       - label: "Join Discord"
@@ -21,12 +21,12 @@ sections:
     right:
       title: "Stay connected"
       body: |
-        Follow FastFlowLM development through GitHub releases and Discord announcements.
+        Follow OpenFlowLM development through GitHub releases and Discord announcements.
       items:
         - heading: "Release notes"
-          body: "Detailed changelogs for every FastFlowLM release."
+          body: "Detailed changelogs for every OpenFlowLM release."
         - heading: "Community highlights"
-          body: "Showcasing projects built with FastFlowLM."
+          body: "Showcasing projects built with OpenFlowLM."
         - heading: "Technical updates"
           body: "Deep dives into kernel optimizations and architecture improvements."
 
@@ -46,25 +46,25 @@ sections:
 
   #     NPU is now a powerhouse that runs real AI, right on your device, without stealing power from everything else.
 
-  #     And **FastFlowLM is the runtime software engine making it happen**. 
+  #     And **OpenFlowLM is the runtime software engine making it happen**. 
 
   #     It optimizes large language models (LLMs) to run entirely on NPUs, extracting massive speed, efficiency, and capability from the hardware you already own.
 
   #     ---
 
   #     ### ⚡ The Vision
-  #     **FastFlowLM — Real AI. Real Speed. Always On. All Day Power. On Your NPU.**
+  #     **OpenFlowLM — Real AI. Real Speed. Always On. All Day Power. On Your NPU.**
 
   #     **See it in action:** [Watch Video](https://youtu.be/zKaaHw_IvsM)   
-  #     **Learn more:** [fastflowlm.com](https://www.fastflowlm.com)   
+  #     **Learn more:** [openflowlm.com](https://www.openflowlm.com)   
       
   #     ---
 
   #     ### Why This is a Big Deal for You
 
-  #     Before now, AI workloads hogged your computer. With FastFlowLM, your NPU takes over the “brain work,” freeing your CPU and GPU to do everything else.
+  #     Before now, AI workloads hogged your computer. With OpenFlowLM, your NPU takes over the “brain work,” freeing your CPU and GPU to do everything else.
 
-  #     * **🔋 Incredible Battery Life:** Stop tethering yourself to a wall outlet. FastFlowLM delivers **over 10× power efficiency vs GPU-based AI workloads**, so your battery lasts all day.      
+  #     * **🔋 Incredible Battery Life:** Stop tethering yourself to a wall outlet. OpenFlowLM delivers **over 10× power efficiency vs GPU-based AI workloads**, so your battery lasts all day.      
   #     * **🎮 Do It All at Once:** For the first time, you can run a **Pro AI assistant** while **Gaming** or on a **Zoom call**. Since the AI stays on the NPU, your game stays smooth and your video calls never lag.
   #     * **🤫 Quiet and Cool:** No more loud cooling fans turning on the second you start a smart task. Your laptop stays cool and quiet.
   #     * **🔒 Private & Secure:** Your data stays inside your laptop. No "cloud," no subscription, and no internet required.
@@ -73,7 +73,7 @@ sections:
 
   #     ### What Can You Do Now?
 
-  #     FastFlowLM allows your system to handle things it used to struggle with:
+  #     OpenFlowLM allows your system to handle things it used to struggle with:
 
   #     * **🎮 Game Smarter:** Get an AI co-pilot that watches your screen and gives real-time strategy tips—**without stealing a single frame from your GPU.**
   #     * **🗣️ Meet Smarter:** Live translation for international calls? Check. Perfect summaries of boring meetings? Check. You listen; the AI takes the notes.
@@ -92,16 +92,16 @@ sections:
 
   #     This isn't a "someday" promise. It is working **right now.**
 
-  #     * **Powering AMD:** FastFlowLM is the chosen AI runtime software engine inside the official **[AMD Lemonade Server](https://lemonade-server.ai/)** 🍋, bringing production-ready NPU AI capability to developers and partners.
-  #     * **Expanding Platform Support:** FastFlowLM continues to deepen support across the AMD Ryzen™ AI NPU lineup (Strix, Strix Halo, Kraken).
+  #     * **Powering AMD:** OpenFlowLM is the chosen AI runtime software engine inside the official **[AMD Lemonade Server](https://lemonade-server.ai/)** 🍋, bringing production-ready NPU AI capability to developers and partners.
+  #     * **Expanding Platform Support:** OpenFlowLM continues to deepen support across the AMD Ryzen™ AI NPU lineup (Strix, Strix Halo, Kraken).
 
   #     ---
 
   #     ### The Bottom Line
 
-  #     The AI laptop era is officially real. With FastFlowLM, NPUs finally deliver the on-device intelligence they were built for—efficiently, privately, and without compromise.
+  #     The AI laptop era is officially real. With OpenFlowLM, NPUs finally deliver the on-device intelligence they were built for—efficiently, privately, and without compromise.
 
-  #     **FastFlowLM — the runtime software engine that makes NPUs truly useful. 🚀**
+  #     **OpenFlowLM — the runtime software engine that makes NPUs truly useful. 🚀**
 
 ---
 

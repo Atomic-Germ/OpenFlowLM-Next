@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file rest_handler.hpp
  * \brief RestHandler class and related declarations
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-06-24
  *  \version 0.9.24
  */
@@ -120,7 +120,7 @@ private:
     std::unique_ptr<Whisper> whisper_engine;
     std::unique_ptr<AutoEmbeddingModel> auto_embedding_engine;
 #endif
-    flm_rt::device npu_device_inst;
+    oflm_rt::device npu_device_inst;
     model_list& supported_models;
     ModelDownloader& downloader;
     std::string current_model_tag;

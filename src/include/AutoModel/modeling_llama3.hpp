@@ -1,6 +1,6 @@
 /// \file llama3.hpp
 /// \brief llama3 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.24
 /// \note This is a source file for the llama3 class
@@ -14,7 +14,7 @@ private:
     void setup_tokenizer(std::string model_path);
 
 public:
-    Llama3(flm_rt::device* npu_device_inst);
+    Llama3(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;
@@ -36,7 +36,7 @@ private:
     void setup_tokenizer(std::string model_path);
 
 public:
-    DeepSeek_r1_8b(flm_rt::device* npu_device_inst);
+    DeepSeek_r1_8b(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;

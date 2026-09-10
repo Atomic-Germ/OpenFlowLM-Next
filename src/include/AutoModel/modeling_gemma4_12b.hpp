@@ -1,6 +1,6 @@
 /// \file modeling_gemma4_12b.hpp
 /// \brief Gemma4_12B class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-08-25
 /// \version 0.9.45
 /// \note This is a header file for the Gemma4_12B class.
@@ -97,7 +97,7 @@ private:
         int pooling_kernel_size
     );
 public:
-    Gemma4_12B(flm_rt::device* npu_device_inst);
+    Gemma4_12B(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     bool insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled = [] { return false; }) override;

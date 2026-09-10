@@ -6,7 +6,7 @@
       "name": "common-default",
       "hidden": true,
       "cacheVariables": {
-        "FLM_VERSION": "1.0.4",
+        "OFLM_VERSION": "0.1.0",
         "NPU_VERSION": "32.0.203.304"
       }
     },
@@ -14,20 +14,20 @@
       "name": "common-install",
       "hidden": true,
       "cacheVariables": {
-        "CMAKE_INSTALL_PREFIX": "/opt/fastflowlm",
-        "CMAKE_XCLBIN_PREFIX": "/opt/fastflowlm/share/flm"
+        "CMAKE_INSTALL_PREFIX": "/opt/openflowlm",
+        "CMAKE_XCLBIN_PREFIX": "/opt/openflowlm/share/oflm"
       }
     },
     {
       "name": "linux-default",
       "displayName": "Linux Default",
-      "description": "Release build: flm engine + open NPU kernel xclbins (full distribution)",
+      "description": "Release build: oflm engine + open NPU kernel xclbins (full distribution)",
       "inherits": ["common-default", "common-install"],
       "generator": "Ninja",
       "binaryDir": "build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "FLM_BUILD_KERNELS": "ON"
+        "OFLM_BUILD_KERNELS": "ON"
       }
     },
     {
@@ -39,7 +39,7 @@
       "binaryDir": "build-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "FLM_BUILD_KERNELS": "OFF"
+        "OFLM_BUILD_KERNELS": "OFF"
       }
     },
     {
@@ -48,7 +48,7 @@
       "description": "Portable build bundling XRT/XDNA libraries",
       "inherits": "linux-default",
       "cacheVariables": {
-        "FLM_PORTABLE_BUILD": "ON"
+        "OFLM_PORTABLE_BUILD": "ON"
       }
     },
     {

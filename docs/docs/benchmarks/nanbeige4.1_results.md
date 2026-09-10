@@ -7,11 +7,11 @@ nav_order: 11
 
 ## ⚡ Performance and Efficiency Benchmarks
 
-This section reports the performance on NPU with FastFlowLM (FLM).
+This section reports the performance on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on FastFlowLM v0.9.38.
-> - Under FLM's default NPU power mode (Performance)   
+> - Results are based on OpenFlowLM v0.9.38.
+> - Under OFLM's default NPU power mode (Performance)   
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
@@ -32,7 +32,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Nanbeige4.1-3B**  | NPU (FLM)    | 23.5	| 22.3	| 20.4	| 17.3	| 13.3	| 9.0|
+| **Nanbeige4.1-3B**  | NPU (OFLM)    | 23.5	| 22.3	| 20.4	| 17.3	| 13.3	| 9.0|
 
 ---
 
@@ -40,4 +40,4 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Nanbeige4.1-3B**  | NPU (FLM)    | 612	| 731	| 742	| 686	| 523	| 343 | 
+| **Nanbeige4.1-3B**  | NPU (OFLM)    | 612	| 731	| 742	| 686	| 523	| 343 | 

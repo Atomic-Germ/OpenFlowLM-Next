@@ -1,6 +1,6 @@
 /// \file modeling_Qwen3VL_image.cpp
 /// \brief Qwen3_5VL image processing implementation
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the Qwen3_5VL image processing functionality
@@ -52,7 +52,7 @@ qwen3_5vl_image_t Qwen3_5VL::load_image(const std::string& filename) {
             float ratio = static_cast<float>(max_height) / static_cast<float>(decoded.height);
             int target_width = static_cast<int>(static_cast<float>(decoded.width) * ratio);
             int target_height = max_height;
-            header_print_r("FLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")\n");
+            header_print_r("OFLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")\n");
             if (image_reader_.resize_image(decoded, target_width, target_height, resized_image)) {
                 image_reader_.recycle(decoded);
                 decoded = std::move(resized_image);
@@ -120,7 +120,7 @@ qwen3_5vl_image_t Qwen3_5VL::load_image_base64(const std::string& base64_string)
             float ratio = static_cast<float>(max_height) / static_cast<float>(decoded.height);
             int target_width = static_cast<int>(static_cast<float>(decoded.width) * ratio);
             int target_height = max_height;
-            header_print_r("FLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")");
+            header_print_r("OFLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")");
             if (image_reader_.resize_image(decoded, target_width, target_height, resized_image)) {
                 image_reader_.recycle(decoded);
                 decoded = std::move(resized_image);
@@ -193,7 +193,7 @@ void Qwen3_5VL::preprocess_image(qwen3_5vl_image_t& image, std::vector<bf16> &pi
 
     qwen3_5vl_npu* lm_engine_qwen3_5_ptr = dynamic_cast<qwen3_5vl_npu*>(this->lm_engine.get());
     if (!lm_engine_qwen3_5_ptr)
-        throw std::runtime_error("images need the closed Qwen3.5 engine (FLM_QWEN35_ENGINE=closed); the open engine has no vision path");
+        throw std::runtime_error("images need the closed Qwen3.5 engine (OFLM_QWEN35_ENGINE=closed); the open engine has no vision path");
     smart_resize(
         height, width,
         resized_height, resized_width,

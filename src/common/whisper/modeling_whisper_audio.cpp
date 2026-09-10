@@ -1,6 +1,6 @@
 /// \file modeling_whisper_audio.hpp
 /// \brief modeling_whisper_audio class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-17
 /// \version 0.9.24
 /// \note This is a source file for the modeling_whisper_audio class

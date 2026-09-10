@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file rest_handler.cpp
  * \brief RestHandler class and related declarations
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-08-05
  *  \version 0.9.24
  */
@@ -323,7 +323,7 @@ static json convert_tool_responses_gemma4(json messages) {
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
     : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), embed(args.embed), embedding_model_tag(args.embedding_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
-    this->npu_device_inst = flm_rt::device(0);
+    this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
         this->ctx_length = args.ctx_length >= 512 ? args.ctx_length : 512;
@@ -414,7 +414,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
             header_print("ERROR", "Failed to load model: " + std::string(e.what()));
             this->auto_chat_engine.reset();
             this->npu_device_inst.reset();
-            this->npu_device_inst = flm_rt::device(0);
+            this->npu_device_inst = oflm_rt::device(0);
             this->current_model_tag = "model-faker";
             return false;
         }
@@ -440,7 +440,7 @@ void RestHandler::ensure_asr_model_loaded(const std::string& model_tag) {
             downloader.pull_model(ensure_tag, modelscope);
             break;
         case ModelDownloader::ModelStatus::Incompatible:
-            header_print("ERROR", "Whisper is incompatible with this version of FastFlowLM, skipping... ");
+            header_print("ERROR", "Whisper is incompatible with this version of OpenFlowLM, skipping... ");
             this->asr = false;
             return;
     }
@@ -472,7 +472,7 @@ void RestHandler::ensure_embed_model_loaded(const std::string& model_tag) {
             this->downloader.pull_model(ensure_tag, this->modelscope);
             break;
         case ModelDownloader::ModelStatus::Incompatible:
-            header_print("ERROR", "EmbeddingGemma is incompatible with this version of FastFlowLM, skipping... ");
+            header_print("ERROR", "EmbeddingGemma is incompatible with this version of OpenFlowLM, skipping... ");
             this->embed = false;
             return;
     }
@@ -626,7 +626,7 @@ void RestHandler::handle_show(const json& request,
                 }
             },
             {"model_info", {
-                {"general.architecture", "flm" }
+                {"general.architecture", "oflm" }
             }},
             {"capabilities", {"chat", "vision", "completion"}}
         };
@@ -668,7 +668,7 @@ void RestHandler::handle_generate(const json& request,
         lm_uniform_input_t uniformed_input;
         meta_info.max_prefill_len = this->prefill_chunk_len;
         meta_info.load_duration = (uint64_t)time_utils::duration_ns(load_start_time, load_end_time).first;
-        header_print("FLM", "Start generating...");
+        header_print("OFLM", "Start generating...");
         
         if (stream) {
             // Streaming response using streaming_ostream
@@ -785,7 +785,7 @@ void RestHandler::handle_chat(const json& request,
         lm_uniform_input_t uniformed_input;
         meta_info.load_duration = (uint64_t)time_utils::duration_ns(load_start_time, load_end_time).first;
         meta_info.max_prefill_len = this->prefill_chunk_len;
-        header_print("FLM", "Start generating...");
+        header_print("OFLM", "Start generating...");
         if (stream) {
             // Streaming response using streaming_ostream
             auto total_start_time = time_utils::now();
@@ -895,7 +895,7 @@ void RestHandler::handle_embeddings(const json& request,
         // --embeddingmodel bge-base:en-v1.5: asking for gte-multilingual:base
         // returned bge-base's vectors, byte for byte, under the name
         // "gte-multilingual:base". A RAG deployment embedding documents with
-        // one model and queries with another, against one flm, would retrieve
+        // one model and queries with another, against one oflm, would retrieve
         // nonsense with no signal anywhere.
         //
         // It refuses now, and names what IS loaded. An unknown model is an
@@ -989,7 +989,7 @@ void RestHandler::handle_models(const json& request,
 void RestHandler::handle_version(const json& request,
                                 std::function<void(const json&)> send_response,
                                 StreamResponseCallback send_streaming_response) {
-    std::string version = __FLM_VERSION__;
+    std::string version = __OFLM_VERSION__;
     
     json response = {{"version", version}};
     send_response(response);
@@ -1170,15 +1170,15 @@ void RestHandler::handle_openai_chat_completion(const json& request,
             can_use_prompt_cache = prompt_cache.can_use_cache(current_messages, auto_chat_engine->get_chat_template_type(), tools, cache_info);
             if (can_use_prompt_cache) {
                 meta_info.restore_allowed = true;
-                header_print("FLM", "Use cached prompt!");
-                header_print("FLM", "Matched " + std::to_string(cache_info.matched_rounds) +
+                header_print("OFLM", "Use cached prompt!");
+                header_print("OFLM", "Matched " + std::to_string(cache_info.matched_rounds) +
                     " out of " + std::to_string(cache_info.total_rounds) + " messages (" +
                     std::to_string(cache_info.total_rounds - cache_info.matched_rounds) + " new to prefill).");
             }
             else {
                 // cannot use cache, clear and re-insert all
-                header_print("FLM", "Prompt cache miss.");
-                header_print("FLM", "Clearing context...");
+                header_print("OFLM", "Prompt cache miss.");
+                header_print("OFLM", "Clearing context...");
                 auto_chat_engine->clear_context();
             }
         }
@@ -1187,7 +1187,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
             current_messages = convert_tool_responses_gemma4(current_messages);
         }
 
-        // std::cout << "FLM current_messages: \n" << current_messages.dump(4) << std::endl;
+        // std::cout << "OFLM current_messages: \n" << current_messages.dump(4) << std::endl;
 
         lm_uniform_input_t uniformed_input;
         uniformed_input.messages = current_messages;
@@ -1204,7 +1204,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 };
             streaming_ostream_openai_chat ostream(model, auto_chat_engine.get(), openai_stream_callback);  // streaming in chat completion format
 
-            header_print("FLM", "Start prefill...");
+            header_print("OFLM", "Start prefill...");
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input, [&] { return cancellation_token->cancelled(); });
                 if (!success) {
@@ -1236,7 +1236,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 this->prompt_cache.reset();
                 return;
             }
-            header_print("FLM", "Start generating...");
+            header_print("OFLM", "Start generating...");
             try {
                 auto_chat_engine->generate(meta_info, length_limit, ostream, [&] { return cancellation_token->cancelled(); });
             } catch (const std::exception& e) {
@@ -1257,7 +1257,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
             nullstream nstream;
             json response;
             std::string response_text;
-            header_print("FLM", "Start prefill...");
+            header_print("OFLM", "Start prefill...");
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input, [&] { return cancellation_token->cancelled(); });
                 if (!success) {
@@ -1288,7 +1288,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 this->prompt_cache.reset();
                 return;
             }
-            header_print("FLM", "Start generating...");
+            header_print("OFLM", "Start generating...");
             try {
                 response_text = auto_chat_engine->generate(meta_info, length_limit, nstream, [&] { return cancellation_token->cancelled(); });
             } catch (const std::exception& e) {
@@ -1301,7 +1301,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
             // check response_text
             json choices = build_nstream_response(response_text);
             response = {
-                {"id", "fastflowlm-chat-completion"},
+                {"id", "openflowlm-chat-completion"},
                 {"object", "chat.completion"},
                 {"created", static_cast<long long>(std::time(nullptr))},
                 {"model", model},
@@ -1355,7 +1355,7 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         if (this->asr) {
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
             this->whisper_engine->load_audio(audio_raw);
-            header_print("FLM", "Transforming audio to text...");
+            header_print("OFLM", "Transforming audio to text...");
             // Show text
             std::cout << "Audio content: " << std::flush;
             std::pair<std::string, std::string> audio_result = this->whisper_engine->generate(Whisper::whisper_task_type_t::e_transcribe, true, false, std::cout);
@@ -1435,7 +1435,7 @@ void RestHandler::handle_openai_completion(const json& request,
         chat_meta_info_t meta_info;
         meta_info.max_prefill_len = this->prefill_chunk_len;
         lm_uniform_input_t uniformed_input;
-        header_print("FLM", "Start generating...");
+        header_print("OFLM", "Start generating...");
 
         if (stream) {
             // Create a wrapper callback that passes the pre-formatted SSE string directly
@@ -1502,7 +1502,7 @@ void RestHandler::handle_openai_completion(const json& request,
             auto history = this->auto_chat_engine->get_history();
 
             json response = {
-                {"id", "fastflowlm-chat-completion"},
+                {"id", "openflowlm-chat-completion"},
                 {"object", "text_completion"},
                 {"created", (int)std::time(nullptr)},
                 {"model", model},

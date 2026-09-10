@@ -1,6 +1,6 @@
 /// \file npu_cmd_write_dma.hpp
 /// \brief npu dma block write command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu dma block write command
 #pragma once
