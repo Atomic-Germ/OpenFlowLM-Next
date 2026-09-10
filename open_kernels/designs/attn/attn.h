@@ -95,6 +95,14 @@ static_assert(kHD % kV == 0 && kRot % (2 * kV) == 0 && kRot <= kHD && kKVH % 2 =
 static constexpr float kScale = kHD == 256 ? 0.0625f : kHD == 128 ? 0.08838834764831845f
                                 : kHD == 64 ? 0.125f : 0.0f;   // 1/sqrt(HD); a new HD adds its constant here
 static_assert(kScale > 0.0f, "attn.h: no 1/sqrt(HD) for this head dim");
+// Where 1/sqrt(HD) goes on the ATTN_VEXP path. At HD 64 and 256 it is a power of two, so
+// scaling each bf16 half of q is an exponent shift and the scores come out bit-identical
+// (attn_q_impl). At HD 128 it is 2^-3.5: folding it into q would round both halves, so
+// there it multiplies the SCORES instead -- one fmulN per position per vector of heads
+// (three bf16 macs, ~2^-16 relative), on the vector unit, where the scalar version of
+// that same multiply was the 25 ms the fold removed. The HD 64 / 256 builds contain
+// neither branch of that #if and compile byte-for-byte what they did.
+#define ATTN_SCALE_IN_Q (ATTN_HD == 64 || ATTN_HD == 256)
 // ml stride: [m: kMLS][l: kMLS]. With ATTN_VEXP the head count is rounded up to
 // a whole vector so BOTH halves are aligned for a 32-float load; without it the
 // halves are packed and ml is 2 * NH as before.
@@ -111,7 +119,21 @@ static constexpr unsigned kMLS = kNHL;
 static constexpr unsigned kVE = kNHL >= 32 ? 32 : (kNHL >= 16 ? 16 : 8);
 static constexpr unsigned kMLU = ((kNHL + kVE - 1) / kVE) * kVE;
 static constexpr unsigned kRB = ATTN_RB;      // cached rows per call
-static constexpr unsigned kPV = kRB * kNHL;   // the block's score vector: one exp covers it all
+// The block kernel's per-head vectors: kNHL lanes when that is a whole fp32 vector, else
+// padded to 8, the narrowest one (a core owning 2 or 4 heads: Gemma3-4B, the 35B, the
+// Qwen3.5 sizes). The padding lanes carry -1e30 like attn_row_impl's kMLU ones. At 8+
+// heads per core kNL == kNHL and the kernel is byte for byte what it was.
+static constexpr unsigned kNL = kNHL >= 8 ? kNHL : 8;
+// The head-dim loops of the vector-softmax paths (kHD / 32 iterations: 2, 4, 8) unroll
+// fully at HD <= 128. At HD 256 the fully unrolled score and V loops overflowed the core's
+// 16 KB of program memory (Gemma3-4B, 2026-09-08: "Overflow of program memory", at RB 4
+// and at RB 2), so there they unroll by four. HD 64 / 128 compile what they compiled.
+#if ATTN_HD <= 128
+#define ATTN_UNROLL_HD AIE_LOOP_UNROLL_FULL
+#else
+#define ATTN_UNROLL_HD _Pragma("clang loop unroll_count(4)")
+#endif
+static constexpr unsigned kPV = kRB * kNL;    // the block's score vector: one exp covers it all
 static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmetic on the single-core path
 // The head offset is a kernel ARGUMENT only when attention is actually split.
 // Leaving an unused one in the signature is not free: it perturbs codegen, and
@@ -228,16 +250,16 @@ static inline void attn_q_impl(const float *__restrict qe, const bfloat16 *__res
     for (unsigned j = 0; j < kHD; j += kV) {
       vbN<kV> h, l;
       splitN<kV>(aie::load_v<kV>(t + j), h, l);
+#if ATTN_SCALE_IN_Q
       // ...and carry 1/sqrt(HD) here too. It used to be a scalar float multiply on
       // every head's score at every position, and scalar float on this core is a
       // software call: that one operation measured 25 ms of a 185 ms decode step at
-      // position 2048. kScale is a power of two at every head dim this path serves,
-      // so scaling each bf16 half is a pure exponent shift and the scores come out
-      // bit-identical.
-      static_assert(kHD == 64 || kHD == 256, "attn.h: ATTN_VEXP folds kScale into q, which "
-                                             "is only exact when 1/sqrt(HD) is a power of two");
+      // position 2048. kScale is a power of two at this head dim, so scaling each
+      // bf16 half is a pure exponent shift and the scores come out bit-identical.
+      // (At HD 128 it is not, and the scores are scaled instead: ATTN_SCALE_IN_Q.)
       h = aie::mul(h, (bfloat16)kScale).template to_vector<bfloat16>();
       l = aie::mul(l, (bfloat16)kScale).template to_vector<bfloat16>();
+#endif
       aie::store_v(qh + j, h);
       aie::store_v(qh + kQW + j, l);
     }
@@ -308,9 +330,9 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   // Unrolled only when this is the hot path. With ATTN_RB > 1 it runs for the
   // handful of rows that do not fill a block, and the 8x of code it costs is
   // 8x of the core's 16 KB of program memory that the block kernel needs.
-#if ATTN_RB == 1
-  AIE_LOOP_UNROLL_FULL
-#endif
+#if ATTN_RB == 1 && ATTN_HD <= 128
+  AIE_LOOP_UNROLL_FULL      // at HD 256 four heads unrolled over eight head-dim steps overflow
+#endif                      // program memory (the 35B's ax, 2026-09-08); the loop stays a loop there
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
     const unsigned kvh = h / (kNH / kKVH);
@@ -322,7 +344,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
     // arithmetic and measured 116.6 -> 141.2 ms: holding four heads' vectors live
     // to feed it spills, and the spill costs more than the reduction saves.)
     accf32 d0 = aie::zeros<accfloat, kV>(), d1 = aie::zeros<accfloat, kV>();
-    AIE_LOOP_UNROLL_FULL
+    ATTN_UNROLL_HD
     for (unsigned j = 0; j < kHD; j += kV) {
       const vbN<kV> kj = aie::load_v<kV>(k + j);
       d0 = aie::mac(d0, aie::load_v<kV>(q + j), kj);          // hi
@@ -337,7 +359,12 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 #endif
 
   for (unsigned v = 0; v < kMLU; v += kVE) {
+#if ATTN_SCALE_IN_Q
     const vfN<kVE> s = aie::load_v<kVE>(sv + v);
+#else
+    // q carries no 1/sqrt(HD) at this head dim (ATTN_SCALE_IN_Q): the scores take it here
+    const vfN<kVE> s = fmulN<kVE>(aie::load_v<kVE>(sv + v), aie::broadcast<float, kVE>(kScale));
+#endif
     const vfN<kVE> m = aie::load_v<kVE>(ml + v);
     const vfN<kVE> mn = aie::max(m, s);
     // mn is m or s, so exactly one of (m - mn), (s - mn) is zero and its exp is
@@ -369,9 +396,9 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   // Unrolled only when this is the hot path. With ATTN_RB > 1 it runs for the
   // handful of rows that do not fill a block, and the 8x of code it costs is
   // 8x of the core's 16 KB of program memory that the block kernel needs.
-#if ATTN_RB == 1
-  AIE_LOOP_UNROLL_FULL
-#endif
+#if ATTN_RB == 1 && ATTN_HD <= 128
+  AIE_LOOP_UNROLL_FULL      // at HD 256 four heads unrolled over eight head-dim steps overflow
+#endif                      // program memory (the 35B's ax, 2026-09-08); the loop stays a loop there
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
     const bfloat16 *v = Vt + kvh * kHD;
@@ -387,7 +414,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
       // over a long context is the overwhelming majority. Skipping the rescale is
       // not just a multiply by one saved -- it also leaves the fp32 accumulator
       // alone instead of round-tripping it through a bf16 pair.
-      AIE_LOOP_UNROLL_FULL
+      ATTN_UNROLL_HD
       for (unsigned j = 0; j < kHD; j += kV) {
         accf32 acc;
         acc.from_vector(aie::load_v<kV>(o + j));
@@ -398,7 +425,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
       }
     } else {
       const bfloat16 ahh = ah[hl], all = al[hl];
-      AIE_LOOP_UNROLL_FULL
+      ATTN_UNROLL_HD
       for (unsigned j = 0; j < kHD; j += kV) {
         accf32 acc = aie::zeros<accfloat, kV>();
         acc = mac_vs<kV>(acc, aie::load_v<kV>(o + j), ahh, all);
@@ -471,10 +498,15 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   alignas(128) bfloat16 ph[kPV], pl[kPV];
   alignas(128) bfloat16 ah[kMLS], al[kMLS];
   alignas(128) int32_t grew_i[kMLS];
-
-#if ATTN_RB <= 2
-  AIE_LOOP_UNROLL_FULL      // at RB 4 the fully-unrolled body crashes clang (and does not fit)
+#if ATTN_NHL < 8
+  // the padding lanes [kNHL, kNL) of every row: -1e30 never wins a max and exponentiates to 0
+  AIE_LOOP_UNROLL_FULL
+  for (unsigned r = 0; r < kRB; ++r) aie::store_v(sv + r * kNL, aie::broadcast<float, kNL>(-1e30f));
 #endif
+
+#if ATTN_RB <= 2 && ATTN_HD <= 128
+  AIE_LOOP_UNROLL_FULL      // at RB 4 the fully-unrolled body crashes clang (and does not fit);
+#endif                      // at HD 256 it overflows program memory even at RB 2 (Gemma3-4B)
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;
     const unsigned kvh = h / (kNH / kKVH);
@@ -483,24 +515,29 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
     for (unsigned r = 0; r < kRB; ++r) {
       const bfloat16 *k = Kb[r] + kvh * kHD;
       accf32 d0 = aie::zeros<accfloat, kV>(), d1 = aie::zeros<accfloat, kV>();
-      AIE_LOOP_UNROLL_FULL
+      ATTN_UNROLL_HD
       for (unsigned j = 0; j < kHD; j += kV) {
         const vbN<kV> kj = aie::load_v<kV>(k + j);
         d0 = aie::mac(d0, aie::load_v<kV>(q + j), kj);
         d1 = aie::mac(d1, aie::load_v<kV>(q + kQW + j), kj);
       }
-      sv[r * kNHL + hl] = aie::reduce_add(aie::add(d0, d1).template to_vector<float>());
+      sv[r * kNL + hl] = aie::reduce_add(aie::add(d0, d1).template to_vector<float>());
     }
   }
+#if !ATTN_SCALE_IN_Q
+  // q carries no 1/sqrt(HD) at this head dim (ATTN_SCALE_IN_Q): one vector multiply
+  // scales the whole block's scores
+  aie::store_v(sv, fmulN<kPV>(aie::load_v<kPV>(sv), aie::broadcast<float, kPV>(kScale)));
+#endif
 
   // the block's max per head, then one update of (m, l) for the whole block
-  vfN<kNHL> smax = aie::load_v<kNHL>(sv);
+  vfN<kNL> smax = aie::load_v<kNL>(sv);
   AIE_LOOP_UNROLL_FULL
-  for (unsigned r = 1; r < kRB; ++r) smax = aie::max(smax, aie::load_v<kNHL>(sv + r * kNHL));
-  const vfN<kNHL> m = aie::load_v<kNHL>(ml);
-  const vfN<kNHL> mn = aie::max(m, smax);
+  for (unsigned r = 1; r < kRB; ++r) smax = aie::max(smax, aie::load_v<kNL>(sv + r * kNL));
+  const vfN<kNL> m = aie::load_v<kNL>(ml);
+  const vfN<kNL> mn = aie::max(m, smax);
   AIE_LOOP_UNROLL_FULL
-  for (unsigned r = 0; r < kRB; ++r) aie::store_v(mnv + r * kNHL, mn);
+  for (unsigned r = 0; r < kRB; ++r) aie::store_v(mnv + r * kNL, mn);
 
   alignas(128) float pvf[kPV];
   const vfN<kPV> pv = vexpN<kPV>(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)));
@@ -511,24 +548,24 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   aie::store_v(pl, t1);
 
   // a = exp(m - mn): one of (m - mn) and (smax - mn) is zero, so one exp gives both
-  const vfN<kNHL> e = vexpN<kNHL>(faddN<kNHL>(fsubN<kNHL>(m, mn), fsubN<kNHL>(smax, mn)));
+  const vfN<kNL> e = vexpN<kNL>(faddN<kNL>(fsubN<kNL>(m, mn), fsubN<kNL>(smax, mn)));
   const auto grew = aie::gt(smax, m);
-  const vfN<kNHL> a = aie::select(aie::broadcast<float, kNHL>(1.0f), e, grew);
-  vfN<kNHL> lsum = aie::load_v<kNHL>(pvf);
+  const vfN<kNL> a = aie::select(aie::broadcast<float, kNL>(1.0f), e, grew);
+  vfN<kNL> lsum = aie::load_v<kNL>(pvf);
   AIE_LOOP_UNROLL_FULL
-  for (unsigned r = 1; r < kRB; ++r) lsum = faddN<kNHL>(lsum, aie::load_v<kNHL>(pvf + r * kNHL));
+  for (unsigned r = 1; r < kRB; ++r) lsum = faddN<kNL>(lsum, aie::load_v<kNL>(pvf + r * kNL));
   aie::store_v(ml, mn);
-  aie::store_v(ml + kMLS, faddN<kNHL>(fmulN<kNHL>(aie::load_v<kNHL>(ml + kMLS), a), lsum));
-  vbN<kNHL> u0, u1;
-  splitN<kNHL>(a, u0, u1);
+  aie::store_v(ml + kMLS, faddN<kNL>(fmulN<kNL>(aie::load_v<kNL>(ml + kMLS), a), lsum));
+  vbN<kNL> u0, u1;
+  splitN<kNL>(a, u0, u1);
   aie::store_v(ah, u0);
   aie::store_v(al, u1);
-  aie::store_v(grew_i, aie::select(aie::zeros<int32_t, kNHL>(),
-                                   aie::broadcast<int32_t, kNHL>(1), grew));
+  aie::store_v(grew_i, aie::select(aie::zeros<int32_t, kNL>(),
+                                   aie::broadcast<int32_t, kNL>(1), grew));
 
-#if ATTN_RB <= 2
-  AIE_LOOP_UNROLL_FULL      // at RB 4 the fully-unrolled body crashes clang (and does not fit)
-#endif
+#if ATTN_RB <= 2 && ATTN_HD <= 128
+  AIE_LOOP_UNROLL_FULL      // at RB 4 the fully-unrolled body crashes clang (and does not fit);
+#endif                      // at HD 256 it overflows program memory even at RB 2 (Gemma3-4B)
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
     float *o = oacc + hl * kHD;
@@ -537,22 +574,22 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
     // accumulation: at RB rows unrolled over RB * kNHL heads, duplicating the
     // accumulation overflowed the core's 16 KB of program memory.
     if (grew_i[hl] != 0) {
-      AIE_LOOP_UNROLL_FULL
+      ATTN_UNROLL_HD
       for (unsigned j = 0; j < kHD; j += kV) {
         accf32 acc = aie::zeros<accfloat, kV>();
         acc = mac_vs<kV>(acc, aie::load_v<kV>(o + j), ahh, all);
         aie::store_v(o + j, acc.template to_vector<float>());
       }
     }
-    AIE_LOOP_UNROLL_FULL
+    ATTN_UNROLL_HD
     for (unsigned j = 0; j < kHD; j += kV) {
       accf32 acc;
       acc.from_vector(aie::load_v<kV>(o + j));
       AIE_LOOP_UNROLL_FULL
       for (unsigned r = 0; r < kRB; ++r) {
         const vbN<kV> vj = aie::load_v<kV>(Vb[r] + kvh * kHD + j);
-        acc = aie::mac(acc, vj, ph[r * kNHL + hl]);
-        acc = aie::mac(acc, vj, pl[r * kNHL + hl]);
+        acc = aie::mac(acc, vj, ph[r * kNL + hl]);
+        acc = aie::mac(acc, vj, pl[r * kNL + hl]);
       }
       aie::store_v(o + j, acc.template to_vector<float>());
     }

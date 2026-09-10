@@ -74,7 +74,19 @@ if DENSE and PART:
     sys.exit("ax.py: the dense tail is one instruction stream; AX_PART must be 0")
 XN_ELEMS = X.FFN.XN_ELEMS if DENSE else 1               # 4 KB x elements the xn arrives in
 OG_ELEMS = D.OG_ELEMS
-ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={D.ROT}", "-DATTN_GATE=1"]
+from recipes.attnknobs import probe_env  # noqa: E402
+ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={D.ROT}", "-DATTN_GATE=1",
+              f"-DATTN_VEXP={D.VEXP}", f"-DATTN_NHL={D.NHL}"]
+if D.RB > 1:                                           # attn.h defaults it to 1; adding the flag
+    ATTN_FLAGS.append(f"-DATTN_RB={D.RB}")             # would change every other family's build line
+for _k, _v in probe_env().items():                     # ATTN_NULL / ATTN_ABL: see attn.h. In the build key.
+    if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via D.RB; FAST picks D itself.
+        ATTN_FLAGS.append(f"-D{_k}={_v}")
+# The fast attention path (recipes/attnknobs.py, the same split designs/dense/dx.py
+# builds): ACORES cores at Tile(2 + c, 3), each owning NHL heads and draining its own og
+# element(s); RB cached rows per kernel call. At the defaults (1, NH, 1) every shape below
+# is the one this design always had, and the 27B / 35B kernels compile byte for byte.
+ACORES, NHL, RB = D.ACORES, D.NHL, D.RB
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -97,7 +109,14 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     f64 = np.ndarray[(D.ROT,), np.dtype[np.float32]]           # cos | sin of the rotated dims
     f256 = np.ndarray[(HD,), np.dtype[np.float32]]
     f4096 = np.ndarray[(QW,), np.dtype[np.float32]]
-    f32_ = np.ndarray[(2 * NH,), np.dtype[np.float32]]
+    # The attention core's own shapes. On the fast path q is pre-split as a bf16 [hi | lo]
+    # pair, ml sits at the padded stride, the accumulator covers this core's heads only and
+    # the parameter block grows for the row blocks; at the defaults every one of these is
+    # the type it always was (f32[QW], f32[2 NH], f32[QW], i32[4]).
+    fq = np.ndarray[(2 * QW,), np.dtype[bfloat16]] if D.VEXP else f4096
+    fml = np.ndarray[(2 * D.MLS,), np.dtype[np.float32]]
+    foacc = np.ndarray[(NHL * HD,), np.dtype[np.float32]]
+    pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]
 
     inc = include_dirs() + [str(GEMV), str(ATTN), str(X.LN), str(X.LINL), str(X.RT), str(HERE.parent / "moe_experts")]
     K = X.kernels(inc, t)
@@ -106,14 +125,16 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     def af(sym, args):
         return ExternalFunction(sym, source_file=str(ATTN / f"{sym}.cc"), arg_types=args, include_dirs=inc, compile_flags=ATTN_FLAGS)
 
-    f_meta = af("attn_meta", [u8_1k, u8_1k, b256, b256, f64, i32_4])
-    f_q = af("attn_q", [u8_1k, b256, f64, f4096, np.int32])
+    h0_arg = [np.int32] if ACORES > 1 else []                  # only a split needs the head offset
+    f_meta = af("attn_meta", [u8_1k, u8_1k, b256, b256, f64, pb_ty])
+    f_q = af("attn_q", [u8_1k, b256, f64, fq, np.int32])
     f_k = af("attn_k", [u8_1k, b256, f64, f256, b512, np.int32])
     f_v = af("attn_v", [u8_1k, b512, np.int32])
-    f_init = af("attn_init", [f4096, f32_])
-    f_step = af("attn_step", [u8_1k, u8_1k, f4096, f4096, f32_, i32_4])
-    f_stepn = af("attn_step_new", [b512, b512, f4096, f4096, f32_])
-    f_fin = af("attn_fin", [f4096, f32_, u8_1k, u8_1k, b512, np.int32])
+    f_init = af("attn_init", [foacc, fml])
+    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg)
+    f_stepn = af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg)
+    f_stepb = af("attn_stepb", [u8_1k] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg) if RB > 1 else None
+    f_fin = af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32])
 
     # ---- fifos
     of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=2) for c in range(N_CORES)]
@@ -121,8 +142,11 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     of_x = ObjectFifo(t["x"], name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1 if DENSE else 3)
-    of_ain = ObjectFifo(u8_1k, name="ain", depth=4)
+    of_ain = ObjectFifo(u8_1k, name="ain", depth=max(4, 2 * RB + 2))   # a block is acquired at once
     of_aout = ObjectFifo(b512, name="aout", depth=2)
+    # Attention over ACORES cores: heads are independent, so each core owns NHL of them
+    # and drains its own og element(s) -- the pattern dx.py uses.
+    of_og = [ObjectFifo(b512, name=f"og{c}", depth=2) for c in range(1, ACORES)]
 
     def main_body(win, xin, yout, *args):
         B, K = X.unpack_args(args)
@@ -144,7 +168,11 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         xin.release(2)
         X.moe_body(win, xin, yout, B, K)
 
-    def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff):
+    N_OG = NHL // D.HPO          # og elements this core emits (all of them when ACORES == 1)
+
+    def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+              fm, fq, fk, fv, fi, fs, fsn, ff, fsb, c):
+        h0 = c * NHL
         e = ain.acquire(2)                                      # [qn | kn], the position record
         fm(e[0], e[1], qn, kn, cs, pb)
         ain.release(2)
@@ -160,26 +188,66 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             e = ain.acquire(1)
             fv(e, vout, h)
             ain.release(1)
-        o = aout.acquire(1)
-        for j in range_(KVW):
-            o[j] = kout[j]
-        aout.release(1)
-        o = aout.acquire(1)
-        for j in range_(KVW):
-            o[j] = vout[j]
-        aout.release(1)
-        fi(oacc, ml)
-        for _ in range_(pb[1]):                                 # nf cached rows (K_t, V_t)
-            e = ain.acquire(2)
-            fs(e[0], e[1], qs, oacc, ml, pb)
-            ain.release(2)
-        fsn(kout, vout, qs, oacc, ml)
-        for hp in range_(D.OG_AOUT_ELEMS):
-            g = ain.acquire(2)
+        if aout is not None:                                    # core 0 owns the cache row
             o = aout.acquire(1)
-            ff(oacc, ml, g[0], g[1], o, hp)
+            for j in range_(KVW):
+                o[j] = kout[j]
             aout.release(1)
+            o = aout.acquire(1)
+            for j in range_(KVW):
+                o[j] = vout[j]
+            aout.release(1)
+        fi(oacc, ml)
+        if RB > 1:
+            for _ in range_(pb[4]):                             # whole blocks of RB rows
+                e = ain.acquire(2 * RB)
+                args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
+                fsb(*args)
+                ain.release(2 * RB)
+            for _ in range_(pb[5]):                             # what did not fill a block
+                e = ain.acquire(2)
+                fs(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else fs(e[0], e[1], qs, oacc, ml, pb)
+                ain.release(2)
+        else:
+            for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
+                e = ain.acquire(2)
+                fs(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else fs(e[0], e[1], qs, oacc, ml, pb)
+                ain.release(2)
+        fsn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else fsn(kout, vout, qs, oacc, ml)
+        # The gate arrives for EVERY og element on the broadcast stream (two elements per
+        # og element, in head order), so each core consumes all of them and computes only
+        # its own N_OG. The pass-through counts are Python constants: nothing to trace.
+        for _ in range(c * N_OG):
+            ain.acquire(2)
             ain.release(2)
+        for hp in range_(N_OG):
+            g = ain.acquire(2)
+            o = ogout.acquire(1)
+            ff(oacc, ml, g[0], g[1], o, hp)
+            ogout.release(1)
+            ain.release(2)
+        for _ in range((ACORES - 1 - c) * N_OG):
+            ain.acquire(2)
+            ain.release(2)
+
+    # Two shapes of worker body, not one with a defaulted argument: a family that
+    # does not block must present IRON the exact function it presented before.
+    if RB > 1:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb, 0)
+
+        def make_attn_body(c):
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb, c)
+            return body
+    else:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, 0)
+
+        def make_attn_body(c):
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, c)
+            return body
 
     workers = [Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
                       tile=Tile(0, 3), stack_size=0x1800)
@@ -192,13 +260,20 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         workers.append(Worker(main_body,
                               fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), *X.worker_args(X.core_buffers(t, c), K)],
                               tile=Tile(c, 2), stack_size=0x1800))
-    workers.append(Worker(attn_body,
-                          fn_args=[of_ain.cons(), of_aout.prod(),
-                                   Buffer(b256, name="qn"), Buffer(b256, name="kn"), Buffer(f64, name="cs"),
-                                   Buffer(f4096, name="qs"), Buffer(f256, name="tmp"), Buffer(b512, name="kout"),
-                                   Buffer(b512, name="vout"), Buffer(f4096, name="oacc"), Buffer(f32_, name="ml"),
-                                   Buffer(i32_4, name="pb"), f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin],
+    def abufs(c):
+        s = "" if c == 0 else str(c)
+        return [Buffer(b256, name=f"qn{s}"), Buffer(b256, name=f"kn{s}"), Buffer(f64, name=f"cs{s}"),
+                Buffer(fq, name=f"qs{s}"), Buffer(f256, name=f"tmp{s}"), Buffer(b512, name=f"kout{s}"),
+                Buffer(b512, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
+                Buffer(pb_ty, name=f"pb{s}")]
+
+    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+    workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
                           tile=Tile(2, 3), stack_size=0x1800))
+    # The rest of the attention cores: same broadcast stream in, their own og out.
+    for c in range(1, ACORES):
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
+                              tile=Tile(2 + c, 3), stack_size=0x1800))
 
     bt = X.bt
     BB_HID, BB_O = X.role_band_bytes("attn", HID), X.role_band_bytes("attn", O_K)
@@ -216,7 +291,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 (AA_OUT + c * O_PC * YB, O_PC * YB)]
 
     def dense_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
-                       ain_p, aout_c):
+                       ain_p, aout_c, og_cs):
         """ONE instruction stream: the MoE stream's attention half with the router dropped,
         then designs/dense/dx.py's steps 5-7 (residual + norm, the FFN, the output residual)."""
         tg_ln = TaskGroup()
@@ -236,7 +311,9 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             py.drain(y_conss[c], a_act, bt(AA_BYTES, *y_regions(c)[3]))
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         pa_out.drain(aout_c, a_kv, bt(KV_BYTES, KV_ROW, KV_ROW))        # the new row [k' | v'] (attnpos)
-        pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, QW * 2))
+        pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, NHL * HD * 2))
+        for c in range(1, ACORES):                                      # heads NHL*c ..
+            pa_out.drain(og_cs[c - 1], a_act, bt(AA_BYTES, AA_OG + c * NHL * HD * 2, NHL * HD * 2))
         pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.E_A))       # [qn | kn]
         pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, PTAB_ROW, PTAB_ROW))   # the position record (attnpos)
         py.finish(*y_conss)                                       # q, gate, k, v are in DDR
@@ -273,10 +350,10 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         px.finish()
         pa_in.finish()
 
-    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c):
+    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
-                           ain_p, aout_c)
+                           ain_p, aout_c, og_cs)
         elif part == 0:
             tg_ln = TaskGroup()
             lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -296,7 +373,9 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 py.drain(y_conss[c], a_act, bt(AA_BYTES, *y_regions(c)[3]))
             pa_out, pa_in = Pipeline(3), Pipeline(3)
             pa_out.drain(aout_c, a_kv, bt(KV_BYTES, KV_ROW, KV_ROW))        # the new row [k' | v'] -> row pos (attnpos)
-            pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, QW * 2))
+            pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, NHL * HD * 2))
+            for c in range(1, ACORES):                                  # heads NHL*c ..
+                pa_out.drain(og_cs[c - 1], a_act, bt(AA_BYTES, AA_OG + c * NHL * HD * 2, NHL * HD * 2))
             pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.E_A))          # [qn | kn], one element
             pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, PTAB_ROW, PTAB_ROW))   # the position record (attnpos)
             py.finish(*y_conss)                                       # q, gate, k, v are in DDR
@@ -334,7 +413,8 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                             [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0))])
+                            of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
+                            [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
