@@ -26,6 +26,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
+    std::cout << "  add <repo>          - Install a pre-converted model (HF/ModelScope id, URL, or local dir)" << std::endl;
     std::cout << "  list                - List all available models" << std::endl;
     std::cout << "  version             - Show version information" << std::endl;
     std::cout << "  help                - Show this help message" << std::endl;
@@ -54,6 +55,9 @@ inline void print_help(po::options_description& general) {
     std::cout << "\tflm list" << std::endl;
     std::cout << "\tflm list --quiet" << std::endl;
     std::cout << "\tflm list --filter installed" << std::endl;
+    std::cout << "\tflm add Atomic-Germ/Phi4-mini-Instruct-NPU2 --tag phi4-mini:1b --thinking" << std::endl;
+    std::cout << "\tflm add . --tag qwen3.5-claude:9b --family qwen3.5 --thinking" << std::endl;
+    std::cout << "\tflm add --list-families" << std::endl;
     std::cout << std::endl;
 }
 
@@ -110,7 +114,43 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prompt,i", po::value<std::string>(&parsed_args.input_file_name)->default_value(""),
              "Direct file input")
             ("bench-iterations", po::value<int>(&parsed_args.iterations)->default_value(2),
-             "Iterations for bench");
+              "Iterations for bench")
+            ("tag", po::value<std::string>(&parsed_args.add_tag)->default_value(""),
+             "Registry tag for `add` (default: derived from repo name, e.g. qwen3.5-claude:9b)")
+            ("family", po::value<std::string>(&parsed_args.add_family)->default_value(""),
+             "details.family for engine dispatch (default: from matching official entry)")
+            ("config", po::value<std::string>(&parsed_args.add_config)->default_value(""),
+             "user model_list.json to update for `add` (default: $FLM_CONFIG_PATH or ~/.config/flm/model_list.json)")
+            ("system-list", po::value<std::string>(&parsed_args.add_system_list)->default_value(""),
+             "official model_list.json used for `add` defaults (default: auto-detect)")
+            ("models-root", po::value<std::string>(&parsed_args.add_models_root)->default_value(""),
+             "models directory for `add` (default: $FLM_MODEL_PATH or ~/.config/flm/models)")
+            ("xclbin-dir", po::value<std::string>(&parsed_args.add_xclbin_dir)->default_value(""),
+             "user xclbins directory for `add` (default: $FLM_XCLBIN_PATH or ~/.config/flm/xclbins)")
+            ("xclbin-from", po::value<std::string>(&parsed_args.add_xclbin_from)->default_value(""),
+             "official model dir to link open_kernels from for `add` (default: best match)")
+            ("no-xclbin", po::bool_switch(&parsed_args.add_no_xclbin),
+             "Do not create the open_kernels symlink for `add`")
+            ("no-verify", po::bool_switch(&parsed_args.add_no_verify),
+             "Skip sha256 verification of downloads for `add`")
+            ("dry-run", po::bool_switch(&parsed_args.add_dry_run),
+             "Print the install plan and exit for `add`")
+            ("thinking", po::bool_switch(&parsed_args.add_thinking),
+             "Set details.think=true for `add` (reasoning model)")
+            ("think-toggleable", po::bool_switch(&parsed_args.add_think_toggleable),
+             "Set details.think_toggleable=true for `add`")
+            ("parameter-size", po::value<std::string>(&parsed_args.add_parameter_size)->default_value(""),
+             "details.parameter_size for `add` (e.g. 9B)")
+            ("quantization", po::value<std::string>(&parsed_args.add_quantization)->default_value(""),
+             "details.quantization_level for `add` (e.g. Q4_K)")
+            ("context-length", po::value<int>(&parsed_args.add_context_length)->default_value(-1),
+             "default_context_length for `add` (tokens)")
+            ("max-prefill", po::value<int>(&parsed_args.add_max_prefill)->default_value(-1),
+             "max_prefill_len for `add` (tokens)")
+            ("label", po::value<std::string>(&parsed_args.add_label)->default_value(""),
+             "Comma-separated label tags for `add` (e.g. reasoning,vision)")
+            ("list-families", po::bool_switch(&parsed_args.add_list_families),
+             "List the family open_kernels shipped with the app and exit (for `add`)");
 
         // Define positional arguments
         po::positional_options_description pos_desc;

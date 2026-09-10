@@ -9,6 +9,7 @@
 #include "server.hpp"
 #include "model_list.hpp"
 #include "model_downloader.hpp"
+#include "flm_add.hpp"
 #include "update.hpp"
 #include "utils/utils.hpp"
 #include "program_args.hpp"
@@ -655,6 +656,12 @@ int main(int argc, char* argv[]) {
         else if (parsed_args.command == "remove") {
             // Remove the model, this will be used to remove the model
             downloader.remove_model(parsed_args.model_tag);
+        }
+        else if (parsed_args.command == "add") {
+            int rc = flm_add::run(parsed_args);
+            if (rc != 0) {
+                return rc;
+            }
         }
         else if (parsed_args.command == "check") {
             downloader.check_model(parsed_args.model_tag, parsed_args.modelscope);
