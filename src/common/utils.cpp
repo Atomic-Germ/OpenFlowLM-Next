@@ -140,6 +140,22 @@ std::string user_flm_directory() {
 #endif
 }
 
+/// The user-level directories for THIS project, newest first (#30). Returned as
+/// a list rather than a single path so that a directory made either way is
+/// found: #30 asks for %USERPROFILE%\.oflm on Windows, while flm-add's own
+/// `Path.home() / ".config" / <name>` would put it beside the flm one. Scanning
+/// both costs one stat.
+std::vector<std::string> user_oflm_directories() {
+    std::vector<std::string> v;
+#ifdef _WIN32
+    v.push_back((std::filesystem::path(get_user_directory()) / ".oflm").string());
+    v.push_back((std::filesystem::path(get_user_directory()) / ".config" / "oflm").string());
+#else
+    v.push_back(get_user_directory() + "/oflm");
+#endif
+    return v;
+}
+
 /// The roots `find_xclbin_path` has always walked, in its order. Kept separate so that
 /// widening the OPEN path's search (xclbin_roots below) cannot move which root the CLOSED
 /// path picks: it returns exactly one, and every closed kernel is loaded relative to it.
@@ -171,7 +187,10 @@ std::vector<std::string> xclbin_roots() {
     if (config_path && *config_path) {
         candidates.push_back(std::filesystem::path(config_path).parent_path().string());
     }
-    // The directory flm-add uses when neither variable is exported.
+    // The directories flm-add uses when neither variable is exported, new
+    // before legacy (#30) -- an existing install keeps working with no
+    // migration and no copying of multi-gigabyte weights.
+    for (const std::string& d : user_oflm_directories()) candidates.push_back(d);
     candidates.push_back(user_flm_directory());
 
     for (const std::string& c : closed_path_roots()) candidates.push_back(c);
@@ -296,8 +315,17 @@ std::string get_models_directory() {
         return std::string(model_path_env);
     }
 #endif
-    // Fallback to user/.flm/ on Windows or ~/.config/flm on Linux if environment variable is not set
+    // No variable set: the new user directory if it exists, else the legacy one
+    // (#30). New before legacy, so an existing install keeps working untouched
+    // and a fresh one lands in .oflm.
     std::string user_dir = get_user_directory();
+#ifdef _WIN32
+    const std::string oflm_dir = user_dir + "\\.oflm";
+#else
+    const std::string oflm_dir = user_dir + "/oflm";
+#endif
+    std::error_code models_ec;
+    if (std::filesystem::is_directory(oflm_dir, models_ec)) return oflm_dir;
 #ifdef _WIN32
     return user_dir + "\\.flm";
 #else
