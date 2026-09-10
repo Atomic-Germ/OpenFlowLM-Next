@@ -140,58 +140,9 @@ No model rewrites, no tuning — it just works.
 
 ## 🛠️ Building from Source
 
-For developers who want to build FastFlowLM from source, we provide CMake presets for a convenient and consistent build experience.
+**[docs/BUILD.md](docs/BUILD.md)** — a step-by-step guide for Windows and Linux.
 
-### Prerequisites
-
-- Git
-- CMake (version 3.22 or higher)
-- A C++20 compatible compiler (e.g., GCC, Clang, MSVC)
-- Ninja (recommended)
-
-### Build Instructions
-
-More details on the exact procedure, with dependencies to be installed, for Linux can be found in [linux-getting-started.md](docs/linux-getting-started.md).
-
-1.  **Clone the repository:**
-
-    ```bash
-    git clone --recursive https://github.com/ROCm/FastFlowLM.git
-    cd FastFlowLM/src
-    ```
-
-2.  **Configure CMake using presets:**
-
-    -   **For Linux:**
-
-        ```bash
-        cmake --preset linux-default
-        ```
-
-        This will configure the build to install to `/opt/fastflowlm`.
-
-    -   **For Windows (in a developer command prompt):**
-
-        ```bash
-        cmake --preset windows-default
-        ```
-
-3.  **Build the project:**
-
-    ```bash
-    cmake --build build
-    ```
-
-4.  **Install the project (optional):**
-
-    -   **For Linux:**
-
-        ```bash
-        sudo cmake --install build
-        ```
-
-    -   **For Windows (with administrator privileges):**
-
-        ```bash
-        cmake --install build
-        ```
+Note that there are **two** things to build: the executable, and the AIE design
+sets the NPU actually runs. The design sets are not checked in, they need a
+second toolchain, and without them the binary starts and then refuses to load a
+model. BUILD.md covers both.
