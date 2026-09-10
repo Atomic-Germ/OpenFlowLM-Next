@@ -123,7 +123,11 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     // back to step(). A kernel set with no gemm_block program (GT == 0) runs
     // exactly the sequential path this engine always has.
     return guarded([&] {
-        if (std::getenv("FLM_OPEN_GEMM_BLOCK")) {
+        // Test the VALUE, not just presence: the docs say =1, and
+        // FLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
+        // that gets diagnosed as a different bug entirely (review on #39).
+        const char* gemm_block_env = std::getenv("FLM_OPEN_GEMM_BLOCK");
+        if (gemm_block_env && std::string(gemm_block_env) == "1") {
             const size_t GT = core_->gemm_block_t();
             if (GT > 0) {
                 size_t i = 0;

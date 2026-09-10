@@ -178,7 +178,11 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         // concatenated because lt.pool[0..2] (q,k,v) are already byte-
         // contiguous in this layout (dense.py's pack_plan lays them out back
         // to back with no gaps); this is checked, not assumed.
-        if (lt.gemm_block.t) {
+        // gemm_block_t_, NOT lt.gemm_block.t: the vectors above are sized only
+        // when every layer type agrees, and step_gemm_block() refuses otherwise,
+        // so a per-layer test here would index empty vectors on a set whose
+        // layer types disagree (review on #39).
+        if (gemm_block_t_ && lt.gemm_block.t) {
             auto [qo, qb] = pool_region(lt, 0);
             auto [ko, kb] = pool_region(lt, 1);
             auto [vo, vb] = pool_region(lt, 2);
@@ -186,13 +190,13 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 throw std::runtime_error("open_qwen36: layer " + std::to_string(l) +
                                          ": q/k/v pool regions are not contiguous -- the GEMM route's "
                                          "qkv3 weight buffer cannot be built by a single memcpy");
-            xrt::bo w = xrt::ext::bo(*dev_, qb + kb + vb);
+            xrt::bo w = xrt::ext::bo(*dev_, padup(qb + kb + vb));
             std::memcpy(w.map<uint8_t*>(), pool_host + qo, qb + kb + vb);
             w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             gqkv3_w_[l] = std::move(w);
             auto mk = [&](int idx, std::vector<xrt::bo>& dst) {
                 auto [off, bytes] = pool_region(lt, idx);
-                xrt::bo b = xrt::ext::bo(*dev_, bytes);
+                xrt::bo b = xrt::ext::bo(*dev_, padup(bytes));
                 std::memcpy(b.map<uint8_t*>(), pool_host + off, bytes);
                 b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
                 dst[l] = std::move(b);
@@ -212,7 +216,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         // CD_LNW=0, CD_POSTLN=eln) -- checked against a real manifest.json,
         // not assumed. Captured from the SAME host buffer pack_consts() just
         // wrote, before its device sync, so this costs no extra I/O.
-        if (lt.gemm_block.t) {
+        if (gemm_block_t_ && lt.gemm_block.t) {
             ln_w_bf16_[l].resize(man_.hidden);
             post_ln_w_bf16_[l].resize(man_.hidden);
             std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
