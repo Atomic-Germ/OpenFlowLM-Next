@@ -189,6 +189,33 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         else fail(tw, "unknown state kind " + t.state_kind);
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
+        // 0167/#32: the GEMM-route block, independent of the sequential
+        // `program` above (see manifest.hpp's GemmBlockProgram) -- exactly
+        // 5 Steps, fixed order.
+        if (v.contains("gemm_block")) {
+            const json& gj = v["gemm_block"];
+            const std::string gw = tw + " gemm_block";
+            t.gemm_block.t = get<uint64_t>(gj, "t", gw);
+            if (t.gemm_block.t == 0) fail(gw, "t must be > 0 when gemm_block is present");
+            t.gemm_block.eps = get<double>(gj, "eps", gw);
+            t.gemm_block.qw = get<uint64_t>(gj, "qw", gw);
+            t.gemm_block.kvw = get<uint64_t>(gj, "kvw", gw);
+            t.gemm_block.ff = get<uint64_t>(gj, "ff", gw);
+            t.gemm_block.ad_q = get<uint64_t>(gj, "ad_q", gw);
+            t.gemm_block.ad_kvn = get<uint64_t>(gj, "ad_kvn", gw);
+            t.gemm_block.ad_og = get<uint64_t>(gj, "ad_og", gw);
+            t.gemm_block.program = parse_program(need(gj, "program", gw), gw + ".program");
+            if (t.gemm_block.program.size() != 5)
+                fail(gw, "program must have exactly 5 steps (qkv3, o, gate, up, down), has " +
+                             std::to_string(t.gemm_block.program.size()));
+            for (const auto& s : t.gemm_block.program) {
+                check_step(m, s, gw, "gemm_block.program");
+                if (s.op != "run" || s.args.size() != 3)
+                    fail(gw, "gemm_block.program step '" + s.kernel + "' must be a run with exactly 3 args (weight, x, y), has " +
+                                 std::to_string(s.args.size()));
+            }
+            if (!m.kernels.count("dxB")) fail(gw, "gemm_block present but this manifest declares no 'dxB' kernel");
+        }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));
         for (const auto& o : need(pk, "consts", tw)) t.consts.push_back(parse_op(o, tw + " pack.consts"));
