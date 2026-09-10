@@ -111,7 +111,32 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     if (ids.empty()) return logits_view();
     // Decode-as-prefill: exact for this architecture, one step per token, the
     // lm_head only for the last one (whose logits pick the first sampled token).
+    //
+    // 0167/#32: FLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
+    // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
+    // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
+    // (q4_1 dequantised on-core) plus T single-token attention dispatches,
+    // instead of T sequential step() calls. Off by default so every existing
+    // measurement is unaffected. The whole prompt runs in GT-wide blocks, the
+    // tail padded with a repeated in-range id (hardware-proven exact: the
+    // real columns' output does not depend on the padding), never falling
+    // back to step(). A kernel set with no gemm_block program (GT == 0) runs
+    // exactly the sequential path this engine always has.
     return guarded([&] {
+        if (std::getenv("FLM_OPEN_GEMM_BLOCK")) {
+            const size_t GT = core_->gemm_block_t();
+            if (GT > 0) {
+                size_t i = 0;
+                while (i < ids.size()) {
+                    const size_t t_real = std::min(GT, ids.size() - i);
+                    std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
+                    block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
+                    core_->step_gemm_block(block, t_real, i + t_real == ids.size());
+                    i += t_real;
+                }
+                return logits_view();
+            }
+        }
         for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
         return logits_view();
     });

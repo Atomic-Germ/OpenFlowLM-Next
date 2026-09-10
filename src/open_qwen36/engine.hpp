@@ -5,8 +5,13 @@
 ///       server, prompt cache — is the app's own open code and drives this
 ///       exactly as it drives the closed engine. What the closed engine still
 ///       does that this does not: the vision encoder (an image payload is
-///       refused), and batched prefill (prompts are decoded one token at a
-///       time, which is exact but ~0.3 s per prompt token on the full model).
+///       refused). Batched prefill (0167/#32) runs when the loaded kernel set
+///       carries a GEMM-route block program (Core::gemm_block_t() > 0,
+///       currently Granite only) AND FLM_OPEN_GEMM_BLOCK=1 is set: T tokens
+///       per layer as 5 whole-array GEMM dispatches plus T attention
+///       dispatches, instead of T sequential steps. Off by default, or with
+///       no such kernel set loaded, prompts decode one token at a time, which
+///       is exact but ~0.3 s per prompt token on the full model.
 #pragma once
 
 #include <memory>
