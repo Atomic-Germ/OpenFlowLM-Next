@@ -134,12 +134,55 @@ model. A call site that does not pass `qk_norm_post_rope` is read as `False`.
 - The `gemv_q8` template's validated `K` set holds 2048 and 4096, entered by OPEN-QUANT-Q8's hardware pass on 2026-09-07 (Ornith-1.0-35B-A3B); `gemv_q8 K=3072` names that set. Before that pass the set was empty and every q8 export needed `OPEN_KERNELS_UNVALIDATED=1`. The Qwen3.5 family's native-q8 pass on 2026-09-07 added nothing to it: its q8 `linear_out` GEMV reduces over `lin_value_width` (4096 on the 9B / 4B, 2048 on the 2B / 0.8B), not over `hidden`, so all four sizes compose at q8 with no override.
 - `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: at an unlisted width `recipes.load` warns in one short line that q8 is NOT IMPLEMENTED YET there and narrows the container's q8 role away, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`. The line names the width, the reason (program memory) and the format it fell back to; what the fallback costs (0.999682) is recorded here rather than spent on a warning. The warning is worded as a gap in what has been built rather than a permanent limit -- the width wants a mixed core small enough to fit and nobody has built one yet (the maintainer's call on PR #26).
 
-### OPEN-ATTN-CONTEXT: decode cost grows linearly with position, on every family
-**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`)
-**Test category:** manual (`open_kernels/model/sweep_positions.ps1`, needs the NPU and two model containers)
+### OPEN-ATTN-CONTEXT: decode cost stays flat in the context position, on every family
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `recipes/attnknobs.py`, `designs/dense/dx.py`, `designs/layer_x/ax.py`)
+**Test category:** manual (the sweep below, needs the NPU and the model container); the geometry each family gets is unit-tested in `tests/test_attn_geometry.py`
 
-**This is an observation, not yet a requirement** — it is written down because
-it was measured, it is large, and nothing else in this spec records it.
+A decode step's attention cost shall not grow with the context position beyond
+a small per-position term: on the fast attention path -- the online softmax's
+exponentials batched on the vector unit (`ATTN_VEXP`), the heads split over
+`ACORES` cores (`ATTN_NHL`), cached rows blocked per kernel call (`ATTN_RB`) --
+a step at position 2048 costs within 2x of a step at position 0 on the
+families below. `1/sqrt(HD)` folds into q as an exponent shift at HD 64 / 256
+and multiplies the scores on the vector unit at HD 128 (`ATTN_SCALE_IN_Q`).
+
+A family enters the path by measurement, never by declaration:
+`recipes/attnknobs.py: FAST_ATTENTION` lists the measured families; every
+other family compiles the single-core attention it compiled before, byte for
+byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
+measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
+
+**Acceptance criteria (unit, `test_attn_geometry.py`):**
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 2 x 4, RB 2; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. Every core's heads are whole og elements; RB x max(NHL, 8) is 8, 16 or 32.
+- Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
+- `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+
+**Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
+directory; one decode step at positions 0 / 256 / 1024 / 2048 through
+`open_qwen36_cli --at-position` on the shipped set and the probe set; then
+200-300 greedy tokens from the same prompt on both, logits dumped
+(`--dump-logits`) and compared position by position until the first token
+that differs. A near-tie flip (the two kernels' top-2 within ~0.05 logits,
+corr > 0.9999 at that position) is not a defect. Passing: flat part0 across
+the sweep, argmax agreement at every comparable position. Then list the family
+in `FAST_ATTENTION`, export without the probe and install the set.
+
+**Measured (2026-09-07/08, `.claude/plans/issue-16-hw-results.md`):**
+
+| family | geometry | step @ 2048, shipped -> fast | greedy agreement |
+|---|---|---|---|
+| Granite-4.2-3B (hd 64) | 5 x 8, RB 4 | 1216 s TTFT -> 59 s on 1005 tokens | fp64 replica, coherent chat |
+| Qwen3-4B (hd 128) | 4 x 8, RB 4 | 5050 -> 258 ms (19.6x) | 300/300, corr min 0.99993 |
+| Llama-3.1-8B (hd 128) | 4 x 8, RB 4 | 4024 -> 427 ms (loaded box) | 54, then a 0.008-logit near-tie |
+| Hy-MT2-7B (hd 128) | 4 x 8, RB 4 | 3395 -> 165 ms (20.6x) | 43, then a 0.05-logit near-tie |
+| Gemma3-4B (hd 256) | 2 x 4, RB 2 | 512 -> 96 ms (5.3x; the local layers never grew) | 41, then a 0.06-logit near-tie |
+| Qwen3.5-0.8B (hd 256, gated; `ax`) | 4 x 2, RB 1 | 176 -> 70 ms (6 attention layers of 24) | 200/200, corr min 0.99993 |
+| Qwen3.6-35B (hd 256, gated; `ax`), 16-layer prefix | 4 x 4, RB 1 | 217 -> 43 ms part0 (four attention layers) | 85 (100 tokens; corr spread from expert flips) |
+
+The 35B's `ax` kernels rebuilt at the default knobs after the split was
+plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Where the requirement came from (the observation, 2026-09-06):**
 
 A decode step's cost is dominated by a term linear in context position.
 Measured 2026-09-06 on one box, one step per point, `--at-position`:
@@ -945,3 +988,51 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
+
+### OPEN-VISION-VIT-REF: the vision tower, reference and host port
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
+
+The shipped `vision_weight.q4nx` -- every linear pre-tiled for the closed
+engine's `vision_mm` as `[n/64][k/256][64][256]` bf16, zero-padded -- shall be
+un-tiled and run as Qwen3-VL's vision tower: patch embed + bilinearly
+interpolated positions, 2-D RoPE attention over the whole image, GELU-tanh
+MLP, the 2x2 merger. The numpy forward matches transformers'
+`Qwen3VLVisionModel` loaded with the same weights; the host C++ port matches the
+numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
+
+**Acceptance criteria:**
+- numpy vs transformers on a random 8 x 8 (unit) / 16 x 16 grid: corr > 0.99999, max error < 1e-3 of max.
+- The patch order is merge-block-major; a 48 x 48 grid samples the position table exactly.
+- `vit_test.exe <model_dir> <fixture>`: corr > 0.99999, max error < 1e-3 of max against `replica_vit.py --fixture`.
+
+**Result 2026-09-08 (35B tower, 27 blocks):** numpy vs transformers corr
+1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
+patches in 1.02 s (numpy 11.5 s).
+
+### OPEN-VISION-EMBED: the open engine takes an image payload
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
+**Test category:** e2e (`utilities/flm-test --vision --model <vlm>` through `flm serve` with the open engine)
+
+`Engine::prefill(ids, payload)` with an image payload shall run the vision
+tower on each image and step each merged patch's row through the model as a
+hidden vector (`Core::step_embed`) at its M-RoPE position (t, h, w) = (c, c +
+row, c + col), text tokens after an image continuing from the same counter
+(`rope_parameters.mrope_section`, interleaved), later prefill chunks and
+generated tokens inheriting it; a request without images is the unchanged
+text path. The model classes read their preprocessing constants from
+`config.json` and no longer require the closed engine for images.
+
+**Acceptance criteria (e2e):**
+- `flm-test --vision --model qwen3.6-moe:35b` (and a Qwen3.5 VL size) passes on the open engine with the answer on the fixed test image matching the closed engine's.
+- A text-only request after an image request answers as before (the position records are restored on `clear_context`).
+
+**Result 2026-09-08:** runs end to end through `flm serve` on Qwen3.5-0.8B and
+on the 35B (tower resident in 2.2 s, a 30 x 44-patch image -> 330 tokens in
+14.8 s on the CPU, prefill 516 tokens, the answer describes the image
+correctly, follow-up turns continue from the same (t, h, w) counter). The
+suite's other two images are dropped by the app's own reader before either
+engine. **The closed-engine comparison did not run**: the closed 1.0.4 DLL
+segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
+so on this box only the open engine can serve these files. Log:
+`.claude/plans/issue-16-hw-results.md`.

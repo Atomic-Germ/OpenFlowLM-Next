@@ -536,17 +536,27 @@ on a memory-starved box, not the kernels.
 
 ## What is still not closed
 
-- **Batched prefill.** Prompt tokens go through the decode step one at a time.
-  Exact, but 124 ms each: a 500-token prompt is a minute. The closed engine
-  has batch kernels; nobody has written open ones (phlegm's plan called it
-  "weeks, gated on one experiment").
-- **Long-context attention cost.** The attention kernel is one core walking the
-  cache: ~24 µs per cached row per attention layer, so a 4096-token context
-  adds ~1 s per token across the 10 attention layers. Capacity is no longer
-  capped (KV buffers are sized from the app's context length); speed at long
-  context is a kernel item.
-- **Vision.** The model is a VLM; images still need the closed engine.
-- **The weight file** is still OFLM's `.q4nx`. The GGUF path is a separate piece
+- **Batched prefill -- open on Granite, not yet on the other families.**
+  `FLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
+  dispatches plus T attention dispatches instead of T decode steps (1.95x TTFT
+  on a 1005-token prompt). It needs a kernel set carrying a `gemm_block`
+  program, which today is Granite only; every other family still goes through
+  the decode step one token at a time. The route writes no M-RoPE position
+  records, so a prompt that has had an image stays on the sequential path.
+- **Long-context attention cost -- closed on the dense families and Qwen3.5,
+  the 35B in progress** (2026-09-08, spec OPEN-ATTN-CONTEXT). The attention
+  kernel now batches its softmax exponentials on the vector unit, splits the
+  heads over up to six cores and blocks the cached rows per call; a step at
+  position 2048 costs about what a step at position 0 does (Qwen3-4B: 5050 ->
+  258 ms). A family joins by measurement (`recipes/attnknobs.py`); the 35B's
+  kernels at the default knobs are byte-identical to what shipped.
+- **Vision -- coded, not yet run end to end.** The vision tower runs on the host
+  (`vision/vit.cpp`, checked against transformers with the shipped weights to
+  4e-6) and its rows enter the model as embedding vectors at their M-RoPE
+  positions (`Core::step_embed`). The app's Qwen3.6 and Qwen3.5 model classes no
+  longer need the closed engine for images. `flm-test --vision` on the open
+  engine is the acceptance (OPEN-VISION-EMBED).
+- **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
   of work; this reader is ~150 lines and will go with it. The chunk format is read
   per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes
   ship, q8 attention and shared experts over q4_1 routed experts -- loads and packs;

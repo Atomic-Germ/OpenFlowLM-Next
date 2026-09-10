@@ -102,7 +102,7 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
     i32 = np.int32
 
     inc = _include_dirs()
-    kernel = ExternalFunction("gemv_q4_gy", source_file=str(GY),
+    kernel = ExternalFunction("gemv_q4_gy", source_file=str(HERE / "gemv_q4_gy.cc"),
                               arg_types=[elem_ty, tab_ty, acc_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
     prep = ExternalFunction("gemv_q4_prep_rt", source_file=str(GEMV / "gemv_q4_prep_rt.cc"),
                             arg_types=[x_ty, tab_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
@@ -157,5 +157,5 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
 
 DESIGN = lm_head_q4
 _src = b"".join([(GEMV / f).read_bytes() for f in ("gemv_q4.h", "gemv_tab.h", "gemv_q4_prep_rt.cc")]
-                + [GY.read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+                + [(HERE / "gemv_q4_gy.cc").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
 SPECIALIZE = {"n": N, "k": K, "n_cores": N_CORES, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

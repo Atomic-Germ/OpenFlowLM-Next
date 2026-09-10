@@ -301,6 +301,7 @@ if(NOT OFLM_USE_HRX)
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/vision/vit.cpp")
 endif()
 
 # ———————————————————————————————————————————————
@@ -507,6 +508,13 @@ if(NOT OFLM_USE_HRX)
     # reachable with OFLM_QWEN36_ENGINE=closed.
     target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_QWEN36=1)
     target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
+    # The vision tower runs on the host (open_qwen36/vision/vit.cpp): threads over OpenMP
+    # where the compiler has it, a single thread otherwise (the pragmas are then ignored).
+    find_package(OpenMP QUIET)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(flm PUBLIC OpenMP::OpenMP_CXX)
+    endif()
+
 endif()
 
 if(WIN32)

@@ -371,25 +371,43 @@ void pack_lmhead(const Manifest& m, const Q4nxFile& f, uint8_t* out) {
     for (const auto& op : m.lmhead_ops) apply(op, f, 0, out, m.lmhead_pool_bytes, m.chunk_bytes);
 }
 
-void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* t) {
+// Which of (t, h, w) rotary pair i takes. transformers' apply_interleaved_mrope: every pair
+// starts as t; pairs a, a + 3, a + 6, ... below 3 * section[a] take axis a for a = h, w.
+// The chunked layout is [t x s0 | h x s1 | w x s2].
+static int mrope_axis(size_t i, const std::vector<int>& section, bool interleaved) {
+    if (section.size() != 3) return 0;
+    if (interleaved) {
+        const int a = static_cast<int>(i % 3);
+        return (a != 0 && i < 3 * static_cast<size_t>(section[a])) ? a : 0;
+    }
+    const size_t s0 = static_cast<size_t>(section[0]), s1 = s0 + static_cast<size_t>(section[1]);
+    return i < s0 ? 0 : (i < s1 ? 1 : 2);
+}
+
+void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const double pos[3],
+                       const std::vector<int>& section, bool interleaved, uint8_t* r) {
     // RoPE over the first rotary_dim dims of a head, half-split pairs (i, i + rot/2), the recipe's theta:
     // [i32 pos | i32 nf | cos f32[rot/2] @512 | sin f32[rot/2] right after] (attn.h reads [cos | sin] at +512)
     const size_t half = m.rotary_dim / 2;
     if (512 + 8 * half > m.ptab_row) fail("the rotary dim does not fit the position record");
-    std::memset(t, 0, rows * m.ptab_row);
+    std::memset(r, 0, m.ptab_row);
+    uint64_t start, nf64;
+    stream_patch::attn_window(row, g.window, &start, &nf64);
+    int32_t valid = static_cast<int32_t>(row - start), nf = static_cast<int32_t>(nf64);
+    std::memcpy(r, &valid, 4);
+    std::memcpy(r + 4, &nf, 4);
+    for (size_t i = 0; i < half; ++i) {
+        double ang = pos[mrope_axis(i, section, interleaved)] * g.inv_freq[i];
+        float c = static_cast<float>(std::cos(ang)), s = static_cast<float>(std::sin(ang));
+        std::memcpy(r + 512 + 4 * i, &c, 4);
+        std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
+    }
+}
+
+void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* t) {
     for (size_t p = 0; p < rows; ++p) {
-        uint8_t* r = t + p * m.ptab_row;
-        uint64_t start, nf64;
-        stream_patch::attn_window(p, g.window, &start, &nf64);
-        int32_t valid = static_cast<int32_t>(p - start), nf = static_cast<int32_t>(nf64);
-        std::memcpy(r, &valid, 4);
-        std::memcpy(r + 4, &nf, 4);
-        for (size_t i = 0; i < half; ++i) {
-            double ang = static_cast<double>(p) * g.inv_freq[i];
-            float c = static_cast<float>(std::cos(ang)), s = static_cast<float>(std::sin(ang));
-            std::memcpy(r + 512 + 4 * i, &c, 4);
-            std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
-        }
+        const double pos[3] = {static_cast<double>(p), static_cast<double>(p), static_cast<double>(p)};
+        build_ptab_record(m, g, p, pos, {}, false, t + p * m.ptab_row);
     }
 }
 

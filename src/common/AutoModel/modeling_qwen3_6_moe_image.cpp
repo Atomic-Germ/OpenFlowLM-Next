@@ -213,16 +213,14 @@ void Qwen3_6_MOE::preprocess_image(qwen3_6_moe_image_t& image, std::vector<bf16>
         return;
     }
 
-    qwen3_6_moe_npu* lm_engine_qwen3_6_ptr = dynamic_cast<qwen3_6_moe_npu*>(this->lm_engine.get());
-    if (!lm_engine_qwen3_6_ptr)
-        throw std::runtime_error("images need the closed Qwen3.6 engine (OFLM_QWEN36_ENGINE=closed); the open engine has no vision path");
+    if (vision_.patch == 0 || vision_.temporal == 0)
+        throw std::runtime_error("Qwen3_6_MOE: config.json has no vision_config; this model cannot take images");
     smart_resize(
         height, width,
         resized_height, resized_width,
-
-        lm_engine_qwen3_6_ptr->QWEN3_6_MOE_PATCH_SIZE * lm_engine_qwen3_6_ptr->QWEN3_6_MOE_IMAGE_MERGE_SIZE,
-        lm_engine_qwen3_6_ptr->QWEN3_6_MOE_SHORTEST_EDGE,
-        lm_engine_qwen3_6_ptr->QWEN3_6_MOE_LONGEST_EDGE
+        vision_.patch * vision_.merge,
+        vision_.shortest_edge,
+        vision_.longest_edge
     );
 
     if (resized_height <= 0 || resized_width <= 0) {
@@ -239,9 +237,9 @@ void Qwen3_6_MOE::preprocess_image(qwen3_6_moe_image_t& image, std::vector<bf16>
 
     // Cache size calculations for efficiency
     const uint32_t single_frame_size = resized_height * resized_width * channels;
-    const uint32_t total_patch_size = single_frame_size * lm_engine_qwen3_6_ptr->QWEN3_6_MOE_TEMPORAL_PATCH_SIZE;
-    const uint32_t grid_h = resized_height / lm_engine_qwen3_6_ptr->QWEN3_6_MOE_PATCH_SIZE;
-    const uint32_t grid_w = resized_width / lm_engine_qwen3_6_ptr->QWEN3_6_MOE_PATCH_SIZE;
+    const uint32_t total_patch_size = single_frame_size * vision_.temporal;
+    const uint32_t grid_h = resized_height / vision_.patch;
+    const uint32_t grid_w = resized_width / vision_.patch;
 
     // Pre-allocate final buffer to avoid reallocation
     const uint32_t prev_pixel_values_size = pixel_values.size();
@@ -262,13 +260,13 @@ void Qwen3_6_MOE::preprocess_image(qwen3_6_moe_image_t& image, std::vector<bf16>
     imgproc::avx512::rescale_and_normalize_avx512(
         resize_image.data(), patch_vector_scratch.data(),
         resized_width, resized_height, channels,
-        true, lm_engine_qwen3_6_ptr->QWEN3_6_MOE_VISION_RESCALE_FACTOR,
-        true, lm_engine_qwen3_6_ptr->QWEN3_6_MOE_VISION_RESCALE_IMAGE_MEAN, lm_engine_qwen3_6_ptr->QWEN3_6_MOE_VISION_RESCALE_IMAGE_STD
+        true, vision_.rescale,
+        true, vision_.mean, vision_.stdv
     );
 
     // Replicate first frame for temporal patches (optimized for QWEN3_6_MOE_TEMPORAL_PATCH_SIZE = 2)
     // This is more efficient than a loop for the common case
-    if  (lm_engine_qwen3_6_ptr->QWEN3_6_MOE_TEMPORAL_PATCH_SIZE == 2) {
+    if  (vision_.temporal == 2) {
         memcpy(
             patch_vector_scratch.data() + single_frame_size,
             patch_vector_scratch.data(),
@@ -276,7 +274,7 @@ void Qwen3_6_MOE::preprocess_image(qwen3_6_moe_image_t& image, std::vector<bf16>
         );
     } else {
         // Generic loop for other TEMPORAL_PATCH_SIZE values
-        for(unsigned l = 1; l < lm_engine_qwen3_6_ptr->QWEN3_6_MOE_TEMPORAL_PATCH_SIZE; l++){
+        for(unsigned l = 1; l < vision_.temporal; l++){
             memcpy(
                 patch_vector_scratch.data() + l * single_frame_size,
                 patch_vector_scratch.data(),
@@ -290,11 +288,11 @@ void Qwen3_6_MOE::preprocess_image(qwen3_6_moe_image_t& image, std::vector<bf16>
         patch_vector_scratch.data(),
         pixel_values.data() + prev_pixel_values_size,
         1, 1, // something special for image
-        lm_engine_qwen3_6_ptr->QWEN3_6_MOE_TEMPORAL_PATCH_SIZE,
+        vision_.temporal,
         channels,
         grid_h, grid_w,
-        lm_engine_qwen3_6_ptr->QWEN3_6_MOE_MERGE_SIZE,
-        lm_engine_qwen3_6_ptr->QWEN3_6_MOE_PATCH_SIZE
+        vision_.merge,
+        vision_.patch
     );
 
 

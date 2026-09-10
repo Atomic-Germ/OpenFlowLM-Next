@@ -2,6 +2,13 @@
 /// \brief The open Qwen3.6-MoE engine behind the app's causal_lm seam (see engine.hpp).
 #include "open_qwen36/engine.hpp"
 
+#include <chrono>
+#include <fstream>
+
+#include "models/qwen3_5vl/qwen3_5vl_npu.hpp"       // qwen3_5vl_image_payload_t
+#include "models/qwen3_6_moe/qwen3_6_moe_npu.hpp"   // qwen3_6_moe_image_payload_t
+#include "nlohmann/json.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -104,44 +111,129 @@ buffer<bf16> Engine::forward(int id) {
     return guarded([&] { core_->step(id, true); return logits_view(); });
 }
 
+void Engine::ensure_vit() {
+    if (vit_) return;
+    auto t0 = std::chrono::steady_clock::now();
+    vcfg_ = vision::VitConfig::from_model_dir(cfg_.model_dir);
+    std::string file = "vision_weight.q4nx";
+    {
+        std::ifstream cf(cfg_.model_dir + "/config.json");
+        auto j = nlohmann::json::parse(cf, nullptr, false);
+        if (j.is_object()) file = j.value("vision_model_weight", file);
+    }
+    vit_ = std::make_unique<vision::VitWeights>(vision::load_vit(cfg_.model_dir + "/" + file, vcfg_));
+    std::fprintf(stderr, "open_qwen36: vision tower resident (%s, %d blocks) in %.1f s\n", file.c_str(), vcfg_.depth,
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
 buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
-    if (payload != nullptr)
-        throw std::runtime_error("open_qwen36: the open engine has no vision path; images need the closed engine "
-                                 "(OFLM_QWEN36_ENGINE=closed)");
     if (ids.empty()) return logits_view();
-    // Decode-as-prefill: exact for this architecture, one step per token, the
-    // lm_head only for the last one (whose logits pick the first sampled token).
-    //
-    // 0167/#32: OFLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
-    // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
-    // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
-    // (q4_1 dequantised on-core) plus T single-token attention dispatches,
-    // instead of T sequential step() calls. Off by default so every existing
-    // measurement is unaffected. The whole prompt runs in GT-wide blocks, the
-    // tail padded with a repeated in-range id (hardware-proven exact: the
-    // real columns' output does not depend on the padding), never falling
-    // back to step(). A kernel set with no gemm_block program (GT == 0) runs
-    // exactly the sequential path this engine always has.
-    return guarded([&] {
-        // Test the VALUE, not just presence: the docs say =1, and
-        // OFLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
-        // that gets diagnosed as a different bug entirely (review on #39).
-        const char* gemm_block_env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
-        if (gemm_block_env && std::string(gemm_block_env) == "1") {
-            const size_t GT = core_->gemm_block_t();
-            if (GT > 0) {
-                size_t i = 0;
-                while (i < ids.size()) {
-                    const size_t t_real = std::min(GT, ids.size() - i);
-                    std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
-                    block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
-                    core_->step_gemm_block(block, t_real, i + t_real == ids.size());
-                    i += t_real;
+    if (payload == nullptr) {
+        // Decode-as-prefill: exact for this architecture, one step per token, the
+        // lm_head only for the last one (whose logits pick the first sampled token).
+        //
+        // 0167/#32: FLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
+        // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
+        // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
+        // (q4_1 dequantised on-core) plus T single-token attention dispatches,
+        // instead of T sequential step() calls. Off by default so every existing
+        // measurement is unaffected. The whole prompt runs in GT-wide blocks, the
+        // tail padded with a repeated in-range id (hardware-proven exact: the
+        // real columns' output does not depend on the padding), never falling
+        // back to step(). A kernel set with no gemm_block program (GT == 0) runs
+        // exactly the sequential path this engine always has.
+        return guarded([&] {
+            // Test the VALUE, not just presence: the docs say =1, and
+            // FLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
+            // that gets diagnosed as a different bug entirely (review on #39).
+            const char* gemm_block_env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
+            // A prompt that has had an image is on the (t, h, w) counter, and the
+            // gemm-block route writes no position records - it would place these
+            // tokens at the wrong positions, so stay sequential.
+            if (gemm_block_env && std::string(gemm_block_env) == "1" && !core_->mrope_active()) {
+                const size_t GT = core_->gemm_block_t();
+                if (GT > 0) {
+                    size_t i = 0;
+                    while (i < ids.size()) {
+                        const size_t t_real = std::min(GT, ids.size() - i);
+                        std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
+                        block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
+                        core_->step_gemm_block(block, t_real, i + t_real == ids.size());
+                        i += t_real;
+                    }
+                    return logits_view();
                 }
-                return logits_view();
+            }
+            for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
+            return logits_view();
+        });
+    }
+    // Images: the app has expanded each one into grid_h * grid_w / 4 image tokens and
+    // hands the preprocessed patches for the whole prompt. The vision tower (host CPU)
+    // turns each image into that many embedding rows; each row is stepped through the
+    // model as a hidden vector at its (t, h, w) position, text tokens continue from the
+    // same counter (Core::mrope_*), and later chunks / generated tokens inherit it.
+    if (!core_->has_mrope() || core_->image_token_id() < 0)
+        throw std::runtime_error("open_qwen36: config.json carries no image_token_id / mrope_section for this model; "
+                                 "images need the closed engine (FLM_QWEN36_ENGINE=closed)");
+    // The app hands its own family's payload struct (qwen3_6_moe_image_payload_t /
+    // qwen3_5vl_image_payload_t -- the same fields); read it through the one matching the
+    // kernel set's family.
+    const std::string& fam = core_->manifest().family;
+    if (fam == "qwen36moe") return prefill_images(ids, *static_cast<const qwen3_6_moe_image_payload_t*>(payload));
+    if (fam == "qwen35") return prefill_images(ids, *static_cast<const qwen3_5vl_image_payload_t*>(payload));
+    throw std::runtime_error("open_qwen36: family " + fam + " has no vision path");
+}
+
+template <class Payload>
+buffer<bf16> Engine::prefill_images(std::vector<int>& ids, const Payload& p_) {
+    const Payload* p = &p_;
+    ensure_vit();
+    const size_t hidden = core_->manifest().hidden, pd = static_cast<size_t>(vcfg_.patch_dim());
+    std::vector<std::vector<float>> embs;
+    size_t off = 0;
+    for (const auto& im : p->images) {
+        const size_t n = static_cast<size_t>(im.grid_h) * im.grid_w;
+        if (off + n * pd > p->_data__processed.size())
+            throw std::runtime_error("open_qwen36: the image payload holds fewer pixels than its grids need");
+        std::vector<float> px(n * pd);
+        for (size_t k = 0; k < n * pd; ++k) px[k] = static_cast<float>(p->_data__processed[off + k]);
+        off += n * pd;
+        auto t0 = std::chrono::steady_clock::now();
+        embs.push_back(vision::vit_forward(vcfg_, *vit_, px.data(), im.grid_h, im.grid_w));
+        if (embs.back().size() != n / 4 * hidden)
+            throw std::runtime_error("open_qwen36: the vision tower's width does not match the model's hidden size");
+        std::fprintf(stderr, "open_qwen36: image %dx%d patches -> %zu tokens in %.2f s\n", im.grid_h, im.grid_w, n / 4,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
+    return guarded([&] {
+        size_t img = 0, j = 0;
+        int64_t base = 0;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const bool last = i + 1 == ids.size();
+            if (ids[i] != core_->image_token_id()) {
+                core_->step(ids[i], last);
+                continue;
+            }
+            if (img >= p->images.size())
+                throw std::runtime_error("open_qwen36: more image tokens in the prompt than images in the payload");
+            const auto& im = p->images[img];
+            const int64_t gh = im.grid_h / 2, gw = im.grid_w / 2;    // the merged token grid
+            if (j == 0) {
+                core_->mrope_begin();
+                base = core_->mrope_pos();
+            }
+            const int64_t mpos[3] = {base, base + static_cast<int64_t>(j) / gw, base + static_cast<int64_t>(j) % gw};
+            core_->step_embed(embs[img].data() + j * hidden, last, mpos);
+            if (++j == static_cast<size_t>(gh * gw)) {
+                core_->mrope_advance(std::max(gh, gw));
+                ++img;
+                j = 0;
             }
         }
-        for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
+        if (img != p->images.size() || j != 0)
+            std::fprintf(stderr, "open_qwen36: WARNING: %zu image(s) in the payload, %zu consumed by the prompt\n",
+                         p->images.size(), img + (j ? 1 : 0));
         return logits_view();
     });
 }

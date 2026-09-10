@@ -28,6 +28,14 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
 if errorlevel 1 goto :clfail
 out\pools_test.exe
 if errorlevel 1 goto :testfail
+echo [open_qwen36] vit_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
+   /I "." /I ".." /I "..\include" ^
+   vision\vit_test.cpp vision\vit.cpp q4nx_file.cpp /Fe:out\vit_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+REM vit_test needs the model's vision_weight.q4nx and a fixture from replica_vit.py; run it by hand:
+REM   python ..\..\open_kernels\model\replica_vit.py --grid 16 16 --no-hf --fixture <dir>
+REM   out\vit_test.exe %USERPROFILE%\.flm\models\Qwen3.6-35B-A3B-NPU2 <dir>
 REM The two unit tests above need no XRT; the CLI does.
 if "%XRT_INCLUDE_DIR%"=="" goto :noxrt
 if "%XRT_LIB_DIR%"=="" goto :noxrt

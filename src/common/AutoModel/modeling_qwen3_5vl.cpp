@@ -17,8 +17,7 @@ void Qwen3_5VL::load_model(std::string model_path, json model_info, int default_
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
     
     // The engine: the open kernels when installed for this model, the closed
-    // qwen3_5vl_npu DLL otherwise; images still need the closed engine (the
-    // open one has no vision path). See AutoModel::_shared_select_open_engine.
+    // qwen3_5vl_npu DLL otherwise. See AutoModel::_shared_select_open_engine.
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN35_ENGINE", "Qwen3.5");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
@@ -30,6 +29,18 @@ void Qwen3_5VL::load_model(std::string model_path, json model_info, int default_
         this->lm_engine->load_weights(*this->q4nx);
         //free the q4nx
         this->q4nx.reset();
+    }
+    {
+        const auto& v = this->lm_config->sub("vision_config");
+        vision_.patch = v.value("QWEN3_5_PATCH_SIZE", 0);
+        vision_.merge = v.value("QWEN3_5_IMAGE_MERGE_SIZE", 0);
+        vision_.spatial_merge = v.value("QWEN3_5_SPATIAL_MERGE_SIZE", 0);
+        vision_.shortest_edge = v.value("QWEN3_5_SHORTEST_EDGE", 0);
+        vision_.longest_edge = v.value("QWEN3_5_LONGEST_EDGE", 0);
+        vision_.temporal = v.value("QWEN3_5_TEMPORAL_PATCH_SIZE", 0);
+        vision_.rescale = v.value("QWEN3_5_VISION_RESCALE_FACTOR", 0.0f);
+        vision_.mean = v.value("QWEN3_5_VISION_RESCALE_IMAGE_MEAN", 0.0f);
+        vision_.stdv = v.value("QWEN3_5_VISION_RESCALE_IMAGE_STD", 0.0f);
     }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -235,12 +246,9 @@ bool Qwen3_5VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, s
         }
 
         if (prefix_skip_count > 0 && !image_payload.images.empty()) {
-            // Per-image bf16 footprint depends on runtime patch/temporal
-            // config carried by the engine.
-            auto* eng = dynamic_cast<qwen3_5vl_npu*>(this->lm_engine.get());
-            if (!eng) throw std::runtime_error("images need the closed Qwen3.5 engine (OFLM_QWEN35_ENGINE=closed)");
-            const unsigned patch_size = eng->QWEN3_5_PATCH_SIZE;
-            const unsigned temporal_patch = eng->QWEN3_5_TEMPORAL_PATCH_SIZE;
+            // Per-image bf16 footprint depends on the patch / temporal config.
+            const unsigned patch_size = vision_.patch;
+            const unsigned temporal_patch = vision_.temporal;
 
             int skipped_image_tokens = 0;
             for (size_t i = 0; i < prefix_skip_count; i++) {

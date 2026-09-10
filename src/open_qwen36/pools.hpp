@@ -94,6 +94,14 @@ void pack_lmhead(const Manifest& m, const Q4nxFile& f, uint8_t* dst);
 /// A position record table: row p = [valid | nf | cos | sin] for the window's row counts
 /// (stream_patch::attn_window) and these RoPE frequencies, `rows` rows of m.ptab_row.
 void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* dst);
+/// One position record at KV row `row`: [i32 valid | i32 nf | cos f32[rot/2] @512 | sin ...],
+/// the rotary angle of pair i taken at pos[axis(i)]. A text token passes the same position
+/// three times. `section` is Qwen3-VL's mrope_section (three counts summing to rot/2) with
+/// `interleaved` (pair i takes axis i % 3 within its section); empty: every pair takes pos[0],
+/// which is what build_ptab writes for row p with pos = (p, p, p).
+void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const double pos[3],
+                       const std::vector<int>& section, bool interleaved, uint8_t* r);
+
 
 }  // namespace pools
 }  // namespace open_qwen36
