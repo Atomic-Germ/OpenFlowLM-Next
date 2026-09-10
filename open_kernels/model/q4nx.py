@@ -197,14 +197,23 @@ class Q4NX:
         return np.frombuffer(self.raw(name), dtype=np.float32).reshape(t["shape"])
 
     def embed(self, token, hidden=2048):
-        vocab_size = self.tensors["model.embed_tokens.weight"]["shape"][0]
-        # A token id past the end of the table used to read whatever bytes
-        # follow the tensor in the container -- silently, returning plausible
-        # garbage rather than an error.
-        assert 0 <= token < vocab_size, (
-            f"Q4NX.embed: token {token} is out of range for a {vocab_size}-row "
-            f"embedding table (model.embed_tokens.weight) -- valid ids are "
-            f"0..{vocab_size - 1}")
+        # A token id past the end of the table, or a `hidden` that disagrees
+        # with the table's own row width, used to read whatever bytes follow
+        # the tensor in the container -- silently, returning plausible garbage
+        # rather than an error. Raise rather than assert: an assert disappears
+        # under `python -O` / PYTHONOPTIMIZE, which is exactly when a silent
+        # out-of-bounds read is least welcome.
+        vocab_size, row = self.tensors["model.embed_tokens.weight"]["shape"]
+        if not 0 <= token < vocab_size:
+            raise IndexError(
+                f"Q4NX.embed: token {token} is out of range for a {vocab_size}-row "
+                f"embedding table (model.embed_tokens.weight) -- valid ids are "
+                f"0..{vocab_size - 1}")
+        if hidden != row:
+            raise ValueError(
+                f"Q4NX.embed: hidden={hidden} does not match the embedding "
+                f"table's row width {row}; the row stride would be wrong and "
+                f"every token would read the wrong bytes")
         o0 = self.tensors["model.embed_tokens.weight"]["data_offsets"][0]
         b = self.data_base + o0 + token * hidden * 2
         return bf16_to_f32(np.frombuffer(self.mm[b: b + hidden * 2], dtype=np.uint16)).astype(np.float64)
