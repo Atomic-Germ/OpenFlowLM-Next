@@ -908,8 +908,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 # the design sources a build of this recipe depends on (for the build key), relative to open_kernels/
 GEN_KERNELS = "designs/layer_x/gen_kernels.py"      # the design's kernel-TU generator (export_qwen36_kernels.py runs it per spec)
 KERNEL_SOURCES = [
-    "designs/layer_x/*.py", "designs/layer_x/*.cc", "designs/layer_x/*.h",
-    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_k2048.cc",
+    "designs/layer_x/*.py", "designs/layer_x/*.h",
+    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4.py",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/router/*.cc", "designs/router/*.h",

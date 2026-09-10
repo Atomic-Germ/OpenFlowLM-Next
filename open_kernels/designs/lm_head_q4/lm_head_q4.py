@@ -5,7 +5,7 @@ Dataflow: n_cores workers, each with its own shim weight stream (10 KB
 elements = 2 chunks, double-buffered), x broadcast once as ONE element of K
 bf16, one 64-float result per band. Bands split as evenly as possible over the
 cores (lm_head_q8's split: 2374 bands of the Qwen3-4B head are 297 x 6 + 296 x 2),
-so the taps are hand-built. Kernel: gemv_q4_gy (designs/layer_x) with the
+so the taps are hand-built. Kernel: gemv_q4_gy (generated in this directory) with the
 runtime band law (K/128 chunks per band, row split 2) and gemv_q4_prep_rt.
 
 Build (WSL):  LMHEAD_N=151936 LMHEAD_K=2560 python build_design.py designs/lm_head_q4/lm_head_q4.py [out]
@@ -29,12 +29,35 @@ from aie.utils import config
 
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
-LX = HERE.parent / "layer_x"
 
 TILE_BYTES = 5120
 BAND_ROWS = 64
 PER_CALL = 2
 CALL_BYTES = PER_CALL * TILE_BYTES
+
+
+def _ensure_gy() -> Path:
+    """The gemv_q4_gy band entry, generated here rather than borrowed from a
+    sibling design's gen_kernels.py output. lm_head_q4 always streams PER_CALL
+    chunks per weight element, so the wrapper is fixed and belongs to this
+    design; it is a generated TU (git-ignored), not source."""
+    src = f'''#define GEMV_PER_CALL {PER_CALL}
+#include "gemv_q4.h"
+// A band into its y element: runtime band law (per_band chunks, row split rs).
+extern "C" {{
+void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
+                int32_t group, int32_t per_band, int32_t rs) {{
+  gemv_q4_pool_group_rt(t, tab, (unsigned)group, y, (unsigned)per_band, (unsigned)rs);
+}}
+}}
+'''
+    p = HERE / "gemv_q4_gy.cc"
+    if not p.is_file() or p.read_text(encoding="utf-8") != src:
+        p.write_text(src, encoding="utf-8", newline="\n")
+    return p
+
+
+GY = _ensure_gy()
 
 N = int(os.environ.get("LMHEAD_N", 151936))
 K = int(os.environ.get("LMHEAD_K", 2560))
@@ -79,7 +102,7 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
     i32 = np.int32
 
     inc = _include_dirs()
-    kernel = ExternalFunction("gemv_q4_gy", source_file=str(LX / "gemv_q4_gy.cc"),
+    kernel = ExternalFunction("gemv_q4_gy", source_file=str(GY),
                               arg_types=[elem_ty, tab_ty, acc_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
     prep = ExternalFunction("gemv_q4_prep_rt", source_file=str(GEMV / "gemv_q4_prep_rt.cc"),
                             arg_types=[x_ty, tab_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
@@ -134,5 +157,5 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
 
 DESIGN = lm_head_q4
 _src = b"".join([(GEMV / f).read_bytes() for f in ("gemv_q4.h", "gemv_tab.h", "gemv_q4_prep_rt.cc")]
-                + [(LX / "gemv_q4_gy.cc").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+                + [GY.read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
 SPECIALIZE = {"n": N, "k": K, "n_cores": N_CORES, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

@@ -1,0 +1,108 @@
+{
+  "version": 8,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "common-default",
+      "hidden": true,
+      "cacheVariables": {
+        "FLM_VERSION": "1.0.4",
+        "NPU_VERSION": "32.0.203.304"
+      }
+    },
+    {
+      "name": "common-install",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "/opt/fastflowlm",
+        "CMAKE_XCLBIN_PREFIX": "/opt/fastflowlm/share/flm"
+      }
+    },
+    {
+      "name": "linux-default",
+      "displayName": "Linux Default",
+      "description": "Release build: flm engine + open NPU kernel xclbins (full distribution)",
+      "inherits": ["common-default", "common-install"],
+      "generator": "Ninja",
+      "binaryDir": "build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLM_BUILD_KERNELS": "ON"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug",
+      "description": "Debug build for development (engine only by default)",
+      "inherits": ["common-default", "common-install"],
+      "generator": "Ninja",
+      "binaryDir": "build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "FLM_BUILD_KERNELS": "OFF"
+      }
+    },
+    {
+      "name": "linux-portable",
+      "displayName": "Linux Portable",
+      "description": "Portable build bundling XRT/XDNA libraries",
+      "inherits": "linux-default",
+      "cacheVariables": {
+        "FLM_PORTABLE_BUILD": "ON"
+      }
+    },
+    {
+      "name": "windows-default",
+      "displayName": "Windows Default",
+      "description": "Windows Visual Studio build (engine only; NPU kernel export is Linux-only)",
+      "inherits": ["common-default", "common-install"],
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "build"
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-default", "configurePreset": "linux-default", "jobs": 0 },
+    { "name": "linux-debug", "configurePreset": "linux-debug", "jobs": 0 },
+    { "name": "linux-portable", "configurePreset": "linux-portable", "jobs": 0 },
+    { "name": "windows-default", "configurePreset": "windows-default", "configuration": "Release", "jobs": 4 }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-default",
+      "configurePreset": "linux-default",
+      "output": { "outputOnFailure": true },
+      "execution": { "stopOnFailure": false }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "linux-package-tgz",
+      "displayName": "Package (TGZ)",
+      "configurePreset": "linux-default",
+      "generators": ["TGZ"]
+    },
+    {
+      "name": "linux-package-deb",
+      "displayName": "Package (DEB)",
+      "configurePreset": "linux-default",
+      "generators": ["DEB"]
+    },
+    {
+      "name": "linux-package-rpm",
+      "displayName": "Package (RPM)",
+      "configurePreset": "linux-default",
+      "generators": ["RPM"]
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "linux-default",
+      "displayName": "Configure + Build + Test",
+      "steps": [
+        { "type": "configure", "name": "linux-default" },
+        { "type": "build", "name": "linux-default" },
+        { "type": "test", "name": "linux-default" }
+      ]
+    }
+  ]
+}

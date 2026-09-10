@@ -300,8 +300,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 
 GEN_KERNELS = "designs/layer_x/gen_kernels.py"
 KERNEL_SOURCES = [
-    "designs/layer_x/*.py", "designs/layer_x/*.cc", "designs/layer_x/*.h",
-    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_k*.cc",
+    "designs/layer_x/*.py", "designs/layer_x/*.h",
+    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4.py",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",

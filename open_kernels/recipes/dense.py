@@ -404,12 +404,12 @@ def hf_config_check(spec: ModelSpec) -> dict:
 
 GEN_KERNELS = "designs/dense/gen_kernels.py"      # the design's kernel-TU generator (export_qwen36_kernels.py runs it per spec)
 KERNEL_SOURCES = [
-    "designs/dense/*.py", "designs/dense/*.cc", "designs/dense/*.h",
+    "designs/dense/*.py", "designs/dense/*.h",
     "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_rt.cc",
     "designs/gemv_q4/gemv_q4_prep_f32_rt.cc",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
-    "designs/lm_head_q4/*.py", "designs/lm_head_q4/*.cc",
+    "designs/lm_head_q4/*.py",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
