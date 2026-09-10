@@ -398,7 +398,7 @@ void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const 
     std::memcpy(r + 4, &nf, 4);
     for (size_t i = 0; i < half; ++i) {
         double ang = pos[mrope_axis(i, section, interleaved)] * g.inv_freq[i];
-        float c = static_cast<float>(std::cos(ang)), s = static_cast<float>(std::sin(ang));
+        float c = static_cast<float>(g.scale * std::cos(ang)), s = static_cast<float>(g.scale * std::sin(ang));
         std::memcpy(r + 512 + 4 * i, &c, 4);
         std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
     }

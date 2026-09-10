@@ -104,6 +104,7 @@ struct KernelDesc {
 struct RowGlobal {
     uint64_t per_row = 0;
     std::vector<double> inv_freq;            ///< its RoPE frequencies (rotary_dim / 2)
+    double scale = 1.0;                      ///< on cos and sin (longrope's attention factor)
     uint64_t window = 0;                     ///< the row counts follow this window
 };
 

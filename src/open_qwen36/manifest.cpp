@@ -232,6 +232,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             RowGlobal rg;
             rg.per_row = v["per_row"].get<uint64_t>();
             rg.inv_freq = v.value("inv_freq", m.rope_inv_freq);
+            rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
             if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
             m.per_row_globals[k] = rg;

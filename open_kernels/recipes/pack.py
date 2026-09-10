@@ -470,12 +470,14 @@ def window_rows(p, window: int):
     return valid, np.maximum(valid, 1)
 
 
-def ptab(rows: int, rotary_dim: int, theta: float, ptab_row: int = 1024, inv_freq=None, window: int = 0) -> np.ndarray:
+def ptab(rows: int, rotary_dim: int, theta: float, ptab_row: int = 1024, inv_freq=None, window: int = 0,
+         scale: float = 1.0) -> np.ndarray:
     """The position record table: row p = [i32 valid | i32 nf | cos f32[rot/2] @512 | sin f32[rot/2]
     right after the cos, @512 + 2*rot] for the RoPE over the first `rotary_dim` dims of a head (half-split
     pairs (i, i + rot/2)); attn.h reads the rot floats at +512 as [cos | sin]. `inv_freq` (rot/2 values,
     ModelSpec.rope_inv_freq -- Llama 3's scaling lives there) defaults to theta^(-2i/rot). `window`
-    (rows, 0 = unbounded) makes the record count the sliding window's rows (window_rows)."""
+    (rows, 0 = unbounded) makes the record count the sliding window's rows (window_rows). `scale`
+    multiplies cos and sin (longrope's attention factor; 1.0 for every other family)."""
     half = rotary_dim // 2
     if 512 + 8 * half > ptab_row:
         raise ValueError(f"a rotary dim of {rotary_dim} does not fit a {ptab_row}-byte position record")
@@ -487,6 +489,6 @@ def ptab(rows: int, rotary_dim: int, theta: float, ptab_row: int = 1024, inv_fre
     if len(f) != half:
         raise ValueError(f"inv_freq has {len(f)} values, the rotary dim wants {half}")
     ang = p[:, None] * f[None, :]
-    t[:, 512:512 + 4 * half] = np.cos(ang).astype(np.float32).view(np.uint8)
-    t[:, 512 + 4 * half:512 + 8 * half] = np.sin(ang).astype(np.float32).view(np.uint8)
+    t[:, 512:512 + 4 * half] = (scale * np.cos(ang)).astype(np.float32).view(np.uint8)
+    t[:, 512 + 4 * half:512 + 8 * half] = (scale * np.sin(ang)).astype(np.float32).view(np.uint8)
     return t.reshape(-1)

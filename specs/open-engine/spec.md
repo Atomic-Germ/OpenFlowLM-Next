@@ -1,4 +1,4 @@
-# open-engine: the open engine (Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense) and its model recipes
+# open-engine: the open engine (Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense, Granite, Phi-3) and its model recipes
 
 Prefix `OPEN`. Home repo: openflowlm-next. Covers `src/open_qwen36/` (the
 resident engine behind the app's `causal_lm` seam) and `open_kernels/recipes/`
@@ -676,6 +676,28 @@ the `llama_npu` DLL for both.
 
 **Result 2026-09-06 (Llama-3.2-3B-NPU2 and Llama-3.2-1B-NPU2):** both 3.2 shapes' first hardware run, and both containers materialise `lm_head.weight` despite `tie_word_embeddings: true`, as the acceptance criteria above assume. **3B** (3072 / 28 / 8192, 24 query heads over 8 kv heads -- GQA group 3, the first odd group, `OG_AOUT_ELEMS` 3): step 2 logits corr 0.999998 / 0.999995, argmax 2 / 2 matching the fp64 replica with top-5 identical at both positions, residual corr 1.000000 in all four layers at t0 and >= 0.999996 at t1, maxrel <= 5.3e-3; step 3 through the engine bit-identical to step 2 and reproduced; step 4 a coherent answer ending in `<|eot_id|>` at token 72 (334 ms/token). **1B** (2048 / 16 / 8192, head_dim 64 -- `E_A` 1024, `KV_ROW` 2048, `PTAB_ROW` 1024, one KV band per core, a 768-byte RoPE record in a 1024-byte position row): step 2 logits corr 0.999999 / 0.999994, argmax 1757 / 1757 matching, top-5 identical at both positions, residual corr 1.000000 in all four layers at t0 and >= 0.999996 at t1, maxrel <= 2.4e-3; step 3 bit-identical and reproduced; step 4 `<|eot_id|>` at token 92 (262 ms/token). The 1B is the run that decides head dim 64, since a wrong q/k rotation there gives fluent nonsense rather than a crash: position 0 does not rotate and position 1 does, and both are clean in every layer, so the rotation is right. Together these admit `gemv_q4` K = 3072 and K = 8192, `ln` width 3072, `lm_head_q4` K = 3072 and the attention combinations (128, 24, 8, 128, False, False, False) and (64, 32, 8, 64, False, False, False). Note `chat.py`'s default `--max-tokens 64` truncates both models mid-sentence; 200 is enough. Details: `.claude/plans/k-new-points-results.md`.
 
+**Nanbeige4.1-3B (2026-09-10).** Declares `model_type: llama` and is one for the
+recipe: 2560 / 32 / 10752, 20 query heads over 4 kv heads at head_dim 128 (GQA group
+5, two q heads per attention element), theta 7e7 with no scaling, eps 1e-5, an
+untied 166144-row head, a q4_1 container. Two catalogue points are new: the
+attention tuple `(128, 20, 4, 128, False, False, False)` and `gemv_q4` K = 10752
+(the widest activation table so far that still keeps two chunks per weight element:
+60032 of the core's 61440 bytes). The registry serves it through its own
+`Nanbeige` class, which selects the open engine under `FLM_LLAMA_ENGINE`.
+
+**Acceptance criteria (unit, Nanbeige):** the derivation and layout in
+`tests/test_llama3.py::test_nanbeige41_3b_derives_and_lays_out_on_the_llama_recipe`
+-- band split `(5, 1, 5, 21, 5)`, `HPE 2`, `H_ELEMS 11`, `PER_CALL 2`, `TAB_BYTES 24192`,
+`LMHEAD_BANDS 2596`, `ELN 5120`, `E_A 1024`; `hf_config_check` without `head_dim`
+(a llama config may omit it).
+
+**Procedure (manual, Nanbeige):** as OPEN-FAMILY-QWEN3 with `Nanbeige4.1-3B-NPU2`,
+`out_nb`, prompt id 166100 (`<|im_start|>`); `chat.py` takes its ChatML template
+without injecting think tags (the model opens its own `<think>` block).
+`flm-test --llm --model nanbeige4.1:3b` through `flm serve`.
+
+**Result:** pending.
+
 ### OPEN-FAMILY-GEMMA3: Gemma 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`)
 **Test category:** manual (needs the NPU and `FastFlowLM/Gemma3-4B-NPU2`); the derivation, the two RoPE tables, the window's row counts and the 4B layout are unit-tested in `tests/test_gemma3.py`
@@ -988,6 +1010,67 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
+
+### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
+`designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `src/open_qwen36/manifest.cpp`,
+`pools.cpp`, `src/common/AutoModel/modeling_phi4.cpp`)
+**Test category:** manual (needs the NPU and `FastFlowLM/Phi4-mini-Instruct-NPU2`); the
+derivation, the longrope tables, the layout and the manifest are unit-tested in
+`tests/test_phi3.py`
+
+A Phi-3 model (`model_type: phi3`; Phi-4-mini is one) shall run on the open kernels
+from its `config.json` alone through the dense recipe. Structurally it is Llama 3.2 3B's
+layer -- GQA 24 over 8 at head_dim 128 without q/k norms, silu FFN at 3072 / 8192, eps
+1e-5, a tied head the container materialises as `lm_head.weight` -- with two things no
+family before it had:
+
+- **A partial rotation.** `partial_rotary_factor 0.75` rotates 96 of the 128 head dims
+  and leaves the rest alone. The attention core's RoPE loop runs 32 pairs a step, so it
+  gains a 16-lane tail and the rule relaxes from "a multiple of 64" to "a multiple of 32"
+  (`attn.h`); a family whose rotation is a multiple of 64 compiles the same loop it did.
+  The replica and the position table already took `rotary_dim`; nothing else moves.
+- **longrope.** Two factor lists over the same theta, one per rotary pair -- the short one
+  up to `original_max_position_embeddings` (4096; on Phi-4-mini every short factor is
+  1.0), the long one above it -- and one attention scale on cos and sin,
+  `sqrt(1 + ln(factor) / ln(original))` with `factor = max_position_embeddings / original`
+  (1.190 here). The factor list is chosen by the context the kernel set is exported
+  for (`--max-ctx`; the manifest bakes the table), not per request: HF switches when a
+  sequence passes the original length, which a resident position table cannot do, and
+  the default export's short table is exact up to 4096 tokens. The scale rides on the
+  ptab global as `scale` (absent, 1.0, for every other family, whose manifests are
+  unchanged) and both packers apply it as they write cos and sin.
+
+Only the HF derivation exists: a Phi-3 GGUF carries the factor lists as tensors
+(`rope_factors_{long,short}.weight`), not metadata. The `Phi4` class selects the open
+engine under `FLM_PHI4_ENGINE`.
+
+**Acceptance criteria (unit):**
+- `rotary_dim` 96 derives from the factor; without one, the whole head.
+- The short and long inverse-frequency tables equal transformers'
+  `_compute_longrope_parameters` (the plain table divided by the list), the short list at
+  and below 4096, the long one above; `rope_scale()` equals its attention factor,
+  1.1902380714; a Llama spec's is 1.0 and its table ignores the context.
+- A `rope_scaling` type other than `longrope` is refused by name.
+- The layout: band split `(6, 2, 6, 16, 6)`, `HPE 4`, `OG_AOUT_ELEMS 3`, `ELN 6144`,
+  `E_A 2048`, `KV_ROW 4096`, `PTAB_ROW 2048`, `PER_CALL 2`, `TAB_BYTES 18432`,
+  `LMHEAD_BANDS 3126`; build dir `dense/build_phi3_h3072`.
+- The manifest's ptab global carries `scale` and a 48-entry `inv_freq` that follows
+  `--max-ctx`; `hf_config_check` carries `partial_rotary_factor` and `head_dim`, so a
+  container with a different rotation is refused at load. A Llama manifest has no
+  `scale` key.
+- `pack.ptab(..., scale)` multiplies cos and sin; `replica_dense.rope` rotates only the
+  first `rot` dims and scales them the same way.
+
+**Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Phi4-mini-Instruct-NPU2`, `out_ph`,
+prompt id 200021 (`<|user|>`; the model has no bos); `chat.py` switches to
+`<|user|>...<|end|><|assistant|>` when the tokenizer has `<|user|>` and `<|end|>`.
+`flm-test --llm --model phi4-mini-it:4b` through `flm serve`. Two catalogue points
+enter with it: the attention tuple `(128, 24, 8, 96, False, False, False)` -- the first
+partial rotation on the dense design -- and nothing new for the GEMVs (3072 and 8192
+are Llama 3.2 3B's).
+
+**Result:** pending.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)

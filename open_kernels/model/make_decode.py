@@ -188,7 +188,7 @@ def main() -> int:
     # and disagrees with tokenizer_config.json's own bos (<|end_of_text|>).
     tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen35": 248045, "qwen3": 151644,
                                                 "llama3": 128000, "gemma3": 2, "hunyuan": 127958,
-                                                "granite": 100264}[spec.family]
+                                                "granite": 100264, "phi3": 199999}[spec.family]
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:
@@ -200,7 +200,8 @@ def main() -> int:
         for name, g in m["globals"].items():
             if isinstance(g, dict):
                 write(out / f"{name}.bin", PK.ptab(a.max_ctx, spec.rotary_dim, spec.rope_theta, g["per_row"],
-                                                   g.get("inv_freq", spec.rope_inv_freq()), g.get("window", 0)))
+                                                   g.get("inv_freq", spec.rope_inv_freq(ctx=a.max_ctx)),
+                                                   g.get("window", 0), g.get("scale", 1.0)))
         write(out / "normw.bin", f32_to_bf16(q.bf16(plan["norm"]["tensor"])))
         for l, lt in enumerate(types):
             pf = pool_dir / f"pool_L{l}.bin"
@@ -249,7 +250,7 @@ def main() -> int:
                                                                     K[l], V[l], t)
                     print(f"  token {t} layer {l} {lt}: |res| {np.abs(xr).max():.3f}", flush=True)
                 else:
-                    xr, K[l], V[l] = RD.dense_decode(q, spec, l, xr.copy(), K[l], V[l], t)
+                    xr, K[l], V[l] = RD.dense_decode(q, spec, l, xr.copy(), K[l], V[l], t, max_ctx=a.max_ctx)
                     print(f"  token {t} layer {l} {lt}: |res| {np.abs(xr).max():.3f}", flush=True)
                 write(out / f"ref_res{l}{sfx(t)}.bin", xr.astype(np.float32))
             if spec.family == "qwen36moe":

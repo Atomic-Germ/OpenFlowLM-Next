@@ -6,8 +6,9 @@ packed from (q4nx.py dequantizes the chunks), so a disagreement is the kernels'
 or the packing's, not a difference of source weights:
 
   * x = rms(res) * ln_w; q k v projections; q/k RMSNorm over the head with the
-    stored weights; full RoPE (rotary dim = head dim, half-split pairs, the
-    model's theta); GQA softmax attention over the KV cache; o_proj; residual.
+    stored weights; RoPE over the first rotary_dim dims (the whole head, or 96
+    of 128 on Phi-3, half-split pairs, the model's theta and scaling); GQA
+    softmax attention over the KV cache; o_proj; residual.
     HunYuan norms after the rotation instead (recipes.dense.QKNORM_POST_ROPE),
     which is attn.h's ATTN_QKNORM_POST
   * post-attention norm; silu(gate) * up @ down; residual
@@ -36,10 +37,12 @@ def gelu_tanh(x):
     return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x ** 3)))
 
 
-def rope(t, p, rot, theta, inv_freq=None):
+def rope(t, p, rot, theta, inv_freq=None, scale=1.0):
+    """The first `rot` dims of each head rotated in half-split pairs; the rest pass through
+    (Phi-3 rotates 96 of 128). `scale` is longrope's attention factor on cos and sin."""
     half = rot // 2
     ang = p * (np.asarray(inv_freq, np.float64) if inv_freq is not None else theta ** (-np.arange(half) / half))
-    c, s = np.cos(ang), np.sin(ang)
+    c, s = scale * np.cos(ang), scale * np.sin(ang)
     y = t.copy()
     x1, x2 = t[..., :half], t[..., half:rot]
     y[..., :half] = x1 * c - x2 * s
@@ -47,14 +50,15 @@ def rope(t, p, rot, theta, inv_freq=None):
     return y
 
 
-def dense_decode(m, spec, layer, x_res, K, V, pos):
-    """One token through a dense layer. Returns (residual, K, V)."""
+def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
+    """One token through a dense layer. Returns (residual, K, V). `max_ctx` picks longrope's
+    factor list, as the kernel set's export does."""
     from recipes.dense import QKNORM_POST_ROPE
     from recipes.spec import DENSE_LOCAL
     pre = f"model.layers.{layer}."
     hid, nh, kvh, hd, ff = spec.hidden, spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.intermediate
     local = spec.layer_types[layer] == DENSE_LOCAL
-    eps, inv = spec.norm_eps, spec.rope_inv_freq(local=local)
+    eps, inv, rsc = spec.norm_eps, spec.rope_inv_freq(local=local, ctx=max_ctx), spec.rope_scale()
     act = gelu_tanh if spec.activation == "gelu_tanh" else silu
     x = (rms(x_res, eps) * m.bf16(pre + "input_layernorm.weight")).astype(np.float32)
     Wq = m.matmul_w(pre + "self_attn.q_proj.weight", nh * hd, hid)
@@ -71,7 +75,8 @@ def dense_decode(m, spec, layer, x_res, K, V, pos):
         if not post:
             q, k = q * qn, k * kn
     v = (x @ Wv.T).reshape(kvh, hd).astype(np.float64)
-    q, k = rope(q, pos, spec.rotary_dim, spec.rope_theta, inv), rope(k, pos, spec.rotary_dim, spec.rope_theta, inv)
+    q = rope(q, pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
+    k = rope(k, pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
     if spec.qk_norm and post:
         q, k = q * qn, k * kn
     K = np.concatenate([K, k[None]], 0)

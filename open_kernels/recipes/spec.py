@@ -39,7 +39,7 @@ class SpecError(ValueError):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    family: str                       # the recipe: "qwen36moe" | "qwen3" | "llama3" | "gemma3" | "hunyuan"
+    family: str                       # the recipe: "qwen36moe" | "qwen35" | "qwen3" | "llama3" | "gemma3" | "hunyuan" | "granite" | "phi3"
     hidden: int
     num_layers: int
     layer_types: tuple[str, ...]      # per layer: LINEAR | FULL | DENSE
@@ -149,11 +149,13 @@ class ModelSpec:
         q = self.canonical_quant()
         return hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:8]
 
-    def rope_inv_freq(self, local: bool = False) -> list[float]:
+    def rope_inv_freq(self, local: bool = False, ctx: int | None = None) -> list[float]:
         """The inverse frequency of each rotary pair i < rotary_dim/2: theta^(-2i/rot), with Llama 3's
-        wavelength-dependent scaling or a linear factor when `rope_scaling` says so (HF's
-        _compute_llama3_parameters / _compute_linear_scaling_rope_parameters). `local`: the
-        sliding-window layers' table (Gemma: rope_local_theta, unscaled)."""
+        wavelength-dependent scaling, a linear factor, or Phi-3's longrope factor lists when
+        `rope_scaling` says so (HF's _compute_llama3_parameters / _compute_linear_scaling_rope_parameters
+        / _compute_longrope_parameters). `local`: the sliding-window layers' table (Gemma:
+        rope_local_theta, unscaled). `ctx`: the context the table serves -- longrope takes its
+        long factors above original_max_position_embeddings and its short ones otherwise."""
         import math
         half = self.rotary_dim // 2
         if local:
@@ -163,6 +165,10 @@ class ModelSpec:
         sc = self.rope_scaling
         if sc and sc.get("rope_type") == "linear":
             return [f / float(sc["factor"]) for f in inv]
+        if sc and sc.get("rope_type") == "longrope":
+            long = ctx is not None and ctx > float(sc["original_max_position_embeddings"])
+            fac = sc["long_factor"] if long else sc["short_factor"]
+            return [f / float(x) for f, x in zip(inv, fac)]
         if sc:
             factor = float(sc["factor"])
             lo, hi = float(sc["low_freq_factor"]), float(sc["high_freq_factor"])
@@ -181,37 +187,14 @@ class ModelSpec:
             inv = out
         return inv
 
-    def rope_inv_freq(self, local: bool = False) -> list[float]:
-        """The inverse frequency of each rotary pair i < rotary_dim/2: theta^(-2i/rot), with Llama 3's
-        wavelength-dependent scaling or a linear factor when `rope_scaling` says so (HF's
-        _compute_llama3_parameters / _compute_linear_scaling_rope_parameters). `local`: the
-        sliding-window layers' table (Gemma: rope_local_theta, unscaled)."""
+    def rope_scale(self) -> float:
+        """What cos and sin are multiplied by: longrope's attention factor
+        sqrt(1 + ln(factor) / ln(original_max_position_embeddings)), 1.0 for everyone else."""
         import math
-        half = self.rotary_dim // 2
-        if local:
-            theta = self.rope_local_theta or self.rope_theta
-            return [theta ** (-i / half) for i in range(half)]
-        inv = [self.rope_theta ** (-i / half) for i in range(half)]
         sc = self.rope_scaling
-        if sc and sc.get("rope_type") == "linear":
-            return [f / float(sc["factor"]) for f in inv]
-        if sc:
-            factor = float(sc["factor"])
-            lo, hi = float(sc["low_freq_factor"]), float(sc["high_freq_factor"])
-            old = float(sc["original_max_position_embeddings"])
-            low_wl, high_wl = old / lo, old / hi
-            out = []
-            for f in inv:
-                wl = 2 * math.pi / f
-                if wl < high_wl:
-                    out.append(f)
-                elif wl > low_wl:
-                    out.append(f / factor)
-                else:
-                    smooth = (old / wl - lo) / (hi - lo)
-                    out.append((1 - smooth) * f / factor + smooth * f)
-            inv = out
-        return inv
+        if sc and sc.get("rope_type") == "longrope":
+            return math.sqrt(1.0 + math.log(float(sc["factor"])) / math.log(float(sc["original_max_position_embeddings"])))
+        return 1.0
 
     # ---- serialisation
     def to_dict(self) -> dict:
@@ -457,6 +440,57 @@ def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         attn_gate=False,
         intermediate=_need(cfg, "intermediate_size"),
         norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Phi-3 / Phi-4-mini: GQA without q/k norms, a PARTIAL rotation (`partial_rotary_factor`
+    of the head, 96 of 128 on Phi-4-mini), longrope scaling (a short and a long factor list
+    over the same theta, chosen by the context, plus one attention scale on cos / sin), silu
+    FFN, tied head. The container materialises `lm_head.weight` and splits the fused
+    `qkv_proj` / `gate_up_proj` into the plain names, so the dense recipe reads it as it
+    reads Llama. Only the HF derivation exists: a Phi-3 GGUF carries the factor lists as
+    tensors, not metadata."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hd = cfg.get("head_dim") or _need(cfg, "hidden_size") // heads
+    rot = int(round(hd * float(cfg.get("partial_rotary_factor", 1.0))))
+    vocab = _need(cfg, "vocab_size")
+    sc = cfg.get("rope_scaling")
+    scaling = None
+    if sc:
+        kind = sc.get("rope_type", sc.get("type"))
+        if kind != "longrope":
+            raise SpecError(f"phi3: rope_scaling type {kind!r} is not supported (longrope only)")
+        orig = sc.get("original_max_position_embeddings", cfg.get("original_max_position_embeddings"))
+        if orig is None:
+            raise SpecError("phi3: longrope needs original_max_position_embeddings")
+        short, long = sc.get("short_factor"), sc.get("long_factor")
+        if not short or not long or len(short) != rot // 2 or len(long) != rot // 2:
+            raise SpecError(f"phi3: longrope wants {rot // 2} short and long factors (one per rotary pair)")
+        scaling = {"rope_type": "longrope", "short_factor": [float(x) for x in short],
+                   "long_factor": [float(x) for x in long],
+                   "factor": float(sc.get("factor") or _need(cfg, "max_position_embeddings") / orig),
+                   "original_max_position_embeddings": int(orig)}
+    return ModelSpec(
+        family="phi3",
+        hidden=_need(cfg, "hidden_size"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=rot,
+        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_scaling=scaling,
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
         quant="q4_1",
         extra={"model_type": cfg["model_type"], "source": "hf_config"},
     )
@@ -1043,7 +1077,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_next": _qwen36moe_hf, "qwen3_5": _qwen35_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
-               "granite": _granite_hf}
+               "granite": _granite_hf, "phi3": _phi3_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
@@ -1051,7 +1085,7 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
-              _granite_hf: "granite", _granite_gguf: "granite"}
+              _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1082,7 +1116,7 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
     "qwen36moe": {**_ATTN_HF, **_LIN_HF, **_MOE_HF},
     "qwen35": {**_ATTN_HF, **_LIN_HF, **_FFN_HF},
 }
-for _f in ("qwen3", "llama3", "gemma3", "hunyuan"):
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
