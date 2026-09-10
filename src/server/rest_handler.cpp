@@ -460,21 +460,6 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             this->current_model_tag = "model-faker";
             return ModelLoad::NotChatModel;
         }
-        switch (downloader.is_model_downloaded(ensure_tag)) {
-            case ModelDownloader::ModelStatus::Ready:
-                break;
-            case ModelDownloader::ModelStatus::Outdated:
-            case ModelDownloader::ModelStatus::Missing:
-                downloader.pull_model(ensure_tag, this->modelscope);
-                break;
-            case ModelDownloader::ModelStatus::Incompatible:
-                // auto_chat_engine holds a freshly CONSTRUCTED engine that was never
-                // loaded, and current_model_tag still names the model just evicted --
-                // so the next request for that tag took the fast path straight into it.
-                // Leave the same state the load-failure catch below leaves.
-                this->auto_chat_engine.reset();
-                this->current_model_tag = "model-faker";
-                return ModelLoad::LoadFailed;
             }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
@@ -992,107 +977,6 @@ void RestHandler::handle_embeddings(const json& request,
         // It refuses now, and names what IS loaded. An unknown model is an
         // error every OpenAI client already understands.
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
-        if (this->auto_embedding_engine) {
-            const std::string loaded = this->auto_embedding_engine->get_current_model();
-            if (!model.empty() && !loaded.empty() && model != loaded) {
-                json err = { {"error", {
-                    {"message", "this server has '" + loaded + "' loaded, not '" +
-                                model + "'. One embedding model is loaded per "
-                                "server; start another with --embeddingmodel " +
-                                model + " to serve it."},
-                    {"type", "invalid_request_error"},
-                    {"param", "model"},
-                    {"code", "model_not_found"}
-                }} };
-                send_response(err);
-                return;
-            }
-        }
-#endif
-
-        // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
-        // which one is chosen changes the vector materially -- measured on this server,
-        // search_query against search_document on the same text is cosine 0.914, not 1.
-        // This handler used to pass task_query unconditionally and ignore the request, so
-        // every DOCUMENT was embedded as a QUERY and no caller could tell: the vector is
-        // correctly shaped, correctly normed and deterministic either way.
-        // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
-        // which one is chosen changes the vector materially -- measured on this server,
-        // search_query against search_document on the same text is cosine 0.914, not 1.
-        // This handler used to pass task_query unconditionally and ignore the request, so
-        // every DOCUMENT was embedded as a QUERY and no caller could tell.
-        embedding_task_type_t task_type = embedding_task_type_t::task_query;
-        const std::string accepted = openai_compat::task_names_csv();
-        std::vector<std::string> declared;
-        bool supports_prompts = false;
-#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
-        if (this->auto_embedding_engine) {
-            declared = this->auto_embedding_engine->prompt_names();
-            supports_prompts = this->auto_embedding_engine->supports_task_prompts();
-        }
-#endif
-        const openai_compat::TaskResolution tr = openai_compat::resolve_task(request);
-        using TRS = openai_compat::TaskResolution::Status;
-
-        const openai_compat::TaskPolicy policy =
-            openai_compat::task_policy(supports_prompts, !declared.empty(), tr.status != TRS::Absent);
-        if (policy == openai_compat::TaskPolicy::NotSupported) {
-            // prompt_for() returns an empty prefix for a model with no prompt table,
-            // so this used to answer 200 with an UNPREFIXED vector -- correctly
-            // shaped, correctly normed, and not what was asked for.
-            // src/open_npue_adapter/README.md: "model has no prompts, a prompt is
-            // given | error".
-            send_response(json{{"error", {
-                {"message", "model '" + model + "' has no task prompts; remove '" + tr.field +
-                            "'. Passing one would be ignored, and the vector would come back "
-                            "correctly shaped and unprefixed with nothing to show it."},
-                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
-            return;
-        }
-        if (policy == openai_compat::TaskPolicy::Required) {
-            std::string names;
-            for (const auto& n : declared) names += (names.empty() ? "" : ", ") + n;
-            // Quote the REST vocabulary, not `declared`: the validator only accepts
-            // the former, so naming the latter sent clients to values it refuses.
-            json err = { {"error", {
-                {"message", "this model requires a task prompt: pass 'prompt_name' as "
-                            "one of [" + accepted + "] (this model declares the prompts [" +
-                            names + "], which those names map onto). Refusing to pick one -- "
-                            "the prefix changes the vector (search_query against "
-                            "search_document on the same text is cosine 0.914 here), and the "
-                            "result is correctly shaped, correctly normed and deterministic "
-                            "either way, so nothing downstream can tell the wrong one was used."},
-                {"type", "invalid_request_error"},
-                {"param", "prompt_name"},
-                {"code", "missing_required_parameter"}
-            }} };
-            send_response(err);
-            return;
-        }
-        if (tr.status == TRS::NotAString) {
-            send_response(json{{"error", {
-                {"message", "'" + tr.field + "' must be a string, one of [" + accepted + "]"},
-                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
-            return;
-        }
-        if (tr.status == TRS::Unknown) {
-            send_response(json{{"error", {
-                {"message", "unknown " + tr.field + " '" + tr.value + "'. Known: [" + accepted +
-                            "]. Refusing to substitute one: an embedding under the wrong task "
-                            "prompt is correctly shaped and correctly normed, so nothing "
-                            "downstream can tell it is wrong."},
-                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
-            return;
-        }
-        if (tr.status == TRS::Conflict) {
-            send_response(json{{"error", {
-                {"message", "'prompt_name' and 'task_type' are aliases and disagree "
-                            "('task_type' says '" + tr.value + "'). Send one, or send the same "
-                            "task in both."},
-                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
-            return;
-        }
-        if (tr.status == TRS::Ok) task_type = tr.task;
 
         std::vector<std::string> inputs;
 

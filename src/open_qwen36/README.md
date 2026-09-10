@@ -557,9 +557,9 @@ on a memory-starved box, not the kernels.
   (`vision/vit.cpp`, checked against transformers with the shipped weights to
   4e-6) and its rows enter the model as embedding vectors at their M-RoPE
   positions (`Core::step_embed`). The app's Qwen3.6 and Qwen3.5 model classes no
-  longer need the closed engine for images. `flm-test --vision` on the open
+  longer need the closed engine for images. `oflm-test --vision` on the open
   engine is the acceptance (OPEN-VISION-EMBED).
-- **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
+- **The weight file** is still OFLM's `.q4nx`. The GGUF path is a separate piece
   of work; this reader is ~150 lines and will go with it. The chunk format is read
   per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes
   ship, q8 attention and shared experts over q4_1 routed experts -- loads and packs;
