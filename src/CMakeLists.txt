@@ -300,7 +300,7 @@ if(NOT OFLM_USE_HRX)
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/vision/vit.cpp")
 endif()
 
@@ -512,7 +512,7 @@ if(NOT OFLM_USE_HRX)
     # where the compiler has it, a single thread otherwise (the pragmas are then ignored).
     find_package(OpenMP QUIET)
     if(OpenMP_CXX_FOUND)
-        target_link_libraries(flm PUBLIC OpenMP::OpenMP_CXX)
+        target_link_libraries(oflm PUBLIC OpenMP::OpenMP_CXX)
     endif()
 
 endif()
