@@ -45,7 +45,7 @@ UninstallDisplayIcon={app}\logo.ico
 
 ; Main executable
 
-Source: "flm.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "oflm.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Required DLL
 
@@ -104,17 +104,17 @@ Source: "..\xclbins\*"; DestDir: "{app}\xclbins"; Flags: ignoreversion recursesu
 
 [Icons]
 
-Name: "{group}\flm"; \
-    Filename: "{app}\flm.exe"; \
+Name: "{group}\oflm"; \
+    Filename: "{app}\oflm.exe"; \
     WorkingDir: "{app}"; \
     IconFilename: "{app}\logo.ico"; \
     IconIndex: 0; \
-    Comment: "Launch flm"
+    Comment: "Launch oflm"
 
 ; Desktop shortcut (conditional based on user choice)
 Name: "{commondesktop}\flm run"; \
     Filename: "{sys}\cmd.exe"; \
-    Parameters: "/K ""{app}\flm.exe"" run llama3.2:1b"; \
+    Parameters: "/K ""{app}\oflm.exe"" run llama3.2:1b"; \
     WorkingDir: "{app}"; \
     IconFilename: "{app}\logo.ico"; \
     IconIndex: 0; \
@@ -125,7 +125,7 @@ Name: "{commondesktop}\flm run"; \
 ; Desktop shortcut (conditional based on user choice)
 Name: "{commondesktop}\flm serve"; \
     Filename: "{sys}\cmd.exe"; \
-    Parameters: "/K ""{app}\flm.exe"" serve"; \
+    Parameters: "/K ""{app}\oflm.exe"" serve"; \
     WorkingDir: "{app}"; \
     IconFilename: "{app}\logo.ico"; \
     IconIndex: 0; \

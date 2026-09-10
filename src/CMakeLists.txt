@@ -412,6 +412,13 @@ endif()
 
 add_executable(flm ${SOURCES} ${HEADERS})
 
+# The file on disk is `oflm`, not `flm` (#8). A binary named `flm` is
+# ambiguous on PATH wherever FastFlowLM is also installed, and the wrong
+# one answering makes its errors look like ours -- a missing flag rather
+# than a different program. The CMake TARGET stays `flm` so that every
+# reference below is unchanged; only the output name moves.
+set_target_properties(flm PROPERTIES OUTPUT_NAME oflm)
+
 if(WIN32)
     if(VCPKG_TOOLCHAIN)
         # A vcpkg toolchain is active (e.g. the rocm-npu-staging dev.py build or
@@ -707,27 +714,28 @@ endif()
 
 
 # ———————————————————————————————————————————————
-# Copy the build flm.exe into the out directory (for local dev)
+# Copy the built executable into the out directory (for local dev)
 # ———————————————————————————————————————————————
 if(WIN32)
     add_custom_command(TARGET flm POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
             $<TARGET_FILE:flm>
-            ${CMAKE_SOURCE_DIR}/out/flm.exe
+            ${CMAKE_SOURCE_DIR}/out/$<TARGET_FILE_NAME:flm>
     )
 
-    # AND THE ENGINE DLLs BESIDE IT, or a freshly built flm.exe cannot start
+    # AND THE ENGINE DLLs BESIDE IT, or a freshly built oflm.exe cannot start
     # -- and fails in a way that sends you looking in the wrong place.
     #
     # The 22 *_npu.dll / q4_npu_eXpress.dll / gemm.dll / dequant.dll live in
     # src/lib/<backend>/ and are load-time imports, so without them the process
     # dies at 0xC0000135 (DLL not found) BEFORE main(), printing nothing.
     # Windows then falls through to the next PATH entry -- which on a machine
-    # with FastFlowLM installed is C:/Program Files/flm/flm.exe. So
+    # with FastFlowLM installed was C:/Program Files/flm/flm.exe -- so
     # `flm.exe serve ... --embeddingmodel x` run from the build directory
-    # reports "unrecognised option", from a completely different binary than
-    # the one you just built. The symptom names a flag; the cause is a
-    # missing DLL two steps earlier.
+    # reported "unrecognised option", from a completely different binary
+    # than the one you just built. Renaming to oflm (#8) removes that
+    # particular confusion, but the DLLs are still load-time imports and
+    # the process still dies before main() without them.
     #
     # Both destinations are gitignored build trees, so this copies nothing
     # into the repository and redistributes nothing: it puts the files this
@@ -735,7 +743,7 @@ if(WIN32)
 
     # AND THE MODEL CATALOGUE, for the same reason. utils.cpp looks for
     # model_list.json next to the executable (after FLM_CONFIG_PATH), and
-    # nothing put one there, so a freshly built flm.exe stops at
+    # nothing put one there, so a freshly built oflm.exe stops at
     #
     #   model_list.json not found. Please set FLM_CONFIG_PATH or place it
     #   next to the executable.
@@ -753,7 +761,7 @@ if(WIN32)
             ${CMAKE_SOURCE_DIR}/model_list.json
             ${CMAKE_SOURCE_DIR}/model_info.json
             ${CMAKE_SOURCE_DIR}/out
-        COMMENT "Copying model_list.json / model_info.json beside flm.exe"
+        COMMENT "Copying model_list.json / model_info.json beside $<TARGET_FILE_NAME:flm>"
     )
 
     file(GLOB FLM_RUNTIME_DLLS "${CMAKE_SOURCE_DIR}/lib/${FLM_RUNTIME_NAME}/*.dll")
@@ -763,7 +771,7 @@ if(WIN32)
                 ${FLM_RUNTIME_DLLS} $<TARGET_FILE_DIR:flm>
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${FLM_RUNTIME_DLLS} ${CMAKE_SOURCE_DIR}/out
-            COMMENT "Copying ${FLM_RUNTIME_NAME} engine DLLs beside flm.exe"
+            COMMENT "Copying ${FLM_RUNTIME_NAME} engine DLLs beside $<TARGET_FILE_NAME:flm>"
         )
     endif()
 

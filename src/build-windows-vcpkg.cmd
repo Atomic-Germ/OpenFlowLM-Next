@@ -1,5 +1,5 @@
 @echo off
-REM Configure + build flm.exe on Windows with MSVC and a vcpkg toolchain.
+REM Configure + build oflm.exe on Windows with MSVC and a vcpkg toolchain.
 REM
 REM This is the path that worked on a bare box (2026-09-05): no standalone
 REM Boost b2 build, no hand-copied import libs — every native dependency comes
@@ -57,12 +57,12 @@ if errorlevel 1 exit /b 1
 REM Stage a runnable tree in out\ (what the Makefile's `run` target does, plus
 REM the vcpkg runtime DLLs).
 if not exist out mkdir out
-copy /y build\flm.exe out\ >nul
+copy /y build\oflm.exe out\ >nul
 copy /y lib\xrt\*.dll out\ >nul
 copy /y lib\*.dll out\ >nul
 copy /y "%VCPKG_ROOT%\installed\x64-windows\bin\*.dll" out\ >nul
 copy /y model_list.json out\ >nul
 copy /y model_info.json out\ >nul
 xcopy /e /i /y /q xclbins out\xclbins >nul
-echo [flm] OK -^> out\flm.exe   (set FLM_MODEL_PATH=%%USERPROFILE%%\.flm from a non-interactive shell)
+echo [flm] OK -^> out\oflm.exe   (set FLM_MODEL_PATH=%%USERPROFILE%%\.flm from a non-interactive shell)
 exit /b 0

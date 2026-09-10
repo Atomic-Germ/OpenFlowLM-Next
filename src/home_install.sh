@@ -56,7 +56,7 @@ fi
 # ---- install into the home prefix -----------------------------------------
 # This runs the same install rules as a system install, just relocated.
 # It populates:
-#   $FLM_PREFIX/bin/flm
+#   $FLM_PREFIX/bin/oflm
 #   $FLM_PREFIX/lib/flm/*.so
 #   $FLM_PREFIX/share/flm/model_list.json
 #   $FLM_PREFIX/share/flm/xclbins/
@@ -81,7 +81,7 @@ XRT_DIR="$XRT_DIR"
 export FLM_CONFIG_PATH="\$FLM_PREFIX/share/flm/model_list.json"
 export FLM_XCLBIN_PATH="\$FLM_PREFIX/share/flm"
 
-# 2. Runtime libraries. The flm binary already has RPATH \$ORIGIN/../lib/flm for
+# 2. Runtime libraries. The oflm binary already has RPATH \$ORIGIN/../lib/flm for
 #    its bundled .so files, but XRT's libs (libxrt_coreutil.so, etc.) are found
 #    via XRT's own setup or LD_LIBRARY_PATH.
 if [[ -f "\$XRT_DIR/setup.sh" ]]; then
