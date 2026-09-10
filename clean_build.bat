@@ -50,6 +50,20 @@ setlocal enabledelayedexpansion
 set "REPO=%~dp0"
 if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
 
+:: ---------------------------------------------------------------- submodules
+::
+:: third_party/tokenizers-cpp (and its own msgpack/sentencepiece submodules)
+:: is a git submodule, not committed content. `git clone --recursive` (as the
+:: README says) picks it up, but a plain `git clone` or a `git pull` of a
+:: branch that added the submodule leaves the directory present but empty --
+:: and CMake's error for that, "does not contain a CMakeLists.txt file",
+:: reads like a broken checkout rather than an uninitialized submodule.
+git -C "%REPO%" submodule update --init --recursive
+if errorlevel 1 (
+    echo ERROR: git submodule update --init --recursive failed. See above.
+    exit /b 1
+)
+
 :: ---------------------------------------------------------------- vcpkg
 ::
 :: DO NOT simply trust %VCPKG_ROOT%. Visual Studio ships its own vcpkg at
