@@ -117,27 +117,27 @@ In short: if 1.1 firmware breaks probing on stock 6.19, do not keep forcing the 
 
 ---
 
-### Building from Source
+### Build System
 
-1. Ensure all required development packages are installed:
-   ```sh
-   sudo apt install ninja
-   sudo apt install libavformat-dev  libavutil-dev libavcodec-dev libswresample-dev libswscale-dev libxrt-dev uuid-dev libdrm-dev
-   ```
+For the full build system with CMake presets, see [docs/BUILD.md](BUILD.md).
 
-2. Clone the repository and pull all submodules:
-   ```sh
-   git clone --recursive https://github.com/Atomic-Germ/OpenFlowLM.git
-   cd OpenFlowLM
-   ```
-3. Build:
-   ```sh
-   cd src
-   cmake --preset linux-default
-   cd build
-   cmake --build . -j$(nproc)
-   sudo cmake --install .
-   ```
+**Quick build:**
+```sh
+cmake --preset linux-default
+cmake --build --preset linux-default
+cmake --install --preset linux-default
+```
+
+**Engine-only (fast iteration):**
+```sh
+cmake --preset linux-debug
+cmake --build --preset linux-debug
+```
+
+**Build specific kernels:**
+```sh
+cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b
+```
 
 ---
 

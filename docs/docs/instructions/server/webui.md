@@ -226,7 +226,7 @@ docker compose pull
 
 # 🧪 More Examples
 
-Well done 🎉 — now let’s explore more apps together!
+Well done 🎉 -- now let’s explore more apps together!
 
 ---
 
@@ -282,7 +282,7 @@ After receiving replies from multiple models, choose how you'd like to continue:
 
 ## 🌐 Example: Agentic AI Web Search with OpenFlowLM
 
-Step-by-step guide to powering Agentic AI web search in Open WebUI — NPU-only, lightning-fast, with Google PSE + OFLM.
+Step-by-step guide to powering Agentic AI web search in Open WebUI -- NPU-only, lightning-fast, with Google PSE + OFLM.
 
 [🎬 Watch the Teaser Video](https://www.youtube.com/watch?v=wHO8ektTlik)
 
@@ -334,7 +334,7 @@ With your **API Key** and **Search Engine ID** from Step 1, follow these steps:
 > ⚠️ **Note:** not all models handle web search well.
 2. Under the chat input box, Click `integrations`, and toggle **Web Search** to activate it.
 - 🔄 You’ll need to activate this **every time you start a new chat**. 
-3. Ask anything you're curious about—real-time search will enhance your answers!
+3. Ask anything you're curious about--real-time search will enhance your answers!
 
 ---
 
@@ -346,7 +346,7 @@ RAG combines two steps:
 1. **Retrieval** – fetch the most relevant information from your knowledge base (e.g., `.md` docs).  
 2. **Generation** – use an AI model to create accurate, context-aware answers based on that retrieved data.  
 
-In this example, the knowledge base is the **Open WebUI documentation**. With OpenFlowLM running on the **NPU**, you get fast, efficient, and secure responses — all without sending your data to the cloud.  
+In this example, the knowledge base is the **Open WebUI documentation**. With OpenFlowLM running on the **NPU**, you get fast, efficient, and secure responses -- all without sending your data to the cloud.  
 
 [🎬 Watch the Teaser Video](https://youtu.be/GAzPj6QbfKk?si=5FDkpjlVDI64oIol)
 

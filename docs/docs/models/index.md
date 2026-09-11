@@ -7,7 +7,7 @@ has_children: true
 
 # 🧩 Models Overview
 
-- 📑 **Detailed model cards are available** — explore the following model families  
+- 📑 **Detailed model cards are available** -- explore the following model families  
 - 🚀 **More models are on the way!**  
 - ✨ **OFLM supports full context length for all listed models!**  
 
