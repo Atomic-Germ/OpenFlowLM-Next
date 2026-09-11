@@ -89,9 +89,9 @@ static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW
 #endif
 static constexpr unsigned kHPE = kKVH / 2;    // fp32 heads per element
 static constexpr unsigned kHPO = kKVH;        // bf16 og heads per element
-static_assert(kHD % kV == 0 && kRot % (2 * kV) == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
+static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
               kNH % kHPO == 0 && kKVH % kHPE == 0,
-              "attn.h: HD a multiple of 32, rotary dim a multiple of 64 within HD, an even kv-head count that divides NH");
+              "attn.h: HD a multiple of 32, rotary dim a multiple of 32 within HD, an even kv-head count that divides NH");
 static constexpr float kScale = kHD == 256 ? 0.0625f : kHD == 128 ? 0.08838834764831845f
                                 : kHD == 64 ? 0.125f : 0.0f;   // 1/sqrt(HD); a new HD adds its constant here
 static_assert(kScale > 0.0f, "attn.h: no 1/sqrt(HD) for this head dim");
@@ -204,15 +204,28 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
 #endif
   }
 #endif
-  // rope on dims [0, ROT): pairs (a = dst[j], b = dst[j + ROT/2]); cs = [cos ROT/2 | sin ROT/2]
-  for (unsigned j = 0; j < kRot / 2; j += kV) {
+  // rope on dims [0, ROT): pairs (a = dst[j], b = dst[j + ROT/2]); cs = [cos ROT/2 | sin ROT/2].
+  // 32 pairs a step, then a 16-lane tail when ROT/2 is not a multiple of 32 (Phi-3 rotates
+  // 96 of 128 dims: 48 pairs).
+  constexpr unsigned kHalf = kRot / 2, kHalfV = kHalf - kHalf % kV;
+  for (unsigned j = 0; j < kHalfV; j += kV) {
     const v32f c = aie::load_v<kV>(cs + j);
-    const v32f s = aie::load_v<kV>(cs + kRot / 2 + j);
+    const v32f s = aie::load_v<kV>(cs + kHalf + j);
     const v32f a = aie::load_v<kV>(dst + j);
-    const v32f b = aie::load_v<kV>(dst + kRot / 2 + j);
+    const v32f b = aie::load_v<kV>(dst + kHalf + j);
     aie::store_v(dst + j, fsub32(fmul32(a, c), fmul32(b, s)));
-    aie::store_v(dst + kRot / 2 + j, fadd32(fmul32(b, c), fmul32(a, s)));
+    aie::store_v(dst + kHalf + j, fadd32(fmul32(b, c), fmul32(a, s)));
   }
+#if (ATTN_ROT / 2) % 32
+  {
+    const v16f c = aie::load_v<16>(cs + kHalfV);
+    const v16f s = aie::load_v<16>(cs + kHalf + kHalfV);
+    const v16f a = aie::load_v<16>(dst + kHalfV);
+    const v16f b = aie::load_v<16>(dst + kHalf + kHalfV);
+    aie::store_v(dst + kHalfV, fsubN<16>(fmulN<16>(a, c), fmulN<16>(b, s)));
+    aie::store_v(dst + kHalf + kHalfV, faddN<16>(fmulN<16>(b, c), fmulN<16>(a, s)));
+  }
+#endif
 #if ATTN_QKNORM_POST
   // the whole head, not just [0, ROT): the unrotated tail is scaled too
   for (unsigned j = 0; j < kHD; j += kV) {

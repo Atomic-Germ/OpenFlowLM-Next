@@ -82,6 +82,11 @@ def main() -> int:
         prompt = f"<|startoftext|>{a.message}<|extra_0|>"
         ids = tk.encode(prompt, add_special_tokens=False).ids
         IM_END, EOT = ids_of("<|eos|>", "<|endoftext|>")
+    elif tk.token_to_id("<|user|>") is not None and tk.token_to_id("<|end|>") is not None:
+        # Phi-4-mini: <|user|>...<|end|><|assistant|>, no bos; a turn ends on <|end|>
+        prompt = f"<|user|>{a.message}<|end|><|assistant|>"
+        ids = tk.encode(prompt, add_special_tokens=False).ids
+        IM_END, EOT = ids_of("<|end|>", "<|endoftext|>")
     elif tk.token_to_id("<|start_of_role|>") is not None:
         # Granite: <|start_of_role|>user<|end_of_role|>...<|end_of_text|><|start_of_role|>assistant<|end_of_role|>
         # Both roles close with <|end_of_text|>, so it is the turn end AND the
@@ -91,6 +96,12 @@ def main() -> int:
         ids = tk.encode(prompt, add_special_tokens=False).ids
         IM_END, = ids_of("<|end_of_text|>")
         EOT = IM_END
+    elif tk.token_to_id("<|im_start|>") == 166100:
+        # Nanbeige 4.1: ChatML, and its template leaves the reasoning to the model (it
+        # opens its own <think> block), so no think tags are injected
+        prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
+        ids = tk.encode(prompt, add_special_tokens=False).ids
+        IM_END, EOT = ids_of("<|im_end|>", "<|endoftext|>")
     else:
         prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
         IM_START, IM_END, EOT, THINK, END_THINK, NL, NLNL = special_ids(tk)

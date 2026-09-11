@@ -26,7 +26,7 @@ MANIFEST_VERSION = 1
 def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> dict:
     F = for_spec(spec)
     F.recipe(spec, max_ctx)                 # refuses a spec outside the validated points
-    prog = F.programs(spec)
+    prog = F.programs(spec, max_ctx)
     check = {"model_type": hf_model_types(spec.family)}
     check.update(F.hf_config_check(spec))
     m = {
@@ -37,6 +37,7 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         "build_key": key if key is not None else build_key(spec),
         "max_ctx_default": max_ctx,
         "hf_config_check": check,
+        "hf_config_defaults": getattr(F, "hf_config_defaults", lambda s: {})(spec),
         "layout": F.manifest_layout(spec, max_ctx),
         "layers": list(spec.layer_types),
         "contexts": prog["contexts"],

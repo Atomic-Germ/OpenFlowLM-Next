@@ -39,7 +39,9 @@ RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the u
 # of the 35B -- 217 -> 43 ms part0 at 2048, 85 identical greedy tokens; the 8-layer prefix
 # 60/60 -- the residual corr spread is the routed experts flipping on near-ties, not the
 # attention).
-FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe")
+# phi3 (2026-09-10, Phi4-mini: hd 128 with a 96-dim rotation, measured on the fast path
+# against its slow-path pass -- see specs OPEN-FAMILY-PHI3).
+FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3")
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):
 # six columns for the split, whatever the head count.
 MAX_ATTN_CORES = 6

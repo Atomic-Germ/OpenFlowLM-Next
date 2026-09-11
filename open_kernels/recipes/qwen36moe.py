@@ -822,7 +822,7 @@ def pack_plan(spec: ModelSpec) -> dict:
 
 
 # ---- the step program (what the driver runs per layer type), and the kernel sets that serve it
-def programs(spec: ModelSpec) -> dict:
+def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     L = layout(spec)
     out: dict = {
         "contexts": {}, "kernels": {}, "layer_types": {},

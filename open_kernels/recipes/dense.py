@@ -1,4 +1,4 @@
-"""The dense recipe (Qwen3 dense, Llama 3, Gemma 3, HunYuan dense): ModelSpec -> everything
+"""The dense recipe (Qwen3 dense, Llama 3, Gemma 3, HunYuan dense, Granite, Phi-3): ModelSpec -> everything
 designs/dense/dx.py, the packers and the driver need for a GQA + gated-FFN
 decoder layer.
 
@@ -15,7 +15,9 @@ has GeGLU-tanh, the sandwich norms in brackets above, and two layer types --
 per-token patch of the KV fill (attnpos), the tables are two `ptab` globals.
 HunYuan dense is Llama 3's shape with q/k RMSNorm applied AFTER RoPE, which is
 a family property (`QKNORM_POST_ROPE`), not a spec field, and one static RoPE
-theta the spec builder folds the NTK alpha into.
+theta the spec builder folds the NTK alpha into. Phi-3 rotates only the first
+`rotary_dim` dims of a head (96 of 128) and scales cos / sin by longrope's attention
+factor, which rides on the position table (`programs`: the ptab global's `scale`).
 
 One xclbin, ONE instruction stream per layer (no routing read, so no part
 split). Same 8 main cores as the MoE designs (w / x / y streams), the ln
@@ -88,7 +90,7 @@ class DenseRecipe:
 # families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
 # query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
 QKNORM_POST_ROPE = ("hunyuan",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite")
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3")
 
 
 def lm_rows(spec: ModelSpec) -> int:
@@ -276,11 +278,24 @@ def pack_plan(spec: ModelSpec) -> dict:
     }
 
 
-def programs(spec: ModelSpec) -> dict:
+def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     """One design serves every dense layer type; a layer type with a sliding window gets its own
     kernel entry (the same instruction stream, its own instruction BO, patched with its window)
-    and its own position table (its RoPE frequencies, its window's row counts)."""
+    and its own position table (its RoPE frequencies, its window's row counts).
+
+    Phi-3's longrope carries TWO factor lists, chosen by HF per forward call from the running
+    sequence length -- a resident table cannot re-select per call, but this engine computes one
+    row per token as the context grows (`Core::step`), so the ROW is the right unit to switch
+    on: row r took the table a real forward call at sequence length r + 1 would have picked, and
+    that decision never moves once made (an earlier row's cached K does not get rewound). Both
+    tables are baked (`inv_freq` for rows below `original_max_position_embeddings`,
+    `long_inv_freq` at and above it -- `pools.cpp` / `pack.ptab` switch per row against
+    `switch_row`) and `max_ctx` plays no part in the choice; every other family's global carries
+    neither key, unchanged. The attention scale rides on the table as `scale` for any family that
+    has one (Phi-3 only, today)."""
     L, G = layout(spec), geometry(spec)
+    sc = spec.rope_scaling
+    longrope = bool(sc) and sc.get("rope_type") == "longrope"
     out = {
         "contexts": {"dx": "dx/final.xclbin", "ln": "ln/final.xclbin", "lm": "lm_head_q4/final.xclbin"},
         "kernels": {"ln": {"context": "ln", "insts": "ln/insts.bin", "build": "ln"},
@@ -302,6 +317,12 @@ def programs(spec: ModelSpec) -> dict:
         check_buffer_args(kn, args)
         out["kernels"][kn] = {"context": "dx", "insts": "dx/insts.bin", "patch": "attnpos", "build": "dx", "window": window}
         out["globals"][tab] = {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq(local=local), "window": window}
+        if longrope:
+            orig = int(sc["original_max_position_embeddings"])
+            out["globals"][tab]["long_inv_freq"] = spec.rope_inv_freq(local=local, ctx=orig + 1)
+            out["globals"][tab]["switch_row"] = orig
+        if spec.rope_scale() != 1.0:
+            out["globals"][tab]["scale"] = spec.rope_scale()
         out["layer_types"][lt] = {
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": kn, "args": args}],
@@ -326,15 +347,65 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     return {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
             "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES, "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
             "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
-            "rope_inv_freq": spec.rope_inv_freq()}     # the global table's; each ptab global carries its own
+            "rope_inv_freq": spec.rope_inv_freq()}     # the global table's short/base table; each ptab
+            # global carries its own (both tables, for a longrope family -- see programs())
+
+
+def _phi3_raw_scaling(spec: ModelSpec):
+    """What a Phi-3 container's config.json literally holds at `rope_scaling`: the verbatim
+    sub-object the derivation kept (`extra.rope_scaling_raw`), or -- for a spec loaded from
+    JSON without it -- the HF-standard shape rebuilt from the canonical fields. None for a
+    plain-RoPE Phi."""
+    if spec.rope_scaling is None:
+        return None
+    raw = spec.extra.get("rope_scaling_raw")
+    if raw is not None:
+        return raw
+    return {"type": "longrope", "short_factor": list(spec.rope_scaling["short_factor"]),
+            "long_factor": list(spec.rope_scaling["long_factor"])}
+
+
+def hf_config_defaults(spec: ModelSpec) -> dict:
+    """What a key ABSENT from a container's config.json means, for the keys
+    `hf_config_check` emits that HF lets a config omit. `Manifest::check_model` compares
+    the manifest's expected value against this instead of refusing the config for
+    lacking the key -- so an omitted optional field is accepted exactly when it implies
+    the value the kernel set was built for, and refused when it does not."""
+    if spec.family != "phi3":
+        return {}
+    raw = _phi3_raw_scaling(spec) or {}
+    return {"head_dim": spec.hidden // spec.num_heads,          # HF's own fallback
+            "partial_rotary_factor": 1.0,                        # a full rotation
+            "rope_scaling": None,                                # plain RoPE
+            # the derivation reads it from the sub-object when the top level lacks it
+            "original_max_position_embeddings": raw.get("original_max_position_embeddings")}
 
 
 def hf_config_check(spec: ModelSpec) -> dict:
     d = {"hidden_size": spec.hidden, "num_hidden_layers": spec.num_layers, "vocab_size": spec.vocab,
          "num_attention_heads": spec.num_heads, "num_key_value_heads": spec.num_kv_heads,
          "intermediate_size": spec.intermediate}
-    if spec.family in ("qwen3", "gemma3", "hunyuan", "granite"):
+    if spec.family in ("qwen3", "gemma3", "hunyuan", "granite", "phi3"):
         d["head_dim"] = spec.head_dim          # Llama configs may omit it (hidden / heads)
+    if spec.family == "phi3":
+        # The rotation width is compiled into the attention core (ATTN_ROT), and the
+        # position table's frequencies (rope_theta, longrope's factor lists, the attention
+        # scale that max_position_embeddings sets) are baked in at export time -- none of
+        # it derivable from the shape fields above, so a same-shaped container with
+        # different RoPE parameters would otherwise load silently and run with the wrong
+        # table. Every key is emitted, whether or not the source config spelled it out;
+        # what an ABSENT key means comes from hf_config_defaults below, so the check is
+        # two-way (a kernel set built from a full-rotation config refuses a 0.75 container
+        # and vice versa) without refusing a config for omitting an optional field.
+        d["partial_rotary_factor"] = spec.rotary_dim / spec.head_dim
+        d["rope_theta"] = spec.rope_theta
+        d["rope_scaling"] = _phi3_raw_scaling(spec)
+        if spec.rope_scaling is not None:
+            orig = spec.rope_scaling["original_max_position_embeddings"]
+            d["original_max_position_embeddings"] = orig
+            if d["rope_scaling"].get("factor") is None:
+                # the factor, and with it rope_scale(), came from max_position_embeddings
+                d["max_position_embeddings"] = int(round(spec.rope_scaling["factor"] * orig))
     if spec.family == "gemma3":
         d["sliding_window"] = spec.sliding_window
     if spec.family == "granite":

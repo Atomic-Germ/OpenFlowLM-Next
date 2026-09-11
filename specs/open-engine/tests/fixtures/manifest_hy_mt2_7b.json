@@ -86,6 +86,7 @@
   "intermediate_size": 14336,
   "head_dim": 128
  },
+ "hf_config_defaults": {},
  "layout": {
   "hidden": 4096,
   "vocab": 128192,

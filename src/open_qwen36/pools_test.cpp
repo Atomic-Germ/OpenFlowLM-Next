@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
@@ -404,6 +405,106 @@ void q4k_container_tests() {
     std::filesystem::remove(path, ec);
 }
 
+/// A non-unit `RowGlobal::scale` (longrope's attention factor, OPEN-FAMILY-PHI3): the
+/// whole-table builder `pools::build_ptab` matches `recipes/pack.py`'s `ptab(..., scale=)`
+/// byte for byte. This is the C++ side of a Python-only gap: `test_phi3.py`'s
+/// `test_ptab_applies_the_scale_to_cos_and_sin` checked only `pack.ptab`, so a Python/C++
+/// mismatch on the scaled path could have reached hardware unnoticed.
+constexpr uint64_t PTAB_SCALE_FNV1A = 0x091cd4029a9681a8ull;
+
+void ptab_scale_tests() {
+    open_qwen36::Manifest m;
+    m.rotary_dim = 8;
+    m.ptab_row = 1024;
+    open_qwen36::RowGlobal g;
+    g.inv_freq = {0.5, 0.25, 0.125, 0.0625};
+    g.scale = 1.19;
+    g.window = 0;
+    const size_t rows = 6;
+    std::vector<uint8_t> t(rows * m.ptab_row);
+    open_qwen36::pools::build_ptab(m, g, rows, t.data());
+
+    // cos/sin at row p, pair i: scale * cos(p * inv_freq[i]) / sin(...), at +512 / +512+2*half
+    const size_t half = g.inv_freq.size();
+    bool ok = true;
+    for (size_t p = 0; p < rows && ok; ++p) {
+        for (size_t i = 0; i < half && ok; ++i) {
+            float c, s;
+            std::memcpy(&c, t.data() + p * m.ptab_row + 512 + 4 * i, 4);
+            std::memcpy(&s, t.data() + p * m.ptab_row + 512 + 4 * half + 4 * i, 4);
+            const double ang = static_cast<double>(p) * g.inv_freq[i];
+            ok = std::abs(c - static_cast<float>(g.scale * std::cos(ang))) < 1e-6f &&
+                 std::abs(s - static_cast<float>(g.scale * std::sin(ang))) < 1e-6f;
+        }
+    }
+    check(ok, "build_ptab: a non-unit scale multiplies both cos and sin");
+    const uint64_t got = fnv1a(t.data(), t.size());
+    std::printf("      ptab scale fnv1a = 0x%016llx\n", static_cast<unsigned long long>(got));
+    check(got == PTAB_SCALE_FNV1A, "build_ptab: byte-identical to recipes/pack.py's ptab(..., scale=)");
+
+    // unit scale (every other family) is the unscaled table -- the key does not move it
+    open_qwen36::RowGlobal g1 = g;
+    g1.scale = 1.0;
+    std::vector<uint8_t> t1(rows * m.ptab_row);
+    open_qwen36::pools::build_ptab(m, g1, rows, t1.data());
+    bool differs = std::memcmp(t.data(), t1.data(), t.size()) != 0;
+    check(differs, "build_ptab: a non-unit scale actually changes the bytes (not silently ignored)");
+}
+
+/// Phi-3's longrope, the full mechanism: row r reads `long_inv_freq` once r >= switch_row,
+/// `inv_freq` before it, together with the attention scale (OPEN-FAMILY-PHI3). The C++ side
+/// of `test_phi3.py`'s `test_ptab_switches_table_per_row_at_the_threshold` /
+/// `test_numpy_and_cpp_agree_on_a_switched_and_scaled_ptab`: a C++-only regression in the
+/// switch itself (as opposed to a plain scale) could otherwise pass every Python test.
+constexpr uint64_t PTAB_SWITCH_FNV1A = 0x7000741bf5ffa40bull;
+
+void ptab_switch_tests() {
+    open_qwen36::Manifest m;
+    m.rotary_dim = 8;
+    m.ptab_row = 1024;
+    open_qwen36::RowGlobal g;
+    g.inv_freq = {0.5, 0.25, 0.125, 0.0625};
+    g.long_inv_freq = {3.0, 1.5, 0.75, 0.375};
+    g.switch_row = 4;
+    g.scale = 1.19;
+    const size_t rows = 10, half = g.inv_freq.size();
+    std::vector<uint8_t> t(rows * m.ptab_row);
+    open_qwen36::pools::build_ptab(m, g, rows, t.data());
+
+    bool ok = true;
+    for (size_t p = 0; p < rows && ok; ++p) {
+        const std::vector<double>& freq = (p >= g.switch_row) ? g.long_inv_freq : g.inv_freq;
+        for (size_t i = 0; i < half && ok; ++i) {
+            float c, s;
+            std::memcpy(&c, t.data() + p * m.ptab_row + 512 + 4 * i, 4);
+            std::memcpy(&s, t.data() + p * m.ptab_row + 512 + 4 * half + 4 * i, 4);
+            const double ang = static_cast<double>(p) * freq[i];
+            ok = std::abs(c - static_cast<float>(g.scale * std::cos(ang))) < 1e-6f &&
+                 std::abs(s - static_cast<float>(g.scale * std::sin(ang))) < 1e-6f;
+        }
+    }
+    check(ok, "build_ptab: row r reads long_inv_freq once r >= switch_row, inv_freq before it");
+    const uint64_t got = fnv1a(t.data(), t.size());
+    std::printf("      ptab switch fnv1a = 0x%016llx\n", static_cast<unsigned long long>(got));
+    check(got == PTAB_SWITCH_FNV1A, "build_ptab: byte-identical to recipes/pack.py's switched ptab");
+
+    // kSwitchNever (every other family): switch_row so large that row >= switch_row never
+    // holds, so long_inv_freq (here left empty, as an unused RowGlobal always has it) is
+    // never read even though the field exists on the struct.
+    open_qwen36::RowGlobal g2;
+    g2.inv_freq = g.inv_freq;
+    check(g2.switch_row == open_qwen36::RowGlobal::kSwitchNever, "RowGlobal: switch_row defaults to kSwitchNever");
+    std::vector<uint8_t> t2(rows * m.ptab_row);
+    open_qwen36::pools::build_ptab(m, g2, rows, t2.data());   // must not read g2.long_inv_freq (empty)
+    for (size_t p = 0; p < rows && ok; ++p)
+        for (size_t i = 0; i < half && ok; ++i) {
+            float c;
+            std::memcpy(&c, t2.data() + p * m.ptab_row + 512 + 4 * i, 4);
+            ok = std::abs(c - static_cast<float>(std::cos(static_cast<double>(p) * g.inv_freq[i]))) < 1e-6f;
+        }
+    check(ok, "build_ptab: kSwitchNever reads inv_freq for every row, long_inv_freq never touched");
+}
+
 }  // namespace
 
 int main() {
@@ -475,6 +576,8 @@ int main() {
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
     mixed_container_tests();
     q4k_container_tests();
+    ptab_scale_tests();
+    ptab_switch_tests();
 
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
