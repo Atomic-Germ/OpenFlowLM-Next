@@ -215,6 +215,68 @@ static void test_is_chat_model(const std::string& list_path) {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// preflight: the `model` field, before any eviction.
+//
+// This one exists because of a REGRESSION. The handlers resolve the field as
+// `request.value("model", current_model_tag)`, which makes an OMITTED "model" and
+// an explicit `""` the same string -- so a sentinel branch added to answer "no
+// model is loaded" started serving an explicit `""` with whatever was resident.
+// It had previously been refused as unknown. Presence is an argument now, and
+// these rows are the reason.
+// ---------------------------------------------------------------------------
+static void test_preflight() {
+    using openai_compat::preflight;
+    using P = openai_compat::Preflight;
+    const bool SENT = true, ABSENT = false, LOADED = true, EMPTY = false;
+    std::printf("\n-- preflight --\n");
+
+    // The regression, both spellings, with a model resident.
+    ok(preflight(SENT, "", "qwen3:4b", LOADED) == P::BadModelValue,
+       "explicit model:\"\" is REFUSED, not served by the loaded model");
+    ok(preflight(SENT, "model-faker", "qwen3:4b", LOADED) == P::BadModelValue,
+       "explicit model:\"model-faker\" is REFUSED too");
+    // ...and with nothing resident, so it cannot be mistaken for the NoModel case.
+    ok(preflight(SENT, "", "", EMPTY) == P::BadModelValue,
+       "explicit model:\"\" is refused as a VALUE, not reported as \"none loaded\"");
+
+    // The case the sentinel branch was actually added for.
+    ok(preflight(ABSENT, "model-faker", "model-faker", EMPTY) == P::NoModel,
+       "no model field and none loaded -> NoModel");
+    ok(preflight(ABSENT, "", "", EMPTY) == P::NoModel,
+       "...same when the current tag is still the initial empty string");
+    ok(preflight(ABSENT, "model-faker", "model-faker", LOADED) == P::Ok,
+       "no model field but one IS loaded -> serve it");
+
+    // A tag match is not proof of a loaded engine (a failed load leaves the
+    // sentinel, and an Incompatible one used to leave a half-built engine).
+    ok(preflight(SENT, "qwen3:4b", "qwen3:4b", LOADED) == P::Ok,
+       "the loaded model, named -> Ok");
+    ok(preflight(SENT, "qwen3:4b", "qwen3:4b", EMPTY) == P::NeedsLoad,
+       "the same tag with NO engine must load, not dereference null");
+    ok(preflight(SENT, "llama3.2:1b", "qwen3:4b", LOADED) == P::NeedsLoad,
+       "a different model -> load it");
+    ok(preflight(ABSENT, "qwen3:4b", "qwen3:4b", LOADED) == P::Ok,
+       "field omitted, resolved to the loaded tag -> Ok");
+
+    // The property, over the whole grid: nothing a client SENDS as the sentinel is
+    // ever served, and nothing is ever served without an engine.
+    bool never_served = true;
+    for (const char* tag : {"", "model-faker"})
+        for (bool loaded : {true, false})
+            for (const char* cur : {"", "model-faker", "qwen3:4b"})
+                if (preflight(SENT, tag, cur, loaded) != P::BadModelValue) never_served = false;
+    ok(never_served, "an explicitly sent sentinel is NEVER Ok, whatever is loaded");
+
+    bool never_ok_without_engine = true;
+    for (bool sent : {true, false})
+        for (const char* tag : {"", "model-faker", "qwen3:4b", "llama3.2:1b"})
+            for (const char* cur : {"", "model-faker", "qwen3:4b"})
+                if (preflight(sent, tag, cur, false) == P::Ok) never_ok_without_engine = false;
+    ok(never_ok_without_engine, "preflight never says Ok while no engine is loaded");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -226,6 +288,7 @@ int main(int argc, char** argv) {
     test_finish_reason();
     test_status_for();
     test_model_error();
+    test_preflight();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);

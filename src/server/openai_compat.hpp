@@ -18,7 +18,11 @@
 
 namespace openai_compat {
 
-using json = nlohmann::json;
+/// The server's own json type (server.hpp, rest_handler.hpp). Building a plain
+/// nlohmann::json here and handing it to send_response() compiles and works, but
+/// it converts -- and an ordered_json built from an unordered one loses the key
+/// order the rest of the wire format keeps.
+using json = nlohmann::ordered_json;
 
 /// OpenAI's finish_reason vocabulary is {stop, length, tool_calls,
 /// content_filter, function_call}. `stop_reason_to_string()` also yields
@@ -98,6 +102,40 @@ inline int status_for(const json& response_data, int fallback = 200) {
         return 500;
     }
     return 500;
+}
+
+/// What to do about a request's `model` field, BEFORE any eviction or loading.
+///
+/// A pure function because the case that made it one was a regression: the handlers
+/// resolve `model` as `request.value("model", current_model_tag)`, which makes an
+/// OMITTED field and an explicit `""` the same string. Treating both as "no model
+/// named" meant an explicit `""` or `"model-faker"` -- previously refused -- was
+/// served by whatever happened to be loaded. Presence has to be carried in, and the
+/// rule is small enough to be worth stating once and testing.
+enum class Preflight {
+    Ok,             ///< the loaded engine already serves this request
+    NoModel,        ///< nothing is loaded and the request named nothing
+    BadModelValue,  ///< the client SENT a sentinel or an empty string
+    NeedsLoad       ///< resolve, evict, load
+};
+
+/// \param field_present  the request actually carried a "model" key
+/// \param requested      that value (or the current tag when absent), normalised
+/// \param current        the tag the loaded engine was loaded for
+/// \param engine_loaded  a model is actually resident
+inline Preflight preflight(bool field_present, const std::string& requested,
+                           const std::string& current, bool engine_loaded) {
+    const bool sentinel = requested.empty() || requested == "model-faker";
+    if (sentinel) {
+        // Sent deliberately, it is not a model name and must not resolve to one.
+        if (field_present) return Preflight::BadModelValue;
+        // Omitted, and the server was started without a model.
+        return engine_loaded ? Preflight::Ok : Preflight::NoModel;
+    }
+    // A tag MATCH is not proof of a loaded model: current_model_tag is also
+    // "model-faker" after a failed load, and it starts empty.
+    if (requested == current && engine_loaded) return Preflight::Ok;
+    return Preflight::NeedsLoad;
 }
 
 }  // namespace openai_compat

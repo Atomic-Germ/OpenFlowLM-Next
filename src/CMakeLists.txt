@@ -1185,9 +1185,14 @@ add_executable(openai_compat_test server/openai_compat_test.cpp)
 target_include_directories(openai_compat_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
-# model_list.hpp -> utils/utils.hpp -> device_runtime.hpp, so the XRT HEADERS are
-# needed to compile even though nothing here links or opens a device.
-if(XRT_INCLUDE_DIRS)
+# model_list.hpp -> utils/utils.hpp -> device_runtime.hpp, so the NPU RUNTIME HEADERS
+# are needed to compile even though nothing here links or opens a device -- and which
+# ones depends on the backend. Without this the test compiled only in an XRT build and
+# took device_runtime.hpp's XRT branch, with no XRT headers, in an HRX one.
+if(OFLM_USE_HRX)
+    target_compile_definitions(openai_compat_test PRIVATE OFLM_USE_HRX=1)
+    target_link_libraries(openai_compat_test PRIVATE hrx::hrx)
+elseif(XRT_INCLUDE_DIRS)
     target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIRS})
 elseif(XRT_INCLUDE_DIR)
     target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIR})

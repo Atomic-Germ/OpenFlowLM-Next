@@ -110,7 +110,10 @@ public:
 
 private:
     using ModelLoad = openai_compat::ModelLoad;
-    ModelLoad ensure_model_loaded(const std::string& model_tag);
+    /// \param model_field_present the request carried a "model" key. Without it an
+    ///        omitted field and an explicit "" are the same string -- see
+    ///        openai_compat::preflight().
+    ModelLoad ensure_model_loaded(const std::string& model_tag, bool model_field_present = false);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
     void configure_chat_engine_parameters(const json& options, const json& request);

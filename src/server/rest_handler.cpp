@@ -385,7 +385,8 @@ RestHandler::~RestHandler() = default;
 
 ///@brief Ensure the model is loaded
 ///@param model_tag the model tag
-RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model_tag) {
+RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model_tag,
+                                                        bool model_field_present) {
     // Normalise FIRST, because both the comparison and the lookup below are exact.
     // Clients send three spellings of one model -- "granite", "granite:3b" and
     // "Ollama/granite:3b" -- and all_tags holds the first two only, while
@@ -405,15 +406,15 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
     // and the handlers default `model` to current_model_tag -- so a request naming no
     // model arrives here as the sentinel. Say so, rather than looking it up and
     // reporting it as a typo.
-    if (ensure_tag.empty() || ensure_tag == "model-faker") {
-        return auto_chat_engine != nullptr ? ModelLoad::Ok : ModelLoad::NoModel;
-    }
-    // A tag match is NOT proof that a model is loaded: current_model_tag is also
-    // "model-faker" after a failed load, and it starts empty. The old shape had the
-    // same hole -- it fell straight through to `return true` -- and the handler then
-    // dereferenced a null engine instead of answering the load error.
-    if (current_model_tag == ensure_tag && auto_chat_engine != nullptr) {
-        return ModelLoad::Ok;                       // already serving it, under any spelling
+    switch (openai_compat::preflight(model_field_present, ensure_tag, current_model_tag,
+                                     auto_chat_engine != nullptr)) {
+        case openai_compat::Preflight::Ok:      return ModelLoad::Ok;
+        case openai_compat::Preflight::NoModel: return ModelLoad::NoModel;
+        case openai_compat::Preflight::BadModelValue:
+            header_print("ERROR", "request set 'model' to '" + ensure_tag +
+                                  "', which is not a model name -- refusing");
+            return ModelLoad::Unknown;
+        case openai_compat::Preflight::NeedsLoad: break;
     }
     {
         // Checked BEFORE anything is unloaded. The old order reset the engine first
@@ -467,6 +468,12 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
                 downloader.pull_model(ensure_tag, this->modelscope);
                 break;
             case ModelDownloader::ModelStatus::Incompatible:
+                // auto_chat_engine holds a freshly CONSTRUCTED engine that was never
+                // loaded, and current_model_tag still names the model just evicted --
+                // so the next request for that tag took the fast path straight into it.
+                // Leave the same state the load-failure catch below leaves.
+                this->auto_chat_engine.reset();
+                this->current_model_tag = "model-faker";
                 return ModelLoad::LoadFailed;
             }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
@@ -723,7 +730,7 @@ void RestHandler::handle_generate(const json& request,
         int length_limit = request.value("max_tokens", 4096);
         auto load_start_time = time_utils::now();
         // TODO: Use Another Check Function avoid loading again
-        if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+        if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
             send_response(openai_compat::model_error(why, model));
             return;
         }
@@ -835,7 +842,7 @@ void RestHandler::handle_chat(const json& request,
         int length_limit = options.value("num_predict", 4096);
 
         auto load_start_time = time_utils::now();
-        if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+        if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
             send_response(openai_compat::model_error(why, model));
             return;
         }
@@ -1300,7 +1307,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         json options = request.value("options", json::object());
 
         auto load_start_time = time_utils::now();
-        if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+        if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
             send_response(openai_compat::model_error(why, model));
             return;
         }
@@ -1582,7 +1589,7 @@ void RestHandler::handle_openai_completion(const json& request,
 
         int length_limit = request.value("max_tokens", 4096);
 
-         if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+         if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
             send_response(openai_compat::model_error(why, model));
             return;
         }
