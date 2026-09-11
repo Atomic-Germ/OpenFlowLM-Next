@@ -46,14 +46,14 @@ before `main()`.
 
 ```bash
 cd src
-cmake --preset linux-default     # installs to /opt/fastflowlm
+cmake --preset linux-default     # installs to /opt/openflowlm
 cmake --build build
 sudo cmake --install build       # optional
 ```
 
-`docs/setup.sh` installs the system dependencies, and
-[`linux-getting-started.md`](linux-getting-started.md) covers the driver and
-XRT side.
+[`linux-getting-started.md`](linux-getting-started.md) has the rest: the
+`apt install` line for the development packages this build needs, and the
+driver and XRT setup.
 
 Other presets: `linux-portable`, `linux-snap`, `windows-vs18`.
 
