@@ -6,6 +6,7 @@
 /// \note This is a header file for the AutoEmbeddingModel class
 #pragma once
 
+#include <stdexcept>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -22,6 +23,17 @@
 
 using json = nlohmann::ordered_json;
 
+
+/// The model declares task prompts and none of them serves the requested task.
+///
+/// Typed because the refusal is deliberate -- prompt_for() raises it rather than
+/// pick a prefix, since a wrongly-prefixed embedding is correctly shaped and
+/// correctly normed. The HTTP layer has to tell it apart from a genuine failure,
+/// and re-deriving that from the message text would be guessing.
+class TaskPromptUnavailable : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 typedef enum : u8 {
     task_query = 0,

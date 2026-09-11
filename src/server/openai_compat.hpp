@@ -80,18 +80,22 @@ inline json model_error(ModelLoad why, const std::string& model) {
 /// The HTTP status a response body deserves, or `fallback` when it is not an error.
 ///
 /// The rules, in order:
-///   1. a numeric `code` in 400-599 is a status and is taken as given;
-///   2. otherwise the `type` classifies it -- our own errors carry a STRING code
+///   1. a top-level `error` that is NOT an object is `{"error": "<text>"}` -- the
+///      shape 22 catch blocks in rest_handler.cpp still use. 500;
+///   2. a numeric `code` in 400-599 is a status and is taken as given;
+///   3. otherwise the `type` classifies it -- our own errors carry a STRING code
 ///      ("model_not_found"), so the type is the only thing that can;
-///   3. an error object this server built but cannot classify is 500, because 200
+///   4. an error object this server built but cannot classify is 500, because 200
 ///      is the one answer that is certainly wrong.
 ///
-/// The first version of this recognised a numeric 400 and nothing else, and
-/// because that test sat inside the `if`, a handler's own 500 fell through BOTH
-/// branches and went out as HTTP 200 with an error body.
+/// Rule 1 was missing, and the test asserted its absence. The first version of
+/// this recognised a numeric 400 and nothing else; the second added the type but
+/// still returned the 200 fallback for a flat string, so the promised invariant
+/// covered error OBJECTS while the handlers were emitting error BODIES.
 inline int status_for(const json& response_data, int fallback = 200) {
-    if (!response_data.contains("error") || !response_data["error"].is_object()) return fallback;
+    if (!response_data.contains("error")) return fallback;
     const json& err = response_data["error"];
+    if (!err.is_object()) return 500;   // {"error": "<what() text>"}
     if (err.contains("code") && err["code"].is_number_integer()) {
         const int c = err["code"].get<int>();
         if (c >= 400 && c <= 599) return c;

@@ -750,7 +750,12 @@ void RestHandler::handle_generate(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -783,7 +788,12 @@ void RestHandler::handle_generate(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -865,7 +875,12 @@ void RestHandler::handle_chat(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -879,7 +894,12 @@ void RestHandler::handle_chat(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -1089,14 +1109,27 @@ void RestHandler::handle_embeddings(const json& request,
         if (this->embed) {
             json embedding_data = json::array();
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
-            for (size_t i = 0; i < inputs.size(); ++i) {
-                std::cout << "Embedding input[" << i << "]: " << "\n" << inputs[i] << std::endl;
-                std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], task_type);
-                embedding_data.push_back({
-                    {"object", "embedding"},
-                    {"embedding", embedding_result},
-                    {"index", i}
-                });
+            try {
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    std::cout << "Embedding input[" << i << "]: " << "\n" << inputs[i] << std::endl;
+                    std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], task_type);
+                    embedding_data.push_back({
+                        {"object", "embedding"},
+                        {"embedding", embedding_result},
+                        {"index", i}
+                    });
+                }
+            } catch (const TaskPromptUnavailable& e) {
+                // The model has prompts but none serves this task -- README.md:288's
+                // "model has prompts, task maps to none of them | error naming what the
+                // model does offer". The engine refuses on purpose; this used to reach
+                // the function-level catch as {"error": <string>} and go out as 200.
+                send_response(json{{"error", {
+                    {"message", std::string(e.what())},
+                    {"type", "invalid_request_error"},
+                    {"param", tr.field.empty() ? std::string("prompt_name") : tr.field},
+                    {"code", "invalid_value"}}}});
+                return;
             }
 #else
             throw std::runtime_error("Embedding models are not supported in this build");
@@ -1607,7 +1640,12 @@ void RestHandler::handle_openai_completion(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success) {
-                    json error_response = { {"error", "Max length reached"} };
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -1638,7 +1676,12 @@ void RestHandler::handle_openai_completion(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success) {
-                    json error_response = { {"error", "Max length reached"} };
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;

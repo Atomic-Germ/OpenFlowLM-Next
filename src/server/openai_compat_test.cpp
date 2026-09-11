@@ -88,8 +88,15 @@ static void test_status_for() {
     std::printf("\n-- status_for --\n");
 
     eqi(status_for(json{{"choices", json::array()}}), 200, "a normal response keeps its status");
-    eqi(status_for(json{{"error", "a bare string"}}), 200,
-        "a non-object 'error' is not an error body (the old shape this never handled)");
+    // THE ROW THAT ASSERTED THE BUG. It read 200 with the comment "a non-object
+    // 'error' is not an error body", which is false: 22 catch blocks in
+    // rest_handler.cpp emit exactly {"error": e.what()}. The rule and this test
+    // were written together, and both covered error OBJECTS while the server was
+    // emitting error BODIES.
+    eqi(status_for(json{{"error", "a bare string"}}), 500,
+        "a flat {\"error\": \"...\"} is 500 -- the shape the catch blocks use");
+    eqi(status_for(json{{"error", "Max length reached"}}), 500,
+        "...whatever the text says");
 
     eqi(status_for(json{{"error", {{"code", 400}}}}), 400, "numeric 400");
     eqi(status_for(json{{"error", {{"code", 500}}}}), 500, "numeric 500 -- the regression under test");
@@ -113,17 +120,29 @@ static void test_status_for() {
     eqi(status_for(json{{"error", {{"message", "no type, no code"}}}}), 500,
         "an error object with neither is still not a success");
 
-    // The property that matters more than any single row.
+    // The property that matters more than any single row -- stated over error
+    // BODIES, not error objects. The narrower version passed while the flat shape
+    // sailed through at 200.
     const nlohmann::json bodies[] = {
         json{{"error", {{"code", 500}}}},
         json{{"error", {{"type", "server_error"}}}},
         json{{"error", {{"type", "invalid_request_error"}, {"code", "model_not_found"}}}},
         json{{"error", {{"message", "bare"}}}},
         json{{"error", {{"type", "unrecognised"}, {"code", "also_unrecognised"}}}},
+        json{{"error", "a flat string from a catch block"}},
+        json{{"error", nullptr}},
+        json{{"error", json::array({"odd", "but still an error key"})}},
+        json{{"error", 42}},
     };
     bool never_200 = true;
     for (const auto& b : bodies) if (status_for(b) == 200) never_200 = false;
-    ok(never_200, "NO error object is ever answered 200");
+    ok(never_200, "NO response carrying an 'error' key is ever answered 200");
+
+    // And a success is still a success -- the rule must not catch ordinary bodies.
+    bool success_untouched = status_for(json{{"choices", json::array()}}) == 200 &&
+                             status_for(json::object()) == 200 &&
+                             status_for(json{{"data", json::array()}, {"model", "m"}}) == 200;
+    ok(success_untouched, "a body with no 'error' key keeps its 200");
 }
 
 // ---------------------------------------------------------------------------
