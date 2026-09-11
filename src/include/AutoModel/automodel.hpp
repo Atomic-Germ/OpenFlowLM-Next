@@ -144,6 +144,8 @@ protected:
     bool has_bos_token;
     int bos_token_id;
     std::vector<int> eos_token_ids;
+    sampler_config default_sampler_config_;
+    bool has_default_sampler_ = false;
 
 	std::string user_system_prompt = "";
 
@@ -223,6 +225,13 @@ public:
 	/// \brief Set the sampler
 	/// \param sampler_config the sampler config
 	virtual void set_sampler(sampler_config& sampler_config);
+
+	/// Per-request settings (temperature, top_k, thinking, ...) are applied to the engine
+	/// only when a request carries them, so without these two they leak from one request
+	/// into the next. The server snapshots once after load and resets at the top of each
+	/// chat request. The base handles the sampler; models with a thinking flag override both.
+	virtual void snapshot_request_defaults();
+	virtual void reset_request_defaults();
 
 	/// \brief Set the max length
 	/// \param MAX_L the max length

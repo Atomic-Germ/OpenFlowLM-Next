@@ -80,3 +80,23 @@ schema into its first non-null member, adding `nullable: true` when `null` was l
 - A schema without type arrays is returned unchanged.
 - A request whose tools include such a field succeeds through `oflm serve` and the
   model can call that tool (manual: `edge_cases.py` "nullable type array").
+
+## All models
+
+### TOOLS-REQUEST-PARAMS-RESET: request parameters do not leak between requests
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`)
+**Test category:** integration (through `oflm serve`)
+**Test:** `specs/tool-calling/tests/test_request_params_reset.py`
+
+`temperature`, `top_p`, `top_k`, `min_p`, the penalties, `think` and `reasoning_effort`
+are applied to the engine only when a request carries them. The server shall restore the
+model's load-time defaults for those settings at the start of every chat request before
+applying the request's own fields, so a request that omits a field gets the model
+default and not whatever the previous request set.
+
+**Acceptance criteria:**
+- After a request with `reasoning_effort: "low"`, a request without the field on a
+  model whose default is no-think (Gemma 4) generates no reasoning content.
+- After a request with `temperature: 0`, a request without the field samples with the
+  model's default temperature (observable: the raw output no longer repeats bit for bit
+  across two identical prompts on a model whose default temperature is above 0).
