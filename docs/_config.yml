@@ -22,6 +22,7 @@ exclude:
   - dev.py
   - templates
   - sync-layout.js
+  - serve-docs.sh
   - docs/_config.yml
 
 defaults:

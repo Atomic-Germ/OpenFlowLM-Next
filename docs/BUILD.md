@@ -1,25 +1,42 @@
 # Building from source
 
-**There are two things to build, and the executable alone is not enough.**
+Building the executable is not the whole job. The `oflm` binary also needs a
+set of compiled NPU kernels - the `.xclbin` and `insts.bin` files, known as
+design sets. Without them the binary starts up fine and then refuses to load
+any model, naming the set it could not find. The kernels are not checked in;
+they are compiled from sources in this repository.
 
-| | what it is | without it |
-|---|---|---|
-| **the executable** | `oflm` (`oflm.exe` on Windows) | nothing to run |
-| **the AIE design sets** (`.xclbin` + `insts.bin`) | the NPU kernels the open engine dispatches | the binary starts and then **refuses to load a model**, naming the missing set |
+There are two ways to get both, and they are not interchangeable.
 
-The design sets are **not** checked in — they are compiled from the sources in
-this repository, and building them needs a second toolchain (IRON / MLIR-AIE)
-that the executable's build does not use. This is the part that surprises
-people, so it comes first in every section below.
+**The short way, Linux only.** From the top of the repository, a single preset
+builds the engine and all the NPU kernels together, and sets up the kernel
+toolchain for itself if it isn't already there:
+
+```bash
+cmake --preset linux-default
+cmake --build --preset linux-default
+```
+
+That is the path the [README](../README.md) describes in full, and on Linux it
+is the one to use.
+
+**The longer way, a step at a time.** From inside `src/`, a different set of
+presets builds the executable on its own, and you build the kernels yourself
+afterwards. This is the only option on Windows, where the kernel build does not
+run. It is also the one you want while you are changing kernels and don't want
+to rebuild everything each time. The rest of this page covers it.
+
+Both directories contain a preset called `linux-default` and the two do
+different things, so where you run the command from matters.
 
 ---
 
-## 1. The executable
+## 1. The executable on its own
 
 ### Prerequisites
 
-- Git, CMake ≥ 3.22, Ninja
-- a C++20 compiler — MSVC on Windows, GCC or Clang on Linux
+- Git, Ninja, and CMake 3.25 or newer
+- a C++20 compiler: MSVC on Windows, GCC or Clang on Linux
 
 ### Windows
 
@@ -59,9 +76,11 @@ Other presets: `linux-portable`, `linux-snap`, `windows-vs18`.
 
 ---
 
-## 2. The AIE design sets
+## 2. The NPU kernels
 
-Both kinds need the IRON toolchain **dot-sourced** into the shell first:
+There are two sets to build: the ones the embedding models use, and the ones
+the language models use. Both need the IRON toolchain **dot-sourced** into the
+shell first:
 
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1        # the leading dot is required
