@@ -1,4 +1,4 @@
-# FastFlowLM Release
+# OpenFlowLM Release
 
 Public version.
 
@@ -63,7 +63,7 @@ cmake --build build --target check_dependencies
 
 ### Static Build (Portable Binary)
 
-FastFlowLM can be built as a portable static binary with XRT and FFmpeg bundled in. This eliminates the need for system dependencies and creates a truly self-contained executable.
+OpenFlowLM can be built as a portable static binary with XRT and FFmpeg bundled in. This eliminates the need for system dependencies and creates a truly self-contained executable.
 
 **Simple static build:**
 
@@ -79,7 +79,7 @@ This will:
    - XRT (v2.21.75)
    - FFmpeg (v7.1)
 3. Build both as static libraries
-4. Link them into the flm binary
+4. Link them into the oflm binary
 
 **What gets statically linked:**
 - ✅ XRT (Xilinx Runtime)
@@ -94,7 +94,7 @@ This will:
 
 ```bash
 # Enable static build manually
-cmake --preset linux-default -DFLM_STATIC_BUILD=ON
+cmake --preset linux-default -DOFLM_STATIC_BUILD=ON
 cmake --build build -j$(nproc)
 ```
 
@@ -139,11 +139,11 @@ Use the provided deployment script:
 ```
 
 The deployment package will include:
-- `flm.exe` - Main executable
+- `oflm.exe` - Main executable
 - All required DLLs from `lib/` directory
 - `model_list.json` - Model configuration
 - `INSTALLATION.md` - Installation instructions
-- `run_flm.bat` - Easy execution script
+- `run_oflm.bat` - Easy execution script
 
 ### Troubleshooting
 

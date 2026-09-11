@@ -1,10 +1,10 @@
 /// \file utils.cpp
 /// \brief utils class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// 
-/// \note This file contains some utility functions for the FastFlowLM project.
+/// \note This file contains some utility functions for the OpenFlowLM project.
 #include "utils/utils.hpp"
 #include <algorithm>
 #include <filesystem>
@@ -23,11 +23,11 @@ namespace utils {
 std::string find_model_list() {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
-    // 1. Check FLM_CONFIG_PATH environment variable
-    const char* env_path = std::getenv("FLM_CONFIG_PATH");
+    // 1. Check OFLM_CONFIG_PATH environment variable
+    const char* env_path = std::getenv("OFLM_CONFIG_PATH");
     if (env_path && *env_path) {
         if (std::filesystem::exists(env_path)) {
-            std::cerr << "[FLM]  Using custom model list path: " << env_path << std::endl;
+            std::cerr << "[OFLM]  Using custom model list path: " << env_path << std::endl;
             return env_path;
         }
     }
@@ -43,38 +43,38 @@ std::string find_model_list() {
     }
 
     // Relocatable installed bundle, independent of its original prefix.
-    std::string bundle_path = exe_dir + "/../share/flm/model_list.json";
+    std::string bundle_path = exe_dir + "/../share/oflm/model_list.json";
     if (std::filesystem::exists(bundle_path)) {
         return bundle_path;
     }
 
     // Legacy configured prefix.
-    std::string installed_path = install_prefix + "/share/flm/model_list.json";
+    std::string installed_path = install_prefix + "/share/oflm/model_list.json";
     if (std::filesystem::exists(installed_path)) {
         return installed_path;
     }
 
     // If not found, throw an error
-    throw std::runtime_error("model_list.json not found. Please set FLM_CONFIG_PATH or place it next to the executable.");
+    throw std::runtime_error("model_list.json not found. Please set OFLM_CONFIG_PATH or place it next to the executable.");
 }
 
 std::string find_model_info() {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
-    // 1. Check FLM_MODELINFO_PATH environment variable
-    const char* env_path = std::getenv("FLM_MODELINFO_PATH");
+    // 1. Check OFLM_MODELINFO_PATH environment variable
+    const char* env_path = std::getenv("OFLM_MODELINFO_PATH");
     if (env_path && *env_path) {
         if (std::filesystem::exists(env_path)) {
-            std::cerr << "[FLM]  Using custom model info path: " << env_path << std::endl;
+            std::cerr << "[OFLM]  Using custom model info path: " << env_path << std::endl;
             return env_path;
         }
     }
 
     // 2. Stay next to an explicitly configured model_list.json. A relocated
-    // install points FLM_CONFIG_PATH at its own share/flm; without this the
+    // install points OFLM_CONFIG_PATH at its own share/oflm; without this the
     // lookup falls through to the baked-in prefix below and we end up sizing
     // and hash-checking downloads against a different (stale) revision.
-    const char* config_path = std::getenv("FLM_CONFIG_PATH");
+    const char* config_path = std::getenv("OFLM_CONFIG_PATH");
     if (config_path && *config_path) {
         std::filesystem::path sibling =
             std::filesystem::path(config_path).parent_path() / "model_info.json";
@@ -95,13 +95,13 @@ std::string find_model_info() {
     }
 
     // Relocatable installed bundle, independent of its original prefix.
-    std::string bundle_path = exe_dir + "/../share/flm/model_info.json";
+    std::string bundle_path = exe_dir + "/../share/oflm/model_info.json";
     if (std::filesystem::exists(bundle_path)) {
         return bundle_path;
     }
 
     // Linux: install
-    std::string installed_path = install_prefix + "/share/flm/model_info.json";
+    std::string installed_path = install_prefix + "/share/oflm/model_info.json";
     if (std::filesystem::exists(installed_path)) {
         return installed_path;
     }
@@ -115,7 +115,7 @@ std::string find_model_info() {
 #endif
 
     // If not found, throw an error
-    throw std::runtime_error("model_info.json not found. Please set FLM_MODELINFO_PATH or place it next to the executable.");
+    throw std::runtime_error("model_info.json not found. Please set OFLM_MODELINFO_PATH or place it next to the executable.");
 }
 
 namespace {
@@ -129,14 +129,14 @@ std::string strip_xclbins(std::string path) {
     return path;
 }
 
-/// The user-level flm directory flm-add writes into: ~/.config/flm on POSIX
-/// (get_user_directory() already ends in .config there) and <profile>/.config/flm
-/// on Windows, which is where flm-add's `Path.home() / ".config" / "flm"` lands.
-std::string user_flm_directory() {
+/// The user-level oflm directory oflm-add writes into: ~/.config/oflm on POSIX
+/// (get_user_directory() already ends in .config there) and <profile>/.config/oflm
+/// on Windows, which is where oflm-add's `Path.home() / ".config" / "oflm"` lands.
+std::string user_oflm_directory() {
 #ifdef _WIN32
-    return (std::filesystem::path(get_user_directory()) / ".config" / "flm").string();
+    return (std::filesystem::path(get_user_directory()) / ".config" / "oflm").string();
 #else
-    return get_user_directory() + "/flm";
+    return get_user_directory() + "/oflm";
 #endif
 }
 
@@ -161,12 +161,12 @@ std::vector<std::string> user_oflm_directories() {
 /// path picks: it returns exactly one, and every closed kernel is loaded relative to it.
 std::vector<std::string> closed_path_roots() {
     std::vector<std::string> c;
-    const char* env_path = std::getenv("FLM_XCLBIN_PATH");
+    const char* env_path = std::getenv("OFLM_XCLBIN_PATH");
     if (env_path && *env_path) c.push_back(strip_xclbins(env_path));
     std::string exe_dir = get_executable_directory();
     c.push_back(exe_dir);                       // portable development tree
     c.push_back(".");                           // then the CWD
-    c.push_back(exe_dir + "/../share/flm");     // relocatable installed bundle
+    c.push_back(exe_dir + "/../share/oflm");     // relocatable installed bundle
     c.push_back(CMAKE_XCLBIN_PREFIX);           // legacy configured prefix
     return c;
 }
@@ -176,14 +176,14 @@ std::vector<std::string> closed_path_roots() {
 std::vector<std::string> xclbin_roots() {
     std::vector<std::string> candidates;
 
-    // The user-level roots first: flm-add installs a model's kernels under one of these,
+    // The user-level roots first: oflm-add installs a model's kernels under one of these,
     // and the shipped sets live in the install tree below. A lookup that stops at the
     // first root (find_xclbin_path) can only ever see one of the two.
-    const char* env_path = std::getenv("FLM_XCLBIN_PATH");
+    const char* env_path = std::getenv("OFLM_XCLBIN_PATH");
     if (env_path && *env_path) candidates.push_back(strip_xclbins(env_path));
     // Beside an explicitly configured model_list.json, the way find_model_info stays
     // beside it: a user registry and its kernels live in one directory.
-    const char* config_path = std::getenv("FLM_CONFIG_PATH");
+    const char* config_path = std::getenv("OFLM_CONFIG_PATH");
     if (config_path && *config_path) {
         candidates.push_back(std::filesystem::path(config_path).parent_path().string());
     }
@@ -191,7 +191,7 @@ std::vector<std::string> xclbin_roots() {
     // before legacy (#30) -- an existing install keeps working with no
     // migration and no copying of multi-gigabyte weights.
     for (const std::string& d : user_oflm_directories()) candidates.push_back(d);
-    candidates.push_back(user_flm_directory());
+    candidates.push_back(user_oflm_directory());
 
     for (const std::string& c : closed_path_roots()) candidates.push_back(c);
 
@@ -209,7 +209,7 @@ std::string find_xclbin_path() {
     for (const std::string& c : closed_path_roots()) {
         if (!c.empty() && std::filesystem::exists(c + "/xclbins")) return c;
     }
-    throw std::runtime_error("xclbins not found. Please set FLM_XCLBIN_PATH or place it next to the executable.");
+    throw std::runtime_error("xclbins not found. Please set OFLM_XCLBIN_PATH or place it next to the executable.");
 }
 
 std::string get_executable_directory() {
@@ -254,7 +254,7 @@ std::string get_user_directory() {
 #endif
 }
 
-///@brief get_server_port gets the server port from environment variable FLM_SERVE_PORT
+///@brief get_server_port gets the server port from environment variable OFLM_SERVE_PORT
 ///@return the server port, default is 52625 if environment variable is not set
 int get_server_port(int user_port) {
     if (user_port > 0 && user_port <= 65535) {
@@ -264,7 +264,7 @@ int get_server_port(int user_port) {
 #ifdef _WIN32
         char* port_env = nullptr;
         size_t len = 0;
-        if (_dupenv_s(&port_env, &len, "FLM_SERVE_PORT") == 0 && port_env != nullptr) {
+        if (_dupenv_s(&port_env, &len, "OFLM_SERVE_PORT") == 0 && port_env != nullptr) {
             try {
                 int port = std::stoi(port_env);
                 free(port_env);
@@ -278,7 +278,7 @@ int get_server_port(int user_port) {
             }
         }
 #else
-        const char* port_env = std::getenv("FLM_SERVE_PORT");
+        const char* port_env = std::getenv("OFLM_SERVE_PORT");
         if (port_env && *port_env) {
             try {
                 int port = std::stoi(port_env);
@@ -296,13 +296,13 @@ int get_server_port(int user_port) {
     return 52625; // Default port
 }
 
-///@brief get_models_directory gets the models directory from environment variable or defaults to user/.flm/models on Windows or ~/.config/flm on Linux
+///@brief get_models_directory gets the models directory from environment variable or defaults to user/.oflm/models on Windows or ~/.config/oflm on Linux
 ///@return the models directory path
 std::string get_models_directory() {
 #ifdef _WIN32
     char* model_path_env = nullptr;
     size_t len = 0;
-    if (_dupenv_s(&model_path_env, &len, "FLM_MODEL_PATH") == 0 && model_path_env != nullptr) {
+    if (_dupenv_s(&model_path_env, &len, "OFLM_MODEL_PATH") == 0 && model_path_env != nullptr) {
         std::string custom_path(model_path_env);
         free(model_path_env);
         if (!custom_path.empty()) {
@@ -310,26 +310,17 @@ std::string get_models_directory() {
         }
     }
 #else
-    const char* model_path_env = std::getenv("FLM_MODEL_PATH");
+    const char* model_path_env = std::getenv("OFLM_MODEL_PATH");
     if (model_path_env && *model_path_env) {
         return std::string(model_path_env);
     }
 #endif
-    // No variable set: the new user directory if it exists, else the legacy one
-    // (#30). New before legacy, so an existing install keeps working untouched
-    // and a fresh one lands in .oflm.
+    // Fallback to user/.oflm/ on Windows or ~/.config/oflm on Linux if environment variable is not set
     std::string user_dir = get_user_directory();
 #ifdef _WIN32
-    const std::string oflm_dir = user_dir + "\\.oflm";
+    return user_dir + "\\.oflm";
 #else
-    const std::string oflm_dir = user_dir + "/oflm";
-#endif
-    std::error_code models_ec;
-    if (std::filesystem::is_directory(oflm_dir, models_ec)) return oflm_dir;
-#ifdef _WIN32
-    return user_dir + "\\.flm";
-#else
-    return user_dir + "/flm";
+    return user_dir + "/oflm";
 #endif
 }
 

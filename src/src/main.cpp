@@ -1,6 +1,6 @@
 /// \file main.cpp
-/// \brief Main entry point for the FLM application
-/// \author FastFlowLM Team
+/// \brief Main entry point for the OFLM application
+/// \author OpenFlowLM Team
 /// \date 2025-08-05
 /// \version 0.9.24
 /// \note This is a source file for the main entry point
@@ -59,7 +59,7 @@ std::atomic<bool> should_exit(false);
 std::mutex exit_mutex;
 std::condition_variable exit_cv;
 
-#if !defined(FLM_USE_HRX) && !defined(_WIN32)
+#if !defined(OFLM_USE_HRX) && !defined(_WIN32)
 ///@brief Preload critical XRT libraries from the executable directory
 ///@details This ensures that dlopen() calls within libraries find the bundled versions
 ///@note Only on Linux/Unix for the XRT backend; Windows handles DLL loading
@@ -141,7 +141,7 @@ std::vector<std::string> get_unicode_command_line_args(int& argc_out) {
 ///@brief ensure_models_directory creates the models directory if it doesn't exist
 ///@param exe_dir the executable directory
 void ensure_models_directory(const std::string& exe_dir) {
-    // Use Documents/flm/models directory on Windows or ~/.config/flm on Linux for models instead of executable directory
+    // Use Documents/oflm/models directory on Windows or ~/.config/oflm on Linux for models instead of executable directory
     std::string models_dir = utils::get_models_directory();
     if (!std::filesystem::exists(models_dir)) {
         std::filesystem::create_directories(models_dir);
@@ -241,7 +241,7 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
     validation_json["kernel_ok"] = kernel_ok;
     if (!kernel_ok) {
         if (print_human) {
-            header_print_r("ERROR", "Kernel version incompatible with this version of FLM. Please update your kernel!");
+            header_print_r("ERROR", "Kernel version incompatible with this version of OFLM. Please update your kernel!");
         }
         validation_json["ready"] = false;
         if (json_output) {
@@ -464,7 +464,7 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
-#elif !defined(FLM_USE_HRX)
+#elif !defined(OFLM_USE_HRX)
     // XRT backend: preload bundled XRT libraries from the executable directory.
     preload_bundled_libraries();
 #endif
@@ -481,7 +481,7 @@ int main(int argc, char* argv[]) {
     std::string config_path;
     try {
         config_path = utils::find_model_list();
-        // header_print("FLM", "Fetching models from: " + config_path);
+        // header_print("OFLM", "Fetching models from: " + config_path);
     }
     catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
@@ -511,7 +511,7 @@ int main(int argc, char* argv[]) {
 
     if (parsed_args.command == "run" || parsed_args.command == "serve" || parsed_args.command == "pull" || parsed_args.command == "remove" || parsed_args.command == "check" || parsed_args.command == "bench") {
       if (parsed_args.model_tag != "model-faker" && (!availble_models.is_model_supported(parsed_args.model_tag))) {
-            header_print("ERROR", "Model not found: " << parsed_args.model_tag << "; Please check with `flm list` and try again.");
+            header_print("ERROR", "Model not found: " << parsed_args.model_tag << "; Please check with `oflm list` and try again.");
             return 1;
         }
     }
@@ -522,7 +522,7 @@ int main(int argc, char* argv[]) {
             parsed_args.power_mode == "performance" || parsed_args.power_mode == "turbo") {
 #ifdef _WIN32
             std::string xrt_cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + parsed_args.power_mode + " > NUL 2>&1";
-            header_print("FLM", "Configuring NPU Power Mode to " + parsed_args.power_mode + (got_power_mode ? "" : " (flm default)"));
+            header_print("OFLM", "Configuring NPU Power Mode to " + parsed_args.power_mode + (got_power_mode ? "" : " (oflm default)"));
             (void)system(xrt_cmd.c_str());
 #endif
         }
@@ -553,11 +553,11 @@ int main(int argc, char* argv[]) {
         }
         if (parsed_args.asr) {
             asr_size = 1000000000;
-            header_print_g("FLM", "ASR mode enabled: reserving additional 1GB of memory");
+            header_print_g("OFLM", "ASR mode enabled: reserving additional 1GB of memory");
         }
         if (parsed_args.embed) {
             embedding_size = 300000000;
-            header_print_g("FLM", "Embedding mode enabled: reserving additional 300MB of memory");
+            header_print_g("OFLM", "Embedding mode enabled: reserving additional 300MB of memory");
         }
 
         // Add 512MB overhead for working memory beyond the model itself
@@ -580,9 +580,9 @@ int main(int argc, char* argv[]) {
     
     if (parsed_args.command == "version") {
         if (parsed_args.json_output) {
-            std::cout << "{ \"version\": \"" << __FLM_VERSION__ << "\" }" << std::endl;
+            std::cout << "{ \"version\": \"" << __OFLM_VERSION__ << "\" }" << std::endl;
         } else {
-            std::cout << "FLM v" << __FLM_VERSION__ << std::endl;
+            std::cout << "OFLM v" << __OFLM_VERSION__ << std::endl;
         }
         return 0;
     }
@@ -597,7 +597,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (parsed_args.preemption){
-        header_print("FLM", "Allowing high priority tasks to preempt FLM!");
+        header_print("OFLM", "Allowing high priority tasks to preempt OFLM!");
     }
 
 
@@ -624,10 +624,10 @@ int main(int argc, char* argv[]) {
             // Create the server
             int port = utils::get_server_port(parsed_args.port);
             if (parsed_args.port == -1) { // User did not specify port
-                header_print("FLM", "Using environment-specified port: " << port);
+                header_print("OFLM", "Using environment-specified port: " << port);
                 parsed_args.port = port; // overwrite to ensure server uses correct port
             } else {
-                header_print("FLM", "Using user-specified port: " << port);
+                header_print("OFLM", "Using user-specified port: " << port);
             }
             auto server = create_lm_server(availble_models, downloader, parsed_args);
             server->set_max_connections(parsed_args.max_socket_connections);           // Allow up to 10 concurrent connections
@@ -635,14 +635,14 @@ int main(int argc, char* argv[]) {
             server->set_npu_queue_length(parsed_args.max_npu_queue);           // Allow up to 10 concurrent queue
             server->set_request_timeout(std::chrono::seconds(600)); // 10 minute timeout for long requests
             // Start the server
-            header_print("FLM", "Starting server on port " << port << "...");
+            header_print("OFLM", "Starting server on port " << port << "...");
             server->start();
-            header_print("FLM", "Press Ctrl+C to stop.");
+            header_print("OFLM", "Press Ctrl+C to stop.");
             {
                 std::unique_lock<std::mutex> lock(mtx);
                 cv.wait(lock, [] { return !running.load(); });
             }
-            // header_print("FLM", "Stopping server...");
+            // header_print("OFLM", "Stopping server...");
             // server->stop();
         }
         else if (parsed_args.command == "pull") {

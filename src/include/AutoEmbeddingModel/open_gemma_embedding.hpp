@@ -1,6 +1,6 @@
 /// \file open_gemma_embedding.hpp
 /// \brief OpenGemma_Embedding: AutoEmbeddingModel backed by the open engine.
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-09-02
 /// \version 0.1.0
 /// \note Fully open replacement for the closed gemma_embedding stack.
@@ -35,7 +35,7 @@ inline const char* open_task_prefix(embedding_task_type_t task_type) {
 
 class OpenGemma_Embedding : public AutoEmbeddingModel {
 public:
-    explicit OpenGemma_Embedding(flm_rt::device* npu_device_inst)
+    explicit OpenGemma_Embedding(oflm_rt::device* npu_device_inst)
         : AutoEmbeddingModel(npu_device_inst, "embed-gemma:300m") {}
 
     ~OpenGemma_Embedding() override = default;

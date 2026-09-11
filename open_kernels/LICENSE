@@ -2,7 +2,7 @@ MIT License
 
 Copyright (c) 2026 Cyrus Attoun and phlegm contributors
 
-Portions derived from FastFlowLM (https://github.com/FastFlowLM/FastFlowLM),
+Portions derived from OpenFlowLM (https://github.com/OpenFlowLM/OpenFlowLM),
 Copyright (c) 2026 Advanced Micro Devices, Inc., also under the MIT License.
 See NOTICE.md for attribution and for the separate terms that govern the AMD
 NPU kernel binaries, which are NOT part of this repository.

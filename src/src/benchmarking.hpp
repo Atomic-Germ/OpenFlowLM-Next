@@ -198,7 +198,7 @@ void print_result(const BenchmarkResults_t& results) {
     int stages;
     stages = results.decoding_speed.size();
 
-    header_print("FLM", "=== Benchmark Results ===");
+    header_print("OFLM", "=== Benchmark Results ===");
     std::cout << "\n";
     
     // Print table header
@@ -267,10 +267,10 @@ BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_confi
         input_file.close();
     }
 
-    flm_rt::device npu_device_inst = flm_rt::device(0);
+    oflm_rt::device npu_device_inst = oflm_rt::device(0);
     std::unique_ptr<AutoModel> auto_chat_engine;
     if (!availble_models.is_model_supported(model_tag)) {
-        header_print_r("ERROR", "Model not found: " << model_tag << "; Please check with `flm list` and try again.");
+        header_print_r("ERROR", "Model not found: " << model_tag << "; Please check with `oflm list` and try again.");
         return results;
     }
     auto [new_tag, model_info] = availble_models.get_model_info(model_tag);
@@ -295,7 +295,7 @@ BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_confi
         log2_num_tokens = std::log2(max_length / 1024);
         stages = (int)std::floor(log2_num_tokens) + 1;
     }
-    header_print("FLM", "Starting benchmark with " + std::to_string(stages) + " stages...");
+    header_print("OFLM", "Starting benchmark with " + std::to_string(stages) + " stages...");
 
     // start doing the most tough benchmark first, in case the bench fails due to memory limitations
     results.TTFT.resize(stages);
@@ -313,7 +313,7 @@ BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_confi
     for (int it = 0; it < bench_config["iterations"]; it++) {
         for (int bench_len = stages - 1; bench_len >= 0; bench_len--)
         {
-            header_print("FLM", "Starting benchmark for " + std::to_string((1 << (bench_len))) << "k and iteration " << (it + 1) << "...");
+            header_print("OFLM", "Starting benchmark for " + std::to_string((1 << (bench_len))) << "k and iteration " << (it + 1) << "...");
             std::string long_text;
             long_text.reserve((1 << (bench_len)) * 1024);
             for (int i = 0; i < (1 << (bench_len)); i++) {
@@ -334,7 +334,7 @@ BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_confi
             ttft[bench_len].push_back((float)auto_chat_engine->get_ttft()); // in second
             prefill_speed[bench_len].push_back((float)meta_info.prompt_tokens / (meta_info.prefill_duration / 1e9)); // in tokens per second
             decoding_speed[bench_len].push_back((float)meta_info.generated_tokens / (meta_info.decoding_duration / 1e9)); // in second
-            header_print("FLM", "\tTTFT: " << ttft[bench_len].back() << "s, Prefill Speed: " << prefill_speed[bench_len].back() << " tokens/s, Decoding Speed: " << decoding_speed[bench_len].back() << " tokens/s");
+            header_print("OFLM", "\tTTFT: " << ttft[bench_len].back() << "s, Prefill Speed: " << prefill_speed[bench_len].back() << " tokens/s, Decoding Speed: " << decoding_speed[bench_len].back() << " tokens/s");
             auto_chat_engine->clear_context();
             // sleep for 1 second between benchmarks to avoid overheating or memory issues
             std::this_thread::sleep_for(std::chrono::seconds(1));

@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 ::
-:: Build flm from a clean CMake cache, on Windows.
+:: Build oflm from a clean CMake cache, on Windows.
 ::
 ::   Open "x64 Native Tools Command Prompt for VS", then:
 ::       clean_build.bat [vcpkg-root]
@@ -36,8 +36,8 @@ setlocal enabledelayedexpansion
 ::     junction instead -- but abseil is fetched inside that same add_subdirectory,
 ::     so on a truly fresh clone the target does not exist on the first pass.
 ::     This script therefore retries the configure ONCE.
-::   * flm.exe on PATH. If the build produced nothing, typing flm.exe in
-::     src\build silently runs the INSTALLED FastFlowLM instead, and you get
+::   * oflm.exe on PATH. If the build produced nothing, typing oflm.exe in
+::     src\build silently runs the INSTALLED OpenFlowLM instead, and you get
 ::     "unrecognised option '--embeddingmodel'" -- an error about a flag, which
 ::     sends you looking for the flag rather than for the binary.
 ::
@@ -49,6 +49,20 @@ setlocal enabledelayedexpansion
 
 set "REPO=%~dp0"
 if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
+
+:: ---------------------------------------------------------------- submodules
+::
+:: third_party/tokenizers-cpp (and its own msgpack/sentencepiece submodules)
+:: is a git submodule, not committed content. `git clone --recursive` (as the
+:: README says) picks it up, but a plain `git clone` or a `git pull` of a
+:: branch that added the submodule leaves the directory present but empty --
+:: and CMake's error for that, "does not contain a CMakeLists.txt file",
+:: reads like a broken checkout rather than an uninitialized submodule.
+git -C "%REPO%" submodule update --init --recursive
+if errorlevel 1 (
+    echo ERROR: git submodule update --init --recursive failed. See above.
+    exit /b 1
+)
 
 :: ---------------------------------------------------------------- vcpkg
 ::
@@ -145,7 +159,7 @@ if errorlevel 1 (
 :: ---------------------------------------------------------------- build
 echo.
 echo === build ===
-cmake --build "%REPO%\src\build" --target flm
+cmake --build "%REPO%\src\build" --target oflm
 if errorlevel 1 (
     echo.
     echo ERROR: build failed. If the link asks for a Boost that is not
@@ -154,19 +168,19 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "%REPO%\src\build\flm.exe" (
-    echo ERROR: the build reported success but there is no flm.exe.
+if not exist "%REPO%\src\build\oflm.exe" (
+    echo ERROR: the build reported success but there is no oflm.exe.
     exit /b 1
 )
 
 :: ---------------------------------------------------------------- report
 echo.
-for %%A in ("%REPO%\src\build\flm.exe") do echo Built %%~fA  ^(%%~zA bytes^)
+for %%A in ("%REPO%\src\build\oflm.exe") do echo Built %%~fA  ^(%%~zA bytes^)
 echo.
 echo Run it BY FULL PATH the first time:
-echo     "%REPO%\src\build\flm.exe" --version
-echo Typing bare `flm.exe` runs whichever one PATH finds first, which on a
-echo machine with FastFlowLM installed is the OTHER one -- and it fails with
+echo     "%REPO%\src\build\oflm.exe" --version
+echo Typing bare `oflm.exe` runs whichever one PATH finds first, which on a
+echo machine with OpenFlowLM installed is the OTHER one -- and it fails with
 echo "unrecognised option '--embeddingmodel'", an error about a flag rather
 echo than about the binary.
 echo.
@@ -193,15 +207,15 @@ exit /b 0
 :: means quoting quotes, and the toolchain path routinely contains spaces --
 :: which produced `Could not find toolchain file: "C:/Program"` and a warning
 :: about an "extra path from command line".
-:: FLM_VERSION gates which models will load; NPU_VERSION is the minimum NPU
+:: OFLM_VERSION gates which models will load; NPU_VERSION is the minimum NPU
 :: DRIVER version. Two different things, and both were wrong here.
 ::
-:: 0.9.25 as FLM_VERSION refuses newer containers outright:
-:: model_downloader.cpp compares a container's config.json "flm_version"
+:: 0.9.25 as OFLM_VERSION refuses newer containers outright:
+:: model_downloader.cpp compares a container's config.json "oflm_version"
 :: against it and reports Incompatible when the container is newer.
 :: qwen3.6-moe:35b-a3b (min 1.0.3) is in this repo's own catalogue and lands
-:: there; a Granite 4.2 container (flm_version 1.0.0) does too, whether it
-:: arrives through the catalogue or through flm-add. src\build-windows-vcpkg.cmd already passes 1.0.4.
+:: there; a Granite 4.2 container (oflm_version 1.0.0) does too, whether it
+:: arrives through the catalogue or through oflm-add. src\build-windows-vcpkg.cmd already passes 1.0.4.
 ::
 :: 0.9.25 as NPU_VERSION is worse, because it fails NON-DETERMINISTICALLY:
 :: main.cpp parses it with sscanf("%d.%d.%d.%d") and compares only the FOURTH
@@ -214,8 +228,8 @@ exit /b 0
 :configure
 cmake -S "%REPO%\src" -B "%REPO%\src\build" -G Ninja ^
     -DCMAKE_BUILD_TYPE=Release ^
-    -DFLM_VERSION=1.0.4 -DNPU_VERSION=32.0.203.304 ^
-    -DFLM_USE_HRX=OFF ^
+    -DOFLM_VERSION=0.1.0 -DNPU_VERSION=32.0.203.304 ^
+    -DOFLM_USE_HRX=OFF ^
     -DCMAKE_TOOLCHAIN_FILE="%VCPKG%\scripts\buildsystems\vcpkg.cmake"
 exit /b %errorlevel%
 

@@ -233,7 +233,7 @@ def test_the_numpy_and_cpp_packers_agree_on_the_mixed_container():
 def test_a_chunk_size_none_of_the_three_the_packer_reads_is_refused_by_name():
     """The message names the tensor, the byte count and what the count probably is. It must
     not GUESS Q4_K for a width that is not 4736 -- the reason this assertion exists (the
-    message used to read "FLM 1.0.3 / Q4_K?" for anything unfamiliar). Q4_K appears only in
+    message used to read "OFLM 1.0.3 / Q4_K?" for anything unfamiliar). Q4_K appears only in
     the list of widths the packer does read (OPEN-QUANT-Q4K)."""
     m = MixedContainer()
     dst = np.zeros(NCH * pack.CH, np.uint8)

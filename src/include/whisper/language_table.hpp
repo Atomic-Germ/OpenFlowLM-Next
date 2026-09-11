@@ -1,6 +1,6 @@
 /// \file language_table.hpp
 /// \brief language_table class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-17
 /// \version 0.9.24
 /// \note This is a header file for the language_table class

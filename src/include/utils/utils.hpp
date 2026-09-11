@@ -1,9 +1,9 @@
 /// \file utils.hpp
 /// \brief utils class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
-/// \note This file contains some utility functions for the FastFlowLM project.
+/// \note This file contains some utility functions for the OpenFlowLM project.
 #pragma once
 
 #include "typedef.hpp"
@@ -374,9 +374,9 @@ std::string find_model_info();
 
 
 ///@brief every directory that may hold an `xclbins/` tree, most specific first
-///@return the roots whose <root>/xclbins exists: $FLM_XCLBIN_PATH, the directory
-///        holding $FLM_CONFIG_PATH, the user-level flm config directory, the
-///        executable's directory, the CWD, <exe>/../share/flm, then the configured
+///@return the roots whose <root>/xclbins exists: $OFLM_XCLBIN_PATH, the directory
+///        holding $OFLM_CONFIG_PATH, the user-level oflm config directory, the
+///        executable's directory, the CWD, <exe>/../share/oflm, then the configured
 ///        prefix. `find_xclbin_path` is the first entry of this list.
 std::vector<std::string> xclbin_roots();
 
@@ -384,11 +384,11 @@ std::vector<std::string> xclbin_roots();
 ///@return path to the xclbin directory
 std::string find_xclbin_path();
 
-///@brief get_server_port gets the server port from environment variable FLM_SERVE_PORT
+///@brief get_server_port gets the server port from environment variable OFLM_SERVE_PORT
 ///@return the server port, default is 52625 if environment variable is not set
 int get_server_port(int user_port);
 
-///@brief get_models_directory gets the models directory from environment variable or defaults to Documents/flm/models on Windows or ~/.config/flm on Linux
+///@brief get_models_directory gets the models directory from environment variable or defaults to Documents/oflm/models on Windows or ~/.config/oflm on Linux
 ///@return the models directory path
 std::string get_models_directory();
 

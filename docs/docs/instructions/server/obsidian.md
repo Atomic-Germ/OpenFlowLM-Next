@@ -1,20 +1,20 @@
 ---
 layout: docs
-title: Obsidian + FLM
+title: Obsidian + OFLM
 nav_order: 3
 parent: Local Server (Server Mode)
 ---
 
-# 🧠 Run Obsidian with FastFlowLM — A Faster, Smarter Second Brain
+# 🧠 Run Obsidian with OpenFlowLM — A Faster, Smarter Second Brain
 
-This guide walks you through setting up **Obsidian** (with *AI Providers* and *Local GPT* plug-ins) and **FastFlowLM (FLM)** to work seamlessly together.
+This guide walks you through setting up **Obsidian** (with *AI Providers* and *Local GPT* plug-ins) and **OpenFlowLM (OFLM)** to work seamlessly together.
 
 ---
 ## 📑 Prerequisites
 
 Before starting, ensure you have the following installed:
 - **[Obsidian](https://obsidian.md/)**
-- **[FastFlowLM](https://fastflowlm.com/docs/install/)**
+- **[OpenFlowLM](https://openflowlm.com/docs/install/)**
 
 ---
 ## 🚀 Quick Start
@@ -29,11 +29,11 @@ Before starting, ensure you have the following installed:
 6. Install and enable **AI Providers**.
 7. Repeat the same steps to install and enable **Local GPT**.
 
-### Start FLM server
+### Start OFLM server
 
-Run the following command in PowerShell to launch the FastFlowLM server:
+Run the following command in PowerShell to launch the OpenFlowLM server:
 
-`flm serve llama3.2:1b`
+`oflm serve llama3.2:1b`
 
 ### Configure AI Providers 
 
@@ -44,8 +44,8 @@ Run the following command in PowerShell to launch the FastFlowLM server:
 3. Click **➕** to create a new provider.
 4. Set **Provider type** to **OpenAI**.
 5. Enter the **Provider URL**: `http://127.0.0.1:52625/v1`.
-6. Enter a **Provider name** (e.g., `FLM_OpenAI`).
-7. Enter any **API key** (e.g., `flm`).
+6. Enter a **Provider name** (e.g., `OFLM_OpenAI`).
+7. Enter any **API key** (e.g., `oflm`).
 8. On the **Model** line, click the **🔄** icon to load available models, then select your preferred model (e.g. llama3.2:1b).
 9. Click **Save**.
 
@@ -56,8 +56,8 @@ Run the following command in PowerShell to launch the FastFlowLM server:
 3. Click **➕** to create a new provider.
 4. Set **Provider type** to **Ollama**.
 5. Enter the **Provider URL**: `http://127.0.0.1:52625`.
-6. Enter a **Provider name** (e.g., `FLM_Ollama`).
-7. Enter any **API key** (e.g., `flm`).
+6. Enter a **Provider name** (e.g., `OFLM_Ollama`).
+7. Enter any **API key** (e.g., `oflm`).
 8. On the **Model** line, click the **🔄** icon to load available models, then select your preferred one (e.g. llama3.2:1b).
 9. Click **Save** to apply your **AI Provider**.
 
@@ -67,7 +67,7 @@ Run the following command in PowerShell to launch the FastFlowLM server:
 
 1. Click **⚙️** to open the setting panel.
 2. Under **Community Plugins** section (left), click **Local GPT**.
-3. Set **Main AI Provider** to the provider you configured earlier (e.g., `FLM_OpenAI ~ llama3.2:1b`).
+3. Set **Main AI Provider** to the provider you configured earlier (e.g., `OFLM_OpenAI ~ llama3.2:1b`).
 4. Review the **Action list** to see what **Local GPT** can do.
 
 #### Set up hotkeys

@@ -147,7 +147,7 @@ class __Q4NX_Converter(ABC):
     def set_default_tensor_type(self, q4nx_name: str) -> None:
         """Override the config's `default_tensor_type` after it is loaded (the CLI's
         `--quant`). Roles that pin their own type in the config keep it; everything else
-        follows, so the name maps are rebuilt. `Q4_K` is what FLM 1.0.3+ requires for the
+        follows, so the name maps are rebuilt. `Q4_K` is what OFLM 1.0.3+ requires for the
         35B MoE projections -- q4_1 there decodes as infinite `////` or segfaults."""
         if q4nx_name == "Q4_K" and self.gguf_reader is None:
             raise ValueError(
@@ -335,12 +335,12 @@ class __Q4NX_Converter(ABC):
         save_file(self.q4nx_tensors, os.path.join(q4nx_path, filename))
 
     def _export_weights(self, q4nx_path: str, weights_type: str = "language"):
-        """Export the current tensor dict to the file expected by the FLM
+        """Export the current tensor dict to the file expected by the OFLM
         runtime for the given weight type.
 
         The runtime reads the file name for vision/audio weights from the
         model's config.json (``vision_model_weight`` / ``audio_model_weight``).
-        The names used by the official FLM model repos are:
+        The names used by the official OFLM model repos are:
           - language -> model.q4nx
           - vision   -> vision_weight.q4nx  (qwen2vl uses vision_weights.q4nx)
           - audio    -> audio_weight.q4nx
@@ -463,7 +463,7 @@ class __Q4NX_Converter(ABC):
         ]
         where a0_0, a0_1 share a common scale
         Thus, this mean the AIE kernel need to do a even_odd filter, as show in code 
-        https://github.com/ngdxzy/FastFlowLM_Dev/blob/30b43b59d77f5759e943cea52ff7a259ca0fa776/npu_framework/gpt_npu_bin/kernel/mvm_MXFP4.hpp#L76
+        https://github.com/ngdxzy/OpenFlowLM_Dev/blob/30b43b59d77f5759e943cea52ff7a259ca0fa776/npu_framework/gpt_npu_bin/kernel/mvm_MXFP4.hpp#L76
         """
         
         # Thus, in this code, let us do the even odd filter for it
@@ -505,7 +505,7 @@ class __Q4NX_Converter(ABC):
         # Final shape: [..., 16]
         data_reordered = torch.cat([low_part_packed, high_part_packed], dim=-1)
         data = data_reordered.contiguous()
-        # NOW, this code change is reflected in https://github.com/ngdxzy/FastFlowLM_Dev/commit/028680d1f670d817fae0e7efe947bb1a4c19c8a3
+        # NOW, this code change is reflected in https://github.com/ngdxzy/OpenFlowLM_Dev/commit/028680d1f670d817fae0e7efe947bb1a4c19c8a3
         
         
         

@@ -1,13 +1,13 @@
 /// \file hrx_cpp.hpp
 /// \brief Minimal C++ `namespace hrx` providing the device/buffer/kernel/run
-///        API that FastFlowLM uses, implemented directly on top of libhrx
+///        API that OpenFlowLM uses, implemented directly on top of libhrx
 ///        (hrx_runtime.h).
 ///
 /// NPU control code goes straight from npu_sequence::dump() into an HRX XADX
 /// "direct executable"; there is no separate assembler step.
 ///
 /// Coherence model: buffers are device-visible, host-coherent, mapped once
-/// (persistent). FastFlowLM already brackets device work with explicit
+/// (persistent). OpenFlowLM already brackets device work with explicit
 /// sync_to_device()/sync_from_device() calls, so we map those directly to
 /// hrx_buffer_flush_range()/hrx_buffer_invalidate_range(). Dispatch is
 /// hrx_stream_dispatch() + hrx_stream_synchronize().
@@ -29,9 +29,9 @@
 #include "hrx_amdxdna.h"
 #include "hrx_runtime.h"
 
-// ---- ert_cmd_state: command states that FLM's npu_utils returns/maps.
-#ifndef FLM_ERT_CMD_STATE_DEFINED
-#define FLM_ERT_CMD_STATE_DEFINED
+// ---- ert_cmd_state: command states that OFLM's npu_utils returns/maps.
+#ifndef OFLM_ERT_CMD_STATE_DEFINED
+#define OFLM_ERT_CMD_STATE_DEFINED
 enum ert_cmd_state {
     ERT_CMD_STATE_NEW = 1,
     ERT_CMD_STATE_QUEUED = 2,
@@ -94,7 +94,7 @@ inline Runtime& rt() {
 }
 
 // Report (do not swallow) an HRX error. Returns true if status was an error.
-// FLM dispatch silently ignored synchronize/dispatch failures, which turns a
+// OFLM dispatch silently ignored synchronize/dispatch failures, which turns a
 // failed ERT_CMD_CHAIN (e.g. a missing host patch table) into silent no-op
 // dispatches -> garbage output at full speed. Always surface these.
 inline bool hrx_report(hrx_status_t s, const char* where) {
@@ -209,7 +209,7 @@ public:
         std::fclose(f);
     }
 
-    // FLM searches kernels for one whose name starts with "MLIR_AIE"; the HRX
+    // OFLM searches kernels for one whose name starts with "MLIR_AIE"; the HRX
     // dispatch path always uses the "MLIR_AIE" export, so a single placeholder
     // kernel is sufficient (matches the proven interposer behavior).
     class kernel {
@@ -224,7 +224,7 @@ public:
 };
 
 namespace info {
-// Argument to device::get_info<>(). FLM only queries the human-readable
+// Argument to device::get_info<>(). OFLM only queries the human-readable
 // device name for diagnostics.
 enum class device { name, architecture };
 }

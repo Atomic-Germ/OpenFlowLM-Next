@@ -1,12 +1,12 @@
 ---
 name: open-granite-kernels
-description: Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for a Granite tag installed with flm-add, or when a Granite container's attention_multiplier is refused at load.
+description: Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for a Granite tag installed with oflm-add, or when a Granite container's attention_multiplier is refused at load.
 ---
 
 # Granite 4.2 3B on the dense recipe
 
 Granite is the **fifth family** on `open_kernels/recipes/dense.py`, and the
-first at **head_dim 64** — the point every shipped FastFlowLM design refused,
+first at **head_dim 64** — the point every shipped OpenFlowLM design refused,
 because head_dim is intrinsic to RoPE and cannot be padded. Nothing in the
 design changed for it: `ATTN_HD` / `ATTN_NH` are compile-time macros and
 `designs/attn/attn.h` already carried HD 64's `kScale = 0.125f`.
@@ -53,7 +53,7 @@ OS-specific — an xclbin is a device artifact with no host code in it.
 ```powershell
 cd C:\dev\mlir-aie; . .\iron_env.ps1          # MUST be dot-sourced
 cd <repo>
-python open_kernels\export_qwen36_kernels.py --model-dir C:\Users\<you>\.flm\models\Granite-4.2-3B-NPU2
+python open_kernels\export_qwen36_kernels.py --model-dir C:\Users\<you>\.oflm\models\Granite-4.2-3B-NPU2
 ```
 
 Three sets, from build dirs `dense/build_granite_h2560`, `ln/build_2560_1e-05`,
@@ -116,7 +116,7 @@ Correctness, 4-layer slice: logits corr **0.999998 / 0.999990**, same argmax
 **Performance: at zero context `dx` wins; past that, context dominates and it
 is not Granite's fault.** `part0` 60.0 ms over 40 layers at position 0 is
 **1500 µs/layer**, against the hand-written four-dispatch Granite kernels in
-`vegah/FastFlowLM@feat/kernels` at **1744.7 µs/layer** — 1.16×, the direction
+`vegah/OpenFlowLM@feat/kernels` at **1744.7 µs/layer** — 1.16×, the direction
 one dispatch per layer was expected to give.
 
 Everything above that is a term linear in position, and it is the **dense

@@ -2,7 +2,7 @@
 *  Copyright (c) 2026 Advanced Micro Devices, Inc.
 *  \file runner.cpp
 *  \brief Runner implementation for interactive model execution
-*  \author FastFlowLM Team
+*  \author OpenFlowLM Team
 *  \date 2025-08-05
 *  \version 0.9.21
 */
@@ -41,7 +41,7 @@ std::map<std::string, runner_cmd_t> cmd_map = {
 Runner::Runner(model_list& supported_models, ModelDownloader& downloader, program_args_t& args)
     : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption) {
 
-    this->npu_device_inst = flm_rt::device(0);
+    this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
         this->ctx_length = args.ctx_length >= 512 ? args.ctx_length : 512;
@@ -96,17 +96,17 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
 
 
     if (this->embed) {
-        header_print("Warning", "Embed model not supported in CLI; Use 'flm serve -e 1'");
+        header_print("Warning", "Embed model not supported in CLI; Use 'oflm serve -e 1'");
     }
 
-    header_print("FLM", "Loading model: " << this->tag);
+    header_print("OFLM", "Loading model: " << this->tag);
 
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
     if (this->asr) {
         // check if multi-modal model with ASR support is loaded, if not, load the default whisper model for ASR
         if (!asr_supported) 
         {
-            header_print("FLM", "The loaded model does not support ASR. Loading default Whisper model for ASR...");
+            header_print("OFLM", "The loaded model does not support ASR. Loading default Whisper model for ASR...");
             std::string whisper_tag = "whisper-v3:turbo";
             switch (this->downloader.is_model_downloaded(whisper_tag)) {
                 case ModelDownloader::ModelStatus::Ready:
@@ -116,7 +116,7 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
                     this->downloader.pull_model(whisper_tag, this->modelscope);
                     break;
                 case ModelDownloader::ModelStatus::Incompatible:
-                    header_print("ERROR", "Whisper is incompatible with this version of FastFlowLM, skipping... ");
+                    header_print("ERROR", "Whisper is incompatible with this version of OpenFlowLM, skipping... ");
                     return;
             }
             this->whisper_engine = std::make_unique<Whisper>(&this->npu_device_inst);
@@ -131,7 +131,7 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
             }
         }
         else {
-            header_print("FLM", "The loaded model (" + this->tag + ") already supports ASR. No additional ASR model is needed.");
+            header_print("OFLM", "The loaded model (" + this->tag + ") already supports ASR. No additional ASR model is needed.");
         }
     }
 #else
@@ -153,7 +153,7 @@ void Runner::run() {
     std::wstring_convert<std::codecvt_utf8<wchar_t>> utf8conv;
     wstream_buf obuf(std::cout);
     std::ostream base_ostream(&obuf);
-    header_print("FLM", "Type /? for help");
+    header_print("OFLM", "Type /? for help");
     int empty_line_count = 0;
     bool is_image = false;
     bytes image;
@@ -163,7 +163,7 @@ void Runner::run() {
         if (input.empty()) {
             empty_line_count++;
             if (empty_line_count > 2) {
-                header_print("FLM", "Type /? for help");
+                header_print("OFLM", "Type /? for help");
                 empty_line_count = 0;
             }
             continue;
@@ -285,7 +285,7 @@ void Runner::run() {
                     last_file_name_idx = 1;
                 }
 
-                header_print("FLM", "Loading file: " << filename);
+                header_print("OFLM", "Loading file: " << filename);
                 std::cout << std::endl;
                 if (filename.find(".jpg") != std::string::npos || filename.find(".png") != std::string::npos || filename.find(".jpeg") != std::string::npos) {
                     uniformed_input.images.push_back(filename);
@@ -301,8 +301,8 @@ void Runner::run() {
                     else if (this->asr) {
                         // check if the file exists
                         if (!std::filesystem::exists(filename)) {
-                            header_print("FLM", "Error: Could not open file: " << filename);
-                            header_print("FLM", "Please check if the file exists and is readable.");
+                            header_print("OFLM", "Error: Could not open file: " << filename);
+                            header_print("OFLM", "Please check if the file exists and is readable.");
                             continue;
                         }
                         this->whisper_engine->load_audio(filename);
@@ -326,8 +326,8 @@ void Runner::run() {
 #ifdef _WIN32
                     std::wifstream file(utf8_to_wstring(filename));
                     if (!file.is_open()) {
-                        header_print("FLM", "Error: Could not open file: " << filename);
-                        header_print("FLM", "Please check if the file exists and is readable.");
+                        header_print("OFLM", "Error: Could not open file: " << filename);
+                        header_print("OFLM", "Please check if the file exists and is readable.");
                         continue;
                     }
                     file.imbue(std::locale(file.getloc(), new std::codecvt_utf8<wchar_t>));  // treat file content as UTF-8
@@ -337,8 +337,8 @@ void Runner::run() {
 #else
                     std::ifstream file(filename);
                     if (!file.is_open()) {
-                        header_print("FLM", "Error: Could not open file: " << filename);
-                        header_print("FLM", "Please check if the file exists and is readable.");
+                        header_print("OFLM", "Error: Could not open file: " << filename);
+                        header_print("OFLM", "Please check if the file exists and is readable.");
                         continue;
                     }
                     std::string file_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -439,7 +439,7 @@ void Runner::cmd_load(std::vector<std::string>& input_list) {
                 this->downloader.pull_model(this->tag, this->modelscope);
                 break;
             case ModelDownloader::ModelStatus::Incompatible:
-                header_print("ERROR", "Model is incompatible with this version of FastFlowLM: " + this->tag);
+                header_print("ERROR", "Model is incompatible with this version of OpenFlowLM: " + this->tag);
                 exit(EXIT_FAILURE);
         }
         auto_chat_engine.reset();
@@ -461,7 +461,7 @@ void Runner::cmd_load(std::vector<std::string>& input_list) {
 
     }
     else
-        header_print("FLM", "Model already loaded: " << model_name);
+        header_print("OFLM", "Model already loaded: " << model_name);
 
 }
 
@@ -469,7 +469,7 @@ void Runner::cmd_load(std::vector<std::string>& input_list) {
 /// \param input_list, std::vector<std::string>
 void Runner::cmd_save(std::vector<std::string>& input_list) {
     std::pair<std::string, std::vector<int>> history = this->auto_chat_engine->get_history();
-    // Get the FLM_MODEL_PATH environment variable for the history directory
+    // Get the OFLM_MODEL_PATH environment variable for the history directory
     std::string history_dir;
     const char* path_sep = "/";
 #ifdef _WIN32
@@ -480,12 +480,12 @@ void Runner::cmd_save(std::vector<std::string>& input_list) {
     history_dir = utils::get_models_directory() + path_sep + "history";
 
 #else
-    const char* model_path_env = std::getenv("FLM_MODEL_PATH");
+    const char* model_path_env = std::getenv("OFLM_MODEL_PATH");
     if (model_path_env && *model_path_env) {
         history_dir = std::string(model_path_env) + path_sep + "history";
     } else {
         std::string documents_dir = utils::get_user_directory();
-        history_dir = documents_dir + path_sep + "flm" + path_sep + "history";
+        history_dir = documents_dir + path_sep + "oflm" + path_sep + "history";
     }
 #endif
     

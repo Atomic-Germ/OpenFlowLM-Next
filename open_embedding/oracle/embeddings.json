@@ -1549,8 +1549,8 @@
    -0.050463
   ]
  },
- "batch_flm": {
-  "text": "FastFlowLM is a local inference server.",
+ "batch_oflm": {
+  "text": "OpenFlowLM is a local inference server.",
   "prompt": "task: search result | query: ",
   "dim": 768,
   "embedding": [

@@ -1,9 +1,9 @@
 /// \file typedef.hpp
-/// \brief typedef file for the FastFlowLM project
-/// \author FastFlowLM Team
+/// \brief typedef file for the OpenFlowLM project
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.10
-/// \note This file contains the typedefs for the FastFlowLM project
+/// \note This file contains the typedefs for the OpenFlowLM project
 
 #pragma once
 #include <cstdint>

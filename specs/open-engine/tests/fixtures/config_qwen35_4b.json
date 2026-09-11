@@ -84,7 +84,7 @@
   "bos_token_id": 248044,
   "addr_qk": 53248,
   "addr_kv": 53536,
-  "flm_version": "1.0.1",
+  "oflm_version": "1.0.1",
   "vision_model_weight": "vision_weight.q4nx",
   "vision_config": {
     "vision_mm_engine_xclbin_name": "vision_mm.xclbin",

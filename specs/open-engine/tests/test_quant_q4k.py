@@ -119,7 +119,7 @@ def _q4k_exact(chunk) -> np.ndarray:
 
 class Q4kContainer:
     """One Q4_K tensor, one q4_1 tensor and one with 1280-byte chunks -- the shape of a
-    container from FLM 1.0.3+, which keeps Q4_K where the closed runtime demands it and
+    container from OFLM 1.0.3+, which keeps Q4_K where the closed runtime demands it and
     leaves the rest alone."""
 
     def __init__(self):
@@ -253,7 +253,7 @@ def test_a_chunk_width_that_is_none_of_the_three_is_still_refused():
     msg = str(e.value)
     assert "up_proj" in msg and "1280" in msg
     assert "4736" in msg, "the accepted widths should now include Q4_K"
-    assert "Q4_K (FLM 1.0.3), which needs a different dequant" not in msg
+    assert "Q4_K (OFLM 1.0.3), which needs a different dequant" not in msg
 
 
 # ------------------------------------------------------------------- the fp64 reader

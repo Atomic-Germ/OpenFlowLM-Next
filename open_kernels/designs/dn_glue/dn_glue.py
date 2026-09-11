@@ -8,7 +8,7 @@ Args:
                              [small f32: A[32], dt_bias[32], pad][convw bf16 [8 tiles][4][1024]
                              = 2 elems per tile]
   qkv    f32[8192]           this token's qkv projection
-  state  bf16[3*8192]        conv state rows (FLM layout)
+  state  bf16[3*8192]        conv state rows (OFLM layout)
   nstate bf16[3*8192]        out: shifted state [s1, s2, bf16(qkv)]
   vec    f32[32*512]         out: per-head records for designs/deltanet
 

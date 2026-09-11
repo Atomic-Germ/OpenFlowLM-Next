@@ -1,6 +1,6 @@
 /// \file deepseek.cpp
 /// \brief deepseek class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the deepseek class
@@ -12,7 +12,7 @@
 
 
 /************              Qwen2VL family            **************/
-Qwen2VL::Qwen2VL(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen2VL") {}
+Qwen2VL::Qwen2VL(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen2VL") {}
 
 void Qwen2VL::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -146,7 +146,7 @@ bool Qwen2VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                 qwenvl_message.push_back(newItem);
             }
             templated_text = this->apply_chat_template(qwenvl_message);
-            header_print_g("FLM", "Total images: " + std::to_string(total_images));
+            header_print_g("OFLM", "Total images: " + std::to_string(total_images));
         }
         else if (!input.prompt.empty()) { // a pure text, usually from the cli
             nlohmann::ordered_json messages;
@@ -270,7 +270,7 @@ bool Qwen2VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
                         image_payload._data__processed.begin(),
                         image_payload._data__processed.begin() + bf16_to_drop);
                 }
-                header_print_g("FLM",
+                header_print_g("OFLM",
                     "Prompt-cache hit: dropped " + std::to_string(images_to_drop)
                     + " cached image(s) from payload");
             }

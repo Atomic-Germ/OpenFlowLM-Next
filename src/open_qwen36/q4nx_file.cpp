@@ -1,5 +1,5 @@
 /// \file q4nx_file.cpp
-/// \brief Open reader for FLM's `.q4nx` weight container (see q4nx_file.hpp).
+/// \brief Open reader for OFLM's `.q4nx` weight container (see q4nx_file.hpp).
 #include "open_qwen36/q4nx_file.hpp"
 
 #include <cstring>

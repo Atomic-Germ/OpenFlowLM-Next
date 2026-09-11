@@ -117,7 +117,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // prefill runs one token at a time even on a model that DOES have one, if
     // the kernel_dir actually loaded is a stale copy without it
     // (Engine::find_kernels() prefers <model>/open_kernels over
-    // FLM_OPEN_KERNELS_DIR/FLM_XCLBIN_PATH -- this project lost real time to
+    // OFLM_OPEN_KERNELS_DIR/OFLM_XCLBIN_PATH -- this project lost real time to
     // exactly that before this log line existed).
     gemm_block_t_ = nl_ > 0 ? types_[0]->gemm_block.t : 0;
     for (int l = 1; l < nl_; ++l)

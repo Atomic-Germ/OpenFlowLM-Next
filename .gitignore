@@ -1,5 +1,6 @@
 build
 build_*/
+build-*/
 .vscode
 .codegraph/
 *.egg-info/
@@ -8,6 +9,8 @@ _site
 .jekyll-metadata
 *.csv
 utilities/mlir-aie
+third_party/mlir-aie
+third_party/Peano
 ironvenv
 Models
 # ...but not the q4nx-build converters, which live in a directory called
@@ -40,6 +43,17 @@ open_kernels/designs/*/*.cfg
 open_kernels/designs/*/*.log
 open_kernels/harness/out/
 open_kernels/model/out*/
+
+# Generated kernel translation units (dense/, layer_x/, lm_head_q4/ and the
+# gemv_q4 activation-prep entries): written per-spec by designs/*/gen_kernels.py
+# (or on demand by gemv_q4.ensure_prep_entry / lm_head_q4._ensure_gy) during the
+# export. They are NOT source -- the source is the generator + the recipe -- so
+# they are regenerated at build time and never tracked. A tracked copy drifts to
+# match whichever spec was exported last.
+open_kernels/designs/dense/*.cc
+open_kernels/designs/layer_x/*.cc
+open_kernels/designs/lm_head_q4/*.cc
+open_kernels/designs/gemv_q4/gemv_q4_prep_k*.cc
 
 # npu_offload/matmul generated fixtures (make_test.py) and run configs
 npu_offload/matmul/[abyr]_m*.bin

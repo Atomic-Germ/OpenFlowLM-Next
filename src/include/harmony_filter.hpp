@@ -1,6 +1,6 @@
 /// \file harmony_filter.hpp
 /// \brief harmony_filter class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-10
 /// \version 0.9.24
 /// \note This class is used to filter the messages that are sent to the model

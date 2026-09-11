@@ -50,7 +50,7 @@ Qwen3.6-27B's here; the engine passes its manifest's.
   system DLL — `src/WinSetup.md`); the script stops with that message if
   either is unset.
 - **Linux:** `cmake -S . -B build && cmake --build build` with XRT at
-  `$XILINX_XRT` or `/opt/xilinx/xrt`. Or `-DFLM_BUILD_OPEN_KERNELS_HARNESS=ON`
+  `$XILINX_XRT` or `/opt/xilinx/xrt`. Or `-DOFLM_BUILD_OPEN_KERNELS_HARNESS=ON`
   from `src/`.
 
 ## Test a design
@@ -69,7 +69,7 @@ GEMV_N=8192 GEMV_K=2048 GEMV_RS=2 GEMV_CORES=8 \
 
 Generated cfgs name every path relative to the design directory, so the same
 `run.cfg` works from WSL and from Windows. Fixtures that slice weights out of
-captured FLM buffers (`router`, `dn_glue`, `dn_post`, `moe_combine`,
+captured OFLM buffers (`router`, `dn_glue`, `dn_post`, `moe_combine`,
 `deltanet`, the fused-layer tests) read them from `$OPEN_KERNELS_CAPS` and say
 so when it is unset — see `../fixture_paths.py`. The six kernel sets the
 engine loads are built by `../export_qwen36_kernels.py`
@@ -87,8 +87,8 @@ its fp64 reference. Timing is start→wait per run, median of 18 warm runs.
 |---|---|---|---|---|---|
 | `ln` (RMSNorm+residual, 2048) | random | y maxrel 5.4e-8, xn bit-exact | **0.21 ms** | 0.27 ms | — |
 | `gemv_q4` qkv 8192×2048 (10.5 MB) | synthetic Q4_1 → pool | cos 1.0, maxrel 3.3e-6 | **0.92 ms** | 0.89 ms | 0.50–0.55 ms |
-| `gemv_q4` qkv | captured FLM pool | cos 1.0, maxrel 1.6e-5 | 0.59 ms (5 runs) | ~1.0 ms | 0.50–0.55 ms |
-| `lm_head_q8` full vocab 248320 (540 MB) | captured FLM pool | cos 1.0, maxrel 4.6e-6 | **15.9 ms** | 34 ms (noisy) | 15.6 ms; FLM closed 15.4 ms |
+| `gemv_q4` qkv | captured OFLM pool | cos 1.0, maxrel 1.6e-5 | 0.59 ms (5 runs) | ~1.0 ms | 0.50–0.55 ms |
+| `lm_head_q8` full vocab 248320 (540 MB) | captured OFLM pool | cos 1.0, maxrel 4.6e-6 | **15.9 ms** | 34 ms (noisy) | 15.6 ms; OFLM closed 15.4 ms |
 | embedding `m512_768x768` bf16→f32 | random | bit-identical to shipped xclbin | 1.0 ms | — | — |
 
 Synthetic and captured Q4_1 weights give the same kernel behaviour, which is
@@ -98,7 +98,7 @@ drivers and is a box effect (the machine was under memory pressure that day),
 not a host-side one. phlegm's driver exits with an access violation in XRT
 teardown after all work is done (known, harmless).
 
-End-to-end context, same day, same box: FLM 1.0.2 on the stock Qwen3.6-35B-A3B
+End-to-end context, same day, same box: OFLM 1.0.2 on the stock Qwen3.6-35B-A3B
 decoded at 0.62 tok/s — but with 3 GB of RAM free and ~100 hard page faults/s;
 phlegm measured the same build at ~6.8 tok/s on a quiet box. phlegm's open
 kernels do the pruned 27B at ~155 ms/token (6.1 tok/s). Whole-model numbers

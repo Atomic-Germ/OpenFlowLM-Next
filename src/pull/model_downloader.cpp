@@ -1,6 +1,6 @@
 /// \file model_downloader.cpp
 /// \brief Model downloader class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to download models from the huggingface
@@ -31,7 +31,7 @@ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::str
 
         if (modelstatus == ModelStatus::Outdated) {
             if (!fast_check) {
-                header_print("FLM", "Checking outdated files...");
+                header_print("OFLM", "Checking outdated files...");
                 verify_and_clean_files(model_tag, sub_process_mode);
             }
         }
@@ -44,23 +44,23 @@ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::str
     return modelstatus;
 }
 
-/// \brief Check if the model is compatible with the current FLM version
+/// \brief Check if the model is compatible with the current OFLM version
 /// \param model_tag the model tag
 /// \return true if the model is compatible, false otherwise
 ModelDownloader::ModelStatus ModelDownloader::check_model_compatibility(const std::string& model_tag, bool sub_process_mode) {
     auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
     LM_Config config;
     config.from_pretrained(this->supported_models.get_model_path(new_model_tag));
-    std::string flm_version = config.flm_version;
-    std::string flm_min_version = model_info["flm_min_version"];
+    std::string oflm_version = config.oflm_version;
+    std::string oflm_min_version = model_info["oflm_min_version"];
 
-    // A CHECKPOINT THAT IS NOT AN FLM ARTIFACT HAS NO VERSION TO COMPARE.
+    // A CHECKPOINT THAT IS NOT AN OFLM ARTIFACT HAS NO VERSION TO COMPARE.
     //
-    // LM_Config defaults flm_version to "0.0.0" when config.json has no such
+    // LM_Config defaults oflm_version to "0.0.0" when config.json has no such
     // key -- and no upstream HuggingFace checkpoint has one, because it is a
     // field this project writes. So every model listed with the author's OWN
-    // files reads as version 0, compares below the entry's flm_min_version,
-    // and is reported Outdated forever: `flm list` shows a warning triangle
+    // files reads as version 0, compares below the entry's oflm_min_version,
+    // and is reported Outdated forever: `oflm list` shows a warning triangle
     // and ensure_*_model_loaded() re-pulls a complete, correct download on
     // every start.
     //
@@ -71,30 +71,30 @@ ModelDownloader::ModelStatus ModelDownloader::check_model_compatibility(const st
     // default as "not versioned" changes nothing for any artifact that really
     // carries a version -- it only stops the check firing on models it was
     // never about.
-    if (flm_version == "0.0.0") {
+    if (oflm_version == "0.0.0") {
         return ModelStatus::Ready;
     }
     int l_l, m_l, r_l; //left, middle, right on local version
     int l_r, m_r, r_r; //left, middle, right on requried version
-    int l_f, m_f, r_f; //left, middle, right on flm version
-    sscanf(__FLM_VERSION__, "%d.%d.%d", &l_f, &m_f, &r_f);
-    sscanf(flm_version.c_str(), "%d.%d.%d", &l_l, &m_l, &r_l);
-    sscanf(flm_min_version.c_str(), "%d.%d.%d", &l_r, &m_r, &r_r);
+    int l_f, m_f, r_f; //left, middle, right on oflm version
+    sscanf(__OFLM_VERSION__, "%d.%d.%d", &l_f, &m_f, &r_f);
+    sscanf(oflm_version.c_str(), "%d.%d.%d", &l_l, &m_l, &r_l);
+    sscanf(oflm_min_version.c_str(), "%d.%d.%d", &l_r, &m_r, &r_r);
     uint32_t local_version_u32 = l_l * 1000000 + m_l * 1000 + r_l;
     uint32_t required_version_u32 = l_r * 1000000 + m_r * 1000 + r_r;
-    uint32_t flm_version_u32 = l_f * 1000000 + m_f * 1000 + r_f;
+    uint32_t oflm_version_u32 = l_f * 1000000 + m_f * 1000 + r_f;
 
-    if (local_version_u32 > flm_version_u32) {
+    if (local_version_u32 > oflm_version_u32) {
         if (!sub_process_mode) {
-            header_print("WARNING", "Local model " + model_tag + " version: " + flm_version + " > " + __FLM_VERSION__);
-            header_print("WARNING", "Please update FLM to the latest version.");
+            header_print("WARNING", "Local model " + model_tag + " version: " + oflm_version + " > " + __OFLM_VERSION__);
+            header_print("WARNING", "Please update OFLM to the latest version.");
         }
         return ModelStatus::Incompatible;
     }
     if (local_version_u32 < required_version_u32) {
         if (!sub_process_mode) {
-            header_print("WARNING", "Local model " + model_tag + " version: " + flm_version + " < " + flm_min_version);
-            // header_print("FLM", "Re-pulling latest model...");
+            header_print("WARNING", "Local model " + model_tag + " version: " + oflm_version + " < " + oflm_min_version);
+            // header_print("OFLM", "Re-pulling latest model...");
         }
         return ModelStatus::Outdated;
     }
@@ -111,15 +111,15 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         std::string model_name = model_info["name"];
         std::string model_server = use_modelscope ? "ModelScope" : "HuggingFace";
         
-        header_print("FLM", "Pulling model from " + model_server + "...");
-        header_print("FLM", "Model: " + new_model_tag);
-        header_print("FLM", "Name: " + model_name);
+        header_print("OFLM", "Pulling model from " + model_server + "...");
+        header_print("OFLM", "Model: " + new_model_tag);
+        header_print("OFLM", "Name: " + model_name);
 
         ModelDownloader::ModelStatus status = is_model_downloaded(new_model_tag);
         switch (status) {
             case ModelStatus::Ready:
                 if (!force_redownload) {
-                    header_print("FLM", "Model already downloaded. Use --force to re-download.");
+                    header_print("OFLM", "Model already downloaded. Use --force to re-download.");
                     return true;
                 }
                 verify_and_clean_files(new_model_tag, use_modelscope);
@@ -135,23 +135,23 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         // Get missing files
         auto missing_files = get_missing_files(new_model_tag);
         if (missing_files.empty() && !force_redownload) {
-            header_print("FLM", "All files already present.");
+            header_print("OFLM", "All files already present.");
             return true;
         }
         
         if (!missing_files.empty()) {
-            header_print("FLM", "Missing files (" + std::to_string(missing_files.size()) + "):");
+            header_print("OFLM", "Missing files (" + std::to_string(missing_files.size()) + "):");
             for (const auto& file : missing_files) {
                 std::cout << "  - " << file << std::endl;
             }
         } else {
-            header_print("FLM", "All required files are present.");
+            header_print("OFLM", "All required files are present.");
         }
         
         // Show present files if any
         auto present_files = get_present_files(new_model_tag);
         if (!present_files.empty()) {
-            header_print("FLM", "Present files (" + std::to_string(present_files.size()) + "):");
+            header_print("OFLM", "Present files (" + std::to_string(present_files.size()) + "):");
             for (const auto& file : present_files) {
                 std::cout << "  - " << file << std::endl;
             }
@@ -162,13 +162,13 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         auto downloads = download_list.first;
         float sum_fize_size = download_list.second;
         if (downloads.empty()) {
-            header_print("FLM", "No files to download for model: " + new_model_tag);
+            header_print("OFLM", "No files to download for model: " + new_model_tag);
             return true; // Return true since all files are already present
         }
         
-        header_print("FLM", "Downloading " + std::to_string(downloads.size()) + " missing files...");
+        header_print("OFLM", "Downloading " + std::to_string(downloads.size()) + " missing files...");
 
-        header_print("FLM", "Files to download (" << std::fixed << std::setprecision(2) << sum_fize_size << " MB): ");
+        header_print("OFLM", "Files to download (" << std::fixed << std::setprecision(2) << sum_fize_size << " MB): ");
         for (const auto& download : downloads) {
             float file_size = download["size"];
             std::string filename = download["file"];
@@ -181,12 +181,12 @@ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelsco
         bool success = download_utils::download_multiple_files(downloads, get_progress_callback());
 
         if (success) {
-            header_print("FLM", "Model downloaded successfully!");
+            header_print("OFLM", "Model downloaded successfully!");
             
             // Verify download
             auto final_missing = get_missing_files(new_model_tag);
             if (final_missing.empty()) {
-                header_print("FLM", "All files verified successfully.");
+                header_print("OFLM", "All files verified successfully.");
             } else {
                 header_print("WARNING", "Some files may be missing after download:");
                 for (const auto& file : final_missing) {
@@ -324,7 +324,7 @@ std::function<void(size_t, size_t)> ModelDownloader::get_progress_callback() {
     return [](size_t completed, size_t total) {
         if (total > 0) {
             double percentage = (static_cast<double>(completed) / total) * 100.0;
-            std::cout << "\r[FLM]  Overall progress:  " << completed << "/" << total << " files" << std::flush;
+            std::cout << "\r[OFLM]  Overall progress:  " << completed << "/" << total << " files" << std::flush;
             
             std::cout << std::endl;
         }
@@ -474,13 +474,13 @@ bool ModelDownloader::remove_model(const std::string& model_tag, bool sub_proces
         
         // Check if model directory exists
         if (!std::filesystem::exists(model_path)) {
-            header_print("FLM", "Model directory does not exist: " + model_path);
+            header_print("OFLM", "Model directory does not exist: " + model_path);
             return true; // Consider it already removed
         }
 
         if (!sub_process_mode) {
-            header_print("FLM", "Removing model: " + model_tag);
-            header_print("FLM", "Path: " + model_path);
+            header_print("OFLM", "Removing model: " + model_tag);
+            header_print("OFLM", "Path: " + model_path);
         }
         
         // Remove all files in the model directory
@@ -495,7 +495,7 @@ bool ModelDownloader::remove_model(const std::string& model_tag, bool sub_proces
         // Remove the model directory itself
         if (std::filesystem::remove(model_path)) {
             if(!sub_process_mode)
-                header_print("FLM", "Successfully removed " + std::to_string(removed_files) + " files and model directory.");
+                header_print("OFLM", "Successfully removed " + std::to_string(removed_files) + " files and model directory.");
             return true;
         } else {
             header_print("ERROR", "Failed to remove model directory: " + model_path);
@@ -513,25 +513,25 @@ bool ModelDownloader::remove_model(const std::string& model_tag, bool sub_proces
 /// \return true if all files are present and compatible, false otherwise
 bool ModelDownloader::check_model(const std::string& model_tag, bool use_modelscope, bool sub_process_mode) {
     auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
-    header_print("FLM", "Checking model: " + new_model_tag + "...\n");
+    header_print("OFLM", "Checking model: " + new_model_tag + "...\n");
 
     ModelStatus status = is_model_downloaded(new_model_tag, sub_process_mode);
     switch (status) {
         case ModelStatus::Missing:
-            header_print("FLM", "Model not found: " + new_model_tag);
-            header_print("FLM", "Use `flm pull " + new_model_tag + "` to download it.");
+            header_print("OFLM", "Model not found: " + new_model_tag);
+            header_print("OFLM", "Use `oflm pull " + new_model_tag + "` to download it.");
             return true;
         case ModelStatus::Incompatible:
-            header_print("FLM", "Model is incompatible with this version of FastFlowLM: " + new_model_tag);
-            header_print("FLM", "Use `flm pull " + new_model_tag + "` to re-download it.");
+            header_print("OFLM", "Model is incompatible with this version of OpenFlowLM: " + new_model_tag);
+            header_print("OFLM", "Use `oflm pull " + new_model_tag + "` to re-download it.");
             return true;
         case ModelStatus::Outdated:
         case ModelStatus::Ready: {
             bool ok = verify_and_clean_files(new_model_tag, use_modelscope, sub_process_mode);
             if (!ok)
-                header_print("FLM", "Model check completed with errors. Use `flm pull " + new_model_tag + "` to re-download corrupted files.");
+                header_print("OFLM", "Model check completed with errors. Use `oflm pull " + new_model_tag + "` to re-download corrupted files.");
             else
-                header_print("FLM", "Model check completed successfully. All files are present and compatible.");
+                header_print("OFLM", "Model check completed successfully. All files are present and compatible.");
             return true;
         }
     }
@@ -566,7 +566,7 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
 
         for (const auto& filename : model_files) {
             if (!sub_process_mode) {
-                header_print("FLM", "Checking file: " + filename + "...");
+                header_print("OFLM", "Checking file: " + filename + "...");
             }
 
             auto it = std::find_if(
@@ -586,7 +586,7 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
             // remove; treat as an error so the caller knows a re-pull is needed.
             if (!file_exists(local_path)) {
                 any_error = true;
-                header_print("FLM", "File missing: " + filename);
+                header_print("OFLM", "File missing: " + filename);
                 continue;
             }
 
@@ -600,7 +600,7 @@ bool ModelDownloader::verify_and_clean_files(const std::string& model_tag, bool 
             // disagreement just forces endless re-downloads.
             if (local_oid == oid_ref) {
                 if (!sub_process_mode) {
-                    header_print("FLM", "Success!");
+                    header_print("OFLM", "Success!");
                 }
             }
             else {

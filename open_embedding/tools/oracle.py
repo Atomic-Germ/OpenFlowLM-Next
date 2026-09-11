@@ -1,8 +1,8 @@
-"""Ground-truth oracle for the open embedding engine (E8 reference in flm-test).
+"""Ground-truth oracle for the open embedding engine (E8 reference in oflm-test).
 
 Uses the dependency-free numpy reference (gemma3_reference) — no torch needed —
-to emit reference embedding vectors for the flm-test embedding corpus, all
-embedded with the task_query prompt that flm's server always uses.
+to emit reference embedding vectors for the oflm-test embedding corpus, all
+embedded with the task_query prompt that oflm's server always uses.
 
 Usage:
     reference_venv/bin/python src/open_embedding/tools/oracle.py \
@@ -19,7 +19,7 @@ from gemma3_reference import ReferenceModel
 CORPUS = {
     "sample": "The embedding model should capture the meaning of this sentence.",
     "batch_hello": "Hello, world!",
-    "batch_flm": "FastFlowLM is a local inference server.",
+    "batch_oflm": "OpenFlowLM is a local inference server.",
     "batch_fox": "The quick brown fox jumps over the lazy dog.",
     "fox": "The quick brown fox jumps over the lazy dog.",
     "cat": "cat",

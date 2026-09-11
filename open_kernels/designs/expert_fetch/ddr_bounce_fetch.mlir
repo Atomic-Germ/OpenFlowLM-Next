@@ -5,7 +5,7 @@
 //   - packets fed by the SHIM's own DMA reach the SHIM's control port and can
 //     read/write shim NoC-module registers, DMA descriptors included
 //   - packets from the array do NOT reach the shim's control port
-//   - FLM's fused layer kernel keeps 32 routed-expert descriptors that its
+//   - OFLM's fused layer kernel keeps 32 routed-expert descriptors that its
 //     instruction stream writes but never enqueues
 // So the zero-host-round-trip design is: the array writes control-packet
 // words to DDR (S2MM), the shim DMA streams them into its own control port,

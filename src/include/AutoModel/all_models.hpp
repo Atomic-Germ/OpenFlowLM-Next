@@ -1,6 +1,6 @@
 /// \file all_models.hpp
 /// \brief all_models class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-10
 /// \version 0.9.24
 /// \note This is a header file for the all_models class
@@ -54,7 +54,7 @@ typedef enum {
     error_embedding
 } SupportedModelFamily;
 
-inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, flm_rt::device* npu_device_inst) {
+inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, oflm_rt::device* npu_device_inst) {
 
     
     static const std::map<std::string, SupportedModelFamily> modelFamilyMap = {

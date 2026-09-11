@@ -1,7 +1,7 @@
 # run_kernel — N-buffer opcode-3 runner for the open kernels (see run_kernel.cpp).
 #
 # Standalone:  cmake -S . -B build && cmake --build build
-# Inside flm:  cmake -DFLM_BUILD_OPEN_KERNELS_HARNESS=ON ... (src/CMakeLists.txt)
+# Inside oflm:  cmake -DOFLM_BUILD_OPEN_KERNELS_HARNESS=ON ... (src/CMakeLists.txt)
 #
 # XRT is located the same way src/CMakeLists.txt does it: XRT_INCLUDE_DIR /
 # XRT_LIB_DIR cache vars, else $XILINX_XRT, else /opt/xilinx/xrt.

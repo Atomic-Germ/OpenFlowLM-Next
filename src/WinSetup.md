@@ -103,12 +103,12 @@ All steps in Win11 (powershell where needed).
 
 1. Open a powershell
 
-2. Go to the FastFlowLM dir
+2. Go to the OpenFlowLM dir
 
 3. Type `make run` 
 ## Building with vcpkg instead (the path that worked on a bare box, 2026-09-05)
 
-`build-windows-vcpkg.cmd` configures and builds `flm.exe` with every native
+`build-windows-vcpkg.cmd` configures and builds `oflm.exe` with every native
 dependency from vcpkg's classic mode — no standalone Boost b2 build, no
 hand-copied import libs — and stages a runnable tree in `out\`. What it needs
 and what bit on the way:
@@ -131,12 +131,12 @@ and what bit on the way:
   (`XRT_INCLUDE_DIR` / `XRT_LIB_DIR`).
 
 Running the result: from a non-interactive shell the app resolves its home to
-the *system* profile and fails on `C:\Windows\system32\config\systemprofile\.flm`;
-set `FLM_MODEL_PATH=%USERPROFILE%\.flm` (the base directory — `models\` is
-appended). And note `flm serve`/`run` verify a model against the registry
-entry's `flm_min_version` and **delete files that fail the check before
+the *system* profile and fails on `C:\Windows\system32\config\systemprofile\.oflm`;
+set `OFLM_MODEL_PATH=%USERPROFILE%\.oflm` (the base directory — `models\` is
+appended). And note `oflm serve`/`run` verify a model against the registry
+entry's `oflm_min_version` and **delete files that fail the check before
 re-downloading**; a local 1.0.2 container with a 1.0.3 registry entry needs
-the staged `out\model_list.json` edited (`flm_min_version`) or it will be
+the staged `out\model_list.json` edited (`oflm_min_version`) or it will be
 wiped and re-pulled.
 
 ## The standalone open-engine CLI: what XRT actually has to supply

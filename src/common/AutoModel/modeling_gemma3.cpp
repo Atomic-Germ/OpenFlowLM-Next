@@ -1,6 +1,6 @@
 /// \file gemma3.cpp
 /// \brief gemma3 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-03
 /// \version 0.9.24
 /// \note This is a source file for the gemma3 class
@@ -8,7 +8,7 @@
 #include "AutoModel/modeling_gemma3.hpp"
 
 /************              Gemma3 family            **************/
-Gemma3::Gemma3(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma3") {}
+Gemma3::Gemma3(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma3") {}
 
 void Gemma3::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -16,7 +16,7 @@ void Gemma3::load_model(std::string model_path, json model_info, int default_con
     // The engine: the open kernels when installed for this model, the closed
     // gemma_npu DLL otherwise; images always need the closed one
     // (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_GEMMA_ENGINE", "Gemma 3");
+    auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA_ENGINE", "Gemma 3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -125,7 +125,7 @@ bool Gemma3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std:
             }
             filtered_messages.push_back(filtered_message);
         }
-        header_print("FLM", "Total images: " << total_images);
+        header_print("OFLM", "Total images: " << total_images);
         templated_text = this->apply_chat_template(filtered_messages);
 
         if (total_images > 0) {
@@ -146,15 +146,15 @@ bool Gemma3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std:
             for (auto& image : input.images){
                 bytes image_rgb = load_image(image);
                 if (image_rgb.size() == 0){
-                    header_print("FLM", "Error: Could not load image: " << image);
-                    header_print("FLM", "Please check if the file exists and is readable.");
+                    header_print("OFLM", "Error: Could not load image: " << image);
+                    header_print("OFLM", "Please check if the file exists and is readable.");
                     continue;
                 }
 
                 buffer<bf16> pv = preprocess_image(image_rgb);
                 if (pv.size() == 0){
-                    header_print("FLM", "Error: Could not preprocess image: " << image);
-                    header_print("FLM", "Please check if the image is valid.");
+                    header_print("OFLM", "Error: Could not preprocess image: " << image);
+                    header_print("OFLM", "Please check if the image is valid.");
                     continue;
                 }
                 memcpy(pixel_values_ptr, pv.data(), pv.size() * sizeof(bf16));
@@ -177,7 +177,7 @@ bool Gemma3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std:
             }
             auto end_time = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-            header_print("FLM", "Image loaded in " << duration.count() << "ms");
+            header_print("OFLM", "Image loaded in " << duration.count() << "ms");
         }
     }
     std::vector<int> tokens = this->tokenizer->encode(templated_text);
@@ -254,7 +254,7 @@ bool Gemma3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std:
                                remaining);
                         pixel_values = std::move(trimmed);
                     }
-                    header_print("FLM",
+                    header_print("OFLM",
                         "Prompt-cache hit: dropped " << skipped_imgs
                         << " cached image(s) from payload");
                 }

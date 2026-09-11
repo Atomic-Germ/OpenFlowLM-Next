@@ -1,6 +1,6 @@
 /// \file modeling_whisper.hpp
 /// \brief modeling_whisper class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-17
 /// \version 0.9.24
 /// \note This is a header file for the modeling_whisper class
@@ -134,7 +134,7 @@ private:
     std::unique_ptr<whisper_npu> whisper_engine;
     std::unique_ptr<npu_xclbin_manager> npu;
 	std::unique_ptr<Whisper_Config> lm_config = nullptr;
-    flm_rt::device* device;
+    oflm_rt::device* device;
 
     bool enable_preemption;
 
@@ -241,7 +241,7 @@ public:
         e_transcribe = 1
     } whisper_task_type_t;
 
-    Whisper(flm_rt::device* npu_device_inst);
+    Whisper(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, nlohmann::ordered_json model_inf, bool enable_preemption = false);
     //void toggle_enable_think() override;

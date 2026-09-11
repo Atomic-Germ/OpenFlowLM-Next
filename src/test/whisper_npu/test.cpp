@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
     std::pair<std::string, nlohmann::json> model_info_pair = model_list.get_model_info(tag);
     nlohmann::json model_info = model_info_pair.second;
 
-    flm_rt::device npu_device_global = flm_rt::device(0);
+    oflm_rt::device npu_device_global = oflm_rt::device(0);
 
     Whisper whisper(&npu_device_global);
 

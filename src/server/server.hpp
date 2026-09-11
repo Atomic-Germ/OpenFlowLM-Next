@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file server.hpp
  * \brief WebServer class and related declarations
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-06-24
  *  \version 0.9.24
  */

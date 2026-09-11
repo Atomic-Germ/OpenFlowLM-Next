@@ -1,4 +1,4 @@
-"""Talk to the open Qwen3.6 engine without the FLM app: tokenize a user message
+"""Talk to the open Qwen3.6 engine without the OFLM app: tokenize a user message
 the way the app's chat path does, run open_qwen36_cli, detokenize as tokens
 stream back.
 
@@ -37,7 +37,7 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=64)
     ap.add_argument("--layers", type=int, default=-1)
     ap.add_argument("--max-ctx", type=int, default=4096)
-    ap.add_argument("--model", default=os.environ.get("FLM_MODEL_DIR", str(Path.home() / ".flm" / "models" / "Qwen3.6-35B-A3B-NPU2")))
+    ap.add_argument("--model", default=os.environ.get("OFLM_MODEL_DIR", str(Path.home() / ".oflm" / "models" / "Qwen3.6-35B-A3B-NPU2")))
     ap.add_argument("--kernels", default=str(HERE.parent / "xclbins" / "Qwen3.6-35B-A3B-NPU2" / "open_kernels"))
     ap.add_argument("--exe", default=str(HERE / "out" / "open_qwen36_cli.exe"))
     ap.add_argument("--think", action="store_true", help="let the model think (the app's enable_think)")

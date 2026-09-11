@@ -1,9 +1,9 @@
 /// \file main.cpp
 /// \brief Standalone CLI for the open embedding engine (offline verification)
 ///
-///   flm_open_embed --model-dir <dir> --text "..." [--prompt query|document]
-///   flm_open_embed --model-dir <dir> --validate-anchor
-///   flm_open_embed --model-dir <dir> --text "..." --compare oracle.json --name sample
+///   oflm_open_embed --model-dir <dir> --text "..." [--prompt query|document]
+///   oflm_open_embed --model-dir <dir> --validate-anchor
+///   oflm_open_embed --model-dir <dir> --text "..." --compare oracle.json --name sample
 #include <cmath>
 #include <cstdio>
 #include <cstring>

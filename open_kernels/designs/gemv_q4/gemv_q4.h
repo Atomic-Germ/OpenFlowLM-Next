@@ -2,7 +2,7 @@
 //===- gemv_q4.h -------------------------------------------*- C++ -*-===//
 //
 // q4_1 GEMV on the AIE core against phlegm's POOL-ORDER chunks:
-//   y[N] = W[N, K] @ x[K],  W in FLM's q4 form, chunks in the layer-pool order
+//   y[N] = W[N, K] @ x[K],  W in OFLM's q4 form, chunks in the layer-pool order
 //   the closed kernel consumes (npu-engine/src/pools.rs std_perm), so the same
 //   kernel later streams straight out of the resident 512 MB pool.
 //
