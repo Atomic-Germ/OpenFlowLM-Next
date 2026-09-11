@@ -48,6 +48,23 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 
 }  // namespace
 
+nlohmann::json derive_config(const GgufFile& g) {
+    const std::string arch = g.kv_str("general.architecture");
+    auto u = [&](const std::string& k) { return g.kv_u64(arch + "." + k); };
+    nlohmann::json c;
+    c["model_type"] = arch;
+    c["hidden_size"] = u("embedding_length");
+    c["num_hidden_layers"] = u("block_count");
+    c["vocab_size"] = u("vocab_size");
+    c["num_attention_heads"] = u("attention.head_count");
+    c["num_key_value_heads"] = u("attention.head_count_kv");
+    c["intermediate_size"] = u("feed_forward_length");
+    if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
+    else c["head_dim"] = u("embedding_length") / u("attention.head_count");
+    if (g.kv_has(arch + ".attention.slide_window")) c["sliding_window"] = g.kv_u64(arch + ".attention.slide_window");
+    return c;
+}
+
 void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
 }
@@ -56,11 +73,35 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
     fs::path md(cfg_.model_dir);
+    // ---- the weight file: the shipped container (model.q4nx) or a GGUF
+    // (model.gguf, the direct path). When both exist the shipped container
+    // wins -- it is the curated conversion.
+    const bool have_q4nx = fs::exists(md / "model.q4nx");
+    const bool have_gguf = fs::exists(md / "model.gguf");
+    if (!have_q4nx && !have_gguf)
+        throw std::runtime_error("open_qwen36: neither model.q4nx nor model.gguf in " + cfg_.model_dir);
+    gguf_ = have_gguf && !have_q4nx;
+    w_ = gguf_ ? man_.gguf.get() : &man_;
+    if (gguf_ && !w_)
+        throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
+                                 "(manifest.json has no gguf section; re-export the kernels)");
+    // ---- the model's config: from the model dir when it ships one, else
+    // derived from the GGUF metadata (the shapes the manifest checks are all
+    // there); anything GGUF does not carry is refused with its name.
+    nlohmann::json j;
     std::ifstream cf(md / "config.json");
-    if (!cf) throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
-    auto j = nlohmann::json::parse(cf, nullptr, false);
-    if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
-    man_.check_model(j, md.filename().string());
+    // #24: config.json is optional for a GGUF -- the metadata carries it.
+    if (cf) {
+        j = nlohmann::json::parse(cf, nullptr, false);
+        if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+    } else if (gguf_) {
+        file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
+        j = derive_config(*static_cast<GgufFile*>(file_.get()));
+        log("config.json absent; derived from the GGUF metadata");
+    } else {
+        throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
+    }
+    w_->check_model(j, md.filename().string());
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
@@ -70,16 +111,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             size_t sum = 0;
             for (const auto& v : rp["mrope_section"]) { mrope_section_.push_back(v.get<int>()); sum += v.get<int>(); }
             mrope_interleaved_ = rp.value("mrope_interleaved", false);
-            if (sum != man_.rotary_dim / 2)
+            if (sum != w_->rotary_dim / 2)
                 throw std::runtime_error("open_qwen36: mrope_section sums to " + std::to_string(sum) + ", not the " +
-                                         std::to_string(man_.rotary_dim / 2) + " rotary pairs");
+                                         std::to_string(w_->rotary_dim / 2) + " rotary pairs");
         }
     }
-    int total = static_cast<int>(man_.layers.size());
+    if (gguf_) {
+        if (!file_) file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
+    } else if (!file_) {
+        file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    }
+    int total = static_cast<int>(w_->layers.size());
     nl_ = cfg_.num_layers > 0 && cfg_.num_layers < total ? cfg_.num_layers : total;
     types_.resize(nl_);
-    for (int l = 0; l < nl_; ++l) types_[l] = &man_.layer_type(l);
-    file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    for (int l = 0; l < nl_; ++l) types_[l] = &w_->layer_type(l);
     int nattn = 0;
     for (int l = 0; l < nl_; ++l) nattn += is_attention_layer(l);
     log("model " + md.filename().string() + " (" + man_.family + ", " + man_.spec_hash.substr(0, 19) + "): " +
@@ -103,10 +148,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
         if (types_[l]->gemm_block.t) wanted["dxB"] = true;
     }
-    for (const auto& s : man_.tail) wanted[s.kernel] = true;
-    for (const auto& [name, d] : man_.kernels)
+    for (const auto& s : w_->tail) wanted[s.kernel] = true;
+    for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
-    logits_host_.assign(man_.vocab, 0.f);
+    logits_host_.assign(w_->vocab, 0.f);
 
     // 0167/#32: the GEMM-route block size every loaded layer type agrees on.
     // Disagreement (a mixed dense_local/dense manifest where only one carries
@@ -131,7 +176,7 @@ Core::~Core() = default;
 xrt::hw_context& Core::context(const std::string& name) {
     auto it = ctxs_.find(name);
     if (it != ctxs_.end()) return *it->second;
-    fs::path p = fs::path(cfg_.kernel_dir) / man_.contexts.at(name);
+    fs::path p = fs::path(cfg_.kernel_dir) / w_->contexts.at(name);
     if (!fs::exists(p)) throw std::runtime_error("open_qwen36: missing kernel " + p.string());
     xrt::xclbin xcl(p.string());
     auto uuid = dev_->register_xclbin(xcl);
@@ -153,10 +198,10 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     k.instr = std::make_unique<xrt::bo>(*dev_, insts.size(), xrt::bo::flags::cacheable, k.k->group_id(1));
     std::memcpy(k.instr->map<void*>(), insts.data(), insts.size());
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, man_.moe);
+    if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, w_->moe);
     else if (d.patch == "attnpos") {
-        k.attn = stream_patch::attn_table(k.words, name, man_.attn);
-        k.geom = man_.attn;
+        k.attn = stream_patch::attn_table(k.words, name, w_->attn);
+        k.geom = w_->attn;
         k.geom.window = d.window;
     }
 }
@@ -182,9 +227,9 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     }
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
-        xrt::bo pool = xrt::ext::bo(*dev_, man_.pool_bytes);
+        xrt::bo pool = xrt::ext::bo(*dev_, w_->pool_bytes);
         uint8_t* pool_host = pool.map<uint8_t*>();
-        pools::pack_pool(man_, lt, *file_, l, pool_host);
+        pools::pack_pool(*w_, lt, *file_, l, pool_host);
         // 0167/#32: the GEMM route's 5 per-layer weight buffers,
         // built ONCE here from the SAME freshly-packed host bytes pool.sync()
         // is about to upload -- see core.hpp's field comment for why these
@@ -222,7 +267,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
-        pools::pack_consts(man_, lt, *file_, l, c_host);
+        pools::pack_consts(*w_, lt, *file_, l, c_host);
         // 0167/#32: this route's host RMSNorm needs the two norm
         // weights as host floats. consts.pack always puts input_layernorm at
         // byte 0 and post_attention_layernorm right after it, both ELN =
@@ -231,10 +276,10 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         // not assumed. Captured from the SAME host buffer pack_consts() just
         // wrote, before its device sync, so this costs no extra I/O.
         if (gemm_block_t_ && lt.gemm_block.t) {
-            ln_w_bf16_[l].resize(man_.hidden);
-            post_ln_w_bf16_[l].resize(man_.hidden);
-            std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
-            std::memcpy(post_ln_w_bf16_[l].data(), c_host + man_.hidden * 2, man_.hidden * 2);
+            ln_w_bf16_[l].resize(w_->hidden);
+            post_ln_w_bf16_[l].resize(w_->hidden);
+            std::memcpy(ln_w_bf16_[l].data(), c_host, w_->hidden * 2);
+            std::memcpy(post_ln_w_bf16_[l].data(), c_host + w_->hidden * 2, w_->hidden * 2);
         }
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
@@ -247,24 +292,24 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     }
     // ---- the globals: the lm_head pool and the final norm's weight from the file, the ptab
     // computed, everything else zero (xres, zero, xresf, hn, logits)
-    for (const auto& [name, bytes] : man_.globals) {
+    for (const auto& [name, bytes] : w_->globals) {
         if (name == "lmpool") {
             xrt::bo lm = xrt::ext::bo(*dev_, bytes);
-            pools::pack_lmhead(man_, *file_, lm.map<uint8_t*>());
+            pools::pack_lmhead(*w_, *file_, lm.map<uint8_t*>());
             lm.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             globals_[name] = std::move(lm);
         } else if (name == "normw") {
-            size_t n = 0;
-            const uint8_t* nw = file_->raw(man_.norm_tensor, &n);
-            if (n != man_.norm_bytes) throw std::runtime_error("open_qwen36: " + man_.norm_tensor + " is not " + std::to_string(man_.norm_bytes) + " B");
-            globals_[name] = alloc(bytes, nw, n);
+            if (bytes != w_->norm_bytes) throw std::runtime_error("open_qwen36: global normw is " + std::to_string(bytes) + " B, pack.norm says " + std::to_string(w_->norm_bytes));
+            std::vector<uint8_t> nw(bytes);
+            pools::pack_norm(*file_, w_->norm_tensor, bytes, nw.data());
+            globals_[name] = alloc(bytes, nw.data(), nw.size());
         } else {
             globals_[name] = alloc(bytes);
         }
     }
-    for (const auto& [name, rg] : man_.per_row_globals) {
+    for (const auto& [name, rg] : w_->per_row_globals) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
-        pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
+        pools::build_ptab(*w_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
     }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
@@ -289,9 +334,9 @@ void Core::reset() {
     // A request with an image rewrote the position records of the rows it used
     // (write_record); the next request expects row p to say position p again.
     if (ptab_dirty_) {
-        for (const auto& [name, rg] : man_.per_row_globals) {
+        for (const auto& [name, rg] : w_->per_row_globals) {
             xrt::bo& bo = globals_.at(name);
-            pools::build_ptab(man_, rg, ptab_dirty_, bo.map<uint8_t*>());
+            pools::build_ptab(*w_, rg, ptab_dirty_, bo.map<uint8_t*>());
             bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, ptab_dirty_ * rg.per_row, 0);
         }
         ptab_dirty_ = 0;
@@ -345,13 +390,13 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     auto t0 = std::chrono::steady_clock::now();
     if (k.moe2.empty()) throw std::runtime_error("open_qwen36: moeroute2 on " + k.name + ", which has no routed-expert table");
     xrt::bo& act = act_[layer];
-    const size_t off = act_off + man_.rout_idx_off;
+    const size_t off = act_off + w_->rout_idx_off;
     act.sync(XCL_BO_SYNC_BO_FROM_DEVICE, 32, off);
     uint32_t idx[8];
     std::memcpy(idx, act.map<uint8_t*>() + off, 32);
-    for (unsigned s = 0; s < man_.moe.topk; ++s)
-        if (idx[s] >= man_.moe.experts) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
-    stream_patch::moe2_apply(k.iw(), k.moe2, idx, man_.moe);
+    for (unsigned s = 0; s < w_->moe.topk; ++s)
+        if (idx[s] >= w_->moe.experts) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
+    stream_patch::moe2_apply(k.iw(), k.moe2, idx, w_->moe);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     timing_.route_ms += ms_since(t0);
 }
@@ -370,10 +415,10 @@ void Core::mrope_begin() {
 }
 
 void Core::write_record(size_t row, const double pos[3]) {
-    for (const auto& [name, rg] : man_.per_row_globals) {
+    for (const auto& [name, rg] : w_->per_row_globals) {
         xrt::bo& bo = globals_.at(name);
         uint8_t* r = bo.map<uint8_t*>() + row * rg.per_row;
-        pools::build_ptab_record(man_, rg, row, pos, mrope_section_, mrope_interleaved_, r);
+        pools::build_ptab_record(*w_, rg, row, pos, mrope_section_, mrope_interleaved_, r);
         bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, rg.per_row, row * rg.per_row);
     }
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
@@ -384,16 +429,26 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     if (static_cast<size_t>(pos_) >= cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
                                  std::to_string(cfg_.max_ctx));
-    if (!x && (token < 0 || static_cast<size_t>(token) >= man_.vocab)) throw std::runtime_error("open_qwen36: token id out of range");
+    if (!x && (token < 0 || static_cast<size_t>(token) >= w_->vocab)) throw std::runtime_error("open_qwen36: token id out of range");
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
 
     xrt::bo& xres = buffer("xres", 0);
     if (x)
-        std::memcpy(xres.map<float*>(), x, man_.hidden * 4);
+        std::memcpy(xres.map<float*>(), x, w_->hidden * 4);
     else
-        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(token), man_.hidden, xres.map<float*>());
-    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
+        file_->embed_row(w_->embed_tensor, static_cast<size_t>(token), w_->hidden, xres.map<float*>());
+    if (cfg_.verbose && !x) {
+        const float* e = xres.map<float*>();
+        int nnan = 0;
+        float mx = 0.f;
+        for (size_t i = 0; i < w_->hidden; ++i) {
+            if (!std::isfinite(e[i])) ++nnan;
+            else mx = std::max(mx, std::fabs(e[i]));
+        }
+        log("embed t=" + std::to_string(token) + " nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
+    }
+    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
     if (mpos) {
         const double p3[3] = {static_cast<double>(mpos[0]), static_cast<double>(mpos[1]), static_cast<double>(mpos[2])};
         write_record(static_cast<size_t>(pos_), p3);
@@ -420,11 +475,22 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         }
     }
     if (want_logits) {
+        if (cfg_.verbose) {
+            xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->hidden * 4, 0);
+            const float* x = xres.map<float*>();
+            int nnan = 0;
+            float mx = 0.f;
+            for (size_t i = 0; i < w_->hidden; ++i) {
+                if (!std::isfinite(x[i])) ++nnan;
+                else mx = std::max(mx, std::fabs(x[i]));
+            }
+            log("xres after layers nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
+        }
         auto t1 = std::chrono::steady_clock::now();
-        for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
+        for (const Step& s : w_->tail) run(kerns_.at(s.kernel), s.args, 0);
         xrt::bo& lg = buffer("logits", 0);
-        lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.vocab * 4, 0);
-        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
+        lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->vocab * 4, 0);
+        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
@@ -443,7 +509,7 @@ std::pair<size_t, size_t> Core::pool_region(const LayerType& lt, int idx) const 
         throw std::runtime_error("open_qwen36: pool_region: index " + std::to_string(idx) + " out of range (" +
                                  std::to_string(lt.pool.size()) + " pool ops)");
     const PackOp& op = lt.pool[static_cast<size_t>(idx)];
-    return {static_cast<size_t>(op.dst), static_cast<size_t>(op.nch) * man_.chunk_bytes};
+    return {static_cast<size_t>(op.dst), static_cast<size_t>(op.nch) * w_->chunk_bytes};
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch) {
@@ -511,7 +577,7 @@ void Core::tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::
 void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
-    const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, ff = gb.ff;
+    const size_t hid = w_->hidden, qw = gb.qw, kvw = gb.kvw, ff = gb.ff;
     const size_t n_qkv3 = qw + 2 * kvw;
 
     // One GEMM dispatch: tile `x` [T,K] -> upload -> run -> download `y` [N,T].
@@ -638,7 +704,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
                                  std::to_string(pos_ + T) + ") would exceed the context capacity " +
                                  std::to_string(cfg_.max_ctx));
     for (int tok : ids)
-        if (tok < 0 || static_cast<size_t>(tok) >= man_.vocab) throw std::runtime_error("open_qwen36: token id out of range");
+        if (tok < 0 || static_cast<size_t>(tok) >= w_->vocab) throw std::runtime_error("open_qwen36: token id out of range");
 
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
@@ -648,12 +714,12 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
     // HOST between GEMM dispatches (RMSNorm/residual/SwiGLU are host-side,
     // not fused on-core), so there is no device-resident T-wide buffer for
     // it, unlike the per-layer weight/activation buffers below. ------------
-    std::vector<double> xres(T * man_.hidden);
+    std::vector<double> xres(T * w_->hidden);
     {
-        std::vector<float> row(man_.hidden);
+        std::vector<float> row(w_->hidden);
         for (size_t tk = 0; tk < T; ++tk) {
-            file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[tk]), man_.hidden, row.data());
-            for (size_t c = 0; c < man_.hidden; ++c) xres[tk * man_.hidden + c] = static_cast<double>(row[c]);
+            file_->embed_row(w_->embed_tensor, static_cast<size_t>(ids[tk]), w_->hidden, row.data());
+            for (size_t c = 0; c < w_->hidden; ++c) xres[tk * w_->hidden + c] = static_cast<double>(row[c]);
         }
     }
 
@@ -672,14 +738,14 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
         auto t1 = std::chrono::steady_clock::now();
         xrt::bo& xres1 = buffer("xres", 0);
         const size_t last = t_real - 1;
-        std::vector<float> last_row(man_.hidden);
-        for (size_t c = 0; c < man_.hidden; ++c) last_row[c] = static_cast<float>(xres[last * man_.hidden + c]);
-        std::memcpy(xres1.map<uint8_t*>(), last_row.data(), man_.hidden * 4);
-        xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
-        for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
+        std::vector<float> last_row(w_->hidden);
+        for (size_t c = 0; c < w_->hidden; ++c) last_row[c] = static_cast<float>(xres[last * w_->hidden + c]);
+        std::memcpy(xres1.map<uint8_t*>(), last_row.data(), w_->hidden * 4);
+        xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
+        for (const Step& s : w_->tail) run(kerns_.at(s.kernel), s.args, 0);
         xrt::bo& lg = buffer("logits", 0);
-        lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.vocab * 4, 0);
-        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
+        lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, w_->vocab * 4, 0);
+        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
         timing_.lmhead_ms = ms_since(t1);
     }
     timing_.total_ms = ms_since(t0);

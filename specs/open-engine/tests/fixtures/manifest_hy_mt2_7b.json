@@ -450,6 +450,23 @@
     "LMHEAD_K": "4096",
     "LMHEAD_CORES": "8"
    }
+  },
+  "dx_f32": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_hunyuan_h4096_f32",
+   "env": {
+    "GEMV_SCALES_F32": "1"
+   }
+  },
+  "lm_head_q4_f32": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_128192_f32",
+   "env": {
+    "LMHEAD_N": "128192",
+    "LMHEAD_K": "4096",
+    "LMHEAD_CORES": "8",
+    "LMHEAD_SCALES_F32": "1"
+   }
   }
  },
  "pack": {
@@ -474,6 +491,502 @@
   "norm": {
    "tensor": "model.norm.weight",
    "bytes": 8192
+  }
+ },
+ "gguf": {
+  "manifest_version": 1,
+  "family": "hunyuan",
+  "spec": {
+   "family": "hunyuan",
+   "hidden": 4096,
+   "num_layers": 32,
+   "layer_types": [
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense"
+   ],
+   "vocab": 128167,
+   "real_vocab": 128166,
+   "num_heads": 32,
+   "num_kv_heads": 8,
+   "head_dim": 128,
+   "rotary_dim": 128,
+   "rope_theta": 11158839.92507748,
+   "rope_scaling": null,
+   "rope_local_theta": 0.0,
+   "sliding_window": 0,
+   "qk_norm": true,
+   "attn_gate": false,
+   "lin_key_heads": 0,
+   "lin_value_heads": 0,
+   "lin_key_dim": 0,
+   "lin_value_dim": 0,
+   "conv_kernel": 0,
+   "intermediate": 14336,
+   "activation": "silu",
+   "sandwich_norms": false,
+   "num_experts": 0,
+   "experts_per_tok": 0,
+   "moe_intermediate": 0,
+   "shared_expert_intermediate": 0,
+   "norm_eps": 1e-05,
+   "quant": "q4_1_f32",
+   "extra": {
+    "model_type": "hunyuan_v1_dense",
+    "source": "hf_config",
+    "model": "Hy-MT2-7B-NPU2"
+   }
+  },
+  "spec_hash": "sha256:e1f8c95a16ec8cd3089ea3ccd792080e80720eabe6e99291f4fe22fc939cef1b",
+  "build_key": "sha256:fixture",
+  "max_ctx_default": 4096,
+  "hf_config_check": {
+   "model_type": [
+    "hunyuan_v1_dense"
+   ],
+   "hidden_size": 4096,
+   "num_hidden_layers": 32,
+   "vocab_size": 128167,
+   "num_attention_heads": 32,
+   "num_key_value_heads": 8,
+   "intermediate_size": 14336,
+   "head_dim": 128
+  },
+  "layout": {
+   "hidden": 4096,
+   "vocab": 128192,
+   "real_vocab": 128166,
+   "chunk_bytes": 6144,
+   "pool_bytes": 163577856,
+   "lmhead_pool_bytes": 395313152,
+   "kv_row": 4096,
+   "ptab_row": 2048,
+   "rotary_dim": 128,
+   "rope_theta": 11158839.92507748,
+   "rope_inv_freq": [
+    1.0,
+    0.7760343630469744,
+    0.6022293326297233,
+    0.4673506565555118,
+    0.3626801690796419,
+    0.28145227400148887,
+    0.21841663618286794,
+    0.16949881513903467,
+    0.13153690504363763,
+    0.1020771583227097,
+    0.07921538254060918,
+    0.06147385893342406,
+    0.0477058269614393,
+    0.037021361039649724,
+    0.02872984833353665,
+    0.022295349551952292,
+    0.017301957388458945,
+    0.01342691348141863,
+    0.01041974625123954,
+    0.008086081145191775,
+    0.0062750768310550495,
+    0.004869675251658632,
+    0.0037790353321665213,
+    0.0029326612769298576,
+    0.0022758459260747888,
+    0.0017661346436345004,
+    0.0013705811732280947,
+    0.0010636180877702393,
+    0.0008254041852680186,
+    0.0006405420111707736,
+    0.0004970826116437393,
+    0.0003857531879086758,
+    0.00029935772947204905,
+    0.00023231188491403007,
+    0.00018028200563750135,
+    0.0001399050314137294,
+    0.00010857111194022045,
+    8.425491369983073e-05,
+    6.538470828662595e-05,
+    5.0740780448224e-05,
+    3.937658923564388e-05,
+    3.0557586346445246e-05,
+    2.371373705661656e-05,
+    1.8402674832194866e-05,
+    1.428110804176293e-05,
+    1.108263058279452e-05,
+    8.600502165203863e-06,
+    6.674285219658104e-06,
+    5.179474679231213e-06,
+    4.019450333615127e-06,
+    3.1192315794459637e-06,
+    2.420630891951356e-06,
+    1.8784927524073003e-06,
+    1.457774926602757e-06,
+    1.1312834366320205e-06,
+    8.779148211723223e-07,
+    6.812920690579616e-07,
+    5.287060568603505e-07,
+    4.1029406807469956e-07,
+    3.184022957803014e-07,
+    2.4709112279856055e-07,
+    1.917512020955427e-07,
+    1.4880552198170613e-07,
+    1.1547819846894587e-07
+   ]
+  },
+  "layers": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "contexts": {
+   "dx": "dx_f32/final.xclbin",
+   "ln": "ln/final.xclbin",
+   "lm": "lm_head_q4_f32/final.xclbin"
+  },
+  "kernels": {
+   "ln": {
+    "context": "ln",
+    "insts": "ln/insts.bin",
+    "build": "ln"
+   },
+   "lm": {
+    "context": "lm",
+    "insts": "lm_head_q4_f32/insts.bin",
+    "build": "lm_head_q4_f32"
+   },
+   "dx": {
+    "context": "dx",
+    "insts": "dx_f32/insts.bin",
+    "patch": "attnpos",
+    "build": "dx_f32",
+    "window": 0
+   }
+  },
+  "layer_types": {
+   "dense": {
+    "buffers": {
+     "consts": 20480,
+     "act": 196608,
+     "state": {
+      "kind": "kv",
+      "row": 4096
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "dx",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act",
+       "ptab"
+      ]
+     }
+    ],
+    "pack": {
+     "pool": [
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+       "dst": 0,
+       "nch": 2048,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+       "dst": 12582912,
+       "nch": 512,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+       "dst": 15728640,
+       "nch": 512,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+       "dst": 18874368,
+       "nch": 2048,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.up_proj.weight",
+       "dst": 31457280,
+       "nch": 7168,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+       "dst": 75497472,
+       "nch": 7168,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.down_proj.weight",
+       "dst": 119537664,
+       "nch": 7168,
+       "in_dim": 14336
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 8192
+      },
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+       "dst": 8192,
+       "cap": 8192
+      },
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.self_attn.q_norm.weight",
+       "dst": 16384,
+       "cap": 256
+      },
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.self_attn.k_norm.weight",
+       "dst": 16640,
+       "cap": 256
+      }
+     ]
+    }
+   }
+  },
+  "tail": [
+   {
+    "op": "run",
+    "kernel": "ln",
+    "args": [
+     "xres",
+     "zero",
+     "normw",
+     "xresf",
+     "hn"
+    ]
+   },
+   {
+    "op": "run",
+    "kernel": "lm",
+    "args": [
+     "lmpool",
+     "hn",
+     "logits"
+    ]
+   }
+  ],
+  "globals": {
+   "xres": 16384,
+   "zero": 16384,
+   "normw": 8192,
+   "xresf": 16384,
+   "hn": 8192,
+   "logits": 512768,
+   "lmpool": 395313152,
+   "ptab": {
+    "per_row": 2048,
+    "inv_freq": [
+     1.0,
+     0.7760343630469744,
+     0.6022293326297233,
+     0.4673506565555118,
+     0.3626801690796419,
+     0.28145227400148887,
+     0.21841663618286794,
+     0.16949881513903467,
+     0.13153690504363763,
+     0.1020771583227097,
+     0.07921538254060918,
+     0.06147385893342406,
+     0.0477058269614393,
+     0.037021361039649724,
+     0.02872984833353665,
+     0.022295349551952292,
+     0.017301957388458945,
+     0.01342691348141863,
+     0.01041974625123954,
+     0.008086081145191775,
+     0.0062750768310550495,
+     0.004869675251658632,
+     0.0037790353321665213,
+     0.0029326612769298576,
+     0.0022758459260747888,
+     0.0017661346436345004,
+     0.0013705811732280947,
+     0.0010636180877702393,
+     0.0008254041852680186,
+     0.0006405420111707736,
+     0.0004970826116437393,
+     0.0003857531879086758,
+     0.00029935772947204905,
+     0.00023231188491403007,
+     0.00018028200563750135,
+     0.0001399050314137294,
+     0.00010857111194022045,
+     8.425491369983073e-05,
+     6.538470828662595e-05,
+     5.0740780448224e-05,
+     3.937658923564388e-05,
+     3.0557586346445246e-05,
+     2.371373705661656e-05,
+     1.8402674832194866e-05,
+     1.428110804176293e-05,
+     1.108263058279452e-05,
+     8.600502165203863e-06,
+     6.674285219658104e-06,
+     5.179474679231213e-06,
+     4.019450333615127e-06,
+     3.1192315794459637e-06,
+     2.420630891951356e-06,
+     1.8784927524073003e-06,
+     1.457774926602757e-06,
+     1.1312834366320205e-06,
+     8.779148211723223e-07,
+     6.812920690579616e-07,
+     5.287060568603505e-07,
+     4.1029406807469956e-07,
+     3.184022957803014e-07,
+     2.4709112279856055e-07,
+     1.917512020955427e-07,
+     1.4880552198170613e-07,
+     1.1547819846894587e-07
+    ],
+    "window": 0
+   }
+  },
+  "builds": {
+   "dx": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_hunyuan_h4096",
+    "env": {}
+   },
+   "ln": {
+    "design": "ln/ln.py",
+    "build_dir": "ln/build_4096_1e-05",
+    "env": {
+     "LN_N": "4096",
+     "LN_EPS": "1e-05"
+    }
+   },
+   "lm_head_q4": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_128192",
+    "env": {
+     "LMHEAD_N": "128192",
+     "LMHEAD_K": "4096",
+     "LMHEAD_CORES": "8"
+    }
+   },
+   "dx_f32": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_hunyuan_h4096_f32",
+    "env": {
+     "GEMV_SCALES_F32": "1"
+    }
+   },
+   "lm_head_q4_f32": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_128192_f32",
+    "env": {
+     "LMHEAD_N": "128192",
+     "LMHEAD_K": "4096",
+     "LMHEAD_CORES": "8",
+     "LMHEAD_SCALES_F32": "1"
+    }
+   }
+  },
+  "pack": {
+   "pool_bytes": 163577856,
+   "chunk_bytes": 6144,
+   "lm_head": {
+    "pool_bytes": 395313152,
+    "ops": [
+     {
+      "op": "std_perm_gguf",
+      "tensor": "lm_head.weight",
+      "dst": 0,
+      "nch": 64096,
+      "in_dim": 4096
+     }
+    ]
+   },
+   "embed": {
+    "tensor": "model.embed_tokens.weight",
+    "dim": 4096
+   },
+   "norm": {
+    "tensor": "model.norm.weight",
+    "bytes": 8192
+   }
   }
  }
 }

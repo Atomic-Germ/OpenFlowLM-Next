@@ -297,6 +297,7 @@ if(NOT OFLM_USE_HRX)
     # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
     list(APPEND SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"

@@ -28,7 +28,7 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL)      # dense_local: a dense lay
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q8")
+QUANT_FORMATS = ("q4_1", "q4_1_f32", "q8")
 DEFAULT_QUANT = "q4_1"
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
 

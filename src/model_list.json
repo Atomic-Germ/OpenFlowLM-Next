@@ -505,20 +505,14 @@
         },
         "embed-gemma": {
             "300m": {
-                "name": "Embedding-Gemma-300M-OpenNPU2",
-                "url": "https://huggingface.co/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
-                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2/tree/main",
+                "name": "embeddinggemma-300M-GGUF",
+                "url": "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF",
+                "file_url": "https://huggingface.co/api/models/ggml-org/embeddinggemma-300M-GGUF/tree/main",
                 "ms_url": "",
                 "size": 300000000,
                 "oflm_min_version": "0.9.15",
                 "files": [
-                    "config.json",
-                    "model.safetensors",
-                    "tokenizer.json",
-                    "tokenizer_config.json",
-                    "2_Dense/model.safetensors",
-                    "3_Dense/model.safetensors",
-                    "weights_manifest.json"
+                    "model.gguf"
                 ],
                 "default_context_length": 2048,
                 "details": {
@@ -526,7 +520,7 @@
                     "family": "embed-gemma",
                     "think": false,
                     "parameter_size": "300M",
-                    "quantization_level": "none"
+                    "quantization_level": "Q8_0"
                 },
                 "label": [
                     "embeddings"

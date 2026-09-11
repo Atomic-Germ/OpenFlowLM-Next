@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -132,6 +133,10 @@ struct Manifest {
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
     nlohmann::json hf_config_check;
+    /// The same kernel set for GGUF-direct weight files (f32-scale pool chunks,
+    /// open_kernels/gguf_pool.py): a complete manifest of its own, parsed with
+    /// this same code; the engine swaps it in when the model ships a .gguf.
+    std::unique_ptr<Manifest> gguf;
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);

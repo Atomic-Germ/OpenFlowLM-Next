@@ -10,6 +10,8 @@
 /// engine; open_kernels/recipes/pack.py is the same interpreter in NumPy, and
 /// specs/open-engine/tests/test_pack_plan.py holds it to the frozen originals.
 ///
+/// Ops: std_perm / std_perm_gguf (a standard [out, in] matmul tensor into 64-row band
+/// order; the _gguf forms read GGUF blocks and widen the fp16 scales EXACTLY to f32),
 /// A q8 source (8704-byte chunks) is accepted transparently by every q4 op and
 /// re-quantized to q4_1 chunk by chunk on the way into the pool
 /// (`requant_q4_1_chunks`). The two formats hold the SAME 32-row x 256-column
@@ -43,13 +45,13 @@
 #include <cstdint>
 
 #include "open_qwen36/manifest.hpp"
-#include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/weight_file.hpp"
 
 namespace open_qwen36 {
 namespace pools {
 
 /// One op of a plan into `dst` (a buffer of `dst_bytes`).
-void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t dst_bytes, size_t chunk_bytes);
+void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_t dst_bytes, size_t chunk_bytes);
 
 /// `nch` q8 chunks (8704 B each) -> `nch` q4_1 chunks (5120 B each), block for block, in
 /// the SAME chunk order (both formats are 32 rows x 256 K, so no permutation happens here).
@@ -86,11 +88,14 @@ void q8_half_tile(const uint8_t* chunk, unsigned half, uint8_t* dst);
 void transpose_bytes(const uint8_t* src, uint64_t rows, uint64_t cols, uint64_t elem, uint64_t dst_rows,
                      uint8_t* dst);
 /// The layer's weight pool (m.pool_bytes, fully written).
-void pack_pool(const Manifest& m, const LayerType& lt, const Q4nxFile& f, int layer, uint8_t* dst);
+void pack_pool(const Manifest& m, const LayerType& lt, const WeightFile& f, int layer, uint8_t* dst);
 /// The layer's small-weight blob (lt.consts_bytes, fully written).
-void pack_consts(const Manifest& m, const LayerType& lt, const Q4nxFile& f, int layer, uint8_t* dst);
+void pack_consts(const Manifest& m, const LayerType& lt, const WeightFile& f, int layer, uint8_t* dst);
 /// The lm_head pool (m.lmhead_pool_bytes): the manifest's pack.lm_head ops.
-void pack_lmhead(const Manifest& m, const Q4nxFile& f, uint8_t* dst);
+void pack_lmhead(const Manifest& m, const WeightFile& f, uint8_t* dst);
+/// A small weight (a layernorm) as bf16: the q4nx container stores it bf16, a
+/// GGUF may store f32/f16 — converted exactly as the container does.
+void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst);
 /// A position record table: row p = [valid | nf | cos | sin] for the window's row counts
 /// (stream_patch::attn_window) and these RoPE frequencies, `rows` rows of m.ptab_row.
 void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* dst);

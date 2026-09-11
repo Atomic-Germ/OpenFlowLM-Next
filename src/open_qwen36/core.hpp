@@ -36,9 +36,11 @@
 #include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
 
+#include "open_qwen36/gguf_file.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 
 namespace open_qwen36 {
@@ -64,6 +66,12 @@ struct Snapshot {
 struct StepTiming {
     double part0_ms = 0, part1_ms = 0, route_ms = 0, lmhead_ms = 0, total_ms = 0;
 };
+
+/// The config.json fields a manifest checks, derived from a GGUF's metadata
+/// (the llama-family `<arch>.embedding_length` keys). A key the model does not
+/// carry is refused by name; families whose config carries GGUF-invisible
+/// fields (Granite's folded multipliers) need their config.json.
+nlohmann::json derive_config(const GgufFile& g);
 
 class Core {
 public:
@@ -130,8 +138,11 @@ public:
     bool is_attention_layer(int l) const { return types_[l]->state_kind == "kv"; }
     const StepTiming& last_timing() const { return timing_; }
     const Manifest& manifest() const { return man_; }
-    size_t vocab() const { return man_.vocab; }
-    size_t real_vocab() const { return man_.real_vocab; }
+    /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
+    const Manifest& weights() const { return w_ ? *w_ : man_; }
+    bool is_gguf() const { return gguf_; }
+    size_t vocab() const { return weights().vocab; }
+    size_t real_vocab() const { return weights().real_vocab; }
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
@@ -139,7 +150,7 @@ public:
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
-    const Q4nxFile& file() const { return *file_; }
+    const WeightFile& file() const { return *file_; }
 
 private:
     struct Kern {
@@ -156,7 +167,9 @@ private:
 
     CoreConfig cfg_;
     Manifest man_;
-    std::unique_ptr<Q4nxFile> file_;
+    const Manifest* w_ = nullptr;              ///< the weights view (man_ or man_.gguf.get())
+    bool gguf_ = false;                        ///< the weights are a GGUF (model.gguf)
+    std::unique_ptr<WeightFile> file_;
     int nl_ = 0;
     std::vector<const LayerType*> types_;      ///< per layer
 

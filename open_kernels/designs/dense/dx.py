@@ -48,10 +48,14 @@ sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes import dense as QR  # noqa: E402
-from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
+from recipes.qwen36moe import BAND_ROWS, ELEM  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
+if int(os.environ.get("GEMV_SCALES_F32", 0)) and SPEC.quant != "q4_1_f32":
+    # the export builds this design twice: q4nx chunks and GGUF-direct f32-scale chunks
+    from dataclasses import replace
+    SPEC = replace(SPEC, quant="q4_1_f32")
 R = QR.recipe(SPEC)
 L, G = R.layout, R.geo
 HID, FF, N_CORES = G.HID, G.FF, G.N_CORES
@@ -62,27 +66,38 @@ OS = ["-Os"]
 STOP = int(os.environ.get("DX_STOP", 99))     # debug: 1 = after q/k/v, 2 = after attention, 3 = after the o proj + norm
 assert not G.GATE, "dx.py: the Qwen3 dense recipe has no attention gate"
 
+# GGUF-direct pools (spec.quant == "q4_1_f32"): f32-scale chunks, the gemv
+# wrappers compiled with the f32-scale define and the gemv_q4s32 symbol prefix.
+F32 = SPEC.quant == "q4_1_f32"
+CH = QR.chunk_bytes(SPEC.quant)
+GEMV_DEF = ["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if F32 else []
+GYSYM = "gemv_q4s32_gy" if F32 else "gemv_q4_gy"
+GMSYM = "gemv_q4s32_gms" if F32 else "gemv_q4_gms"
+
 
 Q8 = SPEC.q8_roles              # the roles the container stores at q8 (OPEN-QUANT-Q8); usually empty
 
 
 def per_band(K):
-    return band_bytes(K) // 5120
+    return QR.band_bytes(K, SPEC.quant) // CH
 
 
 def n_groups(K):
-    return band_bytes(K) // CALL_BYTES
+    return QR.band_bytes(K, SPEC.quant) // CALL_BYTES
 
 
 # A q8 projection's band is the same 64 rows and twice the bytes: four 16-row half-tiles
 # per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h). A q4_1 role gets exactly
 # today's numbers, so a model with no q8 role builds the design it always built.
 def role_band_bytes(role, K):
-    return 2 * band_bytes(K) if role in Q8 else band_bytes(K)
+    # The q4_1 side is F32-aware: the GGUF-direct f32-scale build (SPEC.quant ==
+    # "q4_1_f32") uses 6144-byte chunks rather than q4nx's 5120.
+    b = QR.band_bytes(K, SPEC.quant)
+    return 2 * b if role in Q8 else b
 
 
 def role_per_band(role, K):
-    return role_band_bytes(role, K) // 5120
+    return role_band_bytes(role, K) // CH
 
 
 def role_groups(role, K):
@@ -174,8 +189,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # One ExternalFunction per name in KN, in that order: a q4_1 entry only while a
     # projection still uses it, a q8 one only when a role is q8 -- an ExternalFunction that
     # exists changes the build, so a q4_1 model must see exactly the set it always saw.
-    mk = {"gy": lambda: ef("gemv_q4_gy", HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32]),
-          "gms": lambda: ef("gemv_q4_gms", HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32]),
+    # The q4_1 entries use GYSYM/GMSYM so the GGUF-direct f32-scale build (SPEC.quant ==
+    # "q4_1_f32") picks the gemv_q4s32 wrappers and the f32-scale compile defines.
+    mk = {"gy": lambda: ef(GYSYM, HERE / "gemv_q4_gy.cc", [elem, tab_ty, y_ty, i32, i32, i32], GEMV_OS + GEMV_DEF),
+          "gms": lambda: ef(GMSYM, HERE / "gemv_q4_gms.cc", [elem, tab_ty, ms_ty, i32, i32, i32], GEMV_OS + GEMV_DEF),
           "gyms": lambda: ef("gemv_q4_gyms", HERE / "gemv_q4_gyms.cc",
                              [elem, tab_ty, y_ty, ms_ty, i32, i32, i32], GEMV_OS),
           "act": lambda: ef("dense_act", HERE / "dense_act.cc", [ms_ty, y_ty]),

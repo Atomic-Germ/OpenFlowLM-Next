@@ -30,7 +30,13 @@ from aie.utils import config
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 
-TILE_BYTES = 5120
+# GGUF-direct pool chunks (f32 scales, 6144 B) vs the q4nx ones (bf16, 5120 B).
+# The kernel is this design's own generated gemv_q4_gy, compiled with the f32-scale
+# define and the gemv_q4s32 symbol prefix in the f32 build.
+SCALES_F32 = int(os.environ.get("LMHEAD_SCALES_F32", 0))
+TILE_BYTES = 6144 if SCALES_F32 else 5120
+KERNEL_SYM = "gemv_q4s32_gy" if SCALES_F32 else "gemv_q4_gy"
+KERNEL_FLAGS = ["-Os"] + (["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if SCALES_F32 else [])
 BAND_ROWS = 64
 PER_CALL = 2
 CALL_BYTES = PER_CALL * TILE_BYTES
@@ -44,8 +50,13 @@ def _ensure_gy() -> Path:
     src = f'''#define GEMV_PER_CALL {PER_CALL}
 #include "gemv_q4.h"
 // A band into its y element: runtime band law (per_band chunks, row split rs).
+// The entry name carries GEMV_Q4_PREFIX, so the f32-scale build
+// (-DGEMV_Q4_PREFIX=gemv_q4s32) references gemv_q4s32_gy from its MLIR while both
+// builds compile the one source.
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 extern "C" {{
-void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, y)(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
                 int32_t group, int32_t per_band, int32_t rs) {{
   gemv_q4_pool_group_rt(t, tab, (unsigned)group, y, (unsigned)per_band, (unsigned)rs);
 }}
@@ -102,8 +113,9 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
     i32 = np.int32
 
     inc = _include_dirs()
-    kernel = ExternalFunction("gemv_q4_gy", source_file=str(HERE / "gemv_q4_gy.cc"),
-                              arg_types=[elem_ty, tab_ty, acc_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
+    kernel = ExternalFunction(KERNEL_SYM, source_file=str(GY),
+                              arg_types=[elem_ty, tab_ty, acc_ty, i32, i32, i32], include_dirs=inc,
+                              compile_flags=KERNEL_FLAGS)
     prep = ExternalFunction("gemv_q4_prep_rt", source_file=str(GEMV / "gemv_q4_prep_rt.cc"),
                             arg_types=[x_ty, tab_ty, i32, i32, i32], include_dirs=inc, compile_flags=["-Os"])
 
@@ -157,5 +169,6 @@ def lm_head_q4(w: In, x: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
 
 DESIGN = lm_head_q4
 _src = b"".join([(GEMV / f).read_bytes() for f in ("gemv_q4.h", "gemv_tab.h", "gemv_q4_prep_rt.cc")]
-                + [(HERE / "gemv_q4_gy.cc").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+                + [GY.read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes()]
+                + [str(SCALES_F32).encode()])
 SPECIALIZE = {"n": N, "k": K, "n_cores": N_CORES, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

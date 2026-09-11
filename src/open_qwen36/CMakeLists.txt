@@ -34,12 +34,16 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
 
-add_executable(manifest_test manifest_test.cpp manifest.cpp)
+add_executable(manifest_test manifest_test.cpp manifest.cpp gguf_file.cpp q4nx_file.cpp)
+add_executable(gguf_pack_test gguf_pack_test.cpp gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+foreach(t gguf_pack_test)
+    target_include_directories(${t} PRIVATE ${_inc})
+endforeach()
 target_include_directories(manifest_test PRIVATE ${_inc})
 
 # vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
@@ -58,6 +62,7 @@ foreach(t open_qwen36_cli manifest_test vit_test)
 endforeach()
 
 enable_testing()
+add_test(NAME GGUF-PACK COMMAND gguf_pack_test)
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"

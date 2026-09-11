@@ -50,6 +50,65 @@ REQUIRED_FILES = ["config.json", "model.q4nx", "tokenizer.json", "tokenizer_conf
 OPTIONAL_FILES = ["chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4nx"]
 ALL_FILES = REQUIRED_FILES + OPTIONAL_FILES
 
+# The GGUF-direct path: a repo that carries llama.cpp-style quantized weights
+# (e.g. mradermacher/*-i1-GGUF, Atomic-Germ/*-GGUF) can install one compatible
+# file as model.gguf beside the tokenizer files -- no q4nx conversion needed.
+# The open kernel sets ship an f32-scale build for this (see
+# open_kernels/gguf_pool.py); incompatible quants are refused here, pointing
+# at q4nx-build.
+GGUF_FILES = ["config.json", "model.gguf", "tokenizer.json", "tokenizer_config.json"]
+GGUF_OPTIONAL = ["chat_template.jinja"]
+# preference order: 4.5-bit fits the NPU pools best, Q8_0 is the fallback
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q8_0"]
+# Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
+# manifest section + f32-scale kernel sets only ship for these). qwen3.5
+# (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
+# installs as plain safetensors instead.
+GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+# Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
+# not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
+# dequantizes, so no open_kernels "gguf" manifest section is required.
+EMBEDDING_FAMILIES = {"embed-gemma"}
+# NPU-embedding models (the NpuEmbeddings engine): a HuggingFace safetensors
+# checkpoint plus a pre-tiled `.npue` container packed on first load. They are
+# NOT GGUF/q4nx and do not use the chat-model xclbin linking -- their kernels
+# live under <xclbin_root>/xclbins/<npue_design_family>/. The authoritative file
+# list and npue_design_family come from the official model_list.json entry
+# (matched by name); the engine routes by the exact registered tag.
+NPU_EMBED_FAMILIES = {"bge", "nomic", "minilm", "gte"}
+NPU_EMBED_FILES = [
+    "config.json", "model.safetensors", "tokenizer.json",
+    "tokenizer_config.json", "vocab.txt", "1_Pooling/config.json",
+]
+GGUF_QUANT_RE = re.compile(r"(?:^|[.\-_ ])(I?Q[0-9](?:_[0-9A-Za-z]+)?)")
+
+def gguf_quant_of(name):
+    """The quant specifier in a llama.cpp-style weight file name, e.g.
+    'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked)."""
+    m = GGUF_QUANT_RE.search(name)
+    return m.group(1) if m else None
+
+def choose_gguf_file(names):
+    """Pick the best compatible *.gguf from a repo's root file names.
+    Returns (chosen, refused) -- refused maps every other gguf to why."""
+    refused = {}
+    cands = []
+    for n in names:
+        if not n.endswith(".gguf"):
+            continue
+        if re.search(r"-\d+-of-\d+\.gguf$", n):
+            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
+            continue
+        q = gguf_quant_of(n)
+        if q not in GGUF_QUANT_PREFERENCE:
+            refused[n] = f"quant {q or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
+            continue
+        cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
+    cands.sort()
+    if not cands:
+        return None, refused
+    return cands[0][1], refused
+
 SYSTEM_LIST_CANDIDATES = [
     "/opt/openflowlm/share/oflm/model_list.json",
     "/usr/share/oflm/model_list.json",
@@ -103,6 +162,13 @@ FAMILY_ALIASES = [
     ("whisper-v3", "whisper-v3"),
     ("whisper", "whisper-v3"),
     ("embed-gemma", "embed-gemma"),
+    ("embeddinggemma", "embed-gemma"),
+    # NPU-embedding (NpuEmbeddings) families: HF safetensors checkpoints, no GGUF.
+    ("bge", "bge"),
+    ("nomic", "nomic"),
+    ("all-minilm", "minilm"),
+    ("minilm", "minilm"),
+    ("gte", "gte"),
 ]
 
 
@@ -219,6 +285,43 @@ def derive_tag(dir_name, explicit=None):
         variant = t.lower()
         break
     return f"{family}-{variant}:{size}" if variant else f"{family}:{size}"
+
+
+def _strip_org(name):
+    """Registry names carry a leading "Org-" (e.g. "BAAI-bge-base-en-v1.5"); HF
+    repo slugs drop it ("bge-base-en-v1.5"). Return the part after it."""
+    return name.split("-", 1)[1] if "-" in name else name
+
+
+def match_npue_official(system_registry, family, dir_name):
+    """Best official NPU-embedding entry for `family` whose name best matches
+    `dir_name`. Registry names sometimes carry a leading "Org-" prefix the HF
+    repo slug omits (e.g. "BAAI-bge-base-en-v1.5" vs "bge-base-en-v1.5"), and
+    sometimes do not ("nomic-embed-text-v1.5"). Score BOTH the org-stripped name
+    and the full name against the dir tokens and keep the best, requiring a >=2
+    token common prefix (tolerant of the prefix, unlike match_official_entry).
+    Returns the 4-tuple (common, bucket, size, info) or None."""
+    best = None
+    dir_tokens = re.split(r"[-_ ]+", dir_name)
+    for bucket, sz, info in _official_entries(system_registry, family):
+        name = info.get("name", "")
+        if not name:
+            continue
+        candidates = [re.split(r"[-_ ]+", name)]
+        stripped = _strip_org(name)
+        if stripped != name:
+            candidates.append(re.split(r"[-_ ]+", stripped))
+        common = 0
+        for toks in candidates:
+            c = 0
+            for x, y in zip(toks, dir_tokens):
+                if x.lower() != y.lower():
+                    break
+                c += 1
+            common = max(common, c)
+        if common >= 2 and (best is None or common > best[0]):
+            best = (common, bucket, sz, info)
+    return best
 
 
 def match_official_entry(system_registry, dir_name):
@@ -448,6 +551,147 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def normalize_tokenizer_config(target, repo, bases, modelscope=False):
+    """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
+    stock HF repos keep them in generation_config.json -- merge them over."""
+    tc = target / "tokenizer_config.json"
+    if not tc.is_file():
+        return
+    cfg = json.loads(tc.read_text(encoding="utf-8"))
+    need_eos = "eos_token_id" not in cfg or not isinstance(cfg.get("eos_token_id"), list)
+    need_bos = cfg.get("bos_token") is not None and "bos_token_id" not in cfg
+    if not (need_eos or need_bos):
+        return
+    g = None
+    gc = target / "generation_config.json"
+    repo_gen = None
+    # A local-directory install passes the directory path as `repo`; fetching
+    # generation_config.json from it as an HF id is meaningless (and raises),
+    # so only attempt it when `repo` is a remote id.
+    if not Path(repo).is_dir():
+        try:
+            repo_gen = fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)
+        except Exception:
+            repo_gen = None
+    for cand in [gc, repo_gen] + \
+                [fetch_from_repo(b, "generation_config.json", gc, modelscope=modelscope) for b in bases]:
+        if cand and Path(cand).is_file():
+            try:
+                g = json.loads(Path(cand).read_text(encoding="utf-8"))
+            except Exception:
+                g = None
+            if g and (need_eos and isinstance(g.get("eos_token_id"), list) or
+                      need_bos and isinstance(g.get("bos_token_id"), int)):
+                break
+    if not g:
+        log("[WARN] no generation_config.json; the model may fail at load if the engine "
+            "needs eos_token_id in tokenizer_config.json")
+        return
+    changed = False
+    if need_eos and isinstance(g.get("eos_token_id"), list):
+        cfg["eos_token_id"] = g["eos_token_id"]
+        changed = True
+    if need_bos and isinstance(g.get("bos_token_id"), int):
+        cfg["bos_token_id"] = g["bos_token_id"]
+        changed = True
+    if changed:
+        tc.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        log("[INFO] merged eos/bos ids from generation_config.json into tokenizer_config.json")
+
+
+def _parse_base_model_frontmatter(text):
+    """base_model id(s) from already-read README.md frontmatter text."""
+    lines = text.splitlines()
+    # the frontmatter: the first "---" ... "---" block at the top
+    if not lines or lines[0].strip() != "---":
+        return []
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        return []
+    bases = []
+    in_base = False
+    for line in lines[1:end]:
+        s = line.strip()
+        if s.startswith("base_model:"):
+            in_base = True
+            v = s[len("base_model:"):].strip()
+            if v:
+                bases.append(v)
+        elif in_base and s.startswith("- "):
+            bases.append(s[2:].strip())
+        elif in_base and s and not s.startswith("-"):
+            in_base = False
+    out = []
+    for b in bases:
+        b = re.sub(r"^\[\[|\]\]$", "", b).strip("\"' ")
+        # "org/name (size)" style suffixes occasionally appear
+        b = re.sub(r"\s*\(.*$", "", b).strip()
+        if b and "/" in b and b not in out:
+            out.append(b)
+    return out
+
+
+def readme_base_model(repo_id, modelscope=False):
+    """The base model id(s) from the repo's README.md YAML frontmatter.
+
+    GGUF-quant repos (mradermacher etc.) carry no tokenizer/config files, but
+    their model card names the original model, whose repo has everything. The
+    field is `base_model:` either inline (`[[Org/Name]]` wikilink form or
+    plain) or a `- Org/Name` list (merge lineages; the first entry is the
+    closest to the quantized checkpoint).
+
+    When ``repo_id`` is a local directory holding a README.md (a local-dir
+    install of a quantized model), the frontmatter is parsed from disk so the
+    same base_model crawl applies without touching the network.
+    """
+    local = Path(repo_id)
+    if local.is_dir() and (local / "README.md").is_file():
+        try:
+            return _parse_base_model_frontmatter(
+                (local / "README.md").read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return []
+    url = (f"https://www.modelscope.ai/models/{repo_id}/resolve/master/README.md" if modelscope
+           else f"https://huggingface.co/{repo_id}/raw/main/README.md")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=_hf_headers()), timeout=60) as r:
+            text = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    return _parse_base_model_frontmatter(text)
+
+
+def fetch_from_repo(repo_id, fname, dest, modelscope=False, force=False):
+    """One auxiliary file from another repo (local HF cache first, then remote).
+
+    Returns the local path, or None if the file is not available."""
+    if dest.is_file() and not force:
+        return dest
+    snapshot = ms_cache_snapshot(repo_id) if modelscope else hf_cache_snapshot(repo_id)
+    src = (snapshot / fname) if snapshot else None
+    if src and src.is_file():
+        shutil.copyfile(src, dest)
+        return dest
+    if modelscope:
+        tree = ms_file_tree(repo_id)[1]
+        if fname not in tree:
+            return None
+        meta = tree[fname]
+        url = f"https://www.modelscope.ai/models/{repo_id}/resolve/master/{fname}"
+        headers, sha, size = _ms_headers(), (meta.get("Sha256") or "").lower() or None, meta.get("Size") or None
+    else:
+        entries = {e.get("path"): e for e in hf_file_tree(repo_id)}
+        if fname not in entries:
+            return None
+        lfs = entries[fname].get("lfs") or {}
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{fname}"
+        headers, sha, size = None, lfs.get("oid"), lfs.get("size") or entries[fname].get("size")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    download_file(url, dest, expected_size=size, expected_sha=sha, verify=True)
+    return dest
+
+
 def download_file(url, dest, expected_size=None, expected_sha=None, verify=True, quiet=False,
                   headers=None):
     req = urllib.request.Request(url, headers=headers if headers is not None else _hf_headers())
@@ -485,27 +729,45 @@ def download_file(url, dest, expected_size=None, expected_sha=None, verify=True,
     os.replace(tmp, dest)
 
 
-def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False):
-    """Populate target/ with the model files; returns the list of files present."""
+def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False, gguf_name=None, want=None):
+    """Populate target/ with the model files; returns the list of files present.
+
+    With gguf_name set (the GGUF-direct path) the wanted set is the tokenizer
+    files plus that one GGUF, stored canonically as model.gguf. Otherwise the
+    default is ALL_FILES; an explicit `want` list overrides it (used by the
+    NPU-embedding path, which fetches a safetensors checkpoint, not model.q4nx)."""
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
+    if gguf_name:
+        want_list = GGUF_FILES + GGUF_OPTIONAL
+    else:
+        want_list = want if want is not None else ALL_FILES
     if modelscope:
         domain, entries = ms_file_tree(repo_id)
-        for fname in ALL_FILES:
+        for fname in want_list:
             if fname not in entries:
                 continue
             dest = target / fname
             if dest.is_file() and not force:
                 obtained.append(fname)
                 continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
             meta = entries[fname]
             expected_size = meta.get("Size") or None
             expected_sha = (meta.get("Sha256") or "").lower() or None
             if not quiet:
                 gb = f" ({expected_size / 1e9:.2f} GB)" if expected_size else ""
                 log(f"Downloading {fname}{gb} from ModelScope ({domain})...")
+            remote = gguf_name if fname == "model.gguf" else fname
+            meta = entries.get(remote) or {}
+            expected_size = meta.get("Size") or None
+            expected_sha = (meta.get("Sha256") or "").lower() or None
+            if not quiet:
+                gb = f" ({expected_size / 1e9:.2f} GB)" if expected_size else ""
+                label = remote if remote != fname else fname
+                log(f"Downloading {label}{gb} from ModelScope ({domain})...")
             download_file(
-                f"https://{domain}/models/{repo_id}/resolve/master/{fname}",
+                f"https://{domain}/models/{repo_id}/resolve/master/{remote}",
                 dest,
                 expected_size=expected_size,
                 expected_sha=expected_sha,
@@ -516,25 +778,29 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
             obtained.append(fname)
         return obtained
 
-    # Hugging Face: local cache first, then the tree API.
+    # Hugging Face: local cache first, then the tree API. Keep nested paths too
+    # (e.g. 1_Pooling/config.json for NPU-embedding models).
     entries = {}
     for e in hf_file_tree(repo_id):
         p = e.get("path")
-        if p and "/" not in p:
+        if p:
             entries[p] = e
-    for fname in ALL_FILES:
-        if fname not in entries:
+    for fname in want_list:
+        remote = gguf_name if fname == "model.gguf" else fname
+        if remote not in entries:
             continue
         dest = target / fname
         if dest.is_file() and not force:
             obtained.append(fname)
             continue
-        lfs = entries[fname].get("lfs") or {}
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        lfs = entries[remote].get("lfs") or {}
         expected_sha = lfs.get("oid")
-        expected_size = lfs.get("size") or entries[fname].get("size")
-        log(f"Downloading {fname} ({expected_size/1e9:.2f} GB)...")
+        expected_size = lfs.get("size") or entries[remote].get("size")
+        label = remote if remote != fname else fname
+        log(f"Downloading {label} ({expected_size/1e9:.2f} GB)...")
         download_file(
-            f"https://huggingface.co/{repo_id}/resolve/main/{fname}",
+            f"https://huggingface.co/{repo_id}/resolve/main/{remote}",
             dest,
             expected_size=expected_size,
             expected_sha=expected_sha,
@@ -545,15 +811,17 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     return obtained
 
 
-def copy_from_dir(src_dir, target, force=False):
+def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
     obtained = []
-    for fname in ALL_FILES:
-        src = src_dir / fname
+    want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else (want if want is not None else ALL_FILES)
+    for fname in want_list:
+        src = src_dir / (gguf_name if fname == "model.gguf" else fname)
         if src.is_file():
             dest = target / fname
             if dest.is_file() and not force:
                 obtained.append(fname)
                 continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
             obtained.append(fname)
     return obtained
@@ -587,6 +855,29 @@ def estimate_size(config_path):
     return max(int(round(total / 1e9 * 2) / 2 * 1e9), 1_000_000_000)
 
 
+def link_npue_design(system_prefixes, user_root, design_family, force=False, quiet=False):
+    """Symlink the NPU-embedding design set (compiled kernels, keyed by GEMM
+    geometry) into the user's xclbins so the NpuEmbeddings engine can find it at
+    <xclbin_prefix>/xclbins/<npue_design_family>/gemm_rtp/design.json.
+
+    The design sets ship under one of the system xclbin roots (e.g.
+    /usr/local/share/flm/xclbins); this mirrors the family-kernel symlink the
+    chat models get, so an `flm-add` install needs no manual step to run on NPU."""
+    src = None
+    for p in system_prefixes:
+        cand = Path(p) / "xclbins" / design_family
+        if (cand / "gemm_rtp" / "design.json").is_file():
+            src = cand
+            break
+    if src is None:
+        if not quiet:
+            log(f"[WARN] No npue design set for '{design_family}' under any system "
+                 "xclbin root; the engine can pack the container but will not run on "
+                 "NPU without it. Build it with npu_offload/gemm_rtp/build.ps1.")
+        return
+    _link_one(user_root, design_family, str(src), force, quiet)
+
+
 def build_entry(base_entry, dir_name, files, size):
     entry = dict(base_entry) if base_entry else {}
     entry["name"] = dir_name
@@ -617,19 +908,9 @@ def register(user_list_path, tag, entry, system_registry):
 
 # ------------------------------------------------------------------- xclbins
 
-def link_xclbins(system_root, user_root, dir_name, source_name, force=False, quiet=False):
-    if not source_name:
-        if not quiet:
-            log("[WARN] No xclbin source; skipping symlink. Pass --xclbin-from NAME to link an official model's kernels.")
-        return
-    src = system_root / source_name
-    if not src.is_dir():
-        if not quiet:
-            log(f"[WARN] Official model has no xclbins directory: {source_name}")
-        return
-    user_root.mkdir(parents=True, exist_ok=True)
-    link = user_root / dir_name
-    target = str(src)
+def _link_one(user_root, name, target, force, quiet):
+    """Create symlink user_root/name -> target, reusing it when already correct."""
+    link = user_root / name
     if link.is_symlink():
         if os.readlink(link) == target:
             if not quiet:
@@ -646,6 +927,29 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
     os.symlink(target, link)
     if not quiet:
         log(f"[INFO] Linked xclbins: {link} -> {target}")
+
+
+def link_xclbins(system_root, user_root, dir_name, source_name, force=False, quiet=False):
+    if not source_name:
+        if not quiet:
+            log("[WARN] No xclbin source; skipping symlink. Pass --xclbin-from NAME to link an official model's kernels.")
+        return
+    src = system_root / source_name
+    if not src.is_dir():
+        if not quiet:
+            log(f"[WARN] Official model has no xclbins directory: {source_name}")
+        return
+    user_root.mkdir(parents=True, exist_ok=True)
+    target = str(src)
+    # Link under the installed model directory name (used by per-model engine
+    # lookups that resolve kernels by the model's directory).
+    _link_one(user_root, dir_name, target, force, quiet)
+    # Also link under the kernel family/source name. open_embedding's NPU matmul
+    # probe looks the matmul kernels up by the family directory (e.g.
+    # Embedding-Gemma-300M-OpenNPU2), not by the model directory name, so the
+    # family-named link is what makes the NPU path discoverable.
+    if source_name != dir_name:
+        _link_one(user_root, source_name, target, force, quiet)
 
 
 # -------------------------------------------------------------- open kernels
@@ -853,22 +1157,101 @@ def main():
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
 
+    # ---- scan the repo for a compatible GGUF (the GGUF-direct path): a repo
+    # that carries llama.cpp-style weights installs one of them as model.gguf;
+    # repos that ship model.q4nx take the NPU2 path even if a gguf also sits
+    # there (the converted container is the curated one).
+    gguf_names = []
+    if local_dir:
+        gguf_names = [e.name for e in local_dir.iterdir() if e.is_file() and e.suffix == ".gguf"]
+    else:
+        try:
+            tree = ms_file_tree(repo)[1] if (args.modelscope or split_remote_repo(repo_arg)[0] == "modelscope") else hf_file_tree(repo)
+            gguf_names = [e.get("path") for e in tree if e.get("path") and "/" not in e["path"] and e["path"].endswith(".gguf")]
+        except Exception as ex:
+            log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
+    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    have_q4nx = (local_dir / "model.q4nx").is_file() if local_dir else False
+    gguf_mode = gguf_name is not None and not have_q4nx
+
     system_list = find_system_model_list()
     system_registry = load_json(system_list)
     user_list = user_registry_path(args.config)
     models_root = models_root_dir(args.models_root)
     target = models_root / dir_name
 
-    tag = derive_tag(dir_name, args.tag)
-    bucket, size_token = tag.split(":", 1)
-    official = match_official_entry(system_registry, dir_name)
-    base_entry = official[3] if official else None
-    family = derive_family(system_registry, dir_name, args.family, base_entry)
-    size_value = (base_entry or {}).get("size") or size_from_tag(tag)
-    official, official_note = resolve_official(system_registry, dir_name, family, size_value)
-    base_entry = official[3] if official else None
-    src_tag = f"{official[1]}:{official[2]}" if official else None
-    xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
+    family = derive_family(system_registry, dir_name, args.family)
+    npue_embed = family in NPU_EMBED_FAMILIES
+    if npue_embed:
+        # NPU-embedding (NpuEmbeddings) model: the authoritative registry entry
+        # carries `npue_design_family` + the safetensors file list, and the engine
+        # routes by the EXACT registered tag -- so default the tag to that entry
+        # rather than deriving a numeric size these repos (bge-base:en-v1.5) lack.
+        official = match_npue_official(system_registry, family, dir_name)
+        if not official:
+            raise SystemExit(
+                f"No official entry found for npue-embedding family '{family}' "
+                f"(repo '{dir_name}'). The npue_design_family metadata is required; "
+                "pass --tag if the model is a known variant.")
+        base_entry = official[3]
+        official_note = None
+        src_tag = f"{official[1]}:{official[2]}"
+        xclbin_source = base_entry.get("name")
+        tag = f"{official[1]}:{official[2]}" if not args.tag else args.tag
+        bucket, size_token = tag.split(":", 1)
+        size_value = base_entry.get("size") or size_from_tag(tag)
+        gguf_mode = False
+        gguf_name = None
+    else:
+        official = match_official_entry(system_registry, dir_name)
+        base_entry = official[3] if official else None
+        tag = derive_tag(dir_name, args.tag)
+        bucket, size_token = tag.split(":", 1)
+        size_value = (base_entry or {}).get("size") or size_from_tag(tag)
+        official, official_note = resolve_official(system_registry, dir_name, family, size_value)
+        base_entry = official[3] if official else None
+        src_tag = f"{official[1]}:{official[2]}" if official else None
+        xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
+
+    # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
+    # xclbins must actually carry the GGUF-direct kernel builds (the nested
+    # "gguf" manifest section, produced by the *_f32 sets in utilities/
+    # build-all.sh). Otherwise fall back to the normal safetensors install.
+    gguf_skip = None
+    if gguf_mode:
+        if family in EMBEDDING_FAMILIES:
+            # Embedding GGUF uses the existing bf16 matmul kernels (the engine
+            # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
+            # open_kernels manifest. Just confirm the family is recognized.
+            pass
+        elif family not in GGUF_CAPABLE_FAMILIES:
+            gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
+                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
+                         + "); installing the safetensors weights instead")
+        else:
+            xk = None
+            sys_xcl = find_system_xclbin_root()
+            if xclbin_source and sys_xcl:
+                mj = sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
+                if mj.is_file():
+                    try:
+                        xk = json.loads(mj.read_text(encoding="utf-8"))
+                    except Exception:
+                        xk = None
+            if xk is None or "gguf" not in xk:
+                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
+                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
+                             "rebuild them with utilities/build-all.sh -- "
+                             "installing the safetensors weights instead")
+        if gguf_skip:
+            gguf_refused[gguf_name] = gguf_skip
+            log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
+            gguf_name, gguf_mode = None, False
+        elif family in EMBEDDING_FAMILIES and gguf_mode:
+            # Embedding GGUF loads the existing bf16 matmul kernels, whose
+            # directory is fixed by the engine; point the xclbin link there.
+            xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
+
     if not args.dry_run:
         if official:
             note = f" ({official_note})" if official_note else ""
@@ -882,6 +1265,15 @@ def main():
         print(f"details.family : {family}")
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
+        if gguf_mode:
+            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
+            for n, why in sorted(gguf_refused.items()):
+                print(f"  skipped      : {n} ({why})")
+        elif npue_embed:
+            print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
+        elif gguf_refused:
+            print(f"weights        : safetensors (GGUF present but not usable: "
+                  + "; ".join(sorted(set(gguf_refused.values()))) + ")")
         probe = args.open_kernels or (local_dir if local_dir else None)
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
@@ -896,39 +1288,105 @@ def main():
         return
 
     # --- acquire model files ---
+    if gguf_mode and not args.quiet:
+        log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
+        for n, why in sorted(gguf_refused.items()):
+            log(f"[INFO]   skipping {n}: {why}")
     if local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
         target.mkdir(parents=True, exist_ok=True)
-        files = copy_from_dir(local_dir, target, force=args.force)
+        files = copy_from_dir(local_dir, target, force=args.force,
+                              gguf_name=gguf_name if gguf_mode else None,
+                              want=NPU_EMBED_FILES if npue_embed else None)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
             target.mkdir(parents=True, exist_ok=True)
-            files = copy_from_dir(snapshot, target, force=args.force)
+            files = copy_from_dir(snapshot, target, force=args.force,
+                                  gguf_name=gguf_name if gguf_mode else None,
+                                  want=NPU_EMBED_FILES if npue_embed else None)
         else:
             if not args.quiet:
                 log(f"[INFO] Downloading model files from {'ModelScope' if args.modelscope else 'Hugging Face'}: {repo}")
             target.mkdir(parents=True, exist_ok=True)
-            files = fetch_assets(repo, target, args.modelscope, verify=not args.no_verify, force=args.force, quiet=args.quiet)
+            files = fetch_assets(repo, target, args.modelscope, verify=not args.no_verify, force=args.force,
+                                 quiet=args.quiet, gguf_name=gguf_name if gguf_mode else None,
+                                 want=NPU_EMBED_FILES if npue_embed else None)
 
-    missing = [f for f in REQUIRED_FILES if not (target / f).is_file()]
+    if npue_embed:
+        # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are absent
+        # for some families (e.g. gte has no vocab.txt) and are tolerated.
+        required = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"]
+    else:
+        required = ["model.gguf", "tokenizer.json", "tokenizer_config.json"] if gguf_mode else REQUIRED_FILES
+    missing = [f for f in required if not (target / f).is_file()]
+    if gguf_mode:
+        # GGUF-quant repos (mradermacher etc.) often ship only the GGUF: take the
+        # tokenizer/config files from the original model the README names.
+        # config.json too: the curated config beats the GGUF-derived one (and
+        # Granite's folded multipliers exist only there).
+        aux_missing = [f for f in missing if f != "model.gguf"]
+        if not (target / "config.json").is_file():
+            aux_missing.append("config.json")
+        if aux_missing:
+            bases = readme_base_model(repo, modelscope)
+            if bases:
+                log(f"[INFO] base model(s) from README.md: {', '.join(bases)}")
+                for f in aux_missing:
+                    got = None
+                    for b in bases:
+                        try:
+                            got = fetch_from_repo(b, f, target / f, modelscope=modelscope)
+                        except Exception as ex:
+                            log(f"[WARN] fetching {f} from {b} failed: {ex}")
+                            got = None
+                        if got:
+                            log(f"[INFO]   {f} <- {b}")
+                            break
+                missing = [f for f in required if not (target / f).is_file()]
+    normalize_tokenizer_config(target, repo, readme_base_model(repo, modelscope), modelscope)
     if missing:
-        raise SystemExit(f"Model is missing required files: {missing}")
+        if gguf_mode and missing == ["config.json"]:
+            missing = []
+        if missing and not gguf_mode and gguf_refused and "model.safetensors" in missing:
+            raise SystemExit(
+                f"Model is missing required files: {missing}\n"
+                "The repo carries only GGUF weights and they cannot be used directly: "
+                + "; ".join(sorted(set(gguf_refused.values())))
+                + "\nConvert one to model.q4nx with q4nx-build, or pick a GGUF-capable family (--family).")
+        if missing:
+            raise SystemExit(f"Model is missing required files: {missing}")
+    if gguf_mode and not (target / "config.json").is_file():
+        log("[WARN] No config.json in the repo; the engine will derive the config from the GGUF "
+            "metadata (llama-family shapes only -- Granite etc. need a config.json).")
 
     if not size_value:
         size_value = estimate_size(target / "config.json")
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
+    if gguf_mode:
+        entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
+        entry.setdefault("flm_min_version", "0.9.45")
+    if npue_embed:
+        # build_entry copies npue_design_family / details / label from the official
+        # entry, but blanks `url`; restore it so the .npue packer attributes the
+        # weights to their source repository (a licensing statement, not optional).
+        entry["url"] = base_entry.get("url") or f"https://huggingface.co/{repo}"
 
     register(user_list, tag, entry, system_registry)
     log(f"[INFO] Registered tag '{tag}' in {user_list}")
 
     system_root = find_system_xclbin_root()
     if not args.no_xclbin:
-        if system_root is None:
+        if npue_embed:
+            design = base_entry.get("npue_design_family")
+            if design:
+                link_npue_design(SYSTEM_XCLBIN_PREFIXES, user_xclbin_dir(args.xclbin_dir),
+                                 design, force=args.force, quiet=args.quiet)
+        elif system_root is None:
             log("[WARN] Could not locate system xclbins; skipped symlink.")
         else:
             link_xclbins(
@@ -941,7 +1399,9 @@ def main():
             )
 
     # Open kernels: keyed by this model's spec, not by an official model name.
-    if args.open_kernels or not args.no_xclbin:
+    # NPU-embedding uses the npue_design_family design set (already installed),
+    # not the chat-model open-kernel link, so it is skipped here.
+    if (args.open_kernels or not args.no_xclbin) and not npue_embed:
         setup_open_kernels(
             target,
             dir_name,
