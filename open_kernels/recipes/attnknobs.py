@@ -122,7 +122,13 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # exponential and the reciprocal on the same core -- the block kernel does not fit
         # beside them (Qwen3.5-0.8B, 2026-09-08). The vector softmax and the core split are
         # the large part of the gain; the block is the rest.
-        cap = 4 if spec.head_dim < 256 else (1 if spec.attn_gate else 2)
+        # ... and none at 256 with EIGHT heads on a core (Gemma 3 12B: 16 heads over 8 kv
+        # gives og elements of 8, so ACORES is 2 and NHL is 8). There the block kernel's
+        # working set does not fit L1 at all -- `'aie.tile' op allocated buffers exceeded
+        # available memory`, before any program-memory limit is reached. RB 1 builds and
+        # costs little: RB 1 -> 2 measured 1.22x of the attention ARITHMETIC on granite,
+        # and that arithmetic is ~18% of a decode step.
+        cap = 4 if spec.head_dim < 256 else (1 if (spec.attn_gate or nhl >= 8) else 2)
         rb = max((r for r in (4, 2, 1) if r <= cap and (r * block_lanes(nhl)) in (8, 16, 32)), default=1)
         rb = _probe_rb(rb, nhl)
     return AttnKnobs(VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb)

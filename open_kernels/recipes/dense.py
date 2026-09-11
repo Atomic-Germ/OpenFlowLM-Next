@@ -101,8 +101,32 @@ def lm_rows(spec: ModelSpec) -> int:
     return roundup(spec.vocab, BAND_ROWS)
 
 
+def cores_for(spec: ModelSpec) -> int:
+    """Main cores this spec's widths can be split over, at most LIMITS["n_cols"].
+
+    A GEMV band is BAND_ROWS rows and every width has to divide into whole bands per
+    core, so the core count is bounded by the geometry rather than chosen. Gemma 3 12B
+    is the case that forced this: hidden 3840 is not a multiple of 64*8, while its
+    intermediate (15360), q width (4096) and kv width (2048) all are -- so the model
+    was unbuildable at a fixed 8 while 4 serves every one of its widths.
+
+    Fewer cores is measured to be nearly free, which is what makes this a widening and
+    not a compromise: on gemma3-4b, 8 cores against 4 is 1.18x at position 0 and
+    1.06-1.09x with a context, because the weight stream is DMA-bound and the array is
+    one memory client whatever its width (T45 / tasks/0151, established there for the
+    encoder GEMM and confirmed here for the decoder GEMV).
+
+    Every spec that divides by 64*8 still gets 8 and rebuilds byte-identical.
+    """
+    widths = (spec.hidden, spec.intermediate, spec.attn_q_width, spec.attn_kv_width)
+    for n in range(LIMITS["n_cols"], 0, -1):
+        if all(w % (BAND_ROWS * n) == 0 for w in widths):
+            return n
+    return 1
+
+
 def _check(spec: ModelSpec) -> None:
-    n = LIMITS["n_cols"]
+    n = cores_for(spec)
     if spec.family not in DENSE_FAMILIES:
         raise OpRangeError(f"dense recipe given a {spec.family!r} spec")
     if spec.activation not in ("silu", "gelu_tanh"):
@@ -160,7 +184,7 @@ from .attnknobs import (PROBE_VARS, RB_SUPPORTED, FAST_ATTENTION, MAX_ATTN_CORES
 
 
 def geometry(spec: ModelSpec) -> DenseGeometry:
-    n = LIMITS["n_cols"]
+    n = cores_for(spec)
     hid, ff, nh, kvh, hd = spec.hidden, spec.intermediate, spec.num_heads, spec.num_kv_heads, spec.head_dim
     qw, kvw = nh * hd, kvh * hd
     e_a = kvw * 2
@@ -192,7 +216,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
 
 
 def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
-    n = LIMITS["n_cols"]
+    n = cores_for(spec)
     hid, ff = spec.hidden, spec.intermediate
     G = geometry(spec)
     eln, e_a = hid * 2, G.KVW * 2
@@ -331,7 +355,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 
 
 def builds(spec: ModelSpec) -> dict[str, dict]:
-    n = LIMITS["n_cols"]
+    n = cores_for(spec)
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
     return {

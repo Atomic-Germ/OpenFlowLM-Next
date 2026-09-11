@@ -129,13 +129,15 @@ class Template:
 
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
-             {"K": values(1024, 2048, 3072, 3584, 4096, 2560, 6144, 8192, 9216, 9728, 10240, 10752, 12288, 14336),
+             {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 6144, 8192, 9216, 9728, 10240,
+                          10752, 12288, 14336, 15360),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
                                                  # 3072 / 8192: Llama 3.2 3B; 8192: Llama 3.2 1B; 8192: Granite 4.2 3B;
                                                  # 9216: Qwen3.5 4B; 6144: Qwen3.5 2B; 3584: Qwen3.5 0.8B;
-                                                 # 10752: Nanbeige4.1-3B (OPEN-FAMILY-LLAMA3, 2026-09-10)
+                                                 # 10752: Nanbeige4.1-3B (OPEN-FAMILY-LLAMA3, 2026-09-10);
+                                                 # 3840 / 15360: Gemma 3 12B
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
               "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)
@@ -161,6 +163,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (128, 32, 8, 128, True, False, False),    # Qwen3-4B and Qwen3-8B (OPEN-FAMILY-QWEN3)
                  (128, 32, 8, 128, False, False, False),   # Llama 3.1 8B (OPEN-FAMILY-LLAMA3)
                  (256, 8, 4, 256, True, False, False),     # Gemma 3 4B, a 1024-row window (OPEN-FAMILY-GEMMA3)
+                 (256, 16, 8, 256, True, False, False),    # Gemma 3 12B: 16 heads over 8 kv, RB 1 (OPEN-FAMILY-GEMMA3)
                  (128, 32, 8, 128, True, False, True),     # Hy-MT2-7B, qk-norm AFTER RoPE (OPEN-FAMILY-HUNYUAN)
                  (128, 16, 8, 128, True, False, False),    # Qwen3-1.7B / 0.6B: a GQA group of 2 (OPEN-FAMILY-QWEN3)
                  (128, 24, 8, 128, False, False, False),   # Llama 3.2 3B: GQA group 3, OG_AOUT_ELEMS 3 (OPEN-FAMILY-LLAMA3)
@@ -185,7 +188,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "key head (dn_glue.h kGrp) and 16 heads pack the alpha/beta projection padded "
                   "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass"),
     Template("ln", "designs/ln/ln.cc",
-             {"width": values(1024, 2048, 2560, 3072, 4096)}),
+             {"width": values(1024, 2048, 2560, 3072, 3840, 4096)}),
                                 # LN_N; 1024 / 2048 take the fused single-core path (N <= 2048),
                                 # 2560 / 3072 / 4096 the split-output one
     Template("router", "designs/router/router.h",
@@ -199,7 +202,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "order (pack.py lmhead_q8 reads it as in_dim); 2560 entered with OPEN-FAMILY-QWEN35, "
                   "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
-             {"K": values(1024, 2048, 2560, 3072, 4096), "vocab": multiple_of(64)},
+             {"K": values(1024, 2048, 2560, 3072, 3840, 4096), "vocab": multiple_of(64)},
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
 ]}
 
