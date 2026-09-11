@@ -13,6 +13,10 @@
 
 #include <string>
 
+#include <utility>
+#include <vector>
+
+#include "AutoEmbeddingModel/auto_embedding_model.hpp"   // embedding_task_type_t
 #include "AutoModel/stop_reason.hpp"
 #include "nlohmann/json.hpp"
 
@@ -136,6 +140,79 @@ inline Preflight preflight(bool field_present, const std::string& requested,
     // "model-faker" after a failed load, and it starts empty.
     if (requested == current && engine_loaded) return Preflight::Ok;
     return Preflight::NeedsLoad;
+}
+
+/// The REST names for an embedding task, and the enum each maps to.
+///
+/// NOT the container's vocabulary: a container declares names like "Retrieval",
+/// and these map onto those in NpueEmbedding::prompt_for(). Quoting the wrong one
+/// back to a client is how the "requires a task prompt" error came to name values
+/// the validator then rejected.
+inline const std::vector<std::pair<const char*, embedding_task_type_t>>& task_names() {
+    static const std::vector<std::pair<const char*, embedding_task_type_t>> kTasks = {
+        {"query", task_query}, {"search_query", task_query},
+        {"Retrieval-query", task_query},
+        {"document", task_document}, {"search_document", task_document},
+        {"Retrieval-document", task_document},
+        {"clustering", task_clustering}, {"Clustering", task_clustering},
+        {"classification", task_classification},
+        {"Classification", task_classification},
+        {"MultilabelClassification", task_multilabel_classification},
+        {"STS", task_sentence_similarity},
+        {"sentence_similarity", task_sentence_similarity},
+        {"Summarization", task_summarization},
+        {"summarization", task_summarization},
+        {"BitextMining", task_bitextmining},
+        {"bitextmining", task_bitextmining},
+        {"code_retrieval", task_code_retrieval},
+        {"search_result", task_search_result},
+    };
+    return kTasks;
+}
+
+/// Those names as one comma-separated string, for an error message.
+inline std::string task_names_csv() {
+    std::string s;
+    for (const auto& kv : task_names()) s += (s.empty() ? "" : ", ") + std::string(kv.first);
+    return s;
+}
+
+/// The outcome of reading a request's task prompt.
+struct TaskResolution {
+    enum class Status { Ok, Absent, NotAString, Unknown, Conflict };
+    Status status = Status::Absent;
+    embedding_task_type_t task = task_query;  ///< valid only when Ok
+    std::string field;                        ///< which key this is about
+    std::string value;                        ///< the offending value, when Unknown
+};
+
+/// Read "prompt_name", or its accepted alias "task_type".
+///
+/// BOTH are checked. The first version took prompt_name when present and never
+/// looked at task_type, so `{prompt_name:"query", task_type:7}` was accepted with
+/// an invalid value sitting in the request. Sending both is fine when they agree;
+/// disagreeing is a client bug and is refused rather than resolved by precedence.
+inline TaskResolution resolve_task(const json& request) {
+    TaskResolution out;
+    bool have = false;
+    for (const char* field : {"prompt_name", "task_type"}) {
+        if (!request.contains(field)) continue;
+        const json& f = request.at(field);
+        if (!f.is_string()) return {TaskResolution::Status::NotAString, task_query, field, ""};
+        const std::string want = f.get<std::string>();
+        const auto& tbl = task_names();
+        auto hit = tbl.end();
+        for (auto it = tbl.begin(); it != tbl.end(); ++it)
+            if (want == it->first) { hit = it; break; }
+        if (hit == tbl.end()) return {TaskResolution::Status::Unknown, task_query, field, want};
+        if (have && hit->second != out.task)
+            return {TaskResolution::Status::Conflict, task_query, field, want};
+        out.task = hit->second;
+        out.field = field;
+        have = true;
+    }
+    out.status = have ? TaskResolution::Status::Ok : TaskResolution::Status::Absent;
+    return out;
 }
 
 }  // namespace openai_compat

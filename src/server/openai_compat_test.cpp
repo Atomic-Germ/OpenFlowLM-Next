@@ -277,6 +277,55 @@ static void test_preflight() {
     ok(never_ok_without_engine, "preflight never says Ok while no engine is loaded");
 }
 
+
+// ---------------------------------------------------------------------------
+// resolve_task: "prompt_name", its alias "task_type", and what happens when a
+// request carries both. Third round of bugs in this one validation -- the
+// vocabulary it quoted, the field it named, and now the alias it never read.
+// ---------------------------------------------------------------------------
+static void test_resolve_task() {
+    using openai_compat::resolve_task;
+    using S = openai_compat::TaskResolution::Status;
+    using json = openai_compat::json;
+    std::printf("\n-- resolve_task --\n");
+
+    ok(resolve_task(json{{"input", "hi"}}).status == S::Absent, "no task field -> Absent");
+
+    auto q = resolve_task(json{{"prompt_name", "search_document"}});
+    ok(q.status == S::Ok && q.task == task_document, "prompt_name resolves");
+    auto a = resolve_task(json{{"task_type", "search_document"}});
+    ok(a.status == S::Ok && a.task == task_document, "the task_type alias resolves the same");
+
+    // The field the CLIENT sent has to be the one named back.
+    eq(resolve_task(json{{"task_type", 7}}).field, "task_type", "a bad task_type names task_type");
+    eq(resolve_task(json{{"prompt_name", 7}}).field, "prompt_name", "...and prompt_name names prompt_name");
+    ok(resolve_task(json{{"task_type", 7}}).status == S::NotAString, "a number is NotAString");
+    ok(resolve_task(json{{"prompt_name", "nonsense"}}).status == S::Unknown, "an unlisted name is Unknown");
+    eq(resolve_task(json{{"prompt_name", "nonsense"}}).value, "nonsense", "...and the value is reported back");
+
+    // THE BUG: both present, and only the first was ever looked at.
+    ok(resolve_task(json{{"prompt_name", "query"}, {"task_type", 7}}).status == S::NotAString,
+       "prompt_name valid + task_type a NUMBER is still refused");
+    ok(resolve_task(json{{"prompt_name", "query"}, {"task_type", "nonsense"}}).status == S::Unknown,
+       "prompt_name valid + task_type UNKNOWN is still refused");
+    ok(resolve_task(json{{"prompt_name", "query"}, {"task_type", "document"}}).status == S::Conflict,
+       "two aliases that DISAGREE are refused, not resolved by precedence");
+    auto agree = resolve_task(json{{"prompt_name", "query"}, {"task_type", "search_query"}});
+    ok(agree.status == S::Ok && agree.task == task_query,
+       "two spellings of the SAME task are fine");
+
+    // Every listed name resolves, and the csv the errors quote is exactly this list.
+    bool all_resolve = true;
+    for (const auto& kv : openai_compat::task_names()) {
+        auto r = resolve_task(json{{"prompt_name", kv.first}});
+        if (r.status != S::Ok || r.task != kv.second) all_resolve = false;
+    }
+    ok(all_resolve, "every name in task_names() resolves to its own enum");
+    for (const auto& kv : openai_compat::task_names())
+        if (openai_compat::task_names_csv().find(kv.first) == std::string::npos) all_resolve = false;
+    ok(all_resolve, "...and every one of them appears in the list the errors quote");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -289,6 +338,7 @@ int main(int argc, char** argv) {
     test_status_for();
     test_model_error();
     test_preflight();
+    test_resolve_task();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);

@@ -971,6 +971,7 @@ void RestHandler::handle_embeddings(const json& request,
         //
         // It refuses now, and names what IS loaded. An unknown model is an
         // error every OpenAI client already understands.
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
         if (this->auto_embedding_engine) {
             const std::string loaded = this->auto_embedding_engine->get_current_model();
             if (!model.empty() && !loaded.empty() && model != loaded) {
@@ -987,6 +988,7 @@ void RestHandler::handle_embeddings(const json& request,
                 return;
             }
         }
+#endif
 
         // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
         // which one is chosen changes the vector materially -- measured on this server,
@@ -994,47 +996,33 @@ void RestHandler::handle_embeddings(const json& request,
         // This handler used to pass task_query unconditionally and ignore the request, so
         // every DOCUMENT was embedded as a QUERY and no caller could tell: the vector is
         // correctly shaped, correctly normed and deterministic either way.
+        // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
+        // which one is chosen changes the vector materially -- measured on this server,
+        // search_query against search_document on the same text is cosine 0.914, not 1.
+        // This handler used to pass task_query unconditionally and ignore the request, so
+        // every DOCUMENT was embedded as a QUERY and no caller could tell.
         embedding_task_type_t task_type = embedding_task_type_t::task_query;
-        // The REST vocabulary. It is NOT the container's vocabulary: a container
-        // declares names like "Retrieval" or "search_query", and these map onto them
-        // in NpueEmbedding::prompt_for(). Every message below quotes THIS list,
-        // because it is the one the validator further down accepts.
-        static const std::vector<std::pair<const char*, embedding_task_type_t>> kTasks = {
-            {"query", task_query}, {"search_query", task_query},
-            {"Retrieval-query", task_query},
-            {"document", task_document}, {"search_document", task_document},
-            {"Retrieval-document", task_document},
-            {"clustering", task_clustering}, {"Clustering", task_clustering},
-            {"classification", task_classification},
-            {"Classification", task_classification},
-            {"MultilabelClassification", task_multilabel_classification},
-            {"STS", task_sentence_similarity},
-            {"sentence_similarity", task_sentence_similarity},
-            {"Summarization", task_summarization},
-            {"summarization", task_summarization},
-            {"BitextMining", task_bitextmining},
-            {"bitextmining", task_bitextmining},
-            {"code_retrieval", task_code_retrieval},
-            {"search_result", task_search_result},
-        };
-        std::string accepted;
-        for (const auto& kv : kTasks) accepted += (accepted.empty() ? "" : ", ") + std::string(kv.first);
-        const std::vector<std::string> declared =
-            this->auto_embedding_engine ? this->auto_embedding_engine->prompt_names()
-                                        : std::vector<std::string>();
-        if (!declared.empty() && !request.contains("prompt_name") &&
-            !request.contains("task_type")) {
+        const std::string accepted = openai_compat::task_names_csv();
+        std::vector<std::string> declared;
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+        if (this->auto_embedding_engine) declared = this->auto_embedding_engine->prompt_names();
+#endif
+        const openai_compat::TaskResolution tr = openai_compat::resolve_task(request);
+        using TRS = openai_compat::TaskResolution::Status;
+
+        if (tr.status == TRS::Absent && !declared.empty()) {
             std::string names;
             for (const auto& n : declared) names += (names.empty() ? "" : ", ") + n;
+            // Quote the REST vocabulary, not `declared`: the validator only accepts
+            // the former, so naming the latter sent clients to values it refuses.
             json err = { {"error", {
                 {"message", "this model requires a task prompt: pass 'prompt_name' as "
                             "one of [" + accepted + "] (this model declares the prompts [" +
-                            names + "], which those names map onto). "
-                            "Refusing to pick one -- the prefix "
-                            "changes the vector (search_query against search_document on "
-                            "the same text is cosine 0.914 here), and the result is "
-                            "correctly shaped, correctly normed and deterministic either "
-                            "way, so nothing downstream can tell the wrong one was used."},
+                            names + "], which those names map onto). Refusing to pick one -- "
+                            "the prefix changes the vector (search_query against "
+                            "search_document on the same text is cosine 0.914 here), and the "
+                            "result is correctly shaped, correctly normed and deterministic "
+                            "either way, so nothing downstream can tell the wrong one was used."},
                 {"type", "invalid_request_error"},
                 {"param", "prompt_name"},
                 {"code", "missing_required_parameter"}
@@ -1042,42 +1030,30 @@ void RestHandler::handle_embeddings(const json& request,
             send_response(err);
             return;
         }
-        if (request.contains("prompt_name") || request.contains("task_type")) {
-            // `task_type` is an accepted alias, so every message here names the field
-            // the CLIENT sent. Reporting param "prompt_name" to a client that sent
-            // "task_type" points it at a field it never set.
-            const char* field = request.contains("prompt_name") ? "prompt_name" : "task_type";
-            const json& f = request[field];
-            if (!f.is_string()) {
-                json err = { {"error", {
-                    {"message", std::string("'") + field + "' must be a string, one of [" +
-                                accepted + "]"},
-                    {"type", "invalid_request_error"},
-                    {"param", field},
-                    {"code", "invalid_value"}
-                }} };
-                send_response(err);
-                return;
-            }
-            const std::string want = f.get<std::string>();
-            auto hit = std::find_if(kTasks.begin(), kTasks.end(),
-                                    [&](const auto& kv) { return want == kv.first; });
-            if (hit == kTasks.end()) {
-                json err = { {"error", {
-                    {"message", std::string("unknown ") + field + " '" + want +
-                                "'. Known: [" + accepted +
-                                "]. Refusing to substitute one: an embedding under the "
-                                "wrong task prompt is correctly shaped and correctly "
-                                "normed, so nothing downstream can tell it is wrong."},
-                    {"type", "invalid_request_error"},
-                    {"param", field},
-                    {"code", "invalid_value"}
-                }} };
-                send_response(err);
-                return;
-            }
-            task_type = hit->second;
+        if (tr.status == TRS::NotAString) {
+            send_response(json{{"error", {
+                {"message", "'" + tr.field + "' must be a string, one of [" + accepted + "]"},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
         }
+        if (tr.status == TRS::Unknown) {
+            send_response(json{{"error", {
+                {"message", "unknown " + tr.field + " '" + tr.value + "'. Known: [" + accepted +
+                            "]. Refusing to substitute one: an embedding under the wrong task "
+                            "prompt is correctly shaped and correctly normed, so nothing "
+                            "downstream can tell it is wrong."},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (tr.status == TRS::Conflict) {
+            send_response(json{{"error", {
+                {"message", "'prompt_name' and 'task_type' are aliases and disagree "
+                            "('task_type' says '" + tr.value + "'). Send one, or send the same "
+                            "task in both."},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (tr.status == TRS::Ok) task_type = tr.task;
 
         std::vector<std::string> inputs;
 
