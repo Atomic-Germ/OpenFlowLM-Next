@@ -388,6 +388,15 @@ RestHandler::~RestHandler() = default;
 bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
     std::string ensure_tag = model_tag;
     if (current_model_tag != ensure_tag) {
+        // One request naming another model evicts the loaded one, and may pull it first.
+        // That is the intended behaviour, but it used to happen with no output at all --
+        // a typo in a client's model field took the served model off the NPU and cost a
+        // full reload, and the operator's only evidence was the latency.
+        if (!current_model_tag.empty() && current_model_tag != "model-faker") {
+            header_print("OFLM", "request asked for '" + ensure_tag + "' while '" +
+                                 current_model_tag + "' is loaded -- switching; the "
+                                 "previous model leaves the NPU and must be reloaded");
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (auto_chat_engine != nullptr) {
             auto_chat_engine.reset();
@@ -542,7 +551,21 @@ void RestHandler::configure_chat_engine_parameters(const json& options, const js
     }
 }
 
-json RestHandler::build_nstream_response(std::string response_text) {
+/// OpenAI's finish_reason vocabulary is {stop, length, tool_calls, content_filter,
+/// function_call} -- `stop_reason_to_string()` also yields "cancel", "error" and
+/// "UNKNOWN", which are not in it, so the mapping is done here rather than by calling
+/// that function. Anything without an OpenAI equivalent stays "stop", which is what
+/// this handler emitted for every outcome before.
+static const char* openai_finish_reason(stop_reason_t reason) {
+    switch (reason) {
+        case MAX_LENGTH_REACHED: return "length";
+        case TOOL_DETECTED:      return "tool_calls";
+        default:                 return "stop";
+    }
+}
+
+json RestHandler::build_nstream_response(std::string response_text,
+                                         stop_reason_t stop_reason) {
     // Get tool info
     NonStreamResult result = auto_chat_engine->parse_nstream_content(response_text);
 
@@ -598,7 +621,8 @@ json RestHandler::build_nstream_response(std::string response_text) {
             {"index", 0},
             {"message", message},
             {"logprobs", nullptr},
-            {"finish_reason", is_tool_call ? "tool_calls" : "stop"}
+            {"finish_reason", is_tool_call ? "tool_calls"
+                                           : openai_finish_reason(stop_reason)}
         }
     });
 }
@@ -917,6 +941,65 @@ void RestHandler::handle_embeddings(const json& request,
             }
         }
 
+        // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
+        // which one is chosen changes the vector materially -- measured on this server,
+        // search_query against search_document on the same text is cosine 0.914, not 1.
+        // This handler used to pass task_query unconditionally and ignore the request, so
+        // every DOCUMENT was embedded as a QUERY and no caller could tell: the vector is
+        // correctly shaped, correctly normed and deterministic either way.
+        embedding_task_type_t task_type = embedding_task_type_t::task_query;
+        if (request.contains("prompt_name") || request.contains("task_type")) {
+            const json& f = request.contains("prompt_name") ? request["prompt_name"]
+                                                            : request["task_type"];
+            if (!f.is_string()) {
+                json err = { {"error", {
+                    {"message", "'prompt_name' must be a string"},
+                    {"type", "invalid_request_error"},
+                    {"param", "prompt_name"},
+                    {"code", "invalid_value"}
+                }} };
+                send_response(err);
+                return;
+            }
+            const std::string want = f.get<std::string>();
+            static const std::vector<std::pair<const char*, embedding_task_type_t>> kTasks = {
+                {"query", task_query}, {"search_query", task_query},
+                {"Retrieval-query", task_query},
+                {"document", task_document}, {"search_document", task_document},
+                {"Retrieval-document", task_document},
+                {"clustering", task_clustering}, {"Clustering", task_clustering},
+                {"classification", task_classification},
+                {"Classification", task_classification},
+                {"MultilabelClassification", task_multilabel_classification},
+                {"STS", task_sentence_similarity},
+                {"sentence_similarity", task_sentence_similarity},
+                {"Summarization", task_summarization},
+                {"summarization", task_summarization},
+                {"BitextMining", task_bitextmining},
+                {"bitextmining", task_bitextmining},
+                {"code_retrieval", task_code_retrieval},
+                {"search_result", task_search_result},
+            };
+            auto hit = std::find_if(kTasks.begin(), kTasks.end(),
+                                    [&](const auto& kv) { return want == kv.first; });
+            if (hit == kTasks.end()) {
+                std::string known;
+                for (const auto& kv : kTasks) known += (known.empty() ? "" : ", ") + std::string(kv.first);
+                json err = { {"error", {
+                    {"message", "unknown prompt_name '" + want + "'. Known: [" + known +
+                                "]. Refusing to substitute one: an embedding under the "
+                                "wrong task prompt is correctly shaped and correctly "
+                                "normed, so nothing downstream can tell it is wrong."},
+                    {"type", "invalid_request_error"},
+                    {"param", "prompt_name"},
+                    {"code", "invalid_value"}
+                }} };
+                send_response(err);
+                return;
+            }
+            task_type = hit->second;
+        }
+
         std::vector<std::string> inputs;
 
         if (request["input"].is_string()) {
@@ -934,7 +1017,7 @@ void RestHandler::handle_embeddings(const json& request,
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
             for (size_t i = 0; i < inputs.size(); ++i) {
                 std::cout << "Embedding input[" << i << "]: " << "\n" << inputs[i] << std::endl;
-                std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], embedding_task_type_t::task_query);
+                std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], task_type);
                 embedding_data.push_back({
                     {"object", "embedding"},
                     {"embedding", embedding_result},
@@ -1299,7 +1382,10 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 return;
             }
             // check response_text
-            json choices = build_nstream_response(response_text);
+            // meta_info.stop_reason is MAX_LENGTH_REACHED when generation stopped at
+            // max_tokens. It was computed and then dropped, so every truncated answer
+            // reported finish_reason "stop" and no client could see the cut.
+            json choices = build_nstream_response(response_text, meta_info.stop_reason);
             response = {
                 {"id", "openflowlm-chat-completion"},
                 {"object", "chat.completion"},
@@ -1511,7 +1597,7 @@ void RestHandler::handle_openai_completion(const json& request,
                         {"text", response_text},
                         {"index", 0},
                         {"logprobs", nullptr},
-                        {"finish_reason", "stop"}
+                        {"finish_reason", openai_finish_reason(meta_info.stop_reason)}
                     }
                 })},
                 {"usage", {
