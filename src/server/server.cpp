@@ -765,14 +765,32 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             if (response_data.contains("error") && response_data["error"].is_object())
             {
                 const json& err = response_data["error"];
+                // A numeric `code` is a status; anything in 400-599 is taken as given.
+                // The first version of this only recognised exactly 400, so a handler's
+                // own 500 fell through BOTH branches -- the `if` had already been taken --
+                // and the response went out as HTTP 200 with an error body, which is the
+                // defect this block exists to fix, one value along.
+                bool mapped = false;
                 if (err.contains("code") && err["code"].is_number_integer()) {
-                    if (err["code"].get<int>() == 400) {
-                        status = http::status::bad_request;
+                    const int c = err["code"].get<int>();
+                    if (c >= 400 && c <= 599) {
+                        status = static_cast<http::status>(c);
+                        mapped = true;
                     }
                 }
-                else if (err.contains("type") && err["type"].is_string() &&
-                         err["type"].get<std::string>() == "invalid_request_error") {
-                    status = http::status::bad_request;
+                if (!mapped && err.contains("type") && err["type"].is_string()) {
+                    // Our own errors carry a STRING code ("model_not_found"), so the type
+                    // is what classifies them.
+                    const std::string t = err["type"].get<std::string>();
+                    if (t == "invalid_request_error")      status = http::status::bad_request;            // 400
+                    else if (t == "authentication_error")  status = http::status::unauthorized;           // 401
+                    else if (t == "permission_error")      status = http::status::forbidden;              // 403
+                    else if (t == "not_found_error")       status = http::status::not_found;              // 404
+                    else if (t == "rate_limit_error")      status = http::status::too_many_requests;      // 429
+                    else                                   status = http::status::internal_server_error;  // 500
+                    // The default is 500 on purpose: an error object this server built and
+                    // cannot classify is this server's problem, and 200 is the one answer
+                    // that is certainly wrong.
                 }
             }
 

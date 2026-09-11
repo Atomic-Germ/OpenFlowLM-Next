@@ -78,8 +78,13 @@ public:
     std::vector<float> embed(std::string& text,
                              embedding_task_type_t task_type) override;
 
-    /// The container's own prompt table, read at load. Empty for a model that
-    /// declares none (the bge sizes, MiniLM), non-empty for nomic and gte.
+    /// The container's own prompt table, read at load, and EMPTY is the common case.
+    /// Of the packers in npue_pack.cpp only two write one: prepare_model_gemma()
+    /// copies the checkpoint's own table, and prepare_model_nomic() synthesises one
+    /// (marked prompts_source, because it is not from the checkpoint). The BERT
+    /// family and gte-multilingual-base write none, so their prompt_names() is empty
+    /// and /v1/embeddings does not require the field. An earlier version of this
+    /// comment claimed gte was non-empty; it is not, and nothing had checked.
     std::vector<std::string> prompt_names() const override;
 
     /// \brief Embed several texts in one call.

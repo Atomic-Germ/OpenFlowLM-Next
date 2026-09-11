@@ -55,8 +55,9 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
     }
     std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(this->tag, this->supported_models, &this->npu_device_inst);
     if (auto_model.second == nullptr) {
-        throw std::runtime_error("unknown model '" + this->tag + "' -- `oflm list` shows what "
-                                 "this build can run. Refusing rather than running a different one.");
+        throw std::runtime_error("cannot run '" + this->tag + "': it is either unknown to this "
+                                 "build or not a chat model. `oflm list` shows what this build "
+                                 "can run. Refusing rather than running a different one.");
     }
     this->auto_chat_engine = std::move(auto_model.second);
     
@@ -431,7 +432,8 @@ void Runner::cmd_load(std::vector<std::string>& input_list) {
 
     std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(model_name, this->supported_models, &this->npu_device_inst);
     if (auto_model.second == nullptr) {
-        header_print("ERROR", "unknown model '" + model_name + "' -- keeping '" + this->tag +
+        header_print("ERROR", "cannot load '" + model_name + "': it is either unknown to this "
+                              "build or not a chat model -- keeping '" + this->tag +
                               "'. `oflm list` shows what this build can run.");
         return;
     }

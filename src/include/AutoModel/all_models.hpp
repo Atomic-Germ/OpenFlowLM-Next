@@ -54,9 +54,10 @@ typedef enum {
     error_embedding
 } SupportedModelFamily;
 
-inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, oflm_rt::device* npu_device_inst) {
-
-    
+/// The family name -> engine map. At namespace scope because two callers need it:
+/// the factory below, and `is_chat_model()`, which the server asks BEFORE it takes
+/// the loaded model off the NPU.
+inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
     static const std::map<std::string, SupportedModelFamily> modelFamilyMap = {
         {"llama3", SupportedModelFamily::llama3},
         {"granite", SupportedModelFamily::granite},
@@ -83,8 +84,27 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
         {"whisper-v3", SupportedModelFamily::error_whiper},
         {"embed-gemma", SupportedModelFamily::error_embedding}
     };
+    return modelFamilyMap;
+}
 
-    
+/// True when `model_tag` names something this build can serve AS A CHAT MODEL.
+///
+/// `model_list` answers a different question -- whether the tag exists -- and
+/// `embed-gemma:300m` and `whisper-v3:turbo` exist. They are not chat models, and
+/// the caller has to learn that BEFORE it evicts what is loaded, because the
+/// factory can only say so by returning null, and by then the NPU is already clear.
+inline bool is_chat_model(const std::string& model_tag, model_list& available_models) {
+    if (!available_models.is_model_supported(model_tag)) return false;
+    auto [resolved, model_info] = available_models.get_model_info(model_tag);
+    (void)resolved;
+    const auto& m = model_family_map();
+    const auto it = m.find(model_info["details"]["family"].get<std::string>());
+    if (it == m.end()) return false;            // a family this build has no engine for
+    return it->second != SupportedModelFamily::error_whiper &&
+           it->second != SupportedModelFamily::error_embedding;
+}
+
+inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, oflm_rt::device* npu_device_inst) {
     if (available_models.is_model_supported(model_tag) == false) {
         // An unsupported tag used to return a Llama3 engine under the name
         // "llama3.2:1b" -- so `oflm serve` answered a request for a model it does
@@ -99,7 +119,17 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
     std::unique_ptr<AutoModel> auto_chat_engine = nullptr;
     auto [new_model_tag, model_info] = available_models.get_model_info(model_tag);
 
-    switch(modelFamilyMap.at(model_info["details"]["family"])) {
+    const auto& modelFamilyMap = model_family_map();
+    const auto family_it = modelFamilyMap.find(model_info["details"]["family"].get<std::string>());
+    if (family_it == modelFamilyMap.end()) {
+        // `.at()` here used to throw std::out_of_range for a family this build has no
+        // entry for -- an exception from a factory whose contract is "null on failure".
+        header_print_r("ERROR", "Model '" << model_tag << "' is family '"
+                       << model_info["details"]["family"].get<std::string>()
+                       << "', which this build has no engine for.");
+        return std::make_pair(model_tag, std::unique_ptr<AutoModel>(nullptr));
+    }
+    switch(family_it->second) {
         case SupportedModelFamily::llama3:
             auto_chat_engine = std::make_unique<Llama3>(npu_device_inst);
             break;
@@ -169,9 +199,19 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
         case SupportedModelFamily::error_whiper:
         case SupportedModelFamily::error_embedding:
         default:
-            header_print_r("ERROR", "Unsupported model family or non-llm: " << model_info["details"]["family"]);
-            auto_chat_engine = std::make_unique<Llama3>(npu_device_inst);
-            new_model_tag = "llama3.2:1b";
+            // The SECOND substitution path, and the one the tag guard above does not
+            // cover: `embed-gemma:300m` and `whisper-v3:turbo` ARE in model_list.json,
+            // so they pass is_model_supported() and arrive here -- where a chat engine
+            // is what the caller wants and this family cannot provide one. It used to
+            // build a Llama3 and rename the request to "llama3.2:1b", so asking for an
+            // embedding model over /v1/chat/completions was answered, HTTP 200, by a
+            // different model under a name the client never sent.
+            //
+            // Null, like the unsupported tag. The caller decides what to say.
+            header_print_r("ERROR", "Model '" << model_tag << "' is family '"
+                           << model_info["details"]["family"].get<std::string>()
+                           << "', which is not a chat model this build can run.");
+            return std::make_pair(model_tag, std::unique_ptr<AutoModel>(nullptr));
     }
   
     return std::make_pair(new_model_tag, std::move(auto_chat_engine));

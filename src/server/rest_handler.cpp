@@ -369,7 +369,7 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
             header_print("Warning", "Default model tag '" << default_model_tag << "' is not supported. Falling back to 'llama3.2:1b'.");
             this->default_model_tag = "llama3.2:1b";
         }
-        if (!ensure_model_loaded(default_model_tag)) {
+        if (ensure_model_loaded(default_model_tag) != ModelLoad::Ok) {
             header_print("Error", "Failed to load default model: " + default_model_tag);
         }
     }
@@ -385,16 +385,65 @@ RestHandler::~RestHandler() = default;
 
 ///@brief Ensure the model is loaded
 ///@param model_tag the model tag
-bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
-    std::string ensure_tag = model_tag;
-    if (current_model_tag != ensure_tag) {
+json RestHandler::model_error_json(ModelLoad why, const std::string& model) {
+    // The author's note on #52: do not say "no substitute was used" -- it reads as if
+    // answering with a different model were an option somewhere. It is not, any more.
+    switch (why) {
+        case ModelLoad::Unknown:
+            return json{{"error", {
+                {"message", "model '" + model + "' is not in this build's model list"},
+                {"type", "invalid_request_error"}, {"param", "model"}, {"code", "model_not_found"}}}};
+        case ModelLoad::NotChatModel:
+            return json{{"error", {
+                {"message", "model '" + model + "' is not a chat model; this endpoint serves "
+                            "text generation only"},
+                {"type", "invalid_request_error"}, {"param", "model"}, {"code", "model_not_found"}}}};
+        case ModelLoad::LoadFailed:
+        default:
+            return json{{"error", {
+                {"message", "model '" + model + "' is known to this build but could not be "
+                            "loaded; the server log says why"},
+                {"type", "server_error"}, {"param", "model"}, {"code", "model_load_failed"}}}};
+    }
+}
+
+RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model_tag) {
+    // Normalise FIRST, because both the comparison and the lookup below are exact.
+    // Clients send three spellings of one model -- "granite", "granite:3b" and
+    // "Ollama/granite:3b" -- and all_tags holds the first two only, while
+    // current_model_tag always holds the resolved "granite:3b". The prefixed form was
+    // therefore refused as unknown, and a bare "granite" compared unequal to the
+    // "granite:3b" it had itself just loaded: every bare-tag request after the first
+    // took the switch path below, evicted the model and reloaded it from disk. The
+    // only symptom was latency.
+    //
+    // rectify_model_tag() indexes config["models"][type], so it is only safe once the
+    // type is known to exist -- hence the support check around it rather than after.
+    std::string ensure_tag = this->supported_models.cut_tag(model_tag);
+    if (this->supported_models.is_model_supported(ensure_tag)) {
+        ensure_tag = this->supported_models.rectify_model_tag(ensure_tag);
+    }
+    if (current_model_tag == ensure_tag) {
+        return ModelLoad::Ok;                       // already serving it, under any spelling
+    }
+    {
         // Checked BEFORE anything is unloaded. The old order reset the engine first
         // and only then resolved the tag, so a request for a model that does not
         // exist evicted the served one and was answered by the substitute.
         if (!this->supported_models.is_model_supported(ensure_tag)) {
             header_print("ERROR", "unknown model '" + ensure_tag + "' -- refusing; '" +
                                   current_model_tag + "' stays loaded");
-            return false;
+            return ModelLoad::Unknown;
+        }
+        // ... and the same question one level down. `embed-gemma:300m` and
+        // `whisper-v3:turbo` ARE in the model list, so the check above passes them;
+        // the factory can only refuse them by returning null, and it is called after
+        // the loaded engine has already been reset. Asking here keeps the promise the
+        // comment above makes -- nothing is unloaded for a request that cannot be served.
+        if (!is_chat_model(ensure_tag, this->supported_models)) {
+            header_print("ERROR", "model '" + ensure_tag + "' is not a chat model -- refusing; '" +
+                                  current_model_tag + "' stays loaded");
+            return ModelLoad::NotChatModel;
         }
         // One request naming another model evicts the loaded one, and may pull it first.
         // That is the intended behaviour, but it used to happen with no output at all --
@@ -412,6 +461,15 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
         std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(ensure_tag, this->supported_models, &this->npu_device_inst);
         auto_chat_engine = std::move(auto_model.second);
         ensure_tag = auto_model.first;
+        if (auto_chat_engine == nullptr) {
+            // The factory's contract is null-on-failure and this was the one caller that
+            // did not honour it -- configure_parameter() below is a dereference. It was
+            // unreachable while null meant only "unsupported tag" (checked above); it
+            // stopped being unreachable the moment null also meant "not a chat model".
+            header_print("ERROR", "no engine for '" + ensure_tag + "'; nothing is loaded now");
+            this->current_model_tag = "model-faker";
+            return ModelLoad::NotChatModel;
+        }
         switch (downloader.is_model_downloaded(ensure_tag)) {
             case ModelDownloader::ModelStatus::Ready:
                 break;
@@ -420,7 +478,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
                 downloader.pull_model(ensure_tag, this->modelscope);
                 break;
             case ModelDownloader::ModelStatus::Incompatible:
-                return false;
+                return ModelLoad::LoadFailed;
             }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
@@ -433,7 +491,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
             this->npu_device_inst.reset();
             this->npu_device_inst = oflm_rt::device(0);
             this->current_model_tag = "model-faker";
-            return false;
+            return ModelLoad::LoadFailed;
         }
         
         if (this->prefill_chunk_len == -1) {
@@ -441,7 +499,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
         }
         current_model_tag = ensure_tag;
     }
-    return true;
+    return ModelLoad::Ok;
 }
 
 ///@brief Ensure the asr model is loaded
@@ -689,16 +747,8 @@ void RestHandler::handle_generate(const json& request,
         int length_limit = request.value("max_tokens", 4096);
         auto load_start_time = time_utils::now();
         // TODO: Use Another Check Function avoid loading again
-        if (!ensure_model_loaded(model)) {
-            json error_response = { {"error", {
-                {"message", "could not serve model '" + model + "'. It is either unknown to "
-                            "this build's model list or failed to load; the server log says "
-                            "which. No substitute was used."},
-                {"type", "invalid_request_error"},
-                {"param", "model"},
-                {"code", "model_not_found"}
-            }} };
-            send_response(error_response);
+        if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+            send_response(model_error_json(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -809,16 +859,8 @@ void RestHandler::handle_chat(const json& request,
         int length_limit = options.value("num_predict", 4096);
 
         auto load_start_time = time_utils::now();
-        if (!ensure_model_loaded(model)) {
-            json error_response = { {"error", {
-                {"message", "could not serve model '" + model + "'. It is either unknown to "
-                            "this build's model list or failed to load; the server log says "
-                            "which. No substitute was used."},
-                {"type", "invalid_request_error"},
-                {"param", "model"},
-                {"code", "model_not_found"}
-            }} };
-            send_response(error_response);
+        if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+            send_response(model_error_json(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -970,6 +1012,30 @@ void RestHandler::handle_embeddings(const json& request,
         // every DOCUMENT was embedded as a QUERY and no caller could tell: the vector is
         // correctly shaped, correctly normed and deterministic either way.
         embedding_task_type_t task_type = embedding_task_type_t::task_query;
+        // The REST vocabulary. It is NOT the container's vocabulary: a container
+        // declares names like "Retrieval" or "search_query", and these map onto them
+        // in NpueEmbedding::prompt_for(). Every message below quotes THIS list,
+        // because it is the one the validator further down accepts.
+        static const std::vector<std::pair<const char*, embedding_task_type_t>> kTasks = {
+            {"query", task_query}, {"search_query", task_query},
+            {"Retrieval-query", task_query},
+            {"document", task_document}, {"search_document", task_document},
+            {"Retrieval-document", task_document},
+            {"clustering", task_clustering}, {"Clustering", task_clustering},
+            {"classification", task_classification},
+            {"Classification", task_classification},
+            {"MultilabelClassification", task_multilabel_classification},
+            {"STS", task_sentence_similarity},
+            {"sentence_similarity", task_sentence_similarity},
+            {"Summarization", task_summarization},
+            {"summarization", task_summarization},
+            {"BitextMining", task_bitextmining},
+            {"bitextmining", task_bitextmining},
+            {"code_retrieval", task_code_retrieval},
+            {"search_result", task_search_result},
+        };
+        std::string accepted;
+        for (const auto& kv : kTasks) accepted += (accepted.empty() ? "" : ", ") + std::string(kv.first);
         const std::vector<std::string> declared =
             this->auto_embedding_engine ? this->auto_embedding_engine->prompt_names()
                                         : std::vector<std::string>();
@@ -979,7 +1045,9 @@ void RestHandler::handle_embeddings(const json& request,
             for (const auto& n : declared) names += (names.empty() ? "" : ", ") + n;
             json err = { {"error", {
                 {"message", "this model requires a task prompt: pass 'prompt_name' as "
-                            "one of [" + names + "]. Refusing to pick one -- the prefix "
+                            "one of [" + accepted + "] (this model declares the prompts [" +
+                            names + "], which those names map onto). "
+                            "Refusing to pick one -- the prefix "
                             "changes the vector (search_query against search_document on "
                             "the same text is cosine 0.914 here), and the result is "
                             "correctly shaped, correctly normed and deterministic either "
@@ -992,49 +1060,34 @@ void RestHandler::handle_embeddings(const json& request,
             return;
         }
         if (request.contains("prompt_name") || request.contains("task_type")) {
-            const json& f = request.contains("prompt_name") ? request["prompt_name"]
-                                                            : request["task_type"];
+            // `task_type` is an accepted alias, so every message here names the field
+            // the CLIENT sent. Reporting param "prompt_name" to a client that sent
+            // "task_type" points it at a field it never set.
+            const char* field = request.contains("prompt_name") ? "prompt_name" : "task_type";
+            const json& f = request[field];
             if (!f.is_string()) {
                 json err = { {"error", {
-                    {"message", "'prompt_name' must be a string"},
+                    {"message", std::string("'") + field + "' must be a string, one of [" +
+                                accepted + "]"},
                     {"type", "invalid_request_error"},
-                    {"param", "prompt_name"},
+                    {"param", field},
                     {"code", "invalid_value"}
                 }} };
                 send_response(err);
                 return;
             }
             const std::string want = f.get<std::string>();
-            static const std::vector<std::pair<const char*, embedding_task_type_t>> kTasks = {
-                {"query", task_query}, {"search_query", task_query},
-                {"Retrieval-query", task_query},
-                {"document", task_document}, {"search_document", task_document},
-                {"Retrieval-document", task_document},
-                {"clustering", task_clustering}, {"Clustering", task_clustering},
-                {"classification", task_classification},
-                {"Classification", task_classification},
-                {"MultilabelClassification", task_multilabel_classification},
-                {"STS", task_sentence_similarity},
-                {"sentence_similarity", task_sentence_similarity},
-                {"Summarization", task_summarization},
-                {"summarization", task_summarization},
-                {"BitextMining", task_bitextmining},
-                {"bitextmining", task_bitextmining},
-                {"code_retrieval", task_code_retrieval},
-                {"search_result", task_search_result},
-            };
             auto hit = std::find_if(kTasks.begin(), kTasks.end(),
                                     [&](const auto& kv) { return want == kv.first; });
             if (hit == kTasks.end()) {
-                std::string known;
-                for (const auto& kv : kTasks) known += (known.empty() ? "" : ", ") + std::string(kv.first);
                 json err = { {"error", {
-                    {"message", "unknown prompt_name '" + want + "'. Known: [" + known +
+                    {"message", std::string("unknown ") + field + " '" + want +
+                                "'. Known: [" + accepted +
                                 "]. Refusing to substitute one: an embedding under the "
                                 "wrong task prompt is correctly shaped and correctly "
                                 "normed, so nothing downstream can tell it is wrong."},
                     {"type", "invalid_request_error"},
-                    {"param", "prompt_name"},
+                    {"param", field},
                     {"code", "invalid_value"}
                 }} };
                 send_response(err);
@@ -1271,16 +1324,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         json options = request.value("options", json::object());
 
         auto load_start_time = time_utils::now();
-        if (!ensure_model_loaded(model)) {
-            json error_response = { {"error", {
-                {"message", "could not serve model '" + model + "'. It is either unknown to "
-                            "this build's model list or failed to load; the server log says "
-                            "which. No substitute was used."},
-                {"type", "invalid_request_error"},
-                {"param", "model"},
-                {"code", "model_not_found"}
-            }} };
-            send_response(error_response);
+        if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+            send_response(model_error_json(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -1553,23 +1598,16 @@ void RestHandler::handle_openai_completion(const json& request,
         bool stream = request.value("stream", false);
         json options = request.value("options", json::object());
 
-        // direct return if model not supported
-        if (!supported_models.is_model_supported(model)) {
-            throw std::runtime_error("Model " + model + " is not supported.");
-        }
-       
+        // The is_model_supported() throw that used to sit here ran BEFORE
+        // ensure_model_loaded(), so /v1/completions never reached the structured
+        // model_not_found response below -- the outer catch turned an unknown model
+        // into a generic server_error. ensure_model_loaded() asks the same question
+        // and answers it properly.
+
         int length_limit = request.value("max_tokens", 4096);
 
-         if (!ensure_model_loaded(model)) {
-            json error_response = { {"error", {
-                {"message", "could not serve model '" + model + "'. It is either unknown to "
-                            "this build's model list or failed to load; the server log says "
-                            "which. No substitute was used."},
-                {"type", "invalid_request_error"},
-                {"param", "model"},
-                {"code", "model_not_found"}
-            }} };
-            send_response(error_response);
+         if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
+            send_response(model_error_json(why, model));
             return;
         }
 

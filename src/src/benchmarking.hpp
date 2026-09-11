@@ -276,7 +276,8 @@ BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_confi
     auto [new_tag, model_info] = availble_models.get_model_info(model_tag);
     std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(new_tag, availble_models, &npu_device_inst);
     if (auto_model.second == nullptr) {
-        throw std::runtime_error("unknown model '" + new_tag + "' -- refusing to benchmark a "
+        throw std::runtime_error("cannot benchmark '" + new_tag + "': it is either unknown to "
+                                 "this build or not a chat model. Refusing to benchmark a "
                                  "substitute, which would report the wrong model's numbers.");
     }
     auto_chat_engine = std::move(auto_model.second);
