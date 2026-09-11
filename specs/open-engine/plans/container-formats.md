@@ -11,7 +11,7 @@ requirement changes; `OPEN-PACK-PLAN`'s frozen q4_1 bytes must stay byte-equal.
 
 ## Why
 
-FLM ships two block encodings inside the same 5120-byte chunk, and the engine
+OFLM ships two block encodings inside the same 5120-byte chunk, and the engine
 only understands one of them. Measured 2026-09-06 by range-reading chunk 0 of
 `model.q4nx` for every model Atomic-Germ publishes
 (`.claude/plans/open-kernel-model-priority.md` has the full census):
@@ -37,7 +37,7 @@ There is also a second axis the census turned up — chunk *geometry*. Gemma3-1B
 and 270M use 1280-byte chunks (2048 values), gpt-oss and Whisper 2560 (4096
 values), gemma4 several sizes for its embedding tensors. Those are already
 refused (`q4nx_file.cpp:80`), which is correct; this plan only makes the
-refusal message say what was found rather than guessing "FLM 1.0.3 / Q4_K?".
+refusal message say what was found rather than guessing "OFLM 1.0.3 / Q4_K?".
 
 ## Why it is cheap
 
@@ -93,7 +93,7 @@ intended values for both forms.
 
 | file | change |
 |---|---|
-| `src/open_qwen36/q4nx_file.hpp/.cpp` | add `enum class Quant { Q4_1, Q4_0 }` and `Quant quant() const`. Detect at open: pick the largest non-`lm_head` `I8` tensor, scan the `d`/`m` arrays of its first N chunks (N ~= 4096, bounded so a 22 GB file costs a few MB of page faults), classify per the rules above, refuse the ambiguous case. Replace the "FLM 1.0.3 / Q4_K?" guess in the chunk-size refusal with the byte count and tensor name. |
+| `src/open_qwen36/q4nx_file.hpp/.cpp` | add `enum class Quant { Q4_1, Q4_0 }` and `Quant quant() const`. Detect at open: pick the largest non-`lm_head` `I8` tensor, scan the `d`/`m` arrays of its first N chunks (N ~= 4096, bounded so a 22 GB file costs a few MB of page faults), classify per the rules above, refuse the ambiguous case. Replace the "OFLM 1.0.3 / Q4_K?" guess in the chunk-size refusal with the byte count and tensor name. |
 | `src/open_qwen36/pools.cpp` | add `static void q4_0_mins(uint8_t* dst, size_t nchunks)`: for each 5120-byte chunk, read `d[256]` at +0 and write `bf16(-8 * d)` over the 512 bytes at +512. Call it after the copy loops of `std_perm`, `expert_stripes` and `expert_down` when `m.quant() == Q4_0 && ch == 5120`. `put` and `conv_transpose` move bf16/small tensors and are untouched. |
 | `open_kernels/model/q4nx.py` | same detection on the Python reader; `dq_chunks_q4_1` gains a `q4_0` branch (or a sibling `dq_chunks_q4_0`) so the replica and `dense_probe.py` read these containers correctly. |
 | `open_kernels/recipes/pack.py` | the NumPy packer applies the same min substitution, so `test_pack_plan.py`-style byte comparisons hold for both forms. |
@@ -157,7 +157,7 @@ Atomic-Germ's own `Qwen3.6-35B-A3B-NPU2` mirror pack **251 of 733 tensors at
 q8** -- attention, linear-attention and shared-expert projections -- and keep
 only the routed experts, the bulk of the bytes, at q4_1. A Qwen3.5 dense
 container stores `ssm_out_proj` and alpha / beta at q8. All of them were
-refused on sight, with a message that guessed "FLM 1.0.3 / Q4_K?" -- wrong:
+refused on sight, with a message that guessed "OFLM 1.0.3 / Q4_K?" -- wrong:
 Q4_K is 4736 bytes.
 
 ## What it does now

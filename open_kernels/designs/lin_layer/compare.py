@@ -1,6 +1,6 @@
 """Compare the fused lin_a -> dn -> lin_c chain against the fp64 CPU replica
 (same references and tolerances as layer_chain/compare_chain.py; xn/og are
-rounded to bf16 as FLM does, so residual-level agreement is ~1e-3)."""
+rounded to bf16 as OFLM does, so residual-level agreement is ~1e-3)."""
 import sys
 from pathlib import Path
 

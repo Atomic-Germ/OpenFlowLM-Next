@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
+from .attnknobs import knobs as attn_knobs, probe_env  # noqa: F401  (probe_env: cache.py reads it off the family module)
 from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
@@ -266,6 +267,9 @@ class Attn:
     E_A: int = 0; HPE: int = 0; HPO: int = 0
     Q_AIN_ELEMS: int = 0; K_AIN_ELEMS: int = 0; OG_AOUT_ELEMS: int = 0
     OG_ELEMS: int = 0                    # 4 KB x-stream elements the og (bf16[QW]) arrives in
+    # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
+    # kernel every family compiled before it existed
+    VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
 
 
 @dataclass(frozen=True)
@@ -757,6 +761,7 @@ def attn(spec: ModelSpec) -> Attn | None:
     qw, kvw, hd = spec.attn_q_width, spec.attn_kv_width, spec.head_dim
     e_a = kvw * 2                                 # one cache-row half, attn.h's fifo element
     hpe, hpo = e_a // (hd * 4), e_a // (hd * 2)   # f32 heads per q/k/v/gate element; bf16 heads per og element
+    A = attn_knobs(spec, spec.num_heads, hpo)
     return Attn(
         NH=spec.num_heads, KVH=spec.num_kv_heads, HD=hd, ROT=spec.rotary_dim,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=spec.hidden // BAND_ROWS // n,
@@ -766,6 +771,7 @@ def attn(spec: ModelSpec) -> Attn | None:
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
         OG_ELEMS=roundup(qw * 2, ELEM) // ELEM,
+        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB,
     )
 
 
@@ -944,8 +950,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 # the design sources a build of this recipe depends on (for the build key), relative to open_kernels/
 GEN_KERNELS = "designs/layer_x/gen_kernels.py"      # the design's kernel-TU generator (export_qwen36_kernels.py runs it per spec)
 KERNEL_SOURCES = [
-    "designs/layer_x/*.py", "designs/layer_x/*.cc", "designs/layer_x/*.h",
-    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_k2048.cc",
+    "designs/layer_x/*.py", "designs/layer_x/*.h",
+    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4.py",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/router/*.cc", "designs/router/*.h",

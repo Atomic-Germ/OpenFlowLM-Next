@@ -1,17 +1,17 @@
 /// \file automodel.cpp
 /// \brief automodel class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the auto_model class
 
 #include "AutoModel/automodel.hpp"
-#ifdef FLM_USE_OPEN_QWEN36
+#ifdef OFLM_USE_OPEN_QWEN36
 #include "open_qwen36/engine.hpp"
 #endif
 
 
-AutoModel::AutoModel(flm_rt::device* npu_device_inst, std::string current_model) {
+AutoModel::AutoModel(oflm_rt::device* npu_device_inst, std::string current_model) {
     this->npu_device_inst = npu_device_inst;
     this->current_model = current_model;
     this->total_tokens = 0;
@@ -35,15 +35,17 @@ std::string AutoModel::get_current_model() {
 ///       branch -- which DLL, which sampler -- and differ only in the override
 ///       variable and the label.
 std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env_var, const std::string& family_label) {
-#ifdef FLM_USE_OPEN_QWEN36
+#ifdef OFLM_USE_OPEN_QWEN36
     const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
-    const char* sel = std::getenv(env_var);
-    const bool use_open = sel ? std::string(sel) == "open" : !kernels.empty();
+    // getenv_oflm, not getenv: an install that predates the oflm rename still has the
+    // FLM_* name exported, and silently ignoring it would pick a different ENGINE (#41).
+    const std::string sel = utils::getenv_oflm(env_var);
+    const bool use_open = !sel.empty() ? sel == "open" : !kernels.empty();
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
     if (!use_open)
         return nullptr;
-    header_print("FLM", family_label + " on the open kernels (" + kernels + ")");
+    header_print("OFLM", family_label + " on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();
     return eng;
@@ -154,12 +156,12 @@ nlohmann::json AutoModel::_shared_setup_tokenizer(std::string model_path) {
 
 void AutoModel::_shared_load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     if (this->is_model_loaded && this->model_path == model_path) {
-        header_print("FLM", "Model already loaded: " << this->model_path);
+        header_print("OFLM", "Model already loaded: " << this->model_path);
         return;
     }
 
     this->model_path = model_path;
-    header_print("FLM", "Loading model: " << this->model_path);
+    header_print("OFLM", "Loading model: " << this->model_path);
     this->lm_config = std::make_unique<LM_Config>();
     this->lm_config->from_pretrained(this->model_path);
     if (this->npu_device_inst == nullptr) {
@@ -212,7 +214,7 @@ bool AutoModel::_shared_insert(chat_meta_info_t& meta_info, std::vector<int>& to
         }
     }
     if (skip_count != idx) {
-        header_print("FLM", "System prompt changed! Clearing context...");
+        header_print("OFLM", "System prompt changed! Clearing context...");
         clear_context();
         skip_count = 0;
     }
@@ -283,7 +285,7 @@ buffer<bf16> AutoModel::_chunked_insert(chat_meta_info_t& meta_info, std::vector
             int start = i * max_prefill_len;
             int end = std::min(static_cast<int>(tokens.size()), (i + 1) * max_prefill_len);
             std::vector<int> chunk_tokens(tokens.begin() + start, tokens.begin() + end);
-            header_print("FLM", "Prefill chunk " + std::to_string(i+1) + "/" + std::to_string(chunks) + " with " + std::to_string(chunk_tokens.size()) + " tokens");
+            header_print("OFLM", "Prefill chunk " + std::to_string(i+1) + "/" + std::to_string(chunks) + " with " + std::to_string(chunk_tokens.size()) + " tokens");
             buffer<bf16> chunk_y = this->lm_engine->prefill(chunk_tokens, (i == 0)? payload : nullptr);
             if (i == chunks - 1) {
                 y = chunk_y;
@@ -370,7 +372,7 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 

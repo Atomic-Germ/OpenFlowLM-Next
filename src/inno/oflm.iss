@@ -1,0 +1,381 @@
+[Setup]
+
+; Basic installer configuration for oflm
+
+AppName=oflm
+
+AppVersion=0.1.0
+
+AppPublisher=OpenFlowLM
+
+AppPublisherURL=www.openflowlm.com
+
+; DefaultDirName={localappdata}\oflm
+; PrivilegesRequired=lowest
+; PrivilegesRequiredOverridesAllowed=dialog
+
+DefaultDirName={pf64}\oflm
+
+DefaultGroupName=oflm
+
+DisableProgramGroupPage=no
+
+OutputBaseFilename=oflm-setup
+
+Compression=lzma
+
+SolidCompression=yes
+
+LicenseFile=terms.txt
+
+ChangesEnvironment=yes
+
+; Icon configuration to preserve original background
+SetupIconFile=logo.ico
+
+UninstallDisplayIcon={app}\logo.ico
+
+; Force icon usage without transparency effects
+; UsePreviousAppDir=no
+
+; SignTool=OFLM_INC
+
+
+[Files]
+
+; Main executable
+
+Source: "oflm.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Required DLL
+
+Source: "libcurl.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "llama_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gemma_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gemma_text_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gpt_oss_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "lfm2_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "phi4_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen2_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen2vl_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen3_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen3vl_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen3_5vl_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen3_5_omni_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "qwen3_6_moe_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "nanbeige_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gemma4e_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gemma4e_12b_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "lm_head.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dequant.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "whisper_npu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gemm.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "msvcp140.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "q4_npu_eXpress.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "mha.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "vcruntime140.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "vcruntime140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "abseil_dll.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "avcodec-61.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "avdevice-61.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "avfilter-10.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "avformat-61.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "avutil-59.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "libprotobuf-lite.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "libprotobuf.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "libprotoc.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "swresample-5.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "swscale-8.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "zlib1.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "libfftw3-3.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "libfftw3f-3.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "libfftw3l-3.dll"; DestDir: "{app}"; Flags: ignoreversion
+
+; Application icon (used for shortcuts)
+
+Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+Source: "model_list.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "model_info.json"; DestDir: "{app}"; Flags: ignoreversion
+
+; xclbins directory - recursively include all files
+Source: "..\xclbins\*"; DestDir: "{app}\xclbins"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+
+[Icons]
+
+Name: "{group}\oflm"; \
+    Filename: "{app}\oflm.exe"; \
+    WorkingDir: "{app}"; \
+    IconFilename: "{app}\logo.ico"; \
+    IconIndex: 0; \
+    Comment: "Launch oflm"
+
+; Desktop shortcut (conditional based on user choice)
+Name: "{commondesktop}\oflm run"; \
+    Filename: "{sys}\cmd.exe"; \
+    Parameters: "/K ""{app}\oflm.exe"" run llama3.2:1b"; \
+    WorkingDir: "{app}"; \
+    IconFilename: "{app}\logo.ico"; \
+    IconIndex: 0; \
+    Comment: "Launch oflm with llama3.2:1b model"; \
+    Tasks: desktopicon
+    
+    
+; Desktop shortcut (conditional based on user choice)
+Name: "{commondesktop}\oflm serve"; \
+    Filename: "{sys}\cmd.exe"; \
+    Parameters: "/K ""{app}\oflm.exe"" serve"; \
+    WorkingDir: "{app}"; \
+    IconFilename: "{app}\logo.ico"; \
+    IconIndex: 0; \
+    Comment: "Launch oflm in serve mode"; \
+    Tasks: desktopicon
+
+[Tasks]
+; Optional desktop icon task
+
+Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
+
+[Code]
+var
+  ModelPathPage: TInputDirWizardPage;
+  PortPage: TInputQueryWizardPage;
+  CustomModelPath: string;
+  CustomPort: string;
+
+function DirInPath(Path: string; Dir: string): Boolean;
+var
+  I: Integer;
+  Entry: string;
+begin
+  Result := False;
+  Path := Path + ';'; 
+
+  if (Length(Dir) > 0) and (Dir[Length(Dir)] = '\') then
+    Dir := Copy(Dir, 1, Length(Dir) - 1);
+  Dir := Uppercase(Dir);
+
+  while Path <> '' do
+  begin
+    I := Pos(';', Path);
+    if I > 0 then
+    begin
+      Entry := Copy(Path, 1, I - 1);
+      Delete(Path, 1, I);
+      Entry := Trim(Entry);
+      if Entry <> '' then
+      begin
+        if (Length(Entry) > 0) and (Entry[Length(Entry)] = '\') then
+          Entry := Copy(Entry, 1, Length(Entry) - 1);
+        
+        if Uppercase(Entry) = Dir then
+        begin
+          Result := True;
+          Exit;
+        end;
+      end;
+    end
+    else
+      Path := '';
+  end;
+end;
+  
+procedure RemoveDirFromPath(var Path: string; Dir: string);
+var
+  NewPath: string;
+  I: Integer;
+  Entry: string;
+  CompareEntry: string; 
+begin
+  NewPath := '';
+  Path := Path + ';'; 
+
+  if (Length(Dir) > 0) and (Dir[Length(Dir)] = '\') then
+    Dir := Copy(Dir, 1, Length(Dir) - 1);
+  Dir := Uppercase(Dir);
+
+  while Path <> '' do
+  begin
+    I := Pos(';', Path);
+    if I > 0 then
+    begin
+      Entry := Copy(Path, 1, I - 1);
+      Delete(Path, 1, I);
+      Entry := Trim(Entry);
+      if Entry <> '' then
+      begin
+        CompareEntry := Entry;
+        if (Length(CompareEntry) > 0) and (CompareEntry[Length(CompareEntry)] = '\') then
+          CompareEntry := Copy(CompareEntry, 1, Length(CompareEntry) - 1);
+        
+        if Uppercase(CompareEntry) <> Dir then
+        begin
+          if NewPath <> '' then
+            NewPath := NewPath + ';';
+          NewPath := NewPath + Entry;
+        end;
+      end;
+    end
+    else
+      Path := '';
+  end;
+  Path := NewPath;
+end;  
+  
+function GetExistingModelPath: string;
+var
+  ExistingPath: string;
+begin
+  // OFLM_MODEL_PATH, if this machine has already run a post-rename installer.
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'OFLM_MODEL_PATH', ExistingPath) and (ExistingPath <> '')
+  then begin
+    Result := ExistingPath;
+    Exit;
+  end;
+  // Otherwise FLM_MODEL_PATH, which every installer before the oflm rename wrote (#41).
+  // Without this the wizard defaults to the profile's .oflm and points an upgrading
+  // user AWAY from a model store that is gigabytes -- silently, because nothing is
+  // deleted and nothing errors; the models simply stop being found.
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'FLM_MODEL_PATH', ExistingPath) and (ExistingPath <> '')
+  then begin
+    Result := ExistingPath;
+    Exit;
+  end;
+  Result := GetEnv('USERPROFILE') + '\.oflm';
+end;
+
+function GetExistingPort: string;
+var
+  ExistingPort: string;
+begin
+  // OFLM_SERVE_PORT, then the pre-rename FLM_SERVE_PORT (#41), then the default.
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'OFLM_SERVE_PORT', ExistingPort) and (ExistingPort <> '')
+  then begin
+    Result := ExistingPort;
+    Exit;
+  end;
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'FLM_SERVE_PORT', ExistingPort) and (ExistingPort <> '')
+  then begin
+    Result := ExistingPort;
+    Exit;
+  end;
+  Result := '52625';
+  end;
+
+procedure InitializeWizard;
+begin
+  ModelPathPage := CreateInputDirPage(wpSelectDir,
+    'Model Storage Location', 'Where should OFLM store downloaded models?',
+    'Select the folder where OFLM will store downloaded models, then click Next.' + #13#10 + #13#10 + 
+    'Existing OFLM users -- restart PC after path change, then move oflm/model/.',
+    True, '');
+  ModelPathPage.Add('Model storage location:');
+  ModelPathPage.Values[0] := GetExistingModelPath;
+  
+  PortPage := CreateInputQueryPage(wpSelectDir,
+    'Server Port Configuration', 'What port should OFLM use for the server?',
+    'Enter the port number for OFLM server (default: 52625).' + #13#10 + #13#10 +
+    'Existing OFLM users -- the current port will be used as default.');
+  PortPage.Add('Server port:', False);
+  PortPage.Values[0] := GetExistingPort;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  if CurPageID = ModelPathPage.ID then
+  begin
+    CustomModelPath := ModelPathPage.Values[0];
+  end
+  else if CurPageID = PortPage.ID then
+  begin
+    CustomPort := PortPage.Values[0];
+  end;
+  Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  OldPath: string;
+  AppPath: string;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if not RegQueryStringValue(HKEY_LOCAL_MACHINE,
+      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+      'Path', OldPath)
+    then
+      OldPath := '';
+
+    AppPath := ExpandConstant('{app}');
+
+    if not DirInPath(OldPath, AppPath) then
+    begin
+      if OldPath = '' then
+        OldPath := AppPath
+      else if OldPath[Length(OldPath)] = ';' then
+        OldPath := OldPath + AppPath
+      else
+        OldPath := OldPath + ';' + AppPath;
+      
+      RegWriteStringValue(HKEY_LOCAL_MACHINE,
+        'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+        'Path', OldPath);
+    end;
+    // Always set the OFLM_MODEL_PATH environment variable to user's choice
+    RegWriteStringValue(HKEY_LOCAL_MACHINE,
+      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+      'OFLM_MODEL_PATH', CustomModelPath);
+      
+    // Always set the OFLM_SERVE_PORT environment variable to user's choice
+    RegWriteStringValue(HKEY_LOCAL_MACHINE,
+      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+      'OFLM_SERVE_PORT', CustomPort);
+  end;
+end;
+
+// --- Uninstall ---
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  OldPath: string;
+  AppPath: string;
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    // --- remove from PATH  ---
+    if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+      'Path', OldPath)
+    then
+    begin
+      AppPath := ExpandConstant('{app}');
+      if DirInPath(OldPath, AppPath) then
+      begin
+        RemoveDirFromPath(OldPath, AppPath);
+        
+        RegWriteStringValue(HKEY_LOCAL_MACHINE,
+          'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+          'Path', OldPath);
+      end;
+    end;
+
+    // --- Delete OFLM_MODEL_PATH ---
+    RegDeleteValue(HKEY_LOCAL_MACHINE,
+      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+      'OFLM_MODEL_PATH');
+      
+    // --- Delete OFLM_SERVE_PORT ---
+    RegDeleteValue(HKEY_LOCAL_MACHINE,
+      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+      'OFLM_SERVE_PORT');
+  end;
+end;
+

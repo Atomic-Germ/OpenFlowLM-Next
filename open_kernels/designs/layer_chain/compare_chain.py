@@ -1,6 +1,6 @@
 """Compare the open-kernel layer chain against the fp64 CPU replica.
 
-The chain rounds xn and og to bf16 (as FLM does), so residual-level agreement is
+The chain rounds xn and og to bf16 (as OFLM does), so residual-level agreement is
 ~1e-3 relative, not fp32-exact; the recurrent state S carries the same error."""
 import sys
 from pathlib import Path

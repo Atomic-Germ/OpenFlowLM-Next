@@ -9,7 +9,7 @@ from q4nx.build_plan import derive_build_plan, format_chain
 from q4nx.model_assets import (
     assemble_model_assets,
     assemble_model_assets_hf,
-    get_default_flm_version,
+    get_default_oflm_version,
     find_repo_gguf,
     select_repo_gguf,
 )
@@ -71,7 +71,7 @@ def _parse_args(argv):
         help="Source HF/ModelScope model for tokenizer/config assets (the NPU2 "
              "skeleton). Default: the first ancestor in the repo card's "
              "base_model chain with an {org}/{base}-NPU2 mirror "
-             "(orgs: Atomic-Germ, then FastFlowLM).",
+             "(orgs: Atomic-Germ, then OpenFlowLM).",
     )
     parser.add_argument(
         "--dry-run", dest="dry_run", action="store_true",
@@ -85,11 +85,17 @@ def _parse_args(argv):
              "fit the compiled variant (padded channels are inert).",
     )
     parser.add_argument(
-        "--flm-version", dest="flm_version", default=None, help="flm_version to write into config.json"
+        "--oflm-version", dest="oflm_version", default=None, help="oflm_version to write into config.json"
+    )
+    parser.add_argument(
+        "--quant", dest="quant", default=None, choices=["Q4_0", "Q4_1", "Q8_0", "Q4_K"],
+        help="Override the family config's default weight format. Q4_K is the 4736-byte "
+             "super-block layout OFLM 1.0.3+ requires for the 35B MoE projections; the "
+             "configs still default to what each family has shipped.",
     )
     parser.add_argument(
         "-d", "--deploy", dest="deploy_tag", default=None, metavar="NAME:SIZE",
-        help="Deploy the converted model into flm's models dir and register it under this tag (e.g. 'qwen3.5-claude:9b')",
+        help="Deploy the converted model into oflm's models dir and register it under this tag (e.g. 'qwen3.5-claude:9b')",
     )
     parser.add_argument(
         "--deploy-from", dest="deploy_from", default=None, metavar="SOURCE_TAG",
@@ -97,7 +103,7 @@ def _parse_args(argv):
     )
     parser.add_argument(
         "--deploy-name", dest="deploy_name", default=None, metavar="DIR",
-        help="Directory name inside flm's models dir (default: derived from the deploy tag)",
+        help="Directory name inside oflm's models dir (default: derived from the deploy tag)",
     )
     parser.add_argument(
         "--open-embedding", dest="open_embedding", action="store_true",
@@ -187,7 +193,7 @@ def main(argv=None) -> int:
     if not _is_hf_repo_id(input_path) and not os.path.exists(input_path):
         sys.exit(f"Error: Input file does not exist: {input_path}")
 
-    flm_version = args.flm_version or get_default_flm_version()
+    oflm_version = args.oflm_version or get_default_oflm_version()
 
     # Fill unspecified -s/-o/-t from the repo card's base_model chain
     # (q4nx.build_plan): walk ancestors until one has an {org}/{base}-NPU2
@@ -270,6 +276,8 @@ def main(argv=None) -> int:
     if hf_input is not None:
         model = create_hf_converter(hf_input, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
+        if args.quant:
+            model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
             model.convert(q4nx_path=output_folder, weights_type="language")
             model.convert(q4nx_path=output_folder, weights_type="vision")
@@ -280,13 +288,15 @@ def main(argv=None) -> int:
             model.q4nx_config,
             output_folder,
             source_model=source_model or hf_input,
-            flm_version=flm_version,
+            oflm_version=oflm_version,
             source_file=source_file,
             model_arch=model.model_arch,
         )
     else:
         model = create_converter(input_path, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
+        if args.quant:
+            model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
             model.convert(q4nx_path=output_folder, weights_type="language")
             model.convert(q4nx_path=output_folder, weights_type="vision")
@@ -297,7 +307,7 @@ def main(argv=None) -> int:
             model.q4nx_config,
             output_folder,
             source_model=source_model,
-            flm_version=flm_version,
+            oflm_version=oflm_version,
             source_file=source_file,
             model_arch=model.model_arch,
         )

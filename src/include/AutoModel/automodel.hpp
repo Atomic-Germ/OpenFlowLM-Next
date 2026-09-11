@@ -1,6 +1,6 @@
 /// \file automodel.hpp
 /// \brief automodel class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a header file for the auto_model class
@@ -143,7 +143,7 @@ protected:
 	bool is_model_loaded = false;
 	std::string current_model = "";
 	std::vector<int> token_history;
-	flm_rt::device* npu_device_inst = nullptr;
+	oflm_rt::device* npu_device_inst = nullptr;
 	std::unique_ptr<npu_xclbin_manager> npu = nullptr;
 	bool enable_preemption = false;
     std::vector<int> checkpoint_his;
@@ -203,7 +203,7 @@ protected:
 	///        installed is an error rather than a silent fall back to the DLL.
 	///        The open engine is text only -- images still need the closed one.
 	/// \param env_var name of the environment variable that overrides the choice
-	///        (FLM_QWEN3_ENGINE, FLM_LLAMA_ENGINE, ... -- one per architecture)
+	///        (OFLM_QWEN3_ENGINE, OFLM_LLAMA_ENGINE, ... -- one per architecture)
 	/// \param family_label the family name printed in the "on the open kernels" line
 	/// \return the loaded open engine, or nullptr when the caller should build
 	///         its own closed engine
@@ -224,7 +224,7 @@ public:
 	//************ Shared by all models *************/
 	virtual ~AutoModel() = default;
 
-	AutoModel(flm_rt::device* npu_device_inst, std::string current_model = "");
+	AutoModel(oflm_rt::device* npu_device_inst, std::string current_model = "");
 
 	void reset_parser() {
 		buffer_.clear();

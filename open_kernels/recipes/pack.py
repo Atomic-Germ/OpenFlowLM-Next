@@ -2,7 +2,7 @@
 
 The plan (qwen36moe.pack_plan) says which tensor lands at which byte offset in
 which chunk order; the ops here are the chunk-permutation laws phlegm verified
-byte-for-byte against pools captured from FLM's own engine (they were
+byte-for-byte against pools captured from OFLM's own engine (they were
 open_kernels/model/pools.py's build_layer_pool / build_side / build_pack; the
 frozen originals live in specs/open-engine/tests/legacy_pools.py and the test
 there checks this interpreter reproduces them). src/open_qwen36/pools.cpp is
@@ -11,7 +11,7 @@ the same interpreter in C++.
 The container object needs one method: `raw(name) -> bytes-like` (the
 tensor's bytes as stored, in the file's raster order). It may also offer
 `chunk_bytes_of(name) -> int`, the quantized chunk size that tensor is stored in
-(5120 = q4_1, 8704 = q8); a container that cannot say is read as q4_1.
+(5120 = q4_1, 8704 = q8, 4736 = Q4_K); a container that cannot say is read as q4_1.
 
   std_perm        standard [out, in] matmul tensor -> pool band order (64-row bands, K/128 chunks)
   q8_perm         the same tensor kept at q8: 16-row half-tiles of its chunks, in the q8 band
@@ -29,14 +29,16 @@ as 16-row half-tiles the main cores' `gemv_q8_half` consumes. `q8_perm` refuses 
 that is not q8, naming the tensor: that is the check that a container agrees with the
 kernel set it is being packed for.
 
-**q8 sources.** The three chunk ops above (std_perm, expert_stripes, expert_down)
+**Source forms.** The three chunk ops above (std_perm, expert_stripes, expert_down)
 accept a q8 tensor transparently and re-quantize it to q4_1 chunk by chunk on the
-way into the pool (`requant_q4_1`). A q8 chunk and a q4_1 chunk hold the SAME
-32-row x 256-column tile, so no chunk index law changes and neither the plan, the
-manifest nor the kernels know the difference. That is what lets the Qwen3.6-35B
-fine-tunes -- q8 attention, linear-attention and shared experts, q4_1 routed
-experts -- and Qwen3.5's q8 `ssm_out_proj` run on a q4_1-only GEMV. Any other
-chunk size is refused, naming the tensor (OPEN-PACK-PLAN).
+way into the pool (`requant_q4_1`), and a Q4_K tensor -- what OFLM 1.0.3+ writes --
+by transcoding it (`q4k_to_q4_1`). All three forms hold the SAME 32-row x
+256-column tile, so no chunk index law changes and neither the plan, the manifest
+nor the kernels know the difference. That is what lets the Qwen3.6-35B fine-tunes
+-- q8 attention, linear-attention and shared experts, q4_1 routed experts -- and
+Qwen3.5's q8 `ssm_out_proj` run on a q4_1-only GEMV, and a 1.0.3 container run at
+all (OPEN-QUANT-Q4K). Any other chunk size is refused, naming the tensor
+(OPEN-PACK-PLAN).
 """
 from __future__ import annotations
 
@@ -44,6 +46,7 @@ import numpy as np
 
 CH = 5120
 Q8 = 8704            # a q8 chunk: 256 bf16 scales then 8192 int8 codes
+Q4K = 4736           # a Q4_K chunk (OFLM 1.0.3+): uint8 scales/mins, nibbles, one bf16 (S, M) per row
 BLOCK = 32           # values per quantisation block, along the input dim
 NBLOCK = 8           # 32-blocks per chunk (8192 values = 32 rows x 256 K)
 
@@ -76,6 +79,14 @@ def _bf16_ceil(x) -> np.ndarray:
     """f32 -> bf16 rounded toward +inf."""
     u = np.ascontiguousarray(x, np.float32).view(np.uint32)
     return np.where(u >> 31, u >> 16, (u + 0xFFFF) >> 16).astype(np.uint16)
+
+
+def _bf16_rne(x) -> np.ndarray:
+    """f32 -> bf16, round to nearest even. The directed roundings above exist to make a
+    re-quantized block's range cover its source; a Q4_K scale is not a range end, it is a
+    value being re-expressed, so it takes the nearest bf16."""
+    u = np.ascontiguousarray(x, np.float32).view(np.uint32)
+    return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
 
 
 def requant_q4_1(chunks) -> np.ndarray:
@@ -117,6 +128,47 @@ def requant_q4_1(chunks) -> np.ndarray:
     flat = np.zeros((n, 8192), np.uint8)
     flat[:, _CODE_IDX] = nib.reshape(n, -1)
     out[:, 1024:] = flat[:, 0::2] | (flat[:, 1::2] << 4)
+    return out
+
+
+def q4k_to_q4_1(chunks) -> np.ndarray:
+    """[n, 4736] Q4_K chunk bytes -> [n, 5120] q4_1 chunk bytes, in the same chunk order.
+
+    Both formats hold a 32-row x 256-column tile with one (scale, min) pair per (row,
+    32-column group), indexed `g*32 + r` in both, so nothing is re-quantized and no index
+    law moves. The Q4_K chunk (`q4k_block_t` in the OFLM 1.0.3 decoding kernels) is
+
+        scales[8][32] uint8 @ [0, 256)      mins[8][32] uint8 @ [256, 512)
+        qs[256][16]         @ [512, 4608)   byte k*16 + r/2, even row in the low nibble
+        S[32] bf16          @ [4608, 4672)  M[32] bf16 @ [4672, 4736), M already negated
+
+    and reads as `S[r] * scales[g][r] * nib + M[r] * mins[g][r]`. That is the pool's
+    `nib*d + m` with `d = S*scales` and `m = M*mins`, so the transcode is:
+
+      * the two products, rounded to bf16 -- the one place values move. The exact product
+        of a bf16 and a uint8 needs 16 significand bits and the pool holds 8, so each
+        group's scale shifts by at most a half-ulp of bf16, 2^-8 relative. Nothing else
+        is lost;
+      * a byte de-interleave of the nibbles. Q4_K keeps a column's 32 rows in 16
+        contiguous bytes; the pool splits rows 0-15 and 16-31 into two 2048-byte planes,
+        so q4_1 byte `h*2048 + k*8 + j` is Q4_K byte `k*16 + h*8 + j`. The nibble values
+        and their parity are unchanged.
+
+    src/open_qwen36/pools.cpp does the same in float and must agree byte for byte
+    (specs/open-engine/tests/test_quant_q4k.py and pools_test.cpp hash the same vectors).
+    """
+    src = _u8(chunks).reshape(-1, Q4K)
+    n = src.shape[0]
+    S = _bf16_to_f32(np.ascontiguousarray(src[:, 4608:4672]).view(np.uint16))     # [n, 32] per row
+    M = _bf16_to_f32(np.ascontiguousarray(src[:, 4672:4736]).view(np.uint16))     # [n, 32] per row
+    row = np.arange(256) % BLOCK                                                  # meta slot g*32 + r
+    d = (S[:, row] * src[:, :256].astype(np.float32)).astype(np.float32)
+    m = (M[:, row] * src[:, 256:512].astype(np.float32)).astype(np.float32)
+    out = np.empty((n, CH), np.uint8)
+    out[:, :512] = _bf16_rne(d).view(np.uint8).reshape(n, 512)
+    out[:, 512:1024] = _bf16_rne(m).view(np.uint8).reshape(n, 512)
+    qs = src[:, 512:4608].reshape(n, 256, 2, 8)                                   # [k, half, j]
+    out[:, 1024:] = qs.transpose(0, 2, 1, 3).reshape(n, CH - 1024)
     return out
 
 
@@ -182,7 +234,7 @@ def std_perm(nch: int, in_dim: int) -> np.ndarray:
     covers row half i % 2 and k-tile i // 2 (gemv_q4.h's band law, q4_1_pack.chunk_geometry);
     file chunk f covers rows 32*(f//ncol), cols 256*(f%ncol).
 
-    The law phlegm verified against FLM's captured pools was written as
+    The law phlegm verified against OFLM's captured pools was written as
     cols = 1024*((c//8) % (in//1024)) + 256*((c//2) % 4); for in_dim a multiple of 1024
     that is this same k-tile order (tests/test_pack_plan.py checks the two agree there);
     this form is the one that also holds for in_dim = 2560 or 9728."""
@@ -214,8 +266,6 @@ def _u8(b) -> np.ndarray:
 
 
 def _chunk_guess(ch: int) -> str:
-    if ch == 4736:
-        return "Q4_K (FLM 1.0.3), which needs a different dequant"
     if ch in (1280, 2560):
         return f"a smaller chunk geometry ({ch * 8192 // CH} values per chunk instead of 8192)"
     return "not a chunk format this packer knows"
@@ -224,23 +274,25 @@ def _chunk_guess(ch: int) -> str:
 def q4_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.ndarray:
     """Chunks [c0, c0 + n) of `raw` as [n, 5120] q4_1 bytes, whatever the container stores.
 
-    q4_1 is a view; q8 (8704 B chunks) is re-quantized here, in batches so a 2048-chunk
-    projection does not build a 70 MB float array. Anything else is refused by name, byte
-    count and what the count probably means -- the message someone reads when they point
-    the engine at a container this packer cannot use."""
+    q4_1 is a view; q8 (8704 B chunks) is re-quantized here and Q4_K (4736 B chunks) is
+    transcoded, both in batches so a 2048-chunk projection does not build a 70 MB float
+    array. Anything else is refused by name, byte count and what the count probably means
+    -- the message someone reads when they point the engine at a container this packer
+    cannot use."""
     b = _u8(raw)
     get = getattr(m, "chunk_bytes_of", None)
     ch = (get(name) if callable(get) else 0) or CH
-    if ch not in (CH, Q8):
-        raise ValueError(f"{name}: {ch}-byte quant chunks; the packer reads {CH} (q4_1) and {Q8} (q8) "
-                         f"only -- {ch} is {_chunk_guess(ch)}")
+    if ch not in (CH, Q8, Q4K):
+        raise ValueError(f"{name}: {ch}-byte quant chunks; the packer reads {CH} (q4_1), {Q8} (q8) "
+                         f"and {Q4K} (Q4_K) only -- {ch} is {_chunk_guess(ch)}")
     src = b.reshape(-1, ch)
     sel = src[c0:] if n is None else src[c0:c0 + n]
     if ch == CH:
         return sel
+    conv = requant_q4_1 if ch == Q8 else q4k_to_q4_1
     out = np.empty((sel.shape[0], CH), np.uint8)
     for i in range(0, sel.shape[0], 256):
-        out[i:i + 256] = requant_q4_1(sel[i:i + 256])
+        out[i:i + 256] = conv(sel[i:i + 256])
     return out
 
 
@@ -268,7 +320,7 @@ def _raw(m, name: str):
 
     This is where the head of a tied model is checked: a plan always names
     `lm_head.weight` (the recipes never fold the head into the embedding table),
-    and every container we pack from materialises it -- FLM's `.q4nx` even for
+    and every container we pack from materialises it -- OFLM's `.q4nx` even for
     Llama 3.2 and the small Qwen3 models, whose config.json says
     `tie_word_embeddings: true`. A container that really is tied fails here,
     naming the tensor, rather than producing a pool of zeros."""

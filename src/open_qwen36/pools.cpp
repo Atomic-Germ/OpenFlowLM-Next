@@ -37,7 +37,7 @@ void bounds(const PackOp& op, uint64_t nbytes, size_t dst_bytes) {
 /// a band is 64 rows x in_dim = in_dim/128 chunks; inside its band chunk i covers
 /// row half i%2 and k-tile i/2 (gemv_q4.h's band law); file chunk f covers rows
 /// 32*(f/ncol), cols 256*(f%ncol). Same law as recipes/pack.py (which documents
-/// its equivalence with the form phlegm verified against FLM's captured pools).
+/// its equivalence with the form phlegm verified against OFLM's captured pools).
 std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
     size_t ncol = in_dim / 256, per_band = in_dim / 128;
     std::vector<size_t> perm(nch);
@@ -59,6 +59,7 @@ const uint8_t* raw(const WeightFile& m, const std::string& name, size_t need, si
 
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
+constexpr size_t Q4K_CHUNK = 4736;   // 256 uint8 scales, 256 uint8 mins, 4096 B of nibbles, 32 bf16 S, 32 bf16 M
 constexpr size_t Q8H_SCALES = 256;   // a half-tile's 128 bf16 scales
 constexpr size_t Q8H_CODES = 4096;   // a half-tile's 4096 int8 codes
 constexpr unsigned Q8H_ROWS = 16;
@@ -102,6 +103,14 @@ uint16_t bf16_ceil(float x) {
     return static_cast<uint16_t>((u >> 31) ? (u >> 16) : ((u + 0xFFFFu) >> 16));
 }
 
+/// f32 -> bf16, round to nearest even. The directed roundings above make a re-quantized
+/// block's range cover its source; a Q4_K scale is not a range end but a value being
+/// re-expressed, so it takes the nearest bf16.
+uint16_t bf16_rne(float x) {
+    const uint32_t u = bits(x);
+    return static_cast<uint16_t>((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+}
+
 /// Code index of (row, block, lane) inside a chunk: the raster both formats use.
 inline unsigned code_index(unsigned r, unsigned b, unsigned i) {
     return (r / 16) * 4096 + b * 512 + i * 16 + (r % 16);
@@ -109,7 +118,6 @@ inline unsigned code_index(unsigned r, unsigned b, unsigned i) {
 
 /// What a chunk size that is neither 5120 nor 8704 probably is, for the refusal message.
 std::string chunk_guess(size_t ch) {
-    if (ch == 4736) return "Q4_K (FLM 1.0.3), which needs a different dequant";
     if (ch == 1280 || ch == 2560) return "a smaller chunk geometry (" + std::to_string(ch * 8192 / Q4_CHUNK) +
                                          " values per chunk instead of 8192)";
     return "not a chunk format this packer knows";
@@ -132,9 +140,15 @@ const uint8_t* q4_source(const WeightFile& m, const std::string& name, size_t ch
         requant_q4_1_chunks(src, nch, tmp.data());
         return tmp.data();
     }
+    if (src_ch == Q4K_CHUNK && ch == Q4_CHUNK) {
+        const uint8_t* src = raw(m, name, (chunk0 + nch) * Q4K_CHUNK) + chunk0 * Q4K_CHUNK;
+        tmp.resize(nch * Q4_CHUNK);
+        q4k_to_q4_1_chunks(src, nch, tmp.data());
+        return tmp.data();
+    }
     fail(name + " has " + std::to_string(src_ch) + "-byte quant chunks; the packer reads " +
-         std::to_string(ch) + " (q4_1) and " + std::to_string(Q8_CHUNK) + " (q8); " + std::to_string(src_ch) +
-         " is " + chunk_guess(src_ch));
+         std::to_string(ch) + " (q4_1), " + std::to_string(Q8_CHUNK) + " (q8) and " +
+         std::to_string(Q4K_CHUNK) + " (Q4_K); " + std::to_string(src_ch) + " is " + chunk_guess(src_ch));
 }
 
 }  // namespace
@@ -223,6 +237,29 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
                 }
             }
         }
+    }
+}
+
+void q4k_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
+    for (size_t c = 0; c < nch; ++c) {
+        const uint8_t* s = src + c * Q4K_CHUNK;
+        uint8_t* o = dst + c * Q4_CHUNK;
+        // d[g*32 + r] = bf16(S[r] * scales[g*32 + r]), m likewise from M and mins -- the
+        // two formats already agree on the meta index, so this is a multiply in place.
+        for (unsigned i = 0; i < 256; ++i) {
+            uint16_t sh, mh;
+            std::memcpy(&sh, s + 4608 + 2 * (i % 32), 2);
+            std::memcpy(&mh, s + 4672 + 2 * (i % 32), 2);
+            const uint16_t d = bf16_rne(bf16_to_f32(sh) * static_cast<float>(s[i]));
+            const uint16_t mn = bf16_rne(bf16_to_f32(mh) * static_cast<float>(s[256 + i]));
+            std::memcpy(o + 2 * i, &d, 2);
+            std::memcpy(o + 512 + 2 * i, &mn, 2);
+        }
+        // Q4_K holds a column's 32 rows in 16 contiguous bytes; the pool splits rows 0-15
+        // and 16-31 into two 2048-byte planes. Nibble values and parity are unchanged.
+        for (unsigned k = 0; k < 256; ++k)
+            for (unsigned h = 0; h < 2; ++h)
+                std::memcpy(o + 1024 + h * 2048 + k * 8, s + 512 + k * 16 + h * 8, 8);
     }
 }
 
@@ -488,25 +525,43 @@ void pack_lmhead(const Manifest& m, const WeightFile& f, uint8_t* out) {
     for (const auto& op : m.lmhead_ops) apply(op, f, 0, out, m.lmhead_pool_bytes, m.chunk_bytes);
 }
 
-void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* t) {
+// Which of (t, h, w) rotary pair i takes. transformers' apply_interleaved_mrope: every pair
+// starts as t; pairs a, a + 3, a + 6, ... below 3 * section[a] take axis a for a = h, w.
+// The chunked layout is [t x s0 | h x s1 | w x s2].
+static int mrope_axis(size_t i, const std::vector<int>& section, bool interleaved) {
+    if (section.size() != 3) return 0;
+    if (interleaved) {
+        const int a = static_cast<int>(i % 3);
+        return (a != 0 && i < 3 * static_cast<size_t>(section[a])) ? a : 0;
+    }
+    const size_t s0 = static_cast<size_t>(section[0]), s1 = s0 + static_cast<size_t>(section[1]);
+    return i < s0 ? 0 : (i < s1 ? 1 : 2);
+}
+
+void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const double pos[3],
+                       const std::vector<int>& section, bool interleaved, uint8_t* r) {
     // RoPE over the first rotary_dim dims of a head, half-split pairs (i, i + rot/2), the recipe's theta:
     // [i32 pos | i32 nf | cos f32[rot/2] @512 | sin f32[rot/2] right after] (attn.h reads [cos | sin] at +512)
     const size_t half = m.rotary_dim / 2;
     if (512 + 8 * half > m.ptab_row) fail("the rotary dim does not fit the position record");
-    std::memset(t, 0, rows * m.ptab_row);
+    std::memset(r, 0, m.ptab_row);
+    uint64_t start, nf64;
+    stream_patch::attn_window(row, g.window, &start, &nf64);
+    int32_t valid = static_cast<int32_t>(row - start), nf = static_cast<int32_t>(nf64);
+    std::memcpy(r, &valid, 4);
+    std::memcpy(r + 4, &nf, 4);
+    for (size_t i = 0; i < half; ++i) {
+        double ang = pos[mrope_axis(i, section, interleaved)] * g.inv_freq[i];
+        float c = static_cast<float>(std::cos(ang)), s = static_cast<float>(std::sin(ang));
+        std::memcpy(r + 512 + 4 * i, &c, 4);
+        std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
+    }
+}
+
+void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* t) {
     for (size_t p = 0; p < rows; ++p) {
-        uint8_t* r = t + p * m.ptab_row;
-        uint64_t start, nf64;
-        stream_patch::attn_window(p, g.window, &start, &nf64);
-        int32_t valid = static_cast<int32_t>(p - start), nf = static_cast<int32_t>(nf64);
-        std::memcpy(r, &valid, 4);
-        std::memcpy(r + 4, &nf, 4);
-        for (size_t i = 0; i < half; ++i) {
-            double ang = static_cast<double>(p) * g.inv_freq[i];
-            float c = static_cast<float>(std::cos(ang)), s = static_cast<float>(std::sin(ang));
-            std::memcpy(r + 512 + 4 * i, &c, 4);
-            std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
-        }
+        const double pos[3] = {static_cast<double>(p), static_cast<double>(p), static_cast<double>(p)};
+        build_ptab_record(m, g, p, pos, {}, false, t + p * m.ptab_row);
     }
 }
 

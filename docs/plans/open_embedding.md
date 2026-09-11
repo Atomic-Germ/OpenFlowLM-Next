@@ -20,12 +20,12 @@ Artifacts:
 - Shapes: 768×768, 768×256, 768×1152, 1152×768, 768×3072, 3072×768
 - Output dtype: bf16_f32 (bf16 inputs, FP32 output) — eliminates output quantization
 - Tile size: 64×32 (tile_n=32 for FP32 output memory fit)
-- Artifacts location: ~/.config/flm/models/Embedding-Gemma-300M-NPU2/npu_matmul_f32/
+- Artifacts location: ~/.config/oflm/models/Embedding-Gemma-300M-NPU2/npu_matmul_f32/
 
 Integration:
 - Engine boundary: Engine::matmul_t() in src/open_embedding/engine.cpp
 - NPU path: 5 per-layer projections (q, o, gate, up, down) offloaded to NPU; k/v projections and contrastive head remain on CPU
 - Runtime: XRT with hw_context + register_xclbin (modern API)
-- Build flag: FLM_USE_OPEN_EMBEDDING_NPU=1 (auto-enabled when FLM_USE_OPEN_EMBEDDING=ON and FLM_USE_HRX=OFF)
-- Disable: FLM_NPU_DISABLE=1 for CPU fallback
+- Build flag: OFLM_USE_OPEN_EMBEDDING_NPU=1 (auto-enabled when OFLM_USE_OPEN_EMBEDDING=ON and OFLM_USE_HRX=OFF)
+- Disable: OFLM_NPU_DISABLE=1 for CPU fallback
 

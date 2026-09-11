@@ -1,6 +1,6 @@
 /// \file whisper_npu.hpp
 /// \brief whisper_npu class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-17
 /// \version 0.9.24
 /// \note This is a header file for the whisper_npu class

@@ -1,6 +1,6 @@
 /// \file tokenizer.hpp
 /// \brief tokenizer class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-08-05
 /// \version 0.9.10
 /// \note This class is used to tokenize the text.

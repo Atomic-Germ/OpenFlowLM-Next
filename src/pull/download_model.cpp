@@ -1,6 +1,6 @@
 /// \file download_model.cpp
 /// \brief Download model class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class for curl download
@@ -111,7 +111,7 @@ int progress_callback(void* clientp, double dltotal, double dlnow, double ultota
             double mb_total = dltotal / 1024.0 / 1024.0;
 
             std::cout << "\r\033[K"
-                << "[FLM]  Downloading: " << std::fixed << std::setprecision(1)
+                << "[OFLM]  Downloading: " << std::fixed << std::setprecision(1)
                 << percentage << "% (" << mb_now << "MB / " << mb_total << "MB)"
                 << std::flush;
 
@@ -158,7 +158,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "FastFlowLM/1.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "OpenFlowLM/1.0");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3600L); // 1 hour timeout
 
     // Set progress callback if provided
@@ -194,7 +194,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     // when the model fails to load or produces garbage, so a mismatch must not
     // block a pull or burn all retries on an unfixable comparison.
     if (!remote_oid.empty()) {
-        header_print("FLM", "Checking Hash...");
+        header_print("OFLM", "Checking Hash...");
         std::string local_oid = is_lfs ? calculate_file_sha256(local_path) : calculate_git_blob_oid(local_path);
         if (local_oid != remote_oid) {
             header_print("WARN", "Hash mismatch (expected " << remote_oid << ", have " << local_oid
@@ -203,7 +203,7 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     }
 
 
-    header_print("FLM", "Download completed: " << local_path);
+    header_print("OFLM", "Download completed: " << local_path);
     return true;
 }
 
@@ -214,9 +214,9 @@ static bool download_with_retry(const std::string& url, const std::string& local
         if (download_file(url, local_path, is_lfs, remote_oid, progress_cb)) {
             return true; 
         }
-        header_print("FLM", "Download failed (attempt " << (attempt + 1) << "/" << max_retries << ")"); 
+        header_print("OFLM", "Download failed (attempt " << (attempt + 1) << "/" << max_retries << ")"); 
         if(attempt < max_retries - 1)
-            header_print("FLM", "Retrying...");
+            header_print("OFLM", "Retrying...");
         attempt++;
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -242,7 +242,7 @@ std::string download_string(const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "FastFlowLM/1.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "OpenFlowLM/1.0");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L); // 1 minute timeout
 
     CURLcode res = curl_easy_perform(curl);
@@ -279,7 +279,7 @@ bool download_multiple_files(const nlohmann::json downloads,
         if (filename.find("?download=true") != std::string::npos) {
             filename = filename.substr(0, filename.find("?download=true"));
         }
-        header_print("FLM", "Downloading " << (completed_files + 1) << "/" << total_files 
+        header_print("OFLM", "Downloading " << (completed_files + 1) << "/" << total_files 
                   << ": " << filename);
 
         auto file_progress = [&](double percentage) {
@@ -302,7 +302,7 @@ bool download_multiple_files(const nlohmann::json downloads,
 
     // Show cursor after all downloads complete
     show_cursor();
-    header_print("FLM", "All downloads completed successfully!");
+    header_print("OFLM", "All downloads completed successfully!");
     return true;
 }
 

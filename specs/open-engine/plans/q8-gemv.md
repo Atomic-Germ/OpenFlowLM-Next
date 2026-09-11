@@ -9,13 +9,13 @@ law; `OPEN-SPEC-DERIVE` gains the per-role quant map; new catalogue template `ge
 
 ## Why
 
-FLM's newer converter stores every non-expert projection of the 35B-A3B fine-tunes
+OFLM's newer converter stores every non-expert projection of the 35B-A3B fine-tunes
 (251 of 733 tensors: attention q/k/v/o/gate, linear qkv/z/out, the shared expert) and the
 `ssm_out_proj` + alpha/beta of every Qwen3.5 dense model at **q8**. The open engine today
 re-quantises those to q4_1 on the way into the pool. Measured cost on the 9B's out-projection:
 0.997 correlation on that projection's output, 0.9997 logits correlation on a 4-layer slice
 (`.claude/plans/q-qwen35-handoff.md`, R3). Small per layer, compounding over 32–40 layers,
-and it serves the newest models at FLM 1.0.2's quality when the author chose 1.0.3's.
+and it serves the newest models at OFLM 1.0.2's quality when the author chose 1.0.3's.
 Native q8 removes that gap: the pool holds the q8 values as shipped and the kernel
 consumes them.
 
@@ -81,7 +81,7 @@ chunks ⇒ q8) or the GGUF tensor types:
     quant: {"attn": "q4_1" | "q8", "linear": ..., "linear_out": ..., "shared": ...,
             "ffn": ..., "experts": "q4_1", "lm_head": "q8" | "q4_1"}
 
-with `"q4_1"` everywhere the default (the FastFlowLM 1.0.2 layout; every checked-in spec
+with `"q4_1"` everywhere the default (the OpenFlowLM 1.0.2 layout; every checked-in spec
 and fixture keeps deriving byte-identically). Roles, not tensor names, so the recipes
 stay readable; the deriver maps tensor names to roles once. A container whose tensor
 format disagrees with the manifest's role map is refused by the packer naming the tensor
@@ -103,7 +103,7 @@ Consequences, all mechanical:
   core program calls `gy8` there. `dx.py` gets the same switch for `ffn` / `attn` roles
   (no shipped dense model needs it today, but the code path should not be MoE-only).
 - `build_key` / `spec_hash`: the map is part of the spec, so a q8-variant 35B is a
-  *different kernel set* from FastFlowLM's 35B (its instruction streams bake in the pool
+  *different kernel set* from OpenFlowLM's 35B (its instruction streams bake in the pool
   offsets and fill sizes). Build dirs get the quant map's short hash in their names.
   "Kernels belong to families": the family is shape + quant map.
 - `hf_config_check` cannot check the map; the packer's per-tensor refusal is the check.
@@ -158,7 +158,7 @@ reference must now be ≥ 0.99999 where the re-quantised path scored 0.9997.
 - **Bandwidth.** A q8 tensor streams 2× the bytes. On the 35B a linear layer's non-expert
   projections are ~23 MB at q4_1 and ~39 MB at q8 against ~16 MB of routed experts per
   token, so per-layer bytes rise ~40 % and decode drops from ~7 to roughly 5 tok/s. The
-  closed engine pays the same on these containers; the honest comparison is against FLM
+  closed engine pays the same on these containers; the honest comparison is against OFLM
   1.0.3 on the same file. On Qwen3.5 dense only the out-projection is q8: negligible.
 - **Program memory.** One more `noinline` body plus one entry on a core that holds 10–16.
   If the build overflows 16 KB, fold `gemv_q4_gms` into `gemv_q4_gy` first (the q35

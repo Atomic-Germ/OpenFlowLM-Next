@@ -1,6 +1,6 @@
 /// \file modeling_Qwen3VL_image.cpp
 /// \brief Gemma4e image processing implementation
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the Gemma4e image processing functionality

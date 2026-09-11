@@ -107,5 +107,5 @@
     "partial_rotary_factor": 0.25
   },
   "bos_token_id": 248044,
-  "flm_version": "1.0.1"
+  "oflm_version": "1.0.1"
 }

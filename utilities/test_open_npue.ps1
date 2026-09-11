@@ -1,7 +1,7 @@
 # Test the open_npue embedding backend end to end.
 #
 #   pwsh -File utilities/test_open_npue.ps1
-#       SELF-CONTAINED. Needs nothing but this repository and a built flm.
+#       SELF-CONTAINED. Needs nothing but this repository and a built oflm.
 #       Starts a server per model and checks the OpenAI response shape, that
 #       vectors are unit length, that a paraphrase is nearer than an unrelated
 #       sentence, that gte-multilingual really is multilingual, and that a
@@ -30,7 +30,7 @@
 #
 # One model per process on purpose. The engine's geometry is process-wide and a
 # ShapeLease refuses a second, so one server serves one embedding model; the
-# loop restarts flm for each.
+# loop restarts oflm for each.
 
 param(
   [string]$Upstream = "",
@@ -40,8 +40,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $fork = (Resolve-Path "$PSScriptRoot/..").Path
-$exe  = Join-Path $fork 'src/build/flm.exe'
-if (-not (Test-Path $exe)) { throw "no flm.exe at $exe -- build it first" }
+$exe  = Join-Path $fork 'src/build/oflm.exe'
+if (-not (Test-Path $exe)) { throw "no oflm.exe at $exe -- build it first" }
 
 $EN   = "A man is playing a guitar on stage."
 $PARA = "Someone plays a guitar at a concert."
@@ -59,7 +59,7 @@ $cases = @(
 
 $env:PATH = (Join-Path $fork 'src/lib/xrt') + ";C:\dev\vcpkg\installed\x64-windows\bin;C:\Xilinx\XRT\bin;" + $env:PATH
 if (-not $Xclbins) { $Xclbins = Join-Path $fork 'src' }
-$env:FLM_XCLBIN_PATH = $Xclbins
+$env:OFLM_XCLBIN_PATH = $Xclbins
 
 $in = Join-Path $env:TEMP 'npue_one.txt'
 [System.IO.File]::WriteAllText($in, "$EN`n", (New-Object System.Text.UTF8Encoding $false))
@@ -85,10 +85,10 @@ foreach ($c in $cases) {
 
     # Stop any server FIRST, before the oracle runs. The first version of this
     # script stopped it afterwards, so npuembed ran while the previous model's
-    # flm still held an hw_context -- and hung indefinitely, no output and no
+    # oflm still held an hw_context -- and hung indefinitely, no output and no
     # error, until the server was killed. Two processes each holding a context
     # on this NPU do not queue, they block.
-    Get-Process flm -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process oflm -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 3
 
     $ref = $null
@@ -112,7 +112,7 @@ foreach ($c in $cases) {
         if (-not (Test-Path $ref)) { Write-Host "  oracle FAILED" -ForegroundColor Red; $fail++; continue }
     }
 
-    $log = Join-Path $env:TEMP ("flm_" + ($c.tag -replace '[:\.]', '_') + ".txt")
+    $log = Join-Path $env:TEMP ("oflm_" + ($c.tag -replace '[:\.]', '_') + ".txt")
     Remove-Item $log -Force -ErrorAction SilentlyContinue
     $p = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) `
          -ArgumentList 'serve', 'llama3.2:1b', '--embed', '1', '--embeddingmodel', $c.tag `
@@ -201,7 +201,7 @@ foreach ($c in $cases) {
     }
 }
 
-Get-Process flm -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process oflm -ErrorAction SilentlyContinue | Stop-Process -Force
 Write-Host ""
 if ($fail) { Write-Host "$fail check(s) FAILED across $($cases.Count) models" -ForegroundColor Red; exit 1 }
 if ($Upstream) { Write-Host "all $($cases.Count) models pass, and are bit-identical to the upstream binary" -ForegroundColor Green }

@@ -1,13 +1,13 @@
 /// \file modeling_gpt_oss.cpp
 /// \brief modeling_gpt_oss class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-01
 /// \version 0.9.24
 /// \note This is a source file for the gpt-oss class
 #include "AutoModel/modeling_gpt_oss.hpp"   
 
 
-GPT_OSS::GPT_OSS(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "gpt-oss") {}
+GPT_OSS::GPT_OSS(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "gpt-oss") {}
 
 void GPT_OSS::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->model_path = model_path;
@@ -173,7 +173,7 @@ std::string GPT_OSS::generate(chat_meta_info_t& meta_info, int length_limit, std
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
 
     os << "<|end|>" << std::flush;
     return "<|start|>assistant" + result + "<|end|>";

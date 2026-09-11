@@ -2,13 +2,13 @@
 layout: page
 title: "Models"
 permalink: /models/
-description: "Curated Ryzen AI-ready model catalog with first-class FastFlowLM recipes."
+description: "Curated Ryzen AI-ready model catalog with first-class OpenFlowLM recipes."
 sections:
   - type: hero
     kicker: "Model catalog"
     title: "Choose a recipe"
     body: |
-      FastFlowLM curates the most requested families and publishes tuned manifests under `flm pull <model>`.
+      OpenFlowLM curates the most requested families and publishes tuned manifests under `oflm pull <model>`.
       We validate every build on Ryzen™ AI laptops and provide matching cards—see them [here](/docs/models/).
       The catalog already covers models spanning Qwen3.6 (MoE), Qwen3.5 (Vision), Gemma4 (omni), Qwen3, GPT-OSS-20B (MoE), DeepSeek-R1, Whisper
       (Audio), MedGemma (Medical), and other leading open families.
@@ -50,7 +50,7 @@ sections:
       title: "Stay in the loop"
       ctas:
         - label: "Release notes"
-          href: "https://github.com/ROCm/FastFlowLM/releases"
+          href: "https://github.com/Atomic-Germ/OpenFlowLM/releases"
           style: primary
           external: true
         - label: "Discord"

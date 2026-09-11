@@ -2,19 +2,19 @@
 layout: page
 title: "Team"
 permalink: /team/
-description: "Researchers, engineers, and community leads building FastFlowLM."
+description: "Researchers, engineers, and community leads building OpenFlowLM."
 sections:
   - type: hero
     kicker: "Team"
     title: "Architecture + systems + community"
     body: |
-      FastFlowLM is a collaboration between academic researchers, software engineers,
+      OpenFlowLM is a collaboration between academic researchers, software engineers,
       and community maintainers. The core group includes four PhDs and three
       B.S. graduates in Electrical and Computer Engineering with deep experience in LLM internals, parallel
       processing, and architecture-specific software optimization.
     ctas:
       - label: "Contact us"
-        href: "mailto:info@fastflowlm.com"
+        href: "mailto:info@openflowlm.com"
         style: primary
       - label: "Join Discord"
         href: "https://discord.com/invite/jtWZdMJ8ee?utm_source=site"
@@ -39,7 +39,7 @@ sections:
         image: "/assets/weitao.jpg"
         bio: |
           Professor of Electrical & Computer Engineering · Clemson University. Leads the NEXT Lab focused on domain-specific accelerators, reconfigurable computing, and applied ML.
-          Guides FastFlowLM kernel strategy and academic collaborations.
+          Guides OpenFlowLM kernel strategy and academic collaborations.
         links:
           - label: "Clemson profile"
             url: "https://www.clemson.edu/cecas/departments/ece/faculty_staff/faculty/twei.html"
@@ -73,19 +73,19 @@ sections:
       kicker: "Advisors & contributors"
       title: "Builder network"
       body: |
-        FastFlowLM thrives because of community engineers who maintain connectors, polish docs, and stress-test nightly builds.
+        OpenFlowLM thrives because of community engineers who maintain connectors, polish docs, and stress-test nightly builds.
     right:
       kicker: "Press & partnerships"
       title: "Let’s make Ryzen AI shine"
       body: |
-        Hardware vendors, ISVs, and research labs collaborate with FastFlowLM for demos, co-marketing,
+        Hardware vendors, ISVs, and research labs collaborate with OpenFlowLM for demos, co-marketing,
         and silicon feedback loops. Drop us a line to get started.
       ctas:
         - label: "Email the team"
-          href: "mailto:info@fastflowlm.com"
+          href: "mailto:info@openflowlm.com"
           style: primary
         - label: "Open an issue"
-          href: "https://github.com/ROCm/FastFlowLM/issues/new"
+          href: "https://github.com/Atomic-Germ/OpenFlowLM/issues/new"
           style: ghost
           external: true
 ---

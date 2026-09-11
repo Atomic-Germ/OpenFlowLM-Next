@@ -14,12 +14,14 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
 using open_qwen36::pools::q8_half_tile;
+using open_qwen36::pools::q4k_to_q4_1_chunks;
 using open_qwen36::pools::requant_q4_1_chunks;
 using open_qwen36::pools::transpose_bytes;
 
@@ -36,6 +38,10 @@ constexpr uint64_t MIXED_FNV1A = 0x548390807a90d2ebull;
 // The pool the SAME q8 tensor packs to when the kernel set streams it at q8 (`q8_perm`,
 // OPEN-QUANT-Q8). specs/open-engine/tests/test_quant_q8.py asserts this number.
 constexpr uint64_t Q8_POOL_FNV1A = 0x8d4a3cf75e4cbffaull;
+// The Q4_K chunks of q4k_vector(NCH) transcoded to q4_1, and the pool std_perm puts them
+// in beside a q4_1 tensor (OPEN-QUANT-Q4K). tests/test_quant_q4k.py asserts both.
+constexpr uint64_t Q4K_TRANSCODE_FNV1A = 0x685dc049ec1ca2d7ull;
+constexpr uint64_t Q4K_POOL_FNV1A = 0xb02083912551d9d3ull;
 
 int failures = 0;
 
@@ -131,26 +137,33 @@ std::vector<size_t> band_perm(size_t nch, size_t in_dim) {
     return p;
 }
 
-/// Write a synthetic `.q4nx` (safetensors: 8-byte header length, JSON header, data) with
-/// one q8 tensor, one q4_1 tensor and one whose chunks are neither.
-std::string write_mixed_container(const std::vector<uint8_t>& q8, const std::vector<uint8_t>& q4,
-                                  const std::vector<uint8_t>& bad) {
-    auto entry = [](const char* name, size_t nch, size_t ch, size_t off) {
-        return std::string("\"") + name + "\":{\"dtype\":\"I8\",\"shape\":[" + std::to_string(nch) + "," +
-               std::to_string(ch) + "],\"data_offsets\":[" + std::to_string(off) + "," +
-               std::to_string(off + nch * ch) + "]}";
-    };
-    std::string hdr = "{" + entry(Q8_NAME, NCH, Q8_CH, 0) + "," +
-                      entry(Q4_NAME, NCH, Q4_CH, q8.size()) + "," +
-                      entry(BAD_NAME, NCH, BAD_CH, q8.size() + q4.size()) + "}";
-    const std::string path = (std::filesystem::temp_directory_path() / "open_qwen36_pools_test.q4nx").string();
+/// Write a synthetic `.q4nx` (safetensors: 8-byte header length, JSON header, data) from
+/// {tensor name, chunk width, bytes} triples -- the mixed q8 / q4_1 container and the Q4_K
+/// one differ only in what they hold.
+struct Tensor {
+    const char* name;
+    size_t ch;
+    const std::vector<uint8_t>* data;
+};
+
+std::string write_container(const std::string& stem, const std::vector<Tensor>& ts) {
+    std::string hdr = "{";
+    size_t off = 0;
+    for (size_t i = 0; i < ts.size(); ++i) {
+        const size_t n = ts[i].data->size();
+        hdr += (i ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"I8\",\"shape\":[" +
+               std::to_string(n / ts[i].ch) + "," + std::to_string(ts[i].ch) + "],\"data_offsets\":[" +
+               std::to_string(off) + "," + std::to_string(off + n) + "]}";
+        off += n;
+    }
+    hdr += "}";
+    const std::string path = (std::filesystem::temp_directory_path() / (stem + ".q4nx")).string();
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     uint64_t n = hdr.size();
     f.write(reinterpret_cast<const char*>(&n), 8);
     f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
-    f.write(reinterpret_cast<const char*>(q8.data()), static_cast<std::streamsize>(q8.size()));
-    f.write(reinterpret_cast<const char*>(q4.data()), static_cast<std::streamsize>(q4.size()));
-    f.write(reinterpret_cast<const char*>(bad.data()), static_cast<std::streamsize>(bad.size()));
+    for (const Tensor& t : ts)
+        f.write(reinterpret_cast<const char*>(t.data->data()), static_cast<std::streamsize>(t.data->size()));
     f.close();
     return path;
 }
@@ -179,7 +192,8 @@ void mixed_container_tests() {
     const std::vector<uint8_t> q8 = q8_vector(NCH);
     const std::vector<uint8_t> q4 = lcg_bytes(0x1234567u, NCH * Q4_CH);
     const std::vector<uint8_t> bad = lcg_bytes(0x89ABCDEu, NCH * BAD_CH);
-    const std::string path = write_mixed_container(q8, q4, bad);
+    const std::string path = write_container("open_qwen36_pools_test",
+                                             {{Q8_NAME, Q8_CH, &q8}, {Q4_NAME, Q4_CH, &q4}, {BAD_NAME, BAD_CH, &bad}});
     open_qwen36::Q4nxFile f(path);
 
     check(f.chunk_bytes(Q8_NAME) == Q8_CH && f.chunk_bytes(Q4_NAME) == Q4_CH &&
@@ -216,8 +230,8 @@ void mixed_container_tests() {
     } catch (const std::exception& e) {
         msg = e.what();
     }
-    check(msg.find("mlp.up_proj.weight") != std::string::npos && msg.find("1280") != std::string::npos &&
-              msg.find("Q4_K") == std::string::npos,
+    check(msg.find("mlp.up_proj.weight") != std::string::npos &&
+              msg.find("1280 is a smaller chunk geometry") != std::string::npos,
           "a 1280-byte chunk tensor is refused, naming it and 1280 (\"" + msg + "\")");
 
     // ---- OPEN-QUANT-Q8: the same q8 tensor streamed AT q8, through q8_perm
@@ -266,6 +280,125 @@ void mixed_container_tests() {
     check(msg.find("mlp.down_proj.weight") != std::string::npos && msg.find("5120") != std::string::npos &&
               msg.find("8704") != std::string::npos,
           "q8_perm over a q4_1 tensor is refused, naming it (\"" + msg + "\")");
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+// ---- OPEN-QUANT-Q4K: a Q4_K source (4736-byte chunks, what OFLM 1.0.3+ writes)
+constexpr size_t Q4K_CH = 4736;
+const char* Q4K_NAME = "model.layers.0.mlp.gate_proj.weight";
+
+/// The Q4_K test vector specs/open-engine/tests/test_quant_q4k.py builds byte for byte:
+/// per chunk one LCG seeded from the chunk index; 4608 plain bytes (uint8 scales, uint8
+/// mins, nibbles), then 32 bf16 `S` with exponent 0x76 and 32 bf16 `M` with the same
+/// exponent and the sign bit set -- a Q4_K min is stored already negated.
+std::vector<uint8_t> q4k_vector(size_t nch) {
+    std::vector<uint8_t> out(nch * Q4K_CH);
+    for (size_t c = 0; c < nch; ++c) {
+        uint32_t s = 0x9E3779B9u * static_cast<uint32_t>(c + 1);
+        uint8_t* p = out.data() + c * Q4K_CH;
+        for (size_t i = 0; i < 4608; ++i) {
+            s = s * 1664525u + 1013904223u;
+            p[i] = static_cast<uint8_t>(s >> 24);
+        }
+        for (size_t i = 0; i < 32; ++i) {
+            s = s * 1664525u + 1013904223u;
+            const uint16_t h = static_cast<uint16_t>(0x3B00u | (s >> 24));
+            std::memcpy(p + 4608 + 2 * i, &h, 2);
+        }
+        for (size_t i = 0; i < 32; ++i) {
+            s = s * 1664525u + 1013904223u;
+            const uint16_t h = static_cast<uint16_t>(0xBB00u | (s >> 24));
+            std::memcpy(p + 4672 + 2 * i, &h, 2);
+        }
+    }
+    return out;
+}
+
+/// A Q4_K chunk's value at (row, block, lane), read straight off the layout rather than
+/// through the transcode: value = S[r]*scales[b*32+r]*nib + M[r]*mins[b*32+r]. The two
+/// terms come back separately because each is rounded once by the transcode, so the error
+/// bound is 2^-8 * (|scale term| + |min term|) -- and where the two cancel, that is much
+/// larger than 2^-8 * |value|.
+std::pair<double, double> q4k_terms(const uint8_t* chunk, unsigned r, unsigned b, unsigned i) {
+    auto f32 = [](uint16_t h) {
+        uint32_t u = static_cast<uint32_t>(h) << 16;
+        float f;
+        std::memcpy(&f, &u, 4);
+        return static_cast<double>(f);
+    };
+    uint16_t sh, mh;
+    std::memcpy(&sh, chunk + 4608 + 2 * r, 2);
+    std::memcpy(&mh, chunk + 4672 + 2 * r, 2);
+    const unsigned k = b * 32 + i;
+    const uint8_t byte = chunk[512 + k * 16 + r / 2];
+    const unsigned nib = (r % 2) ? (byte >> 4) : (byte & 0xF);
+    return {nib * f32(sh) * chunk[b * 32 + r], f32(mh) * chunk[256 + b * 32 + r]};
+}
+
+void q4k_container_tests() {
+    const std::vector<uint8_t> q4k = q4k_vector(NCH);
+    const std::vector<uint8_t> q4 = lcg_bytes(0x1234567u, NCH * Q4_CH);
+    const std::vector<uint8_t> bad = lcg_bytes(0x89ABCDEu, NCH * BAD_CH);
+    const std::string path = write_container("open_qwen36_pools_test_q4k",
+                                             {{Q4K_NAME, Q4K_CH, &q4k}, {Q4_NAME, Q4_CH, &q4}, {BAD_NAME, BAD_CH, &bad}});
+    open_qwen36::Q4nxFile f(path);
+    check(f.chunk_bytes(Q4K_NAME) == Q4K_CH, "a Q4_K tensor's chunk width is read per tensor");
+
+    // the transcode itself: the reading is the container's value up to the bf16 rounding of
+    // the two products -- a half-ulp each, 2^-8 relative
+    std::vector<uint8_t> tr(NCH * Q4_CH);
+    q4k_to_q4_1_chunks(q4k.data(), NCH, tr.data());
+    double worst = 0.0;
+    bool moved = false;
+    for (size_t c = 0; c < NCH; ++c)
+        for (unsigned r = 0; r < 32; ++r)
+            for (unsigned b = 0; b < 8; ++b)
+                for (unsigned i = 0; i < 32; ++i) {
+                    const auto t = q4k_terms(q4k.data() + c * Q4K_CH, r, b, i);
+                    const double want = t.first + t.second;
+                    const double got = q4_read(tr.data() + c * Q4_CH, r, b, i);
+                    const double tol = (0x1p-8 + 0x1p-20) * (std::abs(t.first) + std::abs(t.second));
+                    worst = std::max(worst, std::abs(got - want) / (tol + 1e-300));
+                    moved = moved || got != want;
+                }
+    check(worst <= 1.0, "q4k_to_q4_1: within a bf16 half-ulp of the container's value (worst " +
+                            std::to_string(worst) + " x the bound)");
+    check(moved, "q4k_to_q4_1: the rounding is really exercised");
+
+    const uint64_t gott = fnv1a(tr.data(), tr.size());
+    std::printf("      q4k transcode fnv1a = 0x%016llx\n", static_cast<unsigned long long>(gott));
+    check(gott == Q4K_TRANSCODE_FNV1A, "q4k_to_q4_1: byte-identical to the NumPy transcode");
+
+    // as a pack source: the permutation is applied to transcoded chunks, exactly as to
+    // file chunks, and a q4_1 tensor beside it is still a verbatim copy
+    std::vector<uint8_t> pool(2 * NCH * Q4_CH, 0);
+    open_qwen36::pools::apply(std_perm_op(Q4K_NAME, 0), f, 0, pool.data(), pool.size(), Q4_CH);
+    open_qwen36::pools::apply(std_perm_op(Q4_NAME, NCH * Q4_CH), f, 0, pool.data(), pool.size(), Q4_CH);
+    const auto perm = band_perm(NCH, IN_DIM);
+    bool okk = true, ok4 = true;
+    for (size_t c = 0; c < NCH && okk; ++c)
+        okk = std::memcmp(pool.data() + c * Q4_CH, tr.data() + perm[c] * Q4_CH, Q4_CH) == 0;
+    check(okk, "std_perm: a Q4_K source packs as the transcoded q4_1, same chunk order");
+    for (size_t c = 0; c < NCH && ok4; ++c)
+        ok4 = std::memcmp(pool.data() + (NCH + c) * Q4_CH, q4.data() + perm[c] * Q4_CH, Q4_CH) == 0;
+    check(ok4, "std_perm: a q4_1 source beside a Q4_K one is still copied chunk for chunk");
+
+    const uint64_t got = fnv1a(pool.data(), pool.size());
+    std::printf("      q4k pool fnv1a = 0x%016llx\n", static_cast<unsigned long long>(got));
+    check(got == Q4K_POOL_FNV1A, "Q4_K / q4_1 pool: byte-identical to the NumPy packer");
+
+    // a kernel set that streams this projection at q8 is not satisfied by Q4_K
+    std::string msg;
+    try {
+        open_qwen36::pools::apply(q8_perm_op(Q4K_NAME, 0), f, 0, pool.data(), pool.size(), Q4_CH);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    check(msg.find("mlp.gate_proj.weight") != std::string::npos && msg.find("4736") != std::string::npos &&
+              msg.find("8704") != std::string::npos,
+          "q8_perm over a Q4_K tensor is refused, naming it (\"" + msg + "\")");
 
     std::error_code ec;
     std::filesystem::remove(path, ec);
@@ -341,6 +474,7 @@ int main() {
 
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
     mixed_container_tests();
+    q4k_container_tests();
 
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

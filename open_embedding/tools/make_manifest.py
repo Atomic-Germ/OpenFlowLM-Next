@@ -9,7 +9,7 @@ shape of every fp32 tensor. Textures of the pipeline:
     weights/2_Dense.safetensors  contrastive head Dense 768 -> 3072
     weights/3_Dense.safetensors  contrastive head Dense 3072 -> 768
 
-Output goes into FLM's model directory, next to config.json, so the engine can
+Output goes into OFLM's model directory, next to config.json, so the engine can
 be pointed at the model dir just like the closed path.
 """
 
@@ -43,7 +43,7 @@ def safetensors_index(path: Path) -> dict[str, dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", required=True, help="flm model dir to receive weights_manifest.json")
+    parser.add_argument("--model-dir", required=True, help="oflm model dir to receive weights_manifest.json")
     parser.add_argument("--base", default=str(HF_SNAP / "model.safetensors"))
     parser.add_argument("--dense-dir", default=str(ORACLE_WEIGHTS))
     args = parser.parse_args()
@@ -62,7 +62,7 @@ def main() -> None:
             tensors[f"{name}.{k}"] = meta
 
     manifest = {
-        "format": "flm-open-embedding-manifest-v1",
+        "format": "oflm-open-embedding-manifest-v1",
         "config": str(model_dir / "config.json"),
         "tokenizer": str(HF_SNAP / "tokenizer.json"),
         "tensors": tensors,

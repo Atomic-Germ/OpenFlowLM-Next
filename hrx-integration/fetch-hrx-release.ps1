@@ -8,10 +8,10 @@
   verifies its checksum, extracts it, locates the HRX CMake package config, and
   prints the package prefix to feed find_package(hrx) via CMAKE_PREFIX_PATH.
 
-  After XADX removal, FLM consumes HRX through find_package(hrx CONFIG REQUIRED)
+  After XADX removal, OFLM consumes HRX through find_package(hrx CONFIG REQUIRED)
   from the public package (CMake package config + hrx.dll/import lib + public
   headers), not the former HRX_DIR/HRX_BUILD source+build tree. So configure the
-  FLM build with:
+  OFLM build with:
 
       -DCMAKE_PREFIX_PATH=<the HRX_CMAKE_PREFIX printed below>
 
@@ -145,7 +145,7 @@ Write-Host "HRX_ARTIFACT_ROOT=$artifactRoot"
 Write-Host "HRX_CMAKE_CONFIG=$($configFile.FullName)"
 Write-Host "HRX_CMAKE_PREFIX=$prefix"
 Write-Host ""
-Write-Host "Configure FLM with: -DCMAKE_PREFIX_PATH=`"$prefix`""
+Write-Host "Configure OFLM with: -DCMAKE_PREFIX_PATH=`"$prefix`""
 if ($env:GITHUB_OUTPUT) {
     # Append without a BOM: Windows PowerShell 5.1's `Out-File -Encoding utf8`
     # emits a UTF-8 BOM, which would corrupt the output key name and make

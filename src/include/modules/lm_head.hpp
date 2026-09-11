@@ -1,6 +1,6 @@
 /// \file lm_head.hpp
 /// \brief lm_head class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This is a header file for the lm_head class

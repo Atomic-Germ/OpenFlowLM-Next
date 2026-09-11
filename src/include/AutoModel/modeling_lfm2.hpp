@@ -1,6 +1,6 @@
 /// \file lfm2.hpp
 /// \brief lfm2 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-11-03
 /// \version 0.9.15
 /// \note This is a source file for the lfm2 class
@@ -24,7 +24,7 @@ private:
     }
 
 public:
-    LFM2(flm_rt::device* npu_device_inst);
+    LFM2(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;
@@ -53,7 +53,7 @@ private:
     }
 
 public:
-    LFM2_5_TK(flm_rt::device* npu_device_inst);
+    LFM2_5_TK(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;

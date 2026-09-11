@@ -1,6 +1,6 @@
 /// \file Qwen3_6_MOE.hpp
 /// \brief Qwen3_6_MOE class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-01-23
 /// \version 0.9.28
 /// \note This is a source file for the Qwen3_6_MOE class
@@ -37,6 +37,13 @@ private:
 
     int image_pre_resize = 0;
 
+    /// The image preprocessing constants (config.json vision_config), read at
+    /// load_model so preprocess_image is the same code on either engine.
+    struct {
+        unsigned patch = 0, merge = 0, spatial_merge = 0, shortest_edge = 0, longest_edge = 0, temporal = 0;
+        float rescale = 0, mean = 0, stdv = 0;
+    } vision_;
+
     int debug_count= 0;
     void smart_resize(
     int height, int width,
@@ -48,7 +55,7 @@ private:
     void preprocess_image(qwen3_6_moe_image_t& image,  std::vector<bf16> &pixel_values);
 
 public:
-    Qwen3_6_MOE(flm_rt::device* npu_device_inst);
+    Qwen3_6_MOE(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;
@@ -133,7 +140,7 @@ public:
                     target_size = 0;
                 }
                 if (this->image_pre_resize > 0) {
-                    header_print_r("FLM", "Qwen3.6 pre-resize image height to " + std::to_string(target_size) + " pixels if larger than that");
+                    header_print_r("OFLM", "Qwen3.6 pre-resize image height to " + std::to_string(target_size) + " pixels if larger than that");
                 }
                 return true;
             } catch (const std::bad_any_cast&) {

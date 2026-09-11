@@ -39,7 +39,7 @@ POOL = "m0d/000123.bo"                  # the captured layer-2 pool (q/k/v/gate/
 PACK = "m0d/000124.bo"                  # [lnw | postln | sgw | router W ...]
 SIDE = "m0d/000125.bo"                  # q_norm / k_norm (effective) at 128 / 640
 POS = 11
-CAP_V_OFF = 1_073_152                   # FLM's 3 MB pack: K rows @0, V rows here, 1 KB per row
+CAP_V_OFF = 1_073_152                   # OFLM's 3 MB pack: K rows @0, V rows here, 1 KB per row
 
 
 def main() -> int:

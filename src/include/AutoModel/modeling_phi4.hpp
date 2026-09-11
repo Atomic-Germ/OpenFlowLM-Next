@@ -1,6 +1,6 @@
 /// \file phi4.hpp
 /// \brief phi4 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.25
 /// \note This is a source file for the phi4 class
@@ -13,7 +13,7 @@ private:
     void setup_tokenizer(std::string model_path);
 
 public:
-    Phi4(flm_rt::device* npu_device_inst);
+    Phi4(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;

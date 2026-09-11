@@ -152,7 +152,7 @@ std::string find_container(const std::filesystem::path& dir, const json& info) {
     // authority on it: ModelDownloader fetched them from the entry's own
     // `url`. Upstream's packer falls back to a CHECKPOINT.json side-car, which
     // is a file NpuEmbeddings writes and a HuggingFace checkpoint does not
-    // have -- so without this, packing a model fetched by `flm pull` refuses.
+    // have -- so without this, packing a model fetched by `oflm pull` refuses.
     // It refuses rather than guessing because a container that misattributes
     // its own weights is a licensing statement, and the fix is to tell it,
     // not to loosen it.
@@ -233,7 +233,7 @@ struct NpueEmbedding::Impl {
     std::unique_ptr<npue::enc::Embedder> emb;
 };
 
-NpueEmbedding::NpueEmbedding(flm_rt::device* npu_device_inst, std::string tag)
+NpueEmbedding::NpueEmbedding(oflm_rt::device* npu_device_inst, std::string tag)
     : AutoEmbeddingModel(npu_device_inst, tag), impl_(new Impl) {
     impl_->tag = std::move(tag);
 }

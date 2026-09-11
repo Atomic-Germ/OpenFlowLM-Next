@@ -1,6 +1,6 @@
 /// \file npu_cmd_ddr.hpp
 /// \brief npu ddr command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu ddr command
 #pragma once

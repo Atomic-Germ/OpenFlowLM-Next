@@ -85,7 +85,7 @@ def read_safetensors(path: Path) -> dict[str, np.ndarray]:
 class ReferenceModel:
     def __init__(self):
         self.cfg = json.loads(Path(
-            "/home/atomic-germ/.config/flm/models/Embedding-Gemma-300M-NPU2/config.json").read_text())
+            "/home/atomic-germ/.config/oflm/models/Embedding-Gemma-300M-NPU2/config.json").read_text())
         self.w = read_safetensors(HF_SNAP / "model.safetensors")
         self.w2 = read_safetensors(ORACLE_DIR / "weights" / "2_Dense.safetensors")["linear.weight"]
         self.w3 = read_safetensors(ORACLE_DIR / "weights" / "3_Dense.safetensors")["linear.weight"]

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
+from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, Q8_CHUNK, Recipe, ab_lanes, ffn_geometry, mixed_check,
                         per_call, proj_op, q4_chunks, quant_check, require_gemv, roundup)
 from .spec import FULL, LINEAR, ModelSpec
@@ -300,8 +301,8 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 
 GEN_KERNELS = "designs/layer_x/gen_kernels.py"
 KERNEL_SOURCES = [
-    "designs/layer_x/*.py", "designs/layer_x/*.cc", "designs/layer_x/*.h",
-    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_k*.cc",
+    "designs/layer_x/*.py", "designs/layer_x/*.h",
+    "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4.py",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",

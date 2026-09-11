@@ -11,7 +11,7 @@ from .arch_detect import (
     resolve_override_candidates,
 )
 from .constants import nearest_qwen35_variant
-from .gguf_tensor import GGUFTensor, GGMLQuantizationType
+from .gguf_tensor import GGUFTensor, GGMLQuantizationType, pack_q4k
 from typing import List, Dict, Type
 import os
 import json
@@ -124,6 +124,8 @@ class __Q4NX_Converter(ABC):
             self.default_tensor_type = GGMLQuantizationType.Q4_1
         elif self.q4nx_config["default_tensor_type"] == "Q8_0":
             self.default_tensor_type = GGMLQuantizationType.Q8_0
+        elif self.q4nx_config["default_tensor_type"] == "Q4_K":
+            self.default_tensor_type = GGMLQuantizationType.Q4_K
         else:
             raise ValueError("Unsupported default_tensor_type in config")
         
@@ -142,6 +144,21 @@ class __Q4NX_Converter(ABC):
             self.audio_MM_N = None
         self._create_name_maps()
 
+    def set_default_tensor_type(self, q4nx_name: str) -> None:
+        """Override the config's `default_tensor_type` after it is loaded (the CLI's
+        `--quant`). Roles that pin their own type in the config keep it; everything else
+        follows, so the name maps are rebuilt. `Q4_K` is what OFLM 1.0.3+ requires for the
+        35B MoE projections -- q4_1 there decodes as infinite `////` or segfaults."""
+        if q4nx_name == "Q4_K" and self.gguf_reader is None:
+            raise ValueError(
+                "--quant Q4_K needs a GGUF source. The HF-safetensors path quantizes with "
+                "its own fixed per-role targets (_store_q), so it would write a q4_1 "
+                "container while claiming Q4_K. Convert from the family's GGUF instead."
+            )
+        self.q4nx_config["default_tensor_type"] = q4nx_name
+        self.default_tensor_type = self.get_ggml_type(q4nx_name)
+        self._create_name_maps()
+
     def get_ggml_type(self, q4nx_name: str) -> GGMLQuantizationType:
         if q4nx_name == "Q4_0":
             return GGMLQuantizationType.Q4_0
@@ -149,6 +166,8 @@ class __Q4NX_Converter(ABC):
             return GGMLQuantizationType.Q4_1
         elif q4nx_name == "Q8_0":
             return GGMLQuantizationType.Q8_0
+        elif q4nx_name == "Q4_K":
+            return GGMLQuantizationType.Q4_K
         elif q4nx_name == "BF16":
             return GGMLQuantizationType.BF16
         else:
@@ -316,12 +335,12 @@ class __Q4NX_Converter(ABC):
         save_file(self.q4nx_tensors, os.path.join(q4nx_path, filename))
 
     def _export_weights(self, q4nx_path: str, weights_type: str = "language"):
-        """Export the current tensor dict to the file expected by the FLM
+        """Export the current tensor dict to the file expected by the OFLM
         runtime for the given weight type.
 
         The runtime reads the file name for vision/audio weights from the
         model's config.json (``vision_model_weight`` / ``audio_model_weight``).
-        The names used by the official FLM model repos are:
+        The names used by the official OFLM model repos are:
           - language -> model.q4nx
           - vision   -> vision_weight.q4nx  (qwen2vl uses vision_weights.q4nx)
           - audio    -> audio_weight.q4nx
@@ -444,7 +463,7 @@ class __Q4NX_Converter(ABC):
         ]
         where a0_0, a0_1 share a common scale
         Thus, this mean the AIE kernel need to do a even_odd filter, as show in code 
-        https://github.com/ngdxzy/FastFlowLM_Dev/blob/30b43b59d77f5759e943cea52ff7a259ca0fa776/npu_framework/gpt_npu_bin/kernel/mvm_MXFP4.hpp#L76
+        https://github.com/ngdxzy/OpenFlowLM_Dev/blob/30b43b59d77f5759e943cea52ff7a259ca0fa776/npu_framework/gpt_npu_bin/kernel/mvm_MXFP4.hpp#L76
         """
         
         # Thus, in this code, let us do the even odd filter for it
@@ -486,7 +505,7 @@ class __Q4NX_Converter(ABC):
         # Final shape: [..., 16]
         data_reordered = torch.cat([low_part_packed, high_part_packed], dim=-1)
         data = data_reordered.contiguous()
-        # NOW, this code change is reflected in https://github.com/ngdxzy/FastFlowLM_Dev/commit/028680d1f670d817fae0e7efe947bb1a4c19c8a3
+        # NOW, this code change is reflected in https://github.com/ngdxzy/OpenFlowLM_Dev/commit/028680d1f670d817fae0e7efe947bb1a4c19c8a3
         
         
         
@@ -584,7 +603,13 @@ class __Q4NX_Converter(ABC):
             
             
     def _pack(self, d: torch.Tensor, m: torch.Tensor = None, qw: torch.Tensor = None, tensor_type: GGMLQuantizationType = None) -> torch.Tensor:
-        if tensor_type == GGMLQuantizationType.Q8_0:
+        if tensor_type == GGMLQuantizationType.Q4_K:
+            # Same shapes as Q4_1, different semantics: d and m are the effective per-group
+            # scale t_j and *subtracted* min u_j, and the super-block re-fit happens inside
+            # pack_q4k. Dispatch is by type.
+            return pack_q4k(d, m, qw, self.row_block_size, self.col_block_size,
+                            self.keep_block_in_2D)
+        elif tensor_type == GGMLQuantizationType.Q8_0:
             # Q8NX format: scale array (d, bf16) followed by int8 data, no min
             # array. This matches the official Q8_0-packed tensors (alpha/beta/
             # out_proj/lm_head) which use 8704-byte chunks (256 blocks x 34).

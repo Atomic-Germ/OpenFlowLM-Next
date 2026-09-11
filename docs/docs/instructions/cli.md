@@ -7,7 +7,7 @@ parent: Instructions
 
 # ⚡ CLI Mode
 
-FLM CLI mode offers a familiar terminal-based interactive experience, fully offline and accelerated exclusively on AMD NPUs. Here are detailed descriptions of commands and setup for CLI mode usage. It includes:
+OFLM CLI mode offers a familiar terminal-based interactive experience, fully offline and accelerated exclusively on AMD NPUs. Here are detailed descriptions of commands and setup for CLI mode usage. It includes:
 
 - **[🔧 Pre-Run PowerShell Commands (System)](#-pre-run-powershell-commands)**
 - **[💻 Commands Inside CLI Mode](#-commands-inside-cli-mode)**
@@ -19,16 +19,16 @@ FLM CLI mode offers a familiar terminal-based interactive experience, fully offl
 
 ### 🖥️ System Compatibility Check
 
-Verify that your hardware meets the necessary requirements to run FastFlowLM:
+Verify that your hardware meets the necessary requirements to run OpenFlowLM:
 
 ```shell
-flm validate
+oflm validate
 ```
 
 Output the validation results as a JSON object:
 
 ```shell
-flm validate --json
+oflm validate --json
 ```
 
 ---
@@ -36,7 +36,7 @@ flm validate --json
 ### 🆘 Show Help
 
 ```shell
-flm help
+oflm help
 ```
 
 ---
@@ -46,12 +46,12 @@ flm help
 Run a model interactively from the terminal:
 
 ```shell
-flm run llama3.2:1b
+oflm run llama3.2:1b
 ```
 
-> `flm` is short for FastFlowLM. If the model isn't available locally, it will be downloaded automatically. This launches FastFlowLM in CLI mode.
+> `oflm` is short for OpenFlowLM. If the model isn't available locally, it will be downloaded automatically. This launches OpenFlowLM in CLI mode.
 
-> **Linux note:** `flm validate` checks the kernel DRM device, while `flm run` opens the NPU through XRT. If validation succeeds but `flm run` fails with `No such device with index '0'`, confirm XRT can see the NPU:
+> **Linux note:** `oflm validate` checks the kernel DRM device, while `oflm run` opens the NPU through XRT. If validation succeeds but `oflm run` fails with `No such device with index '0'`, confirm XRT can see the NPU:
 > ```shell
 > xrt-smi examine
 > ```
@@ -64,13 +64,13 @@ flm run llama3.2:1b
 Download a model from HuggingFace without launching it:
 
 ```shell
-flm pull llama3.2:3b
+oflm pull llama3.2:3b
 ```
 
 This code forces a re-download of the model, overwriting the current version.
 
 ```shell
-flm pull llama3.2:3b --force
+oflm pull llama3.2:3b --force
 ```
 
 > ⚠️ Use `--force` **only if the model file is corrupted** (e.g., incomplete download). Proceed with caution.
@@ -79,28 +79,28 @@ flm pull llama3.2:3b --force
 
 | Platform | Default Path |
 |----------|-------------|
-| Windows  | `C:\Users\<USER>\.flm\models` |
-| Linux    | `~/.config/flm/models` |
+| Windows  | `C:\Users\<USER>\.oflm\models` |
+| Linux    | `~/.config/oflm/models` |
 
 #### 🔧 Changing the Model Storage Path
 
-You can override the default location by setting the `FLM_MODEL_PATH` environment variable.
+You can override the default location by setting the `OFLM_MODEL_PATH` environment variable.
 
 **Windows** — Update the existing system environment variable:
 1. Open **Start** and search for **"Edit the system environment variables"**.
 2. Click **Environment Variables…**.
-3. Under **System variables**, find `FLM_MODEL_PATH`, select it, and click **Edit…**.
-4. Update the value to your desired path (e.g., `D:\models\flm`).
+3. Under **System variables**, find `OFLM_MODEL_PATH`, select it, and click **Edit…**.
+4. Update the value to your desired path (e.g., `D:\models\oflm`).
 5. Click **OK** and restart any open terminals for the change to take effect.
 
 **Linux** — Set temporarily for the current shell session:
 ```shell
-export FLM_MODEL_PATH="/your/custom/path"
+export OFLM_MODEL_PATH="/your/custom/path"
 ```
 
 To make the change permanent, add the line above to your `~/.bashrc`, then reload it:
 ```shell
-echo 'export FLM_MODEL_PATH="/your/custom/path"' >> ~/.bashrc
+echo 'export OFLM_MODEL_PATH="/your/custom/path"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -111,13 +111,13 @@ source ~/.bashrc
 Display all available models and locally downloaded models:
 
 ```shell
-flm list
+oflm list
 ```
 
 Output as JSON:
 
 ```shell
-flm list --json
+oflm list --json
 ```
 
 
@@ -125,32 +125,32 @@ Filters flag:
 
 ```shell
 # Show everything
-flm list --filter all
+oflm list --filter all
 
 # Only models already installed
-flm list --filter installed
+oflm list --filter installed
 
 # Only models not yet installed
-flm list --filter not-installed
+oflm list --filter not-installed
 ```
 
 Quiet mode:
 
 ```shell
 # Default view (pretty, with icons)
-flm list
+oflm list
 
 # Quiet view (no emoji / minimal)
-flm list --quiet
+oflm list --quiet
 
 # Show everything
-flm list --filter all --quiet
+oflm list --filter all --quiet
 
 # Only models already installed
-flm list --filter installed --quiet
+oflm list --filter installed --quiet
 
 # Only models not yet installed
-flm list --filter not-installed --quiet
+oflm list --filter not-installed --quiet
 ```
 
 ---
@@ -160,7 +160,7 @@ flm list --filter not-installed --quiet
 Delete a model from local storage:
 
 ```shell
-flm remove llama3.2:3b
+oflm remove llama3.2:3b
 ```
 
 ### ✅ Check a Downloaded Model
@@ -168,50 +168,50 @@ flm remove llama3.2:3b
 Verify the file hashes for a downloaded model:
 
 ```shell
-flm check llama3.2:3b
+oflm check llama3.2:3b
 ```
 
 ---
 
 ### 🚀 Start Server Mode (Local)
 
-Launch FastFlowLM as a local REST API server (also supports the OpenAI API):
+Launch OpenFlowLM as a local REST API server (also supports the OpenAI API):
 
 ```shell
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
 
 ---
 
 ### 🔌 Show Server Port 
 
-Show current FLM port (default) in PowerShell:  
+Show current OFLM port (default) in PowerShell:  
   
 ```shell
-flm port
+oflm port
 ```
 
 ---
 
 ### ⚡ NPU Power Mode
 
-By default, **FLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`powersaver`, `balanced`, or `turbo`) using the `--pmode` flag:
+By default, **OFLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`powersaver`, `balanced`, or `turbo`) using the `--pmode` flag:
 
 For **CLI mode**:
 ```shell
-flm run gemma3:4b --pmode balanced
+oflm run gemma3:4b --pmode balanced
 ```
 
 For **Server mode**:
 ```shell
-flm serve gemma3:4b --pmode balanced
+oflm serve gemma3:4b --pmode balanced
 ```
 
 ---
 
 ### 📏 Set Context Length at Launch
 
-The default context length for each model can be found [here](https://fastflowlm.com/docs/models/).   
+The default context length for each model can be found [here](https://openflowlm.com/docs/models/).   
 
 Set the context length with `--ctx-len` (or `-c`).  
 
@@ -219,16 +219,16 @@ In PowerShell, run:
 
 For **CLI mode**:
 ```shell
-flm run llama3.2:1b --ctx-len 8192
+oflm run llama3.2:1b --ctx-len 8192
 ```
 
 For **Server mode**:
 ```shell
-flm serve llama3.2:1b --ctx-len 8192
+oflm serve llama3.2:1b --ctx-len 8192
 ```
 
-> - Internally, FLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.  
-> - If you enter a context length that is not a power of 2, FLM automatically rounds it up to the nearest power of 2. For example: input `8000` → adjusted to `8192`.
+> - Internally, OFLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.  
+> - If you enter a context length that is not a power of 2, OFLM automatically rounds it up to the nearest power of 2. For example: input `8000` → adjusted to `8192`.
 
 ---
 
@@ -237,8 +237,8 @@ flm serve llama3.2:1b --ctx-len 8192
 Set a custom port at launch:
 
   ```shell
-  flm serve llama3.2:1b --port 8000
-  flm serve llama3.2:1b -p 8000
+  oflm serve llama3.2:1b --port 8000
+  oflm serve llama3.2:1b -p 8000
   ```
 
 > ⚠️ `--port` (`-p`) only affects the **current run**; it won’t change the default port.
@@ -250,7 +250,7 @@ Set a custom port at launch:
 Specify a custom host address when starting the server:
 
 ```powershell
-flm serve llama3.2:1b --host 127.0.0.1
+oflm serve llama3.2:1b --host 127.0.0.1
 ```
 
 ⚠️ Note: --host applies only to the current session. It does not modify the default host configuration (default: `127.0.0.1`).
@@ -259,17 +259,17 @@ flm serve llama3.2:1b --host 127.0.0.1
 
 ### 🌐 Cross-Origin Resource Sharing (CORS)
 
-CORS lets browser apps hosted on a different origin call your FLM server safely.
+CORS lets browser apps hosted on a different origin call your OFLM server safely.
 
 - Enable CORS
 
 ```shell
-flm serve --cors 1
+oflm serve --cors 1
 ```
 - Disable CORS
 
 ```shell
-flm serve --cors 0
+oflm serve --cors 0
 ```
 
 > ⚠️ **Default:** CORS is **enabled**.  
@@ -283,12 +283,12 @@ Preemption allows high-priority tasks to interrupt ongoing NPU jobs, improving r
 
 For **CLI mode**:
 ```shell
-flm run llama3.2:1b --preemption 1
+oflm run llama3.2:1b --preemption 1
 ```
 
 For **Server mode**:
 ```shell
-flm serve llama3.2:1b --preemption 1
+oflm serve llama3.2:1b --preemption 1
 ```
 
 > ⚠️ Note: Preemption is for **engineering testing/optimization** only. It requires a special driver + toolkit and is **not for public use**.
@@ -303,13 +303,13 @@ The `--prefill-chunk-len` flag controls how many tokens are processed per chunk 
 For **CLI mode**:
 
 ```shell
-flm run llama3.2:1b --prefill-chunk-len 8192
+oflm run llama3.2:1b --prefill-chunk-len 8192
 ```
 
 For **Server mode**:
 
 ```shell
-flm serve llama3.2:1b --prefill-chunk-len 8192
+oflm serve llama3.2:1b --prefill-chunk-len 8192
 ```
 
 ---
@@ -320,17 +320,17 @@ flm serve llama3.2:1b --prefill-chunk-len 8192
 
 #### CLI mode
 ```shell
-flm run gemma3:4b --asr 1  # Load Whisper (whisper-large-v3-turbo) in the background and load the LLM (gemma3:4b) concurrently.
+oflm run gemma3:4b --asr 1  # Load Whisper (whisper-large-v3-turbo) in the background and load the LLM (gemma3:4b) concurrently.
 ```
 
 #### Server mode
 ```shell
-flm serve gemma3:4b --asr 1  # Background-load Whisper and initialize the LLM (gemma3:4b) concurrently.
+oflm serve gemma3:4b --asr 1  # Background-load Whisper and initialize the LLM (gemma3:4b) concurrently.
 ```
 
 > **Note:** ASR alone isn’t supported—an LLM must be present for end-to-end voice→text→LLM workflows.
 
-See the ASR guide [here](https://fastflowlm.com/docs/models/whisper/)
+See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
 
 ---
 
@@ -470,11 +470,11 @@ Example:
 * **No quotes** around the prompt
 * File must be plain text (readable in Notepad)
 
-👉 [Download a sample prompt (around 40k tokens)](https://github.com/ROCm/FastFlowLM/blob/main/assets/alice_in_wonderland.txt)  
+👉 [Download a sample prompt (around 40k tokens)](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/assets/alice_in_wonderland.txt)  
 
 > ⚠️ **Caution:** a model’s supported context length is limited by available DRAM capacity. For example, with **32 GB** of DRAM, **LLaMA 3.1:8B** cannot run beyond a **32K** context length. For the full **128K** context, we recommend a larger memory system.
 
-If DRAM is heavily used by other programs while running **FastFlowLM**, you may encounter errors due to insufficient memory, such as:
+If DRAM is heavily used by other programs while running **OpenFlowLM**, you may encounter errors due to insufficient memory, such as:
 
 ```error
 [XRT] ERROR: Failed to submit the command to the hw queue (0xc01e0200):
@@ -540,24 +540,24 @@ Example:
 
 ## 📊 Benchmarking Tool
 
-Use the FLM benchmarking tool to measure a model's performance across different context lengths.
+Use the OFLM benchmarking tool to measure a model's performance across different context lengths.
 
 Each benchmark tests context lengths from `1k` to `32k`, running `2` iterations at each length.
 
 ```shell
-flm bench llama3.2:1b
+oflm bench llama3.2:1b
 ```
 
 Change the iteration times by `bench-iterations`:
 
 ```shell
-flm bench llama3.2:1b --bench-iterations 4
+oflm bench llama3.2:1b --bench-iterations 4
 ```
 
-FLM prints the results in your terminal and also saves them as a CSV file in the current folder for later reference.
+OFLM prints the results in your terminal and also saves them as a CSV file in the current folder for later reference.
 
 ```text
-[FLM]  === Benchmark Results ===
+[OFLM]  === Benchmark Results ===
 
  Context Length |              TTFT (s) |      Prefill Speed (tok/s) |     Decoding Speed (tok/s)
 ----------------------------------------------------------------------------------------------------
@@ -579,7 +579,7 @@ FLM prints the results in your terminal and also saves them as a CSV file in the
 You can find more information about available models here:  
 
 ```
-C:\Program Files\flm\model_list.json
+C:\Program Files\oflm\model_list.json
 ```
 
 You can also change the `default_context_length` setting.

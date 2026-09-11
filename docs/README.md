@@ -1,6 +1,6 @@
-# FastFlowLM Website Content Guide
+# OpenFlowLM Website Content Guide
 
-This guide will help you add and edit content on the FastFlowLM website, even if you're not a developer. The website uses simple text files (Markdown) that you can edit directly on GitHub.
+This guide will help you add and edit content on the OpenFlowLM website, even if you're not a developer. The website uses simple text files (Markdown) that you can edit directly on GitHub.
 
 ## Table of Contents
 
@@ -33,7 +33,7 @@ You don't need to install anything or run code—you can edit these files direct
 
 ### Step 1: Navigate to the File
 
-1. Go to the [GitHub repository](https://github.com/FastFlowLM/landingpage) (or your repository URL)
+1. Go to the [GitHub repository](https://github.com/OpenFlowLM/landingpage) (or your repository URL)
 2. Find the file you want to edit (e.g., `index.md` for the homepage)
 3. Click on the file name to open it
 
@@ -162,8 +162,8 @@ A section that displays content in two columns (left and right).
     code_blocks:
       - title: "CLI"
         content: |
-          flm run llama3.2:1b
-          flm list
+          oflm run llama3.2:1b
+          oflm list
     metric_cards:
       - label: "Performance"
         value: "72 tok/s"
@@ -237,10 +237,10 @@ Displays an image or media with accompanying text content.
 - type: media
   kicker: "Demo"
   title: "See It In Action"
-  body: "Watch FastFlowLM in action"
+  body: "Watch OpenFlowLM in action"
   media:
     src: "/assets/demo.gif"
-    alt: "FastFlowLM demo"
+    alt: "OpenFlowLM demo"
     title: "Interactive Demo"
     body: "Experience the power of NPU-first AI"
     items:
@@ -309,7 +309,7 @@ Displays a grid of team member or person cards.
    layout: page
    title: "About"
    permalink: /about/
-   description: "About FastFlowLM"
+   description: "About OpenFlowLM"
    sections:
      - type: hero
        title: "About Us"

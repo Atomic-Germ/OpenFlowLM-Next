@@ -1,7 +1,7 @@
 r"""q4_1 GEMV on the NPU from phlegm's pool-order chunks: y[N] = W[N,K] @ x[K].
 
 Phase 1 of .claude/plans/open-kernels-feasibility.md: the first real compute
-kernel, checked against the pool bytes FLM's closed kernel consumes (which are
+kernel, checked against the pool bytes OFLM's closed kernel consumes (which are
 themselves verified byte-exact against C:/caps captures in pools.rs).
 
 Dataflow (after vegah/LLMNpuTest granite_gemv, Apache-2.0): n_cores workers,

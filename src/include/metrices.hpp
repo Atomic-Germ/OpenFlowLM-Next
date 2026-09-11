@@ -1,6 +1,6 @@
 /// \file metrices.hpp
 /// \brief metrices class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to calculate the numerical error metrics.

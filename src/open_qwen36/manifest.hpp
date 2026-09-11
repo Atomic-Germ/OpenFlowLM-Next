@@ -51,12 +51,46 @@ struct Step {
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
 };
 
+/// 0167/#32: the GEMM prefill route -- T tokens through a layer as 5
+/// whole-array bf16 GEMM dispatches (q4_1 dequantised on-core) with q|k|v
+/// FUSED into one ("qkv3"), T single-token attention dispatches between GEMM
+/// A' and GEMM O, and HOST-side fp64 RMSNorm / residual / SwiGLU between
+/// every GEMM stage (this route does NOT fuse norm/SwiGLU on-core; the
+/// sequential production path does). `program` holds exactly 5 Steps in
+/// FIXED order -- qkv3, o_proj, gate_proj, up_proj, down_proj -- each a plain
+/// "run" against a per-layer weight buffer (named "gqkv3_w"/"go_w"/
+/// "ggate_w"/"gup_w"/"gdown_w", built once at load_weights() time by Core,
+/// see core.cpp) and a pair of GLOBAL scratch buffers ("gemm_x_hid"/
+/// "gemm_x_ff" in, "gemm_y_qkv3"/"gemm_y_o"/"gemm_y_gate"/"gemm_y_up"/
+/// "gemm_y_down" out) the manifest's own `globals` section sizes, exactly
+/// like every other global. The attention half (kernel name fixed as "dxB")
+/// is NOT a Step in `program` -- Core drives it directly (T attnpos-patched
+/// dispatches through a GLOBAL "gact" T-wide scratch buffer, one shuttle
+/// in/out per token) because it sits strictly between program[0] (qkv3) and
+/// program[1] (o_proj), not appended to the list. Special-purpose and
+/// Granite-only on purpose, not a generalized N-stage interpreter.
+struct GemmBlockProgram {
+    uint64_t t = 0;              ///< 0 = no gemm-block program for this layer type
+    std::vector<Step> program;   ///< exactly 5 when t > 0: qkv3, o, gate, up, down (see above)
+    // The handful of model constants this route's HOST-side math needs that
+    // the rest of the manifest does not otherwise carry (RMSNorm eps; the
+    // q/k/v attention-width split and FFN width; the T=1 "act" buffer's
+    // AD_Q/AD_KVN/AD_OG byte offsets, open_kernels/recipes/dense.py's
+    // DenseLayout). Not model constants baked into THIS file (core.hpp's own
+    // rule) -- read from the manifest like everything else, just via new
+    // fields instead of a generic Step.
+    double eps = 0;
+    uint64_t qw = 0, kvw = 0, ff = 0;
+    uint64_t ad_q = 0, ad_kvn = 0, ad_og = 0;
+};
+
 struct LayerType {
     std::string name;
     uint64_t consts_bytes = 0, act_bytes = 0;
     std::string state_kind;                  ///< "linear" (a fixed-size state BO) | "kv" (max_ctx x state_row)
     uint64_t state_bytes = 0, state_row = 0;
     std::vector<Step> program;
+    GemmBlockProgram gemm_block;
     std::vector<PackOp> pool, consts;
 };
 

@@ -31,7 +31,7 @@ import struct
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-REFERENCE_FORMAT = "flm-open-causal-reference-v1"
+REFERENCE_FORMAT = "oflm-open-causal-reference-v1"
 
 # Short prompts plus one deliberately long prompt (>512 tokens) to exercise
 # Gemma3's sliding-window attention path.

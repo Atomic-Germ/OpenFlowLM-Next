@@ -24,17 +24,32 @@ if errorlevel 1 goto :testfail
 echo [open_qwen36] pools_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   pools_test.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\pools_test.exe /Fo:out\
+   pools_test.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp /Fe:out\pools_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
 out\pools_test.exe
 if errorlevel 1 goto :testfail
+echo [open_qwen36] gguf_pack_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
+   gguf_pack_test.cpp gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\gguf_pack_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+out\gguf_pack_test.exe
+if errorlevel 1 goto :testfail
+echo [open_qwen36] vit_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
+   /I "." /I ".." /I "..\include" ^
+   vision\vit_test.cpp vision\vit.cpp q4nx_file.cpp /Fe:out\vit_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+REM vit_test needs the model's vision_weight.q4nx and a fixture from replica_vit.py; run it by hand:
+REM   python ..\..\open_kernels\model\replica_vit.py --grid 16 16 --no-hf --fixture <dir>
+REM   out\vit_test.exe %USERPROFILE%\.flm\models\Qwen3.6-35B-A3B-NPU2 <dir>
 REM The two unit tests above need no XRT; the CLI does.
 if "%XRT_INCLUDE_DIR%"=="" goto :noxrt
 if "%XRT_LIB_DIR%"=="" goto :noxrt
 echo [open_qwen36] XRT_INCLUDE_DIR=%XRT_INCLUDE_DIR%
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   q4nx_file.cpp pools.cpp manifest.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   q4nx_file.cpp gguf_file.cpp pools.cpp manifest.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_qwen36_cli.exe /Fo:out\
 if errorlevel 1 goto :clfail
 echo [open_qwen36] OK -^> out\open_qwen36_cli.exe

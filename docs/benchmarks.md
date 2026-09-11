@@ -8,7 +8,7 @@ sections:
     kicker: "Benchmarks"
     title: "Measured on real laptops."
     body: |
-      Every FastFlowLM release is validated on Ryzen™ AI NPUs.
+      Every OpenFlowLM release is validated on Ryzen™ AI NPUs.
       We publish the results in `docs/benchmarks` so teams can compare apples-to-apples.
       
       The runtime extends AMD’s native 2K context limit to 256K tokens for long-context LLMs and VLMs and, in power

@@ -1,6 +1,6 @@
 /// \file npu_utils.hpp
 /// \brief npu_utils class
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This file contains the classes for managing the npu device
 #pragma once

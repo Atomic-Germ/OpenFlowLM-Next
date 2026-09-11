@@ -16,7 +16,7 @@ This skill captures the end-to-end pipeline proven on `google/embeddinggemma-300
 
 **Key achievement**: bf16→f32 output dtype gives bit-exact FP32 reference match (E8 cosine 0.999993 vs threshold 0.999).
 
-**Integration status**: Open embedding fully integrated into FastFlowLM repo, replacing closed `libgemma_embedding.so`. Auto-manifest generation handles both FLM and HuggingFace cache layouts. Server verified working: `./flm serve -e 1` → `/v1/embeddings` returns valid 768-dim vectors. **NPU verified**: 12 xclbins compiled (6 shapes × 2 M values), bf16→f32 kernel, cosine similarity 1.000000 vs CPU reference.
+**Integration status**: Open embedding fully integrated into OpenFlowLM repo, replacing closed `libgemma_embedding.so`. Auto-manifest generation handles both OFLM and HuggingFace cache layouts. Server verified working: `./oflm serve -e 1` → `/v1/embeddings` returns valid 768-dim vectors. **NPU verified**: 12 xclbins compiled (6 shapes × 2 M values), bf16→f32 kernel, cosine similarity 1.000000 vs CPU reference.
 
 ---
 
@@ -221,9 +221,9 @@ static bool is_npu_projection(const string& name) {
 
 ```cmake
 # In main CMakeLists.txt
-if(FLM_USE_OPEN_EMBEDDING AND NOT FLM_USE_HRX)
-  target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
-  target_sources(flm PRIVATE open_embedding/npu_matmul.cpp)
+if(OFLM_USE_OPEN_EMBEDDING AND NOT OFLM_USE_HRX)
+  target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)
+  target_sources(oflm PRIVATE open_embedding/npu_matmul.cpp)
 endif()
 ```
 
@@ -231,10 +231,10 @@ endif()
 
 | Env Var | Purpose |
 |---------|---------|
-| `FLM_NPU_DISABLE=1` | Force CPU path |
-| `FLM_NPU_DEVICE_ID=0000:XX:XX.X` | Override NPU PCI address |
-| `FLM_CONFIG_PATH=/path/model_list.json` | Model list file |
-| `FLM_XCLBIN_PATH=/path/to/xclbins` | Closed stack assets (if needed) |
+| `OFLM_NPU_DISABLE=1` | Force CPU path |
+| `OFLM_NPU_DEVICE_ID=0000:XX:XX.X` | Override NPU PCI address |
+| `OFLM_CONFIG_PATH=/path/model_list.json` | Model list file |
+| `OFLM_XCLBIN_PATH=/path/to/xclbins` | Closed stack assets (if needed) |
 
 ---
 
@@ -243,12 +243,12 @@ endif()
 ```bash
 # Start server with NPU
 export XILINX_XRT=/opt/xilinx/xrt
-export FLM_CONFIG_PATH=/path/model_list.json
-export FLM_XCLBIN_PATH=/path/xclbins
-./flm serve -e 1
+export OFLM_CONFIG_PATH=/path/model_list.json
+export OFLM_XCLBIN_PATH=/path/xclbins
+./oflm serve -e 1
 
 # Run embedding tests
-flm-test --embedding --port 52625
+oflm-test --embedding --port 52625
 ```
 
 ### Required Thresholds
@@ -266,7 +266,7 @@ flm-test --embedding --port 52625
 
 ## HF Cache & Auto-Manifest Integration
 
-When integrating into a fresh repo, the engine needs to handle models pulled via `flm pull` (which downloads to `~/.config/flm/models/<name>/`) AND models already cached in HuggingFace cache (`~/.cache/huggingface/hub/`).
+When integrating into a fresh repo, the engine needs to handle models pulled via `oflm pull` (which downloads to `~/.config/oflm/models/<name>/`) AND models already cached in HuggingFace cache (`~/.cache/huggingface/hub/`).
 
 ### Auto-Manifest Generation
 
@@ -288,7 +288,7 @@ if (!read_file(mpath, mtext) || !(manifest_ = json::parse(mtext, ...)).is_object
 ```
 
 **Search order for dense head weights** (per `2_Dense`, `3_Dense`):
-1. FLM layout: `<model_dir>/weights/<name>.safetensors`
+1. OFLM layout: `<model_dir>/weights/<name>.safetensors`
 2. HF layout: `<model_dir>/<name>/model.safetensors`
 3. HF cache: `<hf_cache_snapshot>/<name>/model.safetensors`
 
@@ -339,7 +339,7 @@ safetensors_index(const std::string& path) {
   "url": "https://huggingface.co/google/embeddinggemma-300m",
   "files": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json",
             "2_Dense/model.safetensors", "3_Dense/model.safetensors"],
-  "run": "flm serve -e 1",
+  "run": "oflm serve -e 1",
   "type": "embedding",
   "size": "300m",
   "mode": "fp32",
@@ -362,13 +362,13 @@ safetensors_index(const std::string& path) {
 | E8 cosine ~0.98 | bf16 output quantization | Use `dtype_out=f32` (bf16_f32 kernel) |
 | M=2048 OOM | tile_n too large | Reduce `tile_n` (32 for f32, 64 for bf16) |
 | "allocated buffers exceeded available memory" | C buffer too large | Reduce `tile_n` or `n_aie_cols` |
-| Server crash on model load | `find_model_list` returns dir not file | Set `FLM_CONFIG_PATH=.../model_list.json` (file) |
+| Server crash on model load | `find_model_list` returns dir not file | Set `OFLM_CONFIG_PATH=.../model_list.json` (file) |
 | `unordered_map::at` on model load | `weights_manifest.json` missing dense heads | Check if manifest is incomplete (missing `2_Dense`/`3_Dense` entries) |
 | HF cache lookup fails silently | `c = '--'` assigns multi-char literal to char | Use string concatenation: `safe_id += "--"` not in-place `c = '--'` |
 | Model dir has Q4NX but no safetensors dense heads | Old closed model files mixed with open | Delete stale `weights_manifest.json`, engine regenerates from safetensors |
 | `HOME` env var not set in container | HF cache path defaults to `./.cache/huggingface` | Set `HF_HOME` or `HOME` env var |
 | `cannot read *.insts` | Symlinks to blob storage (broken) | Recompile xclbins with `matmul_whole_array.py`, copy real files |
-| NPU not used despite xclbins present | `FLM_USE_OPEN_EMBEDDING_NPU` not defined | Add `target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)` in CMake |
+| NPU not used despite xclbins present | `OFLM_USE_OPEN_EMBEDDING_NPU` not defined | Add `target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)` in CMake |
 
 ---
 
@@ -407,7 +407,7 @@ Engine selects smallest m_pad >= actual M at runtime.
 
 ### Upstream Integration Checklist
 
-When merging open embedding into the main flm repo:
+When merging open embedding into the main oflm repo:
 
 - [ ] Copy `open_embedding/` sources into `src/open_embedding/`
 - [ ] Copy `npu_utils_matmul.hpp` into `src/include/npu_utils/`
@@ -419,13 +419,13 @@ When merging open embedding into the main flm repo:
 - [ ] Update `CMakeLists.txt`:
   - Add open_embedding sources
   - Remove closed library link
-  - Add `FLM_USE_OPEN_EMBEDDING=1` and `FLM_USE_OPEN_EMBEDDING_NPU=1` defines
+  - Add `OFLM_USE_OPEN_EMBEDDING=1` and `OFLM_USE_OPEN_EMBEDDING_NPU=1` defines
   - Add `tokenizers` link (needed for tokenizer)
 - [ ] Update `model_list.json` — point URL to HF model repo
 - [ ] Update `model_info.json` — add correct HF file metadata (oid, lfs_oid, size)
-- [ ] Verify `flm pull` downloads all files including subdirectory paths (`2_Dense/model.safetensors`)
-- [ ] Verify auto-manifest generation handles both FLM layout and HF cache layout
-- [ ] Test: `./flm serve -e 1` → embedding endpoint returns valid vectors
+- [ ] Verify `oflm pull` downloads all files including subdirectory paths (`2_Dense/model.safetensors`)
+- [ ] Verify auto-manifest generation handles both OFLM layout and HF cache layout
+- [ ] Test: `./oflm serve -e 1` → embedding endpoint returns valid vectors
 
 ### Correct Open-Only Adapter Boundary
 
@@ -460,18 +460,18 @@ Use explicit sources rather than extending broad globs:
 
 ```cmake
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/engine.cpp")
-if(NOT FLM_USE_HRX)
+if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
 endif()
 
-target_include_directories(flm PUBLIC
+target_include_directories(oflm PUBLIC
     ${CMAKE_SOURCE_DIR}          # resolves open_embedding/engine.hpp
     ${CMAKE_SOURCE_DIR}/include
 )
 
-target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING=1)
-if(NOT FLM_USE_HRX)
-    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
+target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING=1)
+if(NOT OFLM_USE_HRX)
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)
 endif()
 ```
 
@@ -482,7 +482,7 @@ Verification used for this integration:
 
 ```bash
 cmake -S src -B src/build \
-  -DFLM_VERSION=0.9.24 -DNPU_VERSION=1 -DFLM_USE_HRX=OFF
+  -DOFLM_VERSION=0.9.24 -DNPU_VERSION=1 -DOFLM_USE_HRX=OFF
 cmake --build src/build -j4
 ```
 
@@ -502,8 +502,8 @@ EmbeddingGemma is distributed as an **open, unquantized HF repo**
 (`Atomic-Germ/Embedding-Gemma-300M-OpenNPU2`), not as Q4NX. Rationale:
 embedding needs no quantization, and the distributable route is the same
 pipeline future open families will use, so it stays extensible. Pointing
-`flm pull` at the upstream `google/embeddinggemma-300m` repo is not viable: it
-is gated, `flm pull` uses plain curl with no HF token, and it lacks
+`oflm pull` at the upstream `google/embeddinggemma-300m` repo is not viable: it
+is gated, `oflm pull` uses plain curl with no HF token, and it lacks
 `weights_manifest.json`.
 
 One-shot reproducible build:
@@ -518,7 +518,7 @@ Registry wiring is mandatory and easy to miss:
 
 - `src/model_list.json` supplies `files`, `url`, and `name` (the `name` field
   is the on-disk directory name under `<models_root>/models/`).
-- `src/model_info.json` is the authoritative manifest for `flm pull`.
+- `src/model_info.json` is the authoritative manifest for `oflm pull`.
   `build_download_list` **silently skips** any file absent from it, then
   reports success. Always merge the builder's `model_info_entry.json` into
   `src/model_info.json`, or the pull downloads nothing and the engine fails
@@ -590,11 +590,11 @@ Verified paths (cosine against the bf16 reference array in
 | App-installed family kernels | NPU enabled, 6 shapes, cosine 0.99775 |
 | Model-local kernels | NPU enabled, cosine 0.99775 |
 | No xclbin tree | graceful CPU-only, cosine 0.997711 |
-| `FLM_NPU_DISABLE=1` | CPU-only, cosine 0.997711 |
+| `OFLM_NPU_DISABLE=1` | CPU-only, cosine 0.997711 |
 
-The standalone embedding test defines `FLM_USE_OPEN_EMBEDDING_NPU=1` and
+The standalone embedding test defines `OFLM_USE_OPEN_EMBEDDING_NPU=1` and
 compiles `open_embedding/npu_matmul.cpp` so the NPU path is actually exercised.
-Set `FLM_XCLBIN_PATH` to exercise app-family discovery without installing.
+Set `OFLM_XCLBIN_PATH` to exercise app-family discovery without installing.
 
 Inventory classifiers treat `npu_matmul_f32` kernels as `open_npu_kernel`
 distinct from `closed_npu_kernel`, so our own built kernels are never counted
@@ -662,21 +662,21 @@ Changed behaviour:
 
 **Related: never abort on a missing xclbin tree for work that doesn't need
 kernels.** `utils::find_xclbin_path()` throws when no tree is installed, which
-broke both the open engine's CPU path and `flm pull` itself.
+broke both the open engine's CPU path and `oflm pull` itself.
 
 - `src/open_embedding/engine.cpp` catches it around the app-family kernel lookup
   and falls back to CPU-only.
 - `src/include/lm_config.hpp::_resolve_paths()` catches it and leaves
-  `exec_path` empty, so reading `config.json` during `flm pull` / `flm list`
+  `exec_path` empty, so reading `config.json` during `oflm pull` / `oflm list`
   works without any xclbins installed.
 
-Verified end to end against the live repo: `flm pull embed-gemma:300m` downloads
+Verified end to end against the live repo: `oflm pull embed-gemma:300m` downloads
 all 7 files, warns on advisory hash differences, reports success, and the pulled
 model then loads and runs on NPU (cosine 0.99775).
 
 ## Validated: Full E-Suite Pass (2026-09-02)
 
-`flm pull embed-gemma:300m` → `flm serve -e 1` → `flm-test --embed` gives a
+`oflm pull embed-gemma:300m` → `oflm serve -e 1` → `oflm-test --embed` gives a
 clean sweep, **8/8 PASS, 0 FAIL**:
 
 | Check | Result |
@@ -703,11 +703,11 @@ and L2 normalisation — to the validated numpy oracle.
   That array only has bf16 precision, so ~0.998 is expected and is *not* a
   regression. NPU (0.99775) and CPU (0.997711) agree with each other.
 
-**Gotcha: run the repo's `flm-test`, not a system-installed one.** A stale
+**Gotcha: run the repo's `oflm-test`, not a system-installed one.** A stale
 system copy predating E8 silently produced a CSV with only E1–E7 and no error,
 which looks like E8 was skipped or crashed. Always invoke
-`utilities/flm-test` explicitly (for example
-`python -m flm_test --embed`) so the bundled
+`utilities/oflm-test` explicitly (for example
+`python -m oflm_test --embed`) so the bundled
 `test_files/embedding_reference.json` oracle and current checks are used.
 
 Results are written next to the model as
@@ -731,11 +731,11 @@ Results are written next to the model as
 
 - [ ] `matmul_whole_array.py` adapted with model-specific shapes
 - [ ] All xclbin/insts in `model_dir/npu_matmul_f32/`
-- [ ] `npu_matmul.cpp` compiled with `FLM_USE_OPEN_EMBEDDING_NPU`
+- [ ] `npu_matmul.cpp` compiled with `OFLM_USE_OPEN_EMBEDDING_NPU`
 - [ ] `is_npu_projection()` matches model's layer names
 - [ ] Weight transpose logic verified (`[N,K]` → `[K,N]`)
 - [ ] E-suite passes (E8 cosine ≥ 0.999)
-- [ ] `FLM_NPU_DISABLE=1` tested for CPU fallback
+- [ ] `OFLM_NPU_DISABLE=1` tested for CPU fallback
 
 ---
 

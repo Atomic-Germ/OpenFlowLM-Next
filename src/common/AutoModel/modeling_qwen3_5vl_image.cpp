@@ -1,6 +1,6 @@
 /// \file modeling_Qwen3VL_image.cpp
 /// \brief Qwen3_5VL image processing implementation
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the Qwen3_5VL image processing functionality
@@ -52,7 +52,7 @@ qwen3_5vl_image_t Qwen3_5VL::load_image(const std::string& filename) {
             float ratio = static_cast<float>(max_height) / static_cast<float>(decoded.height);
             int target_width = static_cast<int>(static_cast<float>(decoded.width) * ratio);
             int target_height = max_height;
-            header_print_r("FLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")\n");
+            header_print_r("OFLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")\n");
             if (image_reader_.resize_image(decoded, target_width, target_height, resized_image)) {
                 image_reader_.recycle(decoded);
                 decoded = std::move(resized_image);
@@ -120,7 +120,7 @@ qwen3_5vl_image_t Qwen3_5VL::load_image_base64(const std::string& base64_string)
             float ratio = static_cast<float>(max_height) / static_cast<float>(decoded.height);
             int target_width = static_cast<int>(static_cast<float>(decoded.width) * ratio);
             int target_height = max_height;
-            header_print_r("FLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")");
+            header_print_r("OFLM", "Qwen3_5VL resizing image from (" + std::to_string(decoded.width) + ", " + std::to_string(decoded.height) + ") to (" + std::to_string(target_width) + ", " + std::to_string(target_height) + ")");
             if (image_reader_.resize_image(decoded, target_width, target_height, resized_image)) {
                 image_reader_.recycle(decoded);
                 decoded = std::move(resized_image);
@@ -191,24 +191,23 @@ void Qwen3_5VL::preprocess_image(qwen3_5vl_image_t& image, std::vector<bf16> &pi
     int resized_width;    
     // do the automatically resizing in here 
 
-    qwen3_5vl_npu* lm_engine_qwen3_5_ptr = dynamic_cast<qwen3_5vl_npu*>(this->lm_engine.get());
-    if (!lm_engine_qwen3_5_ptr)
-        throw std::runtime_error("images need the closed Qwen3.5 engine (FLM_QWEN35_ENGINE=closed); the open engine has no vision path");
+    if (vision_.patch == 0 || vision_.temporal == 0)
+        throw std::runtime_error("Qwen3_5VL: config.json has no vision_config; this model cannot take images");
     smart_resize(
         height, width,
         resized_height, resized_width,
         
-        lm_engine_qwen3_5_ptr->QWEN3_5_PATCH_SIZE * lm_engine_qwen3_5_ptr->QWEN3_5_IMAGE_MERGE_SIZE,
-        lm_engine_qwen3_5_ptr->QWEN3_5_SHORTEST_EDGE,
-        lm_engine_qwen3_5_ptr->QWEN3_5_LONGEST_EDGE
+        vision_.patch * vision_.merge,
+        vision_.shortest_edge,
+        vision_.longest_edge
     );
     // std::cout << "resized_height "<< resized_height << " resized_width " << resized_width <<std::endl;
 
     // Cache size calculations for efficiency
     const uint32_t single_frame_size = resized_height * resized_width * channels;
-    const uint32_t total_patch_size = single_frame_size * lm_engine_qwen3_5_ptr->QWEN3_5_TEMPORAL_PATCH_SIZE;
-    const uint32_t grid_h = resized_height / lm_engine_qwen3_5_ptr->QWEN3_5_PATCH_SIZE;
-    const uint32_t grid_w = resized_width / lm_engine_qwen3_5_ptr->QWEN3_5_PATCH_SIZE;
+    const uint32_t total_patch_size = single_frame_size * vision_.temporal;
+    const uint32_t grid_h = resized_height / vision_.patch;
+    const uint32_t grid_w = resized_width / vision_.patch;
 
     // Pre-allocate final buffer to avoid reallocation
     const uint32_t prev_pixel_values_size = pixel_values.size();
@@ -229,13 +228,13 @@ void Qwen3_5VL::preprocess_image(qwen3_5vl_image_t& image, std::vector<bf16> &pi
     imgproc::avx512::rescale_and_normalize_avx512(
         resize_image.data(), patch_vector_scratch.data(),
         resized_width, resized_height, channels,
-        true, lm_engine_qwen3_5_ptr->QWEN3_5_VISION_RESCALE_FACTOR,
-        true, lm_engine_qwen3_5_ptr->QWEN3_5_VISION_RESCALE_IMAGE_MEAN, lm_engine_qwen3_5_ptr->QWEN3_5_VISION_RESCALE_IMAGE_STD
+        true, vision_.rescale,
+        true, vision_.mean, vision_.stdv
     );
     
     // Replicate first frame for temporal patches (optimized for QWEN3_5_TEMPORAL_PATCH_SIZE = 2)
     // This is more efficient than a loop for the common case
-    if  (lm_engine_qwen3_5_ptr->QWEN3_5_TEMPORAL_PATCH_SIZE == 2) {
+    if  (vision_.temporal == 2) {
         memcpy(
             patch_vector_scratch.data() + single_frame_size,
             patch_vector_scratch.data(),
@@ -243,7 +242,7 @@ void Qwen3_5VL::preprocess_image(qwen3_5vl_image_t& image, std::vector<bf16> &pi
         );
     } else {
         // Generic loop for other TEMPORAL_PATCH_SIZE values
-        for(unsigned l = 1; l < lm_engine_qwen3_5_ptr->QWEN3_5_TEMPORAL_PATCH_SIZE; l++){
+        for(unsigned l = 1; l < vision_.temporal; l++){
             memcpy(
                 patch_vector_scratch.data() + l * single_frame_size,
                 patch_vector_scratch.data(),
@@ -257,11 +256,11 @@ void Qwen3_5VL::preprocess_image(qwen3_5vl_image_t& image, std::vector<bf16> &pi
         patch_vector_scratch.data(),
         pixel_values.data() + prev_pixel_values_size,
         1, 1, // something special for image
-        lm_engine_qwen3_5_ptr->QWEN3_5_TEMPORAL_PATCH_SIZE,
+        vision_.temporal,
         channels,
         grid_h, grid_w,
-        lm_engine_qwen3_5_ptr->QWEN3_5_MERGE_SIZE,
-        lm_engine_qwen3_5_ptr->QWEN3_5_PATCH_SIZE
+        vision_.merge,
+        vision_.patch
     );
 
 

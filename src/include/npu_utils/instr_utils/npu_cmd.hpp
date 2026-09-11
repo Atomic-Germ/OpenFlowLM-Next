@@ -1,6 +1,6 @@
 /// \file npu_cmd.hpp
 /// \brief npu command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu command, it is a virtual class for all npu commands
 #ifndef __NPU_CMD_HPP__

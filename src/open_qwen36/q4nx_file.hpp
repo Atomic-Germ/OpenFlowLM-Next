@@ -1,5 +1,5 @@
 /// \file q4nx_file.hpp
-/// \brief Open reader for FLM's `.q4nx` weight container (format 1.0.2, q4_1).
+/// \brief Open reader for OFLM's `.q4nx` weight container (format 1.0.2, q4_1).
 /// \note Replaces the closed q4_npu_eXpress reader on the open Qwen3.6 path.
 ///
 /// The container is a safetensors file: an 8-byte header length, a JSON header

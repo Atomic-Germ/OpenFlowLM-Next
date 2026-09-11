@@ -169,8 +169,8 @@ engine never hard-requires the xclbin tree.
 The open EmbeddingGemma engine builds and the residual closed references are
 now removed:
 
-- `src/wix/flm.wxs`: removed the `gemma_embedding.dll` component.
-- `src/inno/flm.iss`: removed the `gemma_embedding.dll` source entry.
+- `src/wix/oflm.wxs`: removed the `gemma_embedding.dll` component.
+- `src/inno/oflm.iss`: removed the `gemma_embedding.dll` source entry.
 - `src/test/gemma_embedding/CMakeLists.txt`: no longer links `gemma_embedding`
   or compiles the deleted `modeling_gemma_embedding.cpp`. It is now a
   standalone open-engine target that links only Boost, threads, tokenizers-cpp,

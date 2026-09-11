@@ -7,7 +7,7 @@
 // Why this shape (and not shim -> its own TileControl, which timed out):
 // the target model only allows a shim switchbox to reach its TileControl
 // port from FIFO/South/West/North/East, not from its own DMA. Packets from
-// a core tile arrive on South, which is legal -- and matches FastFlowLM,
+// a core tile arrive on South, which is legal -- and matches OpenFlowLM,
 // whose 32 routed-expert descriptors are written by the txn stream but never
 // enqueued by it.
 //

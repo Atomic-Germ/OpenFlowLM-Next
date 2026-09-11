@@ -1,6 +1,6 @@
 /// \file options.hpp
-/// \brief options file for the FastFlowLM project
-/// \author FastFlowLM Team
+/// \brief options file for the OpenFlowLM project
+/// \author OpenFlowLM Team
 /// \date 2026-02-24
 /// \version 0.9.26
 /// \note This file contains a struct for passing all user arguments from command line

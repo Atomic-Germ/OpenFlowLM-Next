@@ -12,11 +12,11 @@ CURRENT_DIR := $(notdir $(CURDIR))
 BUILD_DIR := ../../build/test/$(CURRENT_DIR)
 
 # ————————————————————————————————————————————————————————————————
-# NPU runtime backend selection (mirrors the CMake FLM_USE_HRX flag).
-#   FLM_USE_HRX=0 -> XRT (default)   FLM_USE_HRX=1 -> HRX
+# NPU runtime backend selection (mirrors the CMake OFLM_USE_HRX flag).
+#   OFLM_USE_HRX=0 -> XRT (default)   OFLM_USE_HRX=1 -> HRX
 # Prebuilt engine libs are consumed from the matching per-backend subdir.
 # ————————————————————————————————————————————————————————————————
-FLM_USE_HRX ?= 0
+OFLM_USE_HRX ?= 0
 
 ifeq ($(WSL), 0)
 # Linux build environment
@@ -30,14 +30,14 @@ CXX_FLAGS += -I../../include
 CXX_FLAGS += -MMD -MP
 CXX_FLAGS += -DDEV_BUILD
 CXX_FLAGS += -fopenmp
-CXX_FLAGS += -DCMAKE_INSTALL_PREFIX="\"/opt/fastflowlm\""
-CXX_FLAGS += -DCMAKE_XCLBIN_PREFIX="\"/opt/fastflowlm/share/flm/xclbins\""
+CXX_FLAGS += -DCMAKE_INSTALL_PREFIX="\"/opt/openflowlm\""
+CXX_FLAGS += -DCMAKE_XCLBIN_PREFIX="\"/opt/openflowlm/share/oflm/xclbins\""
 #NOTE: TODO: FIXME: Either deprecate makefile, or keep the parameter sync with ../CMAKELists.txt, otherwise it is error-prone
-CXX_FLAGS += -D__FLM_VERSION__="\"0.9.34\""
+CXX_FLAGS += -D__OFLM_VERSION__="\"0.9.34\""
 CXX_FLAGS += -D__NPU_VERSION__="\"32.0.203.304\""
 CXX_FLAGS += -DDISABLE_ABI_CHECK=1
 
-ifeq ($(FLM_USE_HRX),1)
+ifeq ($(OFLM_USE_HRX),1)
 # --- HRX backend ---
 # Consumed from the pinned release artifact fetched by
 # hrx-integration/fetch-hrx-release.sh (pin: hrx-integration/hrx-release.env).
@@ -57,7 +57,7 @@ HRX_INC := -I$(HRX_DIR)/libhrx/include -I$(HRX_DIR)/runtime/src \
            -I$(HRX_BUILD)/runtime/src -I$(HRX_BUILD)/_deps/flatcc-src/include
 HRX_LIBS := $(HRX_BUILD)/libhrx/src/libhrx/libhrx.so $(HRX_BUILD)/libflatcc_runtime.a
 HRX_RPATH := -Wl,-rpath,$(HRX_BUILD)/libhrx/src/libhrx
-CXX_FLAGS += -DFLM_USE_HRX=1 $(HRX_INC)
+CXX_FLAGS += -DOFLM_USE_HRX=1 $(HRX_INC)
 RUNTIME_LDFLAGS := $(HRX_RPATH) $(HRX_LIBS)
 else
 # --- XRT backend (default) ---

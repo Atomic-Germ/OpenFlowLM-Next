@@ -1,0 +1,2 @@
+include README.md
+recursive-include oflm_test/test_files *.png *.jpg *.jpeg *.mp3 *.json

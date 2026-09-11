@@ -1,6 +1,6 @@
 /// \file engine.hpp
 /// \brief Open CPU implementation of Gemma3 text (causal LM) models.
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-09-02
 /// \note Fully open replacement for the closed libgemma_text_npu.so stack.
 ///

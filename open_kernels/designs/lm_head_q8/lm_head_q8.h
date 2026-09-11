@@ -5,7 +5,7 @@
 //   logits[248320] = W[248320, 2048] @ x[2048]
 //
 // Inner arithmetic ported from vegah/LLMNpuTest designs/lm_head (Apache-2.0,
-// ../../LICENSE.LLMNpuTest); the chunk layout is FLM's q8 (q4nx.rs):
+// ../../LICENSE.LLMNpuTest); the chunk layout is OFLM's q8 (q4nx.rs):
 //
 //   chunk = 32 output rows x 256 K, 8704 B:
 //     scales[256] bf16 at [0   : 512]     index kb*32 + r          (r = 0..31)

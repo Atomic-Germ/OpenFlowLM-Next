@@ -1,6 +1,6 @@
 # Linux Getting Started Guide
 
-This guide will help you get started with FastFlowLM on Linux, including setup for various distributions and NPU (Neural Processing Unit) support.
+This guide will help you get started with OpenFlowLM on Linux, including setup for various distributions and NPU (Neural Processing Unit) support.
 
 ## Supported Distributions
 - Ubuntu 24.04 LTS
@@ -41,11 +41,11 @@ sudo apt install libxrt-npu2 amdxdna-dkms
 sudo reboot
 ```
 
-#### 4. Install FastFlowLM
-- Download the latest `.deb` package from the [Releases page](https://github.com/ROCm/FastFlowLM/releases):
+#### 4. Install OpenFlowLM
+- Download the latest `.deb` package from the [Releases page](https://github.com/Atomic-Germ/OpenFlowLM/releases):
 
 ```sh
-sudo apt install ./fastflowlm*.deb
+sudo apt install ./openflowlm*.deb
 ```
 
 #### 5. (NPU) Check memlock limit
@@ -64,7 +64,7 @@ sudo apt install ./fastflowlm*.deb
 
 ### Arch Linux
 
-Arch requires both the kernel-side `amdxdna` driver and the XRT userspace plugin. `flm validate` can see the NPU through `/dev/accel/accel0`, but `flm run` uses XRT (`xrt::device(0)`), so both layers must be working.
+Arch requires both the kernel-side `amdxdna` driver and the XRT userspace plugin. `oflm validate` can see the NPU through `/dev/accel/accel0`, but `oflm run` uses XRT (`xrt::device(0)`), so both layers must be working.
 
 #### 1. Install the runtime packages
 
@@ -107,13 +107,13 @@ If it points under `kernel/drivers/accel/amdxdna/`, the stock kernel driver is s
 xrt-smi examine
 ```
 
-The output should list an NPU under the device table. If `flm validate` succeeds but `flm run` fails with `No such device with index '0'`, XRT usually cannot see the NPU. Confirm `xrt-plugin-amdxdna` is installed and that `xrt-smi examine` lists the device before trying `flm run` again.
+The output should list an NPU under the device table. If `oflm validate` succeeds but `oflm run` fails with `No such device with index '0'`, XRT usually cannot see the NPU. Confirm `xrt-plugin-amdxdna` is installed and that `xrt-smi examine` lists the device before trying `oflm run` again.
 
 #### 4. Firmware note for Linux 6.19
 
 Some Arch `linux-firmware-other` versions include both `npu.sbin.1.0.0.63.zst` and `npu.sbin.1.1.2.64.zst` for `17f0_10`. On the stock 6.19 in-tree `amdxdna` driver, forcing `npu.sbin.zst` to the 1.1 firmware can make the NPU disappear because the driver expects the older firmware protocol. The DKMS driver can use the protocol-7 firmware through `npu_7.sbin.zst`.
 
-In short: if 1.1 firmware breaks probing on stock 6.19, do not keep forcing the `npu.sbin.zst` symlink. Use `amdxdna-dkms` or a kernel with the newer `amdxdna` driver, then verify `flm validate` reports firmware version `1.1.x`.
+In short: if 1.1 firmware breaks probing on stock 6.19, do not keep forcing the `npu.sbin.zst` symlink. Use `amdxdna-dkms` or a kernel with the newer `amdxdna` driver, then verify `oflm validate` reports firmware version `1.1.x`.
 
 ---
 
@@ -127,8 +127,8 @@ In short: if 1.1 firmware breaks probing on stock 6.19, do not keep forcing the 
 
 2. Clone the repository and pull all submodules:
    ```sh
-   git clone --recursive https://github.com/ROCm/FastFlowLM.git
-   cd FastFlowLM
+   git clone --recursive https://github.com/Atomic-Germ/OpenFlowLM.git
+   cd OpenFlowLM
    ```
 3. Build:
    ```sh
@@ -145,7 +145,7 @@ In short: if 1.1 firmware breaks probing on stock 6.19, do not keep forcing the 
 
 To validate your NPU setup, run:
 ```sh
-flm validate
+oflm validate
 ```
 You should see output similar to:
 ```
@@ -161,4 +161,4 @@ If validation passes but running a model fails, check XRT separately:
 xrt-smi examine
 ```
 
-`flm validate` uses the kernel DRM device directly, while `flm run` uses XRT. On Linux, a passing validation does not guarantee XRT can open device index `0`.
+`oflm validate` uses the kernel DRM device directly, while `oflm run` uses XRT. On Linux, a passing validation does not guarantee XRT can open device index `0`.

@@ -36,6 +36,17 @@ HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 ELEM = 4096
 
+
+def _gemv_prep_entry(k: int) -> Path:
+    """Generate the gemv_q4 activation-prep TU for width k (git-ignored), the
+    same on-demand entry lm_head_q8 uses: gemv_q4.ensure_prep_entry rewrites it
+    only when the text differs, so it is generated at build time, not tracked."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_gemv_q4_gen", GEMV / "gemv_q4.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    return gen.ensure_prep_entry(k)
+
 C = R.common
 KIND = R.kind                         # "moe" (qwen36moe) | "dense" (qwen35): which tail the layer runs
 Q8 = R.q8                             # the projection roles streamed at q8 (OPEN-QUANT-Q8); usually empty
@@ -202,7 +213,7 @@ def kernels(inc, t):
     k["gup"] = ef("gemv_q4_gup", [e, tab, ms, i32, i32])            # (t, tab, ms, group, band)  u | g
     k["gdown"] = ef("gemv_q4_gdown", [e, tab, ms, i32, i32])        # (t, tab, ms, j, slot)      routed / shared law
     # activation tables: x (one element, K = HID) and the two-element og (K = KWIDE)
-    k["prep2048"] = ExternalFunction(f"gemv_q4_prep_k{HID}", source_file=str(GEMV / f"gemv_q4_prep_k{HID}.cc"),
+    k["prep2048"] = ExternalFunction(f"gemv_q4_prep_k{HID}", source_file=str(_gemv_prep_entry(HID)),
                                      arg_types=[x, tab], include_dirs=inc, compile_flags=OS)
     k["prep4096a"] = ef(f"gemv_q4_prep_k{KWIDE}_b0n{nb}", [x, tab])
     k["prep4096b"] = ef(f"gemv_q4_prep_k{KWIDE}_b{nb}n{nb}", [x, tab])

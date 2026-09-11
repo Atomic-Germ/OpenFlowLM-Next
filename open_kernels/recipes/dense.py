@@ -155,44 +155,11 @@ def per_call(spec: ModelSpec) -> int:
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")
 
 
-# ---- probe knobs, and why they are in the build key
-#
-# ATTN_NULL, ATTN_ABL and ATTN_RB change the COMPILED kernel, and cache.build_key
-# hashes sources + spec + quant, which cannot see an environment variable. Two
-# exports that differ only in a probe would therefore share a key, and
-# export_qwen36_kernels.py skips a build whose key the destination already has
-# -- so a probe build could be shipped as a real one, silently. `probe_env()`
-# is what cache.py folds in to stop that; it returns {} when nothing is set, so
-# an ordinary build's key is unchanged.
-PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB")
-
-RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
-
-
-def probe_env() -> dict[str, str]:
-    """The probe variables that are actually set, for the build key."""
-    return {k: os.environ[k] for k in PROBE_VARS if os.environ.get(k)}
-
-
-def _probe_rb(default: int, nhl: int) -> int:
-    """ATTN_RB, validated. Rejected rather than passed on to fail at compile time."""
-    raw = os.environ.get("ATTN_RB")
-    if raw is None:
-        return default
-    try:
-        rb = int(raw)
-    except ValueError:
-        raise OpRangeError(f"ATTN_RB={raw!r} is not an integer (expected one of {RB_SUPPORTED})")
-    if rb not in RB_SUPPORTED:
-        raise OpRangeError(
-            f"ATTN_RB={rb} is not supported: attn_stepb.cc has a body for 2 and 4, and 1 is the "
-            f"unblocked path. Anything else compiles to `#error` after a full design build.")
-    if rb > 1 and (rb * nhl) not in (8, 16, 32):
-        raise OpRangeError(
-            f"ATTN_RB={rb} with {nhl} heads per core gives a {rb * nhl}-lane score block, and the "
-            f"block exponential needs 8, 16 or 32. Legal here: "
-            f"{[r for r in RB_SUPPORTED if r == 1 or (r * nhl) in (8, 16, 32)]}.")
-    return rb
+# ---- the fast attention path's knobs live in recipes/attnknobs.py (shared with the
+# MoE / Qwen3.5 recipe, which compiles the same attn.h); re-exported here because the
+# dense recipe is where they were first exposed and where cache.py and the tests look.
+from .attnknobs import (PROBE_VARS, RB_SUPPORTED, FAST_ATTENTION, MAX_ATTN_CORES,  # noqa: E402,F401
+                        probe_env, fast_attention, attn_cores, knobs as attn_knobs)
 
 
 def geometry(spec: ModelSpec) -> DenseGeometry:
@@ -204,32 +171,10 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     hpo = e_a // (hd * 2)                     # og heads (bf16) per aout element = KVH
     wide = max(hid, qw, ff)
     pc = per_call(spec)
-    ch = chunk_bytes(spec.quant)
-    # attn.h's online softmax spends two sexp() per head per position, and sexp
-    # is software float on the scalar unit. ATTN_VEXP batches them through the
-    # vector unit instead -- same arithmetic, ~1e-7 either way. Granite only for
-    # now: it is the family whose measurement motivated it (OPEN-ATTN-CONTEXT),
-    # and every other family's artifacts must stay byte-identical until each has
-    # been measured the same way.
-    vexp = 1 if spec.family == "granite" else 0
-    # Attention runs on ONE core while ~22 of the array's 32 sit idle, and after
-    # ATTN_VEXP it is still the whole decode step. Heads are independent, so the
-    # work splits cleanly -- but an og output element carries HPO heads, so the
-    # core count has to divide the og element count exactly.
-    acores = 1
-    if spec.family == "granite":
-        og_elems = nh // hpo
-        acores = og_elems if og_elems > 1 else 1
-    nhl = nh // acores
-    mls = ((nhl + 31) // 32) * 32 if vexp else nhl
-    # Rows per kernel call. One row per call reloads q for every head and reloads,
-    # rescales and stores the whole output accumulator, at every position; a block
-    # pays those once for RB rows and exponentiates the whole block in one vector
-    # (RB * NHL lanes) instead of one per row. RB * NHL must be a whole vector.
-    rb = 1
-    if vexp:
-        rb = max((r for r in (4, 2, 1) if (r * nhl) in (8, 16, 32)), default=1)
-        rb = _probe_rb(rb, nhl)
+    # The fast attention path (recipes/attnknobs.py): only for the families measured on
+    # it; every other family's artifacts stay byte-identical until it has been.
+    A = attn_knobs(spec, nh, hpo)
+    vexp, acores, nhl, mls, rb = A.VEXP, A.ACORES, A.NHL, A.MLS, A.RB
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
@@ -429,12 +374,12 @@ def hf_config_check(spec: ModelSpec) -> dict:
 
 GEN_KERNELS = "designs/dense/gen_kernels.py"      # the design's kernel-TU generator (export_qwen36_kernels.py runs it per spec)
 KERNEL_SOURCES = [
-    "designs/dense/*.py", "designs/dense/*.cc", "designs/dense/*.h",
+    "designs/dense/*.py", "designs/dense/*.h",
     "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_rt.cc",
     "designs/gemv_q4/gemv_q4_prep_f32_rt.cc",
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
-    "designs/lm_head_q4/*.py", "designs/lm_head_q4/*.cc",
+    "designs/lm_head_q4/*.py",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

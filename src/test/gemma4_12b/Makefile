@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Test harness for the Gemma4-12B omni model. Links against the
-# prebuilt libgemma4_12b_npu engine in ../../lib/$(FLM_RUNTIME).
+# prebuilt libgemma4_12b_npu engine in ../../lib/$(OFLM_RUNTIME).
 #
 # Usage:
 #   make        - Build the test executable

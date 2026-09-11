@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oflm-add"
+version = "0.2.0"
+description = "Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+keywords = ["oflm", "openflowlm", "q4nx", "npu", "model-install"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = []
+
+[project.scripts]
+oflm-add = "oflm_add:main"
+
+[tool.setuptools]
+packages = ["oflm_add"]

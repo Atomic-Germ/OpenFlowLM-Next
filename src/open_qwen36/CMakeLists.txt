@@ -1,6 +1,6 @@
-# open_qwen36_cli — the open Qwen3.6-MoE engine driven without the FLM app
+# open_qwen36_cli — the open Qwen3.6-MoE engine driven without the OFLM app
 # (see cli.cpp). The engine's core (core.cpp, pools.cpp, manifest.cpp,
-# q4nx_file.cpp) is also compiled into flm by src/CMakeLists.txt; engine.cpp
+# q4nx_file.cpp) is also compiled into oflm by src/CMakeLists.txt; engine.cpp
 # (the causal_lm adapter) only there. manifest_test (no XRT) is the
 # OPEN-MANIFEST unit test: `ctest` runs it against the checked-in fixture.
 #
@@ -46,7 +46,15 @@ foreach(t gguf_pack_test)
 endforeach()
 target_include_directories(manifest_test PRIVATE ${_inc})
 
-foreach(t open_qwen36_cli manifest_test)
+# vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
+add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
+target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+foreach(t open_qwen36_cli manifest_test vit_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
