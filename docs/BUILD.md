@@ -35,7 +35,7 @@ different things, so where you run the command from matters.
 
 ### Prerequisites
 
-- Git, Ninja, and CMake 3.25 or newer
+- Git, Ninja, and CMake 3.27 or newer
 - a C++20 compiler: MSVC on Windows, GCC or Clang on Linux
 
 ### Windows
