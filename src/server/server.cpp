@@ -753,17 +753,27 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             auto& response_ref = *res_ptr;
             http::status status = http::status::ok;
 
-            if (response_data.contains("error") &&
-                response_data["error"].contains("code"))
+            // `code` is a STRING in the OpenAI error shape ("model_not_found",
+            // "invalid_value"), and reading it as an int threw
+            // `[json.exception.type_error.302] type must be number, but is string`
+            // out of this lambda. The outer handler then turned that into
+            // {"error": "<exception text>"} with status 200 -- so every
+            // OpenAI-shaped error this server built was swallowed and answered OK,
+            // including the embeddings handler's own "this server has X loaded,
+            // not Y". Accept both spellings, and treat the type as authoritative
+            // when the code is not numeric.
+            if (response_data.contains("error") && response_data["error"].is_object())
             {
-                int code = response_data["error"]["code"].get<int>();
-
-                if (code == 400) {
+                const json& err = response_data["error"];
+                if (err.contains("code") && err["code"].is_number_integer()) {
+                    if (err["code"].get<int>() == 400) {
+                        status = http::status::bad_request;
+                    }
+                }
+                else if (err.contains("type") && err["type"].is_string() &&
+                         err["type"].get<std::string>() == "invalid_request_error") {
                     status = http::status::bad_request;
                 }
-                //else if () {
-
-                //}
             }
 
             response_ref.result(status);
