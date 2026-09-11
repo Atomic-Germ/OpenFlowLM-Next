@@ -58,7 +58,10 @@ public:
     /// find_xclbin_path() happens to return first. A kernel set is a manifest.json
     /// plus the files it names. Empty when none is found — the caller then keeps
     /// the closed engine.
-    static std::string find_kernels(const LM_Config& config);
+    /// Resolve the kernel set. `how`, when given, receives which rule won.
+    /// The caller logs it: a silently-chosen set produces perfectly valid
+    /// output from kernels the user did not mean to run (#35).
+    static std::string find_kernels(const LM_Config& config, std::string* how = nullptr);
 
     const Core& core() const { return *core_; }
 
