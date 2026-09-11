@@ -2,7 +2,7 @@
 interpreter (recipes/pack.py). These were open_kernels/model/pools.py
 (build_layer_pool / build_pack / build_side / build_lmhead_pool) and
 model/make_decode.py's layer_consts, byte-verified against pools captured
-from FLM's own engine (phlegm's tools/kernel-interp/build_pools.py). Do not
+from OFLM's own engine (phlegm's tools/kernel-interp/build_pools.py). Do not
 "improve" them: they are the definition of correct.
 
 Traces: OPEN-PACK-PLAN (canonical spec: specs/open-engine/spec.md)

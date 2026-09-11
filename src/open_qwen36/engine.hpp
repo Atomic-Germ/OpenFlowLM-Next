@@ -31,7 +31,7 @@ class Engine : public causal_lm {
 public:
     /// Opens the device contexts and instruction streams; weights follow with
     /// load_weights(). `MAX_L` sizes the KV cache (the context capacity).
-    Engine(const LM_Config& config, flm_rt::device* dev, int MAX_L);
+    Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L);
     ~Engine() override;
 
     buffer<bf16> forward(int ids) override;
@@ -49,10 +49,10 @@ public:
     int checkpoint() override;
     int restore() override;
 
-    /// Where this model's open kernels are: FLM_OPEN_KERNELS_DIR, else
+    /// Where this model's open kernels are: OFLM_OPEN_KERNELS_DIR, else
     /// <model>/open_kernels, else <root>/xclbins/<model name>/open_kernels over
     /// EVERY root the closed path would consider (utils::xclbin_roots(): the
-    /// configured root, the user-level flm directory, the exe dir, the CWD, the
+    /// configured root, the user-level oflm directory, the exe dir, the CWD, the
     /// installed bundle, the configured prefix) — a set under the user root and
     /// one shipped in the install tree are both reachable, whichever of the two
     /// find_xclbin_path() happens to return first. A kernel set is a manifest.json
@@ -64,7 +64,7 @@ public:
 
 private:
     CoreConfig cfg_;
-    flm_rt::device* dev_;
+    oflm_rt::device* dev_;
     std::unique_ptr<Core> core_;
     Snapshot snapshot_;
     bool has_snapshot_ = false;

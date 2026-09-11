@@ -1,11 +1,11 @@
-# Open FastFlowLM XCLBIN and Kernel replacement plan
+# Open OpenFlowLM XCLBIN and Kernel replacement plan
 
 ## Decisions and Assumptions
-- For the open embedding integration into upstream FastFlowLM, should we keep the closed `libgemma_embedding.so` as a compile-time fallback (behind `FLM_USE_OPEN_EMBEDDING=OFF`), or should the open engine become the sole embedding path?
+- For the open embedding integration into upstream OpenFlowLM, should we keep the closed `libgemma_embedding.so` as a compile-time fallback (behind `OFLM_USE_OPEN_EMBEDDING=OFF`), or should the open engine become the sole embedding path?
   Replace entirely
 
-- Should the Python utility tools (flm-add, flm-test, q4nx-build) and the `flm_model.py` CLI wrapper also be integrated into the upstream CMakeLists.txt as part of this plan?
-  Include flm-test only
+- Should the Python utility tools (oflm-add, oflm-test, q4nx-build) and the `oflm_model.py` CLI wrapper also be integrated into the upstream CMakeLists.txt as part of this plan?
+  Include oflm-test only
 
 - For the long-term vision of replacing all model engines, which model family should be the next priority after embedding? This affects how we design the extensibility of the open engine pattern.
   Same architecture family (google/gemma-3-1b-it)
@@ -15,16 +15,16 @@
 
 ---
 
-## Design Plan: Open Embedding Integration into Upstream FastFlowLM
+## Design Plan: Open Embedding Integration into Upstream OpenFlowLM
 
 ### Context
-FastFlowLM currently ships with a closed-source libgemma_embedding.so for the Embedding-Gemma-300M model. In FastFlowLM_v1.0.1-add, we developed and validated a fully open replacement (open_embedding::Engine) that:
+OpenFlowLM currently ships with a closed-source libgemma_embedding.so for the Embedding-Gemma-300M model. In OpenFlowLM_v1.0.1-add, we developed and validated a fully open replacement (open_embedding::Engine) that:
 - Loads FP32 weights directly from safetensors via a manifest (no Q4NX)
 - Runs the full transformer forward pass in C++ on CPU
 - Optionally offloads 5 large matmul projections to NPU2 via bf16 kernels
 - Passes the full E-suite (E1-E8) with cosine 0.999993 (threshold 0.999)
 
-The goal is to cleanly integrate this into the upstream FastFlowLM repo, replacing the closed embedding entirely, and establish a pattern for replacing all model engines with open implementations.
+The goal is to cleanly integrate this into the upstream OpenFlowLM repo, replacing the closed embedding entirely, and establish a pattern for replacing all model engines with open implementations.
 
 ---
 
@@ -79,13 +79,13 @@ list(APPEND SOURCES
     "${CMAKE_SOURCE_DIR}/open_embedding/npu_matmul.cpp"
 )
 - Add include directories:
-  - target_include_directories(flm PUBLIC ${CMAKE_SOURCE_DIR})
+  - target_include_directories(oflm PUBLIC ${CMAKE_SOURCE_DIR})
 - Add compile definitions (always on, since no fallback):
-  - target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING=1)
+  - target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING=1)
 
 ### NPU offload for embedding (only with XRT backend, not HRX)
-if(NOT FLM_USE_HRX)
-    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)
+if(NOT OFLM_USE_HRX)
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)
 endif()
 - Add tokenizers-cpp dependency (the open engine uses it directly):
 
@@ -123,14 +123,14 @@ The 24 NPU matmul artifacts (6 shapes x 2 pads x 2 files) need a home:
 - Option A: Bundle into the model directory under npu_matmul_f32/ (current pattern)
 - Option B: Shared location under xclbins/ alongside the closed xclbins
 
-Recommendation: Option A — keep them in the model directory. This is self-contained and matches how flm-add installs embedding models. The closed xclbins/Embedding-Gemma-300M-NPU2/ directory (containing attn_full_mask.xclbin, mm.xclbin, mv.xclbin, sliding_attn.xclbin) becomes dead code and can be removed.
+Recommendation: Option A — keep them in the model directory. This is self-contained and matches how oflm-add installs embedding models. The closed xclbins/Embedding-Gemma-300M-NPU2/ directory (containing attn_full_mask.xclbin, mm.xclbin, mv.xclbin, sliding_attn.xclbin) becomes dead code and can be removed.
 
 #### 1.7 Validation Strategy
 1. Build the modified upstream with open embedding only
 2. Run full E-suite (E1-E8) against the live server
 3. Verify no regressions in LLM, VLM, ASR, or tool-calling suites
-4. Test with FLM_NPU_DISABLE=1 to verify CPU-only fallback
-5. Test on HRX backend to verify FLM_USE_OPEN_EMBEDDING_NPU is correctly gated
+4. Test with OFLM_NPU_DISABLE=1 to verify CPU-only fallback
+5. Test on HRX backend to verify OFLM_USE_OPEN_EMBEDDING_NPU is correctly gated
 
 ### Phase 2: Gemma3-Text Open Engine (Next Model)
 
@@ -210,18 +210,18 @@ src/open_common/npu_matmul.cpp         (shared NPU dispatch)
 #### 3.3 Build System Evolution
 The CMakeLists.txt should evolve to support multiple open engines:
 ```
-option(FLM_USE_OPEN_EMBEDDING "Replace closed embedding with open engine" ON)
-option(FLM_USE_OPEN_GEMMA3 "Replace closed gemma with open engine" OFF)
-#Future: option(FLM_USE_OPEN_LLAMA3 ...)*
-#Future: option(FLM_USE_OPEN_QWEN3 ...)*
+option(OFLM_USE_OPEN_EMBEDDING "Replace closed embedding with open engine" ON)
+option(OFLM_USE_OPEN_GEMMA3 "Replace closed gemma with open engine" OFF)
+#Future: option(OFLM_USE_OPEN_LLAMA3 ...)*
+#Future: option(OFLM_USE_OPEN_QWEN3 ...)*
 
-if(FLM_USE_OPEN_EMBEDDING)
+if(OFLM_USE_OPEN_EMBEDDING)
     list(APPEND SOURCES src/open_embedding/engine.cpp)
-    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING=1)
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING=1)
 endif()
-if(FLM_USE_OPEN_GEMMA3)
+if(OFLM_USE_OPEN_GEMMA3)
     list(APPEND SOURCES src/open_gemma3/engine.cpp)
-    target_compile_definitions(flm PUBLIC FLM_USE_OPEN_GEMMA3=1)
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_GEMMA3=1)
 endif()
 ```
 Each lib*_npu.so would be conditionally excluded from linking when its open replacement is enabled.
@@ -236,12 +236,12 @@ Each new open engine must pass:
 
 ### Phase 4: Python Tooling (Minimal)
 
-#### 4.1 flm-test Integration
+#### 4.1 oflm-test Integration
 Add to CMakeLists.txt:
 ```
 if(NOT WIN32)
-    install(PROGRAMS ${CMAKE_SOURCE_DIR}/../utilities/flm-test/flm_test.py
-            DESTINATION "${FLM_BIN_DESTINATION}" RENAME flm-test)
+    install(PROGRAMS ${CMAKE_SOURCE_DIR}/../utilities/oflm-test/oflm_test.py
+            DESTINATION "${OFLM_BIN_DESTINATION}" RENAME oflm-test)
 endif()
 ```
 
@@ -259,7 +259,7 @@ Model download size increase (FP32 safetensors > Q4NX)	Low
 --- 
 
 ## Execution Order
- 1. Port source files from FastFlowLM_v1.0.1-add/src/open_embedding/ into FastFlowLM/src/open_embedding/
+ 1. Port source files from OpenFlowLM_v1.0.1-add/src/open_embedding/ into OpenFlowLM/src/open_embedding/
  2. Port open_gemma_embedding.hpp adapter class
  3. Remove closed embedding files (modeling_gemma_embedding.*, gemma_embedding.hpp)
  4. Simplify AutoEmbeddingModel (remove Q4NX dependency in the embedding path)
@@ -267,7 +267,7 @@ Model download size increase (FP32 safetensors > Q4NX)	Low
  6. Update CMakeLists.txt (add sources, remove closed lib, add tokenizers link)
  7. Update model_list.json (embedding files list)
  8. Remove dead xclbins (xclbins/Embedding-Gemma-300M-NPU2/)
- 9. Add flm-test install rule to CMakeLists.txt
+ 9. Add oflm-test install rule to CMakeLists.txt
 10. Build and run E-suite to verify
 11. Update npu_offload_pipeline.md skill with Gemma3-text notes
 12. Begin Gemma3-text open engine (Phase 2)

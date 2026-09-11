@@ -63,7 +63,7 @@
 
 class NpueEmbedding : public AutoEmbeddingModel {
 public:
-    NpueEmbedding(flm_rt::device* npu_device_inst, std::string tag);
+    NpueEmbedding(oflm_rt::device* npu_device_inst, std::string tag);
     ~NpueEmbedding() override;
 
     /// \brief Load a model directory.

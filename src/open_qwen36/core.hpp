@@ -13,7 +13,7 @@
 /// in this file; a new model in the family is a new manifest.
 ///
 /// This is the host half of the open path that phlegm ran as a batch `.cfg`
-/// program and planned as `OpenBackend`. It has no dependency on the FLM app
+/// program and planned as `OpenBackend`. It has no dependency on the OFLM app
 /// headers so it can be built and tested on its own (cli.cpp); engine.hpp
 /// adapts it to the app's `causal_lm` seam.
 ///

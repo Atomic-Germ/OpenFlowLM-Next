@@ -1,6 +1,6 @@
 /// \file buffer.hpp
 /// \brief Buffer and bytes class for memory management
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.10
 /// \note This class is used to manage the memory.
@@ -15,11 +15,11 @@
 #include <string>
 #include <vector>
 
-#define FLM_DEVICE_BUFFER
+#define OFLM_DEVICE_BUFFER
 
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
 // Pulls in the selected NPU runtime backend (XRT or HRX) behind the neutral
-// `flm_rt` alias. All device buffer types below are referenced as flm_rt::bo.
+// `oflm_rt` alias. All device buffer types below are referenced as oflm_rt::bo.
 #include "device_runtime.hpp"
 #endif
 
@@ -34,10 +34,10 @@ protected:
     uint8_t* data_;
     size_t size_;
     bool is_owner_;
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
     bool is_bo_owner_;
-    flm_rt::bo* bo_;
-    std::unique_ptr<flm_rt::bo> owned_bo_;
+    oflm_rt::bo* bo_;
+    std::unique_ptr<oflm_rt::bo> owned_bo_;
 #endif
 
 public:
@@ -45,7 +45,7 @@ public:
     /// \note This is a buffer wrapper that maps to a bo_buffer or other memory without performing a deep copy.
     /// \note A copy (or mapping) does not duplicate the underlying memory; it only maps the pointer.
     bytes() : data_(nullptr), size_(0), is_owner_(false)
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         , is_bo_owner_(false), bo_(nullptr), owned_bo_(nullptr)
 #endif
     {}
@@ -53,7 +53,7 @@ public:
     /// \brief copy constructor
     /// \param other the other bytes
     bytes(const bytes& other) : owned_data_(nullptr), data_(other.data_), size_(other.size_), is_owner_(false)
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         , is_bo_owner_(false), bo_(other.bo_), owned_bo_(nullptr)
 #endif
     {}
@@ -62,14 +62,14 @@ public:
     /// \param other the other bytes
     bytes(bytes&& other) noexcept
         : owned_data_(std::move(other.owned_data_)), data_(other.data_), size_(other.size_), is_owner_(other.is_owner_)
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         , is_bo_owner_(other.is_bo_owner_), bo_(other.bo_), owned_bo_(std::move(other.owned_bo_))
 #endif
     {
         other.data_ = nullptr;
         other.size_ = 0;
         other.is_owner_ = false;
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         other.is_bo_owner_ = false;
         other.bo_ = nullptr;
         other.owned_bo_ = nullptr;
@@ -80,7 +80,7 @@ public:
     /// \param size the size
     bytes(size_t size)
         : size_(size), is_owner_(true)
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         , is_bo_owner_(false), bo_(nullptr), owned_bo_(nullptr)
 #endif
     {
@@ -103,15 +103,15 @@ public:
     /// \param size the size
     bytes(uint8_t* data, size_t size)
         : owned_data_(nullptr), data_(data), size_(size), is_owner_(false)
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         , is_bo_owner_(false), bo_(nullptr), owned_bo_(nullptr)
 #endif
     {}
 
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
     /// \brief constructor
     /// \param bo the bo
-    bytes(flm_rt::bo& bo)
+    bytes(oflm_rt::bo& bo)
         : owned_data_(nullptr), data_(bo.map<uint8_t*>()), size_(bo.size()), is_owner_(false), is_bo_owner_(false), bo_(&bo), owned_bo_(nullptr)
     {}
 
@@ -121,7 +121,7 @@ public:
     /// \param kernel the kernel
     /// \param group_id the group id
     /// \param flags the flags
-    bytes(flm_rt::device& device, size_t size)
+    bytes(oflm_rt::device& device, size_t size)
         : owned_data_(nullptr), size_(size), is_owner_(false), is_bo_owner_(true)
     {
         if (size > 3ull * 1024 * 1024 * 1024 || size == 0){
@@ -131,17 +131,17 @@ public:
         int padded_size = (size + alignment - 1) / alignment * alignment; // 1MB alignment
 
         try {
-            owned_bo_ = std::make_unique<flm_rt::ext::bo>(device, padded_size);
+            owned_bo_ = std::make_unique<oflm_rt::ext::bo>(device, padded_size);
         }
         catch (const std::exception& e) {
-            throw std::runtime_error(std::string("Failed to allocate flm_rt::ext::bo: ") + e.what());
+            throw std::runtime_error(std::string("Failed to allocate oflm_rt::ext::bo: ") + e.what());
         }
         
         // uint64_t bo_address = reinterpret_cast<uintptr_t>(owned_bo_->map<uint8_t*>());
         // while ( ((bo_address & 0xF0000000) == 0x60000000) ||
         //     ((bo_address & 0xF0000000) == 0x70000000) ) {
                 
-        //     owned_bo_ = std::make_unique<flm_rt::ext::bo>(device, padded_size);
+        //     owned_bo_ = std::make_unique<oflm_rt::ext::bo>(device, padded_size);
         //     //header_print("info", "Re-allocating proj_weights for layer " + std::to_string(i) + " to avoid address in 0x60000000 - 0x7FFFFFFF, new address: " + std::to_string(reinterpret_cast<uintptr_t>(proj_weights[i].data())));
         //     bo_address = reinterpret_cast<uintptr_t>(owned_bo_->map<uint8_t*>());
         // }
@@ -157,7 +157,7 @@ public:
             owned_data_.reset();
         }
         data_ = nullptr;
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         if (is_bo_owner_) {
             owned_bo_.reset();
         }
@@ -175,7 +175,7 @@ public:
             data_ = other.data_;
             size_ = other.size_;
             is_owner_ = false;
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
             if (is_bo_owner_){
                 owned_bo_.reset();
             }
@@ -197,7 +197,7 @@ public:
             data_ = other.data_;
             size_ = other.size_;
             is_owner_ = other.is_owner_;
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
             if (is_bo_owner_){
                 owned_bo_.reset();
             }
@@ -247,7 +247,7 @@ public:
     /// \brief resize
     /// \param new_size the new size
     void resize(size_t new_size) {
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         assert(!is_bo_owner_);
 #endif
         if (data_ != nullptr && !is_owner_) {
@@ -269,7 +269,7 @@ public:
 
     /// \brief free, release the memory or the bo
     void free() {
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         assert(!is_bo_owner_);
 #endif
         if (is_owner_){
@@ -278,7 +278,7 @@ public:
         data_ = nullptr;
         size_ = 0;
         is_owner_ = false;
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
         if (is_bo_owner_){
             owned_bo_.reset();
         }
@@ -297,20 +297,20 @@ public:
     /// \brief is owner
     /// \return the is owner
     bool is_owner() const { return is_owner_; }
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
     /// \brief is bo owner
     /// \return the is bo owner
     bool is_bo_owner() const { return is_bo_owner_; }
 
     /// \brief sync to device (host writes -> device)
-#if defined(FLM_USE_HRX)
+#if defined(OFLM_USE_HRX)
     void sync_to_device() { assert(bo_); bo_->flush(); }
 #else
     void sync_to_device() { assert(bo_); bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE); }
 #endif
 
     /// \brief sync from device (device writes -> host)
-#if defined(FLM_USE_HRX)
+#if defined(OFLM_USE_HRX)
     void sync_from_device() { assert(bo_); bo_->invalidate(); }
 #else
     void sync_from_device() { assert(bo_); bo_->sync(XCL_BO_SYNC_BO_FROM_DEVICE); }
@@ -318,7 +318,7 @@ public:
 
     /// \brief bo
     /// \return the bo
-    flm_rt::bo& bo() { assert(bo_); return *bo_; }
+    oflm_rt::bo& bo() { assert(bo_); return *bo_; }
 #endif
 
     /// \brief from file
@@ -368,10 +368,10 @@ public:
     /// \note Transfers ownership (owned_data_/owned_bo_) so a returned buffer does not dangle.
     buffer(buffer&& other) noexcept : bytes(std::move(other)) {}
 
-#ifdef FLM_DEVICE_BUFFER
+#ifdef OFLM_DEVICE_BUFFER
     /// \brief constructor
     /// \param bo the bo
-    buffer(flm_rt::bo& bo) : bytes(bo) {}
+    buffer(oflm_rt::bo& bo) : bytes(bo) {}
 
     /// \brief constructor
     /// \param count the count
@@ -379,7 +379,7 @@ public:
     /// \param kernel the kernel
     /// \param group_id the group id
     /// \param flags the flags
-    buffer(flm_rt::device& device, size_t count)
+    buffer(oflm_rt::device& device, size_t count)
         : bytes(device, count * sizeof(T)) {}
 #endif
 

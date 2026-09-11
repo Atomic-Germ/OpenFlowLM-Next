@@ -26,7 +26,7 @@ GGUF_QWEN3_4B = {
     "qwen3.attention.key_length": 128, "qwen3.rope.freq_base": 1000000.0, "qwen3.feed_forward_length": 9728,
     "qwen3.attention.layer_norm_rms_epsilon": 1e-06,
 }
-# FastFlowLM/Qwen3-{8,1.7,0.6}B-NPU2 config.json, verbatim apart from FLM's addr_* keys.
+# OpenFlowLM/Qwen3-{8,1.7,0.6}B-NPU2 config.json, verbatim apart from OFLM's addr_* keys.
 # DynaGuard-8B-NPU2 and DeepSeek-R1-0528-Qwen3-8B-NPU2 publish the 8B's shape byte for byte.
 HF_QWEN3_8B = {
     "model_type": "qwen3", "vocab_size": 151936, "hidden_size": 4096, "intermediate_size": 12288,

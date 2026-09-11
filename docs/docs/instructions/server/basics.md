@@ -7,7 +7,7 @@ parent: Local Server (Server Mode)
 
 # 🧠 Understanding Local LLM Servers
 
-This page explains the key concepts behind **Local LLM Servers**, including FastFlowLM (FLM) Server and others.  
+This page explains the key concepts behind **Local LLM Servers**, including OpenFlowLM (OFLM) Server and others.  
 
 ---
 
@@ -66,7 +66,7 @@ Why?
 
 > Even though OpenAI runs their own cloud-based LLMs, their **API design is public** and **free to adopt**.
 
-That means local servers like Ollama and FastFlowLM — and your own custom servers — can all **pretend to be OpenAI** to your app.
+That means local servers like Ollama and OpenFlowLM — and your own custom servers — can all **pretend to be OpenAI** to your app.
 
 ### 🔁 Why does this matter?
 

@@ -7,7 +7,7 @@ has_children: true
 
 # 📊 Benchmarks Overview
 
-Browse detailed NPU benchmark results for each major model family supported by FastFlowLM:
+Browse detailed NPU benchmark results for each major model family supported by OpenFlowLM:
 
 - [LLaMA3](llama3_results/)
 - [Gemma3](gemma3_results/)

@@ -1,6 +1,6 @@
 /// \file modeling_qwen3_5_omni.hpp
 /// \brief Qwen3_5_Omni driver class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \note Inherits AutoModel. The underlying engine (qwen3_5_omni) is NOT a
 ///       causal_lm -- its prefill()/forward() return qwen3_5_omni_thinker_result_t
 ///       (logits + hidden_states) rather than buffer<bf16>. So this class keeps
@@ -28,7 +28,7 @@
 /************              Qwen3_5_Omni            **************/
 class Qwen3_5_Omni : public AutoModel {
 public:
-    explicit Qwen3_5_Omni(flm_rt::device* npu_device_inst);
+    explicit Qwen3_5_Omni(oflm_rt::device* npu_device_inst);
     ~Qwen3_5_Omni() override = default;
 
     /// \brief Load config + weights and set up tokenizer / sampler.
@@ -105,7 +105,7 @@ public:
                     target_size = 0;
                 }
                 if (this->image_pre_resize > 0) {
-                    header_print_r("FLM", "Qwen3_5-Omni pre-resize image height to " + std::to_string(target_size) + " pixels if larger than that");
+                    header_print_r("OFLM", "Qwen3_5-Omni pre-resize image height to " + std::to_string(target_size) + " pixels if larger than that");
                 }
                 return true;
             } catch (const std::bad_any_cast&) {

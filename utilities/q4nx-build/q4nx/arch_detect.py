@@ -31,7 +31,7 @@ class FamilyProfile:
     """Everything the heuristics know about one model family.
 
     arch:      archetype arch the family maps to (variants resolved later)
-    family:    flm runtime family name, e.g. "qwen3.6-moe"
+    family:    oflm runtime family name, e.g. "qwen3.6-moe"
     keywords:  substrings searched in general.basename / general.name
                (case-insensitive; the longest keyword wins across families)
     fingerprints: distinctive tensor-name substrings. Score = how many of
@@ -436,7 +436,7 @@ def detect_model_family(reader: GGUFReader) -> List[Guess]:
 def resolve_override_arch(override: str) -> Optional[ModelArch]:
     """Map a user-supplied -f arch string to a ModelArch, or None.
 
-    Mirrors the override branch of get_model_arch_from_gguf: flm tag names use
+    Mirrors the override branch of get_model_arch_from_gguf: oflm tag names use
     a colon (e.g. 'qwen3.5:9b') while arch names use a dash (e.g. 'qwen3.5-9B').
     Normalize and prefer the longest matching arch name so a shorthand still
     resolves to the right converter.

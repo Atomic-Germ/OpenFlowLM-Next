@@ -1,6 +1,6 @@
 /// \file deepseek.cpp
 /// \brief deepseek class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the deepseek class
@@ -9,7 +9,7 @@
 #include "AutoModel/modeling_qwen2.hpp"
 
 /************              Qwen2 family            **************/
-Qwen2::Qwen2(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
+Qwen2::Qwen2(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void Qwen2::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);

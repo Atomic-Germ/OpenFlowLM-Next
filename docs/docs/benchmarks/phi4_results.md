@@ -7,11 +7,11 @@ nav_order: 6
 
 ## ⚡ Performance and Efficiency Benchmarks
 
-This section reports the performance on NPU with FastFlowLM (FLM).
+This section reports the performance on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on FastFlowLM v0.9.30.
-> - Under FLM's default NPU power mode (Performance)   
+> - Results are based on OpenFlowLM v0.9.30.
+> - Under OFLM's default NPU power mode (Performance)   
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
@@ -32,7 +32,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Phi-4-mini-instruct**  | NPU (FLM)    | 21.8	| 21.2	| 19.9	| 18.1	| 14.9	| 11.2|
+| **Phi-4-mini-instruct**  | NPU (OFLM)    | 21.8	| 21.2	| 19.9	| 18.1	| 14.9	| 11.2|
 
 ---
 
@@ -40,4 +40,4 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Phi-4-mini-instruct**  | NPU (FLM)    | 643	| 787	| 857	| 809	| 644	| 447 | 
+| **Phi-4-mini-instruct**  | NPU (OFLM)    | 643	| 787	| 857	| 809	| 644	| 447 | 

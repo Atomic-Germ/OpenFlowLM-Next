@@ -6,7 +6,7 @@ Inputs: embed(token 248068) as the residual, states from C:/caps/m0c/000898.bo,
 weights from the captured L0 pool/pack/side (C:/caps/m0d/000117..119 = blob).
 Chain:  ln -> gemv(qkv), gemv(z) -> glue -> dn_step -> post -> gemv(out) -> ln(+residual, post-attn norm)
 
-    MODEL_Q4NX=/mnt/c/Users/josha/.flm/models/Qwen3.6-35B-A3B-NPU2/model_3LiF.q4nx python make_chain.py
+    MODEL_Q4NX=/mnt/c/Users/josha/.oflm/models/Qwen3.6-35B-A3B-NPU2/model_3LiF.q4nx python make_chain.py
     open-qwen-npu npu designs/layer_chain/run.cfg ; python compare_chain.py
 """
 from __future__ import annotations

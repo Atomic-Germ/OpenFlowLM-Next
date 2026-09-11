@@ -28,9 +28,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $models = @(
-    @{ name = "Qwen3-4B";   dir = "$HOME\.flm\models\Qwen3-4B-NPU2";
+    @{ name = "Qwen3-4B";   dir = "$HOME\.oflm\models\Qwen3-4B-NPU2";
        kernels = "src\xclbins\Qwen3-4B-NPU2\open_kernels";        id = 151644 },
-    @{ name = "Granite-3B"; dir = "$HOME\.flm\models\Granite-4.2-3B-NPU2";
+    @{ name = "Granite-3B"; dir = "$HOME\.oflm\models\Granite-4.2-3B-NPU2";
        kernels = "src\xclbins\Granite-4.2-3B-NPU2\open_kernels";  id = 100264 }
 )
 

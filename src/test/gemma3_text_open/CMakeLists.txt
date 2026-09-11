@@ -46,7 +46,7 @@ target_compile_definitions(test_gemma3_text_open PRIVATE
     CMAKE_INSTALL_PREFIX="${CMAKE_BINARY_DIR}"
     # utils.cpp (find_xclbin_path) requires this; the engine never uses it.
     CMAKE_XCLBIN_PREFIX="${CMAKE_CURRENT_LIST_DIR}/../../xclbins"
-    __FLM_VERSION__="test"
+    __OFLM_VERSION__="test"
     __NPU_VERSION__="test"
 )
 

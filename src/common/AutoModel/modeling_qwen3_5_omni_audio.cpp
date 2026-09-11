@@ -1,6 +1,6 @@
 /// \file modeling_qwen3_5_omni_audio.cpp
 /// \brief Qwen3_5_Omni audio preprocessing (log-mel spectrogram).
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \note 128-bin log-mel pipeline ported from the gemma4e audio path; the omni
 ///       audio payload is field-for-field identical to gemma4e's.
 

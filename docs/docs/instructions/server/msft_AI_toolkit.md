@@ -1,13 +1,13 @@
 ---
 layout: docs
-title: Microsoft AI Toolkit + FLM
+title: Microsoft AI Toolkit + OFLM
 nav_order: 4
 parent: Local Server (Server Mode)
 ---
 
-# 🧠 Using Microsoft AI Toolkit with FastFlowLM in VS Code
+# 🧠 Using Microsoft AI Toolkit with OpenFlowLM in VS Code
 
-This guide explains how to run **FastFlowLM locally** on Windows and connect it to **Microsoft AI Toolkit** in **Visual Studio Code**.
+This guide explains how to run **OpenFlowLM locally** on Windows and connect it to **Microsoft AI Toolkit** in **Visual Studio Code**.
 
 ---
 
@@ -34,29 +34,29 @@ You’ll now see the **AI Toolkit** icon on the sidebar.
 
 ---
 
-## 🧠 3. Install FastFlowLM & Pull a Model
+## 🧠 3. Install OpenFlowLM & Pull a Model
 
-1. Download & install [FastFlowLM](../../install_win/)
+1. Download & install [OpenFlowLM](../../install_win/)
 
 2. Open **PowerShell**
 
 3. Pull a base model:
 
 ```shell
-flm pull llama3.2:1b
+oflm pull llama3.2:1b
 ```
 
 4. Confirm it's installed:
 
 ```shell
-flm list
+oflm list
 ```
 
 You should see models like `llama3.2:1b` listed.
 
 ---
 
-## 🧩 4. Add FastFlowLM Model in AI Toolkit via Custom Endpoint
+## 🧩 4. Add OpenFlowLM Model in AI Toolkit via Custom Endpoint
 
 1. In **VS Code**, open the **AI Toolkit** panel  
 2. Navigate to **Models → Catalog**  
@@ -74,7 +74,7 @@ llama3.2:1b
 Click **Enter**
 7. Enter display model name:
 ```
-flm-llama3.2:1b
+oflm-llama3.2:1b
 ```
 Click **Enter**
 8. Enter API key:
@@ -91,7 +91,7 @@ Click **Enter**
 Open PowerShell, enter
 
 ```shell
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
 
 ---
@@ -99,7 +99,7 @@ flm serve llama3.2:1b
 ## 💬 6. Use the Model in Playground
 
 1. Switch to the **Playground** tab in AI Toolkit  
-2. Choose your custom FastFlowLM model from the dropdown  
+2. Choose your custom OpenFlowLM model from the dropdown  
 3. Type a prompt, e.g.:
 
 ```
@@ -107,7 +107,7 @@ What are the benefits of local inference?
 ```
 
 4. Click **Send**
-5. The model response will stream from your local FastFlowLM instance
+5. The model response will stream from your local OpenFlowLM instance
 
 ---
 

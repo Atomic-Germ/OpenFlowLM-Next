@@ -1,7 +1,7 @@
 r"""Build an IRON design into xclbin + insts.bin + insts.elf (no NPU needed).
 
 Runs in the WSL `ironenv` (mlir-aie wheel + Peano); the artifacts are then
-loaded on Windows by phlegm's XRT shim exactly like FLM's kernels are:
+loaded on Windows by phlegm's XRT shim exactly like OFLM's kernels are:
 xrt::elf(insts.elf) -> xrt::module -> xrt::ext::kernel(ctx, "MLIR_AIE"),
 run(opcode=3, 0, 0, bo...).
 

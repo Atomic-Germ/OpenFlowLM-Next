@@ -1,6 +1,6 @@
 /// \file npu_instr_utils.hpp
 /// \brief npu_instr_utils class
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This file contains the classes for managing the npu instructions
 #ifndef __NPU_INSTR_UTILS_HPP__

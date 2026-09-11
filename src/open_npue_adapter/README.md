@@ -16,7 +16,7 @@
 >   different host ISA levels — that is measured and documented below — so a
 >   mismatch is informative rather than automatically a bug. `1-cos` against
 >   sentence-transformers is the check that should hold anywhere.
-> * **Linux is unverified for `flm`.** The engine's platform-independent subset
+> * **Linux is unverified for `oflm`.** The engine's platform-independent subset
 >   compiles there at C++17 and C++20, but the binary was only built and run on
 >   Windows.
 > * **The two co-resident `hw_context` objects are unmeasured**, because the
@@ -36,7 +36,7 @@ It is **additive**. `open_embedding` stays exactly where it is and keeps serving
 `embed-gemma:300m`; this adds six encoders the tree did not have.
 
 ```
-flm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
 curl -s localhost:52625/v1/embeddings \
   -H 'content-type: application/json' \
   -d '{"model":"bge-base:en-v1.5","input":["A man is playing a guitar on stage."]}'
@@ -107,7 +107,7 @@ sentence-transformers, upstream's golden gate reads `1-cos 2.284e-04` for
 bge-base on this datapath. (`open_embedding`'s own validation reports E8 cosine
 0.999993; that is its claim, not a measurement made here.)
 
-**All six models verified end to end**, each `flm pull` → pack → `serve` →
+**All six models verified end to end**, each `oflm pull` → pack → `serve` →
 `POST /v1/embeddings`, each compared against the same engine in its own binary:
 
 | tag | dims | datapath the design records | vs `npuembed --embed` |
@@ -178,15 +178,15 @@ a separate change that deserves to be judged on its own.
 
 ## Building
 
-Nothing new is required. `open_npue` compiles with the rest of `flm`.
+Nothing new is required. `open_npue` compiles with the rest of `oflm`.
 
 ```powershell
 cmake -S src -B src/build -G Ninja `
       -DCMAKE_BUILD_TYPE=Release `
-      -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 `
-      -DFLM_USE_HRX=OFF `
+      -DOFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 `
+      -DOFLM_USE_HRX=OFF `
       -DCMAKE_TOOLCHAIN_FILE=C:/dev/vcpkg/scripts/buildsystems/vcpkg.cmake
-cmake --build src/build --target flm
+cmake --build src/build --target oflm
 ```
 
 Three things about the CMake are load-bearing rather than stylistic:
@@ -200,7 +200,7 @@ Three things about the CMake are load-bearing rather than stylistic:
   `src/include/tokenizer/tokenizer.hpp` are different files with the same
   basename; on the global path the wrong one wins for some translation unit
   depending on directory order.
-* **`NOT FLM_USE_HRX`**, exactly like `npu_matmul.cpp`: `npu_device.cpp` talks
+* **`NOT OFLM_USE_HRX`**, exactly like `npu_matmul.cpp`: `npu_device.cpp` talks
   to XRT directly.
 
 ### The one trap worth reading before you touch this
@@ -238,7 +238,7 @@ byte-identical**. The eight that differ are the five `final.xclbin`s, by 402
 bytes of 631,126 (0.064%) — UUIDs and build timestamps, in 5-6 tight clusters
 each, with the embedded AIE core ELFs identical.
 
-Without them `flm` still builds; an `open_npue` model refuses to load, naming
+Without them `oflm` still builds; an `open_npue` model refuses to load, naming
 the README and the command that fixes it.
 
 
@@ -253,7 +253,7 @@ Two entries and, once, a design set.
    * `npue_tile_n` when the widths need one other than 48 (bge-large needs 32:
      the design asserts `N % (tile_n * n_cols) == 0` and its `N ∈ {1024, 3072,
      4096}`).
-   * `flm_min_version` should be `"0.0.0"` — see below.
+   * `oflm_min_version` should be `"0.0.0"` — see below.
 2. **`src/model_info.json`** — the per-file manifest (`path`, `size`, `oid`).
    `build_download_list()` needs it to build URLs; the HuggingFace API path
    that would make it unnecessary is commented out. Generate it from

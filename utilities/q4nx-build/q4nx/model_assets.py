@@ -14,7 +14,7 @@ ASSET_FILES = ["vision_weight.q4nx","audio_weight.q4nx","config.json", "tokenize
 REQUIRED_ASSETS = ["config.json", "tokenizer.json", "tokenizer_config.json"]
 
 # Dense qwen3.5 variants always ship as vision-capable models: the upstream
-# FLM NPU repos carry a vision_weight.q4nx and the runtime expects a unified
+# OFLM NPU repos carry a vision_weight.q4nx and the runtime expects a unified
 # model_type, whether or not the finetune itself had vision weights.
 # Qwen3.5/3.6-MoE NPUs are likewise always vision-capable.
 QWEN35_VISION_ARCHS = frozenset({
@@ -500,13 +500,13 @@ def _modality_label(output_dir: Path) -> str:
     return " / ".join(labels) or "language"
 
 
-def build_readme_meta(output_dir: Path, flm_version: Optional[str]) -> dict:
+def build_readme_meta(output_dir: Path, oflm_version: Optional[str]) -> dict:
     """Gather conversion metadata used to render the README banner."""
     meta = {
         "title": output_dir.name or None,
         "tag": output_dir.name,
         "modality": _modality_label(output_dir),
-        "flm_version": flm_version,
+        "oflm_version": oflm_version,
         "date": date.today().isoformat(),
     }
     for filename in ("model.q4nx", "vision_weight.q4nx", "audio_weight.q4nx"):
@@ -561,17 +561,17 @@ def _readme_banner(meta: dict) -> str:
     parts = [frontmatter, f"# {title}", ""]
     if source and meta.get("source_url"):
         parts.append(
-            f"**FastFlowLM Q4NX conversion of [`{source}`]({meta['source_url']})** "
+            f"**OpenFlowLM Q4NX conversion of [`{source}`]({meta['source_url']})** "
             "for AMD XDNA NPU inference."
         )
     elif source:
-        parts.append(f"**FastFlowLM Q4NX conversion of `{source}`** for AMD XDNA NPU inference.")
+        parts.append(f"**OpenFlowLM Q4NX conversion of `{source}`** for AMD XDNA NPU inference.")
     else:
-        parts.append("**FastFlowLM Q4NX model** for AMD XDNA NPU inference.")
+        parts.append("**OpenFlowLM Q4NX model** for AMD XDNA NPU inference.")
     parts += [
         "",
         "This repository contains a quantized **Q4NX** port of the model, compiled for the "
-        "FastFlowLM (FLM) runtime. It is **not** a GGUF file.",
+        "OpenFlowLM (OFLM) runtime. It is **not** a GGUF file.",
         "",
         "| Item | Value |",
         "|------|-------|",
@@ -586,8 +586,8 @@ def _readme_banner(meta: dict) -> str:
     if meta.get("weight_size"):
         rows.append(f"| Weights | `{weight_file}` ({meta['weight_size']}) |")
     rows.append(f"| Modality | {modality} |")
-    if meta.get("flm_version"):
-        rows.append(f"| FLM version | `{meta['flm_version']}` |")
+    if meta.get("oflm_version"):
+        rows.append(f"| OFLM version | `{meta['oflm_version']}` |")
     if meta.get("date"):
         rows.append(f"| Converted | {meta['date']} |")
     parts.append("\n".join(rows))
@@ -595,16 +595,16 @@ def _readme_banner(meta: dict) -> str:
         "",
         "## Install and run",
         "",
-        "This repository works with `flm-add`, a small installer that copies the model",
-        "into the FastFlowLM user directory and registers the tag. It never",
-        "modifies the system FastFlowLM install.",
+        "This repository works with `oflm-add`, a small installer that copies the model",
+        "into the OpenFlowLM user directory and registers the tag. It never",
+        "modifies the system OpenFlowLM install.",
         "",
-        "`pip install flm-add` or `uv tool install flm-add`",
+        "`pip install oflm-add` or `uv tool install oflm-add`",
         "",
         "```bash",
-        f"uv tool install flm-add",
-        f"flm-add Atomic-Germ/{tag} --family {meta.get('family', 'qwen3.5')} --xclbin-from {meta.get('xclbin_from', tag)}",
-        f"FLM_CONFIG_PATH=\"$HOME/.config/flm/model_list.json\" FLM_XCLBIN_PATH=\"$HOME/.config/flm\" flm run {tag}",
+        f"uv tool install oflm-add",
+        f"oflm-add Atomic-Germ/{tag} --family {meta.get('family', 'qwen3.5')} --xclbin-from {meta.get('xclbin_from', tag)}",
+        f"OFLM_CONFIG_PATH=\"$HOME/.config/oflm/model_list.json\" OFLM_XCLBIN_PATH=\"$HOME/.config/oflm\" oflm run {tag}",
         "```",
         "",
         "## Files",
@@ -618,7 +618,7 @@ def _readme_banner(meta: dict) -> str:
     if "audio" in modality:
         file_rows.append(("audio_weight.q4nx", "Audio encoder weights"))
     file_rows += [
-        ("config.json", "FLM runtime configuration"),
+        ("config.json", "OFLM runtime configuration"),
         ("tokenizer.json", "Tokenizer vocabulary"),
         ("tokenizer_config.json", "Tokenizer configuration"),
         ("chat_template.jinja", "Chat template"),
@@ -735,7 +735,7 @@ def generate_config_from_gguf(reader) -> dict:
 
 
 def generate_tokenizer_config(reader) -> dict:
-    """Minimal tokenizer_config.json the FLM runtime can parse (no-source fallback)."""
+    """Minimal tokenizer_config.json the OFLM runtime can parse (no-source fallback)."""
     cfg: dict = {}
     tokens = _gguf_token_list(reader)
     id_map = {
@@ -764,7 +764,7 @@ def generate_tokenizer_config(reader) -> dict:
 def ensure_runtime_tokenizer_ids(reader, output_dir: Path):
     """Backfill EOS/BOS/PAD token ids into the deployed tokenizer_config.json.
 
-    The FLM runtime stops generation only when the sampled token id is in
+    The OFLM runtime stops generation only when the sampled token id is in
     ``tokenizer_config["eos_token_id"]``. Several official sources (e.g.
     Qwen/Qwen3.5-9B) ship that field as null, which silently disables
     end-of-generation. Fill any null id from GGUF metadata, and normalize
@@ -827,7 +827,7 @@ def _tokenizer_id_lookup(tokenizer_path: Path) -> Dict[str, int]:
 def ensure_hf_tokenizer_ids(output_dir: Path) -> None:
     """Backfill EOS/BOS/PAD token ids into a copied HF tokenizer_config.json.
 
-    The FLM runtime stops generation only when the sampled token id appears in
+    The OFLM runtime stops generation only when the sampled token id appears in
     ``tokenizer_config["eos_token_id"]``. HF Qwen-family repos ship that field as
     null (the end-of-turn token lives in ``eos_token``), which silently disables
     end-of-generation. Resolve each token string against the tokenizer and
@@ -923,14 +923,14 @@ def apply_granite_fold_to_config(config: dict, reader) -> dict:
     return config
 
 
-def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_version: Optional[str]):
-    """Restructure a source HF config.json into the shape the FLM runtime expects.
+def inject_oflm_keys(config: dict, q4nx_config: dict, output_dir: Path, oflm_version: Optional[str]):
+    """Restructure a source HF config.json into the shape the OFLM runtime expects.
 
     - Flatten ``text_config`` into the top level (lm_config.hpp reads top-level
       keys such as hidden_size / num_attention_heads).
     - Keep the nested ``vision_config`` / ``audio_config`` objects (the runtime
       reads those via ``_vision_config`` / ``_audio_config``).
-    - Inject flm_version and the weight-file names once the converted weights exist.
+    - Inject oflm_version and the weight-file names once the converted weights exist.
     """
     text_config = config.pop("text_config", None)
     if isinstance(text_config, dict):
@@ -944,7 +944,7 @@ def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_versi
         # Darwin-style text-only MoE: model_type becomes qwen3_5_moe_text.
         if text_config.get("model_type"):
             config["model_type"] = text_config["model_type"]
-    # Strip keys the FLM runtime doesn't consume (HF VL wrapper leftovers).
+    # Strip keys the OFLM runtime doesn't consume (HF VL wrapper leftovers).
     for key in ("video_token_id",):
         config.pop(key, None)
     # Drop HF vision blob when no vision weights were converted (text-only finetunes).
@@ -955,7 +955,7 @@ def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_versi
             "qwen3_5_moe_text", "qwen3_6_moe_text"
         ) or "text_config" not in config:
             # If original was a VL wrapper with nested text_config already popped,
-            # strip unused vision_config so FLM stays text-only.
+            # strip unused vision_config so OFLM stays text-only.
             vc = config.get("vision_config")
             if isinstance(vc, dict) and "vision_mm_engine_xclbin_name" not in vc:
                 config.pop("vision_config", None)
@@ -972,7 +972,7 @@ def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_versi
         config["intermediate_size"] = config["moe_intermediate_size"]
     # Engine memory-layout offsets (lm_config.hpp JSON_GETs addr_* with default 0).
     # Architecture-level, declared in the arch config. Darwin worked without them
-    # on some FLM builds; still inject when present so MHA layouts are correct.
+    # on some OFLM builds; still inject when present so MHA layouts are correct.
     for key in ("addr_qk", "addr_kv", "addr_kk", "addr_l_begin_mha", "addr_l_end_mha"):
         if key in q4nx_config:
             config.setdefault(key, q4nx_config[key])
@@ -984,8 +984,8 @@ def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_versi
     # Darwin/Ornith engines need caching enabled at runtime.
     if config.get("model_type") in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6_moe", "qwen3_6_moe_text"):
         config["use_cache"] = True
-    if flm_version:
-        config["flm_version"] = flm_version
+    if oflm_version:
+        config["oflm_version"] = oflm_version
     vision_config = q4nx_config.get("vision_config", {})
     if vision_config:
         vision_file = vision_config.get("vision_file", "vision_weight.q4nx")
@@ -1026,11 +1026,11 @@ def inject_flm_keys(config: dict, q4nx_config: dict, output_dir: Path, flm_versi
     return config
 
 
-def get_default_flm_version() -> Optional[str]:
-    """Best-effort: read the installed FLM version for the config's flm_version."""
+def get_default_oflm_version() -> Optional[str]:
+    """Best-effort: read the installed OFLM version for the config's oflm_version."""
     try:
         output = subprocess.run(
-            ["flm", "--version"], capture_output=True, text=True, timeout=3
+            ["oflm", "--version"], capture_output=True, text=True, timeout=3
         ).stdout
         m = re.search(r"v?(\d+\.\d+\.\d+)", output)
         if m:
@@ -1045,7 +1045,7 @@ def assemble_model_assets_hf(
     q4nx_config: dict,
     output_dir: str,
     source_model: Optional[str] = None,
-    flm_version: Optional[str] = None,
+    oflm_version: Optional[str] = None,
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
 ) -> None:
@@ -1054,7 +1054,7 @@ def assemble_model_assets_hf(
     Same result as assemble_model_assets but sourced straight from an HF repo
     (no GGUF provenance involved): config.json / tokenizer.json /
     tokenizer_config.json / chat_template.jinja are copied from the HF model,
-    then the config is restructured for the FLM runtime.
+    then the config is restructured for the OFLM runtime.
     """
     output_dir = Path(output_dir)
     if output_dir.suffix == ".q4nx":
@@ -1084,7 +1084,7 @@ def assemble_model_assets_hf(
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
     if model_arch is ModelArch.GRANITE:
         apply_granite_fold_to_config(config, reader)
-    inject_flm_keys(config, q4nx_config, output_dir, flm_version)
+    inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
@@ -1094,7 +1094,7 @@ def assemble_model_assets_hf(
     ensure_hf_tokenizer_ids(output_dir)
 
     assemble_readme(
-        output_dir, candidates, build_readme_meta(output_dir, flm_version), source_file
+        output_dir, candidates, build_readme_meta(output_dir, oflm_version), source_file
     )
 
     print(f"[INFO] Model directory ready: {output_dir}")
@@ -1105,7 +1105,7 @@ def assemble_model_assets(
     q4nx_config: dict,
     output_dir: str,
     source_model: Optional[str] = None,
-    flm_version: Optional[str] = None,
+    oflm_version: Optional[str] = None,
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
 ) -> None:
@@ -1150,7 +1150,7 @@ def assemble_model_assets(
 
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
-    inject_flm_keys(config, q4nx_config, output_dir, flm_version)
+    inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
@@ -1174,6 +1174,6 @@ def assemble_model_assets(
             print("[INFO] Writing chat_template.jinja from GGUF metadata.")
             chat_template_path.write_text(chat_template, encoding="utf-8")
 
-    assemble_readme(output_dir, candidates, build_readme_meta(output_dir, flm_version), source_file)
+    assemble_readme(output_dir, candidates, build_readme_meta(output_dir, oflm_version), source_file)
 
     print(f"[INFO] Model directory ready: {output_dir}")

@@ -2,7 +2,7 @@
 
     python make_test.py [--captured] [--runs N]
 
-`--captured` takes the norm weight from FLM's captured L0 pack instead
+`--captured` takes the norm weight from OFLM's captured L0 pack instead
 (phlegm's original fixture; $OPEN_KERNELS_CAPS/m0d/000118.bo or LN_PACK=path,
 bf16[2048] at offset 0). Paths in run.cfg are relative to this directory.
 """

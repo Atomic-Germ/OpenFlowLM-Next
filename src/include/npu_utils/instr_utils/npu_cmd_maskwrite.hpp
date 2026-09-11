@@ -1,6 +1,6 @@
 /// \file npu_cmd_maskwrite.hpp
 /// \brief npu maskwrite command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu maskwrite command
 #ifndef __NPU_CMD_MASKWRITE_HPP__

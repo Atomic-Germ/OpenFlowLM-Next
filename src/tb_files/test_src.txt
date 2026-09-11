@@ -1,6 +1,6 @@
 /// \file main.cpp
-/// \brief Main entry point for the FLM application
-/// \author FastFlowLM Team
+/// \brief Main entry point for the OFLM application
+/// \author OpenFlowLM Team
 /// \date 2025-08-05
 /// \version 0.9.12
 /// \note This is a source file for the main entry point
@@ -98,7 +98,7 @@ std::string get_user_directory() {
 void ensure_models_directory(const std::string& exe_dir) {
     // Use Documents directory for models instead of executable directory
     std::string documents_dir = get_user_directory();
-    std::string models_dir = documents_dir + "/flm/models";
+    std::string models_dir = documents_dir + "/oflm/models";
     if (!std::filesystem::exists(models_dir)) {
         std::filesystem::create_directories(models_dir);
     }
@@ -108,7 +108,7 @@ void ensure_models_directory(const std::string& exe_dir) {
 void handle_user_input() {
     std::string input;
     while (!should_exit) {
-        header_print("FLM", "Enter 'exit' to stop the server: ");
+        header_print("OFLM", "Enter 'exit' to stop the server: ");
         std::getline(std::cin, input);
         if (input == "exit") {
             should_exit = true;
@@ -125,7 +125,7 @@ void handle_user_input() {
 std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader& downloader, const std::string& default_tag, int port, int ctx_length, bool preemption);
 
 
-///@brief get_server_port gets the server port from environment variable FLM_SERVE_PORT
+///@brief get_server_port gets the server port from environment variable OFLM_SERVE_PORT
 ///@return the server port, default is 11434 if environment variable is not set
 int get_server_port(int user_port) {
     if (user_port > 0 && user_port <= 65535) {
@@ -134,7 +134,7 @@ int get_server_port(int user_port) {
     else {
         char* port_env = nullptr;
         size_t len = 0;
-        if (_dupenv_s(&port_env, &len, "FLM_SERVE_PORT") == 0 && port_env != nullptr) {
+        if (_dupenv_s(&port_env, &len, "OFLM_SERVE_PORT") == 0 && port_env != nullptr) {
             try {
                 int port = std::stoi(port_env);
                 free(port_env);
@@ -157,7 +157,7 @@ int get_server_port(int user_port) {
 std::string get_models_directory() {
     char* model_path_env = nullptr;
     size_t len = 0;
-    if (_dupenv_s(&model_path_env, &len, "FLM_MODEL_PATH") == 0 && model_path_env != nullptr) {
+    if (_dupenv_s(&model_path_env, &len, "OFLM_MODEL_PATH") == 0 && model_path_env != nullptr) {
         std::string custom_path(model_path_env);
         free(model_path_env);
         if (!custom_path.empty()) {
@@ -166,7 +166,7 @@ std::string get_models_directory() {
     }
     // Fallback to Documents directory if environment variable is not set
     std::string documents_dir = get_user_directory();
-    return documents_dir + "/flm/models";
+    return documents_dir + "/oflm/models";
 }
 
 ///@brief main function
@@ -186,7 +186,7 @@ int main(int argc, char* argv[]) {
     // Handle version requests
     
     if (parsed_args.version_requested) {
-        std::cout << "FLM v" << __FLM_VERSION__ << std::endl;
+        std::cout << "OFLM v" << __OFLM_VERSION__ << std::endl;
         return 0;
     }
 
@@ -220,7 +220,7 @@ int main(int argc, char* argv[]) {
     
     if (command == "run" || command == "serve" || command == "pull" || command == "remove") {
       if (!modelTags.count(tag)) {
-            header_print("ERROR", "Model not found: " << tag << "; Please check with `flm list` and try again.");
+            header_print("ERROR", "Model not found: " << tag << "; Please check with `oflm list` and try again.");
             return 1;
         }
     }
@@ -230,7 +230,7 @@ int main(int argc, char* argv[]) {
         if (power_mode == "default" || power_mode == "powersaver" || power_mode == "balanced" || 
             power_mode == "performance" || power_mode == "turbo") {
             std::string xrt_cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + power_mode + " > NUL 2>&1";
-            header_print("FLM", "Configuring NPU Power Mode to " + power_mode + (got_power_mode ? "" : " (flm default)"));
+            header_print("OFLM", "Configuring NPU Power Mode to " + power_mode + (got_power_mode ? "" : " (oflm default)"));
             system(xrt_cmd.c_str());
         }
         else{
@@ -241,7 +241,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (preemption){
-        header_print("FLM", "Allowing high priority tasks to preempt FLM!");
+        header_print("OFLM", "Allowing high priority tasks to preempt OFLM!");
     }
 
     // Get the command, model tag, and force flag
@@ -276,7 +276,7 @@ int main(int argc, char* argv[]) {
             server->set_npu_queue_length(max_npu_queue);           // Allow up to 10 concurrent queue
             server->set_request_timeout(std::chrono::seconds(600)); // 10 minute timeout for long requests
             // Start the server
-            header_print("FLM", "Starting server on port " << port << "...");
+            header_print("OFLM", "Starting server on port " << port << "...");
             server->start();
 
             // Start a thread to handle user input, this thread will be used to handle the user input
@@ -288,7 +288,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Cleanup, this will be used to stop the server
-            header_print("FLM", "Stopping server...");
+            header_print("OFLM", "Stopping server...");
             server->stop();
             input_thread.join();
         }
@@ -296,16 +296,16 @@ int main(int argc, char* argv[]) {
             // Check if the model is already downloaded, if true, the model will not be downloaded
             // Check if model is already downloaded
             if (!force_redownload && downloader.is_model_downloaded(tag)) {
-                header_print("FLM", "Model is already downloaded.");
+                header_print("OFLM", "Model is already downloaded.");
                 // Show missing files if any, this will be used to show the missing files
                 auto missing_files = downloader.get_missing_files(tag);
                 if (!missing_files.empty()) {
-                    header_print("FLM", "Missing files:");
+                    header_print("OFLM", "Missing files:");
                     for (const auto& file : missing_files) {
                         std::cout << "  - " << file << std::endl;
                     }
                 } else {
-                    header_print("FLM", "All required files are present.");
+                    header_print("OFLM", "All required files are present.");
                 }
             } else {
                 // Download the model, this will be used to download the model
@@ -390,8 +390,8 @@ int main(int argc, char* argv[]) {
 //    std::string exe_dir = get_executable_directory();
 //    std::string config_path = exe_dir + "/model_list.json";
 //    std::string models_dir = get_models_directory();
-//    //std::cout << exe_dir << std::endl; // C:\Users\nock9\Projects\FastFlowLM\out
-//    //std::cout << models_dir << std::endl; // C:\Users\nock9\Documents\flm
+//    //std::cout << exe_dir << std::endl; // C:\Users\nock9\Projects\OpenFlowLM\out
+//    //std::cout << models_dir << std::endl; // C:\Users\nock9\Documents\oflm
 //
 //    model_list supported_models(config_path, models_dir);
 //    ModelDownloader downloader(supported_models);

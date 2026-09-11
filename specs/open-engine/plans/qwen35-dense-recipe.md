@@ -169,7 +169,7 @@ q8 out_proj (the quality cost of R3).
 ## Order
 
 1. R1–R5 (a few hours, Windows python + the 9B container downloaded to
-   `~/.flm/models/Qwen3.8-Distilled-9B-NPU2`); write the findings at the top of
+   `~/.oflm/models/Qwen3.8-Distilled-9B-NPU2`); write the findings at the top of
    the handoff file. A red R1 stops here.
 2. `spec.py` + `qwen35.py` + the qwen36moe refactor, TDD against
    `test_qwen35.py` and the frozen `test_recipe_layout.py`; manifest fixture;

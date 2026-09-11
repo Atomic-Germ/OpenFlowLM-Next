@@ -33,7 +33,7 @@ add_npu_test(
 
 target_compile_definitions(test_gemma4e_npu PUBLIC
     USEAVX512=1
-    __FLM_VERSION__="0.9.39"
+    __OFLM_VERSION__="0.9.39"
 )
 
 # Add OpenMP compiler flags if available

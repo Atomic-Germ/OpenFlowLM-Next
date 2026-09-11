@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file server.cpp
  * \brief WebServer class and related declarations
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-06-24
  *  \version 0.9.24
  */
@@ -532,7 +532,7 @@ void WebServer::start() {
         });
     }
     
-    header_print("FLM", "WebServer started on port " + std::to_string(port) + " with " + std::to_string(io_thread_count_) + " I/O threads");
+    header_print("OFLM", "WebServer started on port " + std::to_string(port) + " with " + std::to_string(io_thread_count_) + " I/O threads");
 }
 
 ///@brief stop

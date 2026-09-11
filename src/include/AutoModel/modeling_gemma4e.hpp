@@ -1,6 +1,6 @@
 /// \file Gemma4e.hpp
 /// \brief Gemma4e class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-03
 /// \version 0.9.24
 /// \note This is a source file for the Gemma4e class
@@ -80,7 +80,7 @@ private:
 
 
 public:
-    Gemma4e(flm_rt::device* npu_device_inst);
+    Gemma4e(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     bool insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled = [] { return false; }) override;

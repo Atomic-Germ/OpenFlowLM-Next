@@ -33,7 +33,7 @@ void bounds(const PackOp& op, uint64_t nbytes, size_t dst_bytes) {
 /// a band is 64 rows x in_dim = in_dim/128 chunks; inside its band chunk i covers
 /// row half i%2 and k-tile i/2 (gemv_q4.h's band law); file chunk f covers rows
 /// 32*(f/ncol), cols 256*(f%ncol). Same law as recipes/pack.py (which documents
-/// its equivalence with the form phlegm verified against FLM's captured pools).
+/// its equivalence with the form phlegm verified against OFLM's captured pools).
 std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
     size_t ncol = in_dim / 256, per_band = in_dim / 128;
     std::vector<size_t> perm(nch);

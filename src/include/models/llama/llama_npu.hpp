@@ -1,6 +1,6 @@
 /// \file llama_npu.hpp
 /// \brief llama_npu class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This is a header file for the llama_npu class

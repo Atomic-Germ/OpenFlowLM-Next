@@ -1,4 +1,4 @@
-"""Read FLM's `.q4nx` weight container (format 1.0.2: q4_1 chunks).
+"""Read OFLM's `.q4nx` weight container (format 1.0.2: q4_1 chunks).
 
 The container is a safetensors file: an 8-byte header length, a JSON header of
 tensor name -> {dtype, shape, data_offsets}, then the data. BF16/F32 tensors are
@@ -18,7 +18,7 @@ The chunk format is PER TENSOR. The stock Qwen3.6-35B keeps only its lm_head at
 q8; its fine-tunes (Darwin, Grug, BigBang, Aquila-mini, Ornith 1.5, and
 Atomic-Germ's own NPU2 mirror) pack attention, linear-attention and shared-expert
 projections at q8 and only the routed experts at q4_1; Qwen3.5 dense containers
-store `ssm_out_proj` and alpha / beta at q8; a container written by FLM 1.0.3+
+store `ssm_out_proj` and alpha / beta at q8; a container written by OFLM 1.0.3+
 holds Q4_K (4736 B, `dq_chunks_q4_k`). So nothing is refused at open: each tensor
 is classified from its own shape, and `dq_tile` reads all three. A chunk size that
 is none of them is refused when that tensor is read, naming it (1280 / 2560 are a
@@ -124,7 +124,7 @@ def dq_chunks_q8(chunks):
 def dq_chunks_q4_k(chunks):
     """[n, 4736] raw Q4_K chunk bytes -> [n, 32, 8, 32] f32 (row, block, lane).
 
-    The container's own values, with no bf16 collapse: `q4k_block_t` from the FLM 1.0.3
+    The container's own values, with no bf16 collapse: `q4k_block_t` from the OFLM 1.0.3
     decoding kernels holds the same 32-row x 256-K tile a q4_1 chunk does, with a uint8
     scale and a uint8 min per (32-column group, row) -- index `g*32 + r`, the q4_1 index --
     against one bf16 pair `(S, M)` per row, `M` already negated:

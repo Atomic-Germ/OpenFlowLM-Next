@@ -1,6 +1,6 @@
 ﻿/// \file lfm2.cpp
 /// \brief lfm2 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.15
 /// \note This is a source file for the lfm2 class
@@ -10,7 +10,7 @@
 #include "metrices.hpp"
 
 /************              LFM2 family            **************/
-LFM2::LFM2(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "LFM2") {}
+LFM2::LFM2(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "LFM2") {}
 
 void LFM2::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -265,7 +265,7 @@ StreamResult LFM2::parse_stream_content(const std::string content) {
 
 
 /***********              LFM2_5_TK family            ***********/
-LFM2_5_TK::LFM2_5_TK(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "LFM2_5_TK") {}
+LFM2_5_TK::LFM2_5_TK(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "LFM2_5_TK") {}
 
 void LFM2_5_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -451,7 +451,7 @@ std::string LFM2_5_TK::generate(chat_meta_info_t& meta_info, int length_limit, s
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 

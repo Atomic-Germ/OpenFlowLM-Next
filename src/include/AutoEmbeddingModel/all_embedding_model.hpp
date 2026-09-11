@@ -1,6 +1,6 @@
 /// \file all_embedding_models.hpp
 /// \brief get_auto_embedding_model func
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-09-03
 /// \version 0.2.0
 /// \note This is a header file for get_auto_embedding_model func
@@ -58,7 +58,7 @@ inline std::string complete_simple_embedding_tag(std::string model_tag) {
 
 inline std::pair<std::string, std::unique_ptr<AutoEmbeddingModel>>
 get_auto_embedding_model(const std::string& model_tag,
-                         flm_rt::device* npu_device_inst) {
+                         oflm_rt::device* npu_device_inst) {
 
     const std::string tag = complete_simple_embedding_tag(model_tag);
     const auto& reg = embedding_backend_registry();

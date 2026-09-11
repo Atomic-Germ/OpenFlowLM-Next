@@ -177,7 +177,7 @@ Gate: logit/token agreement with the Phase 0 oracle.
 - Offload prefill (large M) and the LM head (dominant per-token cost).
 - Decode: CPU first (Decision 3). Add a dedicated small-M kernel only if
   simpler than shoehorning the padded GEMM.
-- Gate: NPU vs CPU agreement; `flm-test --llm`.
+- Gate: NPU vs CPU agreement; `oflm-test --llm`.
 
 ### Phase 3 — Hybrid quantization groundwork (CPU)
 

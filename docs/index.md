@@ -1,6 +1,6 @@
 ---
 layout: page
-title: "FastFlowLM"
+title: "OpenFlowLM"
 permalink: /
 description: "NPU-native runtime that unlocks AMD Ryzen AI NPUs with instant installs, rich models, and matching docs."
 sections:
@@ -9,16 +9,16 @@ sections:
     kicker: "NPU-first runtime"
     title: "The fastest, most efficient LLM inference on NPUs"
     body: |
-      FastFlowLM (FLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k — all with dramatically better efficiency than GPU-first stacks.
+      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k — all with dramatically better efficiency than GPU-first stacks.
       
-      The FastFlowLM team is now part of AMD.
+      The OpenFlowLM team is now part of AMD.
     ctas:
-      - label: "Download FastFlowLM (Windows)"
-        href: "https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi"
+      - label: "Download OpenFlowLM (Windows)"
+        href: "https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi"
         style: primary
         external: true
       - label: "GitHub"
-        href: "https://github.com/ROCm/FastFlowLM"
+        href: "https://github.com/Atomic-Germ/OpenFlowLM"
         style: ghost
         external: true
       - label: "Models"
@@ -49,7 +49,7 @@ sections:
             visual:
               type: "npu_orbit"
               title: "Ryzen™ AI"
-              subtitle: "FastFlowLM Runtime"
+              subtitle: "OpenFlowLM Runtime"
               metrics:
                 - "Over 10× power efficiency"
                 - "256k ctx"
@@ -60,9 +60,9 @@ sections:
               type: "code"
               title: "PowerShell"
               content: |
-                flm run qwen3.5:4b
-                flm list
-                flm serve qwen3.5:4b
+                oflm run qwen3.5:4b
+                oflm list
+                oflm serve qwen3.5:4b
           - title: "Unmatched Performance and Efficiency"
             description: "Ultra‑lightweight runtime with exceptional power efficiency and massive context windows."
             visual:
@@ -120,7 +120,7 @@ sections:
       href: "https://youtu.be/BLd2j9dPw40?si=5GzOW2FlZgGVp8Xi"
       kicker: "Gemma3 (Vision) on NPU"
       body: |
-        Understand and describe images instantly — FastFlowLM runs Google Gemma3 fully on the NPU for fast, private, and efficient vision inference.
+        Understand and describe images instantly — OpenFlowLM runs Google Gemma3 fully on the NPU for fast, private, and efficient vision inference.
 
   - type: media
     variant: alt
@@ -132,7 +132,7 @@ sections:
       href: "https://youtu.be/0t8ijUPg4A0?si=ETKdvig6lYiZb1Q_"
       kicker: "Whisper on-device"
       body: |
-        Transcribe hours of audio locally — FLM runs OpenAI Whisper fully on the NPU — fast, private, and efficient.
+        Transcribe hours of audio locally — OFLM runs OpenAI Whisper fully on the NPU — fast, private, and efficient.
 
   - type: media
     variant: alt
@@ -140,7 +140,7 @@ sections:
     title: "Interact with Llama 3.2-3B via Open WebUI"
     media:
       src: "/assets/llama-demo.gif"
-      alt: "Llama 3.2 chat demo running in the FastFlowLM WebUI"
+      alt: "Llama 3.2 chat demo running in the OpenFlowLM WebUI"
       href: "https://youtu.be/mPrr9FLd8ps?si=vsyHkmtrBjP4s-dq"
       kicker: "Llama 3.2 on NPU"
       body: |
@@ -152,7 +152,7 @@ sections:
       kicker: "Install"
       title: "From download to first token in under a minute"
       body: |
-        FastFlowLM ships as a 17 MB runtime with a familiar single-command CLI and a server compatible with the OpenAI API.
+        OpenFlowLM ships as a 17 MB runtime with a familiar single-command CLI and a server compatible with the OpenAI API.
         No drivers, no guesswork—just run the installer, pull a model, and start chatting.
       items:
         - heading: "Zero-conf installer"
@@ -166,18 +166,18 @@ sections:
       code_blocks:
         - title: "CLI"
           content: |
-            Invoke-WebRequest https://github.com/ROCm/FastFlowLM/releases/latest/download/flm-setup.msi `
-              -OutFile flm-setup.msi
-            Start-Process .\flm-setup.msi -Wait
-            flm pull llama3.2:3b
-            flm run llama3.2:3b --ctx-len 131072
+            Invoke-WebRequest https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi `
+              -OutFile oflm-setup.msi
+            Start-Process .\oflm-setup.msi -Wait
+            oflm pull llama3.2:3b
+            oflm run llama3.2:3b --ctx-len 131072
             
   - type: cards
     id: models
     kicker: "Models"
     title: "One runtime, every Ryzen-ready model"
     body: |
-      Pull curated FastFlowLM recipes.
+      Pull curated OpenFlowLM recipes.
       The runtime streams tokens via an OpenAI-compatible API, so existing apps work without rewrites.
     cards:
       - label: "Flagship reasoning"
@@ -204,7 +204,7 @@ sections:
       kicker: "Benchmarks"
       title: "Proof on silicon, not slides"
       body: |
-        FastFlowLM is tuned on real Ryzen™ AI hardware with synthetic and application-level workloads.
+        OpenFlowLM is tuned on real Ryzen™ AI hardware with synthetic and application-level workloads.
         Expect steady 20–80 tok/s on models at < 2 W (CPU+NPU), plus deterministic latency for agentic chains.
       items:
         - heading: "Full-stack telemetry"
@@ -235,7 +235,7 @@ sections:
     left:
       title: "Dive into the docs"
       body: |
-        Everything you need to install FastFlowLM, pick a model, and start streaming on your Ryzen™ AI NPU.
+        Everything you need to install OpenFlowLM, pick a model, and start streaming on your Ryzen™ AI NPU.
 
         For inquiries: [Discord](https://discord.com/invite/jtWZdMJ8ee?utm_source=site)
     right:

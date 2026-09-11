@@ -1,6 +1,6 @@
 /// \file gemma3.hpp
 /// \brief gemma3 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-03
 /// \version 0.9.24
 /// \note This is a source file for the gemma3 class
@@ -29,7 +29,7 @@ private:
     void setup_tokenizer(std::string model_path);
 
 public:
-    Gemma3_Text_Only(flm_rt::device* npu_device_inst);
+    Gemma3_Text_Only(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;

@@ -1,6 +1,6 @@
 /// \file npu_cmd_write.hpp
 /// \brief npu write command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu write command
 #pragma once

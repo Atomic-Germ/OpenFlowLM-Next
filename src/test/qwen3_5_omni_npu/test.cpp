@@ -103,7 +103,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Prefill Done!" << std::endl;
         std::string response = chat->generate(meta_info, 1024, std::cout);
     } catch (const std::exception& e) {
-        header_print("FLM", "Engine path not available yet: " << e.what());
+        header_print("OFLM", "Engine path not available yet: " << e.what());
     }
     chat->stop_total_timer();
     std::cout << std::endl << std::endl;

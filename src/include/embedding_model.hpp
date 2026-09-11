@@ -1,6 +1,6 @@
 /// \file causal_lm.hpp
 /// \brief causal_lm class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.10
 /// \note This class is a virtual class for causal language models

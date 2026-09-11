@@ -13,13 +13,13 @@ parent: Models
 - **Base Model:** [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)
 - **Quantization:** Q4_1
 - **Max Context Length:** 32k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3:0.6b
+oflm run qwen3:0.6b
 ```
 
 📝 **Note:**
@@ -37,13 +37,13 @@ flm run qwen3:0.6b
 - **Base Model:** [Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B)
 - **Quantization:** Q4_1
 - **Max Context Length:** 32k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3:1.7b
+oflm run qwen3:1.7b
 ```
 
 📝 **Note:**
@@ -61,13 +61,13 @@ flm run qwen3:1.7b
 - **Base Model:** [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B)
 - **Quantization:** Q4_1
 - **Max Context Length:** 32k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3:4b
+oflm run qwen3:4b
 ```
 
 📝 **Note:**
@@ -85,13 +85,13 @@ flm run qwen3:4b
 - **Base Model:** [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)
 - **Quantization:** Q4_1
 - **Max Context Length:** 32k tokens  
-- **Default Context Length:** 16k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 16k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3:8b
+oflm run qwen3:8b
 ```
 
 📝 **Note:**
@@ -109,13 +109,13 @@ flm run qwen3:8b
 - **Base Model:** [Qwen/Qwen3-4B-Thinking-2507](https://huggingface.co/Qwen/Qwen3-4B-Thinking-2507)
 - **Quantization:** Q4_1
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3-tk:4b
+oflm run qwen3-tk:4b
 ```
 
 ---
@@ -128,13 +128,13 @@ flm run qwen3-tk:4b
 - **Base Model:** [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
 - **Quantization:** Q4_1
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3-it:4b
+oflm run qwen3-it:4b
 ```
 
 ---
@@ -147,13 +147,13 @@ flm run qwen3-it:4b
 - **Base Model:** [Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)
 - **Quantization:** Q4_1
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3vl-it:4b
+oflm run qwen3vl-it:4b
 ```
 
 ▶️ Image Resize Options
@@ -161,11 +161,11 @@ flm run qwen3vl-it:4b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen3vl-it:3b -r 1
+oflm run qwen3vl-it:3b -r 1
 ```
 
 ```shell
-flm serve qwen3vl-it:3b -r 1
+oflm serve qwen3vl-it:3b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -193,13 +193,13 @@ The `-r` option determines the image's height:
 - **Base Model:** [Qwen/Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
 - **Quantization:** Q4_1
 - **Max Context Length:** 32k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen2.5-it:3b
+oflm run qwen2.5-it:3b
 ```
 
 ---
@@ -212,13 +212,13 @@ flm run qwen2.5-it:3b
 - **Base Model:** [Qwen/Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)
 - **Quantization:** Q4_1
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen2.5vl-it:3b
+oflm run qwen2.5vl-it:3b
 ```
 
 ▶️ Image Resize Options
@@ -226,11 +226,11 @@ flm run qwen2.5vl-it:3b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen2.5vl-it:3b -r 1
+oflm run qwen2.5vl-it:3b -r 1
 ```
 
 ```shell
-flm serve qwen2.5vl-it:3b -r 1
+oflm serve qwen2.5vl-it:3b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -258,13 +258,13 @@ The `-r` option determines the image's height:
 - **Base Model:** [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B)
 - **Quantization:** Q4_K
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3.5:0.8b
+oflm run qwen3.5:0.8b
 ```
 
 ▶️ Image Resize Options
@@ -272,11 +272,11 @@ flm run qwen3.5:0.8b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen3.5:0.8b -r 1
+oflm run qwen3.5:0.8b -r 1
 ```
 
 ```shell
-flm serve qwen3.5:0.8b -r 1
+oflm serve qwen3.5:0.8b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -305,13 +305,13 @@ The `-r` option determines the image's height:
 - **Base Model:** [Qwen/Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)
 - **Quantization:** Q4_K
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3.5:2b
+oflm run qwen3.5:2b
 ```
 
 ▶️ Image Resize Options
@@ -319,11 +319,11 @@ flm run qwen3.5:2b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen3.5:2b -r 1
+oflm run qwen3.5:2b -r 1
 ```
 
 ```shell
-flm serve qwen3.5:2b -r 1
+oflm serve qwen3.5:2b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -352,13 +352,13 @@ The `-r` option determines the image's height:
 - **Base Model:** [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)
 - **Quantization:** Q4_K
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3.5:4b
+oflm run qwen3.5:4b
 ```
 
 ▶️ Image Resize Options
@@ -366,11 +366,11 @@ flm run qwen3.5:4b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen3.5:4b -r 1
+oflm run qwen3.5:4b -r 1
 ```
 
 ```shell
-flm serve qwen3.5:4b -r 1
+oflm serve qwen3.5:4b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -399,13 +399,13 @@ The `-r` option determines the image's height:
 - **Base Model:** [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B)
 - **Quantization:** Q4_K
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3.5:9b
+oflm run qwen3.5:9b
 ```
 
 ▶️ Image Resize Options
@@ -413,11 +413,11 @@ flm run qwen3.5:9b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen3.5:9b -r 1
+oflm run qwen3.5:9b -r 1
 ```
 
 ```shell
-flm serve qwen3.5:9b -r 1
+oflm serve qwen3.5:9b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -446,13 +446,13 @@ The `-r` option determines the image's height:
 - **Base Model:** [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 - **Quantization:** Q4_K
 - **Max Context Length:** 256k tokens  
-- **Default Context Length:** 32k tokens ([change default](https://fastflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
-- **[Set Context Length at Launch](https://fastflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
+- **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
+- **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
 
-▶️ Run with FastFlowLM in PowerShell:  
+▶️ Run with OpenFlowLM in PowerShell:  
 
 ```shell
-flm run qwen3.6-moe:35b-a3b
+oflm run qwen3.6-moe:35b-a3b
 ```
 
 ▶️ Image Resize Options
@@ -460,11 +460,11 @@ flm run qwen3.6-moe:35b-a3b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-flm run qwen3.6-moe:35b-a3b -r 1
+oflm run qwen3.6-moe:35b-a3b -r 1
 ```
 
 ```shell
-flm run qwen3.6-moe:35b-a3b -r 1
+oflm run qwen3.6-moe:35b-a3b -r 1
 ```
 
 The `-r` option determines the image's height:

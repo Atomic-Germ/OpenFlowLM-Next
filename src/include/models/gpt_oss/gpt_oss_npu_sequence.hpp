@@ -1,6 +1,6 @@
 /// \file gpt_oss_npu_sequence.hpp
 /// \brief gpt_oss_npu_sequence class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.6
 /// \note This is a header file for the gpt_oss_npu_sequence class

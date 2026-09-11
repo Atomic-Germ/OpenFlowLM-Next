@@ -1,6 +1,6 @@
 /// \file gemma3.cpp
 /// \brief gemma3 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-03
 /// \version 0.9.24
 /// \note This is a source file for the gemma3 class
@@ -9,7 +9,7 @@
 
 
 /************              Gemma3_Text_Only family            **************/
-Gemma3_Text_Only::Gemma3_Text_Only(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma3_Text_Only") {}
+Gemma3_Text_Only::Gemma3_Text_Only(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma3_Text_Only") {}
 
 void Gemma3_Text_Only::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
 
@@ -18,7 +18,7 @@ void Gemma3_Text_Only::load_model(std::string model_path, json model_info, int d
     // A Gemma 3 text model, so the same choice as Gemma3: the open kernels when
     // installed for this model, the closed gemma_text_npu DLL otherwise
     // (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_GEMMA_ENGINE", "Gemma 3 (text)");
+    auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA_ENGINE", "Gemma 3 (text)");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
