@@ -175,7 +175,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     // same counter (Core::mrope_*), and later chunks / generated tokens inherit it.
     if (!core_->has_mrope() || core_->image_token_id() < 0)
         throw std::runtime_error("open_qwen36: config.json carries no image_token_id / mrope_section for this model; "
-                                 "images need the closed engine (FLM_QWEN36_ENGINE=closed)");
+                                 "images need the closed engine (OFLM_QWEN36_ENGINE=closed)");
     // The app hands its own family's payload struct (qwen3_6_moe_image_payload_t /
     // qwen3_5vl_image_payload_t -- the same fields); read it through the one matching the
     // kernel set's family.

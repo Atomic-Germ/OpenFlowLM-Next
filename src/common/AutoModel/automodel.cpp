@@ -37,8 +37,10 @@ std::string AutoModel::get_current_model() {
 std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env_var, const std::string& family_label) {
 #ifdef OFLM_USE_OPEN_QWEN36
     const std::string kernels = open_qwen36::Engine::find_kernels(*this->lm_config);
-    const char* sel = std::getenv(env_var);
-    const bool use_open = sel ? std::string(sel) == "open" : !kernels.empty();
+    // getenv_oflm, not getenv: an install that predates the oflm rename still has the
+    // FLM_* name exported, and silently ignoring it would pick a different ENGINE (#41).
+    const std::string sel = utils::getenv_oflm(env_var);
+    const bool use_open = !sel.empty() ? sel == "open" : !kernels.empty();
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
     if (!use_open)

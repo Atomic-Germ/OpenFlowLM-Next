@@ -227,36 +227,48 @@ function GetExistingModelPath: string;
 var
   ExistingPath: string;
 begin
-  // Check if OFLM_MODEL_PATH environment variable already exists
+  // OFLM_MODEL_PATH, if this machine has already run a post-rename installer.
   if RegQueryStringValue(HKEY_LOCAL_MACHINE,
     'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
-    'OFLM_MODEL_PATH', ExistingPath)
+    'OFLM_MODEL_PATH', ExistingPath) and (ExistingPath <> '')
   then begin
-    // OFLM_MODEL_PATH exists, use it as default
     Result := ExistingPath;
-  end
-  else begin
-    // OFLM_MODEL_PATH doesn't exist, use default userdocs location
-    Result := GetEnv('USERPROFILE') + '\.oflm';
+    Exit;
   end;
+  // Otherwise FLM_MODEL_PATH, which every installer before the oflm rename wrote (#41).
+  // Without this the wizard defaults to the profile's .oflm and points an upgrading
+  // user AWAY from a model store that is gigabytes -- silently, because nothing is
+  // deleted and nothing errors; the models simply stop being found.
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'FLM_MODEL_PATH', ExistingPath) and (ExistingPath <> '')
+  then begin
+    Result := ExistingPath;
+    Exit;
+  end;
+  Result := GetEnv('USERPROFILE') + '\.oflm';
 end;
 
 function GetExistingPort: string;
 var
   ExistingPort: string;
 begin
-  // Check if OFLM_SERVE_PORT environment variable already exists
+  // OFLM_SERVE_PORT, then the pre-rename FLM_SERVE_PORT (#41), then the default.
   if RegQueryStringValue(HKEY_LOCAL_MACHINE,
     'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
-    'OFLM_SERVE_PORT', ExistingPort)
+    'OFLM_SERVE_PORT', ExistingPort) and (ExistingPort <> '')
   then begin
-    // OFLM_SERVE_PORT exists, use it as default
     Result := ExistingPort;
-  end
-  else begin
-    // OFLM_SERVE_PORT doesn't exist, use default port
-    Result := '52625';
+    Exit;
   end;
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'FLM_SERVE_PORT', ExistingPort) and (ExistingPort <> '')
+  then begin
+    Result := ExistingPort;
+    Exit;
+  end;
+  Result := '52625';
   end;
 
 procedure InitializeWizard;
