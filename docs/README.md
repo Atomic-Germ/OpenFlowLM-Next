@@ -409,5 +409,15 @@ Simply move the section blocks up or down in the `sections` array. The order in 
 
 ---
 
+## Previewing the site on your own machine
+
+You don't need to - GitHub previews your changes for you, and that is enough for
+most edits. If you would rather see the whole site running locally first, and you
+are on a Mac, run `./serve-docs.sh` from this folder. It installs what it needs
+the first time (Homebrew, Ruby, Jekyll) and then serves the site at
+http://127.0.0.1:4000. Press Ctrl-C to stop it.
+
+---
+
 **Remember:** You can always preview your changes on GitHub before they go live, and you can always revert changes if something goes wrong. Happy editing! 🎉
 

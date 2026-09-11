@@ -1,5 +1,6 @@
 # Build System
 
+<<<<<<< HEAD
 > "The code that matters." -- Keep it simple, clear, and focused.
 
 OpenFlowLM uses a **single-command CMake workflow** for building from source. The build system handles both the executable and kernel exports automatically.
@@ -7,26 +8,35 @@ OpenFlowLM uses a **single-command CMake workflow** for building from source. Th
 ---
 
 ## Quick Start
+=======
+Building the executable is not the whole job. The `oflm` binary also needs a
+set of compiled NPU kernels - the `.xclbin` and `insts.bin` files, known as
+design sets. Without them the binary starts up fine and then refuses to load
+any model, naming the set it could not find. The kernels are not checked in;
+they are compiled from sources in this repository.
 
-**Build everything (executable + kernels):**
+There are two ways to get both, and they are not interchangeable.
+
+**The short way, Linux only.** From the top of the repository, a single preset
+builds the engine and all the NPU kernels together, and sets up the kernel
+toolchain for itself if it isn't already there:
 
 ```bash
 cmake --preset linux-default
 cmake --build --preset linux-default
-cmake --install --preset linux-default
 ```
 
-**Run tests:**
+That is the path the [README](../README.md) describes in full, and on Linux it
+is the one to use.
 
-```bash
-cmake --test --preset linux-default
-```
+**The longer way, a step at a time.** From inside `src/`, a different set of
+presets builds the executable on its own, and you build the kernels yourself
+afterwards. This is the only option on Windows, where the kernel build does not
+run. It is also the one you want while you are changing kernels and don't want
+to rebuild everything each time. The rest of this page covers it.
 
-**Package for distribution:**
-
-```bash
-cpack --preset linux-package-tgz
-```
+Both directories contain a preset called `linux-default` and the two do
+different things, so where you run the command from matters.
 
 ---
 
@@ -81,9 +91,9 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 Builds the executable **and** exports all open NPU kernels.
 
 ```bash
-cmake --preset linux-default
-cmake --build --preset linux-default
-cmake --install --preset linux-default
+cmake -B build --preset linux-default
+cmake --build build -j
+cmake --install build
 ```
 
 **What builds:**
@@ -102,15 +112,14 @@ cmake --install --preset linux-default
 Fast development iteration without kernel compilation.
 
 ```bash
-cmake --preset linux-debug
-cmake --build --preset linux-debug
+cmake -B build --preset linux-debug
+cmake --build build
 cmake --install --preset linux-debug
 ```
 
 **What builds:**
 - `oflm` executable
 - Engine shared libraries (XRT or HRX)
-
 **What doesn't build:**
 - Open NPU kernel xclbins (export requires ironvenv)
 
@@ -122,10 +131,10 @@ Export only specific kernel families.
 
 ```bash
 # Build only Qwen3.5 4B kernel
-cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-4b
+cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-4b
 
 # Build specific kernel composition
-cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
+cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
 ```
 
 **Available specs:**
@@ -142,8 +151,8 @@ cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
 Build only the BERT embedding kernels (open_npue).
 
 ```bash
-cmake --preset linux-debug  # First, build engine only
-cmake --build --preset linux-default  # Then build kernels
+cmake -B build --preset linux-debug  # First, build engine only
+cmake -B --build --preset linux-default  # Then build kernels
 ```
 
 **Note:** Open NPUE kernels require the NPU present on the build host.
@@ -204,7 +213,7 @@ CMake provides custom targets for fine-grained control:
 Export all open NPU kernels during the build.
 
 ```bash
-cmake --build --target export_kernels
+cmake --build build --target export_kernels
 ```
 
 ### `oflm`
@@ -212,12 +221,18 @@ cmake --build --target export_kernels
 Build the executable.
 
 ```bash
-cmake --build --target oflm
+cmake --build build --target oflm
 ```
 
 ### `install`
 
 Install the build to the configured prefix.
+
+```bash
+cmake --install build
+```
+
+or
 
 ```bash
 cmake --build --target install
@@ -258,8 +273,7 @@ Windows builds use Visual Studio. Run from a Visual Studio developer environment
 & "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
 
 # Configure and build
-cd src
-cmake --preset windows-default
+cmake -B build --preset windows-default
 cmake --build build
 ```
 
@@ -270,6 +284,54 @@ cmake --build build
 ## Development Workflow
 
 ### Quick Development
+=======
+The binary lands in `src/build/oflm.exe`, with `model_list.json`,
+`model_info.json` and the engine DLLs copied beside it by the build — it will
+not start without those, and Windows reports a missing DLL as a silent exit
+before `main()`.
+
+### Linux
+
+[`linux-getting-started.md`](linux-getting-started.md) has the rest: the
+`apt install` line for the development packages this build needs, and the
+driver and XRT setup.
+
+Other presets: `linux-portable`, `linux-snap`, `windows-vs18`.
+
+---
+
+## 2. The NPU kernels
+
+There are two sets to build: the ones the embedding models use, and the ones
+the language models use. Both need the IRON toolchain **dot-sourced** into the
+shell first:
+
+```powershell
+cd C:\dev\mlir-aie; . .\iron_env.ps1        # the leading dot is required
+```
+
+On Linux, activate the equivalent `mlir-aie` virtualenv (`ironenv`), with
+`xclbinutil` and `aiebu-asm` on `PATH` — both come from XRT, not from the
+mlir-aie wheel.
+
+### Embedding models (`open_npue`)
+
+```powershell
+cd <repo>
+.\npu_offload\gemm_rtp\build.ps1
+```
+
+Five families, roughly 3–4 minutes each, so budget about 20 minutes. Already
+built families are skipped; `-Force` rebuilds and `-Only <name>` does one. The
+build flags live in `families.json`, not in the script — one machine-readable
+source, verified by `check_design_sets.py`.
+
+**Do not run two families concurrently.** The IRON build cache is shared and
+matches on content, so two families that share a geometry will delete each
+other's work; the script takes a lock and refuses rather than letting that
+happen.
+
+### LLM models (the open engine)
 
 ```bash
 # 1. Configure
@@ -289,20 +351,6 @@ oflm run <model>
 2. Test with `oflm run <model>`
 3. Run `oflm list` to verify kernel resolution
 4. Commit and push
-
-### Full Distribution Development
-
-```bash
-# Configure
-cmake --preset linux-default
-
-# Build and test
-cmake --build --preset linux-default
-ctest --preset linux-default
-
-# Install
-cmake --install --preset linux-default
-```
 
 ---
 
@@ -328,7 +376,7 @@ chore/cmake-configuration
 
 ```bash
 # Test build process
-cmake --build --preset linux-default
+cmake --build build --preset linux-default
 ctest --preset linux-default
 
 # Test specific preset

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# serve-docs.sh - preview this documentation site on your own machine.
+#
+# It installs what Jekyll needs (Homebrew, Ruby, the gems) and then serves the
+# site at http://127.0.0.1:4000. macOS only, and nothing to do with building
+# OpenFlowLM itself - for that see BUILD.md.
+#
 set -e
 
 echo "=== Step 1: Checking command line tools (this may open a popup)..."
@@ -61,15 +68,12 @@ echo "If you want this permanently, add this line to your shell config (~/.zshrc
 echo "    export PATH=\"$GEM_BIN_DIR:\$PATH\""
 echo
 
-# === Project-specific: point this to your Jekyll site ===
-# For your OpenFlowLM repo, the Jekyll site is under docs/
-PROJECT_DIR="$HOME/oflm/OpenFlowLM"
-JEKYLL_DIR="$PROJECT_DIR/docs"
+# The Jekyll site is the directory this script lives in.
+JEKYLL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ ! -d "$JEKYLL_DIR" ]; then
-  echo "WARNING: Expected Jekyll directory not found at:"
+if [ ! -f "$JEKYLL_DIR/_config.yml" ]; then
+  echo "ERROR: no _config.yml next to this script, so this is not the docs site:"
   echo "  $JEKYLL_DIR"
-  echo "Please edit this script and set PROJECT_DIR/JEKYLL_DIR correctly."
   exit 1
 fi
 
