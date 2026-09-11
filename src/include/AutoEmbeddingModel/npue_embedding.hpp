@@ -78,6 +78,10 @@ public:
     std::vector<float> embed(std::string& text,
                              embedding_task_type_t task_type) override;
 
+    /// The container's own prompt table, read at load. Empty for a model that
+    /// declares none (the bge sizes, MiniLM), non-empty for nomic and gte.
+    std::vector<std::string> prompt_names() const override;
+
     /// \brief Embed several texts in one call.
     ///
     /// NOT an override -- AutoEmbeddingModel::embed() takes one text, and

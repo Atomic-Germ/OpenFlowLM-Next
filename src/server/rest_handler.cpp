@@ -948,6 +948,27 @@ void RestHandler::handle_embeddings(const json& request,
         // every DOCUMENT was embedded as a QUERY and no caller could tell: the vector is
         // correctly shaped, correctly normed and deterministic either way.
         embedding_task_type_t task_type = embedding_task_type_t::task_query;
+        const std::vector<std::string> declared =
+            this->auto_embedding_engine ? this->auto_embedding_engine->prompt_names()
+                                        : std::vector<std::string>();
+        if (!declared.empty() && !request.contains("prompt_name") &&
+            !request.contains("task_type")) {
+            std::string names;
+            for (const auto& n : declared) names += (names.empty() ? "" : ", ") + n;
+            json err = { {"error", {
+                {"message", "this model requires a task prompt: pass 'prompt_name' as "
+                            "one of [" + names + "]. Refusing to pick one -- the prefix "
+                            "changes the vector (search_query against search_document on "
+                            "the same text is cosine 0.914 here), and the result is "
+                            "correctly shaped, correctly normed and deterministic either "
+                            "way, so nothing downstream can tell the wrong one was used."},
+                {"type", "invalid_request_error"},
+                {"param", "prompt_name"},
+                {"code", "missing_required_parameter"}
+            }} };
+            send_response(err);
+            return;
+        }
         if (request.contains("prompt_name") || request.contains("task_type")) {
             const json& f = request.contains("prompt_name") ? request["prompt_name"]
                                                             : request["task_type"];
