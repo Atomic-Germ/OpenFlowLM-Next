@@ -154,11 +154,12 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // Test the VALUE, not just presence: the docs say =1, and
             // OFLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
             // that gets diagnosed as a different bug entirely (review on #39).
-            const char* gemm_block_env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
+            // getenv_oflm, not getenv, so a pre-rename FLM_* export still works (#41).
+            const std::string gemm_block_env = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK");
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
-            if (gemm_block_env && std::string(gemm_block_env) == "1" && !core_->mrope_active()) {
+            if (gemm_block_env == "1" && !core_->mrope_active()) {
                 const size_t GT = core_->gemm_block_t();
                 if (GT > 0) {
                     size_t i = 0;
