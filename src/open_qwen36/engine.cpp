@@ -140,7 +140,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // Decode-as-prefill: exact for this architecture, one step per token, the
         // lm_head only for the last one (whose logits pick the first sampled token).
         //
-        // 0167/#32: FLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
+        // 0167/#32: OFLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
         // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
         // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
         // (q4_1 dequantised on-core) plus T single-token attention dispatches,
@@ -152,7 +152,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // exactly the sequential path this engine always has.
         return guarded([&] {
             // Test the VALUE, not just presence: the docs say =1, and
-            // FLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
+            // OFLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
             // that gets diagnosed as a different bug entirely (review on #39).
             const char* gemm_block_env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
             // A prompt that has had an image is on the (t, h, w) counter, and the
