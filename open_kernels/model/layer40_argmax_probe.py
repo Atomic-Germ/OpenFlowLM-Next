@@ -53,7 +53,7 @@ from q4nx import Q4NX  # noqa: E402
 import replica_dense as RD  # noqa: E402
 from npue import tile_b  # noqa: E402
 
-DEFAULT_MODEL_DIR = Path.home() / ".flm" / "models" / "Granite-4.2-3B-NPU2"
+DEFAULT_MODEL_DIR = Path.home() / ".oflm" / "models" / "Granite-4.2-3B-NPU2"
 RUN_KERNEL = HERE.parent / "harness" / "out" / "run_kernel.exe"
 GQP = DESIGNS / "gemm_q4_prefill"
 DENSE = DESIGNS / "dense"

@@ -23,7 +23,7 @@ add_npu_test(
 )
 
 target_compile_definitions(test_gemma4_12b PUBLIC
-    __FLM_VERSION__="0.9.45"
+    __OFLM_VERSION__="0.9.45"
     USEAVX512=1    
 )
 

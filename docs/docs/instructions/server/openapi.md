@@ -9,7 +9,7 @@ parent: Local Server (Server Mode)
 
 - **[📡 How Does the OpenAI Standard Work?](#-how-does-the-openai-standard-work)**
 - **[📚 Developer Support](#-developer-support)**
-- **[🚀 Quick Test: Use OpenAI SDK with FastFlowLM in Python](#-quick-test-use-openai-sdk-with-fastflowlm-in-python)**
+- **[🚀 Quick Test: Use OpenAI SDK with OpenFlowLM in Python](#-quick-test-use-openai-sdk-with-openflowlm-in-python)**
 - **[📌 Notes](#-notes)**
 - **[🧪 More Examples](#-more-examples)**
   - [Example: Multi-turn Chat (Conversation History)](#-example-multi-turn-chat-conversation-history)
@@ -44,7 +44,7 @@ OpenAI provides [official libraries](https://platform.openai.com/docs/libraries/
 
 These libraries make it easy to send prompts, receive completions, and integrate with local or cloud-based OpenAI-compatible servers.
 
-FLM follows the OpenAI API format in **Server Mode**.  
+OFLM follows the OpenAI API format in **Server Mode**.  
 
 The following endpoints are actively supported and maintained:
 
@@ -55,21 +55,21 @@ The following endpoints are actively supported and maintained:
 
 ---
 
-# 🚀 Quick Test: Use OpenAI SDK with FastFlowLM in Python
+# 🚀 Quick Test: Use OpenAI SDK with OpenFlowLM in Python
 
 You can try this instantly in any Python environment — including Jupyter Notebook. Follow the steps below by copying each block into a notebook cell.
 
 ---
 
-## ✅ Step 0: Start FastFlowLM in Server Mode
+## ✅ Step 0: Start OpenFlowLM in Server Mode
 
 Open PowerShell or terminal and launch the model server:
 
 ```
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
 
-> 🧠 This loads the model and starts the FastFlowLM OpenAI-compatible API at `http://127.0.0.1:52625/v1`.
+> 🧠 This loads the model and starts the OpenFlowLM OpenAI-compatible API at `http://127.0.0.1:52625/v1`.
 
 ---
 
@@ -81,21 +81,21 @@ pip install --upgrade openai
 
 ---
 
-## ✅ Step 2: Send a Chat Request to FastFlowLM
+## ✅ Step 2: Send a Chat Request to OpenFlowLM
 
 ```python
 # Quick Start
 from openai import OpenAI
 
-# Connect to local FastFlowLM server
+# Connect to local OpenFlowLM server
 client = OpenAI(
-    base_url="http://127.0.0.1:52625/v1",  # FastFlowLM's local API endpoint
-    api_key="flm"  # Dummy key (FastFlowLM doesn’t require authentication)
+    base_url="http://127.0.0.1:52625/v1",  # OpenFlowLM's local API endpoint
+    api_key="oflm"  # Dummy key (OpenFlowLM doesn’t require authentication)
 )
 
 # Send a chat-style prompt using OpenAI API format
 response = client.chat.completions.create(
-    model="llama3.2:1b",  # Replace with any model you've launched with `flm serve`
+    model="llama3.2:1b",  # Replace with any model you've launched with `oflm serve`
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Why is the sky blue?"}
@@ -115,10 +115,10 @@ gc.collect()
 
 ## 📌 Notes
 
-- 🧠 You can replace `"llama3.2:1b"` with any other model available via `flm run` or `flm pull`.
-- 🖥 Make sure the FastFlowLM server is running in the background (`flm serve ...`).
-- 🔒 No real API key is needed — just pass `"flm"` as a placeholder.
-- ⚡ FastFlowLM runs fully offline and is optimized for AMD Ryzen™ AI NPUs.
+- 🧠 You can replace `"llama3.2:1b"` with any other model available via `oflm run` or `oflm pull`.
+- 🖥 Make sure the OpenFlowLM server is running in the background (`oflm serve ...`).
+- 🔒 No real API key is needed — just pass `"oflm"` as a placeholder.
+- ⚡ OpenFlowLM runs fully offline and is optimized for AMD Ryzen™ AI NPUs.
 
 > ✅ This setup is perfect for quick offline LLM testing using standard OpenAI tooling.
 
@@ -144,7 +144,7 @@ messages = [
     {"role": "user", "content": "Write the beginning of a fantasy story."},
 ]
 
-client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="flm")
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
 response = client.chat.completions.create(model="llama3.2:1b", messages=messages)
 print(response.choices[0].message.content)
 
@@ -161,10 +161,10 @@ import gc
 gc.collect()
 ```
 
-> ⚠️ The OpenAI API (and FastFlowLM server mode) is **stateless** — you must resend the full conversation each time. No KV cache is kept between turns.  
+> ⚠️ The OpenAI API (and OpenFlowLM server mode) is **stateless** — you must resend the full conversation each time. No KV cache is kept between turns.  
 > 🌀 This means all previous messages are reprocessed (**prefill**), which adds latency for long chats.  
-> ⚡ **FastFlowLM’s CLI mode** uses a **real KV cache**, making multi-turn responses much faster — especially with long conversations.  
-> 🧠 FastFlowLM is optimized for **long sequences** with large KV caches, ideal for 32k–256k context windows.  
+> ⚡ **OpenFlowLM’s CLI mode** uses a **real KV cache**, making multi-turn responses much faster — especially with long conversations.  
+> 🧠 OpenFlowLM is optimized for **long sequences** with large KV caches, ideal for 32k–256k context windows.  
 <!-- > 🔧 We’re working on adding **stateful KV cache** to server mode. Stay tuned!   -->
 
 ---
@@ -178,7 +178,7 @@ Display the model’s output as it generates, token-by-token:
 from openai import OpenAI
 import gc, sys
 
-client = OpenAI(base_url="http://127.0.0.1:52625/v1/", api_key="flm")
+client = OpenAI(base_url="http://127.0.0.1:52625/v1/", api_key="oflm")
 
 stream = client.chat.completions.create(
     model="llama3.2:1b",
@@ -210,9 +210,9 @@ gc.collect()
 
 You can load a full `.txt` file as a prompt — useful for long documents or testing large context windows.
 
-👉 [Download the sample prompt](https://github.com/ROCm/FastFlowLM/blob/main/assets/alice_in_wonderland.txt)  
+👉 [Download the sample prompt](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/assets/alice_in_wonderland.txt)  
 
-Download to Downloads folder. This contains over 38k tokens, so it may take longer to prompt. FastFlowLM supports full context length (32k–128k), making it ideal for processing long documents like this
+Download to Downloads folder. This contains over 38k tokens, so it may take longer to prompt. OpenFlowLM supports full context length (32k–128k), making it ideal for processing long documents like this
 
 ```python
 # Use a text file to prompt
@@ -221,7 +221,7 @@ from openai import OpenAI
 with open("C:\\Users\\<username>\\Downloads\\alice_in_wonderland.txt", "r", encoding="utf-8") as f:
     user_prompt = f.read()
 
-client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="flm")
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
 
 response = client.chat.completions.create(
     model="llama3.2:1b",
@@ -255,7 +255,7 @@ prompts = [
     "What are the key themes in ‘To Kill a Mockingbird’?",
 ]
 
-client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="flm")
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
 
 for prompt in prompts:
     response = client.chat.completions.create(
@@ -283,7 +283,7 @@ Control randomness and creativity — for brainstorming or open-ended tasks.
 # Change hyper parameters
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="flm")
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
 
 response = client.chat.completions.create(
     model="llama3.2:1b",
@@ -316,8 +316,8 @@ import base64
 from openai import OpenAI
 
 # Paths to your local images
-image_path_0 = r"C:\Users\info\OneDrive\Desktop\FLM\image_test\image0.jpg"
-image_path_1 = r"C:\Users\info\OneDrive\Desktop\FLM\image_test\image1.png"
+image_path_0 = r"C:\Users\info\OneDrive\Desktop\OFLM\image_test\image0.jpg"
+image_path_1 = r"C:\Users\info\OneDrive\Desktop\OFLM\image_test\image1.png"
 
 # Read and encode the images as Base64 strings (required for API input)
 with open(image_path_0, "rb") as image_file:
@@ -325,7 +325,7 @@ with open(image_path_0, "rb") as image_file:
 with open(image_path_1, "rb") as image_file:
     image_1 = base64.b64encode(image_file.read()).decode("utf-8")
 
-# Connect to your local FLM/OpenAI-compatible endpoint
+# Connect to your local OFLM/OpenAI-compatible endpoint
 client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="dummykey")
 
 # Create a chat completion request with text + two images
@@ -365,8 +365,8 @@ import gc
 import sys
 from openai import OpenAI
 
-audio_path = r"C:\Users\info\OneDrive\Desktop\FLM\audio_test\audio.wav"
-image_path = r"C:\Users\info\OneDrive\Desktop\FLM\image_test\image.png"
+audio_path = r"C:\Users\info\OneDrive\Desktop\OFLM\audio_test\audio.wav"
+image_path = r"C:\Users\info\OneDrive\Desktop\OFLM\image_test\image.png"
 
 
 # Read the audio and image files and encode them as Base64 for API input

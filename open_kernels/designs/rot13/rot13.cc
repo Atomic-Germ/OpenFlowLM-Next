@@ -1,6 +1,6 @@
 //===- rot13.cc ---------------------------------------------*- C++ -*-===//
 //
-// OpenFFLM PoC -- the readable proof that we can put our own code on the array.
+// OpenFOFLM PoC -- the readable proof that we can put our own code on the array.
 // SPDX-License-Identifier: Apache-2.0
 //
 // ROT13 over an ASCII tile. Chosen because it is self-inverse: running the

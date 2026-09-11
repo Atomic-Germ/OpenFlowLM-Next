@@ -1,6 +1,6 @@
 /// \file engine.cpp
 /// \brief Open CPU Gemma3 text engine.
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-09-02
 /// \note Mirrors the validated NumPy reference in
 /// utilities/q4nx-build/q4nx/reference.py. Any behavioural change here must be
@@ -170,7 +170,7 @@ bool Engine::ensure_manifest() {
                 };
             }
         }
-        manifest_ = json{{"format", "flm-open-causal-manifest-v1"},
+        manifest_ = json{{"format", "oflm-open-causal-manifest-v1"},
                          {"config", "config.json"},
                          {"tokenizer", "tokenizer.json"},
                          {"tensors", tensors}};

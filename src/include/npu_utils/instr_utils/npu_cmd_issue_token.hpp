@@ -1,6 +1,6 @@
 /// \file npu_cmd_issue_token.hpp
 /// \brief npu issue token command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu issue token command
 #pragma once

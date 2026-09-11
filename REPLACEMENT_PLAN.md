@@ -1,4 +1,4 @@
-# Open FastFlowLM Closed-Source Replacement Plan
+# Open OpenFlowLM Closed-Source Replacement Plan
 
 ## Overview
 Map of all pre-compiled closed-source artifacts and replacement strategies for AMD NPU2/iron/mlirae backends.
@@ -74,19 +74,19 @@ src/open_embedding/tools/oracle/       - Reference validation scripts
 ### Phase 1 - Open Embedding Integration
 - Remove closed embedding: `modeling_gemma_embedding.hpp`, `modeling_gemma_embedding.cpp`, `gemma_embedding/gemma_embedding.hpp`
 - Add open_embedding sources: `src/open_embedding/engine.cpp`, `src/open_embedding/npu_matmul.cpp`
-- Add compile definition: `FLM_USE_OPEN_EMBEDDING=1`
-- Gate NPU offload: `FLM_USE_OPEN_EMBEDDING_NPU=1` when `FLM_USE_OPEN_EMBEDDING=ON` AND `FLM_USE_HRX=OFF`
+- Add compile definition: `OFLM_USE_OPEN_EMBEDDING=1`
+- Gate NPU offload: `OFLM_USE_OPEN_EMBEDDING_NPU=1` when `OFLM_USE_OPEN_EMBEDDING=ON` AND `OFLM_USE_HRX=OFF`
 - Update `model_list.json` files list: remove `model.q4nx`, add `weights_manifest.json` + safetensors weight paths (`weights/2_Dense.safetensors`, `weights/3_Dense.safetensors`)
 - Remove dead xclbins: `xclbins/Embedding-Gemma-300M-NPU2/`
 
 ### Phase 2+ - Subsequent Models
-- Add `option(FLM_USE_OPEN_GEMMA3 ...)` and similar flags
+- Add `option(OFLM_USE_OPEN_GEMMA3 ...)` and similar flags
 - Conditionally link/open-link appropriate `lib*_npu.so` based on enabled flags
 - Each model gets `src/open_<family>/engine.cpp`
 
 ### CMake Highlights (from existing CMakeLists.txt)
-- `target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING=1)` — always on when enabled
-- `if(NOT FLM_USE_HRX) target_compile_definitions(flm PUBLIC FLM_USE_OPEN_EMBEDDING_NPU=1)` — NPU only with XRT
+- `target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING=1)` — always on when enabled
+- `if(NOT OFLM_USE_HRX) target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)` — NPU only with XRT
 - Source glob: add `"src/open_embedding/*.cpp"` 
 - Link: close `gemma_embedding` when open path enabled
 
@@ -99,8 +99,8 @@ The existing utilities can be extended rather than rebuilt from scratch:
 | Tool | Current Scope | Extensions Needed |
 |------|--------------|------------------|
 | **`q4nx-build/`** | Converts GGUF/HF → Q4NX | Also generate `weights_manifest.json` + safetensors splitting (2_Dense, 3_Dense heads) |
-| **`flm-add/`** | Installs FLM models, symlinks xclbins | Also copy/convert weights to safetensors + generate `weights_manifest.json`; stop symlinking closed xclbins |
-| **`flm-test/`** | E-suite embedding tests (E1-E8) | Extend E-suite for LLM models (perplexity/cosine checks); add NPU offload validation |
+| **`oflm-add/`** | Installs OFLM models, symlinks xclbins | Also copy/convert weights to safetensors + generate `weights_manifest.json`; stop symlinking closed xclbins |
+| **`oflm-test/`** | E-suite embedding tests (E1-E8) | Extend E-suite for LLM models (perplexity/cosine checks); add NPU offload validation |
 | **`q4nx-build/` builder extension** | Reuse the existing converter architecture | Add a builder mode/subcommand that generates config.json, weights_manifest.json, tokenizer assets, safetensors splits, and model-family build metadata |
 
 **Key insight**: Do not build a separate converter from scratch. `q4nx-build/model_converter.py` and its architecture detection, tensor mapping, and packing infrastructure are the base for the open-model builder. Add open-output backends alongside Q4NX output so both pipelines share model-family knowledge.
@@ -127,7 +127,7 @@ Each open engine must pass:
 6. Update `CMakeLists.txt` (add sources, remove closed lib, add tokenizers link)
 7. Update `model_list.json` (embedding files list)
 8. Remove dead xclbins (`xclbins/Embedding-Gemma-300M-NPU2/`)
-9. Add `flm-test` install rule to `CMakeLists.txt`
+9. Add `oflm-test` install rule to `CMakeLists.txt`
 10. Build and run E-suite to verify
 11. Update `npu_offload_pipeline.md` skill with Gemma3-text notes
 12. Begin Gemma3-text open engine (Phase 2)

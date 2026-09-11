@@ -39,15 +39,15 @@ output records versions, this tree's commit and sha256s.
   then on Windows `..\..\harness\out\run_kernel.exe run.cfg && python compare.py`.
 - Whole decode step vs the fp64 oracle: `open_kernels/model/README.md`
   (`make_decode.py` / `compare_decode.py`; needs the model's `.q4nx`).
-- Through the app: `flm serve qwen3.6-moe:35b-a3b` logs *"Qwen3.6-MoE on the
-  open kernels"*; `FLM_QWEN36_ENGINE=open` fails loudly if the kernels are
-  missing. Then `flm-test --llm --model qwen3.6-moe:35b-a3b`.
+- Through the app: `oflm serve qwen3.6-moe:35b-a3b` logs *"Qwen3.6-MoE on the
+  open kernels"*; `OFLM_QWEN36_ENGINE=open` fails loudly if the kernels are
+  missing. Then `oflm-test --llm --model qwen3.6-moe:35b-a3b`.
 
 ## Rules
 
 - Never commit the xclbins; the distributed package is the only place they
   ship pre-built. Update `SETS` and the README table when a set is added.
-- Fixtures that need captured FLM buffers read `OPEN_KERNELS_CAPS`
+- Fixtures that need captured OFLM buffers read `OPEN_KERNELS_CAPS`
   (`open_kernels/fixture_paths.py`); do not hard-code capture or checkout paths.
 - Record a rebuild's `--check` outcome and toolchain versions in the README
   when the toolchain pin changes.

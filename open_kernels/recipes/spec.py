@@ -1,7 +1,7 @@
 """ModelSpec: the hyperparameter tuple a recipe composes kernels from.
 
 One plain dataclass, JSON on disk, built from either of the two places a model
-already publishes its shape: the HF-style `config.json` FLM ships beside the
+already publishes its shape: the HF-style `config.json` OFLM ships beside the
 `.q4nx` container, or a GGUF's metadata (`general.architecture`,
 `<arch>.embedding_length`, ...). Anything a recipe needs that is not here is
 a recipe constant (a family property), not a model property.
@@ -242,10 +242,10 @@ class ModelSpec:
     # ---- sources
     @classmethod
     def from_hf_config(cls, cfg: Mapping[str, Any], real_vocab: int | None = None) -> "ModelSpec":
-        """From the HF-style config.json FLM ships with a model.
+        """From the HF-style config.json OFLM ships with a model.
 
         `real_vocab` is the tokenizer's id count (tokenizer.json); it defaults
-        to vocab_size, which for FLM's Qwen3.6 containers is the padded lm_head
+        to vocab_size, which for OFLM's Qwen3.6 containers is the padded lm_head
         row count -- pass the real one when the tokenizer is at hand."""
         mt = cfg.get("model_type")
         if mt not in HF_FAMILIES:
@@ -379,7 +379,7 @@ def _qwen35_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     conv kernel 4 -- so the field reads are `_qwen36moe_hf`'s.
 
     Qwen publishes the tower inside a `text_config` (`model_type: qwen3_5_text`) under a
-    `qwen3_5` VLM wrapper; FLM's containers flatten it. Both are read here.
+    `qwen3_5` VLM wrapper; OFLM's containers flatten it. Both are read here.
     Images always route to the closed engine (the open one has no vision path)."""
     tc = cfg.get("text_config", cfg)
     if tc.get("num_experts") or tc.get("moe_intermediate_size"):
@@ -544,7 +544,7 @@ def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
 
     `tie_word_embeddings` is NOT a refusal. Llama 3.2 (1B / 3B) ties the head to the
     embedding table, but every container the recipe packs from materialises
-    `lm_head.weight` as its own q4 tensor -- FLM's `.q4nx` does it for
+    `lm_head.weight` as its own q4 tensor -- OFLM's `.q4nx` does it for
     `Llama-3.2-{1,3}B-NPU2` (I8 [32064, 5120] / [48096, 5120], the whole 128256-row
     head), and utilities/q4nx-build does it for a tied GGUF (the HunYuan converter's
     zero-padded head). The derivation sees only config.json, never the container, so

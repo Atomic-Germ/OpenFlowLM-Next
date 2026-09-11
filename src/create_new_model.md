@@ -1,6 +1,6 @@
-# Adding a New Model to FastFlowLM
+# Adding a New Model to OpenFlowLM
 
-This document lists every step required to bring a new model online in FastFlowLM,
+This document lists every step required to bring a new model online in OpenFlowLM,
 from the prebuilt NPU engine down to a standalone test harness.
 
 `Gemma4-12B` is used as the worked example throughout. Substitute:
@@ -109,7 +109,7 @@ picks them up automatically.
 ### 2a. Constructor
 
 ```cpp
-Gemma4_12B::Gemma4_12B(flm_rt::device* npu_device_inst)
+Gemma4_12B::Gemma4_12B(oflm_rt::device* npu_device_inst)
     : AutoModel(npu_device_inst, "Gemma4_12B") {}
 ```
 
@@ -231,7 +231,7 @@ A mismatch between (3) and `model_list.json` shows up at runtime as
 
 ## Step 5 — Link the engine library
 
-`CMakeLists.txt` — add the bare library name inside `target_link_libraries(flm PUBLIC ...)`
+`CMakeLists.txt` — add the bare library name inside `target_link_libraries(oflm PUBLIC ...)`
 (around line 420):
 
 ```cmake
@@ -241,7 +241,7 @@ A mismatch between (3) and `model_list.json` shows up at runtime as
 ```
 
 Your new `.cpp` files need **no** CMake change — line 238 globs
-`common/*/*.cpp` automatically. The `FLM_USE_HRX` option selects whether the
+`common/*/*.cpp` automatically. The `OFLM_USE_HRX` option selects whether the
 linker searches `lib/hrx` or `lib/xrt`.
 
 ---
@@ -255,11 +255,11 @@ variant. The CLI tag is `<family>:<variant>` (e.g. `gemma4-12b:12b`).
 "gemma4-12b": {
   "12b": {
     "name": "Gemma4-12B-IT-NPU2",
-    "url": "https://huggingface.co/FastFlowLM/Gemma4-12B-IT-NPU2",
-    "file_url": "https://huggingface.co/api/models/FastFlowLM/Gemma4-12B-IT-NPU2/tree/main",
+    "url": "https://huggingface.co/OpenFlowLM/Gemma4-12B-IT-NPU2",
+    "file_url": "https://huggingface.co/api/models/OpenFlowLM/Gemma4-12B-IT-NPU2/tree/main",
     "ms_url": "https://modelscope.cn/models/amd/Gemma4-12B-IT-NPU2",
     "size": 12000000000,
-    "flm_min_version": "0.9.45",
+    "oflm_min_version": "0.9.45",
     "files": ["config.json", "model.q4nx", "tokenizer.json",
               "tokenizer_config.json", "chat_template.jinja"],
     "vlm": false,
@@ -283,19 +283,19 @@ Field notes:
 
 - `name` — **must match both** the on-disk weights folder and `xclbins/<ModelName>/`.
 - `details.family` — must match the `modelFamilyMap` key from Step 4.
-- `files` — the minimum set `flm pull` must fetch; a missing entry surfaces as a
+- `files` — the minimum set `oflm pull` must fetch; a missing entry surfaces as a
   tokenizer or config load failure at first run.
 - `vlm` / `asr` — capability flags read by the runner to enable image / audio CLI paths.
-- `flm_min_version` — refuses to load on older FLM builds.
+- `oflm_min_version` — refuses to load on older OFLM builds.
 - `footprint` — GiB of memory reported to the user for model-fits checks.
 
 Model resolution at runtime:
-`get_models_directory()` = `$FLM_MODEL_PATH` or `~/flm`;
+`get_models_directory()` = `$OFLM_MODEL_PATH` or `~/oflm`;
 `get_model_path(tag)` = `<models_dir>/<model_path>/<name>`.
 
 ---
 
-## Step 7 — Add the download manifest (needed for `flm pull`)
+## Step 7 — Add the download manifest (needed for `oflm pull`)
 
 `model_info.json` — a HuggingFace file listing keyed by the full tag
 (`"gemma4-12b:12b"`), containing one object per file with `type`, `oid`, `size`,
@@ -305,11 +305,11 @@ Model resolution at runtime:
 You can regenerate the block from the HF tree API:
 
 ```bash
-curl -s https://huggingface.co/api/models/FastFlowLM/Gemma4-12B-IT-NPU2/tree/main
+curl -s https://huggingface.co/api/models/OpenFlowLM/Gemma4-12B-IT-NPU2/tree/main
 ```
 
-Skipping this step is fine for local development (point `FLM_MODEL_PATH` at the
-weights yourself), but `flm pull <family>:<variant>` will not work without it.
+Skipping this step is fine for local development (point `OFLM_MODEL_PATH` at the
+weights yourself), but `oflm pull <family>:<variant>` will not work without it.
 
 ---
 
@@ -322,8 +322,8 @@ Only touch these if the model needs them.
 | Audio / vision CLI plumbing      | `runner/runner.cpp` (`asr_supported` at :72, plus :107, :296) and `runner/runner.hpp:54` |
 | Template-specific tool-response rewriting | `server/rest_handler.cpp` — see `convert_tool_responses_gemma4()` at :210 and the family dispatch at :1140 |
 | REST prompt-cache validation     | `server/rest_handler.cpp:1124` uses `get_chat_template_type()` — return the right `chat_template_type_t` in Step 1 |
-| Windows installer (Inno)         | `inno/flm.iss` — add `Source: "<model>_npu.dll"; DestDir: "{app}"; Flags: ignoreversion` |
-| Windows installer (WiX)          | `wix/flm.wxs` — add a `<Component>` / `<File>` pair for `<model>_npu.dll`        |
+| Windows installer (Inno)         | `inno/oflm.iss` — add `Source: "<model>_npu.dll"; DestDir: "{app}"; Flags: ignoreversion` |
+| Windows installer (WiX)          | `wix/oflm.wxs` — add a `<Component>` / `<File>` pair for `<model>_npu.dll`        |
 | Public documentation             | `docs/docs/models/<family>.md`, `docs/docs/benchmarks/`, and the model tables in `docs/docs/instructions/server/` |
 
 ---
@@ -338,7 +338,7 @@ rename; the structure is fixed.
 Boost `program_options` front-end. Minimal skeleton:
 
 ```cpp
-flm_rt::device npu_device_global;
+oflm_rt::device npu_device_global;
 
 std::string exe_dir   = utils::get_executable_directory();
 std::string model_dir = utils::get_models_directory();
@@ -348,7 +348,7 @@ std::string model_path = model_list.get_model_path(tag);
 nlohmann::json model_info = model_list.get_model_info(tag).second;
 
 std::unique_ptr<AutoModel> chat = std::make_unique<Gemma4_12B>(&npu_device_global);
-npu_device_global = flm_rt::device(0);        // AFTER construction
+npu_device_global = oflm_rt::device(0);        // AFTER construction
 chat->load_model(model_path, model_info, -1, preemption);
 chat->set_topk(1);                            // deterministic output for testing
 chat->configure_parameter("enable_think", enable_think);
@@ -371,7 +371,7 @@ add_npu_test(test_gemma4_12b test/gemma4_12b
     USE_AUTOMODEL USE_TOKENIZER USE_SAMPLER
     SOURCES "${CMAKE_SOURCE_DIR}/../../common/AutoModel/modeling_gemma4_12b.cpp")
 
-target_compile_definitions(test_gemma4_12b PUBLIC __FLM_VERSION__="0.9.45")
+target_compile_definitions(test_gemma4_12b PUBLIC __OFLM_VERSION__="0.9.45")
 target_link_libraries(test_gemma4_12b PUBLIC gemma4_12b_npu xrt_coreutil)
 
 add_custom_target(test_gemma4_12b_target DEPENDS test_gemma4_12b)
@@ -399,7 +399,7 @@ executable looks for it next to itself.
 
 ```bash
 #!/usr/bin/bash
-export FLM_MODEL_PATH="/scratch/michyu"
+export OFLM_MODEL_PATH="/scratch/michyu"
 cp /path/to/kernels/build/lib/libgemma4_12b_npu.so ../../lib/xrt
 # cp -r /path/to/xclbins/Gemma4-12B-IT-NPU2 ../../xclbins/
 ```
@@ -410,19 +410,19 @@ cp /path/to/kernels/build/lib/libgemma4_12b_npu.so ../../lib/xrt
 
 ```bash
 cd src/test/gemma4_12b
-source activate.sh          # sets FLM_MODEL_PATH, stages the .so / xclbins
+source activate.sh          # sets OFLM_MODEL_PATH, stages the .so / xclbins
 make                        # build only
 make test                   # build + run gemma4-12b:12b with the short prompt set
 ```
 
-`FLM_MODEL_PATH` must point at the **parent** of `models/`, so the weights end up at
-`$FLM_MODEL_PATH/models/<ModelName>/`.
+`OFLM_MODEL_PATH` must point at the **parent** of `models/`, so the weights end up at
+`$OFLM_MODEL_PATH/models/<ModelName>/`.
 
-Then build the full `flm` binary and smoke-test the real entry points:
+Then build the full `oflm` binary and smoke-test the real entry points:
 
 ```bash
-flm run gemma4-12b:12b
-flm serve gemma4-12b:12b     # then exercise /v1/chat/completions, streaming, and tools
+oflm run gemma4-12b:12b
+oflm serve gemma4-12b:12b     # then exercise /v1/chat/completions, streaming, and tools
 ```
 
 ---
@@ -436,10 +436,10 @@ flm serve gemma4-12b:12b     # then exercise /v1/chat/completions, streaming, an
 - [ ] `common/AutoModel/modeling_<model>.cpp`
 - [ ] Engine include added to `include/AutoModel/automodel.hpp`
 - [ ] All four edits in `include/AutoModel/all_models.hpp`
-- [ ] Engine lib added to `target_link_libraries(flm PUBLIC …)` in `CMakeLists.txt`
+- [ ] Engine lib added to `target_link_libraries(oflm PUBLIC …)` in `CMakeLists.txt`
 - [ ] `model_list.json` entry, `details.family` matches `modelFamilyMap`
-- [ ] `model_info.json` manifest (if `flm pull` support is wanted)
+- [ ] `model_info.json` manifest (if `oflm pull` support is wanted)
 - [ ] `get_chat_template_type()` returns the correct value for REST prompt caching
-- [ ] Installer manifests updated (`inno/flm.iss`, `wix/flm.wxs`) for Windows releases
+- [ ] Installer manifests updated (`inno/oflm.iss`, `wix/oflm.wxs`) for Windows releases
 - [ ] `test/<model>/` builds and runs; prompt-cache turn produces sane output
 - [ ] Docs updated under `docs/docs/models/`

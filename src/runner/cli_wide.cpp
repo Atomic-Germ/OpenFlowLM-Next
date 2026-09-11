@@ -2,7 +2,7 @@
 *  Copyright (c) 2026 Advanced Micro Devices, Inc.
 *  \file cli_wide.cpp
 *  \brief CLI interactive input implementation using Windows Console API
-*  \author FastFlowLM Team
+*  \author OpenFlowLM Team
 *  \date 2025-06-24
 *  \version 0.9.24
 */

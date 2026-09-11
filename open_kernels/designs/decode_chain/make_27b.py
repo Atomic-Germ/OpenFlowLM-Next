@@ -4,7 +4,7 @@ layers + final norm + lm_head, as one driver config -- or, with `--whole-layer
 --tokens N`, N greedy tokens at positions 0..N-1 in one config (the linear
 states and the KV caches persist in their BOs; the replica picks each next
 token, and the driver's `attnpos` sets the position per token). Oracle: the
-HF-faithful CPU replica (decode_step.py) on the same q4nx -- FLM cannot be the
+HF-faithful CPU replica (decode_step.py) on the same q4nx -- OFLM cannot be the
 oracle for an interval-3 model (it skips the full-attention block, see the
 plan's Finding).
 
@@ -12,7 +12,7 @@ Weights come from the q4nx via tools/kernel-interp/build_pools.py (the same pool
 /pack/side layouts the resident engine builds), sliced per kernel. Run from
 tools/kernel-interp (it imports decode_step, which loads MODEL_Q4NX):
 
-    cd tools/kernel-interp && MODEL_Q4NX=/mnt/c/Users/josha/.flm/models/Qwen3.6-27B-A2.8B-open/model.q4nx \
+    cd tools/kernel-interp && MODEL_Q4NX=/mnt/c/Users/josha/.oflm/models/Qwen3.6-27B-A2.8B-open/model.q4nx \
         python .../decode_chain/make_27b.py [--layers N] [--token T] [--whole-layer [--tokens N]]
     open-qwen-npu npu designs/decode_chain/run_27b_x.cfg ; python compare_27b.py [--tokens N]
 (run_27b.cfg, without --whole-layer, is the superseded per-block chain: attn_layer at position 0.)

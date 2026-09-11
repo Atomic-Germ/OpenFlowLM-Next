@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Builds the flm MSI installer with WiX v5.
+    Builds the oflm MSI installer with WiX v5.
 
 .DESCRIPTION
-    Runs `wix build` against flm.wxs and drops the resulting flm-setup.msi
+    Runs `wix build` against oflm.wxs and drops the resulting oflm-setup.msi
     into <repo root>/output/. Requires WiX Toolset v5 (wix.exe) on PATH.
 
 .PARAMETER OutputDir
-    Directory to write flm-setup.msi into. Defaults to <repo root>/output.
+    Directory to write oflm-setup.msi into. Defaults to <repo root>/output.
 
 .EXAMPLE
     ./build.ps1
@@ -35,7 +35,7 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 $OutputDir = (Resolve-Path $OutputDir).Path
-$msiPath = Join-Path $OutputDir "flm-setup.msi"
+$msiPath = Join-Path $OutputDir "oflm-setup.msi"
 
 Push-Location $ScriptDir
 try {
@@ -45,8 +45,8 @@ try {
         throw "get_files.bat failed with exit code $LASTEXITCODE"
     }
 
-    Write-Host "Building flm.wxs -> $msiPath"
-    wix build flm.wxs -arch x64 -ext WixToolset.UI.wixext -out $msiPath
+    Write-Host "Building oflm.wxs -> $msiPath"
+    wix build oflm.wxs -arch x64 -ext WixToolset.UI.wixext -out $msiPath
     if ($LASTEXITCODE -ne 0) {
         throw "wix build failed with exit code $LASTEXITCODE"
     }

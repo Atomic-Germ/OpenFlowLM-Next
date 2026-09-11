@@ -5,11 +5,11 @@ nav_order: 6
 parent: Local Server (Server Mode)
 ---
 
-# 🔍 RAG with Live Web Search + FastFlowLM Summarizer
+# 🔍 RAG with Live Web Search + OpenFlowLM Summarizer
 
 This project demonstrates how to build a lightweight Retrieval-Augmented Generation (RAG) pipeline that:
 - Performs live web search using `ddgs` (DuckDuckGo)
-- Summarizes the results using a local LLM via **FastFlowLM**
+- Summarizes the results using a local LLM via **OpenFlowLM**
 - Runs fully offline except for the web search
 
 ---
@@ -18,8 +18,8 @@ This project demonstrates how to build a lightweight Retrieval-Augmented Generat
 
 - Windows machine
 - Python 3.9 or later
-- [FastFlowLM](https://github.com/ROCm/FastFlowLM) installed
-- FastFlowLM model served (e.g., `llama3.2:1b`)
+- [OpenFlowLM](https://github.com/Atomic-Germ/OpenFlowLM) installed
+- OpenFlowLM model served (e.g., `llama3.2:1b`)
 
 ---
 
@@ -28,8 +28,8 @@ This project demonstrates how to build a lightweight Retrieval-Augmented Generat
 ### 1. 🧪 Create the Project Folder
 
 ```shell
-mkdir rag_websearch_flm
-cd rag_websearch_flm
+mkdir rag_websearch_oflm
+cd rag_websearch_oflm
 ```
 
 ### 2. 🐍 Create a Virtual Environment
@@ -54,15 +54,15 @@ pip install -U langchain langchain-community langchainhub langchain-ollama langc
 
 ---
 
-### 4. 🚀 Launch FastFlowLM
+### 4. 🚀 Launch OpenFlowLM
 
 In another terminal:
 
 ```bash
-flm serve llama3.2:1b
+oflm serve llama3.2:1b
 ```
 
-This starts your FastFlowLM API at: `http://127.0.0.1:52625`
+This starts your OpenFlowLM API at: `http://127.0.0.1:52625`
 
 ---
 
@@ -115,9 +115,9 @@ def run_web_search(query: str, max_results: int = 5) -> str:
 
 
 # ----------------------------
-# Step 2: FastFlowLM Summarization
+# Step 2: OpenFlowLM Summarization
 # ----------------------------
-def summarize_with_fastflowlm(search_results: str, model_name=MODEL_NAME) -> str:
+def summarize_with_openflowlm(search_results: str, model_name=MODEL_NAME) -> str:
     if not search_results.strip():
         return "⚠️ No search results to summarize."
 
@@ -198,7 +198,7 @@ def main():
     print(search_text)
 
     # Summarization
-    summary = summarize_with_fastflowlm(search_text)
+    summary = summarize_with_openflowlm(search_text)
     print("\n🧠 Summary:\n")
     print(summary)
 
@@ -217,7 +217,7 @@ if __name__ == "__main__":
 
 ## ▶️ Run the Script
 
-Make sure FastFlowLM is running, then:
+Make sure OpenFlowLM is running, then:
 
 ```bash
 python websearch_rag.py
@@ -279,7 +279,7 @@ The AMD Ryzen AI series has been launched, offering new features and enhancement
 
 ## 🧠 What’s Happening Behind the Scenes
 
-This Python script combines real-time web search with a local FastFlowLM model for Retrieval-Augmented Generation (RAG). Here's how each step works:
+This Python script combines real-time web search with a local OpenFlowLM model for Retrieval-Augmented Generation (RAG). Here's how each step works:
 
 ---
 
@@ -312,12 +312,12 @@ The retrieved or scraped content is broken into chunks using `RecursiveCharacter
 
 ---
 
-### 🤖 4. RAG Retrieval with FastFlowLM
+### 🤖 4. RAG Retrieval with OpenFlowLM
 
-A local FastFlowLM model is accessed via `OllamaLLM`, pointing to `http://127.0.0.1:52625`. We build a LangChain `RetrievalQA` pipeline:
+A local OpenFlowLM model is accessed via `OllamaLLM`, pointing to `http://127.0.0.1:52625`. We build a LangChain `RetrievalQA` pipeline:
 - Queries are matched to relevant chunks from the vector store
 - A prompt template supplies those chunks as **context**
-- FastFlowLM generates an answer based strictly on that context
+- OpenFlowLM generates an answer based strictly on that context
 
 ---
 
@@ -339,7 +339,7 @@ You get:
 | `langchain.text_splitter` | Chunk large documents |
 | `langchain_huggingface` | Create vector embeddings |
 | `langchain_community.vectorstores.FAISS` | Store & search context chunks |
-| `langchain_ollama.OllamaLLM` | Call local FastFlowLM models |
+| `langchain_ollama.OllamaLLM` | Call local OpenFlowLM models |
 | `RetrievalQA` | Combine retriever + LLM in RAG pipeline |
 
 ---

@@ -1,6 +1,6 @@
 /// \file nanbeige.cpp
 /// \brief nanbeige class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.24
 /// \note This is a source file for the nanbeige class
@@ -8,14 +8,14 @@
 #include "AutoModel/modeling_nanbeige.hpp"
 
 /************              Nanbeige family            **************/
-Nanbeige::Nanbeige(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Nanbeige") {}
+Nanbeige::Nanbeige(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Nanbeige") {}
 
 void Nanbeige::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
     
     // The engine: the open kernels when installed for this model, the closed
     // DLL otherwise (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_LLAMA_ENGINE", "Nanbeige");
+    auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "Nanbeige");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -187,7 +187,7 @@ std::string Nanbeige::generate(chat_meta_info_t& meta_info, int length_limit, st
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 

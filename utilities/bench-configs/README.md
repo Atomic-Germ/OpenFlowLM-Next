@@ -1,7 +1,7 @@
-# `flm bench` configs
+# `oflm bench` configs
 
 ```
-flm bench <tag> -i <config.json>
+oflm bench <tag> -i <config.json>
 ```
 
 It is `-i` / `--prompt`, not a positional argument -- `vm_args.hpp:110` binds
@@ -13,7 +13,7 @@ wholesale. Passing the path positionally gives
 
 Every file here carries the **same `input_text` as the built-in default**, copied
 verbatim out of `src/src/benchmarking.hpp`, so a run with any of them is
-comparable to a bare `flm bench` at the stages it shares. Only `max_length` and
+comparable to a bare `oflm bench` at the stages it shares. Only `max_length` and
 `iterations` differ. The `_comment` key is ignored — the parser reads three keys
 and no more.
 

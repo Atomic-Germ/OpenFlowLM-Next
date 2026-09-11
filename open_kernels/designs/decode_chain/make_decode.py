@@ -1,6 +1,6 @@
 r"""The whole decode step of the captured 3LiF model (token 248068 at position 11)
 as ONE driver config of open kernels: L0 linear+MoE, L1 linear+MoE, L2 full
-attention+MoE, final norm, lm_head. Logits are compared with FLM's own captured
+attention+MoE, final norm, lm_head. Logits are compared with OFLM's own captured
 logits (C:/caps/m0c/000905.bo) and with the CPU replica (decode_step.py).
 
 Routing: each MoE block's 8 experts are sliced by the host from the routing the
@@ -217,7 +217,7 @@ def main() -> int:
     (HERE / "run.cfg").write_text("\n".join(cfg + runs), newline="\n")
     cap = np.fromfile(CAPC / "000905.bo", np.float32)[:124160]
     print(f"routing: L0 {top[0].tolist()} L1 {top[1].tolist()} L2 {top[2].tolist()}")
-    print(f"replica vs FLM capture: corr {np.corrcoef(logits_rep, cap)[0, 1]:.5f}; "
+    print(f"replica vs OFLM capture: corr {np.corrcoef(logits_rep, cap)[0, 1]:.5f}; "
           f"argmax vocab replica {2 * int(logits_rep.argmax()) + 1} capture {2 * int(cap.argmax()) + 1}")
     print(f"{len([r for r in runs if r.startswith('run ')])} runs, {len(X)} xclbin contexts")
     return 0

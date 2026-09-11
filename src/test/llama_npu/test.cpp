@@ -10,7 +10,7 @@
 #include "model_list.hpp"
 #include "utils/vm_args.hpp"
 
-flm_rt::device npu_device_global;
+oflm_rt::device npu_device_global;
 
 int main(int argc, char* argv[]) {
     #ifdef __WINDOWS__
@@ -57,7 +57,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    npu_device_global = flm_rt::device(0); 
+    npu_device_global = oflm_rt::device(0); 
    
     chat->load_model(model_path, model_info, -1, preemption);
     chat_meta_info_t meta_info;

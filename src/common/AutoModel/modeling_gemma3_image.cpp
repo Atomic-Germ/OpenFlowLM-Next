@@ -1,6 +1,6 @@
 /// \file modeling_gemma3_image.cpp
 /// \brief Gemma3 image processing implementation
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the Gemma3 image processing functionality

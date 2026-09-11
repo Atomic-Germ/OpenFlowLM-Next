@@ -1,10 +1,10 @@
 /// \file modeling_qwen3_5_omni.cpp
 /// \brief Qwen3_5_Omni driver: tokenizer/template/sampler + prefill/decode loop.
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 
 #include "AutoModel/modeling_qwen3_5_omni.hpp"
 
-Qwen3_5_Omni::Qwen3_5_Omni(flm_rt::device* npu_device_inst)
+Qwen3_5_Omni::Qwen3_5_Omni(oflm_rt::device* npu_device_inst)
     : AutoModel(npu_device_inst) {}
 
 /// \brief Pull the thinker-scope vision config (with VL fallbacks).
@@ -65,11 +65,11 @@ void Qwen3_5_Omni::setup_tokenizer(std::string model_path) {
 
 void Qwen3_5_Omni::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     if (this->is_model_loaded && this->model_path == model_path) {
-        header_print("FLM", "Model already loaded: " << this->model_path);
+        header_print("OFLM", "Model already loaded: " << this->model_path);
         return;
     }
     this->model_path = model_path;
-    header_print("FLM", "Loading model: " << this->model_path);
+    header_print("OFLM", "Loading model: " << this->model_path);
 
     this->lm_config = std::make_unique<LM_Config>();
     this->lm_config->from_pretrained(this->model_path);
@@ -259,7 +259,7 @@ bool Qwen3_5_Omni::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input
             };
             qwen_messages.push_back(new_item);
         }
-        header_print("FLM", "Total images: " << total_images);
+        header_print("OFLM", "Total images: " << total_images);
         templated_text = this->apply_chat_template(qwen_messages, input.tools);
     }
     else { // CLI Processing
@@ -358,7 +358,7 @@ bool Qwen3_5_Omni::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input
     }
     this->profiler_list[TKOEN_ENCODE_TIME].stop(tokens.size());
 
-    // header_print("FLM", "Prompt tokens: " << tokens.size()
+    // header_print("OFLM", "Prompt tokens: " << tokens.size()
     //     << " (images: " << image_payload.num_images << ", soft image tokens: " << total_image_tokens
     //     << "; audios: " << audio_payload.num_audios << ", soft audio tokens: " << total_audio_tokens << ")");
 
@@ -428,7 +428,7 @@ bool Qwen3_5_Omni::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input
             drop_front(image_payload.image_grid_h_w,              images_to_drop);
             drop_front(image_payload.num_soft_tokens_per_image,   images_to_drop);
             image_payload.num_images -= static_cast<unsigned>(images_to_drop);
-            header_print("FLM", "Prompt-cache hit: dropped " << images_to_drop << " cached image(s) from payload");
+            header_print("OFLM", "Prompt-cache hit: dropped " << images_to_drop << " cached image(s) from payload");
         }
 
         // Count complete audio blocks (audio_start..audio_end pairs) that fall
@@ -458,7 +458,7 @@ bool Qwen3_5_Omni::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input
             drop_front(audio_payload.mel_spectrogram_bins_per_audio,   audios_to_drop);
             drop_front(audio_payload.audio_tokens,                     audios_to_drop);
             audio_payload.num_audios -= static_cast<unsigned>(audios_to_drop);
-            header_print("FLM", "Prompt-cache hit: dropped " << audios_to_drop << " cached audio(s) from payload");
+            header_print("OFLM", "Prompt-cache hit: dropped " << audios_to_drop << " cached audio(s) from payload");
         }
 
     }
@@ -541,7 +541,7 @@ bool Qwen3_5_Omni::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input
             int start = i * max_prefill_len;
             int end = std::min(static_cast<int>(tokens.size()), (i + 1) * max_prefill_len);
             std::vector<int> chunk_tokens(tokens.begin() + start, tokens.begin() + end);
-            header_print("FLM", "Prefill chunk " + std::to_string(i+1) + "/" + std::to_string(chunks) + " with " + std::to_string(chunk_tokens.size()) + " tokens");
+            header_print("OFLM", "Prefill chunk " + std::to_string(i+1) + "/" + std::to_string(chunks) + " with " + std::to_string(chunk_tokens.size()) + " tokens");
             auto chunk_thinker_result = this->engine->prefill(chunk_tokens, (i == 0) ? &payload : nullptr);
             if (i == chunks - 1) {
                 this->last_thinker_result = chunk_thinker_result;
@@ -668,7 +668,7 @@ std::string Qwen3_5_Omni::generate(chat_meta_info_t& meta_info, int length_limit
     }
 
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 
@@ -676,7 +676,7 @@ std::string Qwen3_5_Omni::generate_with_prompt(chat_meta_info_t& meta_info, lm_u
     if (!this->insert(meta_info, input)) {
         return "";
     }
-    header_print("FLM", "Prompt inserted, starting generation...");
+    header_print("OFLM", "Prompt inserted, starting generation...");
     return this->generate(meta_info, length_limit, os);
 }
 
@@ -686,12 +686,12 @@ buffer<bf16> Qwen3_5_Omni::say(std::string wav_out_path) {
         // TODO: once the talker/codec path lands, decode `audio` to PCM and write
         //       a WAV file at wav_out_path.
         if (!wav_out_path.empty()) {
-            header_print("FLM", "Audio output produced (" << audio.size()
+            header_print("OFLM", "Audio output produced (" << audio.size()
                 << " elements); WAV writing not implemented yet.");
         }
         return audio;
     } catch (const std::exception& e) {
-        header_print("FLM", "Audio output not available yet: " << e.what());
+        header_print("OFLM", "Audio output not available yet: " << e.what());
         return buffer<bf16>();
     }
 }

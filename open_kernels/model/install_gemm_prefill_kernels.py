@@ -1,9 +1,9 @@
 r"""0167/#32: build a SELF-CONTAINED kernel directory carrying the GEMM
 prefill route (manifest.hpp's GemmBlockProgram) alongside the existing
 sequential ("dx") path, WITHOUT touching the installed
-~/Documents/flm/models/Granite-4.2-3B-NPU2/open_kernels -- so a baseline
+~/Documents/oflm/models/Granite-4.2-3B-NPU2/open_kernels -- so a baseline
 re-run (no env var) is untouched, and the new route is opt-in via
-FLM_OPEN_KERNELS_DIR. That variable is checked FIRST by Engine::find_kernels()
+OFLM_OPEN_KERNELS_DIR. That variable is checked FIRST by Engine::find_kernels()
 (engine.cpp), before the model-dir copy -- so a rebuilt kernel set here is
 never silently shadowed by a stale one already installed next to the model.
 
@@ -32,8 +32,8 @@ sys.path.insert(0, str(HERE))
 from recipes import dense as QR  # noqa: E402
 from recipes.load import spec_from_model_dir  # noqa: E402
 
-DEFAULT_MODEL_DIR = Path.home() / ".flm" / "models" / "Granite-4.2-3B-NPU2"
-SRC_KERNELS = Path.home() / "Documents" / "flm" / "models" / "Granite-4.2-3B-NPU2" / "open_kernels"
+DEFAULT_MODEL_DIR = Path.home() / ".oflm" / "models" / "Granite-4.2-3B-NPU2"
+SRC_KERNELS = Path.home() / "Documents" / "oflm" / "models" / "Granite-4.2-3B-NPU2" / "open_kernels"
 GQP = DESIGNS / "gemm_q4_prefill"
 DENSE = DESIGNS / "dense"
 T = 256

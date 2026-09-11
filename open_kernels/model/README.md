@@ -4,7 +4,7 @@
 > `src/open_qwen36/` (built on the same packing and the same kernels). This
 > directory is the batch harness path and the fp64 reference it is scored by.
 
-This directory is the model-side half of the open path: it takes FLM's own
+This directory is the model-side half of the open path: it takes OFLM's own
 `.q4nx` weight file, packs each layer's weights into the byte order the open
 kernels stream, writes a driver program for `../harness/run_kernel.exe`, and
 computes an fp64 CPU reference to score the result against.
@@ -12,7 +12,7 @@ computes an fp64 CPU reference to score the result against.
 Nothing here is closed: the container is parsed by [q4nx.py](q4nx.py), the pool
 layouts by the recipe's packing plan (`../recipes/qwen36moe.py`, applied by
 `../recipes/pack.py` -- the same plan `src/open_qwen36/pools.cpp` interprets),
-the math by [replica.py](replica.py). FLM's engine is never loaded. (The weights are still FLM's file — the GGUF path that
+the math by [replica.py](replica.py). OFLM's engine is never loaded. (The weights are still OFLM's file — the GGUF path that
 replaces it is a separate piece of work; see the repo plan.)
 
 ## Use
@@ -27,7 +27,7 @@ The program names the kernels at `../designs/layer_x/build_lx0` … `build_ax1`,
 `../designs/ln/build` and `../designs/lm_head_q8/build_full`, which is where
 `../export_qwen36_kernels.py` builds them (it also copies them to
 `src/xclbins/<model>/open_kernels/` for the engine). The model directory comes
-from `FLM_MODEL_DIR` (default `~/.flm/models/Qwen3.6-35B-A3B-NPU2`).
+from `OFLM_MODEL_DIR` (default `~/.oflm/models/Qwen3.6-35B-A3B-NPU2`).
 
 `make_decode.py` writes into `out/` (small per-layer blobs, the reference, the
 `.cfg`) and `out/pools/` (the 512 MB-per-layer weight pools and the 542 MB
@@ -62,7 +62,7 @@ the array state a fused layer carries between its two dispatches would be lost.
 
 `replica.py` is vendored from phlegm's `tools/kernel-interp/` (`decode_step.py`,
 `full_forward.py`), where every math element was verified against buffers
-captured from FLM's own engine. The pool laws came the same way
+captured from OFLM's own engine. The pool laws came the same way
 (`build_pools.py`, checked byte-for-byte for both layer types of this model);
 they now live as ops of the recipe's packing plan, and the original
 hand-written packer is frozen as the oracle in

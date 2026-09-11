@@ -1,9 +1,9 @@
 /// \file debug_utils.hpp
 /// \brief debug_utils class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
-/// \note This file contains the debug utilities for the FastFlowLM project.
+/// \note This file contains the debug utilities for the OpenFlowLM project.
 #pragma once
 #include <iostream>
 #include <iomanip>

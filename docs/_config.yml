@@ -1,6 +1,6 @@
-title: "FastFlowLM"
+title: "OpenFlowLM"
 description: "The leading LLM inference runtime for parallel NPU architectures"
-url: "https://fastflowlm.com"
+url: "https://openflowlm.com"
 baseurl: ""
 
 markdown: kramdown
@@ -22,6 +22,7 @@ exclude:
   - dev.py
   - templates
   - sync-layout.js
+  - serve-docs.sh
   - docs/_config.yml
 
 defaults:
@@ -51,16 +52,16 @@ nav_links:
 
 cta_links:
   - label: GitHub
-    url: "https://github.com/ROCm/FastFlowLM"
+    url: "https://github.com/Atomic-Germ/OpenFlowLM"
     icon: github
   - label: Discord
     url: "https://discord.com/invite/jtWZdMJ8ee?utm_source=site"
     icon: discord
   - label: YouTube
-    url: "https://www.youtube.com/@FastFlowLM-YT/playlists"
+    url: "https://www.youtube.com/@OpenFlowLM-YT/playlists"
     icon: youtube
   - label: Email
-    url: "mailto:info@fastflowlm.com"
+    url: "mailto:info@openflowlm.com"
     icon: mail
 
 docs_nav:

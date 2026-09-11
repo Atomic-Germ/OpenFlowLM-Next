@@ -13,7 +13,7 @@
 
 Phase 0a of `.claude/plans/open-kernels-feasibility.md` (2026-09-01): prove we
 can build an AIE kernel with the open toolchain and run it on the XDNA2 NPU
-through phlegm's own XRT shim, the same way FLM's closed kernels are run.
+through phlegm's own XRT shim, the same way OFLM's closed kernels are run.
 **Done — ROT13 round-trips byte-exact via both loading paths.**
 
 ## Toolchain (WSL builds, Windows runs)
@@ -55,7 +55,7 @@ directives for open designs:
   1/2 of every run (word count at arg 2).
 - `run <kernel> <buf>...` — generic immediate submit, buffers at args 3+.
 
-FLM's flow (`kernel <name> <ctx> <insts.elf>`: `xrt::elf → module →
+OFLM's flow (`kernel <name> <ctx> <insts.elf>`: `xrt::elf → module →
 ext::kernel`) also loads IRON's `insts.elf` unchanged. Example
 `designs/rot13/run.cfg`:
 ```
@@ -84,7 +84,7 @@ ELF; output == ROT13(input) byte-exact for both.
   packets bounced through DDR, no host round-trip. `ddr_bounce_fetch.mlir` is
   the proof; the rest is the bisection ladder. See the plan's 0b section.
 - `designs/gemv_q4/` — **phase 1**: q4_1 GEMV with in-kernel dequant, consuming
-  chunks in the LAYER-POOL order FLM's kernel uses (`pools.rs std_perm`: 64-row
+  chunks in the LAYER-POOL order OFLM's kernel uses (`pools.rs std_perm`: 64-row
   bands of `K/128` chunks, half = c%2, k-tile = c/2). Tile arithmetic ported from
   vegah's `granite_gemv.h` (same chunk layout). 8 cores, x broadcast, 4 chunks
   per DMA element. Shape via env `GEMV_N/GEMV_K/GEMV_CORES`; `make_test.py
@@ -120,7 +120,7 @@ ELF; output == ROT13(input) byte-exact for both.
   32-chunk bands, quarter = c%4, k-tile = c/4). One entry point with a runtime
   `group` argument; 1940 bands split 243/242 over 8 cores with hand-built taps.
   `make_test.py [--bands B]` + `compare.py <tag>`. Full 248320 logits: **PASS
-  cos 1.0, maxrel 2.9e-6, 21.4 ms** (540 MB, ~25 GB/s; FLM's closed lm_head:
+  cos 1.0, maxrel 2.9e-6, 21.4 ms** (540 MB, ~25 GB/s; OFLM's closed lm_head:
   15.4 ms). 80-band subset: 0.67 ms at 33 GB/s.
 
 - `designs/deltanet/` — **phase 1**: gated DeltaNet decode step, 32 v-heads,
@@ -198,7 +198,7 @@ ELF; output == ROT13(input) byte-exact for both.
   | output | cos | maxrel | note |
   |---|---|---|---|
   | xn (normed input) | 0.9999986 | 2.4e-3 | bf16 |
-  | residual after attention | 0.9999996 | 9.4e-4 | fp32; error = bf16 xn/og rounding, as FLM |
+  | residual after attention | 0.9999996 | 9.4e-4 | fp32; error = bf16 xn/og rounding, as OFLM |
   | MoE input xm | 0.9999975 | 2.7e-3 | bf16 |
   | DeltaNet state S | 1.0000000 | 2.8e-4 | fp32 |
   | conv state | 0.9999996 | 1.9e-3 | bf16 |
@@ -262,54 +262,54 @@ step now run on open kernels and match the CPU replica.**
   (lm_head 38 ms cold). `make_decode.py` slices every weight from the captured
   pools/packs/sides, predicts each layer's routing with the mirrored math (and
   adopts the NPU's own selection from a previous run if it differs);
-  `compare_decode.py` compares logits with FLM's capture (odd vocab rows) and
+  `compare_decode.py` compares logits with OFLM's capture (odd vocab rows) and
   the replica. Result (2026-09-02):
 
   | | corr | top token |
   |---|---|---|
   | open kernels vs CPU replica | **1.00000** (residuals 0.999999 per layer) | same |
-  | open kernels vs FLM capture | 0.671 | differs |
-  | CPU replica vs FLM capture | 0.671 | differs |
+  | open kernels vs OFLM capture | 0.671 | differs |
+  | CPU replica vs OFLM capture | 0.671 | differs |
 
   So the open kernels reproduce the replica's math exactly, and inherit its
-  **pre-existing divergence from FLM** (the repo already deposed the CPU model
+  **pre-existing divergence from OFLM** (the repo already deposed the CPU model
   as oracle for this reason: 0.57–0.68 vs both NPU paths, which agree at
   0.9996). The divergence is a semantics difference in some op, not
   accumulation; it must be found before the open engine is "correct". The
-  decode block in `C:/caps/m0c` is FLM's older many-ops-per-layer flow with
+  decode block in `C:/caps/m0c` is OFLM's older many-ops-per-layer flow with
   every op's buffers captured, so it can be bisected op by op against this
   modular chain. (Process exit after 19 contexts segfaults in XRT teardown,
   after all work and dumps are done — harmless, noted.)
 
-  **Diagnosed (2026-09-02): the "CPU-model divergence" is FLM skipping the
+  **Diagnosed (2026-09-02): the "CPU-model divergence" is OFLM skipping the
   full-attention block.** Bisecting the m0c capture with the replica: the
   normalized layer inputs match at layers 0→1 and 1→2 (0.996–0.9998 per
-  token), FLM's own captured q/gate/k/v projections and its CPU-built KV cache
+  token), OFLM's own captured q/gate/k/v projections and its CPU-built KV cache
   match ours (0.9994–0.9999, which also pins RoPE to half-split, rotary 64,
   θ=1e7 and the planar q|gate layout), yet layer 2's captured expert inputs
   match our MoE input only at 0.53 — and at **0.995 when the attention
   contribution is set to zero**. Same for the whole step: replica decode
-  logits vs FLM's captured logits go from 0.671 to **0.998 with the same top
+  logits vs OFLM's captured logits go from 0.671 to **0.998 with the same top
   token** when layer-2 attention is skipped; the prefill's final hidden from
-  0.72 to 0.995. FLM's captured execution of this 3-layer `[L,L,F]`
+  0.72 to 0.995. OFLM's captured execution of this 3-layer `[L,L,F]`
   (`full_attention_interval=3`) test model contributes nothing from the
-  attention block — consistent with the repo's earlier note that FLM
+  attention block — consistent with the repo's earlier note that OFLM
   mis-executes interval-3 models (Josh's pruned 27B is interval-3). So:
   the CPU replica is the faithful (HF) math, the open kernels match it to
-  corr 1.00000, and FLM's captures are the wrong oracle for interval-3 models.
+  corr 1.00000, and OFLM's captures are the wrong oracle for interval-3 models.
   **Control (done): on the base 40-layer interval-4 model the same replica's
-  prefill logits match FLM's capture (`C:/caps/pf_t11_full/008566.bo`) at
-  corr 0.955 with the same top token (9419)** � FLM does compute attention
+  prefill logits match OFLM's capture (`C:/caps/pf_t11_full/008566.bo`) at
+  corr 0.955 with the same top token (9419)** � OFLM does compute attention
   there. The skip is specific to the interval-3 configuration.
 
 - **Josh's pruned Qwen3.6-27B-A2.8B (30 layers, interval 3) on open kernels
   (2026-09-02):** `make_27b.py` builds every layer's pool/pack/side with
-  `build_pools.py` from `~/.flm/models/Qwen3.6-27B-A2.8B-open/model.q4nx`,
+  `build_pools.py` from `~/.oflm/models/Qwen3.6-27B-A2.8B-open/model.q4nx`,
   slices the kernels' inputs, and runs one decode step at position 0 (zero
   states, empty cache) through all 30 layers + final norm + lm_head as one
   config: **1622 dispatches, logits corr 0.999998 vs the CPU replica, same
   argmax (846) and top-5, every layer's residual ≥ 0.999998** (`compare_27b.py`).
-  ~4 s of NPU time host-driven. This is the model FLM mis-executes; the open
+  ~4 s of NPU time host-driven. This is the model OFLM mis-executes; the open
   kernels run it correctly.
 
 Phase-1 status and what's next: `.claude/plans/open-kernels-feasibility.md`,
@@ -552,7 +552,7 @@ expert, 1350 dispatches in all), hence MoE first.
   on the same path (`mmul<4,8,8,int16,int8>`, an unzip at step 8 splits each
   128 B into the two 8-row B operands; rows come out in order, no
   permutation): **full 21.4 → 15.6 ms (34.7 GB/s), PASS maxrel 4.6e-6** —
-  level with FLM's closed lm_head (15.4). The activation table code is now
+  level with OFLM's closed lm_head (15.4). The activation table code is now
   `gemv_tab.h`, shared by both kernels.
   **27B decode step: 313 → 208 ms (4.8 tok/s), same load, logits corr
   0.999998, same argmax / top-5** (`run_27b_item5c.log`): me 1.85 ms/layer

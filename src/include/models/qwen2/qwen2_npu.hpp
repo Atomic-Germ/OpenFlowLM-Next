@@ -1,6 +1,6 @@
 /// \file qwen2_npu.hpp
 /// \brief qwen2_npu class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-01-23
 /// \version 0.9.28
 /// \note This is a header file for the qwen2_npu class

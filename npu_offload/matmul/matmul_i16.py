@@ -30,7 +30,7 @@ tile_ty = np.ndarray[(DIM_M, DIM_K), np.dtype[np.int16]]
 tile_ty_b = np.ndarray[(DIM_K, DIM_N), np.dtype[np.int16]]
 tile_ty_c = np.ndarray[(DIM_M, DIM_N), np.dtype[np.int32]]
 
-_MM_SRC = Path("/home/atomic-germ/Projects/FastFlowLM_v1.0.1-add/ironvenv/"
+_MM_SRC = Path("/home/atomic-germ/Projects/OpenFlowLM_v1.0.1-add/ironvenv/"
                "lib/python3.13/site-packages/mlir_aie/include/aie_kernels/aie2p/mm.cc")
 
 

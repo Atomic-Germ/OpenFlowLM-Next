@@ -5,12 +5,12 @@ nav_order: 5
 parent: Local Server (Server Mode)
 ---
 
-# ⚡ RAG with LangChain + FastFlowLM + FAISS (Windows, Offline)
+# ⚡ RAG with LangChain + OpenFlowLM + FAISS (Windows, Offline)
 
 This guide walks you through building a **Retrieval-Augmented Generation (RAG)** system using:
 
 - ✅ **LangChain** for orchestration  
-- ✅ **FastFlowLM** as a local LLM backend (drop-in replacement for Ollama)  
+- ✅ **OpenFlowLM** as a local LLM backend (drop-in replacement for Ollama)  
 - ✅ **HuggingFace Embeddings** via `sentence-transformers`  
 - ✅ **FAISS** for fast vector search  
 - ✅ **Multiple .txt files** loaded from a folder  
@@ -27,15 +27,15 @@ This guide walks you through building a **Retrieval-Augmented Generation (RAG)**
 - VS Code (recommended)
 - PowerShell
 
-### ✅ Install FastFlowLM (local server)
+### ✅ Install OpenFlowLM (local server)
 
 Download from GitHub Releases:  
-👉 https://github.com/ROCm/FastFlowLM
+👉 https://github.com/Atomic-Germ/OpenFlowLM
 
 Launch the server:
 
 ```shell
-flm serve llama3.2:3b
+oflm serve llama3.2:3b
 ```
 
 > This exposes a REST API at `http://127.0.0.1:52625` by default.
@@ -47,8 +47,8 @@ flm serve llama3.2:3b
 ### 1. Create a virtual environment
 
 ```shell
-mkdir rag_with_flm
-cd rag_with_flm
+mkdir rag_with_oflm
+cd rag_with_oflm
 python -m venv rag-env
 .\rag-env\Scripts\activate
 ```
@@ -66,15 +66,15 @@ python -m venv rag-env
 pip install -U langchain langchain-community langchain-huggingface sentence-transformers faiss-cpu tiktoken ollama langchain-ollama
 ```
 
-> ✅ We still install the `ollama` Python package because **LangChain’s `OllamaLLM` class can be pointed at any local REST backend like FastFlowLM**.  
-> 🔁 `Ollama` and `FastFlowLM` use the same base URL `base_url="http://127.0.0.1:52625"`. Thus, they are interchangeable.
+> ✅ We still install the `ollama` Python package because **LangChain’s `OllamaLLM` class can be pointed at any local REST backend like OpenFlowLM**.  
+> 🔁 `Ollama` and `OpenFlowLM` use the same base URL `base_url="http://127.0.0.1:52625"`. Thus, they are interchangeable.
 
 ---
 
 ## 📂 Project Structure
 
 ```
-rag_with_flm/
+rag_with_oflm/
 ├── docs/
 │   ├── un_history.txt
 │   ├── peacekeeping.txt
@@ -117,7 +117,7 @@ from langchain_community.document_loaders import TextLoader, DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_ollama import OllamaLLM  # still used to wrap FastFlowLM!
+from langchain_ollama import OllamaLLM  # still used to wrap OpenFlowLM!
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 
@@ -155,7 +155,7 @@ prompt = PromptTemplate(
     template=prompt_template
 )
 
-# ✅ FastFlowLM via OllamaLLM (optional: custom base_url)
+# ✅ OpenFlowLM via OllamaLLM (optional: custom base_url)
 llm = OllamaLLM(model="llama3.2:3b", base_url="http://127.0.0.1:52625")
 
 # Build Retrieval-Augmented QA chain
@@ -184,10 +184,10 @@ for i, doc in enumerate(result["source_documents"]):
 
 ## ▶️ Run It
 
-Start your FastFlowLM server in one terminal:
+Start your OpenFlowLM server in one terminal:
 
 ```bash
-flm serve llama3.2:3b
+oflm serve llama3.2:3b
 ```
 
 Then in another terminal (with env activated):

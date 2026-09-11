@@ -1,4 +1,4 @@
-# FLM Q4NX Converter
+# OFLM Q4NX Converter
 
 A utility for converting GGUF model files, usually fine-tunes, into the Q4NX format. This tool supports converting language, vision, and audio model weights.
 
@@ -67,7 +67,7 @@ shot:
 ```bash
 q4nx-build --open-embedding -i google/embeddinggemma-300m \
   -o ~/Embedding-Gemma-300M-OpenNPU2 \
-  --npu-assets ~/.config/flm/models/.../npu_matmul_f32
+  --npu-assets ~/.config/oflm/models/.../npu_matmul_f32
 ```
 
 `-i` accepts either an HF repo id or a local model directory. The output
@@ -138,7 +138,7 @@ build artifact; exclude it when uploading the repo directory.
 
 1. **Base chain** — it follows the `base_model` frontmatter up the tree
    (`numind/NuExtract3-GGUF -> numind/NuExtract3 -> Qwen/Qwen3.5-4B -> ...`) and stops at the first
-   ancestor with a `{org}/{base}-NPU2` mirror. Orgs are tried in order: **Atomic-Germ**, then **FastFlowLM**.
+   ancestor with a `{org}/{base}-NPU2` mirror. Orgs are tried in order: **Atomic-Germ**, then **OpenFlowLM**.
    That mirror becomes the `-s` skeleton source for tokenizer/config/vision assets.
 2. **Weights type** — VLM pipeline tags (`image-text-to-text`, ...) or vision tags imply `-t vision`
    (language + vision weights); otherwise language.
@@ -227,7 +227,7 @@ The conversion process works as follows:
 
 1. The converter reads the quantization type of each tensor from the GGUF file.
 2. If the tensor is not already in the expected format (Q4_0 or Q4_1, depending on the model config), it is dequantized to FP32.
-3. The dequantized weights are then re-quantized into the target format required by FLM.
+3. The dequantized weights are then re-quantized into the target format required by OFLM.
 
 This process is fully automatic and requires no additional flags beyond **`-f`** if the architecture cannot be auto-detected.
 
@@ -246,9 +246,9 @@ python convert.py -i Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf -o un
 Here, **`-f qwen3.5-9B`** tells the converter to use the Qwen 3.5 9B architecture, since the GGUF metadata from the community model may not be detected correctly.
 
 
-## Step-by-Step Converting and Registering Custom FLM Models
+## Step-by-Step Converting and Registering Custom OFLM Models
 
-This guide walks you through how to convert a supported GGUF model into FLM's Q4NX format, then either:
+This guide walks you through how to convert a supported GGUF model into OFLM's Q4NX format, then either:
 
 - **replace an existing installed model**, or
 - **register your converted weights as a separate custom model**
@@ -261,9 +261,9 @@ The examples below use **`qwen3vl-it:4b`**, but the same overall workflow applie
 
 Make sure you have:
 
-- **FLM** installed on your system
+- **OFLM** installed on your system
 - a **supported GGUF model file**
-- the **FLM converter**
+- the **OFLM converter**
 - the correct **conversion type** for your model family
 
 #### Important compatibility note
@@ -281,7 +281,7 @@ If the source GGUF file uses a different quantization format (such as Q4_K_M or 
 
 ### Option 1: Replace an Existing Installed Model
 
-Choose this option if you want to **swap the original FLM model weights** with your own converted weights while keeping the same model name and launch command.
+Choose this option if you want to **swap the original OFLM model weights** with your own converted weights while keeping the same model name and launch command.
 
 #### Step 1: Download a compatible GGUF model
 
@@ -291,7 +291,7 @@ Before continuing, verify that:
 
 - the model is compatible with the converter
 - the quantization matches the expected format for the model family
-- you know which FLM model you plan to replace
+- you know which OFLM model you plan to replace
 
 For the `qwen3vl` family, make sure the GGUF model matches **Q4_1** expectations.
 
@@ -318,20 +318,20 @@ For vision-language models such as Qwen3-VL, this may include files such as:
 
 ---
 
-#### Step 3: Locate the installed FLM model directory
+#### Step 3: Locate the installed OFLM model directory
 
-Find the installed FLM model directory for the model you want to replace.
+Find the installed OFLM model directory for the model you want to replace.
 
 **Default model paths**
 
 **Windows**
 ```text
-C:\Users\<username>\Documents\flm\models\Qwen3-VL-4B-Instruct-NPU2
+C:\Users\<username>\Documents\oflm\models\Qwen3-VL-4B-Instruct-NPU2
 ```
 
 **Linux**
 ```text
-/home/<username>/.config/flm/models/Qwen3-VL-4B-Instruct-NPU2
+/home/<username>/.config/oflm/models/Qwen3-VL-4B-Instruct-NPU2
 ```
 
 > Replace `<username>` with your actual system username.
@@ -340,14 +340,14 @@ C:\Users\<username>\Documents\flm\models\Qwen3-VL-4B-Instruct-NPU2
 
 #### Step 4: Replace the existing Q4NX file or files
 
-Copy the newly converted files from your output folder into the installed FLM model directory.
+Copy the newly converted files from your output folder into the installed OFLM model directory.
 
 Replace the corresponding existing file(s), such as:
 
 - `model.q4nx`
 - `vision_weights.q4nx`
 
-Be careful to preserve the original filenames expected by FLM.
+Be careful to preserve the original filenames expected by OFLM.
 
 **Recommended best practice**
 
@@ -360,22 +360,22 @@ Before replacing anything, create a backup of the original model folder or at le
 Once the replacement files are in place, start the model using either of the following commands:
 
 ```bash
-flm run qwen3vl:4b
+oflm run qwen3vl:4b
 ```
 
 or
 
 ```bash
-flm serve qwen3vl:4b
+oflm serve qwen3vl:4b
 ```
 
-If the conversion and replacement were successful, FLM should now load your custom-converted weights under the original model name.
+If the conversion and replacement were successful, OFLM should now load your custom-converted weights under the original model name.
 
 ---
 
 ### Option 2: Add a Custom Model Configuration
 
-Choose this option if you want to **keep the original FLM model intact** and register your converted model as a **separate custom model**.
+Choose this option if you want to **keep the original OFLM model intact** and register your converted model as a **separate custom model**.
 
 This is the safer and more flexible option, especially if you want to compare the original model with your custom version.
 
@@ -388,20 +388,20 @@ Then continue below.
 
 ---
 
-#### Step 1: Open the main FLM models directory
+#### Step 1: Open the main OFLM models directory
 
-Locate the main FLM models directory.
+Locate the main OFLM models directory.
 
 **Default model paths**
 
 **Windows**
 ```text
-C:\Users\<username>\Documents\flm\models\
+C:\Users\<username>\Documents\oflm\models\
 ```
 
 **Linux**
 ```text
-/home/<username>/.config/flm/models/
+/home/<username>/.config/oflm/models/
 ```
 
 ---
@@ -433,24 +433,24 @@ Typical files include:
 - `model.q4nx`
 - `vision_weights.q4nx`
 
-Make sure the filenames match what FLM expects for that model.
+Make sure the filenames match what OFLM expects for that model.
 
 ---
 
 #### Step 4: Edit `model_list.json`
 
-Open your FLM installation directory and locate `model_list.json`.
+Open your OFLM installation directory and locate `model_list.json`.
 
 **Default installation paths**
 
 **Windows**
 ```text
-C:\Program Files\flm
+C:\Program Files\oflm
 ```
 
 **Linux**
 ```text
-/opt/fastflowlm/share/flm
+/opt/openflowlm/share/oflm
 ```
 
 You now have two ways to register your custom model:
@@ -469,10 +469,10 @@ Add a new entry under `models`:
 "qwen3vl-it-custom": {
    "4b": {
       "name": "Qwen3-VL-4B-Custom",
-      "url": "https://huggingface.co/FastFlowLM/Qwen3-VL-4B-Custom/resolve/v0.9.22-faster-q4-1",
-      "file_url": "https://huggingface.co/api/models/FastFlowLM/Qwen3-VL-4B-Custom/tree/v0.9.22-faster-q4-1",
+      "url": "https://huggingface.co/OpenFlowLM/Qwen3-VL-4B-Custom/resolve/v0.9.22-faster-q4-1",
+      "file_url": "https://huggingface.co/api/models/OpenFlowLM/Qwen3-VL-4B-Custom/tree/v0.9.22-faster-q4-1",
       "size": 4000000000,
-      "flm_min_version": "0.9.22",
+      "oflm_min_version": "0.9.22",
       "files": [
          "config.json",
          "model.q4nx",
@@ -507,10 +507,10 @@ Add a new sub-entry under the existing `qwen3vl-it` model family.
 "qwen3vl-it": {
    "4b-custom": {
       "name": "Qwen3-VL-4B-Custom",
-      "url": "https://huggingface.co/FastFlowLM/Qwen3-VL-4B-Custom/resolve/v0.9.22-faster-q4-1",
-      "file_url": "https://huggingface.co/api/models/FastFlowLM/Qwen3-VL-4B-Custom/tree/v0.9.22-faster-q4-1",
+      "url": "https://huggingface.co/OpenFlowLM/Qwen3-VL-4B-Custom/resolve/v0.9.22-faster-q4-1",
+      "file_url": "https://huggingface.co/api/models/OpenFlowLM/Qwen3-VL-4B-Custom/tree/v0.9.22-faster-q4-1",
       "size": 4000000000,
-      "flm_min_version": "0.9.22",
+      "oflm_min_version": "0.9.22",
       "files": [
          "config.json",
          "model.q4nx",
@@ -537,10 +537,10 @@ Add a new sub-entry under the existing `qwen3vl-it` model family.
 
 **Note on `url` and `file_url`**
 
-The `url` and `file_url` fields only matter when FLM needs to fetch the model from a remote source, for example when you run:
+The `url` and `file_url` fields only matter when OFLM needs to fetch the model from a remote source, for example when you run:
 
 ```bash
-flm pull <custom-model-name>
+oflm pull <custom-model-name>
 ```
 
 If you want that workflow to work, make sure:
@@ -548,14 +548,14 @@ If you want that workflow to work, make sure:
 - the model files are already uploaded and reachable online
 - the `files` list matches what is actually hosted
 
-In this guide, you have already copied all required model files into the local model directory manually, FLM can load them directly from disk. In that case, `url` and `file_url` can be dummy placeholder values and do not need to point to real hosted files.
+In this guide, you have already copied all required model files into the local model directory manually, OFLM can load them directly from disk. In that case, `url` and `file_url` can be dummy placeholder values and do not need to point to real hosted files.
 
 
 ---
 
 #### Step 5: Copy the matching `xclbins/` folder
 
-In the FLM installation directory, open the `xclbins/` folder.
+In the OFLM installation directory, open the `xclbins/` folder.
 
 If you created a **standalone custom model**, copy:
 
@@ -575,12 +575,12 @@ This folder name should match the `"name"` value used in your custom model entry
 
 ---
 
-#### Step 6: Confirm that FLM recognizes the custom model
+#### Step 6: Confirm that OFLM recognizes the custom model
 
 Run:
 
 ```bash
-flm list
+oflm list
 ```
 
 You should see one of the following in the output:
@@ -588,7 +588,7 @@ You should see one of the following in the output:
 - `qwen3vl-it-custom:4b` for a **standalone model**
 - `qwen3vl-it:4b-custom` for a **submodel** of qwen3vl-it family
 
-If the new model appears in the list, FLM has recognized your configuration successfully.
+If the new model appears in the list, OFLM has recognized your configuration successfully.
 
 ---
 
@@ -599,25 +599,25 @@ Use the command that matches the registration style you chose.
 **Standalone model**
 
 ```bash
-flm run qwen3vl-it-custom:4b
+oflm run qwen3vl-it-custom:4b
 ```
 
 or
 
 ```bash
-flm serve qwen3vl-it-custom:4b
+oflm serve qwen3vl-it-custom:4b
 ```
 
 **Submodel**
 
 ```bash
-flm run qwen3vl-it:4b-custom
+oflm run qwen3vl-it:4b-custom
 ```
 
 or
 
 ```bash
-flm serve qwen3vl-it:4b-custom
+oflm serve qwen3vl-it:4b-custom
 ```
 
 

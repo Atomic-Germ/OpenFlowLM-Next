@@ -1,6 +1,6 @@
 /// \file audio_reader.cpp
 /// \brief AudioReader implementation – decode and resample audio via FFmpeg
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 
 #include "audio/audio_reader.hpp"
 #include <iostream>

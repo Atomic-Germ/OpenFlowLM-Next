@@ -1,6 +1,6 @@
 /// \file tensor_2d.hpp
 /// \brief tensor_2d class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is a helper class for managing 2D buffers.

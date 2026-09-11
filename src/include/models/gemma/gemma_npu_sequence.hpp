@@ -1,6 +1,6 @@
 /// \file gemma_npu_sequence.hpp
 /// \brief gemma_npu_sequence class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-01-07
 /// \version 0.9.25
 /// \note This is a header file for the gemma_npu_sequence class

@@ -8,7 +8,7 @@
 
 #pragma once
 #include "AutoModel/automodel.hpp"
-#ifdef FLM_USE_OPEN_QWEN36
+#ifdef OFLM_USE_OPEN_QWEN36
 #include "open_qwen36/engine.hpp"
 #endif
 
@@ -18,7 +18,7 @@ private:
     void setup_tokenizer(std::string model_path);
 
 public:
-    Granite(flm_rt::device* npu_device_inst);
+    Granite(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     bool insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled = [] { return false; }) override;

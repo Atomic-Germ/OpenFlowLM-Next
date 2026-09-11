@@ -1,6 +1,6 @@
 ---
 name: open-phi3-nanbeige-kernels
-description: Build, verify and serve the open XDNA2 kernel sets for Phi-4-mini (the phi3 recipe: a 96-of-128 rotation and longrope) and Nanbeige4.1-3B (the llama3 recipe at 20 heads over 4). Use when re-exporting either, adding another Phi-3 or Nanbeige size, when a Phi export dies in Peano on a rename, or when `flm serve` segfaults on the first request for a model whose adapter still casts to its closed engine class.
+description: Build, verify and serve the open XDNA2 kernel sets for Phi-4-mini (the phi3 recipe: a 96-of-128 rotation and longrope) and Nanbeige4.1-3B (the llama3 recipe at 20 heads over 4). Use when re-exporting either, adding another Phi-3 or Nanbeige size, when a Phi export dies in Peano on a rename, or when `oflm serve` segfaults on the first request for a model whose adapter still casts to its closed engine class.
 ---
 
 # Phi-4-mini and Nanbeige4.1-3B on the dense recipe
@@ -16,8 +16,8 @@ OPEN-FAMILY-LLAMA3; hardware log `.claude/plans/b-hw-results.md` (gitignored).
 source ~/ironenv142/bin/activate
 export PATH=~/xrt-tools/bin:$PATH LD_LIBRARY_PATH=~/xrt-tools/lib     # both, or xclbinutil dies late
 cd /mnt/c/code/openflowlm-next
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Phi4-mini-Instruct-NPU2
-python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Nanbeige4.1-3B-NPU2
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Phi4-mini-Instruct-NPU2
+python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Nanbeige4.1-3B-NPU2
 ```
 
 Sets: `dense/build_phi3_h3072` + `ln/build_3072_1e-05` + `lm_head_q4/build_200064`, and
@@ -67,15 +67,15 @@ The OPEN-FAMILY-QWEN3 procedure; `.claude/plans/validate_b.ps1` runs it end to e
 
 Phi's first token is `<|user|>` (no bos); Nanbeige's is `<|im_start|>`. `chat.py` has both
 templates. Nanbeige is a reasoning model with no off switch: every answer opens `<think>`,
-so `flm-test --llm` needs a real generation budget (`--gen-lim 4000`; 600 leaves the answer
+so `oflm-test --llm` needs a real generation budget (`--gen-lim 4000`; 600 leaves the answer
 column empty) and its greedy opening "Weimplify is asked:" is the quantized model, not the
 kernels (24/24 positions of a decode chain match the fp64 replica).
 
 ## Traps
 
-- **`flm serve` segfaults on the first request** if the adapter reaches its closed engine
+- **`oflm serve` segfaults on the first request** if the adapter reaches its closed engine
   through `dynamic_cast<xxx_npu*>` (Nanbeige did, for checkpoint/restore). On the open
   engine that cast is null. Use the `causal_lm` virtuals (`this->lm_engine->checkpoint()`).
 - The app finds a set at `<root>/xclbins/<model>/open_kernels`; for a one-off serve check
-  `FLM_OPEN_KERNELS_DIR=<dir>` wins. `FLM_SERVE_PORT=52626` (52625 is often taken).
-- Kill `flm.exe` after a serve check or the next Ninja build fails in its copy step.
+  `OFLM_OPEN_KERNELS_DIR=<dir>` wins. `OFLM_SERVE_PORT=52626` (52625 is often taken).
+- Kill `oflm.exe` after a serve check or the next Ninja build fails in its copy step.

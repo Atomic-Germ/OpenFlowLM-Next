@@ -1,6 +1,6 @@
 /// \file phi4_npu_sequence.hpp
 /// \brief phi4_npu_sequence class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.10
 /// \note This is a header file for the phi4_npu_sequence class

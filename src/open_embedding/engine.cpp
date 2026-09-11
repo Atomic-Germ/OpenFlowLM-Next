@@ -13,13 +13,13 @@
 #include "nlohmann/json.hpp"
 #include "tokenizers_cpp.h"
 
-#ifdef FLM_USE_OPEN_EMBEDDING_NPU
+#ifdef OFLM_USE_OPEN_EMBEDDING_NPU
 #include "npu_utils/npu_utils_matmul.hpp"
 #endif
 
 // Declared at global scope rather than including utils/utils.hpp: that header
 // pulls in the XRT-dependent buffer/typedef chain, and the engine only needs
-// this one resolver. Both the flm target and the standalone test link
+// this one resolver. Both the oflm target and the standalone test link
 // common/utils.cpp.
 namespace utils {
 std::string find_xclbin_path();
@@ -163,14 +163,14 @@ std::string Engine::pick_npu_asset_dir() const {
 }
 
 bool Engine::load_npu() {
-#ifdef FLM_USE_OPEN_EMBEDDING_NPU
-    if (std::getenv("FLM_NPU_DISABLE")) return false;
+#ifdef OFLM_USE_OPEN_EMBEDDING_NPU
+    if (std::getenv("OFLM_NPU_DISABLE")) return false;
     const std::string asset_dir = pick_npu_asset_dir();
     if (asset_dir.empty()) {
         std::fprintf(stderr, "open_embedding: running CPU-only\n");
         return false;
     }
-    const char* dev_id = std::getenv("FLM_NPU_DEVICE_ID");
+    const char* dev_id = std::getenv("OFLM_NPU_DEVICE_ID");
     npu_ = std::make_shared<NpuMatmul>();
     if (!npu_->init(asset_dir, dev_id ? dev_id : "")) {
         npu_.reset();
@@ -301,7 +301,7 @@ bool Engine::ensure_manifest() {
         }
 
         json out = json::object();
-        out["format"] = "flm-open-embedding-manifest-v1";
+        out["format"] = "oflm-open-embedding-manifest-v1";
         out["config"] = "config.json";
         out["tokenizer"] = "tokenizer.json";
         auto& jt = out["tensors"] = json::object();
@@ -419,7 +419,7 @@ void Engine::matmul_t(const std::vector<float>& x, const std::vector<float>& w, 
 void Engine::matmul_t_npu(const std::string& name, const std::vector<float>& x, size_t M, size_t K, size_t N,
                           std::vector<float>& y) {
     const std::vector<float>& w = weight(name);
-#ifdef FLM_USE_OPEN_EMBEDDING_NPU
+#ifdef OFLM_USE_OPEN_EMBEDDING_NPU
     if (npu_ && M > 0 && M <= 2048) {
         const int m_pad = npu_->m_pad_for(static_cast<int>(K), static_cast<int>(N),
                                           static_cast<int>(M));

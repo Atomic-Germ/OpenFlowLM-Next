@@ -1,6 +1,6 @@
 /// \file engine.hpp
 /// \brief Open CPU implementation of google/embeddinggemma-300m
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-08-30
 /// \version 0.1.0
 /// \note Fully open replacement for the closed libgemma_embedding.so stack.

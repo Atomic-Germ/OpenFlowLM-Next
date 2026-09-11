@@ -25,7 +25,8 @@ namespace open_qwen36 {
 
 namespace fs = std::filesystem;
 
-std::string Engine::find_kernels(const LM_Config& config) {
+std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
+    auto chose = [how](const char* where) { if (how) *how = where; };
     // A kernel set is a manifest.json plus every xclbin / insts.bin it names.
     auto complete = [](const fs::path& dir, std::string* why) {
         std::error_code ec;
@@ -41,15 +42,15 @@ std::string Engine::find_kernels(const LM_Config& config) {
         return true;
     };
     std::string why;
-    if (const char* env = std::getenv("FLM_OPEN_KERNELS_DIR")) {
-        if (complete(env, &why)) return env;
-        std::fprintf(stderr, "open_qwen36: FLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
+    if (const char* env = std::getenv("OFLM_OPEN_KERNELS_DIR")) {
+        if (complete(env, &why)) { chose("OFLM_OPEN_KERNELS_DIR"); return env; }
+        std::fprintf(stderr, "open_qwen36: OFLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
     }
     fs::path local = fs::path(config.model_path) / "open_kernels";
-    if (complete(local, &why)) return local.string();
+    if (complete(local, &why)) { chose("beside the model"); return local.string(); }
     // Every xclbins root the closed path would consider, not just the first one
-    // find_xclbin_path() happens to return: flm-add links a set under the user
-    // root ($FLM_XCLBIN_PATH / ~/.config/flm) while the shipped sets live in the
+    // find_xclbin_path() happens to return: oflm-add links a set under the user
+    // root ($OFLM_XCLBIN_PATH / ~/.config/oflm) while the shipped sets live in the
     // install tree, and whichever root wins there would otherwise hide the other.
     std::vector<std::string> roots = utils::xclbin_roots();
     // config.exec_path is find_xclbin_path()'s single winner, already in the list above --
@@ -60,20 +61,27 @@ std::string Engine::find_kernels(const LM_Config& config) {
     }
     for (const std::string& r : roots) {
         fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
-        if (complete(cand, &why)) return cand.string();
+        if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
     }
     return {};
 }
 
-Engine::Engine(const LM_Config& config, flm_rt::device* dev, int MAX_L) : dev_(dev) {
+Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(dev) {
     cfg_.model_dir = config.model_path;
-    cfg_.kernel_dir = find_kernels(config);
+    std::string how;
+    cfg_.kernel_dir = find_kernels(config, &how);
     if (cfg_.kernel_dir.empty())
         throw std::runtime_error("open_qwen36: no open kernels found for " + config.model_name +
-                                 " (set FLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
+                                 " (set OFLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
-    if (const char* tm = std::getenv("FLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
-    cfg_.verbose = std::getenv("FLM_OPEN_QUIET") == nullptr;
+    if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
+    cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
+    // Say which set won. Three rules can pick one, and every one of them yields
+    // valid output -- so a set chosen against the user's intent looks exactly
+    // like the right one. An A/B that silently ran identical kernels twice, and
+    // read as "no measurable effect", is what this line exists to prevent (#35).
+    if (cfg_.verbose)
+        std::fprintf(stderr, "open_qwen36: kernels %s (%s)\n", cfg_.kernel_dir.c_str(), how.c_str());
     core_ = std::make_unique<Core>(cfg_, dev_);
     logits_.assign(core_->vocab(), bf16(0.f));
 }
@@ -146,7 +154,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // Test the VALUE, not just presence: the docs say =1, and
             // FLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
             // that gets diagnosed as a different bug entirely (review on #39).
-            const char* gemm_block_env = std::getenv("FLM_OPEN_GEMM_BLOCK");
+            const char* gemm_block_env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
@@ -175,7 +183,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     // same counter (Core::mrope_*), and later chunks / generated tokens inherit it.
     if (!core_->has_mrope() || core_->image_token_id() < 0)
         throw std::runtime_error("open_qwen36: config.json carries no image_token_id / mrope_section for this model; "
-                                 "images need the closed engine (FLM_QWEN36_ENGINE=closed)");
+                                 "images need the closed engine (OFLM_QWEN36_ENGINE=closed)");
     // The app hands its own family's payload struct (qwen3_6_moe_image_payload_t /
     // qwen3_5vl_image_payload_t -- the same fields); read it through the one matching the
     // kernel set's family.

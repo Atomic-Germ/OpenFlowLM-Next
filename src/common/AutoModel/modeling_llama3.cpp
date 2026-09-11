@@ -1,6 +1,6 @@
 /// \file llama3.cpp
 /// \brief llama3 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.24
 /// \note This is a source file for the llama3 class
@@ -8,14 +8,14 @@
 #include "AutoModel/modeling_llama3.hpp"
 
 /************              Llama3 family            **************/
-Llama3::Llama3(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Llama3") {}
+Llama3::Llama3(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Llama3") {}
 
 void Llama3::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
 
     // The engine: the open kernels when installed for this model, the closed
     // llama_npu DLL otherwise (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_LLAMA_ENGINE", "Llama 3");
+    auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "Llama 3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -96,7 +96,7 @@ std::string Llama3::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform
 }
 
 /************              DeepSeek_r1_8b family            **************/
-DeepSeek_r1_8b::DeepSeek_r1_8b(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
+DeepSeek_r1_8b::DeepSeek_r1_8b(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void DeepSeek_r1_8b::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -104,7 +104,7 @@ void DeepSeek_r1_8b::load_model(std::string model_path, json model_info, int def
     // A Llama 3.1 8B distill, so the same choice as Llama3: the open kernels
     // when installed for this model, the closed llama_npu DLL otherwise
     // (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_LLAMA_ENGINE", "DeepSeek-R1");
+    auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "DeepSeek-R1");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -258,7 +258,7 @@ std::string DeepSeek_r1_8b::generate(chat_meta_info_t& meta_info, int length_lim
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     result = "<think>\n\n" + result;
     return result;
 }

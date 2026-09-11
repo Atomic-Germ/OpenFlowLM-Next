@@ -1,6 +1,6 @@
 ﻿/// \file deepseek.cpp
 /// \brief deepseek class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-01
 /// \version 0.9.24
 /// \note This is a source file for the deepseek class
@@ -10,14 +10,14 @@
 
 
 /************              Qwen3 family            **************/
-Qwen3::Qwen3(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen3") {}
+Qwen3::Qwen3(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Qwen3") {}
 
 void Qwen3::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
 
     // The engine: the open kernels when installed for this model, the closed
     // qwen3_npu DLL otherwise (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "Qwen3");
+    auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -217,7 +217,7 @@ std::string Qwen3::generate(chat_meta_info_t& meta_info, int length_limit, std::
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 
@@ -312,7 +312,7 @@ StreamResult Qwen3::parse_stream_content(const std::string content) {
 }
 
 /************              Qwen3_IT family            **************/
-Qwen3_IT::Qwen3_IT(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
+Qwen3_IT::Qwen3_IT(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void Qwen3_IT::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -320,7 +320,7 @@ void Qwen3_IT::load_model(std::string model_path, json model_info, int default_c
     // Qwen3 dense, same as Qwen3: the open kernels when installed for this
     // model, the closed qwen3_npu DLL otherwise
     // (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "Qwen3-IT");
+    auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3-IT");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -468,7 +468,7 @@ StreamResult Qwen3_IT::parse_stream_content(const std::string content) {
 }
 
 /************              Qwen3_TK family            **************/
-Qwen3_TK::Qwen3_TK(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
+Qwen3_TK::Qwen3_TK(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void Qwen3_TK::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -476,7 +476,7 @@ void Qwen3_TK::load_model(std::string model_path, json model_info, int default_c
     // Qwen3 dense, same as Qwen3: the open kernels when installed for this
     // model, the closed qwen3_npu DLL otherwise
     // (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "Qwen3-TK");
+    auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "Qwen3-TK");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -653,7 +653,7 @@ std::string Qwen3_TK::generate(chat_meta_info_t& meta_info, int length_limit, st
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 
@@ -695,7 +695,7 @@ StreamResult Qwen3_TK::parse_stream_content(const std::string content) {
 }
 
 /************              DeepSeek_r1_0528_8b family            **************/
-DeepSeek_r1_0528_8b::DeepSeek_r1_0528_8b(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
+DeepSeek_r1_0528_8b::DeepSeek_r1_0528_8b(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst) {}
 
 void DeepSeek_r1_0528_8b::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
@@ -703,7 +703,7 @@ void DeepSeek_r1_0528_8b::load_model(std::string model_path, json model_info, in
     // A Qwen3 dense distill, so the same choice as Qwen3: the open kernels when
     // installed for this model, the closed qwen3_npu DLL otherwise
     // (AutoModel::_shared_select_open_engine).
-    auto open_engine = this->_shared_select_open_engine("FLM_QWEN3_ENGINE", "DeepSeek-R1-0528");
+    auto open_engine = this->_shared_select_open_engine("OFLM_QWEN3_ENGINE", "DeepSeek-R1-0528");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
     }
@@ -858,7 +858,7 @@ std::string DeepSeek_r1_0528_8b::generate(chat_meta_info_t& meta_info, int lengt
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 

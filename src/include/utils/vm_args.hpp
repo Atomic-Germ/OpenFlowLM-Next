@@ -1,6 +1,6 @@
 /// \file vm_args.hpp
 /// \brief vm_args class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-06-24
 /// \version 0.9.24
 /// \note This class is used to parse the command line arguments.
@@ -18,7 +18,7 @@ namespace arg_utils {
 namespace po = boost::program_options;
 
 inline void print_help(po::options_description& general) {
-    std::cout << "Usage: flm <command> [options] [model_tag]" << std::endl;
+    std::cout << "Usage: oflm <command> [options] [model_tag]" << std::endl;
     std::cout << std::endl;
     std::cout << "Commands:" << std::endl;
     std::cout << "  run <model_tag>     - Run the model interactively" << std::endl;
@@ -34,26 +34,26 @@ inline void print_help(po::options_description& general) {
     std::cout << std::endl;
     std::cout << general << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "\tflm run llama3.2:1b" << std::endl;
-    std::cout << "\tflm run llama3.2:1b --asr 1" << std::endl;
-    std::cout << "\tflm run llama3.2:1b --modelscope 1" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --pmode balanced" << std::endl;
-    std::cout << "\tflm pull llama3.2:1b --force" << std::endl;
-    std::cout << "\tflm pull llama3.2:1b --modelscope 1" << std::endl;
-    std::cout << "\tflm check llama3.2:1b" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --ctx-len 8192" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --prefill-chunk-len 8192" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --socket 10" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --q-len 10" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --port 8000" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --cors 0" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --asr 1" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --embed 1" << std::endl;
-    std::cout << "\tflm serve llama3.2:1b --modelscope 1" << std::endl;
-    std::cout << "\tflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
-    std::cout << "\tflm list" << std::endl;
-    std::cout << "\tflm list --quiet" << std::endl;
-    std::cout << "\tflm list --filter installed" << std::endl;
+    std::cout << "\toflm run llama3.2:1b" << std::endl;
+    std::cout << "\toflm run llama3.2:1b --asr 1" << std::endl;
+    std::cout << "\toflm run llama3.2:1b --modelscope 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --pmode balanced" << std::endl;
+    std::cout << "\toflm pull llama3.2:1b --force" << std::endl;
+    std::cout << "\toflm pull llama3.2:1b --modelscope 1" << std::endl;
+    std::cout << "\toflm check llama3.2:1b" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --ctx-len 8192" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --prefill-chunk-len 8192" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --socket 10" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --q-len 10" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --port 8000" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --cors 0" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --asr 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
+    std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
+    std::cout << "\toflm list" << std::endl;
+    std::cout << "\toflm list --quiet" << std::endl;
+    std::cout << "\toflm list --filter installed" << std::endl;
     std::cout << std::endl;
 }
 
@@ -144,7 +144,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
 
         if (vm.count("version")) {
             // Custom help formatting to match the desired style
-            std::cout << "FLM v" << __FLM_VERSION__ << std::endl;
+            std::cout << "OFLM v" << __OFLM_VERSION__ << std::endl;
             return false; // Exit after showing help
         }
 

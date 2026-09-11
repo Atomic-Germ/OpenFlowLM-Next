@@ -30,7 +30,7 @@ GGUF_LLAMA31_8B = {
     "llama.rope.scaling.factor": 8.0, "llama.rope.scaling.low_freq_factor": 1.0,
     "llama.rope.scaling.high_freq_factor": 4.0, "llama.rope.scaling.original_context_length": 8192,
 }
-# FastFlowLM/Llama-3.2-{3,1}B-NPU2 config.json, verbatim apart from FLM's addr_* keys.
+# OpenFlowLM/Llama-3.2-{3,1}B-NPU2 config.json, verbatim apart from OFLM's addr_* keys.
 # Both set tie_word_embeddings; both containers carry lm_head.weight as its own q4
 # tensor (I8 [48096, 5120] / [32064, 5120] = the whole 128256-row head).
 HF_LLAMA32_3B = {

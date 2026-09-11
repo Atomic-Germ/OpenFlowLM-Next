@@ -1,6 +1,6 @@
 /// \file qwen2.hpp
 /// \brief qwen2 class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.24
 /// \note This is a source file for the qwen2 class
@@ -17,7 +17,7 @@ private:
     void setup_tokenizer(std::string model_path);
 
 public:
-    Qwen2(flm_rt::device* npu_device_inst);
+    Qwen2(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_inf, int default_context_length = -1, bool enable_preemption = false) override;
     //void toggle_enable_think() override;

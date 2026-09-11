@@ -2,7 +2,7 @@
 //===- gemv_q8.h -------------------------------------------*- C++ -*-===//
 //
 // W8A16 GEMV on the main cores, against POOL-ORDER q8 HALF-TILES:
-//   y[N] += W[N, K] @ x[K],  W as FLM stores it at q8, no re-quantization.
+//   y[N] += W[N, K] @ x[K],  W as OFLM stores it at q8, no re-quantization.
 //
 // Sibling of gemv_q4.h (same activation table, same band, same y element); the
 // arithmetic is designs/lm_head_q8/lm_head_q8.h's `gemv_q8_tile` cut down to ONE

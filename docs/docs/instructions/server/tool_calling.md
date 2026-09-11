@@ -7,7 +7,7 @@ parent: Local Server (Server Mode)
 
 # 🔧 Tool Calling
 
-**Tool calling** (also known as **function calling**) provides a powerful and flexible way for FLM models to interface with external systems and access data outside their training data. This guide shows how you can connect a model to data and actions provided by your application. 
+**Tool calling** (also known as **function calling**) provides a powerful and flexible way for OFLM models to interface with external systems and access data outside their training data. This guide shows how you can connect a model to data and actions provided by your application. 
 
 ## ⚙️ How Tool Calling works
 
@@ -46,15 +46,15 @@ Let's begin by understanding a few key terms about tool calling. After we have a
    - Step 2:
 
       After receiving the **tool name** and **argument**, you can either   
-      - Invoke the tool manually using a [Python script](#-how-to-use-tool-calling-with-flm-via-python-script), or
+      - Invoke the tool manually using a [Python script](#-how-to-use-tool-calling-with-oflm-via-python-script), or
 
-      - Let a client that supports tool calling (e.g., [Open WebUI](#️-how-to-use-tool-calling-with-flm-in-open-webui)) automatically execute the tool.
+      - Let a client that supports tool calling (e.g., [Open WebUI](#️-how-to-use-tool-calling-with-oflm-in-open-webui)) automatically execute the tool.
 
       The **tool call output** might return a JSON object (e.g., `{"temperature": "25°C", "city": "New York"}`, indicating a current temperature of 25 degrees).
 
    - Step 3:
 
-      Finally, the messages containing **tool definition**, the **original prompt**, the model's **tool call**, and the **tool call output**, are combined either by [Python script](#-how-to-use-tool-calling-with-flm-via-python-script) or a client like [Open WebUI](#️-how-to-use-tool-calling-with-flm-in-open-webui) (as in Step 2) and sent back to the model.
+      Finally, the messages containing **tool definition**, the **original prompt**, the model's **tool call**, and the **tool call output**, are combined either by [Python script](#-how-to-use-tool-calling-with-oflm-via-python-script) or a client like [Open WebUI](#️-how-to-use-tool-calling-with-oflm-in-open-webui) (as in Step 2) and sent back to the model.
 
       The model then produces a natural-language response such as:
       ```
@@ -67,9 +67,9 @@ Let's begin by understanding a few key terms about tool calling. After we have a
 
 Tool calling has been supported since `v0.9.26`.
 
-Please refer to the [model card](https://fastflowlm.com/docs/models/) to see whether tool calling is supported for each model.
+Please refer to the [model card](https://openflowlm.com/docs/models/) to see whether tool calling is supported for each model.
 
-## 🐍 How to use tool calling with FLM via Python script
+## 🐍 How to use tool calling with OFLM via Python script
 
 This section walks through an end‑to‑end tool‑calling flow in both streaming and non‑streaming modes. 
 > ⚠️ This simulates a tool‑calling scenario; no real tools are executed.
@@ -82,10 +82,10 @@ A streaming‑mode example demonstrating how the `get_temperature` tool retrieve
 from openai import OpenAI
 import json
 
-# Connect to local FastFlowLM server
+# Connect to local OpenFlowLM server
 client = OpenAI(
     base_url="http://127.0.0.1:52625/v1",
-    api_key="flm",
+    api_key="oflm",
 )
 
 # OpenAI Chat Completions Tool definition
@@ -185,10 +185,10 @@ A non‑streaming example showing how the `get_horoscope` tool returns a daily h
 from openai import OpenAI
 import json
 
-# Connect to local FastFlowLM server
+# Connect to local OpenFlowLM server
 client = OpenAI(
     base_url="http://127.0.0.1:1234/v1",
-    api_key="flm",
+    api_key="oflm",
 )
 
 # OpenAI Chat Completions Tool definition
@@ -270,10 +270,10 @@ print(resp2.choices[0].message.content)
 
 ```
 
-## 🕸️ How to use tool calling with FLM in Open WebUI (Stream Mode Only)
+## 🕸️ How to use tool calling with OFLM in Open WebUI (Stream Mode Only)
 ### 🛠️ How to set up and use a tool
 
-1. Follow the quick Open WebUI setup guide [here](https://fastflowlm.com/docs/instructions/server/webui/#-run-open-webui-with-fastflowlm).
+1. Follow the quick Open WebUI setup guide [here](https://openflowlm.com/docs/instructions/server/webui/#-run-open-webui-with-openflowlm).
 
 2. Disable Builtin Tools (These may include functionality that could interfere with your expected results.)
     - In the **bottom-left corner** of the Open WebUI page, click the `User` icon, then select `Settings`.
@@ -296,7 +296,7 @@ print(resp2.choices[0].message.content)
     - Configure the tool as guided on the tool page if necessary (for example, provide an API key; in the `arXiv Search Tool` case, it's **not** needed).
     - Click `Save` in the **bottom-right corner**.
 
-5. Use `arXiv Search Tool` with your FLM tool-calling models.
+5. Use `arXiv Search Tool` with your OFLM tool-calling models.
     - Start a new chat.
     - Select a tool-calling model, such as `qwen3-it:4b` (One of the best-performing models in our tool‑calling tests).
     - Under the chat box, click the `Integration Icon` > `Tools` > activate `arXiv Search Tool`.
@@ -304,10 +304,10 @@ print(resp2.choices[0].message.content)
 
         (In `Default` mode, the tool definition and tool call output are treated as regular user content, meaning the model must interpret them purely through its own comprehension rather than using actual tool‑calling capabilities.)
     - Ask the model what tools it supports by entering a prompt like `What tools do you have?`. 
-    - For specific tasks, enter a direct request, for example: `Search for papers about Mamba LLM`. FLM together with Open WebUI will behave as follows:
-        - FLM receives the prompt and generates the **tool call** tokens, which are sent back to Open WebUI (Step 1).
+    - For specific tasks, enter a direct request, for example: `Search for papers about Mamba LLM`. OFLM together with Open WebUI will behave as follows:
+        - OFLM receives the prompt and generates the **tool call** tokens, which are sent back to Open WebUI (Step 1).
         - Open WebUI invokes the tool according to the **tool call** tokens and gets **tool call outputs** (Step 2).
-        - Open WebUI then combines all messages and sends them back to FLM, which produces the final answer containing the relevant list of papers (Step 3).
+        - Open WebUI then combines all messages and sends them back to OFLM, which produces the final answer containing the relevant list of papers (Step 3).
 
 
 ### ⭐ Recommended tools
@@ -336,7 +336,7 @@ Here we recommend some useful tools and walk you through their step‑by‑step 
 
 4. Start chatting! Choose a tool calling model such as `qwen3-it:4b` and test the tool by asking the model to search for content. You can try prompts like: 
     - "What tools do you have?" 
-    - "Search for YouTube videos about FastFlowLM."
+    - "Search for YouTube videos about OpenFlowLM."
     - "Play the first video."
 
 #### 🔍 Tool: Google PSE Search

@@ -1,6 +1,6 @@
 /// \file image_reader.cpp
 /// \brief image_reader class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-08-16
 /// \version 0.9.24
 /// \note This is a source file for the image_reader functions

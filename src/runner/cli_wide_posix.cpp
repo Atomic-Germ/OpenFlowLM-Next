@@ -2,7 +2,7 @@
 *  Copyright (c) 2026 Advanced Micro Devices, Inc.
 *  \file cli_wide_posix.cpp
 *  \brief CLI interactive input implementation for non-Windows platforms
-*  \author FastFlowLM Team
+*  \author OpenFlowLM Team
 *  \date 2026-02-03
 *  \version 0.9.24
 */

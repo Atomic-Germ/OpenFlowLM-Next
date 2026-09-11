@@ -1,6 +1,6 @@
 /// \file modeling_gemma4_12b.cpp
 /// \brief Gemma4_12B class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2026-08-25
 /// \version 0.9.45
 /// \note This is a source file for the Gemma4_12B class (text-only interface).
@@ -401,7 +401,7 @@ std::pair<std::string, json> parse_gemma4_12b_tool_content(std::string tool_cont
 
 
 /************              Gemma4_12B family            **************/
-Gemma4_12B::Gemma4_12B(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4_12B") {}
+Gemma4_12B::Gemma4_12B(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Gemma4_12B") {}
 
 void Gemma4_12B::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
 
@@ -565,7 +565,7 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
                     );
 
                     if (audio_chunks.size() > 1) {
-                        header_print_g("FLM", "Audio in message is split into " << audio_chunks.size() << " chunks for processing.");
+                        header_print_g("OFLM", "Audio in message is split into " << audio_chunks.size() << " chunks for processing.");
                     }
 
                     for (size_t c = 0; c < audio_chunks.size(); c++) {
@@ -592,7 +592,7 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
             };
             gemma4_12b_message.push_back(newItem);
         }
-        header_print("FLM", "Total images: " << total_images);
+        header_print("OFLM", "Total images: " << total_images);
     }
     else { // a pure text, usually from the cli
         // nlohmann::ordered_json messages;
@@ -829,7 +829,7 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
                 drop_front(image_payload.image_grid_pairs_per_image,     images_to_drop);
                 drop_front(image_payload.num_soft_tokens_per_image,      images_to_drop);
                 image_payload.num_images -= static_cast<unsigned>(images_to_drop);
-                header_print("FLM",
+                header_print("OFLM",
                     "Prompt-cache hit: dropped " << images_to_drop
                     << " cached image(s) from payload");
             }
@@ -840,7 +840,7 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
                 drop_front(audio_payload.mel_spectrogram_bins_per_audio,   audios_to_drop);
                 drop_front(audio_payload.num_soft_tokens_per_audio,        audios_to_drop);
                 audio_payload.num_audios -= static_cast<unsigned>(audios_to_drop);
-                header_print("FLM",
+                header_print("OFLM",
                     "Prompt-cache hit: dropped " << audios_to_drop
                     << " cached audio(s) from payload");
             }
@@ -999,7 +999,7 @@ std::string Gemma4_12B::generate(chat_meta_info_t& meta_info, int length_limit, 
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 
     // if (!this->enable_think) {

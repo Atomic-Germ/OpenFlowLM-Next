@@ -12,7 +12,7 @@
 > AI 340, no IDE — has built and run it. That retires the largest caveat this
 > PR opened with; the remaining ones are listed below and are unchanged.
 >
-> **The endpoint tests now live in `utilities/flm-test`**, not in a script of
+> **The endpoint tests now live in `utilities/oflm-test`**, not in a script of
 > their own. See *Testing it* below.
 
 > ### Depended on #3 — *"Fix the submodule metadata: a fresh clone cannot build"* — **now merged**
@@ -20,7 +20,7 @@
 > Without it this tree did not configure, so a reviewer could not build this
 > branch to look at it: `git submodule update --init` failed outright on a
 > dangling `docs/ExampleNPU` gitlink, and `third_party/tokenizers-cpp` — which
-> `src/CMakeLists.txt` `add_subdirectory()`s and links into `flm` — did not
+> `src/CMakeLists.txt` `add_subdirectory()`s and links into `oflm` — did not
 > exist.
 >
 > Those two commits are the base of this branch, so they still appear in this
@@ -43,7 +43,7 @@
 >   different host ISA levels — that is measured and documented below — so a
 >   mismatch is informative rather than automatically a bug. `1-cos` against
 >   sentence-transformers is the check that should hold anywhere.
-> * ~~**Linux is unverified for `flm`.**~~ **Verified** — built and run on
+> * ~~**Linux is unverified for `oflm`.**~~ **Verified** — built and run on
 >   Fedora Rawhide (Framework 13 AI 340). The engine's platform-independent
 >   subset also compiles there at C++17 and C++20, which is the check upstream
 >   runs on every change.
@@ -60,11 +60,11 @@ Adds the [NpuEmbeddings][upstream] engine as a second `AutoEmbeddingModel`, and
 turns `--embed` into something you can point at a model.
 
 ```
-flm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
 ```
 
 **It is additive.** `open_embedding` stays exactly where it is and keeps serving
-`embed-gemma:300m`. Nothing that works today changes: `flm help` is
+`embed-gemma:300m`. Nothing that works today changes: `oflm help` is
 byte-identical apart from the two lines describing the new flag.
 
 ---
@@ -137,7 +137,7 @@ upstream's golden gate reads `1-cos 2.284e-04` for bge-base on this datapath.
 (`open_embedding`'s own validation reports E8 cosine 0.999993; that is its
 claim, not a measurement made here.)
 
-**All six models verified end to end**, each `flm pull` → pack → `serve` →
+**All six models verified end to end**, each `oflm pull` → pack → `serve` →
 `POST /v1/embeddings`, each compared against the same engine in its own binary:
 
 | tag | dims | datapath the design records | vs `npuembed --embed` |
@@ -208,8 +208,8 @@ in its own PR.
 ## What a user does
 
 ```
-flm pull bge-base:en-v1.5      # BAAI's own files, 438 MB
-flm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+oflm pull bge-base:en-v1.5      # BAAI's own files, 438 MB
+oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
 curl -s localhost:52625/v1/embeddings -H 'content-type: application/json' \
   -d '{"model":"bge-base:en-v1.5","input":["A man is playing a guitar on stage."]}'
 ```
@@ -243,13 +243,13 @@ shape: something goes wrong and the tool carries on as though it had not.
    417 MB, reported as verified. It compares the manifest's size now.
 
 3. **`check_model_compatibility()` reported every author-hosted model as
-   `Outdated`, forever.** `LM_Config` defaults `flm_version` to `"0.0.0"` when
+   `Outdated`, forever.** `LM_Config` defaults `oflm_version` to `"0.0.0"` when
    `config.json` has no such key — and no upstream HuggingFace checkpoint has
    one, because it is a field this project writes. **`embed-gemma:300m` was in
    exactly that state on a freshly pulled tree**: a warning triangle in
-   `flm list`, and `ensure_embed_model_loaded()` re-pulling a complete, correct
+   `oflm list`, and `ensure_embed_model_loaded()` re-pulling a complete, correct
    download on every start. Since "absent" and `"0.0.0"` were already
-   indistinguishable, treating the default as *"not an FLM artifact"* changes
+   indistinguishable, treating the default as *"not an OFLM artifact"* changes
    nothing for anything that really carries a version. Both embedding models
    read `✅` now; `embed-gemma` did not before.
 
@@ -291,7 +291,7 @@ shape: something goes wrong and the tool carries on as though it had not.
    ```
 
    All three vectors byte-identical. A RAG deployment embedding documents with
-   one model and queries with another, against one `flm`, would retrieve
+   one model and queries with another, against one `oflm`, would retrieve
    nonsense with no signal anywhere. It refuses now, naming what *is* loaded, as
    `invalid_request_error` / `model_not_found`.
 
@@ -316,9 +316,9 @@ touch **any** submodule while one is present. It is a leftover: it was the tree
 `open_embedding` was ported *from*, and that port has landed.
 
 Removing it exposed the second problem. `.gitmodules` listed four submodules and
-**none of them was one** — `utilities/flm-add`, `q4nx-build` and `flm-test` are
+**none of them was one** — `utilities/oflm-add`, `q4nx-build` and `oflm-test` are
 vendored (6, 51 and 15 tracked blobs), and `third_party/tokenizers-cpp`, which
-`src/CMakeLists.txt` `add_subdirectory()`s and links into `flm`, **did not
+`src/CMakeLists.txt` `add_subdirectory()`s and links into `oflm`, **did not
 exist**. The second was invisible because of the first: the command that would
 have reported it was already refusing to run.
 
@@ -328,7 +328,7 @@ branch, so they appear in this diff until that one lands.
 
 ---
 
-## And a freshly built `flm.exe` now runs
+## And a freshly built `oflm.exe` now runs
 
 It could not, and the way it failed sent you looking in the wrong place. Two
 things were missing beside the executable:
@@ -336,32 +336,32 @@ things were missing beside the executable:
 * **The 22 engine DLLs** (`src/lib/<backend>/*.dll`). They are load-time
   imports, so without them the process dies at `0xC0000135` **before `main()`**,
   printing nothing at all. Windows then falls through to the next PATH entry —
-  which on a machine with FastFlowLM installed is
-  `C:\Program Files\flm\flm.exe`. So running
-  `flm.exe serve ... --embeddingmodel x` from the build directory reported
+  which on a machine with OpenFlowLM installed is
+  `C:\Program Files\oflm\oflm.exe`. So running
+  `oflm.exe serve ... --embeddingmodel x` from the build directory reported
   *"unrecognised option '--embeddingmodel'"*, **from a completely different
   binary than the one just built.** The symptom named a flag; the cause was a
   missing DLL two steps earlier with a silent fallback in between.
 * **The xclbin tree.** `find_xclbin_path()` already looks for
   `<exe_dir>/xclbins` and calls it *"the portable development-tree location"* —
   but nothing ever put one there, so every model failed with *"no design set"*
-  until `FLM_XCLBIN_PATH` was set by hand.
+  until `OFLM_XCLBIN_PATH` was set by hand.
 
 The DLLs are copied (into the build dir and `src/out`, both gitignored, so
 nothing enters the repository); the xclbin tree is a **junction**, because it is
 hundreds of megabytes and because a rebuilt kernel should be visible
 immediately. `mklink /J` needs no privileges; if it fails the build warns and
-names `FLM_XCLBIN_PATH` rather than erroring.
+names `OFLM_XCLBIN_PATH` rather than erroring.
 
 From a clean shell in `src/build`, with nothing set:
 
 ```
-.\flm.exe serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+.\oflm.exe serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
 ```
 
 Note the `.\`. Where the current directory is not searched for executables
-(`NoDefaultCurrentDirectoryInExePath`), a bare `flm.exe` resolves to an
-installed `flm` and never to your build. That is a Windows setting, not
+(`NoDefaultCurrentDirectoryInExePath`), a bare `oflm.exe` resolves to an
+installed `oflm` and never to your build. That is a Windows setting, not
 something this repository can fix — but it is worth knowing, because it is how
 the DLL problem above disguised itself.
 
@@ -383,17 +383,17 @@ Given `-Upstream <path-to-NpuEmbeddings>` it also compares every vector against
 `npuembed --embed`. That mode is why the ODR bug was caught: every
 self-contained check passed on the wrong vectors.
 
-**`utilities/flm-test`** — the repository's own suite, which is where the
+**`utilities/oflm-test`** — the repository's own suite, which is where the
 client-side endpoint checks for this backend now live. This started as a
 separate script; it was folded in on review, because two suites testing the same
 endpoint is how they drift apart.
 
 ```
-flm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
-flm-test --embedding --model bge-base:en-v1.5
+oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+oflm-test --embedding --model bge-base:en-v1.5
 ```
 
-Three changes went in, all of them in `flm_test/tasks.py`:
+Three changes went in, all of them in `oflm_test/tasks.py`:
 
 **E9 Model Identity, a new check.** A request naming a model the server cannot
 have loaded must be **refused**, not answered; and an accepted request must
@@ -423,7 +423,7 @@ between draws is a per-row bug (lane aliasing, tier misindexing, shared
 scratch). Upstream has hit two of those and both produced plausible vectors that
 differed only between rows.
 
-Unit tests for all of it are in `utilities/flm-test/tests/test_embedding_checks.py`
+Unit tests for all of it are in `utilities/oflm-test/tests/test_embedding_checks.py`
 — 51 tests, no server required:
 
 ```
@@ -441,10 +441,10 @@ Nothing new is required.
 ```powershell
 cmake -S src -B src/build -G Ninja `
       -DCMAKE_BUILD_TYPE=Release `
-      -DFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 `
-      -DFLM_USE_HRX=OFF `
+      -DOFLM_VERSION=0.9.25 -DNPU_VERSION=0.9.25 `
+      -DOFLM_USE_HRX=OFF `
       -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build src/build --target flm
+cmake --build src/build --target oflm
 ```
 
 ### `clean_build.bat`
@@ -534,7 +534,7 @@ Three CMake choices are load-bearing rather than stylistic, and
   and is 2.1–2.6× slower.**
 * **The include path is per-source, not global.** `open_npue/tokenizer.hpp` and
   `src/include/tokenizer/tokenizer.hpp` share a basename.
-* **`NOT FLM_USE_HRX`**, exactly like `npu_matmul.cpp`.
+* **`NOT OFLM_USE_HRX`**, exactly like `npu_matmul.cpp`.
 
 ### The trap worth knowing about
 
@@ -656,7 +656,7 @@ all 6 models pass, and are bit-identical to the upstream binary
 ```
 
 Per model: 384, 384, 768, 1024, 768, 768 components, **all exact**. The five
-sets the fork's `flm` can reach are the five it just built -- there is no
+sets the fork's `oflm` can reach are the five it just built -- there is no
 upstream artifact directory anywhere in this tree -- so these are vectors from
 design sets compiled here, matching a binary that was never told about them.
 
@@ -740,7 +740,7 @@ ok       BERT-h768-gated-bfp16
 
 ### The cost, stated plainly
 
-**A reviewer without mlir-aie and Peano can build `flm` but cannot run an
+**A reviewer without mlir-aie and Peano can build `oflm` but cannot run an
 `open_npue` model.** That is a real regression in reviewability, taken
 deliberately: the sets ship pre-built in the distributed package, and a binary
 sitting in a repository beside the source that allegedly produces it is a claim
@@ -784,12 +784,12 @@ version and the git HEAD that produced it.
   server running while starting the next model's reference process, and the
   reference **hung indefinitely** — no output, no progress, no error. Killing
   the server made it complete instantly. So two processes each holding a
-  context on this NPU do not queue, they block. `flm serve <llm> --embed 1`
+  context on this NPU do not queue, they block. `oflm serve <llm> --embed 1`
   holds the LLM's context and the engine's at once, which is the same shape,
   and it has **not** been exercised here because the LLM never loaded for want
   of its own xclbins.
 * ~~**Linux is unverified.**~~ **Verified after this PR was opened**: a second
-  machine built and ran `flm` on Fedora Rawhide (Framework 13 AI 340, no IDE).
+  machine built and ran `oflm` on Fedora Rawhide (Framework 13 AI 340, no IDE).
   The engine's platform-independent subset also compiles there at C++17 and
   C++20, which is the check upstream runs on every change. The numbers in this
   PR are still one machine's; the *build* is now two.

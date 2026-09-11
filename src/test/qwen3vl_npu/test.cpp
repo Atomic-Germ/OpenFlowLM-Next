@@ -5,7 +5,7 @@
 #include "AutoModel/modeling_qwen3vl.hpp"
 #include "model_list.hpp"
 
-flm_rt::device npu_device_global;
+oflm_rt::device npu_device_global;
 
 // Model-specific factory function for Qwen family and DeepSeek_r1_0528_8b
 inline std::pair<std::string, std::unique_ptr<AutoModel>> get_qwen3vl_model(const std::string& model_tag) {
@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Model path: " << model_path << std::endl;
 
     std::unique_ptr<AutoModel> chat = std::make_unique<Qwen3VL>(&npu_device_global);
-    npu_device_global = flm_rt::device(0); 
+    npu_device_global = oflm_rt::device(0); 
    
     chat->load_model(model_path, model_info, -1, preemption);
     header_print("info", "Model loaded");
@@ -69,7 +69,7 @@ int main(int argc, char* argv[]) {
     if (short_prompt) {
         uniformed_input.prompt = "Describe this image in brief?";
         // uniformed_input.prompt = "Who are you?";
-        //uniformed_input.images.push_back("C:/Users/alfred/Projects/FastFlowLM_Dev/libraries/panda.png");
+        //uniformed_input.images.push_back("C:/Users/alfred/Projects/OpenFlowLM_Dev/libraries/panda.png");
         uniformed_input.images.push_back("../../../tb_files/panda.png");
         std::cout << "Prompt: " << uniformed_input.prompt << std::endl;
         std::cout << "Response: ";

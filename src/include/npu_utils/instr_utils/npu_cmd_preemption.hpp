@@ -1,6 +1,6 @@
 /// \file npu_cmd_preemption.hpp
 /// \brief npu preemption command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu preemption command
 #ifndef __NPU_CMD_PREEMPTION_HPP__

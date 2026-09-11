@@ -34,15 +34,15 @@ the offending key named.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
-- `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `FLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$FLM_XCLBIN_PATH`, the directory holding `$FLM_CONFIG_PATH`, the user-level flm directory `flm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/flm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `flm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
+- `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
 
-### OPEN-ADD-KERNEL-LINK: `flm-add` links a model to the kernel set matching its spec
-**Applies to:** openflowlm-next (`utilities/flm-add/flm_add/__init__.py`)
+### OPEN-ADD-KERNEL-LINK: `oflm-add` links a model to the kernel set matching its spec
+**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py`)
 **Test category:** unit
-**Tests:** `utilities/flm-add/tests/test_open_kernels_link.py`
+**Tests:** `utilities/oflm-add/tests/test_open_kernels_link.py`
 
 Open kernel sets belong to a `ModelSpec`, not to an official model name. When
-installing a model, `flm-add` shall derive that model's spec the way the recipes
+installing a model, `oflm-add` shall derive that model's spec the way the recipes
 do (`recipes.load.spec_from_model_dir`: config.json, the tokenizer's real vocab,
 and the per-role weight format read from the `model.q4nx` safetensors header) and
 link the installed set whose `open_kernels/manifest.json` carries the same
@@ -80,7 +80,7 @@ kernels that shipped.
 **Test category:** unit
 **Tests:** `tests/test_spec_derive.py`
 
-`ModelSpec.from_hf_config` (the HF-style `config.json` FLM ships) and
+`ModelSpec.from_hf_config` (the HF-style `config.json` OFLM ships) and
 `ModelSpec.from_gguf_metadata` (llama.cpp's key names) shall produce the
 hyperparameter tuple for every supported family; an unknown family or a
 missing key is an error naming it.
@@ -230,7 +230,7 @@ is not arithmetic.
 
 Fixed for Granite in `attn.h` behind `ATTN_VEXP` / `ATTN_NHL` / `ATTN_RB`; the
 slope goes **2.289 -> 0.0247 ms/position, 92x flatter**, measured end to end
-through `flm bench` at 20.6x TTFT and 32.1x decode on a 1005-token prompt.
+through `oflm bench` at 20.6x TTFT and 32.1x decode on a 1005-token prompt.
 Every other family compiles byte-identically, so the observation above still
 holds for them and this section stays an observation rather than a requirement
 until a second family has been measured the same way.
@@ -268,7 +268,7 @@ The recipe's plan (`expert_stripes`, `expert_down`, `std_perm`, `q8_perm`,
 `put`, `conv_transpose`, `transpose`, the lm_head supertile order, the position
 table) applied by `recipes/pack.py` shall produce, for a container with the
 27B's tensor shapes, exactly the bytes the hand-written packers produced (the
-ones verified against pools captured from FLM's engine). `pools.cpp`
+ones verified against pools captured from OFLM's engine). `pools.cpp`
 interprets the same plan and is verified by the hardware run.
 
 **The q8 band law (`q8_perm`).** Where the recipe's quant map says a projection
@@ -298,7 +298,7 @@ chunk hold the same 32-row x 256-column tile, so the chunk index laws, the
 plan, the manifest and the kernels are unchanged; the packer is the only place
 that knows. There is no separate re-quantizing op.
 
-A Q4_K source (4736-byte chunks, what FLM 1.0.3+ writes) is accepted the same
+A Q4_K source (4736-byte chunks, what OFLM 1.0.3+ writes) is accepted the same
 way and transcoded to q4_1 on the way in, for the same reason and through the
 same seam -- but nearly free, because Q4_K's scale and min already carry the
 pool's granularity and index (OPEN-QUANT-Q4K). So the three chunk ops read
@@ -309,7 +309,7 @@ three source forms and refuse everything else by name.
 - A small weight larger than its slot is refused (`does not fit its 4096 B slot`).
 - On a synthetic container mixing one q8 and one q4_1 tensor: the q8 tensor's pool bytes equal `requant_q4_1` of its chunks put through the same `std_perm` order; the q4_1 tensor's are the verbatim chunk copy they were before q8 sources existed; and the whole pool has the same FNV-1a in NumPy and in C++ (`tests/test_pack_plan.py`, `src/open_qwen36/pools_test.cpp`, which writes the container as a real `.q4nx`).
 - A container that cannot report a tensor's chunk size is read as q4_1, so the frozen pools above are unaffected.
-- A tensor with 1280-byte chunks is refused by both packers, the message naming the tensor, `1280`, the three widths that ARE read (5120 q4_1, 8704 q8, 4736 Q4_K) and what 1280 probably is -- rather than guessing "FLM 1.0.3 / Q4_K?", which is what it used to say about any unfamiliar width.
+- A tensor with 1280-byte chunks is refused by both packers, the message naming the tensor, `1280`, the three widths that ARE read (5120 q4_1, 8704 q8, 4736 Q4_K) and what 1280 probably is -- rather than guessing "OFLM 1.0.3 / Q4_K?", which is what it used to say about any unfamiliar width.
 - `requant_q4_1` (q8 chunks -> q4_1 chunks) and `transpose` (`[rows, cols]` -> `[cols, rows]`) produce identical bytes in NumPy and C++: both sides build the same synthetic q8 chunks and assert the same FNV-1a of the output (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
 - Every value of a re-quantized block lands within `d/2` of its q4_1 reading, `d` being the block's stored scale: `m` is the minimum rounded toward -inf in bf16 and `d = (max - m)/15` rounded toward +inf, so `[m, m + 15d]` covers the block whatever bf16 did to either end.
 **The q8 lm_head's supertile order is a function of K.** A band is 128 output rows = 4 row
@@ -445,7 +445,7 @@ no `OPEN_KERNELS_UNVALIDATED`.
 writer) + manual (the hardware run: needs the NPU and a Q4_K container)
 **Tests:** `tests/test_quant_q4k.py`, `src/open_qwen36/pools_test.cpp`
 
-FLM 1.0.3+ writes a third quantized chunk form, `q4k_block_t`, 4736 B per 32-row x
+OFLM 1.0.3+ writes a third quantized chunk form, `q4k_block_t`, 4736 B per 32-row x
 256-column tile. Packing the 35B MoE projections as q4_1 instead makes the closed runtime
 decode infinite `////` or segfault, so this is not a preference and the open engine cannot
 refuse it. Both packers shall accept it as a source for the three q4 chunk ops
@@ -500,23 +500,23 @@ out mirrored about each block's minimum and nothing downstream notices.
 
 **Procedure (manual):** convert a GGUF for a validated shape twice, `--quant Q4_K` and
 `--quant Q4_1`, and run both through `src/open_qwen36/` on the same kernel set. Then serve
-each with `flm serve` on the open engine and run `utilities/flm-test --llm --tools` against
+each with `oflm serve` on the open engine and run `utilities/oflm-test --llm --tools` against
 it. The two containers hold the same source weights, so the only variable is the format.
 
 **Result 2026-09-08 (Qwen3.5-0.8B, condB fine-tune, 24 layers, Strix): PASS.** The Q4_K
 container -- 108 tensors at 4736 B beside 79 at 8704 -- is the first one that exists
-anywhere; no model on Atomic-Germ's Hugging Face or in FLM's registry ships the format
+anywhere; no model on Atomic-Germ's Hugging Face or in OFLM's registry ships the format
 yet. It loads, packs and decodes at **21.6 tok/s**, and its greedy output agrees with the
 q4_1 twin's for **36 of 37 tokens**, diverging only where a sentence-final `.` and `,`
 were a near-tie. Both continuations are coherent and say the same thing.
 
-**Result 2026-09-09, through `flm serve` (same model, same box): PASS.** `flm-add` registers
+**Result 2026-09-09, through `oflm serve` (same model, same box): PASS.** `oflm-add` registers
 the container and the engine loads it on the open kernels, 24 of 24 layers resident, at the
 same spec hash the q4_1 twin derives -- the transcode is invisible above the packer, which is
-the point. `flm-test --llm` returns coherent, on-topic answers in stream mode. At temperature
+the point. `oflm-test --llm` returns coherent, on-topic answers in stream mode. At temperature
 0 the two containers agree for the first 148 of 215 characters on a fixed prompt and then
 pick different phrasing for the same claim, at 16.67 tok/s against the twin's 16.86.
-`flm-test --tools` fails 5 of its 6 checks (no tool call issued), but the q4_1 twin fails the
+`oflm-test --tools` fails 5 of its 6 checks (no tool call issued), but the q4_1 twin fails the
 same 5 identically, so that is the 0.8B model and not the format.
 
 Getting there needed one converter fix, in this commit: `configs/qwen3.5_0.8b.json` pinned
@@ -538,7 +538,7 @@ fp64 logits at every position, and the full model shall answer a chat prompt
 coherently.
 
 **Procedure:**
-1. `python -m recipes.manifest --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2 --out src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/manifest.json` (or a full `export_qwen36_kernels.py` run).
+1. `python -m recipes.manifest --model-dir ~/.oflm/models/Qwen3.6-35B-A3B-NPU2 --out src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/manifest.json` (or a full `export_qwen36_kernels.py` run).
 2. `src\open_qwen36\out\open_qwen36_cli.exe --model <model dir> --kernels src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels --ids 248045 --max-tokens 3 --layers 8 --dump-logits <dir>/y --twice`
 3. Correlate `y_t{0,1,2}.bin` with `open_kernels/model/out8t3/ref_logits{,_t1,_t2}.bin` over the first 248070 ids: corr ≥ 0.9999, same argmax; the second request reproduces the first.
 4. `python src/open_qwen36/chat.py "Explain what an NPU is in two sentences."` → a coherent two-sentence answer ending in `<|im_end|>`.
@@ -579,7 +579,7 @@ change generated text. That is the evidence for a main-core q8 GEMV. Log:
 
 ### OPEN-FAMILY-QWEN3: Qwen3 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen3.py`, `designs/dense/dx.py`, `designs/lm_head_q4`, `src/open_qwen36/`)
-**Test category:** manual (needs the NPU and `FastFlowLM/Qwen3-4B-NPU2`); the recipe's arithmetic is unit-tested in `tests/test_qwen3_dense.py`
+**Test category:** manual (needs the NPU and `OpenFlowLM/Qwen3-4B-NPU2`); the recipe's arithmetic is unit-tested in `tests/test_qwen3_dense.py`
 
 A Qwen3 dense model (GQA with q/k RMSNorm, full RoPE, no attention gate,
 silu-gated FFN, a q4_1 lm_head) shall run on the open kernels from its
@@ -607,18 +607,18 @@ are in the catalogue:
 - 0.6B: `ELN 2048` (half an x-stream element), `TAB_BYTES 6912`, band split `(4, 2, 2, 6, 2)`, `attn_q_width == 2 * hidden`, `ln` built at 1024.
 
 **Procedure:**
-1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3-4B-NPU2` (WSL) → `src/xclbins/Qwen3-4B-NPU2/open_kernels/{dx,ln,lm_head_q4}` + `manifest.json`.
-2. `python open_kernels/model/make_decode.py --model-dir ~/.flm/models/Qwen3-4B-NPU2 --layers 4 --tokens 2 --out open_kernels/model/out_q3`, then `open_kernels/harness/out/run_kernel.exe open_kernels/model/out_q3/run_decode.cfg` and `python open_kernels/model/compare_decode.py --tokens 2 --out open_kernels/model/out_q3`: every layer's residual corr > 0.9999, logits corr > 0.9999, same argmax at both positions.
+1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Qwen3-4B-NPU2` (WSL) → `src/xclbins/Qwen3-4B-NPU2/open_kernels/{dx,ln,lm_head_q4}` + `manifest.json`.
+2. `python open_kernels/model/make_decode.py --model-dir ~/.oflm/models/Qwen3-4B-NPU2 --layers 4 --tokens 2 --out open_kernels/model/out_q3`, then `open_kernels/harness/out/run_kernel.exe open_kernels/model/out_q3/run_decode.cfg` and `python open_kernels/model/compare_decode.py --tokens 2 --out open_kernels/model/out_q3`: every layer's residual corr > 0.9999, logits corr > 0.9999, same argmax at both positions.
 3. `src\open_qwen36\out\open_qwen36_cli.exe --model <model dir> --kernels src/xclbins/Qwen3-4B-NPU2/open_kernels --ids 151644 --max-tokens 3 --layers 4 --dump-logits <dir>/y` matches step 2's reference logits (the engine's packer, manifest path and attnpos on the dense stream).
 4. `python src/open_qwen36/chat.py "Explain what an NPU is in two sentences." --model <model dir> --kernels src/xclbins/Qwen3-4B-NPU2/open_kernels` → a coherent answer ending in `<|im_end|>`.
 
 **Adapters (manual):** every Qwen3-dense adapter class selects the open engine when a
-kernel set is installed for its model, and honours `FLM_QWEN3_ENGINE=open|closed`:
+kernel set is installed for its model, and honours `OFLM_QWEN3_ENGINE=open|closed`:
 `Qwen3`, `Qwen3_IT`, `Qwen3_TK` and `DeepSeek_r1_0528_8b` (`model_list.json`
 families `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528`). Verify with
-`flm serve <tag>` on a model that has `open_kernels/` installed: the load logs
+`oflm serve <tag>` on a model that has `open_kernels/` installed: the load logs
 `<Family> on the open kernels (<dir>)` -- `Qwen3`, `Qwen3-IT`, `Qwen3-TK`,
-`DeepSeek-R1-0528` respectively -- and `FLM_QWEN3_ENGINE=closed` restores the
+`DeepSeek-R1-0528` respectively -- and `OFLM_QWEN3_ENGINE=closed` restores the
 `qwen3_npu` DLL for all four.
 
 **Result 2026-09-05 (Qwen3-4B):** step 2 logits corr 0.999997 / 0.999994, same argmax and top-5, residual corr ≥ 0.999996 in every layer at both positions; step 3 identical through the engine, request 2 reproduced request 1; step 4 a coherent two-sentence answer ending in `<|im_end|>` at token 58 (272 ms/token). Details: `.claude/plans/open-kernels-phase-b-qwen3-dense.md`.
@@ -629,13 +629,13 @@ families `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528`). Verify with
 
 **Result 2026-09-06 (Qwen3-8B-NPU2, and DynaGuard-8B / DeepSeek-R1-0528-Qwen3-8B on its kernels):** the 8B shape's first hardware run. Step 2 logits corr 0.999998 / 0.999997, argmax 104222 / 118063 matching the fp64 replica with identical top-5, residual corr 1.000000 (t0) / >= 0.999998 (t1) in all four layers, maxrel <= 1.1e-3; step 3 through the engine is BIT-IDENTICAL to step 2 (0.000e+00 over all 151936 logits) and request 2 reproduced request 1; step 4 a coherent two-sentence answer ending in `<|im_end|>` at token 63 (540 ms/token, 36 layers, a loaded box). This admits `gemv_q4` K = 12288 to the catalogue; the 4096 norm, the (128, 32, 8, 128, qk-norm, no gate) attention tuple and the K = 4096 q4 head were already in it. DynaGuard-8B (spec hash identical, `sha256:04374f23aede`) passed the same procedure on its own `--no-build` export, byte-identical to Qwen3-8B's in all six artefacts: corr 0.999997 / 0.999997, same argmax and top-5, `<|im_end|>` at token 59. DeepSeek-R1-0528-Qwen3-8B (the same shape, `real_vocab` 151671 instead of 151669) passed on correlation and residuals -- corr 0.999993 / 0.999996, residual corr >= 0.999997 every layer -- but its position-1 ARGMAX differs: the fp64 top two, 102188 and 108204, are 0.004 logits apart on a 14.5-logit scale and the NPU's ~0.015 per-logit deviation flips them, with slots 3-6 unchanged. Harness and engine agree bit for bit, so this is a tie inside q4_1 noise rather than a kernel disagreement, but it is the first time it has crossed `compare_decode`'s "same argmax" bar. `chat.py` handles this tokenizer now (the `<｜Assistant｜>` branch landed this session), answering coherently after a `</think>` chain. Details: `.claude/plans/k-new-points-results.md`.
 
-**Result 2026-09-06 (Qwen3-1.7B-NPU2, and Qwen3-1.7B-NPU2-BASE on its kernels):** the 16/8-head shape's first hardware run, and the first run of the attention TUPLE (128, 16, 8, 128, qk-norm, no gate, pre-RoPE) -- a GQA group of 2 at head dim 128, which the catalogue's per-parameter check had been passing silently and now names. Step 2 logits corr 1.000000 / 0.999993, argmax 1121 / 17764 matching the fp64 replica, top-5 identical at t0 and slots 1-4 identical at t1 (slot 5 differs, 36976 against 78200), residual corr >= 0.999992 in every layer at both positions, maxrel <= 3.9e-3; step 3 through the engine BIT-IDENTICAL to step 2 and request 2 reproduced request 1 (4-layer slice 10-11 ms/token); step 4 a coherent answer ending in `<|im_end|>` at token 50 (139 ms/token, 28 layers). This admits `gemv_q4` K = 6144, `lm_head_q4` K = 2048 and the (128, 16, 8, 128, True, False, False) attention combination. Qwen3-1.7B-NPU2-BASE passed the same procedure identically on a `--no-build` export byte-identical in all six artefacts -- because it IS the same container: its `model.q4nx`, `config.json` and `tokenizer_config.json` have the same sha256 as `FastFlowLM/Qwen3-1.7B-NPU2`'s, chat template included, so it is the instruct model published under a `-BASE` name rather than a base checkpoint. Details: `.claude/plans/k-new-points-results.md`.
+**Result 2026-09-06 (Qwen3-1.7B-NPU2, and Qwen3-1.7B-NPU2-BASE on its kernels):** the 16/8-head shape's first hardware run, and the first run of the attention TUPLE (128, 16, 8, 128, qk-norm, no gate, pre-RoPE) -- a GQA group of 2 at head dim 128, which the catalogue's per-parameter check had been passing silently and now names. Step 2 logits corr 1.000000 / 0.999993, argmax 1121 / 17764 matching the fp64 replica, top-5 identical at t0 and slots 1-4 identical at t1 (slot 5 differs, 36976 against 78200), residual corr >= 0.999992 in every layer at both positions, maxrel <= 3.9e-3; step 3 through the engine BIT-IDENTICAL to step 2 and request 2 reproduced request 1 (4-layer slice 10-11 ms/token); step 4 a coherent answer ending in `<|im_end|>` at token 50 (139 ms/token, 28 layers). This admits `gemv_q4` K = 6144, `lm_head_q4` K = 2048 and the (128, 16, 8, 128, True, False, False) attention combination. Qwen3-1.7B-NPU2-BASE passed the same procedure identically on a `--no-build` export byte-identical in all six artefacts -- because it IS the same container: its `model.q4nx`, `config.json` and `tokenizer_config.json` have the same sha256 as `OpenFlowLM/Qwen3-1.7B-NPU2`'s, chat template included, so it is the instruct model published under a `-BASE` name rather than a base checkpoint. Details: `.claude/plans/k-new-points-results.md`.
 
 **Result 2026-09-06 (Qwen3-0.6B-NPU2):** the narrowest shape the recipe has produced. Step 2 logits corr 0.999999 / 0.999986, argmax 1121 / 460 matching the fp64 replica with top-5 identical at BOTH positions, residual corr >= 0.999982 in every layer at both positions (the loosest number in the batch, on the narrowest residual in the tree), maxrel <= 4.4e-3; step 3 through the engine bit-identical to step 2 and reproduced; step 4 a fluent answer ending in `<|im_end|>` at token 36 (57 ms/token, 28 layers -- the fastest model in this batch; the answer is factually wrong about NPUs, which is a 0.6B model being a 0.6B model, not a kernel result). This admits `ln` width 1024 -- the first width other than 2048 to take the fused single-core path -- plus `gemv_q4` K = 1024 and K = 3072 and `lm_head_q4` K = 1024. The three geometry firsts the handoff flagged all behaved: the half-used x-stream element (`ELN` 2048 against a 4096-byte element) is read correctly, with no position-independent offset on the first residual; the o-projection GEMV being wider than the layer's own residual (q width 2048, hidden 1024) changes nothing. Details: `.claude/plans/k-new-points-results.md`.
 
 ### OPEN-FAMILY-LLAMA3: Llama 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `src/open_qwen36/`)
-**Test category:** manual (needs the NPU and `FastFlowLM/Llama-3.1-8B-NPU2`); the derivation, the RoPE scaling and the 8B / 3.2-3B / 3.2-1B layouts are unit-tested in `tests/test_llama3.py`
+**Test category:** manual (needs the NPU and `OpenFlowLM/Llama-3.1-8B-NPU2`); the derivation, the RoPE scaling and the 8B / 3.2-3B / 3.2-1B layouts are unit-tested in `tests/test_llama3.py`
 
 A Llama 3 model (GQA without q/k norms, full RoPE with the llama3 frequency
 scaling, eps 1e-5, silu FFN, a q4_1 head) shall run on the open kernels
@@ -647,7 +647,7 @@ by the recipe (one chunk per weight element; one norm output element per call).
 
 `tie_word_embeddings` is not a refusal. Llama 3.2 (1B / 3B) ties the head to
 the embedding table in `config.json`, but every container the recipe packs from
-materialises `lm_head.weight` as its own q4 tensor -- FLM's `.q4nx` does it for
+materialises `lm_head.weight` as its own q4 tensor -- OFLM's `.q4nx` does it for
 `Llama-3.2-{1,3}B-NPU2` (I8 `[32064, 5120]` / `[48096, 5120]`, the whole
 128256-row head), and `utilities/q4nx-build` does it for a tied GGUF
 (OPEN-FAMILY-HUNYUAN's converter). The derivation sees only `config.json`, so
@@ -664,11 +664,11 @@ container that lacks the tensor, naming it.
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Llama-3.1-8B-NPU2`, `out_l3`, prompt id 128000, and `chat.py` (which switches to the Llama 3 template when the tokenizer has `<|start_header_id|>`).
 
 **Adapters (manual):** both Llama-3 adapter classes select the open engine when a
-kernel set is installed for their model, and honour `FLM_LLAMA_ENGINE=open|closed`:
+kernel set is installed for their model, and honour `OFLM_LLAMA_ENGINE=open|closed`:
 `Llama3` (`model_list.json` families `llama3.1`, `llama3.2`) and `DeepSeek_r1_8b`
-(family `deepseek-r1`, a Llama-3.1-8B distill). Verify with `flm serve <tag>` on a
+(family `deepseek-r1`, a Llama-3.1-8B distill). Verify with `oflm serve <tag>` on a
 model that has `open_kernels/` installed: the load logs `Llama 3 on the open kernels (<dir>)`
-or `DeepSeek-R1 on the open kernels (<dir>)`, and `FLM_LLAMA_ENGINE=closed` restores
+or `DeepSeek-R1 on the open kernels (<dir>)`, and `OFLM_LLAMA_ENGINE=closed` restores
 the `llama_npu` DLL for both.
 
 **Result 2026-09-05 (Llama-3.1-8B):** slice logits corr 1.000000 / 0.999993, same argmax and top-5, residual corr ≥ 0.999994 every layer; identical through the engine; a coherent two-sentence answer ending in `<|eot_id|>` at token 79 (203 ms/token). Details: `.claude/plans/open-kernels-phase-c-llama3.md`.
@@ -684,7 +684,7 @@ untied 166144-row head, a q4_1 container. Two catalogue points are new: the
 attention tuple `(128, 20, 4, 128, False, False, False)` and `gemv_q4` K = 10752
 (the widest activation table so far that still keeps two chunks per weight element:
 60032 of the core's 61440 bytes). The registry serves it through its own
-`Nanbeige` class, which selects the open engine under `FLM_LLAMA_ENGINE`.
+`Nanbeige` class, which selects the open engine under `OFLM_LLAMA_ENGINE`.
 
 **Acceptance criteria (unit, Nanbeige):** the derivation and layout in
 `tests/test_llama3.py::test_nanbeige41_3b_derives_and_lays_out_on_the_llama_recipe`
@@ -695,24 +695,24 @@ attention tuple `(128, 20, 4, 128, False, False, False)` and `gemv_q4` K = 10752
 **Procedure (manual, Nanbeige):** as OPEN-FAMILY-QWEN3 with `Nanbeige4.1-3B-NPU2`,
 `out_nb`, prompt id 166100 (`<|im_start|>`); `chat.py` takes its ChatML template
 without injecting think tags (the model opens its own `<think>` block).
-`flm-test --llm --model nanbeige4.1:3b` through `flm serve`.
+`oflm-test --llm --model nanbeige4.1:3b` through `oflm serve`.
 
 **Result 2026-09-10:** slice logits corr 0.999999 / 0.999989, same argmax and top-5 at
 both positions, residual corr >= 0.999991 every layer; a 24-token decode chain extends
 this to every position 0-23 (logits corr 0.99995-0.999999 throughout, top-5 identical at
 21 of 24, a near-tie slot-5 swap at the rest); step 3 bit-identical to the harness,
 request 2 reproduced request 1; `chat.py` opens `<think>` and reasons coherently (the
-model has no off switch for it); `flm serve` + `flm-test --llm` PASS with a real
+model has no off switch for it); `oflm serve` + `oflm-test --llm` PASS with a real
 generation budget (`--gen-lim 600`+; the reasoning chain can outrun a small one, which
 reads as an empty answer column rather than a failure).
 
 Nanbeige's adapter originally reached the closed engine's class through a `dynamic_cast`
-for checkpoint / restore, null on the open engine -- `flm serve` segfaulted on the first
+for checkpoint / restore, null on the open engine -- `oflm serve` segfaulted on the first
 request. Fixed to the `causal_lm` virtuals every other open-engine adapter already uses.
 
 ### OPEN-FAMILY-GEMMA3: Gemma 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`)
-**Test category:** manual (needs the NPU and `FastFlowLM/Gemma3-4B-NPU2`); the derivation, the two RoPE tables, the window's row counts and the 4B layout are unit-tested in `tests/test_gemma3.py`
+**Test category:** manual (needs the NPU and `OpenFlowLM/Gemma3-4B-NPU2`); the derivation, the two RoPE tables, the window's row counts and the 4B layout are unit-tested in `tests/test_gemma3.py`
 
 A Gemma 3 text model (GQA with q/k RMSNorm, GeGLU-tanh, sandwich norms, five
 sliding-window layers per global one, a local and a linearly scaled global
@@ -733,11 +733,11 @@ stored.
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Gemma3-4B-NPU2`, `out_g3`, 6 layers (five local, one global), prompt id 2; then `open_qwen36_cli --at-position 1100 --layers 6` (finite logits through the window path); then `chat.py` (the Gemma template when the tokenizer has `<start_of_turn>`).
 
 **Adapters (manual):** both Gemma-3 adapter classes select the open engine when a
-kernel set is installed for their model, and honour `FLM_GEMMA_ENGINE=open|closed`:
+kernel set is installed for their model, and honour `OFLM_GEMMA_ENGINE=open|closed`:
 `Gemma3` (`model_list.json` family `gemma3`, e.g. `gemma3:4b`) and `Gemma3_Text_Only`
-(family `gemma3-text`, e.g. `gemma3:1b`). Verify with `flm serve <tag>` on a model
+(family `gemma3-text`, e.g. `gemma3:1b`). Verify with `oflm serve <tag>` on a model
 that has `open_kernels/` installed: the load logs `Gemma 3 on the open kernels (<dir>)`
-or `Gemma 3 (text) on the open kernels (<dir>)`, and `FLM_GEMMA_ENGINE=closed`
+or `Gemma 3 (text) on the open kernels (<dir>)`, and `OFLM_GEMMA_ENGINE=closed`
 restores the `gemma_npu` / `gemma_text_npu` DLL. Images always need the closed
 engine -- the open one has no vision path.
 
@@ -821,7 +821,7 @@ originals under `q4nx_folded_multipliers`.
 
 **Prior evidence (2026-09-02, a different design):** these shapes have been run
 and compared on this hardware before, by hand-written Granite kernels in
-`vegah/FastFlowLM@feat/kernels` — all eight projection shapes cosine
+`vegah/OpenFlowLM@feat/kernels` — all eight projection shapes cosine
 1.00000000 under a one-hot activation, GQA attention 0.9993–0.9998, and a whole
 layer in **four** dispatches at 1744.7 µs (13.6 tok/s device time). That is the
 baseline the one-dispatch `dx` program should beat, and the reason head_dim 64
@@ -838,9 +838,9 @@ Through the app: the model loads 40/40 layers at context capacity 8192
 (weights resident in 11 s), logs *"Granite on the open kernels"* and answers a
 Norwegian prompt coherently, reasoning first. **That run used a catalogue entry
 this PR no longer ships** -- per AGENTS.md the container belongs on
-`Atomic-Germ/*-OpenNPU2` and installs through `flm-add`
-(`flm-add <repo-or-directory> --family granite`), which is the supported path
-until it is hosted there. The measurement above is what was run; the flm-add
+`Atomic-Germ/*-OpenNPU2` and installs through `oflm-add`
+(`oflm-add <repo-or-directory> --family granite`), which is the supported path
+until it is hosted there. The measurement above is what was run; the oflm-add
 install has not been re-verified end to end.
 
 **Known rough edge:** the reasoning block is not parsed. Granite carries
@@ -881,7 +881,7 @@ their bf16 `[heads, hidden]` copies through `transpose` into the `[hidden, heads
 layout `glue_ab` reads. Images are refused as on the other VLM families.
 
 **Acceptance criteria (unit):**
-- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the nested `text_config` (`qwen3_5_text`) and FLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
+- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the nested `text_config` (`qwen3_5_text`) and OFLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
 - Swapping only the FFN moves nothing in the attention half: the 27B spec and a dense twin of it (an FFN narrow enough to keep 10 KB weight elements) give identical DeltaNet / attention / state / KV / lm_head constants, and `qwen35.layout` is `qwen36moe.layout(..., ffn="dense")`, not a copy.
 - The 9B layout: `PER_CALL 1` (a 12288-wide activation table leaves no room for two 10 KB weight elements beside the streams), `DN_ROWS 10 / DN_SLICES 13 / DN_PAD 130`, `S_ROWS 130`, `ELN 8192` (so the split `ln_y` / `ln_xn` norm entries), `E_A 2048` with 2 f32 heads per attention element and 4 og heads, `KV_ROW 4096`, `PTAB_ROW 2048`; the pool holds q4-sized `up | gate | down` first, at the same offsets for both layer types.
 - No `moe` block, no `rout_idx_off`, no router or shared-expert tensor anywhere in the manifest; each layer type's program is one `run`, with `attnpos` on the full-attention kernel only.
@@ -905,13 +905,13 @@ corr >= 0.9999 every layer. Reported separately: the same slice against the repl
 the q8 out_proj -- the quality cost of the re-quantization decision.
 
 **Adapters (manual):** the Qwen3.5 adapter class selects the open engine when a kernel set
-is installed for its model, and honours `FLM_QWEN35_ENGINE=open|closed`: `Qwen3_5VL`
-(`model_list.json` family `qwen3.5`, e.g. `qwen3.5:4b`). Verify with `flm serve <tag>` on a
+is installed for its model, and honours `OFLM_QWEN35_ENGINE=open|closed`: `Qwen3_5VL`
+(`model_list.json` family `qwen3.5`, e.g. `qwen3.5:4b`). Verify with `oflm serve <tag>` on a
 model that has `open_kernels/` installed: the load logs
-`Qwen3.5 on the open kernels (<dir>)`, and `FLM_QWEN35_ENGINE=closed` restores the
+`Qwen3.5 on the open kernels (<dir>)`, and `OFLM_QWEN35_ENGINE=closed` restores the
 `qwen3_5vl_npu` DLL. Images always need the closed engine -- the open one has no vision
 path, and an image payload is refused with
-`images need the closed Qwen3.5 engine (FLM_QWEN35_ENGINE=closed)`.
+`images need the closed Qwen3.5 engine (OFLM_QWEN35_ENGINE=closed)`.
 
 **Result 2026-09-06 (Qwen3.8-Distilled-4B-NPU2, HID 2560 / 32 layers / FFN 9216): PASS.**
 Slice (8 layers, 3 tokens from `[248045]`, six linear and two full): logits corr **0.999999 /
@@ -1084,7 +1084,7 @@ family before it had:
 
 Only the HF derivation exists: a Phi-3 GGUF carries the factor lists as tensors
 (`rope_factors_{long,short}.weight`), not metadata. The `Phi4` class selects the open
-engine under `FLM_PHI4_ENGINE`.
+engine under `OFLM_PHI4_ENGINE`.
 
 **Acceptance criteria (unit):**
 - `rotary_dim` 96 derives from the factor; without one, the whole head, and the check
@@ -1129,7 +1129,7 @@ engine under `FLM_PHI4_ENGINE`.
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Phi4-mini-Instruct-NPU2`, `out_ph`,
 prompt id 200021 (`<|user|>`; the model has no bos); `chat.py` switches to
 `<|user|>...<|end|><|assistant|>` when the tokenizer has `<|user|>` and `<|end|>`.
-`flm-test --llm --model phi4-mini-it:4b` through `flm serve`. Two catalogue points
+`oflm-test --llm --model phi4-mini-it:4b` through `oflm serve`. Two catalogue points
 enter with it: the attention tuple `(128, 24, 8, 96, False, False, False)` -- the first
 partial rotation on the dense design -- and nothing new for the GEMVs (3072 and 8192
 are Llama 3.2 3B's).

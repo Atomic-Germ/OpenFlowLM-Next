@@ -7,7 +7,7 @@ import pytest
 from recipes.load import default_spec
 from recipes.spec import FULL, LINEAR, ModelSpec, SpecError, hf_model_types
 
-# the fields of ~/.flm/models/Qwen3.6-35B-A3B-NPU2/config.json the derivation reads
+# the fields of ~/.oflm/models/Qwen3.6-35B-A3B-NPU2/config.json the derivation reads
 HF_QWEN36 = {
     "model_type": "qwen3_5_moe", "hidden_size": 2048, "num_hidden_layers": 40, "full_attention_interval": 4,
     "head_dim": 256, "num_attention_heads": 16, "num_key_value_heads": 2, "attn_output_gate": True,

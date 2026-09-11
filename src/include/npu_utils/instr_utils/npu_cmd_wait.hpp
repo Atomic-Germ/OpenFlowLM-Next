@@ -1,6 +1,6 @@
 /// \file npu_cmd_wait.hpp
 /// \brief npu wait command
-/// \author FastFlowLM Team, Alfred
+/// \author OpenFlowLM Team, Alfred
 /// \date 2025-09-09
 /// \note This is a class for the npu wait command
 #pragma once

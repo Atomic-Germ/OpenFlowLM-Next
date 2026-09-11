@@ -2,7 +2,7 @@
 layout: page
 title: "Documentation Hub"
 permalink: /docs/landing/
-description: "Overview of FastFlowLM documentation, organized for builders."
+description: "Overview of OpenFlowLM documentation, organized for builders."
 sections:
   - type: hero
     kicker: "Docs"
@@ -57,14 +57,14 @@ sections:
         Liquid shortcodes + markdown tables keep everything portable.
       ctas:
         - label: "Edit on GitHub"
-          href: "https://github.com/ROCm/FastFlowLM/tree/main/docs"
+          href: "https://github.com/Atomic-Germ/OpenFlowLM/tree/main/docs"
           style: ghost
           external: true
     right:
       title: "Looking for something else?"
       body: |
         The docs hub is the best starting point, but you can also reach us via Discord or
-        [info@fastflowlm.com](mailto:info@fastflowlm.com) for bespoke support.
+        [info@openflowlm.com](mailto:info@openflowlm.com) for bespoke support.
 ---
 
 
