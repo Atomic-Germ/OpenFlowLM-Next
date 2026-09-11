@@ -7,8 +7,10 @@
 /// \note This file contains some utility functions for the OpenFlowLM project.
 #include "utils/utils.hpp"
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <cstdlib>
+#include <set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -20,12 +22,44 @@
 
 namespace utils {
 
+std::string getenv_oflm(const char* oflm_name) {
+    if (const char* v = std::getenv(oflm_name)) {
+        if (*v) return std::string(v);
+    }
+    // "OFLM_FOO" -> "FLM_FOO". The rename dropped nothing else, so the inverse is
+    // to remove the leading 'O'; a name that is not OFLM_-prefixed has no legacy form.
+    if (std::strncmp(oflm_name, "OFLM_", 5) != 0) return std::string();
+    const std::string legacy = std::string("FLM_") + (oflm_name + 5);
+    const char* v = std::getenv(legacy.c_str());
+    if (!v || !*v) return std::string();
+    static std::set<std::string> warned;          // once per variable, not once per read
+    if (warned.insert(legacy).second) {
+        std::cerr << "[OFLM]  " << legacy << " is the name used before the oflm rename. "
+                  << "It still works; set " << oflm_name << " instead." << std::endl;
+    }
+    return std::string(v);
+}
+
+/// The user-level directories the pre-rename releases used, for the same reason
+/// user_oflm_directories() exists: a model store is gigabytes and must not have to
+/// move for an upgrade. Searched AFTER every oflm location, never before.
+std::vector<std::string> legacy_flm_directories() {
+    std::vector<std::string> v;
+#ifdef _WIN32
+    v.push_back((std::filesystem::path(get_user_directory()) / ".flm").string());
+    v.push_back((std::filesystem::path(get_user_directory()) / ".config" / "flm").string());
+#else
+    v.push_back(get_user_directory() + "/flm");
+#endif
+    return v;
+}
+
 std::string find_model_list() {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
     // 1. Check OFLM_CONFIG_PATH environment variable
-    const char* env_path = std::getenv("OFLM_CONFIG_PATH");
-    if (env_path && *env_path) {
+    const std::string env_path = getenv_oflm("OFLM_CONFIG_PATH");
+    if (!env_path.empty()) {
         if (std::filesystem::exists(env_path)) {
             std::cerr << "[OFLM]  Using custom model list path: " << env_path << std::endl;
             return env_path;
@@ -62,8 +96,8 @@ std::string find_model_info() {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
     // 1. Check OFLM_MODELINFO_PATH environment variable
-    const char* env_path = std::getenv("OFLM_MODELINFO_PATH");
-    if (env_path && *env_path) {
+    const std::string env_path = getenv_oflm("OFLM_MODELINFO_PATH");
+    if (!env_path.empty()) {
         if (std::filesystem::exists(env_path)) {
             std::cerr << "[OFLM]  Using custom model info path: " << env_path << std::endl;
             return env_path;
@@ -74,8 +108,8 @@ std::string find_model_info() {
     // install points OFLM_CONFIG_PATH at its own share/oflm; without this the
     // lookup falls through to the baked-in prefix below and we end up sizing
     // and hash-checking downloads against a different (stale) revision.
-    const char* config_path = std::getenv("OFLM_CONFIG_PATH");
-    if (config_path && *config_path) {
+    const std::string config_path = getenv_oflm("OFLM_CONFIG_PATH");
+    if (!config_path.empty()) {
         std::filesystem::path sibling =
             std::filesystem::path(config_path).parent_path() / "model_info.json";
         if (std::filesystem::exists(sibling)) {
@@ -129,22 +163,16 @@ std::string strip_xclbins(std::string path) {
     return path;
 }
 
-/// The user-level oflm directory oflm-add writes into: ~/.config/oflm on POSIX
-/// (get_user_directory() already ends in .config there) and <profile>/.config/oflm
-/// on Windows, which is where oflm-add's `Path.home() / ".config" / "oflm"` lands.
-std::string user_oflm_directory() {
-#ifdef _WIN32
-    return (std::filesystem::path(get_user_directory()) / ".config" / "oflm").string();
-#else
-    return get_user_directory() + "/oflm";
-#endif
-}
-
 /// The user-level directories for THIS project, newest first (#30). Returned as
 /// a list rather than a single path so that a directory made either way is
-/// found: #30 asks for %USERPROFILE%\.oflm on Windows, while flm-add's own
-/// `Path.home() / ".config" / <name>` would put it beside the flm one. Scanning
-/// both costs one stat.
+/// found: #30 asks for %USERPROFILE%\.oflm on Windows, while oflm-add's own
+/// `Path.home() / ".config" / <name>` lands in <profile>/.config/oflm. On POSIX
+/// get_user_directory() already ends in .config, so one entry covers it. Scanning
+/// them costs one stat each.
+///
+/// This list subsumes the former user_oflm_directory(), which the oflm rename left
+/// returning a path already in here -- dead code, and the reason nobody noticed the
+/// legacy root had stopped being searched (#41).
 std::vector<std::string> user_oflm_directories() {
     std::vector<std::string> v;
 #ifdef _WIN32
@@ -161,8 +189,8 @@ std::vector<std::string> user_oflm_directories() {
 /// path picks: it returns exactly one, and every closed kernel is loaded relative to it.
 std::vector<std::string> closed_path_roots() {
     std::vector<std::string> c;
-    const char* env_path = std::getenv("OFLM_XCLBIN_PATH");
-    if (env_path && *env_path) c.push_back(strip_xclbins(env_path));
+    const std::string env_path = getenv_oflm("OFLM_XCLBIN_PATH");
+    if (!env_path.empty()) c.push_back(strip_xclbins(env_path));
     std::string exe_dir = get_executable_directory();
     c.push_back(exe_dir);                       // portable development tree
     c.push_back(".");                           // then the CWD
@@ -179,19 +207,25 @@ std::vector<std::string> xclbin_roots() {
     // The user-level roots first: oflm-add installs a model's kernels under one of these,
     // and the shipped sets live in the install tree below. A lookup that stops at the
     // first root (find_xclbin_path) can only ever see one of the two.
-    const char* env_path = std::getenv("OFLM_XCLBIN_PATH");
-    if (env_path && *env_path) candidates.push_back(strip_xclbins(env_path));
+    const std::string env_path = getenv_oflm("OFLM_XCLBIN_PATH");
+    if (!env_path.empty()) candidates.push_back(strip_xclbins(env_path));
     // Beside an explicitly configured model_list.json, the way find_model_info stays
     // beside it: a user registry and its kernels live in one directory.
-    const char* config_path = std::getenv("OFLM_CONFIG_PATH");
-    if (config_path && *config_path) {
+    const std::string config_path = getenv_oflm("OFLM_CONFIG_PATH");
+    if (!config_path.empty()) {
         candidates.push_back(std::filesystem::path(config_path).parent_path().string());
     }
-    // The directories flm-add uses when neither variable is exported, new
+    // The directories oflm-add uses when neither variable is exported, new
     // before legacy (#30) -- an existing install keeps working with no
     // migration and no copying of multi-gigabyte weights.
+    //
+    // The second line used to be user_flm_directory(), i.e. the LEGACY root, and the
+    // oflm rename turned it into user_oflm_directory() -- a strict subset of the list
+    // above it. The line became dead and the legacy root stopped being searched, while
+    // the comment went on promising it. legacy_flm_directories() restores what the
+    // comment says (#41).
     for (const std::string& d : user_oflm_directories()) candidates.push_back(d);
-    candidates.push_back(user_oflm_directory());
+    for (const std::string& d : legacy_flm_directories()) candidates.push_back(d);
 
     for (const std::string& c : closed_path_roots()) candidates.push_back(c);
 
@@ -261,25 +295,9 @@ int get_server_port(int user_port) {
         return user_port;
     }
     else {
-#ifdef _WIN32
-        char* port_env = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&port_env, &len, "OFLM_SERVE_PORT") == 0 && port_env != nullptr) {
-            try {
-                int port = std::stoi(port_env);
-                free(port_env);
-                if (port > 0 && port <= 65535) {
-                    return port;
-                }
-            }
-            catch (const std::exception&) {
-                free(port_env);
-                // Invalid port number, use default
-            }
-        }
-#else
-        const char* port_env = std::getenv("OFLM_SERVE_PORT");
-        if (port_env && *port_env) {
+        // OFLM_SERVE_PORT, or the FLM_SERVE_PORT the pre-rename installer wrote (#41).
+        const std::string port_env = getenv_oflm("OFLM_SERVE_PORT");
+        if (!port_env.empty()) {
             try {
                 int port = std::stoi(port_env);
                 if (port > 0 && port <= 65535) {
@@ -290,7 +308,6 @@ int get_server_port(int user_port) {
                 // Invalid port number, use default
             }
         }
-#endif
     }
 
     return 52625; // Default port
@@ -299,29 +316,28 @@ int get_server_port(int user_port) {
 ///@brief get_models_directory gets the models directory from environment variable or defaults to user/.oflm/models on Windows or ~/.config/oflm on Linux
 ///@return the models directory path
 std::string get_models_directory() {
-#ifdef _WIN32
-    char* model_path_env = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&model_path_env, &len, "OFLM_MODEL_PATH") == 0 && model_path_env != nullptr) {
-        std::string custom_path(model_path_env);
-        free(model_path_env);
-        if (!custom_path.empty()) {
-            return custom_path;
-        }
-    }
-#else
-    const char* model_path_env = std::getenv("OFLM_MODEL_PATH");
-    if (model_path_env && *model_path_env) {
-        return std::string(model_path_env);
-    }
-#endif
-    // Fallback to user/.oflm/ on Windows or ~/.config/oflm on Linux if environment variable is not set
+    // OFLM_MODEL_PATH, or the FLM_MODEL_PATH the pre-rename installer wrote (#41).
+    const std::string custom_path = getenv_oflm("OFLM_MODEL_PATH");
+    if (!custom_path.empty()) return custom_path;
+
+    // No variable set: the oflm directory, then the pre-rename one if it exists and the
+    // oflm one does not. A model store is gigabytes; an upgrade must not orphan it.
     std::string user_dir = get_user_directory();
 #ifdef _WIN32
-    return user_dir + "\\.oflm";
+    const std::string oflm_dir = user_dir + "\\.oflm";
 #else
-    return user_dir + "/oflm";
+    const std::string oflm_dir = user_dir + "/oflm";
 #endif
+    std::error_code ec;
+    if (std::filesystem::is_directory(oflm_dir, ec)) return oflm_dir;
+    for (const std::string& d : legacy_flm_directories()) {
+        if (std::filesystem::is_directory(d, ec)) {
+            std::cerr << "[OFLM]  using the pre-rename model directory " << d
+                      << "; move it to " << oflm_dir << " when convenient." << std::endl;
+            return d;
+        }
+    }
+    return oflm_dir;
 }
 
 } // end of namespace utils

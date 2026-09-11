@@ -392,4 +392,14 @@ int get_server_port(int user_port);
 ///@return the models directory path
 std::string get_models_directory();
 
+///@brief Read an OFLM_* environment variable, falling back to the FLM_* name the
+///       pre-rename releases (and their installer) wrote.
+///
+/// Every variable this project reads was renamed by prefixing an 'O', so one rule
+/// covers all of them. An install that predates the rename keeps working, and the
+/// legacy name is reported once per variable rather than silently honoured -- a
+/// migration that says nothing is indistinguishable from one that did not happen.
+///@return the value, or an empty string when neither name is set
+std::string getenv_oflm(const char* oflm_name);
+
 } // end of namespace utils

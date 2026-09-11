@@ -52,7 +52,28 @@ ModelDownloader::ModelStatus ModelDownloader::check_model_compatibility(const st
     LM_Config config;
     config.from_pretrained(this->supported_models.get_model_path(new_model_tag));
     std::string oflm_version = config.oflm_version;
-    std::string oflm_min_version = model_info["oflm_min_version"];
+    // oflm_min_version, or the flm_min_version that a registry written before the
+    // oflm rename carries (#41) -- the field was renamed in the DATA as well as the
+    // code, and nothing read the old name.
+    //
+    // An entry with neither is not a reason to abort. The implicit conversion this
+    // replaces threw `[json.exception.type_error.302] type must be string, but is
+    // null` straight out of check_model_compatibility, which `oflm list` calls once
+    // per entry -- so a single pre-rename or hand-written registry entry killed the
+    // ENTIRE listing, naming neither the model nor the field. Measured on a user
+    // registry carrying flm_min_version: 1 row printed, 39 lost, exit 1.
+    std::string oflm_min_version;
+    for (const char* key : {"oflm_min_version", "flm_min_version"}) {
+        auto it = model_info.find(key);
+        if (it != model_info.end() && it->is_string()) {
+            oflm_min_version = it->get<std::string>();
+            break;
+        }
+    }
+    // Nothing to compare against -- the same reasoning as the "0.0.0" case below.
+    if (oflm_min_version.empty()) {
+        return ModelStatus::Ready;
+    }
 
     // A CHECKPOINT THAT IS NOT AN OFLM ARTIFACT HAS NO VERSION TO COMPARE.
     //
