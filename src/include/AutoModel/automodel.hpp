@@ -69,30 +69,7 @@ struct NonStreamResult {
 	std::vector<std::pair<std::string, std::string>> tool_calls_list; // (name, args) for multiple tool calls
 };
 
-typedef enum {
-    EOT_DETECTED, 
-    MAX_LENGTH_REACHED,
-    ERROR_DETECTED,
-	CANCEL_DETECTED,
-	TOOL_DETECTED
-} stop_reason_t;
-
-inline std::string stop_reason_to_string(stop_reason_t reason){
-    switch (reason){
-        case EOT_DETECTED:
-            return "stop";
-        case MAX_LENGTH_REACHED:
-            return "length";
-		case CANCEL_DETECTED:
-			return "cancel";
-        case ERROR_DETECTED:
-            return "error";
-		case TOOL_DETECTED:
-			return "tool_calls";
-		default:
-            return "UNKNOWN";
-    }
-}
+#include "AutoModel/stop_reason.hpp"   // stop_reason_t, stop_reason_to_string
 
 struct chat_meta_info_t {
 	int max_prefill_len;

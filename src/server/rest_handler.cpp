@@ -385,28 +385,6 @@ RestHandler::~RestHandler() = default;
 
 ///@brief Ensure the model is loaded
 ///@param model_tag the model tag
-json RestHandler::model_error_json(ModelLoad why, const std::string& model) {
-    // The author's note on #52: do not say "no substitute was used" -- it reads as if
-    // answering with a different model were an option somewhere. It is not, any more.
-    switch (why) {
-        case ModelLoad::Unknown:
-            return json{{"error", {
-                {"message", "model '" + model + "' is not in this build's model list"},
-                {"type", "invalid_request_error"}, {"param", "model"}, {"code", "model_not_found"}}}};
-        case ModelLoad::NotChatModel:
-            return json{{"error", {
-                {"message", "model '" + model + "' is not a chat model; this endpoint serves "
-                            "text generation only"},
-                {"type", "invalid_request_error"}, {"param", "model"}, {"code", "model_not_found"}}}};
-        case ModelLoad::LoadFailed:
-        default:
-            return json{{"error", {
-                {"message", "model '" + model + "' is known to this build but could not be "
-                            "loaded; the server log says why"},
-                {"type", "server_error"}, {"param", "model"}, {"code", "model_load_failed"}}}};
-    }
-}
-
 RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model_tag) {
     // Normalise FIRST, because both the comparison and the lookup below are exact.
     // Clients send three spellings of one model -- "granite", "granite:3b" and
@@ -423,7 +401,18 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
     if (this->supported_models.is_model_supported(ensure_tag)) {
         ensure_tag = this->supported_models.rectify_model_tag(ensure_tag);
     }
-    if (current_model_tag == ensure_tag) {
+    // "model-faker" is the sentinel for `oflm serve` started without a chat model,
+    // and the handlers default `model` to current_model_tag -- so a request naming no
+    // model arrives here as the sentinel. Say so, rather than looking it up and
+    // reporting it as a typo.
+    if (ensure_tag.empty() || ensure_tag == "model-faker") {
+        return auto_chat_engine != nullptr ? ModelLoad::Ok : ModelLoad::NoModel;
+    }
+    // A tag match is NOT proof that a model is loaded: current_model_tag is also
+    // "model-faker" after a failed load, and it starts empty. The old shape had the
+    // same hole -- it fell straight through to `return true` -- and the handler then
+    // dereferenced a null engine instead of answering the load error.
+    if (current_model_tag == ensure_tag && auto_chat_engine != nullptr) {
         return ModelLoad::Ok;                       // already serving it, under any spelling
     }
     {
@@ -617,19 +606,6 @@ void RestHandler::configure_chat_engine_parameters(const json& options, const js
     }
 }
 
-/// OpenAI's finish_reason vocabulary is {stop, length, tool_calls, content_filter,
-/// function_call} -- `stop_reason_to_string()` also yields "cancel", "error" and
-/// "UNKNOWN", which are not in it, so the mapping is done here rather than by calling
-/// that function. Anything without an OpenAI equivalent stays "stop", which is what
-/// this handler emitted for every outcome before.
-static const char* openai_finish_reason(stop_reason_t reason) {
-    switch (reason) {
-        case MAX_LENGTH_REACHED: return "length";
-        case TOOL_DETECTED:      return "tool_calls";
-        default:                 return "stop";
-    }
-}
-
 json RestHandler::build_nstream_response(std::string response_text,
                                          stop_reason_t stop_reason) {
     // Get tool info
@@ -688,7 +664,7 @@ json RestHandler::build_nstream_response(std::string response_text,
             {"message", message},
             {"logprobs", nullptr},
             {"finish_reason", is_tool_call ? "tool_calls"
-                                           : openai_finish_reason(stop_reason)}
+                                           : openai_compat::finish_reason(stop_reason)}
         }
     });
 }
@@ -748,7 +724,7 @@ void RestHandler::handle_generate(const json& request,
         auto load_start_time = time_utils::now();
         // TODO: Use Another Check Function avoid loading again
         if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
-            send_response(model_error_json(why, model));
+            send_response(openai_compat::model_error(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -860,7 +836,7 @@ void RestHandler::handle_chat(const json& request,
 
         auto load_start_time = time_utils::now();
         if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
-            send_response(model_error_json(why, model));
+            send_response(openai_compat::model_error(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -1325,7 +1301,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
 
         auto load_start_time = time_utils::now();
         if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
-            send_response(model_error_json(why, model));
+            send_response(openai_compat::model_error(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -1607,7 +1583,7 @@ void RestHandler::handle_openai_completion(const json& request,
         int length_limit = request.value("max_tokens", 4096);
 
          if (const ModelLoad why = ensure_model_loaded(model); why != ModelLoad::Ok) {
-            send_response(model_error_json(why, model));
+            send_response(openai_compat::model_error(why, model));
             return;
         }
 
@@ -1692,7 +1668,7 @@ void RestHandler::handle_openai_completion(const json& request,
                         {"text", response_text},
                         {"index", 0},
                         {"logprobs", nullptr},
-                        {"finish_reason", openai_finish_reason(meta_info.stop_reason)}
+                        {"finish_reason", openai_compat::finish_reason(meta_info.stop_reason)}
                     }
                 })},
                 {"usage", {

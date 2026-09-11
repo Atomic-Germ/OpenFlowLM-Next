@@ -32,6 +32,7 @@ struct CancellationToken;
 ///@brief Stream callback type for sending streaming responses
 using StreamResponseCallback = std::function<void(const json&, bool)>; // data, is_final
 
+#include "server/openai_compat.hpp"
 class RestHandler {
 public:
     RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args);
@@ -108,16 +109,8 @@ public:
         std::shared_ptr<CancellationToken> cancellation_token = nullptr);
 
 private:
-    /// Why ensure_model_loaded() did not leave `model_tag` serving. The distinction
-    /// is not cosmetic: Unknown and NotChatModel are the CLIENT's mistake and answer
-    /// 400, while LoadFailed is ours and answers 500 -- a client that retries a 400
-    /// forever is being told the wrong thing about whose problem it is.
-    enum class ModelLoad { Ok, Unknown, NotChatModel, LoadFailed };
-
+    using ModelLoad = openai_compat::ModelLoad;
     ModelLoad ensure_model_loaded(const std::string& model_tag);
-    /// The OpenAI-shaped error body for a non-Ok outcome. One copy; four call sites
-    /// used to carry their own, and they had already drifted.
-    static json model_error_json(ModelLoad why, const std::string& model);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
     void configure_chat_engine_parameters(const json& options, const json& request);

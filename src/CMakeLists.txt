@@ -287,6 +287,8 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
 # Gather your sources
 # ———————————————————————————————————————————————
 file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
+# Unit-test translation units carry their own main() and must never join the engine.
+list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
@@ -1173,6 +1175,29 @@ enable_testing()
 add_test(NAME oflm_smoke COMMAND $<TARGET_FILE:oflm> list)
 set_tests_properties(oflm_smoke PROPERTIES
     ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# openai_compat: the OpenAI wire vocabulary (finish_reason, error bodies, HTTP
+# status) and the chat-model predicate. NO device, NO weights, NO network -- it
+# links nothing but nlohmann and reads model_list.json off disk, so it runs on a
+# build machine with no NPU. The smoke test above cannot cover any of this: every
+# defect it guards produces a WELL-FORMED wrong answer, and the server stays up.
+add_executable(openai_compat_test server/openai_compat_test.cpp)
+target_include_directories(openai_compat_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+# model_list.hpp -> utils/utils.hpp -> device_runtime.hpp, so the XRT HEADERS are
+# needed to compile even though nothing here links or opens a device.
+if(XRT_INCLUDE_DIRS)
+    target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIRS})
+elseif(XRT_INCLUDE_DIR)
+    target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIR})
+endif()
+if(MSVC)
+    target_compile_options(openai_compat_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(openai_compat_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME openai_compat
+         COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.

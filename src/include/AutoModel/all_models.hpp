@@ -25,84 +25,8 @@
 #include "modeling_gemma4e.hpp"
 #include "modeling_gemma4_12b.hpp"
 #include "model_list.hpp"
+#include "AutoModel/model_families.hpp"   // SupportedModelFamily, model_family_map, is_chat_model
 #include "nlohmann/json.hpp"
-
-typedef enum {
-    llama3,
-    granite,
-    deepseek_r1,
-    deepseek_r1_0528,
-    qwen2,
-    qwen2vl,
-    qwen3,
-    qwen3_it,
-    qwen3_tk,
-    qwen3vl,
-    qwen3_5,
-    qwen3_5_omni,
-    qwen3_6_moe,
-    gemma3,
-    gemma3_text,
-    gemma4e,
-    gemma4_12b,
-    gpt_oss,
-    lfm2,
-    lfm2_5_tk,
-    phi4,
-    nanbeige,
-    error_whiper,
-    error_embedding
-} SupportedModelFamily;
-
-/// The family name -> engine map. At namespace scope because two callers need it:
-/// the factory below, and `is_chat_model()`, which the server asks BEFORE it takes
-/// the loaded model off the NPU.
-inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
-    static const std::map<std::string, SupportedModelFamily> modelFamilyMap = {
-        {"llama3", SupportedModelFamily::llama3},
-        {"granite", SupportedModelFamily::granite},
-        {"deepseek-r1", SupportedModelFamily::deepseek_r1},
-        {"deepseek-r1-0528", SupportedModelFamily::deepseek_r1_0528},
-        {"qwen2", SupportedModelFamily::qwen2},
-        {"qwen3", SupportedModelFamily::qwen3},
-        {"qwen3-it", SupportedModelFamily::qwen3_it},
-        {"qwen3-tk", SupportedModelFamily::qwen3_tk},
-        {"qwen3vl", SupportedModelFamily::qwen3vl},
-        {"qwen3.5", SupportedModelFamily::qwen3_5},
-        {"qwen3.5-omni", SupportedModelFamily::qwen3_5_omni},
-        {"qwen3.6-moe", SupportedModelFamily::qwen3_6_moe},
-        {"gemma3", SupportedModelFamily::gemma3},
-        {"gemma3-text", SupportedModelFamily::gemma3_text},
-        {"gemma4e", SupportedModelFamily::gemma4e},
-        {"gemma4-12b", SupportedModelFamily::gemma4_12b},
-        {"gpt-oss", SupportedModelFamily::gpt_oss},
-        {"lfm2", SupportedModelFamily::lfm2},
-        {"lfm2.5-tk", SupportedModelFamily::lfm2_5_tk},
-        {"qwen2vl", SupportedModelFamily::qwen2vl},
-        {"phi4", SupportedModelFamily::phi4},
-        {"nanbeige", SupportedModelFamily::nanbeige},
-        {"whisper-v3", SupportedModelFamily::error_whiper},
-        {"embed-gemma", SupportedModelFamily::error_embedding}
-    };
-    return modelFamilyMap;
-}
-
-/// True when `model_tag` names something this build can serve AS A CHAT MODEL.
-///
-/// `model_list` answers a different question -- whether the tag exists -- and
-/// `embed-gemma:300m` and `whisper-v3:turbo` exist. They are not chat models, and
-/// the caller has to learn that BEFORE it evicts what is loaded, because the
-/// factory can only say so by returning null, and by then the NPU is already clear.
-inline bool is_chat_model(const std::string& model_tag, model_list& available_models) {
-    if (!available_models.is_model_supported(model_tag)) return false;
-    auto [resolved, model_info] = available_models.get_model_info(model_tag);
-    (void)resolved;
-    const auto& m = model_family_map();
-    const auto it = m.find(model_info["details"]["family"].get<std::string>());
-    if (it == m.end()) return false;            // a family this build has no engine for
-    return it->second != SupportedModelFamily::error_whiper &&
-           it->second != SupportedModelFamily::error_embedding;
-}
 
 inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, oflm_rt::device* npu_device_inst) {
     if (available_models.is_model_supported(model_tag) == false) {

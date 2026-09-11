@@ -8,6 +8,10 @@
  */
 #pragma once
 
+// finish_reason is OpenAI's vocabulary, not the engine's: a streamed
+// cancellation used to go out as "cancel", which is not a value the
+// OpenAI schema has.
+#include "server/openai_compat.hpp"
 #include <ostream>
 #include <streambuf>
 #include <functional>
@@ -202,7 +206,7 @@ private:
             {"model", model_name},
             {"choices", json::array({
                 {
-                    {"finish_reason", stop_reason_to_string(meta_info.stop_reason)},
+                    {"finish_reason", openai_compat::finish_reason(meta_info.stop_reason)},
                 }
             })},
             {"usage", {
@@ -488,7 +492,7 @@ private:
                     {"content", nullptr}
                 }},
                     //{"logprobs", nullptr},
-                    {"finish_reason", stop_reason_to_string(meta_info.stop_reason)}
+                    {"finish_reason", openai_compat::finish_reason(meta_info.stop_reason)}
                 }
             })},
             {"usage", {
