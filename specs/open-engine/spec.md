@@ -31,6 +31,7 @@ the offending key named.
 - `Manifest::load` on the checked-in fixture (`tests/fixtures/manifest_qwen36.json`) yields 40 layers, two layer types with the 27B's buffer sizes and three-step programs, four contexts, six kernels with their patch kinds (`ax0` attnpos, `lx1`/`ax1` moeroute2), the tail `ln` → `lm`, and the MoE pool geometry `stripe 163840, up 655360, down_core 81920, pool_down 335544320, share 503316480 / 503971840 / 504627200`.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
 - `manifest_version: 2` → refused by the parser.
+- An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `FLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$FLM_XCLBIN_PATH`, the directory holding `$FLM_CONFIG_PATH`, the user-level flm directory `flm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/flm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `flm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
@@ -1067,20 +1068,27 @@ family before it had:
   two same-shaped containers can be longrope fine-tunes extended to different context
   lengths, with different factor lists and nothing else different, and loading one under
   a kernel set built for the other would run and return plausible garbage. So `phi3`'s
-  `hf_config_check` also carries `rope_theta` always, and -- only when the source
-  `config.json` actually had the key, so a config that legitimately omits an optional
-  field is not refused for lacking it (`Manifest::check_model` fails closed on an ABSENT
-  key, not just a disagreeing one) -- `rope_scaling` verbatim and
-  `original_max_position_embeddings` when it is a top-level key.
+  `hf_config_check` also carries `rope_theta`, `rope_scaling` verbatim,
+  `original_max_position_embeddings`, and `max_position_embeddings` when it set the
+  attention scale (a `rope_scaling` without its own `factor`). HF lets a config omit
+  several of these (`head_dim`, `partial_rotary_factor`, `rope_scaling`), and
+  `Manifest::check_model` fails closed on an absent key -- so rather than emit a check
+  only when the source config spelled the key out (one-way: a kernel set built from a
+  full-rotation config would then accept a 0.75 container), the manifest also carries
+  **`hf_config_defaults`**, what an absent key means (`head_dim`: hidden / heads;
+  `partial_rotary_factor`: 1.0; `rope_scaling`: none; `original_max_position_embeddings`:
+  whatever the sub-object says). The checker compares the expected value against the
+  default when the key is absent, so an omitted optional field is accepted exactly when it
+  implies what the kernels were built for and refused otherwise, in both directions.
+  `hidden_act` other than silu is refused at derivation (the FFN kernel is silu).
 
 Only the HF derivation exists: a Phi-3 GGUF carries the factor lists as tensors
 (`rope_factors_{long,short}.weight`), not metadata. The `Phi4` class selects the open
 engine under `FLM_PHI4_ENGINE`.
 
 **Acceptance criteria (unit):**
-- `rotary_dim` 96 derives from the factor; without one, the whole head. A config that
-  never had `partial_rotary_factor` derives fine and gets no `hf_config_check` entry for
-  it (`test_refusals_and_defaults`).
+- `rotary_dim` 96 derives from the factor; without one, the whole head, and the check
+  then names 1.0 (`test_refusals_and_defaults`); a non-silu `hidden_act` is refused.
 - The short and long inverse-frequency tables equal transformers'
   `_compute_longrope_parameters` (the plain table divided by the list), the short list at
   and below 4096, the long one above; `rope_scale()` equals its attention factor,
@@ -1092,10 +1100,17 @@ engine under `FLM_PHI4_ENGINE`.
 - The manifest's ptab global carries `scale`, the short `inv_freq`, `long_inv_freq` and
   `switch_row = original_max_position_embeddings` -- all independent of the export's
   `--max-ctx` (`test_layout_and_manifest`). `hf_config_check` carries
-  `partial_rotary_factor`, `head_dim`, `rope_theta`, the raw `rope_scaling` and
-  `original_max_position_embeddings`, so a container with a different rotation, theta or
-  longrope table is refused at load, by name (`test_the_compatibility_check_catches_a_different_longrope_table`).
-  A Llama manifest has no `scale` / `long_inv_freq` / `switch_row` key.
+  `partial_rotary_factor`, `head_dim`, `rope_theta`, the raw `rope_scaling`,
+  `original_max_position_embeddings` and (when it set the scale) `max_position_embeddings`;
+  `hf_config_defaults` carries what an absent `head_dim` / `partial_rotary_factor` /
+  `rope_scaling` / `original_max_position_embeddings` means. A container with a different
+  rotation, theta, longrope table or `max_position_embeddings` is refused at load by name;
+  one omitting `head_dim` is accepted; one omitting `partial_rotary_factor` is refused
+  against the 96-dim kernels (`test_the_compatibility_check_is_two_way_through_the_defaults`,
+  `manifest_test.cpp`'s phi3 block on `fixtures/manifest_phi4_mini_4b.json`). The
+  checked-in `recipes/specs/phi4-mini-4b.json` yields the same checks through
+  `export --spec` (`test_a_spec_loaded_from_json_still_emits_the_full_check`). A Llama
+  manifest has no `scale` / `long_inv_freq` / `switch_row` key and empty defaults.
 - `pack.ptab(..., scale)` multiplies cos and sin; given `long_inv_freq` + `switch_row` it
   reads `inv_freq` for row r < switch_row and `long_inv_freq` for r >= switch_row, in the
   SAME table (not two separate calls that happen to agree); the two are required together.

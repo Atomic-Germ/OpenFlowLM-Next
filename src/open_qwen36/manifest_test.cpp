@@ -305,6 +305,45 @@ int main(int argc, char** argv) {
                 if (o["op"] == "transpose") o.erase("rows");
         });
     }
+    // ---- Phi-3: a 96-dim rotation, longrope's two tables, and hf_config_defaults -- the
+    // compatibility check is two-way for keys a config may omit (OPEN-FAMILY-PHI3)
+    if (argc >= 7) {
+        try {
+            Manifest p = Manifest::load(argv[6]);
+            check(p.family == "phi3" && p.layers.size() == 32 && p.rotary_dim == 96 && p.hidden == 3072,
+                  "phi3: 32 dense layers, a 96-dim rotation");
+            const auto& rg = p.per_row_globals.at("ptab");
+            check(rg.switch_row == 4096 && rg.inv_freq.size() == 48 && rg.long_inv_freq.size() == 48 &&
+                      rg.scale > 1.19 && rg.scale < 1.191 && rg.inv_freq[1] != rg.long_inv_freq[1],
+                  "phi3: both longrope tables, the switch row and the attention scale");
+            check(p.hf_config_defaults.value("partial_rotary_factor", 0.0) == 1.0 &&
+                      p.hf_config_defaults.value("head_dim", 0) == 128 && p.hf_config_defaults.contains("rope_scaling"),
+                  "phi3: the manifest names what an absent optional key means");
+            json ok = matching_config(p);
+            p.check_model(ok, "phi3");
+            check(true, "phi3: a matching config.json is accepted");
+            json nohd = ok; nohd.erase("head_dim");
+            p.check_model(nohd, "phi3");
+            check(true, "phi3: a config without head_dim is accepted through its default (hidden / heads)");
+            json noprf = ok; noprf.erase("partial_rotary_factor");
+            refused(p, noprf, "partial_rotary_factor", "phi3: a config WITHOUT partial_rotary_factor (a full rotation) is refused against the 96-dim kernels");
+            json half = ok; half["partial_rotary_factor"] = 0.5;
+            refused(p, half, "partial_rotary_factor", "phi3: a different rotation is refused by name");
+            json table = ok; table["rope_scaling"]["long_factor"][47] = 1.0;
+            refused(p, table, "rope_scaling", "phi3: a different longrope table is refused by name");
+            json plain = ok; plain.erase("rope_scaling");
+            refused(p, plain, "rope_scaling", "phi3: a plain-RoPE config is refused against a longrope kernel set");
+            json theta = ok; theta["rope_theta"] = 500000.0;
+            refused(p, theta, "rope_theta", "phi3: a different theta is refused by name");
+            json mp = ok; mp["max_position_embeddings"] = 65536;
+            refused(p, mp, "max_position_embeddings", "phi3: a different max_position_embeddings (it sets the attention scale) is refused");
+            json noorig = ok; noorig.erase("original_max_position_embeddings");
+            refused(p, noorig, "original_max_position_embeddings", "phi3: dropping the original context (nowhere else to read it from) is refused");
+        } catch (const std::exception& e) {
+            check(false, std::string("phi3 fixture: ") + e.what());
+        }
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

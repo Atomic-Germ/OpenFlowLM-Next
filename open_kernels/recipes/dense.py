@@ -351,6 +351,36 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
             # global carries its own (both tables, for a longrope family -- see programs())
 
 
+def _phi3_raw_scaling(spec: ModelSpec):
+    """What a Phi-3 container's config.json literally holds at `rope_scaling`: the verbatim
+    sub-object the derivation kept (`extra.rope_scaling_raw`), or -- for a spec loaded from
+    JSON without it -- the HF-standard shape rebuilt from the canonical fields. None for a
+    plain-RoPE Phi."""
+    if spec.rope_scaling is None:
+        return None
+    raw = spec.extra.get("rope_scaling_raw")
+    if raw is not None:
+        return raw
+    return {"type": "longrope", "short_factor": list(spec.rope_scaling["short_factor"]),
+            "long_factor": list(spec.rope_scaling["long_factor"])}
+
+
+def hf_config_defaults(spec: ModelSpec) -> dict:
+    """What a key ABSENT from a container's config.json means, for the keys
+    `hf_config_check` emits that HF lets a config omit. `Manifest::check_model` compares
+    the manifest's expected value against this instead of refusing the config for
+    lacking the key -- so an omitted optional field is accepted exactly when it implies
+    the value the kernel set was built for, and refused when it does not."""
+    if spec.family != "phi3":
+        return {}
+    raw = _phi3_raw_scaling(spec) or {}
+    return {"head_dim": spec.hidden // spec.num_heads,          # HF's own fallback
+            "partial_rotary_factor": 1.0,                        # a full rotation
+            "rope_scaling": None,                                # plain RoPE
+            # the derivation reads it from the sub-object when the top level lacks it
+            "original_max_position_embeddings": raw.get("original_max_position_embeddings")}
+
+
 def hf_config_check(spec: ModelSpec) -> dict:
     d = {"hidden_size": spec.hidden, "num_hidden_layers": spec.num_layers, "vocab_size": spec.vocab,
          "num_attention_heads": spec.num_heads, "num_key_value_heads": spec.num_kv_heads,
@@ -359,20 +389,23 @@ def hf_config_check(spec: ModelSpec) -> dict:
         d["head_dim"] = spec.head_dim          # Llama configs may omit it (hidden / heads)
     if spec.family == "phi3":
         # The rotation width is compiled into the attention core (ATTN_ROT), and the
-        # position table's frequencies (rope_theta, and longrope's factor lists when
-        # present) are baked in at export time -- neither is derivable from the shape
-        # fields above, so a same-shaped container with different RoPE parameters would
-        # otherwise load silently and run with the wrong baked table. Each key is added
-        # only when the source config actually carried it (spec.py's _phi3_hf), so a
-        # config that legitimately omits an optional field is not refused for lacking it.
-        if spec.extra.get("partial_rotary_factor_present"):
-            d["partial_rotary_factor"] = spec.rotary_dim / spec.head_dim
+        # position table's frequencies (rope_theta, longrope's factor lists, the attention
+        # scale that max_position_embeddings sets) are baked in at export time -- none of
+        # it derivable from the shape fields above, so a same-shaped container with
+        # different RoPE parameters would otherwise load silently and run with the wrong
+        # table. Every key is emitted, whether or not the source config spelled it out;
+        # what an ABSENT key means comes from hf_config_defaults below, so the check is
+        # two-way (a kernel set built from a full-rotation config refuses a 0.75 container
+        # and vice versa) without refusing a config for omitting an optional field.
+        d["partial_rotary_factor"] = spec.rotary_dim / spec.head_dim
         d["rope_theta"] = spec.rope_theta
-        raw_scaling = spec.extra.get("rope_scaling_raw")
-        if raw_scaling is not None:
-            d["rope_scaling"] = raw_scaling
-            if spec.extra.get("original_max_position_embeddings_at_top"):
-                d["original_max_position_embeddings"] = spec.rope_scaling["original_max_position_embeddings"]
+        d["rope_scaling"] = _phi3_raw_scaling(spec)
+        if spec.rope_scaling is not None:
+            orig = spec.rope_scaling["original_max_position_embeddings"]
+            d["original_max_position_embeddings"] = orig
+            if d["rope_scaling"].get("factor") is None:
+                # the factor, and with it rope_scale(), came from max_position_embeddings
+                d["max_position_embeddings"] = int(round(spec.rope_scaling["factor"] * orig))
     if spec.family == "gemma3":
         d["sliding_window"] = spec.sliding_window
     if spec.family == "granite":

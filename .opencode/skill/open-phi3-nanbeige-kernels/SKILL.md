@@ -47,12 +47,13 @@ than reading it as a kernel error.
   `scale`, unconditionally; `pools.cpp`, `pack.ptab` and `replica_dense.rope` all multiply
   cos and sin by it. No key for other families -- `RowGlobal::switch_row` defaults to
   `kSwitchNever`.
-- **The load-time compatibility check names `rope_theta` and the longrope config**, not
-  just the shape fields every other family checks -- two same-shaped containers can differ
-  only in their factor lists (different longrope fine-tunes), and that has to be caught at
-  load, not run silently. Only checked when the source `config.json` actually carried the
-  key, so an omitted-but-defaulted field (`partial_rotary_factor`) doesn't turn into a
-  refusal for containers that never had it.
+- **The load-time compatibility check names `rope_theta`, the longrope config and
+  `max_position_embeddings`** (it sets the attention scale), not just the shape fields
+  every other family checks -- two same-shaped containers can differ only in their factor
+  lists (different longrope fine-tunes), and that has to be caught at load, not run
+  silently. Keys HF lets a config omit (`head_dim`, `partial_rotary_factor`,
+  `rope_scaling`) get their meaning-when-absent from the manifest's `hf_config_defaults`,
+  so the check is two-way without refusing a config for leaving an optional field out.
 - Nothing new for Nanbeige beyond the two points: it declares `model_type: llama` and is one.
 
 ## Verify

@@ -98,12 +98,13 @@ def test_refusals_and_defaults():
     del plain["partial_rotary_factor"]
     s = ModelSpec.from_hf_config(plain)
     assert s.rotary_dim == 128 and s.rope_scaling is None and s.rope_scale() == 1.0
-    # a config that never had these optional keys does not get a check demanding them --
-    # Manifest::check_model fails closed on a key config.json LACKS, not just a disagreeing one
+    # every compatibility key is emitted even for a config that omitted it; what the absent
+    # key MEANS is in hf_config_defaults, so the check is two-way (see test below)
     d = DR.hf_config_check(s)
-    assert "partial_rotary_factor" not in d and "rope_scaling" not in d
-    assert "original_max_position_embeddings" not in d
-    assert d["rope_theta"] == 10000.0
+    assert d["partial_rotary_factor"] == 1.0 and d["rope_scaling"] is None and d["rope_theta"] == 10000.0
+    assert "original_max_position_embeddings" not in d and "max_position_embeddings" not in d
+    with pytest.raises(SpecError, match="hidden_act"):
+        ModelSpec.from_hf_config(dict(HF_PHI4_MINI, hidden_act="gelu"))
 
 
 def test_layout_and_manifest(unvalidated):
@@ -141,6 +142,47 @@ def test_layout_and_manifest(unvalidated):
     assert np.allclose(g["long_inv_freq"], s.rope_inv_freq(ctx=4097))
     assert g["switch_row"] == 4096
     assert manifest(s, 8192)["globals"]["ptab"]["long_inv_freq"] == g["long_inv_freq"]      # max_ctx-independent
+
+
+def test_the_compatibility_check_is_two_way_through_the_defaults():
+    """Manifest::check_model compares an ABSENT config key against hf_config_defaults, so
+    a kernel set built from a full-rotation config refuses a 0.75 container and one built
+    from a 0.75 config refuses a container that omits the field -- neither direction is a
+    silent accept -- while a config that omits head_dim is accepted through HF's own
+    hidden / heads fallback. The C++ side of this is manifest_test.cpp's phi3 block."""
+    s = ModelSpec.from_hf_config(HF_PHI4_MINI)
+    d, dflt = DR.hf_config_check(s), DR.hf_config_defaults(s)
+    assert dflt == {"head_dim": 128, "partial_rotary_factor": 1.0, "rope_scaling": None,
+                    "original_max_position_embeddings": None}
+    assert d["partial_rotary_factor"] == 0.75 != dflt["partial_rotary_factor"]      # absent -> refused
+    assert d["head_dim"] == dflt["head_dim"]                                        # absent -> accepted
+    assert d["rope_scaling"] is not None and dflt["rope_scaling"] is None           # absent -> refused
+    # max_position_embeddings set the attention scale (rope_scaling carried no factor)
+    assert d["max_position_embeddings"] == 131072 and "max_position_embeddings" not in dflt
+    assert d["original_max_position_embeddings"] == 4096
+    # a config carrying the factor itself does not depend on max_position_embeddings
+    with_factor = dict(HF_PHI4_MINI, rope_scaling={**HF_PHI4_MINI["rope_scaling"], "factor": 32.0})
+    assert "max_position_embeddings" not in DR.hf_config_check(ModelSpec.from_hf_config(with_factor))
+    # nested original_max_position_embeddings: the default is what the sub-object says
+    nested = dict(HF_PHI4_MINI, rope_scaling={**HF_PHI4_MINI["rope_scaling"], "original_max_position_embeddings": 4096})
+    del nested["original_max_position_embeddings"]
+    assert DR.hf_config_defaults(ModelSpec.from_hf_config(nested))["original_max_position_embeddings"] == 4096
+    # every other family: no defaults, its check is unchanged
+    from test_llama3 import HF_LLAMA32_3B
+    assert DR.hf_config_defaults(ModelSpec.from_hf_config(HF_LLAMA32_3B)) == {}
+
+
+def test_a_spec_loaded_from_json_still_emits_the_full_check():
+    """The checked-in recipes/specs/phi4-mini-4b.json goes through export --spec too; its
+    checks must not depend on the derivation's raw metadata being present."""
+    from recipes.load import load_spec
+    from pathlib import Path
+    s = load_spec(Path(DR.__file__).resolve().parent / "specs" / "phi4-mini-4b.json")
+    d = DR.hf_config_check(s)
+    assert d["partial_rotary_factor"] == 0.75 and d["rope_scaling"]["type"] == "longrope"
+    assert len(d["rope_scaling"]["long_factor"]) == 48 and d["max_position_embeddings"] == 131072
+    bare = ModelSpec.from_dict({**s.to_dict(), "extra": {"model_type": "phi3"}})   # no raw sub-object
+    assert DR.hf_config_check(bare)["rope_scaling"] == d["rope_scaling"]
 
 
 def test_the_compatibility_check_catches_a_different_longrope_table():

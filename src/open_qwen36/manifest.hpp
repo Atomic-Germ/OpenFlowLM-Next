@@ -140,11 +140,17 @@ struct Manifest {
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
     nlohmann::json hf_config_check;
+    /// What a key ABSENT from config.json means, for the keys of hf_config_check a config
+    /// may omit (Phi-3's head_dim, partial_rotary_factor, rope_scaling, ...): check_model
+    /// compares the expected value against this instead of refusing for the missing key.
+    nlohmann::json hf_config_defaults = nlohmann::json::object();
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);
 
-    /// Throws naming the first key of config.json that disagrees with the manifest.
+    /// Throws naming the first key of config.json that disagrees with the manifest. A key
+    /// config.json lacks takes its hf_config_defaults value when there is one, and is
+    /// refused as lacking otherwise.
     void check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
     /// Every file (relative to the kernel dir) the manifest names.
