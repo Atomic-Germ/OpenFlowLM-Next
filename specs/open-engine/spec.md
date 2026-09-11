@@ -696,7 +696,18 @@ attention tuple `(128, 20, 4, 128, False, False, False)` and `gemv_q4` K = 10752
 without injecting think tags (the model opens its own `<think>` block).
 `flm-test --llm --model nanbeige4.1:3b` through `flm serve`.
 
-**Result:** pending.
+**Result 2026-09-10:** slice logits corr 0.999999 / 0.999989, same argmax and top-5 at
+both positions, residual corr >= 0.999991 every layer; a 24-token decode chain extends
+this to every position 0-23 (logits corr 0.99995-0.999999 throughout, top-5 identical at
+21 of 24, a near-tie slot-5 swap at the rest); step 3 bit-identical to the harness,
+request 2 reproduced request 1; `chat.py` opens `<think>` and reasons coherently (the
+model has no off switch for it); `flm serve` + `flm-test --llm` PASS with a real
+generation budget (`--gen-lim 600`+; the reasoning chain can outrun a small one, which
+reads as an empty answer column rather than a failure).
+
+Nanbeige's adapter originally reached the closed engine's class through a `dynamic_cast`
+for checkpoint / restore, null on the open engine -- `flm serve` segfaulted on the first
+request. Fixed to the `causal_lm` virtuals every other open-engine adapter already uses.
 
 ### OPEN-FAMILY-GEMMA3: Gemma 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`)
@@ -1013,11 +1024,11 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
-`designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `src/open_qwen36/manifest.cpp`,
-`pools.cpp`, `src/common/AutoModel/modeling_phi4.cpp`)
+`designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `model/dense_probe.py`,
+`src/open_qwen36/manifest.hpp`, `manifest.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_phi4.cpp`)
 **Test category:** manual (needs the NPU and `FastFlowLM/Phi4-mini-Instruct-NPU2`); the
-derivation, the longrope tables, the layout and the manifest are unit-tested in
-`tests/test_phi3.py`
+derivation, the longrope tables, the per-row table switch, the layout and the manifest
+are unit-tested in `tests/test_phi3.py` and `src/open_qwen36/pools_test.cpp`
 
 A Phi-3 model (`model_type: phi3`; Phi-4-mini is one) shall run on the open kernels
 from its `config.json` alone through the dense recipe. Structurally it is Llama 3.2 3B's
@@ -1034,19 +1045,42 @@ family before it had:
   up to `original_max_position_embeddings` (4096; on Phi-4-mini every short factor is
   1.0), the long one above it -- and one attention scale on cos and sin,
   `sqrt(1 + ln(factor) / ln(original))` with `factor = max_position_embeddings / original`
-  (1.190 here). The factor list is chosen by the context the kernel set is exported
-  for (`--max-ctx`; the manifest bakes the table), not per request: HF switches when a
-  sequence passes the original length, which a resident position table cannot do, and
-  the default export's short table is exact up to 4096 tokens. The scale rides on the
-  ptab global as `scale` (absent, 1.0, for every other family, whose manifests are
-  unchanged) and both packers apply it as they write cos and sin.
+  (1.190 here), applied regardless of which list is active. HF picks the list per forward
+  call from the running sequence length (`seq_len = max(position_ids) + 1 >
+  original_max_position_embeddings`); this engine computes one row per token as the
+  context grows (`Core::step`), so **both tables are baked into the manifest and the
+  position table switches per row** at `original_max_position_embeddings` (`switch_row`
+  on the ptab global; `long_inv_freq` beside `inv_freq`) instead of picking one table for
+  the whole resident buffer at export time. Row r therefore carries whichever table a real
+  forward call at sequence length r + 1 would have picked, and -- matching how a real KV
+  cache behaves -- that choice does not move once a row is written even if the
+  conversation later crosses the threshold. `original_max_position_embeddings` is
+  wherever the container states it (`rope_scaling` or the top level); the export's own
+  `--max-ctx` plays no part in the choice, only in how many rows exist. The scale rides on
+  the ptab global as `scale` (absent, 1.0, for every other family, whose manifests carry
+  neither key and are byte-for-byte unchanged) and both packers apply it unconditionally
+  as they write cos and sin.
+- **A load-time compatibility check that actually names the RoPE configuration.** Every
+  other family bakes `rope_theta` (and Llama 3's scaling) into the manifest without
+  checking the container agrees at load -- harmless there, because none of those tables
+  vary with anything but the shape fields `hf_config_check` already compares. Phi-3's do:
+  two same-shaped containers can be longrope fine-tunes extended to different context
+  lengths, with different factor lists and nothing else different, and loading one under
+  a kernel set built for the other would run and return plausible garbage. So `phi3`'s
+  `hf_config_check` also carries `rope_theta` always, and -- only when the source
+  `config.json` actually had the key, so a config that legitimately omits an optional
+  field is not refused for lacking it (`Manifest::check_model` fails closed on an ABSENT
+  key, not just a disagreeing one) -- `rope_scaling` verbatim and
+  `original_max_position_embeddings` when it is a top-level key.
 
 Only the HF derivation exists: a Phi-3 GGUF carries the factor lists as tensors
 (`rope_factors_{long,short}.weight`), not metadata. The `Phi4` class selects the open
 engine under `FLM_PHI4_ENGINE`.
 
 **Acceptance criteria (unit):**
-- `rotary_dim` 96 derives from the factor; without one, the whole head.
+- `rotary_dim` 96 derives from the factor; without one, the whole head. A config that
+  never had `partial_rotary_factor` derives fine and gets no `hf_config_check` entry for
+  it (`test_refusals_and_defaults`).
 - The short and long inverse-frequency tables equal transformers'
   `_compute_longrope_parameters` (the plain table divided by the list), the short list at
   and below 4096, the long one above; `rope_scale()` equals its attention factor,
@@ -1055,12 +1089,27 @@ engine under `FLM_PHI4_ENGINE`.
 - The layout: band split `(6, 2, 6, 16, 6)`, `HPE 4`, `OG_AOUT_ELEMS 3`, `ELN 6144`,
   `E_A 2048`, `KV_ROW 4096`, `PTAB_ROW 2048`, `PER_CALL 2`, `TAB_BYTES 18432`,
   `LMHEAD_BANDS 3126`; build dir `dense/build_phi3_h3072`.
-- The manifest's ptab global carries `scale` and a 48-entry `inv_freq` that follows
-  `--max-ctx`; `hf_config_check` carries `partial_rotary_factor` and `head_dim`, so a
-  container with a different rotation is refused at load. A Llama manifest has no
-  `scale` key.
-- `pack.ptab(..., scale)` multiplies cos and sin; `replica_dense.rope` rotates only the
-  first `rot` dims and scales them the same way.
+- The manifest's ptab global carries `scale`, the short `inv_freq`, `long_inv_freq` and
+  `switch_row = original_max_position_embeddings` -- all independent of the export's
+  `--max-ctx` (`test_layout_and_manifest`). `hf_config_check` carries
+  `partial_rotary_factor`, `head_dim`, `rope_theta`, the raw `rope_scaling` and
+  `original_max_position_embeddings`, so a container with a different rotation, theta or
+  longrope table is refused at load, by name (`test_the_compatibility_check_catches_a_different_longrope_table`).
+  A Llama manifest has no `scale` / `long_inv_freq` / `switch_row` key.
+- `pack.ptab(..., scale)` multiplies cos and sin; given `long_inv_freq` + `switch_row` it
+  reads `inv_freq` for row r < switch_row and `long_inv_freq` for r >= switch_row, in the
+  SAME table (not two separate calls that happen to agree); the two are required together.
+  `pools::build_ptab` (C++) is byte-identical to `pack.ptab` on the same inputs, checked
+  both for a plain scale and for the full switch, by shared FNV-1a hash
+  (`src/open_qwen36/pools_test.cpp`'s `ptab_scale_tests` / `ptab_switch_tests`) -- this is
+  the actual production function `Core::Core()` calls to build the resident table, not a
+  reimplementation. `RowGlobal::switch_row` defaults to `kSwitchNever`, so an unrelated
+  family's table is unaffected by the field existing on the struct.
+- `replica_dense.rope` rotates only the first `rot` dims and scales the whole rotation;
+  `dense_decode` and `dense_probe.py` pick the table from `ctx = pos + 1` per call -- HF's
+  own `seq_len` rule -- so positions `original - 1` and `original` straddle the switch
+  exactly where the packer's `switch_row = original` does
+  (`test_dense_decode_picks_the_table_from_pos_plus_one`).
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Phi4-mini-Instruct-NPU2`, `out_ph`,
 prompt id 200021 (`<|user|>`; the model has no bos); `chat.py` switches to
@@ -1070,7 +1119,23 @@ enter with it: the attention tuple `(128, 24, 8, 96, False, False, False)` -- th
 partial rotation on the dense design -- and nothing new for the GEMVs (3072 and 8192
 are Llama 3.2 3B's).
 
-**Result:** pending.
+**What the boundary itself is not covered by:** the 4-layer slice below exercises
+positions 0-1, both short-table rows (`original_max_position_embeddings` is 4096), so it
+cannot see the switch on real weights directly. What stands in for it: `build_ptab` is
+the identical function the engine calls at load, exercised at a row straddling a
+synthetic switch and cross-checked against the NumPy packer byte for byte (the
+acceptance criteria above); the hardware slice separately proves the engine correctly
+consumes whatever the table holds at the positions it was run at. Together these cover
+the mechanism end to end without a multi-thousand-token hardware decode.
+
+**Result 2026-09-10:** slice logits corr 0.999998 / 0.999990, same argmax and top-5 at
+both positions, residual corr >= 0.999995 every layer (layer 3's residual norm at
+position 0, 2807, is the family's attention-sink token; the replica agrees); step 3
+bit-identical to the harness, request 2 reproduced request 1; `chat.py` answers
+coherently, ending on `<|end|>` at token 50. Fast attention (`attnknobs.FAST_ATTENTION`)
+measured against the slow path afterward: identical correlation and residuals, decode
+190 -> 84 ms/token (2.3x). Re-run unchanged after the compatibility-check and per-row
+longrope fixes below (same corr, argmax, top-5 -- the new manifest fields are additive).
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)

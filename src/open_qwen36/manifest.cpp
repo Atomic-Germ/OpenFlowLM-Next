@@ -235,6 +235,15 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
             if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
+            if (has_long != has_switch)
+                fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
+            if (has_long) {
+                rg.long_inv_freq = v["long_inv_freq"].get<std::vector<double>>();
+                rg.switch_row = v["switch_row"].get<uint64_t>();
+                if (rg.long_inv_freq.size() != m.rotary_dim / 2)
+                    fail(where, "global " + k + ": long_inv_freq has " + std::to_string(rg.long_inv_freq.size()) + " values");
+            }
             m.per_row_globals[k] = rg;
         } else {
             fail(where, "global " + k + " is neither a size nor {per_row}");

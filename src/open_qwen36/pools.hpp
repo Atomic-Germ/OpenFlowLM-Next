@@ -98,7 +98,9 @@ void build_ptab(const Manifest& m, const RowGlobal& g, size_t rows, uint8_t* dst
 /// the rotary angle of pair i taken at pos[axis(i)]. A text token passes the same position
 /// three times. `section` is Qwen3-VL's mrope_section (three counts summing to rot/2) with
 /// `interleaved` (pair i takes axis i % 3 within its section); empty: every pair takes pos[0],
-/// which is what build_ptab writes for row p with pos = (p, p, p).
+/// which is what build_ptab writes for row p with pos = (p, p, p). `row >= g.switch_row`
+/// (Phi-3's longrope only; RowGlobal::kSwitchNever for every other family) reads
+/// `g.long_inv_freq` in place of `g.inv_freq` for the whole record.
 void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const double pos[3],
                        const std::vector<int>& section, bool interleaved, uint8_t* r);
 

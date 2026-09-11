@@ -37,11 +37,22 @@ than reading it as a kernel error.
   96 of 128 dims = 48 pairs; the loop does 32 and the tail 16. The rule is now "a multiple
   of 32". Families whose rotation is a multiple of 64 compile the identical loop -- the 35B
   and Qwen3-4B `--force --check` gates were byte-identical after the edit.
-- **longrope on the position table.** `ModelSpec.rope_inv_freq(ctx=...)` picks the short
-  factor list at or below `original_max_position_embeddings` (4096) and the long one above;
-  the export's `--max-ctx` decides, since the table is resident. `ModelSpec.rope_scale()`
-  (1.190 on Phi-4-mini) rides on the ptab global as `scale`; `pools.cpp`, `pack.ptab` and
-  `replica_dense.rope` all multiply cos and sin by it. No key for other families.
+- **longrope on the position table, switched per row.** HF picks its short or long factor
+  list per forward call from the running sequence length. A resident table can't re-select
+  per call, but this engine computes one row per token as the context grows, so both
+  tables are baked (`inv_freq` + `long_inv_freq` on the ptab global) and row r reads
+  `long_inv_freq` once r reaches `switch_row` (= `original_max_position_embeddings`,
+  4096 on Phi-4-mini) -- `--max-ctx` no longer decides which table ships, only how many
+  rows exist. `ModelSpec.rope_scale()` (1.190 on Phi-4-mini) rides on the same global as
+  `scale`, unconditionally; `pools.cpp`, `pack.ptab` and `replica_dense.rope` all multiply
+  cos and sin by it. No key for other families -- `RowGlobal::switch_row` defaults to
+  `kSwitchNever`.
+- **The load-time compatibility check names `rope_theta` and the longrope config**, not
+  just the shape fields every other family checks -- two same-shaped containers can differ
+  only in their factor lists (different longrope fine-tunes), and that has to be caught at
+  load, not run silently. Only checked when the source `config.json` actually carried the
+  key, so an omitted-but-defaulted field (`partial_rotary_factor`) doesn't turn into a
+  refusal for containers that never had it.
 - Nothing new for Nanbeige beyond the two points: it declares `model_type: llama` and is one.
 
 ## Verify

@@ -51,14 +51,16 @@ def rope(t, p, rot, theta, inv_freq=None, scale=1.0):
 
 
 def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
-    """One token through a dense layer. Returns (residual, K, V). `max_ctx` picks longrope's
-    factor list, as the kernel set's export does."""
+    """One token through a dense layer. Returns (residual, K, V). `max_ctx` is unused here and
+    kept only so callers built for the older single-table selection still pass; longrope's
+    factor list is picked per call from `pos` -- HF's own `seq_len = pos + 1` rule -- matching
+    the kernel set's per-row selection (recipes.dense.programs, OPEN-FAMILY-PHI3)."""
     from recipes.dense import QKNORM_POST_ROPE
     from recipes.spec import DENSE_LOCAL
     pre = f"model.layers.{layer}."
     hid, nh, kvh, hd, ff = spec.hidden, spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.intermediate
     local = spec.layer_types[layer] == DENSE_LOCAL
-    eps, inv, rsc = spec.norm_eps, spec.rope_inv_freq(local=local, ctx=max_ctx), spec.rope_scale()
+    eps, inv, rsc = spec.norm_eps, spec.rope_inv_freq(local=local, ctx=pos + 1), spec.rope_scale()
     act = gelu_tanh if spec.activation == "gelu_tanh" else silu
     x = (rms(x_res, eps) * m.bf16(pre + "input_layernorm.weight")).astype(np.float32)
     Wq = m.matmul_w(pre + "self_attn.q_proj.weight", nh * hd, hid)

@@ -15,6 +15,18 @@ from recipes import pack
 from recipes.manifest import manifest
 from recipes.spec import DENSE, ModelSpec, SpecError
 
+from test_pack_plan import _fnv1a
+
+# FNV-1a 64 of pack.ptab(6, 8, ..., inv_freq=[0.5, 0.25, 0.125, 0.0625], scale=1.19).
+# src/open_qwen36/pools_test.cpp builds the same table through pools::build_ptab and
+# asserts the same number, so a Python/C++ mismatch on the scaled path cannot reach
+# hardware validation unnoticed.
+PTAB_SCALE_FNV1A = 0x091CD4029A9681A8
+# FNV-1a 64 of a 10-row table switching from a short to a long table at row 4, scaled --
+# the actual longrope mechanism, both knobs together. pools_test.cpp asserts the same
+# number through pools::build_ptab.
+PTAB_SWITCH_FNV1A = 0x7000741BF5FFA40B
+
 # FastFlowLM/Phi4-mini-Instruct-NPU2 config.json, the fields the derivation reads.
 SHORT = [1.0] * 48
 LONG = [1, 1.118320672, 1.250641126, 1.398617824, 1.564103225, 1.74916897, 1.956131817, 2.187582649,
@@ -86,6 +98,12 @@ def test_refusals_and_defaults():
     del plain["partial_rotary_factor"]
     s = ModelSpec.from_hf_config(plain)
     assert s.rotary_dim == 128 and s.rope_scaling is None and s.rope_scale() == 1.0
+    # a config that never had these optional keys does not get a check demanding them --
+    # Manifest::check_model fails closed on a key config.json LACKS, not just a disagreeing one
+    d = DR.hf_config_check(s)
+    assert "partial_rotary_factor" not in d and "rope_scaling" not in d
+    assert "original_max_position_embeddings" not in d
+    assert d["rope_theta"] == 10000.0
 
 
 def test_layout_and_manifest(unvalidated):
@@ -109,9 +127,34 @@ def test_layout_and_manifest(unvalidated):
     assert g["scale"] == pytest.approx(s.rope_scale(), rel=1e-12) and len(g["inv_freq"]) == 48
     assert m["hf_config_check"]["partial_rotary_factor"] == 0.75 and m["hf_config_check"]["head_dim"] == 128
     assert m["hf_config_check"]["model_type"] == ["phi3"]
-    # the export's context picks the table the manifest bakes
-    assert np.allclose(manifest(s, 8192)["globals"]["ptab"]["inv_freq"], s.rope_inv_freq(ctx=8192))
-    assert np.allclose(g["inv_freq"], s.rope_inv_freq(ctx=4096))
+    # the compatibility check names enough of the RoPE configuration that a same-shaped
+    # container with a different theta or a different longrope table would be refused at
+    # load, not silently accepted and run with the wrong baked position table
+    check = m["hf_config_check"]
+    assert check["rope_theta"] == 10000.0
+    assert check["rope_scaling"] == {"type": "longrope", "short_factor": SHORT, "long_factor": LONG}
+    assert check["original_max_position_embeddings"] == 4096
+    # both tables are baked, not just the export's own max_ctx: row r takes long_inv_freq once
+    # r >= switch_row, matching HF's per-call seq_len = pos + 1 > original rule applied per row
+    # (OPEN-FAMILY-PHI3) -- max_ctx no longer decides which table ships, only how many rows do
+    assert np.allclose(g["inv_freq"], s.rope_inv_freq())            # the short table, ctx <= 4096
+    assert np.allclose(g["long_inv_freq"], s.rope_inv_freq(ctx=4097))
+    assert g["switch_row"] == 4096
+    assert manifest(s, 8192)["globals"]["ptab"]["long_inv_freq"] == g["long_inv_freq"]      # max_ctx-independent
+
+
+def test_the_compatibility_check_catches_a_different_longrope_table():
+    """Two containers agreeing on every shape field but disagreeing on the factor lists
+    (a real scenario: two longrope fine-tunes extended to different context lengths) must
+    NOT produce the same hf_config_check -- that is what OPEN-FAMILY-PHI3's load-time
+    refusal (Manifest::check_model) keys off."""
+    other = dict(HF_PHI4_MINI, rope_scaling={"type": "longrope", "short_factor": SHORT,
+                                             "long_factor": [x * 2 for x in LONG]})
+    a = DR.hf_config_check(ModelSpec.from_hf_config(HF_PHI4_MINI))
+    b = DR.hf_config_check(ModelSpec.from_hf_config(other))
+    assert a["rope_scaling"] != b["rope_scaling"]
+    other_theta = dict(HF_PHI4_MINI, rope_theta=500000.0)
+    assert DR.hf_config_check(ModelSpec.from_hf_config(other_theta))["rope_theta"] != a["rope_theta"]
 
 
 def test_a_family_without_a_scale_writes_no_scale_key(unvalidated):
@@ -130,6 +173,61 @@ def test_ptab_applies_the_scale_to_cos_and_sin():
     assert np.allclose(cs[:, 2:], 1.25 * np.sin(ang), rtol=1e-6)
     assert np.allclose(pack.ptab(3, 4, 10000.0, 1024, inv_freq=inv).reshape(3, 1024)[:, 512:528].copy()
                        .view(np.float32).reshape(3, 4)[:, :2], np.cos(ang), rtol=1e-6)
+
+
+def test_ptab_switches_table_per_row_at_the_threshold():
+    """Row r < switch_row reads `inv_freq`; row r >= switch_row reads `long_inv_freq`. Both
+    tables live in the SAME call (`pack.ptab` builds a whole max_ctx x row table in one shot),
+    so this is the actual mechanism OPEN-FAMILY-PHI3 relies on, not just two separate calls
+    that happen to agree."""
+    short, long_ = [0.5, 0.25], [2.0, 4.0]
+    t = pack.ptab(6, 4, 10000.0, 1024, inv_freq=short, long_inv_freq=long_, switch_row=3).reshape(6, 1024)
+    p = np.arange(6)[:, None]
+    want_short = np.cos(p * np.asarray(short))
+    want_long = np.cos(p * np.asarray(long_))
+    for row in range(6):
+        cos = t[row, 512:520].copy().view(np.float32)
+        want = want_long[row] if row >= 3 else want_short[row]
+        assert np.allclose(cos, want, rtol=1e-6), row
+    with pytest.raises(ValueError, match="long_inv_freq and switch_row"):
+        pack.ptab(6, 4, 10000.0, 1024, inv_freq=short, long_inv_freq=long_)
+    with pytest.raises(ValueError, match="long_inv_freq and switch_row"):
+        pack.ptab(6, 4, 10000.0, 1024, inv_freq=short, switch_row=3)
+
+
+def test_dense_decode_picks_the_table_from_pos_plus_one():
+    """`replica_dense.dense_decode` reads `spec.rope_inv_freq(ctx=pos + 1)` -- HF's own
+    `seq_len = pos + 1` rule, applied per token since this engine computes one row per token.
+    Position original - 1 (seq_len == original, still short) and position original (seq_len
+    == original + 1, long) must straddle the switch exactly there, matching the packer's
+    `switch_row = original` in `recipes/dense.py::programs`."""
+    s = ModelSpec.from_hf_config(HF_PHI4_MINI)
+    orig = s.rope_scaling["original_max_position_embeddings"]
+    short, long_ = np.asarray(s.rope_inv_freq()), np.asarray(s.rope_inv_freq(ctx=orig + 1))
+    assert not np.allclose(short, long_)
+    assert np.array_equal(s.rope_inv_freq(ctx=(orig - 1) + 1), short)
+    assert np.array_equal(s.rope_inv_freq(ctx=orig + 1), long_)
+
+
+def test_numpy_and_cpp_agree_on_a_scaled_ptab():
+    """The whole-table builder, not just one row: `pools::build_ptab` (C++) and
+    `pack.ptab` (NumPy) on the same rows/inv_freq/scale must be byte-identical, or a
+    C++-only regression in the scaled path would pass every Python test and still ship."""
+    t = pack.ptab(6, 8, 10000.0, 1024, inv_freq=[0.5, 0.25, 0.125, 0.0625], scale=1.19)
+    got = _fnv1a(t)
+    print(f"\nptab scale fnv1a = 0x{got:016x}")
+    assert got == PTAB_SCALE_FNV1A
+
+
+def test_numpy_and_cpp_agree_on_a_switched_and_scaled_ptab():
+    """The full longrope mechanism together -- a per-row table switch plus the attention
+    scale -- must be byte-identical between the two packers, or a C++-only regression in
+    the switch could pass every Python test and still ship wrong to hardware."""
+    t = pack.ptab(10, 8, 10000.0, 1024, inv_freq=[0.5, 0.25, 0.125, 0.0625],
+                 long_inv_freq=[3.0, 1.5, 0.75, 0.375], switch_row=4, scale=1.19)
+    got = _fnv1a(t)
+    print(f"\nptab switch fnv1a = 0x{got:016x}")
+    assert got == PTAB_SWITCH_FNV1A
 
 
 def test_the_replica_rotates_the_first_rot_dims_only_and_scales_them():

@@ -106,6 +106,13 @@ struct RowGlobal {
     std::vector<double> inv_freq;            ///< its RoPE frequencies (rotary_dim / 2)
     double scale = 1.0;                      ///< on cos and sin (longrope's attention factor)
     uint64_t window = 0;                     ///< the row counts follow this window
+    /// Phi-3's longrope: row r takes `long_inv_freq` once r >= switch_row, `inv_freq` before
+    /// it -- HF's own per-call `seq_len = pos + 1 > original_max_position_embeddings` rule,
+    /// applied per row since this engine computes one row per token as the context grows.
+    /// Empty / kSwitchNever for every other family (row always takes `inv_freq`).
+    std::vector<double> long_inv_freq;
+    static constexpr uint64_t kSwitchNever = ~uint64_t{0};
+    uint64_t switch_row = kSwitchNever;
 };
 
 struct Manifest {

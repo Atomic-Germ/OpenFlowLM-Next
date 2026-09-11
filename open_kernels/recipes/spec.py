@@ -456,10 +456,13 @@ def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     n = _need(cfg, "num_hidden_layers")
     heads = _need(cfg, "num_attention_heads")
     hd = cfg.get("head_dim") or _need(cfg, "hidden_size") // heads
+    prf_present = "partial_rotary_factor" in cfg
     rot = int(round(hd * float(cfg.get("partial_rotary_factor", 1.0))))
     vocab = _need(cfg, "vocab_size")
     sc = cfg.get("rope_scaling")
     scaling = None
+    raw_scaling = None            # the container's own rope_scaling sub-object, verbatim
+    orig_at_top = "original_max_position_embeddings" in cfg
     if sc:
         kind = sc.get("rope_type", sc.get("type"))
         if kind != "longrope":
@@ -474,6 +477,7 @@ def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
                    "long_factor": [float(x) for x in long],
                    "factor": float(sc.get("factor") or _need(cfg, "max_position_embeddings") / orig),
                    "original_max_position_embeddings": int(orig)}
+        raw_scaling = dict(sc)     # what a real container's config.json literally holds at this key
     return ModelSpec(
         family="phi3",
         hidden=_need(cfg, "hidden_size"),
@@ -492,7 +496,15 @@ def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         intermediate=_need(cfg, "intermediate_size"),
         norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
         quant="q4_1",
-        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+        extra={"model_type": cfg["model_type"], "source": "hf_config",
+               # OPEN-FAMILY-PHI3's load-time compatibility check needs to know which of
+               # these optional keys the container actually carries, and at which spot --
+               # emitting a check for a key hf_config_check's own derivation defaulted
+               # away would refuse a valid config that never had it (Manifest::check_model
+               # fails closed on a MISSING key, not just a disagreeing one).
+               "partial_rotary_factor_present": prf_present,
+               "rope_scaling_raw": raw_scaling,
+               "original_max_position_embeddings_at_top": orig_at_top},
     )
 
 

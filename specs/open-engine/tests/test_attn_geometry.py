@@ -24,6 +24,7 @@ FAST_GEOMETRY = {
     "hy-mt2-7b.json": (4, 8, 4),      # same shape, norm after RoPE
     "gemma3-4b.json": (2, 4, 2),      # 8 / 4 at hd 256: 2 og elements; RB capped at 2 for hd 256
     "granite42-3b.json": (5, 8, 4),   # 40 / 8 at hd 64: 5 og elements (the measured family)
+    "phi4-mini-4b.json": (3, 8, 4),   # 24 / 8 at hd 128, a 96-dim rotation: 3 og elements
 }
 
 
@@ -56,10 +57,12 @@ def test_unmeasured_family_keeps_the_shipped_kernel(name, unvalidated, monkeypat
     assert (G.VEXP, G.ACORES, G.NHL, G.RB, G.MLS) == (0, 1, G.NH, 1, G.NH), name
 
 
-@pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-4b.json", "llama31-8b.json", "hy-mt2-7b.json", "gemma3-4b.json"])
+@pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-4b.json", "llama31-8b.json", "hy-mt2-7b.json",
+                                  "gemma3-4b.json", "phi4-mini-4b.json"])
 def test_measured_family_is_on_the_path_without_the_probe(name, unvalidated, monkeypatch):
-    """Granite (2026-09-07) and Qwen3 (2026-09-08, the first HD-128 point: 5050 -> 258 ms at
-    position 2048, 300/300 greedy tokens identical to the shipped kernel)."""
+    """Granite (2026-09-07), Qwen3 (2026-09-08, the first HD-128 point: 5050 -> 258 ms at
+    position 2048, 300/300 greedy tokens identical to the shipped kernel), and Phi-3
+    (2026-09-10, the first partial-rotation point: 190 -> 84 ms/token on Phi4-mini)."""
     monkeypatch.delenv("ATTN_FAST", raising=False)
     G = DR.geometry(load_spec(SPECS / name))
     assert (G.VEXP, G.ACORES, G.NHL, G.RB) == (1,) + FAST_GEOMETRY[name]
