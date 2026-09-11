@@ -388,6 +388,14 @@ RestHandler::~RestHandler() = default;
 bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
     std::string ensure_tag = model_tag;
     if (current_model_tag != ensure_tag) {
+        // Checked BEFORE anything is unloaded. The old order reset the engine first
+        // and only then resolved the tag, so a request for a model that does not
+        // exist evicted the served one and was answered by the substitute.
+        if (!this->supported_models.is_model_supported(ensure_tag)) {
+            header_print("ERROR", "unknown model '" + ensure_tag + "' -- refusing; '" +
+                                  current_model_tag + "' stays loaded");
+            return false;
+        }
         // One request naming another model evicts the loaded one, and may pull it first.
         // That is the intended behaviour, but it used to happen with no output at all --
         // a typo in a client's model field took the served model off the NPU and cost a
@@ -682,7 +690,14 @@ void RestHandler::handle_generate(const json& request,
         auto load_start_time = time_utils::now();
         // TODO: Use Another Check Function avoid loading again
         if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
+            json error_response = { {"error", {
+                {"message", "could not serve model '" + model + "'. It is either unknown to "
+                            "this build's model list or failed to load; the server log says "
+                            "which. No substitute was used."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}
+            }} };
             send_response(error_response);
             return;
         }
@@ -795,7 +810,14 @@ void RestHandler::handle_chat(const json& request,
 
         auto load_start_time = time_utils::now();
         if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
+            json error_response = { {"error", {
+                {"message", "could not serve model '" + model + "'. It is either unknown to "
+                            "this build's model list or failed to load; the server log says "
+                            "which. No substitute was used."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}
+            }} };
             send_response(error_response);
             return;
         }
@@ -1250,7 +1272,14 @@ void RestHandler::handle_openai_chat_completion(const json& request,
 
         auto load_start_time = time_utils::now();
         if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
+            json error_response = { {"error", {
+                {"message", "could not serve model '" + model + "'. It is either unknown to "
+                            "this build's model list or failed to load; the server log says "
+                            "which. No substitute was used."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}
+            }} };
             send_response(error_response);
             return;
         }
@@ -1532,7 +1561,14 @@ void RestHandler::handle_openai_completion(const json& request,
         int length_limit = request.value("max_tokens", 4096);
 
          if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
+            json error_response = { {"error", {
+                {"message", "could not serve model '" + model + "'. It is either unknown to "
+                            "this build's model list or failed to load; the server log says "
+                            "which. No substitute was used."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}
+            }} };
             send_response(error_response);
             return;
         }

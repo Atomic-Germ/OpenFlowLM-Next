@@ -86,8 +86,14 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
 
     
     if (available_models.is_model_supported(model_tag) == false) {
+        // An unsupported tag used to return a Llama3 engine under the name
+        // "llama3.2:1b" -- so `oflm serve` answered a request for a model it does
+        // not have with a DIFFERENT MODEL, HTTP 200, after taking the loaded one off
+        // the NPU. The error below went to the server console and nowhere else.
+        //
+        // The engine is null now. Every caller checks it; none may dereference it.
         header_print_r("ERROR", "Model tag '" << model_tag << "' is not supported. Please check the model list.");
-        return std::make_pair("llama3.2:1b", std::make_unique<Llama3>(npu_device_inst));
+        return std::make_pair(model_tag, std::unique_ptr<AutoModel>(nullptr));
     }
 
     std::unique_ptr<AutoModel> auto_chat_engine = nullptr;
