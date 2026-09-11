@@ -232,8 +232,18 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             RowGlobal rg;
             rg.per_row = v["per_row"].get<uint64_t>();
             rg.inv_freq = v.value("inv_freq", m.rope_inv_freq);
+            rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
             if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
+            if (has_long != has_switch)
+                fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
+            if (has_long) {
+                rg.long_inv_freq = v["long_inv_freq"].get<std::vector<double>>();
+                rg.switch_row = v["switch_row"].get<uint64_t>();
+                if (rg.long_inv_freq.size() != m.rotary_dim / 2)
+                    fail(where, "global " + k + ": long_inv_freq has " + std::to_string(rg.long_inv_freq.size()) + " values");
+            }
             m.per_row_globals[k] = rg;
         } else {
             fail(where, "global " + k + " is neither a size nor {per_row}");
@@ -246,6 +256,10 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     for (const auto& o : need(need(pack, "lm_head", where), "ops", where + " pack.lm_head")) m.lmhead_ops.push_back(parse_op(o, where + " pack.lm_head"));
     if (m.lmhead_ops.empty()) fail(where, "pack.lm_head has no ops");
     m.hf_config_check = need(j, "hf_config_check", where);
+    if (j.contains("hf_config_defaults")) {
+        if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
+        m.hf_config_defaults = j["hf_config_defaults"];
+    }
     return m;
 }
 
@@ -284,9 +298,14 @@ void Manifest::check_model(const json& config, const std::string& where) const {
             if (got != want.get<std::vector<std::string>>())
                 fail(where, "config.json layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
         } else {
-            if (!config.contains(key)) lacks(key);
-            if (config[key] != want)
-                fail(where, "config.json " + key + " = " + config[key].dump() + ", the kernel set was built for " + want.dump());
+            // an absent key means its default when the manifest names one (Phi-3's optional
+            // fields); the comparison is the same either way, so the check stays two-way
+            const bool present = config.contains(key);
+            if (!present && !hf_config_defaults.contains(key)) lacks(key);
+            const json& got = present ? config[key] : hf_config_defaults[key];
+            if (got != want)
+                fail(where, "config.json " + key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
+                                 ", the kernel set was built for " + want.dump());
         }
     }
 }

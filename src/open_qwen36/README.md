@@ -1,5 +1,5 @@
 # open_qwen36 — Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3,
-# HunYuan dense and IBM Granite on open XDNA2 kernels
+# HunYuan dense, IBM Granite and Phi-3 on open XDNA2 kernels
 
 The open replacement for the closed `qwen3_6_moe_npu` engine. It sits behind
 the app's `causal_lm` seam ([engine.hpp](engine.hpp)), so the tokenizer, chat
@@ -113,8 +113,9 @@ so an architecture's variants behave identically:
 | --- | --- | --- |
 | `OFLM_QWEN36_ENGINE` | `qwen3.6-moe` | `Qwen3_6_MOE` |
 | `OFLM_QWEN3_ENGINE` | `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528` | `Qwen3`, `Qwen3_IT`, `Qwen3_TK`, `DeepSeek_r1_0528_8b` |
-| `OFLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1` | `Llama3`, `DeepSeek_r1_8b` |
+| `OFLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1`, `nanbeige4.1` | `Llama3`, `DeepSeek_r1_8b`, `Nanbeige` |
 | `OFLM_GEMMA_ENGINE` | `gemma3`, `gemma3-text` | `Gemma3`, `Gemma3_Text_Only` |
+| `OFLM_PHI4_ENGINE` | `phi4-mini-it` | `Phi4` |
 
 Kernels are per model directory, so a family entry only means the adapter will
 use whatever set is installed for that particular model. Images always go to the
