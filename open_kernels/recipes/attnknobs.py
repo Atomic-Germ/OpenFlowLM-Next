@@ -62,11 +62,16 @@ def fast_attention(spec: ModelSpec) -> bool:
     return spec.family in FAST_ATTENTION or os.environ.get("ATTN_FAST") == "1"
 
 
-def attn_cores(og_elems: int) -> int:
-    """Cores for the split: the largest divisor of the og element count that fits the
-    columns. A core's heads must be whole og elements (attn.h's kNHL % kHPO), so the
-    count has to divide og_elems exactly; 1 when nothing else does."""
-    return max(d for d in range(1, min(og_elems, MAX_ATTN_CORES) + 1) if og_elems % d == 0)
+def attn_cores(nh: int) -> int:
+    """Cores for the split: the largest divisor of the HEAD COUNT that fits the columns.
+
+    It used to be the largest divisor of `og_elems = NH // HPO`, because a core had to
+    own whole og elements. That made NHL exactly HPO in every family, and it cost
+    Gemma 3 two thirds of the fabric: 8 heads over 4 kv is og_elems 2, so two cores, on
+    a split that has room for six. attn.h's kOGH lets a core own fewer heads than an og
+    element holds, so the only remaining requirement is that the heads divide evenly.
+    """
+    return max(d for d in range(1, min(nh, MAX_ATTN_CORES) + 1) if nh % d == 0)
 
 
 def _probe_rb(default: int, nhl: int) -> int:
@@ -110,7 +115,7 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
     vector of 8, 16 or 32."""
     fast = fast_attention(spec)
     vexp = 1 if fast else 0
-    acores = attn_cores(nh // hpo) if fast else 1
+    acores = attn_cores(nh) if fast else 1
     nhl = nh // acores
     mls = ((nhl + 31) // 32) * 32 if vexp else nhl
     rb = 1
@@ -128,7 +133,7 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # available memory`, before any program-memory limit is reached. RB 1 builds and
         # costs little: RB 1 -> 2 measured 1.22x of the attention ARITHMETIC on granite,
         # and that arithmetic is ~18% of a decode step.
-        cap = 4 if spec.head_dim < 256 else (1 if (spec.attn_gate or nhl >= 8) else 2)
+        cap = 4 if spec.head_dim < 256 else (1 if (spec.attn_gate or nhl > 2) else 2)
         rb = max((r for r in (4, 2, 1) if r <= cap and (r * block_lanes(nhl)) in (8, 16, 32)), default=1)
         rb = _probe_rb(rb, nhl)
     return AttnKnobs(VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb)
