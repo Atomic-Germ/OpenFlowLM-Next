@@ -9,7 +9,7 @@ sections:
     kicker: "NPU-first runtime"
     title: "The fastest, most efficient LLM inference on NPUs"
     body: |
-      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k — all with dramatically better efficiency than GPU-first stacks.
+      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k -- all with dramatically better efficiency than GPU-first stacks.
       
       The OpenFlowLM team is now part of AMD.
     ctas:
@@ -55,7 +55,7 @@ sections:
                 - "256k ctx"
                 - "Vision · Audio · OMNI · Text"
           - title: "Familiar Developer Flow"
-            description: "Same simple CLI & API patterns you already know — deeply optimized for NPU performance."
+            description: "Same simple CLI & API patterns you already know -- deeply optimized for NPU performance."
             visual:
               type: "code"
               title: "PowerShell"
@@ -96,7 +96,7 @@ sections:
       href: "https://youtu.be/TT7WZOeqxQY?si=DUpdyw_xNBYfEZNz"
       kicker: "Qwen3.6-MoE on NPU"
       body: |
-        The fastest Qwen3.6-35B-A3B MoE implementation on any NPU—built for both Windows and Linux (Linux in this demo).
+        The fastest Qwen3.6-35B-A3B MoE implementation on any NPU--built for both Windows and Linux (Linux in this demo).
 
   - type: media
     variant: alt
@@ -108,7 +108,7 @@ sections:
       href: "https://youtu.be/sZt1WyNoL2U?si=7U3z6u6E9KF6G_Dd"
       kicker: "GPT-OSS on NPU"
       body: |
-        Runs GPT-OSS-20B at 19 TPS (tokens per second) with 10× GPU efficiency — the fastest MoE on any NPU.
+        Runs GPT-OSS-20B at 19 TPS (tokens per second) with 10× GPU efficiency -- the fastest MoE on any NPU.
 
   - type: media
     variant: alt
@@ -120,7 +120,7 @@ sections:
       href: "https://youtu.be/BLd2j9dPw40?si=5GzOW2FlZgGVp8Xi"
       kicker: "Gemma3 (Vision) on NPU"
       body: |
-        Understand and describe images instantly — OpenFlowLM runs Google Gemma3 fully on the NPU for fast, private, and efficient vision inference.
+        Understand and describe images instantly -- OpenFlowLM runs Google Gemma3 fully on the NPU for fast, private, and efficient vision inference.
 
   - type: media
     variant: alt
@@ -132,7 +132,7 @@ sections:
       href: "https://youtu.be/0t8ijUPg4A0?si=ETKdvig6lYiZb1Q_"
       kicker: "Whisper on-device"
       body: |
-        Transcribe hours of audio locally — OFLM runs OpenAI Whisper fully on the NPU — fast, private, and efficient.
+        Transcribe hours of audio locally -- OFLM runs OpenAI Whisper fully on the NPU -- fast, private, and efficient.
 
   - type: media
     variant: alt
@@ -144,7 +144,7 @@ sections:
       href: "https://youtu.be/mPrr9FLd8ps?si=vsyHkmtrBjP4s-dq"
       kicker: "Llama 3.2 on NPU"
       body: |
-        Runs Meta Llama 3.2-3B at 28 TPS with over 10× GPU efficiency — the fastest on any NPU.
+        Runs Meta Llama 3.2-3B at 28 TPS with over 10× GPU efficiency -- the fastest on any NPU.
 
   - type: two_column
     id: install
@@ -153,12 +153,12 @@ sections:
       title: "From download to first token in under a minute"
       body: |
         OpenFlowLM ships as a 17 MB runtime with a familiar single-command CLI and a server compatible with the OpenAI API.
-        No drivers, no guesswork—just run the installer, pull a model, and start chatting.
+        No drivers, no guesswork--just run the installer, pull a model, and start chatting.
       items:
         - heading: "Zero-conf installer"
-          body: "Signed installers for every Ryzen™ AI 300 laptop — download, run, done."
+          body: "Signed installers for every Ryzen™ AI 300 laptop -- download, run, done."
         - heading: "Drop-in APIs"
-          body: "OpenAI-compatible APIs — plug in your existing tools instantly."
+          body: "OpenAI-compatible APIs -- plug in your existing tools instantly."
         - heading: "Secure by default"
           body: "On-device security: local tokens and full offline mode."
     right:

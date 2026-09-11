@@ -47,7 +47,7 @@ tensor).
 
 **Hybrid attention**: `sliding_window_pattern: 6` -> every 6th layer
 (`(L+1) % 6 == 0`) is global/full attention; the rest are sliding with a
-512-token window. `config.json` has **no `layer_types` key** — it must be
+512-token window. `config.json` has **no `layer_types` key** -- it must be
 derived, not read.
 
 ### Closed Q4NX block layout (recovered, for reference only)
@@ -70,7 +70,7 @@ We are **not** required to keep this geometry. See Decision 2.
 - AIE2P has **no native int4 MAC**. `kernels.mm` takes a single `input_dtype`
   for both operands and offers no int4 (`--dtype-in {bf16,i16,i8}`).
 - Therefore "never unpack to fp" is achievable as **unpack in-core,
-  tile-local, fused into the GEMM** — a dequantized tile lives only in L1/L2
+  tile-local, fused into the GEMM** -- a dequantized tile lives only in L1/L2
   and is immediately MAC'd. No full float weight matrix exists anywhere, and
   nothing is unpacked on the host. This is exactly what the closed stack's
   fused `dequant_mm.xclbin` does for Gemma4-12B and Qwen3.6.
@@ -80,13 +80,13 @@ We are **not** required to keep this geometry. See Decision 2.
   `M % 256 == 0`; **decode is M=1**, and the closed stack needed dedicated
   skinny kernels (`mv.xclbin`, `short_seq_mm.xclbin`).
 - The closed Q plane is **row-parallel** (8 bytes = 16 rows x 1 column) while a
-  GEMM consumes **K contiguous** — a friction point the new layout should fix.
+  GEMM consumes **K contiguous** -- a friction point the new layout should fix.
 
 ---
 
 ## Phases
 
-### Phase 0 — Weight pipeline and oracle (no engine) — **COMPLETE**
+### Phase 0 -- Weight pipeline and oracle (no engine) -- **COMPLETE**
 
 - [x] Confirmed `google/gemma-3-1b-it` availability (already in the HF cache).
 - [x] `q4nx/open_causal.py`: open **bf16 safetensors** export for the Gemma3
@@ -139,7 +139,7 @@ rest of the work:
 | Constraint | Impact | Resolution |
 |---|---|---|
 | `transformers` + ROCm torch **segfaults** in `from_pretrained` (even with `HIP_VISIBLE_DEVICES=""` and `device_map='cpu'`) | Cannot use HF as the oracle generator | Wrote an independent NumPy oracle instead. Bonus: no torch dependency, so the community can run it anywhere. |
-| NumPy has **no bfloat16**; `safetensors.numpy` fails with `data type 'bfloat16' not understood` | Cannot load the bf16 checkpoint with the plain NumPy path | Decode bf16 as `uint16 << 16` viewed as `float32` — the same bit trick the C++ engine uses, so oracle and engine agree at the bit level. |
+| NumPy has **no bfloat16**; `safetensors.numpy` fails with `data type 'bfloat16' not understood` | Cannot load the bf16 checkpoint with the plain NumPy path | Decode bf16 as `uint16 << 16` viewed as `float32` -- the same bit trick the C++ engine uses, so oracle and engine agree at the bit level. |
 
 Also note `/tmp` is a RAM-backed tmpfs (~4.7 G free). Large model artifacts must
 go on real disk; use the git-ignored `Models/` directory.
@@ -147,7 +147,7 @@ go on real disk; use the git-ignored `Models/` directory.
 Next validation step: cross-check the NumPy oracle against the closed
 `gemma_text_npu` engine (still functional) to confirm both agree.
 
-### Phase 1 — CPU causal engine from bf16 safetensors
+### Phase 1 -- CPU causal engine from bf16 safetensors
 
 New `src/open_gemma3/engine.{hpp,cpp}` implementing `causal_lm`'s 11 virtuals.
 
@@ -161,16 +161,16 @@ Must build (gap list versus the embedding engine):
 
 | Gap | Note |
 |---|---|
-| Causal masking | Embedding's `full_attention` is bidirectional — wrong for LM. Need `kpos <= t`, plus sliding band. |
+| Causal masking | Embedding's `full_attention` is bidirectional -- wrong for LM. Need `kpos <= t`, plus sliding band. |
 | KV cache | None exists. Two fill policies: ring at 512 (sliding), append (every 6th). |
 | Incremental decode | M=1 QKV, RoPE at absolute position, attention over `[0..p]`. |
-| `layer_types` synthesis | Engine hard-fails without a `layer_types` key; derive from `sliding_window_pattern`. Gemma3-1B does NOT scale embeddings — verify against the oracle, do not assume. |
+| `layer_types` synthesis | Engine hard-fails without a `layer_types` key; derive from `sliding_window_pattern`. Gemma3-1B does NOT scale embeddings -- verify against the oracle, do not assume. |
 | LM head | 1152 -> 262144, returns `buffer<bf16>`. Tied from embeddings. |
 | bf16 loading | Current loader assumes fp32; needs dtype-aware reading per manifest. |
 
 Gate: logit/token agreement with the Phase 0 oracle.
 
-### Phase 2 — NPU offload (bf16 weights)
+### Phase 2 -- NPU offload (bf16 weights)
 
 - Family xclbin bundle at `src/xclbins/Gemma3-1B-OpenNPU2/`, built from
   `matmul_whole_array.py` (bf16 -> f32).
@@ -179,7 +179,7 @@ Gate: logit/token agreement with the Phase 0 oracle.
   simpler than shoehorning the padded GEMM.
 - Gate: NPU vs CPU agreement; `oflm-test --llm`.
 
-### Phase 3 — Hybrid quantization groundwork (CPU)
+### Phase 3 -- Hybrid quantization groundwork (CPU)
 
 - Publish the **open format specification** as the shared contract (packer +
   runtime + kernel), owned with the community.
@@ -189,7 +189,7 @@ Gate: logit/token agreement with the Phase 0 oracle.
   norms stay bf16; embedding stays high-precision (Decision 1b); lm_head and
   embedding decided by measurement, not by default.
 
-### Phase 4 — Fused int4 dequant+GEMM on NPU
+### Phase 4 -- Fused int4 dequant+GEMM on NPU
 
 - Stage 1: single-core Iron `ExternalFunction` dequant core for one block
   (precedent: `matmul_i16.py` bypassing `kernels.mm`).
@@ -199,11 +199,11 @@ Gate: logit/token agreement with the Phase 0 oracle.
 - `zero_point` handling: fold `(q - zp)` into the activation domain, or keep a
   second accumulator `sum(x)`.
 
-### Phase 5 — Packaging and methodology capture
+### Phase 5 -- Packaging and methodology capture
 
 - Family xclbins + `Atomic-Germ/Gemma3-1B-OpenNPU2` repo.
 - Registry wiring: `model_list.json` **and** `model_info.json` (the latter
-  silently skips files — it is the real gate).
+  silently skips files -- it is the real gate).
 - Remove closed remnants (Decision 4): `gemma_text_npu` link, its
   XRT/HRX/Windows binaries, installer entries, and standalone-test wiring.
 - Generalize the builder so the next text family is config-only; record the

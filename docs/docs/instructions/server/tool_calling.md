@@ -290,7 +290,7 @@ print(resp2.choices[0].message.content)
 
 4. Get a tool in your Open WebUI.
     - You can scroll through the list to find something interesting, or use the search box to look up a tool. (Keep in mind that not every tool works perfectly, and many require an API key.)
-    - For example, try searching for `arXiv Search Tool` — it has worked well in our tests and doesn’t require an API key.
+    - For example, try searching for `arXiv Search Tool` -- it has worked well in our tests and doesn’t require an API key.
     - Click on the tool and navigate to the tool page.
     - Click `Get` and then `Import`.
     - Configure the tool as guided on the tool page if necessary (for example, provide an API key; in the `arXiv Search Tool` case, it's **not** needed).

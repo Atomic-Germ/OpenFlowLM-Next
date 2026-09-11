@@ -20,16 +20,16 @@ corresponding release; build metadata (`+`) does not affect precedence.
 
 Given a version `MAJOR.MINOR.PATCH`, increment the:
 
-1. **MAJOR** version when you make incompatible API or behaviour changes —
+1. **MAJOR** version when you make incompatible API or behaviour changes --
    anything that breaks existing users: a renamed CLI, a removed flag, a changed
    default, an output format change, or a model container format that old
    binaries can no longer read.
 
-2. **MINOR** version when you add functionality in a backward-compatible manner —
+2. **MINOR** version when you add functionality in a backward-compatible manner --
    a new model family, a new flag, a new endpoint, a new optional feature. The
    `0.1.0` -> `0.2.0` kind of bump.
 
-3. **PATCH** version when you make backward-compatible bug fixes — a crash fix,
+3. **PATCH** version when you make backward-compatible bug fixes -- a crash fix,
    a wrong number, a broken link, a build fix. `0.1.0` -> `0.1.1`.
 
 When a number is incremented, the ones to its right reset to zero: `1.2.3` ->
@@ -39,7 +39,7 @@ When a number is incremented, the ones to its right reset to zero: `1.2.3` ->
 
 Before `1.0.0`, the public API is treated as unstable. The rule is:
 
-- `0.MAJOR` — while the major is `0`, **anything may change at any time**.
+- `0.MAJOR` -- while the major is `0`, **anything may change at any time**.
   `0.1.0` -> `0.2.0` may contain breaking changes. This is expected and normal;
   it is the whole point of the leading zero.
 
@@ -69,6 +69,6 @@ bump while the major is `0`, and a major bump once the major is `>= 1`.
 
 Version numbers that follow SemVer are a promise. A consumer can read `1.3.1`
 and know, without reading the changelog, that upgrading from `1.3.0` is safe,
-and that jumping to `2.0.0` is not. Skipping the discipline — bumping the patch
-for a breaking change, or the major for a trivial one — destroys that promise
+and that jumping to `2.0.0` is not. Skipping the discipline -- bumping the patch
+for a breaking change, or the major for a trivial one -- destroys that promise
 and forces everyone to read every release note by hand.

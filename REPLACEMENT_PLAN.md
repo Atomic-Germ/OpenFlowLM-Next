@@ -25,7 +25,7 @@ Map of all pre-compiled closed-source artifacts and replacement strategies for A
 - Used by original `libgemma_embedding.so` stack
 
 ### Other Closed Components
-- **`libgemma_embedding.so`**: Original closed embedding backend — already replaced by `open_embedding::Engine` in `docs/ExampleNPU/src/open_embedding/`
+- **`libgemma_embedding.so`**: Original closed embedding backend -- already replaced by `open_embedding::Engine` in `docs/ExampleNPU/src/open_embedding/`
 - **XRT runtime**: `libxrt_coreutil.so` + plugins (device management, xclbin loading)
 - **HRX runtime**: `libhrx.so` (amdxdna alternative)
 
@@ -85,8 +85,8 @@ src/open_embedding/tools/oracle/       - Reference validation scripts
 - Each model gets `src/open_<family>/engine.cpp`
 
 ### CMake Highlights (from existing CMakeLists.txt)
-- `target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING=1)` — always on when enabled
-- `if(NOT OFLM_USE_HRX) target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)` — NPU only with XRT
+- `target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING=1)` -- always on when enabled
+- `if(NOT OFLM_USE_HRX) target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_EMBEDDING_NPU=1)` -- NPU only with XRT
 - Source glob: add `"src/open_embedding/*.cpp"` 
 - Link: close `gemma_embedding` when open path enabled
 
@@ -136,11 +136,11 @@ Each open engine must pass:
 
 ## Key Files Already Existing (reusable)
 
-- `docs/ExampleNPU/src/open_embedding/engine.hpp` — Engine class definition
-- `docs/ExampleNPU/src/open_embedding/engine.cpp` — Full transformer forward with NPU offload
-- `docs/ExampleNPU/src/open_embedding/npu_matmul.cpp` — NPU2 BF16 matmul backend (XRT)
-- `docs/ExampleNPU/src/open_embedding/tools/make_manifest.py` — Generate weights_manifest.json
-- `docs/ExampleNPU/src/open_embedding/tools/gemma3_reference.py` — Numpy reference validation
-- `docs/plans/open_xclbin_plan.md` — Full transition plan from closed to open
-- `docs/plans/open_embedding.md` — E8 validation summary (cosine 0.999993)
-- `utilities/q4nx-build/` — Model converter (extend for manifest generation)
+- `docs/ExampleNPU/src/open_embedding/engine.hpp` -- Engine class definition
+- `docs/ExampleNPU/src/open_embedding/engine.cpp` -- Full transformer forward with NPU offload
+- `docs/ExampleNPU/src/open_embedding/npu_matmul.cpp` -- NPU2 BF16 matmul backend (XRT)
+- `docs/ExampleNPU/src/open_embedding/tools/make_manifest.py` -- Generate weights_manifest.json
+- `docs/ExampleNPU/src/open_embedding/tools/gemma3_reference.py` -- Numpy reference validation
+- `docs/plans/open_xclbin_plan.md` -- Full transition plan from closed to open
+- `docs/plans/open_embedding.md` -- E8 validation summary (cosine 0.999993)
+- `utilities/q4nx-build/` -- Model converter (extend for manifest generation)

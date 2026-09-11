@@ -86,14 +86,14 @@ oflm pull llama3.2:3b --force
 
 You can override the default location by setting the `OFLM_MODEL_PATH` environment variable.
 
-**Windows** — Update the existing system environment variable:
+**Windows** -- Update the existing system environment variable:
 1. Open **Start** and search for **"Edit the system environment variables"**.
 2. Click **Environment Variables…**.
 3. Under **System variables**, find `OFLM_MODEL_PATH`, select it, and click **Edit…**.
 4. Update the value to your desired path (e.g., `D:\models\oflm`).
 5. Click **OK** and restart any open terminals for the change to take effect.
 
-**Linux** — Set temporarily for the current shell session:
+**Linux** -- Set temporarily for the current shell session:
 ```shell
 export OFLM_MODEL_PATH="/your/custom/path"
 ```
@@ -328,7 +328,7 @@ oflm run gemma3:4b --asr 1  # Load Whisper (whisper-large-v3-turbo) in the backg
 oflm serve gemma3:4b --asr 1  # Background-load Whisper and initialize the LLM (gemma3:4b) concurrently.
 ```
 
-> **Note:** ASR alone isn’t supported—an LLM must be present for end-to-end voice→text→LLM workflows.
+> **Note:** ASR alone isn’t supported--an LLM must be present for end-to-end voice→text→LLM workflows.
 
 See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
 

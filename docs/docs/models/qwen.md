@@ -176,7 +176,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 
@@ -241,7 +241,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 
@@ -287,7 +287,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 
@@ -334,7 +334,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 
@@ -381,7 +381,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 
@@ -428,7 +428,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px 
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 
@@ -475,7 +475,7 @@ The `-r` option determines the image's height:
 - 3: height = 1080 px 
 - 4: height = 1440 px 
                  
-> Don't worry—if your image is already smaller than the setup, it keeps its original resolution! ✨
+> Don't worry--if your image is already smaller than the setup, it keeps its original resolution! ✨
 
 📝 **Note**
 

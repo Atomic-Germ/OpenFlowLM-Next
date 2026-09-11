@@ -2,18 +2,18 @@
   <img src="https://img.shields.io/badge/NPU-Optimized-red" />
 </p>
 
-## OpenFlowLM — open NPU kernels for Ryzen™ AI
+## OpenFlowLM -- open NPU kernels for Ryzen™ AI
 
 A community fork of [FastFlowLM](https://github.com/ROCm/FastFlowLM) that
 replaces the closed NPU kernels with open ones, built from source in this
 repository.
 
 📦 **The only out-of-box, NPU-first runtime built exclusively for Ryzen™ AI.**  
-🤝 **A familiar single-command CLI — deeply optimized for NPUs.**  
-✨ **From Idle Silicon to Instant Power — OpenFlowLM Makes Ryzen™ AI Shine.**
+🤝 **A familiar single-command CLI -- deeply optimized for NPUs.**  
+✨ **From Idle Silicon to Instant Power -- OpenFlowLM Makes Ryzen™ AI Shine.**
 
 > OpenFlowLM (OFLM) supports all Ryzen™ AI Series chips with XDNA2 NPUs (Strix, Strix Halo, Kraken, and Gorgon Point).
-Run LLMs, embedding models and MoE models on **AMD Ryzen™ AI NPUs** — no GPU
+Run LLMs, embedding models and MoE models on **AMD Ryzen™ AI NPUs** -- no GPU
 required.
 
 > Supports Ryzen™ AI chips with XDNA2 NPUs (Strix, Strix Halo, Kraken and
@@ -24,12 +24,12 @@ required.
 ## What is different from upstream
 
 - **Open kernels.** `open_kernels/` holds the AIE designs the engine
-  dispatches — source, not pre-compiled binaries. Seven model families run on a
+  dispatches -- source, not pre-compiled binaries. Seven model families run on a
   shared recipe that works each model's shape out of its own `config.json`.
 - **A second embedding backend.** Six encoder models beyond the one upstream
   ships, through [`src/open_npue/`](src/open_npue/).
 - **GGUF and Q4_K containers**, so models are not confined to one weight format.
-- **Built from source.** There is no packaged installer here; see
+- **Built from source.** Use CMake presets for building; see
   [docs/BUILD.md](docs/BUILD.md).
 
 Upstream remains the place to go for a turnkey install and for the closed,
@@ -39,17 +39,15 @@ tuned kernels.
 
 ## Getting started
 
-1. **The NPU driver** — use **32.0.203.311 or above** (Task Manager →
-   Performance → NPU, or Device Manager). Earlier versions are not supported.
-   Windows Update or [AMD's driver download](https://www.amd.com/en/support) is
-   the recommended route; the
-   [official install doc](https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers)
-   has the details.
+1. **The NPU driver** -- use **32.0.203.311 or above** (Task Manager →
+    Performance → NPU, or Device Manager). Earlier versions are not supported.
+    Windows Update or [AMD's driver download](https://www.amd.com/en/support) is
+    the recommended route; the
+    [official install doc](https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers)
+    has the details.
 
-2. **Build it** — [docs/BUILD.md](docs/BUILD.md). There are two things to
-   build: the executable, and the AIE design sets the NPU actually runs. The
-   design sets are not checked in, and without them the binary starts and then
-   refuses to load a model.
+2. **Build it** -- [docs/BUILD.md](docs/BUILD.md). The build system handles
+    both the executable and kernel exports via CMake presets.
 
 3. **Run it:**
 
@@ -69,11 +67,10 @@ tuned kernels.
 
 ## Highlights
 
-- **Runs on the NPU** — not the GPU, and not as CPU fallback
-- **Open kernel path** — the designs are here, and rebuilding them is a
-  documented step rather than a vendor drop
-- **Long context** — up to 256k tokens on models that support it
-- **Familiar CLI** — `run`, `serve`, `list`, `bench`
+- **Runs on the NPU** -- not the GPU, and not as CPU fallback
+- **Open kernel path** -- the designs are here, built via CMake presets
+- **Long context** -- up to 256k tokens on models that support it
+- **Familiar CLI** -- `run`, `serve`, `list`, `bench`
 
 ---
 
@@ -111,7 +108,17 @@ tuned kernels.
 
 ## 🛠️ Building from Source
 
-For developers who want to build OpenFlowLM from source, we provide CMake presets for a convenient and consistent build experience. From a clean recursive clone you can configure, build, test, install and package the whole distribution with a handful of preset-based commands run from the **repository root**.
+OpenFlowLM uses a unified CMake build system. From a clean recursive clone, configure, build, test, install, and package with preset-based commands from the **repository root**:
+
+```bash
+cmake --preset linux-default
+cmake --build --preset linux-default
+cmake --test --preset linux-default
+cmake --install --preset linux-default
+cpack --preset linux-package-tgz
+```
+
+For detailed instructions, see [docs/BUILD.md](docs/BUILD.md).
 
 ### Prerequisites
 
@@ -120,16 +127,16 @@ For developers who want to build OpenFlowLM from source, we provide CMake preset
 - A C++20 compatible compiler (e.g., GCC, Clang, MSVC)
 - Ninja (recommended)
 
-The full Linux build also compiles the open NPU kernel xclbins — the `open_kernels`
+The full Linux build also compiles the open NPU kernel xclbins -- the `open_kernels`
 families (Qwen3.6-MoE, Qwen3.5/3 dense, Llama 3, Gemma 3, HunYuan, Granite) and the
-`open_npue` BERT embedding design sets — which needs:
+`open_npue` BERT embedding design sets -- which needs:
 
 - **XRT** installed on the host (the AMD NPU runtime; `/opt/xilinx/xrt`), including its
   Python binding `pyxrt`. The installed XRT ships `pyxrt` for Python 3.11, so the
   kernel toolchain venv is pinned to 3.11.
-- The kernel toolchain (`ironvenv` with `mlir-aie` + Peano, Python 3.11) — **created
+- The kernel toolchain (`ironvenv` with `mlir-aie` + Peano, Python 3.11) -- **created
   automatically** by the build if absent.
-- `third_party/mlir-aie` — **cloned automatically** by the build if absent (best-effort;
+- `third_party/mlir-aie` -- **cloned automatically** by the build if absent (best-effort;
   only used for `toolchain.json` metadata).
 - An **NPU present** on the build host: the BERT design sets allocate NPU tensors, so
   that part of the export runs on the device (the `open_kernels` families are
@@ -139,59 +146,15 @@ On Windows the engine builds, but the NPU kernel export is Linux-only (it requir
 
 ### Build Instructions
 
-More details on the exact procedure, with dependencies to be installed, for Linux can be found in [linux-getting-started.md](docs/linux-getting-started.md).
+See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions.
 
-1.  **Clone the repository:**
+**Presets:**
+- **Linux full distribution:** `cmake --preset linux-default`
+- **Linux debug (engine only):** `cmake --preset linux-debug`
+- **Linux portable:** `cmake --preset linux-portable`
+- **Windows:** `cmake --preset windows-default`
 
-    ```bash
-    git clone --recursive https://github.com/Atomic-Germ/OpenFlowLM.git
-    cd OpenFlowLM
-    ```
-
-2.  **Configure (Linux, full distribution — engine + open NPU kernels):**
-
-    ```bash
-    cmake --preset linux-default
-    ```
-
-    This configures a Release build that installs to `/opt/openflowlm`. The default `linux-default` preset builds the NPU kernel xclbins during the build step below.
-
-    -   **Windows (developer command prompt):** `cmake --preset windows-default`
-    -   **Engine-only / fast debug iteration:** `cmake --preset linux-debug` (sets `OFLM_BUILD_KERNELS=OFF`, skipping the long kernel compile).
-    -   **Portable bundle (bundled XRT/XDNA libs):** `cmake --preset linux-portable`
-
-3.  **Build:**
-
-    ```bash
-    cmake --build --preset linux-default
-    ```
-
-    This compiles the `oflm` engine and exports every open NPU kernel set into `src/xclbins`. To build only a subset of kernel specs, configure with `-DOFLM_KERNEL_SPECS=qwen3-4b,gemma3-4b` (comma-separated; empty = all).
-
-4.  **Test (optional):**
-
-    ```bash
-    ctest --preset linux-default
-    ```
-
-    Runs the smoke test (`oflm list`), which verifies the binary, its engine shared libraries, and the model registry all load.
-
-5.  **Install:**
-
-    -   **Linux:** `sudo cmake --install build` (or `cmake --install build --prefix "$HOME/oflm"` to stage without root).
-    -   **Windows (admin):** `cmake --install build`
-
-    The install tree is `bin/oflm`, `lib*/`, and `share/oflm/` (`model_list.json`, `model_info.json`, and the `xclbins/` tree the engine loads at runtime).
-
-6.  **Package (optional):**
-
-    ```bash
-    cpack --preset linux-package-tgz     # .tar.gz
-    cpack --preset linux-package-deb     # .deb  (needs dpkg)
-    cpack --preset linux-package-rpm     # .rpm  (needs rpmbuild)
-    ```
-
-    Run `cpack` from the repository root (where `CMakePresets.json` lives). Each package bundles the full install tree under the install prefix.
-
-> **Tip:** the one-shot `linux-default` workflow preset also chains configure + build + test:
-> `cmake --workflow --preset linux-default`
+**Build specific kernels:**
+```bash
+cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b
+```
