@@ -1192,9 +1192,13 @@ if(XRT_INCLUDE_DIRS)
 elseif(XRT_INCLUDE_DIR)
     target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIR})
 endif()
+# DISABLE_ABI_CHECK for the same reason the engine sets it: an XRT REPO checkout
+# has no generated xrt/detail/version-slim.h, and abi.h includes it unguarded.
+target_compile_definitions(openai_compat_test PRIVATE DISABLE_ABI_CHECK=1)
 if(MSVC)
     target_compile_options(openai_compat_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
-    target_compile_definitions(openai_compat_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+    target_compile_definitions(openai_compat_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
 endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
