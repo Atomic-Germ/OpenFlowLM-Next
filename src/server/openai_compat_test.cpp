@@ -326,6 +326,50 @@ static void test_resolve_task() {
     ok(all_resolve, "...and every one of them appears in the list the errors quote");
 }
 
+
+// ---------------------------------------------------------------------------
+// task_policy: required, refused, or fine.
+//
+// The bug: prompt_for() returns an empty prefix when the model declares no
+// prompts, so an explicit prompt_name on the BERT family came back 200 with an
+// UNPREFIXED vector. src/open_npue_adapter/README.md:288 says that is an error.
+// The trap next to it: an empty prompt table does NOT mean "no task concept" --
+// OpenGemma_Embedding declares no names and still prefixes per task.
+// ---------------------------------------------------------------------------
+static void test_task_policy() {
+    using openai_compat::task_policy;
+    using P = openai_compat::TaskPolicy;
+    const bool SUPPORTS = true, NONE = false, DECLARES = true, NODECL = false;
+    const bool GIVEN = true, OMITTED = false;
+    std::printf("\n-- task_policy --\n");
+
+    // BERT / gte: no task concept at all.
+    ok(task_policy(NONE, NODECL, GIVEN) == P::NotSupported,
+       "a prompt on a model with no task concept is REFUSED, not ignored");
+    ok(task_policy(NONE, NODECL, OMITTED) == P::Ok,
+       "...and omitting it is fine");
+
+    // nomic / EmbeddingGemma: a declared table, so the choice is the client's.
+    ok(task_policy(SUPPORTS, DECLARES, OMITTED) == P::Required,
+       "a model that declares prompts requires one");
+    ok(task_policy(SUPPORTS, DECLARES, GIVEN) == P::Ok,
+       "...and accepts one");
+
+    // OpenGemma: prefixes hardcoded, table empty. The case a naive
+    // "empty table means no tasks" rule would have broken.
+    ok(task_policy(SUPPORTS, NODECL, GIVEN) == P::Ok,
+       "hardcoded prefixes accept a task even with an EMPTY prompt table");
+    ok(task_policy(SUPPORTS, NODECL, OMITTED) == P::Ok,
+       "...and do not require one");
+
+    // The property: a task is never accepted by something that would drop it.
+    bool never_silently_dropped = true;
+    for (bool declares : {true, false})
+        if (task_policy(false, declares, true) != P::NotSupported) never_silently_dropped = false;
+    ok(never_silently_dropped,
+       "no combination lets a task reach a backend that does not honour it");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -339,6 +383,7 @@ int main(int argc, char** argv) {
     test_model_error();
     test_preflight();
     test_resolve_task();
+    test_task_policy();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);

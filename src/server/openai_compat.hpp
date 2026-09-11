@@ -215,4 +215,22 @@ inline TaskResolution resolve_task(const json& request) {
     return out;
 }
 
+/// Whether a request's task prompt is required, refused, or fine.
+///
+/// Three states because an empty prompt table means two different things: a model
+/// with no task concept (the BERT family), and one whose prefixes are hardcoded
+/// rather than declared (OpenGemma). Inferring from the table alone silently
+/// dropped an explicit prompt on the first and would have broken the second.
+enum class TaskPolicy {
+    Ok,            ///< what the request carries is acceptable
+    Required,      ///< the model declares prompts and the request named none
+    NotSupported   ///< the model has no task concept and the request named one
+};
+
+inline TaskPolicy task_policy(bool supports_prompts, bool declares_names, bool task_given) {
+    if (task_given && !supports_prompts) return TaskPolicy::NotSupported;
+    if (!task_given && declares_names)   return TaskPolicy::Required;
+    return TaskPolicy::Ok;
+}
+
 }  // namespace openai_compat

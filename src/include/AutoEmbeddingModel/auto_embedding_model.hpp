@@ -70,4 +70,12 @@ public:
 	/// so a caller that got the wrong one has nothing to detect it with. The REST
 	/// handler uses this to refuse rather than to pick.
 	virtual std::vector<std::string> prompt_names() const { return {}; }
+
+	/// Whether this backend applies a per-task prompt at all.
+	///
+	/// NOT the same as prompt_names() being non-empty: OpenGemma_Embedding
+	/// declares no names and still prefixes per task (open_task_prefix()),
+	/// while the BERT family has no task concept. Default false, so a new
+	/// backend refuses a prompt it would otherwise silently drop.
+	virtual bool supports_task_prompts() const { return false; }
 };

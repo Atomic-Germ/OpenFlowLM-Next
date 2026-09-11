@@ -54,6 +54,10 @@ public:
         return engine_.embed_with_prefix(text, open_task_prefix(task_type));
     }
 
+    /// Prefixes are hardcoded here (open_task_prefix), not declared in a
+    /// container, so prompt_names() is empty while tasks ARE honoured.
+    bool supports_task_prompts() const override { return true; }
+
 private:
     open_embedding::Engine engine_;
 };

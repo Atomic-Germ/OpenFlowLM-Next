@@ -87,6 +87,10 @@ public:
     /// comment claimed gte was non-empty; it is not, and nothing had checked.
     std::vector<std::string> prompt_names() const override;
 
+    /// Container-driven: this backend prefixes exactly when the container
+    /// declares a prompt table. The BERT family and gte declare none.
+    bool supports_task_prompts() const override { return !prompt_names().empty(); }
+
     /// \brief Embed several texts in one call.
     ///
     /// NOT an override -- AutoEmbeddingModel::embed() takes one text, and

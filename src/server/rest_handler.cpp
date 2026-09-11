@@ -1004,13 +1004,32 @@ void RestHandler::handle_embeddings(const json& request,
         embedding_task_type_t task_type = embedding_task_type_t::task_query;
         const std::string accepted = openai_compat::task_names_csv();
         std::vector<std::string> declared;
+        bool supports_prompts = false;
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
-        if (this->auto_embedding_engine) declared = this->auto_embedding_engine->prompt_names();
+        if (this->auto_embedding_engine) {
+            declared = this->auto_embedding_engine->prompt_names();
+            supports_prompts = this->auto_embedding_engine->supports_task_prompts();
+        }
 #endif
         const openai_compat::TaskResolution tr = openai_compat::resolve_task(request);
         using TRS = openai_compat::TaskResolution::Status;
 
-        if (tr.status == TRS::Absent && !declared.empty()) {
+        const openai_compat::TaskPolicy policy =
+            openai_compat::task_policy(supports_prompts, !declared.empty(), tr.status != TRS::Absent);
+        if (policy == openai_compat::TaskPolicy::NotSupported) {
+            // prompt_for() returns an empty prefix for a model with no prompt table,
+            // so this used to answer 200 with an UNPREFIXED vector -- correctly
+            // shaped, correctly normed, and not what was asked for.
+            // src/open_npue_adapter/README.md: "model has no prompts, a prompt is
+            // given | error".
+            send_response(json{{"error", {
+                {"message", "model '" + model + "' has no task prompts; remove '" + tr.field +
+                            "'. Passing one would be ignored, and the vector would come back "
+                            "correctly shaped and unprefixed with nothing to show it."},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (policy == openai_compat::TaskPolicy::Required) {
             std::string names;
             for (const auto& n : declared) names += (names.empty() ? "" : ", ") + n;
             // Quote the REST vocabulary, not `declared`: the validator only accepts
