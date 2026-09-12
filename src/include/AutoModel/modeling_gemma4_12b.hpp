@@ -24,8 +24,6 @@
 /************              Gemma4_12B (text only)            **************/
 class Gemma4_12B : public AutoModel {
 private:
-    bool enable_think = false;
-    bool default_enable_think = false;
     // set per insert(): the prompt ended with the empty thought block that was trimmed off
     bool feed_empty_thought = false;
 
@@ -118,15 +116,6 @@ public:
     /// \param parameter_name the name of the parameter
     /// \param value the value to set (can be any type)
     /// \return true if the parameter was configured successfully, false otherwise
-    void snapshot_request_defaults() override {
-        AutoModel::snapshot_request_defaults();
-        default_enable_think = enable_think;
-    }
-    void reset_request_defaults() override {
-        AutoModel::reset_request_defaults();
-        enable_think = default_enable_think;
-    }
-
     bool configure_parameter(std::string parameter_name, const std::any& value) override {
         if (parameter_name == "enable_think") {
             try {

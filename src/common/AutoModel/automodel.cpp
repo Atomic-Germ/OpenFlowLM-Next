@@ -537,6 +537,9 @@ void AutoModel::set_sampler(sampler_config& sampler_config) {
 }
 
 void AutoModel::snapshot_request_defaults() {
+    default_enable_think_ = this->enable_think;
+    default_user_system_prompt_ = this->user_system_prompt;
+    default_extra_context_ = this->extra_context;
     if (this->sampler == nullptr) return;
     default_sampler_config_.temperature = this->sampler->temperature;
     default_sampler_config_.top_k = this->sampler->top_k;
@@ -549,6 +552,9 @@ void AutoModel::snapshot_request_defaults() {
 }
 
 void AutoModel::reset_request_defaults() {
+    this->enable_think = default_enable_think_;
+    this->user_system_prompt = default_user_system_prompt_;
+    this->extra_context = default_extra_context_;
     if (this->sampler == nullptr || !has_default_sampler_) return;
     this->sampler->temperature = default_sampler_config_.temperature;
     this->sampler->top_k = default_sampler_config_.top_k;

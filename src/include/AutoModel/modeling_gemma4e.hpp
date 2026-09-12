@@ -36,8 +36,6 @@ private:
     static constexpr int think_start_id = 100;
     static constexpr int think_end_id = 101;
 
-    bool enable_think = false;
-    bool default_enable_think = false;
     bool enable_tool = false;
     void setup_tokenizer(std::string model_path);
     
@@ -99,15 +97,6 @@ public:
 	/// \param parameter_name the name of the parameter
 	/// \param value the value to set (can be any type)
 	/// \return true if the parameter was configured successfully, false otherwise
-    void snapshot_request_defaults() override {
-        AutoModel::snapshot_request_defaults();
-        default_enable_think = enable_think;
-    }
-    void reset_request_defaults() override {
-        AutoModel::reset_request_defaults();
-        enable_think = default_enable_think;
-    }
-
 	bool configure_parameter(std::string parameter_name, const std::any& value) override{
         if (parameter_name == "enable_think") {
             try {

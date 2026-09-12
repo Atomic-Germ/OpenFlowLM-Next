@@ -2,6 +2,10 @@
 # Integration: needs `oflm serve gemma4-it:12b` listening on localhost:52625 (Gemma 4 is the
 # model whose default is no-think, which is what makes the leak observable). Skips with the
 # reason when no server answers.
+#
+# The reset lives in AutoModel, so every model with a thinking flag is covered by the same
+# two tests - point OFLM_TEST_MODEL at qwen3:8b or gpt-oss:20b (serving that model) to run
+# them there.
 import json
 import os
 import urllib.request
@@ -9,7 +13,7 @@ import urllib.request
 import pytest
 
 BASE = os.environ.get("OFLM_TEST_BASE_URL", "http://localhost:52625")
-MODEL = "gemma4-it:12b"
+MODEL = os.environ.get("OFLM_TEST_MODEL", "gemma4-it:12b")
 
 
 def _server_up():

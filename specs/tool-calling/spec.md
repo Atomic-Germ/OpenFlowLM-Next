@@ -53,7 +53,9 @@ The model sometimes wraps the real call in a generic envelope whose outer name i
 `tool_call` (or `call`, `function`, `tool`, `function_call`) and whose arguments carry the
 real name under `id` or `name` and the real arguments under `args`, `arguments`,
 `parameters`, `params` or `input`. The parser shall return the inner name and inner
-arguments in that case, and leave every other call untouched.
+arguments in that case, and leave every other call untouched. Those outer names are legal
+tool names too, so a call only counts as an envelope when every one of its argument keys is
+one of the nine listed above; any other key means the call is real and is left alone.
 
 **Acceptance criteria:**
 - `call:tool_call{args:{query:"x"},id:<|"|>memory_search<|"|>}` parses to name
@@ -61,6 +63,9 @@ arguments in that case, and leave every other call untouched.
 - `call:function{name:<|"|>lookup_item_price<|"|>,arguments:{item:<|"|>widget<|"|>}}`
   parses to `lookup_item_price` / `{"item": "widget"}`.
 - `call:tool_call{query:<|"|>x<|"|>}` (no inner name) stays `tool_call` / `{"query": "x"}`.
+- `call:function{name:<|"|>widget<|"|>,quantity:2}` stays `function` /
+  `{"name": "widget", "quantity": 2}` — `quantity` is not an envelope key, so this is a
+  real tool named `function` and neither its name nor its arguments may be rewritten.
 - Direct calls, empty argument lists and nested object/array arguments parse as before.
 
 ### TOOLS-GEMMA4-SCHEMA-TYPES: a type array in a tool schema does not fail the request
@@ -84,19 +89,24 @@ schema into its first non-null member, adding `nullable: true` when `null` was l
 ## All models
 
 ### TOOLS-REQUEST-PARAMS-RESET: request parameters do not leak between requests
-**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`)
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/common/AutoModel/automodel.cpp`)
 **Test category:** integration (through `oflm serve`)
 **Test:** `specs/tool-calling/tests/test_request_params_reset.py`
 
-`temperature`, `top_p`, `top_k`, `min_p`, the penalties, `think` and `reasoning_effort`
-are applied to the engine only when a request carries them. The server shall restore the
-model's load-time defaults for those settings at the start of every chat request before
-applying the request's own fields, so a request that omits a field gets the model
-default and not whatever the previous request set.
+`temperature`, `top_p`, `top_k`, `min_p`, the penalties, `think`, `reasoning_effort` and
+`system_prompt` are applied to the engine only when a request carries them. The server
+shall restore the model's load-time defaults for those settings at the start of every
+chat request before applying the request's own fields, so a request that omits a field
+gets the model default and not whatever the previous request set. This holds for every
+model that accepts the setting, not only the Gemma 4 pair: `AutoModel` owns the thinking
+flag, the system prompt and the template's extra context, so its snapshot and reset cover
+all of them, and a model only overrides them for request state it keeps elsewhere.
 
 **Acceptance criteria:**
 - After a request with `reasoning_effort: "low"`, a request without the field on a
   model whose default is no-think (Gemma 4) generates no reasoning content.
+- The same holds on the other models that accept the field — Qwen 3, Qwen 3 MoE,
+  Qwen 3 VL and GPT-OSS — since none of them keeps the flag privately any more.
 - After a request with `temperature: 0`, a request without the field samples with the
   model's default temperature (observable: the raw output no longer repeats bit for bit
   across two identical prompts on a model whose default temperature is above 0).
