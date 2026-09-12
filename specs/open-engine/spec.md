@@ -1280,10 +1280,37 @@ being free there. Both are arithmetic over the spec and shall be checked as such
 3. `oflm-test --llm` through `flm serve` on the installed model.
 4. Then add the tuple to `catalogue.py` and drop the override.
 
-**Status (2026-09-12):** step 1 passes -- every attention translation unit is byte-identical
-across the qwen3, hunyuan, MoE, llama3 and phi3 flag sets. Steps 2-4 are in progress
-against the OpenFlowLM Qwen2.5-3B-Instruct-NPU2 container, and the tuple stays out of the
-catalogue until they pass.
+**Result 2026-09-12 (Qwen2.5-3B-Instruct-NPU2):** step 1 passes -- 44 attention translation
+units, built for the qwen3, hunyuan, MoE, llama3 and phi3 flag sets from the tree before
+and after, every one byte-identical.
+
+Step 2 runs and gives the right answers, and misses the correlation bar. Over an 8-layer
+slice at positions 0-3 the argmax matches the fp64 replica at every position and the top
+five match up to two adjacent swaps on near-ties, but full-vocab logits correlation is
+0.999977 at position 0 and 0.9993-0.9998 once there are cached rows -- where every other
+dense family records 0.99998 or better.
+
+The kernels are not what is wrong, and that is established rather than assumed. Stage by
+stage on layer 0, the entry norm and the q, k and v GEMVs agree with the replica at
+0.9999985 or better at every position, and the o projection of the device's own attention
+output is exact -- so the disagreement is inside the attention core. Dumping layer 0's KV
+buffer after four tokens and comparing every row against the replica's own values rounded
+to bf16, two thirds of each row is bit-identical and the largest disagreement is one bf16
+step: the rows, their offsets, the rotation and the bias are all right.
+
+What is left is the bf16 KV cache, which costs this model about sixteen times what it
+costs any other family, because of the size of its k bias. `k_proj.bias` reaches 91.5
+while the k projection itself only reaches about 6, so stored K sits near 92, where one
+bf16 step is 0.36 instead of the 0.02 it would be at 6. Rerunning the comparison against a
+replica that stores K and V as the device does moves position 2 from 0.999327 to 0.999934
+and position 3 from 0.999815 to 0.999968. Detail and the probes:
+`.claude/plans/qwen2-qkv-bias-hw-results.md`.
+
+The attention tuple and `gemv_q4` K 11264 therefore stay OUT of the catalogue, and the
+recipe still refuses the family by name. A looser bar invented for one model is not what
+the catalogue is for. The choice is between recording the measured correlation beside the
+point on the evidence that greedy decoding is unaffected, and storing K at more than
+bf16 -- which is a `KV_ROW` format change touching every family, and wants its own plan.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
