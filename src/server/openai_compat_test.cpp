@@ -16,7 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "AutoModel/model_families.hpp"
 #include "server/openai_compat.hpp"
@@ -389,6 +392,128 @@ static void test_task_policy() {
        "no combination lets a task reach a backend that does not honour it");
 }
 
+// ---------------------------------------------------------------------------
+// Errors in a streaming handler (#64).
+//
+// The bug: an exception out of generate() after tokens had streamed went through
+// send_response(). The 200 and the chunked headers were already on the wire, so the
+// body was never written (HttpSession skips write_response() once streaming) and the
+// stream was never ended -- the client waited for a [DONE] that did not come.
+// ---------------------------------------------------------------------------
+static void test_stream_errors() {
+    using openai_compat::error_route;
+    using openai_compat::stream_error_frames;
+    using openai_compat::StreamState;
+    using openai_compat::StreamWire;
+    using R = openai_compat::ErrorRoute;
+    using json = openai_compat::json;
+    std::printf("\n-- stream errors --\n");
+
+    using openai_compat::send_tracked;
+    int sent = 0;
+    auto send_ok = [&] { ++sent; };
+    auto send_throws = [&] { ++sent; throw std::runtime_error("write failed"); };
+
+    StreamState s;
+    ok(error_route(s) == R::Body,
+       "nothing sent yet: an ordinary error body, which is still correct before the first frame");
+    send_tracked(s, false, send_ok);
+    ok(error_route(s) == R::Frame, "after a token frame: the error goes in-stream");
+    send_tracked(s, false, send_ok);
+    ok(error_route(s) == R::Frame, "...after any number of them");
+    send_tracked(s, true, send_ok);
+    ok(error_route(s) == R::Unreportable,
+       "after the final frame: nothing, because the stream has ended and the queue has moved on");
+    send_tracked(s, false, send_ok);
+    ok(error_route(s) == R::Unreportable, "...and a frame after the final one does not reopen it");
+    eqi(sent, 4, "send_tracked calls the send exactly once per frame");
+
+    StreamState only_final;
+    send_tracked(only_final, true, send_ok);
+    ok(error_route(only_final) == R::Unreportable,
+       "a final frame that is also the first still ends the stream");
+
+    // The review finding: a FINAL send that throws has not ended the stream and has
+    // not advanced the NPU queue. Recording it as closed before the send made the
+    // handler drop the error -- and nothing ever released the NPU.
+    auto threw = [](StreamState& st, bool is_final, const std::function<void()>& send) {
+        try {
+            send_tracked(st, is_final, send);
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    StreamState final_throws;
+    send_tracked(final_throws, false, send_ok);
+    ok(threw(final_throws, true, send_throws), "a throwing send propagates its exception");
+    ok(error_route(final_throws) == R::Frame,
+       "a FINAL send that threw leaves the stream open, so the error still goes in-stream");
+    StreamState first_throws;
+    ok(threw(first_throws, false, send_throws), "...a throwing first send propagates too");
+    ok(error_route(first_throws) == R::Frame,
+       "a first send that threw counts as opened: its headers may already be on the wire");
+
+    // SSE: OpenAI's error object, then the terminator.
+    auto sse = stream_error_frames(StreamWire::Sse, "NPU fault");
+    eqi(static_cast<int>(sse.size()), 2, "SSE: an error event and a terminator");
+    if (sse.size() == 2) {
+        const std::string& ev = sse[0];
+        const bool framed = ev.rfind("data: ", 0) == 0 && ev.size() >= 8 &&
+                            ev.compare(ev.size() - 2, 2, "\n\n") == 0;
+        ok(framed, "SSE: the error is one `data: ...\\n\\n` event");
+        if (framed) {
+            json body = json::parse(ev.substr(6, ev.size() - 8), nullptr, false);
+            ok(body.is_object() && body.contains("error") && body["error"].is_object(),
+               "SSE: the event carries an error OBJECT, which is what OpenAI clients look for");
+            if (body.is_object() && body.contains("error") && body["error"].is_object()) {
+                eq(body["error"].value("message", ""), "NPU fault", "SSE: the message is the exception's");
+                eq(body["error"].value("type", ""), "server_error", "SSE: type server_error");
+                eqi(openai_compat::status_for(body), 500,
+                    "SSE: the same body read as a response is a 500, as the Body route would say");
+            }
+        }
+        eq(sse[1], "data: [DONE]\n\n", "SSE: the stream ends with [DONE], last");
+    }
+
+    // A newline pair in the message must not end the event early.
+    auto sse_nl = stream_error_frames(StreamWire::Sse, "line one\n\nline two");
+    ok(!sse_nl.empty() && sse_nl[0].find("\n\n") == sse_nl[0].size() - 2,
+       "SSE: a blank line in the message does not split the event");
+
+    // NDJSON: Ollama's {"error": "<text>"}, one line, no SSE prefix.
+    auto nd = stream_error_frames(StreamWire::Ndjson, "NPU fault\nsecond line");
+    eqi(static_cast<int>(nd.size()), 1, "NDJSON: one line, which the caller sends as final");
+    if (nd.size() == 1) {
+        const std::string& line = nd[0];
+        ok(!line.empty() && line.back() == '\n' && line.find('\n') == line.size() - 1,
+           "NDJSON: exactly one newline, at the end, even when the message has one");
+        ok(line.rfind("data: ", 0) != 0, "NDJSON: no SSE prefix");
+        json body = json::parse(line, nullptr, false);
+        ok(body.is_object() && body.contains("error") && body["error"].is_string(),
+           "NDJSON: {\"error\": \"<text>\"}, the shape Ollama's client checks each line for");
+        if (body.is_object() && body.contains("error") && body["error"].is_string())
+            eq(body["error"].get<std::string>(), "NPU fault\nsecond line", "NDJSON: the message survives");
+    }
+
+    // what() can quote invalid UTF-8 (json::parse_error does). The error path must
+    // not throw on the thing it is reporting.
+    const std::string bad = std::string("parse error, last read: '") + '\xE5' + "'";
+    for (StreamWire w : {StreamWire::Sse, StreamWire::Ndjson}) {
+        const char* name = w == StreamWire::Sse ? "SSE" : "NDJSON";
+        bool threw = false;
+        std::vector<std::string> frames;
+        try {
+            frames = stream_error_frames(w, bad);
+        } catch (...) {
+            threw = true;
+        }
+        ok(!threw, std::string(name) + ": invalid UTF-8 in the message does not throw");
+        ok(!frames.empty() && frames[0].find("\xEF\xBF\xBD") != std::string::npos,
+           std::string(name) + ": ...it is replaced with U+FFFD");
+    }
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -403,6 +528,7 @@ int main(int argc, char** argv) {
     test_preflight();
     test_resolve_task();
     test_task_policy();
+    test_stream_errors();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);
