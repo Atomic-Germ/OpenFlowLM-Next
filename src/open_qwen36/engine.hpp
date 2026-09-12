@@ -9,7 +9,7 @@
 ///       time by default, which is exact but ~0.12 s per prompt token on the full
 ///       model; batched prefill (0167/#32) runs instead when the loaded kernel set
 ///       carries a GEMM-route block program (Core::gemm_block_t() > 0, currently
-///       Granite only) AND FLM_OPEN_GEMM_BLOCK=1 is set: T tokens per layer as 5
+///       Granite only) AND OFLM_OPEN_GEMM_BLOCK=1 is set: T tokens per layer as 5
 ///       whole-array GEMM dispatches plus T attention dispatches, instead of T
 ///       sequential steps.
 #pragma once

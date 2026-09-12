@@ -538,9 +538,11 @@ on a memory-starved box, not the kernels.
 ## What is still not closed
 
 - **Batched prefill -- open on Granite, not yet on the other families.**
-  `FLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
+  `OFLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
   dispatches plus T attention dispatches instead of T decode steps (1.95x TTFT
-  on a 1005-token prompt). It needs a kernel set carrying a `gemm_block`
+  on a 1005-token prompt). It is read through `utils::getenv_oflm`, so the
+  pre-rename `FLM_OPEN_GEMM_BLOCK` still works and prints a one-line notice
+  naming the current variable. It needs a kernel set carrying a `gemm_block`
   program, which today is Granite only; every other family still goes through
   the decode step one token at a time. The route writes no M-RoPE position
   records, so a prompt that has had an image stays on the sequential path.

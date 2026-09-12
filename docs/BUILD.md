@@ -138,7 +138,7 @@ The engine prints which kernel set it resolved when it loads a model:
 open_qwen36: kernels .../<model>/open_kernels (beside the model)
 ```
 
-Three rules can pick that directory — `FLM_OPEN_KERNELS_DIR`, then a set beside
+Three rules can pick that directory — `OFLM_OPEN_KERNELS_DIR`, then a set beside
 the model, then an `xclbins` root — and all three produce valid output. If you
 have just rebuilt kernels and want to be sure the new ones ran, read that line.
 
@@ -149,5 +149,10 @@ have just rebuilt kernels and want to be sure the new ones ran, read that line.
 - The Windows and embedding-set instructions above were run on this repository;
   the Linux presets and the LLM kernel export are transcribed from the build
   scripts' own documented usage.
-- `~/.flm`, `share/flm`, `lib/flm` and the `FLM_*` environment variables keep
-  their names — those are install layout and contract, not the executable.
+- The install layout and the environment variables were renamed with the
+  executable: `~/.oflm`, `share/oflm`, `lib/oflm`, `OFLM_*`. A pre-rename
+  install still works — `~/.flm` is searched after the oflm locations, and any
+  variable read through `utils::getenv_oflm` accepts its old `FLM_*` name and
+  prints a one-line notice naming the new one. `OFLM_OPEN_KERNELS_DIR` is the
+  exception: the open engine reads it with plain `getenv`, so `FLM_OPEN_KERNELS_DIR`
+  does nothing.
