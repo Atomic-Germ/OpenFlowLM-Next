@@ -93,17 +93,18 @@ public:
 
     /// \brief Embed several texts in one call.
     ///
-    /// NOT an override -- AutoEmbeddingModel::embed() takes one text, and
-    /// widening the base class is a separate change that deserves to be judged
-    /// on its own. It matters here because THIS ENGINE'S THROUGHPUT IS IN THE
-    /// BATCH: it encodes `batch` sequences per dispatch over a resident
-    /// xclbin, so a single text pays for a whole tier. Upstream measures a
-    /// single text at 5.8x worse per text than a full batch. The REST handler
-    /// already parses the whole `input` array before discarding it in a loop,
-    /// so adopting this is one line there once the base class allows it.
+    /// An override now. It used to be a non-virtual extra, because widening
+    /// AutoEmbeddingModel deserved to be judged on its own -- it has been, and
+    /// the base class carries a default that loops over embed(). This is the
+    /// override that makes the batch real: THIS ENGINE'S THROUGHPUT IS IN THE
+    /// BATCH, since it encodes a whole tier of sequences per dispatch over a
+    /// resident xclbin, so a single text pays for the tier either way.
+    /// Measured on bge-base: sixteen texts cost 405 ms looped against 70 ms
+    /// batched. `oflm bench-embed` reports that ratio per batch size, which is
+    /// what turned it from a README note into a number.
     std::vector<float> embed_batch(const std::vector<std::string>& texts,
                                    embedding_task_type_t task_type,
-                                   int64_t* tokens = nullptr);
+                                   int64_t* tokens = nullptr) override;
 
     int64_t hidden() const;
 

@@ -972,7 +972,54 @@ void RestHandler::handle_embeddings(const json& request,
                                    std::function<void(const json&)> send_response,
                                    StreamResponseCallback send_streaming_response) {
     try {
-        std::string model = request["model"];
+        // VALIDATE `input` FIRST, and read every other field through a checked
+        // accessor. `std::string model = request["model"]` used to be the first
+        // statement here, on a `const json&`, with nothing checking that the key
+        // existed -- so `POST /v1/embeddings {}` did not answer the 400 the guard
+        // below promises. It KILLED THE SERVER PROCESS, after logging
+        // "NPU Locked!", i.e. while holding the NPU access lock. Reproduced at
+        // exit 139. The input guard was written for exactly that request and sat
+        // below the line that crashed before reaching it.
+        if (!request.is_object()) {
+            send_response(json{{"error", {
+                {"message", "the request body must be a JSON object."},
+                {"type", "invalid_request_error"},
+                {"param", ""},
+                {"code", "invalid_value"}}}});
+            return;
+        }
+        if (!request.contains("input")) {
+            send_response(json{{"error", {
+                {"message", "input is required: a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "missing_required_parameter"}}}});
+            return;
+        }
+        std::vector<std::string> inputs;
+
+        // `model` is OPTIONAL on this endpoint and stays that way: the mismatch
+        // check below is written as `!model.empty() && ...`, i.e. an absent model
+        // means "whatever this server loaded". What was missing was the type
+        // check and the presence check, not the field.
+        std::string model;
+        // `contains()` alone, deliberately: an explicit `null` is neither a
+        // string nor omitted, and the message below says so. The previous
+        // version skipped null before the type check, which accepted it and
+        // contradicted its own error text. A caller that means "whatever is
+        // loaded" omits the field.
+        if (request.contains("model")) {
+            if (!request["model"].is_string()) {
+                send_response(json{{"error", {
+                    {"message", "model must be a string naming the loaded embedding "
+                                "model, or be omitted."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "invalid_value"}}}});
+                return;
+            }
+            model = request["model"].get<std::string>();
+        }
 
         // THE `model` FIELD USED TO BE ECHOED AND OTHERWISE IGNORED, which is
         // the worst version of a wrong answer: the response ASSERTED it was
@@ -1094,30 +1141,86 @@ void RestHandler::handle_embeddings(const json& request,
         }
         if (tr.status == TRS::Ok) task_type = tr.task;
 
-        std::vector<std::string> inputs;
-
-        if (request["input"].is_string()) {
-            inputs.push_back(request["input"].get<std::string>());
+        const json& input_field = request.at("input");
+        if (input_field.is_string()) {
+            inputs.push_back(input_field.get<std::string>());
         }
-        else if (request["input"].is_array()) {
-            for (const auto& item : request["input"]) {
-                inputs.push_back(item.get<std::string>());
+        else if (input_field.is_array()) {
+            for (size_t i = 0; i < input_field.size(); ++i) {
+                if (!input_field[i].is_string()) {
+                    send_response(json{{"error", {
+                        {"message", "input[" + std::to_string(i) + "] is not a string."
+                                    " input must be a string, or an array of strings."},
+                        {"type", "invalid_request_error"},
+                        {"param", "input[" + std::to_string(i) + "]"},
+                        {"code", "invalid_value"}}}});
+                    return;
+                }
+                inputs.push_back(input_field[i].get<std::string>());
             }
+        }
+        else {
+            // An empty ARRAY is deliberately still 200 with an empty list: that
+            // request is well formed and its answer is correct. This branch is
+            // for null, numbers, booleans and objects, which are not.
+            send_response(json{{"error", {
+                {"message", "input must be a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "invalid_value"}}}});
+            return;
         }
 
         json response;
+        // -1 means the backend did not report a count; see the usage field below.
+        int64_t prompt_tokens = -1;
         if (this->embed) {
             json embedding_data = json::array();
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
             try {
-                for (size_t i = 0; i < inputs.size(); ++i) {
-                    std::cout << "Embedding input[" << i << "]: " << "\n" << inputs[i] << std::endl;
-                    std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], task_type);
-                    embedding_data.push_back({
-                        {"object", "embedding"},
-                        {"embedding", embedding_result},
-                        {"index", i}
-                    });
+                // ONE call for the whole array, not one per input.
+                //
+                // AutoEmbeddingModel::embed_batch() defaults to exactly the loop
+                // this replaces, so a backend that does not override it behaves
+                // identically. NpueEmbedding does override it and encodes a whole
+                // tier of sequences per dispatch: measured 5-10x faster on all six
+                // of its models, peaking at 10.3x
+                // (docs/docs/benchmarks/embeddings_results.md).
+                //
+                // The vectors are BIT-IDENTICAL either way. Batching is a
+                // scheduling choice, not an arithmetic one, which is precisely why
+                // nothing here could ever have flagged the loop: no accuracy check,
+                // cosine or byte comparison can tell the slow path from the fast
+                // one. The only symptom was time, and the endpoint measured none.
+                if (!inputs.empty()) {
+                    const std::vector<float> flat =
+                        this->auto_embedding_engine->embed_batch(inputs, task_type,
+                                                                &prompt_tokens);
+                    // The vectors come back concatenated, so the width has to be
+                    // derived -- and therefore CHECKED. A mis-split returns
+                    // correctly shaped, correctly normed, deterministic vectors for
+                    // the wrong inputs, which is the one failure nothing downstream
+                    // can see. openai_compat::embedding_batch_dim() refuses rather
+                    // than dividing and hoping, and benchmark_embed_test holds it
+                    // to that without a device -- one definition, shared with
+                    // bench-embed, so the two cannot drift. (The helper lives in
+                    // openai_compat.hpp; its assertions are in
+                    // benchmark_embed_test.cpp, not openai_compat_test.cpp.)
+                    const size_t dim =
+                        openai_compat::embedding_batch_dim(flat.size(), inputs.size());
+                    for (size_t i = 0; i < inputs.size(); ++i) {
+                        embedding_data.push_back({
+                            {"object", "embedding"},
+                            {"embedding", std::vector<float>(
+                                 flat.begin() + static_cast<std::ptrdiff_t>(i * dim),
+                                 flat.begin() + static_cast<std::ptrdiff_t>((i + 1) * dim))},
+                            {"index", i}
+                        });
+                    }
+                    // One line, not one per input with the text echoed back. The
+                    // old print put the full text of every request on the console.
+                    header_print("OFLM", "embedded " + std::to_string(inputs.size()) +
+                                         " input(s), " + std::to_string(dim) + " dims");
                 }
             } catch (const TaskPromptUnavailable& e) {
                 // The model has prompts but none serves this task -- README.md:288's
@@ -1135,13 +1238,27 @@ void RestHandler::handle_embeddings(const json& request,
             throw std::runtime_error("Embedding models are not supported in this build");
 #endif
 
+            // WHICH MODEL PRODUCED THESE VECTORS. `model` is empty when the
+            // request omitted the field, and echoing "" tells a client nothing
+            // -- while this handler exists to stop a response asserting
+            // something it is not. An omitted model means "whatever is
+            // loaded", so name it rather than leaving the field blank.
+            std::string response_model = model;
+            if (response_model.empty() && this->auto_embedding_engine)
+                response_model = this->auto_embedding_engine->get_current_model();
+
             response = {
                 {"object", "list"},
                 {"data", embedding_data},
-                {"model", model},
+                {"model", response_model},
                 {"usage", {
-                    {"prompt_tokens", 0},
-                    {"total_tokens", 0}
+                    // A real count when the backend reports one. 0 still means
+                    // NOT REPORTED -- which is what every request got before this,
+                    // on both backends. embed_batch() yields -1 rather than 0 for a
+                    // backend that does not count, because a zero there would read
+                    // as a real number.
+                    {"prompt_tokens", prompt_tokens < 0 ? 0 : prompt_tokens},
+                    {"total_tokens",  prompt_tokens < 0 ? 0 : prompt_tokens}
                 }}
             };
         }

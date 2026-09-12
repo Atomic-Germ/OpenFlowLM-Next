@@ -87,6 +87,8 @@ garbage.
 **End-to-end HTTP latency**, same binary, same endpoint, median of three after
 a warm-up. This is wall-clock request latency, **not** an NPU kernel claim: it
 includes tokenization, the host-side half of the encode, JSON and the socket.
+These were measured by hand; `oflm bench-embed` is the committed tool that
+reproduces the engine-side half of them, for all seven models.
 
 | request | `open_embedding` (EmbeddingGemma-300M) | `open_npue` (bge-base, 109M) |
 |---:|---:|---:|
@@ -167,12 +169,68 @@ measured here rather than cited from either project's own claims.
 > it today. `embed-gemma:300m` stays with `open_embedding`, which is the right
 > outcome regardless: it is live, validated code and this PR is additive.
 
-**There is ~5.8× still on the table.** `AutoEmbeddingModel::embed()` takes one
-text, so `handle_embeddings` loops. Sixteen texts cost 405 ms through the
-endpoint and **70 ms** as one batched call to the same engine — 5.8×, which is
-exactly what upstream measures for a single text through the smallest tier.
-`NpueEmbedding::embed_batch()` exists and is unused; widening the base class is
-a separate change that deserves to be judged on its own.
+**The ~5.8× is now measured, on every model, by a committed tool.**
+`AutoEmbeddingModel` has a virtual `embed_batch()` whose default loops over
+`embed()`, and `NpueEmbedding` overrides it. `oflm bench-embed <tag>` times both
+paths at each batch size and prints the ratio:
+
+| batch | 1 | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| all-MiniLM-L6-v2 | 0.86 | 3.35 | 6.19 | 6.55 | 8.00 | 9.97 | 8.53 |
+| bge-base-en-v1.5 | 0.96 | 3.83 | 6.82 | 5.82 | 5.84 | 7.61 | 6.13 |
+| bge-large-en-v1.5 | 1.00 | 3.82 | 5.93 | 4.80 | 5.24 | 6.33 | 5.50 |
+| EmbeddingGemma-300M *(control)* | *1.02* | *0.97* | *1.04* | *0.99* | — | — | — |
+
+The last row is what makes the others mean anything: `open_embedding` does not
+override `embed_batch()`, so its two paths are the same loop and its ratio has
+to read ~1.00×. It reads 0.97—1.04× across every batch size it was
+swept at (the four shown, plus batch 2, which this table has no column for).
+
+`bge-base` at batch 16 reads **5.82×** against the 5.8× measured by hand above,
+on a different day and a different binary — which is the check that the tool
+measures what the note claimed.
+
+**And the REST handler now uses it.** `handle_embeddings` makes one
+`embed_batch()` call for the whole `input` array instead of one `embed()` call
+per element. Measured THROUGH THE ENDPOINT on bge-base — over HTTP, best of
+three, same process, LLM co-resident — not through the engine, because those
+are two different claims:
+
+| inputs | before | after | 
+|---:|---:|---:|
+| 1 | 0.0319 s | 0.0285 s (1.12×) |
+| 4 | 0.1066 s | 0.0282 s (3.78×) |
+| 8 | 0.2289 s | 0.0375 s (6.10×) |
+| 16 | 0.4437 s | 0.0916 s (4.84×) |
+| 32 | 0.8532 s | 0.2215 s (3.85×) |
+| 64 | 1.6134 s | 0.2515 s (6.42×) |
+| 128 | 3.4088 s | 0.6371 s (5.35×) |
+
+**Before, throughput was FLAT at 31—40 texts/s at every batch size** — the
+endpoint got nothing at all from batching. After, it is 35 at one input and
+254.5 at sixty-four.
+
+The endpoint stays below the engine-only figures (200.9 against 250.1 texts/s
+at 128 inputs); the difference is HTTP and serialising 128×768 floats to JSON,
+and it is the honest number for what a client sees.
+
+**The vectors did not change.** Verified two ways, because the risk in slicing
+a concatenated result is not a crash: a wrong width or order returns a
+correctly shaped, correctly normed, deterministic vector for somebody
+else's text, and nothing downstream can see that. So 16 distinct texts sent as
+one batch were compared **byte-for-byte** against each text sent alone — 16 of
+16 exact, `index` fields correct — and the first components of every response
+are unchanged from before the edit at all seven batch sizes.
+
+Two things came along with it. `usage` reported `{0, 0}` for every request on
+both backends and now carries the real token count (30 for one text, 2824 for
+128); 0 still means *not reported*, which is what `open_embedding` returns.
+And a request with **no `input` field** used to answer **200 with an empty
+list** — `request["input"]` on a `const json&` with a missing key is undefined
+behaviour — so it is a 400 now. An empty `input` array is still 200 and an
+empty list, unchanged.
+
+Full results: [`docs/docs/benchmarks/embeddings_results.md`](../../docs/docs/benchmarks/embeddings_results.md).
 
 ---
 

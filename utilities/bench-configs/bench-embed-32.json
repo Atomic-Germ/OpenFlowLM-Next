@@ -1,0 +1,6 @@
+{
+  "_comment": "oflm bench-embed <tag> -i utilities/bench-configs/bench-embed-32.json -- a shorter sweep than the default 128. max_batch picks the LARGEST stage and every smaller power of two runs after it, hardest first, so this gives 6 stages (32, 16, 8, 4, 2, 1) rather than 8. Keys read: max_batch, iterations, task, texts. Omit texts to use the built-in corpus. Unlike `oflm bench`, max_batch and iterations here fall back to the CLI flags when absent from the file.",
+  "max_batch": 32,
+  "iterations": 3,
+  "task": "query"
+}

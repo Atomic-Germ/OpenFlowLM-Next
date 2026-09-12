@@ -193,7 +193,7 @@ inline void write_bench_csv(const BenchmarkResults_t& results, const std::string
     out.close();
 }
 
-void print_result(const BenchmarkResults_t& results) {
+inline void print_result(const BenchmarkResults_t& results) {
     // Calculate number of stages (1k, 2k, 4k, ...)
     int stages;
     stages = results.decoding_speed.size();
@@ -246,7 +246,7 @@ void print_result(const BenchmarkResults_t& results) {
     std::cout << "\n";
 }
 
-BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_config_file, model_list& availble_models, int iterations){
+inline BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_config_file, model_list& availble_models, int iterations){
     BenchmarkResults_t results;
     json bench_config;
     // this is used for our benchmarking, not for public use.
