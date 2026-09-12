@@ -144,10 +144,20 @@ protected:
     bool has_bos_token;
     int bos_token_id;
     std::vector<int> eos_token_ids;
+    sampler_config default_sampler_config_;
+    bool has_default_sampler_ = false;
 
 	std::string user_system_prompt = "";
 
     nlohmann::json extra_context;
+
+	/// Lives here rather than in each model so one reset covers them all - a request
+	/// that turns thinking on used to leave it on for whatever came next.
+	bool enable_think = false;
+
+	bool default_enable_think_ = false;
+	std::string default_user_system_prompt_;
+	nlohmann::json default_extra_context_;
 
 	typedef enum {
 		PREFILL_TIME,
@@ -223,6 +233,15 @@ public:
 	/// \brief Set the sampler
 	/// \param sampler_config the sampler config
 	virtual void set_sampler(sampler_config& sampler_config);
+
+	/// Per-request settings (temperature, top_k, thinking, system prompt, ...) are applied
+	/// to the engine only when a request carries them, so without these two they leak from
+	/// one request into the next. The server snapshots once after load and resets at the
+	/// top of each chat request. The base covers everything it owns - the sampler,
+	/// enable_think, the system prompt and extra_context - so a model only overrides these
+	/// if it keeps request state of its own outside those.
+	virtual void snapshot_request_defaults();
+	virtual void reset_request_defaults();
 
 	/// \brief Set the max length
 	/// \param MAX_L the max length

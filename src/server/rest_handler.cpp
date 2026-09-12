@@ -460,6 +460,8 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             this->current_model_tag = "model-faker";
             return ModelLoad::NotChatModel;
         }
+        // A request may name a model that is in the list but not on disk, or one an update
+        // has left behind - pull it before loading rather than failing the request.
         switch (downloader.is_model_downloaded(ensure_tag)) {
             case ModelDownloader::ModelStatus::Ready:
                 break;
@@ -468,18 +470,17 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
                 downloader.pull_model(ensure_tag, this->modelscope);
                 break;
             case ModelDownloader::ModelStatus::Incompatible:
-                // auto_chat_engine holds a freshly CONSTRUCTED engine that was never
-                // loaded, and current_model_tag still names the model just evicted --
-                // so the next request for that tag took the fast path straight into it.
-                // Leave the same state the load-failure catch below leaves.
+                header_print("ERROR", "model '" + ensure_tag + "' is not compatible with this "
+                                      "version of OpenFlowLM; nothing is loaded now");
                 this->auto_chat_engine.reset();
                 this->current_model_tag = "model-faker";
                 return ModelLoad::LoadFailed;
-            }
+        }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
         try {
             auto_chat_engine->load_model(supported_models.get_model_path(new_ensure_tag), model_info, ctx_length, preemption);
+            auto_chat_engine->snapshot_request_defaults();
         }
         catch (const std::exception& e) {
             header_print("ERROR", "Failed to load model: " + std::string(e.what()));
@@ -570,6 +571,8 @@ void RestHandler::ensure_embed_model_loaded(const std::string& model_tag) {
 ///@param options the options JSON object
 ///@param request the request JSON object
 void RestHandler::configure_chat_engine_parameters(const json& options, const json& request) {
+    // a field the request leaves out means the model default, not the previous request's value
+    auto_chat_engine->reset_request_defaults();
     if (request.contains("temperature")) {
         float temperature = request["temperature"];
         auto_chat_engine->set_temperature(temperature);

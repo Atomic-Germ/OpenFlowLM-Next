@@ -48,7 +48,7 @@ def main():
     parser.add_argument('--audio', action='store_true', help="Run Audio tests")
     parser.add_argument('--vision', action='store_true', help="Run vision tests")
     parser.add_argument('--tools', action='store_true',
-                        help="Run tool-calling tests (five complexity levels)")
+                        help="Run tool-calling tests (seven complexity levels)")
     parser.add_argument('--all', action='store_true',
                         help="Run all suites except embedding (which stays exclusive)")
     parser.add_argument('--gen-lim', type=int, default=-1, help="Maximum number of tokens to generate")

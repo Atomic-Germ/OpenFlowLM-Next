@@ -900,7 +900,7 @@ class VisionTask(BaseTestTask):
 
 class ToolCallingTask(BaseTestTask):
     """
-    Tests OpenAI-compatible function/tool calling at five escalating
+    Tests OpenAI-compatible function/tool calling at seven escalating
     complexity levels, each run in both streaming and non-streaming mode:
 
       L1 Basic Tool Call      One obvious call whose arguments appear verbatim
@@ -912,6 +912,11 @@ class ToolCallingTask(BaseTestTask):
       L4 Parallel Tool Calls  Several independent calls belong in one turn.
       L5 Multi-Turn Tool Loop The model must call a tool, consume the locally
                               executed result, and ground its final answer in it.
+      L6 Tool Result Fidelity A code in the last few tokens of a tool result must
+                              come back verbatim, which prompt trimming that eats
+                              the tail of the result would break.
+      L7 Nullable Schema      A parameter typed ["string", "null"] must not fail
+                              the request, and the tool must still be called.
 
     Automated checks validate tool names, JSON argument validity/values and,
     for L5, the arithmetic derived from the tool result ($54 total).
@@ -982,6 +987,40 @@ class ToolCallingTask(BaseTestTask):
     PARALLEL_PROMPT = "Using your tools, compare the current weather in Paris and Tokyo."
     LOOP_PROMPT = ("Use the price lookup tool to check the unit price of a 'widget', then tell me "
                    "what 3 widgets would cost after a 10% discount. Do the math yourself.")
+    # L6: the value the model must repeat sits in the last few tokens of the tool result
+    # (templates that sort keys put zz_code last), so any truncation of the result shows up.
+    FIDELITY_PROMPT = ("Fetch ticket 42 and reply with ONLY the exact value of its `zz_code` field, "
+                       "nothing else.")
+    FIDELITY_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "get_ticket",
+            "description": "Fetch a support ticket by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticket_id": {"type": "string", "description": "Ticket id, e.g. '42'."}},
+                "required": ["ticket_id"],
+            },
+        },
+    }
+    FIDELITY_RESULT = {"a_status": "open", "zz_code": "ZQX-7731"}
+    # L7: a JSON-schema type array, the shape Pydantic optionals and most MCP servers emit
+    NULLABLE_PROMPT = "Search my notes for 'budget' in any folder. Use the tool."
+    NULLABLE_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "search_notes",
+            "description": "Search the user's notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search text."},
+                    "folder": {"type": ["string", "null"], "description": "Folder to search, or null for all."},
+                },
+                "required": ["query"],
+            },
+        },
+    }
 
     LEVEL_NAMES = [
         "L1 Basic Tool Call",
@@ -989,6 +1028,8 @@ class ToolCallingTask(BaseTestTask):
         "L3 Tool Restraint",
         "L4 Parallel Tool Calls",
         "L5 Multi-Turn Tool Loop",
+        "L6 Tool Result Fidelity",
+        "L7 Nullable Schema",
     ]
 
     FINAL_ANSWER_PATTERN = re.compile(r"\b54(\.0{1,2})?\b")
@@ -1081,12 +1122,13 @@ class ToolCallingTask(BaseTestTask):
                       for _, entry in sorted(accumulated.items())]
         return reasoning_content, output_content, tool_calls
 
-    def _call_model(self, model_id, messages, stream, max_completion_tokens, temperature, reasoning=None):
+    def _call_model(self, model_id, messages, stream, max_completion_tokens, temperature, reasoning=None,
+                    tools=None):
         """One chat completion with tools bound; returns (reasoning, content, tool_calls)."""
         response = self.client.chat.completions.create(
             model=model_id,
             messages=messages,
-            tools=self.TOOLS,
+            tools=tools if tools is not None else self.TOOLS,
             stream=stream,
             max_completion_tokens=max_completion_tokens,
             temperature=temperature,
@@ -1250,6 +1292,73 @@ class ToolCallingTask(BaseTestTask):
                             f"ERROR: {e}", "N/A", [], "ERROR")
         time.sleep(1)
 
+    def _check_fidelity(self, content, tool_calls):
+        """L6: the tail value of the tool result is reproduced verbatim, with no further call."""
+        if tool_calls:
+            return ("FAIL", f"called {[tc['name'] for tc in tool_calls]} instead of answering from the result")
+        if self.FIDELITY_RESULT["zz_code"] in (content or ""):
+            return ("PASS", "tool result reached the model intact")
+        return ("FAIL", f"expected '{self.FIDELITY_RESULT['zz_code']}' in the answer, got '{(content or '')[:80]}'")
+
+    def _check_nullable(self, content, tool_calls):
+        """L7: the request survives a type-array schema and the tool gets called."""
+        if not tool_calls:
+            return ("FAIL", "no tool call issued")
+        first = tool_calls[0]
+        if first["name"] != "search_notes":
+            return ("FAIL", f"expected 'search_notes', got '{first['name'] or '<empty>'}'")
+        args = self._parse_arguments(first["arguments"])
+        if args is None:
+            return ("FAIL", "tool arguments are not a valid JSON object")
+        if "budget" not in str(args.get("query", "")).lower():
+            return ("FAIL", f"expected query to mention 'budget', got '{args.get('query')}'")
+        return ("PASS", f"called search_notes with query '{args.get('query')}'")
+
+    def _run_fidelity_level(self, writer, model_id, stream, max_completion_tokens, temperature, reasoning=None):
+        level_name = self.LEVEL_NAMES[5]
+        mode = "Stream" if stream else "Non-Stream"
+        messages = [
+            {"role": "user", "content": self.FIDELITY_PROMPT},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_fidelity_1", "type": "function",
+                 "function": {"name": "get_ticket", "arguments": json.dumps({"ticket_id": "42"})}}]},
+            {"role": "tool", "tool_call_id": "call_fidelity_1", "content": json.dumps(self.FIDELITY_RESULT)},
+        ]
+        label = f"{self.FIDELITY_PROMPT} [with tool result fed back]"
+        try:
+            print(f"{level_name}: {self.FIDELITY_PROMPT}")
+            reasoning_content, content, tool_calls = self._call_model(
+                model_id, messages, stream, max_completion_tokens, temperature, reasoning,
+                tools=self.TOOLS + [self.FIDELITY_TOOL])
+            verdict = self._check_fidelity(content, tool_calls)
+            self._write_row(writer, model_id, level_name, mode, label,
+                            reasoning_content, content, tool_calls, verdict)
+            print(f"Check result: {verdict[0]} ({verdict[1]})")
+        except Exception as e:
+            print(f"Error occurred in {level_name}, model: {model_id}: {e}")
+            self._write_row(writer, model_id, level_name, mode, label, f"ERROR: {e}", "N/A", [], "ERROR")
+        time.sleep(1)
+
+    def _run_nullable_level(self, writer, model_id, stream, max_completion_tokens, temperature, reasoning=None):
+        level_name = self.LEVEL_NAMES[6]
+        mode = "Stream" if stream else "Non-Stream"
+        messages = [{"role": "user", "content": self.NULLABLE_PROMPT}]
+        try:
+            print(f"{level_name}: {self.NULLABLE_PROMPT}")
+            reasoning_content, content, tool_calls = self._call_model(
+                model_id, messages, stream, max_completion_tokens, temperature, reasoning,
+                tools=self.TOOLS + [self.NULLABLE_TOOL])
+            verdict = self._check_nullable(content, tool_calls)
+            self._write_row(writer, model_id, level_name, mode, self.NULLABLE_PROMPT,
+                            reasoning_content, content, tool_calls, verdict)
+            print(f"Check result: {verdict[0]} ({verdict[1]})")
+        except Exception as e:
+            # a template that cannot render the schema comes back as an HTTP error, which is the failure
+            print(f"Error occurred in {level_name}, model: {model_id}: {e}")
+            self._write_row(writer, model_id, level_name, mode, self.NULLABLE_PROMPT,
+                            f"ERROR: {e}", "N/A", [], ("FAIL", f"request failed: {str(e)[:120]}"))
+        time.sleep(1)
+
     def run(self, max_completion_tokens=-1, temperature=0.3, reasoning=None):
         single_round_levels = [
             (self.LEVEL_NAMES[0], self.BASIC_PROMPT,
@@ -1278,5 +1387,9 @@ class ToolCallingTask(BaseTestTask):
                                                      reasoning=reasoning)
                     self._run_loop_level(writer, model_id, stream, max_completion_tokens, temperature,
                                          reasoning=reasoning)
+                    self._run_fidelity_level(writer, model_id, stream, max_completion_tokens, temperature,
+                                             reasoning=reasoning)
+                    self._run_nullable_level(writer, model_id, stream, max_completion_tokens, temperature,
+                                             reasoning=reasoning)
                 print(f"Finished testing model: {model_id}")
         print(f"\nTool calling tests complete. Saved to {self.csv_filename}")

@@ -536,6 +536,35 @@ void AutoModel::set_sampler(sampler_config& sampler_config) {
     this->sampler = std::make_unique<Sampler>(this->lm_config->get("vocab_size"), sampler_config);
 }
 
+void AutoModel::snapshot_request_defaults() {
+    default_enable_think_ = this->enable_think;
+    default_user_system_prompt_ = this->user_system_prompt;
+    default_extra_context_ = this->extra_context;
+    if (this->sampler == nullptr) return;
+    default_sampler_config_.temperature = this->sampler->temperature;
+    default_sampler_config_.top_k = this->sampler->top_k;
+    default_sampler_config_.top_p = this->sampler->top_p;
+    default_sampler_config_.min_p = this->sampler->min_p;
+    default_sampler_config_.rep_penalty = this->sampler->rep_penalty;
+    default_sampler_config_.freq_penalty = this->sampler->freq_penalty;
+    default_sampler_config_.pre_penalty = this->sampler->pre_penalty;
+    has_default_sampler_ = true;
+}
+
+void AutoModel::reset_request_defaults() {
+    this->enable_think = default_enable_think_;
+    this->user_system_prompt = default_user_system_prompt_;
+    this->extra_context = default_extra_context_;
+    if (this->sampler == nullptr || !has_default_sampler_) return;
+    this->sampler->temperature = default_sampler_config_.temperature;
+    this->sampler->top_k = default_sampler_config_.top_k;
+    this->sampler->top_p = default_sampler_config_.top_p;
+    this->sampler->min_p = default_sampler_config_.min_p;
+    this->sampler->rep_penalty = default_sampler_config_.rep_penalty;
+    this->sampler->freq_penalty = default_sampler_config_.freq_penalty;
+    this->sampler->pre_penalty = default_sampler_config_.pre_penalty;
+}
+
 /// \brief Set the max length
 /// \param MAX_L the max length
 /// \note The function will set the max length

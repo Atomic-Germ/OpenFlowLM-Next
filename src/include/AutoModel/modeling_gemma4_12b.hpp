@@ -24,7 +24,8 @@
 /************              Gemma4_12B (text only)            **************/
 class Gemma4_12B : public AutoModel {
 private:
-    bool enable_think = false;
+    // set per insert(): the prompt ended with the empty thought block that was trimmed off
+    bool feed_empty_thought = false;
 
     void setup_tokenizer(std::string model_path);
 

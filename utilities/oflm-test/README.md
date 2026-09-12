@@ -10,7 +10,7 @@ oflm-test is designed to thoroughly test OpenFlowLM's API compatibility and mode
 - **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`oflm serve -e 1`, or `oflm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
 - **Audio Tests**: Audio understanding via chat completions, with a bundled music clip
 - **Vision Tests**: Vision-Language Model (VLM) tests with multi-image support and automated response checking
-- **Tool Calling Tests**: Function/tool-calling across five escalating complexity levels, in streaming and non-streaming modes
+- **Tool Calling Tests**: Function/tool-calling across seven escalating complexity levels, in streaming and non-streaming modes
 
 All test media is **bundled inside the package**, so no extra downloads or local paths are needed once installed.
 
@@ -251,7 +251,7 @@ Because this suite is exclusive, only an embedding model is loaded on the server
 **Output:** `embedding_results_v{version}_{timestamp}.csv`
 
 ### Tool Calling Tests
-Tests OpenAI-compatible function/tool-calling across five escalating complexity levels. Each level runs in both **non-streaming** and **streaming** mode.
+Tests OpenAI-compatible function/tool-calling across seven escalating complexity levels. Each level runs in both **non-streaming** and **streaming** mode.
 
 **What it tests:**
 - Emitting well-formed tool calls with valid JSON arguments (streamed and non-streamed)
@@ -259,6 +259,8 @@ Tests OpenAI-compatible function/tool-calling across five escalating complexity 
 - Restraint: not calling tools when none are needed (negative control)
 - Parallel tool calls for multiple independent requests in one turn
 - The full tool loop: call → locally executed result → final answer grounded in the result
+- Tool result fidelity: a value in the last few tokens of a tool result comes back verbatim (catches prompt trimming that eats the tail of the result)
+- Schema robustness: a tool whose parameter uses a JSON-schema type array (`["string", "null"]`) still renders and gets called
 
 | Level | Name | Scenario |
 |-------|------|----------|
@@ -267,6 +269,8 @@ Tests OpenAI-compatible function/tool-calling across five escalating complexity 
 | L3 | Tool Restraint | Capital-of-France question with tools bound; nothing should be called |
 | L4 | Parallel Tool Calls | Compare current weather in Paris and Tokyo in one turn |
 | L5 | Multi-Turn Tool Loop | Look up widget price via a tool, then compute 3 widgets at 10% discount |
+| L6 | Tool Result Fidelity | A completed `get_ticket` call whose result ends in `zz_code: ZQX-7731`; the model must echo that code |
+| L7 | Nullable Schema | Search notes with a `folder` parameter typed `["string", "null"]`; the request must succeed and call `search_notes` |
 
 Tool results in L5 are produced by built-in mock implementations (deterministic fake weather/price databases), so no external services are required. Widget price is $20.00, so a correct final answer contains **54** (3 × $20 − 10%).
 
@@ -278,6 +282,8 @@ Tool results in L5 are produced by built-in mock implementations (deterministic 
 | L4 Parallel Check | PASS / SOFT-FAIL / FAIL | At least two calls covering both cities; SOFT-FAIL if only one call was issued |
 | L5 Lookup Check | PASS / FAIL | `lookup_item_price` called with item 'widget' |
 | L5 Final Answer Check | PASS / FAIL | Final answer reflects the computed total of $54 |
+| L6 Fidelity Check | PASS / FAIL | Answer contains `ZQX-7731` and no further tool call was made |
+| L7 Nullable Check | PASS / FAIL | `search_notes` called with a query mentioning 'budget'; an HTTP error from the server is a FAIL |
 
 **Output:** `tools_results_v{version}_{timestamp}.csv`
 
