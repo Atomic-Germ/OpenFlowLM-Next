@@ -1,5 +1,5 @@
-/// ile gemma4_tool_parser.hpp
-/// rief Gemma 4 tool-call text -> (name, JSON args), shared by the 12B and E2B/E4B models.
+/// \file gemma4_tool_parser.hpp
+/// \brief Gemma 4 tool-call text -> (name, JSON args), shared by the 12B and E2B/E4B models.
 ///
 /// The model emits `<|tool_call>call:NAME{ARGS}<tool_call|>` where ARGS is relaxed JSON:
 /// bare keys, strings wrapped in <|"|>...<|"|>, and enough variation on that to need a
@@ -406,19 +406,32 @@ inline std::pair<std::string, json> parse_tool_content(std::string tool_content)
 /// `call:tool_call{args:{query:...},id:<|"|>memory_search<|"|>}` (ROCm/FastFlowLM#722).
 /// Recover the named tool so the client sees a call it can execute.
 inline void unwrap_envelope(std::string& name, json& args) {
+    static const char* name_keys[] = {"name", "id", "function", "tool"};
+    static const char* args_keys[] = {"args", "arguments", "parameters", "params", "input"};
     static const char* wrappers[] = {"tool_call", "call", "function", "tool", "function_call"};
+
     bool wrapped = false;
     for (const char* w : wrappers) if (name == w) wrapped = true;
     if (!wrapped || !args.is_object()) return;
 
+    // A tool really named `function` or `tool` is legal, so the name alone is not enough -
+    // every key has to be one an envelope would carry. Without this, a call like
+    // `function{name:<|"|>x<|"|>,quantity:2}` would be read as an envelope and quantity dropped.
+    for (auto& kv : args.items()) {
+        bool known = false;
+        for (const char* k : name_keys) if (kv.key() == k) known = true;
+        for (const char* k : args_keys) if (kv.key() == k) known = true;
+        if (!known) return;
+    }
+
     std::string inner_name;
-    for (const char* k : {"name", "id", "function", "tool"}) {
+    for (const char* k : name_keys) {
         if (args.contains(k) && args[k].is_string()) { inner_name = args[k].get<std::string>(); break; }
     }
     if (inner_name.empty()) return;
 
     json inner_args = json::object();
-    for (const char* k : {"args", "arguments", "parameters", "params", "input"}) {
+    for (const char* k : args_keys) {
         if (args.contains(k) && args[k].is_object()) { inner_args = args[k]; break; }
     }
     name = inner_name;

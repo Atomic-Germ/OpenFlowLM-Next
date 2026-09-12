@@ -3,7 +3,8 @@ project(gemma4_tool_parser VERSION 1.0.0 LANGUAGES CXX)
 
 # Header-only parser test: no NPU, no XRT, no model. Configure and run with
 #   cmake -S src/test/gemma4_tool_parser -B src/build/test_gemma4_tool_parser -G Ninja
-#   cmake --build src/build/test_gemma4_tool_parser && src/build/test/gemma4_tool_parser/test_gemma4_tool_parser.exe
+#   cmake --build src/build/test_gemma4_tool_parser
+#   ctest --test-dir src/build/test_gemma4_tool_parser --output-on-failure
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -62,6 +62,15 @@ static void test_envelope_without_inner_name_is_left_alone() {
     CHECK(args == json({{"query", "x"}}));
 }
 
+static void test_tool_named_function_with_a_name_argument_is_left_alone() {
+    // a tool really called `function` whose own arguments include `name`: the extra
+    // argument proves this is not an envelope, so nothing may be renamed or dropped
+    auto [name, args] = gemma4_tools::parse_tool_call(
+        "call:function{name:<|\"|>widget<|\"|>,quantity:2}");
+    CHECK(name == "function");
+    CHECK(args == json({{"name", "widget"}, {"quantity", 2}}));
+}
+
 static void test_schema_type_array_becomes_nullable_scalar() {
     json tools = json::parse(R"([{"type":"function","function":{"name":"search_notes","parameters":{
         "type":"object","properties":{
@@ -97,6 +106,7 @@ int main() {
     test_envelope_from_issue_722();
     test_envelope_name_arguments_variant();
     test_envelope_without_inner_name_is_left_alone();
+    test_tool_named_function_with_a_name_argument_is_left_alone();
     test_schema_type_array_becomes_nullable_scalar();
     test_schema_without_arrays_is_unchanged();
     if (failures) {
