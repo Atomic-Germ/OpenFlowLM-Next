@@ -87,6 +87,8 @@ garbage.
 **End-to-end HTTP latency**, same binary, same endpoint, median of three after
 a warm-up. This is wall-clock request latency, **not** an NPU kernel claim: it
 includes tokenization, the host-side half of the encode, JSON and the socket.
+These were measured by hand; `oflm bench-embed` is the committed tool that
+reproduces the engine-side half of them, for all seven models.
 
 | request | `open_embedding` (EmbeddingGemma-300M) | `open_npue` (bge-base, 109M) |
 |---:|---:|---:|
@@ -167,12 +169,30 @@ measured here rather than cited from either project's own claims.
 > it today. `embed-gemma:300m` stays with `open_embedding`, which is the right
 > outcome regardless: it is live, validated code and this PR is additive.
 
-**There is ~5.8× still on the table.** `AutoEmbeddingModel::embed()` takes one
-text, so `handle_embeddings` loops. Sixteen texts cost 405 ms through the
-endpoint and **70 ms** as one batched call to the same engine — 5.8×, which is
-exactly what upstream measures for a single text through the smallest tier.
-`NpueEmbedding::embed_batch()` exists and is unused; widening the base class is
-a separate change that deserves to be judged on its own.
+**The ~5.8× is now measured, on every model, by a committed tool.**
+`AutoEmbeddingModel` has a virtual `embed_batch()` whose default loops over
+`embed()`, and `NpueEmbedding` overrides it. `oflm bench-embed <tag>` times both
+paths at each batch size and prints the ratio:
+
+| batch | 1 | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| all-MiniLM-L6-v2 | 0.87 | 3.28 | 6.42 | 6.42 | 7.88 | **10.00** | 8.47 |
+| bge-base-en-v1.5 | 0.96 | 3.70 | 6.56 | 5.68 | 5.42 | **7.27** | 5.86 |
+| bge-large-en-v1.5 | 0.97 | 3.87 | 5.96 | 4.81 | 4.90 | **6.31** | 5.30 |
+| EmbeddingGemma-300M *(control)* | *0.96* | *1.08* | *0.99* | *0.96* | — | — | — |
+
+The last row is what makes the others mean anything: `open_embedding` does not
+override `embed_batch()`, so its two paths are the same loop and its ratio has
+to read ~1.00×. It does, across five batch sizes.
+
+`bge-base` at batch 16 reads **5.68×** against the 5.8× measured by hand above,
+on a different day and a different binary — which is the check that the tool
+measures what the note claimed.
+
+**What is still on the table is in the REST handler**, not in the base class:
+`handle_embeddings` still loops over the request inputs. Adopting
+`embed_batch()` there is now one line, and its value is no longer an estimate.
+Full results: [`docs/docs/benchmarks/embeddings_results.md`](../../docs/docs/benchmarks/embeddings_results.md).
 
 ---
 

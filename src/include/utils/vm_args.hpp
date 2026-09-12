@@ -26,6 +26,8 @@ inline void print_help(po::options_description& general) {
     std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
+    std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
+    std::cout << "  bench-embed <tag>   - Benchmark an embedding model over batch sizes" << std::endl;
     std::cout << "  list                - List all available models" << std::endl;
     std::cout << "  version             - Show version information" << std::endl;
     std::cout << "  help                - Show this help message" << std::endl;
@@ -51,6 +53,9 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
+    std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
+    std::cout << "\toflm bench-embed bge-base:en-v1.5" << std::endl;
+    std::cout << "\toflm bench-embed nomic-embed-text:v1.5 --max-batch 32 --prompt-name document" << std::endl;
     std::cout << "\toflm list" << std::endl;
     std::cout << "\toflm list --quiet" << std::endl;
     std::cout << "\toflm list --filter installed" << std::endl;
@@ -110,7 +115,14 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prompt,i", po::value<std::string>(&parsed_args.input_file_name)->default_value(""),
              "Direct file input")
             ("bench-iterations", po::value<int>(&parsed_args.iterations)->default_value(2),
-             "Iterations for bench");
+             "Iterations for bench and bench-embed")
+            ("max-batch", po::value<int>(&parsed_args.max_batch)->default_value(128),
+             "Largest batch bench-embed sweeps to; it doubles 1, 2, 4 ... max-batch, "
+             "so this picks the number of stages as well as the last one")
+            ("prompt-name", po::value<std::string>(&parsed_args.prompt_name)->default_value(""),
+             "Task prompt for bench-embed, by its REST name (query, document, "
+             "clustering, ...). Empty means query, which is what /v1/embeddings "
+             "resolves an unspecified request to");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
@@ -170,6 +182,10 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             if (parsed_args.command == "bench") {
                 return true;
             }
+            // "bench-embed" is DELIBERATELY not here. This early exit skips the
+            // serve-only option guards below, so a command that takes it accepts
+            // --port and --cors silently. Exact equality above also means a
+            // prefix like "bench-embed" never matches "bench" by accident.
             if (parsed_args.command == "validate") {
                 return true;
             }
@@ -224,6 +240,14 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 return false;
             }
             //if(parsed_args.model_tag == "")
+        }
+
+        if (parsed_args.command == "bench-embed" &&
+            (parsed_args.model_tag.empty() || parsed_args.model_tag == "model-faker")) {
+            std::cerr << "Error: bench-embed needs an embedding model tag, e.g. "
+                         "`oflm bench-embed bge-base:en-v1.5`. `oflm list` shows "
+                         "which are installed." << std::endl;
+            return false;
         }
 
         // Validate command-specific requirements

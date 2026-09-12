@@ -113,3 +113,87 @@ run from a directory you can name. Three series per stage — `TTFT`,
 does, so anything that changes the decode curve changes all three. If you are
 comparing two builds and expecting `prefill_speed` to hold still, it will not,
 and that is not a sign something else moved.
+
+## The embedding sibling: `oflm bench-embed`
+
+```
+oflm bench-embed <tag> [-i <config.json>] [--max-batch N] [--bench-iterations N]
+                       [--prompt-name query|document|...]
+```
+
+Encoders get their own command rather than a flag on this one, because **not one
+of TTFT, prefill or decode exists for them**: there is no first token, no
+prefill/decode split, and the sequence length is fixed by the compiled design
+rather than by the request. The axis that costs is the **batch**, so that is
+what it sweeps -- 1, 2, 4 ... `max_batch`, the same doubling shape, hardest
+stage first for the same reason.
+
+Its config file reads four keys:
+
+```json
+{ "max_batch": 32, "iterations": 3, "task": "query", "texts": ["...", "..."] }
+```
+
+**Two deliberate differences from `oflm bench`.**
+
+1. **The CLI flags still work when a config file is given.** `max_batch` and
+   `iterations` in the file win when present, and fall back to `--max-batch` /
+   `--bench-iterations` when absent. `oflm bench` ignores `--bench-iterations`
+   outright once `-i` is used -- the trap documented above. Same file shape,
+   better rule.
+2. **There is a discarded warm-up iteration.** `oflm bench` needs none. This
+   does: the first call on a model with no `.npue` container yet **packs one
+   from the checkpoint**, tens of seconds for a 100M model. Without the warm-up
+   that lands inside iteration 1 and reads as a slow model rather than a
+   one-off.
+
+`texts` is optional; omitted, a built-in corpus of 16 sentences is cycled to
+fill each batch. The cycling is printed rather than implied, because a reader
+who assumes 128 unique documents is reading a different experiment.
+
+### What the columns mean
+
+Every stage times **two paths over the same texts**: one `embed_batch()` call,
+and the same texts one `embed()` call at a time -- which is what
+`/v1/embeddings` does per input. `Speedup` is the second over the first: what a
+caller gains by sending one request with N inputs instead of N requests.
+
+**That ratio is the reason the command exists.** Batching is a scheduling
+choice, not an arithmetic one, so **both paths return the same vectors** and no
+accuracy gate, cosine or bit-identity check can see the slow one. The only
+symptom is time, and nothing measured time. The benchmark compares one vector
+from each path anyway and prints `BIT-IDENTICAL` or the difference, because a
+pure stopwatch would not have noticed if the fast path were wrong.
+
+**Reading the curve: the flat stretches are the design's batch tiers.** A
+request is right-sized to a tier, so several batch sizes can cost the same wall
+clock and then step. You do not have to infer which -- the engine prints them
+in its own banner a few lines above the table (`tiers  4, 16, 32, 128` for
+bge-base), so the curve can be read against the stated values rather than
+guessed at.
+
+Be careful about how far that explanation reaches. On bge-base the flat stretch
+across batch 1, 2 and 4 matches the smallest tier exactly. Beyond it the cost
+is **not** a simple round-up to the next tier: batch 8 and batch 16 both fit
+tier 16 and do not cost the same, and batch 64 is the best per-text point on
+all six models while 128 is worse. The tier list alone does not account for
+that, and this benchmark does not claim to know what does.
+
+### Output
+
+A table, then `bench_embed_<tag>_<YYYYMMDD>[_<cpu>].csv` in the working
+directory. The prefix is `bench_embed_`, not `bench_`: benchmarking both sides
+of one model on one day would otherwise have the second run silently overwrite
+the first.
+
+`Tokens/s` reads `not reported` for a backend that does not return a token
+count. Empty CSV fields rather than zeros, for the same reason -- a zero reads
+as a real count.
+
+### Not measured
+
+No NPU-side breakdown (dispatch count, occupancy, per-bucket host time): the
+engine's counters are behind a PIMPL that exists to stop an ODR/ISA hazard, and
+`oflm bench` has no such breakdown either. No contention guard -- quiesce the
+NPU yourself before comparing two runs, because wall clock measures how busy
+the machine was as much as how good the kernels are. No energy, and no CPU arm.

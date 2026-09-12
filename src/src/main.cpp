@@ -34,6 +34,7 @@
 #include "utils/vm_args.hpp"
 #include <boost/program_options.hpp>
 #include "benchmarking.hpp"
+#include "benchmark_embed.hpp"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -509,14 +510,14 @@ int main(int argc, char* argv[]) {
         return stable_stack ? 0 : 1;
     }
 
-    if (parsed_args.command == "run" || parsed_args.command == "serve" || parsed_args.command == "pull" || parsed_args.command == "remove" || parsed_args.command == "check" || parsed_args.command == "bench") {
+    if (parsed_args.command == "run" || parsed_args.command == "serve" || parsed_args.command == "pull" || parsed_args.command == "remove" || parsed_args.command == "check" || parsed_args.command == "bench" || parsed_args.command == "bench-embed") {
       if (parsed_args.model_tag != "model-faker" && (!availble_models.is_model_supported(parsed_args.model_tag))) {
             header_print("ERROR", "Model not found: " << parsed_args.model_tag << "; Please check with `oflm list` and try again.");
             return 1;
         }
     }
   
-    if (parsed_args.command == "serve" || parsed_args.command == "run" || parsed_args.command == "bench"){
+    if (parsed_args.command == "serve" || parsed_args.command == "run" || parsed_args.command == "bench" || parsed_args.command == "bench-embed"){
         // Configure AMD XRT for the specified power mode
         if (parsed_args.power_mode == "default" || parsed_args.power_mode == "powersaver" || parsed_args.power_mode == "balanced" || 
             parsed_args.power_mode == "performance" || parsed_args.power_mode == "turbo") {
@@ -540,7 +541,7 @@ int main(int argc, char* argv[]) {
 
 #ifndef _WIN32
     // Raise memlock limit to accommodate the model being loaded
-    if ((parsed_args.command == "run" || parsed_args.command == "serve" || parsed_args.command == "bench")) {
+    if ((parsed_args.command == "run" || parsed_args.command == "serve" || parsed_args.command == "bench" || parsed_args.command == "bench-embed")) {
         rlim_t model_size = 0;
         rlim_t asr_size = 0;
         rlim_t embedding_size = 0;
@@ -613,6 +614,15 @@ int main(int argc, char* argv[]) {
 
         if (parsed_args.command == "bench") {
             benchmarking::BenchmarkResults_t results = benchmarking::run_benchmarks(parsed_args.model_tag, parsed_args.input_file_name, availble_models, parsed_args.iterations);
+        }
+        else if (parsed_args.command == "bench-embed") {
+            // The embedding sibling of bench. Separate because not one of
+            // TTFT, prefill or decode exists for an encoder, and the axis
+            // that costs is the batch rather than the context length.
+            benchmarking::run_embed_benchmarks(
+                parsed_args.model_tag, parsed_args.input_file_name, availble_models,
+                downloader, parsed_args.iterations, parsed_args.max_batch,
+                parsed_args.prompt_name, parsed_args.preemption, parsed_args.modelscope);
         }
         else if (parsed_args.command == "run") {
             check_and_notify_new_version();

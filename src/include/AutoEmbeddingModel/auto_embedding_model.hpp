@@ -6,6 +6,7 @@
 /// \note This is a header file for the AutoEmbeddingModel class
 #pragma once
 
+#include <cstdint>
 #include <stdexcept>
 #include <ctime>
 #include <iomanip>
@@ -72,6 +73,34 @@ public:
 	
 	virtual void load_model(std::string model_path, json model_info, bool enable_preemption) {}
 	virtual std::vector<float> embed(std::string& text, embedding_task_type_t task_type) = 0;
+
+	/// \brief Embed several texts in one call. Returns them concatenated,
+	///        hidden() floats each, in the order given.
+	///
+	/// The default is the loop the REST handler already runs: correct for every
+	/// backend, fast for none. A backend whose throughput lives in the batch
+	/// overrides it -- NpueEmbedding encodes a whole tier of sequences per
+	/// dispatch over a resident xclbin, so a single text pays for the tier
+	/// either way, and sixteen texts measure 405 ms looped against 70 ms
+	/// batched on bge-base.
+	///
+	/// \param tokens when non-null, set to the total token count, or to -1 for
+	///        a backend that does not report one. NOT 0: a zero reads as a real
+	///        count and becomes a 0 tok/s or a division by zero downstream,
+	///        which is the same fail-open shape as every other defect in this
+	///        seam -- a plausible number that nothing can flag.
+	virtual std::vector<float> embed_batch(const std::vector<std::string>& texts,
+	                                       embedding_task_type_t task_type,
+	                                       int64_t* tokens = nullptr) {
+		if (tokens) *tokens = -1;
+		std::vector<float> out;
+		for (const std::string& t : texts) {
+			std::string one = t;   // embed() takes a non-const reference
+			const std::vector<float> v = embed(one, task_type);
+			out.insert(out.end(), v.begin(), v.end());
+		}
+		return out;
+	}
 
 	/// \brief The task prompt names this model declares, empty when it has none.
 	///
