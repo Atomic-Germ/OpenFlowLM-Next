@@ -1335,10 +1335,17 @@ and position 3 from 0.999815 to 0.999968. Detail and the probes:
 `.claude/plans/qwen2-qkv-bias-hw-results.md`.
 
 The attention tuple and `gemv_q4` K 11264 therefore stay OUT of the catalogue, and the
-recipe still refuses the family by name. A looser bar invented for one model is not what
-the catalogue is for. The choice is between recording the measured correlation beside the
-point on the evidence that greedy decoding is unaffected, and storing K at more than
-bf16 -- which is a `KV_ROW` format change touching every family, and wants its own plan.
+recipe still refuses the family by name.
+
+**These correlations are not the family's final numbers.** They were measured against a
+container the packer misreads (OPEN-PACK-Q4-0): both the device and the replica decode
+its signed 4-bit weights as q4_1, so they agree with each other while the model is wrong.
+What the slice establishes is that the KERNELS do what the replica does -- the bias, the
+split position record, the og elements, the cache, all of it -- which is what this
+requirement is about. The correlation bar has to be retaken on a container that is read
+correctly, and the k-bias magnitude above will move with it, because the k projection it
+is compared against is one of the misread tensors. The bias itself is stored as bf16 and
+read correctly either way, so its size is not in doubt.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
