@@ -6,6 +6,7 @@
  * \date 2025-06-24
  *  \version 0.9.24
  */
+#include "server/openai_compat.hpp"
 #include "server.hpp"
 #include "rest_handler.hpp"
 #include <sstream>
@@ -753,18 +754,20 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             auto& response_ref = *res_ptr;
             http::status status = http::status::ok;
 
-            if (response_data.contains("error") &&
-                response_data["error"].contains("code"))
-            {
-                int code = response_data["error"]["code"].get<int>();
-
-                if (code == 400) {
-                    status = http::status::bad_request;
-                }
-                //else if () {
-
-                //}
-            }
+            // `code` is a STRING in the OpenAI error shape ("model_not_found",
+            // "invalid_value"), and reading it as an int threw
+            // `[json.exception.type_error.302] type must be number, but is string`
+            // out of this lambda. The outer handler then turned that into
+            // {"error": "<exception text>"} with status 200 -- so every
+            // OpenAI-shaped error this server built was swallowed and answered OK,
+            // including the embeddings handler's own "this server has X loaded,
+            // not Y". Accept both spellings, and treat the type as authoritative
+            // when the code is not numeric.
+            // openai_compat::status_for is the whole rule, and it is unit-tested --
+            // this block previously recognised a numeric 400 and let a handler's own
+            // 500 out as HTTP 200.
+            status = static_cast<http::status>(
+                openai_compat::status_for(response_data, static_cast<int>(status)));
 
             response_ref.result(status);
             response_ref.body() = response_data.dump();
