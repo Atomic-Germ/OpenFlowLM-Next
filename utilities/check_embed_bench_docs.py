@@ -56,18 +56,28 @@ DISPLAY = {
 
 # Which metric each documented table holds, and which batch sizes its columns
 # are, in order. `skip` drops leading non-metric columns (the dims column).
+# Which models each table MUST list. Without this the checker passed on a
+# gutted table: doc_rows() returns only the rows it recognises and zip()
+# truncates to the shorter sequence, so deleting a model row or a trailing
+# column still printed "0 problems". A checker whose own coverage is unchecked
+# is worse than none, because its answer still looks like a verification.
+ALL_SEVEN = ["all-MiniLM-L6-v2", "bge-small-en-v1.5", "bge-base-en-v1.5",
+      "nomic-embed-text-v1.5", "gte-multilingual-base", "bge-large-en-v1.5",
+      "EmbeddingGemma-300M"]
+ADAPTER_FOUR = ["all-MiniLM-L6-v2", "bge-base-en-v1.5", "bge-large-en-v1.5", "EmbeddingGemma-300M"]
+
 TABLES = [
-    # (file, heading substring, metric, batches, leading columns to skip)
+    # (file, heading substring, metric, batches, leading cols to skip, models)
     ("docs/docs/benchmarks/embeddings_results.md",
-     "Throughput (texts per second", "texts", [1, 4, 8, 16, 32, 64, 128], 1),
+     "Throughput (texts per second", "texts", [1, 4, 8, 16, 32, 64, 128], 1, ALL_SEVEN),
     ("docs/docs/benchmarks/embeddings_results.md",
-     "Latency (seconds", "lat", [1, 4, 16, 32, 64, 128], 0),
+     "Latency (seconds", "lat", [1, 4, 16, 32, 64, 128], 0, ALL_SEVEN),
     ("docs/docs/benchmarks/embeddings_results.md",
-     "Batch speedup", "sp", [1, 2, 4, 8, 16, 32, 64, 128], 0),
+     "Batch speedup", "sp", [1, 2, 4, 8, 16, 32, 64, 128], 0, ALL_SEVEN),
     ("docs/docs/benchmarks/embeddings_results.md",
-     "Token throughput", "tok", [16, 32, 64, 128], 0),
+     "Token throughput", "tok", [16, 32, 64, 128], 0, ALL_SEVEN),
     ("src/open_npue_adapter/README.md",
-     "is now measured, on every model", "sp", [1, 4, 8, 16, 32, 64, 128], 0),
+     "is now measured, on every model", "sp", [1, 4, 8, 16, 32, 64, 128], 0, ADAPTER_FOUR),
 ]
 
 # The summary table restates three DERIVED values per model: the peak texts/s,
@@ -145,7 +155,7 @@ def main(argv):
     compared = 0
     bad = []
     missing_tables = []
-    for rel, heading, metric, batches, skip in TABLES:
+    for rel, heading, metric, batches, skip, want_models in TABLES:
         path = REPO / rel
         if not path.exists():
             missing_tables.append("%s (file missing)" % rel)
@@ -157,8 +167,23 @@ def main(argv):
         if not rows:
             missing_tables.append("%s :: %s (no model rows)" % (rel, heading))
             continue
+        # every expected model present, and no unexpected one
+        for want in want_models:
+            if want not in rows:
+                bad.append("%-46s %-22s ROW MISSING from %s"
+                           % (rel, want, heading))
+        for got in rows:
+            if got not in want_models:
+                bad.append("%-46s %-22s unexpected row in %s"
+                           % (rel, got, heading))
         for name, cells in rows.items():
-            for batch, cell in zip(batches, cells[skip:]):
+            metric_cells = cells[skip:]
+            # exact width, so a deleted trailing column cannot be truncated away
+            if len(metric_cells) != len(batches):
+                bad.append("%-46s %-22s has %d metric cells, want %d, in %s"
+                           % (rel, name, len(metric_cells), len(batches), heading))
+                continue
+            for batch, cell in zip(batches, metric_cells):
                 cell = cell.replace("*", "").strip()
                 if cell in ("—", "-", "--", ""):
                     continue
@@ -182,6 +207,10 @@ def main(argv):
         rows = doc_rows(path.read_text(encoding="utf-8"), heading)
         if not rows:
             missing_tables.append("%s :: %s (summary table not found)" % (rel, heading))
+        for want in ALL_SEVEN:
+            if want not in (rows or {}):
+                bad.append("%-46s %-22s ROW MISSING from the summary table"
+                           % (rel, want))
         for name, cells in (rows or {}).items():
             if len(cells) < 3:
                 bad.append("%-46s %-22s summary row has %d cells, want 3"

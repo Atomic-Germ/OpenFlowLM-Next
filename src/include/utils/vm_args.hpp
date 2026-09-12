@@ -234,6 +234,15 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 std::cerr << "Error: The cors option is only supported with the serve command! " << std::endl;
                 return false;
             }
+            // `host` belongs with them: it is documented "(for serve command)"
+            // and read in exactly one place, create_lm_server(). It was accepted
+            // and ignored everywhere else, which is the same defect as the four
+            // above and reads the same way to a user -- a flag that took effect.
+            if (!vm["host"].defaulted())
+            {
+                std::cerr << "Error: The host option is only supported with the serve command! " << std::endl;
+                return false;
+            }
         }
 
         // Handle all options

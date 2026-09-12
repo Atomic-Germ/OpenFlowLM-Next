@@ -588,7 +588,7 @@ oflm bench-embed bge-base -i utilities/bench-configs/bench-embed-32.json
 |---|---|
 | `--max-batch N` | largest batch swept; it doubles 1, 2, 4 ... N (default 128). Must be a power of two. |
 | `--bench-iterations N` | timed iterations per stage (default 2), after one discarded warm-up. |
-| `--prompt-name NAME` | the task prompt, by its REST name (`query`, `document`, `clustering`, ...). Required for a model that declares prompts, refused for one that does not. |
+| `--prompt-name NAME` | the task prompt, by its REST name (`query`, `document`, `clustering`, ...). **Required** for a model that declares prompt names (nomic). **Refused** for one with no task-prompt concept at all (the bge sizes, MiniLM, gte). `embed-gemma:300m` is the exception: it declares no names and still honours tasks through a hardcoded per-task prefix, so it accepts the flag and needs none. |
 | `-i FILE` | a JSON config: `max_batch`, `iterations`, `task`, `texts`. |
 
 Every stage times **two paths over the same texts**: one batched call, and the

@@ -183,7 +183,8 @@ paths at each batch size and prints the ratio:
 
 The last row is what makes the others mean anything: `open_embedding` does not
 override `embed_batch()`, so its two paths are the same loop and its ratio has
-to read ~1.00×. It reads 0.97—1.04× across five batch sizes.
+to read ~1.00×. It reads 0.97—1.04× across every batch size it was
+swept at (the four shown, plus batch 2, which this table has no column for).
 
 `bge-base` at batch 16 reads **5.82×** against the 5.8× measured by hand above,
 on a different day and a different binary — which is the check that the tool

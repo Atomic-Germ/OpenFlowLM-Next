@@ -165,8 +165,10 @@ who assumes 128 unique documents is reading a different experiment.
 ### What the columns mean
 
 Every stage times **two paths over the same texts**: one `embed_batch()` call,
-and the same texts one `embed()` call at a time -- which is what
-`/v1/embeddings` does per input. `Speedup` is the second over the first: what a
+and the same texts one `embed()` call at a time -- the baseline for a caller
+that sends one request per text. (`/v1/embeddings` itself batches now, and this
+benchmark is what decided that it should.) `Speedup` is the second over the
+first: what a
 caller gains by sending one request with N inputs instead of N requests.
 
 **That ratio is the reason the command exists.** Batching is a scheduling
@@ -215,15 +217,28 @@ plausible number rather than an error.
 | `--prompt-name` on bge/MiniLM/gte | refused: they have no task-prompt concept and `/v1/embeddings` refuses a prompt for them. |
 | no `--prompt-name` on nomic | refused: it declares prompts and the endpoint **requires** one, so timing it without one would measure a request no client can send. |
 | `--prompt-name tullball` | refused, listing the valid names. |
-| `--port`, `--cors`, … | refused as serve-only. (`oflm bench` still accepts these silently.) |
+| `--port`, `--cors`, `--socket`, `--q-len`, `--host` | refused as serve-only |
+
+**The two guards have different reach, and it is worth knowing which.**
+`--max-batch` and `--prompt-name` are checked **above** the early exits in
+`parse_options`, so they are refused for every other command, `bench`
+included. The serve-only five are checked **below** them, so they are refused
+for `run`, `pull`, `remove`, `check` and `bench-embed` and NOT for `bench`,
+`list`, `version`, `port` or `validate`. Measured, not assumed.
+
+That is a pre-existing hole, and it is left alone because it is not the
+one-line fix it looks like: `oflm port --port 8123` prints
+`Server Port: 8123`, so the `port` command really does consume `--port`, and
+hoisting the guard above the early exits would break it.
 
 The task policy is decided by `openai_compat::task_policy()` -- the endpoint's
 own predicate -- so a task this benchmark accepts is one a client could also
 have asked for, by construction rather than by intention.
 
 `src/src/benchmark_embed_test.cpp` holds all of the above plus the config
-parsing to 104 assertions with no device, no weights and no network:
-`ctest --test-dir src/build -R bench_embed`.
+parsing, with no device, no weights and no network:
+`ctest --test-dir src/build -R bench_embed`. It prints its own assertion count;
+quoting one here was a drift source, and drifted (104 against 108) within a day.
 
 ### Not measured
 

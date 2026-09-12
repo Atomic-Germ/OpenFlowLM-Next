@@ -1109,13 +1109,40 @@ void RestHandler::handle_embeddings(const json& request,
 
         std::vector<std::string> inputs;
 
-        if (request["input"].is_string()) {
-            inputs.push_back(request["input"].get<std::string>());
+        // The TYPE has to be checked too, not just the presence. `input: null`,
+        // a number or an object left `inputs` empty and answered 200 with an
+        // empty `data` -- indistinguishable from a request that asked for
+        // nothing. An array holding a non-string threw out of
+        // get<std::string>() into the function-level catch, which is a 500 for
+        // what is plainly a client error. Both are 400s, named, before any work.
+        const json& input_field = request.at("input");
+        if (input_field.is_string()) {
+            inputs.push_back(input_field.get<std::string>());
         }
-        else if (request["input"].is_array()) {
-            for (const auto& item : request["input"]) {
-                inputs.push_back(item.get<std::string>());
+        else if (input_field.is_array()) {
+            for (size_t i = 0; i < input_field.size(); ++i) {
+                if (!input_field[i].is_string()) {
+                    send_response(json{{"error", {
+                        {"message", "input[" + std::to_string(i) + "] is not a string."
+                                    " input must be a string, or an array of strings."},
+                        {"type", "invalid_request_error"},
+                        {"param", "input[" + std::to_string(i) + "]"},
+                        {"code", "invalid_value"}}}});
+                    return;
+                }
+                inputs.push_back(input_field[i].get<std::string>());
             }
+        }
+        else {
+            // An empty ARRAY is deliberately still 200 with an empty list: that
+            // request is well formed and its answer is correct. This branch is
+            // for null, numbers, booleans and objects, which are not.
+            send_response(json{{"error", {
+                {"message", "input must be a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "invalid_value"}}}});
+            return;
         }
 
         json response;

@@ -243,8 +243,10 @@ oflm bench-embed nomic-embed-text:v1.5 --max-batch 128 --bench-iterations 3 --pr
 
 `nomic` needs `--prompt-name` because it declares task prompts and
 `/v1/embeddings` requires one; benchmarking it without one would time a request
-no client can send, so the command refuses. The other five need none and refuse
-the flag.
+no client can send, so the command refuses. The five BERT-family models (the
+three bge sizes, MiniLM and gte) have no task-prompt concept and refuse the
+flag. `embed-gemma:300m` is the odd one out: it declares no prompt names and
+still prefixes per task, so it accepts the flag and needs none.
 
 Every run writes `bench_embed_<tag>_<YYYYMMDD>[_<cpu>].csv` into the working
 directory, with min/max/σ per stage and a `#` provenance header naming the

@@ -77,8 +77,10 @@ public:
 	/// \brief Embed several texts in one call. Returns them concatenated,
 	///        hidden() floats each, in the order given.
 	///
-	/// The default is the loop the REST handler already runs: correct for every
-	/// backend, fast for none. A backend whose throughput lives in the batch
+	/// The default preserves what the REST handler USED to do -- one embed() call
+	/// per input -- so a backend that does not override this is unaffected by the
+	/// handler having moved to one batched call. Correct for every backend, fast
+	/// for none. A backend whose throughput lives in the batch
 	/// overrides it -- NpueEmbedding encodes a whole tier of sequences per
 	/// dispatch over a resident xclbin, so a single text pays for the tier
 	/// either way, and sixteen texts measure 405 ms looped against 70 ms
