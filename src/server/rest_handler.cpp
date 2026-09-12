@@ -460,6 +460,22 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             this->current_model_tag = "model-faker";
             return ModelLoad::NotChatModel;
         }
+        // A request may name a model that is in the list but not on disk, or one an update
+        // has left behind - pull it before loading rather than failing the request.
+        switch (downloader.is_model_downloaded(ensure_tag)) {
+            case ModelDownloader::ModelStatus::Ready:
+                break;
+            case ModelDownloader::ModelStatus::Outdated:
+            case ModelDownloader::ModelStatus::Missing:
+                downloader.pull_model(ensure_tag, this->modelscope);
+                break;
+            case ModelDownloader::ModelStatus::Incompatible:
+                header_print("ERROR", "model '" + ensure_tag + "' is not compatible with this "
+                                      "version of OpenFlowLM; nothing is loaded now");
+                this->auto_chat_engine.reset();
+                this->current_model_tag = "model-faker";
+                return ModelLoad::LoadFailed;
+        }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
         try {
