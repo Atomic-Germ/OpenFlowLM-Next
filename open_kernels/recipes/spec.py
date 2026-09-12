@@ -445,6 +445,55 @@ def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     )
 
 
+def _qwen3vl_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen3-VL: the decoder is Qwen3 dense, so it derives as one and links to a Qwen3
+    bundle of the same geometry. M-RoPE only changes the position table the engine hands
+    the kernels, so it does not reach the spec, and neither does the tower -- the vision
+    side is VitConfig's, read from `vision_config`.
+
+    Raw HF nests the decoder under `text_config`; the container OFLM ships flattens it."""
+    inner = cfg.get("text_config")
+    text = {**inner, "model_type": cfg["model_type"]} if isinstance(inner, Mapping) else cfg
+    return _qwen3_hf(text, real_vocab)
+
+
+def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen2.5 dense: GQA without q/k norms, full RoPE, silu-gated FFN. Qwen2 puts a bias
+    on q/k/v that the attention GEMVs cannot apply, so `recipes.families` refuses the
+    family; deriving the spec is still worth doing, for arch detection and oflm-add."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hidden = _need(cfg, "hidden_size")
+    # Qwen2.5's configs predate the key; Qwen3's always carry it.
+    if "head_dim" in cfg:
+        hd = cfg["head_dim"]
+    elif hidden % heads:
+        raise SpecError(f"qwen2: no head_dim in config.json and hidden_size {hidden} is not "
+                        f"a multiple of num_attention_heads {heads}")
+    else:
+        hd = hidden // heads
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="qwen2",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(cfg, "rope_theta")),
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
 def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     """Phi-3 / Phi-4-mini: GQA without q/k norms, a PARTIAL rotation (`partial_rotary_factor`
     of the head, 96 of 128 on Phi-4-mini), longrope scaling (a short and a long factor list
@@ -1083,14 +1132,15 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 # exactly as `gemma3_text` and `qwen3_5_text` do for their towers.
 HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_next": _qwen36moe_hf, "qwen3_5": _qwen35_hf,
-               "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
+               "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
+               "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
-              _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
+              _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3"}

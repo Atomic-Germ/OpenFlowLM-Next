@@ -80,7 +80,9 @@
  "max_ctx_default": 4096,
  "hf_config_check": {
   "model_type": [
-   "qwen3"
+   "qwen3",
+   "qwen3_vl",
+   "qwen3_vl_text"
   ],
   "hidden_size": 2560,
   "num_hidden_layers": 36,

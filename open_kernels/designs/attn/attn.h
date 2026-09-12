@@ -8,6 +8,10 @@
 // HunYuan's order (query_layernorm AFTER apply_rotary_pos_emb). RoPE is orthogonal and the
 // rotary dim is the whole head there, so the RMS is the same either way; what moves is the
 // per-dim weight, which does not commute with the pair rotation.
+// ATTN_QKV_BIAS adds a per-channel bias to q, k and v first -- q = q + bq before the norm --
+// which is Qwen2's shape (its q/k/v projections carry one; o_proj and the FFN do not). The
+// bias arrives as its own fifo element beside the projection's, f32 and already in the same
+// channel order, so the add is one vector pass and nothing downstream changes.
 //   for head h (kv head h / (NH/KVH)): s_t = q'_h . K_t / sqrt(HD) over t in [0, pos] (cache rows + new)
 //   o_h = softmax(s) V  (online softmax, fp32 accumulators), og_h = o_h [* sigmoid(gate_h)]
 // RoPE over the first ROT dims of each head, half-split pairs (i, i + ROT/2); cos/sin for
@@ -56,6 +60,9 @@
 #endif
 #if ATTN_QKNORM_POST && !ATTN_QKNORM
 #error "ATTN_QKNORM_POST needs ATTN_QKNORM"
+#endif
+#ifndef ATTN_QKV_BIAS
+#define ATTN_QKV_BIAS 0      // 1: q/k/v carry a per-channel bias, added before the norm (Qwen2)
 #endif
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
@@ -154,6 +161,16 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #define ATTN_H0_DECL
 #define ATTN_H0_ARG , h0
 #endif
+// The bias element is a kernel ARGUMENT only for a family that has one, for the same
+// reason h0 is: an unused parameter changes the generated code.
+#if ATTN_QKV_BIAS
+#define ATTN_BIAS_PARM , const bfloat16 *__restrict be
+#define ATTN_BIAS_ARG , be
+#else
+#define ATTN_BIAS_PARM
+#define ATTN_BIAS_ARG
+#endif
+
 // kNHL % kHPO was required while a core had to own WHOLE og elements. It now owns
 // kOGH = min(kNHL, kHPO) heads per element, so the requirement is the weaker one that
 // its heads tile the element evenly -- which holds trivially when kOGH == kNHL.
@@ -246,6 +263,22 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
 #endif
 }
 
+#if ATTN_QKV_BIAS
+// One element's worth of channels: d = x + b. The projection's bias is per-channel and
+// sits in the same order the GEMV wrote its rows, so the element boundary is the same on
+// both sides and there is no head arithmetic here. b is bf16 -- the container's own dtype
+// for it, as for the q/k norms -- widened into the fp32 accumulator, so the add is exact.
+static constexpr unsigned kEL = kHPE * kHD;
+static inline void add_bias_e(const float *__restrict x, const bfloat16 *__restrict b,
+                              float *__restrict d) {
+  for (unsigned j = 0; j < kEL; j += kV) {
+    accN<kV> a;
+    a.from_vector(aie::load_v<kV>(x + j));
+    aie::store_v(d + j, aie::add(a, aie::load_v<kV>(b + j)).template to_vector<float>());
+  }
+}
+#endif
+
 static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict dst) {
   for (unsigned j = 0; j < kHD; j += kV) {
     accf32 a;
@@ -260,15 +293,22 @@ static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict 
 // bf16 halves and mac twice. q does not change over the context, so that split was being
 // recomputed for every cached row: NH * P times per token instead of NH. Hoisting it here
 // leaves the inner loop two macs and no split, and the arithmetic is bit-identical.
-static inline void attn_q_impl(const float *__restrict qe, const bfloat16 *__restrict qn,
+static inline void attn_q_impl(const float *__restrict qe ATTN_BIAS_PARM, const bfloat16 *__restrict qn,
                                const float *__restrict cs, ATTN_QT *__restrict qs, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
+#if ATTN_QKV_BIAS
+  alignas(128) float qb[kEL];
+  add_bias_e(qe, be, qb);
+  const float *__restrict qsrc = qb;
+#else
+  const float *__restrict qsrc = qe;
+#endif
 #if !ATTN_VEXP
-  for (unsigned i = 0; i < kHPE; ++i) norm_rope(qe + i * kHD, qn, cs, qs + ((unsigned)e * kHPE + i) * kHD);
+  for (unsigned i = 0; i < kHPE; ++i) norm_rope(qsrc + i * kHD, qn, cs, qs + ((unsigned)e * kHPE + i) * kHD);
 #else
   alignas(128) float t[kHD];
   for (unsigned i = 0; i < kHPE; ++i) {
-    norm_rope(qe + i * kHD, qn, cs, t);
+    norm_rope(qsrc + i * kHD, qn, cs, t);
     bfloat16 *qh = qs + ((unsigned)e * kHPE + i) * kHD;
     for (unsigned j = 0; j < kHD; j += kV) {
       vbN<kV> h, l;
@@ -290,18 +330,32 @@ static inline void attn_q_impl(const float *__restrict qe, const bfloat16 *__res
 #endif
 }
 // k element e -> bf16 kout (the cache row half); v element e -> bf16 vout
-static inline void attn_k_impl(const float *__restrict ke, const bfloat16 *__restrict kn,
+static inline void attn_k_impl(const float *__restrict ke ATTN_BIAS_PARM, const bfloat16 *__restrict kn,
                                const float *__restrict cs, float *__restrict tmp,
                                bfloat16 *__restrict kout, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
+#if ATTN_QKV_BIAS
+  alignas(128) float kb[kEL];
+  add_bias_e(ke, be, kb);
+  const float *__restrict ksrc = kb;
+#else
+  const float *__restrict ksrc = ke;
+#endif
   for (unsigned i = 0; i < kHPE; ++i) {
-    norm_rope(ke + i * kHD, kn, cs, tmp);
+    norm_rope(ksrc + i * kHD, kn, cs, tmp);
     to_bf16_hd(tmp, kout + (e * kHPE + i) * kHD);
   }
 }
-static inline void attn_v_impl(const float *__restrict ve, bfloat16 *__restrict vout, int e) {
+static inline void attn_v_impl(const float *__restrict ve ATTN_BIAS_PARM, bfloat16 *__restrict vout, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
-  for (unsigned i = 0; i < kHPE; ++i) to_bf16_hd(ve + i * kHD, vout + (e * kHPE + i) * kHD);
+#if ATTN_QKV_BIAS
+  alignas(128) float vb[kEL];
+  add_bias_e(ve, be, vb);
+  const float *__restrict vsrc = vb;
+#else
+  const float *__restrict vsrc = ve;
+#endif
+  for (unsigned i = 0; i < kHPE; ++i) to_bf16_hd(vsrc + i * kHD, vout + (e * kHPE + i) * kHD);
 }
 
 static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) {

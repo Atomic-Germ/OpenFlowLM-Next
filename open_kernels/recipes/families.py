@@ -16,15 +16,15 @@ def family_module(name: str) -> ModuleType:
     if name == "qwen35":
         from . import qwen35
         return qwen35
-    if name in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3"):
+    if name in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
         from . import dense
         return dense
     raise ValueError(f"no recipe for family {name!r} "
-                     f"(have qwen36moe, qwen35, qwen3, llama3, gemma3, hunyuan, granite, phi3)")
+                     f"(have qwen36moe, qwen35, qwen3, llama3, gemma3, hunyuan, granite, phi3, qwen2)")
 
 
 def for_spec(spec: ModelSpec) -> ModuleType:
     return family_module(spec.family)
 
 
-FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3")
+FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")

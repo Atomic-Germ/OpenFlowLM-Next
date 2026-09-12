@@ -65,6 +65,11 @@ L, G = R.layout, R.geo
 E_A = L.E_A
 QW, KVW = G.QW, G.KVW
 HID = G.HID
+if G.QKVB:
+    # dx.py streams the q/k/v bias on a second fifo; this file's attention phase is a
+    # verbatim copy of the version without one, so it would drop the bias silently.
+    raise ValueError("dx_attn.py: this spec's q/k/v projections carry a bias and this "
+                     "design has no bias stream (copy dx.py's abias fifo across first)")
 
 # ---- verbatim from dx.py: ATTN_FLAGS / ACORES / NHL / RB (same derivation,
 # same module-level constants dx.py's own attention kernels are compiled

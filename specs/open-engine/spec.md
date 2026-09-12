@@ -1169,6 +1169,102 @@ measured against the slow path afterward: identical correlation and residuals, d
 190 -> 84 ms/token (2.3x). Re-run unchanged after the compatibility-check and per-row
 longrope fixes below (same corr, argmax, top-5 -- the new manifest fields are additive).
 
+### OPEN-FAMILY-QWEN3VL: Qwen3-VL's decoder is a Qwen3 dense spec
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
+**Test category:** unit (`tests/test_qwen3vl.py`); the end-to-end run is
+OPEN-VISION-EMBED's, once the model and a kernel set for it exist
+
+Qwen3-VL's decoder is Qwen3 dense. A config whose `model_type` is `qwen3_vl` or
+`qwen3_vl_text` shall derive a `ModelSpec` with `family` `qwen3` and the same
+hyperparameters a plain Qwen3 of that geometry derives, so a Qwen3-VL model links to a
+Qwen3 kernel bundle rather than building its own. Interleaved M-RoPE changes only the
+position table the engine hands the kernels, and the vision tower is read separately by
+`VitConfig`; neither reaches the spec. Both config shapes are accepted: the decoder
+nested under `text_config` (raw HF) and flattened at the top level (the container OFLM
+ships).
+
+**Acceptance criteria:**
+- `model_type: "qwen3_vl"` with Qwen3-VL-4B's fields derives `family == "qwen3"`,
+  `qk_norm`, no `attn_gate`, `rotary_dim == head_dim`, all layers `dense`.
+- The nested and flat forms of the same config give the same `spec_hash()`.
+- That hash equals the hash of the same geometry declared as `model_type: "qwen3"`.
+- Two configs differing only inside `vision_config` give the same `spec_hash()`.
+- A missing decoder field is refused by name, in either config shape.
+
+### OPEN-FAMILY-QWEN2: Qwen2.5 is a dense spec with a bias on q, k and v
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`, `dense.py`)
+**Test category:** unit (`tests/test_qwen2.py`); the hardware run is OPEN-ATTN-QKV-BIAS's
+
+Qwen2.5 is the dense recipe's shape in every respect but one: its q/k/v projections
+carry a per-channel bias. A config whose `model_type` is `qwen2` shall derive a
+`ModelSpec` with `family` `qwen2` -- GQA, no q/k RMSNorm, no attention gate, full RoPE,
+a silu-gated FFN -- and `recipes.families.family_module` shall route it to the dense
+recipe, which carries the bias through to the kernels (OPEN-ATTN-QKV-BIAS).
+
+The bias is not a `ModelSpec` field: every Qwen2 has it, which makes it a family
+property, and `spec_hash()` covers every field, so adding one would move every shipped
+model's hash for no kernel change.
+
+**Acceptance criteria:**
+- `model_type: "qwen2"` derives `family == "qwen2"`, `qk_norm` false, `attn_gate` false,
+  `activation` `silu`, all layers `dense`.
+- `head_dim` absent falls back to `hidden_size / num_attention_heads`; present, it wins.
+- A `hidden_size` that is not a multiple of the head count is refused, naming `head_dim`.
+- `family_module("qwen2")` is the dense recipe and `"qwen2" in families.FAMILIES`.
+- `dense.qkv_bias` is true for `qwen2` and false for every other dense family; `qkv_bias`
+  is not a key of `spec.to_dict()`.
+
+### OPEN-ATTN-QKV-BIAS: a per-channel bias on the q, k and v projections
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `designs/dense/dx.py`,
+`recipes/dense.py`, `model/replica_dense.py`)
+**Test category:** unit (`tests/test_qwen2.py`, `tests/test_op_range.py`) for the layout and
+the refusal; manual (the procedure below, needs the NPU and a Qwen2.5 container) for the
+numbers
+
+A family whose q, k and v projections carry a per-channel bias shall have it added to
+each projection's output before the q/k norm and the rotation -- `q = q + b_q`, and the
+same for k and v -- and nowhere else: `o_proj` and the FFN have none. The bias is a
+family property (`recipes.dense.QKV_BIAS_FAMILIES`), so a family without one shall
+compile the attention it compiled before, byte for byte.
+
+The three vectors ride in the layer's `consts` buffer as bf16, the dtype the container
+stores them in, and stream into the attention core on a fifo of their own, one bias
+element per projection element. That lockstep is what makes a second stream cheaper than
+either interleaving the fills or holding the whole bias in the core's L1: a projection
+element carries `KVH/2` heads as f32 (`E_A` bytes) and the same heads of a bf16 bias are
+half that, so `QW*2 / (E_A/2)` is exactly `Q_AIN_ELEMS` and `KVW*2 / (E_A/2)` is exactly
+`K_AIN_ELEMS`, for any geometry `attn.h` accepts.
+
+**Acceptance criteria (unit):**
+- `dense.layout` gives a Qwen2.5-3B spec three consts slots, `CD_QB | CD_KB | CD_VB`, sized
+  `QW*2 | KVW*2 | KVW*2` and within `CD_BYTES`; a family without a bias gets `-1` for all
+  three, not 0 -- 0 is the input norm's own offset, where a stray read would find a real
+  tensor instead of failing.
+- `dense.pack_plan` emits a `put` for each of `q_proj.bias`, `k_proj.bias`, `v_proj.bias`
+  at those offsets, with those caps.
+- The bias element count equals the projection element count for q and for k/v.
+- The `attn` catalogue combination carries `qkv_bias` as its eighth key; Qwen2.5-3B's
+  `(128, 16, 2, 128, False, False, False, True)` is refused by name until hardware has run
+  it (OPEN-OP-RANGE).
+- `replica_dense.dense_decode` adds the bias for a `QKV_BIAS_FAMILIES` spec and not
+  otherwise.
+
+**Procedure (manual):**
+1. Compile `designs/attn/*.cc` for a shipped family's flags from the tree before and after
+   the change and compare the objects: every one must be byte-identical. The guards
+   (`ATTN_BIAS_PARM` / `ATTN_BIAS_ARG`) exist for this, the same way `ATTN_H0_PARM` does --
+   an unused parameter changes the generated code.
+2. Export the kernel set for the Qwen2.5 container with `OPEN_KERNELS_UNVALIDATED=1`, pack
+   it, and run `model/make_decode.py` + `compare_decode.py` at positions 0 and a few
+   hundred: logits correlation > 0.9999 and the same argmax against the fp64 replica.
+3. `oflm-test --llm` through `flm serve` on the installed model.
+4. Then add the tuple to `catalogue.py` and drop the override.
+
+**Status (2026-09-12):** step 1 passes -- every attention translation unit is byte-identical
+across the qwen3, hunyuan, MoE, llama3 and phi3 flag sets. Steps 2-4 are open: no Qwen2.5
+container is installed on this machine, so the tuple is deliberately NOT in the catalogue
+and the recipe refuses the family by name.
+
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
 **Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)

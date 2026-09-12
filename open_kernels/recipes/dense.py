@@ -15,7 +15,10 @@ has GeGLU-tanh, the sandwich norms in brackets above, and two layer types --
 per-token patch of the KV fill (attnpos), the tables are two `ptab` globals.
 HunYuan dense is Llama 3's shape with q/k RMSNorm applied AFTER RoPE, which is
 a family property (`QKNORM_POST_ROPE`), not a spec field, and one static RoPE
-theta the spec builder folds the NTK alpha into. Phi-3 rotates only the first
+theta the spec builder folds the NTK alpha into. Qwen2.5 is Llama 3's shape with
+a per-channel bias on q, k and v (`QKV_BIAS_FAMILIES`, attn.h's ATTN_QKV_BIAS):
+the three vectors ride in `consts` as bf16 and stream into the attention core
+beside the projections they belong to. Phi-3 rotates only the first
 `rotary_dim` dims of a head (96 of 128) and scales cos / sin by longrope's attention
 factor, which rides on the position table (`programs`: the ptab global's `scale`).
 
@@ -46,7 +49,9 @@ from .spec import DENSE, DENSE_LOCAL, ModelSpec
 @dataclass(frozen=True)
 class DenseLayout:
     # consts: [lnw (ELN)][postln (ELN)][meta: qn bf16 HD @0 | kn @HD*2 (E_A)][sandwich: preffn (ELN)][postffn (ELN)]
-    CD_LNW: int; CD_POSTLN: int; CD_META: int; CD_PREFFN: int; CD_POSTFFN: int; CD_BYTES: int
+    #         [qkv bias, bf16: qb (QW) | kb (KVW) | vb (KVW)]  -- only a family that has one; -1 otherwise
+    CD_LNW: int; CD_POSTLN: int; CD_META: int; CD_PREFFN: int; CD_POSTFFN: int
+    CD_QB: int; CD_KB: int; CD_VB: int; CD_BYTES: int
     # act: the DDR bounce between stages (T / T2: the sandwich norms' outputs, f32 HID)
     AD_XN: int; AD_Q: int; AD_KVN: int; AD_OG: int; AD_OUT: int; AD_RES: int; AD_XM: int
     AD_H: int; AD_OUT2: int; AD_JUNK: int; AD_T: int; AD_T2: int; AD_BYTES: int
@@ -65,6 +70,7 @@ class DenseLayout:
 class DenseGeometry:
     N_CORES: int; HID: int; FF: int; NH: int; KVH: int; HD: int; ROT: int; GATE: bool; QKNORM: bool
     QKNORM_POST: bool                                               # the norm weight multiplies after RoPE (HunYuan)
+    QKVB: bool                                                      # q/k/v carry a per-channel bias (Qwen2)
     EPS: float; ACT: str; SANDWICH: bool; WINDOW: int
     PER_CALL: int; CALL_BYTES: int                                  # chunks per weight element (1 when the table is wide)
     QW: int; KVW: int
@@ -90,7 +96,15 @@ class DenseRecipe:
 # families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
 # query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
 QKNORM_POST_ROPE = ("hunyuan",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3")
+# families whose q/k/v projections carry a per-channel bias (o_proj and the FFN do not).
+# Like the post-RoPE norm this is a family property, not a spec field: every Qwen2 has it,
+# and spec_hash() covers every field, so a field would move every shipped model's hash.
+QKV_BIAS_FAMILIES = ("qwen2",)
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")
+
+
+def qkv_bias(spec: ModelSpec) -> bool:
+    return spec.family in QKV_BIAS_FAMILIES
 
 
 def lm_rows(spec: ModelSpec) -> int:
@@ -152,7 +166,7 @@ def _check(spec: ModelSpec) -> None:
     require("ln", width=spec.hidden)
     require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
             rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
-            qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE)
+            qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE, qkv_bias=qkv_bias(spec))
     pc = per_call(spec)
     require_gemv(spec, "attn", spec.hidden, spec.attn_q_width // n, pc)
     require_gemv(spec, "attn", spec.attn_q_width, spec.hidden // n, pc)
@@ -199,6 +213,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
+        QKVB=qkv_bias(spec),
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
         WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * CHUNK,
         QW=qw, KVW=kvw,
@@ -224,7 +239,17 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
         raise OpRangeError("dense: qn | kn or the RoPE record do not fit the attention element")
     # consts
     c = {"lnw": 0, "postln": eln, "meta": 2 * eln, "preffn": 2 * eln + e_a, "postffn": 3 * eln + e_a}
-    cd_bytes = roundup((4 * eln + e_a) if spec.sandwich_norms else (2 * eln + e_a), ELEM)
+    off = (4 * eln + e_a) if spec.sandwich_norms else (2 * eln + e_a)
+    # The bias vectors stream into the attention core beside the projections they belong to,
+    # one bias element per q / k / v element. A projection element carries KVH/2 heads as
+    # f32 (E_A bytes); the same heads of a bf16 bias are E_A/2, so the two streams run in
+    # lockstep for any geometry: QW*2 / (E_A/2) = 2*NH/KVH = Q_AIN_ELEMS, KVW*2 / (E_A/2) = 2.
+    if qkv_bias(spec):
+        c["qb"], c["kb"], c["vb"] = off, off + G.QW * 2, off + (G.QW + G.KVW) * 2
+        off += (G.QW + 2 * G.KVW) * 2
+    else:
+        c["qb"] = c["kb"] = c["vb"] = -1
+    cd_bytes = roundup(off, ELEM)
     # act
     a: dict[str, int] = {}
     off = 0
@@ -250,7 +275,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     bands = lm_rows(spec) // BAND_ROWS
     return DenseLayout(
         CD_LNW=c["lnw"], CD_POSTLN=c["postln"], CD_META=c["meta"], CD_PREFFN=c["preffn"], CD_POSTFFN=c["postffn"],
-        CD_BYTES=cd_bytes,
+        CD_QB=c["qb"], CD_KB=c["kb"], CD_VB=c["vb"], CD_BYTES=cd_bytes,
         AD_XN=a["xn"], AD_Q=a["q"], AD_KVN=a["kvn"], AD_OG=a["og"], AD_OUT=a["out"], AD_RES=a["res"], AD_XM=a["xm"],
         AD_H=a["h"], AD_OUT2=a["out2"], AD_JUNK=a["junk"], AD_T=a["t"], AD_T2=a["t2"], AD_BYTES=ad_bytes,
         POOL_Q=p["q"], POOL_K=p["k"], POOL_V=p["v"], POOL_O=p["o"], POOL_UP=p["up"], POOL_GATE=p["gate"],
@@ -287,6 +312,10 @@ def pack_plan(spec: ModelSpec) -> dict:
                 {"op": "put", "tensor": pre + "self_attn.q_norm.weight", "dst": L.CD_META, "cap": G.HD * 2},
                 {"op": "put", "tensor": pre + "self_attn.k_norm.weight", "dst": L.CD_META + G.HD * 2, "cap": G.HD * 2},
             ] if spec.qk_norm else []) + ([
+                {"op": "put", "tensor": pre + "self_attn.q_proj.bias", "dst": L.CD_QB, "cap": G.QW * 2},
+                {"op": "put", "tensor": pre + "self_attn.k_proj.bias", "dst": L.CD_KB, "cap": G.KVW * 2},
+                {"op": "put", "tensor": pre + "self_attn.v_proj.bias", "dst": L.CD_VB, "cap": G.KVW * 2},
+            ] if G.QKVB else []) + ([
                 {"op": "put", "tensor": pre + "pre_feedforward_layernorm.weight", "dst": L.CD_PREFFN, "cap": L.ELN},
                 {"op": "put", "tensor": pre + "post_feedforward_layernorm.weight", "dst": L.CD_POSTFFN, "cap": L.ELN},
             ] if spec.sandwich_norms else []),
