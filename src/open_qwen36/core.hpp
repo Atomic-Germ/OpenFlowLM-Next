@@ -122,23 +122,6 @@ public:
     /// when asked.
     void step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits);
 
-    /// 0167/#32: the GEMM-route batched-prefill block size (manifest.hpp's
-    /// GemmBlockProgram), or 0 when the loaded kernel set has none / its
-    /// layer types disagree -- refuses rather than guesses.
-    size_t gemm_block_t() const { return gemm_block_t_; }
-    /// T tokens through every layer as 5 GEMM dispatches (q|k|v fused,
-    /// o_proj, gate_proj, up_proj, down_proj) plus T single-token attnpos-
-    /// patched attention dispatches between GEMM A' and GEMM O, with
-    /// HOST-side fp64 RMSNorm/residual/SwiGLU between every GEMM stage (see
-    /// manifest.hpp's GemmBlockProgram docstring for the full chain).
-    /// `ids.size()` must equal gemm_block_t(); the caller pads a short tail
-    /// with any in-range token id (hardware-proven exact: the real columns'
-    /// output does not depend on what the padding columns carry) and passes
-    /// the REAL count as `t_real` so position only advances by the real
-    /// tokens. Logits, like step(), only for the (t_real-1)th token, only
-    /// when asked.
-    void step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits);
-
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
     void seek(int pos);
