@@ -1094,6 +1094,19 @@ void RestHandler::handle_embeddings(const json& request,
         }
         if (tr.status == TRS::Ok) task_type = tr.task;
 
+        // `input` is REQUIRED, and this guard is not cosmetic: `request` is a
+        // const json&, so reading a missing key through operator[] is undefined
+        // behaviour. In practice it answered 200 with an empty data array, which
+        // made a malformed request look exactly like one that asked for nothing.
+        if (!request.contains("input")) {
+            send_response(json{{"error", {
+                {"message", "input is required: a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "missing_required_parameter"}}}});
+            return;
+        }
+
         std::vector<std::string> inputs;
 
         if (request["input"].is_string()) {
@@ -1106,18 +1119,56 @@ void RestHandler::handle_embeddings(const json& request,
         }
 
         json response;
+        // -1 means the backend did not report a count; see the usage field below.
+        int64_t prompt_tokens = -1;
         if (this->embed) {
             json embedding_data = json::array();
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
             try {
-                for (size_t i = 0; i < inputs.size(); ++i) {
-                    std::cout << "Embedding input[" << i << "]: " << "\n" << inputs[i] << std::endl;
-                    std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], task_type);
-                    embedding_data.push_back({
-                        {"object", "embedding"},
-                        {"embedding", embedding_result},
-                        {"index", i}
-                    });
+                // ONE call for the whole array, not one per input.
+                //
+                // AutoEmbeddingModel::embed_batch() defaults to exactly the loop
+                // this replaces, so a backend that does not override it behaves
+                // identically. NpueEmbedding does override it and encodes a whole
+                // tier of sequences per dispatch: measured 5-10x faster on all six
+                // of its models, peaking at 10.3x
+                // (docs/docs/benchmarks/embeddings_results.md).
+                //
+                // The vectors are BIT-IDENTICAL either way. Batching is a
+                // scheduling choice, not an arithmetic one, which is precisely why
+                // nothing here could ever have flagged the loop: no accuracy check,
+                // cosine or byte comparison can tell the slow path from the fast
+                // one. The only symptom was time, and the endpoint measured none.
+                if (!inputs.empty()) {
+                    const std::vector<float> flat =
+                        this->auto_embedding_engine->embed_batch(inputs, task_type,
+                                                                &prompt_tokens);
+                    // The vectors come back concatenated, so the width has to be
+                    // derived -- and therefore CHECKED. A mis-split returns
+                    // correctly shaped, correctly normed, deterministic vectors for
+                    // the wrong inputs, which is the one failure nothing downstream
+                    // can see. Refuse rather than divide and hope.
+                    if (flat.empty() || flat.size() % inputs.size() != 0)
+                        throw std::runtime_error(
+                            "embedding backend returned " + std::to_string(flat.size()) +
+                            " floats for " + std::to_string(inputs.size()) +
+                            " inputs, which does not divide evenly. Refusing to guess"
+                            " the vector width: a mis-split returns correctly shaped,"
+                            " correctly normed vectors for the wrong inputs.");
+                    const size_t dim = flat.size() / inputs.size();
+                    for (size_t i = 0; i < inputs.size(); ++i) {
+                        embedding_data.push_back({
+                            {"object", "embedding"},
+                            {"embedding", std::vector<float>(
+                                 flat.begin() + static_cast<std::ptrdiff_t>(i * dim),
+                                 flat.begin() + static_cast<std::ptrdiff_t>((i + 1) * dim))},
+                            {"index", i}
+                        });
+                    }
+                    // One line, not one per input with the text echoed back. The
+                    // old print put the full text of every request on the console.
+                    header_print("OFLM", "embedded " + std::to_string(inputs.size()) +
+                                         " input(s), " + std::to_string(dim) + " dims");
                 }
             } catch (const TaskPromptUnavailable& e) {
                 // The model has prompts but none serves this task -- README.md:288's
@@ -1140,8 +1191,13 @@ void RestHandler::handle_embeddings(const json& request,
                 {"data", embedding_data},
                 {"model", model},
                 {"usage", {
-                    {"prompt_tokens", 0},
-                    {"total_tokens", 0}
+                    // A real count when the backend reports one. 0 still means
+                    // NOT REPORTED -- which is what every request got before this,
+                    // on both backends. embed_batch() yields -1 rather than 0 for a
+                    // backend that does not count, because a zero there would read
+                    // as a real number.
+                    {"prompt_tokens", prompt_tokens < 0 ? 0 : prompt_tokens},
+                    {"total_tokens",  prompt_tokens < 0 ? 0 : prompt_tokens}
                 }}
             };
         }

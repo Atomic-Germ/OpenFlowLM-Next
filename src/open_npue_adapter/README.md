@@ -189,9 +189,46 @@ to read ~1.00×. It does, across five batch sizes.
 on a different day and a different binary — which is the check that the tool
 measures what the note claimed.
 
-**What is still on the table is in the REST handler**, not in the base class:
-`handle_embeddings` still loops over the request inputs. Adopting
-`embed_batch()` there is now one line, and its value is no longer an estimate.
+**And the REST handler now uses it.** `handle_embeddings` makes one
+`embed_batch()` call for the whole `input` array instead of one `embed()` call
+per element. Measured THROUGH THE ENDPOINT on bge-base — over HTTP, best of
+three, same process, LLM co-resident — not through the engine, because those
+are two different claims:
+
+| inputs | before | after | 
+|---:|---:|---:|
+| 1 | 0.0319 s | 0.0285 s (1.12×) |
+| 4 | 0.1066 s | 0.0282 s (3.78×) |
+| 8 | 0.2289 s | 0.0375 s (6.10×) |
+| 16 | 0.4437 s | 0.0916 s (4.84×) |
+| 32 | 0.8532 s | 0.2215 s (3.85×) |
+| 64 | 1.6134 s | 0.2515 s (6.42×) |
+| 128 | 3.4088 s | 0.6371 s (5.35×) |
+
+**Before, throughput was FLAT at 31—40 texts/s at every batch size** — the
+endpoint got nothing at all from batching. After, it is 35 at one input and
+254.5 at sixty-four.
+
+The endpoint stays below the engine-only figures (200.9 against 250.1 texts/s
+at 128 inputs); the difference is HTTP and serialising 128×768 floats to JSON,
+and it is the honest number for what a client sees.
+
+**The vectors did not change.** Verified two ways, because the risk in slicing
+a concatenated result is not a crash: a wrong width or order returns a
+correctly shaped, correctly normed, deterministic vector for somebody
+else's text, and nothing downstream can see that. So 16 distinct texts sent as
+one batch were compared **byte-for-byte** against each text sent alone — 16 of
+16 exact, `index` fields correct — and the first components of every response
+are unchanged from before the edit at all seven batch sizes.
+
+Two things came along with it. `usage` reported `{0, 0}` for every request on
+both backends and now carries the real token count (30 for one text, 2824 for
+128); 0 still means *not reported*, which is what `open_embedding` returns.
+And a request with **no `input` field** used to answer **200 with an empty
+list** — `request["input"]` on a `const json&` with a missing key is undefined
+behaviour — so it is a 400 now. An empty `input` array is still 200 and an
+empty list, unchanged.
+
 Full results: [`docs/docs/benchmarks/embeddings_results.md`](../../docs/docs/benchmarks/embeddings_results.md).
 
 ---
