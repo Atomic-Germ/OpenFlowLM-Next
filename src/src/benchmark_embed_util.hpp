@@ -166,6 +166,17 @@ inline EmbedBenchPlan make_embed_bench_plan(const nlohmann::json& cfg, bool have
     plan.corpus_source = CorpusSource::BuiltIn;
 
     if (have_cfg) {
+        // The ROOT has to be an object before any key is read. nlohmann's
+        // contains() is `is_object() && ...`, so a file holding `[]`, `null`
+        // or a scalar made every key below invisible and the sweep ran on the
+        // CLI defaults with nothing to say the file had been ignored.
+        if (!cfg.is_object())
+            throw std::runtime_error(
+                "bench config: the file must hold a JSON object with the keys "
+                "max_batch, iterations, task and texts; its root is " +
+                std::string(cfg.type_name()) +
+                ". Every key would otherwise have been read as absent and the "
+                "run would have used the command-line values instead.");
         if (cfg.contains("max_batch")) {
             if (!cfg["max_batch"].is_number_integer())
                 throw std::runtime_error("bench config: \"max_batch\" must be an integer");

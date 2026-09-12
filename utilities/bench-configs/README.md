@@ -217,6 +217,8 @@ plausible number rather than an error.
 | `--prompt-name` on bge/MiniLM/gte | refused: they have no task-prompt concept and `/v1/embeddings` refuses a prompt for them. |
 | no `--prompt-name` on nomic | refused: it declares prompts and the endpoint **requires** one, so timing it without one would measure a request no client can send. |
 | `--prompt-name tullball` | refused, listing the valid names. |
+| `-i` a file whose root is `[]`, `null` or a scalar | refused. nlohmann's `contains()` is `is_object() && ...`, so every key would have read as absent and the sweep would have run on the CLI defaults with nothing to say the file was ignored. |
+| `-i` a file holding `{}` | **accepted** -- an empty object means "use the CLI values", said explicitly. |
 | `--port`, `--cors`, `--socket`, `--q-len`, `--host` | refused as serve-only |
 
 **The two guards have different reach, and it is worth knowing which.**

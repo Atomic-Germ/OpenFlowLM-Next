@@ -1003,7 +1003,12 @@ void RestHandler::handle_embeddings(const json& request,
         // means "whatever this server loaded". What was missing was the type
         // check and the presence check, not the field.
         std::string model;
-        if (request.contains("model") && !request["model"].is_null()) {
+        // `contains()` alone, deliberately: an explicit `null` is neither a
+        // string nor omitted, and the message below says so. The previous
+        // version skipped null before the type check, which accepted it and
+        // contradicted its own error text. A caller that means "whatever is
+        // loaded" omits the field.
+        if (request.contains("model")) {
             if (!request["model"].is_string()) {
                 send_response(json{{"error", {
                     {"message", "model must be a string naming the loaded embedding "
@@ -1196,9 +1201,11 @@ void RestHandler::handle_embeddings(const json& request,
                     // correctly shaped, correctly normed, deterministic vectors for
                     // the wrong inputs, which is the one failure nothing downstream
                     // can see. openai_compat::embedding_batch_dim() refuses rather
-                    // than dividing and hoping, and openai_compat_test holds it to
-                    // that without a device -- one definition, shared with
-                    // bench-embed, so the two cannot drift.
+                    // than dividing and hoping, and benchmark_embed_test holds it
+                    // to that without a device -- one definition, shared with
+                    // bench-embed, so the two cannot drift. (The helper lives in
+                    // openai_compat.hpp; its assertions are in
+                    // benchmark_embed_test.cpp, not openai_compat_test.cpp.)
                     const size_t dim =
                         openai_compat::embedding_batch_dim(flat.size(), inputs.size());
                     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -1231,10 +1238,19 @@ void RestHandler::handle_embeddings(const json& request,
             throw std::runtime_error("Embedding models are not supported in this build");
 #endif
 
+            // WHICH MODEL PRODUCED THESE VECTORS. `model` is empty when the
+            // request omitted the field, and echoing "" tells a client nothing
+            // -- while this handler exists to stop a response asserting
+            // something it is not. An omitted model means "whatever is
+            // loaded", so name it rather than leaving the field blank.
+            std::string response_model = model;
+            if (response_model.empty() && this->auto_embedding_engine)
+                response_model = this->auto_embedding_engine->get_current_model();
+
             response = {
                 {"object", "list"},
                 {"data", embedding_data},
-                {"model", model},
+                {"model", response_model},
                 {"usage", {
                     // A real count when the backend reports one. 0 still means
                     // NOT REPORTED -- which is what every request got before this,

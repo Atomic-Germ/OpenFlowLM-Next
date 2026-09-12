@@ -301,6 +301,23 @@ static void test_plan() {
     throws_with([] { make_embed_bench_plan(njson::object(), false, 2, 1 << 20, ""); },
                 "beyond the", "a max_batch above the ceiling refuses at plan time");
 
+    // A config file whose ROOT is not an object was silently ignored:
+    // nlohmann contains() is `is_object() && ...`, so every key read as
+    // absent and the sweep ran on the CLI defaults with no sign of it.
+    throws_with([] { make_embed_bench_plan(njson::array(), true, 2, 8, ""); },
+                "must hold a JSON object", "a config whose root is an array refuses");
+    throws_with([] { make_embed_bench_plan(njson(), true, 2, 8, ""); },
+                "must hold a JSON object", "a null config root refuses");
+    throws_with([] { make_embed_bench_plan(njson(42), true, 2, 8, ""); },
+                "must hold a JSON object", "a scalar config root refuses");
+    throws_with([] { make_embed_bench_plan(njson::array(), true, 2, 8, ""); },
+                "command-line values instead",
+                "and the refusal says what would have happened silently");
+    // ...while an OBJECT root with no keys at all is fine: it means "use the
+    // CLI values", said explicitly.
+    does_not_throw([] { make_embed_bench_plan(njson::object(), true, 2, 8, ""); },
+                   "an empty object config is accepted");
+
     // An unknown key is NOT an error: the shipped config carries a `_comment`,
     // and `oflm bench`'s configs do too.
     does_not_throw([] { njson c = {{"_comment", "why this file exists"}, {"max_batch", 8}};
@@ -397,10 +414,13 @@ static void test_model_tags(const std::string& list_path) {
         {"embed-gemma", "embed-gemma:300m"},
     };
     for (const auto& [shortf, full] : shorthand) {
-        if (!ml.is_model_supported(full)) {
-            std::printf("skip  %s is not in this model_list.json\n", full);
-            continue;
-        }
+        // Absence is a FAILURE, not a skip. This list is the set of tags the
+        // embedding registry advertises, so a tag missing from model_list.json
+        // means `bench-embed <tag>` fails its own model check -- and a test
+        // that skips it reports success for a command that cannot run.
+        ok(ml.is_model_supported(full),
+           std::string(full) + " is present in model_list.json");
+        if (!ml.is_model_supported(full)) continue;
         ok(ml.is_model_supported(shortf),
            std::string("the shorthand '") + shortf + "' is accepted by the model list");
         auto [canonical, info] = ml.get_model_info(shortf);

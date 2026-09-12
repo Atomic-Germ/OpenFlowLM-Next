@@ -120,22 +120,44 @@ def parse_truth(paths):
 
 
 def doc_rows(doc_text, heading):
-    """{display_name: [cells]} for the first markdown table after `heading`."""
+    """(rows, raw_names) for the first markdown table after `heading`.
+
+    `raw_names` is EVERY data row's first cell, in order, including ones this
+    checker does not recognise. The first version returned only recognised
+    rows, which threw away exactly the evidence the caller's "unexpected row"
+    check needs -- so that check could never fire -- and let two rows for one
+    model overwrite each other silently.
+    """
     try:
         seg = doc_text[doc_text.index(heading):]
     except ValueError:
-        return None
+        return None, None
     rows = {}
+    raw_names = []
+    # A markdown table is a header line, an alignment line, then data. Count
+    # the lines rather than pattern-matching the header text: the first
+    # version skipped a first cell of "Model", and the adapter README heads
+    # its table with "batch" -- which the new duplicate/extra check then
+    # reported as an unexpected model row. It was right to.
+    seen = 0
     for line in seg.splitlines():
         if not line.startswith("|"):
-            if rows:
+            if seen:
                 break
             continue
+        seen += 1
         cells = [c.strip() for c in line.strip("|").split("|")]
+        if seen == 1:
+            continue                      # header
+        if seen == 2:
+            if not all(set(c) <= set("-: ") and c for c in cells):
+                return None, None         # not a table after all
+            continue                      # alignment row
         name = cells[0].replace("*", "").replace("(control)", "").strip()
+        raw_names.append(name)
         if name in DISPLAY.values():
             rows[name] = cells[1:]
-    return rows
+    return rows, raw_names
 
 
 def main(argv):
@@ -160,22 +182,28 @@ def main(argv):
         if not path.exists():
             missing_tables.append("%s (file missing)" % rel)
             continue
-        rows = doc_rows(path.read_text(encoding="utf-8"), heading)
+        rows, raw_names = doc_rows(path.read_text(encoding="utf-8"), heading)
         if rows is None:
             missing_tables.append("%s :: %s (heading missing)" % (rel, heading))
             continue
         if not rows:
             missing_tables.append("%s :: %s (no model rows)" % (rel, heading))
             continue
-        # every expected model present, and no unexpected one
+        # every expected model present, nothing else, and nothing twice --
+        # checked against raw_names, because the recognised-rows dict cannot
+        # show an extra row or a duplicate
         for want in want_models:
             if want not in rows:
                 bad.append("%-46s %-22s ROW MISSING from %s"
                            % (rel, want, heading))
-        for got in rows:
+        for got in raw_names:
             if got not in want_models:
-                bad.append("%-46s %-22s unexpected row in %s"
+                bad.append("%-46s %-22s UNEXPECTED row in %s"
                            % (rel, got, heading))
+        for got in set(raw_names):
+            if raw_names.count(got) > 1:
+                bad.append("%-46s %-22s appears %d times in %s"
+                           % (rel, got, raw_names.count(got), heading))
         for name, cells in rows.items():
             metric_cells = cells[skip:]
             # exact width, so a deleted trailing column cannot be truncated away
@@ -185,9 +213,16 @@ def main(argv):
                 continue
             for batch, cell in zip(batches, metric_cells):
                 cell = cell.replace("*", "").strip()
-                if cell in ("—", "-", "--", ""):
-                    continue
                 want = truth.get((name, batch), {}).get(metric)
+                if cell in ("—", "-", "--", ""):
+                    # A dash is legitimate ONLY where the sweep has no such
+                    # stage -- EmbeddingGemma stops at 16. Accepting it
+                    # unconditionally meant replacing any measured value with
+                    # an em dash passed.
+                    if want is not None:
+                        bad.append("%-46s %-22s b=%-4d %-6s doc=%-9s printed=%s"
+                                   % (rel, name, batch, metric, "(dash)", want))
+                    continue
                 if want is None:
                     # The docs quote a point the logs do not cover. That is not
                     # automatically wrong -- embed-gemma is swept to 16 only --
@@ -204,7 +239,7 @@ def main(argv):
     rel, heading = ONE_NUMBER
     path = REPO / rel
     if path.exists():
-        rows = doc_rows(path.read_text(encoding="utf-8"), heading)
+        rows, _raw = doc_rows(path.read_text(encoding="utf-8"), heading)
         if not rows:
             missing_tables.append("%s :: %s (summary table not found)" % (rel, heading))
         for want in ALL_SEVEN:
@@ -212,8 +247,10 @@ def main(argv):
                 bad.append("%-46s %-22s ROW MISSING from the summary table"
                            % (rel, want))
         for name, cells in (rows or {}).items():
-            if len(cells) < 3:
-                bad.append("%-46s %-22s summary row has %d cells, want 3"
+            # exact, like the metric tables. `< 3` let an EXTRA cell through,
+            # which is the same drift the width check exists to stop.
+            if len(cells) != 3:
+                bad.append("%-46s %-22s summary row has %d cells, want exactly 3"
                            % (rel, name, len(cells)))
                 continue
             peak_doc = cells[0].replace("*", "").strip()
