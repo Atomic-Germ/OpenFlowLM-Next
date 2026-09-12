@@ -20,6 +20,38 @@
 #include <random>
 #include "server.hpp"
 
+///@brief Report a handler's error on the transport the client is actually reading (#64)
+///@param stream what the handler's stream callback has already sent
+///@param wire the streaming format, used only once the stream is open
+///@param message the error text for an in-stream frame
+///@param body the error body to send when nothing is on the wire yet
+///@param send_response the non-streaming transport
+///@param sink the handler's own stream callback -- the one that updates `stream`
+///@note Which route applies is openai_compat::error_route(), unit-tested there.
+template <class FrameSink>
+static void send_error(const openai_compat::StreamState& stream,
+                       openai_compat::StreamWire wire,
+                       const std::string& message,
+                       const json& body,
+                       const std::function<void(const json&)>& send_response,
+                       FrameSink& sink) {
+    switch (openai_compat::error_route(stream)) {
+        case openai_compat::ErrorRoute::Body:
+            send_response(body);
+            return;
+        case openai_compat::ErrorRoute::Frame: {
+            const std::vector<std::string> frames = openai_compat::stream_error_frames(wire, message);
+            for (size_t i = 0; i < frames.size(); ++i) {
+                sink(frames[i], i + 1 == frames.size());
+            }
+            return;
+        }
+        case openai_compat::ErrorRoute::Unreportable:
+            header_print("OFLM", "Error after the stream ended; the client cannot be told: " + message);
+            return;
+    }
+}
+
 ///@brief Normalize messages by merging consecutive user messages (like Ollama does)
 ///@param messages the original messages
 ///@return normalized messages with consecutive user messages merged
@@ -724,6 +756,11 @@ void RestHandler::handle_generate(const json& request,
                                  std::function<void(const json&)> send_response,
                                  StreamResponseCallback send_streaming_response,
                                  std::shared_ptr<CancellationToken> cancellation_token) {
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    auto ndjson_stream_callback = [&send_streaming_response, &stream_state](const json& data, bool is_final) {
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data, is_final); });
+        };
     try {
         std::string prompt = request["prompt"];
         bool stream = request.value("stream", true);
@@ -748,7 +785,7 @@ void RestHandler::handle_generate(const json& request,
         if (stream) {
             // Streaming response using streaming_ostream
             auto total_start_time = time_utils::now();
-            streaming_ostream ostream(model, send_streaming_response, false);
+            streaming_ostream ostream(model, ndjson_stream_callback, false);
             uniformed_input.prompt = prompt;
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
@@ -773,7 +810,9 @@ void RestHandler::handle_generate(const json& request,
                 auto_chat_engine->generate(meta_info, length_limit, ostream);
             } catch (const std::exception& e) {
                 json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Ndjson, e.what(),
+                           error_response, send_response, ndjson_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -835,7 +874,8 @@ void RestHandler::handle_generate(const json& request,
         }
     } catch (const std::exception& e) {
         json error_response = {{"error", e.what()}};
-        send_response(error_response);
+        send_error(stream_state, openai_compat::StreamWire::Ndjson, e.what(),
+                   error_response, send_response, ndjson_stream_callback);
     }
 }
 
@@ -1328,6 +1368,13 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                                                StreamResponseCallback send_streaming_response,
                                                std::shared_ptr<CancellationToken> cancellation_token) {
     static std::string model_used_for_last_message = "model-faker";
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    // Passes the pre-formatted SSE string directly
+    auto openai_stream_callback = [&send_streaming_response, &stream_state](const std::string& data, bool is_final) {
+        json data_json = data;
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data_json, is_final); });
+        };
     try {
         // Extract OpenAI-style parameters
         json current_messages = request["messages"];
@@ -1387,13 +1434,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         meta_info.load_duration = (uint64_t)time_utils::duration_ns(load_start_time, load_end_time).first;
         meta_info.max_prefill_len = this->prefill_chunk_len;
         if (stream){
-            // Create a wrapper callback that passes the pre-formatted SSE string directly
             cancellation_token->reset();
             auto_chat_engine->reset_parser();
-            auto openai_stream_callback = [&send_streaming_response](const std::string& data, bool is_final) {
-                json data_json = data;
-                send_streaming_response(data_json, is_final);
-                };
             streaming_ostream_openai_chat ostream(model, auto_chat_engine.get(), openai_stream_callback);  // streaming in chat completion format
 
             header_print("OFLM", "Start prefill...");
@@ -1433,7 +1475,9 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 auto_chat_engine->generate(meta_info, length_limit, ostream, [&] { return cancellation_token->cancelled(); });
             } catch (const std::exception& e) {
                 json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                           error_response, send_response, openai_stream_callback);
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1529,7 +1573,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 {"code", 500}
             }}
         };
-        send_response(error_response);
+        send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                   error_response, send_response, openai_stream_callback);
     }
 }
 
@@ -1604,6 +1649,13 @@ void RestHandler::handle_openai_completion(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response,
     std::shared_ptr<CancellationToken> cancellation_token) {
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    // Passes the pre-formatted SSE string directly
+    auto openai_stream_callback = [&send_streaming_response, &stream_state](const std::string& data, bool is_final) {
+        json data_json = data;
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data_json, is_final); });
+        };
     try {
         // Extract OpenAI-style parameters
         std::string prompt = request["prompt"];
@@ -1633,11 +1685,6 @@ void RestHandler::handle_openai_completion(const json& request,
         header_print("OFLM", "Start generating...");
 
         if (stream) {
-            // Create a wrapper callback that passes the pre-formatted SSE string directly
-            auto openai_stream_callback = [&send_streaming_response](const std::string& data, bool is_final) {
-                json data_json = data;
-                send_streaming_response(data_json, is_final);
-                };
             streaming_ostream_openai ostream(model, openai_stream_callback);  // streaming in completion format
             uniformed_input.prompt = prompt;
             try {
@@ -1663,7 +1710,9 @@ void RestHandler::handle_openai_completion(const json& request,
                 auto_chat_engine->generate(meta_info, length_limit, ostream);
             } catch (const std::exception& e) {
                 json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                           error_response, send_response, openai_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -1736,6 +1785,7 @@ void RestHandler::handle_openai_completion(const json& request,
                 {"code", 500}
             }}
         };
-        send_response(error_response);
+        send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                   error_response, send_response, openai_stream_callback);
     }
 }
