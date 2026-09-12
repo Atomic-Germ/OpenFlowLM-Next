@@ -10,7 +10,7 @@ oflm-test is designed to thoroughly test OpenFlowLM's API compatibility and mode
 - **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`oflm serve -e 1`, or `oflm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
 - **Audio Tests**: Audio understanding via chat completions, with a bundled music clip
 - **Vision Tests**: Vision-Language Model (VLM) tests with multi-image support and automated response checking
-- **Tool Calling Tests**: Function/tool-calling across five escalating complexity levels, in streaming and non-streaming modes
+- **Tool Calling Tests**: Function/tool-calling across seven escalating complexity levels, in streaming and non-streaming modes
 
 All test media is **bundled inside the package**, so no extra downloads or local paths are needed once installed.
 

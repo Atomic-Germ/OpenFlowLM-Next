@@ -900,7 +900,7 @@ class VisionTask(BaseTestTask):
 
 class ToolCallingTask(BaseTestTask):
     """
-    Tests OpenAI-compatible function/tool calling at five escalating
+    Tests OpenAI-compatible function/tool calling at seven escalating
     complexity levels, each run in both streaming and non-streaming mode:
 
       L1 Basic Tool Call      One obvious call whose arguments appear verbatim
@@ -912,6 +912,11 @@ class ToolCallingTask(BaseTestTask):
       L4 Parallel Tool Calls  Several independent calls belong in one turn.
       L5 Multi-Turn Tool Loop The model must call a tool, consume the locally
                               executed result, and ground its final answer in it.
+      L6 Tool Result Fidelity A code in the last few tokens of a tool result must
+                              come back verbatim, which prompt trimming that eats
+                              the tail of the result would break.
+      L7 Nullable Schema      A parameter typed ["string", "null"] must not fail
+                              the request, and the tool must still be called.
 
     Automated checks validate tool names, JSON argument validity/values and,
     for L5, the arithmetic derived from the tool result ($54 total).
