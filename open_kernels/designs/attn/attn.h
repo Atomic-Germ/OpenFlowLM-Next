@@ -134,6 +134,13 @@ static constexpr unsigned kNL = kNHL >= 8 ? kNHL : 8;
 #define ATTN_UNROLL_HD _Pragma("clang loop unroll_count(4)")
 #endif
 static constexpr unsigned kPV = kRB * kNL;    // the block's score vector: one exp covers it all
+// Heads in one og element. Until attention could be split more finely than the og
+// element, ACORES was the largest divisor of NH/HPO, so NHL was ALWAYS exactly HPO and
+// this was kHPO by construction. A core may now own fewer heads than an og element
+// holds; it then writes just its own, and the drain -- already sized NHL * HD * 2 --
+// takes exactly those bytes. At kNHL >= kHPO this is kHPO and every family that had
+// NHL == HPO compiles what it compiled.
+static constexpr unsigned kOGH = kNHL < kHPO ? kNHL : kHPO;
 static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmetic on the single-core path
 // The head offset is a kernel ARGUMENT only when attention is actually split.
 // Leaving an unused one in the signature is not free: it perturbs codegen, and
@@ -147,7 +154,10 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #define ATTN_H0_DECL
 #define ATTN_H0_ARG , h0
 #endif
-static_assert(kNH % kNHL == 0 && kNHL % kHPO == 0,
+// kNHL % kHPO was required while a core had to own WHOLE og elements. It now owns
+// kOGH = min(kNHL, kHPO) heads per element, so the requirement is the weaker one that
+// its heads tile the element evenly -- which holds trivially when kOGH == kNHL.
+static_assert(kNH % kNHL == 0 && kNHL % kOGH == 0,
               "attn.h: the local head count must divide NH and be a whole number of og elements");
 
 static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1,
@@ -630,8 +640,8 @@ __attribute__((noinline)) inline void attn_fin_impl(const float *__restrict oacc
                                  const float *__restrict g0, const float *__restrict g1,
                                  bfloat16 *__restrict og, int hp) {
   aie::set_rounding(aie::rounding_mode::conv_even);
-  for (unsigned i = 0; i < kHPO; ++i) {
-    const unsigned h = kHPO * hp + i;
+  for (unsigned i = 0; i < kOGH; ++i) {
+    const unsigned h = kOGH * hp + i;
     const float inv = 1.0f / ml[kMLS + h];
     const float *o = oacc + h * kHD;
 #if ATTN_GATE

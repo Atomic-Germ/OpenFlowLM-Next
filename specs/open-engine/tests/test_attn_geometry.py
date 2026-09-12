@@ -16,15 +16,20 @@ from recipes.load import load_spec
 
 SPECS = Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
 
-# spec file -> (ACORES, NHL, RB) on the fast path. Every row is a whole number of og
-# elements per core and a block of 8 / 16 / 32 score lanes -- attn.h's two constraints.
+# spec file -> (ACORES, NHL, RB) on the fast path. ACORES is the largest divisor of the
+# HEAD COUNT that fits the columns (attnknobs.attn_cores); a core owns kOGH = min(NHL, HPO)
+# heads of an og element, and a block is 8 / 16 / 32 score lanes -- attn.h's two constraints.
 FAST_GEOMETRY = {
-    "qwen3-4b.json": (4, 8, 4),       # 32 heads / 8 kv at hd 128: 4 og elements
+    "qwen3-4b.json": (4, 8, 4),       # 32 heads / 8 kv at hd 128: NHL == HPO, unchanged by the og split
     "llama31-8b.json": (4, 8, 4),     # same shape, no qk norm
     "hy-mt2-7b.json": (4, 8, 4),      # same shape, norm after RoPE
-    "gemma3-4b.json": (2, 4, 2),      # 8 / 4 at hd 256: 2 og elements; RB capped at 2 for hd 256
-    "granite42-3b.json": (5, 8, 4),   # 40 / 8 at hd 64: 5 og elements (the measured family)
-    "phi4-mini-4b.json": (3, 8, 4),   # 24 / 8 at hd 128, a 96-dim rotation: 3 og elements
+    "gemma3-4b.json": (4, 2, 2),      # 8 / 4 at hd 256: 2 heads a core once og is NHL wide (was 2 cores
+                                      # of 4, the whole point of the split); RB capped at 2 for hd 256
+    "granite42-3b.json": (5, 8, 4),   # 40 / 8 at hd 64: NHL == HPO (the measured family)
+    "phi4-mini-4b.json": (6, 4, 4),   # 24 / 8 at hd 128, a 96-dim rotation: 6 cores of 4 (was 3 of 8;
+                                      # measured 2026-09-12, 123 -> 117 ms at 2048, 250/250 identical)
+    "gemma3-12b.json": (4, 4, 1),     # 16 / 8 at hd 256: 4 cores of 4; RB 1, the block kernel does not
+                                      # fit L1 beside more than two heads at hd 256
 }
 
 
@@ -39,7 +44,9 @@ def test_fast_path_geometry(name, unvalidated, monkeypatch):
     G = DR.geometry(load_spec(SPECS / name))
     acores, nhl, rb = FAST_GEOMETRY[name]
     assert (G.VEXP, G.ACORES, G.NHL, G.RB) == (1, acores, nhl, rb), name
-    assert G.NHL * G.ACORES == G.NH and G.NHL % G.HPO == 0
+    # attn.h's static_assert, exactly: the heads divide NH, and tile the og element
+    # they are written through (kOGH = min(kNHL, kHPO)).
+    assert G.NHL * G.ACORES == G.NH and G.NHL % min(G.NHL, G.HPO) == 0
     assert G.RB * max(G.NHL, 8) in (8, 16, 32)
     assert G.MLS % 32 == 0 and G.MLS >= G.NHL
 
@@ -58,7 +65,7 @@ def test_unmeasured_family_keeps_the_shipped_kernel(name, unvalidated, monkeypat
 
 
 @pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-4b.json", "llama31-8b.json", "hy-mt2-7b.json",
-                                  "gemma3-4b.json", "phi4-mini-4b.json"])
+                                  "gemma3-4b.json", "phi4-mini-4b.json", "gemma3-12b.json"])
 def test_measured_family_is_on_the_path_without_the_probe(name, unvalidated, monkeypatch):
     """Granite (2026-09-07), Qwen3 (2026-09-08, the first HD-128 point: 5050 -> 258 ms at
     position 2048, 300/300 greedy tokens identical to the shipped kernel), and Phi-3
@@ -75,10 +82,12 @@ def test_attn_fast_is_a_probe_variable(monkeypatch):
     assert DR.probe_env() == {"ATTN_FAST": "1"}
 
 
-@pytest.mark.parametrize("og_elems,cores", [(1, 1), (2, 2), (4, 4), (5, 5), (8, 4), (12, 6), (7, 1), (16, 4)])
-def test_attn_cores_divides_and_fits(og_elems, cores):
-    assert DR.attn_cores(og_elems) == cores
-    assert og_elems % DR.attn_cores(og_elems) == 0 and DR.attn_cores(og_elems) <= DR.MAX_ATTN_CORES
+@pytest.mark.parametrize("nh,cores", [(1, 1), (2, 2), (4, 4), (5, 5), (8, 4), (12, 6), (7, 1), (16, 4)])
+def test_attn_cores_divides_and_fits(nh, cores):
+    """It divides the HEAD COUNT now, not the og element count -- a core may own fewer
+    heads than an og element holds (attn.h kOGH)."""
+    assert DR.attn_cores(nh) == cores
+    assert nh % DR.attn_cores(nh) == 0 and DR.attn_cores(nh) <= DR.MAX_ATTN_CORES
 
 
 # ---- the MoE / Qwen3.5 recipe compiles the same attn.h through designs/layer_x/ax.py

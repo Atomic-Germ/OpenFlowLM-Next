@@ -154,7 +154,7 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 2 x 4, RB 2; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. Every core's heads are whole og elements; RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
 
@@ -182,6 +182,23 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
+
+Until an og element was NHL wide, ACORES was the largest divisor of `NH / HPO`,
+so NHL was always exactly HPO. Splitting the og fifo frees the two families
+whose head count divides further than their og element count did:
+
+| family | geometry | step @ 2048, before -> after | greedy agreement |
+|---|---|---|---|
+| Gemma3-4B (hd 256) | 2 x 4 -> 4 x 2, RB 2 | 94.2 -> 86.4 ms (1.090x) | `818,236743` both ways, identical |
+| Phi4-mini (hd 128, 96-dim rotation) | 3 x 8 -> 6 x 4, RB 4 | 123 -> 117 ms (1.05x, n=4 each) | 250/250 identical |
+
+Phi-4-mini was not in the branch that made the change -- it landed on main
+first, and `attn_cores(NH)` reached it on the rebase. Position 0 is unchanged
+within a jitter of +-25% on that path (no attention work there); position 2048
+is stable to +-2% and is where the split shows. Every other dense family has
+`NHL == HPO` and rebuilds byte-identical.
 
 **Where the requirement came from (the observation, 2026-09-06):**
 
