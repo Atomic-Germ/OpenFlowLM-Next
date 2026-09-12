@@ -445,11 +445,18 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # One shape of worker body per combination of knobs, not one with defaulted arguments:
     # a family that does not block, or has no bias, must present IRON the exact function it
     # presented before. The bias fifo is the worker's SECOND argument, before the drains.
-    if QKVB:
-        if RB > 1:
-            raise ValueError("dx.py: the q/k/v bias and blocked attention rows (ATTN_RB > 1) "
-                             "have not been built together; qwen2 is not on the fast path")
+    if QKVB and RB > 1:
+        def attn_body(ain, bias_in, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, bias_in)
 
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, bias_in, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in)
+            return body
+    elif QKVB:
         def attn_body(ain, bias_in, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
             _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, 0, bias_in)

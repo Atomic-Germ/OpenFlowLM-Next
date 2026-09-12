@@ -10,8 +10,8 @@
 // per-dim weight, which does not commute with the pair rotation.
 // ATTN_QKV_BIAS adds a per-channel bias to q, k and v first -- q = q + bq before the norm --
 // which is Qwen2's shape (its q/k/v projections carry one; o_proj and the FFN do not). The
-// bias arrives as its own fifo element beside the projection's, f32 and already in the same
-// channel order, so the add is one vector pass and nothing downstream changes.
+// bias arrives as its own fifo element beside the projection's, bf16 and already in the
+// same channel order, so the add is one vector pass and nothing downstream changes.
 //   for head h (kv head h / (NH/KVH)): s_t = q'_h . K_t / sqrt(HD) over t in [0, pos] (cache rows + new)
 //   o_h = softmax(s) V  (online softmax, fp32 accumulators), og_h = o_h [* sigmoid(gate_h)]
 // RoPE over the first ROT dims of each head, half-split pairs (i, i + ROT/2); cos/sin for
