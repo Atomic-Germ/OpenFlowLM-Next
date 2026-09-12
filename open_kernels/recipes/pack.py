@@ -288,12 +288,44 @@ def q4_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.nda
     src = b.reshape(-1, ch)
     sel = src[c0:] if n is None else src[c0:c0 + n]
     if ch == CH:
+        _refuse_q4_0(name, sel)
         return sel
     conv = requant_q4_1 if ch == Q8 else q4k_to_q4_1
     out = np.empty((sel.shape[0], CH), np.uint8)
     for i in range(0, sel.shape[0], 256):
         out[i:i + 256] = conv(sel[i:i + 256])
     return out
+
+
+def _refuse_q4_0(name: str, sel: np.ndarray) -> None:
+    """A 5120-byte chunk whose 256 mins are ALL exactly zero is not q4_1.
+
+    q4_1 stores (scale, min) per 32-value block and reconstructs w = d * q + min with q an
+    UNSIGNED nibble. Some containers -- Qwen2.5-3B-Instruct-NPU2 is the one that found this
+    -- use the same chunk for a signed quantiser instead: w = d * int4(q), no min, so every
+    min is written as zero. Read as q4_1 those come out one-sided, every value in a block
+    sharing the sign of its scale, at about 2.7x the right spread. Nothing downstream
+    notices. The replica dequantises the same way, so it agrees with the kernels to the bit
+    and the model answers with noise.
+
+    A real q4_1 tensor does not have 256 exactly-zero mins in its first chunk, so this
+    costs a comparison and catches the case. The transcode is known and small -- flip bit 3
+    of every nibble, which turns two's complement into offset binary, then write
+    min = -8 * d -- but WHERE a container declares its format is the container's business,
+    and it declares nothing today: no safetensors metadata, no per-tensor flag, nothing in
+    config.json. So this refuses and names it rather than guessing for every container.
+    """
+    if not sel.size:
+        return
+    mins = sel[0, 512:1024].view(np.uint16)
+    if not (mins == 0).all():
+        return
+    raise ValueError(
+        f"{name}: every min in this {CH}-byte chunk is zero, so the tensor is a signed "
+        f"4-bit quantiser (w = d * int4(q)), not q4_1 (w = d * q + min). Packing it as "
+        f"q4_1 gives one-sided blocks and a model that answers with noise while agreeing "
+        f"with the fp64 replica, which misreads it the same way. The transcode is "
+        f"nibble ^= 8 then min = -8 * d; see .claude/plans/qwen2-q4-0-container.md")
 
 
 def q8_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.ndarray:

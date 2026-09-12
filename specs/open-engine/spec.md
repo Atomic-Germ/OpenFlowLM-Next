@@ -1214,6 +1214,34 @@ model's hash for no kernel change.
 - `dense.qkv_bias` is true for `qwen2` and false for every other dense family; `qkv_bias`
   is not a key of `spec.to_dict()`.
 
+### OPEN-PACK-Q4-0: a 5120-byte chunk with no mins is not q4_1
+**Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`)
+**Test category:** unit (`tests/test_quant_q4_0.py`)
+
+Some containers store a SIGNED 4-bit quantiser in the same 5120-byte chunk q4_1 uses:
+`w = d * int4(q)` with the min written as zero, rather than q4_1's `w = d * q + min`
+over an unsigned nibble. Nothing about the chunk's size or the safetensors header
+separates the two. Read as q4_1 the tensor comes out one-sided -- every value in a block
+shares the sign of its scale -- at about 2.7 times the right spread, and the model
+answers with noise while agreeing with the fp64 replica to the bit, because
+`dq_chunks_q4_1` misreads it the same way.
+
+The packer shall therefore refuse a q4_1-sized chunk whose mins are all exactly zero,
+naming the tensor, the format and the transcode, rather than pack it. A real q4_1 tensor
+does not have 256 exactly-zero mins in a chunk.
+
+The transcode itself is known and small -- flip bit 3 of every nibble, turning two's
+complement into offset binary, then write `min = -8 * d`, after which the kernels, the
+pool and the replica are all already correct -- but WHERE a container declares its
+format is the container's business and it declares nothing today, so applying it
+automatically to every container is not this packer's call.
+`.claude/plans/qwen2-q4-0-container.md` carries the evidence.
+
+**Acceptance criteria:**
+- A 5120-byte chunk with 256 zero mins is refused, and the message names the tensor, the
+  phrase `signed 4-bit quantiser`, and the transcode (`nibble ^= 8`, `-8 * d`).
+- One non-zero min in the chunk is enough for it to pack unchanged.
+
 ### OPEN-ATTN-QKV-BIAS: a per-channel bias on the q, k and v projections
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `designs/dense/dx.py`,
 `recipes/dense.py`, `model/replica_dense.py`)
