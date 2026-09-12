@@ -239,14 +239,21 @@ def main(argv):
     rel, heading = ONE_NUMBER
     path = REPO / rel
     if path.exists():
-        rows, _raw = doc_rows(path.read_text(encoding="utf-8"), heading)
+        rows, raw_names = doc_rows(path.read_text(encoding="utf-8"), heading)
         if not rows:
             missing_tables.append("%s :: %s (summary table not found)" % (rel, heading))
+        for got in (raw_names or []):
+            if got not in ALL_SEVEN:
+                bad.append("%-46s %-22s UNEXPECTED row in the summary table" %
+                           (rel, got))
+        for got in set(raw_names or []):
+            if (raw_names or []).count(got) > 1:
+                bad.append("%-46s %-22s appears %d times in the summary table" %
+                           (rel, got, (raw_names or []).count(got)))
         for want in ALL_SEVEN:
             if want not in (rows or {}):
                 bad.append("%-46s %-22s ROW MISSING from the summary table"
                            % (rel, want))
-        for name, cells in (rows or {}).items():
             # exact, like the metric tables. `< 3` let an EXTRA cell through,
             # which is the same drift the width check exists to stop.
             if len(cells) != 3:
