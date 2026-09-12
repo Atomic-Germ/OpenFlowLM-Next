@@ -972,7 +972,49 @@ void RestHandler::handle_embeddings(const json& request,
                                    std::function<void(const json&)> send_response,
                                    StreamResponseCallback send_streaming_response) {
     try {
-        std::string model = request["model"];
+        // VALIDATE `input` FIRST, and read every other field through a checked
+        // accessor. `std::string model = request["model"]` used to be the first
+        // statement here, on a `const json&`, with nothing checking that the key
+        // existed -- so `POST /v1/embeddings {}` did not answer the 400 the guard
+        // below promises. It KILLED THE SERVER PROCESS, after logging
+        // "NPU Locked!", i.e. while holding the NPU access lock. Reproduced at
+        // exit 139. The input guard was written for exactly that request and sat
+        // below the line that crashed before reaching it.
+        if (!request.is_object()) {
+            send_response(json{{"error", {
+                {"message", "the request body must be a JSON object."},
+                {"type", "invalid_request_error"},
+                {"param", ""},
+                {"code", "invalid_value"}}}});
+            return;
+        }
+        if (!request.contains("input")) {
+            send_response(json{{"error", {
+                {"message", "input is required: a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "missing_required_parameter"}}}});
+            return;
+        }
+        std::vector<std::string> inputs;
+
+        // `model` is OPTIONAL on this endpoint and stays that way: the mismatch
+        // check below is written as `!model.empty() && ...`, i.e. an absent model
+        // means "whatever this server loaded". What was missing was the type
+        // check and the presence check, not the field.
+        std::string model;
+        if (request.contains("model") && !request["model"].is_null()) {
+            if (!request["model"].is_string()) {
+                send_response(json{{"error", {
+                    {"message", "model must be a string naming the loaded embedding "
+                                "model, or be omitted."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "invalid_value"}}}});
+                return;
+            }
+            model = request["model"].get<std::string>();
+        }
 
         // THE `model` FIELD USED TO BE ECHOED AND OTHERWISE IGNORED, which is
         // the worst version of a wrong answer: the response ASSERTED it was
@@ -1094,27 +1136,6 @@ void RestHandler::handle_embeddings(const json& request,
         }
         if (tr.status == TRS::Ok) task_type = tr.task;
 
-        // `input` is REQUIRED, and this guard is not cosmetic: `request` is a
-        // const json&, so reading a missing key through operator[] is undefined
-        // behaviour. In practice it answered 200 with an empty data array, which
-        // made a malformed request look exactly like one that asked for nothing.
-        if (!request.contains("input")) {
-            send_response(json{{"error", {
-                {"message", "input is required: a string, or an array of strings."},
-                {"type", "invalid_request_error"},
-                {"param", "input"},
-                {"code", "missing_required_parameter"}}}});
-            return;
-        }
-
-        std::vector<std::string> inputs;
-
-        // The TYPE has to be checked too, not just the presence. `input: null`,
-        // a number or an object left `inputs` empty and answered 200 with an
-        // empty `data` -- indistinguishable from a request that asked for
-        // nothing. An array holding a non-string threw out of
-        // get<std::string>() into the function-level catch, which is a 500 for
-        // what is plainly a client error. Both are 400s, named, before any work.
         const json& input_field = request.at("input");
         if (input_field.is_string()) {
             inputs.push_back(input_field.get<std::string>());
