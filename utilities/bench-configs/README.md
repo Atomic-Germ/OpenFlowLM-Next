@@ -141,11 +141,22 @@ Its config file reads four keys:
    `--bench-iterations` when absent. `oflm bench` ignores `--bench-iterations`
    outright once `-i` is used -- the trap documented above. Same file shape,
    better rule.
-2. **There is a discarded warm-up iteration.** `oflm bench` needs none. This
-   does: the first call on a model with no `.npue` container yet **packs one
-   from the checkpoint**, tens of seconds for a 100M model. Without the warm-up
-   that lands inside iteration 1 and reads as a slow model rather than a
-   one-off.
+2. **There is a discarded warm-up, and it doubles as the identity gate.**
+   `oflm bench` has neither.
+
+   An earlier version of this section claimed the warm-up kept `.npue`
+   **packing** out of iteration 1. That was **wrong**, and worth recording:
+   `load_model()` runs before the warm-up and calls `find_container()`, which
+   is what packs, so packing was already outside the timed loop. What the
+   discarded call actually excludes is first-call *runtime* cost -- faulting
+   in the mmapped container, the tokenizer's first use, the lanes' first
+   dispatch.
+
+   The same call also runs the identity gate: every row of the largest batch
+   is compared against the same text embedded alone, and the footer prints how
+   many vectors that was. The first version compared only the first row, which
+   is a probe whose coverage nothing checked -- an ordering or truncation
+   error in any later row would still have printed `BIT-IDENTICAL`.
 
 `texts` is optional; omitted, a built-in corpus of 16 sentences is cycled to
 fill each batch. The cycling is printed rather than implied, because a reader
@@ -189,6 +200,30 @@ the first.
 `Tokens/s` reads `not reported` for a backend that does not return a token
 count. Empty CSV fields rather than zeros, for the same reason -- a zero reads
 as a real count.
+
+### What it refuses, and why each one is there
+
+Every one of these used to be accepted, and every one of them produced a
+plausible number rather than an error.
+
+| you asked for | what happens |
+|---|---|
+| a chat tag (`llama3.2:1b`) | refused, naming the seven embedding tags -- **before** any download. It used to pull the model first and fail afterwards. |
+| a shorthand tag (`bge-base`) | **accepted**, and canonicalised to `bge-base:en-v1.5`. It used to clear every check and then fail as an unknown embedding model. |
+| `--max-batch 3` | refused. The sweep doubles from 1, so a limit it cannot land on would run 1 and 2 and never 3 -- a result depending on an undocumented rounding rule. |
+| no model tag | refused, naming an example. The pre-existing check tests `.empty()`, and an omitted positional is `model-faker`, not empty. |
+| `--prompt-name` on bge/MiniLM/gte | refused: they have no task-prompt concept and `/v1/embeddings` refuses a prompt for them. |
+| no `--prompt-name` on nomic | refused: it declares prompts and the endpoint **requires** one, so timing it without one would measure a request no client can send. |
+| `--prompt-name tullball` | refused, listing the valid names. |
+| `--port`, `--cors`, … | refused as serve-only. (`oflm bench` still accepts these silently.) |
+
+The task policy is decided by `openai_compat::task_policy()` -- the endpoint's
+own predicate -- so a task this benchmark accepts is one a client could also
+have asked for, by construction rather than by intention.
+
+`src/src/benchmark_embed_test.cpp` holds all of the above plus the config
+parsing to 104 assertions with no device, no weights and no network:
+`ctest --test-dir src/build -R bench_embed`.
 
 ### Not measured
 

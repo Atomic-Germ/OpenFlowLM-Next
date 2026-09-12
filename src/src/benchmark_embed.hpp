@@ -14,7 +14,7 @@
 ///
 /// WHAT IT IS ACTUALLY FOR. The one property that decides this engine's
 /// throughput is whether a caller batches, and until now nothing measured it.
-/// AutoEmbeddingModel::embed() takes one text so /v1/embeddings loops;
+/// AutoEmbeddingModel::embed() takes one text so a naive caller loops;
 /// embed_batch() encodes a whole tier per dispatch. On bge-base that is 405 ms
 /// against 70 ms for sixteen texts -- a number that lived in a README because
 /// no committed tool produced it. So every stage here times BOTH paths and
@@ -24,8 +24,8 @@
 /// worth stating: BOTH PATHS RETURN THE SAME VECTORS. Batching is a scheduling
 /// choice, not an arithmetic one, so no accuracy gate, no cosine and no
 /// bit-identity test can see the slow one. The only symptom is time. This file
-/// checks the vectors agree anyway, because a pure stopwatch would not have
-/// noticed if the fast path were wrong.
+/// checks the vectors agree anyway -- over EVERY row, see the identity gate --
+/// because a pure stopwatch would not have noticed if the fast path were wrong.
 ///
 /// RULE ON THE NUMBERS. Everything here is WALL CLOCK, end to end: tokenizer,
 /// the host half of the encode, the array, pooling and the normalise. It is a
@@ -33,6 +33,10 @@
 /// kernel claim -- the array is shared, and a wall-clock reading measures how
 /// busy the machine was as much as how good the kernels are. The footer under
 /// every table says so, and it is not decoration.
+///
+/// The pure half of this -- the sweep plan, the stage count, the task lookup,
+/// the corpus -- lives in benchmark_embed_util.hpp so it can be unit-tested
+/// without a device. See benchmark_embed_test.cpp.
 #pragma once
 
 #include <algorithm>
@@ -51,8 +55,8 @@
 #include <vector>
 
 #include "benchmarking.hpp"                            // statistic_t + helpers
+#include "benchmark_embed_util.hpp"                    // the pure, tested half
 #include "AutoEmbeddingModel/all_embedding_model.hpp"  // get_auto_embedding_model
-#include "openai_compat.hpp"                           // task_names, task_policy
 #include "model_downloader.hpp"
 #include "model_list.hpp"
 #include "nlohmann/json.hpp"
@@ -73,73 +77,21 @@ struct EmbedStage_t {
 struct EmbedBenchResults_t {
     std::vector<EmbedStage_t> stages;   ///< ascending batch size
     std::string task_name;              ///< the REST task name requested
-    std::string prompt_applied;         ///< container prompt, "" when none
+    std::string prompt_applied;         ///< container prompt name, when there is one
+    PrefixKind  prefix_kind = PrefixKind::None;
     int    iterations = 0;
     int    corpus_texts = 0;
-    /// Largest absolute difference between one text's vector from the batched
-    /// path and from the looped one. 0.0 is the expected value; -1.0 means the
-    /// comparison could not be made.
+    CorpusSource corpus_source = CorpusSource::BuiltIn;
+    /// The identity gate: how many vectors were compared between the batched
+    /// and the looped path, and the largest absolute difference found. -1.0
+    /// means the comparison did not run.
     double agreement = -1.0;
+    size_t agreement_vectors = 0;
 };
-
-/// The built-in corpus.
-///
-/// Sixteen distinct sentences, cycled to fill a batch. Distinctness does not
-/// change the timing -- there is no data-dependent branching in an encoder --
-/// but the cycling is printed rather than left implicit, because a reader who
-/// assumes 128 unique documents is reading a different experiment than the one
-/// that ran. They sit in the length range a RAG chunk does; the design pads
-/// every row to its own compiled `seq` regardless, which is exactly why text
-/// length is not the interesting axis here.
-inline const std::vector<std::string>& builtin_corpus() {
-    static const std::vector<std::string> texts = {
-        "The Ryzen AI NPU runs encoder-only models as a sequence of GEMM dispatches over one resident xclbin.",
-        "Vector databases store dense embeddings and retrieve them by approximate nearest-neighbour search.",
-        "A retrieval-augmented pipeline embeds the query, fetches the closest chunks, and passes them to a chat model.",
-        "Batching matters more than raw arithmetic throughput when the per-dispatch overhead dominates.",
-        "Sentence transformers pool token vectors into one fixed-width vector per input text.",
-        "Cosine similarity compares direction and ignores magnitude, which is why embeddings are normalised.",
-        "The tokenizer splits text into subword units before any matrix multiplication happens.",
-        "Quantisation trades a little numerical accuracy for a large reduction in memory traffic.",
-        "Attention cost grows with the square of the sequence length, so long documents are chunked.",
-        "A design compiled for one geometry serves every model whose GEMM shapes match it exactly.",
-        "Host-side layer normalisation was measured faster and more accurate than its device dispatch at these widths.",
-        "Weights are pre-tiled offline so the runtime never rearranges them on the critical path.",
-        "An embedding for the wrong task is correctly shaped and correctly normed, so nothing downstream can flag it.",
-        "Energy per thousand sequences is a better figure of merit for a laptop than peak throughput.",
-        "The shim DMA is the only path to DRAM, so it bounds what any kernel above it can achieve.",
-        "Reproducibility means the same input produces the same bytes, on the same binary and the same host ISA level.",
-    };
-    return texts;
-}
-
-/// Fill `n` texts by cycling the corpus.
-inline std::vector<std::string> take_texts(const std::vector<std::string>& corpus, int n) {
-    std::vector<std::string> out;
-    out.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; i++)
-        out.push_back(corpus[static_cast<size_t>(i) % corpus.size()]);
-    return out;
-}
 
 inline double bench_now_s() {
     return std::chrono::duration<double>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-/// Resolve a REST task name to the enum, reusing the server's own table.
-///
-/// Reused rather than re-listed on purpose: a second copy of this vocabulary
-/// would drift, and then `bench-embed` would measure a prompt the endpoint
-/// cannot be asked for. Empty means "query", which is what the endpoint
-/// resolves an unspecified request to.
-inline embedding_task_type_t task_from_name(const std::string& name) {
-    if (name.empty()) return task_query;
-    for (const auto& kv : openai_compat::task_names())
-        if (name == kv.first) return kv.second;
-    throw std::runtime_error(
-        "unknown task prompt '" + name + "'. Valid names: " +
-        openai_compat::task_names_csv());
 }
 
 inline void write_embed_bench_csv(const EmbedBenchResults_t& results,
@@ -165,6 +117,27 @@ inline void write_embed_bench_csv(const EmbedBenchResults_t& results,
         return;
     }
 
+    // Provenance first. Two runs of one model differing only in --prompt-name,
+    // or one of them using a config-supplied corpus, used to write
+    // indistinguishable files -- and the numbers really do differ. `#` lines
+    // are skippable (pandas: comment="#"); `oflm bench`'s CSV has none, so
+    // nothing depends on their absence.
+    out << "# oflm bench-embed\n"
+        << "# model=" << model_tag << "\n"
+        << "# task=" << results.task_name << "\n"
+        << "# prefix=" << (results.prefix_kind == PrefixKind::ContainerPrompt
+                               ? (results.prompt_applied.empty()
+                                      ? "container-prompt-unnamed"
+                                      : results.prompt_applied)
+                               : results.prefix_kind == PrefixKind::BackendHardcoded
+                                     ? "backend-hardcoded"
+                                     : "none") << "\n"
+        << "# corpus=" << corpus_source_name(results.corpus_source)
+        << " texts=" << results.corpus_texts << "\n"
+        << "# iterations=" << results.iterations << " warmup=1\n"
+        << "# identity_gate_vectors=" << results.agreement_vectors
+        << " max_abs_diff=" << results.agreement << "\n"
+        << "# wall clock, end to end; NOT an NPU kernel claim\n";
     out << "batch,"
            "batched_avg_s,batched_std_s,batched_min_s,batched_max_s,"
            "texts_avg_per_s,texts_std_per_s,texts_min_per_s,texts_max_per_s,"
@@ -239,20 +212,41 @@ inline void print_embed_result(const EmbedBenchResults_t& results,
     std::cout << std::string(98, '-') << "\n";
 
     std::cout << "  " << model_tag << ", task " << results.task_name;
-    if (results.prompt_applied.empty())
-        std::cout << " (model declares no prompt table -- no prefix applied)";
-    else
-        std::cout << " -> container prompt \"" << results.prompt_applied << "\"";
+    switch (results.prefix_kind) {
+        case PrefixKind::ContainerPrompt:
+            if (results.prompt_applied.empty())
+                std::cout << " -> a prompt from the container's own table that this"
+                             " build cannot name";
+            else
+                std::cout << " -> container prompt \"" << results.prompt_applied << "\"";
+            break;
+        case PrefixKind::BackendHardcoded:
+            // OpenGemma declares no prompt NAMES and still prefixes every text.
+            // Saying "no prefix applied" here, as the first version did, was
+            // simply false.
+            std::cout << " -> a prefix the backend hardcodes per task"
+                         " (it declares no prompt names)";
+            break;
+        case PrefixKind::None:
+            std::cout << " (this model has no task-prompt concept; no prefix applied)";
+            break;
+    }
     std::cout << "\n";
-    std::cout << "  corpus: built-in, " << results.corpus_texts
+    std::cout << "  corpus: " << corpus_source_name(results.corpus_source) << ", "
+              << results.corpus_texts
               << " distinct texts cycled to fill each batch; "
               << results.iterations << " iterations, 1 warm-up discarded\n";
     if (results.agreement == 0.0)
-        std::cout << "  batched and looped paths returned BIT-IDENTICAL vectors\n";
+        std::cout << "  identity gate: all " << results.agreement_vectors
+                  << " vectors of the largest batch are BIT-IDENTICAL to the same"
+                     " text embedded alone\n";
     else if (results.agreement > 0.0)
-        std::cout << "  WARNING: batched and looped paths DISAGREE, max abs diff "
+        std::cout << "  WARNING: batched and looped paths DISAGREE over "
+                  << results.agreement_vectors << " vectors, max abs diff "
                   << std::scientific << std::setprecision(3) << results.agreement
                   << std::fixed << "\n";
+    else
+        std::cout << "  identity gate: DID NOT RUN\n";
     std::cout << "  Speedup is the looped average over the batched average -- what a caller\n"
                  "  gains by sending one request with N inputs instead of N requests.\n";
     std::cout << "  Wall clock, end to end (tokenizer + host + array + pooling).\n"
@@ -264,11 +258,8 @@ inline void print_embed_result(const EmbedBenchResults_t& results,
 /// Run the sweep.
 ///
 /// \param bench_config_file optional JSON: {"max_batch":N, "iterations":N,
-///        "task":"document", "texts":[...]}. `max_batch` and `iterations` in
-///        the file win over the CLI when present; when absent the CLI value is
-///        used. That differs DELIBERATELY from `oflm bench`, whose
-///        --bench-iterations never reaches a file-supplied config at all -- a
-///        trap its own README documents. Same file shape, better rule.
+///        "task":"document", "texts":[...]}. See make_embed_bench_plan() for
+///        the precedence rules.
 inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
                                                 const std::string& bench_config_file,
                                                 model_list& availble_models,
@@ -279,134 +270,161 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
                                                 bool preemption,
                                                 bool modelscope) {
     EmbedBenchResults_t results;
-    std::vector<std::string> corpus = builtin_corpus();
-    std::string task_name = prompt_name;
 
+    nlohmann::json cfg;
+    bool have_cfg = false;
     if (!bench_config_file.empty()) {
         std::ifstream input_file(bench_config_file);
         if (!input_file.is_open())
             throw std::runtime_error("Failed to open bench config: " + bench_config_file);
-        const nlohmann::json cfg = nlohmann::json::parse(input_file);
+        cfg = nlohmann::json::parse(input_file);
         input_file.close();
-        if (cfg.contains("max_batch") && cfg["max_batch"].is_number_integer())
-            max_batch = cfg["max_batch"].get<int>();
-        if (cfg.contains("iterations") && cfg["iterations"].is_number_integer())
-            iterations = cfg["iterations"].get<int>();
-        if (cfg.contains("task") && cfg["task"].is_string())
-            task_name = cfg["task"].get<std::string>();
-        if (cfg.contains("texts") && cfg["texts"].is_array() && !cfg["texts"].empty()) {
-            corpus.clear();
-            for (const auto& t : cfg["texts"])
-                if (t.is_string()) corpus.push_back(t.get<std::string>());
-            if (corpus.empty())
-                throw std::runtime_error("bench config \"texts\" contained no strings");
-        }
+        have_cfg = true;
     }
 
-    if (max_batch < 1)
-        throw std::runtime_error("--max-batch must be at least 1");
-    if (iterations < 1)
-        throw std::runtime_error("--bench-iterations must be at least 1");
+    // Everything the run depends on, decided and validated before anything is
+    // downloaded, loaded or timed.
+    const EmbedBenchPlan plan = make_embed_bench_plan(cfg, have_cfg, iterations,
+                                                      max_batch, prompt_name);
+    const embedding_task_type_t task = task_from_name(plan.task_name);
+    const int stages = bench_stages(plan.max_batch);
 
-    const embedding_task_type_t task = task_from_name(task_name);
-    if (task_name.empty()) task_name = "query";
+    // Canonicalise the tag FIRST. model_list::all_tags accepts the shorthand
+    // ("bge-base"), so main.cpp's model-support check passes it, but
+    // get_auto_embedding_model() matches on the full tag -- so the shorthand
+    // used to clear every check and then fail as an unknown embedding model.
+    auto [canonical_tag, model_info] = availble_models.get_model_info(model_tag);
 
-    // The model has to be on disk. Say what is happening rather than failing
-    // inside load_model with a path that means nothing to the reader.
-    switch (downloader.is_model_downloaded(model_tag)) {
+    oflm_rt::device npu_device_inst = oflm_rt::device(0);
+
+    // Resolve the BACKEND before touching the network. A valid chat tag such as
+    // llama3.2:1b otherwise triggered a multi-gigabyte download and only then
+    // failed as an unknown embedding model. Constructing the backend is cheap
+    // -- it stores a tag; load_model() is what opens anything.
+    auto [resolved_tag, engine] = get_auto_embedding_model(canonical_tag, &npu_device_inst);
+    if (engine == nullptr)
+        throw std::runtime_error(
+            "cannot benchmark '" + canonical_tag + "': no embedding backend claimed it. "
+            "Refusing to benchmark a substitute, which would report the wrong "
+            "model's numbers under the right model's name.");
+
+    switch (downloader.is_model_downloaded(resolved_tag)) {
         case ModelDownloader::ModelStatus::Ready:
             break;
         case ModelDownloader::ModelStatus::Missing:
         case ModelDownloader::ModelStatus::Outdated:
-            header_print("OFLM", "Model not present or outdated -- pulling '" + model_tag + "'");
-            if (!downloader.pull_model(model_tag, modelscope))
-                throw std::runtime_error("failed to pull '" + model_tag +
-                                         "'. Run `oflm pull " + model_tag + "` and retry.");
+            header_print("OFLM", "Model not present or outdated -- pulling '" +
+                                 resolved_tag + "'");
+            if (!downloader.pull_model(resolved_tag, modelscope))
+                throw std::runtime_error("failed to pull '" + resolved_tag +
+                                         "'. Run `oflm pull " + resolved_tag +
+                                         "` and retry.");
             break;
         case ModelDownloader::ModelStatus::Incompatible:
-            throw std::runtime_error("'" + model_tag +
+            throw std::runtime_error("'" + resolved_tag +
                                      "' is not compatible with this build of OFLM");
     }
 
-    oflm_rt::device npu_device_inst = oflm_rt::device(0);
-
     // Same sequence RestHandler::ensure_embed_model_loaded runs, so the
-    // benchmark exercises the load path the server exercises.
-    auto [resolved_tag, engine] = get_auto_embedding_model(model_tag, &npu_device_inst);
-    if (engine == nullptr)
-        throw std::runtime_error(
-            "cannot benchmark '" + model_tag + "': no embedding backend claimed it. "
-            "Refusing to benchmark a substitute, which would report the wrong "
-            "model's numbers under the right model's name.");
-    auto [new_tag, model_info] = availble_models.get_model_info(resolved_tag);
-    engine->load_model(availble_models.get_model_path(new_tag), model_info, preemption);
+    // benchmark exercises the load path the server exercises. NOTE that this is
+    // also where a missing `.npue` container gets PACKED, by find_container()
+    // inside load_model() -- i.e. before the warm-up below, and outside every
+    // timed iteration already.
+    engine->load_model(availble_models.get_model_path(resolved_tag), model_info,
+                       preemption);
 
-    // Whether this model takes a prompt at all, decided by the same predicate
-    // the endpoint uses -- so a task this benchmark accepts is one a client
-    // could also have asked for.
+    // Does the endpoint accept the request this is about to time? Decided by
+    // the endpoint's own predicate, so the answer cannot drift from it.
     const std::vector<std::string> declared = engine->prompt_names();
-    const openai_compat::TaskPolicy policy = openai_compat::task_policy(
-        engine->supports_task_prompts(), !declared.empty(), !prompt_name.empty());
-    if (policy == openai_compat::TaskPolicy::NotSupported)
-        header_print("OFLM", "'" + new_tag + "' has no task-prompt concept; the "
-                             "requested task is not applied to it");
-    for (const auto& kv : openai_compat::task_names())
-        if (kv.second == task &&
-            std::find(declared.begin(), declared.end(), kv.first) != declared.end()) {
-            results.prompt_applied = kv.first;
-            break;
-        }
+    const std::string refusal = task_policy_refusal(
+        engine->supports_task_prompts(), !declared.empty(), plan.task_explicit,
+        declared);
+    if (!refusal.empty())
+        throw std::runtime_error("cannot benchmark '" + resolved_tag + "': " + refusal);
 
-    const int stages = static_cast<int>(std::floor(std::log2((double)max_batch))) + 1;
+    // What prefix actually gets applied -- three cases, because "declares no
+    // prompt names" means two different things.
+    if (!declared.empty()) {
+        // A prompt IS applied -- the engine would have thrown otherwise. Set the
+        // kind first and fill the name only if this build can name it: the
+        // adapter matches candidates such as "Retrieval" that
+        // openai_compat::task_names() does not list, and a failed name lookup is
+        // not evidence that no prefix ran.
+        results.prefix_kind = PrefixKind::ContainerPrompt;
+        for (const auto& kv : openai_compat::task_names())
+            if (kv.second == task &&
+                std::find(declared.begin(), declared.end(), kv.first) != declared.end()) {
+                results.prompt_applied = kv.first;
+                break;
+            }
+    } else if (engine->supports_task_prompts()) {
+        results.prefix_kind = PrefixKind::BackendHardcoded;
+    } else {
+        results.prefix_kind = PrefixKind::None;
+    }
+
     header_print("OFLM", "Starting embedding benchmark: " + std::to_string(stages) +
                          " stages up to batch " + std::to_string(1 << (stages - 1)) +
-                         ", " + std::to_string(iterations) + " iterations");
+                         ", " + std::to_string(plan.iterations) + " iterations");
 
     std::vector<std::vector<float>> batched_s(stages), texts_ps(stages),
                                     tokens_ps(stages), looped_s(stages);
     std::vector<bool> have_tokens(stages, false);
 
-    // ---- warm-up, discarded ----
+    // ---- warm-up and identity gate, both discarded from the timings ----
     //
-    // The LLM benchmark has none and does not need one. This does: the FIRST
-    // call on a model with no `.npue` container yet PACKS ONE from the
-    // checkpoint, which takes tens of seconds for a 100M model. Without a
-    // discarded iteration that lands inside iteration 1 and the average is
-    // nonsense -- and it would read as a slow model rather than a one-off.
+    // WHAT THE WARM-UP IS NOT FOR. An earlier version of this comment, and of
+    // the README, claimed it kept `.npue` packing out of iteration 1. That was
+    // wrong: load_model() above calls find_container(), which packs, so packing
+    // was already outside the timed loop. What this call actually excludes is
+    // first-call runtime cost -- faulting in the mmapped container, the
+    // tokenizer's first use, and the lanes' first dispatch.
+    //
+    // THE IDENTITY GATE. Every row of the largest batch is compared against the
+    // same text embedded alone. The first version compared only the first row,
+    // which is a probe whose coverage nobody checked: a batch-specific
+    // ordering, truncation or write error in any later row would still have
+    // printed BIT-IDENTICAL. It costs N extra single calls, once.
     {
         const int warm = 1 << (stages - 1);
-        header_print("OFLM", "Warm-up at batch " + std::to_string(warm) + " (discarded)");
-        std::vector<std::string> texts = take_texts(corpus, warm);
+        header_print("OFLM", "Warm-up and identity gate at batch " +
+                             std::to_string(warm) + " (discarded from the timings)");
+        const std::vector<std::string> texts = take_texts(plan.corpus, warm);
         int64_t tok = -1;
         const std::vector<float> hot = engine->embed_batch(texts, task, &tok);
+        const size_t dim = openai_compat::embedding_batch_dim(hot.size(), texts.size());
 
-        // Do the two paths agree? A stopwatch cannot tell, and the whole
-        // reason this benchmark exists is a difference no accuracy gate sees.
-        // Compare the FIRST text through both -- if batching changed the
-        // arithmetic, this is where it shows.
-        std::string one = corpus[0];
-        const std::vector<float> single = engine->embed(one, task);
         double worst = 0.0;
-        if (!single.empty() && hot.size() >= single.size()) {
-            for (size_t i = 0; i < single.size(); i++)
-                worst = std::max(worst, std::abs((double)hot[i] - (double)single[i]));
-            results.agreement = worst;
+        for (size_t i = 0; i < texts.size(); ++i) {
+            std::string one = texts[i];
+            const std::vector<float> single = engine->embed(one, task);
+            if (single.size() != dim)
+                throw std::runtime_error(
+                    "embed() returned " + std::to_string(single.size()) +
+                    " floats while embed_batch() implies " + std::to_string(dim) +
+                    ". The two paths do not agree on the vector width, so the"
+                    " speedup below would not be a like-for-like comparison.");
+            for (size_t k = 0; k < dim; ++k)
+                worst = std::max(worst, std::abs(static_cast<double>(hot[i * dim + k]) -
+                                                 static_cast<double>(single[k])));
+            ++results.agreement_vectors;
         }
-        if (results.agreement > 0.0)
+        results.agreement = worst;
+        if (worst != 0.0)
             header_print_r("WARN", "batched and looped vectors differ by " +
-                                   std::to_string(results.agreement) +
+                                   std::to_string(worst) +
                                    " -- the speedup below is not a like-for-like "
                                    "comparison");
     }
 
     // Hardest stage first, like the LLM benchmark: a run killed early has then
     // measured the expensive end rather than nothing.
-    for (int it = 0; it < iterations; it++) {
+    for (int it = 0; it < plan.iterations; it++) {
         for (int s = stages - 1; s >= 0; s--) {
             const int n = 1 << s;
             header_print("OFLM", "batch " + std::to_string(n) + ", iteration " +
                                  std::to_string(it + 1) + "...");
-            std::vector<std::string> texts = take_texts(corpus, n);
+            std::vector<std::string> texts = take_texts(plan.corpus, n);
 
             int64_t tok = -1;
             const double b0 = bench_now_s();
@@ -444,14 +462,15 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
         results.stages.push_back(st);
     }
 
-    results.task_name = task_name;
-    results.iterations = iterations;
-    results.corpus_texts = (int)corpus.size();
+    results.task_name = plan.task_name.empty() ? std::string("query") : plan.task_name;
+    results.iterations = plan.iterations;
+    results.corpus_texts = (int)plan.corpus.size();
+    results.corpus_source = plan.corpus_source;
 
     engine.reset();
 
-    print_embed_result(results, new_tag);
-    write_embed_bench_csv(results, new_tag, ".");
+    print_embed_result(results, resolved_tag);
+    write_embed_bench_csv(results, resolved_tag, ".");
     return results;
 }
 

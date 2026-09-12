@@ -1147,15 +1147,12 @@ void RestHandler::handle_embeddings(const json& request,
                     // derived -- and therefore CHECKED. A mis-split returns
                     // correctly shaped, correctly normed, deterministic vectors for
                     // the wrong inputs, which is the one failure nothing downstream
-                    // can see. Refuse rather than divide and hope.
-                    if (flat.empty() || flat.size() % inputs.size() != 0)
-                        throw std::runtime_error(
-                            "embedding backend returned " + std::to_string(flat.size()) +
-                            " floats for " + std::to_string(inputs.size()) +
-                            " inputs, which does not divide evenly. Refusing to guess"
-                            " the vector width: a mis-split returns correctly shaped,"
-                            " correctly normed vectors for the wrong inputs.");
-                    const size_t dim = flat.size() / inputs.size();
+                    // can see. openai_compat::embedding_batch_dim() refuses rather
+                    // than dividing and hoping, and openai_compat_test holds it to
+                    // that without a device -- one definition, shared with
+                    // bench-embed, so the two cannot drift.
+                    const size_t dim =
+                        openai_compat::embedding_batch_dim(flat.size(), inputs.size());
                     for (size_t i = 0; i < inputs.size(); ++i) {
                         embedding_data.push_back({
                             {"object", "embedding"},

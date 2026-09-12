@@ -11,6 +11,8 @@
 /// to it without a server, a device or a model.
 #pragma once
 
+#include <cstddef>
+#include <stdexcept>
 #include <string>
 
 #include <utility>
@@ -179,6 +181,28 @@ inline std::string task_names_csv() {
     std::string s;
     for (const auto& kv : task_names()) s += (s.empty() ? "" : ", ") + std::string(kv.first);
     return s;
+}
+
+/// The width of one embedding inside a concatenated batch result.
+///
+/// embed_batch() returns every vector end to end, so the caller has to slice.
+/// The failure that matters is not a crash: a wrong width, or a wrong order,
+/// hands a caller a correctly shaped, correctly normed, deterministic vector
+/// for somebody else's text, and nothing downstream can detect it. So the
+/// width is derived and then CHECKED, and a result that does not divide is
+/// refused rather than rounded.
+inline size_t embedding_batch_dim(size_t flat_size, size_t n_inputs) {
+    if (n_inputs == 0)
+        throw std::runtime_error(
+            "embedding_batch_dim: asked for the vector width of zero inputs");
+    if (flat_size == 0 || flat_size % n_inputs != 0)
+        throw std::runtime_error(
+            "embedding backend returned " + std::to_string(flat_size) +
+            " floats for " + std::to_string(n_inputs) +
+            " inputs, which does not divide evenly. Refusing to guess the"
+            " vector width: a mis-split returns correctly shaped, correctly"
+            " normed vectors for the wrong inputs.");
+    return flat_size / n_inputs;
 }
 
 /// The outcome of reading a request's task prompt.

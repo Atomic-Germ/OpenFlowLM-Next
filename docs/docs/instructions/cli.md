@@ -570,6 +570,51 @@ OFLM prints the results in your terminal and also saves them as a CSV file in th
 ----------------------------------------------------------------------------------------------------
 ```
 
+### Embedding models: `bench-embed`
+
+`bench` is for chat models. Encoders have no first token and no
+prefill/decode split, and their sequence length is fixed by the compiled
+design rather than by the request -- so they get their own command, which
+sweeps **batch size** instead of context length.
+
+```shell
+oflm bench-embed bge-base:en-v1.5
+oflm bench-embed bge-base --max-batch 32 --bench-iterations 5
+oflm bench-embed nomic-embed-text:v1.5 --prompt-name query
+oflm bench-embed bge-base -i utilities/bench-configs/bench-embed-32.json
+```
+
+| flag | meaning |
+|---|---|
+| `--max-batch N` | largest batch swept; it doubles 1, 2, 4 ... N (default 128). Must be a power of two. |
+| `--bench-iterations N` | timed iterations per stage (default 2), after one discarded warm-up. |
+| `--prompt-name NAME` | the task prompt, by its REST name (`query`, `document`, `clustering`, ...). Required for a model that declares prompts, refused for one that does not. |
+| `-i FILE` | a JSON config: `max_batch`, `iterations`, `task`, `texts`. |
+
+Every stage times **two paths over the same texts**: one batched call, and the
+same texts one at a time -- which is what a caller doing one request per text
+gets. `Speedup` is the ratio, and on the NPU-backed encoders it is 5-10x.
+
+```text
+[OFLM]  === Embedding Benchmark Results ===
+
+  Batch |         Batched (s) | Looped (s) |  Speedup |             Texts/s |          Tokens/s
+--------------------------------------------------------------------------------------------------
+      1 |      0.0250 +- 0.0000 |     0.0240 |    0.96x |        40.0 +-  0.1 |        1199 +-   2
+      8 |      0.0296 +- 0.0002 |     0.2019 |    6.82x |       270.3 +-  2.1 |        5779 +-  45
+     64 |      0.2057 +- 0.0037 |     1.5648 |    7.61x |       311.2 +-  5.6 |        6867 +- 123
+    128 |      0.4980 +- 0.0028 |     3.0538 |    6.13x |       257.1 +-  1.4 |        5671 +-  32
+--------------------------------------------------------------------------------------------------
+```
+
+Results also go to `bench_embed_<tag>_<date>[_<cpu>].csv` in the current
+folder, with a `#` provenance header naming the model, the task, the corpus and
+the identity-gate result.
+
+Full methodology, what it refuses and why, and what it does **not** measure:
+[`utilities/bench-configs/README.md`](https://github.com/Atomic-Germ/OpenFlowLM-Next/blob/main/utilities/bench-configs/README.md).
+Measured results for every model: [Benchmarks -> Embeddings](/docs/benchmarks/embeddings_results/).
+
 ---
 
 ## 🗂️ Others

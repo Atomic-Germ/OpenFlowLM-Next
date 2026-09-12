@@ -170,6 +170,24 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 return false; // Exit after showing help
             }
             
+            // bench-embed-only options, refused everywhere else for exactly the
+            // reason the serve-only ones are: a flag that is accepted and then
+            // ignored reads as a flag that took effect. `oflm bench granite:3b
+            // --max-batch 4` used to be accepted in silence.
+            //
+            // This has to sit ABOVE the early exits below. `bench`, `list`,
+            // `version`, `port` and `validate` all return before the serve-only
+            // guards, so a check placed down there would never see them.
+            if (parsed_args.command != "bench-embed") {
+                for (const char* opt : {"max-batch", "prompt-name"}) {
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: --" << opt << " is only supported with"
+                                     " the bench-embed command!" << std::endl;
+                        return false;
+                    }
+                }
+            }
+
             if (parsed_args.command == "version") {
                 return true;
             }

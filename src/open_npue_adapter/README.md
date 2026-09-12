@@ -176,16 +176,16 @@ paths at each batch size and prints the ratio:
 
 | batch | 1 | 4 | 8 | 16 | 32 | 64 | 128 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| all-MiniLM-L6-v2 | 0.87 | 3.28 | 6.42 | 6.42 | 7.88 | **10.00** | 8.47 |
-| bge-base-en-v1.5 | 0.96 | 3.70 | 6.56 | 5.68 | 5.42 | **7.27** | 5.86 |
-| bge-large-en-v1.5 | 0.97 | 3.87 | 5.96 | 4.81 | 4.90 | **6.31** | 5.30 |
-| EmbeddingGemma-300M *(control)* | *0.96* | *1.08* | *0.99* | *0.96* | — | — | — |
+| all-MiniLM-L6-v2 | 0.86 | 3.35 | 6.19 | 6.55 | 8.00 | 9.97 | 8.53 |
+| bge-base-en-v1.5 | 0.96 | 3.83 | 6.82 | 5.82 | 5.84 | 7.61 | 6.13 |
+| bge-large-en-v1.5 | 1.00 | 3.82 | 5.93 | 4.80 | 5.24 | 6.33 | 5.50 |
+| EmbeddingGemma-300M *(control)* | *1.02* | *0.97* | *1.04* | *0.99* | — | — | — |
 
 The last row is what makes the others mean anything: `open_embedding` does not
 override `embed_batch()`, so its two paths are the same loop and its ratio has
-to read ~1.00×. It does, across five batch sizes.
+to read ~1.00×. It reads 0.97—1.04× across five batch sizes.
 
-`bge-base` at batch 16 reads **5.68×** against the 5.8× measured by hand above,
+`bge-base` at batch 16 reads **5.82×** against the 5.8× measured by hand above,
 on a different day and a different binary — which is the check that the tool
 measures what the note claimed.
 
