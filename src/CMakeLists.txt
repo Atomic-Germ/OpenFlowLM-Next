@@ -1182,6 +1182,9 @@ set_tests_properties(oflm_smoke PROPERTIES
 # build machine with no NPU. The smoke test above cannot cover any of this: every
 # defect it guards produces a WELL-FORMED wrong answer, and the server stays up.
 add_executable(openai_compat_test server/openai_compat_test.cpp)
+if(NOT WIN32)
+    target_compile_options(openai_compat_test PRIVATE -mavx -mavx2)
+endif()
 target_include_directories(openai_compat_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
