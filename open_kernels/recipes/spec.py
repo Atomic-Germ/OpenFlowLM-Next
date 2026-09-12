@@ -458,9 +458,9 @@ def _qwen3vl_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
 
 
 def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
-    """Qwen2.5 dense: GQA without q/k norms, full RoPE, silu-gated FFN. Qwen2 puts a bias
-    on q/k/v that the attention GEMVs cannot apply, so `recipes.families` refuses the
-    family; deriving the spec is still worth doing, for arch detection and oflm-add."""
+    """Qwen2.5 dense: GQA without q/k norms, full RoPE, silu-gated FFN. The one thing that
+    sets it apart -- a per-channel bias on q/k/v -- is a family property the dense recipe
+    carries (`dense.QKV_BIAS_FAMILIES`, attn.h's ATTN_QKV_BIAS), not a field here."""
     n = _need(cfg, "num_hidden_layers")
     heads = _need(cfg, "num_attention_heads")
     hidden = _need(cfg, "hidden_size")
@@ -1174,7 +1174,7 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
     "qwen36moe": {**_ATTN_HF, **_LIN_HF, **_MOE_HF},
     "qwen35": {**_ATTN_HF, **_LIN_HF, **_FFN_HF},
 }
-for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3"):
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")

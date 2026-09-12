@@ -689,6 +689,13 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
     kv["POOL_BYTES"] = roundup(end, MB)
 
     ptab_row = max(PTAB_ROW, e_a)
+    if ptab_row != e_a:
+        # ax.py acquires ONE element for the record, as the dense design did until
+        # recipes/dense.py's _ptab_check. A wider record would leave the rest of it in
+        # the stream to be read as q. No MoE geometry reaches this; say so rather than
+        # let the next one find out on hardware.
+        raise OpRangeError(f"qwen36moe: a {ptab_row}-byte position record does not fit one "
+                           f"{e_a}-byte attention element (see recipes/dense.py _ptab_check)")
     band = 128 * hid // CHUNK_VALUES * Q8_CHUNK
     bands = spec.vocab // 128
     kv.update(KV_ROW=kv_row, PTAB_ROW=ptab_row, MAX_CTX=max_ctx, KV_BYTES=max_ctx * kv_row,

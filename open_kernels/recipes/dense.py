@@ -71,6 +71,7 @@ class DenseGeometry:
     N_CORES: int; HID: int; FF: int; NH: int; KVH: int; HD: int; ROT: int; GATE: bool; QKNORM: bool
     QKNORM_POST: bool                                               # the norm weight multiplies after RoPE (HunYuan)
     QKVB: bool                                                      # q/k/v carry a per-channel bias (Qwen2)
+    PTAB_ELEMS: int; PTAB_CS_ELEM: int                              # fifo elements per position record; which one holds cos / sin
     EPS: float; ACT: str; SANDWICH: bool; WINDOW: int
     PER_CALL: int; CALL_BYTES: int                                  # chunks per weight element (1 when the table is wide)
     QW: int; KVW: int
@@ -105,6 +106,31 @@ DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qw
 
 def qkv_bias(spec: ModelSpec) -> bool:
     return spec.family in QKV_BIAS_FAMILIES
+
+
+def _ptab_row(spec: ModelSpec) -> int:
+    """One position record: [pos i32 @0][nf i32 @4][cos f32[ROT/2] @512][sin @512 + 2*ROT].
+    It is streamed to the attention core through the same fifo as q / k / v, so it is at
+    least one element wide -- and, where the element is narrower, a whole number of them."""
+    return max(1024, spec.num_kv_heads * spec.head_dim * 2)
+
+
+def _ptab_check(spec: ModelSpec, e_a: int) -> None:
+    """Every family until Qwen2.5-3B had a record exactly one element wide, so the design
+    read cos / sin at a fixed offset into the one element it acquired. At 2 kv heads and
+    head dim 128 the element is 512 B and the record 1024, which would have desynchronised
+    the whole stream by an element. attn.h's ATTN_PTAB_SPLIT covers the case; these are its
+    limits."""
+    row = _ptab_row(spec)
+    if row % e_a:
+        raise OpRangeError(f"dense: a {row}-byte position record is not a whole number of "
+                           f"{e_a}-byte attention elements")
+    if row // e_a > 2:
+        raise OpRangeError(f"dense: a {row}-byte position record spans {row // e_a} "
+                           f"{e_a}-byte elements; attn.h handles one or two")
+    if 512 // e_a != (512 + 4 * spec.rotary_dim - 1) // e_a:
+        raise OpRangeError(f"dense: cos / sin straddle two {e_a}-byte attention elements "
+                           f"(record offsets 512 to {512 + 4 * spec.rotary_dim})")
 
 
 def lm_rows(spec: ModelSpec) -> int:
@@ -202,6 +228,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     hid, ff, nh, kvh, hd = spec.hidden, spec.intermediate, spec.num_heads, spec.num_kv_heads, spec.head_dim
     qw, kvw = nh * hd, kvh * hd
     e_a = kvw * 2
+    _ptab_check(spec, e_a)
     hpe = e_a // (hd * 4)                     # q/k/v heads (f32) per ain element = KVH/2
     hpo = e_a // (hd * 2)                     # og heads (bf16) per aout element = KVH
     wide = max(hid, qw, ff)
@@ -214,6 +241,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
         QKVB=qkv_bias(spec),
+        PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=512 // e_a,
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
         WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * CHUNK,
         QW=qw, KVW=kvw,
@@ -235,8 +263,9 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     hid, ff = spec.hidden, spec.intermediate
     G = geometry(spec)
     eln, e_a = hid * 2, G.KVW * 2
-    if 2 * G.HD * 2 > e_a or 512 + 4 * spec.rotary_dim > max(1024, e_a):
+    if 2 * G.HD * 2 > e_a or 512 + 4 * spec.rotary_dim > _ptab_row(spec):
         raise OpRangeError("dense: qn | kn or the RoPE record do not fit the attention element")
+    _ptab_check(spec, e_a)
     # consts
     c = {"lnw": 0, "postln": eln, "meta": 2 * eln, "preffn": 2 * eln + e_a, "postffn": 3 * eln + e_a}
     off = (4 * eln + e_a) if spec.sandwich_norms else (2 * eln + e_a)
@@ -270,7 +299,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
         off += role_bytes(spec, role, rows, cols)
     pool_bytes = roundup(off, MB)
     kv_row = 2 * e_a
-    ptab_row = max(1024, e_a)
+    ptab_row = _ptab_row(spec)
     band = band_bytes(hid)
     bands = lm_rows(spec) // BAND_ROWS
     return DenseLayout(

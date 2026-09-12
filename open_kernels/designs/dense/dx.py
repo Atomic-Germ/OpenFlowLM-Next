@@ -140,10 +140,15 @@ if G.RB > 1:                                           # attn.h defaults it to 1
 QKVB = G.QKVB
 if QKVB:                                               # same: only a family that has a bias sees the flag
     ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
+NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position record; which holds cos / sin
+if NPTAB > 1:
+    ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
+N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 
 
@@ -168,7 +173,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                                                                     # [pos, nf, seen, -] + [blocks, remainder] when blocked
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
-    og_ty = np.ndarray[(NHL * G.HD,), np.dtype[bfloat16]]   # one core's own heads
+    og_ty = np.ndarray[(OGH * G.HD,), np.dtype[bfloat16]]   # attn_fin writes kOGH heads at a time
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
     fq = (np.ndarray[(2 * QW,), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
@@ -199,7 +204,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
     f_nr32 = ef("ln_nr32", LN / "ln_nr32.cc", [u8_ln] * 4 + [i32], LN_FLAGS) if G.SANDWICH else None
-    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a, bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
+    pz = [u8_a] if NPTAB > 1 else []                        # the record's second element
+    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a] + pz + [bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
     bz = [u8_ab] if QKVB else []                            # the bias element, when the family has one
     f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a] + bz + [bhd, fcs, fq, i32], ATTN_FLAGS)
     f_k = ef("attn_k", ATTN / "attn_k.cc", [u8_a] + bz + [bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
@@ -218,7 +224,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)      # one output element at a time (8 KB elements at 4096 wide)
-    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2))   # a block is acquired at once
+    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))   # a block is acquired at once
     # Attention over ACORES cores: heads are independent, so each core owns NHL of
     # them and drains its own og element. Separate fifos + separate drains at
     # offsets is the pattern the GEMV cores already use below; a memtile join()
@@ -367,16 +373,17 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             if stop >= 3:
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
 
-    # og elements this core emits. NHL // HPO while a core owns whole og elements (every
-    # family before attention could be split finer), and 1 once it owns fewer heads than
-    # one element holds -- attn.h's kOGH is the same min().
-    N_OG = NHL // min(NHL, G.HPO)
-
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
               f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in=None):
-        e = ain.acquire(2)                                      # [qn | kn], the position record
-        f_meta(e[0], e[1], qn, kn, cs, pb)
-        ain.release(2)
+        # [qn | kn] then the position record, which is NPTAB elements wide: every family
+        # until Qwen2.5-3B had exactly one, and acquiring fewer elements than the fill
+        # delivers would leave the rest to be read as q.
+        e = ain.acquire(1 + NPTAB)
+        if NPTAB > 1:
+            f_meta(e[0], e[1], e[1 + CSE], qn, kn, cs, pb)
+        else:
+            f_meta(e[0], e[1], qn, kn, cs, pb)
+        ain.release(1 + NPTAB)
         for h in range_(G.Q_AIN_ELEMS):
             e = ain.acquire(1)
             if bias_in is None:

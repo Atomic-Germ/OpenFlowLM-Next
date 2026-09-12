@@ -64,6 +64,9 @@
 #ifndef ATTN_QKV_BIAS
 #define ATTN_QKV_BIAS 0      // 1: q/k/v carry a per-channel bias, added before the norm (Qwen2)
 #endif
+#ifndef ATTN_PTAB_SPLIT
+#define ATTN_PTAB_SPLIT 0    // 1: the position record is wider than a fifo element, so cos / sin
+#endif                       // arrive in a second one (Qwen2.5-3B: a 1024 B record, 512 B elements)
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
@@ -94,6 +97,7 @@ static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW
 #else
 #define ATTN_QT float
 #endif
+static constexpr unsigned kEA = kKVH * kHD * 2;   // one fifo element: half a KV cache row
 static constexpr unsigned kHPE = kKVH / 2;    // fp32 heads per element
 static constexpr unsigned kHPO = kKVH;        // bf16 og heads per element
 static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
@@ -161,6 +165,15 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #define ATTN_H0_DECL
 #define ATTN_H0_ARG , h0
 #endif
+// The second half of the position record is an argument only where the record needs one.
+#if ATTN_PTAB_SPLIT
+#define ATTN_PTAB2_PARM , const uint8_t *__restrict m2
+#define ATTN_PTAB2_ARG , m2
+#else
+#define ATTN_PTAB2_PARM
+#define ATTN_PTAB2_ARG
+#endif
+
 // The bias element is a kernel ARGUMENT only for a family that has one, for the same
 // reason h0 is: an unused parameter changes the generated code.
 #if ATTN_QKV_BIAS
@@ -177,14 +190,21 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 static_assert(kNH % kNHL == 0 && kNHL % kOGH == 0,
               "attn.h: the local head count must divide NH and be a whole number of og elements");
 
-static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1,
+static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1 ATTN_PTAB2_PARM,
                                   bfloat16 *__restrict qn, bfloat16 *__restrict kn,
                                   float *__restrict cs, int32_t *__restrict pb) {
   const bfloat16 *q = (const bfloat16 *)m0;
   for (unsigned j = 0; j < kHD; j += kV) aie::store_v(qn + j, aie::load_v<kV>(q + j));
   const bfloat16 *k = (const bfloat16 *)(m0 + kHD * 2);
   for (unsigned j = 0; j < kHD; j += kV) aie::store_v(kn + j, aie::load_v<kV>(k + j));
+  // cos[ROT/2] then sin[ROT/2], one contiguous 4 * ROT block at record offset 512. On a
+  // family whose element is narrower than the record that block sits in a later element,
+  // which the design hands over as m2 (the recipe checks it does not straddle two).
+#if ATTN_PTAB_SPLIT
+  const float *c = (const float *)(m2 + 512 % kEA);
+#else
   const float *c = (const float *)(m1 + 512);
+#endif
   for (unsigned j = 0; j < kRot; j += kV) aie::store_v(cs + j, aie::load_v<kV>(c + j));
   const int32_t *p = (const int32_t *)m1;
   pb[0] = p[0];

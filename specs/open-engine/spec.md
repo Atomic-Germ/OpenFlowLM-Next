@@ -1235,7 +1235,27 @@ element carries `KVH/2` heads as f32 (`E_A` bytes) and the same heads of a bf16 
 half that, so `QW*2 / (E_A/2)` is exactly `Q_AIN_ELEMS` and `KVW*2 / (E_A/2)` is exactly
 `K_AIN_ELEMS`, for any geometry `attn.h` accepts.
 
+Qwen2.5-3B is also the narrowest attention element any dense family has had -- 2 kv heads
+at head dim 128 is 512 bytes -- and two things the design had always got for free stop
+being free there. Both are arithmetic over the spec and shall be checked as such
+(`tests/test_dense_stream.py`), for every dense family, rather than found on hardware:
+
+- The position record is 1024 bytes, so it spans TWO elements, not one. The core shall
+  acquire the whole record and read cos / sin from the element that holds them
+  (`ATTN_PTAB_SPLIT`); acquiring one would leave the other half in the stream to be read
+  as q, and the leftover would still be there when the next layer started.
+- A core emits `NHL / kOGH` output elements of `kOGH = min(NHL, HPO)` heads each, not one
+  element of `NHL` heads. The two agree exactly while a core owns one element's worth of
+  heads, which every shipped dense family does.
+
 **Acceptance criteria (unit):**
+- Every fill into the attention stream -- meta, the position record, q, k, v, a cached KV
+  row -- is a whole number of elements, on every dense family, and the count the core
+  acquires equals the count the fill delivers.
+- Qwen2.5-3B gives `(E_A, PTAB_ROW) == (512, 1024)` and `(PTAB_ELEMS, PTAB_CS_ELEM) ==
+  (2, 1)`; Qwen3-4B gives `(1, 0)`, as every family before it.
+- A record that is not a whole number of elements, one that spans more than two, and one
+  whose cos / sin straddle two are each refused by name.
 - `dense.layout` gives a Qwen2.5-3B spec three consts slots, `CD_QB | CD_KB | CD_VB`, sized
   `QW*2 | KVW*2 | KVW*2` and within `CD_BYTES`; a family without a bias gets `-1` for all
   three, not 0 -- 0 is the input norm's own offset, where a stray read would find a real
@@ -1261,9 +1281,9 @@ half that, so `QW*2 / (E_A/2)` is exactly `Q_AIN_ELEMS` and `KVW*2 / (E_A/2)` is
 4. Then add the tuple to `catalogue.py` and drop the override.
 
 **Status (2026-09-12):** step 1 passes -- every attention translation unit is byte-identical
-across the qwen3, hunyuan, MoE, llama3 and phi3 flag sets. Steps 2-4 are open: no Qwen2.5
-container is installed on this machine, so the tuple is deliberately NOT in the catalogue
-and the recipe refuses the family by name.
+across the qwen3, hunyuan, MoE, llama3 and phi3 flag sets. Steps 2-4 are in progress
+against the OpenFlowLM Qwen2.5-3B-Instruct-NPU2 container, and the tuple stays out of the
+catalogue until they pass.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)

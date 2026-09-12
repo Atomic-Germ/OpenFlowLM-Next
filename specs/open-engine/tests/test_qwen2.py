@@ -98,6 +98,32 @@ def test_the_bias_stream_runs_in_step_with_the_projection_stream():
     assert G.KVW * 2 // (L.E_A // 2) == G.K_AIN_ELEMS
 
 
+def test_the_position_record_is_two_attention_elements_here():
+    """Every dense family before this one had a record exactly one element wide, so the
+    design read cos / sin at a fixed offset into the single element it acquired. Two kv
+    heads at head dim 128 give a 512-byte element and a 1024-byte record; acquiring one
+    would leave the other half in the stream to be read as q."""
+    spec = ModelSpec.from_hf_config(HF_QWEN25_3B)
+    L, G = DR.layout(spec), DR.geometry(spec)
+    assert (L.E_A, L.PTAB_ROW) == (512, 1024)
+    assert (G.PTAB_ELEMS, G.PTAB_CS_ELEM) == (2, 1)
+    from test_qwen3_dense import HF_QWEN3_4B
+    G3 = DR.geometry(ModelSpec.from_hf_config(HF_QWEN3_4B))
+    assert (G3.PTAB_ELEMS, G3.PTAB_CS_ELEM) == (1, 0), "one element, as every family before"
+
+
+def test_a_record_that_does_not_tile_the_element_is_refused():
+    """The limits of attn.h's ATTN_PTAB_SPLIT, named rather than discovered on hardware."""
+    from recipes.catalogue import OpRangeError
+    # 3 kv heads: a 768-byte element, which 1024 is not a multiple of
+    with pytest.raises(OpRangeError, match="whole number of"):
+        DR.geometry(ModelSpec.from_hf_config({**HF_QWEN25_3B, "head_dim": 128,
+                                              "num_key_value_heads": 3}))
+    # 2 kv heads at head dim 64: a 256-byte element, so the record is four of them
+    with pytest.raises(OpRangeError, match="spans 4"):
+        DR.geometry(ModelSpec.from_hf_config({**HF_QWEN25_3B, "head_dim": 64}))
+
+
 def test_the_geometry_is_not_in_the_catalogue_until_hardware_has_run_it():
     """OPEN-OP-RANGE: the kernels exist, the point has not been compared on the NPU, and
     the recipe says so rather than emitting a bundle nobody has checked."""
