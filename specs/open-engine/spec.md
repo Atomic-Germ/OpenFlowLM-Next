@@ -177,7 +177,7 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
 
@@ -203,6 +203,7 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 | Qwen3.5-0.8B (hd 256, gated; `ax`) | 4 x 2, RB 1 | 176 -> 70 ms (6 attention layers of 24) | 200/200, corr min 0.99993 |
 | Qwen2.5-3B (hd 128, q/k/v bias) | 4 x 4, RB 4 | 1605 -> 84 ms/token at 2048 (19.1x) | 143, then a 0.021-logit near-tie |
 | Qwen3.6-35B (hd 256, gated; `ax`), 16-layer prefix | 4 x 4, RB 1 | 217 -> 43 ms part0 (four attention layers) | 85 (100 tokens; corr spread from expert flips) |
+| LFM2-1.2B (hd 64, q/k normed; hybrid) | 4 x 8, RB 4 | 527 -> 35.6 ms/token at 2048 (14.8x) | 250/250, corr min 0.9999413 |
 
 Qwen2.5 (2026-09-12) is the first family whose cores emit more than one og element:
 16 heads over 2 kv heads means `HPO` is 2, so a core owning 4 heads writes them through two
@@ -212,6 +213,24 @@ family at 512 B. Per-token cost across positions 0 / 256 / 1024 / 2048 went 60 /
 of the sweep, against the 2x the requirement allows. Decode over 250 tokens went 5.03 ->
 15.98 tok/s. Re-exporting with the probe unset reproduced the probe build: every instruction
 stream byte-identical, the xclbins differing only in build stamps.
+
+LFM2 (2026-09-13) is the first HYBRID measured, and it is what separates the
+requirement's two halves cleanly. Ten of its sixteen layers are `short_conv`, whose
+state is a fixed 16 KB window rather than a growing cache: the first two layers alone
+cost 2.9 ms at position 0 and 3.1 ms at position 2048, flat as the block's arithmetic
+says they must be. Adding the first attention layer takes the same slice from 4.7 to
+86.6 ms, so one attention layer grows 81.7 ms across the sweep and the six of them
+account for 490 ms of the whole model's 497 ms of growth. The conv layers contribute
+nothing to measure. Per-token cost across positions 0 / 256 / 1024 / 2048 went 29.5 /
+96.5 / 284.8 / 527.1 ms on the slow path and 28.8 / 29.5 / 35.1 / 35.6 ms on the probe
+-- 1.24x from end to end of the sweep. Decode over 250 tokens went 14.29 -> 33.04
+tok/s, 250/250 greedy tokens identical, and over 100 dumped positions the logits agree
+at corr min 0.9999413 with no argmax disagreement anywhere. Re-exporting with the probe
+unset reproduced it: all four instruction streams byte-identical, the xclbins differing
+only in build stamps. Through `oflm serve`, `oflm-test --llm` went from 6.84 and 2.74
+tok/s on the two rounds to 30.9 and 27.8 (`results/20260913_092125/windows/`); that the
+second round no longer costs a quarter of the first is the flatness showing up end to
+end, since it is the round that starts with the first one's answer in context.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
@@ -1836,6 +1855,8 @@ engine through `_shared_select_open_engine` under `OFLM_LFM2_ENGINE`, the
 way every other family with an open path does; `LFM2_5_TK` (the thinking
 variant, which casts its engine to the closed class for checkpoint /
 restore) stays on the closed DLL. Decode through the server ran at 6.8 and
-2.7 tok/s against 18-25 tok/s in the standalone CLI, the same gap Qwen2.5's
-shipped kernels showed; the attention layers are on the slow attention path
-and OPEN-ATTN-CONTEXT's fast geometry has not been tried on this family.
+2.7 tok/s against 18-25 tok/s in the standalone CLI, which is not a server
+overhead but the context position: those CLI runs were at position 25 and the
+server's two rounds averaged 410 and 1180. The six attention layers were still
+on the slow path. LFM2 joined the fast one later the same day and the sweep is
+flat -- OPEN-ATTN-CONTEXT carries the numbers.

@@ -167,7 +167,9 @@ def test_no_shipped_models_hash_moved():
     Adding a member to the `layer_types` tuple cannot: no shipped spec uses it. These are
     the hashes at the commit before the short-conv layer type existed. qwen25-3b joined
     after, when Qwen2.5 was measured onto the fast attention path; its hash is the one the
-    engine logs for the installed container."""
+    engine logs for the installed container, and lfm2-1.2b joined the same way. The lfm2
+    entry is also the one spec here whose own family owns the new layer type, so it is
+    what would catch a `short_conv` change that moved the hash."""
     import pathlib
 
     from recipes.load import load_spec
@@ -182,6 +184,7 @@ def test_no_shipped_models_hash_moved():
         "qwen3-4b.json": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
         "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
         "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
+        "lfm2-1.2b.json": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
