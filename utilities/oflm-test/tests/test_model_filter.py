@@ -18,8 +18,9 @@ from unittest.mock import patch
 # Make sure the package is importable from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from oflm_test.tasks import LLMTask, VisionTask, EmbeddingTask, AudioTask, BaseTestTask
-from oflm_test import resolve_suites
+from oflm_test.tasks import (LLMTask, VisionTask, EmbeddingTask, AudioTask, BaseTestTask,
+                             SuiteResult)
+from oflm_test import resolve_suites, print_summary
 
 # Fake server model list — pretend the server has these three models loaded
 FAKE_SERVER_MODELS = ["gemma3:4b", "qwen3vl-it:4b", "some-llm:7b"]
@@ -121,44 +122,64 @@ class TestEmbeddingModelFilter(unittest.TestCase):
 class TestSuiteExclusivity(unittest.TestCase):
     """The embedding suite must stay exclusive so a full model never loads."""
 
+    CHAT_SUITES = ("llm", "audio", "vision", "tools", "api")
+
     def _args(self, **overrides):
-        defaults = dict(llm=False, embedding=False, audio=False, vision=False, tools=False, all=False)
+        defaults = dict(llm=False, embedding=False, audio=False, vision=False, tools=False,
+                        api=False, all=False)
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
+    def _only_embedding(self):
+        suites = {name: False for name in ("llm", "audio", "vision", "tools", "api")}
+        suites["embedding"] = True
+        return suites
+
     def test_embedding_alone_runs_only_embedding(self):
         suites, note = resolve_suites(self._args(embedding=True))
-        self.assertEqual(suites, {"llm": False, "embedding": True,
-                                  "audio": False, "vision": False, "tools": False})
+        self.assertEqual(suites, self._only_embedding())
         self.assertEqual(note, "")
 
     def test_embedding_plus_llm_runs_only_embedding(self):
         suites, note = resolve_suites(self._args(embedding=True, llm=True))
-        self.assertEqual(suites, {"llm": False, "embedding": True,
-                                  "audio": False, "vision": False, "tools": False})
+        self.assertEqual(suites, self._only_embedding())
         self.assertIn("mutually exclusive", note)
 
+    def test_embedding_plus_api_runs_only_embedding(self):
+        """--api needs a chat model loaded, so it loses to --embedding like the rest."""
+        suites, note = resolve_suites(self._args(embedding=True, api=True))
+        self.assertEqual(suites, self._only_embedding())
+        self.assertIn("mutually exclusive", note)
+        self.assertIn("--api", note)
+
     def test_embedding_plus_any_chat_suite_runs_only_embedding(self):
-        for suite in ("llm", "audio", "vision", "tools"):
+        for suite in self.CHAT_SUITES:
             with self.subTest(suite=suite):
                 kwargs = {"embedding": True, suite: True}
                 suites, _ = resolve_suites(self._args(**kwargs))
                 self.assertTrue(suites["embedding"])
-                for name in ("llm", "audio", "vision", "tools"):
+                for name in self.CHAT_SUITES:
                     self.assertFalse(suites[name])
 
     def test_all_excludes_embedding(self):
         suites, note = resolve_suites(self._args(all=True))
         self.assertEqual(suites["embedding"], False)
-        for name in ("llm", "audio", "vision", "tools"):
+        for name in self.CHAT_SUITES:
             self.assertTrue(suites[name])
         self.assertIn("--all excludes the embedding suite", note)
+
+    def test_api_alone_runs_only_api(self):
+        suites, note = resolve_suites(self._args(api=True))
+        self.assertTrue(suites["api"])
+        for name in ("llm", "embedding", "audio", "vision", "tools"):
+            self.assertFalse(suites[name])
+        self.assertEqual(note, "")
 
     def test_all_plus_embedding_runs_only_embedding(self):
         """--all --embedding is an explicit request for embedding alone."""
         suites, note = resolve_suites(self._args(all=True, embedding=True))
         self.assertEqual(suites["embedding"], True)
-        for name in ("llm", "audio", "vision", "tools"):
+        for name in self.CHAT_SUITES:
             self.assertFalse(suites[name])
         self.assertIn("mutually exclusive", note)
 
@@ -166,6 +187,41 @@ class TestSuiteExclusivity(unittest.TestCase):
         suites, note = resolve_suites(self._args())
         self.assertFalse(any(suites.values()))
         self.assertEqual(note, "")
+
+
+class TestPrintSummary(unittest.TestCase):
+    """The summary is what turns suite verdicts into an exit code.
+
+    The tool used to end with a CSV and no verdict, so a red suite still looked
+    like a successful run.
+    """
+
+    @staticmethod
+    def _result(name, **verdicts):
+        result = SuiteResult(name)
+        result.verdicts.update(verdicts)
+        for verdict, count in verdicts.items():
+            if verdict in ("FAIL", "ERROR"):
+                result.failures.extend([f"{name} check: {verdict}"] * count)
+        return result
+
+    def test_clean_run_reports_no_hard_failures(self):
+        self.assertEqual(print_summary([self._result("api", PASS=9)]), 0)
+
+    def test_fail_and_error_are_both_counted(self):
+        results = [self._result("api", PASS=7, FAIL=2),
+                   self._result("llm", PASS=3, ERROR=1)]
+        self.assertEqual(print_summary(results), 3)
+
+    def test_soft_fail_does_not_fail_the_run(self):
+        self.assertEqual(print_summary([self._result("api", PASS=5, **{"SOFT-FAIL": 4})]), 0)
+
+    def test_soft_fail_alongside_a_fail_adds_nothing(self):
+        results = [self._result("api", FAIL=1, PASS=2, **{"SOFT-FAIL": 3})]
+        self.assertEqual(print_summary(results), 1)
+
+    def test_no_suites_ran(self):
+        self.assertEqual(print_summary([]), 0)
 
 
 class TestArgParsing(unittest.TestCase):

@@ -7,6 +7,8 @@ import json
 import urllib.request
 import urllib.error
 from abc import ABC, abstractmethod
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -20,11 +22,39 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NON_CHAT_MODELS = ("gpt-oss:20b", "gpt-oss-sg:20b", "qwen3.5:4b", "qwen3.5:9b",
                    "medgemma:4b", "medgemma1.5:4b", "translategemma:4b")
 
+# Verdicts that make a run fail. SOFT-FAIL is noted and does not, which is what
+# it already means everywhere else in the suite.
+HARD_VERDICTS = ("FAIL", "ERROR")
+# Verdicts that are not a judgement at all, so they are not counted.
+IGNORED_VERDICTS = ("N/A", "SKIPPED", "SKIP", "")
+
+
+@dataclass
+class SuiteResult:
+    """What one suite decided, so the runner can summarise and set an exit code.
+
+    Without this the tool could only ever report: a FAIL landed in a CSV cell
+    and waited for someone to open the file.
+    """
+    name: str
+    verdicts: Counter = field(default_factory=Counter)
+    failures: list[str] = field(default_factory=list)
+
+    @property
+    def hard_failures(self) -> int:
+        return sum(self.verdicts[v] for v in HARD_VERDICTS)
+
+    @property
+    def total(self) -> int:
+        return sum(self.verdicts.values())
+
+
 class BaseTestTask(ABC):
     """
     Abstract base class for all testing tasks.
     Enforces a standard interface for running tests and saving results.
     """
+    SUITE_NAME = "suite"
     MUSIC_PATTERN = re.compile(
         r"\b(music|melod\w*|song|tune|rhythm|beat|tempo|instrument\w*|drum\w*|bass|synth\w*|vocal\w*|chord\w*|harmo\w*)\b",
         re.IGNORECASE,
@@ -44,6 +74,7 @@ class BaseTestTask(ABC):
             self.models = filtered
         self.results_dir = os.path.join("results", self.timestamp, backend_os)
         os.makedirs(self.results_dir, exist_ok=True)
+        self.result = SuiteResult(self.SUITE_NAME)
 
     # OFLM's OpenAI-compatible API accepts `reasoning_effort` with "low",
     # "medium" or "high" (thinking enabled) and "none" (thinking disabled).
@@ -58,6 +89,58 @@ class BaseTestTask(ABC):
 
     def get_csv_filename(self, task_name: str) -> str:
         return os.path.join(self.results_dir, f"{task_name}_results_v{self.version}.csv")
+
+    def record(self, verdict, where: str):
+        """Tally one check verdict and return it unchanged, so call sites can wrap.
+
+        Accepts either the (verdict, detail) tuple the checks return or a bare
+        string like "PASS" or "ERROR: connection refused".
+        """
+        text = verdict[0] if isinstance(verdict, tuple) else str(verdict)
+        name, _, inline_detail = text.partition(":")
+        name = name.strip().upper()
+        if name in IGNORED_VERDICTS:
+            return verdict
+        self.result.verdicts[name] += 1
+        if name in HARD_VERDICTS:
+            detail = verdict[1] if isinstance(verdict, tuple) else inline_detail.strip()
+            self.result.failures.append(f"{where}: {name}" + (f" ({detail})" if detail else ""))
+        return verdict
+
+    def _post_json(self, path: str, body, timeout: int = 600, raw_body: bytes | None = None):
+        """One raw POST; returns (status, parsed_json_or_None, raw_text).
+
+        Raw rather than through the OpenAI SDK because for the conformance
+        checks the HTTP status *is* the assertion, and the SDK hides it: a 4xx
+        becomes an exception and a 200 carrying an error body becomes a success.
+        """
+        data = raw_body if raw_body is not None else json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(f"{self.base_url}{path}", data=data,
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status, text = response.status, response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            status, text = e.code, e.read().decode("utf-8", "replace")
+        try:
+            return status, json.loads(text), text
+        except json.JSONDecodeError:
+            return status, None, text
+
+    @staticmethod
+    def _error_fields(body) -> tuple[str | None, str | None, str | None]:
+        """(code, type, message) out of an OpenAI-shaped error body.
+
+        A body whose `error` is a bare string is the shape the server produced
+        when its own error handling threw, so it is reported rather than
+        smoothed over: the message comes back and code and type are None.
+        """
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict):
+            return error.get("code"), error.get("type"), error.get("message")
+        if isinstance(error, str):
+            return None, None, error
+        return None, None, None
 
     def _get_oflm_version(self) -> str:
         print("\nChecking oflm version...")
@@ -83,17 +166,31 @@ class BaseTestTask(ABC):
             model_id = []
         return model_id
 
-    def _collect_stream(self, response) -> tuple[str, str]:
-        """Accumulates streamed chunks into (reasoning_content, output_content)."""
+    def _collect_stream_meta(self, response) -> tuple[str, str, str | None, object, str | None]:
+        """Accumulates a stream into (reasoning, content, finish_reason, usage, model).
+
+        A stream that never reports a finish_reason yields None for it, which is
+        itself a finding rather than a missing value to paper over.
+        """
         reasoning_content, output_content = "", ""
+        finish_reason, usage, model = None, None, None
         for chunk in response:
+            usage = getattr(chunk, "usage", None) or usage
+            model = getattr(chunk, "model", None) or model
             if not chunk.choices:
                 continue
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta
             if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                 reasoning_content += delta.reasoning_content
             if delta.content:
                 output_content += delta.content
+        return reasoning_content, output_content, finish_reason, usage, model
+
+    def _collect_stream(self, response) -> tuple[str, str]:
+        """Accumulates streamed chunks into (reasoning_content, output_content)."""
+        reasoning_content, output_content = self._collect_stream_meta(response)[:2]
         return reasoning_content, output_content
 
     @abstractmethod
@@ -103,11 +200,80 @@ class BaseTestTask(ABC):
 
 
 class LLMTask(BaseTestTask):
+    """
+    Tests language models over two-round conversations, streamed and not.
+
+    The checks here are deliberately not about answer quality: they are the
+    things the server owes every client whatever the weights say. An answer
+    that is empty, that reports no finish_reason, that comes back under a
+    different model's name or with usage counts that do not add up is a server
+    defect, and this suite used to write all four to CSV without comment.
+    """
+
+    SUITE_NAME = "llm"
+
+    PROMPT = "Teach me Maxwell's equations."
+    FOLLOWUP_NON_STREAM = "Summarize your answer."
+    FOLLOWUP_STREAM = "Explain why they are important."
+
+    # A code the model is asked to keep, then asked for again. Nothing but the
+    # earlier turn can supply it, so a server that drops history cannot guess it.
+    MEMORY_CODE = "QX-7731-ZB"
+    MEMORY_PROMPT = (f"Remember this reference code exactly: {MEMORY_CODE}. "
+                     f"Reply with just the code and nothing else.")
+    MEMORY_FOLLOWUP = "What was the reference code I gave you? Reply with just the code."
 
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
         super().__init__(base_url, backend_os, model_filter=model_filter)
         self.models = [m for m in self.models if m not in NON_CHAT_MODELS]
         self.csv_filename = self.get_csv_filename("llm")
+
+    @staticmethod
+    def _check_round(requested_model, reported_model, content, finish_reason, usage):
+        """What the server owes a chat client, whatever the model answered."""
+        if not (content or "").strip():
+            return ("FAIL", "empty response")
+        if not finish_reason:
+            return ("FAIL", "response carries no finish_reason, so a client "
+                            "cannot tell a complete answer from a truncated one")
+        if usage is not None:
+            prompt_tokens = getattr(usage, "prompt_tokens", None)
+            completion_tokens = getattr(usage, "completion_tokens", None)
+            total_tokens = getattr(usage, "total_tokens", None)
+            if None in (prompt_tokens, completion_tokens, total_tokens):
+                return ("SOFT-FAIL", f"usage is incomplete: {usage}")
+            if prompt_tokens <= 0 or completion_tokens <= 0:
+                return ("FAIL", f"usage reports {prompt_tokens} prompt and "
+                                f"{completion_tokens} completion tokens")
+            if prompt_tokens + completion_tokens != total_tokens:
+                return ("FAIL", f"usage does not add up: {prompt_tokens} + "
+                                f"{completion_tokens} != {total_tokens}")
+        if reported_model and reported_model != requested_model:
+            return ("SOFT-FAIL", f"requested '{requested_model}', response reports "
+                                 f"'{reported_model}'")
+        if not reported_model:
+            return ("SOFT-FAIL", "response names no model, so a client cannot "
+                                 "confirm which one answered")
+        return ("PASS", f"finish_reason '{finish_reason}', {len(content)} chars")
+
+    def _one_round(self, model_id, messages, stream, max_completion_tokens,
+                   temperature, reasoning_kwargs):
+        """One chat call; returns (reasoning, content, finish_reason, usage, model)."""
+        response = self.client.chat.completions.create(
+            model=model_id,
+            messages=messages,
+            stream=stream,
+            max_completion_tokens=max_completion_tokens,
+            temperature=temperature,
+            **reasoning_kwargs,
+        )
+        if stream:
+            return self._collect_stream_meta(response)
+        choice = response.choices[0]
+        reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
+        return (reasoning_content, choice.message.content or "",
+                getattr(choice, "finish_reason", None), getattr(response, "usage", None),
+                getattr(response, "model", None))
 
     def _run_two_rounds(self, writer, model_id, prompt, followup_prompt, stream, max_completion_tokens,
                         temperature=None, reasoning=None):
@@ -115,82 +281,91 @@ class LLMTask(BaseTestTask):
         mode = "Stream" if stream else "Non-Stream"
         messages = [{"role": "user", "content": prompt}]
 
-        # first round
-        try:
-            print(f"Prompt: {prompt}")
-            response = self.client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                stream=stream,
-                max_completion_tokens=max_completion_tokens,
-                temperature=temperature,
-                **reasoning_kwargs,
-            )
-            if stream:
-                reasoning_content, output_content = self._collect_stream(response)
-            else:
-                reasoning_content = getattr(response.choices[0].message, "reasoning_content", "N/A") or "N/A"
-                output_content = response.choices[0].message.content or ""
-            writer.writerow([model_id, mode, prompt, reasoning_content or "N/A", output_content])
-            print("Done.")
-            time.sleep(1)
-            messages.append({"role": "assistant", "content": output_content})
-            messages.append({"role": "user", "content": followup_prompt})
-        except Exception as e:
-            print(f"Error occurred in first round, model: {model_id}: {e}")
-            writer.writerow([model_id, mode, prompt, f"ERROR: {e}", "N/A"])
+        rounds = (prompt, followup_prompt)
+        for index, round_prompt in enumerate(rounds):
+            try:
+                print(f"Prompt: {round_prompt}")
+                reasoning_content, content, finish_reason, usage, reported = self._one_round(
+                    model_id, messages, stream, max_completion_tokens, temperature, reasoning_kwargs)
+                verdict = self._check_round(model_id, reported, content, finish_reason, usage)
+                self.record(verdict, f"{model_id} / {mode} / {round_prompt[:32]}")
+                writer.writerow([model_id, mode, round_prompt, reasoning_content or "N/A",
+                                 content, finish_reason or "N/A", f"{verdict[0]}: {verdict[1]}"])
+                print(f"Check result: {verdict[0]} ({verdict[1]})")
+                time.sleep(1)
+                if index + 1 < len(rounds):
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": rounds[index + 1]})
+            except Exception as e:
+                print(f"Error occurred in round '{round_prompt[:32]}', model: {model_id}: {e}")
+                self.record(f"ERROR: {e}", f"{model_id} / {mode} / {round_prompt[:32]}")
+                writer.writerow([model_id, mode, round_prompt, f"ERROR: {e}", "N/A", "N/A",
+                                 f"ERROR: {e}"])
+                return
 
-        # second round
+    def _run_memory_probe(self, writer, model_id, max_completion_tokens, temperature, reasoning):
+        """Round two must be able to see round one, or the history never arrived."""
+        reasoning_kwargs = self._reasoning_kwargs(reasoning)
+        messages = [{"role": "user", "content": self.MEMORY_PROMPT}]
         try:
-            print(f"Follow-up Prompt: {followup_prompt}")
-            response = self.client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                stream=stream,
-                max_completion_tokens=max_completion_tokens,
-                temperature=temperature,
-                **reasoning_kwargs,
-            )
-            if stream:
-                reasoning_content, output_content = self._collect_stream(response)
+            _, first, _, _, _ = self._one_round(model_id, messages, False, max_completion_tokens,
+                                                temperature, reasoning_kwargs)
+            messages.append({"role": "assistant", "content": first})
+            messages.append({"role": "user", "content": self.MEMORY_FOLLOWUP})
+            reasoning_content, content, finish_reason, usage, reported = self._one_round(
+                model_id, messages, False, max_completion_tokens, temperature, reasoning_kwargs)
+            round_verdict = self._check_round(model_id, reported, content, finish_reason, usage)
+            if round_verdict[0] == "FAIL":
+                # An empty round two is an empty response, not a model that
+                # forgot: say which one it is.
+                verdict = round_verdict
+            elif self.MEMORY_CODE in (content or ""):
+                verdict = ("PASS", "the earlier turn reached the model")
+            elif self.MEMORY_CODE not in (first or ""):
+                # It never echoed the code in round one, so round two failing to
+                # repeat it says nothing about whether the history was carried.
+                verdict = ("SOFT-FAIL", f"the model never echoed {self.MEMORY_CODE} in round one, "
+                                        f"so the retention check is inconclusive")
             else:
-                reasoning_content = getattr(response.choices[0].message, "reasoning_content", "N/A") or "N/A"
-                output_content = response.choices[0].message.content or ""
-            writer.writerow([model_id, mode, followup_prompt, reasoning_content or "N/A", output_content])
-            print("Done.")
+                verdict = ("FAIL", f"expected {self.MEMORY_CODE} from the earlier turn, "
+                                   f"got '{(content or '')[:80]}'")
+            self.record(verdict, f"{model_id} / Context Retention")
+            writer.writerow([model_id, "Non-Stream", self.MEMORY_FOLLOWUP, reasoning_content or "N/A",
+                             content, finish_reason or "N/A", f"{verdict[0]}: {verdict[1]}"])
+            print(f"Context retention check: {verdict[0]} ({verdict[1]})")
             time.sleep(1)
         except Exception as e:
-            print(f"Error occurred in second round, model: {model_id}: {e}")
-            writer.writerow([model_id, mode, followup_prompt, f"ERROR: {e}", "N/A"])
+            print(f"Error occurred in context retention probe, model: {model_id}: {e}")
+            self.record(f"ERROR: {e}", f"{model_id} / Context Retention")
+            writer.writerow([model_id, "Non-Stream", self.MEMORY_FOLLOWUP, f"ERROR: {e}",
+                             "N/A", "N/A", f"ERROR: {e}"])
 
     def run(self, max_completion_tokens=-1, temperature=0.3, reasoning=None):
-        prompt = "Teach me Maxwell's equations."
-        followup_prompt = "Summarize your answer."
-
-        stream_prompt = "Teach me Maxwell's equations."
-        stream_followup_prompt = "Explain why they are important."
-
         with open(self.csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
             writer = csv.writer(csv_file)
-            writer.writerow(["Model", "Mode", "Input", "Reasoning Content", "Output Content"])
+            writer.writerow(["Model", "Mode", "Input", "Reasoning Content", "Output Content",
+                             "Finish Reason", "Check Result"])
             print("\n=== Starting LLM Tests ===")
             print(f"Models found: {len(self.models)}")
             for model_id in self.models:
-            # for model_id in self.models[2:4]:  # Limit to first 2 models for testing purposes
                 print(f"\n--- Testing LLM model: {model_id} ---")
-                # print("Testing non-stream mode...\n")
-                # self._run_two_rounds(writer, model_id, prompt, followup_prompt, stream=False, max_completion_tokens=max_completion_tokens)
+                print("\nTesting non-stream mode...\n")
+                self._run_two_rounds(writer, model_id, self.PROMPT, self.FOLLOWUP_NON_STREAM,
+                                     stream=False, max_completion_tokens=max_completion_tokens,
+                                     temperature=temperature, reasoning=reasoning)
                 print("\nTesting stream mode...\n")
-                self._run_two_rounds(writer, model_id, stream_prompt, stream_followup_prompt, stream=True,
-                                     max_completion_tokens=max_completion_tokens, temperature=temperature,
-                                     reasoning=reasoning)
+                self._run_two_rounds(writer, model_id, self.PROMPT, self.FOLLOWUP_STREAM,
+                                     stream=True, max_completion_tokens=max_completion_tokens,
+                                     temperature=temperature, reasoning=reasoning)
+                self._run_memory_probe(writer, model_id, max_completion_tokens, temperature, reasoning)
                 print(f"Finished testing model: {model_id}")
         print(f"\nLLM tests complete. Saved to {self.csv_filename}")
+        return self.result
 
 
 class EmbeddingTask(BaseTestTask):
     """
-    Tests OpenAI-compatible text embeddings across seven automated checks:
+    Tests OpenAI-compatible text embeddings across eleven automated checks:
 
       E1 Response Structure      The response is a well-formed embeddings payload
                                  with a non-empty numeric vector.
@@ -224,12 +399,20 @@ E7 Batch Reference
                                  or refuses. The one failure the checks above
                                  cannot see, because a substituted model's
                                  vectors pass every one of them.
+      E10 Task Prompt Honoured   The request's task prompt reaches the model:
+                                 the same text under a query prompt and under a
+                                 document prompt must not embed identically.
+      E11 Unknown Task Prompt    A task prompt the server cannot resolve is
+                                 refused, never quietly replaced with the
+                                 default.
 
     Like the tool-calling suite, each check produces a PASS / SOFT-FAIL / FAIL
     verdict with a detail line, all written to CSV. Unlike the chat-based suites
     there is no streaming mode, temperature or reasoning, and the server is
     assumed to be running with only an embed model loaded (`oflm serve -e 1`).
     """
+
+    SUITE_NAME = "embedding"
 
     EMBED_MODELS = [
         "embed-gemma:300m", "embed-gemma",
@@ -265,6 +448,11 @@ E7 Batch Reference
     REFERENCE_MODELS = {"embed-gemma:300m", "embed-gemma"}
     # A tag no server can have loaded, for E9.
     IMPOSSIBLE_MODEL = "oflm-test-no-such-embedding-model"
+    # REST names for the two task prompts every prompted model has, and a name
+    # no table contains. See task_names() in src/server/openai_compat.hpp.
+    QUERY_PROMPT = "search_query"
+    DOCUMENT_PROMPT = "search_document"
+    IMPOSSIBLE_PROMPT = "not_a_task"
     CHECK_NAMES = [
         "E1 Response Structure",
         "E2 Repeatability",
@@ -275,6 +463,8 @@ E7 Batch Reference
         "E7 Batch Reference Consistency",
         "E8 Reference Agreement",
         "E9 Model Identity",
+        "E10 Task Prompt Honoured",
+        "E11 Unknown Task Prompt",
     ]
 
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
@@ -303,6 +493,24 @@ E7 Batch Reference
     def _embed_response(self, model_id: str, input_text: str | list[str]):
         """One embeddings call; returns the raw response payload."""
         return self.client.embeddings.create(model=model_id, input=input_text)
+
+    def _embed_raw(self, model_id: str, input_text: str, **extra):
+        """One embeddings POST outside the SDK; returns (status, body, text).
+
+        E10 and E11 turn on the status code and the error code, and the SDK
+        shows neither: it raises on a 4xx and accepts a 200 that carries an
+        error body.
+        """
+        return self._post_json("/embeddings", {"model": model_id, "input": input_text, **extra})
+
+    @staticmethod
+    def _raw_vector(body) -> list[float] | None:
+        data = body.get("data") if isinstance(body, dict) else None
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            vector = data[0].get("embedding")
+            if isinstance(vector, list) and vector:
+                return vector
+        return None
 
     def _embed(self, model_id: str, input_text: str) -> list[float]:
         """One embeddings call; returns the first vector."""
@@ -341,10 +549,12 @@ E7 Batch Reference
         try:
             result, vector = check()
             verdict, detail = result if isinstance(result, tuple) else (result, "")
+            self.record(result, f"{model_id} / {check_name}")
             self._write_row(writer, model_id, check_name, input_text, result, vector)
             print(f"  {check_name}: {verdict} ({detail})")
         except Exception as e:
             print(f"  {check_name}: ERROR ({e})")
+            self.record(f"ERROR: {e}", f"{model_id} / {check_name}")
             self._write_row(writer, model_id, check_name, input_text, f"ERROR: {e}")
         time.sleep(1)
 
@@ -600,6 +810,96 @@ E7 Batch Reference
         return ("PASS", f"unknown model refused; '{model_id}' served and "
                         f"reported as itself"), vector
 
+    def _check_task_prompt_honoured(self, model_id: str):
+        """E10: the task prompt in the request reaches the model.
+
+        This server passed task_query unconditionally, so every document was
+        embedded as a query. The vector was correctly shaped, correctly normed
+        and deterministic either way, and E1 through E9 all pass on it -- the
+        only visible difference is against the same text under the other prompt.
+        No oracle vectors needed: the assertion is that the field does
+        something, not that it produces any particular number.
+
+        Two refusals here are deliberate and are SKIPs rather than failures: a
+        model with no task concept (the BERT family) refuses a prompt name
+        outright, and a model whose prompts serve neither query nor document
+        refuses to pick one. Both are the behaviour the fix kept on purpose.
+        """
+        status, body, text = self._embed_raw(model_id, self.SAMPLE_TEXT,
+                                             prompt_name=self.QUERY_PROMPT)
+        if status >= 400:
+            code, _, message = self._error_fields(body)
+            if "no task prompts" in (message or ""):
+                return ("SKIP", f"'{model_id}' has no task prompts and refused one, "
+                                f"which is what it should do"), None
+            if "none of them matches" in (message or ""):
+                return ("SKIP", f"'{model_id}' declares task prompts but none serves "
+                                f"'{self.QUERY_PROMPT}', and it refused rather than picking "
+                                f"one, which is what it should do"), None
+            return ("FAIL", f"'{self.QUERY_PROMPT}' was refused with HTTP {status} "
+                            f"({code}): {(message or text)[:160]}"), None
+        query_vector = self._raw_vector(body)
+        if not query_vector:
+            return ("FAIL", f"HTTP {status} carried no embedding: {text[:160]}"), None
+
+        status, body, text = self._embed_raw(model_id, self.SAMPLE_TEXT,
+                                             prompt_name=self.DOCUMENT_PROMPT)
+        document_vector = self._raw_vector(body)
+        if status >= 400 or not document_vector:
+            return ("FAIL", f"'{self.DOCUMENT_PROMPT}' returned HTTP {status} with no "
+                            f"embedding: {text[:160]}"), query_vector
+
+        across = self._cosine_similarity(query_vector, document_vector)
+        if across >= self.STABILITY_THRESHOLD:
+            return ("FAIL", f"the same text under '{self.QUERY_PROMPT}' and "
+                            f"'{self.DOCUMENT_PROMPT}' embeds to cosine {across:.6f}: the "
+                            f"request's task prompt is being dropped, and every vector "
+                            f"comes back under whichever task the server picked"), query_vector
+
+        repeat_status, repeat_body, repeat_text = self._embed_raw(
+            model_id, self.SAMPLE_TEXT, prompt_name=self.QUERY_PROMPT)
+        repeat_vector = self._raw_vector(repeat_body)
+        if repeat_status >= 400 or not repeat_vector:
+            # Say the draw failed rather than blaming noise for a request that
+            # never came back.
+            return ("SOFT-FAIL", f"the two prompts differ (cosine {across:.6f}), but the repeat "
+                                 f"draw of '{self.QUERY_PROMPT}' returned HTTP {repeat_status} "
+                                 f"with no embedding, so this run cannot rule out noise: "
+                                 f"{repeat_text[:160]}"), query_vector
+        within = self._cosine_similarity(query_vector, repeat_vector)
+        if within < self.STABILITY_THRESHOLD:
+            # The prompts differ, but so do two draws of the same prompt, so the
+            # difference above is not evidence the field was read.
+            return ("SOFT-FAIL", f"the two prompts differ (cosine {across:.6f}) but so do two "
+                                 f"draws of '{self.QUERY_PROMPT}' (cosine {within:.6f}), so "
+                                 f"this run cannot tell the prompt apart from noise"), query_vector
+        return ("PASS", f"'{self.QUERY_PROMPT}' against '{self.DOCUMENT_PROMPT}' measures "
+                        f"cosine {across:.6f}, repeat draws {within:.6f}"), query_vector
+
+    def _check_unknown_task_prompt(self, model_id: str):
+        """E11: a task prompt the server cannot resolve is refused.
+
+        Falling back to the default is the same defect one step quieter: the
+        caller asked for one task, got another, and nothing in the response
+        says so.
+        """
+        status, body, text = self._embed_raw(model_id, self.SAMPLE_TEXT,
+                                             prompt_name=self.IMPOSSIBLE_PROMPT)
+        vector = self._raw_vector(body)
+        if status < 400 and vector:
+            return ("FAIL", f"'{self.IMPOSSIBLE_PROMPT}' was accepted with HTTP {status} and "
+                            f"answered with a {len(vector)}-dim vector under some other task "
+                            f"prompt; nothing downstream can tell"), vector
+        if status < 400:
+            return ("SOFT-FAIL", f"'{self.IMPOSSIBLE_PROMPT}' was refused inside an HTTP "
+                                 f"{status} success envelope rather than by an error "
+                                 f"status: {text[:160]}"), None
+        code, error_type, message = self._error_fields(body)
+        if not code or not error_type:
+            return ("SOFT-FAIL", f"refused with HTTP {status}, but the body is not an "
+                                 f"OpenAI-shaped error: {text[:160]}"), None
+        return ("PASS", f"refused with HTTP {status} {code}"), None
+
     def _reference_draw_rows(self, model_id: str, check_name: str):
         """One CSV row per E7 draw, carrying the full raw vector for diffing."""
         rows = []
@@ -624,7 +924,7 @@ E7 Batch Reference
             print("No embedding models found. Start the server with the embed model "
                   "loaded, e.g. `oflm serve -e 1`.")
             print(f"Embedding tests complete. Saved to {self.csv_filename}")
-            return
+            return self.result
 
         with open(self.csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
             writer = csv.writer(csv_file)
@@ -654,10 +954,19 @@ E7 Batch Reference
                 self._run_check(writer, model_id, self.CHECK_NAMES[8],
                                 self.IMPOSSIBLE_MODEL,
                                 lambda: self._check_model_identity(model_id))
+                self._run_check(writer, model_id, self.CHECK_NAMES[9],
+                                f"{self.QUERY_PROMPT} vs {self.DOCUMENT_PROMPT}",
+                                lambda: self._check_task_prompt_honoured(model_id))
+                self._run_check(writer, model_id, self.CHECK_NAMES[10],
+                                self.IMPOSSIBLE_PROMPT,
+                                lambda: self._check_unknown_task_prompt(model_id))
                 print(f"Finished testing model: {model_id}")
         print(f"\nEmbedding tests complete. Saved to {self.csv_filename}")
+        return self.result
 
 class AudioTask(BaseTestTask):
+    SUITE_NAME = "audio"
+
     AUDIO_MODELS = ["whisper-v3:turbo"]
 
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
@@ -710,6 +1019,7 @@ class AudioTask(BaseTestTask):
                     )
                     reasoning_content, output_content = self._collect_stream(response)
                     music_check = "PASS" if self.MUSIC_PATTERN.search(output_content) else "SOFT-FAIL"
+                    self.record(music_check, f"{model_id} / Music Mention")
                     writer.writerow([model_id, prompt, reasoning_content or "N/A", output_content, music_check])
                     if music_check == "PASS":
                         print("Music mention check: PASS")
@@ -721,6 +1031,7 @@ class AudioTask(BaseTestTask):
                     messages.append({"role": "user", "content": followup_prompt})
                 except Exception as e:
                     print(f"Error occurred in first round, model: {model_id}: {e}")
+                    self.record(f"ERROR: {e}", f"{model_id} / audio round 1")
                     writer.writerow([model_id, prompt, f"ERROR: {e}", "N/A", "ERROR"])
 
                 # second round
@@ -740,11 +1051,14 @@ class AudioTask(BaseTestTask):
                     time.sleep(1)
                 except Exception as e:
                     print(f"Error occurred in second round, model: {model_id}: {e}")
+                    self.record(f"ERROR: {e}", f"{model_id} / audio round 2")
                     writer.writerow([model_id, followup_prompt, f"ERROR: {e}", "N/A", "N/A"])
                 print(f"Finished testing model: {model_id}")
         print(f"Audio tests complete. Saved to {self.csv_filename}")
+        return self.result
 
 class VisionTask(BaseTestTask):
+    SUITE_NAME = "vision"
 
     EXPECTED_TEXT = ("The capital of France is Paris. It is a major global city "
                      "and serves as the nation's center for finance, commerce, "
@@ -816,6 +1130,7 @@ class VisionTask(BaseTestTask):
                     )
                     reasoning_content, output_content = self._collect_stream(response)
                     text_check = "PASS" if self.expected_text_pattern.search(output_content) else "FAIL"
+                    self.record(text_check, f"{model_id} / Text Extraction")
                     if text_check == "PASS":
                         print("Text extraction check: PASS")
                     else:
@@ -830,6 +1145,7 @@ class VisionTask(BaseTestTask):
                     messages.append({"role": "user", "content": followup_prompt})
                 except Exception as e:
                     print(f"Error occurred in first round, model: {model_id}: {e}")
+                    self.record(f"ERROR: {e}", f"{model_id} / vision round 1")
                     writer.writerow([model_id, prompt, f"ERROR: {e}", "N/A", "ERROR", "ERROR", "ERROR"])
 
                 # second round
@@ -848,6 +1164,8 @@ class VisionTask(BaseTestTask):
                     seagull_in_story = "PASS" if self.SEAGULL_PATTERN.search(output_content) else "FAIL"
                     writer.writerow([model_id, followup_prompt, reasoning_content or "N/A", output_content,
                                      "N/A", seagull_in_story, "N/A"])
+                    self.record("PASS" if "PASS" in (seagull_in_story, seagull_in_description)
+                                else "FAIL", f"{model_id} / Seagull Mention")
                     if seagull_in_story == "PASS":
                         print("Seagull check (story): PASS")
                     elif seagull_in_description == "PASS":
@@ -861,6 +1179,7 @@ class VisionTask(BaseTestTask):
                     round2_ok = True
                 except Exception as e:
                     print(f"Error occurred in second round, model: {model_id}: {e}")
+                    self.record(f"ERROR: {e}", f"{model_id} / vision round 2")
                     writer.writerow([model_id, followup_prompt, f"ERROR: {e}", "N/A", "N/A", "ERROR", "N/A"])
 
                 # third round (spectrogram; informational, not a hard failure)
@@ -879,6 +1198,8 @@ class VisionTask(BaseTestTask):
                         music_check = "PASS" if self.MUSIC_PATTERN.search(output_content) else "SOFT-FAIL"
                         writer.writerow([model_id, followup_prompt_music, reasoning_content or "N/A",
                                          output_content, "N/A", "N/A", music_check])
+                        self.record("PASS" if "PASS" in (music_check, music_in_description)
+                                    else "SOFT-FAIL", f"{model_id} / Spectrogram Music")
                         if music_check == "PASS":
                             print("Spectrogram music check: PASS")
                         elif music_in_description == "PASS":
@@ -889,6 +1210,7 @@ class VisionTask(BaseTestTask):
                         time.sleep(1)
                     except Exception as e:
                         print(f"Error occurred in third round, model: {model_id}: {e}")
+                        self.record(f"ERROR: {e}", f"{model_id} / vision round 3")
                         writer.writerow([model_id, followup_prompt_music, f"ERROR: {e}", "N/A",
                                          "N/A", "N/A", "ERROR"])
                 else:
@@ -896,6 +1218,7 @@ class VisionTask(BaseTestTask):
                                      "SKIPPED: second round failed", "N/A", "N/A", "SKIPPED"])
                 print(f"Finished testing model: {model_id}")
         print(f"Vision tests complete. Saved to {self.csv_filename}")
+        return self.result
 
 
 class ToolCallingTask(BaseTestTask):
@@ -921,6 +1244,8 @@ class ToolCallingTask(BaseTestTask):
     Automated checks validate tool names, JSON argument validity/values and,
     for L5, the arithmetic derived from the tool result ($54 total).
     """
+
+    SUITE_NAME = "tools"
 
     TOOLS = [
         {
@@ -1217,6 +1542,7 @@ class ToolCallingTask(BaseTestTask):
     def _write_row(self, writer, model_id, level_name, mode, prompt,
                    reasoning, content, tool_calls, verdict_detail):
         verdict, detail = verdict_detail if isinstance(verdict_detail, tuple) else (verdict_detail, "")
+        self.record(verdict_detail, f"{model_id} / {level_name} / {mode}")
         writer.writerow([model_id, level_name, mode, prompt,
                          reasoning or "N/A", content or "N/A",
                          self._format_tool_calls(tool_calls),
@@ -1393,3 +1719,305 @@ class ToolCallingTask(BaseTestTask):
                                              reasoning=reasoning)
                 print(f"Finished testing model: {model_id}")
         print(f"\nTool calling tests complete. Saved to {self.csv_filename}")
+        return self.result
+
+
+class ApiConformanceTask(BaseTestTask):
+    """
+    Server conformance: what the OpenAI-compatible API owes every client,
+    whatever the weights say.
+
+      A1 Error Status       A refused request comes back with a non-2xx status
+                            and an OpenAI-shaped error body, so the error text
+                            actually reaches the caller.
+      A2 Model Identity     A tag the server cannot load is refused, not
+                            answered by whichever model happens to be loaded.
+      A3 Finish Reason      An answer cut at max_tokens says so, and one that
+                            ended on its own says that.
+      A4 Request Isolation  Settings a request does not carry come from the
+                            model's defaults, not from the previous request.
+      A5 Stream Parity      The two response modes report the same metadata for
+                            the same request.
+
+    Every defect these come from returned a well-formed 200 with a plausible
+    body, which is why the model-quality suites never saw any of them. A1 and A2
+    go through raw HTTP rather than the OpenAI SDK, because there the status code
+    IS the assertion and the SDK hides it: a 4xx becomes an exception and a 200
+    carrying an error body becomes a success.
+    """
+
+    SUITE_NAME = "api"
+
+    # A tag no server can have loaded, for A2.
+    IMPOSSIBLE_MODEL = "oflm-test-no-such-model:0b"
+    # Long enough that eight tokens cannot finish it, so the cut is unambiguous.
+    LONG_PROMPT = ("Write a detailed multi-paragraph history of the transistor, "
+                   "covering the 1947 Bell Labs work and everything after it.")
+    SHORT_PROMPT = "Reply with exactly one word: ok"
+    ISOLATION_PROMPT = "In one short sentence, what is an NPU?"
+    TRUNCATION_LIMIT = 8
+    PARITY_LIMIT = 24
+    ISOLATION_LIMIT = 40
+
+    def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
+        super().__init__(base_url, backend_os, model_filter=model_filter)
+        self.models = [m for m in self.models if m not in NON_CHAT_MODELS]
+        # These checks are about the server, not the weights, so one model
+        # answers them all. Without a --model filter, take the first rather than
+        # making the server swap models on the NPU for no extra coverage.
+        if not model_filter:
+            self.models = self.models[:1]
+        self.csv_filename = self.get_csv_filename("api")
+
+    # -------------------------------------------------------------- helpers
+
+    def _chat_raw(self, body=None, raw_body=None):
+        return self._post_json("/chat/completions", body, raw_body=raw_body)
+
+    def _chat(self, model_id, prompt, stream=False, max_completion_tokens=None,
+              temperature=None, reasoning=None):
+        """One chat call through the SDK; returns (reasoning, content, finish_reason, usage, model)."""
+        kwargs = {}
+        if max_completion_tokens is not None:
+            kwargs["max_completion_tokens"] = max_completion_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        kwargs.update(self._reasoning_kwargs(reasoning))
+        response = self.client.chat.completions.create(
+            model=model_id, messages=[{"role": "user", "content": prompt}], stream=stream, **kwargs)
+        if stream:
+            return self._collect_stream_meta(response)
+        choice = response.choices[0]
+        return (getattr(choice.message, "reasoning_content", "") or "",
+                choice.message.content or "", getattr(choice, "finish_reason", None),
+                getattr(response, "usage", None), getattr(response, "model", None))
+
+    def _write_row(self, writer, model_id, check_name, probe, status, detail, verdict_detail):
+        verdict, verdict_text = verdict_detail
+        writer.writerow([model_id, check_name, probe, status if status is not None else "N/A",
+                         detail, f"{verdict}: {verdict_text}"])
+
+    def _run_probe(self, writer, model_id, check_name, probe, probe_fn):
+        """Runs one (verdict, detail, status, note) producing closure, with error handling."""
+        try:
+            verdict, status, note = probe_fn()
+            self.record(verdict, f"{model_id} / {check_name} / {probe}")
+            self._write_row(writer, model_id, check_name, probe, status, note, verdict)
+            print(f"  {check_name} [{probe}]: {verdict[0]} ({verdict[1]})")
+        except Exception as e:
+            print(f"  {check_name} [{probe}]: ERROR ({e})")
+            self.record(f"ERROR: {e}", f"{model_id} / {check_name} / {probe}")
+            self._write_row(writer, model_id, check_name, probe, None, str(e), ("ERROR", str(e)))
+        time.sleep(1)
+
+    # -------------------------------------------------------------- checks
+
+    def _judge_refusal(self, status, body, text, expected_code=None):
+        """A request that must be refused: was it, and could the client tell?"""
+        code, error_type, message = self._error_fields(body)
+        if status < 400:
+            if message is not None:
+                return ("FAIL", f"answered HTTP {status} with an error in the body, so the "
+                                f"error never reaches a client as an error: "
+                                f"{message[:160]}")
+            return ("FAIL", f"answered HTTP {status} instead of refusing: {text[:160]}")
+        if message is None:
+            return ("SOFT-FAIL", f"refused with HTTP {status}, but the body carries no error "
+                                 f"object a client can read: {text[:160]}")
+        if code is None:
+            return ("SOFT-FAIL", f"refused with HTTP {status}, but the error is a bare string "
+                                 f"rather than an OpenAI error object, so a client cannot read "
+                                 f"a code off it: {message[:160]}")
+        # The type of error.code is deliberately not asserted. It is a string on
+        # the errors the server builds for a client and a number on the outer
+        # catch's 500, and status_for() accepts both; the defect was in the
+        # reader, and what a client can see of it is the status above.
+        if not isinstance(code, (str, int)):
+            return ("SOFT-FAIL", f"refused with HTTP {status}, but error.code is "
+                                 f"{type(code).__name__} {code!r}")
+        if not error_type:
+            return ("SOFT-FAIL", f"refused with HTTP {status} {code}, but the error names no type")
+        if expected_code and code != expected_code:
+            return ("SOFT-FAIL", f"refused with HTTP {status}, but the code is '{code}' rather "
+                                 f"than '{expected_code}'")
+        return ("PASS", f"refused with HTTP {status} {code}")
+
+    def _probe_malformed_json(self, model_id):
+        status, body, text = self._chat_raw(raw_body=b'{"model": "' + model_id.encode() + b'", "mess')
+        return self._judge_refusal(status, body, text), status, text[:200]
+
+    def _probe_no_messages(self, model_id):
+        status, body, text = self._chat_raw({"model": model_id})
+        return self._judge_refusal(status, body, text), status, text[:200]
+
+    def _probe_messages_wrong_type(self, model_id):
+        status, body, text = self._chat_raw({"model": model_id, "messages": "hello"})
+        return self._judge_refusal(status, body, text), status, text[:200]
+
+    def _probe_unknown_model(self, model_id):
+        """A2: the chat half of the embedding suite's E9."""
+        status, body, text = self._chat_raw({
+            "model": self.IMPOSSIBLE_MODEL,
+            "messages": [{"role": "user", "content": self.SHORT_PROMPT}],
+            "max_completion_tokens": self.PARITY_LIMIT})
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if status < 400 and choices:
+            answer = ""
+            try:
+                answer = choices[0]["message"]["content"] or ""
+            except (KeyError, TypeError, IndexError):
+                pass
+            return ("FAIL", f"answered a request for '{self.IMPOSSIBLE_MODEL}', a model it "
+                            f"cannot have loaded, with HTTP {status} and a completion "
+                            f"reported as '{body.get('model')}': '{answer[:80]}'. Some other "
+                            f"model answered under the requested name."), status, text[:200]
+        return self._judge_refusal(status, body, text, expected_code="model_not_found"), status, text[:200]
+
+    def _probe_model_echo(self, model_id):
+        """A2, second half: an accepted request names the model that answered."""
+        status, body, text = self._chat_raw({
+            "model": model_id,
+            "messages": [{"role": "user", "content": self.SHORT_PROMPT}],
+            "max_completion_tokens": self.PARITY_LIMIT})
+        if status >= 400:
+            return ("ERROR", f"HTTP {status}: {text[:160]}"), status, text[:200]
+        reported = body.get("model") if isinstance(body, dict) else None
+        if not reported:
+            return ("SOFT-FAIL", "the response names no model, so a client cannot confirm "
+                                 "which one answered"), status, text[:200]
+        if reported != model_id:
+            return ("SOFT-FAIL", f"requested '{model_id}', response reports "
+                                 f"'{reported}'"), status, text[:200]
+        return ("PASS", f"reported as '{reported}'"), status, ""
+
+    def _probe_truncated(self, model_id, stream):
+        """A3: an answer cut at max_tokens must not claim it finished."""
+        _, content, finish_reason, _, _ = self._chat(
+            model_id, self.LONG_PROMPT, stream=stream,
+            max_completion_tokens=self.TRUNCATION_LIMIT, temperature=0.0)
+        note = f"finish_reason={finish_reason!r}, {len(content)} chars"
+        if finish_reason is None:
+            return ("FAIL", "no finish_reason at all, so a client cannot tell a complete "
+                            "answer from a truncated one"), None, note
+        if finish_reason == "length":
+            return ("PASS", f"reported 'length' at {self.TRUNCATION_LIMIT} tokens"), None, note
+        if finish_reason == "stop":
+            return ("FAIL", f"an answer cut at {self.TRUNCATION_LIMIT} tokens reported 'stop', "
+                            f"which is what a complete answer reports; the cut is invisible "
+                            f"to the caller"), None, note
+        return ("SOFT-FAIL", f"reported '{finish_reason}' rather than 'length'"), None, note
+
+    def _probe_complete(self, model_id, stream):
+        """A3, the other half: a normal answer still reports 'stop'."""
+        _, content, finish_reason, _, _ = self._chat(
+            model_id, self.SHORT_PROMPT, stream=stream, temperature=0.0)
+        note = f"finish_reason={finish_reason!r}, {len(content)} chars"
+        if finish_reason is None:
+            return ("FAIL", "no finish_reason on a complete answer"), None, note
+        if finish_reason == "stop":
+            return ("PASS", "reported 'stop'"), None, note
+        if finish_reason == "length":
+            return ("SOFT-FAIL", "reported 'length' on an unbounded request; the answer may "
+                                 "genuinely have hit the context limit"), None, note
+        return ("SOFT-FAIL", f"reported '{finish_reason}'"), None, note
+
+    def _probe_isolation(self, model_id):
+        """A4: what one request sets must not survive into the next.
+
+        One client asking for reasoning_effort low turned thinking on for
+        everybody else, and the answers stayed plausible throughout.
+        """
+        def probe():
+            reasoning, content, _, _, _ = self._chat(
+                model_id, self.ISOLATION_PROMPT,
+                max_completion_tokens=self.ISOLATION_LIMIT, temperature=0.0)
+            return bool(reasoning.strip()), content
+
+        # Two probes back to back first. Decoding on the NPU is not always
+        # reproducible, and without knowing that up front a difference after the
+        # poisoning request cannot be told from ordinary run-to-run drift.
+        before_thinking, before_text = probe()
+        _, baseline_text = probe()
+        deterministic = before_text == baseline_text
+
+        self._chat(model_id, self.ISOLATION_PROMPT, max_completion_tokens=self.ISOLATION_LIMIT,
+                   temperature=1.0, reasoning="high")
+        after_thinking, after_text = probe()
+
+        note = (f"thinking before={before_thinking} after={after_thinking}; "
+                f"deterministic={deterministic}; identical text={before_text == after_text}")
+        if before_thinking != after_thinking:
+            return ("FAIL", f"a request carrying reasoning_effort 'high' changed what a later "
+                            f"request with no reasoning_effort does: thinking was "
+                            f"{before_thinking} before it and {after_thinking} after"), None, note
+        if deterministic and before_text != after_text:
+            return ("FAIL", "two back-to-back probes answered identically, and the same probe "
+                            "after a request that set temperature 1.0 did not: a setting from "
+                            "that request survived into the next one"), None, note
+        if not deterministic:
+            return ("PASS", "thinking state survived the intervening request unchanged; the "
+                            "text comparison is not usable here, since two back-to-back probes "
+                            "already differ"), None, note
+        return ("PASS", "an intervening request changed nothing for the next one"), None, note
+
+    def _probe_parity(self, model_id):
+        """A5: both response modes describe the same request the same way."""
+        _, non_stream_content, non_stream_reason, _, non_stream_model = self._chat(
+            model_id, self.LONG_PROMPT, stream=False,
+            max_completion_tokens=self.PARITY_LIMIT, temperature=0.0)
+        _, stream_content, stream_reason, _, stream_model = self._chat(
+            model_id, self.LONG_PROMPT, stream=True,
+            max_completion_tokens=self.PARITY_LIMIT, temperature=0.0)
+        note = (f"non-stream finish_reason={non_stream_reason!r} model={non_stream_model!r}; "
+                f"stream finish_reason={stream_reason!r} model={stream_model!r}")
+        if stream_reason is None:
+            return ("FAIL", "the stream never sent a chunk carrying a finish_reason, so a "
+                            "streaming client cannot tell why generation ended"), None, note
+        if non_stream_reason != stream_reason:
+            return ("FAIL", f"the same request reports finish_reason '{non_stream_reason}' "
+                            f"non-streamed and '{stream_reason}' streamed"), None, note
+        if non_stream_model != stream_model:
+            return ("SOFT-FAIL", f"the two modes name different models: "
+                                 f"'{non_stream_model}' and '{stream_model}'"), None, note
+        if not stream_content.strip():
+            return ("FAIL", "the stream produced no content"), None, note
+        return ("PASS", f"both modes report '{stream_reason}' for '{stream_model}'"), None, note
+
+    # -------------------------------------------------------------- runner
+
+    def run(self):
+        print("\n=== Starting API Conformance Tests ===")
+        if not self.models:
+            print("No chat model found. Start the server with a model loaded, e.g. `oflm serve`.")
+            self.record(("ERROR", "no chat model available to test against"), "api suite")
+            return self.result
+
+        with open(self.csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["Model", "Check", "Probe", "HTTP Status", "Detail", "Check Result"])
+            for model_id in self.models:
+                print(f"\n--- API conformance against: {model_id} ---")
+                for probe_name, probe_fn in (
+                        ("malformed JSON", self._probe_malformed_json),
+                        ("no messages field", self._probe_no_messages),
+                        ("messages is not a list", self._probe_messages_wrong_type)):
+                    self._run_probe(writer, model_id, "A1 Error Status", probe_name,
+                                    lambda fn=probe_fn: fn(model_id))
+                self._run_probe(writer, model_id, "A2 Model Identity", self.IMPOSSIBLE_MODEL,
+                                lambda: self._probe_unknown_model(model_id))
+                self._run_probe(writer, model_id, "A2 Model Identity", "reported model",
+                                lambda: self._probe_model_echo(model_id))
+                for mode_label, stream in (("Non-Stream", False), ("Stream", True)):
+                    self._run_probe(writer, model_id, "A3 Finish Reason",
+                                    f"truncated / {mode_label}",
+                                    lambda s=stream: self._probe_truncated(model_id, s))
+                    self._run_probe(writer, model_id, "A3 Finish Reason",
+                                    f"complete / {mode_label}",
+                                    lambda s=stream: self._probe_complete(model_id, s))
+                self._run_probe(writer, model_id, "A4 Request Isolation", "reasoning_effort",
+                                lambda: self._probe_isolation(model_id))
+                self._run_probe(writer, model_id, "A5 Stream Parity", "same request both ways",
+                                lambda: self._probe_parity(model_id))
+                print(f"Finished API conformance for: {model_id}")
+        print(f"\nAPI conformance tests complete. Saved to {self.csv_filename}")
+        return self.result
