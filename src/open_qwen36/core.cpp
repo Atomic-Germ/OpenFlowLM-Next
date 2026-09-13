@@ -64,6 +64,28 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
+    if (image_token_id_ < 0) {
+        // Qwen3-VL-4B-Instruct-NPU2's config.json omits it where Qwen2.5-VL's carries it.
+        // The tokenizer has it though, as an added token, so read it there rather than
+        // hardcode 151655 the way the closed adapter does - a number that is right for
+        // one model and silently wrong for the next.
+        std::ifstream tf(md / "tokenizer.json");
+        if (tf) {
+            auto t = nlohmann::json::parse(tf, nullptr, false);
+            if (t.is_object() && t.contains("added_tokens") && t["added_tokens"].is_array()) {
+                for (const auto& a : t["added_tokens"]) {
+                    if (a.is_object() && a.value("content", std::string()) == "<|image_pad|>") {
+                        image_token_id_ = a.value("id", -1);
+                        if (image_token_id_ >= 0 && cfg_.verbose)
+                            std::fprintf(stderr,
+                                         "open_qwen36: config.json has no image_token_id; <|image_pad|> is %d in "
+                                         "this model's tokenizer\n", image_token_id_);
+                        break;
+                    }
+                }
+            }
+        }
+    }
     // `rope_parameters` is what transformers calls this now; a container converted before
     // the rename carries `rope_scaling` instead, and Qwen2.5-VL's (transformers 4.41) is
     // one of those. Reading only the new name left the engine reporting that a config with
@@ -364,9 +386,13 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
 
 void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
 
-void Core::step_embed(const float* x, bool want_logits, const int64_t mpos[3]) {
+void Core::step_embed(const float* x, bool want_logits, const int64_t mpos[3],
+                      const float* deepstack, int n_deepstack) {
     if (!has_mrope()) throw std::runtime_error("open_qwen36: step_embed on a model without M-RoPE");
-    step_impl(-1, x, want_logits, mpos);
+    if (n_deepstack > nl_)
+        throw std::runtime_error("open_qwen36: " + std::to_string(n_deepstack) +
+                                 " deepstack features but only " + std::to_string(nl_) + " layers are running");
+    step_impl(-1, x, want_logits, mpos, deepstack, n_deepstack);
 }
 
 void Core::mrope_begin() {
@@ -385,7 +411,8 @@ void Core::write_record(size_t row, const double pos[3]) {
     if (row + 1 > ptab_dirty_) ptab_dirty_ = row + 1;
 }
 
-void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos) {
+void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
+                     const float* deepstack, int n_deepstack) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
     if (static_cast<size_t>(pos_) >= cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
@@ -423,6 +450,17 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             } else {
                 route(k, l, s.act_off);
             }
+        }
+        // Qwen3-VL's deepstack: feature l onto this row's residual, after layer l ran.
+        // xres lives on the device, so this is a sync back, a host add and a sync forward
+        // - about 10 KB each way per injected layer per image row, against a vision tower
+        // that costs seconds.
+        if (deepstack && l < n_deepstack) {
+            xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.hidden * 4, 0);
+            float* r = xres.map<float*>();
+            const float* f = deepstack + static_cast<size_t>(l) * man_.hidden;
+            for (size_t i = 0; i < man_.hidden; ++i) r[i] += f[i];
+            xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
         }
     }
     if (want_logits) {

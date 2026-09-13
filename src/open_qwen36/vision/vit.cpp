@@ -687,6 +687,26 @@ VitConfig VitConfig::for_model_dir(const std::string& model_dir) {
     // Qwen2.5-VL's decoder derives as plain qwen2, so the kernel set's family cannot tell
     // the two apart - only the container's own model_type does.
     if (mt == "qwen2_5_vl" || mt == "qwen2_5_vl_text") return qwen25_from_config_text(text);
+    // Qwen3-VL-4B-Instruct-NPU2 ships no vision_config at all, so there is nothing here to
+    // read the tower from - but the weight file determines all of it bar the head count
+    // and the tap indexes. Those two come from config.json, where q4nx-build should be
+    // writing them; until it does, oflm-add can add them at install time. Naming them in
+    // the refusal is the point: a guessed head count gives plausible wrong embeddings.
+    if (!j.contains("vision_config") && j.contains("vision_model_weight")) {
+        const auto v = j.find("vision_heads");
+        const auto d = j.find("vision_deepstack_indexes");
+        if (v == j.end() || d == j.end() || !d->is_array())
+            throw std::runtime_error(
+                "vit: " + model_dir + "/config.json has no vision_config, and this container's weight file "
+                "cannot say how many attention heads its tower has or which blocks its deepstack mergers hang "
+                "off. Add \"vision_heads\" (an integer) and \"vision_deepstack_indexes\" (an array) to "
+                "config.json - for Qwen3-VL-4B they are 16 and [5, 11, 17]. Everything else is read from the "
+                "weight file and checked.");
+        std::vector<int> taps;
+        for (const auto& e : *d) taps.push_back(e.get<int>());
+        return qwen3vl_from_tensors(model_dir + "/" + j.value("vision_model_weight", std::string("vision_weight.q4nx")),
+                                    v->get<int>(), taps);
+    }
     return from_config_text(text);
 }
 

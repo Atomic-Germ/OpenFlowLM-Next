@@ -87,7 +87,14 @@ public:
     /// One step whose input is a hidden vector instead of a token -- an image token's
     /// embedding from the vision tower -- at the M-RoPE position `mpos` = (t, h, w). The
     /// (t, h, w) counter is not advanced; the caller does that per image (mrope_advance).
-    void step_embed(const float* x, bool want_logits, const int64_t mpos[3]);
+    /// One pre-computed row (an image patch) instead of a token id.
+    ///
+    /// `deepstack` is Qwen3-VL's: `n_deepstack` rows of `hidden` floats, feature j being
+    /// added onto the residual AFTER decoder layer j has run - which is where transformers
+    /// puts it, and is not the same as folding feature 0 into the input embedding. nullptr
+    /// for every other VLM.
+    void step_embed(const float* x, bool want_logits, const int64_t mpos[3],
+                    const float* deepstack = nullptr, int n_deepstack = 0);
     const std::vector<float>& logits() const { return logits_host_; }
 
     /// M-RoPE (Qwen3-VL, config.json rope_parameters.mrope_section): once a request has
@@ -212,7 +219,8 @@ private:
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
-    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos);
+    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
+                   const float* deepstack = nullptr, int n_deepstack = 0);
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);
