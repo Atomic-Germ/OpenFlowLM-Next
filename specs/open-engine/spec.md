@@ -1933,6 +1933,27 @@ weighs the two.
 **Acceptance criteria (e2e):**
 - `flm-test --vision --model qwen3.6-moe:35b` (and a Qwen3.5 VL size) passes on the open engine with the answer on the fixed test image matching the closed engine's.
 - A text-only request after an image request answers as before (the position records are restored on `clear_context`).
+- Qwen2.5-VL-3B answers correctly about a decodable image and about that image in a following text-only turn.
+
+**Result 2026-09-13 (Qwen2.5-VL-3B, the windowed tower): PASS.** `oflm serve
+qwen2.5vl-it:3b` loads on the open kernels -- 36 pools resident, the tower in 1.4 s -- and a
+689 x 480 JPEG becomes a 40 x 56 patch grid, 560 tokens, in about 35 s on the host CPU.
+Asked what is in it, the model answers "The image shows a seagull standing on top of a
+lamppost", which is what the photograph shows; a text-only follow-up in the same
+conversation answers "Blue" to a question about the sky, so the image rows and the M-RoPE
+counter carry across the turn as this requirement says they must. The decoder runs on a
+kernel set built for Qwen2.5-3B-Instruct (OPEN-FAMILY-QWEN25VL), and its logits match the
+fp64 reference at corr 0.99999125 and 0.99999362 on the two scored positions, argmax and
+top-5 identical.
+
+Two failures in `oflm-test --vision` are NOT the engine's, and the closed engine was run on
+the same box to say so: it fails all three rounds with a bad allocation while applying the
+chat template and returns nothing, where the open engine answers the first. The suite's
+other two images never reach either engine -- the same reader problem the 2026-09-08 entry
+below records, now pinned: the shipped `avcodec-63.dll` carries mjpeg, webp, bmp, gif and
+tiff decoders and **no png** one, and both remaining test images are PNG. The bad allocation
+is specific to that three-image round; the two-turn case above, with one decodable image,
+passes.
 
 **Result 2026-09-08:** runs end to end through `flm serve` on Qwen3.5-0.8B and
 on the 35B (tower resident in 2.2 s, a 30 x 44-patch image -> 330 tokens in
