@@ -45,9 +45,4 @@ NOT_IMPLEMENTED = {
               "projections carry a bias the dense one does not cover; the MoE FFN has to "
               "compose with sliding-window layers, which no recipe does today; and the "
               "engine needs YaRN position tables. See .claude/plans/gptoss-attention-sinks.md",
-    "lfm2": "ten of its sixteen layers replace attention with a short depthwise causal "
-            "convolution (the short_conv layer type), and no designs/short_conv exists to "
-            "run one. The fp64 reference and the element accounting are in "
-            ".claude/plans/lfm2-short-conv.md; the attention half also needs its geometry "
-            "(64, 32, 8, 64, True, False, False, False) validated in catalogue.py",
 }

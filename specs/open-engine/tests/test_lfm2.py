@@ -214,9 +214,8 @@ def test_a_family_with_no_recipe_still_says_so_by_name():
 
 
 def test_lfm2_is_in_the_implemented_family_list():
-    """It joined when designs/short_conv landed. What still gates it is the catalogue: the
-    conv template's validated set is empty and the attention tuple is unvalidated, so an
-    export needs OPEN_KERNELS_UNVALIDATED=1 until the hardware procedure passes."""
+    """It joined when designs/short_conv landed; the catalogue points followed with the
+    hardware pass on 2026-09-13 (OPEN-SHORT-CONV-KERNEL)."""
     assert "lfm2" in families.FAMILIES
 
 
@@ -234,14 +233,16 @@ def test_the_dense_and_qwen35_recipes_refuse_an_lfm2_spec():
         qwen35.recipe(spec)
 
 
-def test_the_attention_geometry_is_not_in_the_catalogue_yet():
-    """qk_norm at head dim 64 over 32 heads and 8 kv heads has not been run. Llama 3.2 1B's
-    tuple is the same shape WITHOUT the norms, which is exactly the near-miss OPEN-OP-RANGE
-    exists to catch."""
+def test_the_attention_geometry_entered_the_catalogue_as_a_whole_tuple():
+    """qk_norm at head dim 64 over 32 heads and 8 kv heads passed on 2026-09-13. Llama 3.2
+    1B's tuple is the same shape WITHOUT the norms, the near-miss OPEN-OP-RANGE exists to
+    catch, so the tuple is accepted with the norms and a gate on top is still refused."""
     from recipes.catalogue import require
-    with pytest.raises(OpRangeError, match=r"\(64, 32, 8, 64, True, False, False, False\)"):
+    require("attn", head_dim=64, num_heads=32, num_kv_heads=8, rotary_dim=64,
+            rope_theta=1e6, qk_norm=True, attn_gate=False)
+    with pytest.raises(OpRangeError, match=r"\(64, 32, 8, 64, True, True, False, False\)"):
         require("attn", head_dim=64, num_heads=32, num_kv_heads=8, rotary_dim=64,
-                rope_theta=1e6, qk_norm=True, attn_gate=False)
+                rope_theta=1e6, qk_norm=True, attn_gate=True)
 
 
 # ---- the per-role weight format

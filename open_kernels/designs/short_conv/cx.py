@@ -50,7 +50,7 @@ sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes import lfm2 as QR  # noqa: E402
-from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
+from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes, per_band  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
@@ -80,12 +80,8 @@ def bt(total, off, n):
     return TensorAccessPattern((1, total), off, [1, 1, 1, n], [0, 0, 0, 1])
 
 
-def per_band(K):
-    return band_bytes(K) // 5120 // G.PER_CALL
-
-
 def n_groups(K):
-    return band_bytes(K) // (G.PER_CALL * 5120)
+    return band_bytes(K) // G.CALL_BYTES
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

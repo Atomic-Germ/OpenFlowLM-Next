@@ -1723,11 +1723,12 @@ The short-conv block's fused input projection and its output projection take
 the `linear` and `linear_out` quant roles a DeltaNet layer already has, so no
 role is added to `QUANT_ROLES`.
 
-`recipes.families.family_module("lfm2")` shall raise `NotImplementedError`
-naming the missing `designs/short_conv` and the unvalidated attention
-geometry, and `lfm2` shall stay out of `FAMILIES`. Routing the family to the
+`recipes.families.family_module("lfm2")` shall resolve to `recipes/lfm2.py`,
+its own recipe, and `lfm2` shall be in `FAMILIES`. Routing the family to the
 nearest existing recipe would emit kernels that drop the convolution and then
-report parity against a replica making the same mistake.
+report parity against a replica making the same mistake. (Until the design
+landed on 2026-09-12 it raised `NotImplementedError` naming the gap instead;
+that is the standing rule, and `gptoss` is what the table holds now.)
 
 **Acceptance criteria:**
 - `model_type: "lfm2"` with LFM2-1.2B's config gives 16 layers, `full_attention` at 2, 5, 8, 10, 12, 14 and `short_conv` at the other ten; hidden 2048, 32 heads over 8 kv heads at head dim 64, full RoPE, `qk_norm` true, no gate, intermediate 8192, `conv_kernel` 3, eps 1e-5.
@@ -1735,7 +1736,7 @@ report parity against a replica making the same mistake.
 - `conv_dim` or `conv_dim_out` that is not `hidden_size` is refused naming the key; `conv_bias: true` likewise.
 - `block_ff_dim` 12288 gives intermediate 8192, which is what the container's gate / up projections hold; with `block_auto_adjust_ff_dim` false the width is taken as written.
 - Every checked-in spec under `recipes/specs/` hashes to what it hashed before `short_conv` existed, and no key named for the convolution appears in `to_dict()`.
-- `family_module("lfm2")` raises `NotImplementedError` naming `short_conv` and `designs/short_conv`; the dense and qwen35 recipes refuse an lfm2 spec by family.
+- `family_module("lfm2")` is `recipes.lfm2`, and `lfm2` is in `FAMILIES`; the dense and qwen35 recipes refuse an lfm2 spec by family.
 - `quant_map_from_chunk_sizes("lfm2", ...)` maps `shortconv.in_proj` to `linear` and `shortconv.out_proj` to `linear_out`; the installed container, all 4-bit, gives an empty map.
 
 **Container, read 2026-09-12** (`LFM2-1.2B-NPU2/model.q4nx`, 149 tensors): ten
@@ -1786,10 +1787,9 @@ right. About 30-40 s per token.
 **Test category:** manual (the procedure below; needs the NPU, a Linux kernel build and
 the LFM2 container)
 
-NOT IMPLEMENTED YET. The design, the element accounting and the reasoning are
-in `.claude/plans/lfm2-short-conv.md`; this requirement carries the procedure
-that will verify it, so the verification is fixed before the kernel is written
-rather than after.
+The design, the element accounting and the reasoning are in
+`.claude/plans/lfm2-short-conv.md`; this requirement carries the procedure
+that verifies it, written down before the kernel was.
 
 What the engine needs is only data: `manifest.cpp` looks a layer's type up by
 NAME (`layer_types.at(layers[layer])`) and a fixed-size state buffer is already
@@ -1807,4 +1807,35 @@ module.
 
 **Acceptance criteria:**
 - Steps 3 and 4 pass at the bar above, on the container at `LFM2-1.2B-NPU2`.
-- Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.
+- `catalogue.py` holds the attention tuple and the `short_conv` point `(taps 3, width 2048)`, so an LFM2-1.2B export needs no `OPEN_KERNELS_UNVALIDATED`.
+
+**Result 2026-09-13 (LFM2-1.2B-NPU2, Strix): PASS.** The first build ran on the
+NPU and produced noise; the fault was in `cx.py`, not the conv core. It handed
+the GEMV a per-band count divided by the chunks-per-element count (8 instead
+of 16 at hidden 2048), and `gemv_q4_pool_group_rt` derives the table width
+from that argument, so every projection read a 1024-wide activation table and
+B, C and u came out around 1e37. `per_band` now lives in
+`recipes/qwen36moe.py` beside `band_bytes` and `tests/test_lfm2_recipe.py`
+pins the round trip. With that fixed, one token from a zeroed state through
+layer 0 (`--dump-act`) matches the fp64 reference at every stage: `xn`
+0.9999992, B / C / u 0.999999, the conv output `y` 0.999998, `out` 0.999999,
+`res` 0.9999999, `h` and `out2` 0.9999996, and the layer-0 logits 0.9999988
+with the same argmax. Layer 0 alone over positions 0-3 (the conv state
+carrying across tokens): corr 0.999998-0.999999, argmax and top-5 identical
+at every position. Whole model, positions 0-3: corr 0.99995, 0.99999,
+0.99999, 0.99999, argmax and top-5 identical. Greedy decode of the France
+prompt gives `The capital of France is Paris` and the fp64 reference produces
+the same six tokens. The kernel set was then exported cleanly with
+`export_qwen36_kernels.py`, installed by `oflm-add` (which found it by spec
+hash, `sha256:fd500fa0be38`), and `oflm-test --llm --model lfm2:1.2b`
+through `oflm serve` PASSED both rounds with coherent answers
+(`utilities/oflm-test/results/20260913_082356/windows/`): 789 and 746
+tokens, both ending on the model's own stop token. Serving it needed one
+adapter change: `modeling_lfm2.cpp`'s `LFM2` class now selects the open
+engine through `_shared_select_open_engine` under `OFLM_LFM2_ENGINE`, the
+way every other family with an open path does; `LFM2_5_TK` (the thinking
+variant, which casts its engine to the closed class for checkpoint /
+restore) stays on the closed DLL. Decode through the server ran at 6.8 and
+2.7 tok/s against 18-25 tok/s in the standalone CLI, the same gap Qwen2.5's
+shipped kernels showed; the attention layers are on the slow attention path
+and OPEN-ATTN-CONTEXT's fast geometry has not been tried on this family.

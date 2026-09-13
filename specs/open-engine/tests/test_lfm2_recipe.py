@@ -28,10 +28,11 @@ MIB = 1 << 20
 
 
 @pytest.fixture(autouse=True)
-def unvalidated(monkeypatch):
-    """The attention tuple and the short_conv template are both unvalidated until the
-    hardware procedure runs; the recipe refuses without this, which is the point."""
-    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+def validated(monkeypatch):
+    """The attention tuple and the short_conv point entered the catalogue with the 2026-09-13
+    hardware pass, so the recipe must resolve WITHOUT the override - that is what these
+    tests now prove."""
+    monkeypatch.delenv("OPEN_KERNELS_UNVALIDATED", raising=False)
 
 
 def lfm2_config() -> dict:
@@ -161,3 +162,15 @@ def test_a_different_tap_count_is_refused_by_name(spec):
     import dataclasses
     with pytest.raises(OpRangeError, match="conv_kernel"):
         lfm2.layout(dataclasses.replace(spec, conv_kernel=4))
+
+
+def test_the_band_law_the_gemv_is_handed_recovers_the_projection_width(spec):
+    """cx.py passes `per_band(K)` to gemv_q4_gy, and the kernel derives K back from it as
+    256 * per_band / rs (gemv_q4_pool_group_rt). The first LFM2 build divided it by the
+    chunks-per-element count as well, so the kernel read a 1024-wide table for a 2048-wide
+    projection and B, C and u came out around 1e37 (2026-09-13). The law has to round-trip."""
+    from recipes.qwen36moe import CHUNK, PER_CALL, band_bytes, per_band
+    for K in (spec.hidden, spec.intermediate):
+        assert 256 * per_band(K) // 2 == K
+        assert per_band(K) == band_bytes(K) // CHUNK
+        assert per_band(K) != band_bytes(K) // CHUNK // PER_CALL
