@@ -17,8 +17,18 @@ container is involved, so this runs offline on any box with torch.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
+
+REPO = Path(__file__).resolve().parents[3]
+
+
+def _registry_size(model: str, filename: str) -> int:
+    files = json.loads((REPO / "src" / "model_info.json").read_text(encoding="utf-8"))[model]
+    return next(f["size"] for f in files if f.get("path") == filename)
 
 
 def _have_torch() -> bool:
@@ -168,6 +178,92 @@ def test_ignoring_the_windows_does_not_match_transformers():
     corr = np.corrcoef(y_full.ravel().astype(np.float64), y_hf.ravel().astype(np.float64))[0, 1]
     assert corr < 0.9
     assert np.abs(y_full - y_hf).max() > 0.1 * np.abs(y_hf).max()
+
+
+# ---- what the shipped container should weigh
+#
+# The loader's tensor names, shapes and tiling are only guesses until a file is opened, and
+# the cheapest check on them that needs no file is arithmetic: model the container's size
+# and compare it with the registry. The model is calibrated on containers whose sizes are
+# in this repo already, so a wrong model shows up there rather than hiding in the one case
+# nobody can check.
+
+
+@pytest.mark.parametrize("model,fixture", [
+    ("qwen3.5:0.8b", "config_qwen35_0p8b_container.json"),
+    ("qwen3.5:9b", "config_qwen35_9b.json"),
+    ("qwen3.6-moe:35b-a3b", "config_qwen36_35b.json"),
+])
+def test_the_size_model_reproduces_a_shipped_container_exactly(model, fixture):
+    """Three full-attention towers whose geometry and published size are both in the repo."""
+    import replica_vit_qwen25 as V
+    import replica_vit as R
+    cfg = R.vision_config_of(json.loads((Path(__file__).parent / "fixtures" / fixture).read_text()))
+    got = V.safetensors_bytes(V.qwen3vl_container_tensors(dict(cfg, channels=3)))
+    assert got == _registry_size(model, "vision_weight.q4nx")
+
+
+def test_the_size_model_accounts_for_the_qwen2_5_language_container():
+    """The same arithmetic over q4_1 rather than bf16, on the other half of this very
+    model: 20 bytes per 32 weights, the FFN padded to 512. Its weights land on the
+    published size to the byte with only a header left over, so a 52 MB shortfall on the
+    vision half is not this repo misreading the container format.
+
+    The data is asserted exactly; the header is not, because this container lists its
+    tensors in the converter's insertion order rather than sorted, and the order decides
+    how many digits the offsets take."""
+    import replica_vit_qwen25 as V
+    L, H, I, V_, KV, HD = 36, 2048, 11008, 151936, 2, 128
+    pad512 = lambda x: -(-x // 512) * 512  # noqa: E731
+    # one 32 x 256 chunk is 5120 bytes: a bf16 scale and min per 32-block plus the nibbles
+    q4 = lambda n, k: ("I8", [(n // 32) * (k // 256), 5120])  # noqa: E731
+    t = [("model.embed_tokens.weight", "BF16", [V_, H]), ("model.norm.weight", "BF16", [H]),
+         ("lm_head.weight", *q4(V_, H))]
+    for i in range(L):
+        p = f"model.layers.{i}."
+        for n, o in (("q_proj", H), ("k_proj", KV * HD), ("v_proj", KV * HD), ("o_proj", H)):
+            t.append((p + "self_attn." + n + ".weight", *q4(o, H)))
+        for n in ("q_proj", "k_proj", "v_proj"):
+            t.append((p + "self_attn." + n + ".bias", "BF16", [H if n == "q_proj" else KV * HD]))
+        t.append((p + "mlp.gate_proj.weight", *q4(pad512(I), H)))
+        t.append((p + "mlp.up_proj.weight", *q4(pad512(I), H)))
+        t.append((p + "mlp.down_proj.weight", *q4(H, pad512(I))))
+        t += [(p + "input_layernorm.weight", "BF16", [H]), (p + "post_attention_layernorm.weight", "BF16", [H])]
+    assert len(t) == 435
+    assert V.data_bytes(t) == 2586763264
+    header = _registry_size("qwen2.5vl-it:3b", "model.q4nx") - 8 - V.data_bytes(t)
+    assert header % 8 == 0 and 90 * len(t) < header < 130 * len(t)
+
+
+def test_the_vision_container_is_fifty_mebibytes_larger_than_the_tower_needs():
+    """The open question. With the tower transformers describes and the tiling every other
+    container on disk uses, `vision_weights.q4nx` should be 1,377,729,112 bytes and the
+    registry says 1,430,158,096 -- exactly 1600 more vision_mm tiles (50 MiB, the size of
+    one more 5120 x 5120 bf16 matrix) plus 184 bytes of header text.
+
+    Padding cannot explain it: a tiled weight only ever grows by whole 64 x 256 tiles, and
+    52,428,984 is not a multiple of 32,768. Nothing may be loaded from this container until
+    someone reads its header; if this number moves, that reading happened and this test
+    should be replaced by what it found.
+    """
+    import replica_vit_qwen25 as V
+    modelled = V.safetensors_bytes(V.container_tensors(V.QWEN25VL_3B))
+    assert modelled == 1377729112
+    short = _registry_size("qwen2.5vl-it:3b", "vision_weights.q4nx") - modelled
+    assert short == 52428984
+    tile_bytes = V.TILE_N * V.TILE_K * 2
+    assert divmod(short, tile_bytes) == (1600, 184)
+    assert 1600 * tile_bytes == V.QWEN25VL_3B["hidden"] * 4 * V.QWEN25VL_3B["hidden"] * 4 * 2
+
+
+def test_tiling_a_matrix_and_untiling_it_gives_it_back():
+    """Both dims pad up to 256 together, which is what makes a 3420-wide MLP ship as 3584."""
+    import replica_vit_qwen25 as V
+    w = np.random.default_rng(3).standard_normal((140, 300), dtype=np.float32)
+    t = V.tile(w)
+    assert list(t.shape) == V.tiled_shape(140, 300) == [4, 2, 16384]
+    assert np.array_equal(V.untile(t, 140, 300), w)
+    assert list(V.tiled_shape(3420, 1280)) == [56, 5, 16384]
 
 
 @needs_torch

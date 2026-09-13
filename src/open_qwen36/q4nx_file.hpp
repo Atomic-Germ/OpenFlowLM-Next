@@ -66,6 +66,9 @@ public:
     /// I8 tensor (5120 = q4_1, 8704 = q8), 0 when the tensor is not quantized.
     size_t chunk_bytes(const std::string& name) const;
     const std::string& path() const { return path_; }
+    /// How many tensors the header lists, so a loader can say when a container holds more
+    /// than it read rather than silently ignoring the rest.
+    size_t tensor_count() const { return tensors_.size(); }
 
 private:
     std::string path_;

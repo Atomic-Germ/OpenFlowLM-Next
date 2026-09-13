@@ -25,13 +25,20 @@ inline float bf16f(uint16_t u) {
 std::vector<float> f32_of(const Q4nxFile& f, const std::string& name) { return f.bf16(name); }
 
 /// [nt, kt, 64 * 256] bf16 (zero-padded tiles) -> bf16 [out, in], the padding dropped.
+/// An empty bname gives a zero bias, so a bias-less linear needs no special case downstream.
 Linear untile(const Q4nxFile& f, const std::string& wname, const std::string& bname, int out, int in) {
     const TensorMeta& m = f.meta(wname);
     if (m.dtype != "BF16" || m.shape.size() != 3 || m.shape[2] != static_cast<size_t>(kTileN * kTileK))
         throw std::runtime_error("vit: " + wname + " is not a tiled bf16 [nt, kt, 16384] tensor");
     const size_t nt = m.shape[0], kt = m.shape[1];
-    if (nt * kTileN < static_cast<size_t>(out) || kt * kTileK < static_cast<size_t>(in))
-        throw std::runtime_error("vit: " + wname + " tiles do not cover [" + std::to_string(out) + ", " + std::to_string(in) + "]");
+    // exactly the padding the converter applies, not merely enough of it: a tensor with
+    // more tiles than [out, in] needs is a tensor this loader has the wrong shape for
+    const size_t pad = kTileK;   // both dims round up to max(kTileN, kTileK)
+    if (nt != (out + pad - 1) / pad * pad / kTileN || kt != (in + pad - 1) / pad * pad / kTileK)
+        throw std::runtime_error("vit: " + wname + " is [" + std::to_string(nt) + ", " + std::to_string(kt) +
+                                 "] tiles where [" + std::to_string(out) + ", " + std::to_string(in) +
+                                 "] padded to 256 needs [" + std::to_string((out + pad - 1) / pad * pad / kTileN) +
+                                 ", " + std::to_string((in + pad - 1) / pad * pad / kTileK) + "]");
     size_t nbytes = 0;
     const uint16_t* t = reinterpret_cast<const uint16_t*>(f.raw(wname, &nbytes));
     Linear L;
@@ -47,6 +54,10 @@ Linear untile(const Q4nxFile& f, const std::string& wname, const std::string& bn
             std::memcpy(dst + k, t + ((tn * kt + tk) * kTileN + rn) * kTileK, static_cast<size_t>(len) * 2);
         }
     }
+    if (bname.empty()) {
+        L.b.assign(static_cast<size_t>(out), 0.f);
+        return L;
+    }
     L.b = f32_of(f, bname);
     if (L.b.size() != static_cast<size_t>(out)) throw std::runtime_error("vit: " + bname + " has the wrong length");
     return L;
@@ -54,8 +65,10 @@ Linear untile(const Q4nxFile& f, const std::string& wname, const std::string& bn
 
 /// y[n, out] = x[n, in] . W^T + b. Eight output columns at a time: their W rows are
 /// widened to f32 once, then every x row streams past them. Parallel over column blocks.
-void linear(const float* x, int n, const Linear& L, float* y) {
+/// ldy is the output row stride, so q, k and v can be written into one [n, 3H] buffer.
+void linear(const float* x, int n, const Linear& L, float* y, int ldy = 0) {
     const int in = L.in, out = L.out;
+    if (ldy == 0) ldy = out;
     const int nb = (out + 7) / 8;
 #pragma omp parallel
     {
@@ -90,7 +103,7 @@ void linear(const float* x, int n, const Linear& L, float* y) {
                         acc[j] = a;
                     }
                 }
-                float* yr = y + static_cast<size_t>(i) * out + o0;
+                float* yr = y + static_cast<size_t>(i) * ldy + o0;
                 for (int j = 0; j < oc; ++j) yr[j] = acc[j] + L.b[o0 + j];
             }
         }
@@ -112,6 +125,21 @@ void layer_norm(const float* x, int n, int d, const float* w, const float* b, fl
         for (int k = 0; k < d; ++k) yr[k] = (xr[k] - static_cast<float>(mu)) * inv * w[k] + b[k];
     }
 }
+
+/// Qwen2.5-VL's norm: no mean subtraction, no bias, eps fixed at 1e-6 in the module.
+void rms_norm(const float* x, int n, int d, const float* w, float eps, float* y) {
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; ++i) {
+        const float* xr = x + static_cast<size_t>(i) * d;
+        float* yr = y + static_cast<size_t>(i) * d;
+        double ms = 0;
+        for (int k = 0; k < d; ++k) ms += static_cast<double>(xr[k]) * xr[k];
+        const float inv = static_cast<float>(1.0 / std::sqrt(ms / d + eps));
+        for (int k = 0; k < d; ++k) yr[k] = xr[k] * inv * w[k];
+    }
+}
+
+inline float silu(float x) { return x / (1.0f + std::exp(-x)); }
 
 inline float gelu_tanh(float x) {
     const float c = 0.7978845608028654f;  // sqrt(2/pi)
@@ -175,9 +203,13 @@ void rope_tables(const VitConfig& cfg, const std::vector<int>& ph, const std::ve
     }
 }
 
-/// Bidirectional attention over the whole image, one head per task, 32 query rows at a time.
+/// Bidirectional attention inside each [cu[i], cu[i+1]) segment, 32 query rows at a time.
+/// The whole-image tower passes {0, n}; the windowed one passes its window boundaries, so
+/// the work list is (segment, query block) pairs rather than query blocks - a windowed
+/// layer has many short segments and a full layer one long one, and collapsing over heads
+/// x query blocks alone starves on the first.
 void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<float>& cs, const std::vector<float>& sn,
-               float* o) {
+               const std::vector<int>& cu, float* o) {
     const int NH = cfg.heads, HD = cfg.head_dim, H = cfg.hidden, half = HD / 2;
     const size_t row = static_cast<size_t>(3) * H;   // one token's [q | k | v]
     const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
@@ -200,20 +232,30 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
             }
         }
     }
-    const int QB = 32, nqb = (n + QB - 1) / QB;
+    const int QB = 32;
+    struct Work { int seg0, seg_len, q0, qc; };
+    std::vector<Work> work;
+    int longest = 0;
+    for (size_t s = 0; s + 1 < cu.size(); ++s) {
+        const int a = cu[s], len = cu[s + 1] - a;
+        longest = std::max(longest, len);
+        for (int q0 = a; q0 < a + len; q0 += QB) work.push_back({a, len, q0, std::min(QB, a + len - q0)});
+    }
+    const int nw = static_cast<int>(work.size());
 #pragma omp parallel
     {
-        std::vector<float> sc(static_cast<size_t>(QB) * n);
+        std::vector<float> sc(static_cast<size_t>(QB) * longest);
 #pragma omp for schedule(dynamic, 1) collapse(2)
         for (int h = 0; h < NH; ++h)
-            for (int qb = 0; qb < nqb; ++qb) {
-                const int q0 = qb * QB, qc = std::min(QB, n - q0);
-                const float* kh = k.data() + static_cast<size_t>(h) * n * HD;
-                for (int i = 0; i < qc; ++i) {
-                    const float* qr = q.data() + (static_cast<size_t>(h) * n + q0 + i) * HD;
-                    float* sr = sc.data() + static_cast<size_t>(i) * n;
+            for (int wi = 0; wi < nw; ++wi) {
+                const Work& W = work[wi];
+                const int m = W.seg_len;
+                const float* kh = k.data() + (static_cast<size_t>(h) * n + W.seg0) * HD;
+                for (int i = 0; i < W.qc; ++i) {
+                    const float* qr = q.data() + (static_cast<size_t>(h) * n + W.q0 + i) * HD;
+                    float* sr = sc.data() + static_cast<size_t>(i) * m;
                     float mx = -1e30f;
-                    for (int t = 0; t < n; ++t) {
+                    for (int t = 0; t < m; ++t) {
                         const float* kr = kh + static_cast<size_t>(t) * HD;
                         float a = 0;
                         for (int d = 0; d < HD; ++d) a += qr[d] * kr[d];
@@ -222,13 +264,13 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
                         mx = std::max(mx, a);
                     }
                     float sum = 0;
-                    for (int t = 0; t < n; ++t) { sr[t] = std::exp(sr[t] - mx); sum += sr[t]; }
+                    for (int t = 0; t < m; ++t) { sr[t] = std::exp(sr[t] - mx); sum += sr[t]; }
                     const float inv = 1.0f / sum;
-                    float* orow = o + static_cast<size_t>(q0 + i) * H + h * HD;
+                    float* orow = o + static_cast<size_t>(W.q0 + i) * H + h * HD;
                     float acc[128] = {};
-                    for (int t = 0; t < n; ++t) {
+                    for (int t = 0; t < m; ++t) {
                         const float p = sr[t] * inv;
-                        const float* vr = qkv + t * row + 2 * H + h * HD;
+                        const float* vr = qkv + (W.seg0 + t) * row + 2 * H + h * HD;
                         for (int d = 0; d < HD; ++d) acc[d] += p * vr[d];
                     }
                     for (int d = 0; d < HD; ++d) orow[d] = acc[d];
@@ -332,8 +374,110 @@ VitConfig VitConfig::from_config_text(const std::string& config_json) {
     return c;
 }
 
+VitConfig VitConfig::qwen25_from_model_dir(const std::string& model_dir) {
+    std::ifstream f(model_dir + "/config.json");
+    if (!f) throw std::runtime_error("vit: cannot open " + model_dir + "/config.json");
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return qwen25_from_config_text(text);
+}
+
+VitConfig VitConfig::qwen25_from_config_text(const std::string& config_json) {
+    const nlohmann::json j = nlohmann::json::parse(config_json);
+    const auto it = j.find("vision_config");
+    if (it == j.end() || !it->is_object() || it->empty())
+        throw std::runtime_error("vit: config.json has no vision_config, so this container does not say what its "
+                                 "windowed tower looks like");
+    const nlohmann::json& v = *it;
+    if (!v.contains("window_size") || !v.contains("fullatt_block_indexes"))
+        throw std::runtime_error("vit: vision_config has no window_size / fullatt_block_indexes - this reader is "
+                                 "Qwen2.5-VL's windowed tower; the full-attention one is VitConfig::from_config_text");
+    if (!v.contains("depth"))
+        throw std::runtime_error("vit: vision_config has no depth - Qwen2.5-VL's container keeps its source block, so "
+                                 "this reads the plain transformers keys: depth, hidden_size, num_heads, "
+                                 "intermediate_size, out_hidden_size, patch_size, temporal_patch_size, "
+                                 "spatial_merge_size, window_size, fullatt_block_indexes");
+    auto h = [&](const char* k) {
+        if (!v.contains(k)) throw std::runtime_error("vit: vision_config has no " + std::string(k));
+        return v.at(k);
+    };
+    VitConfig c;
+    c.family = VitFamily::Qwen25VL;
+    c.depth = h("depth");
+    c.hidden = h("hidden_size");
+    c.heads = h("num_heads");
+    if (c.heads <= 0 || c.hidden % c.heads)
+        throw std::runtime_error("vit: vision_config hidden_size " + std::to_string(c.hidden) +
+                                 " is not a multiple of num_heads " + std::to_string(c.heads));
+    // Neither head_dim nor an epsilon is a key on this tower: hidden/heads, and RMSNorm's
+    // 1e-6, which transformers hardcodes in the module rather than reading from the config.
+    c.head_dim = c.hidden / c.heads;
+    c.inter = h("intermediate_size");
+    c.out = h("out_hidden_size");
+    c.patch = h("patch_size");
+    c.temporal = h("temporal_patch_size");
+    c.merge = h("spatial_merge_size");
+    c.npos = 0;                       // no learned position table; position is entirely 2-D RoPE
+    c.eps = v.value("rms_norm_eps", 1e-6f);
+    c.channels = v.value("in_channels", v.value("in_chans", 3));
+    c.window = h("window_size");
+    for (const auto& b : v.at("fullatt_block_indexes")) c.fullatt.push_back(b.get<int>());
+    const std::string act = v.value("hidden_act", std::string("silu"));
+    if (act != "silu")
+        throw std::runtime_error("vit: vision_config hidden_act '" + act + "' - this tower's MLP is SwiGLU over SiLU");
+    if (c.window_side() <= 0)
+        throw std::runtime_error("vit: window_size " + std::to_string(c.window) + " is smaller than one merge unit");
+    return c;
+}
+
+static VitWeights load_vit_qwen25(const Q4nxFile& f, const VitConfig& cfg) {
+    const std::string p = "model.visual.";
+    const int H = cfg.hidden, I = cfg.inter, M = cfg.merge * cfg.merge;
+    VitWeights w;
+    {
+        // Conv3d(bias=False), stored flat as the Qwen3-VL one is; untile() is not involved
+        const TensorMeta& m = f.meta(p + "patch_embed.proj.weight");
+        size_t nb = 0;
+        const uint16_t* t = reinterpret_cast<const uint16_t*>(f.raw(p + "patch_embed.proj.weight", &nb));
+        w.patch.out = H;
+        w.patch.in = cfg.patch_dim();
+        if (nb != static_cast<size_t>(H) * w.patch.in * 2 || m.dtype != "BF16")
+            throw std::runtime_error("vit: patch_embed.proj.weight is not bf16 [hidden, C*T*P*P]");
+        w.patch.w.assign(t, t + static_cast<size_t>(H) * w.patch.in);
+        w.patch.b.assign(static_cast<size_t>(H), 0.f);
+    }
+    w.blocks.resize(cfg.depth);
+    for (int i = 0; i < cfg.depth; ++i) {
+        const std::string b = p + std::to_string(i) + ".";   // no "blocks." segment on this family
+        VitBlock& B = w.blocks[i];
+        B.ln1_w = f32_of(f, b + "rmsnorm1.weight");
+        B.ln2_w = f32_of(f, b + "rmsnorm2.weight");
+        B.q = untile(f, b + "attn.q_proj.weight", b + "attn.q_proj.bias", H, H);
+        B.k = untile(f, b + "attn.k_proj.weight", b + "attn.k_proj.bias", H, H);
+        B.v = untile(f, b + "attn.v_proj.weight", b + "attn.v_proj.bias", H, H);
+        B.proj = untile(f, b + "attn.o_proj.weight", b + "attn.o_proj.bias", H, H);
+        B.gate = untile(f, b + "mlp.gate_proj.weight", b + "mlp.gate_proj.bias", I, H);
+        B.up = untile(f, b + "mlp.up_proj.weight", b + "mlp.up_proj.bias", I, H);
+        B.down = untile(f, b + "mlp.down_proj.weight", b + "mlp.down_proj.bias", H, I);
+    }
+    w.merger_ln_w = f32_of(f, p + "merger.ln_q.weight");
+    if (w.merger_ln_w.size() != static_cast<size_t>(H))
+        throw std::runtime_error("vit: merger.ln_q.weight is not [hidden] - it normalises before the 2x2 concat");
+    w.merger_fc1 = untile(f, p + "merger.mlp.0.weight", p + "merger.mlp.0.bias", H * M, H * M);
+    w.merger_fc2 = untile(f, p + "merger.mlp.2.weight", p + "merger.mlp.2.bias", cfg.out, H * M);
+    // The shipped 3B container is 50 MiB larger than this tower accounts for and nobody has
+    // listed its tensors; if the extra is a tensor, say so here rather than run on a tower
+    // that is missing a piece. See .claude/plans/qwen25vl-container-size.md.
+    const size_t want = 6 + 16 * static_cast<size_t>(cfg.depth);
+    if (f.tensor_count() != want)
+        throw std::runtime_error("vit: " + f.path() + " holds " + std::to_string(f.tensor_count()) +
+                                 " tensors where this tower reads " + std::to_string(want) +
+                                 " - list its names before loading it");
+    return w;
+}
+
 VitWeights load_vit(const std::string& path, const VitConfig& cfg) {
     Q4nxFile f(path);
+    if (cfg.family == VitFamily::Qwen25VL) return load_vit_qwen25(f, cfg);
     const std::string p = "model.visual.";
     const int H = cfg.hidden, M = cfg.merge * cfg.merge;
     VitWeights w;
@@ -371,9 +515,10 @@ VitWeights load_vit(const std::string& path, const VitConfig& cfg) {
     return w;
 }
 
-std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
+namespace {
+
+std::vector<float> forward_qwen3vl(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
     const int n = gh * gw, H = cfg.hidden, M = cfg.merge * cfg.merge;
-    if (gh % cfg.merge || gw % cfg.merge) throw std::runtime_error("vit: the grid is not a multiple of the merge size");
     std::vector<int> ph, pw;
     position_ids(gh, gw, cfg.merge, ph, pw);
     std::vector<float> x(static_cast<size_t>(n) * H);
@@ -383,10 +528,11 @@ std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const 
     rope_tables(cfg, ph, pw, cs, sn);
     std::vector<float> hn(x.size()), qkv(static_cast<size_t>(n) * 3 * H), att(x.size()), tmp(x.size());
     std::vector<float> ff(static_cast<size_t>(n) * cfg.inter);
+    const std::vector<int> whole = {0, n};
     for (const VitBlock& B : w.blocks) {
         layer_norm(x.data(), n, H, B.ln1_w.data(), B.ln1_b.data(), cfg.eps, hn.data());
         linear(hn.data(), n, B.qkv, qkv.data());
-        attention(cfg, qkv.data(), n, cs, sn, att.data());
+        attention(cfg, qkv.data(), n, cs, sn, whole, att.data());
         linear(att.data(), n, B.proj, tmp.data());
         for (size_t i = 0; i < x.size(); ++i) x[i] += tmp[i];
         layer_norm(x.data(), n, H, B.ln2_w.data(), B.ln2_b.data(), cfg.eps, hn.data());
@@ -405,6 +551,104 @@ std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const 
     for (int i = 0; i < static_cast<int>(mid.size()); ++i) mid[i] = gelu_erf(mid[i]);
     linear(mid.data(), nm, w.merger_fc2, y.data());
     return y;
+}
+
+/// Qwen2.5-VL. The tokens run the whole stack in window order and come back at the end.
+std::vector<float> forward_qwen25(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
+    const int n = gh * gw, H = cfg.hidden;
+    const int unit = cfg.merge * cfg.merge, nm = n / unit;
+    std::vector<int> idx, cu_win;
+    window_index(cfg, gh, gw, idx, cu_win);
+    // the permutation acts on whole merge units, so widen it to the tokens inside them
+    std::vector<int> tok(static_cast<size_t>(n));
+    for (size_t j = 0; j < idx.size(); ++j)
+        for (int u = 0; u < unit; ++u) tok[j * unit + u] = idx[j] * unit + u;
+
+    std::vector<float> x0(static_cast<size_t>(n) * H), x(x0.size());
+    linear(pixels, n, w.patch, x0.data());
+    for (int i = 0; i < n; ++i)
+        std::memcpy(x.data() + static_cast<size_t>(i) * H, x0.data() + static_cast<size_t>(tok[i]) * H, sizeof(float) * H);
+
+    std::vector<int> ph, pw, ph_p(n), pw_p(n);
+    position_ids(gh, gw, cfg.merge, ph, pw);
+    for (int i = 0; i < n; ++i) { ph_p[i] = ph[tok[i]]; pw_p[i] = pw[tok[i]]; }
+    std::vector<float> cs, sn;
+    rope_tables(cfg, ph_p, pw_p, cs, sn);
+
+    const std::vector<int> whole = {0, n};
+    std::vector<char> is_full(w.blocks.size(), 0);
+    for (int b : cfg.fullatt)
+        if (b >= 0 && b < static_cast<int>(is_full.size())) is_full[b] = 1;
+
+    std::vector<float> hn(x.size()), qkv(static_cast<size_t>(n) * 3 * H), att(x.size()), tmp(x.size());
+    std::vector<float> g(static_cast<size_t>(n) * cfg.inter), up(g.size());
+    for (size_t i = 0; i < w.blocks.size(); ++i) {
+        const VitBlock& B = w.blocks[i];
+        rms_norm(x.data(), n, H, B.ln1_w.data(), cfg.eps, hn.data());
+        linear(hn.data(), n, B.q, qkv.data(), 3 * H);
+        linear(hn.data(), n, B.k, qkv.data() + H, 3 * H);
+        linear(hn.data(), n, B.v, qkv.data() + 2 * H, 3 * H);
+        attention(cfg, qkv.data(), n, cs, sn, is_full[i] ? whole : cu_win, att.data());
+        linear(att.data(), n, B.proj, tmp.data());
+        for (size_t t = 0; t < x.size(); ++t) x[t] += tmp[t];
+        rms_norm(x.data(), n, H, B.ln2_w.data(), cfg.eps, hn.data());
+        linear(hn.data(), n, B.gate, g.data());
+        linear(hn.data(), n, B.up, up.data());
+#pragma omp parallel for schedule(static)
+        for (int t = 0; t < static_cast<int>(g.size()); ++t) g[t] = silu(g[t]) * up[t];
+        linear(g.data(), n, B.down, tmp.data());
+        for (size_t t = 0; t < x.size(); ++t) x[t] += tmp[t];
+    }
+    rms_norm(x.data(), n, H, w.merger_ln_w.data(), cfg.eps, hn.data());
+    std::vector<float> mid(static_cast<size_t>(nm) * H * unit), y(static_cast<size_t>(nm) * cfg.out);
+    linear(hn.data(), nm, w.merger_fc1, mid.data());
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < static_cast<int>(mid.size()); ++i) mid[i] = gelu_erf(mid[i]);
+    linear(mid.data(), nm, w.merger_fc2, y.data());
+    // and back to the processor's row order
+    std::vector<float> out(y.size());
+    for (int j = 0; j < nm; ++j)
+        std::memcpy(out.data() + static_cast<size_t>(idx[j]) * cfg.out, y.data() + static_cast<size_t>(j) * cfg.out,
+                    sizeof(float) * cfg.out);
+    return out;
+}
+
+}  // namespace
+
+void window_index(const VitConfig& cfg, int gh, int gw, std::vector<int>& index, std::vector<int>& cu) {
+    const int merge = cfg.merge, side = cfg.window_side();
+    if (side <= 0)
+        throw std::runtime_error("vit: window_size " + std::to_string(cfg.window) + " is smaller than one merge unit");
+    const int lh = gh / merge, lw = gw / merge;
+    // transformers does NOT modulo this, so a grid that already divides grows a whole extra
+    // row and column of windows. They hold no units and collapse out of cu below.
+    const int nwh = (lh + side - lh % side) / side, nww = (lw + side - lw % side) / side;
+    index.clear();
+    index.reserve(static_cast<size_t>(lh) * lw);
+    cu.assign(1, 0);
+    int seen = 0;
+    for (int wh = 0; wh < nwh; ++wh)
+        for (int ww = 0; ww < nww; ++ww) {
+            for (int i = 0; i < side; ++i) {
+                const int r = wh * side + i;
+                if (r >= lh) break;
+                for (int j = 0; j < side; ++j) {
+                    const int c = ww * side + j;
+                    if (c >= lw) break;
+                    index.push_back(r * lw + c);
+                    ++seen;
+                }
+            }
+            const int boundary = seen * merge * merge;
+            if (boundary != cu.back()) cu.push_back(boundary);
+        }
+}
+
+std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
+    if (gh % cfg.merge || gw % cfg.merge) throw std::runtime_error("vit: the grid is not a multiple of the merge size");
+    if (cfg.head_dim > 128) throw std::runtime_error("vit: head_dim > 128 does not fit the attention accumulator");
+    return cfg.family == VitFamily::Qwen25VL ? forward_qwen25(cfg, w, pixels, gh, gw)
+                                             : forward_qwen3vl(cfg, w, pixels, gh, gw);
 }
 
 }  // namespace open_qwen36::vision
