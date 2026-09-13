@@ -349,4 +349,33 @@ inline std::vector<std::string> stream_error_frames(StreamWire wire, const std::
     return {body.dump(-1, ' ', false, json::error_handler_t::replace) + "\n"};
 }
 
+/// The JSON type a required request field must have.
+enum class FieldType { String, Array };
+
+/// Check a required field BEFORE a handler reads it.
+///
+/// `request["x"]` on a const json without the key is undefined behaviour, and on
+/// this build it segfaults: `POST {}` took the server down on /api/show,
+/// /api/generate and /v1/completions (#70). Returns an empty json when the field
+/// is present with the right type, otherwise the 400 body to send.
+inline json require_field(const json& request, const char* field, FieldType type) {
+    const char* want = type == FieldType::String ? "a string" : "an array";
+    if (!request.is_object())
+        return json{{"error", {
+            {"message", "the request body must be a JSON object."},
+            {"type", "invalid_request_error"}, {"param", ""}, {"code", "invalid_value"}}}};
+    if (!request.contains(field))
+        return json{{"error", {
+            {"message", std::string(field) + " is required and must be " + want + "."},
+            {"type", "invalid_request_error"}, {"param", field},
+            {"code", "missing_required_parameter"}}}};
+    const json& v = request[field];
+    const bool right = type == FieldType::String ? v.is_string() : v.is_array();
+    if (!right)
+        return json{{"error", {
+            {"message", std::string(field) + " must be " + want + "."},
+            {"type", "invalid_request_error"}, {"param", field}, {"code", "invalid_value"}}}};
+    return json();
+}
+
 }  // namespace openai_compat

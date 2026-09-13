@@ -719,15 +719,10 @@ void RestHandler::handle_show(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response) {
     try {
-        // Checked before reading: `request["model"]` on a const json without
-        // the key is undefined behaviour, and POST /api/show {} killed the server.
-        if (!request.is_object() || !request.contains("model") ||
-            !request["model"].is_string()) {
-            send_response(json{{"error", {
-                {"message", "model is required and must be a string."},
-                {"type", "invalid_request_error"},
-                {"param", "model"},
-                {"code", "invalid_value"}}}});
+        // Checked before reading: POST /api/show {} killed the server (#70).
+        if (json err = openai_compat::require_field(request, "model", openai_compat::FieldType::String);
+            !err.is_null()) {
+            send_response(err);
             return;
         }
         std::string model = request["model"].get<std::string>();
@@ -773,7 +768,13 @@ void RestHandler::handle_generate(const json& request,
         openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data, is_final); });
         };
     try {
-        std::string prompt = request["prompt"];
+        // Checked before reading: POST /api/generate {} killed the server (#70).
+        if (json err = openai_compat::require_field(request, "prompt", openai_compat::FieldType::String);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
+        std::string prompt = request["prompt"].get<std::string>();
         bool stream = request.value("stream", true);
         std::string model = request.value("model", current_model_tag);
         json options = request.value("options", json::object());
@@ -899,6 +900,12 @@ void RestHandler::handle_chat(const json& request,
                              StreamResponseCallback send_streaming_response,
                              std::shared_ptr<CancellationToken> cancellation_token) {
     try {
+        // Checked before reading, like the other handlers (#70).
+        if (json err = openai_compat::require_field(request, "messages", openai_compat::FieldType::Array);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
         nlohmann::ordered_json messages = request["messages"];
         bool stream = request.value("stream", false);
         std::string model = request.value("model", current_model_tag);
@@ -1073,6 +1080,17 @@ void RestHandler::handle_embeddings(const json& request,
                 return;
             }
             model = request["model"].get<std::string>();
+            // specs/server-api: an explicit "" is refused, as on the chat
+            // endpoints; only an omitted field means "whatever is loaded".
+            if (model.empty()) {
+                send_response(json{{"error", {
+                    {"message", "model is empty. Name the loaded embedding model, or "
+                                "omit the field to use it."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "model_not_found"}}}});
+                return;
+            }
         }
 
         // THE `model` FIELD USED TO BE ECHOED AND OTHERWISE IGNORED, which is
@@ -1510,6 +1528,12 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data_json, is_final); });
         };
     try {
+        // Checked before reading, like the other handlers (#70).
+        if (json err = openai_compat::require_field(request, "messages", openai_compat::FieldType::Array);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
         // Extract OpenAI-style parameters
         json current_messages = request["messages"];
         std::string model = request.value("model", current_model_tag);
@@ -1721,15 +1745,11 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                                         StreamResponseCallback send_streaming_response,
                                         std::shared_ptr<CancellationToken> cancellation_token) {
     try {
-        // Checked before reading, for the same reason as handle_show.
+        // Checked before reading (#70).
         for (const char* field : {"model", "file"}) {
-            if (!request.is_object() || !request.contains(field) ||
-                !request[field].is_string()) {
-                send_response(json{{"error", {
-                    {"message", std::string(field) + " is required and must be a string."},
-                    {"type", "invalid_request_error"},
-                    {"param", field},
-                    {"code", "invalid_value"}}}});
+            if (json err = openai_compat::require_field(request, field, openai_compat::FieldType::String);
+                !err.is_null()) {
+                send_response(err);
                 return;
             }
         }
@@ -1810,8 +1830,14 @@ void RestHandler::handle_openai_completion(const json& request,
         openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data_json, is_final); });
         };
     try {
+        // Checked before reading: POST /v1/completions {} killed the server (#70).
+        if (json err = openai_compat::require_field(request, "prompt", openai_compat::FieldType::String);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
         // Extract OpenAI-style parameters
-        std::string prompt = request["prompt"];
+        std::string prompt = request["prompt"].get<std::string>();
         std::string model = request.value("model", current_model_tag);
         std::string reasoning_effort = request.value("reasoning_effort", "medium");
         bool stream = request.value("stream", false);
