@@ -1373,6 +1373,22 @@ being free there. Both are arithmetic over the spec and shall be checked as such
 **Result 2026-09-12 (Qwen2.5-3B-Instruct-NPU2):** passes, and admits the attention tuple
 `(128, 16, 2, 128, False, False, False, True)` and `gemv_q4` K 11264 to the catalogue.
 
+Step 3 ran the same day and PASSES: `oflm-test --llm --model qwen2.5-it:3b` through
+`oflm serve` on the rebuilt engine returns coherent on-topic answers in both stream
+rounds, 3862 and 3595 characters, the follow-up round reusing the prompt cache.
+
+One caveat that has to travel with that result. The first attempt at the same two
+rounds died on the follow-up: the cache-reusing prefill of 16 tokens completed, the
+first decode step after it did not, and `Engine::guarded` poisoned the engine and
+rebuilt it (`core.cpp`'s per-dispatch wait, 60 s, `OFLM_OPEN_TIMEOUT_MS`). It has not
+happened since -- the passing run above plus two non-streamed two-turn repros at 120
+and 704 tokens of first-turn context. So it is intermittent, once in four, and NOT
+understood. Decode here runs 2.5 tok/s falling as the context grows, because Qwen2.5 is
+still on the slow attention path (OPEN-ATTN-CONTEXT), which puts a single dispatch far
+closer to the timeout than any measured family. Measuring this family onto the fast path
+is the first thing to try; if the failure survives that, it is a real defect and the 60 s
+wait is hiding it rather than causing it.
+
 Step 1: 44 attention translation units, built for the qwen3, hunyuan, MoE, llama3 and phi3
 flag sets from the tree before and after, every one byte-identical.
 
