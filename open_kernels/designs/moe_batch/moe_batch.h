@@ -19,10 +19,19 @@
 static constexpr unsigned MB_CHUNK = 5120;
 static constexpr unsigned MB_NIB = 1024;      // nibbles start; d bf16[256] at 0, m at 512
 
-// eight copies of an 8-lane pattern: the scale for a B block's 64 lanes (k-major, row fast)
-static inline aie::vector<bfloat16, 64> mb_rep8(const aie::vector<bfloat16, 8> &v) {
-  const aie::vector<bfloat16, 32> q = aie::concat(v, v, v, v);
-  return aie::concat(q, q);
+// One parity's row scales from the 16 of a (32-k block, 16-row) group, laid out as a B
+// operand: lane k * 8 + r is row 2r's scale (2r + 1 for ODD). Built by halving a 512-bit
+// register and doubling back up - concatenating 8-lane pieces instead lowers to one scalar
+// extract and push per lane, which used to be most of the inner loop. D16 folds the odd
+// rows' x16 (their nibbles arrive unshifted) into the scale.
+template <bool ODD, bool D16>
+static inline aie::vector<bfloat16, 64> mb_scale(const bfloat16 *__restrict p, unsigned kb_abs) {
+  const aie::vector<bfloat16, 16> v16 = aie::load_v<16>(p + kb_abs * 32);
+  const aie::vector<bfloat16, 32> v32 = aie::concat(v16, v16);
+  aie::vector<bfloat16, 16> h = ODD ? aie::filter_odd(v32, 1) : aie::filter_even(v32, 1);
+  if constexpr (ODD && D16) h = aie::mul(h, (bfloat16)0.0625f).to_vector<bfloat16>();
+  const aie::vector<bfloat16, 32> h32 = aie::concat(h, h);
+  return aie::concat(h32, h32);
 }
 
 // C[band's 64 rows x 8 tokens] += the k-tile ky of W[band]'s product with the A tile `xa`
@@ -32,7 +41,6 @@ static inline void mb_step_tile(const uint8_t *__restrict band, unsigned ky, con
   return;   // timing ablation: the streams without any core work
 #endif
   using MMUL = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
-  const bfloat16 inv16 = 0.0625f;
   for (unsigned g = 0; g < 4; ++g) {
     const uint8_t *__restrict chunk = band + (g >> 1) * MB_CHUNK;
     const unsigned half = g & 1;
@@ -46,14 +54,10 @@ static inline void mb_step_tile(const uint8_t *__restrict band, unsigned ky, con
     for (unsigned kb = 0; kb < 2; ++kb) {
       const unsigned kb_abs = ky * 2 + kb;
 #ifndef MB_NULL_DQ
-      const aie::vector<bfloat16, 16> d16 = aie::load_v<16>(dp + kb_abs * 32);
-      const aie::vector<bfloat16, 16> m16 = aie::load_v<16>(mp + kb_abs * 32);
-      const auto d_eo = aie::interleave_unzip(d16.extract<8>(0), d16.extract<8>(1), 1);
-      const auto m_eo = aie::interleave_unzip(m16.extract<8>(0), m16.extract<8>(1), 1);
-      const aie::vector<bfloat16, 64> d_e = mb_rep8(d_eo.first);
-      const aie::vector<bfloat16, 64> d_o = mb_rep8(aie::mul(d_eo.second, inv16).template to_vector<bfloat16>());
-      const aie::vector<bfloat16, 64> m_e = mb_rep8(m_eo.first);
-      const aie::vector<bfloat16, 64> m_o = mb_rep8(m_eo.second);
+      const aie::vector<bfloat16, 64> d_e = mb_scale<false, true>(dp, kb_abs);
+      const aie::vector<bfloat16, 64> d_o = mb_scale<true, true>(dp, kb_abs);
+      const aie::vector<bfloat16, 64> m_e = mb_scale<false, false>(mp, kb_abs);
+      const aie::vector<bfloat16, 64> m_o = mb_scale<true, false>(mp, kb_abs);
 #endif
       for (unsigned il = 0; il < 4; ++il) {
         const unsigned i = kb * 4 + il;                                   // k-block inside the tile
