@@ -1597,8 +1597,8 @@ use -- an unused parameter changes the generated code.
 5. `oflm-test --llm` through `flm serve`, then add the tuple to `catalogue.py`.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
-**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
-**Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `replica_deepstack.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit.py`, needing the container and torch and skipping without them; `tests/test_vision_deepstack.py`, needing only torch); the C++ port is checked by `vit_test.exe` (procedure below)
 
 The shipped `vision_weight.q4nx` -- every linear pre-tiled for the closed
 engine's `vision_mm` as `[n/64][k/256][64][256]` bf16, zero-padded -- shall be
@@ -1617,9 +1617,36 @@ numpy forward. The geometry is read as OPEN-VISION-VIT-CONFIG says.
 1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
 patches in 1.02 s (numpy 11.5 s).
 
+**Deepstack.** The forward above is the tower with `deepstack_visual_indexes`
+empty, which is the 35B. Qwen3-VL uses deepstack: extra mergers hang off the
+blocks that list names (5, 11 and 17 on the 4B), and each one's output is a
+second set of image rows for the decoder to absorb, not part of the tower's
+output. `replica_deepstack.py` is their fp64 reference. Two things about them
+differ from the tower's own merger and shall be reproduced, not approximated:
+
+- A deepstack merger normalises **after** the merge shuffle
+  (`use_postshuffle_norm=True`): it reshapes `[n, hidden]` to
+  `[n / merge^2, hidden * merge^2]` and runs one LayerNorm across the whole
+  merged row. The tower's merger normalises each patch across `hidden` first.
+  The two are not interchangeable -- their LayerNorms are different widths.
+- An index names the block a feature is taken **after**. Its activation is
+  `nn.GELU()`, the exact one, as the tower merger's is.
+
+**Acceptance criteria (deepstack):**
+- numpy vs transformers on a random 8 x 12 grid, three taps: the merged output and every deepstack feature at corr > 0.99999, max error < 1e-3 of max.
+- Taking each feature one block early gives corr < 0.99 against the same oracle, so the tap position cannot drift unnoticed.
+- A deepstack merger's LayerNorm is `hidden * merge^2` wide and the tower merger's is `hidden` wide, read off transformers' own `state_dict`; running either through the other's path raises rather than returning plausible numbers.
+- Every merger's output is `out_hidden_size` wide -- the decoder's hidden size, not the tower's.
+
+**Result 2026-09-13 (random 6-block tower, taps at 1, 3, 5, 8 x 12 grid):**
+numpy vs transformers corr 1.00000000 on the merged output and all three
+features, rel 2.6e-6 to 4.3e-6; the tap-one-block-early control gives at worst
+0.9092. No container was involved and none is needed. The C++ port is designed
+and not written: `.claude/plans/qwen3vl-deepstack.md`.
+
 ### OPEN-VISION-VIT-CONFIG: where the tower's geometry comes from, and which towers are refused
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/vit.cpp`)
-**Test category:** unit (`tests/test_vision_config.py` for the reference; `vit_test --configs`, run by `ctest -R OPEN-VISION-VIT-CONFIG`, for the C++ port -- neither needs a container)
+**Test category:** unit (`tests/test_vision_config.py` for the reference and `tests/test_vision_deepstack.py` for what the weight file can supply instead; `vit_test --configs`, run by `ctest -R OPEN-VISION-VIT-CONFIG`, for the C++ port -- none of them needs a container)
 
 The tower's numbers come from `config.json`'s `vision_config`, in whichever of three
 shapes the container carries: OFLM's per-family prefixes `QWEN3_6_MOE_*` and `QWEN3_5_*`,
@@ -1643,7 +1670,36 @@ hardcodes the tower's numbers in C++ (`src/include/models/qwen3vl/qwen3vl_npu.hp
 the DLL contains none of the `*_VISION_*` key strings the other two do), so the shipped
 config.json carries the vision weights' file name and nothing about their shape.
 
+Note what that header does and does not hold: it fixes the *preprocessing* --
+`QWEN3_PATCH_SIZE` 16, `QWEN3_TEMPORAL_PATCH_SIZE` 2, the merge sizes, the
+rescale mean and standard deviation, the edge limits -- and says nothing about
+depth, hidden size, head count or MLP width. Those the closed engine gets from
+the weight file and its xclbins.
+
+So the open tower has two possible sources and needs both. `vision_weight.q4nx`'s
+tensor shapes give back depth, hidden size, MLP width, output width, position
+count, merge factor and channel count, plus how many deepstack mergers there
+are (`replica_deepstack.geometry_from_tensors`). Two numbers are not in the
+weights at any tiling:
+
+- **the head count** -- the qkv projection is `[3 * hidden, hidden]` for every
+  split, so a tower with twice the heads has byte-identical tensor shapes;
+- **the deepstack indexes** -- the merger names say there are three, never which
+  blocks they hang off.
+
+Those shall come from a `vision_config`, which means `q4nx-build` writing one
+into the containers it converts (the source block carries all of it, and
+`inject_oflm_keys` now keeps it). For a container that already shipped without
+one, the refusal stands: a guessed head count gives image embeddings that look
+plausible and are wrong, which is the failure this requirement exists to
+prevent. Reading a tiled linear back gives a bound, not a width -- the 35B's
+4304-wide MLP reads as 4352 -- so the derivation reports whether its numbers are
+exact.
+
 **Acceptance criteria:**
+- `geometry_from_tensors` over transformers' own `state_dict` shapes recovers depth, hidden, MLP width, output width, position count, merge factor and channel count, and the deepstack merger count.
+- It returns no head count and no deepstack indexes, and two towers differing only in those have identical tensor shapes.
+- Over the closed engine's `[n/64][k/256][64][256]` tiling it reports its widths as inexact.
 - The 35B container's `QWEN3_6_MOE_*` block reads as 27 x 1152, 16 heads x 72, MLP 4304 -> 2048, patch 16, 2304 positions; a Qwen3.5 container's `QWEN3_5_*` block reads with `hidden == heads * head_dim`.
 - Qwen3.5-0.8B's HF config and its shipped container give the same tower (12 x 768, 12 heads x 64, MLP 3072 -> 1024), the HF one deriving `head_dim` and using eps 1e-6.
 - Qwen3-VL-4B-Instruct-NPU2's config.json is refused with a message naming `vision_config`.
@@ -1698,6 +1754,31 @@ row, c + col), text tokens after an image continuing from the same counter
 generated tokens inheriting it; a request without images is the unchanged
 text path. The model classes read their preprocessing constants from
 `config.json` and no longer require the closed engine for images.
+
+**Deepstack.** A tower with `deepstack_visual_indexes` produces one extra set of
+image rows per index, and those are added into the decoder's residual stream
+rather than stepped through it. Feature `j` shall be added **after** decoder
+layer `j` has run -- transformers gates this as
+`layer_idx in range(len(deepstack_visual_embeds))` and applies it to
+`hidden_states` after the layer, so three features cover layers 0, 1 and 2. The
+add touches the image tokens' rows only, in prompt order, one feature row per
+image token; text rows are untouched, which is what keeps a text-only request
+after an image request unchanged.
+
+Folding feature 0 into the input embedding instead is a different computation
+and shall not be done: it would pass the feature through layer 0's attention
+and MLP before the residual stream ever sees it.
+
+This is host-side work for the first feature only. Features 1 and 2 land between
+decoder layers, and the dense layer program has no input for a per-row addend,
+so the open engine cannot run a deepstack model on the NPU without either a new
+kernel input or a break in the layer loop. `.claude/plans/qwen3vl-deepstack.md`
+weighs the two.
+
+**Acceptance criteria (deepstack, unit -- `tests/test_vision_deepstack.py`):**
+- `deepstack_layer_map(3) == [0, 1, 2]`.
+- The injection leaves every non-image row bit-identical and does not mutate its input.
+- A mask whose True count differs from the feature's row count is refused by name, as is a feature whose width is not the decoder's hidden size.
 
 **Acceptance criteria (e2e):**
 - `flm-test --vision --model qwen3.6-moe:35b` (and a Qwen3.5 VL size) passes on the open engine with the answer on the fixed test image matching the closed engine's.

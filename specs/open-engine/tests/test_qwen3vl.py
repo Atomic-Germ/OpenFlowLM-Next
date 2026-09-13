@@ -146,3 +146,54 @@ def test_the_upstream_config_derives_the_same_geometry_at_a_different_rope_theta
     assert hf.to_dict() | {"rope_theta": 0.0, "extra": {}} == container.to_dict() | {"rope_theta": 0.0, "extra": {}}
     assert (hf.rope_theta, container.rope_theta) == (5_000_000.0, 1_000_000.0)
     assert hf.spec_hash() != container.spec_hash()
+
+
+# ---- which spec_hash is which
+#
+# Two different hashes have been written down for this model. Both are real; they describe
+# different derivations, and only one of them is what oflm-add matches a bundle on.
+
+
+def test_the_config_only_hash_is_not_the_one_oflm_add_links_on():
+    """`ModelSpec.from_hf_config` defaults `real_vocab` to `vocab`, because a bare config
+    does not say how many ids the tokenizer actually has. `recipes.load.spec_from_model_dir`
+    -- which is what oflm-add calls -- reads `tokenizer.json` instead, and on Qwen3-4B that
+    gives 151669, not the config's 151936. One field differs, so the two hashes differ, and
+    only the second ever appears in a kernel manifest.
+
+    `open_kernels/recipes/specs/qwen3-4b.json` is the checked-in spec for the Qwen3-4B
+    bundle, written from a real container -- an independent artifact, not something this
+    test computes."""
+    import dataclasses
+
+    config_only = ModelSpec.from_hf_config(fixture("qwen3_4b"))
+    assert config_only.real_vocab == config_only.vocab == 151936
+    assert config_only.spec_hash() == \
+        "sha256:b3b9381d1193bc4be5a96a325b2aa79de25e309caccff935d650b20242616f67"
+
+    on_file = ModelSpec.from_dict(json.loads(
+        (Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs" /
+         "qwen3-4b.json").read_text(encoding="utf-8")))
+    assert on_file.real_vocab == 151669
+    assert on_file.spec_hash() == \
+        "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd"
+
+    # real_vocab is the whole of the difference: put the tokenizer's count on the
+    # config-derived spec and the two land on the same hash.
+    assert dataclasses.replace(config_only, real_vocab=151669).spec_hash() == on_file.spec_hash()
+
+
+def test_the_vl_container_links_to_that_bundle_only_if_its_tokenizer_agrees():
+    """Which makes "the text half needs no kernel build" conditional, on two things a
+    config.json cannot show: the tokenizer's id count, and the container's per-role weight
+    formats (`quant`, which `spec_from_model_dir` reads out of `model.q4nx`). Both fixtures
+    derive the same config-only hash; whether the two real containers land on one bundle is
+    decided when the VL model is on disk."""
+    import dataclasses
+
+    vl = ModelSpec.from_hf_config(fixture("qwen3vl_4b"))
+    assert vl.spec_hash() == ModelSpec.from_hf_config(fixture("qwen3_4b")).spec_hash()
+
+    # ... and either unknown moves it off that bundle on its own
+    assert dataclasses.replace(vl, real_vocab=151669).spec_hash() != vl.spec_hash()
+    assert dataclasses.replace(vl, quant={"linear_out": "q8"}).spec_hash() != vl.spec_hash()
