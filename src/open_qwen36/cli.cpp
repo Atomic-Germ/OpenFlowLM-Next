@@ -30,6 +30,7 @@
 /// pairs (correlation / argmax / top-5).
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -87,6 +88,7 @@ struct Args {
     std::string dump_prefix;
     bool twice = false;
     int repeat = 1;
+    int gap_ms = 0;
     int at_position = 0;
     bool gemm_block = false;        // 0167/#32: prefill via step_gemm_block()
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
@@ -139,6 +141,11 @@ Args parse(int argc, char** argv) {
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--prefill-logits") a.prefill_logits = true;
+        // The server has a host gap right here that the CLI does not: between the last
+        // prefill dispatch and the first decode one it samples, detokenises and writes
+        // the first SSE chunk to a socket. Every dx timeout so far has landed on that
+        // dispatch, so this makes the gap reproducible without the server.
+        else if (k == "--gap-ms") a.gap_ms = std::atoi(val().c_str());
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -195,6 +202,10 @@ std::vector<int> request(Core& core, const Args& a) {
         core.step(a.ids[i], want);
         if (!a.dump_prefix.empty() && want) dump_pos(a.dump_prefix, static_cast<int>(i), core.logits());
         if (!a.dump_prefix.empty() && last) dump(a.dump_prefix, dumped++, core.logits());  // preserve the original _t<i> convention
+    }
+    if (a.gap_ms > 0) {
+        std::fprintf(stderr, "idling %d ms before the first decode dispatch\n", a.gap_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(a.gap_ms));
     }
     double prefill_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
     std::fprintf(stderr, "prefill %zu tokens: %.0f ms (%.0f ms/token)\n", a.ids.size(), prefill_ms, prefill_ms / a.ids.size());
