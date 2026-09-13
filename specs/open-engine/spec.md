@@ -1265,6 +1265,36 @@ unchanged.
 
 **Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`OFLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `OFLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
 
+**Result 2026-09-13 (the host stages):** the block line now splits `mid` into
+the DeltaNet's two halves and the attention's, which contradicted the standing
+assumption about where the host time went. At 256 tokens `mid` was 1040 ms a
+block and **856 of it was the DeltaNet's per-token half** -- the conv, the q/k
+norms and the alpha/beta projection -- against 111 ms for the delta rule on S
+that every plan had named as the expensive part. The per-token half was
+single-threaded because the conv was written as a ring buffer with a shift,
+which looks like a recurrence and is not: the conv reads a fixed four-tap
+window of the projection's own rows, so row r of token t's window is qkv row
+t - 3 + r and every token is independent. Over tokens under OpenMP it is
+**856 -> 165 ms**, bit-exact (`block_host_test.cpp` still matches
+`replica_block.py` on og, S and the conv state rows).
+
+Two host stages around the GEMMs went with it. `gemm()` returned its output by
+value, so each of the 160 dispatches a block allocated a vector and
+value-initialised it before the transpose overwrote every element -- 716 MB a
+block of zeroes written for nothing; the four buffers now live across layers
+(transpose stage **240 -> 126 ms**). And both layer kinds transposed the widest
+GEMM into a 12 MB buffer only to memcpy it apart immediately, so
+`transpose_parts` writes the column ranges into their destinations in one pass.
+
+Per 256-token block the host half went **1306 -> ~500 ms**: `mid` 1040 -> ~360
+(DeltaNet 165 + 111, attention 70-115 growing with the window), transpose 115,
+tail 75, shared expert 40. With `OPEN-MOE-BATCH`'s two changes of the same day,
+`open_qwen36_cli --gemm-block` on 2582 tokens went **57.7 -> 41.6 s (22 -> 16
+ms/token)** with the identical eight-token greedy continuation, and 512 tokens
+9.98 -> 7.50 s. `oflm-test --llm` passes through this tree's `oflm serve` on
+the route. Details: `.claude/plans/moe-stage-cost.md`, raw data in
+`.claude/plans/decode-run/logs/`.
+
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`
@@ -1279,23 +1309,53 @@ and the per-row scales ride along as vectors. The expert pools are read as
 packed: a 128-row stripe is two 64-row bands interleaved at k-tile
 granularity, so a band is a strided read and no repack exists. A kernel set
 carries one `mb` xclbin and one instruction stream per dispatch length
-(`gemm_block.moe_batch.kernels`: 256, 128, 32 and 8 slots for 256 experts),
-each slot compiled as its own expert and patched per dispatch (`moebatch`,
-moeroute2's table with every expert a placeholder). The route gathers each
-expert's tokens eight at a time into `mb_x`, runs the shortest stream that
-holds the experts still owed tokens, scatters `mb_y` back with the router
-weights, and goes round again until every token is served; the shared
+(`gemm_block.moe_batch.kernels`, a binary ladder down from the expert count:
+256, 128, 64, 32, 16 and 8 slots for 256 experts), each slot compiled as its
+own expert and patched per dispatch (`moebatch`, moeroute2's table with every
+expert a placeholder). The route gathers each expert's tokens eight at a time
+into `mb_x`, runs the shortest stream that holds the experts still owed tokens,
+scatters `mb_y` back with the router weights, and goes round again until every
+token is served. The ladder has to be fine because an unused slot is not free:
+it streams a real expert's weights and the result is discarded, so the rungs
+decide how much of a dispatch is wasted; the shared
 expert stays outside it (`OPEN-PREFILL-BATCH`). A set without `moe_batch`,
 or `OFLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
 
 **Acceptance criteria (unit):**
 - The up / gate band tap is sizes [8, 10240] strides [20480, 1] at `(8 e + 2 (b // 2)) STRIPE + (b % 2) BAND`, the down band tap two elements at `POOL_DOWN + e 655360 + (b // 2) 40960 + (b % 2) BAND`, derived from `stripe_transpose`, `std_perm` and `down_perm` themselves (`test_moe_batch.py`).
-- The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s32 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots (`test_moe_batch.py`).
-- The parser (`manifest_test.cpp`): a stream a `moe_batch` names must exist with patch `moebatch`, its slot count a positive multiple of 8, its x / h / y declared globals; the fixture parses to those four streams on both kinds.
+- The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s64 / mb_s32 / mb_s16 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots (`test_moe_batch.py`).
+- The parser (`manifest_test.cpp`): a stream a `moe_batch` names must exist with patch `moebatch`, its slot count a positive multiple of 8, its x / h / y declared globals; the fixture parses to those six streams on both kinds.
 
 **Procedure:** as `tests/test_moe_batch.py` documents -- the 64-expert harness run (`make_test.py --slots 64`, `compare.py s64`, gate rel_fro <= 5e-3 on y) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 with and without `OFLM_OPEN_MOE_BATCH=0`.
 
 **Result 2026-09-12 (Qwen3.6-35B-A3B-NPU2):** the harness at 64 experts PASSes at rel_fro 4.4e-4 (gate 5e-3; every slot's cosine >= 0.999995, every token column's >= 0.99997), 4.27 ms per run = 33 GB/s over the 143 MB streamed. Full model: the 4-layer check against the sequential path is argmax 19/19, top-5 19/19, corr >= 0.9993 per position, and against mx per token corr >= 0.99999. The 1020-token prompt at 40 layers, nothing else on the NPU: prefill **40.0 s -> 24.0 s (39 -> 23 ms/token)**, the same 8-token greedy continuation as mx per token (first token 248068). Per 256-token block the expert stage went 7.1-7.5 s to 1.78-1.87 s: two dispatches per layer (256 slots, then ~95 of the 128-slot stream; 342-363 visits per layer), the 256-slot dispatch 27-32 ms (19 GB/s against the harness's 33: the difference is the context switch and the host memory churn between dispatches, measured by `--bench` and written up in `.claude/plans/prefill-gap.md`, "What a dispatch actually costs"). The block is now GEMM 1.4 s, host 1.8-2.4 s (growing with the window), experts 1.8-2.1 s. At 2582 tokens (the length the closed kernels were measured at) the same run is 64.5 s, 25 ms/token: the expert stage and the GEMMs are flat per block (1.7-1.9 s and 1.38 s) while the host stage grows from 1.36 s in block 0 to 3.72 s in block 9 -- 262 ms per 256 rows of window, and by the last block half of it. Against stock FLM 1.0.2's closed `qwen3_6_moe_npu` (14.3 s at 972 tokens, 21.9 s at 2582) the open path is 1.6x behind at ~1000 tokens and 2.9x at 2582, where before this kernel it was 2.9x and 5.4x. The host stages are the next step (`.claude/plans/prefill-gap.md`). **Through `flm serve` (2026-09-12, kernel set with the two DeltaNet decode changes as well, `k35v4`):** `flm-test --llm` passes -- both answers coherent and on-topic, the follow-up served from the prompt cache, no dispatch error; the same two long prompts prefill in 21.8 s at 972 tokens (22 ms/token, from 41.8) and 71.2 s at 2582 (28 ms/token, from 119.3), client-side time to first token, decode about 8 tok/s. The closed kernels' 14.3 s and 21.9 s make that 1.5x and 3.3x behind.
+
+**Result 2026-09-13 (the read-back and the ladder):** two things were being
+thrown away, both found by logging what each dispatch actually carried
+(`OFLM_OPEN_MOE_BATCH_LOG=1`) against `--bench` for what it costs alone.
+
+The read-back staged the whole dispatch's `y` -- 20 MB a layer -- into a second
+buffer to un-interleave the C tiles, then read all of it back to scatter the
+rows into their tokens. A column belongs to exactly one token, so the two
+passes are one: reading the tiles straight into the token's row is the same
+arithmetic in the same order and drops 40 MB a layer. The read stage went
+**185 -> 31 ms** a block and the expert stage 2035 -> 1763, most of the second
+number being the host traffic that was slowing the next dispatch.
+
+The ladder was 256, 128, 32, 8. A 256-token block leaves ~306 visits in a layer
+(min 292, max 333 over 2048 expert-token pairs), so the driver ran 256 and then
+a 128 for the last ~50 -- and a padded slot streams a real expert's 2 MB for
+nothing. That was **20.3 %** of every block's expert traffic, about 6 GB. With
+64 and 16 in the ladder the same layer closes on a 64: padding **7.2 %**,
+expert stage 1763 -> 1625 ms a block. The streams ride the xclbin that is
+already there and took 30 s each to build.
+
+The stream rate itself is not the problem it was read as: `mb_s256` alone is
+16.3 ms for 256 slots = 63.6 us a slot = **30.9 GB/s**, flat from 32 slots up,
+against the lm head's 44 GB/s on contiguous q8. What a dispatch costs beyond
+that is ~2.9 ms of context switch and the host traffic around it, unchanged in
+shape from 2026-09-12. `.claude/plans/moe-stage-cost.md` has the decomposition
+and what is left.
 
 ### OPEN-PREFILL-ATTN: the block attention's products on the NPU
 **Applies to:** openflowlm-next (`open_kernels/designs/attn_block/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,block_host,core}.cpp`)
