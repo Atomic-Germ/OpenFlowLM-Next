@@ -176,19 +176,18 @@ paths at each batch size and prints the ratio:
 
 | batch | 1 | 4 | 8 | 16 | 32 | 64 | 128 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| all-MiniLM-L6-v2 | 0.86 | 3.35 | 6.19 | 6.55 | 8.00 | 9.97 | 8.53 |
-| bge-base-en-v1.5 | 0.96 | 3.83 | 6.82 | 5.82 | 5.84 | 7.61 | 6.13 |
-| bge-large-en-v1.5 | 1.00 | 3.82 | 5.93 | 4.80 | 5.24 | 6.33 | 5.50 |
-| EmbeddingGemma-300M *(control)* | *1.02* | *0.97* | *1.04* | *0.99* | — | — | — |
+| all-MiniLM-L6-v2 | 0.99 | 3.49 | 5.99 | 6.64 | 8.07 | 10.05 | 8.53 |
+| bge-base-en-v1.5 | 0.99 | 3.91 | 6.43 | 5.44 | 5.73 | 7.55 | 6.14 |
+| bge-large-en-v1.5 | 0.98 | 3.95 | 5.79 | 4.94 | 5.01 | 6.35 | 5.47 |
+| EmbeddingGemma-300M *(control)* | *0.98* | *1.04* | *0.97* | *1.07* | — | — | — |
 
 The last row is what makes the others mean anything: `open_embedding` does not
 override `embed_batch()`, so its two paths are the same loop and its ratio has
-to read ~1.00×. It reads 0.97—1.04× across every batch size it was
+to read ~1.00×. It reads 0.96—1.07× across every batch size it was
 swept at (the four shown, plus batch 2, which this table has no column for).
 
-`bge-base` at batch 16 reads **5.82×** against the 5.8× measured by hand above,
-on a different day and a different binary — which is the check that the tool
-measures what the note claimed.
+`bge-base` at batch 16 reads **5.44×** here, against the 5.8× measured by hand
+above on a different day and a different binary.
 
 **And the REST handler now uses it.** `handle_embeddings` makes one
 `embed_batch()` call for the whole `input` array instead of one `embed()` call
