@@ -448,6 +448,15 @@ void Core::bench_dispatch(int layer, int reps) {
         for (const Step& st : *prog) jobs.push_back({st.kernel, st.args});
     for (const auto& [slots, name] : gb.moe_batch.kernels) jobs.push_back({name, gb.moe_batch.args});
     if (!gb.moe_kernel.empty()) jobs.push_back({gb.moe_kernel, gb.moe_args});
+    // The attention GEMMs sit on their own context, so a full-attention layer pays a switch into
+    // them and another one back out. They read only globals, so a linear layer can still time them.
+    for (int l = 0; l < nl_; ++l) {
+        const AttnBlock& ab = types_[l]->gemm_block.attn_block;
+        if (!ab.present()) continue;
+        jobs.push_back({ab.kernels_s.rbegin()->second, ab.args});
+        jobs.push_back({ab.kernels_pv.rbegin()->second, ab.args});
+        break;
+    }
 
     std::fprintf(stderr, "\nopen_qwen36: dispatch bench, layer %d, %d reps each\n", layer, reps);
     std::fprintf(stderr, "  %-22s %8s %8s %8s %8s\n", "kernel", "min ms", "mean ms", "submit", "context");
