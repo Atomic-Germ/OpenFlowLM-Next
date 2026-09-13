@@ -83,9 +83,25 @@ private:
     /// every later submission fails. Mark the engine and rebuild it (contexts
     /// + weights, ~90 s) before the next request instead of failing forever.
     void ensure_alive();
+    /// Print what failed before rethrowing. Core::run's message already names the
+    /// kernel, the position and the ERT state, but on a streamed request that
+    /// message only ever reaches an HTTP error body the streaming path does not
+    /// write - so an intermittent dispatch failure used to show up as a client
+    /// timeout and the one line that would diagnose it was thrown away.
+    static void note_failure(const char* what);
     template <class F> auto guarded(F&& f) -> decltype(f()) {
         ensure_alive();
-        try { return f(); } catch (...) { poisoned_ = true; throw; }
+        try {
+            return f();
+        } catch (const std::exception& e) {
+            poisoned_ = true;
+            note_failure(e.what());
+            throw;
+        } catch (...) {
+            poisoned_ = true;
+            note_failure("a non-std exception");
+            throw;
+        }
     }
 };
 

@@ -106,6 +106,11 @@ buffer<bf16> Engine::logits_view() {
     return buffer<bf16>(logits_.data(), logits_.size());
 }
 
+void Engine::note_failure(const char* what) {
+    std::fprintf(stderr, "open_qwen36: request failed: %s\n", what ? what : "(no message)");
+    std::fflush(stderr);
+}
+
 void Engine::ensure_alive() {
     if (!poisoned_) return;
     std::fprintf(stderr, "open_qwen36: a kernel failed on the last request; rebuilding the engine\n");
