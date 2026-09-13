@@ -2142,6 +2142,17 @@ sends are PNG.
   already live rather than copied.
 - An interlaced file is refused with a message naming "interlaced"; a truncated file
   and a JPEG are refused.
+- Hostile inputs are refused by name, because images arrive base64 inside an HTTP
+  request and none of these needs an attacker to do anything unusual: a header
+  declaring 65535 x 65535, a decompression bomb (200 MB of zeros in 200 KB), a
+  palette image with no PLTE, a palette index past the end of PLTE, and a zero
+  dimension. The bomb cannot work by construction -- the output buffer is sized from
+  the header, so inflate stops the moment it would exceed it -- and the test says so
+  rather than leaving it to be re-derived.
+- 40,000 mangled inputs (byte flips, truncations, spliced noise over ten valid seeds)
+  compiled with MSVC `/RTC1` produce no crash, and every input that DOES decode is
+  self-consistent: `rgb.size() == width * height * 3`, so a caller sizing from the
+  reported dimensions cannot walk off the buffer.
 - The test links no FFmpeg and no zlib, so it passes on a machine whose ffmpeg has
   no png decoder -- which is the machine the bug is about.
 
@@ -2152,7 +2163,7 @@ sends are PNG.
 4. The first round's text-extraction check passes -- it can only pass by reading
    `paris.png`, whose text is the answer.
 
-**Result 2026-09-13:** `ctest -R OPEN-VISION-IMAGE-READ` passes 18 of 18. End to end on
+**Result 2026-09-13:** `ctest -R OPEN-VISION-IMAGE-READ` passes 23 of 23, and the fuzz run above found nothing. End to end on
 Qwen2.5-VL-3B through the open engine, `oflm-test --vision` passes all three rounds
 for the first time on this box -- text extraction, seagull and spectrogram -- where
 before the fix the same suite reported `Total images: 1`, failed text extraction, and

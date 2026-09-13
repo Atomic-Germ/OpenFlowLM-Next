@@ -29,6 +29,8 @@ OUT = HERE / "fixtures" / "png"
 # the tree into a tool's package data.
 BUNDLED = HERE.parents[2] / "utilities" / "oflm-test" / "oflm_test" / "test_files" / "image"
 
+SIG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+
 W, H = 37, 23          # not a multiple of 8, so the sub-byte depths pad their rows
 CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 
@@ -201,6 +203,24 @@ def main() -> int:
     whole = (OUT / "rgb8.png").read_bytes()
     (OUT / "truncated.png").write_bytes(whole[: len(whole) - 40])
     print("  truncated.png")
+
+    # Hostile inputs. Images arrive base64 inside an HTTP request, so every one
+    # of these is something a caller can actually send.
+    def raw(name, w, h, depth, ct, idat, extra=b""):
+        d = SIG
+        d += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, depth, ct, 0, 0, 0))
+        d += extra + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+        (OUT / f"{name}.png").write_bytes(d)
+        print(f"  {name}.png  ({len(d)} bytes, declares {w}x{h})")
+
+    raw("adv_huge", 65535, 65535, 8, 2, zlib.compress(bytes(16)))
+    # 200 MB of zeros in a couple of hundred KB. The output buffer is sized
+    # from the header, so a bomb cannot expand past it - but say so in a test.
+    raw("adv_bomb", 8, 8, 8, 2, zlib.compress(bytes(200 * 1024 * 1024), 9))
+    raw("adv_nopalette", 4, 4, 8, 3, zlib.compress(bytes(20)))
+    raw("adv_palette_oob", 4, 4, 8, 3, zlib.compress(bytes([0, 9, 9, 9, 9] * 4)),
+        extra=chunk(b"PLTE", bytes([255, 0, 0, 0, 255, 0])))
+    raw("adv_zerodim", 0, 4, 8, 2, zlib.compress(bytes(1)))
 
     # The two real images oflm-test sends - the ones that were being dropped.
     # They are NOT copied in: the test reads them where they already live and

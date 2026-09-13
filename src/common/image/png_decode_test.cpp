@@ -181,6 +181,16 @@ int main(int argc, char** argv) {
 
     expect_refused(dir, "interlaced", "interlaced");
 
+    // Hostile inputs. These arrive base64 inside an HTTP request, so each is
+    // something a caller can send. The bomb is the interesting one: the output
+    // buffer is sized from the header, so 200 MB of zeros in 200 KB cannot
+    // expand past it - inflate stops the moment it would.
+    expect_refused(dir, "adv_huge", "too large");
+    expect_refused(dir, "adv_bomb", "more pixel data than the header declares");
+    expect_refused(dir, "adv_nopalette", "no PLTE");
+    expect_refused(dir, "adv_palette_oob", "past the end of PLTE");
+    expect_refused(dir, "adv_zerodim", "zero dimension");
+
     // Not a PNG at all, and a PNG cut short mid-IDAT.
     {
         const uint8_t junk[16] = {0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
