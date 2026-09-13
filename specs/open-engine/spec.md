@@ -1509,11 +1509,36 @@ first decode step after it did not, and `Engine::guarded` poisoned the engine an
 rebuilt it (`core.cpp`'s per-dispatch wait, 60 s, `OFLM_OPEN_TIMEOUT_MS`). It has not
 happened since -- the passing run above plus two non-streamed two-turn repros at 120
 and 704 tokens of first-turn context. So it is intermittent, once in four, and NOT
-understood. Decode here runs 2.5 tok/s falling as the context grows, because Qwen2.5 is
-still on the slow attention path (OPEN-ATTN-CONTEXT), which puts a single dispatch far
-closer to the timeout than any measured family. Measuring this family onto the fast path
-is the first thing to try; if the failure survives that, it is a real defect and the 60 s
-wait is hiding it rather than causing it.
+understood.
+
+> **Diagnosed 2026-09-13, and it is not ours.** The dispatch is not slow, and the array
+> does not hang: the command is never executed. The NPU driver logs its own view of
+> every occurrence as `pci` Event ID 3 against `\Device\NTPNP_PCI0033`, naming the
+> process and hardware context --
+>
+>     PID=1100 Ctx=144 TxnOp=ffffffff CtxPC=28b06005 FeTYPE=0 FeExTYPE=0 FePC=0 FeAM=0
+>
+> -- and those fields are AMD's own `struct aie2_ctx_health` (`txn_op_idx`, `ctx_pc`,
+> `fatal_error_type`, `fatal_error_exception_type`, `fatal_error_exception_pc`,
+> `fatal_error_app_module`), which the `amdxdna` driver collects for exactly one reason:
+> a command timed out, so it asked the firmware what happened. Every fatal-error field
+> is **zero** and `txn_op_idx` is `0xffffffff`: no fault, no exception, nothing in
+> flight. A lost command, not a hung kernel.
+>
+> Eight entries, all inside the 45-minute window holding the three failures; none across
+> the following three hours and about 200 clean requests. Ruled out by measurement:
+> context position (a sweep at 0 / 256 / 613 / 1024 / 2048), the turn boundary (it hit a
+> first-round prefill and a cache-reusing one in the same run), context capacity (40
+> requests at the full 32768), extra hardware contexts (three either way), NPU power
+> mode (global and persistent), thread handoff (prefill and first decode are back to
+> back on one thread), Modern Standby, and this entry's own suggestion below.
+>
+> **The slow-path theory here was wrong.** Qwen2.5 has been on the fast attention path
+> since 2026-09-12 and the failure outlived it; a dispatch that normally takes about
+> 2 ms is nowhere near a 60 s ceiling either way. And raising `OFLM_OPEN_TIMEOUT_MS`
+> would only hide it. `Core::run` now prints the layer, the dispatch number, the host gap
+> before it, waits again to separate a late command from a lost one, and points at the
+> driver's event. Full record: `.claude/plans/dx-timeout.md`.
 
 Step 1: 44 attention translation units, built for the qwen3, hunyuan, MoE, llama3 and phi3
 flag sets from the tree before and after, every one byte-identical.
