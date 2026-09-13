@@ -29,7 +29,7 @@ static inline aie::vector<bfloat16, 64> mb_rep8(const aie::vector<bfloat16, 8> &
 static inline void mb_step_tile(const uint8_t *__restrict band, unsigned ky, const bfloat16 *__restrict xa,
                                 float *__restrict c) {
 #ifdef MB_NULL_MM
-  return;   // timing ablation
+  return;   // timing ablation: the streams without any core work
 #endif
   using MMUL = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
   const bfloat16 inv16 = 0.0625f;
@@ -45,6 +45,7 @@ static inline void mb_step_tile(const uint8_t *__restrict band, unsigned ky, con
     MMUL acc_o(aie::load_v<64>(co));
     for (unsigned kb = 0; kb < 2; ++kb) {
       const unsigned kb_abs = ky * 2 + kb;
+#ifndef MB_NULL_DQ
       const aie::vector<bfloat16, 16> d16 = aie::load_v<16>(dp + kb_abs * 32);
       const aie::vector<bfloat16, 16> m16 = aie::load_v<16>(mp + kb_abs * 32);
       const auto d_eo = aie::interleave_unzip(d16.extract<8>(0), d16.extract<8>(1), 1);
@@ -53,19 +54,26 @@ static inline void mb_step_tile(const uint8_t *__restrict band, unsigned ky, con
       const aie::vector<bfloat16, 64> d_o = mb_rep8(aie::mul(d_eo.second, inv16).template to_vector<bfloat16>());
       const aie::vector<bfloat16, 64> m_e = mb_rep8(m_eo.first);
       const aie::vector<bfloat16, 64> m_o = mb_rep8(m_eo.second);
+#endif
       for (unsigned il = 0; il < 4; ++il) {
         const unsigned i = kb * 4 + il;                                   // k-block inside the tile
         const aie::vector<uint8_t, 64> q = aie::load_v<64>(nibp + i * 64);
         const aie::vector<bfloat16, 64> ne = aie::to_float<bfloat16>(aie::bit_and((uint8_t)0x0F, q), 0);
         const aie::vector<bfloat16, 64> no = aie::to_float<bfloat16>(aie::bit_and((uint8_t)0xF0, q), 0);
+#ifdef MB_NULL_DQ
+        const aie::vector<bfloat16, 64> we = ne, wo = no;   // timing ablation: no scales
+#else
         accN<64> se, so;
         se.from_vector(m_e);
         so.from_vector(m_o);
         se = aie::mac(se, ne, d_e);
         so = aie::mac(so, no, d_o);
+        const aie::vector<bfloat16, 64> we = se.template to_vector<bfloat16>();
+        const aie::vector<bfloat16, 64> wo = so.template to_vector<bfloat16>();
+#endif
         const aie::vector<bfloat16, 64> a = aie::load_v<64>(xa + i * 64);
-        acc_e.mac(a, se.template to_vector<bfloat16>());
-        acc_o.mac(a, so.template to_vector<bfloat16>());
+        acc_e.mac(a, we);
+        acc_o.mac(a, wo);
       }
     }
     aie::store_v(ce, acc_e.template to_vector<float>());
