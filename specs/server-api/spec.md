@@ -219,10 +219,15 @@ request both ways.
 Handlers read required fields with `request["field"]` on a `const json&`. For a key that is not
 there that is undefined behaviour, and on this build it segfaults: `POST {}` killed the server on
 `/api/show`, `/api/generate`, `/v1/completions` and `/v1/embeddings` (#70). A `request_id` that
-is not a string threw before the handler ran, while the request held the NPU lock, and the lock
-was never released: the process stayed up and `/v1/models` kept answering, but every request that
-needed the NPU queued behind it and was never answered. Checking that a server survives a bad
-request therefore means sending it a request that needs the NPU, not one that does not.
+is not a string threw before the handler ran, while the request held the NPU lock -- the same
+leaked lock SERVER-ERROR-STATUS describes for a body that is not JSON, reached by a different
+input. The process stayed up and `/v1/models` kept answering, because it does not take the lock,
+so checking that a server survives a bad request means sending it a request that needs the NPU.
+
+This extends two existing checks rather than replacing them: SERVER-ERROR-STATUS already covers a
+body that is not JSON, and `oflm-test --api` check A1 already sends `/v1/chat/completions` a
+request with no `messages` and one with `"messages"` as a string. The tests below repeat those two
+probes, as the tests in this directory do for every `oflm-test` check.
 
 The server shall check a request's required fields, and the type of `request_id`, before reading
 them, and refuse a missing or mistyped one with 400 and an OpenAI-shaped error naming the field.

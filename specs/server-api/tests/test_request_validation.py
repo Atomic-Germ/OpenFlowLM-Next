@@ -70,6 +70,7 @@ def _assert_400(status, body, param, what):
 
 
 # ---- every handler with a required field ----------------------------------------------------
+# The /v1/chat/completions cases repeat oflm-test --api check A1 (no messages, messages a string).
 
 REQUIRED = [
     ("/api/show", "model"),
