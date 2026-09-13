@@ -1215,8 +1215,10 @@ model's hash for no kernel change.
   is not a key of `spec.to_dict()`.
 
 ### OPEN-PACK-Q4-0: a 5120-byte chunk with no mins is not q4_1
-**Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`)
-**Test category:** unit (`tests/test_quant_q4_0.py`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`, `model/q4nx.py`,
+`src/open_qwen36/pools.cpp`)
+**Test category:** unit (`tests/test_quant_q4_0.py`); the end-to-end run is
+OPEN-ATTN-QKV-BIAS's
 
 Some containers store a SIGNED 4-bit quantiser in the same 5120-byte chunk q4_1 uses:
 `w = d * int4(q)` with the min written as zero, rather than q4_1's `w = d * q + min`
@@ -1226,21 +1228,33 @@ shares the sign of its scale -- at about 2.7 times the right spread, and the mod
 answers with noise while agreeing with the fp64 replica to the bit, because
 `dq_chunks_q4_1` misreads it the same way.
 
-The packer shall therefore refuse a q4_1-sized chunk whose mins are all exactly zero,
-naming the tensor, the format and the transcode, rather than pack it. A real q4_1 tensor
-does not have 256 exactly-zero mins in a chunk.
+A 5120-byte tensor shall therefore be transcoded to q4_1 on the way into the pool when
+it is the signed form: flip bit 3 of every nibble, which turns two's complement into
+offset binary, then write `min = -8 * d`. `int4(q) == (q ^ 8) - 8`, so both halves are
+exact -- the flip is a relabelling and `-8 * d` only moves a bf16 exponent -- and
+afterwards the GEMV, the pool and the replica are all already reading the right values.
+Nothing downstream learns a new format, the same way a Q4_K container needs no kernel to
+know about Q4_K.
 
-The transcode itself is known and small -- flip bit 3 of every nibble, turning two's
-complement into offset binary, then write `min = -8 * d`, after which the kernels, the
-pool and the replica are all already correct -- but WHERE a container declares its
-format is the container's business and it declares nothing today, so applying it
-automatically to every container is not this packer's call.
+Which form a tensor is in comes from the container when the container says: a
+`quant_format` stamp in the safetensors `__metadata__`, per tensor or for the file. No
+container writes one today, so the fallback is the data -- 256 exactly-zero mins in a
+chunk, which a real q4_1 tensor does not manage, because a min is a block's own minimum
+and every one of them being 0.0 does not happen to real weights. The stamp wins when it
+is there, so a container that declares itself is never second-guessed.
+
+The replica reads through the same rule and the same transcode (`q4nx.dq_tile`), so it
+cannot disagree with the pool about a format -- which is exactly how this went unnoticed:
+before it, both misread the container identically and every comparison passed.
 `.claude/plans/qwen2-q4-0-container.md` carries the evidence.
 
 **Acceptance criteria:**
-- A 5120-byte chunk with 256 zero mins is refused, and the message names the tensor, the
-  phrase `signed 4-bit quantiser`, and the transcode (`nibble ^= 8`, `-8 * d`).
-- One non-zero min in the chunk is enough for it to pack unchanged.
+- A 5120-byte chunk with 256 zero mins reads as the signed form; one non-zero min and it
+  is a plain q4_1 tensor, passed into the pool untouched.
+- A container that declares `quant_format` wins over the data signal, both ways.
+- The transcode gives `min == -8 * d` exactly, and every nibble's `(q ^ 8) - 8` is the
+  signed value it stood for.
+- `pools.cpp`'s `q4_0_to_q4_1_chunks` agrees with `pack.q4_0_to_q4_1` byte for byte.
 
 ### OPEN-ATTN-QKV-BIAS: a per-channel bias on the q, k and v projections
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `designs/dense/dx.py`,
@@ -1308,44 +1322,30 @@ being free there. Both are arithmetic over the spec and shall be checked as such
 3. `oflm-test --llm` through `flm serve` on the installed model.
 4. Then add the tuple to `catalogue.py` and drop the override.
 
-**Result 2026-09-12 (Qwen2.5-3B-Instruct-NPU2):** step 1 passes -- 44 attention translation
-units, built for the qwen3, hunyuan, MoE, llama3 and phi3 flag sets from the tree before
-and after, every one byte-identical.
+**Result 2026-09-12 (Qwen2.5-3B-Instruct-NPU2):** passes, and admits the attention tuple
+`(128, 16, 2, 128, False, False, False, True)` and `gemv_q4` K 11264 to the catalogue.
 
-Step 2 runs and gives the right answers, and misses the correlation bar. Over an 8-layer
-slice at positions 0-3 the argmax matches the fp64 replica at every position and the top
-five match up to two adjacent swaps on near-ties, but full-vocab logits correlation is
-0.999977 at position 0 and 0.9993-0.9998 once there are cached rows -- where every other
-dense family records 0.99998 or better.
+Step 1: 44 attention translation units, built for the qwen3, hunyuan, MoE, llama3 and phi3
+flag sets from the tree before and after, every one byte-identical.
 
-The kernels are not what is wrong, and that is established rather than assumed. Stage by
-stage on layer 0, the entry norm and the q, k and v GEMVs agree with the replica at
-0.9999985 or better at every position, and the o projection of the device's own attention
-output is exact -- so the disagreement is inside the attention core. Dumping layer 0's KV
-buffer after four tokens and comparing every row against the replica's own values rounded
-to bf16, two thirds of each row is bit-identical and the largest disagreement is one bf16
-step: the rows, their offsets, the rotation and the bias are all right.
+Step 2: an 8-layer slice at positions 0-3 gives logits corr 0.999998 / 0.999981 / 0.999979
+/ 0.999965 with the same argmax and top-5 at every position, and the whole 36-layer model
+gives 0.999965 / 0.999945, argmax and top-5 identical at both. The engine is bit-identical
+to the harness at every position of a sixteen-position prefill.
 
-What is left is the bf16 KV cache, which costs this model about sixteen times what it
-costs any other family, because of the size of its k bias. `k_proj.bias` reaches 91.5
-while the k projection itself only reaches about 6, so stored K sits near 92, where one
-bf16 step is 0.36 instead of the 0.02 it would be at 6. Rerunning the comparison against a
-replica that stores K and V as the device does moves position 2 from 0.999327 to 0.999934
-and position 3 from 0.999815 to 0.999968. Detail and the probes:
-`.claude/plans/qwen2-qkv-bias-hw-results.md`.
+Step 3: `src/open_qwen36/chat.py` through `open_qwen36_cli` on the full model answers the
+NPU question in one coherent sentence, ending on `<|im_end|>`.
 
-The attention tuple and `gemv_q4` K 11264 therefore stay OUT of the catalogue, and the
-recipe still refuses the family by name.
-
-**These correlations are not the family's final numbers.** They were measured against a
-container the packer misreads (OPEN-PACK-Q4-0): both the device and the replica decode
-its signed 4-bit weights as q4_1, so they agree with each other while the model is wrong.
-What the slice establishes is that the KERNELS do what the replica does -- the bias, the
-split position record, the og elements, the cache, all of it -- which is what this
-requirement is about. The correlation bar has to be retaken on a container that is read
-correctly, and the k-bias magnitude above will move with it, because the k projection it
-is compared against is one of the misread tensors. The bias itself is stored as bf16 and
-read correctly either way, so its size is not in doubt.
+The first run of step 2 did NOT pass, and what it found is recorded as OPEN-PACK-Q4-0: the
+container stores a signed 4-bit quantiser in the chunk q4_1 uses, and both the packer and
+the fp64 replica decoded it as q4_1. They agreed with each other to the bit -- engine and
+harness identical over sixteen positions, argmax matching at fourteen, 36 layers at
+position 0 at corr 0.999944 -- while the model answered with noise. The numbers above are
+from after that was fixed. Two things follow for anyone reading a result like it again:
+agreement between the device and the replica says nothing about the weights being right,
+because they share a dequantiser; and the apparent bf16 KV-cache sensitivity in the first
+run was an artefact of the misread weights and is not real. `qwen2` reaches the fast
+attention path the way every family does, by measurement, and has not been measured yet.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)

@@ -75,6 +75,23 @@ def _q4k_to_q4_1(chunks):
     return _pack_fn("q4k_to_q4_1")(chunks)
 
 
+def _q4_0_to_q4_1(chunks):
+    """recipes.pack's signed-nibble -> q4_1."""
+    return _pack_fn("q4_0_to_q4_1")(chunks)
+
+
+def _is_signed_q4(m, name, chunks):
+    """recipes.pack's rule, so the replica and the pool never disagree about a format."""
+    return _pack_fn("is_signed_q4")(m, name, chunks)
+
+
+def q4_1_chunks_of(m, name):
+    """A q4_1 tensor's [n, 5120] chunks as the POOL holds them, transcoding the signed
+    form on the way. Anything reading chunk bytes straight out of the container has to come
+    through here, or it reads a different model than the NPU does (OPEN-PACK-Q4-0)."""
+    return _pack_fn("q4_chunks_of")(m, name, m.raw(name))
+
+
 def bf16_to_f32(u16):
     return (np.asarray(u16, np.uint16).astype(np.uint32) << 16).view(np.float32)
 
@@ -218,16 +235,21 @@ class Q4NX:
         b = self.data_base + o0 + token * hidden * 2
         return bf16_to_f32(np.frombuffer(self.mm[b: b + hidden * 2], dtype=np.uint16)).astype(np.float64)
 
-    def dq_tile(self, raw_bytes, out_dim, in_dim, chunk=CHUNK_Q4, requant=None):
+    def dq_tile(self, raw_bytes, out_dim, in_dim, chunk=CHUNK_Q4, requant=None, signed=None):
         """Raw chunk bytes -> [out, in] f32, in the file's raster order.
 
         `chunk` is the format those bytes are in. A q8 or Q4_K tensor reads as the packer's
-        q4_1 when `requant` (the default: the values the NPU holds), else as its own."""
+        q4_1 when `requant` (the default: the values the NPU holds), else as its own.
+        `signed` says whether a 5120-byte tensor is the signed quantiser rather than q4_1;
+        None detects it the way the packer does, so the two cannot disagree."""
         if requant is None:
             requant = self.requant_q8
         b = np.frombuffer(raw_bytes, dtype=np.uint8)
         if chunk == CHUNK_Q4:
-            w = dq_chunks_q4_1(b.reshape(-1, CHUNK_Q4))
+            c = b.reshape(-1, CHUNK_Q4)
+            if signed is None:
+                signed = _is_signed_q4(None, "", c)
+            w = dq_chunks_q4_1(_q4_0_to_q4_1(c) if signed else c)
         elif chunk == CHUNK_Q8 and requant:
             w = dq_chunks_q4_1(_requant_q4_1(b.reshape(-1, CHUNK_Q8)))
         elif chunk == CHUNK_Q8:
@@ -245,11 +267,21 @@ class Q4NX:
             W[32 * (f // ncol): 32 * (f // ncol) + 32, 256 * (f % ncol): 256 * (f % ncol) + 256] = w[f]
         return W
 
+    def quant_format_of(self, name):
+        """What the container SAYS a 4-bit tensor's format is, when it says anything.
+
+        Nothing writes this yet -- the containers carry no `__metadata__` at all -- but it
+        is where a stamp lands, and a stamp beats the packer's data signal when present."""
+        md = self.header.get("__metadata__") or {}
+        return md.get(f"quant_format:{name}") or md.get("quant_format")
+
     def matmul_w(self, name, out_dim, in_dim):
         cb = self.chunk_bytes_of(name)
         if cb not in (CHUNK_Q4, CHUNK_Q8, CHUNK_Q4K):
             self._refuse(name, cb)
-        return self.dq_tile(self.raw(name), out_dim, in_dim, cb, self.requant_of(name))
+        signed = (cb == CHUNK_Q4 and _is_signed_q4(self, name, np.frombuffer(self.raw(name), np.uint8)
+                                                   .reshape(-1, CHUNK_Q4)))
+        return self.dq_tile(self.raw(name), out_dim, in_dim, cb, self.requant_of(name), signed)
 
     def expert_w(self, layer, kind, e):
         """One expert's `kind` ('up' | 'gate' | 'down') matrix, dequantized."""

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from q4nx import CHUNK_Q4, dq_chunks_q4_1
+from q4nx import CHUNK_Q4, dq_chunks_q4_1, q4_1_chunks_of
 
 
 def rms(x, eps=1e-6):
@@ -116,9 +116,13 @@ def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
 
 
 def lmhead_q4_logits(m, hn, spec, block=2048):
-    """logits[vocab] = W_lm[vocab, hidden] @ hn from the q4_1 chunks in the file's raster order."""
+    """logits[vocab] = W_lm[vocab, hidden] @ hn from the q4_1 chunks in the file's raster order.
+
+    Through `q4_1_chunks_of`, not the raw bytes: a container that stores the signed
+    quantiser instead has to be transcoded here exactly as it is on the way into the pool,
+    or the head reads one format while the layers read the other (OPEN-PACK-Q4-0)."""
     hid = spec.hidden
-    raw = np.frombuffer(m.raw("lm_head.weight"), dtype=np.uint8).reshape(-1, CHUNK_Q4)
+    raw = q4_1_chunks_of(m, "lm_head.weight")
     ncol = hid // 256
     nch = raw.shape[0]
     hn = np.asarray(hn, np.float64)

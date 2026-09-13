@@ -124,11 +124,13 @@ def test_a_record_that_does_not_tile_the_element_is_refused():
         DR.geometry(ModelSpec.from_hf_config({**HF_QWEN25_3B, "head_dim": 64}))
 
 
-def test_the_geometry_is_not_in_the_catalogue_until_hardware_has_run_it():
-    """OPEN-OP-RANGE: the kernels exist, the point has not been compared on the NPU, and
-    the recipe says so rather than emitting a bundle nobody has checked."""
+def test_the_geometry_is_in_the_catalogue_now_that_hardware_has_run_it():
+    """OPEN-OP-RANGE: the tuple entered when OPEN-ATTN-QKV-BIAS's compare passed on
+    Qwen2.5-3B (2026-09-12). The 3B's own intermediate, 11264, is a `gemv_q4` K; the
+    stock HF 11008 is not, and is still refused by name."""
     from recipes.catalogue import OpRangeError
-    with pytest.raises(OpRangeError, match=r"128, 16, 2, 128, False, False, False, True"):
+    DR.recipe(ModelSpec.from_hf_config({**HF_QWEN25_3B, "intermediate_size": 11264}))
+    with pytest.raises(OpRangeError, match=r"gemv_q4: K=11008"):
         DR.recipe(ModelSpec.from_hf_config(HF_QWEN25_3B))
 
 

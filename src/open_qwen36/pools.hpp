@@ -74,6 +74,11 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 /// q4k_to_q4_1` is the same in NumPy; pools_test and tests/test_quant_q4k.py hash the
 /// same vectors (OPEN-QUANT-Q4K).
 void q4k_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
+
+/// Signed-nibble chunks -> q4_1, in place of the same 5120 bytes: flip bit 3 of every
+/// nibble (two's complement becomes offset binary) and write min = -8 * d. Exact both
+/// ways. recipes/pack.py q4_0_to_q4_1 must agree byte for byte (OPEN-PACK-Q4-0).
+void q4_0_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 /// One container q8 chunk (8704 B: scales[256] bf16 then codes[8192] int8, 32 rows x 256 K)
 /// -> its 16-row half-tile `half` (5120 B: scales[128] bf16 at [0, 256), codes[4096] int8 at
 /// [256, 4352), zero pad). Rows 16*half .. 16*half+15. The container's row-block stride is

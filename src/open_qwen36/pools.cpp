@@ -123,9 +123,30 @@ std::string chunk_guess(size_t ch) {
 /// A q4_1 tensor is a view into the mapping; a q8 one is re-quantized into `tmp` first
 /// (OPEN-PACK-PLAN: a q8 source is accepted transparently by every q4 pack op, because the
 /// two formats hold the SAME 32-row x 256-column tile, so no chunk index law changes).
+/// Is this 5120-byte tensor the SIGNED quantiser (w = d * int4(q), every min zero) rather
+/// than q4_1 (w = d * q + min)? Both share the chunk and nothing in the container says
+/// which, so the signal is the mins: a real q4_1 tensor does not have 256 exactly-zero
+/// ones, because a min is a block's own minimum. recipes/pack.py is_signed_q4 has the
+/// same rule, and the replica reads through it, so the two cannot disagree.
+bool signed_q4(const Q4nxFile& m, const std::string& name) {
+    const uint8_t* p = raw(m, name, Q4_CHUNK) + 512;
+    for (unsigned i = 0; i < 256; ++i) {
+        uint16_t mn;
+        std::memcpy(&mn, p + 2 * i, 2);
+        if (mn) return false;
+    }
+    return true;
+}
+
 const uint8_t* q4_source(const Q4nxFile& m, const std::string& name, size_t chunk0, size_t nch, size_t ch,
                          std::vector<uint8_t>& tmp) {
     const size_t src_ch = m.chunk_bytes(name);
+    if (src_ch == Q4_CHUNK && ch == Q4_CHUNK && signed_q4(m, name)) {
+        const uint8_t* src = raw(m, name, (chunk0 + nch) * Q4_CHUNK) + chunk0 * Q4_CHUNK;
+        tmp.resize(nch * Q4_CHUNK);
+        q4_0_to_q4_1_chunks(src, nch, tmp.data());
+        return tmp.data();
+    }
     if (src_ch == ch) return raw(m, name, (chunk0 + nch) * ch) + chunk0 * ch;
     if (src_ch == Q8_CHUNK && ch == Q4_CHUNK) {
         const uint8_t* src = raw(m, name, (chunk0 + nch) * Q8_CHUNK) + chunk0 * Q8_CHUNK;
@@ -187,6 +208,26 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
                 }
             }
         }
+    }
+}
+
+void q4_0_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
+    // int4(q) == (q ^ 8) - 8, so flipping bit 3 of every nibble turns two's complement
+    // into offset binary and d * int4(q) becomes d * q' + (-8 * d). Writing -8 * d into
+    // the min slot leaves the GEMV reading exactly the right values. Both halves are
+    // exact: the flip is a relabelling and -8 * d only moves a bf16 exponent.
+    // recipes/pack.py q4_0_to_q4_1 does the same and must agree byte for byte.
+    for (size_t c = 0; c < nch; ++c) {
+        const uint8_t* s = src + c * Q4_CHUNK;
+        uint8_t* o = dst + c * Q4_CHUNK;
+        std::memcpy(o, s, 512);                            // the scales are unchanged
+        for (unsigned i = 0; i < 256; ++i) {
+            uint16_t d;
+            std::memcpy(&d, s + 2 * i, 2);
+            const uint16_t mn = bf16_rne(-8.0f * bf16_to_f32(d));
+            std::memcpy(o + 512 + 2 * i, &mn, 2);
+        }
+        for (size_t k = 1024; k < Q4_CHUNK; ++k) o[k] = static_cast<uint8_t>(s[k] ^ 0x88);
     }
 }
 

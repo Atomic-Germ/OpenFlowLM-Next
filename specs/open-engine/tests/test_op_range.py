@@ -50,7 +50,7 @@ def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take
 def test_an_unvalidated_gemv_k_is_refused():
     with pytest.raises(OpRangeError, match=r"gemv_q4: K=5120 is outside the validated set "
                                           r"\{1024, 2048, 2560, 3072, 3584, 3840, 4096, 6144, 8192, 9216, 9728, 10240, 10752, "
-                                          r"12288, 14336, 15360\}"):
+                                          r"11264, 12288, 14336, 15360\}"):
         require("gemv_q4", K=5120)
 
 

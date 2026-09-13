@@ -130,14 +130,15 @@ class Template:
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
              {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 6144, 8192, 9216, 9728, 10240,
-                          10752, 12288, 14336, 15360),
+                          10752, 11264, 12288, 14336, 15360),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
                                                  # 3072 / 8192: Llama 3.2 3B; 8192: Llama 3.2 1B; 8192: Granite 4.2 3B;
                                                  # 9216: Qwen3.5 4B; 6144: Qwen3.5 2B; 3584: Qwen3.5 0.8B;
                                                  # 10752: Nanbeige4.1-3B (OPEN-FAMILY-LLAMA3, 2026-09-10);
-                                                 # 3840 / 15360: Gemma 3 12B
+                                                 # 3840 / 15360: Gemma 3 12B;
+                                                 # 11264: Qwen2.5-3B (OPEN-ATTN-QKV-BIAS, 2026-09-12)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
               "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)
@@ -173,6 +174,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (64, 40, 8, 64, False, False, False, False),    # Granite 4.2 3B (OPEN-FAMILY-GRANITE)
                  (128, 20, 4, 128, False, False, False, False),  # Nanbeige4.1-3B: GQA group 5, two q heads per element (OPEN-FAMILY-LLAMA3)
                  (128, 24, 8, 96, False, False, False, False),   # Phi4-mini: 96 of 128 dims rotated, the 16-lane tail (OPEN-FAMILY-PHI3)
+                 (128, 16, 2, 128, False, False, False, True),   # Qwen2.5-3B: a q/k/v bias, and the narrowest
+                                                                 # attention element yet at 512 B (OPEN-ATTN-QKV-BIAS)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them

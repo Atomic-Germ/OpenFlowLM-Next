@@ -288,44 +288,59 @@ def q4_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.nda
     src = b.reshape(-1, ch)
     sel = src[c0:] if n is None else src[c0:c0 + n]
     if ch == CH:
-        _refuse_q4_0(name, sel)
-        return sel
+        return _batched(q4_0_to_q4_1, sel) if is_signed_q4(m, name, sel) else sel
     conv = requant_q4_1 if ch == Q8 else q4k_to_q4_1
+    return _batched(conv, sel)
+
+
+def _batched(conv, sel: np.ndarray) -> np.ndarray:
+    """In batches, so a 2048-chunk projection does not build a 70 MB float array."""
     out = np.empty((sel.shape[0], CH), np.uint8)
     for i in range(0, sel.shape[0], 256):
         out[i:i + 256] = conv(sel[i:i + 256])
     return out
 
 
-def _refuse_q4_0(name: str, sel: np.ndarray) -> None:
-    """A 5120-byte chunk whose 256 mins are ALL exactly zero is not q4_1.
+def is_signed_q4(m, name: str, sel: np.ndarray) -> bool:
+    """Is this 5120-byte tensor the SIGNED quantiser rather than q4_1?
 
-    q4_1 stores (scale, min) per 32-value block and reconstructs w = d * q + min with q an
-    UNSIGNED nibble. Some containers -- Qwen2.5-3B-Instruct-NPU2 is the one that found this
-    -- use the same chunk for a signed quantiser instead: w = d * int4(q), no min, so every
-    min is written as zero. Read as q4_1 those come out one-sided, every value in a block
-    sharing the sign of its scale, at about 2.7x the right spread. Nothing downstream
-    notices. The replica dequantises the same way, so it agrees with the kernels to the bit
-    and the model answers with noise.
+    Two formats share the chunk. q4_1 stores (scale, min) per 32-value block and reads
+    w = d * q + min with q an unsigned nibble, 0..15. Some containers -- Qwen2.5 is the one
+    that found this -- use the same chunk for w = d * int4(q), a signed nibble -8..7 with
+    no min, and write every min as zero. Read the wrong way every block comes out
+    one-sided, sharing the sign of its scale, at about 2.7x the right spread; the replica
+    misreads it identically, so it agrees with the kernels to the bit and the model answers
+    with noise.
 
-    A real q4_1 tensor does not have 256 exactly-zero mins in its first chunk, so this
-    costs a comparison and catches the case. The transcode is known and small -- flip bit 3
-    of every nibble, which turns two's complement into offset binary, then write
-    min = -8 * d -- but WHERE a container declares its format is the container's business,
-    and it declares nothing today: no safetensors metadata, no per-tensor flag, nothing in
-    config.json. So this refuses and names it rather than guessing for every container.
+    A container that SAYS which it is wins: `quant_format_of` is the hook for that, and no
+    container implements it yet. Failing that, 256 exactly-zero mins in a chunk is the
+    signal -- a real q4_1 tensor does not manage that, because a min is a block's own
+    minimum and every one of them being exactly 0.0 does not happen to real weights.
     """
-    if not sel.size:
-        return
-    mins = sel[0, 512:1024].view(np.uint16)
-    if not (mins == 0).all():
-        return
-    raise ValueError(
-        f"{name}: every min in this {CH}-byte chunk is zero, so the tensor is a signed "
-        f"4-bit quantiser (w = d * int4(q)), not q4_1 (w = d * q + min). Packing it as "
-        f"q4_1 gives one-sided blocks and a model that answers with noise while agreeing "
-        f"with the fp64 replica, which misreads it the same way. The transcode is "
-        f"nibble ^= 8 then min = -8 * d; see .claude/plans/qwen2-q4-0-container.md")
+    say = getattr(m, "quant_format_of", None)
+    declared = say(name) if callable(say) else None
+    if declared:
+        return declared == "q4_0"
+    return bool(sel.size) and bool((sel[0, 512:1024].view(np.uint16) == 0).all())
+
+
+def q4_0_to_q4_1(chunks) -> np.ndarray:
+    """[n, 5120] signed-nibble chunk bytes -> [n, 5120] q4_1 chunk bytes.
+
+    int4(q) == (q ^ 8) - 8, so flipping bit 3 of every nibble turns two's complement into
+    offset binary and w = d * int4(q) becomes w = d * q' + (-8 * d). Writing -8 * d into
+    the min slot leaves the GEMV, the pool and the replica reading exactly the right
+    values, and nothing downstream learns a new format. Both halves are exact: the bit flip
+    is a relabelling, and -8 * d only moves a bf16 exponent.
+
+    src/open_qwen36/pools.cpp does the same and must agree byte for byte.
+    """
+    src = _u8(chunks).reshape(-1, CH)
+    out = src.copy()
+    d = _bf16_to_f32(np.ascontiguousarray(src[:, :512]).view(np.uint16))
+    out[:, 512:1024] = _bf16_rne(-8.0 * d).view(np.uint8).reshape(-1, 512)
+    out[:, 1024:] = src[:, 1024:] ^ 0x88          # bit 3 of the low nibble and of the high
+    return out
 
 
 def q8_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.ndarray:
