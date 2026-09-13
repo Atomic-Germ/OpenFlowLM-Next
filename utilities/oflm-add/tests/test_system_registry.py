@@ -78,3 +78,18 @@ def test_the_refusal_names_the_paths_it_tried(monkeypatch, tmp_path):
     assert str(tmp_path / "share" / "model_list.json") in msg
     assert str(tmp_path / "flm" / "model_list.json") in msg
     assert "--system-list" in msg
+
+
+def test_the_xclbin_link_falls_back_to_a_junction(monkeypatch, tmp_path):
+    """Windows only grants the symlink privilege to admins and developer mode.
+    link_open_kernels already handles that; the xclbins link did not."""
+    system_root = tmp_path / "sys" / "xclbins"
+    (system_root / "Off-NPU2").mkdir(parents=True)
+    user_root = tmp_path / "user" / "xclbins"
+
+    def no_privilege(*a, **k):
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(oflm_add.os, "symlink", no_privilege)
+    oflm_add.link_xclbins(system_root, user_root, "Off-NPU2", "Off-NPU2", quiet=True)
+    assert (user_root / "Off-NPU2").is_dir()

@@ -638,20 +638,25 @@ def link_xclbins(system_root, user_root, dir_name, source_name, force=False, qui
     user_root.mkdir(parents=True, exist_ok=True)
     link = user_root / dir_name
     target = str(src)
-    if link.is_symlink():
-        if os.readlink(link) == target:
+    if link.exists() or link.is_symlink():
+        # resolve() covers a junction too, which does not answer to readlink
+        if link.exists() and link.resolve() == src.resolve():
             if not quiet:
                 log(f"[INFO] xclbins link already in place: {link}")
             return
-        link.unlink()
-    elif link.exists():
-        if force:
+        if link.is_symlink():
+            link.unlink()
+        elif force:
             shutil.rmtree(link)
         else:
             raise SystemExit(
                 f"{link} already exists and is not a symlink. Remove it or pass --force."
             )
-    os.symlink(target, link)
+    if not _make_dir_link(link, src):
+        raise SystemExit(
+            f"Could not link {link} -> {target}. Windows grants the symlink privilege to "
+            f"admins and developer mode only, and the junction fallback failed too."
+        )
     if not quiet:
         log(f"[INFO] Linked xclbins: {link} -> {target}")
 
