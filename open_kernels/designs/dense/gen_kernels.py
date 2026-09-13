@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))          # open_kernels/
 from recipes.load import current_spec  # noqa: E402
-from recipes import dense as QR  # noqa: E402
+from recipes.families import for_spec  # noqa: E402
 
 
 
@@ -197,5 +197,7 @@ def generate(R, out: Path = HERE) -> int:
 
 
 if __name__ == "__main__":
-    n = generate(QR.recipe(current_spec()))
+    spec = current_spec()
+    # LFM2's short-conv design shares these TUs, and its recipe is not `dense`
+    n = generate(for_spec(spec).recipe(spec))
     print(f"{n} kernel files")

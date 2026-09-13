@@ -92,15 +92,15 @@ def test_the_fused_input_projection_becomes_three_ordinary_ones(spec):
     assert all(o["op"] == "std_perm" for o in ops)
 
 
-def test_the_conv_taps_go_in_as_they_are(spec):
-    """[hidden, taps] bf16 is already channel-major, so a plain put -- the DeltaNet plan's
-    conv_transpose would reorder a weight that is in the right order already."""
+def test_the_conv_taps_go_in_tap_major(spec):
+    """The container stores [hidden, taps]; the core wants [taps, hidden], so that one tap's
+    32 consecutive channels are 32 contiguous values rather than a stride-3 gather."""
     L = lfm2.layout(spec)
     consts = lfm2.pack_plan(spec)["layer_types"][SHORT_CONV]["consts"]
     conv = [o for o in consts if o["tensor"].endswith("shortconv.conv.weight")]
     assert len(conv) == 1
-    assert conv[0]["op"] == "put"
-    assert conv[0]["cap"] == HID * TAPS * 2
+    assert conv[0]["op"] == "transpose"
+    assert (conv[0]["rows"], conv[0]["cols"], conv[0]["elem"]) == (HID, TAPS, 2)
     assert conv[0]["dst"] == L.CD_CONV
 
 

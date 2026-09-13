@@ -16,6 +16,10 @@ with the LAST tap. `model/replica_lfm2.py` is the fp64 reference and asserts tha
 orientation directly - a transposed tap weight is the one error that still produces
 plausible numbers.
 
+The conv weight ships as [hidden, taps] and goes into consts TAP-major, [taps, hidden]: a
+core loading tap k for 32 consecutive channels wants those 32 contiguous, and at
+[hidden, taps] they are a stride-taps gather. `designs/short_conv/sc.h` reads it that way.
+
 The fused `shortconv.in_proj.weight` is [3 * hidden, hidden] with B, C and u down the rows.
 The conv core wants B[c], C[c] and u[c] together, which in band order sit a third of the
 tensor apart, so the plan emits THREE std_perm ops off the one tensor at source chunk
@@ -192,8 +196,11 @@ def pack_plan(spec: ModelSpec) -> dict:
         "consts": [
             {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.CD_LNW, "cap": L.ELN},
             {"op": "put", "tensor": pre + "post_attention_layernorm.weight", "dst": L.CD_POSTLN, "cap": L.ELN},
-            # already channel-major as [hidden, taps], so a plain put -- no conv_transpose
-            {"op": "put", "tensor": pre + "shortconv.conv.weight", "dst": Lx.CD_CONV, "cap": hid * TAPS * 2},
+            # The container stores [hidden, taps]; the core wants TAP-major, so that loading
+            # tap k for 32 consecutive channels is 32 contiguous values instead of a
+            # stride-taps gather. [hidden, taps] -> [taps, hidden].
+            {"op": "transpose", "tensor": pre + "shortconv.conv.weight", "dst": Lx.CD_CONV,
+             "rows": hid, "cols": TAPS, "elem": 2},
         ],
     }
     return {

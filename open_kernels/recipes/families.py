@@ -16,21 +16,24 @@ def family_module(name: str) -> ModuleType:
     if name == "qwen35":
         from . import qwen35
         return qwen35
+    if name == "lfm2":
+        from . import lfm2
+        return lfm2
     if name in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
         from . import dense
         return dense
     if name in NOT_IMPLEMENTED:
         raise NotImplementedError(f"the open kernels have no recipe for {name!r} yet: "
                                   f"{NOT_IMPLEMENTED[name]}")
-    raise ValueError(f"no recipe for family {name!r} "
-                     f"(have qwen36moe, qwen35, qwen3, llama3, gemma3, hunyuan, granite, phi3, qwen2)")
+    raise ValueError(f"no recipe for family {name!r} (have {', '.join(FAMILIES)})")
 
 
 def for_spec(spec: ModelSpec) -> ModuleType:
     return family_module(spec.family)
 
 
-FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")
+FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2",
+            "lfm2")
 
 # Families whose ModelSpec derives but whose kernels do not exist. Naming the gap here is
 # the point: routing such a model to the nearest recipe would emit kernels that drop a whole
