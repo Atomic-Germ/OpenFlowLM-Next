@@ -38,6 +38,21 @@ def gelu_tanh(x):
     return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x ** 3)))
 
 
+def sink_softmax(s, sink):
+    """Softmax over a head's scores with one extra learned logit in the denominator that has
+    no value vector behind it -- GPT-OSS's per-head attention sink. The weights come back
+    over the real positions only, so they sum to less than one and the head can attend to
+    nothing at all.
+
+    `sink` is the raw stored scalar: the scores are already divided by sqrt(head_dim) when it
+    joins them, so it is not scaled here either.
+    """
+    s = np.asarray(s, dtype=np.float64)
+    m = max(float(s.max()) if s.size else -np.inf, float(sink))
+    e = np.exp(s - m)
+    return e / (e.sum() + np.exp(float(sink) - m))
+
+
 def rope(t, p, rot, theta, inv_freq=None, scale=1.0):
     """The first `rot` dims of each head rotated in half-split pairs; the rest pass through
     (Phi-3 rotates 96 of 128). `scale` is longrope's attention factor on cos and sin."""
