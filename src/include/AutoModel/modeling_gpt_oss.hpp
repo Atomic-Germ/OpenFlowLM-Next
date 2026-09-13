@@ -11,9 +11,8 @@
 class GPT_OSS : public AutoModel {
 private:
 
-    bool enable_think = true;
-
     std::string reasoning_effort = "low";
+    std::string default_reasoning_effort = "low";
     std::string model_identity = "You are ChatGPT, a large language model trained by OpenAI.";
     std::string role = "developer";
 
@@ -49,6 +48,17 @@ public:
     StreamResult parse_stream_content(const std::string content);
     chat_template_type_t get_chat_template_type() {
         return chat_template_type_t::harmony;
+    }
+
+    // apply_chat_template reads reasoning_effort directly, so the base reset of
+    // extra_context is not enough to keep one request's effort out of the next
+    void snapshot_request_defaults() override {
+        AutoModel::snapshot_request_defaults();
+        default_reasoning_effort = reasoning_effort;
+    }
+    void reset_request_defaults() override {
+        AutoModel::reset_request_defaults();
+        reasoning_effort = default_reasoning_effort;
     }
 
     /// \brief Override configure_parameter to handle GPT-oss-specific parameters

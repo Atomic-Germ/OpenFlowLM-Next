@@ -36,7 +36,6 @@ private:
     static constexpr int think_start_id = 100;
     static constexpr int think_end_id = 101;
 
-    bool enable_think = false;
     bool enable_tool = false;
     void setup_tokenizer(std::string model_path);
     

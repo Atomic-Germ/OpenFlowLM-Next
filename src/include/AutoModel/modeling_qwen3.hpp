@@ -13,7 +13,6 @@
 class Qwen3 : public AutoModel {
 private:
 
-    bool enable_think = false;
     bool enable_tool = false;
     
     int think_start_id = 151667;

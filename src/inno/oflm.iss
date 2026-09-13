@@ -269,7 +269,7 @@ begin
     Exit;
   end;
   Result := '52625';
-  end;
+end;
 
 procedure InitializeWizard;
 begin

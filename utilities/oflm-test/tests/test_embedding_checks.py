@@ -1,5 +1,5 @@
 """
-Unit tests for EmbeddingTask — embedding checks E1-E9. All embedding API calls
+Unit tests for EmbeddingTask — embedding checks E1-E11. All embedding API calls
 are mocked so no OFLM server is required.
 
 Run with:
@@ -38,15 +38,62 @@ def _embed_response(data, object_type="list"):
     return SimpleNamespace(data=data, object=object_type)
 
 
+def _vector_body(vector, model="embed-gemma:300m"):
+    """A 200 carrying one embedding, in the shape /v1/embeddings really sends."""
+    body = {"object": "list", "model": model,
+            "data": [{"object": "embedding", "embedding": vector, "index": 0}]}
+    return 200, body, json.dumps(body)
+
+
+def _empty_body(status=200, model="embed-gemma:300m"):
+    """A success envelope with no embedding in it."""
+    body = {"object": "list", "model": model, "data": []}
+    return status, body, json.dumps(body)
+
+
+def _error(status, message, code="invalid_value", error_type="invalid_request_error",
+           param="prompt_name"):
+    """An OpenAI-shaped refusal, matching rest_handler.cpp's embeddings errors."""
+    body = {"error": {"message": message, "type": error_type, "param": param, "code": code}}
+    return status, body, json.dumps(body)
+
+
+# The refusal a model with no task concept really sends - see the
+# TaskPolicy::NotSupported branch in src/server/rest_handler.cpp.
+NO_PROMPTS_MESSAGE = ("model 'bge-base:en-v1.5' has no task prompts; remove 'prompt_name'. "
+                      "Passing one would be ignored, and the vector would come back "
+                      "correctly shaped and unprefixed with nothing to show it.")
+
+# The other refusal the engine makes on purpose: the model HAS prompts, but none
+# of them serves query or document. src/open_npue_adapter/npue_embedding.cpp:85.
+NO_MATCHING_PROMPT_MESSAGE = ("this model declares task prompts [Clustering, Classification] "
+                              "and none of them matches the requested task. Refusing to pick "
+                              "one: the prefix changes the vector.")
+
+
+def _fake_embed_raw(by_prompt):
+    """Stands in for _embed_raw, answering per prompt name in call order.
+
+    Each value is a list of (status, body, text) triples; the last one repeats,
+    so a prompt that is only ever drawn once needs a single entry.
+    """
+    def fake(model_id, input_text, **extra):
+        queue = by_prompt[extra.get("prompt_name")]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+    return fake
+
+
 class TestCheckNames(unittest.TestCase):
 
     def setUp(self):
         self.task = _make_task()
 
-    def test_nine_checks_defined(self):
-        self.assertEqual(len(self.task.CHECK_NAMES), 9)
-        for name in self.task.CHECK_NAMES:
-            self.assertIn(name[0], "E123456789")
+    def test_eleven_checks_defined(self):
+        # run() indexes CHECK_NAMES positionally, so a name out of order puts
+        # the wrong label on a verdict in the CSV.
+        self.assertEqual(len(self.task.CHECK_NAMES), 11)
+        for number, name in enumerate(self.task.CHECK_NAMES, 1):
+            self.assertTrue(name.startswith(f"E{number} "), name)
 
     def test_embed_allowlist_present(self):
         self.assertIn("embed-gemma:300m", EmbeddingTask.EMBED_MODELS)
@@ -545,6 +592,204 @@ class TestRepeatabilityExactness(unittest.TestCase):
             (verdict, detail), _ = self.task._check_repeatability("m")
         self.assertEqual(verdict, "PASS")
         self.assertIn("not bit-identical", detail)
+
+
+class TestTaskPromptHonoured(unittest.TestCase):
+    """E10 - the check that would have caught the dropped task prompt.
+
+    The handler passed task_query whatever the request said, so a document and
+    a query embedded the same text to the same vector. That vector is correctly
+    shaped, correctly normed and deterministic, so E1 through E9 pass on it.
+    """
+
+    def setUp(self):
+        self.task = _make_task()
+
+    def test_identical_vectors_under_both_prompts_fail_as_a_dropped_prompt(self):
+        # The #52 defect itself: the same text under 'search_query' and under
+        # 'search_document' comes back byte for byte the same.
+        same = [0.1, 0.2, 0.3]
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_vector_body(same)],
+            EmbeddingTask.DOCUMENT_PROMPT: [_vector_body(same)],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("task prompt is being dropped", detail)
+        self.assertIn("1.000000", detail)
+        self.assertEqual(vector, same)
+
+    def test_different_vectors_with_stable_repeats_pass_and_report_both_cosines(self):
+        query, document = [1.0, 0.0, 0.0], [0.9, 0.1, 0.0]
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_vector_body(query), _vector_body(query)],
+            EmbeddingTask.DOCUMENT_PROMPT: [_vector_body(document)],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "PASS")
+        across = self.task._cosine_similarity(query, document)
+        self.assertIn(f"{across:.6f}", detail)      # the two prompts apart
+        self.assertIn("1.000000", detail)           # two draws of the same prompt
+        self.assertEqual(vector, query)
+
+    def test_a_model_with_no_task_prompts_skips_rather_than_fails(self):
+        # Refusing a prompt name is what a BERT-family model should do, and the
+        # fix kept that on purpose, so it is not this suite's business to fail it.
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_error(400, NO_PROMPTS_MESSAGE)],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            verdict, vector = self.task._check_task_prompt_honoured("bge-base:en-v1.5")
+        self.assertEqual(verdict[0], "SKIP")
+        self.assertIn("bge-base:en-v1.5", verdict[1])
+        self.assertIsNone(vector)
+
+        # And a SKIP must not land in the run's failure count.
+        self.task.record(verdict, "bge-base:en-v1.5 / E10 Task Prompt Honoured")
+        self.assertEqual(self.task.result.hard_failures, 0)
+        self.assertEqual(self.task.result.total, 0)
+
+    def test_a_model_whose_prompts_serve_neither_task_skips_rather_than_fails(self):
+        # The engine refuses to pick a prompt when none matches, and
+        # src/open_npue_adapter/README.md calls that the correct behaviour. It is
+        # the same deliberate refusal as the BERT one, so it gets the same verdict.
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_error(400, NO_MATCHING_PROMPT_MESSAGE)],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            verdict, vector = self.task._check_task_prompt_honoured("nomic-embed-text:v1.5")
+        self.assertEqual(verdict[0], "SKIP")
+        self.assertIn("none serves", verdict[1])
+        self.assertIsNone(vector)
+
+        self.task.record(verdict, "nomic-embed-text:v1.5 / E10 Task Prompt Honoured")
+        self.assertEqual(self.task.result.hard_failures, 0)
+
+    def test_a_repeat_draw_that_fails_is_reported_as_a_failed_draw(self):
+        # Without this the cosine against a missing vector comes out 0.0 and the
+        # run blames noise for a request that never came back.
+        query, document = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_vector_body(query),
+                                         _error(500, "Handler exception: engine reset")],
+            EmbeddingTask.DOCUMENT_PROMPT: [_vector_body(document)],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("repeat draw", detail)
+        self.assertIn("HTTP 500", detail)
+        self.assertNotIn("apart from noise", detail)
+        self.assertEqual(vector, query)
+
+    def test_a_refusal_for_any_other_reason_fails(self):
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_error(400, "model 'embed-gemma:300m' is not loaded",
+                                                code="model_not_found", param="model")],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), _ = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("HTTP 400", detail)
+        self.assertIn("is not loaded", detail)
+
+    def test_a_success_carrying_no_embedding_fails(self):
+        fake = _fake_embed_raw({EmbeddingTask.QUERY_PROMPT: [_empty_body()]})
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), _ = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("no embedding", detail)
+
+    def test_the_document_prompt_being_refused_fails(self):
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_vector_body([1.0, 0.0, 0.0])],
+            EmbeddingTask.DOCUMENT_PROMPT: [_error(400, "unknown prompt_name 'search_document'")],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn(EmbeddingTask.DOCUMENT_PROMPT, detail)
+        self.assertEqual(vector, [1.0, 0.0, 0.0])
+
+    def test_vectors_that_also_move_between_draws_soft_fail_as_noise(self):
+        # The prompts differ, but so do two draws of the same prompt, so the
+        # difference is not evidence that the field was read at all.
+        query, document = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+        fake = _fake_embed_raw({
+            EmbeddingTask.QUERY_PROMPT: [_vector_body(query), _vector_body([0.9, 0.1, 0.0])],
+            EmbeddingTask.DOCUMENT_PROMPT: [_vector_body(document)],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), _ = self.task._check_task_prompt_honoured("embed-gemma:300m")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("apart from noise", detail)
+
+
+class TestUnknownTaskPrompt(unittest.TestCase):
+    """E11 - a task prompt the server cannot resolve must be refused.
+
+    Quietly falling back to the default is the same defect one step quieter:
+    the caller asked for one task, got another, and nothing says so.
+    """
+
+    def setUp(self):
+        self.task = _make_task()
+
+    def test_an_accepted_unknown_prompt_fails_as_a_silent_substitution(self):
+        fake = _fake_embed_raw({
+            EmbeddingTask.IMPOSSIBLE_PROMPT: [_vector_body([0.1, 0.2, 0.3])],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_unknown_task_prompt("embed-gemma:300m")
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn(EmbeddingTask.IMPOSSIBLE_PROMPT, detail)
+        self.assertIn("nothing downstream can tell", detail)
+        self.assertEqual(vector, [0.1, 0.2, 0.3])
+
+    def test_a_well_formed_refusal_passes(self):
+        fake = _fake_embed_raw({
+            EmbeddingTask.IMPOSSIBLE_PROMPT: [
+                _error(400, "unknown prompt_name 'not_a_task'. Known: [query, search_query, ...]"),
+            ],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_unknown_task_prompt("embed-gemma:300m")
+        self.assertEqual(verdict, "PASS")
+        self.assertIn("400", detail)
+        self.assertIn("invalid_value", detail)
+        self.assertIsNone(vector)
+
+    def test_a_refusal_inside_a_success_envelope_soft_fails(self):
+        fake = _fake_embed_raw({EmbeddingTask.IMPOSSIBLE_PROMPT: [_empty_body()]})
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), vector = self.task._check_unknown_task_prompt("embed-gemma:300m")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("success envelope", detail)
+        self.assertIsNone(vector)
+
+    def test_a_refusal_that_is_not_openai_shaped_soft_fails(self):
+        # {"error": <string>} is the shape this server produced when its own
+        # error handling threw; there is no code or type to report.
+        bare = {"error": "Max length reached"}
+        fake = _fake_embed_raw({
+            EmbeddingTask.IMPOSSIBLE_PROMPT: [(400, bare, json.dumps(bare))],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), _ = self.task._check_unknown_task_prompt("embed-gemma:300m")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("not an", detail)
+        self.assertIn("Max length reached", detail)
+
+    def test_a_refusal_with_no_json_body_at_all_soft_fails(self):
+        fake = _fake_embed_raw({
+            EmbeddingTask.IMPOSSIBLE_PROMPT: [(400, None, "Bad Request")],
+        })
+        with patch.object(self.task, "_embed_raw", side_effect=fake):
+            (verdict, detail), _ = self.task._check_unknown_task_prompt("embed-gemma:300m")
+        self.assertEqual(verdict, "SOFT-FAIL")
+        self.assertIn("Bad Request", detail)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
