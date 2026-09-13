@@ -1,5 +1,0 @@
-[harness] XRT_INCLUDE_DIR=C:\dev\XRT\src\runtime_src\core\include
-[harness] XRT_LIB_DIR=C:\dev\xrtNPUfromDLL
-run_kernel.cpp
-[harness] OK -> out\run_kernel.exe
-EXIT 0 
