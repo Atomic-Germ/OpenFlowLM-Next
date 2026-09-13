@@ -1385,7 +1385,10 @@ being free there. Both are arithmetic over the spec and shall be checked as such
 
 Step 3 ran the same day and PASSES: `oflm-test --llm --model qwen2.5-it:3b` through
 `oflm serve` on the rebuilt engine returns coherent on-topic answers in both stream
-rounds, 3862 and 3595 characters, the follow-up round reusing the prompt cache.
+rounds, 3862 and 3595 characters, the follow-up round reusing the prompt cache. It
+passes again on the fast attention path (OPEN-ATTN-CONTEXT) at 15.9 and 12.6 tok/s
+against 2.5 on the shipped kernel, which takes the suite from about forty minutes to
+about one.
 
 One caveat that has to travel with that result. The first attempt at the same two
 rounds died on the follow-up: the cache-reusing prefill of 16 tokens completed, the
