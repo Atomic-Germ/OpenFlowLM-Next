@@ -735,6 +735,28 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             return;
         }
 
+        // A non-string request_id threw from the read below, outside every try,
+        // while this request held the NPU lock -- which was then never released,
+        // so every request queued behind it waited forever. Refuse it the way a
+        // body that does not parse is refused above.
+        if (request_json.contains("request_id") && !request_json["request_id"].is_string()) {
+            res_ref.result(http::status::bad_request);
+            res_ref.body() = safe_dump(json{ {"error", {
+                {"message", "request_id must be a string."},
+                {"type", "invalid_request_error"},
+                {"param", "request_id"},
+                {"code", "invalid_value"}}} });
+            res_ref.set(http::field::content_type, "application/json");
+            res_ref.prepare_payload();
+
+            if (is_deferred && session) session->write_response_from_callback();
+
+            if (needs_npu) {
+                this->process_next_npu_request();
+            }
+            return;
+        }
+
         auto cancellation_token = std::make_shared<CancellationToken>(session);
         session->set_cancellation_token(cancellation_token);
 
