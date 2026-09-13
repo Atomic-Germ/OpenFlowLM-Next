@@ -1,20 +1,19 @@
 # Plan: one GEMM xclbin for every K — collapse the block route's three GEMM contexts
 
-**Status:** 2026-09-13, branch `prefill/gemm-contexts` (worktree
-`C:/code/openflowlm-ctx`, based on `prefill/35b-block` at `052f364e`).
-**All three gates passed; the kernel change is done and validated** (`b508af8c`).
+**Status:** COMPLETE 2026-09-13, archived. The durable change is folded into
+`spec.md` under `OPEN-PREFILL-BATCH` ("Result 2026-09-13 (one GEMM context for
+the whole route)"), which is the current statement; this file is the working
+record of how it got there. Branch `prefill/gemm-contexts`.
 
-- **Gate 2, build equivalence:** the 35B's five GEMM shapes build to one xclbin,
-  K=512 included.
-- **Correctness:** all five pass the fp64 reference at rel_fro ≤ 2.25e-3 (gate
-  5e-3) **and are bit-exact against the pre-change compile-time-K kernel** on
-  the same vectors.
-- **Gate 1, switch cost with an interleaved baseline, 3 runs:** the cost does
-  **not** scale with what a kernel streams. It is a property of the context
-  being entered and flat within one. **Saving 273 ms a block; residual 266 ms.**
+**End-to-end, the number that mattered:** the GEMM stage went **1489 -> 1096 ms
+a block, a 393 ms saving**, and prefill on 2582 tokens **43.1 -> 38.9 s**, with
+the identical eight-token greedy continuation. That is *larger* than the 273 ms
+this plan predicted from the per-switch cost, because a switch costs ~3.37 ms
+inside a block against the 2.47 the isolated probe reports. Every projection
+whose context change was removed dropped 2.75-3.39 ms per dispatch; the two that
+still follow the expert dispatch were unchanged (-0.17, +0.06), which is the
+mechanism showing up kernel by kernel.
 
-What is left is host-side and small: the recipe one-liner, three test files, the
-fixture and the spec edit. **Still worth finishing — the expensive part is done.**
 **Spec impact:** one modified requirement, `OPEN-PREFILL-BATCH`. Nothing new,
 nothing removed, no manifest schema change.
 **Detail:** `.claude/plans/gemm-context-collapse.md` in the worktree (the byte

@@ -116,14 +116,16 @@ int main(int argc, char** argv) {
           fg.weights.at("gqkvg_w").ops == std::vector<size_t>{5, 6, 7, 8} && fg.weights.at("go_w").ops == std::vector<size_t>{9} &&
           fg.qw == 4096 && fg.kvw == 512 && fg.nh == 16 && fg.kvh == 2 && fg.hd == 256 && fg.rot == 64 && fg.a_rout == 83968,
           "full route: q|k|v|gate then o, the attention geometry");
-    check(m.contexts.count("gemm_k2048") && m.kernels.at("gemm_n9216_k2048").context == "gemm_k2048" &&
-          m.kernels.at("gemm_n1024_k2048").context == "gemm_k2048" &&
-          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 10 &&
+    check(m.contexts.count("gemm") && m.kernels.at("gemm_n9216_k2048").context == "gemm" &&
+          m.kernels.at("gemm_n1024_k2048").context == "gemm" &&
+          m.kernels.at("gemm_n2048_k512").context == "gemm" &&
+          m.kernels.at("gemm_n2048_k4096").context == "gemm" &&
+          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 8 &&
           m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
           m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    check(m.files().size() == 61, "61 files named (10 xclbin + 51 insts: the route adds three GEMM contexts, the MoE one, seven streams, "
-                                  "the token-batched expert kernel one context and six streams, and the attention GEMM one "
+    check(m.files().size() == 59, "59 files named (8 xclbin + 51 insts: the route adds one GEMM context whatever K, the MoE one, seven "
+                                  "streams, the token-batched expert kernel one context and six streams, and the attention GEMM one "
                                   "context and 32 streams)");
     // the attention products on the NPU (OPEN-PREFILL-ATTN): a stream per 256 rows of window, both
     // products, on one xclbin; full attention only

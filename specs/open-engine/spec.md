@@ -1236,8 +1236,10 @@ the host wrote. The shared expert is not in that dispatch: it is the same
 weights for every token of the block, so the route runs it once as two more
 GEMMs (up|gate, contiguous and band-law in the pool, then down) with silu and
 the sigmoid gate on the host, folds it into the residual the dispatch is
-handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Hardware contexts are shared: one GEMM xclbin per
-K (the core program does not depend on N), one `mx` xclbin for both layer
+handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Hardware contexts are shared: ONE GEMM xclbin
+for the whole route -- the core program depends on neither N nor K, the band
+count K/256 reaching each core as a runtime parameter the instruction stream
+writes -- and one `mx` xclbin for both layer
 types. `OFLM_OPEN_GEMM_BLOCK=1` (read through `getenv_oflm`, so the pre-rename
 `FLM_` export still works) selects the route; off by default so every existing
 measurement is unaffected. With it on the engine takes the route whenever the
@@ -1250,7 +1252,7 @@ dequantises the q4_1 band law -- and such a manifest is the sequential one
 unchanged.
 
 **Acceptance criteria (unit):**
-- The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); contexts `gemm_k2048`, `gemm_k4096`, `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes; a spec with `attn`, `linear`, `linear_out` or `shared` at q8 emits none of it and its manifest equals the sequential one.
+- The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); one context `gemm` for every GEMM shape, plus `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes; a spec with `attn`, `linear`, `linear_out` or `shared` at q8 emits none of it and its manifest equals the sequential one.
 - The parser holds a route to its kind (`manifest_test.cpp`): 5 steps for dense, 2 for linear / full, every step a 3-argument run naming a declared weight buffer, weight ops inside the pack plan, `moe_kernel` declared with the moeroute2 patch, each refused by name otherwise.
 - The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
@@ -1293,6 +1295,52 @@ tail 75, shared expert 40. With `OPEN-MOE-BATCH`'s two changes of the same day,
 ms/token)** with the identical eight-token greedy continuation, and 512 tokens
 9.98 -> 7.50 s. `oflm-test --llm` passes through this tree's `oflm serve` on
 the route. Details: `.claude/plans/moe-stage-cost.md`, raw data in
+`.claude/plans/decode-run/logs/`.
+
+**Result 2026-09-13 (one GEMM context for the whole route):** the GEMM core
+program used to bake K in as the trip count of its band-group loop, so the route
+carried three GEMM xclbins and therefore three hardware contexts. The band count
+K/256 now reaches each core as a runtime parameter the instruction stream writes,
+and all five of the 35B's projection shapes are streams over **one** xclbin. All
+five build to the same 203231-byte image (equivalent under
+`export_qwen36_kernels.py`'s own `xclbin_equivalent`, build stamps only), pass
+the harness at rel_fro 2.17e-3 to 2.25e-3 against the fp64 reference, and are
+**bit-exact against the previous compile-time-K kernel** on the same vectors --
+the change moves where K comes from, not the arithmetic. The runtime bound costs
+64 bytes of program memory per core (+2048 B over 32 cores) against a 16 KB
+budget.
+
+A hardware context change costs 2.47 ms into the GEMM context, 2.49 into the
+attention one and 2.93 into the expert kernel's, measured with an interleaved
+baseline over three runs (`Core::bench_dispatch`'s context-switch probe takes its
+own baseline in the same loop, since subtracting one measured minutes earlier put
+box drift straight into the delta). It does **not** scale with the kernel: across
+the `mb_s*` ladder, 0.57 to 14.1 ms of work and 32x the streamed bytes, it is
+2.82-3.14 ms with no trend. A 256-token block made 210 changes and now makes 100.
+
+End to end on 2582 tokens, `open_qwen36_cli --gemm-block`, three runs each side:
+the **GEMM stage goes 1489 -> 1096 ms a block, a 393 ms saving** (spread 19 ms
+across the three baseline runs, 5 ms across the two clean collapsed runs), and
+prefill **43.1 -> 38.9 s** against the fastest baseline, with the identical
+eight-token greedy continuation. Per dispatch the mechanism is visible directly:
+every projection whose context change was removed drops 2.75-3.39 ms, while the
+two that still follow the expert dispatch are unchanged (-0.17 and +0.06). Note
+that a switch costs ~3.37 ms inside a block against the 2.47 the isolated probe
+reports, so the block-level saving is larger than a per-switch model predicts
+(393 against 273); the isolated probe understates it.
+
+The core reads its band count immediately after acquiring the first weight band,
+so the dataflow orders the read: that acquire cannot complete until the runtime
+has issued the fill, which it issues after the parameter writes. A
+`WorkerRuntimeBarrier` -- the idiom `npu_offload/gemm_rtp/gemm_pretiled.py` uses
+for the same job -- **deadlocks here**, because the runtime releases it once per
+dispatch while this worker body runs once per weight row-block group;
+`designs/attn_block` survives it only because its body runs exactly once per
+dispatch. Verified on mlir-aie 1.4.2 that the generated core keeps the
+`AcquireGreaterEqual` ahead of the parameter load; nothing in the source forces
+that ordering, so a toolchain that reordered it would hang the dispatch outright
+rather than return wrong numbers, and re-checking it is worth a moment on a
+toolchain bump. Details: `.claude/plans/gemm-context-collapse.md`, raw data in
 `.claude/plans/decode-run/logs/`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel

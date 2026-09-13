@@ -78,20 +78,18 @@ def test_the_35b_attention_layer_type_carries_the_route(m):
     assert [pool[i]["tensor"].split(".")[-2] for i in (5, 6, 7, 8, 9)] == ["q_proj", "k_proj", "v_proj", "q_proj", "o_proj"]
 
 
-def test_the_gemm_contexts_are_shape_keyed_and_built(m):
-    # one xclbin (context) per K, one instruction stream (kernel) per shape
-    assert sorted(k for k in m["contexts"] if k.startswith("gemm_")) == ["gemm_k2048", "gemm_k4096", "gemm_k512"]
-    # the context points at the first build of its K, the shapes being emitted in sorted order
-    assert m["contexts"]["gemm_k2048"] == "gemm_n1024_k2048/final.xclbin"
-    assert m["contexts"]["gemm_k4096"] == "gemm_n2048_k4096/final.xclbin"
-    assert m["contexts"]["gemm_k512"] == "gemm_n2048_k512/final.xclbin"
+def test_the_gemm_route_is_one_context_and_a_stream_per_shape(m):
+    # the core program depends on neither N nor K, so every shape is a stream over one xclbin
+    assert [k for k in m["contexts"] if k == "gemm" or k.startswith("gemm_")] == ["gemm"]
+    # the context points at the first build, the shapes being emitted in sorted order
+    assert m["contexts"]["gemm"] == "gemm_n1024_k2048/final.xclbin"
     names = sorted(k for k in m["kernels"] if k.startswith("gemm_"))
     assert names == ["gemm_n1024_k2048", "gemm_n12288_k2048", "gemm_n2048_k4096",
                      "gemm_n2048_k512", "gemm_n9216_k2048"]
     for n in names:
         N, K = (int(p[1:]) for p in n.split("_")[1:])
         assert N % 256 == 0 and K % 256 == 0
-        assert m["kernels"][n] == {"context": f"gemm_k{K}", "insts": f"{n}/insts.bin", "build": n}
+        assert m["kernels"][n] == {"context": "gemm", "insts": f"{n}/insts.bin", "build": n}
         b = m["builds"][n]
         assert b["design"] == "gemm_q4_prefill/gemm_q4_prefill.py"
         assert b["build_dir"] == f"gemm_q4_prefill/build_n{N}_k{K}_t{T}"
@@ -113,7 +111,7 @@ def test_a_q8_role_emits_no_route():
     m = manifest(q8)
     for lt in (LINEAR, FULL):
         assert "gemm_block" not in m["layer_types"][lt]
-    assert not [k for k in m["contexts"] if k.startswith("gemm_") or k.startswith("mx_")]
+    assert not [k for k in m["contexts"] if k.startswith("gemm") or k.startswith("mx_")]
     assert not [k for k in m["globals"] if k.startswith("gemm_")]
     assert not [k for k in m["builds"] if k.startswith("gemm_") or k.startswith("mx_")]
 

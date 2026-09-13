@@ -294,12 +294,21 @@ def gemm_q4_prefill(
                     matmul(a_scr, elem_in_b, elem_out)
                     in_b.release(1)
 
-            # The first band is acquired BEFORE the band count is read. That acquire only
-            # completes once the runtime has issued the fill, which it does after the rtp
-            # writes, so the dataflow itself orders the read -- no barrier needed. A
-            # WorkerRuntimeBarrier does not work here: the runtime releases it once per
-            # dispatch but this body runs once per weight row-block group, so from the
-            # second group on the core waits for a release that never comes.
+            # DO NOT reach for a WorkerRuntimeBarrier here to order the rtp read. It is what
+            # gemm_pretiled.py's rtp=True path uses and it DEADLOCKS in this design: the
+            # runtime releases that barrier once per dispatch, but this body runs once per
+            # weight row-block group -- four times for a 1024-row projection -- so from the
+            # second group on the core waits on a release that never comes. Verified on
+            # hardware: barrier alone hangs (state 8), the rtp buffer alone is fine.
+            # attn_block gets away with the same idiom only because its body runs exactly
+            # once per dispatch. Two designs have now been written against that assumption.
+            #
+            # The ordering is free instead: acquire the first band BEFORE reading the count.
+            # That acquire cannot complete until the runtime has issued the fill, and it
+            # issues the fill after the rtp writes. Checked in the generated MLIR that the
+            # AcquireGreaterEqual stays ahead of the memref.load (mlir-aie 1.4.2); if a
+            # later toolchain hoists it the build hangs outright rather than going quietly
+            # wrong, which is the failure you want.
             band = in_a.acquire(1)
             n_bandgroups = my_rtp[1]
             one_band(band)
