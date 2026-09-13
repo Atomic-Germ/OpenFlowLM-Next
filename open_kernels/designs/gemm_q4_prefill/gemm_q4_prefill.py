@@ -36,10 +36,10 @@ Weight is NOT reused across T-tiles (T_TILES = T//tile_n//n_aie_cols > 1): a
 row's whole weight column is refetched from DRAM once per T-tile iteration
 (a real inefficiency above T=256, reported honestly rather than hidden).
 
-The core program depends on neither N, K nor T: the two loop bounds it would
-otherwise bake in are runtime parameters, so every shape is an instruction
-stream over one xclbin and one hardware context. The rtp_bufs comment below
-says why that matters and where the plumbing comes from.
+The core program does not depend on N or K: the band count K/256 is a runtime
+parameter, so at one T every shape is an instruction stream over one xclbin and
+one hardware context. T is still compiled in, and every set this repo emits is
+T=256. The rtp_bufs comment below says why that matters.
 
 Build (from this directory, mlir-aie env dot-sourced):
     GQP_N=2560 GQP_K=2560 GQP_T=256 python ../../build_design.py gemm_q4_prefill.py build_qkv_t256
@@ -58,7 +58,7 @@ from ml_dtypes import bfloat16
 
 import aie.iron as iron
 from aie.iron import (Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker,
-                      WorkerRuntimeBarrier, kernels, str_to_dtype)
+                      kernels, str_to_dtype)
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
@@ -268,45 +268,54 @@ def gemm_q4_prefill(
     nib_bufs = [[Buffer(nib_ty, name=f"nib_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
     scratch_bufs = [[Buffer(scratch_ty, name=f"ascr_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
 
-    # The two loop bounds are the ONLY shape-dependent values in the core program, and both
-    # are runtime parameters, so one xclbin serves every (N, K, T) and each shape is an
-    # instruction stream over it. Compiled in, K made each shape its own image and therefore
-    # its own hardware context, and the block route pays ~2.5 ms every time it changes one.
+    # The band count K/256 was the only thing making each K its own image, and so its own
+    # hardware context - the block route pays ~2.5 ms every time it changes one. It arrives
+    # here instead, per core, written by the instruction stream. Slot 0 carries T_TILES for
+    # symmetry with gemm_pretiled, but core_fn still reads that one at build time.
     # The initial value is ZEROS, not the real bounds: a shape-dependent initializer is baked
-    # into the static image and is exactly the 8 bytes that would keep two shapes apart. Same
+    # into the static image and would be exactly the 8 bytes that keep two shapes apart. Same
     # plumbing as npu_offload/gemm_rtp/gemm_pretiled.py's rtp=True path.
     rtp_bufs = [[Buffer(np.ndarray[(2,), np.dtype[np.int32]], name=f"rtp_{row}_{col}",
                         initial_value=np.zeros(2, dtype=np.int32), use_write_rtp=True)
                  for col in range(n_aie_cols)] for row in range(n_aie_rows)]
-    rtp_barriers = [[WorkerRuntimeBarrier() for _ in range(n_aie_cols)] for _ in range(n_aie_rows)]
 
     # One weight row-block group per pass. The worker body already loops forever (IRON's
     # while_true), and a core cannot see dispatch boundaries -- it blocks on the next
     # element -- so the row-block count is a property of the instruction stream too.
-    def core_fn(in_a, in_b, out_c, zero, matmul, nib_scr, a_scr, my_rtp, barrier, *dequants):
-        barrier.wait_for_value(1)
-        n_t_tiles = my_rtp[0]
-        n_bandgroups = my_rtp[1]
-        for _ in range_(n_t_tiles):
+    def core_fn(in_a, in_b, out_c, zero, matmul, nib_scr, a_scr, my_rtp, *dequants):
+        for _ in range_(T_TILES):
             elem_out = out_c.acquire(1)
             zero(elem_out)
-            for _ in range_(n_bandgroups):
-                band = in_a.acquire(1)
+
+            def one_band(band):
                 for ky in range(4):  # compile-time (Python) unroll: 4 distinct entry symbols
                     dequants[ky](band, nib_scr, a_scr)
                     elem_in_b = in_b.acquire(1)
                     matmul(a_scr, elem_in_b, elem_out)
                     in_b.release(1)
+
+            # The first band is acquired BEFORE the band count is read. That acquire only
+            # completes once the runtime has issued the fill, which it does after the rtp
+            # writes, so the dataflow itself orders the read -- no barrier needed. A
+            # WorkerRuntimeBarrier does not work here: the runtime releases it once per
+            # dispatch but this body runs once per weight row-block group, so from the
+            # second group on the core waits for a release that never comes.
+            band = in_a.acquire(1)
+            n_bandgroups = my_rtp[1]
+            one_band(band)
+            in_a.release(1)
+            for _ in range_(n_bandgroups - 1):
+                band = in_a.acquire(1)
+                one_band(band)
                 in_a.release(1)
             out_c.release(1)
-        barrier.release_with_value(1)
 
     def _mk(row, col):
         return Worker(
             core_fn,
             [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(), C_l1l2_fifos[row][col].prod(),
              zero_kernel, matmul_kernel, nib_bufs[row][col], scratch_bufs[row][col],
-             rtp_bufs[row][col], rtp_barriers[row][col], *dequant_kernels],
+             rtp_bufs[row][col], *dequant_kernels],
             stack_size=0x1000,
         )
 
@@ -374,9 +383,6 @@ def gemm_q4_prefill(
             for col in range(n_aie_cols):
                 rtp_bufs[row][col][0] = T_TILES
                 rtp_bufs[row][col][1] = NBG
-        for row in range(n_aie_rows):
-            for col in range(n_aie_cols):
-                rtp_barriers[row][col].set(1)
         for rbg in range(NRB):
             for ntile in range(T_TILES):
                 tg = TaskGroup()
