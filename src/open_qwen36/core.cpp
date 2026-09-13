@@ -397,6 +397,11 @@ double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
                      "(dispatch #%llu, %.0f ms host gap before it)\n",
                      k.name.c_str(), layer, pos_, static_cast<int>(st), ms_since(t0),
                      static_cast<unsigned long long>(dispatches_), gap_ms);
+        // The driver logs its own view of this, and it is the difference between "our
+        // dispatch was slow" and "the hardware context faulted". Every occurrence so far
+        // had a matching entry; three hours of clean running had none.
+        std::fprintf(stderr, "open_qwen36:   the NPU driver logs context errors as pci Event ID 3 in the Windows"
+                             " System log; look for one at this moment before blaming the dispatch\n");
         std::fflush(stderr);
         // Only a TIMEOUT can still be in flight. An abort or an error is final, and
         // waiting on it just delays the rebuild by another minute.
