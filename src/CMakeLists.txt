@@ -1211,6 +1211,23 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# OPEN-VISION-IMAGE-READ: the reader's own PNG decoder, against fixtures whose
+# expected RGB24 was computed outside this code. Links NOTHING -- no ffmpeg, no
+# zlib, no device, no weights -- which is the point: it passes on a machine whose
+# ffmpeg has no png decoder, where every VLM was silently dropping PNGs.
+add_executable(png_decode_test common/image/png_decode_test.cpp common/image/png_decode.cpp)
+target_include_directories(png_decode_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(png_decode_test PRIVATE /EHsc /Zc:__cplusplus)
+    target_compile_definitions(png_decode_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME OPEN-VISION-IMAGE-READ
+         COMMAND png_decode_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-engine/tests/fixtures/png"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-test/oflm_test/test_files/image")
+
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.
 #   cmake --build --preset linux-package-rpm   # or -deb / -tgz
