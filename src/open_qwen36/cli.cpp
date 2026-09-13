@@ -146,6 +146,7 @@ Args parse(int argc, char** argv) {
         // the first SSE chunk to a socket. Every dx timeout so far has landed on that
         // dispatch, so this makes the gap reproducible without the server.
         else if (k == "--gap-ms") a.gap_ms = std::atoi(val().c_str());
+        else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -236,6 +237,11 @@ std::vector<int> request(Core& core, const Args& a) {
 
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
+    // The server reads this (engine.cpp); the CLI is the tool you reach for when a
+    // dispatch times out, so it should honour the same knob - and a small value is how
+    // the timeout path itself gets exercised without waiting for a real one.
+    if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS"))
+        a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     try {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);

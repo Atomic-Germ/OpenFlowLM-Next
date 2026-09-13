@@ -386,11 +386,15 @@ double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
     r.start();
     auto st = cfg_.timeout_ms ? r.wait(std::chrono::milliseconds(cfg_.timeout_ms)) : r.wait();
     if (st != ERT_CMD_STATE_COMPLETED) {
-        // Is the command hung, or merely late? Throwing here has always thrown that
-        // question away with it. Wait again - OFLM_OPEN_TIMEOUT_RETRY_MS, default the
-        // same again - and say which it was. A command that completes on the second wait
-        // is a scheduling problem; one that never completes is the hardware.
-        unsigned extra = cfg_.timeout_ms;
+        // Is the command hung, or merely late? Throwing here used to throw that question
+        // away with it. Wait a little longer and say which it was.
+        //
+        // Five seconds, not another sixty. On every occurrence measured so far the driver
+        // reported the command as never executed (no fault, nothing in flight), and a
+        // command the firmware is not running does not arrive late - so a long second
+        // wait buys nothing and costs a minute. Short enough to be free, long enough to
+        // catch a genuinely late one and say so. OFLM_OPEN_TIMEOUT_RETRY_MS overrides.
+        unsigned extra = 5000;
         if (const char* e = std::getenv("OFLM_OPEN_TIMEOUT_RETRY_MS")) extra = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
         std::fprintf(stderr,
                      "open_qwen36: %s layer %d at position %d: ERT state %d after %.0f ms "
