@@ -35,6 +35,11 @@ the [512 k, 8 tokens] A tiles the down projection reads back.
 The core program does not depend on the slot count: one xclbin serves every
 dispatch length, each its own instruction stream (MB_SLOTS).
 
+Three timing-only ablations, all of which compute garbage: MB_NULL_MM=1 drops the
+core arithmetic and leaves the streams, MB_NULL_DQ=1 keeps the product but drops
+the q4_1 scales, and MB_CONTIG=1 makes the weight taps read the pool in order
+(same bytes, same footprint, no band stride).
+
 Build (WSL): MB_SLOTS=256 python build_design.py designs/moe_batch/moe_batch.py designs/moe_batch/build_s256
 Test:        python make_test.py --slots 16 (builds against a 16-expert pool: MB_SLOTS=16 MB_EXPERTS=16)
              ..\..\harness\out\run_kernel.exe run_s16.cfg && python compare.py s16
@@ -79,6 +84,9 @@ DOWN_BAND = 128 * FF * 5 // 8                          # one 128-row band of the
 DOWN_BYTES = HID * FF * 5 // 8                         # one expert's down
 POOL_DOWN = int(os.environ.get("MB_POOL_DOWN", EXPERTS * EXP_UG))
 POOL_BYTES = int(os.environ.get("MB_POOL_BYTES", 512 << 20))
+# MB_CONTIG=1: the weight taps walk the pool in order instead of by band stride. Same bytes,
+# same footprint, wrong arithmetic - a probe for whether the stride costs stream rate.
+CONTIG = os.environ.get("MB_CONTIG") == "1"
 X_BYTES = SLOTS * HID * NT * 2
 H_BYTES = SLOTS * FF * NT * 2
 Y_BYTES = SLOTS * HID * NT * 4
@@ -115,8 +123,9 @@ def moe_batch(pool: In, x: In, h: Out, y: Out, *, slots: CompileTime[int], srcha
     y_ty = np.ndarray[(Y_BYTES,), np.dtype[np.uint8]]
 
     inc = include_dirs()
-    # timing-only ablation (output garbage): MB_NULL_MM=1 skips the core work, leaving the streams
-    null_mm = ["-DMB_NULL_MM"] if os.environ.get("MB_NULL_MM") == "1" else []
+    # timing-only ablations (output garbage): MB_NULL_MM=1 skips the core work and leaves the
+    # streams, MB_NULL_DQ=1 keeps the product but drops the q4_1 scales
+    null_mm = [f"-D{v}" for v in ("MB_NULL_MM", "MB_NULL_DQ") if os.environ.get(v) == "1"]
     step_ug = ExternalFunction("mb_step_ug", source_file=str(HERE / "mb_step_ug.cc"),
                                arg_types=[band_ty, b_ty, ug_ty, np.int32, np.int32], include_dirs=inc, compile_flags=null_mm)
     step_dn = ExternalFunction("mb_step_dn", source_file=str(HERE / "mb_step_dn.cc"),
@@ -183,10 +192,16 @@ def moe_batch(pool: In, x: In, h: Out, y: Out, *, slots: CompileTime[int], srcha
     # drain is y rows rbg*256.. in order; rows 0, 1 (one stripe) are contiguous 20 KB. The innermost
     # wrap stays under 4 KB.
     def up_tap(slot: int, proj: int, rbg: int) -> TensorAccessPattern:
+        if CONTIG:                                        # traffic probe: same bytes, read in order
+            off = slot * EXP_UG + (proj * NRB_UP + rbg) * (NBG_UP * N_ROWS * BAND)
+            return TensorAccessPattern((POOL_BYTES,), off, [NBG_UP, N_ROWS, 4, 2560], [N_ROWS * BAND, BAND, 2560, 1])
         off = slot * EXP_UG + proj * STRIPE + rbg * BAND
         return TensorAccessPattern((POOL_BYTES,), off, [NBG_UP, N_ROWS, 4, 2560], [2 * BAND, 2 * STRIPE, 2560, 1])
 
     def down_tap(slot: int, rbg: int) -> TensorAccessPattern:
+        if CONTIG:
+            off = POOL_DOWN + slot * DOWN_BYTES + rbg * (NBG_DN * 4 * BAND)
+            return TensorAccessPattern((POOL_BYTES,), off, [NBG_DN, 2, 8, 2560], [4 * BAND, 2 * BAND, 2560, 1])
         off = POOL_DOWN + slot * DOWN_BYTES + rbg * 2 * DOWN_BAND
         return TensorAccessPattern((POOL_BYTES,), off, [NBG_DN, 2, 8, 2560], [2 * BAND, DOWN_BAND, 2560, 1])
 
