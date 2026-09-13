@@ -1357,6 +1357,34 @@ that is ~2.9 ms of context switch and the host traffic around it, unchanged in
 shape from 2026-09-12. `.claude/plans/moe-stage-cost.md` has the decomposition
 and what is left.
 
+**Result 2026-09-13 (why the stream sat at 31 GB/s):** it was never the strided
+band reads. A build whose A taps read the pool contiguously -- same bytes, same
+footprint, wrong arithmetic -- comes back at 16.31 ms against the shipped
+16.33: no difference. Nulling the core's work through the *same strided taps*
+gives 11.36 ms = **44.3 GB/s**, the rate the lm head gets on contiguous q8, so
+the DMA was never the limit and the shim split, the two input channels and the
+fifo depths are all cleared with it. The kernel is core-bound.
+
+Most of what the core spent was one helper: `mb_rep8` built the mmul's 64-lane
+B operand out of 8-lane pieces, which the compiler lowers to a scalar extract
+and a push **per lane** -- about seventy per 32-k block, and most of the inner
+loop. Building the same vector by halving a 512-bit register and doubling back
+up (`concat`, `filter_even` / `filter_odd`) takes `mb_step_ug` from 258 to 168
+instructions. 256 slots alone **16.33 -> 14.21 ms (30.8 -> 35.4 GB/s)**, and in
+the engine a uniform 1.13-1.16x across the whole ladder: `mb_s256` 16.38 ->
+14.26, `mb_s8` 0.64 -> 0.58. About 110 ms off a 256-token block's expert stream.
+Output is byte-for-byte identical (`cmp` on the harness's y and h at 16 slots,
+not a tolerance), so no requirement moves.
+
+Applying the scales to the summed product instead of to every weight -- the
+change this started as, and algebraically the better one -- is a measured no:
+the raw partial and the running C need two accumulators per parity and four do
+not fit the file, so the kernel has to walk one parity at a time and re-read
+the nibbles. 30.4 ms against 16.3. It is ~24x more accurate (rel_fro 2.0e-05
+against 4.7e-04) and is recorded in `.claude/plans/moe-stream-rate.md` in case
+the register pressure is ever solved. 14.21 ms still stands against an 11.55 ms
+DMA floor; the remaining ~2.3 ms is the scale application.
+
 ### OPEN-PREFILL-ATTN: the block attention's products on the NPU
 **Applies to:** openflowlm-next (`open_kernels/designs/attn_block/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,block_host,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_prefill_attn.py` documents the procedure); the recipe emission and the manifest schema are unit-tested in `tests/test_prefill_attn.py` and `src/open_qwen36/manifest_test.cpp`
