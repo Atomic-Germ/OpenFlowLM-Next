@@ -747,4 +747,14 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
     std::memcpy(out, state_[layer].map<uint8_t*>() + off, kv_row / 2);
 }
 
+void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {
+    if (layer < 0 || layer >= nl_) throw std::runtime_error("open_qwen36: read_act: layer " + std::to_string(layer) + " out of range");
+    const size_t bytes = types_[layer]->act_bytes;
+    if (off + n > bytes)
+        throw std::runtime_error("open_qwen36: read_act: [" + std::to_string(off) + ", " + std::to_string(off + n) +
+                                 ") is outside the layer's " + std::to_string(bytes) + "-byte act buffer");
+    act_[layer].sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, off);
+    std::memcpy(dst, act_[layer].map<uint8_t*>() + off, n);
+}
+
 }  // namespace open_qwen36

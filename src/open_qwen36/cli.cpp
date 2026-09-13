@@ -7,6 +7,7 @@
 ///   open_qwen36_cli --model <dir> --kernels <dir (manifest.json + xclbins)> --ids 1,2,3 [--max-tokens N]
 ///       [--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice]
 ///       [--at-position P] [--ids-file <path>] [--gemm-block] [--prefill-logits]
+///       [--dump-act <layer>:<off>:<bytes>:<path>]   bring-up: a slice of a layer's act scratch
 ///
 /// The prompt ids are prefilled by sequential decode (logits skipped), then
 /// greedy decode runs for --max-tokens. Each produced id is printed on its
@@ -89,7 +90,26 @@ struct Args {
     int at_position = 0;
     bool gemm_block = false;        // 0167/#32: prefill via step_gemm_block()
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
+    std::string dump_act;           // bring-up: "<layer>:<off>:<bytes>:<path>"
 };
+
+/// Write a slice of a layer's act scratch to a file, so a bring-up run can compare one
+/// stage's output against the reference instead of inferring it from the logits.
+void dump_act_slice(Core& core, const std::string& spec) {
+    int layer = 0; long long off = 0, n = 0;
+    char path[512] = {0};
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 || n <= 0) {
+        std::fprintf(stderr, "--dump-act wants <layer>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+        return;
+    }
+    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    core.read_act(layer, static_cast<size_t>(off), buf.size(), buf.data());
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
+    std::fwrite(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    std::fprintf(stderr, "wrote %lld B of layer %d act at %lld -> %s\n", n, layer, off, path);
+}
 
 Args parse(int argc, char** argv) {
     Args a;
@@ -115,6 +135,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--twice") a.twice = true;
         else if (k == "--repeat") a.repeat = std::atoi(val().c_str());
         else if (k == "--at-position") a.at_position = std::atoi(val().c_str());
+        else if (k == "--dump-act") a.dump_act = val();            // "<layer>:<off>:<n>:<path>"
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--prefill-logits") a.prefill_logits = true;
@@ -211,6 +232,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         std::vector<int> first = request(core, a);
+        if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;
         for (int r = 1; r < reps; ++r) {
             // The app checkpoints after the prompt and restores before the next

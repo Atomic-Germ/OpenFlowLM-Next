@@ -109,6 +109,11 @@ public:
     /// GemmBlockProgram), or 0 when the loaded kernel set has none / its
     /// layer types disagree -- refuses rather than guesses.
     size_t gemm_block_t() const { return gemm_block_t_; }
+
+    /// `n` bytes of a layer's `act` scratch at `off`, straight off the device. Bring-up
+    /// only: it is how you tell a stage that computes the wrong thing from a stage that
+    /// never ran, without inferring either from the logits.
+    void read_act(int layer, size_t off, size_t n, uint8_t* dst);
     /// T tokens through every layer as 5 GEMM dispatches (q|k|v fused,
     /// o_proj, gate_proj, up_proj, down_proj) plus T single-token attnpos-
     /// patched attention dispatches between GEMM A' and GEMM O, with
