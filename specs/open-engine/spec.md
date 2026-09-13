@@ -1295,16 +1295,34 @@ The procedure OPEN-FAMILY-QWEN3 defines, run against this container:
 what the weights were converted for as far as this evidence goes. That is text quality,
 which is the right oracle; it is not a long-context result.
 
-**Images: refused, by name, as designed.** `oflm-test --vision --model qwen3vl-it:4b`
-returns `config.json carries no image_token_id / mrope_section for this model` on every
-round -- the refusal naming which of the gaps it hit, rather than a plausible answer.
-Two further findings that were not in the plan and that bound what a deepstack port could
-do: no installed kernel set carries a `gemm_block` program (all three, including the new
-Qwen3-4B one, log `GEMM-route prefill block size: 0`), so the batched-prefill route the
-deepstack design assumed does not exist for any shipped family and would be its own WSL
-kernel build; and this container's vision tensors are declared with a 2-D header shape
-that both `untile` implementations refuse, so even the tower geometry cannot be read off
-it yet. Images stay blocked on a converter change that is Atomic-Germ's call.
+**Result 2026-09-13 (later): images work too.** `oflm-test --vision --model
+qwen3vl-it:4b` passes all three rounds through `oflm serve` on the open engine, and the
+server says what it did:
+
+    open_qwen36: image 18x88 patches -> 396 tokens + 3 deepstack in 4.37 s
+    open_qwen36: image 30x44 patches -> 330 tokens + 3 deepstack in 3.41 s
+    open_qwen36: image 32x50 patches -> 400 tokens + 3 deepstack in 4.46 s
+
+The text it extracts from `paris.png` is what that image says, and a following turn
+tells a story about all three. Four things had to be settled, and three of them were
+recorded here as blockers that turned out to be wrong:
+
+- **The tile order**, OPEN-VISION-VIT-FLAT. Not the 35B's tiling with a collapsed
+  header, and not row-major either.
+- **The geometry.** Everything but two numbers falls out of the weight file; those two
+  are named in the refusal rather than guessed (OPEN-VISION-VIT-FLAT).
+- **The injection route.** The design called for `step_gemm_block` and a batched
+  `visual_pos_mask`, and noted that no kernel set has a `gemm_block` program -- all
+  three log `GEMM-route prefill block size: 0`. It was not needed: `step_embed` already
+  walks image rows one at a time and knows which rows are image rows, so feature j is an
+  add on `xres` between layer j and j+1 -- a 10 KB sync back, a host add and a sync
+  forward, against a tower that costs seconds.
+- **Where the missing keys live.** Not `config.json`: see OPEN-VISION-VIT-FLAT's
+  sidecar note.
+
+What is still Atomic-Germ's is the durable fix -- `q4nx-build` writing the tower keys,
+`image_token_id` and `mrope_section` into the container it converts, so a Qwen3-VL
+describes itself the way the other two VLM families do.
 
 ### OPEN-FAMILY-QWEN25VL: Qwen2.5-VL's decoder is a Qwen2.5 dense spec
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `src/common/AutoModel/modeling_qwen2vl.cpp`)
@@ -2179,6 +2197,67 @@ no `Skipping image that failed to load`, and all three `--vision` rounds pass, w
 the same binary before the fix failed text extraction and the model answered "you have
 only provided one image". No kernel, manifest, xclbin or spec hash moves.
 
+
+### OPEN-VISION-VIT-FLAT: Qwen3-VL's container tiling, geometry and deepstack
+**Applies to:** openflowlm-next (`open_kernels/model/replica_deepstack.py`,
+`src/open_qwen36/vision/vit.cpp`, `core.cpp`, `engine.cpp`, `utilities/oflm-add`)
+**Test category:** unit (`tests/test_qwen3vl_container.py`, and `vit_test --deepstack`
+for the C++ port); the end-to-end run is OPEN-VISION-EMBED's
+
+Qwen3-VL-4B-Instruct-NPU2's vision tensors are declared two-dimensional as
+`[elements / 32768, 32768]`, and the order inside shall be read as tiles of 64 output
+rows by 512 input columns, row-major within a tile and row-major over the tiles, with
+nothing padded. A tensor stored at its natural shape (`pos_embed.weight`, every bias and
+norm, the 5-D patch embed) is read directly; the discriminator is the 32768 row width,
+not the rank.
+
+**This was settled against an independent oracle, not by inspection.** The earlier record
+had it as unsettled between "the 35B's tile order with a collapsed header" and "plain
+row-major", with a column-norm correlation test unable to separate them -- and a wrong
+choice gives image embeddings that look plausible and are wrong. All 315 tensors were
+compared element for element against `Qwen/Qwen3-VL-4B-Instruct`'s own safetensors: 314
+match under the rule above and the 315th matches directly. The bf16 values are identical,
+so the container is upstream's weights reordered, not requantised.
+
+**The geometry then falls out of the weight file**, because nothing is padded and
+`patch_embed.proj.weight` keeps its natural shape, so `hidden` is known and every other
+width divides out exactly. Two numbers never do, and shall be refused rather than
+defaulted: the attention head count (qkv is `[3 * hidden, hidden]` at any split) and
+which blocks the deepstack mergers hang off (the names say how many, never which).
+
+**Where those two live, and why not `config.json`.** `pull` compares every
+registry-listed file against a REMOTE manifest's byte count and treats any difference as
+a truncated download, so a key added to the installed `config.json` is silently replaced
+-- on this model a 4 GB re-pull. They go in `vision.json` beside the model, which is not
+in that list; `oflm-add` writes it at install time. `image_token_id` needs neither: it is
+`<|image_pad|>` in the container's own tokenizer, which is where the engine reads it.
+
+**Acceptance criteria (unit):**
+- 104 of the container's tensors are in the flat form and 211 at their natural shape;
+  `pos_embed.weight` is 2-D and NOT flat, so the discriminator is the row width.
+- `untile_flat` inverts the tiling rule, and refuses a shape that is not whole tiles and
+  an element count that does not match.
+- Every linear's element count is exactly `out * in` -- nothing is padded.
+- The derived geometry equals upstream's `vision_config` on all ten numbers.
+- `geometry_from_flat` returns no `heads`, no `head_dim` and no `deepstack` -- a count of
+  mergers is not their indexes.
+- It refuses a container with no `patch_embed`, and one whose patch embed is not three
+  channels.
+- Against transformers' `Qwen3VLVisionModel` loaded with UPSTREAM's weights while the
+  replica reads the CONTAINER: merged, last_hidden and all three deepstack features at
+  corr > 0.99999. Taking each tap one block early must drop deepstack[0] below 0.9, or
+  the tap positions are not being tested.
+
+**Verification (the C++ port):** `vit_test --deepstack <model dir> <fixture> 16 5,11,17`
+against `replica_deepstack`'s fixture -- corr > 0.99999 and rel < 1e-3 on the merged
+output and every feature.
+
+**Result 2026-09-13:** numpy off the container against transformers with Qwen's weights
+-- merged corr 1.00000000 rel 1.10e-05, last_hidden 1.00000000 / 1.38e-05, the three
+features 1.00000000 at 4.46e-07, 8.80e-06 and 7.84e-06; the one-block-early control
+0.6866. The C++ port against that numpy reference on an 8 x 12 grid -- merged
+1.00000000 / 4.48e-06, features 1.00000000 at 3.07e-07, 1.05e-06 and 7.17e-07. Nine
+tests, eight of which need neither the 830 MB container nor the 3.9 GB upstream shard.
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
