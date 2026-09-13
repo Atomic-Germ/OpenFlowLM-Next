@@ -1504,7 +1504,6 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
     xrt::bo& xb = buffer(mb.args[1], 0);
     xrt::bo& yb = buffer(mb.args[3], 0);
     std::vector<std::vector<std::pair<size_t, float>>> per_token(t_real);   // (slot * NT + column, weight)
-    std::vector<float> yt;                                                    // y un-interleaved: [slot][column][hid]
     static const bool log_passes = std::getenv("OFLM_OPEN_MOE_BATCH_LOG") != nullptr;
     for (size_t done = 0; done < visits.size();) {
         const size_t left = visits.size() - done;
@@ -1553,25 +1552,24 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n * hid * NT * 4, 0);
         const float* yh = yb.map<float*>();
         // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][8 tokens][8];
-        // row 64 band + 16 g + 2 jj + p -- un-interleaved here into [token][hid]
-        yt.resize(n * NT * hid);
-#pragma omp parallel for
-        for (long long i = 0; i < static_cast<long long>(n); ++i)
-            for (size_t band = 0; band < hid / 64; ++band)
-                for (size_t g = 0; g < 4; ++g)
-                    for (size_t par = 0; par < 2; ++par) {
-                        const float* blk = yh + i * hid * NT + ((band * 4 + g) * 2 + par) * 64;
-                        for (size_t t = 0; t < NT; ++t) {
-                            float* d = yt.data() + (i * NT + t) * hid + band * 64 + g * 16 + par;
-                            for (size_t jj = 0; jj < 8; ++jj) d[2 * jj] = blk[t * 8 + jj];
-                        }
-                    }
+        // row 64 band + 16 g + 2 jj + p. A column belongs to exactly one token, so the
+        // un-interleave is the scatter -- read the tiles straight into the token's row rather
+        // than staging 20 MB a layer and reading it back.
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(t_real); ++t) {
             float* o = out + t * hid;
             for (const auto& [col, wt] : per_token[t]) {
-                const float* y = yt.data() + col * hid;
-                for (size_t k = 0; k < hid; ++k) o[k] += wt * y[k];
+                const float* base = yh + (col / NT) * hid * NT + (col % NT) * 8;
+                for (size_t band = 0; band < hid / 64; ++band)
+                    for (size_t g = 0; g < 4; ++g) {
+                        const float* even = base + ((band * 4 + g) * 2) * 64;
+                        const float* odd = even + 64;
+                        float* d = o + band * 64 + g * 16;
+                        for (size_t jj = 0; jj < 8; ++jj) {
+                            d[2 * jj] += wt * even[jj];
+                            d[2 * jj + 1] += wt * odd[jj];
+                        }
+                    }
             }
         }
         timing_.moe_read_ms += ms_since(t2);
