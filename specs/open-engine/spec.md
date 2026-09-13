@@ -201,7 +201,17 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 | Hy-MT2-7B (hd 128) | 4 x 8, RB 4 | 3395 -> 165 ms (20.6x) | 43, then a 0.05-logit near-tie |
 | Gemma3-4B (hd 256) | 2 x 4, RB 2 | 512 -> 96 ms (5.3x; the local layers never grew) | 41, then a 0.06-logit near-tie |
 | Qwen3.5-0.8B (hd 256, gated; `ax`) | 4 x 2, RB 1 | 176 -> 70 ms (6 attention layers of 24) | 200/200, corr min 0.99993 |
+| Qwen2.5-3B (hd 128, q/k/v bias) | 4 x 4, RB 4 | 1605 -> 84 ms/token at 2048 (19.1x) | 143, then a 0.021-logit near-tie |
 | Qwen3.6-35B (hd 256, gated; `ax`), 16-layer prefix | 4 x 4, RB 1 | 217 -> 43 ms part0 (four attention layers) | 85 (100 tokens; corr spread from expert flips) |
+
+Qwen2.5 (2026-09-12) is the first family whose cores emit more than one og element:
+16 heads over 2 kv heads means `HPO` is 2, so a core owning 4 heads writes them through two
+2-head elements (`kOGH = min(NHL, HPO)`), on the narrowest attention element of any dense
+family at 512 B. Per-token cost across positions 0 / 256 / 1024 / 2048 went 60 / 270 / 839 /
+1605 ms on the shipped kernel and 64 / 65 / 69 / 84 ms on the probe -- 1.3x from end to end
+of the sweep, against the 2x the requirement allows. Decode over 250 tokens went 5.03 ->
+15.98 tok/s. Re-exporting with the probe unset reproduced the probe build: every instruction
+stream byte-identical, the xclbins differing only in build stamps.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).

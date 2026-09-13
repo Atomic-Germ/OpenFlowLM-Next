@@ -165,7 +165,9 @@ def test_short_conv_is_a_layer_type_value():
 def test_no_shipped_models_hash_moved():
     """`spec_hash()` hashes every dataclass FIELD, so a new field would move all of these.
     Adding a member to the `layer_types` tuple cannot: no shipped spec uses it. These are
-    the hashes at the commit before the short-conv layer type existed."""
+    the hashes at the commit before the short-conv layer type existed. qwen25-3b joined
+    after, when Qwen2.5 was measured onto the fast attention path; its hash is the one the
+    engine logs for the installed container."""
     import pathlib
 
     from recipes.load import load_spec
@@ -176,6 +178,7 @@ def test_no_shipped_models_hash_moved():
         "hy-mt2-7b.json": "sha256:857e09843a229d259ec52d5174560e429af3597b446142eab140977a571cd1d7",
         "llama31-8b.json": "sha256:e4baa37e429635bc133b50b9bdac750abb02e6ce58c0d10efcb06bc2bd29a4bb",
         "phi4-mini-4b.json": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
+        "qwen25-3b.json": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
         "qwen3-4b.json": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
         "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
         "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
