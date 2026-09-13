@@ -398,7 +398,9 @@ double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
                      k.name.c_str(), layer, pos_, static_cast<int>(st), ms_since(t0),
                      static_cast<unsigned long long>(dispatches_), gap_ms);
         std::fflush(stderr);
-        if (extra) {
+        // Only a TIMEOUT can still be in flight. An abort or an error is final, and
+        // waiting on it just delays the rebuild by another minute.
+        if (extra && st == ERT_CMD_STATE_TIMEOUT) {
             auto st2 = r.wait(std::chrono::milliseconds(extra));
             std::fprintf(stderr, "open_qwen36:   waited %u ms more: ERT state %d%s\n", extra,
                          static_cast<int>(st2),
