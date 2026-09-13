@@ -1213,6 +1213,28 @@ ships).
 - That hash equals the hash of the same geometry declared as `model_type: "qwen3"`.
 - Two configs differing only inside `vision_config` give the same `spec_hash()`.
 - A missing decoder field is refused by name, in either config shape.
+- Qwen3-VL-4B-Instruct-NPU2's own config.json derives the same `spec_hash()` as Qwen3-4B-NPU2's, so `oflm-add` links it to that bundle with no build of its own. (That is the hash over config.json; `recipes.load.spec_from_model_dir` also folds in the tokenizer's real vocab and the container's per-role weight formats, which need the files.)
+- That container is tagged `model_type: "qwen3"`, flat, with no `text_config` and no `vision_config` -- `_qwen3vl_hf` never runs for the model people pull, `_qwen3_hf` does.
+- Qwen/Qwen3-VL-4B-Instruct derives the same geometry at a different `rope_theta`.
+
+**The container's rope_theta disagrees with upstream: 1e6 against Qwen's 5e6.** Every
+other field matches. A kernel set built from the container rotates at 1e6, and so does
+the replica, so the two will agree with each other whether or not that is the right
+number -- the same trap OPEN-PACK-Q4-0 walked into. Settle it against text quality or
+against transformers with the original weights, not against the replica.
+
+**Adapters:** `Qwen3VL` (`model_list.json` family `qwen3vl`, `qwen3vl-it:4b`) selects the
+open engine when a kernel set is installed for its model and honours
+`OFLM_QWEN3VL_ENGINE=open|closed`, as the other adapters do. The vision dispatch in
+`Engine::prefill` reads a `qwen3vl_image_payload_t` under family `qwen3` -- Qwen3-VL's
+decoder derives as plain Qwen3, so its kernel set is a `qwen3` one and the family string
+does not say VL.
+
+**Images are not reachable for this family yet**, for three reasons, none of which is the
+decoder: the container carries no `vision_config` (OPEN-VISION-VIT-CONFIG), no
+`image_token_id` and no `rope_parameters.mrope_section`, which is what
+`Engine::prefill`'s existing refusal names; and Qwen3-VL's tower uses deepstack, which
+the host tower does not implement. Text-only is the reachable half.
 
 ### OPEN-FAMILY-QWEN2: Qwen2.5 is a dense spec with a bias on q, k and v
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`, `dense.py`)
@@ -1383,7 +1405,7 @@ un-tiled and run as Qwen3-VL's vision tower: patch embed + bilinearly
 interpolated positions, 2-D RoPE attention over the whole image, GELU-tanh
 MLP, the 2x2 merger. The numpy forward matches transformers'
 `Qwen3VLVisionModel` loaded with the same weights; the host C++ port matches the
-numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
+numpy forward. The geometry is read as OPEN-VISION-VIT-CONFIG says.
 
 **Acceptance criteria:**
 - numpy vs transformers on a random 8 x 8 (unit) / 16 x 16 grid: corr > 0.99999, max error < 1e-3 of max.
@@ -1393,6 +1415,39 @@ numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
 **Result 2026-09-08 (35B tower, 27 blocks):** numpy vs transformers corr
 1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
 patches in 1.02 s (numpy 11.5 s).
+
+### OPEN-VISION-VIT-CONFIG: where the tower's geometry comes from, and which towers are refused
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/vit.cpp`)
+**Test category:** unit (`tests/test_vision_config.py` for the reference; `vit_test --configs`, run by `ctest -R OPEN-VISION-VIT-CONFIG`, for the C++ port -- neither needs a container)
+
+The tower's numbers come from `config.json`'s `vision_config`, in whichever of three
+shapes the container carries: OFLM's per-family prefixes `QWEN3_6_MOE_*` and `QWEN3_5_*`,
+or the plain transformers keys (`depth`, `hidden_size`, `num_heads`, `intermediate_size`,
+`out_hidden_size`, `patch_size`, `temporal_patch_size`, `spatial_merge_size`,
+`num_position_embeddings`), which is what a container that kept its source block ships --
+Qwen2.5-VL's does. The plain shape has no head dimension and no epsilon: `head_dim` is
+`hidden_size / num_heads` and the epsilon is LayerNorm's 1e-6, which is what transformers
+uses for this tower.
+
+A `vision_config` describing a tower this code does not implement shall be refused with
+the reason named, not run with the extra parts dropped -- dropping one gives image
+embeddings that look plausible and are wrong. Refused: a non-empty
+`deepstack_visual_indexes` (Qwen3-VL feeds three vision layers through extra mergers into
+the first decoder layers), `window_size` / `fullatt_block_indexes` (Qwen2.5-VL's windowed
+tower), and a `hidden_act` other than `gelu_pytorch_tanh`.
+
+A container with no `vision_config` at all shall say so and name every key set it looked
+for. **Qwen3-VL-4B-Instruct-NPU2 is such a container**: its closed `qwen3vl_npu` engine
+hardcodes the tower's numbers in C++ (`src/include/models/qwen3vl/qwen3vl_npu.hpp`, and
+the DLL contains none of the `*_VISION_*` key strings the other two do), so the shipped
+config.json carries the vision weights' file name and nothing about their shape.
+
+**Acceptance criteria:**
+- The 35B container's `QWEN3_6_MOE_*` block reads as 27 x 1152, 16 heads x 72, MLP 4304 -> 2048, patch 16, 2304 positions; a Qwen3.5 container's `QWEN3_5_*` block reads with `hidden == heads * head_dim`.
+- Qwen3.5-0.8B's HF config and its shipped container give the same tower (12 x 768, 12 heads x 64, MLP 3072 -> 1024), the HF one deriving `head_dim` and using eps 1e-6.
+- Qwen3-VL-4B-Instruct-NPU2's config.json is refused with a message naming `vision_config`.
+- Qwen/Qwen3-VL-4B-Instruct's config.json is refused with a message naming `deepstack`.
+- Qwen2.5-VL-3B-Instruct-NPU2's config.json is refused with a message naming `window`.
 
 ### OPEN-VISION-EMBED: the open engine takes an image payload
 **Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)

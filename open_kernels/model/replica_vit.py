@@ -39,13 +39,72 @@ DEFAULT_MODEL_DIR = Path.home() / ".flm" / "models" / "Qwen3.6-35B-A3B-NPU2"
 TILE_N, TILE_K = 64, 256
 
 
+PREFIXES = ("QWEN3_6_MOE_", "QWEN3_5_")
+HF_KEYS = ("depth, hidden_size, num_heads, intermediate_size, out_hidden_size, patch_size, "
+           "temporal_patch_size, spatial_merge_size, num_position_embeddings")
+
+
+def vision_config_of(config: dict) -> dict:
+    """The tower's geometry out of config.json. OFLM prefixes the keys per family
+    (QWEN3_6_MOE_* on the 35B, QWEN3_5_* on Qwen3.5); a container that kept the source
+    block instead carries the plain transformers keys, which is what Qwen2.5-VL ships."""
+    v = config.get("vision_config")
+    if not isinstance(v, dict) or not v:
+        raise ValueError(
+            "config.json has no vision_config, so this container does not say what its "
+            "tower looks like - Qwen3-VL-4B-Instruct-NPU2 is like this, its closed engine "
+            "hardcodes the numbers. Looked for QWEN3_6_MOE_VISION_NUM_LAYERS, "
+            f"QWEN3_5_VISION_NUM_LAYERS, and the plain keys: {HF_KEYS}.")
+    _refuse_towers_we_do_not_run(v)
+    prefix = next((p for p in PREFIXES if f"{p}VISION_NUM_LAYERS" in v), None)
+    if prefix:
+        g = lambda k: v[f"{prefix}{k}"]  # noqa: E731
+        cfg = dict(depth=g("VISION_NUM_LAYERS"), hidden=g("VISION_EMBED_DIM"), heads=g("VISION_NUM_HEADS"),
+                   head_dim=g("VISION_HEAD_DIM"), inter=g("VISION_MLP_INTERMEDIATE_SIZE"),
+                   out=g("VISION_OUT_HIDDEN_SIZE"), patch=g("PATCH_SIZE"), temporal=g("TEMPORAL_PATCH_SIZE"),
+                   merge=g("SPATIAL_MERGE_SIZE"), npos=g("VISION_NUM_POSITION_EMBEDDINGS"),
+                   eps=g("VISION_LAYER_NORM_EPSILON"), channels=3)
+    elif "depth" in v:
+        def h(k):
+            if k not in v:
+                raise ValueError(f"vision_config: no {k} in the transformers-shaped block")
+            return v[k]
+        hidden, heads = h("hidden_size"), h("num_heads")
+        if hidden % heads:
+            raise ValueError(f"vision_config: hidden_size {hidden} is not a multiple of num_heads {heads}")
+        # transformers has no head_dim or epsilon for this tower: hidden/heads, LayerNorm's default.
+        cfg = dict(depth=h("depth"), hidden=hidden, heads=heads, head_dim=hidden // heads,
+                   inter=h("intermediate_size"), out=h("out_hidden_size"), patch=h("patch_size"),
+                   temporal=h("temporal_patch_size"), merge=h("spatial_merge_size"),
+                   npos=h("num_position_embeddings"), eps=v.get("layer_norm_eps", 1e-6),
+                   channels=v.get("in_channels", v.get("in_chans", 3)))
+    else:
+        raise ValueError("vision_config carries none of the key sets this tower is read from: "
+                         f"{', '.join(p + 'VISION_NUM_LAYERS' for p in PREFIXES)}, or {HF_KEYS}.")
+    if cfg["hidden"] != cfg["heads"] * cfg["head_dim"]:
+        raise ValueError("vision_config: heads x head_dim != hidden")
+    return cfg
+
+
+def _refuse_towers_we_do_not_run(v: dict) -> None:
+    """This is Qwen3-VL's full-attention tower without deepstack. A config describing
+    anything else is named, not approximated - dropping a part gives image embeddings
+    that look plausible and are wrong."""
+    ds = v.get("deepstack_visual_indexes") or []
+    if ds:
+        raise ValueError(f"vision_config: deepstack_visual_indexes {list(ds)} - this tower feeds those "
+                         "layers through extra mergers into the first decoder layers, which the host "
+                         "tower does not implement")
+    if v.get("window_size") or v.get("fullatt_block_indexes"):
+        raise ValueError("vision_config: window_size / fullatt_block_indexes - a windowed tower "
+                         "(Qwen2.5-VL) is a different design from the full-attention one implemented here")
+    act = v.get("hidden_act")
+    if act is not None and act != "gelu_pytorch_tanh":
+        raise ValueError(f"vision_config: hidden_act {act!r} - the tower's MLP is GELU-tanh")
+
+
 def vision_config(model_dir: Path) -> dict:
-    v = json.loads((model_dir / "config.json").read_text())["vision_config"]
-    g = lambda k: v[f"QWEN3_6_MOE_{k}"]  # noqa: E731
-    return dict(depth=g("VISION_NUM_LAYERS"), hidden=g("VISION_EMBED_DIM"), heads=g("VISION_NUM_HEADS"),
-                head_dim=g("VISION_HEAD_DIM"), inter=g("VISION_MLP_INTERMEDIATE_SIZE"), out=g("VISION_OUT_HIDDEN_SIZE"),
-                patch=g("PATCH_SIZE"), temporal=g("TEMPORAL_PATCH_SIZE"), merge=g("SPATIAL_MERGE_SIZE"),
-                npos=g("VISION_NUM_POSITION_EMBEDDINGS"), eps=g("VISION_LAYER_NORM_EPSILON"), channels=3)
+    return vision_config_of(json.loads((model_dir / "config.json").read_text()))
 
 
 def untile(t: np.ndarray, n_out: int, k_in: int) -> np.ndarray:

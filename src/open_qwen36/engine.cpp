@@ -7,6 +7,7 @@
 
 #include "models/qwen3_5vl/qwen3_5vl_npu.hpp"       // qwen3_5vl_image_payload_t
 #include "models/qwen3_6_moe/qwen3_6_moe_npu.hpp"   // qwen3_6_moe_image_payload_t
+#include "models/qwen3vl/qwen3vl_npu.hpp"           // qwen3vl_image_payload_t
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
@@ -191,6 +192,9 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     const std::string& fam = core_->manifest().family;
     if (fam == "qwen36moe") return prefill_images(ids, *static_cast<const qwen3_6_moe_image_payload_t*>(payload));
     if (fam == "qwen35") return prefill_images(ids, *static_cast<const qwen3_5vl_image_payload_t*>(payload));
+    // Qwen3-VL's decoder derives as plain Qwen3, so its kernel set is a qwen3 one and the
+    // family string does not say "VL" - only the payload does.
+    if (fam == "qwen3") return prefill_images(ids, *static_cast<const qwen3vl_image_payload_t*>(payload));
     throw std::runtime_error("open_qwen36: family " + fam + " has no vision path");
 }
 
