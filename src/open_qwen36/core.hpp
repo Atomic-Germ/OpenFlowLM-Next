@@ -243,6 +243,7 @@ private:
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
+    std::vector<float> gy_, gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
@@ -287,7 +288,11 @@ private:
     /// The consts tensor whose name ends in `suffix`, with the layer index filled in.
     std::string const_tensor(const LayerType& lt, const std::string& suffix, int layer) const;
     /// One GEMM step over x [T, K] (f32 row-major): tile, upload, run, download y as [T, N].
-    std::vector<float> gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer);
+    /// `out` is grown if it is short and then fully overwritten; pass a buffer that lives
+    /// across layers, so the 12 MB the widest GEMM returns is allocated once, not 40 times
+    /// a block.
+    void gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
+              std::vector<float>& out);
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL

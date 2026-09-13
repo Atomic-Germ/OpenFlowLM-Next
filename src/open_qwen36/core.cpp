@@ -873,7 +873,8 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
     throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
 }
 
-std::vector<float> Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer) {
+void Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
+                std::vector<float>& out) {
     xrt::bo& xb = buffer(s.args[1], 0);
     xrt::bo& yb = buffer(s.args[2], 0);
     if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
@@ -887,11 +888,10 @@ std::vector<float> Core::gemm(const Step& s, const std::vector<float>& x, size_t
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
     yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
     auto t1 = std::chrono::steady_clock::now();
-    std::vector<float> out(T * N);
+    if (out.size() < T * N) out.resize(T * N);             // grow-only, so only the first block pays for it
     host::transpose(yb.map<float*>(), N, T, out.data());   // [N, T] on the device -> [T, N]
     timing_.part1_ms += ms_since(t1);
     timing_.gemm_tr_ms += ms_since(t1);
-    return out;
 }
 
 void Core::tail_logits(const float* row) {
@@ -1242,7 +1242,8 @@ void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, siz
     const GemmBlockProgram& gb = lt.gemm_block;
     const size_t hid = man_.hidden, ff = gb.shared_ff;
     std::vector<float> xv(xm, xm + T * hid);
-    const std::vector<float> ug = gemm(gb.shared_program[0], xv, T, hid, 2 * ff, l);
+    gemm(gb.shared_program[0], xv, T, hid, 2 * ff, l, sg_ug_);
+    const std::vector<float>& ug = sg_ug_;
     auto t0 = std::chrono::steady_clock::now();
     std::vector<float> h(T * ff);
     for (size_t t = 0; t < T; ++t) {
@@ -1252,7 +1253,8 @@ void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, siz
         for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
     }
     timing_.shared_ms += ms_since(t0);
-    const std::vector<float> y = gemm(gb.shared_program[1], h, T, ff, hid, l);
+    gemm(gb.shared_program[1], h, T, ff, hid, l, sg_y_);
+    const std::vector<float>& y = sg_y_;
     auto t1 = std::chrono::steady_clock::now();
     const std::vector<float>& sgw = hc_[l].sgw;
     for (size_t t = 0; t < t_real; ++t) {
@@ -1275,7 +1277,8 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
 
     std::vector<float> xn(T * hid);
     host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
-    const std::vector<float> y = gemm(gb.program[0], xn, T, hid, nch + vw, l);
+    gemm(gb.program[0], xn, T, hid, nch + vw, l, gy_);
+    const std::vector<float>& y = gy_;
     std::vector<float> qkv(T * nch), z(T * vw);
     for (size_t t = 0; t < T; ++t) {
         std::memcpy(qkv.data() + t * nch, y.data() + t * (nch + vw), nch * 4);
@@ -1304,7 +1307,8 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
-    const std::vector<float> out = gemm(gb.program[1], og, T, vw, hid, l);
+    gemm(gb.program[1], og, T, vw, hid, l, gout_);
+    const std::vector<float>& out = gout_;
 
     auto t1 = std::chrono::steady_clock::now();
     MoeTail m;
@@ -1410,7 +1414,8 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
 
     std::vector<float> xn(T * hid);
     host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
-    const std::vector<float> y = gemm(gb.program[0], xn, T, hid, nf, l);
+    gemm(gb.program[0], xn, T, hid, nf, l, gy_);
+    const std::vector<float>& y = gy_;
     std::vector<float> q(T * qw), k(T * kvw), v(T * kvw), gate(T * qw);
     for (size_t t = 0; t < T; ++t) {
         const float* row = y.data() + t * nf;
@@ -1447,7 +1452,8 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, static_cast<size_t>(pos_) * row);
     timing_.state_ms += ms_since(ts);
     timing_.attn_ms += timing_.mid_ms - mid0;
-    const std::vector<float> out = gemm(gb.program[1], og, T, qw, hid, l);
+    gemm(gb.program[1], og, T, qw, hid, l, gout_);
+    const std::vector<float>& out = gout_;
 
     auto t1 = std::chrono::steady_clock::now();
     MoeTail m;
