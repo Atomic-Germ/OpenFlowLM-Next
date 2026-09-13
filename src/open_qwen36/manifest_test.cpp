@@ -122,8 +122,8 @@ int main(int argc, char** argv) {
           m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
           m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    check(m.files().size() == 59, "59 files named (10 xclbin + 49 insts: the route adds three GEMM contexts, the MoE one, seven streams, "
-                                  "the token-batched expert kernel one context and four streams, and the attention GEMM one "
+    check(m.files().size() == 61, "61 files named (10 xclbin + 51 insts: the route adds three GEMM contexts, the MoE one, seven streams, "
+                                  "the token-batched expert kernel one context and six streams, and the attention GEMM one "
                                   "context and 32 streams)");
     // the attention products on the NPU (OPEN-PREFILL-ATTN): a stream per 256 rows of window, both
     // products, on one xclbin; full attention only
@@ -137,12 +137,14 @@ int main(int argc, char** argv) {
           m.kernels.at("ag_s256").patch.empty() && m.contexts.at("ag") == "ag_s256/final.xclbin" &&
           m.globals.at("ag_a") == 2048 * 4096 * 2 && m.globals.at("ag_b") == 4096 * 256 * 2 && m.globals.at("ag_c") == 2048 * 4096 * 4,
           "attn_block: every stream on the ag context, no patch, the a / b / c globals sized for the widest window");
-    // the token-batched expert kernel (OPEN-MOE-BATCH): four stream lengths on one xclbin, the same on both kinds
+    // the token-batched expert kernel (OPEN-MOE-BATCH): a binary ladder of stream lengths on one
+    // xclbin, the same on both kinds
     const auto& mbk = lg.moe_batch;
     check(mbk.present() && mbk.nt == 8 && mbk.args == std::vector<std::string>{"pool", "mb_x", "mb_h", "mb_y"} &&
-          mbk.kernels.size() == 4 && mbk.kernels.at(256) == "mb_s256" && mbk.kernels.at(128) == "mb_s128" &&
-          mbk.kernels.at(32) == "mb_s32" && mbk.kernels.at(8) == "mb_s8" && fg.moe_batch.kernels == mbk.kernels,
-          "moe_batch: 256 / 128 / 32 / 8 slot streams, four buffer args, eight token slots");
+          mbk.kernels.size() == 6 && mbk.kernels.at(256) == "mb_s256" && mbk.kernels.at(128) == "mb_s128" &&
+          mbk.kernels.at(64) == "mb_s64" && mbk.kernels.at(32) == "mb_s32" && mbk.kernels.at(16) == "mb_s16" &&
+          mbk.kernels.at(8) == "mb_s8" && fg.moe_batch.kernels == mbk.kernels,
+          "moe_batch: 256 down to 8 slot streams, four buffer args, eight token slots");
     check(m.kernels.at("mb_s256").patch == "moebatch" && m.kernels.at("mb_s8").context == "mb" &&
           m.contexts.at("mb") == "mb_s256/final.xclbin" && m.globals.at("mb_x") == 256 * 2048 * 8 * 2 &&
           m.globals.at("mb_h") == 256 * 512 * 8 * 2 && m.globals.at("mb_y") == 256 * 2048 * 8 * 4,

@@ -62,6 +62,18 @@ void transpose(const float* y, size_t N, size_t T, float* out) {
                 for (size_t t = tb; t < std::min(tb + B, T); ++t) out[t * N + n] = y[n * T + t];
 }
 
+void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_t n_parts) {
+    constexpr size_t B = 32;
+    for (size_t p = 0; p < n_parts; ++p) {
+        const TransposePart& q = parts[p];
+#pragma omp parallel for
+        for (long long nb = 0; nb < static_cast<long long>(q.width); nb += B)
+            for (size_t tb = 0; tb < T; tb += B)
+                for (size_t n = nb; n < std::min(static_cast<size_t>(nb) + B, q.width); ++n)
+                    for (size_t t = tb; t < std::min(tb + B, T); ++t) q.dst[t * q.width + n] = y[(q.off + n) * T + t];
+    }
+}
+
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
     // [T,K] fp32 -> bf16, pre-tiled [K,T] in "k,n" order: K_TILE 64 x tile_n 32 tiles, each
     // tile in (8 x 8) MAC sub-tiles -- the layout gemm_q4_prefill.py streams its activation in

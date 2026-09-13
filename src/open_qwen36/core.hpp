@@ -243,7 +243,7 @@ private:
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
-    std::vector<float> gy_, gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
+    std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
@@ -293,6 +293,10 @@ private:
     /// a block.
     void gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
               std::vector<float>& out);
+    /// The same dispatch without the transpose: y stays [N, T] in the output buffer and the
+    /// mapping is returned, so a caller that is going to slice the output can transpose
+    /// straight into its own arrays. Valid until the next GEMM on the same buffer.
+    const float* gemm_run(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer);
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL

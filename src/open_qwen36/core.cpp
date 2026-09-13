@@ -873,8 +873,7 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
     throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
 }
 
-void Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
-                std::vector<float>& out) {
+const float* Core::gemm_run(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer) {
     xrt::bo& xb = buffer(s.args[1], 0);
     xrt::bo& yb = buffer(s.args[2], 0);
     if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
@@ -887,9 +886,15 @@ void Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, 
     xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
     yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
+    return yb.map<float*>();
+}
+
+void Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
+                std::vector<float>& out) {
+    const float* y = gemm_run(s, x, T, K, N, layer);
     auto t1 = std::chrono::steady_clock::now();
     if (out.size() < T * N) out.resize(T * N);             // grow-only, so only the first block pays for it
-    host::transpose(yb.map<float*>(), N, T, out.data());   // [N, T] on the device -> [T, N]
+    host::transpose(y, N, T, out.data());                  // [N, T] on the device -> [T, N]
     timing_.part1_ms += ms_since(t1);
     timing_.gemm_tr_ms += ms_since(t1);
 }
@@ -1277,12 +1282,14 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
 
     std::vector<float> xn(T * hid);
     host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
-    gemm(gb.program[0], xn, T, hid, nch + vw, l, gy_);
-    const std::vector<float>& y = gy_;
+    const float* yq = gemm_run(gb.program[0], xn, T, hid, nch + vw, l);
     std::vector<float> qkv(T * nch), z(T * vw);
-    for (size_t t = 0; t < T; ++t) {
-        std::memcpy(qkv.data() + t * nch, y.data() + t * (nch + vw), nch * 4);
-        std::memcpy(z.data() + t * vw, y.data() + t * (nch + vw) + nch, vw * 4);
+    {
+        auto tt = std::chrono::steady_clock::now();
+        const host::TransposePart parts[2] = {{qkv.data(), 0, nch}, {z.data(), nch, vw}};
+        host::transpose_parts(yq, T, parts, 2);
+        timing_.part1_ms += ms_since(tt);
+        timing_.gemm_tr_ms += ms_since(tt);
     }
     // the conv rows and S live in the state BO; the recurrence runs on the host in place
     xrt::bo& st = state_[l];
@@ -1414,15 +1421,17 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
 
     std::vector<float> xn(T * hid);
     host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
-    gemm(gb.program[0], xn, T, hid, nf, l, gy_);
-    const std::vector<float>& y = gy_;
+    const float* yf = gemm_run(gb.program[0], xn, T, hid, nf, l);
     std::vector<float> q(T * qw), k(T * kvw), v(T * kvw), gate(T * qw);
-    for (size_t t = 0; t < T; ++t) {
-        const float* row = y.data() + t * nf;
-        std::memcpy(q.data() + t * qw, row, qw * 4);
-        std::memcpy(k.data() + t * kvw, row + qw, kvw * 4);
-        std::memcpy(v.data() + t * kvw, row + qw + kvw, kvw * 4);
-        std::memcpy(gate.data() + t * qw, row + qw + 2 * kvw, qw * 4);
+    {
+        auto tt = std::chrono::steady_clock::now();
+        const host::TransposePart parts[4] = {{q.data(), 0, qw},
+                                              {k.data(), qw, kvw},
+                                              {v.data(), qw + kvw, kvw},
+                                              {gate.data(), qw + 2 * kvw, qw}};
+        host::transpose_parts(yf, T, parts, 4);
+        timing_.part1_ms += ms_since(tt);
+        timing_.gemm_tr_ms += ms_since(tt);
     }
     // the KV rows: [0, pos_) read, [pos_, pos_ + t_real) written by the host attention
     xrt::bo& st = state_[l];

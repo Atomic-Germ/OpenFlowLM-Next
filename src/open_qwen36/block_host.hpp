@@ -22,6 +22,16 @@ namespace host {
 void rmsnorm_rows(const float* x, size_t T, size_t d, const float* w, double eps, float* out);
 /// y [N, T] row-major (the GEMM's own output order) -> out [T, N].
 void transpose(const float* y, size_t N, size_t T, float* out);
+
+/// One column range of a GEMM's output and where it goes: columns [off, off + width) of
+/// y [N, T] land in dst as [T, width].
+struct TransposePart {
+    float* dst = nullptr;
+    size_t off = 0, width = 0;
+};
+/// y [N, T] transposed straight into the ranges the caller is going to read it as, so a
+/// fused projection needs no [T, N] copy in between. The ranges may not overlap.
+void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_t n_parts);
 /// x [T, K] fp32 -> the GEMM's tiled bf16 activation layout ([K, T] "k,n" order, 64 x 32
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
