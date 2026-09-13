@@ -1395,6 +1395,159 @@ because they share a dequantiser; and the apparent bf16 KV-cache sensitivity in 
 run was an artefact of the misread weights and is not real. `qwen2` reaches the fast
 attention path the way every family does, by measurement, and has not been measured yet.
 
+### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
+**Test category:** unit (`tests/test_gptoss.py`)
+
+GPT-OSS extends a 4096-token pretraining context to 131072 with YaRN, which is a third way
+of stretching RoPE alongside the Llama 3 and longrope rules the spec already reads. Each
+rotary pair is either left alone -- it turns few enough times inside the original context
+that the model saw its whole range -- or divided by `factor`, which is plain position
+interpolation; the pairs between the two dims where `beta_fast` and `beta_slow` rotations
+fit take a linear blend. A `rope_scaling` (or `rope_parameters`) whose type is `yarn` shall
+derive that table, and `rope_scale()` shall return YaRN's attention factor,
+`0.1 * ln(factor) + 1`, which multiplies cos and sin.
+
+The blend is HF's `_compute_yarn_parameters` including its asymmetry -- the ramp indexes
+`rotary_dim / 2` pairs against bounds computed on the `rotary_dim` scale -- because the
+position table has to be the one the weights were trained against, not the tidier one.
+`mscale` / `mscale_all_dim` (DeepSeek's variant of the attention factor) is refused rather
+than ignored.
+
+**Acceptance criteria:**
+- GPT-OSS 20B's parameters (theta 150000, factor 32, beta 32/1, truncate false, original
+  context 4096, rotary dim 64) reproduce transformers' own table to fp32 precision: pair 0
+  is 1.0 (unscaled), pair 31 is `150000^(-31/32) / 32` (fully interpolated), pairs 16 and 17
+  are 4.564839e-4 and 1.2931869e-4.
+- `rope_scale()` is 1.3465735902799727; an explicit `attention_factor` wins over it; a
+  `factor` of 1 or less gives 1.0.
+- The branch is keyed on `rope_type`, so linear, longrope, Llama 3 and unscaled families
+  derive exactly what they derived before.
+
+### OPEN-FAMILY-GPTOSS: GPT-OSS derives a spec and has no recipe yet
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
+**Test category:** unit (`tests/test_gptoss.py`)
+
+A config whose `model_type` is `gpt_oss` shall derive a `ModelSpec` with `family` `gptoss`:
+GQA attention with no q/k norm and no gate, a sliding window on the layers HF marks
+`sliding_attention` and none on the ones it marks `full_attention`, YaRN RoPE, and an MoE
+FFN with no shared expert. Two keys mean something other than what they say and the
+derivation shall read them as they are meant:
+
+- `intermediate_size` is the EXPERT width. There is no dense FFN, so it becomes
+  `moe_intermediate` and `intermediate` stays 0.
+- `hidden_act` says `silu` and is wrong about it. The experts compute
+  `(up + 1) * gate * sigmoid(1.702 * gate)` with `gate` clipped above at 7 and `up` clipped
+  both ways, and `gate` and `up` interleaved down the expert's rows rather than split in
+  half. The spec records `activation == "clamped_swiglu"`; 1.702 and 7.0 are family
+  constants, not fields.
+
+GPT-OSS's `full_attention` is a plain dense layer and shall map to `dense`, NOT to the
+spec's `full_attention` layer type -- that one is the full half of Qwen3.6's linear/full
+alternation and has nothing to do with this family.
+
+The sink, the biases and the activation's constants are family properties for the same
+reason Qwen2's bias is: every GPT-OSS has them and `spec_hash()` covers every field.
+
+`recipes.families.family_module("gptoss")` shall raise `NotImplementedError` naming what is
+missing, and `gptoss` shall stay out of `FAMILIES` and `DENSE_FAMILIES`. Routing it to the
+dense or the MoE recipe would emit kernels that drop the sink and compute the wrong FFN, and
+then report parity against a reference carrying the same gaps -- which is exactly how
+OPEN-PACK-Q4-0 went unnoticed.
+
+**Acceptance criteria:**
+- gpt-oss-20b's fields derive `family == "gptoss"`, `(num_heads, num_kv_heads, head_dim) ==
+  (64, 8, 64)`, `rotary_dim == 64`, `(num_experts, experts_per_tok) == (32, 4)`,
+  `moe_intermediate == 2880`, `intermediate == 0`, `shared_expert_intermediate == 0`,
+  `qk_norm` and `attn_gate` false, `norm_eps == 1e-5`.
+- `layer_types` alternates `dense_local`, `dense` starting at `dense_local`, from the config's
+  list or, when it has none, from HF's own default; `sliding_window == 128`. An unknown layer
+  type name and a sliding layer with no window are each refused by name.
+- `head_dim` is read from the key when present -- GPT-OSS's is 64 while `hidden / heads` is
+  45 -- and a `hidden_size` that is not a multiple of the head count is refused naming
+  `head_dim`.
+- The older `rope_theta` + `rope_scaling` pair and transformers 5's single `rope_parameters`
+  object give the same `spec_hash()`. A missing `hidden_size`, `num_hidden_layers`,
+  `num_local_experts`, `num_experts_per_tok`, `vocab_size` or `rope_theta` is named.
+- `family_module("gptoss")` raises `NotImplementedError` whose message names the sink, the
+  clamped SwiGLU and the extra biases; `"gptoss"` is in neither `FAMILIES` nor
+  `DENSE_FAMILIES`.
+- `quant_map_from_chunk_sizes("gptoss", ...)` reads the tensor names `q4nx-build` writes
+  (`configs/gpt-oss.json`) and refuses a role at two formats.
+
+**What a recipe would still need** (not requirements yet; each earns its own when it is
+built): the sink (OPEN-ATTN-SINK), the clamped SwiGLU experts, a bias on `o_proj`, on the
+router and on all three expert projections -- OPEN-ATTN-QKV-BIAS covers none of those -- an
+MoE FFN on sliding-window layers, which no recipe composes today, and YaRN position tables in
+the engine.
+
+### OPEN-ATTN-SINK: a learned per-head attention sink logit
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`,
+`model/replica_dense.py`)
+**Test category:** unit (`tests/test_attn_sink.py`) for the math and the guard; manual (the
+procedure below, needs the NPU and a GPT-OSS container) for the numbers
+
+A family with attention sinks carries one learned scalar per head per layer that joins the
+softmax denominator and has no value vector behind it, so the head's output weights sum to
+less than one and it can decline to attend. Given a head's scores `s_t` (already divided by
+`sqrt(head_dim)`) and its sink `c`:
+
+    o_h = sum_t exp(s_t - M) V_t / ( exp(c - M) + sum_t exp(s_t - M) ),  M = max(c, max_t s_t)
+
+The sink is the raw stored scalar: GPT-OSS scales the q.k dots and concatenates the sink
+after that, so it is NOT divided by `sqrt(head_dim)`. `replica_dense.sink_softmax` is the
+fp64 reference.
+
+That is one more row of an online softmax whose score is `c` and whose V is zero, so on this
+codebase's attention core the whole change is the state `attn_init_impl` starts from --
+`m = c, l = 1` instead of `m = -1e30, l = 0`, with `oacc` still zero -- and the per-row
+kernels, the block kernel and `attn_fin_impl` are untouched. `attn_fin_impl` already divides
+by `ml[kMLS + h]`, which now carries the sink's 1.
+
+The sinks shall ride in the meta element after `qn | kn`, as bf16, NOT on a fifo of their
+own. They are one value per head for the whole layer -- 128 bytes at 64 heads -- where the
+q/k/v bias is one per channel and has to arrive in lockstep with the projection stream; a
+second fifo would cost two buffers and a descriptor per layer for data that fits in the meta
+element's unused room. `attn_meta_impl` widens this core's own heads into an `sk[NHL]` f32
+buffer, so `attn_init_impl` indexes it locally and needs no head offset; only `attn_meta` takes
+`h0`, and only under this guard.
+
+A family without sinks shall compile the attention it compiled before, byte for byte:
+`ATTN_SINK` defaults to 0 and `ATTN_SINK_IN_PARM` / `ATTN_SINK_OUT_PARM` / `ATTN_SINK_ARG` /
+`ATTN_SINK_H0_PARM` expand to nothing, the same trick `ATTN_H0_PARM` and `ATTN_BIAS_PARM`
+use -- an unused parameter changes the generated code.
+
+**Acceptance criteria (unit):**
+- A sink equal to the scores adds exactly one more equal share to the denominator: two
+  positions at score 0 with a sink at 0 give 1/3 each, and a sink at `ln 2` gives 1/4 each.
+- The reference equals GPT-OSS's own expression -- append the sink as one more column,
+  subtract the row max, softmax, drop the column -- and equals transformers'
+  `eager_attention_forward` on a GQA case (skipped where torch is absent).
+- A sink far below every score reproduces plain softmax exactly.
+- The weights sum to `1 - exp(c - M)/Z`, strictly between 0 and 1, and their ratios are the
+  ones plain softmax gives: the sink rescales and contributes no value.
+- The online form seeded `m = c, l = 1` equals the closed form over 512 positions with an
+  8-sigma score spread, and over a context where the sink holds the max at every row.
+- `ATTN_SINK` defaults to 0 in `attn.h`, no recipe emits it, and no recipe geometry carries a
+  SINK field.
+- `4 * HD + 2 * NH <= E_A` decides whether the sinks fit the meta element, equivalently
+  `NH <= HD * (KVH - 2)`; GPT-OSS 20B's `(64, 8, 64)` gives 384 bytes of a 1024-byte element,
+  and `attn.h` asserts the same inequality at compile time.
+
+**Procedure (manual) -- NOT RUN:**
+1. Compile `designs/attn/*.cc` for a shipped family's flags from the tree before and after
+   and diff the objects: every one must be byte-identical, as OPEN-ATTN-QKV-BIAS step 1 did.
+   Nothing here has been near a compiler; this is the first gate.
+2. Give the recipe a `SINK` knob and a `CD_SINK` consts slot of `NH * 2` bytes (`-1` for a
+   family without one, as `CD_QB` does), widen the meta fill from `4 * HD` to
+   `4 * HD + 2 * NH` bytes, and pack `self_attn.sinks.weight` into it.
+3. Export with `OPEN_KERNELS_UNVALIDATED=1`, pack, and run `model/make_decode.py` +
+   `compare_decode.py` at positions 0 and a few hundred against a replica that calls
+   `sink_softmax`: logits correlation > 0.9999 and the same argmax.
+4. A sink whose weight is zero must reproduce the no-sink answer to the bit, which separates
+   a wrong sink from a wrong anything-else.
+5. `oflm-test --llm` through `flm serve`, then add the tuple to `catalogue.py`.
+
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
 **Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)

@@ -42,7 +42,7 @@ class SpecError(ValueError):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    family: str                       # the recipe: "qwen36moe" | "qwen35" | "qwen3" | "llama3" | "gemma3" | "hunyuan" | "granite" | "phi3"
+    family: str                       # the recipe: "qwen36moe" | "qwen35" | "qwen3" | "llama3" | "gemma3" | "hunyuan" | "granite" | "phi3" | "qwen2" | "gptoss" (no recipe yet)
     hidden: int
     num_layers: int
     layer_types: tuple[str, ...]      # per layer: LINEAR | FULL | DENSE
@@ -176,6 +176,8 @@ class ModelSpec:
             long = ctx is not None and ctx > float(sc["original_max_position_embeddings"])
             fac = sc["long_factor"] if long else sc["short_factor"]
             return [f / float(x) for f, x in zip(inv, fac)]
+        if sc and sc.get("rope_type") == "yarn":
+            return _yarn_inv_freq(inv, self.rotary_dim, self.rope_theta, sc)
         if sc:
             factor = float(sc["factor"])
             lo, hi = float(sc["low_freq_factor"]), float(sc["high_freq_factor"])
@@ -196,11 +198,17 @@ class ModelSpec:
 
     def rope_scale(self) -> float:
         """What cos and sin are multiplied by: longrope's attention factor
-        sqrt(1 + ln(factor) / ln(original_max_position_embeddings)), 1.0 for everyone else."""
+        sqrt(1 + ln(factor) / ln(original_max_position_embeddings)), yarn's
+        0.1 * ln(factor) + 1, 1.0 for everyone else."""
         import math
         sc = self.rope_scaling
         if sc and sc.get("rope_type") == "longrope":
             return math.sqrt(1.0 + math.log(float(sc["factor"])) / math.log(float(sc["original_max_position_embeddings"])))
+        if sc and sc.get("rope_type") == "yarn":
+            if sc.get("attention_factor") is not None:
+                return float(sc["attention_factor"])
+            factor = float(sc["factor"])
+            return 1.0 if factor <= 1.0 else 0.1 * math.log(factor) + 1.0
         return 1.0
 
     # ---- serialisation
@@ -272,6 +280,72 @@ def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
     if key not in d:
         raise SpecError(f"{what} lacks {key!r}")
     return d[key]
+
+
+def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, Any]) -> list[float]:
+    """YaRN's inverse frequencies (HF's _compute_yarn_parameters). Each rotary pair is either
+    left alone -- it completes few enough turns inside the original context that the model has
+    seen its whole range -- or divided by `factor`, which is plain position interpolation. The
+    pairs in between take a linear blend of the two, over the dim range where beta_fast and
+    beta_slow rotations fit in `original_max_position_embeddings`.
+
+    HF's `linear_ramp_factor` indexes its rot/2 pairs against bounds computed on the rot
+    scale; that asymmetry is reproduced here rather than corrected, because the position
+    table has to be the one the weights were trained against."""
+    import math
+    factor = float(sc["factor"])
+    orig = float(sc["original_max_position_embeddings"])
+    beta_fast = float(sc.get("beta_fast") or 32)
+    beta_slow = float(sc.get("beta_slow") or 1)
+
+    def corr(rotations: float) -> float:
+        return rot * math.log(orig / (rotations * 2 * math.pi)) / (2 * math.log(theta))
+
+    low, high = corr(beta_fast), corr(beta_slow)
+    if sc.get("truncate", True):
+        low, high = math.floor(low), math.ceil(high)
+    low, high = max(low, 0.0), min(high, rot - 1.0)
+    if low == high:
+        high += 0.001                      # HF prevents the singularity the same way
+    out = []
+    for i, f in enumerate(inv):
+        ramp = min(max((i - low) / (high - low), 0.0), 1.0)
+        extrap = 1.0 - ramp
+        out.append(f / factor * (1.0 - extrap) + f * extrap)
+    return out
+
+
+def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, Any]) -> list[float]:
+    """YaRN's inverse frequencies (HF's _compute_yarn_parameters). Each rotary pair is either
+    left alone -- it completes few enough turns inside the original context that the model has
+    seen its whole range -- or divided by `factor`, which is plain position interpolation. The
+    pairs in between take a linear blend of the two, over the dim range where beta_fast and
+    beta_slow rotations fit in `original_max_position_embeddings`.
+
+    HF's `linear_ramp_factor` indexes its rot/2 pairs against bounds computed on the rot
+    scale; that asymmetry is reproduced here rather than corrected, because the position
+    table has to be the one the weights were trained against."""
+    import math
+    factor = float(sc["factor"])
+    orig = float(sc["original_max_position_embeddings"])
+    beta_fast = float(sc.get("beta_fast") or 32)
+    beta_slow = float(sc.get("beta_slow") or 1)
+
+    def corr(rotations: float) -> float:
+        return rot * math.log(orig / (rotations * 2 * math.pi)) / (2 * math.log(theta))
+
+    low, high = corr(beta_fast), corr(beta_slow)
+    if sc.get("truncate", True):
+        low, high = math.floor(low), math.ceil(high)
+    low, high = max(low, 0.0), min(high, rot - 1.0)
+    if low == high:
+        high += 0.001                      # HF prevents the singularity the same way
+    out = []
+    for i, f in enumerate(inv):
+        ramp = min(max((i - low) / (high - low), 0.0), 1.0)
+        extrap = 1.0 - ramp
+        out.append(f / factor * (1.0 - extrap) + f * extrap)
+    return out
 
 
 def _layer_types_hf(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
@@ -581,6 +655,102 @@ def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         conv_kernel=int(cfg.get("conv_L_cache", 3)),
         intermediate=_lfm2_ff_dim(cfg),
         norm_eps=float(cfg.get("norm_eps", cfg.get("rms_norm_eps", 1e-5))),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+
+# GPT-OSS's own layer-type names. `full_attention` here means a plain dense layer, NOT the
+# spec's FULL -- that one is the full-attention half of Qwen3.6's linear/full alternation.
+_GPTOSS_LAYER_TYPES = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
+
+
+def _gptoss_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """GPT-OSS: GQA attention over an MoE FFN, a 128-row sliding window on every other layer,
+    YaRN RoPE, and a learned per-head attention sink (`self_attn.sinks`, one scalar per head
+    per layer) that joins the softmax denominator with no value vector behind it.
+
+    Two config keys mean something other than what they say. `intermediate_size` is the
+    EXPERT width -- there is no dense FFN, so `intermediate` stays 0 and `moe_intermediate`
+    takes it. And `hidden_act` says silu while the experts compute a clamped SwiGLU:
+    `(up + 1) * gate * sigmoid(1.702 * gate)` with gate clipped above at 7 and up clipped
+    both ways, gate and up interleaved down the expert's rows rather than split in half. The
+    activation records what they do; alpha and the limit are family constants, not fields.
+
+    The sink and the biases are family properties for the same reason the Qwen2 bias is:
+    every GPT-OSS has them and `spec_hash()` covers every field. There is no recipe for this
+    family yet -- `families.family_module("gptoss")` says what is missing."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hidden = _need(cfg, "hidden_size")
+    rope = cfg.get("rope_parameters") or {}
+    theta = rope.get("rope_theta", cfg.get("rope_theta"))
+    if theta is None:
+        raise SpecError("gptoss: config.json lacks 'rope_theta' (top level or rope_parameters)")
+    sc = cfg.get("rope_scaling") or {k: v for k, v in rope.items() if k != "rope_theta"} or None
+    if sc:
+        kind = sc.get("rope_type", sc.get("type"))
+        if kind != "yarn":
+            raise SpecError(f"gptoss: rope_scaling type {kind!r} is not supported (yarn only)")
+        if sc.get("mscale") or sc.get("mscale_all_dim"):
+            raise SpecError("gptoss: yarn mscale / mscale_all_dim is not supported "
+                            "(the attention factor comes from 'factor' alone)")
+        for key in ("factor", "original_max_position_embeddings"):
+            if sc.get(key) is None:
+                raise SpecError(f"gptoss: yarn rope_scaling lacks {key!r}")
+        canon = {"rope_type": "yarn", "factor": float(sc["factor"]),
+                 "beta_fast": float(sc.get("beta_fast") or 32), "beta_slow": float(sc.get("beta_slow") or 1),
+                 "truncate": bool(sc.get("truncate", True)),
+                 "original_max_position_embeddings": int(sc["original_max_position_embeddings"])}
+        if sc.get("attention_factor") is not None:
+            canon["attention_factor"] = float(sc["attention_factor"])
+        sc = canon
+    if "head_dim" in cfg and cfg["head_dim"]:
+        hd = cfg["head_dim"]
+    elif hidden % heads:
+        raise SpecError(f"gptoss: no head_dim in config.json and hidden_size {hidden} is not "
+                        f"a multiple of num_attention_heads {heads}")
+    else:
+        hd = hidden // heads
+    if "layer_types" in cfg:
+        raw = tuple(cfg["layer_types"])
+        if len(raw) != n:
+            raise SpecError(f"gptoss: layer_types has {len(raw)} entries, num_hidden_layers is {n}")
+        bad = sorted({t for t in raw if t not in _GPTOSS_LAYER_TYPES})
+        if bad:
+            raise SpecError(f"gptoss: layer_types: unknown layer type(s) {bad} "
+                            f"(have {sorted(_GPTOSS_LAYER_TYPES)})")
+        layers = tuple(_GPTOSS_LAYER_TYPES[t] for t in raw)
+    else:
+        # HF's own default: the sliding layer comes first (configuration_gpt_oss.py)
+        layers = tuple(DENSE_LOCAL if l % 2 == 0 else DENSE for l in range(n))
+    window = int(cfg.get("sliding_window") or 0)
+    if DENSE_LOCAL in layers and window <= 0:
+        raise SpecError("gptoss: the sliding_attention layers need a positive 'sliding_window'")
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="gptoss",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=layers,
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(theta),
+        rope_scaling=sc,
+        sliding_window=window,
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=0,
+        activation="clamped_swiglu",
+        num_experts=_need(cfg, "num_local_experts"),
+        experts_per_tok=_need(cfg, "num_experts_per_tok"),
+        moe_intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
         quant="q4_1",
         extra={"model_type": cfg["model_type"], "source": "hf_config"},
     )
@@ -1227,7 +1397,8 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
-               "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf}
+               "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
+               "gpt_oss": _gptoss_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
@@ -1236,7 +1407,7 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
-              _lfm2_hf: "lfm2"}
+              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1275,6 +1446,10 @@ ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
                         "shortconv.out_proj.weight": "linear_out"}
 for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
+# GPT-OSS's routed experts, under the names q4nx-build writes them
+# (utilities/q4nx-build/configs/gpt-oss.json). No shared expert and no dense FFN.
+ROLE_TENSORS["gptoss"] = {**_ATTN_HF, "ffn_up_exps.weight": "experts",
+                          "ffn_gate_exps.weight": "experts", "ffn_down_exps.weight": "experts"}
 
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
 _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",

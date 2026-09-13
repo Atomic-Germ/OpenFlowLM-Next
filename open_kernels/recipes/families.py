@@ -36,6 +36,12 @@ FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "gran
 # the point: routing such a model to the nearest recipe would emit kernels that drop a whole
 # stage of the layer and then report parity against a replica making the same mistake.
 NOT_IMPLEMENTED = {
+    "gptoss": "the learned per-head attention sink logit has no ATTN_SINK in attn.h; the "
+              "experts want a clamped SwiGLU with gate and up interleaved down the rows "
+              "rather than split in half; o_proj, the router and all three expert "
+              "projections carry a bias the dense one does not cover; the MoE FFN has to "
+              "compose with sliding-window layers, which no recipe does today; and the "
+              "engine needs YaRN position tables. See .claude/plans/gptoss-attention-sinks.md",
     "lfm2": "ten of its sixteen layers replace attention with a short depthwise causal "
             "convolution (the short_conv layer type), and no designs/short_conv exists to "
             "run one. The fp64 reference and the element accounting are in "
