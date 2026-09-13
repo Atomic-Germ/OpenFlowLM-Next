@@ -36,10 +36,74 @@ inline float bf16f(uint16_t u) {
 
 std::vector<float> f32_of(const Q4nxFile& f, const std::string& name) { return f.bf16(name); }
 
+// Qwen3-VL-4B-Instruct-NPU2 uses a different tiling from the 35B: its linears are
+// declared two-dimensional as [elements / 32768, 32768] and the order inside is tiles of
+// 64 output rows by 512 input columns, row-major within a tile and row-major over the
+// tiles, with NOTHING padded. Settled against Qwen/Qwen3-VL-4B-Instruct's own
+// safetensors, all 315 tensors (see specs OPEN-VISION-VIT-FLAT).
+constexpr int kFlatN = 64, kFlatK = 512, kFlatRow = kFlatN * kFlatK;
+
+bool is_flat_tiled(const TensorMeta& m) {
+    return m.shape.size() == 2 && m.shape[1] == static_cast<size_t>(kFlatRow);
+}
+
+/// The flat form -> bf16 [out, in]. Sizes are exact, so a mismatch is an error, not padding.
+Linear untile_flat(const Q4nxFile& f, const std::string& wname, const std::string& bname, int out, int in) {
+    const TensorMeta& m = f.meta(wname);
+    const size_t want = static_cast<size_t>(out) * in;
+    if (m.shape[0] * static_cast<size_t>(kFlatRow) != want)
+        throw std::runtime_error("vit: " + wname + " holds " + std::to_string(m.shape[0] * kFlatRow) +
+                                 " elements where [" + std::to_string(out) + ", " + std::to_string(in) +
+                                 "] needs " + std::to_string(want));
+    if (out % kFlatN || in % kFlatK)
+        throw std::runtime_error("vit: " + wname + " [" + std::to_string(out) + ", " + std::to_string(in) +
+                                 "] is not a whole number of " + std::to_string(kFlatN) + "x" +
+                                 std::to_string(kFlatK) + " tiles");
+    size_t nbytes = 0;
+    const uint16_t* t = reinterpret_cast<const uint16_t*>(f.raw(wname, &nbytes));
+    Linear L;
+    L.out = out;
+    L.in = in;
+    L.w.resize(want);
+    const size_t kt = static_cast<size_t>(in) / kFlatK;
+    for (int o = 0; o < out; ++o) {
+        const size_t tn = static_cast<size_t>(o) / kFlatN, rn = static_cast<size_t>(o) % kFlatN;
+        uint16_t* dst = L.w.data() + static_cast<size_t>(o) * in;
+        for (size_t tk = 0; tk < kt; ++tk)
+            std::memcpy(dst + tk * kFlatK, t + ((tn * kt + tk) * kFlatN + rn) * kFlatK,
+                        static_cast<size_t>(kFlatK) * 2);
+    }
+    if (bname.empty()) {
+        L.b.assign(static_cast<size_t>(out), 0.f);
+        return L;
+    }
+    L.b = f32_of(f, bname);
+    if (L.b.size() != static_cast<size_t>(out)) throw std::runtime_error("vit: " + bname + " has the wrong length");
+    return L;
+}
+
 /// [nt, kt, 64 * 256] bf16 (zero-padded tiles) -> bf16 [out, in], the padding dropped.
 /// An empty bname gives a zero bias, so a bias-less linear needs no special case downstream.
 Linear untile(const Q4nxFile& f, const std::string& wname, const std::string& bname, int out, int in) {
     const TensorMeta& m = f.meta(wname);
+    if (m.dtype == "BF16" && is_flat_tiled(m)) return untile_flat(f, wname, bname, out, in);
+    if (m.dtype == "BF16" && m.shape.size() == 2 && m.shape[0] == static_cast<size_t>(out) &&
+        m.shape[1] == static_cast<size_t>(in)) {
+        // Stored at its natural shape (Qwen3-VL keeps pos_embed that way).
+        size_t nbytes = 0;
+        const uint16_t* t = reinterpret_cast<const uint16_t*>(f.raw(wname, &nbytes));
+        Linear L;
+        L.out = out;
+        L.in = in;
+        L.w.assign(t, t + static_cast<size_t>(out) * in);
+        if (bname.empty()) L.b.assign(static_cast<size_t>(out), 0.f);
+        else {
+            L.b = f32_of(f, bname);
+            if (L.b.size() != static_cast<size_t>(out))
+                throw std::runtime_error("vit: " + bname + " has the wrong length");
+        }
+        return L;
+    }
     if (m.dtype != "BF16" || m.shape.size() != 3 || m.shape[2] != static_cast<size_t>(kTileN * kTileK))
         throw std::runtime_error("vit: " + wname + " is not a tiled bf16 [nt, kt, 16384] tensor");
     const size_t nt = m.shape[0], kt = m.shape[1];
@@ -529,6 +593,91 @@ VitConfig VitConfig::from_config_text(const std::string& config_json) {
     return c;
 }
 
+/// Qwen3-VL-4B-Instruct-NPU2 carries no vision_config at all, so the weight file is the
+/// only description of its tower on disk. Everything but two numbers is determined by the
+/// tensor shapes, and nothing in this container is padded, so an element count fixes a
+/// width exactly once `hidden` is known -- and `hidden` is known, because patch_embed
+/// keeps its natural [hidden, C, T, P, P] shape.
+///
+/// `heads` and `deepstack` are arguments because they are NOT in the file at any tiling:
+/// qkv is [3 * hidden, hidden] for every head count, and the merger names say how many
+/// extra mergers there are and never which blocks they hang off. They come from the
+/// model's published config. Every other number is derived and cross-checked here, so a
+/// wrong argument is refused rather than believed.
+VitConfig VitConfig::qwen3vl_from_tensors(const std::string& vision_q4nx_path, int heads,
+                                          const std::vector<int>& deepstack) {
+    Q4nxFile f(vision_q4nx_path);
+    const std::string p = "model.visual.";
+    VitConfig c;
+    c.family = VitFamily::Qwen3VL;
+
+    const std::string pe = p + "patch_embed.proj.weight";
+    if (!f.has(pe)) throw std::runtime_error("vit: " + vision_q4nx_path + " has no " + pe);
+    const TensorMeta& m = f.meta(pe);
+    if (m.dtype != "BF16" || m.shape.size() != 5)
+        throw std::runtime_error("vit: " + pe + " is not bf16 [hidden, C, T, P, P]");
+    c.hidden = static_cast<int>(m.shape[0]);
+    c.channels = static_cast<int>(m.shape[1]);
+    c.temporal = static_cast<int>(m.shape[2]);
+    c.patch = static_cast<int>(m.shape[3]);
+    if (c.channels != 3 || m.shape[3] != m.shape[4])
+        throw std::runtime_error("vit: " + pe + " is not 3 channels of square patches");
+
+    auto elems = [&](const std::string& name) -> size_t {
+        if (!f.has(name)) throw std::runtime_error("vit: " + vision_q4nx_path + " has no " + name);
+        const TensorMeta& t = f.meta(name);
+        size_t n = 1;
+        for (size_t d : t.shape) n *= d;
+        return n;
+    };
+
+    c.depth = 0;
+    while (f.has(p + "blocks." + std::to_string(c.depth) + ".attn.qkv.weight")) ++c.depth;
+    if (!c.depth) throw std::runtime_error("vit: " + vision_q4nx_path + " has no blocks.N.* tensors");
+
+    const size_t fc1 = elems(p + "blocks.0.mlp.linear_fc1.weight");
+    if (fc1 % static_cast<size_t>(c.hidden))
+        throw std::runtime_error("vit: mlp.linear_fc1 is not a multiple of hidden");
+    c.inter = static_cast<int>(fc1 / c.hidden);
+
+    const size_t sq = elems(p + "merger.linear_fc1.weight");
+    size_t width = 0;
+    while (width * width < sq) ++width;                       // the merger fc1 is square
+    if (width * width != sq) throw std::runtime_error("vit: merger.linear_fc1 is not square");
+    const size_t merge_sq = width / static_cast<size_t>(c.hidden);
+    if (width % static_cast<size_t>(c.hidden) || merge_sq * c.hidden != width)
+        throw std::runtime_error("vit: the merger width is not hidden times a square merge factor");
+    c.merge = 0;
+    while (static_cast<size_t>(c.merge) * c.merge < merge_sq) ++c.merge;
+    if (static_cast<size_t>(c.merge) * c.merge != merge_sq)
+        throw std::runtime_error("vit: the merge factor is not square");
+
+    const size_t fc2 = elems(p + "merger.linear_fc2.weight");
+    if (fc2 % width) throw std::runtime_error("vit: merger.linear_fc2 is not a multiple of the merged width");
+    c.out = static_cast<int>(fc2 / width);
+    c.npos = static_cast<int>(f.meta(p + "pos_embed.weight").shape[0]);
+
+    int have = 0;
+    while (f.has(p + "deepstack_merger_list." + std::to_string(have) + ".linear_fc1.weight")) ++have;
+    if (have != static_cast<int>(deepstack.size()))
+        throw std::runtime_error("vit: " + vision_q4nx_path + " holds " + std::to_string(have) +
+                                 " deepstack mergers but " + std::to_string(deepstack.size()) +
+                                 " indexes were given");
+    for (int i : deepstack)
+        if (i < 0 || i >= c.depth)
+            throw std::runtime_error("vit: deepstack index " + std::to_string(i) + " is outside the tower's " +
+                                     std::to_string(c.depth) + " blocks");
+    c.deepstack = deepstack;
+
+    if (heads <= 0 || c.hidden % heads)
+        throw std::runtime_error("vit: head count " + std::to_string(heads) + " does not divide hidden " +
+                                 std::to_string(c.hidden));
+    c.heads = heads;
+    c.head_dim = c.hidden / heads;
+    c.eps = 1e-6f;
+    return c;
+}
+
 VitConfig VitConfig::for_model_dir(const std::string& model_dir) {
     std::ifstream f(model_dir + "/config.json");
     if (!f) throw std::runtime_error("vit: cannot open " + model_dir + "/config.json");
@@ -683,12 +832,44 @@ VitWeights load_vit(const std::string& path, const VitConfig& cfg) {
     w.merger_ln_b = f32_of(f, p + "merger.norm.bias");
     w.merger_fc1 = untile(f, p + "merger.linear_fc1.weight", p + "merger.linear_fc1.bias", H * M, H * M);
     w.merger_fc2 = untile(f, p + "merger.linear_fc2.weight", p + "merger.linear_fc2.bias", cfg.out, H * M);
+    // The deepstack mergers. Their norm is H * M wide, not H: they reshape into merge
+    // groups and normalise across the whole row, where the tower's own merger normalises
+    // each patch first. Reading one as the other does not broadcast, so a mix-up fails
+    // here rather than producing plausible numbers.
+    for (size_t j = 0; j < cfg.deepstack.size(); ++j) {
+        const std::string d = p + "deepstack_merger_list." + std::to_string(j) + ".";
+        Merger m;
+        m.ln_w = f32_of(f, d + "norm.weight");
+        m.ln_b = f32_of(f, d + "norm.bias");
+        if (m.ln_w.size() != static_cast<size_t>(H) * M)
+            throw std::runtime_error("vit: " + d + "norm.weight is [" + std::to_string(m.ln_w.size()) +
+                                     "] where a post-shuffle norm is [" + std::to_string(H * M) + "]");
+        m.fc1 = untile(f, d + "linear_fc1.weight", d + "linear_fc1.bias", H * M, H * M);
+        m.fc2 = untile(f, d + "linear_fc2.weight", d + "linear_fc2.bias", cfg.out, H * M);
+        w.deepstack.push_back(std::move(m));
+    }
     return w;
 }
 
 namespace {
 
-std::vector<float> forward_qwen3vl(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
+/// A deepstack merger: reshape into merge groups FIRST, then one LayerNorm across the
+/// whole merged row. That ordering is the only structural difference from the tower's own
+/// merger, and it is why the two norms are different widths.
+std::vector<float> postshuffle_merger(const VitConfig& cfg, const Merger& m, const float* x, int n) {
+    const int H = cfg.hidden, M = cfg.merge * cfg.merge, nm = n / M;
+    std::vector<float> hn(static_cast<size_t>(nm) * H * M);
+    layer_norm(x, nm, H * M, m.ln_w.data(), m.ln_b.data(), cfg.eps, hn.data());
+    std::vector<float> mid(static_cast<size_t>(nm) * H * M), y(static_cast<size_t>(nm) * cfg.out);
+    linear(hn.data(), nm, m.fc1, mid.data());
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < static_cast<int>(mid.size()); ++i) mid[i] = gelu_erf(mid[i]);
+    linear(mid.data(), nm, m.fc2, y.data());
+    return y;
+}
+
+std::vector<float> forward_qwen3vl(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw,
+                                   std::vector<std::vector<float>>* deep) {
     const int n = gh * gw, H = cfg.hidden, M = cfg.merge * cfg.merge;
     std::vector<int> ph, pw;
     position_ids(gh, gw, cfg.merge, ph, pw);
@@ -700,7 +881,9 @@ std::vector<float> forward_qwen3vl(const VitConfig& cfg, const VitWeights& w, co
     std::vector<float> hn(x.size()), qkv(static_cast<size_t>(n) * 3 * H), att(x.size()), tmp(x.size());
     std::vector<float> ff(static_cast<size_t>(n) * cfg.inter);
     const std::vector<int> whole = {0, n};
-    for (const VitBlock& B : w.blocks) {
+    if (deep) deep->clear();
+    for (size_t bi = 0; bi < w.blocks.size(); ++bi) {
+        const VitBlock& B = w.blocks[bi];
         layer_norm(x.data(), n, H, B.ln1_w.data(), B.ln1_b.data(), cfg.eps, hn.data());
         linear(hn.data(), n, B.qkv, qkv.data());
         attention(cfg, qkv.data(), n, cs, sn, whole, att.data());
@@ -712,6 +895,12 @@ std::vector<float> forward_qwen3vl(const VitConfig& cfg, const VitWeights& w, co
         for (int i = 0; i < static_cast<int>(ff.size()); ++i) ff[i] = gelu_tanh(ff[i]);
         linear(ff.data(), n, B.fc2, tmp.data());
         for (size_t i = 0; i < x.size(); ++i) x[i] += tmp[i];
+        // The tap is taken AFTER the block runs, in the order cfg.deepstack lists them.
+        if (deep) {
+            const auto at = std::find(cfg.deepstack.begin(), cfg.deepstack.end(), static_cast<int>(bi));
+            if (at != cfg.deepstack.end())
+                deep->push_back(postshuffle_merger(cfg, w.deepstack[at - cfg.deepstack.begin()], x.data(), n));
+        }
     }
     // merger: LayerNorm per patch, 2x2 groups concatenated, fc1 -> exact GELU -> fc2
     layer_norm(x.data(), n, H, w.merger_ln_w.data(), w.merger_ln_b.data(), cfg.eps, hn.data());
@@ -815,11 +1004,24 @@ void window_index(const VitConfig& cfg, int gh, int gw, std::vector<int>& index,
         }
 }
 
-std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
+std::vector<float> vit_forward_deepstack(const VitConfig& cfg, const VitWeights& w, const float* pixels,
+                                         int gh, int gw, std::vector<std::vector<float>>* deep) {
     if (gh % cfg.merge || gw % cfg.merge) throw std::runtime_error("vit: the grid is not a multiple of the merge size");
     if (cfg.head_dim > 128) throw std::runtime_error("vit: head_dim > 128 does not fit the attention accumulator");
-    return cfg.family == VitFamily::Qwen25VL ? forward_qwen25(cfg, w, pixels, gh, gw)
-                                             : forward_qwen3vl(cfg, w, pixels, gh, gw);
+    if (deep && !cfg.deepstack.empty() && w.deepstack.size() != cfg.deepstack.size())
+        throw std::runtime_error("vit: " + std::to_string(cfg.deepstack.size()) + " deepstack indexes but " +
+                                 std::to_string(w.deepstack.size()) + " mergers were loaded");
+    if (cfg.family == VitFamily::Qwen25VL) {
+        if (deep) deep->clear();
+        if (!cfg.deepstack.empty())
+            throw std::runtime_error("vit: the windowed tower has no deepstack path");
+        return forward_qwen25(cfg, w, pixels, gh, gw);
+    }
+    return forward_qwen3vl(cfg, w, pixels, gh, gw, deep);
+}
+
+std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
+    return vit_forward_deepstack(cfg, w, pixels, gh, gw, nullptr);
 }
 
 }  // namespace open_qwen36::vision

@@ -123,12 +123,88 @@ static int window_index_tests() {
     return g_failed == 0 ? 0 : 1;
 }
 
+/// OPEN-VISION-VIT-FLAT: Qwen3-VL's tower off the shipped container, deepstack included,
+/// against replica_deepstack.py's fixture. The config comes from the WEIGHT FILE, because
+/// this container has no vision_config at all; only the head count and the tap indexes are
+/// given, and the loader checks everything else it derives.
+///
+///   python open_kernels/model/replica_deepstack.py --model-dir DIR --indexes 5 11 17 --fixture FX
+///   vit_test --deepstack DIR FX 16 5,11,17
+static int deepstack_test(const std::string& md, const std::string& fx, int heads,
+                          const std::vector<int>& taps) {
+    using namespace open_qwen36::vision;
+    nlohmann::json g;
+    std::ifstream(fx + "/grid.json") >> g;
+    const int gh = g.at("h"), gw = g.at("w");
+    const VitConfig cfg = VitConfig::qwen3vl_from_tensors(md + "/vision_weight.q4nx", heads, taps);
+    std::printf("from the weight file alone: depth %d hidden %d inter %d out %d npos %d merge %d "
+                "patch %d temporal %d\n",
+                cfg.depth, cfg.hidden, cfg.inter, cfg.out, cfg.npos, cfg.merge, cfg.patch, cfg.temporal);
+    auto t0 = std::chrono::steady_clock::now();
+    const VitWeights w = load_vit(md + "/vision_weight.q4nx", cfg);
+    std::printf("weights: %d blocks + %zu deepstack mergers in %.1f s\n", cfg.depth, w.deepstack.size(),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+
+    const std::vector<float> px = read_f32(fx + "/pixels.bin");
+    std::vector<std::vector<float>> deep;
+    t0 = std::chrono::steady_clock::now();
+    const std::vector<float> y = vit_forward_deepstack(cfg, w, px.data(), gh, gw, &deep);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    auto compare = [&](const std::vector<float>& got, const std::string& path, const char* label) {
+        const std::vector<float> ref = read_f32(path);
+        if (got.size() != ref.size()) {
+            std::printf("FAIL %-14s %zu vs ref %zu\n", label, got.size(), ref.size());
+            ++g_failed;
+            return;
+        }
+        double sy = 0, sr = 0, syy = 0, srr = 0, syr = 0, maxe = 0, maxr = 0;
+        for (size_t i = 0; i < got.size(); ++i) {
+            sy += got[i]; sr += ref[i];
+            syy += double(got[i]) * got[i]; srr += double(ref[i]) * ref[i]; syr += double(got[i]) * ref[i];
+            maxe = std::max(maxe, std::fabs(double(got[i]) - ref[i]));
+            maxr = std::max(maxr, std::fabs(double(ref[i])));
+        }
+        const double nn = static_cast<double>(got.size());
+        const double corr = (syr - sy * sr / nn) / std::sqrt((syy - sy * sy / nn) * (srr - sr * sr / nn));
+        const bool ok = corr > 0.99999 && maxe / maxr < 1e-3;
+        std::printf("%s %-14s corr %.8f  rel %.2e\n", ok ? "ok  " : "FAIL", label, corr, maxe / maxr);
+        if (!ok) ++g_failed;
+    };
+
+    std::printf("%d x %d patches in %.2f s\n", gh, gw, secs);
+    compare(y, fx + "/ref.bin", "merged");
+    for (size_t j = 0; j < deep.size(); ++j)
+        compare(deep[j], fx + "/deep" + std::to_string(j) + ".bin", ("deepstack[" + std::to_string(j) + "]").c_str());
+    if (deep.size() != taps.size()) {
+        std::printf("FAIL %zu features for %zu taps\n", deep.size(), taps.size());
+        ++g_failed;
+    }
+    std::printf("%s\n", g_failed ? "FAILED" : "PASS");
+    return g_failed == 0 ? 0 : 1;
+}
+
+static std::vector<int> parse_ints(const std::string& csv) {
+    std::vector<int> out;
+    size_t i = 0;
+    while (i < csv.size()) {
+        size_t j = csv.find(',', i);
+        if (j == std::string::npos) j = csv.size();
+        out.push_back(std::atoi(csv.substr(i, j - i).c_str()));
+        i = j + 1;
+    }
+    return out;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "--window-index") return window_index_tests();
     if (argc >= 3 && std::string(argv[1]) == "--configs") return config_tests(argv[2]);
+    if (argc >= 6 && std::string(argv[1]) == "--deepstack")
+        return deepstack_test(argv[2], argv[3], std::atoi(argv[4]), parse_ints(argv[5]));
     const bool windowed = argc >= 4 && std::string(argv[1]) == "--windowed";
     if (argc < 3) {
         std::fprintf(stderr, "usage: vit_test <model_dir> <fixture_dir> | vit_test --windowed <model_dir> <fixture_dir>"
+                             " | vit_test --deepstack <model_dir> <fixture_dir> <heads> <taps,csv>"
                              " | vit_test --configs <fixtures_dir> | vit_test --window-index\n");
         return 2;
     }
