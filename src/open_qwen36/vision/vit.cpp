@@ -693,19 +693,35 @@ VitConfig VitConfig::for_model_dir(const std::string& model_dir) {
     // writing them; until it does, oflm-add can add them at install time. Naming them in
     // the refusal is the point: a guessed head count gives plausible wrong embeddings.
     if (!j.contains("vision_config") && j.contains("vision_model_weight")) {
-        const auto v = j.find("vision_heads");
-        const auto d = j.find("vision_deepstack_indexes");
-        if (v == j.end() || d == j.end() || !d->is_array())
+        // config.json cannot hold these. The downloader compares every registry-listed
+        // file against a REMOTE manifest's byte count and re-pulls anything that differs,
+        // so a key added locally is reverted (and on this model that is a 4 GB re-pull).
+        // vision.json is not in the registry's file list, so it survives; oflm-add writes
+        // it at install time.
+        nlohmann::json side;
+        {
+            std::ifstream sf(model_dir + "/vision.json");
+            if (sf) {
+                auto parsed = nlohmann::json::parse(sf, nullptr, false);
+                if (parsed.is_object()) side = parsed;
+            }
+        }
+        const nlohmann::json& hv = j.contains("vision_heads") ? j["vision_heads"] : side["vision_heads"];
+        const nlohmann::json& dv = j.contains("vision_deepstack_indexes") ? j["vision_deepstack_indexes"]
+                                                                         : side["vision_deepstack_indexes"];
+        if (!hv.is_number_integer() || !dv.is_array())
             throw std::runtime_error(
-                "vit: " + model_dir + "/config.json has no vision_config, and this container's weight file "
-                "cannot say how many attention heads its tower has or which blocks its deepstack mergers hang "
-                "off. Add \"vision_heads\" (an integer) and \"vision_deepstack_indexes\" (an array) to "
-                "config.json - for Qwen3-VL-4B they are 16 and [5, 11, 17]. Everything else is read from the "
-                "weight file and checked.");
+                "vit: " + model_dir + " has no vision_config, and this container's weight file cannot say how "
+                "many attention heads its tower has or which blocks its deepstack mergers hang off. Write "
+                "\"vision_heads\" (an integer) and \"vision_deepstack_indexes\" (an array) into vision.json "
+                "beside the model - for Qwen3-VL-4B they are 16 and [5, 11, 17]. Everything else is read from "
+                "the weight file and checked. (config.json cannot hold them: the downloader re-pulls any "
+                "registry-listed file whose size changes.)");
         std::vector<int> taps;
-        for (const auto& e : *d) taps.push_back(e.get<int>());
+        for (const auto& e : dv) taps.push_back(e.get<int>());
+        const int heads = hv.get<int>();
         return qwen3vl_from_tensors(model_dir + "/" + j.value("vision_model_weight", std::string("vision_weight.q4nx")),
-                                    v->get<int>(), taps);
+                                    heads, taps);
     }
     return from_config_text(text);
 }

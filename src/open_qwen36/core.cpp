@@ -92,8 +92,23 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // a perfectly good mrope_section had none.
     const char* rope_key = j.contains("rope_parameters") && j["rope_parameters"].is_object() ? "rope_parameters"
                          : (j.contains("rope_scaling") && j["rope_scaling"].is_object() ? "rope_scaling" : nullptr);
+    // Qwen3-VL's container carries neither, and config.json cannot be edited to add them:
+    // the downloader compares every registry-listed file against a remote manifest's byte
+    // count and re-pulls anything that differs. vision.json is not in that list, so that
+    // is where oflm-add writes what the container omits.
+    nlohmann::json side;
+    if (!rope_key) {
+        std::ifstream sf(md / "vision.json");
+        if (sf) {
+            auto parsed = nlohmann::json::parse(sf, nullptr, false);
+            if (parsed.is_object() && parsed.contains("rope_scaling") && parsed["rope_scaling"].is_object()) {
+                side = parsed;
+                rope_key = "rope_scaling";
+            }
+        }
+    }
     if (rope_key) {
-        const auto& rp = j[rope_key];
+        const auto& rp = side.is_object() && side.contains(rope_key) ? side[rope_key] : j[rope_key];
         if (rp.contains("mrope_section") && rp["mrope_section"].is_array() && rp["mrope_section"].size() == 3) {
             size_t sum = 0;
             for (const auto& v : rp["mrope_section"]) { mrope_section_.push_back(v.get<int>()); sum += v.get<int>(); }
