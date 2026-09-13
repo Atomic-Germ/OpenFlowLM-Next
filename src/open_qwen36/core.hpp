@@ -80,6 +80,11 @@ struct StepTiming {
     // The block route's stages, split finely enough to say which one to work on.
     // part1_ms is mid + tail; route_ms is the four moe_* below.
     double mid_ms = 0;        ///< the DeltaNet recurrence, or the attention itself
+    double dn_conv_ms = 0;    ///< of mid: DeltaNet's per-token half (conv, q/k norms, alpha/beta)
+    double dn_rule_ms = 0;    ///< of mid: DeltaNet's delta rule on S, per head over the block
+    double attn_ms = 0;       ///< of mid: the attention layers' host half
+    double gemm_tile_ms = 0;  ///< x into the GEMM's tiled bf16 activation layout
+    double gemm_tr_ms = 0;    ///< the GEMM's [N, T] output back to [T, N], allocation included
     double tail_ms = 0;       ///< residual, post-norm, router
     double state_ms = 0;      ///< the state BO syncs (the KV read grows with position)
     double moe_prep_ms = 0;   ///< xm / the router record / the residual into act

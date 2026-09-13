@@ -9,6 +9,7 @@
 #include "open_qwen36/block_host.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -81,7 +82,8 @@ void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
 
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
                     const float* Wa, const float* Wb, const float* A, const float* dtb, const float* nw,
-                    uint16_t* conv_state, float* S, float* og) {
+                    uint16_t* conv_state, float* S, float* og, double* phase_ms) {
+    const auto tp0 = std::chrono::steady_clock::now();
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     if (g.value_heads % g.key_heads || g.t_real > g.T || g.s_rows < dim || g.lanes < g.value_heads)
         throw std::runtime_error("open_qwen36: deltanet_block: inconsistent geometry");
@@ -136,6 +138,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
         for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(rows[r * nch + j]);
 
     // ---- phase 2, per head over every token: the gated delta rule on S (in place), the gated norm
+    const auto tp1 = std::chrono::steady_clock::now();
 #pragma omp parallel for
     for (long long h = 0; h < static_cast<long long>(g.value_heads); ++h) {
         std::vector<float> tv(dim), delta(dim), o(dim), on(dim);
@@ -170,6 +173,12 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
             const float* zz = z + t * vw + h * dim;
             for (size_t j = 0; j < dim; ++j) out[j] = on[j] * silu(zz[j]);
         }
+    }
+    if (phase_ms) {
+        using ms = std::chrono::duration<double, std::milli>;
+        const auto tp2 = std::chrono::steady_clock::now();
+        phase_ms[0] += ms(tp1 - tp0).count();
+        phase_ms[1] += ms(tp2 - tp1).count();
     }
 }
 

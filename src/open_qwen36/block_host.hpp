@@ -39,10 +39,11 @@ struct DeltaGeom {
 /// input; convw [taps, nch], Wa / Wb [hid, lanes], A / dtb [value_heads], nw [head_dim].
 /// conv_state [taps-1, nch] (bf16) and S [value_heads, s_rows, head_dim] (f32) are the
 /// layer's state, updated in place through the first t_real tokens. og [T, vw] out
-/// (zero past t_real).
+/// (zero past t_real). phase_ms, if given, gets the two halves' wall time: the
+/// per-token one then the delta rule.
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
                     const float* Wa, const float* Wb, const float* A, const float* dtb, const float* nw,
-                    uint16_t* conv_state, float* S, float* og);
+                    uint16_t* conv_state, float* S, float* og, double* phase_ms = nullptr);
 
 struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;

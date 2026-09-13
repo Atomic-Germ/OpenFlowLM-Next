@@ -882,6 +882,7 @@ std::vector<float> Core::gemm(const Step& s, const std::vector<float>& x, size_t
     auto t0 = std::chrono::steady_clock::now();
     host::tile_x(x.data(), T, K, xb.map<uint16_t*>());   // straight into the mapped buffer
     timing_.part1_ms += ms_since(t0);
+    timing_.gemm_tile_ms += ms_since(t0);
     xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
     yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
@@ -889,6 +890,7 @@ std::vector<float> Core::gemm(const Step& s, const std::vector<float>& x, size_t
     std::vector<float> out(T * N);
     host::transpose(yb.map<float*>(), N, T, out.data());   // [N, T] on the device -> [T, N]
     timing_.part1_ms += ms_since(t1);
+    timing_.gemm_tr_ms += ms_since(t1);
     return out;
 }
 
@@ -1291,9 +1293,12 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
     std::vector<float> og(T * vw);
     auto t0 = std::chrono::steady_clock::now();
+    double phase[2] = {0, 0};
     host::deltanet_block(g, qkv.data(), z.data(), xn.data(), hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
                          hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
-                         reinterpret_cast<float*>(sp + gb.state_s_off), og.data());
+                         reinterpret_cast<float*>(sp + gb.state_s_off), og.data(), phase);
+    timing_.dn_conv_ms += phase[0];
+    timing_.dn_rule_ms += phase[1];
     timing_.part1_ms += ms_since(t0);
     timing_.mid_ms += ms_since(t0);
     ts = std::chrono::steady_clock::now();
@@ -1396,6 +1401,7 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
 }
 
 void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real) {
+    const double mid0 = timing_.mid_ms;   // whatever this layer adds to mid is the attention half
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const HostConsts& hc = hc_[l];
@@ -1440,6 +1446,7 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, static_cast<size_t>(pos_) * row);
     timing_.state_ms += ms_since(ts);
+    timing_.attn_ms += timing_.mid_ms - mid0;
     const std::vector<float> out = gemm(gb.program[1], og, T, qw, hid, l);
 
     auto t1 = std::chrono::steady_clock::now();
