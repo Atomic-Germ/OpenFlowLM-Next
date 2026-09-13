@@ -30,6 +30,9 @@
 #ifndef SC_W                    // channels in one fifo element
 #define SC_W 1024
 #endif
+#ifndef SC_PASSTHROUGH          // bring-up bisect: emit C unchanged, ignoring the window
+#define SC_PASSTHROUGH 0
+#endif
 
 static_assert(SC_TAPS == 3, "sc.h implements a 3-tap window; another tap count is another "
                             "design (the core holds taps - 1 rows of state)");
@@ -47,12 +50,12 @@ extern "C" {
 /// rotating a ring keeps the host out of the state's parity.
 ///
 /// `w0` / `w1` / `w2` are this element's channels of taps 0, 1 and 2 -- contiguous, because
-/// the weight is tap-major.
+/// the weight is tap-major. `y` is bf16; the state stays f32.
 __attribute__((noinline)) inline void
 short_conv_elem(const float *__restrict Bv, const float *__restrict Cv, const float *__restrict uv,
                 const bfloat16 *__restrict w0, const bfloat16 *__restrict w1,
                 const bfloat16 *__restrict w2, const float *__restrict s0,
-                const float *__restrict s1, float *__restrict y, float *__restrict n0,
+                const float *__restrict s1, bfloat16 *__restrict y, float *__restrict n0,
                 float *__restrict n1) {
   aie::set_rounding(aie::rounding_mode::conv_even);
 #pragma clang loop unroll(disable)
@@ -64,7 +67,16 @@ short_conv_elem(const float *__restrict Bv, const float *__restrict Cv, const fl
     acc = mac_vv(acc, aie::load_v<kSCV>(s1 + j), aie::load_v<kSCV>(w1 + j));
     acc = mac_vv(acc, bx, aie::load_v<kSCV>(w2 + j));
     const vfN<kSCV> conv = acc.template to_vector<float>();
-    aie::store_v(y + j, fmulN<kSCV>(aie::load_v<kSCV>(Cv + j), conv));
+    // bf16 out: the out projection's GEMV takes its activation the way every other
+    // projection here does, and dx.py's attention output is bf16 for the same reason.
+    // to_vector lives on the accumulator, not the vector -- vecmath.h's own idiom.
+    accN<kSCV> out;
+#if SC_PASSTHROUGH                 // BRING-UP ONLY: y = C, so the expected value is trivial
+    out.from_vector(aie::load_v<kSCV>(Cv + j));
+#else
+    out.from_vector(fmulN<kSCV>(aie::load_v<kSCV>(Cv + j), conv));
+#endif
+    aie::store_v(y + j, out.template to_vector<bfloat16>());
     // the window slides: what was state1 becomes state0, this token becomes state1
     aie::store_v(n0 + j, aie::load_v<kSCV>(s1 + j));
     aie::store_v(n1 + j, bx);

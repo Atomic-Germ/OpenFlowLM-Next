@@ -153,9 +153,9 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> Lfm2Layout:
     # act: the dense bounce, then B / C / u / y (f32 hidden each)
     off = L.AD_BYTES
     a = {}
-    for name in ("b", "c", "u", "y"):
+    for name, width in (("b", 4), ("c", 4), ("u", 4), ("y", 2)):
         a[name] = off
-        off += hid * 4
+        off += hid * width          # y is bf16: the out projection's GEMV input
     ad_bytes = roundup(off, ELEM)
     return Lfm2Layout(
         dense=L,

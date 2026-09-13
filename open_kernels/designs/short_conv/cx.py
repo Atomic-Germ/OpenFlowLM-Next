@@ -71,7 +71,8 @@ SC_PC = HID // (BAND_ROWS * N_CORES)     # bands per core for a [hidden, hidden]
 OS = ["-O2"]
 GEMV_OS = ["-O2"]
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
-SC_FLAGS = [f"-DSC_TAPS={TAPS}", f"-DSC_W={SCW}"]
+SC_FLAGS = [f"-DSC_TAPS={TAPS}", f"-DSC_W={SCW}",
+            f"-DSC_PASSTHROUGH={os.environ.get('SC_PASSTHROUGH', '0')}"]
 STOP = int(os.environ.get("CX_STOP", 99))   # debug: 1 = after B|C|u, 2 = after the out proj, 3 = after up|gate
 
 
@@ -119,8 +120,9 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
+    #        B    C    u    w0   w1   w2   s0   s1   y    n0   n1   -- y is bf16, the state f32
     f_sc = ef("short_conv_step", HERE / "sc_elem.cc",
-              [fsc, fsc, fsc, bsc, bsc, bsc, fsc, fsc, fsc, fsc, fsc], SC_FLAGS)
+              [fsc, fsc, fsc, bsc, bsc, bsc, fsc, fsc, bsc, fsc, fsc], SC_FLAGS)
 
     # ---- fifos
     of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
@@ -132,7 +134,10 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
     # element; `scw` the three taps; `scout` the gated output and the two new state rows.
     of_scin = ObjectFifo(fsc, name="scin", depth=6)   # five acquired at once, so depth > 5
     of_scw = ObjectFifo(bsc, name="scw", depth=4)
-    of_scout = ObjectFifo(fsc, name="scout", depth=4)
+    # y and the state leave on separate fifos because they are different dtypes: y is bf16,
+    # the activation every GEMV takes, and the state stays f32.
+    of_scy = ObjectFifo(bsc, name="scy", depth=4)
+    of_scst = ObjectFifo(fsc, name="scst", depth=4)
 
     PB_H, NG_H = per_band(HID), n_groups(HID)
     PB_F, NG_F = per_band(FF), n_groups(FF)
@@ -217,15 +222,17 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
         if stop >= 3:
             add_norm()                      # 3. xres = res + out2 (the xn is junk)
 
-    def sc_body(scin, scw, scout, f_sc):
+    def sc_body(scin, scw, scy, scst, f_sc):
         """One token. Per element: the three taps, then B, C, u and the two state rows in,
-        then the gated output and the two new state rows out."""
+        then the gated output (bf16) and the two new state rows (f32) out."""
         for _ in range_(SC_ELEMS):
             w = scw.acquire(TAPS)
             e = scin.acquire(5)             # B, C, u, state0, state1
-            o = scout.acquire(3)            # y, new state0, new state1
-            f_sc(e[0], e[1], e[2], w[0], w[1], w[2], e[3], e[4], o[0], o[1], o[2])
-            scout.release(3)
+            oy = scy.acquire(1)
+            os = scst.acquire(2)            # new state0, new state1
+            f_sc(e[0], e[1], e[2], w[0], w[1], w[2], e[3], e[4], oy, os[0], os[1])
+            scst.release(2)
+            scy.release(1)
             scin.release(5)
             scw.release(TAPS)
 
@@ -236,17 +243,19 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}"),
                                                   f_gy, f_gms, f_act, f_prep, f_prepf],
                               tile=Tile(c, 2), stack_size=0x1800))
-    workers.append(Worker(sc_body, fn_args=[of_scin.cons(), of_scw.cons(), of_scout.prod(), f_sc],
+    workers.append(Worker(sc_body, fn_args=[of_scin.cons(), of_scw.cons(), of_scy.prod(),
+                                            of_scst.prod(), f_sc],
                           tile=Tile(2, 3), stack_size=0x1800))
 
     BB_H, BB_F = band_bytes(HID), band_bytes(FF)
     BB_UG = band_bytes(HID)
     YB = BAND_ROWS * 4
     SCB = SCW * 4                            # one conv element in bytes (f32)
-    TAPB = SCW * 2                           # one tap's channels for one element (bf16)
+    SCYB = SCW * 2                           # the same channels as bf16: y, and one tap
+    TAPB = SCW * 2
 
     def _sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                  scin_p, scw_p, scout_c):
+                  scin_p, scw_p, scy_c, scst_c):
         # 1. layer-entry norm: xn -> act
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -279,12 +288,13 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
             ps_in.fill(scin_p, a_act, bt(L.AD_BYTES, L.AD_U + i * SCB, SCB))
             ps_in.fill(scin_p, a_state, bt(L.STATE_BYTES, i * SCB, SCB))
             ps_in.fill(scin_p, a_state, bt(L.STATE_BYTES, HID * 4 + i * SCB, SCB))
-            ps_out.drain(scout_c, a_act, bt(L.AD_BYTES, L.AD_Y + i * SCB, SCB))
-            ps_out.drain(scout_c, a_state, bt(L.STATE_BYTES, i * SCB, SCB))
-            ps_out.drain(scout_c, a_state, bt(L.STATE_BYTES, HID * 4 + i * SCB, SCB))
+            ps_out.drain(scy_c, a_act, bt(L.AD_BYTES, L.AD_Y + i * SCYB, SCYB))
+            ps_out.drain(scst_c, a_state, bt(L.STATE_BYTES, i * SCB, SCB))
+            ps_out.drain(scst_c, a_state, bt(L.STATE_BYTES, HID * 4 + i * SCB, SCB))
         ps_out.finish()                                       # y and the new state are in DDR
         ps_in.finish()
         # 4. out projection against y
+        # y is bf16 hidden = one x element wide, exactly like the norm's output
         x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_Y, G.XN_ELEMS * ELEM), wait=True, group=tg_x)
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_SC_OUT + c * SC_PC * BB_H, SC_PC * BB_H))
@@ -333,9 +343,9 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
         tg_x.finish()
 
     def sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                 scin_p, scw_p, scout_c):
+                 scin_p, scw_p, scy_c, scst_c):
         _sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                  scin_p, scw_p, scout_c)
+                  scin_p, scw_p, scy_c, scst_c)
 
     # Shim channels, following dx.py: columns 0..2 already pair a producer with lni, x and
     # the helper's input, so the taps take column 3 the way the q/k/v bias does there.
@@ -346,7 +356,8 @@ def cx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *,
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_scin.prod(tile=Tile(2, 0)),
                             of_scw.prod(tile=Tile(3, 0)),
-                            of_scout.cons(tile=Tile(1, 0))])
+                            of_scy.cons(tile=Tile(1, 0)),
+                            of_scst.cons(tile=Tile(2, 0))])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
