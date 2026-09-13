@@ -8,6 +8,7 @@
 #include "models/qwen3_5vl/qwen3_5vl_npu.hpp"       // qwen3_5vl_image_payload_t
 #include "models/qwen3_6_moe/qwen3_6_moe_npu.hpp"   // qwen3_6_moe_image_payload_t
 #include "models/qwen3vl/qwen3vl_npu.hpp"           // qwen3vl_image_payload_t
+#include "models/qwen2vl/qwen2vl_npu.hpp"           // qwen2vl_image_payload_t
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
@@ -123,7 +124,7 @@ buffer<bf16> Engine::forward(int id) {
 void Engine::ensure_vit() {
     if (vit_) return;
     auto t0 = std::chrono::steady_clock::now();
-    vcfg_ = vision::VitConfig::from_model_dir(cfg_.model_dir);
+    vcfg_ = vision::VitConfig::for_model_dir(cfg_.model_dir);
     std::string file = "vision_weight.q4nx";
     {
         std::ifstream cf(cfg_.model_dir + "/config.json");
@@ -195,6 +196,10 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     // Qwen3-VL's decoder derives as plain Qwen3, so its kernel set is a qwen3 one and the
     // family string does not say "VL" - only the payload does.
     if (fam == "qwen3") return prefill_images(ids, *static_cast<const qwen3vl_image_payload_t*>(payload));
+    // Qwen2.5-VL likewise: its decoder derives as plain qwen2 and shares a kernel set with
+    // Qwen2.5-3B-Instruct, so the family says qwen2 and the windowed tower comes from the
+    // container's own vision_config.
+    if (fam == "qwen2") return prefill_images(ids, *static_cast<const qwen2vl_image_payload_t*>(payload));
     throw std::runtime_error("open_qwen36: family " + fam + " has no vision path");
 }
 

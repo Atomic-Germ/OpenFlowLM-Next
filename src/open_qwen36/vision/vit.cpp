@@ -374,6 +374,18 @@ VitConfig VitConfig::from_config_text(const std::string& config_json) {
     return c;
 }
 
+VitConfig VitConfig::for_model_dir(const std::string& model_dir) {
+    std::ifstream f(model_dir + "/config.json");
+    if (!f) throw std::runtime_error("vit: cannot open " + model_dir + "/config.json");
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const nlohmann::json j = nlohmann::json::parse(text);
+    const std::string mt = j.value("model_type", std::string());
+    // Qwen2.5-VL's decoder derives as plain qwen2, so the kernel set's family cannot tell
+    // the two apart - only the container's own model_type does.
+    if (mt == "qwen2_5_vl" || mt == "qwen2_5_vl_text") return qwen25_from_config_text(text);
+    return from_config_text(text);
+}
+
 VitConfig VitConfig::qwen25_from_model_dir(const std::string& model_dir) {
     std::ifstream f(model_dir + "/config.json");
     if (!f) throw std::runtime_error("vit: cannot open " + model_dir + "/config.json");
@@ -464,14 +476,18 @@ static VitWeights load_vit_qwen25(const Q4nxFile& f, const VitConfig& cfg) {
         throw std::runtime_error("vit: merger.ln_q.weight is not [hidden] - it normalises before the 2x2 concat");
     w.merger_fc1 = untile(f, p + "merger.mlp.0.weight", p + "merger.mlp.0.bias", H * M, H * M);
     w.merger_fc2 = untile(f, p + "merger.mlp.2.weight", p + "merger.mlp.2.bias", cfg.out, H * M);
-    // The shipped 3B container is 50 MiB larger than this tower accounts for and nobody has
-    // listed its tensors; if the extra is a tensor, say so here rather than run on a tower
-    // that is missing a piece. See .claude/plans/qwen25vl-container-size.md.
+    // The shipped 3B holds one tensor this tower does not read: `identity`, a 5120 x 5120
+    // bf16 identity matrix, which is the 50 MiB the file was larger than the tower accounts
+    // for. The closed engine presumably multiplies by it to move data through vision_mm
+    // where the arithmetic is a copy. Anything else unaccounted for is refused rather than
+    // loaded, because a missing piece reads as plausible numbers, not as an error. Header
+    // read 2026-09-13; see .claude/plans/qwen25vl-container-size.md.
     const size_t want = 6 + 16 * static_cast<size_t>(cfg.depth);
-    if (f.tensor_count() != want)
-        throw std::runtime_error("vit: " + f.path() + " holds " + std::to_string(f.tensor_count()) +
+    const size_t have = f.tensor_count();
+    if (have != want && !(have == want + 1 && f.has("identity")))
+        throw std::runtime_error("vit: " + f.path() + " holds " + std::to_string(have) +
                                  " tensors where this tower reads " + std::to_string(want) +
-                                 " - list its names before loading it");
+                                 " (plus `identity`, which it skips) - list its names before loading it");
     return w;
 }
 

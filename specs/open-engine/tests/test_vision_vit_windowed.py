@@ -235,25 +235,50 @@ def test_the_size_model_accounts_for_the_qwen2_5_language_container():
     assert header % 8 == 0 and 90 * len(t) < header < 130 * len(t)
 
 
-def test_the_vision_container_is_fifty_mebibytes_larger_than_the_tower_needs():
-    """The open question. With the tower transformers describes and the tiling every other
-    container on disk uses, `vision_weights.q4nx` should be 1,377,729,112 bytes and the
-    registry says 1,430,158,096 -- exactly 1600 more vision_mm tiles (50 MiB, the size of
-    one more 5120 x 5120 bf16 matrix) plus 184 bytes of header text.
+def _vision_header():
+    """The shipped container's real safetensors header, read 2026-09-13 by HTTP range
+    request (the first 56,080 bytes of a 1.4 GB file, not the file)."""
+    import json
+    return json.loads((Path(__file__).parent / "fixtures" / "qwen25vl_vision_header.json")
+                      .read_text(encoding="utf-8"))
 
-    Padding cannot explain it: a tiled weight only ever grows by whole 64 x 256 tiles, and
-    52,428,984 is not a multiple of 32,768. Nothing may be loaded from this container until
-    someone reads its header; if this number moves, that reading happened and this test
-    should be replaced by what it found.
-    """
+
+def test_the_size_model_reproduces_the_shipped_container_exactly():
+    """This started as the blocker: the tower accounted for 1,377,729,112 bytes and the
+    registry said 1,430,158,096. The header says why -- a 519th tensor named `identity`,
+    a 5120 x 5120 bf16 matrix, which is exactly the 50 MiB plus 184 bytes of header text.
+    With it the model is exact, so the loader can stop refusing the real file."""
     import replica_vit_qwen25 as V
-    modelled = V.safetensors_bytes(V.container_tensors(V.QWEN25VL_3B))
-    assert modelled == 1377729112
-    short = _registry_size("qwen2.5vl-it:3b", "vision_weights.q4nx") - modelled
-    assert short == 52428984
-    tile_bytes = V.TILE_N * V.TILE_K * 2
-    assert divmod(short, tile_bytes) == (1600, 184)
-    assert 1600 * tile_bytes == V.QWEN25VL_3B["hidden"] * 4 * V.QWEN25VL_3B["hidden"] * 4 * 2
+    assert V.safetensors_bytes(V.container_tensors(V.QWEN25VL_3B)) == 1430158096
+    assert _vision_header()["file_bytes"] == 1430158096
+
+
+def test_every_tensor_the_model_predicts_is_in_the_real_header_with_the_same_shape():
+    """Name, dtype and shape for all 519, against the file rather than against the
+    converter this repo also wrote. This is what the size arithmetic was standing in for."""
+    import replica_vit_qwen25 as V
+    real = {k: (v[0], tuple(v[1])) for k, v in _vision_header()["tensors"].items()}
+    modelled = {n: (d, tuple(sh)) for n, d, sh in V.container_tensors(V.QWEN25VL_3B)}
+    assert set(modelled) == set(real), set(modelled) ^ set(real)
+    assert modelled == real
+    assert len(real) == 519
+
+
+def test_the_extra_tensor_is_an_identity_matrix_the_tower_does_not_need():
+    """`identity` is the only tensor outside the `model.visual.` prefix, and it has the
+    same shape as the merger's first matrix. Sampled from the file, its diagonal is 1.0
+    and everything else is 0.0, so the closed engine is multiplying by it to move data
+    through `vision_mm` where the arithmetic is a copy. Our tower reads the 518 and skips
+    it; what this pins is that skipping it is safe."""
+    import replica_vit_qwen25 as V
+    real = _vision_header()["tensors"]
+    assert [n for n in real if not n.startswith("model.visual.")] == ["identity"]
+    H, U = V.QWEN25VL_3B["hidden"], V.QWEN25VL_3B["merge"] ** 2
+    assert tuple(real["identity"][1]) == tuple(V.tiled_shape(H * U, H * U))
+    assert real["identity"][1] == real["model.visual.merger.mlp.0.weight"][1]
+    src = Path(V.__file__).read_text(encoding="utf-8")
+    body = src[src.index("def load_weights"):src.index("def ", src.index("def load_weights") + 10)]
+    assert "identity" not in body, "load_weights must not read the identity matrix"
 
 
 def test_tiling_a_matrix_and_untiling_it_gives_it_back():

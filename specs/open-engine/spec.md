@@ -1265,6 +1265,41 @@ decoder: the container carries no `vision_config` (OPEN-VISION-VIT-CONFIG), no
 `Engine::prefill`'s existing refusal names; and Qwen3-VL's tower uses deepstack, which
 the host tower does not implement. Text-only is the reachable half.
 
+### OPEN-FAMILY-QWEN25VL: Qwen2.5-VL's decoder is a Qwen2.5 dense spec
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `src/common/AutoModel/modeling_qwen2vl.cpp`)
+**Test category:** unit (`tests/test_qwen25vl.py`); the tower is OPEN-VISION-VIT-WINDOWED's
+and the end-to-end run is OPEN-VISION-EMBED's
+
+Qwen2.5-VL's decoder is Qwen2.5 dense. A config whose `model_type` is `qwen2_5_vl` or
+`qwen2_5_vl_text` shall derive a `ModelSpec` with `family` `qwen2` and the same
+hyperparameters a plain Qwen2.5 of that geometry derives, so the model links to a Qwen2.5
+kernel bundle rather than building its own. M-RoPE changes only the position records the
+engine builds and the tower is read separately by `VitConfig`; neither reaches the spec.
+Both config shapes are accepted: the decoder nested under `text_config` (raw HF) and
+flattened at the top level (the container OFLM ships).
+
+The `Qwen2VL` adapter shall select the open engine whenever a kernel set is installed for
+its model and honour `OFLM_QWEN2VL_ENGINE=open|closed`, as every other adapter with an open
+path does.
+
+**Acceptance criteria:**
+- `model_type: "qwen2_5_vl"` with the shipped 3B's fields derives `family == "qwen2"`, 36 dense layers, hidden 2048, intermediate 11264, 16 heads over 2 kv heads at head dim 128, full RoPE at theta 1e6, and a q/k/v bias.
+- That spec's `spec_hash()` equals the one `Qwen2.5-3B-Instruct-NPU2` derives, through `spec_from_model_dir` -- which folds in the tokenizer's id count and the container's per-role weight formats, not only config.json.
+- A kernel set exported for either model declares `model_type` `["qwen2", "qwen2_5_vl", "qwen2_5_vl_text"]`, so `Manifest::check_model` accepts both containers.
+
+**Result 2026-09-13 (the shipped 3B): PASS, and it needed no kernel build.** Both
+containers derive `sha256:e32bfd7e950c` through `spec_from_model_dir`, so `oflm-add` linked
+the installed Qwen2.5-3B set to the VL model by spec hash with nothing rebuilt -- the
+family-bundle property, on a second real container rather than in principle. The one thing
+that did have to move is the manifest's accepted `model_type` list, which is why the set was
+re-exported. Greedy decode through `open_qwen36_cli` on the VL container answers "The capital
+of France is Paris." and then emits `<|im_end|>`, at 15.5 tok/s.
+
+Note the two containers do NOT share a weight format: Qwen2.5-3B stores the signed 4-bit
+quantiser (every block min exactly zero, OPEN-PACK-Q4-0) and Qwen2.5-VL stores real q4_1.
+The packer detects that per tensor, so one kernel set serves both -- which is the property
+being claimed, and it would have been invisible had only one of them been tried.
+
 ### OPEN-FAMILY-QWEN2: Qwen2.5 is a dense spec with a bias on q, k and v
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`, `dense.py`)
 **Test category:** unit (`tests/test_qwen2.py`); the hardware run is OPEN-ATTN-QKV-BIAS's
@@ -1807,14 +1842,17 @@ vision_mm matrix padded to 256 and tiled) from weights transformers built, so th
 end to end with no container on the box. That checks the forward, not the names: only
 opening a shipped container can do that.
 
-**The container must not be loaded until its header has been read.** Its published size
-does not reconcile with the tower: with transformers' geometry and the tiling every other
-shipped container uses, `vision_weights.q4nx` should be 1,377,729,112 bytes and the
-registry says 1,430,158,096. The difference, 52,428,984, is exactly 1600 vision_mm tiles
-(50 MiB, one more 5120 x 5120 bf16 matrix) plus 184 bytes of header. It cannot be padding,
-because a tiled weight grows only by whole 32,768-byte tiles and this is not a multiple of
-one. The same arithmetic reproduces four shipped containers to the byte, including this
-model's own language half, so the shortfall is in the file and not in the model of it.
+**The container holds one tensor the tower does not read.** Its published size did not
+reconcile: with transformers' geometry and the tiling every other shipped container uses,
+`vision_weights.q4nx` should be 1,377,729,112 bytes and it is 1,430,158,096. The
+difference, 52,428,984, is exactly 1600 vision_mm tiles (50 MiB, one more 5120 x 5120 bf16
+matrix) plus 184 bytes of header, and could not be padding, because a tiled weight grows
+only by whole 32,768-byte tiles. Reading the header settled it: the file holds **519**
+tensors, the 518 this tower reads plus one named `identity`, a 5120 x 5120 bf16 identity
+matrix stored tiled like any weight -- the same shape as `merger.mlp.0.weight`. The closed
+engine presumably multiplies by it to move data through `vision_mm` where the arithmetic is
+a copy. Both loaders skip it and both refuse any other unaccounted tensor, because a
+missing piece reads as plausible numbers rather than as an error.
 
 **Acceptance criteria:**
 - numpy vs transformers on a random 12 x 10 grid: corr > 0.99999, max error < 1e-4 of max, both with four windowed blocks and with every block full-attention.
@@ -1822,8 +1860,9 @@ model's own language half, so the shortfall is in the file and not in the model 
 - `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`, in the numpy reference and in the C++ port.
 - A grid that divides the window size evenly (8 x 8 patches) still pads a whole empty window, which collapses: index `0..15`, boundaries `[0, 64]`.
 - The merger's activation is the exact GELU, `x * Phi(x)` against the standard normal CDF, not the tanh approximation (which the oracle comparison cannot distinguish).
-- The container size model reproduces Gemma3-4B's, Qwen3.5-0.8B/9B's and the 35B's `vision_weight.q4nx` exactly, and accounts for Qwen2.5-3B's `model.q4nx` data to the byte.
-- Qwen2.5-VL-3B's `vision_weights.q4nx` is short by 52,428,984 bytes = 1600 tiles + 184.
+- The container size model reproduces Gemma3-4B's, Qwen3.5-0.8B/9B's and the 35B's `vision_weight.q4nx` exactly, accounts for Qwen2.5-3B's `model.q4nx` data to the byte, and reproduces Qwen2.5-VL-3B's `vision_weights.q4nx` exactly at 1,430,158,096 once `identity` is counted.
+- Every one of the 519 names, dtypes and shapes the model predicts is in the shipped file's own header, and `identity` is the only tensor outside the `model.visual.` prefix.
+- `load_weights` never reads `identity`, and a container with any other tensor count is refused by name.
 - `vit_test --windowed <fixture> <fixture>`: corr > 0.99999, max error < 1e-3 of max against `replica_vit_qwen25.py --fixture`.
 
 **Result 2026-09-13:** the C++ port lands. `vit_test --windowed` against the numpy
@@ -1837,8 +1876,20 @@ The tensor names are now confirmed from outside this repo: the closed
 `mlp.*_proj`, `rmsnorm1` / `rmsnorm2`, `merger.ln_q` / `merger.mlp.0` / `merger.mlp.2` and
 `patch_embed.proj.weight`, with no `blocks.` segment and no other vision tensor name. One
 shape was wrong and is fixed: `merger.ln_q` is `[hidden]`, since it normalises before the
-2 x 2 concat. What remains unknown is the 50 MiB, and the measurement that would settle it
-is a range read of the container's first 64 KB.
+2 x 2 concat.
+
+**Result 2026-09-13, on the shipped container.** It was pulled and opened. Every predicted
+name, dtype and shape matches the file's own header, all 519 of them, and the size model
+is exact. Two things only a real container could show, both now fixed: the 50 MiB is the
+`identity` tensor above, and `replica_vit_qwen25.vision_config` was reading OFLM's prefixed
+key names (`*_VISION_NUM_LAYERS`) where this family's container keeps the plain transformers
+block (`depth`, `hidden_size`, `window_size`, `fullatt_block_indexes`, ...) -- the C++
+reader had it right and the numpy one did not. With the real weights loaded, the numpy
+tower agrees with transformers' `Qwen2_5_VisionTransformerPretrainedModel` at **corr
+1.00000000** (rel 1.7e-6 to 4.4e-5) on 12 x 10, 8 x 8 and 6 x 18 grids, the oracle holding
+this container's own weights rather than random ones; and the C++ port agrees with the numpy
+tower on the same container at **corr 1.00000000**, rel 5.9e-6. So the chain from
+transformers to the shipped bytes to the host port is closed.
 `.claude/plans/qwen25vl-container-size.md`, `.claude/plans/qwen25vl-windowed-vit.md`.
 
 ### OPEN-VISION-EMBED: the open engine takes an image payload

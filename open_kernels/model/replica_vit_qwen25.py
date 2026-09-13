@@ -240,20 +240,27 @@ def hf_forward(m, pixels: np.ndarray, grid_h: int, grid_w: int) -> np.ndarray:
 # ---- reading a shipped container (UNVERIFIED: no Qwen2.5-VL container has been on this box)
 
 def vision_config(model_dir: Path) -> dict:
-    """`config.json`'s vision_config. The key prefix is whatever FLM stamped on this family;
-    the geometry keys are the same names the Qwen3-VL tower reads."""
+    """`config.json`'s vision_config, in the plain transformers keys.
+
+    The shipped 3B keeps its source block verbatim -- `depth`, `hidden_size`, `num_heads`,
+    `intermediate_size`, `out_hidden_size`, `patch_size`, `temporal_patch_size`,
+    `spatial_merge_size`, `window_size`, `fullatt_block_indexes` -- unlike the Qwen3.5 and
+    3.6 towers, whose containers carry OFLM's prefixed names. This read the prefixed form
+    until the container arrived on 2026-09-13 and had none of those keys.
+    `src/open_qwen36/vision/vit.cpp: qwen25_from_config_text` reads the same set."""
     v = json.loads((Path(model_dir) / "config.json").read_text())["vision_config"]
-    pre = next((p for p in ("QWEN2_5_VL_", "QWEN2VL_", "QWEN2_VL_") if f"{p}VISION_NUM_LAYERS" in v), None)
-    if pre is None:
-        raise RuntimeError(f"vision_config has no *_VISION_NUM_LAYERS key; it holds {sorted(v)[:8]}...")
-    g = lambda k: v[pre + k]  # noqa: E731
-    cfg = dict(depth=g("VISION_NUM_LAYERS"), hidden=g("VISION_EMBED_DIM"), heads=g("VISION_NUM_HEADS"),
-               inter=g("VISION_MLP_INTERMEDIATE_SIZE"), out=g("VISION_OUT_HIDDEN_SIZE"),
-               patch=g("PATCH_SIZE"), temporal=g("TEMPORAL_PATCH_SIZE"), merge=g("SPATIAL_MERGE_SIZE"),
-               window=g("VISION_WINDOW_SIZE"), eps=v.get(pre + "VISION_LAYER_NORM_EPSILON", 1e-6),
-               channels=3)
-    cfg["head_dim"] = v.get(pre + "VISION_HEAD_DIM", cfg["hidden"] // cfg["heads"])
-    cfg["fullatt"] = tuple(g("VISION_FULLATT_BLOCK_INDEXES"))
+    missing = [k for k in ("depth", "hidden_size", "num_heads", "intermediate_size", "out_hidden_size",
+                           "patch_size", "temporal_patch_size", "spatial_merge_size", "window_size",
+                           "fullatt_block_indexes") if k not in v]
+    if missing:
+        raise RuntimeError(f"vision_config is missing {missing}; it holds {sorted(v)}")
+    cfg = dict(depth=v["depth"], hidden=v["hidden_size"], heads=v["num_heads"],
+               inter=v["intermediate_size"], out=v["out_hidden_size"], patch=v["patch_size"],
+               temporal=v["temporal_patch_size"], merge=v["spatial_merge_size"],
+               window=v["window_size"], eps=v.get("rms_norm_eps", 1e-6),
+               channels=v.get("in_channels", v.get("in_chans", 3)))
+    cfg["head_dim"] = cfg["hidden"] // cfg["heads"]
+    cfg["fullatt"] = tuple(v["fullatt_block_indexes"])
     return cfg
 
 
@@ -321,6 +328,15 @@ def container_tensors(cfg: dict) -> list:
     which reads exactly this set and nothing else. The shapes follow transformers'
     `Qwen2_5_VisionTransformerPretrainedModel` with the vision_mm tiling applied to the
     nine matrices that go through that kernel.
+
+    Plus `identity`, which is not the tower's. The shipped container holds 519 tensors: the
+    518 above and one 5120 x 5120 bf16 identity matrix under that name, tiled like any
+    other weight. It is what made the file 50 MiB larger than the tower accounts for, and
+    the closed engine presumably multiplies by it to move data through `vision_mm` where
+    the arithmetic is a copy. This reference never reads it; it is here so the size model
+    reconciles and so `load_weights` does not refuse the real file over a tensor it does
+    not need. Header read 2026-09-13, fixture in
+    `specs/open-engine/tests/fixtures/qwen25vl_vision_header.json`.
     """
     H, I, O, U = cfg["hidden"], cfg["inter"], cfg["out"], cfg["merge"] ** 2
     p = "model.visual."
@@ -330,7 +346,8 @@ def container_tensors(cfg: dict) -> list:
          (p + "merger.mlp.0.weight", "BF16", tiled_shape(H * U, H * U)),
          (p + "merger.mlp.0.bias", "BF16", [H * U]),
          (p + "merger.mlp.2.weight", "BF16", tiled_shape(O, H * U)),
-         (p + "merger.mlp.2.bias", "BF16", [O])]
+         (p + "merger.mlp.2.bias", "BF16", [O]),
+         ("identity", "BF16", tiled_shape(H * U, H * U))]   # not the tower's; see the docstring
     for i in range(cfg["depth"]):
         b = f"{p}{i}."
         for n in ("q", "k", "v", "o"):
@@ -376,8 +393,9 @@ def load_weights(model_dir: Path, cfg: dict) -> dict:
     if got != want:
         raise RuntimeError(
             f"{path} is {got} bytes where this tower accounts for {want} ({got - want:+d}). The shipped 3B "
-            f"container has never been read and does not reconcile; list its tensor names, dtypes and shapes "
-            f"before trusting this loader. .claude/plans/qwen25vl-container-size.md")
+            f"container reconciles exactly at {want}; a different size means a different tower or a "
+            f"different tiling, so list the file's tensor names, dtypes and shapes before trusting this "
+            f"loader. .claude/plans/qwen25vl-container-size.md")
     f = q4nx.Q4NX(str(path))
     p = "model.visual."
     H, I, O, U = cfg["hidden"], cfg["inter"], cfg["out"], cfg["merge"] ** 2
@@ -468,10 +486,9 @@ def main() -> int:
     a = ap.parse_args()
     gh, gw = a.grid
     if a.container_size:
-        want = 1430158096          # src/model_info.json, qwen2.5vl-it:3b
+        want = 1430158096          # src/model_info.json, qwen2.5vl-it:3b -- and the shipped file
         got = safetensors_bytes(container_tensors(QWEN25VL_3B))
-        print(f"modelled {got}  registry {want}  short by {want - got} "
-              f"= {(want - got) // (TILE_N * TILE_K * 2)} vision_mm tiles + {(want - got) % (TILE_N * TILE_K * 2)} B")
+        print(f"modelled {got}  registry {want}  difference {want - got}")
         return 0
     if a.model_dir:
         cfg = vision_config(Path(a.model_dir))

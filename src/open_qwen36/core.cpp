@@ -64,8 +64,14 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
-    if (j.contains("rope_parameters") && j["rope_parameters"].is_object()) {
-        const auto& rp = j["rope_parameters"];
+    // `rope_parameters` is what transformers calls this now; a container converted before
+    // the rename carries `rope_scaling` instead, and Qwen2.5-VL's (transformers 4.41) is
+    // one of those. Reading only the new name left the engine reporting that a config with
+    // a perfectly good mrope_section had none.
+    const char* rope_key = j.contains("rope_parameters") && j["rope_parameters"].is_object() ? "rope_parameters"
+                         : (j.contains("rope_scaling") && j["rope_scaling"].is_object() ? "rope_scaling" : nullptr);
+    if (rope_key) {
+        const auto& rp = j[rope_key];
         if (rp.contains("mrope_section") && rp["mrope_section"].is_array() && rp["mrope_section"].size() == 3) {
             size_t sum = 0;
             for (const auto& v : rp["mrope_section"]) { mrope_section_.push_back(v.get<int>()); sum += v.get<int>(); }

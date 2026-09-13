@@ -44,6 +44,10 @@ struct VitConfig {
     /// windowed vision_config because the tower it configures cannot run one.
     static VitConfig qwen25_from_model_dir(const std::string& model_dir);
     static VitConfig qwen25_from_config_text(const std::string& config_json);
+    /// Whichever of the two the container asks for, by config.json's model_type. The
+    /// engine calls this; the two readers above stay narrow so each keeps refusing the
+    /// tower it cannot run (OPEN-VISION-VIT-CONFIG).
+    static VitConfig for_model_dir(const std::string& model_dir);
     int patch_dim() const { return channels * temporal * patch * patch; }
     /// A window's edge in merge units: 112 px / 2 patches per unit / 14 px per patch = 4.
     int window_side() const { return window / merge / patch; }

@@ -538,6 +538,21 @@ def _qwen3vl_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     return _qwen3_hf(text, real_vocab)
 
 
+def _qwen25vl_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen2.5-VL: the decoder is Qwen2.5 dense, so it derives as one and links to a Qwen2
+    bundle of the same geometry -- the 3B's text half hashes to exactly what the shipped
+    Qwen2.5-3B-Instruct container does. M-RoPE only changes the position records the engine
+    builds, never the kernels, so it does not reach the spec; the tower is VitConfig's, read
+    from `vision_config`, which this family's container carries in the plain transformers
+    keys.
+
+    OFLM's container flattens the decoder to the top level; raw HF nests it under
+    `text_config`."""
+    inner = cfg.get("text_config")
+    text = {**inner, "model_type": cfg["model_type"]} if isinstance(inner, Mapping) else cfg
+    return _qwen2_hf(text, real_vocab)
+
+
 def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     """Qwen2.5 dense: GQA without q/k norms, full RoPE, silu-gated FFN. The one thing that
     sets it apart -- a per-channel bias on q/k/v -- is a family property the dense recipe
@@ -1396,6 +1411,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_next": _qwen36moe_hf, "qwen3_5": _qwen35_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
+               "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf}
@@ -1404,6 +1420,7 @@ GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qw
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
+              _qwen25vl_hf: "qwen2",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
