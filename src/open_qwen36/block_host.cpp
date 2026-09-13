@@ -92,50 +92,68 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     std::fill(og, og + g.T * vw, 0.f);
 
     // ---- phase 1, per token: the conv (state rows carried), q / k normalised, alpha / beta
-    std::vector<float> rows(g.taps * nch);                 // rows 0 .. taps-2 carried, taps-1 the token
-    for (size_t r = 0; r + 1 < g.taps; ++r)
-        for (size_t j = 0; j < nch; ++j) rows[r * nch + j] = bf16_to_f32(conv_state[r * nch + j]);
+    // The conv is a fixed taps-wide window over the bf16-rounded rows, not a recurrence, so
+    // every token's work is independent: row r of token t's window is qkv row t - pre + r,
+    // and the carried state stands in where that runs before the block.
+    const size_t pre = g.taps - 1;
+    std::vector<float> carry(pre * nch);
+    for (size_t r = 0; r < pre; ++r)
+        for (size_t j = 0; j < nch; ++j) carry[r * nch + j] = bf16_to_f32(conv_state[r * nch + j]);
     std::vector<float> Q(R * key_w), Kk(R * key_w), V(R * vw), decay(R * g.value_heads), beta(R * g.value_heads);
-    std::vector<float> c(nch), al(g.lanes), be(g.lanes);
-    for (size_t t = 0; t < R; ++t) {
-        float* cur = rows.data() + (g.taps - 1) * nch;
-        for (size_t j = 0; j < nch; ++j) cur[j] = bf16r(qkv[t * nch + j]);
-        for (size_t j = 0; j < nch; ++j) {
-            float acc = 0;
-            for (size_t r = 0; r < g.taps; ++r) acc += convw[r * nch + j] * rows[r * nch + j];
-            c[j] = silu(acc);
-        }
-        for (size_t r = 0; r + 1 < g.taps; ++r)
-            std::copy(rows.begin() + (r + 1) * nch, rows.begin() + (r + 2) * nch, rows.begin() + r * nch);
-        for (size_t hh = 0; hh < g.key_heads; ++hh)
-            for (int which = 0; which < 2; ++which) {
-                const float* src = c.data() + which * key_w + hh * dim;
-                float* dst = (which ? Kk : Q).data() + t * key_w + hh * dim;
-                double ss = 0;
-                for (size_t j = 0; j < dim; ++j) ss += static_cast<double>(src[j]) * src[j];
-                const float r = static_cast<float>(1.0 / std::sqrt(ss + 1e-6));   // dn_glue's L2 norm
-                for (size_t j = 0; j < dim; ++j) dst[j] = src[j] * r;
+#pragma omp parallel
+    {
+        std::vector<float> c(nch), al(g.lanes), be(g.lanes);
+#pragma omp for
+        for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
+            const size_t t = static_cast<size_t>(tt);
+            for (size_t j = 0; j < nch; ++j) {
+                float acc = 0;
+                for (size_t r = 0; r < g.taps; ++r) {
+                    const long long s = tt - static_cast<long long>(pre) + static_cast<long long>(r);
+                    acc += convw[r * nch + j] *
+                           (s < 0 ? carry[(static_cast<size_t>(s) + pre) * nch + j] : bf16r(qkv[static_cast<size_t>(s) * nch + j]));
+                }
+                c[j] = silu(acc);
             }
-        std::copy(c.begin() + 2 * key_w, c.end(), V.begin() + t * vw);
-        std::fill(al.begin(), al.end(), 0.f);
-        std::fill(be.begin(), be.end(), 0.f);
-        const float* x = xn + t * g.hid;
-        for (size_t i = 0; i < g.hid; ++i) {
-            const float xi = x[i];
-            const float* wa = Wa + i * g.lanes;
-            const float* wb = Wb + i * g.lanes;
-            for (size_t h = 0; h < g.lanes; ++h) {
-                al[h] += xi * wa[h];
-                be[h] += xi * wb[h];
+            for (size_t hh = 0; hh < g.key_heads; ++hh)
+                for (int which = 0; which < 2; ++which) {
+                    const float* src = c.data() + which * key_w + hh * dim;
+                    float* dst = (which ? Kk : Q).data() + t * key_w + hh * dim;
+                    double ss = 0;
+                    for (size_t j = 0; j < dim; ++j) ss += static_cast<double>(src[j]) * src[j];
+                    const float r = static_cast<float>(1.0 / std::sqrt(ss + 1e-6));   // dn_glue's L2 norm
+                    for (size_t j = 0; j < dim; ++j) dst[j] = src[j] * r;
+                }
+            std::copy(c.begin() + 2 * key_w, c.end(), V.begin() + t * vw);
+            std::fill(al.begin(), al.end(), 0.f);
+            std::fill(be.begin(), be.end(), 0.f);
+            const float* x = xn + t * g.hid;
+            for (size_t i = 0; i < g.hid; ++i) {
+                const float xi = x[i];
+                const float* wa = Wa + i * g.lanes;
+                const float* wb = Wb + i * g.lanes;
+                for (size_t h = 0; h < g.lanes; ++h) {
+                    al[h] += xi * wa[h];
+                    be[h] += xi * wb[h];
+                }
             }
-        }
-        for (size_t h = 0; h < g.value_heads; ++h) {
-            decay[t * g.value_heads + h] = std::exp(A[h] * softplus(al[h] + dtb[h]));
-            beta[t * g.value_heads + h] = sigmoid(be[h]);
+            for (size_t h = 0; h < g.value_heads; ++h) {
+                decay[t * g.value_heads + h] = std::exp(A[h] * softplus(al[h] + dtb[h]));
+                beta[t * g.value_heads + h] = sigmoid(be[h]);
+            }
         }
     }
-    for (size_t r = 0; r + 1 < g.taps; ++r)
-        for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(rows[r * nch + j]);
+    // the window the next block starts from: the last `pre` rows, short blocks keeping what
+    // the shift would have left in front of them
+    for (size_t r = 0; r < pre; ++r) {
+        const long long s = static_cast<long long>(R) - static_cast<long long>(pre) + static_cast<long long>(r);
+        if (s < 0) {
+            std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
+        } else {
+            const float* row = qkv + static_cast<size_t>(s) * nch;
+            for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(row[j]);
+        }
+    }
 
     // ---- phase 2, per head over every token: the gated delta rule on S (in place), the gated norm
     const auto tp1 = std::chrono::steady_clock::now();
