@@ -1255,6 +1255,9 @@ before it, both misread the container identically and every comparison passed.
 - The transcode gives `min == -8 * d` exactly, and every nibble's `(q ^ 8) - 8` is the
   signed value it stood for.
 - `pools.cpp`'s `q4_0_to_q4_1_chunks` agrees with `pack.q4_0_to_q4_1` byte for byte.
+- A reader that handles one quant format only names the format it got rather than
+  reshaping into it: `Q4NX.lmhead_logits` is the q8 head and refuses a 4-bit one, which
+  17 q4_1 chunks would otherwise pass as 10 q8 chunks.
 
 ### OPEN-ATTN-QKV-BIAS: a per-channel bias on the q, k and v projections
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `designs/dense/dx.py`,
