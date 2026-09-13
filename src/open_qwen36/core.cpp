@@ -424,15 +424,25 @@ namespace {
 struct BenchStat {
     double min = 1e18, sum = 0, submit = 0;
     int n = 0;
+    std::vector<double> all;
     void add(double submit_ms, double wait_ms) {
         const double t = submit_ms + wait_ms;
         min = t < min ? t : min;
         sum += t;
         submit += submit_ms;
+        all.push_back(t);
         ++n;
     }
     double mean() const { return n ? sum / n : 0; }
     double mean_submit() const { return n ? submit / n : 0; }
+    // one dispatch that loses the box to something else drags the mean several ms - which is
+    // how a probe came out reading a negative switch cost. Quote this and the min instead.
+    double median() const {
+        if (all.empty()) return 0;
+        std::vector<double> v = all;
+        std::sort(v.begin(), v.end());
+        return v.size() % 2 ? v[v.size() / 2] : 0.5 * (v[v.size() / 2 - 1] + v[v.size() / 2]);
+    }
 };
 }  // namespace
 
@@ -448,6 +458,15 @@ void Core::bench_dispatch(int layer, int reps) {
         for (const Step& st : *prog) jobs.push_back({st.kernel, st.args});
     for (const auto& [slots, name] : gb.moe_batch.kernels) jobs.push_back({name, gb.moe_batch.args});
     if (!gb.moe_kernel.empty()) jobs.push_back({gb.moe_kernel, gb.moe_args});
+    // The attention GEMMs sit on their own context, so a full-attention layer pays a switch into
+    // them and another one back out. They read only globals, so a linear layer can still time them.
+    for (int l = 0; l < nl_; ++l) {
+        const AttnBlock& ab = types_[l]->gemm_block.attn_block;
+        if (!ab.present()) continue;
+        jobs.push_back({ab.kernels_s.rbegin()->second, ab.args});
+        jobs.push_back({ab.kernels_pv.rbegin()->second, ab.args});
+        break;
+    }
 
     std::fprintf(stderr, "\nopen_qwen36: dispatch bench, layer %d, %d reps each\n", layer, reps);
     std::fprintf(stderr, "  %-22s %8s %8s %8s %8s\n", "kernel", "min ms", "mean ms", "submit", "context");
@@ -612,8 +631,19 @@ void Core::bench_dispatch(int layer, int reps) {
     }
 
     // The same kernels alternating with one from another context: if a dispatch costs more
-    // here than it did alone, the difference is what switching hardware contexts costs.
-    std::fprintf(stderr, "  alternating with the widest GEMM (the context-switch probe)\n");
+    // here than it did after one of its own, the difference is what switching hardware
+    // contexts costs.
+    //
+    // The baseline is taken inside this loop rather than from the pass at the top of the
+    // function. Every other probe here subtracts a number measured minutes earlier, so any
+    // drift in what else the box is doing lands straight in the delta - the k35v5 and k35v6
+    // runs of 2026-09-13 disagree by 5.6 ms on mb_s256 that way, one of them reading a
+    // switch as free. Here a baseline rep and a probe rep alternate, so whatever moves moves
+    // both, and the delta is quoted on the minima.
+    std::fprintf(stderr, "  alternating with the widest GEMM (the context-switch probe, "
+                         "baseline interleaved)\n");
+    std::fprintf(stderr, "  %-22s %8s %8s %8s %8s %9s\n", "kernel", "own min", "own med", "sw min",
+                 "sw med", "switch");
     std::string other;
     size_t widest = 0;
     for (const auto& [name, args] : jobs)
@@ -629,15 +659,17 @@ void Core::bench_dispatch(int layer, int reps) {
         if (name == other) continue;
         Kern& k = kerns_.at(name);
         Kern& o = kerns_.at(other);
-        BenchStat st;
+        BenchStat solo, sw;
+        run_split(o, *other_args, layer);                // warm both contexts before timing
+        run_split(k, args, layer);
         for (int i = 0; i < reps; ++i) {
+            run_split(k, args, layer);                   // the rep before this one pays the switch
+            { const auto [s, w] = run_split(k, args, layer); solo.add(s, w); }
             run_split(o, *other_args, layer);
-            const auto [submit, wait] = run_split(k, args, layer);
-            st.add(submit, wait);
+            { const auto [s, w] = run_split(k, args, layer); sw.add(s, w); }
         }
-        const double solo = alone[name].mean();
-        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
-                     st.mean_submit(), st.mean() - solo);
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f %8.3f  %+.3f\n", name.c_str(), solo.min,
+                     solo.median(), sw.min, sw.median(), sw.min - solo.min);
     }
     std::fprintf(stderr, "\n");
 }

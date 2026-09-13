@@ -945,11 +945,11 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             types[FULL]["attn_block"] = attn_block
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight
-    # columns, so contexts time-share the array): the two MoE streams share one
-    # xclbin, and the GEMM core program does not depend on N -- one xclbin per K,
-    # each N its own instruction stream. The context points at the first build of
-    # its K; a kernel set therefore carries one final.xclbin per K and one
-    # insts.bin per shape.
+    # columns, so contexts time-share the array, and changing one costs ~2.5 ms):
+    # the two MoE streams share one xclbin, and the GEMM core program depends on
+    # neither N nor K, so every projection shape is an instruction stream over one
+    # xclbin. The context points at the first build; a kernel set carries one
+    # final.xclbin for the whole GEMM route and one insts.bin per shape.
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
     kinds = [k for lt, k in ((LINEAR, "linear"), (FULL, "full")) if lt in types]
@@ -985,7 +985,7 @@ def gemm_route(spec: ModelSpec) -> dict | None:
         out["globals"]["ag_b"] = ATTN_LMAX * hd * 2
         out["globals"]["ag_c"] = ag_m * ATTN_LMAX * 4
     for N, K in sorted(shapes):
-        name, ctx = f"gemm_n{N}_k{K}", f"gemm_k{K}"
+        name, ctx = f"gemm_n{N}_k{K}", "gemm"
         if ctx not in out["contexts"]:
             out["contexts"][ctx] = f"{name}/final.xclbin"
         out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}

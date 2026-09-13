@@ -250,9 +250,7 @@
   "mx": "mx_linear/final.xclbin",
   "mb": "mb_s256/final.xclbin",
   "ag": "ag_s256/final.xclbin",
-  "gemm_k2048": "gemm_n1024_k2048/final.xclbin",
-  "gemm_k512": "gemm_n2048_k512/final.xclbin",
-  "gemm_k4096": "gemm_n2048_k4096/final.xclbin"
+  "gemm": "gemm_n1024_k2048/final.xclbin"
  },
  "kernels": {
   "ln": {
@@ -497,27 +495,27 @@
    "build": "ag_pv4096"
   },
   "gemm_n1024_k2048": {
-   "context": "gemm_k2048",
+   "context": "gemm",
    "insts": "gemm_n1024_k2048/insts.bin",
    "build": "gemm_n1024_k2048"
   },
   "gemm_n2048_k512": {
-   "context": "gemm_k512",
+   "context": "gemm",
    "insts": "gemm_n2048_k512/insts.bin",
    "build": "gemm_n2048_k512"
   },
   "gemm_n2048_k4096": {
-   "context": "gemm_k4096",
+   "context": "gemm",
    "insts": "gemm_n2048_k4096/insts.bin",
    "build": "gemm_n2048_k4096"
   },
   "gemm_n9216_k2048": {
-   "context": "gemm_k2048",
+   "context": "gemm",
    "insts": "gemm_n9216_k2048/insts.bin",
    "build": "gemm_n9216_k2048"
   },
   "gemm_n12288_k2048": {
-   "context": "gemm_k2048",
+   "context": "gemm",
    "insts": "gemm_n12288_k2048/insts.bin",
    "build": "gemm_n12288_k2048"
   }
