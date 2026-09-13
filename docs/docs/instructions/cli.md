@@ -255,6 +255,8 @@ oflm serve llama3.2:1b --host 127.0.0.1
 
 ⚠️ Note: --host applies only to the current session. It does not modify the default host configuration (default: `127.0.0.1`).
 
+> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. (`bench`, `list`, `version`, `port` and `validate` still accept it; see #68.)
+
 ---
 
 ### 🌐 Cross-Origin Resource Sharing (CORS)
