@@ -1651,10 +1651,11 @@ config.json carries the vision weights' file name and nothing about their shape.
 - Qwen2.5-VL-3B-Instruct-NPU2's config.json is refused with a message naming `window`.
 
 ### OPEN-VISION-VIT-WINDOWED: Qwen2.5-VL's tower attends inside windows
-**Applies to:** openflowlm-next (`open_kernels/model/replica_vit_qwen25.py`; `src/open_qwen36/vision/` once the port lands)
-**Test category:** unit (`tests/test_vision_vit_windowed.py`; the oracle needs torch and skips without it, the window math does not)
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit_qwen25.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit_windowed.py`; the oracle needs torch and skips without it, the window math and the container arithmetic do not. The C++ window permutation is `vit_test --window-index`, run by `ctest -R OPEN-VISION-VIT-WINDOWED`, which needs neither torch nor a container; the C++ forward is checked numerically by `vit_test --windowed`, procedure below)
 
-Qwen2.5-VL's vision tower shall be reproduced as a numpy fp32 forward. It is not
+Qwen2.5-VL's vision tower shall be reproduced as a numpy fp32 forward and as a host C++
+port beside the full-attention tower OPEN-VISION-VIT-REF covers. It is not
 the tower OPEN-VISION-VIT-REF covers: most blocks attend only within a square
 window of `window_size / spatial_merge_size / patch_size` merge units, the
 blocks named by `fullatt_block_indexes` attend over the whole image, and the
@@ -1672,19 +1673,48 @@ residual stream dominates the output and a forward with the windows wrong still
 agrees to 2e-4; a test asserts that the windows-ignored forward fails, so that
 sensitivity cannot regress unnoticed.
 
+The C++ port reads the tower's geometry through `VitConfig::qwen25_from_config_text`, which
+is separate from the full-attention reader OPEN-VISION-VIT-CONFIG describes -- that one
+still refuses a windowed `vision_config`, because the tower it configures cannot run one.
+It is checked against `replica_vit_qwen25.py --fixture`, which writes a synthetic
+`vision_weights.q4nx` in the shipped layout (the converter's names, both dims of every
+vision_mm matrix padded to 256 and tiled) from weights transformers built, so the port runs
+end to end with no container on the box. That checks the forward, not the names: only
+opening a shipped container can do that.
+
+**The container must not be loaded until its header has been read.** Its published size
+does not reconcile with the tower: with transformers' geometry and the tiling every other
+shipped container uses, `vision_weights.q4nx` should be 1,377,729,112 bytes and the
+registry says 1,430,158,096. The difference, 52,428,984, is exactly 1600 vision_mm tiles
+(50 MiB, one more 5120 x 5120 bf16 matrix) plus 184 bytes of header. It cannot be padding,
+because a tiled weight grows only by whole 32,768-byte tiles and this is not a multiple of
+one. The same arithmetic reproduces four shipped containers to the byte, including this
+model's own language half, so the shortfall is in the file and not in the model of it.
+
 **Acceptance criteria:**
 - numpy vs transformers on a random 12 x 10 grid: corr > 0.99999, max error < 1e-4 of max, both with four windowed blocks and with every block full-attention.
 - A forward in which every block attends over the whole image gives corr < 0.9 against the same oracle.
-- `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`.
+- `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`, in the numpy reference and in the C++ port.
 - A grid that divides the window size evenly (8 x 8 patches) still pads a whole empty window, which collapses: index `0..15`, boundaries `[0, 64]`.
 - The merger's activation is the exact GELU, `x * Phi(x)` against the standard normal CDF, not the tanh approximation (which the oracle comparison cannot distinguish).
+- The container size model reproduces Gemma3-4B's, Qwen3.5-0.8B/9B's and the 35B's `vision_weight.q4nx` exactly, and accounts for Qwen2.5-3B's `model.q4nx` data to the byte.
+- Qwen2.5-VL-3B's `vision_weights.q4nx` is short by 52,428,984 bytes = 1600 tiles + 184.
+- `vit_test --windowed <fixture> <fixture>`: corr > 0.99999, max error < 1e-3 of max against `replica_vit_qwen25.py --fixture`.
 
-**Result 2026-09-12:** numpy vs transformers corr 1.0000000, rel 6.0e-6; the
-windows-ignored control gives corr 0.646. The C++ port is designed but not
-written, and no Qwen2.5-VL container has been read -- the tensor names and
-layout in `load_weights` come from `utilities/q4nx-build`, and the published
-`vision_weights.q4nx` size does not reconcile with the expected geometry by
-52 MB. `.claude/plans/qwen25vl-windowed-vit.md`.
+**Result 2026-09-13:** the C++ port lands. `vit_test --windowed` against the numpy
+reference on 12 x 10, 16 x 24, 6 x 18 and 8 x 8 patch grids: corr 1.00000000, rel 5.0e-6 to
+8.8e-6, the reference itself corr 1.0000000 rel 6.0e-6 against transformers on the same
+towers. `ctest -R OPEN-VISION-VIT-WINDOWED` (the permutation, no container, no torch)
+passes. Suite 452 passed / 1 skipped.
+
+The tensor names are now confirmed from outside this repo: the closed
+`src/lib/hrx/libqwen2vl_npu.so` contains `model.visual.`, the four `attn.*_proj`, the three
+`mlp.*_proj`, `rmsnorm1` / `rmsnorm2`, `merger.ln_q` / `merger.mlp.0` / `merger.mlp.2` and
+`patch_embed.proj.weight`, with no `blocks.` segment and no other vision tensor name. One
+shape was wrong and is fixed: `merger.ln_q` is `[hidden]`, since it normalises before the
+2 x 2 concat. What remains unknown is the 50 MiB, and the measurement that would settle it
+is a range read of the container's first 64 KB.
+`.claude/plans/qwen25vl-container-size.md`, `.claude/plans/qwen25vl-windowed-vit.md`.
 
 ### OPEN-VISION-EMBED: the open engine takes an image payload
 **Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
