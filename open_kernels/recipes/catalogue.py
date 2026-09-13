@@ -190,6 +190,12 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
              note="Qwen3-Next / 3.5 / 3.6 families only; heads/key_heads is the value heads per "
                   "key head (dn_glue.h kGrp) and 16 heads pack the alpha/beta projection padded "
                   "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass"),
+    Template("short_conv", "designs/short_conv/sc.h",
+             {"taps": values(), "width": values()},
+             note="LFM2's depthwise causal conv, which REPLACES attention in a layer. Empty on "
+                  "purpose: nothing has run on hardware yet, so every export needs "
+                  "OPEN_KERNELS_UNVALIDATED=1 until OPEN-SHORT-CONV-KERNEL's procedure passes. "
+                  "gemv_q8 started the same way"),
     Template("ln", "designs/ln/ln.cc",
              {"width": values(1024, 2048, 2560, 3072, 3840, 4096)}),
                                 # LN_N; 1024 / 2048 take the fused single-core path (N <= 2048),
