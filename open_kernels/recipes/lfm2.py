@@ -62,6 +62,17 @@ class Lfm2Layout:
     STATE_BYTES: int          # (taps - 1) x hidden f32, the conv window still in reach
     SC_CHUNKS: int            # chunks in one third of in_proj
 
+    def __getattr__(self, name: str):
+        """Anything not defined here comes from the dense layout underneath -- POOL_Q, the
+        KV and ptab rows, the lm_head bands. An LFM2 attention layer runs `dx.py` unchanged
+        and reads exactly those, while POOL_BYTES / CD_BYTES / AD_BYTES are defined above
+        and so shadow the dense ones: both layer types are allocated the larger of the two.
+        (A frozen dataclass blocks __setattr__, not __getattr__.)"""
+        try:
+            return getattr(object.__getattribute__(self, "dense"), name)
+        except AttributeError:
+            raise AttributeError(f"{type(self).__name__} has no {name!r}") from None
+
     def constants(self) -> dict[str, int]:
         out = dict(self.dense.__dict__)
         out.update({k: v for k, v in self.__dict__.items() if k != "dense"})
