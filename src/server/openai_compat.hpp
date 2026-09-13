@@ -188,13 +188,31 @@ inline std::string task_names_csv() {
 /// embed_batch() returns every vector end to end, so the caller has to slice.
 /// The failure that matters is not a crash: a wrong width, or a wrong order,
 /// hands a caller a correctly shaped, correctly normed, deterministic vector
-/// for somebody else's text, and nothing downstream can detect it. So the
-/// width is derived and then CHECKED, and a result that does not divide is
-/// refused rather than rounded.
-inline size_t embedding_batch_dim(size_t flat_size, size_t n_inputs) {
+/// for somebody else's text, and nothing downstream can detect it.
+///
+/// `expected_dim` is the backend's own vector width
+/// (AutoEmbeddingModel::embedding_dim()). When it is known the result must be
+/// exactly `n_inputs * expected_dim` floats, which also catches a backend that
+/// returns a whole number of vectors but the wrong number of them -- half a
+/// batch divides evenly. When it is 0 the backend does not report a width, and
+/// the only check left is that the result divides; that cannot catch the
+/// half-a-batch case.
+inline size_t embedding_batch_dim(size_t flat_size, size_t n_inputs,
+                                  size_t expected_dim = 0) {
     if (n_inputs == 0)
         throw std::runtime_error(
             "embedding_batch_dim: asked for the vector width of zero inputs");
+    if (expected_dim != 0) {
+        if (flat_size != n_inputs * expected_dim)
+            throw std::runtime_error(
+                "embedding backend returned " + std::to_string(flat_size) +
+                " floats for " + std::to_string(n_inputs) + " inputs, but its"
+                " vectors are " + std::to_string(expected_dim) + " wide, so it"
+                " should have returned " + std::to_string(n_inputs * expected_dim) +
+                ". Refusing to slice: a mis-split returns correctly shaped,"
+                " correctly normed vectors for the wrong inputs.");
+        return expected_dim;
+    }
     if (flat_size == 0 || flat_size % n_inputs != 0)
         throw std::runtime_error(
             "embedding backend returned " + std::to_string(flat_size) +

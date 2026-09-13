@@ -684,7 +684,18 @@ void RestHandler::handle_show(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response) {
     try {
-        std::string model = request["model"];
+        // Checked before reading: `request["model"]` on a const json without
+        // the key is undefined behaviour, and POST /api/show {} killed the server.
+        if (!request.is_object() || !request.contains("model") ||
+            !request["model"].is_string()) {
+            send_response(json{{"error", {
+                {"message", "model is required and must be a string."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "invalid_value"}}}});
+            return;
+        }
+        std::string model = request["model"].get<std::string>();
         json info = {
             {"modelfile", ""},
             {"parameters", ""},
@@ -1196,18 +1207,16 @@ void RestHandler::handle_embeddings(const json& request,
                     const std::vector<float> flat =
                         this->auto_embedding_engine->embed_batch(inputs, task_type,
                                                                 &prompt_tokens);
-                    // The vectors come back concatenated, so the width has to be
-                    // derived -- and therefore CHECKED. A mis-split returns
+                    // The vectors come back concatenated. A mis-split returns
                     // correctly shaped, correctly normed, deterministic vectors for
-                    // the wrong inputs, which is the one failure nothing downstream
-                    // can see. openai_compat::embedding_batch_dim() refuses rather
-                    // than dividing and hoping, and benchmark_embed_test holds it
-                    // to that without a device -- one definition, shared with
-                    // bench-embed, so the two cannot drift. (The helper lives in
-                    // openai_compat.hpp; its assertions are in
-                    // benchmark_embed_test.cpp, not openai_compat_test.cpp.)
-                    const size_t dim =
-                        openai_compat::embedding_batch_dim(flat.size(), inputs.size());
+                    // the wrong inputs, which nothing downstream can see, so the
+                    // result is checked against the backend's own width: exactly
+                    // one vector per input. A backend that reports no width
+                    // (embedding_dim() == 0) only gets the divisibility check.
+                    // Shared with bench-embed; tested in benchmark_embed_test.cpp.
+                    const size_t dim = openai_compat::embedding_batch_dim(
+                        flat.size(), inputs.size(),
+                        this->auto_embedding_engine->embedding_dim());
                     for (size_t i = 0; i < inputs.size(); ++i) {
                         embedding_data.push_back({
                             {"object", "embedding"},
@@ -1264,6 +1273,14 @@ void RestHandler::handle_embeddings(const json& request,
         }
         else {
             header_print("Warning", "No embedding model loaded");
+            // Was a 200 with an empty body.
+            response = {{"error", {
+                {"message", "no embedding model is loaded: this server was started "
+                            "without one. Start oflm serve with --embed 1, and "
+                            "--embeddingmodel TAG to choose which."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}}}};
         }
         send_response(response);
     }
@@ -1656,7 +1673,19 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                                         StreamResponseCallback send_streaming_response,
                                         std::shared_ptr<CancellationToken> cancellation_token) {
     try {
-        std::string model = request["model"];
+        // Checked before reading, for the same reason as handle_show.
+        for (const char* field : {"model", "file"}) {
+            if (!request.is_object() || !request.contains(field) ||
+                !request[field].is_string()) {
+                send_response(json{{"error", {
+                    {"message", std::string(field) + " is required and must be a string."},
+                    {"type", "invalid_request_error"},
+                    {"param", field},
+                    {"code", "invalid_value"}}}});
+                return;
+            }
+        }
+        std::string model = request["model"].get<std::string>();
         std::string file_content = request["file"].get<std::string>();
         std::vector<uint8_t> audio_raw(file_content.begin(), file_content.end());
         bool stream = request.value("stream", false);
@@ -1694,6 +1723,13 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         }
         else {
             header_print("Warning", "No asr model loaded, cannot load audio file");
+            // Was a 200 with an empty body.
+            response = {{"error", {
+                {"message", "no speech model is loaded: this server was started without "
+                            "one. Start oflm serve with --asr 1."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}}}};
         }
         send_response(response);
         //this->whisper_engine->clear_context();

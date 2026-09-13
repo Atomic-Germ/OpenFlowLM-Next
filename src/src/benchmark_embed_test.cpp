@@ -390,6 +390,20 @@ static void test_batch_dim() {
     // it by dividing anyway reintroduces the exact defect.
     throws_with([] { openai_compat::embedding_batch_dim(1000, 16); },
                 "wrong inputs", "the refusal explains what a mis-split would return");
+
+    // With the backend's width known. Half a batch DIVIDES -- 8 vectors for 16
+    // inputs is 6144 / 16 = 384 -- so without the width it would slice every
+    // input a wrong-width vector and succeed.
+    eqi((long long)openai_compat::embedding_batch_dim(768 * 8, 16), 384,
+        "without a width, half a batch divides (the gap the width closes)");
+    throws_with([] { openai_compat::embedding_batch_dim(768 * 8, 16, 768); },
+                "should have returned 12288", "with the width, half a batch refuses");
+    throws_with([] { openai_compat::embedding_batch_dim(768 * 32, 16, 768); },
+                "should have returned 12288", "with the width, a double batch refuses");
+    throws_with([] { openai_compat::embedding_batch_dim(768 * 16 - 1, 16, 768); },
+                "wrong inputs", "with the width, a truncated result refuses");
+    eqi((long long)openai_compat::embedding_batch_dim(768 * 16, 16, 768), 768,
+        "with the width, an exact batch passes");
 }
 
 // ---------------------------------------------------------------------------

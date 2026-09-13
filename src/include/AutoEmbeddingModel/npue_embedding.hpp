@@ -108,6 +108,9 @@ public:
 
     int64_t hidden() const;
 
+    /// Every model this backend serves pools to `hidden` floats per text.
+    size_t embedding_dim() const override { return static_cast<size_t>(hidden()); }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

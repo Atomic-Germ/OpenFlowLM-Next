@@ -104,6 +104,14 @@ public:
 		return out;
 	}
 
+	/// \brief The width of one vector, or 0 when the backend does not report it.
+	///
+	/// Callers slicing an embed_batch() result pass this to
+	/// openai_compat::embedding_batch_dim(), which can then check the result
+	/// holds exactly one vector per input. With 0 it can only check that the
+	/// result divides evenly.
+	virtual size_t embedding_dim() const { return 0; }
+
 	/// \brief The task prompt names this model declares, empty when it has none.
 	///
 	/// A model that HAS them cannot be embedded without choosing one. The prefix
