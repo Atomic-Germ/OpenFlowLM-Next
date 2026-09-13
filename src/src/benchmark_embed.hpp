@@ -300,13 +300,9 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
     // Resolve the BACKEND before touching the network. A valid chat tag such as
     // llama3.2:1b otherwise triggered a multi-gigabyte download and only then
     // failed as an unknown embedding model. Constructing the backend is cheap
-    // -- it stores a tag; load_model() is what opens anything.
+    // -- it stores a tag; load_model() is what opens anything. An unclaimed tag
+    // throws from get_auto_embedding_model(); it never returns null.
     auto [resolved_tag, engine] = get_auto_embedding_model(canonical_tag, &npu_device_inst);
-    if (engine == nullptr)
-        throw std::runtime_error(
-            "cannot benchmark '" + canonical_tag + "': no embedding backend claimed it. "
-            "Refusing to benchmark a substitute, which would report the wrong "
-            "model's numbers under the right model's name.");
 
     switch (downloader.is_model_downloaded(resolved_tag)) {
         case ModelDownloader::ModelStatus::Ready:
@@ -370,29 +366,35 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
     std::vector<std::vector<float>> batched_s(stages), texts_ps(stages),
                                     tokens_ps(stages), looped_s(stages);
     std::vector<bool> have_tokens(stages, false);
+    std::vector<int64_t> stage_tokens(stages, -1);
 
-    // ---- warm-up and identity gate, both discarded from the timings ----
+    // ---- warm-up, token counts and identity gate, all untimed ----
     //
-    // WHAT THE WARM-UP IS NOT FOR. An earlier version of this comment, and of
-    // the README, claimed it kept `.npue` packing out of iteration 1. That was
-    // wrong: load_model() above calls find_container(), which packs, so packing
-    // was already outside the timed loop. What this call actually excludes is
-    // first-call runtime cost -- faulting in the mmapped container, the
-    // tokenizer's first use, and the lanes' first dispatch.
+    // The warm-up excludes first-call runtime cost -- faulting in the mmapped
+    // container, the tokenizer's first use, the lanes' first dispatch. (Packing
+    // a missing `.npue` happens earlier, inside load_model().) Every stage is
+    // warmed, since each batch size can select a different tier.
     //
-    // THE IDENTITY GATE. Every row of the largest batch is compared against the
-    // same text embedded alone. The first version compared only the first row,
-    // which is a probe whose coverage nobody checked: a batch-specific
-    // ordering, truncation or write error in any later row would still have
-    // printed BIT-IDENTICAL. It costs N extra single calls, once.
+    // TOKEN COUNTS are taken here, once per stage, so the timed batched call
+    // does no work the timed looped call does not. The count for a given set of
+    // texts is the same on every call.
+    //
+    // THE IDENTITY GATE compares every row of the largest batch against the
+    // same text embedded alone.
     {
-        const int warm = 1 << (stages - 1);
-        header_print("OFLM", "Warm-up and identity gate at batch " +
-                             std::to_string(warm) + " (discarded from the timings)");
-        const std::vector<std::string> texts = take_texts(plan.corpus, warm);
+        header_print("OFLM", "Warm-up, token counts and identity gate "
+                             "(not timed)");
+        for (int s = 0; s < stages - 1; ++s) {
+            int64_t tok = -1;
+            (void)engine->embed_batch(take_texts(plan.corpus, 1 << s), task, &tok);
+            stage_tokens[s] = tok;
+        }
+        const std::vector<std::string> texts = take_texts(plan.corpus, 1 << (stages - 1));
         int64_t tok = -1;
         const std::vector<float> hot = engine->embed_batch(texts, task, &tok);
-        const size_t dim = openai_compat::embedding_batch_dim(hot.size(), texts.size());
+        stage_tokens[stages - 1] = tok;
+        const size_t dim = openai_compat::embedding_batch_dim(
+            hot.size(), texts.size(), engine->embedding_dim());
 
         double worst = 0.0;
         for (size_t i = 0; i < texts.size(); ++i) {
@@ -426,11 +428,14 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
                                  std::to_string(it + 1) + "...");
             std::vector<std::string> texts = take_texts(plan.corpus, n);
 
-            int64_t tok = -1;
+            // The same one-second gap before EACH path, so both start from the
+            // same idle state and neither runs straight after the other.
+            std::this_thread::sleep_for(std::chrono::seconds(1));
             const double b0 = bench_now_s();
-            (void)engine->embed_batch(texts, task, &tok);
+            (void)engine->embed_batch(texts, task);
             const double b1 = bench_now_s();
 
+            std::this_thread::sleep_for(std::chrono::seconds(1));
             const double l0 = bench_now_s();
             for (std::string& t : texts) (void)engine->embed(t, task);
             const double l1 = bench_now_s();
@@ -439,12 +444,10 @@ inline EmbedBenchResults_t run_embed_benchmarks(const std::string& model_tag,
             batched_s[s].push_back((float)bs);
             looped_s[s].push_back((float)(l1 - l0));
             if (bs > 0.0) texts_ps[s].push_back((float)((double)n / bs));
-            if (tok > 0 && bs > 0.0) {
-                tokens_ps[s].push_back((float)((double)tok / bs));
+            if (stage_tokens[s] > 0 && bs > 0.0) {
+                tokens_ps[s].push_back((float)((double)stage_tokens[s] / bs));
                 have_tokens[s] = true;
             }
-            // Same one-second gap the LLM benchmark leaves, same reason.
-            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
 

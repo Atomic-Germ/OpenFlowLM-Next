@@ -134,29 +134,26 @@ Its config file reads four keys:
 { "max_batch": 32, "iterations": 3, "task": "query", "texts": ["...", "..."] }
 ```
 
-**Two deliberate differences from `oflm bench`.**
+**Three deliberate differences from `oflm bench`.**
 
 1. **The CLI flags still work when a config file is given.** `max_batch` and
    `iterations` in the file win when present, and fall back to `--max-batch` /
    `--bench-iterations` when absent. `oflm bench` ignores `--bench-iterations`
    outright once `-i` is used -- the trap documented above. Same file shape,
    better rule.
-2. **There is a discarded warm-up, and it doubles as the identity gate.**
-   `oflm bench` has neither.
+2. **There is an untimed warm-up, and it doubles as the identity gate.**
+   `oflm bench` has neither. Every batch size is run once before timing
+   starts, which excludes first-call runtime cost (faulting in the mmapped
+   container, the tokenizer's first use, the lanes' first dispatch) and
+   records each stage's token count, so the timed batched call does no
+   counting the timed looped call does not. Packing a missing `.npue` happens
+   earlier still, in `load_model()`.
 
-   An earlier version of this section claimed the warm-up kept `.npue`
-   **packing** out of iteration 1. That was **wrong**, and worth recording:
-   `load_model()` runs before the warm-up and calls `find_container()`, which
-   is what packs, so packing was already outside the timed loop. What the
-   discarded call actually excludes is first-call *runtime* cost -- faulting
-   in the mmapped container, the tokenizer's first use, the lanes' first
-   dispatch.
+   The identity gate compares every row of the largest batch against the same
+   text embedded alone, and the footer prints how many vectors that was.
 
-   The same call also runs the identity gate: every row of the largest batch
-   is compared against the same text embedded alone, and the footer prints how
-   many vectors that was. The first version compared only the first row, which
-   is a probe whose coverage nothing checked -- an ordering or truncation
-   error in any later row would still have printed `BIT-IDENTICAL`.
+3. **Both paths start from the same idle state.** Each timed path is preceded
+   by the same one-second pause, so neither runs straight after the other.
 
 `texts` is optional; omitted, a built-in corpus of 16 sentences is cycled to
 fill each batch. The cycling is printed rather than implied, because a reader
@@ -174,8 +171,8 @@ caller gains by sending one request with N inputs instead of N requests.
 **That ratio is the reason the command exists.** Batching is a scheduling
 choice, not an arithmetic one, so **both paths return the same vectors** and no
 accuracy gate, cosine or bit-identity check can see the slow one. The only
-symptom is time, and nothing measured time. The benchmark compares one vector
-from each path anyway and prints `BIT-IDENTICAL` or the difference, because a
+symptom is time, and nothing measured time. The benchmark compares the vectors
+from both paths anyway and prints `BIT-IDENTICAL` or the difference, because a
 pure stopwatch would not have noticed if the fast path were wrong.
 
 **Reading the curve: the flat stretches are the design's batch tiers.** A
