@@ -20,16 +20,20 @@ round 157.65 differently -- so re-rounding the CSV produces false positives.
 Whatever a user sees on their terminal is what the page must say.
 
 USAGE
-    python utilities/check_embed_bench_docs.py <sweep.log> [more.log ...]
+    python utilities/check_embed_bench_docs.py [sweep.log ...]
 
 where each log is the captured stdout of one or more `oflm bench-embed` runs.
-Exits non-zero on the first disagreement, listing every one.
+With no arguments it checks against the committed log of the run the docs
+publish, DEFAULT_LOG below, so anyone can run it. After re-measuring, replace
+that file with the new run's output and update the docs until this passes.
+Exits non-zero on any disagreement, listing every one.
 """
 import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+DEFAULT_LOG = REPO / "utilities" / "bench-configs" / "results" / "bench_embed_sweep.log"
 NL_JOIN = ""   # every log line, stripped and "|"-joined, for verbatim checks
 
 # The printed table row:
@@ -162,8 +166,11 @@ def doc_rows(doc_text, heading):
 
 def main(argv):
     if len(argv) < 2:
-        print(__doc__)
-        return 2
+        if not DEFAULT_LOG.exists():
+            print(__doc__)
+            print("FATAL no log given and %s does not exist" % DEFAULT_LOG)
+            return 2
+        argv = [argv[0], str(DEFAULT_LOG)]
     global NL_JOIN
     NL_JOIN = "".join(Path(a).read_text(encoding="utf-8", errors="replace")
                       for a in argv[1:])
@@ -254,6 +261,8 @@ def main(argv):
             if want not in (rows or {}):
                 bad.append("%-46s %-22s ROW MISSING from the summary table"
                            % (rel, want))
+                continue
+            name, cells = want, rows[want]
             # exact, like the metric tables. `< 3` let an EXTRA cell through,
             # which is the same drift the width check exists to stop.
             if len(cells) != 3:
