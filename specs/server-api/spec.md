@@ -210,3 +210,36 @@ request both ways.
 - A request refused before generation starts (an unknown model, say) is refused identically in
   both modes: a JSON error body with a non-2xx status, not an SSE stream that opens and then
   stops.
+
+### SERVER-REQUEST-VALIDATION: a malformed request is refused with a 400, and the server keeps serving
+**Applies to:** openflowlm-next (`src/server/server.cpp`, `src/server/rest_handler.cpp`, `src/server/openai_compat.hpp`)
+**Test category:** integration (through `oflm serve`)
+**Test:** `specs/server-api/tests/test_request_validation.py`
+
+Handlers read required fields with `request["field"]` on a `const json&`. For a key that is not
+there that is undefined behaviour, and on this build it segfaults: `POST {}` killed the server on
+`/api/show`, `/api/generate`, `/v1/completions` and `/v1/embeddings` (#70). A `request_id` that
+is not a string threw before the handler ran, while the request held the NPU lock, and the lock
+was never released: the process stayed up and `/v1/models` kept answering, but every request that
+needed the NPU queued behind it and was never answered. Checking that a server survives a bad
+request therefore means sending it a request that needs the NPU, not one that does not.
+
+The server shall check a request's required fields, and the type of `request_id`, before reading
+them, and refuse a missing or mistyped one with 400 and an OpenAI-shaped error naming the field.
+The embeddings endpoint shall also refuse a malformed `input` or `model`, and a server with no
+embedding model loaded shall refuse an embeddings request rather than answer 200 with no body.
+
+**Acceptance criteria:**
+- `POST {}` to `/api/show`, `/api/generate`, `/api/chat`, `/v1/completions`,
+  `/v1/chat/completions` and `/v1/embeddings` returns 400 with `error.param` naming the required
+  field (`model`, `prompt`, `messages` or `input`), and after each one a chat request is answered.
+- A required field of the wrong type (`"prompt": 5`, `"messages": "hi"`) returns 400 with
+  `error.code == "invalid_value"`.
+- A non-string `request_id` returns 400 with `error.param == "request_id"`, and a chat request
+  sent after it is answered rather than left queued. A string `request_id` is accepted.
+- On `/v1/embeddings`: `input` that is `null`, a number or an object returns 400; an array with a
+  non-string element returns 400 with `param` naming that element (`input[1]`); `"model": null`
+  returns 400; `"model": ""` returns 400 `model_not_found`; an omitted `model` is served by the
+  loaded model and the response names it. `"input": []` stays a 200 with an empty `data`.
+- A server started without an embedding model answers `/v1/embeddings` with 400
+  `model_not_found`, not 200.
