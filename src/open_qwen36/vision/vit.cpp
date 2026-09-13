@@ -7,6 +7,18 @@
 #include <iterator>
 #include <stdexcept>
 
+// The tower is host arithmetic, so the projections are worth vectorising. AVX2
+// is chosen at RUNTIME, not by raising the binary's baseline: this is the only
+// translation unit that uses it, and a machine without it runs the scalar loop
+// it always ran. x86 only - nothing here is needed on ARM.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#define OFLM_VIT_AVX2 1
+#include <immintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+#endif
+
 #include "nlohmann/json.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
@@ -63,48 +75,187 @@ Linear untile(const Q4nxFile& f, const std::string& wname, const std::string& bn
     return L;
 }
 
+/// Eight dot products of one x row against eight f32 weight rows, AVX2 + FMA.
+/// Only the reduction order differs from the scalar loop below it, so the two
+/// disagree by float rounding on the last bits and nothing else.
+#if defined(OFLM_VIT_AVX2)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
+void dot8_avx2(const float* xr, const float* wf, int in, float* acc) {
+    __m256 a[8];
+    for (int j = 0; j < 8; ++j) a[j] = _mm256_setzero_ps();
+    int k = 0;
+    for (; k + 8 <= in; k += 8) {
+        const __m256 xv = _mm256_loadu_ps(xr + k);
+        for (int j = 0; j < 8; ++j)
+            a[j] = _mm256_fmadd_ps(xv, _mm256_loadu_ps(wf + static_cast<size_t>(j) * in + k), a[j]);
+    }
+    for (int j = 0; j < 8; ++j) {
+        __m128 lo = _mm256_castps256_ps128(a[j]);
+        lo = _mm_add_ps(lo, _mm256_extractf128_ps(a[j], 1));
+        lo = _mm_add_ps(lo, _mm_movehl_ps(lo, lo));
+        lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 1));
+        float s = _mm_cvtss_f32(lo);
+        for (int t = k; t < in; ++t) s += xr[t] * wf[static_cast<size_t>(j) * in + t];
+        acc[j] = s;
+    }
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2")))
+#endif
+void widen_avx2(const uint16_t* wr, float* wd, int in) {
+    int k = 0;
+    for (; k + 8 <= in; k += 8) {
+        const __m128i h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(wr + k));
+        _mm256_storeu_ps(wd + k, _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16)));
+    }
+    for (; k < in; ++k) wd[k] = bf16f(wr[k]);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
+float dot_avx2(const float* a, const float* b, int n) {
+    __m256 s0 = _mm256_setzero_ps(), s1 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), s0);
+        s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8), s1);
+    }
+    for (; i + 8 <= n; i += 8)
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), s0);
+    s0 = _mm256_add_ps(s0, s1);
+    __m128 lo = _mm_add_ps(_mm256_castps256_ps128(s0), _mm256_extractf128_ps(s0, 1));
+    lo = _mm_add_ps(lo, _mm_movehl_ps(lo, lo));
+    lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 1));
+    float r = _mm_cvtss_f32(lo);
+    for (; i < n; ++i) r += a[i] * b[i];
+    return r;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
+void axpy_avx2(float* acc, const float* x, float p, int n) {
+    const __m256 pv = _mm256_set1_ps(p);
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm256_storeu_ps(acc + i, _mm256_fmadd_ps(pv, _mm256_loadu_ps(x + i), _mm256_loadu_ps(acc + i)));
+    for (; i < n; ++i) acc[i] += p * x[i];
+}
+
+bool have_avx2() {
+#if defined(_MSC_VER)
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuidex(r, 7, 0);
+    const bool avx2 = (r[1] & (1 << 5)) != 0;          // EBX bit 5
+    __cpuid(r, 1);
+    const bool fma = (r[2] & (1 << 12)) != 0;          // ECX bit 12
+    const bool osxsave = (r[2] & (1 << 27)) != 0;
+    if (!(avx2 && fma && osxsave)) return false;
+    return (_xgetbv(0) & 0x6) == 0x6;                  // XMM and YMM state enabled
+#else
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#endif
+}
+#endif  // OFLM_VIT_AVX2
+
+/// The two shapes attention() reduces over, vectorised where the CPU allows it.
+/// The scalar forms use four accumulators rather than one: the old single chain
+/// made every QK dot a serial add at three or four cycles a multiply.
+inline float dot_f32(const float* a, const float* b, int n) {
+#if defined(OFLM_VIT_AVX2)
+    static const bool avx2 = have_avx2();
+    if (avx2) return dot_avx2(a, b, n);
+#endif
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        s0 += a[i] * b[i];
+        s1 += a[i + 1] * b[i + 1];
+        s2 += a[i + 2] * b[i + 2];
+        s3 += a[i + 3] * b[i + 3];
+    }
+    float r = (s0 + s1) + (s2 + s3);
+    for (; i < n; ++i) r += a[i] * b[i];
+    return r;
+}
+
+inline void axpy_f32(float* acc, const float* x, float p, int n) {
+#if defined(OFLM_VIT_AVX2)
+    static const bool avx2 = have_avx2();
+    if (avx2) { axpy_avx2(acc, x, p, n); return; }
+#endif
+    for (int i = 0; i < n; ++i) acc[i] += p * x[i];
+}
+
 /// y[n, out] = x[n, in] . W^T + b. Eight output columns at a time: their W rows are
-/// widened to f32 once, then every x row streams past them. Parallel over column blocks.
-/// ldy is the output row stride, so q, k and v can be written into one [n, 3H] buffer.
+/// widened to f32 once, then a panel of x rows streams past them. Parallel over column
+/// blocks. ldy is the output row stride, so q, k and v can be written into one [n, 3H]
+/// buffer.
+///
+/// The panel is what keeps this off memory. Sweeping all n rows per column block reads
+/// the whole activation matrix once per block - 160 times over for a 1280-wide
+/// projection - and at a 40x56 grid that matrix is 11 MB, so it comes back from L3 every
+/// time. A 128-row panel is under a megabyte and stays in L2 across the sweep.
 void linear(const float* x, int n, const Linear& L, float* y, int ldy = 0) {
     const int in = L.in, out = L.out;
     if (ldy == 0) ldy = out;
     const int nb = (out + 7) / 8;
+    constexpr int kPanel = 128;
+#if defined(OFLM_VIT_AVX2)
+    static const bool avx2 = have_avx2();
+#endif
 #pragma omp parallel
     {
         std::vector<float> wf(static_cast<size_t>(8) * in);
+        for (int p = 0; p < n; p += kPanel) {
+            const int pn = std::min(kPanel, n - p);
 #pragma omp for schedule(dynamic, 4)
-        for (int blk = 0; blk < nb; ++blk) {
-            const int o0 = blk * 8, oc = std::min(8, out - o0);
-            for (int j = 0; j < oc; ++j) {
-                const uint16_t* wr = L.w.data() + static_cast<size_t>(o0 + j) * in;
-                float* wd = wf.data() + static_cast<size_t>(j) * in;
-                for (int k = 0; k < in; ++k) wd[k] = bf16f(wr[k]);
-            }
-            for (int i = 0; i < n; ++i) {
-                const float* xr = x + static_cast<size_t>(i) * in;
-                float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-                if (oc == 8) {
-                    const float *w0 = wf.data(), *w1 = w0 + in, *w2 = w1 + in, *w3 = w2 + in;
-                    const float *w4 = w3 + in, *w5 = w4 + in, *w6 = w5 + in, *w7 = w6 + in;
-                    float a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0;
-                    for (int k = 0; k < in; ++k) {
-                        const float xv = xr[k];
-                        a0 += xv * w0[k]; a1 += xv * w1[k]; a2 += xv * w2[k]; a3 += xv * w3[k];
-                        a4 += xv * w4[k]; a5 += xv * w5[k]; a6 += xv * w6[k]; a7 += xv * w7[k];
-                    }
-                    acc[0] = a0; acc[1] = a1; acc[2] = a2; acc[3] = a3;
-                    acc[4] = a4; acc[5] = a5; acc[6] = a6; acc[7] = a7;
-                } else {
-                    for (int j = 0; j < oc; ++j) {
-                        const float* wd = wf.data() + static_cast<size_t>(j) * in;
-                        float a = 0;
-                        for (int k = 0; k < in; ++k) a += xr[k] * wd[k];
-                        acc[j] = a;
-                    }
+            for (int blk = 0; blk < nb; ++blk) {
+                const int o0 = blk * 8, oc = std::min(8, out - o0);
+                for (int j = 0; j < oc; ++j) {
+                    const uint16_t* wr = L.w.data() + static_cast<size_t>(o0 + j) * in;
+                    float* wd = wf.data() + static_cast<size_t>(j) * in;
+#if defined(OFLM_VIT_AVX2)
+                    if (avx2) { widen_avx2(wr, wd, in); continue; }
+#endif
+                    for (int k = 0; k < in; ++k) wd[k] = bf16f(wr[k]);
                 }
-                float* yr = y + static_cast<size_t>(i) * ldy + o0;
-                for (int j = 0; j < oc; ++j) yr[j] = acc[j] + L.b[o0 + j];
+                for (int i = p; i < p + pn; ++i) {
+                    const float* xr = x + static_cast<size_t>(i) * in;
+                    float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+#if defined(OFLM_VIT_AVX2)
+                    if (avx2 && oc == 8) {
+                        dot8_avx2(xr, wf.data(), in, acc);
+                    } else
+#endif
+                    if (oc == 8) {
+                        const float *w0 = wf.data(), *w1 = w0 + in, *w2 = w1 + in, *w3 = w2 + in;
+                        const float *w4 = w3 + in, *w5 = w4 + in, *w6 = w5 + in, *w7 = w6 + in;
+                        float a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0;
+                        for (int k = 0; k < in; ++k) {
+                            const float xv = xr[k];
+                            a0 += xv * w0[k]; a1 += xv * w1[k]; a2 += xv * w2[k]; a3 += xv * w3[k];
+                            a4 += xv * w4[k]; a5 += xv * w5[k]; a6 += xv * w6[k]; a7 += xv * w7[k];
+                        }
+                        acc[0] = a0; acc[1] = a1; acc[2] = a2; acc[3] = a3;
+                        acc[4] = a4; acc[5] = a5; acc[6] = a6; acc[7] = a7;
+                    } else {
+                        for (int j = 0; j < oc; ++j) {
+                            const float* wd = wf.data() + static_cast<size_t>(j) * in;
+                            float a = 0;
+                            for (int k = 0; k < in; ++k) a += xr[k] * wd[k];
+                            acc[j] = a;
+                        }
+                    }
+                    float* yr = y + static_cast<size_t>(i) * ldy + o0;
+                    for (int j = 0; j < oc; ++j) yr[j] = acc[j] + L.b[o0 + j];
+                }
             }
         }
     }
@@ -213,8 +364,13 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
     const int NH = cfg.heads, HD = cfg.head_dim, H = cfg.hidden, half = HD / 2;
     const size_t row = static_cast<size_t>(3) * H;   // one token's [q | k | v]
     const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-    // q and k with RoPE, per head contiguous: [NH][n][HD]
-    std::vector<float> q(static_cast<size_t>(NH) * n * HD), k(q.size());
+    // q, k (with RoPE) and v, per head contiguous: [NH][n][HD].
+    //
+    // v is re-laid for the same reason q and k are. Read in place it comes out of
+    // the interleaved qkv buffer at a stride of 3 * hidden floats - 15 KB on
+    // Qwen2.5-VL - and the AV loop walks the whole segment once per query, so a
+    // full-attention block re-reads it n times with no prefetcher able to follow.
+    std::vector<float> q(static_cast<size_t>(NH) * n * HD), k(q.size()), v(q.size());
 #pragma omp parallel for schedule(static)
     for (int t = 0; t < n; ++t) {
         const float* c = cs.data() + static_cast<size_t>(t) * HD;
@@ -222,14 +378,17 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
         for (int h = 0; h < NH; ++h) {
             const float* qs = qkv + t * row + h * HD;
             const float* ks = qkv + t * row + H + h * HD;
+            const float* vs = qkv + t * row + 2 * H + h * HD;
             float* qd = q.data() + (static_cast<size_t>(h) * n + t) * HD;
             float* kd = k.data() + (static_cast<size_t>(h) * n + t) * HD;
+            float* vd = v.data() + (static_cast<size_t>(h) * n + t) * HD;
             for (int i = 0; i < HD; ++i) {
                 const float rq = i < half ? -qs[i + half] : qs[i - half];
                 const float rk = i < half ? -ks[i + half] : ks[i - half];
                 qd[i] = qs[i] * c[i] + rq * s[i];
                 kd[i] = ks[i] * c[i] + rk * s[i];
             }
+            std::memcpy(vd, vs, static_cast<size_t>(HD) * sizeof(float));
         }
     }
     const int QB = 32;
@@ -251,15 +410,14 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
                 const Work& W = work[wi];
                 const int m = W.seg_len;
                 const float* kh = k.data() + (static_cast<size_t>(h) * n + W.seg0) * HD;
+                const float* vh = v.data() + (static_cast<size_t>(h) * n + W.seg0) * HD;
                 for (int i = 0; i < W.qc; ++i) {
                     const float* qr = q.data() + (static_cast<size_t>(h) * n + W.q0 + i) * HD;
                     float* sr = sc.data() + static_cast<size_t>(i) * m;
                     float mx = -1e30f;
                     for (int t = 0; t < m; ++t) {
                         const float* kr = kh + static_cast<size_t>(t) * HD;
-                        float a = 0;
-                        for (int d = 0; d < HD; ++d) a += qr[d] * kr[d];
-                        a *= scale;
+                        float a = dot_f32(qr, kr, HD) * scale;
                         sr[t] = a;
                         mx = std::max(mx, a);
                     }
@@ -268,11 +426,8 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
                     const float inv = 1.0f / sum;
                     float* orow = o + static_cast<size_t>(W.q0 + i) * H + h * HD;
                     float acc[128] = {};
-                    for (int t = 0; t < m; ++t) {
-                        const float p = sr[t] * inv;
-                        const float* vr = qkv + (W.seg0 + t) * row + 2 * H + h * HD;
-                        for (int d = 0; d < HD; ++d) acc[d] += p * vr[d];
-                    }
+                    for (int t = 0; t < m; ++t)
+                        axpy_f32(acc, vh + static_cast<size_t>(t) * HD, sr[t] * inv, HD);
                     for (int d = 0; d < HD; ++d) orow[d] = acc[d];
                 }
             }
