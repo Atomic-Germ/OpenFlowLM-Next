@@ -1,10 +1,13 @@
 # Plan: one GEMM xclbin for every K — collapse the block route's three GEMM contexts
 
 **Status:** designed 2026-09-13, branch `prefill/gemm-contexts` (worktree
-`C:/code/openflowlm-ctx`, based on `prefill/35b-block` at `052f364e`). Not
-built, nothing measured. **Three gates are queued behind hardware and the WSL
-toolchain (see Order); gate 1 can invalidate this plan, so no kernel work
-starts before it.**
+`C:/code/openflowlm-ctx`, based on `prefill/35b-block` at `052f364e`).
+**Gate 2 PASSED 2026-09-13** (`08433fb6`, see "Gate 2 result" below): the design
+change is in, all five of the 35B's GEMM shapes build to byte-equivalent
+xclbins, and the K=512 anomaly is explained and gone. Gate 1 — the switch cost,
+re-measured — is still owed and still decides whether the saving is the size
+this plan claims. Nothing has run on hardware; the harness correctness gate is
+owed too.
 **Spec impact:** one modified requirement, `OPEN-PREFILL-BATCH`. Nothing new,
 nothing removed, no manifest schema change.
 **Detail:** `.claude/plans/gemm-context-collapse.md` in the worktree (the byte
@@ -42,6 +45,39 @@ stream and ordered by a `WorkerRuntimeBarrier`. `designs/attn_block/attn_gemm.py
 turns it on, and the receipt is in the same kernel set: `ag_s256`, `ag_s2048`
 and `ag_pv2048` — spanning K 256→2048 and N 256→2048 — are byte-equivalent
 xclbins. One context already carries 32 instruction streams that way.
+
+## Gate 2 result (2026-09-13, WSL only, no NPU)
+
+All five of the 35B's GEMM shapes built from the runtime-bound design
+(`08433fb6`), then compared pairwise with `xclbin_equivalent`:
+
+```
+gemm_n1024_k2048    199135 B xclbin    13328 B insts
+gemm_n12288_k2048   199135 B          134416 B
+gemm_n9216_k2048    199135 B          101392 B
+gemm_n2048_k4096    199135 B           24336 B
+gemm_n2048_k512     199135 B           24336 B
+
+all 10 pairs: SAME (71-77 bytes differ, all build stamps)
+```
+
+**The K=512 anomaly is explained and gone.** It used to build to 195039 B — 192
+bytes per core smaller than the others, diverging broadly rather than by one
+immediate, and it was the open risk on this plan. A compile-time trip count of 2
+evidently got a different loop form out of the compiler; with the bound in a
+register every K gets the same one, and K=512 now lands on the same 199135 B
+image as the rest. (That common image is 2048 B — 64 per core — *smaller* than
+the old K=2048 one, so nothing was added to pay for this.)
+
+**Where K went is visible in the streams.** Diffing `gemm_n2048_k512` against
+`gemm_n2048_k4096` — same length, 190 differing words of 6084 — the largest
+groups are 32 words reading `2` against `16`, one per core, 12 words apart at
+the head of the stream, plus 64 words of B-tap size and 32 of weight-tap stride.
+K is data now, not code. All five instruction streams are distinct and each is
+2304 B longer than its predecessor: the 32 RTP writes and 32 barrier sets.
+
+**What this does not prove:** that the kernel still computes the right answer.
+That is the harness gate (`rel_fro <= 5e-3` per shape) and it needs the NPU.
 
 Nothing else in `gemm_q4_prefill` depends on K in the static design: the
 accumulator is `[64, 32]` fp32 whatever K is, the weight fifo element is one
@@ -90,9 +126,9 @@ string the manifest gives it (`:161-170`). No new kernel kind, so no
   `contexts.size()` 10 → 8, `files().size()` 61 → 59, and the assertion that
   `gemm_n9216_k2048`, `gemm_n1024_k2048` and `gemm_n2048_k512` all resolve to
   the one `gemm` context.
-- **The no-hardware gate:** all five GEMM builds produce `final.xclbin` files
-  that `xclbin_equivalent` reports as identical apart from build stamps. If any
-  pair does not, a K-dependence remains and the change stops.
+- ~~**The no-hardware gate:**~~ **met.** All five GEMM builds produce
+  `final.xclbin` files that `xclbin_equivalent` reports as identical apart from
+  build stamps (2026-09-13, `08433fb6`).
 - Correctness on hardware: each shape through the harness at
   `rel_fro <= 5e-3`, as `OPEN-PREFILL-BATCH`'s procedure step 2 already
   requires; the 1020-token run's greedy continuation unchanged.
@@ -180,28 +216,23 @@ not part of this plan.
    Commit `43bd6e52` adds those two streams to the bench (built clean, host test
    suite passes; not yet run on the NPU), so the next `--bench 6` closes it.
 
-3. **Why is the K=512 xclbin 192 bytes per core smaller, and diverging broadly
-   rather than by one byte?** `gemm_n2048_k512` is 195039 B against 201183, and
-   unlike the K=2048/K=4096 pair the difference is not a single immediate. At
-   `NBG = 2` the compiler evidently emits a different loop form. Unexplained, and
-   the single most likely reason the equivalence gate fails.
+3. ~~**Why is the K=512 xclbin 192 bytes per core smaller?**~~ **Closed by gate
+   2.** At `NBG = 2` the compiler emitted a different loop form for the
+   compile-time bound; with the bound in a register it emits the same one for
+   every K, and K=512 now builds to the same image as the rest.
 
 ## Order
 
-Three gates. The first two need different resources — one the NPU, one the WSL
-toolchain — so they can run independently once hardware frees up.
-
-1. **The switch cost, re-measured with the interleaved baseline** (NPU).
-   `--bench 6` on `k35v6` as it ships, with `3b86aac4` built in. Is the cost
-   flat at ~2.8 ms or does it scale with what the kernel streams? Both the
-   ~270 ms saving and the 280–350 ms residual rest on it, and the measurement
-   underneath them will not currently support either. **If it scales, this plan
-   needs rewriting before anyone builds a kernel** — and `spec.md` and
-   `prefill-gap.md` need their flat-2.8 claims marked stale.
-2. **The five-build equivalence check** (WSL, no NPU). Hoist the loop bounds to
-   runtime parameters in `designs/gemm_q4_prefill/gemm_q4_prefill.py`, build all
-   five GEMM sets, and check every `final.xclbin` against every other with
-   `xclbin_equivalent`. This retires risk 3.
+1. **The switch cost, re-measured with the interleaved baseline** (NPU, **still
+   owed**). `--bench 8` on `k35v6ws` — the current expert kernel, ~1.15x faster
+   than `k35v6`'s and byte-identical in its streams — with `3b86aac4` built in.
+   Is the cost flat at ~2.8 ms or does it scale with what the kernel streams?
+   Both the ~270 ms saving and the 280–350 ms residual rest on it, and the
+   measurement underneath them will not currently support either. **If it
+   scales, this plan needs rewriting before anyone builds further** — and
+   `spec.md` and `prefill-gap.md` need their flat-2.8 claims marked stale.
+2. ~~**The five-build equivalence check**~~ (WSL, no NPU). **DONE 2026-09-13,
+   passed** — see "Gate 2 result" above. `08433fb6`.
 3. Recipe (`recipes/qwen36moe.py:988`: one `gemm` context), the three test
    files, the fixture regeneration, the spec edit.
 4. Hardware: the harness per shape, then `--bench 6` again for the after number,
