@@ -1394,6 +1394,42 @@ numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
 1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
 patches in 1.02 s (numpy 11.5 s).
 
+### OPEN-VISION-VIT-WINDOWED: Qwen2.5-VL's tower attends inside windows
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit_qwen25.py`; `src/open_qwen36/vision/` once the port lands)
+**Test category:** unit (`tests/test_vision_vit_windowed.py`; the oracle needs torch and skips without it, the window math does not)
+
+Qwen2.5-VL's vision tower shall be reproduced as a numpy fp32 forward. It is not
+the tower OPEN-VISION-VIT-REF covers: most blocks attend only within a square
+window of `window_size / spatial_merge_size / patch_size` merge units, the
+blocks named by `fullatt_block_indexes` attend over the whole image, and the
+tower permutes its merge units so that windows are contiguous, runs the entire
+stack in that order, and restores the original row order after the merger. The
+rotary table is permuted with the tokens. The blocks use RMSNorm, a SwiGLU MLP
+with biases, and split q/k/v/o projections; there is no learned position table
+and the patch embed has no bias.
+
+The reference is checked against transformers' own
+`Qwen2_5_VisionTransformerPretrainedModel`, which builds the weights that the
+reference then reads -- nothing in this repo sits on both sides. The oracle's
+tower is initialised at `initializer_range = 0.4`, because at HF's default the
+residual stream dominates the output and a forward with the windows wrong still
+agrees to 2e-4; a test asserts that the windows-ignored forward fails, so that
+sensitivity cannot regress unnoticed.
+
+**Acceptance criteria:**
+- numpy vs transformers on a random 12 x 10 grid: corr > 0.99999, max error < 1e-4 of max, both with four windowed blocks and with every block full-attention.
+- A forward in which every block attends over the whole image gives corr < 0.9 against the same oracle.
+- `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`.
+- A grid that divides the window size evenly (8 x 8 patches) still pads a whole empty window, which collapses: index `0..15`, boundaries `[0, 64]`.
+- The merger's activation is the exact GELU, `x * Phi(x)` against the standard normal CDF, not the tanh approximation (which the oracle comparison cannot distinguish).
+
+**Result 2026-09-12:** numpy vs transformers corr 1.0000000, rel 6.0e-6; the
+windows-ignored control gives corr 0.646. The C++ port is designed but not
+written, and no Qwen2.5-VL container has been read -- the tensor names and
+layout in `load_weights` come from `utilities/q4nx-build`, and the published
+`vision_weights.q4nx` size does not reconcile with the expected geometry by
+52 MB. `.claude/plans/qwen25vl-windowed-vit.md`.
+
 ### OPEN-VISION-EMBED: the open engine takes an image payload
 **Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
 **Test category:** e2e (`utilities/flm-test --vision --model <vlm>` through `flm serve` with the open engine)
