@@ -1420,3 +1420,118 @@ engine. **The closed-engine comparison did not run**: the closed 1.0.4 DLL
 segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
 so on this box only the open engine can serve these files. Log:
 `.claude/plans/issue-16-hw-results.md`.
+
+### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
+**Test category:** unit (`tests/test_lfm2.py`); the kernel and its hardware run are
+OPEN-SHORT-CONV-KERNEL's
+
+LFM2 is a hybrid: some layers are GQA attention, the rest replace the attention
+block entirely with a three-tap depthwise causal convolution. That makes the
+convolution a LAYER TYPE, not a parameter on an existing one, so `short_conv`
+joins `LAYER_TYPES` beside `linear_attention`, `full_attention`, `dense` and
+`dense_local`. A config whose `model_type` is `lfm2` shall derive a `ModelSpec`
+with `family` `lfm2`, `full_attention` at the indices the config names and
+`short_conv` everywhere else.
+
+Nothing about the convolution is a new `ModelSpec` field. Its width is the
+hidden size on every LFM2 that ships and its tap count is `conv_kernel`, the
+field gated DeltaNet already has; a config where either stops being true is
+refused by name rather than given a field, because `spec_hash()` covers every
+field and a new one would move every shipped model's hash for no kernel change.
+Adding a member to the `layer_types` tuple moves nothing, because no shipped
+spec uses the new value.
+
+The FFN width follows transformers' own rule (`Lfm2Config` lets `block_ff_dim`
+override `intermediate_size`, `Lfm2MLP` then takes two thirds of it and rounds
+up to `block_multiple_of`), not the raw `intermediate_size` key.
+
+The short-conv block's fused input projection and its output projection take
+the `linear` and `linear_out` quant roles a DeltaNet layer already has, so no
+role is added to `QUANT_ROLES`.
+
+`recipes.families.family_module("lfm2")` shall raise `NotImplementedError`
+naming the missing `designs/short_conv` and the unvalidated attention
+geometry, and `lfm2` shall stay out of `FAMILIES`. Routing the family to the
+nearest existing recipe would emit kernels that drop the convolution and then
+report parity against a replica making the same mistake.
+
+**Acceptance criteria:**
+- `model_type: "lfm2"` with LFM2-1.2B's config gives 16 layers, `full_attention` at 2, 5, 8, 10, 12, 14 and `short_conv` at the other ten; hidden 2048, 32 heads over 8 kv heads at head dim 64, full RoPE, `qk_norm` true, no gate, intermediate 8192, `conv_kernel` 3, eps 1e-5.
+- `layer_types: ["conv", "full_attention", ...]` derives the same `spec_hash()` as `full_attn_idxs`; a name the family does not have is refused by name.
+- `conv_dim` or `conv_dim_out` that is not `hidden_size` is refused naming the key; `conv_bias: true` likewise.
+- `block_ff_dim` 12288 gives intermediate 8192, which is what the container's gate / up projections hold; with `block_auto_adjust_ff_dim` false the width is taken as written.
+- Every checked-in spec under `recipes/specs/` hashes to what it hashed before `short_conv` existed, and no key named for the convolution appears in `to_dict()`.
+- `family_module("lfm2")` raises `NotImplementedError` naming `short_conv` and `designs/short_conv`; the dense and qwen35 recipes refuse an lfm2 spec by family.
+- `quant_map_from_chunk_sizes("lfm2", ...)` maps `shortconv.in_proj` to `linear` and `shortconv.out_proj` to `linear_out`; the installed container, all 4-bit, gives an empty map.
+
+**Container, read 2026-09-12** (`LFM2-1.2B-NPU2/model.q4nx`, 149 tensors): ten
+layers hold `shortconv.{in_proj, conv, out_proj}` and six hold
+`self_attn.{q,k,v,o}_proj` plus `q_norm` / `k_norm` at width 64; every layer
+holds `input_layernorm`, `post_attention_layernorm` and the three MLP
+projections. `shortconv.conv.weight` is bf16 `[2048, 3]` -- one row of three
+taps per channel, a depthwise `Conv1d` weight with its singleton input-channel
+axis squeezed out. The embedding is `model.token_embd.weight` (bf16) and the
+head is 4-bit, not q8. All 93 four-bit tensors are the signed quantiser the
+packer transcodes (OPEN-PACK-Q4-0).
+
+### OPEN-SHORT-CONV-REF: the fp64 reference for the short-conv block
+**Applies to:** openflowlm-next (`open_kernels/model/replica_lfm2.py`, `model/lfm2_forward.py`)
+**Test category:** unit (`tests/test_lfm2.py`)
+
+The reference for one token through a short-conv block shall be, in float64:
+
+    h = W_in @ x                             # 3 x hidden rows, in the order [B | C | u]
+    Bx = B * u
+    conv[c] = sum_k state[c, k] * w[c, k]    # state[:, taps-1] is this token's Bx
+    out = W_out @ (C * conv)
+
+with no bias and no normalisation inside the block, and with the conv cache
+holding `Bx` -- the gated product the convolution reduces over -- rather than
+the block input. The newest token pairs with the LAST tap; a transposed weight
+is the one orientation error that still produces plausible numbers, so it is
+asserted directly. An attention layer is the dense recipe's block unchanged and
+goes through `replica_dense.dense_decode`, not a second copy of the same math.
+
+**Acceptance criteria:**
+- Three hand-computed tokens through a two-channel, three-tap block reproduce exactly, output and cache both.
+- The cache after the first token holds `B * u`, not `x` and not `B`.
+- With only the first tap non-zero the first token's output is zero; with only the last tap it is the ungated-conv value.
+- The padded-convolution form over a whole prompt equals the one-token-at-a-time form bit for bit, and appending a token cannot change an earlier output.
+- A conv state of the wrong depth and an `in_proj` that is not three times hidden are refused by name.
+
+**Result 2026-09-12 (LFM2-1.2B, CPU, no NPU):** the whole model runs in fp64
+straight out of the container through `model/lfm2_forward.py` and answers
+coherently -- "What is the capital of France?" gives `The capital of France`
+greedily, with `Paris` second at the first position. A wrong tap order, a wrong
+layer schedule, a wrong `[B | C | u]` split or a misread weight format all
+produce noise here, so this is the offline evidence that the geometry above is
+right. About 30-40 s per token.
+
+### OPEN-SHORT-CONV-KERNEL: the short-conv layer on the NPU
+**Applies to:** openflowlm-next (`open_kernels/designs/short_conv/`, `recipes/lfm2.py`)
+**Test category:** manual (the procedure below; needs the NPU, a Linux kernel build and
+the LFM2 container)
+
+NOT IMPLEMENTED YET. The design, the element accounting and the reasoning are
+in `.claude/plans/lfm2-short-conv.md`; this requirement carries the procedure
+that will verify it, so the verification is fixed before the kernel is written
+rather than after.
+
+What the engine needs is only data: `manifest.cpp` looks a layer's type up by
+NAME (`layer_types.at(layers[layer])`) and a fixed-size state buffer is already
+the `"linear"` state kind, so a short-conv layer type and its 16 KB conv state
+need no C++ change. The whole gap is one design directory and one recipe
+module.
+
+**Verification procedure (manual):**
+1. Build the kernels in WSL with `PATH=~/xrt-tools/bin` and `LD_LIBRARY_PATH=~/xrt-tools/lib`: `OPEN_KERNELS_SPEC=<lfm2 spec> python build_design.py designs/short_conv/cx.py designs/short_conv/build_lfm2_cx_h2048`, and the attention layer's `dx`-style build beside it.
+2. `python -m recipes.manifest --model-dir <LFM2 dir> --out manifest.json`; check `layers` names the two types where the config's `full_attn_idxs` says, and that `layer_types.short_conv.buffers.state` is `{"kind": "linear", "bytes": 16384}`.
+3. Pack and run a slice: `open_kernels/model/make_decode.py --model-dir <dir> --layers 2` (one short-conv layer then one attention layer) against `open_kernels/model/lfm2_forward.py --layers 2`. The conv layer alone is the first thing to look at: a tap-order error shows as a residual that is right at position 0 and wrong from position 1.
+4. Whole model, position 0 and positions 1-3: logits corr against `lfm2_forward.py`, argmax and top-5 identical. The bar the other families cleared is corr > 0.9999 with identical argmax.
+5. `utilities/flm-test --llm --model lfm2:1.2b` through `flm serve`, plus a coherence read of the answer.
+6. Only then add `(64, 32, 8, 64, True, False, False, False)` to the `attn` combination set and the short-conv points to `catalogue.py`, with the date and this requirement's name.
+
+**Acceptance criteria:**
+- Steps 3 and 4 pass at the bar above, on the container at `LFM2-1.2B-NPU2`.
+- Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.

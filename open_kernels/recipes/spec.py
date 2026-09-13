@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
-LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL)      # dense_local: a dense layer with sliding-window attention
+SHORT_CONV = "short_conv"                             # LFM2: a short depthwise causal conv INSTEAD of attention
+LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a dense layer with sliding-window attention
+# Adding a member here is free: `layer_types` is one field and no shipped spec uses the new
+# value, so no hash moves. Adding a dataclass FIELD is not - spec_hash() covers every field.
 
 # ---- the per-role weight format (OPEN-QUANT-Q8). A container stores each tensor at
 # q4_1 (5120-byte chunks) or q8 (8704), and which of the two a projection is decides
@@ -111,6 +114,10 @@ class ModelSpec:
     @property
     def has_local(self) -> bool:
         return DENSE_LOCAL in self.layer_types
+
+    @property
+    def has_short_conv(self) -> bool:
+        return SHORT_CONV in self.layer_types
 
     # ---- the weight format, per role
     @property
@@ -489,6 +496,91 @@ def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         attn_gate=False,
         intermediate=_need(cfg, "intermediate_size"),
         norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+_LFM2_LAYER_NAMES = {"conv": SHORT_CONV, SHORT_CONV: SHORT_CONV, FULL: FULL}
+
+
+def _lfm2_layer_types(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
+    """LFM2 says which layers keep attention one of two ways: `layer_types`, the list
+    `Lfm2Config` builds ("conv" / "full_attention"), or `full_attn_idxs`, the index list the
+    container ships. Either way the rest are short-conv layers."""
+    if "layer_types" in cfg:
+        lt = list(cfg["layer_types"])
+        if len(lt) != n:
+            raise SpecError(f"layer_types has {len(lt)} entries, num_hidden_layers is {n}")
+        bad = sorted({t for t in lt if t not in _LFM2_LAYER_NAMES})
+        if bad:
+            raise SpecError(f"lfm2: layer_types: {bad} is not a layer type this family has "
+                            f"(have {sorted(_LFM2_LAYER_NAMES)})")
+        return tuple(_LFM2_LAYER_NAMES[t] for t in lt)
+    idxs = set(_need(cfg, "full_attn_idxs"))
+    return tuple(FULL if l in idxs else SHORT_CONV for l in range(n))
+
+
+def _lfm2_ff_dim(cfg: Mapping[str, Any]) -> int:
+    """The FFN width, by transformers' own rule: `block_ff_dim` overrides `intermediate_size`
+    (`Lfm2Config.__post_init__`), then `Lfm2MLP` takes two thirds of it, applies the
+    multiplier and rounds up to `block_multiple_of`. The 1.2B's 12288 lands on 8192, which is
+    what its gate / up projections hold -- reading `intermediate_size` raw would have worked
+    here by luck and given 5632 on a container that ships only the unadjusted width."""
+    ff = int(cfg["block_ff_dim"] if "block_ff_dim" in cfg else _need(cfg, "intermediate_size"))
+    if not cfg.get("block_auto_adjust_ff_dim", True):
+        return ff
+    ff = int(2 * ff / 3)
+    mult = cfg.get("block_ffn_dim_multiplier")
+    if mult is not None:
+        ff = int(mult * ff)
+    m = int(cfg.get("block_multiple_of", 256))
+    return m * ((ff + m - 1) // m)
+
+
+def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """LFM2: a hybrid where the layers that are not attention run a short depthwise causal
+    convolution instead. Attention is GQA with q/k RMSNorm over the head, full RoPE and no
+    gate -- the dense recipe's shape -- and every layer carries the same silu-gated FFN.
+
+    The conv is `conv_L_cache` taps wide over `conv_dim` channels, and `conv_dim` is the
+    hidden size on every LFM2 that ships, so it rides on `hidden` and `conv_kernel` (the
+    field DeltaNet already has) rather than on a new field that would move every shipped
+    model's hash. A config where that stops being true is refused by name."""
+    n = _need(cfg, "num_hidden_layers")
+    hidden = _need(cfg, "hidden_size")
+    heads = _need(cfg, "num_attention_heads")
+    hd = cfg.get("head_dim") or (hidden // heads if hidden % heads == 0 else None)
+    if hd is None:
+        raise SpecError(f"lfm2: no head_dim in config.json and hidden_size {hidden} is not a "
+                        f"multiple of num_attention_heads {heads}")
+    for key in ("conv_dim", "conv_dim_out"):
+        w = cfg.get(key, hidden)
+        if w != hidden:
+            raise SpecError(f"lfm2: {key} {w} is not hidden_size {hidden}; the short conv is "
+                            f"hidden-wide on every LFM2 that ships and ModelSpec has no "
+                            f"separate conv width")
+    if cfg.get("conv_bias"):
+        raise SpecError("lfm2: conv_bias is set; the short-conv block this recipe implements "
+                        "has no bias (no LFM2 container ships one)")
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="lfm2",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=_lfm2_layer_types(cfg, n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(cfg, "rope_theta")),
+        qk_norm=True,
+        attn_gate=False,
+        conv_kernel=int(cfg.get("conv_L_cache", 3)),
+        intermediate=_lfm2_ff_dim(cfg),
+        norm_eps=float(cfg.get("norm_eps", cfg.get("rms_norm_eps", 1e-5))),
         quant="q4_1",
         extra={"model_type": cfg["model_type"], "source": "hf_config"},
     )
@@ -1135,7 +1227,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
-               "granite": _granite_hf, "phi3": _phi3_hf}
+               "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
@@ -1143,7 +1235,8 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
-              _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3"}
+              _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
+              _lfm2_hf: "lfm2"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1174,6 +1267,12 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
     "qwen36moe": {**_ATTN_HF, **_LIN_HF, **_MOE_HF},
     "qwen35": {**_ATTN_HF, **_LIN_HF, **_FFN_HF},
 }
+# LFM2's short-conv block has the same two roles a DeltaNet layer does -- a fused input
+# projection and an output projection -- so it reuses them rather than adding roles that
+# would appear in every family's quant map.
+ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
+                        "shortconv.in_proj.weight": "linear",
+                        "shortconv.out_proj.weight": "linear_out"}
 for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 
