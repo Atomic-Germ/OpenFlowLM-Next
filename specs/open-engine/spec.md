@@ -2170,11 +2170,14 @@ before the fix the same suite reported `Total images: 1`, failed text extraction
 passed the spectrogram check on a spectrogram the model had invented. The extracted
 text is "The capital of France is Paris...", which is what `paris.png` says.
 
-**Blast radius.** `ImageReader` is shared, so this changes what `modeling_gemma3`,
-`gemma4e`, `gemma4_12b`, `qwen2vl`, `qwen3vl`, `qwen3_5vl`, `qwen3_5_omni` and
-`qwen3_6_moe` do with a PNG, on the closed engine as well as the open one: they
-prefill image rows where they used to prefill nothing. No kernel, manifest, xclbin
-or spec hash moves.
+**Blast radius, and it is checked, not asserted.** `ImageReader` is shared, so this
+changes what `modeling_gemma3`, `gemma4e`, `gemma4_12b`, `qwen2vl`, `qwen3vl`,
+`qwen3_5vl`, `qwen3_5_omni` and `qwen3_6_moe` do with a PNG, on the closed engine as
+well as the open one: they prefill image rows where they used to prefill nothing. The
+CLOSED engine was run on Qwen3-VL-4B to confirm it benefits too -- `Total images: 3`,
+no `Skipping image that failed to load`, and all three `--vision` rounds pass, where
+the same binary before the fix failed text extraction and the model answered "you have
+only provided one image". No kernel, manifest, xclbin or spec hash moves.
 
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
