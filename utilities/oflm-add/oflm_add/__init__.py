@@ -125,28 +125,36 @@ def save_json(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def find_system_model_list():
-    exe = shutil.which("oflm")
-    candidates = []
-    if exe:
-        candidates.append(Path(exe).parent / "model_list.json")
+def _engine_dirs():
+    """Directories holding an installed engine. The release installs as `flm`;
+    `oflm` is a checkout build, so it goes first where both are on PATH."""
+    return [Path(exe).parent for exe in (shutil.which(n) for n in ("oflm", "flm")) if exe]
+
+
+def find_system_model_list(explicit=None):
+    if explicit:
+        p = Path(explicit)
+        if not p.is_file():
+            raise SystemExit(f"--system-list {p} is not a file")
+        return p
+    candidates = [d / "model_list.json" for d in _engine_dirs()]
     candidates += [Path(p) for p in SYSTEM_LIST_CANDIDATES]
     for c in candidates:
         if c.is_file():
             return c
+    tried = "\n  ".join(str(c) for c in candidates) or "(nowhere - no engine on PATH)"
     raise SystemExit(
-        "Could not locate the system model_list.json (looked next to `oflm` and in "
-        "/opt,/usr,/usr/local share/oflm). Pass --system-list."
+        "Could not locate the system model_list.json. Tried:\n  " + tried +
+        "\nPass --system-list with the path to it."
     )
 
 
 def find_system_xclbin_root():
     """Directory whose <root>/xclbins/ holds the per-model kernel folders."""
-    exe = shutil.which("oflm")
     candidates = []
-    if exe:
-        candidates.append(Path(exe).parent)
-        candidates.append((Path(exe).parent / ".." / "share" / "oflm").resolve())
+    for d in _engine_dirs():
+        candidates.append(d)
+        candidates.append((d / ".." / "share" / "oflm").resolve())
     candidates += SYSTEM_XCLBIN_PREFIXES
     for c in candidates:
         if (c / "xclbins").is_dir():
@@ -853,7 +861,7 @@ def main():
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
 
-    system_list = find_system_model_list()
+    system_list = find_system_model_list(args.system_list)
     system_registry = load_json(system_list)
     user_list = user_registry_path(args.config)
     models_root = models_root_dir(args.models_root)
