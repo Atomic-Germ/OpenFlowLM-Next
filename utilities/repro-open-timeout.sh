@@ -74,13 +74,27 @@ done
 say "engine: $(grep -i 'open kernels' "$OUT/serve.log" | head -1)"
 
 fails=0
+ran=0
 for i in $(seq 1 "$N"); do
+    # The server does not always survive a rebuild - one run here completed the
+    # rebuild and then exited. Without this check the attempts that follow get
+    # connection refused in five seconds and score as passes, which turns a dead
+    # server into a clean bill of health.
+    if ! kill -0 $SRV 2>/dev/null; then
+        say "attempt $i: SERVER GONE - not counting this or anything after it"
+        break
+    fi
     before=$(grep -c "request failed" "$OUT/serve.log" 2>/dev/null || true)
     t0=$(date +%s)
     ( cd "$REPO/utilities/oflm-test" && timeout "$CLIENT_DEADLINE" \
         env PYTHONIOENCODING=utf-8 python "$OUT/client.py" "$TAG" ) > "$OUT/run_$i.log" 2>&1
     t1=$(date +%s)
     after=$(grep -c "request failed" "$OUT/serve.log" 2>/dev/null || true)
+    if grep -q "No connection could be made\|Connection refused" "$OUT/run_$i.log" 2>/dev/null; then
+        say "attempt $i: SERVER UNREACHABLE after $((t1 - t0))s - not counted"
+        break
+    fi
+    ran=$((ran + 1))
     if [ "${after:-0}" -gt "${before:-0}" ]; then
         fails=$((fails + 1))
         say "attempt $i: FAIL after $((t1 - t0))s"
@@ -91,7 +105,8 @@ for i in $(seq 1 "$N"); do
 done
 
 say "----"
-say "$fails of $N attempts hit it"
+say "$fails of $ran attempts that actually ran hit it (of $N asked for)"
+kill -0 $SRV 2>/dev/null || say "the server is NOT running at the end of this run"
 say "failing dispatches:"
 grep -o "kernel [a-z_]* at position [0-9]*" "$OUT/serve.log" | sort | uniq -c | sed 's/^/    /' \
     | tee -a "$OUT/summary.txt"
