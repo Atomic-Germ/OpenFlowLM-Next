@@ -1486,9 +1486,9 @@ derivation shall read them as they are meant:
   `moe_intermediate` and `intermediate` stays 0.
 - `hidden_act` says `silu` and is wrong about it. The experts compute
   `(up + 1) * gate * sigmoid(1.702 * gate)` with `gate` clipped above at 7 and `up` clipped
-  both ways, and `gate` and `up` interleaved down the expert's rows rather than split in
-  half. The spec records `activation == "clamped_swiglu"`; 1.702 and 7.0 are family
-  constants, not fields.
+  both ways, and -- in HF's own safetensors -- `gate` and `up` interleaved down the expert's
+  rows rather than split in half. The spec records `activation == "clamped_swiglu"`; 1.702
+  and 7.0 are family constants, not fields, and OPEN-GPTOSS-FFN-REF is the arithmetic.
 
 GPT-OSS's `full_attention` is a plain dense layer and shall map to `dense`, NOT to the
 spec's `full_attention` layer type -- that one is the full half of Qwen3.6's linear/full
@@ -1523,17 +1523,83 @@ OPEN-PACK-Q4-0 went unnoticed.
 - `quant_map_from_chunk_sizes("gptoss", ...)` reads the tensor names `q4nx-build` writes
   (`configs/gpt-oss.json`) and refuses a role at two formats.
 
+**The widths, before any of that.** Hidden 2880 is 45 bands of 64 and shares no factor above
+1 with the q width's 64 bands or the kv width's 8, so `dense.cores_for` gives GPT-OSS 20B a
+single core -- not the four Gemma 3 12B's 3840 gets, which measured nearly free, but an
+eighth of the array. Padding hidden and the expert width to 3072 gives 8, and the same pad
+makes the q4_1 chunk's 256 columns tile (2880 is 11.25 of them). No recipe derives a padded
+width today, and nothing below matters until one does.
+
 **What a recipe would still need** (not requirements yet; each earns its own when it is
-built): the sink (OPEN-ATTN-SINK), the clamped SwiGLU experts, a bias on `o_proj`, on the
-router and on all three expert projections -- OPEN-ATTN-QKV-BIAS covers none of those -- an
-MoE FFN on sliding-window layers, which no recipe composes today, and YaRN position tables in
-the engine.
+built): the padded widths above, the sink in the attention core (OPEN-ATTN-SINK), a
+clamped-SwiGLU expert kernel and room for the three expert biases and the router's, a bias on
+`o_proj` -- which OPEN-ATTN-QKV-BIAS explicitly excludes -- an MoE FFN on sliding-window
+layers, which no recipe composes today, and YaRN position tables in the engine. The
+arithmetic for all of it is settled and tested (OPEN-GPTOSS-FFN-REF); what is left is
+kernels. `.claude/plans/gptoss-moe-and-biases.md` has the element and stream accounting.
+
+### OPEN-GPTOSS-FFN-REF: the fp64 reference for GPT-OSS's experts, router and sink attention
+**Applies to:** openflowlm-next (`open_kernels/model/replica_gptoss.py`)
+**Test category:** unit (`tests/test_gptoss_ffn.py`; the transformers comparisons skip
+without torch)
+
+`replica_gptoss` is the oracle for the four things GPT-OSS does that no family in this tree
+does, and it shall agree with transformers' own modules rather than with anything of ours --
+the fp64 replica and the kernels read weights through the same dequantiser, so they can agree
+perfectly while both being wrong, which is how OPEN-PACK-Q4-0 hid for two sessions.
+
+**The clamped SwiGLU.** `clamped_swiglu(gate, up)` is `(up + 1) * gate * sigmoid(1.702 *
+gate)` with `gate` clipped above at 7 and `up` clipped both ways. The asymmetry is
+deliberate: a very negative gate still shuts the channel, where a symmetric clamp would floor
+it at -7 and leak. `1.702` and `7.0` are family constants.
+
+**The fused row order.** HF stores one `gate_up_proj` per expert with gate at the even output
+rows and up at the odd. `split_gate_up` / `fuse_gate_up` are that rule, and they run down a
+named axis so a packer holding `[experts, 2 * moe_intermediate, hidden]` can use them. A GGUF
+source has the split done already -- `q4nx-build/configs/gpt-oss.json` maps `ffn_gate_exps`
+and `ffn_up_exps` as separate tensors -- so which side does the de-interleave depends on the
+source, and the reference works from the split pair either way.
+
+**The biases.** `expert_ffn` carries one on each of gate, up and down; `route` carries one on
+the router. `gptoss_layer_step` carries one on `o_proj` as well, which OPEN-ATTN-QKV-BIAS
+explicitly excludes.
+
+**Sink attention, windowed.** `sink_attention` is the GQA loop around
+`replica_dense.sink_softmax`, cut to the window `window_start` gives. HF's sliding rule is
+`kv_idx > q_idx - sliding_window`, so a 128-row window admits 128 rows including this token.
+
+**Acceptance criteria:**
+- `clamped_swiglu` equals `GptOssExperts._apply_gate` on the fused row order; the clamps are
+  asymmetric; an `up` of -1 zeroes the channel and an `up` of 0 passes the gate through;
+  `alpha` and `limit` equal transformers' own.
+- `split_gate_up` takes the even entries as gate down any axis, and `fuse_gate_up` inverts it;
+  a mismatched pair is refused.
+- `expert_ffn` from a split pair equals one transformers expert computed from the fused
+  tensor; each of the three biases moves the output.
+- `route` picks the same experts and the same weights as `GptOssTopKRouter`, including the
+  tie-break; softmaxing the top-k equals renormalising the full softmax, which is why the
+  existing router core's shape still fits.
+- `moe_block` equals `GptOssMLP`; forcing the expert choice keeps the reference's own
+  weights and follows the forced order.
+- `sink_attention` equals `eager_attention_forward` with the same sinks; a sink far below
+  every score gives plain GQA attention; a positive sink scales every channel of the head by
+  one factor strictly between 0 and 1; the window agrees with
+  `sliding_window_causal_mask_function`.
+- `cores_for` on gpt-oss-20b's own widths is 1, and 8 once hidden and the expert width are
+  padded to 3072.
+- Six decode steps through `gptoss_layer_step` land within 1e-5 of the last token of
+  `GptOssDecoderLayer`'s own sequence forward, on a sliding layer with YaRN cos/sin. Zeroing
+  the sinks, the o_proj bias, the router bias or any expert bias moves it by more than 1e-3
+  of the answer, so the tolerance discriminates. Giving `GptOssRMSNorm` an fp64 variance --
+  it computes in fp32 whatever the parameter dtype -- closes the gap to 1e-12, which is what
+  says the 1e-5 is transformers' rounding and not a missing piece.
 
 ### OPEN-ATTN-SINK: a learned per-head attention sink logit
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`,
-`model/replica_dense.py`)
-**Test category:** unit (`tests/test_attn_sink.py`) for the math and the guard; manual (the
-procedure below, needs the NPU and a GPT-OSS container) for the numbers
+`model/replica_dense.py`, `model/replica_gptoss.py`)
+**Test category:** unit (`tests/test_attn_sink.py`, `tests/test_gptoss_ffn.py`) for the math
+and the guard; manual (the procedure below, needs the NPU and a GPT-OSS container) for the
+numbers
 
 A family with attention sinks carries one learned scalar per head per layer that joins the
 softmax denominator and has no value vector behind it, so the head's output weights sum to
@@ -1581,6 +1647,9 @@ use -- an unused parameter changes the generated code.
 - `4 * HD + 2 * NH <= E_A` decides whether the sinks fit the meta element, equivalently
   `NH <= HD * (KVH - 2)`; GPT-OSS 20B's `(64, 8, 64)` gives 384 bytes of a 1024-byte element,
   and `attn.h` asserts the same inequality at compile time.
+- `replica_gptoss.sink_attention` puts the GQA loop around it and equals
+  `eager_attention_forward` given the same sinks; cutting it to a sliding window equals
+  running it over the window's rows alone (OPEN-GPTOSS-FFN-REF).
 
 **Procedure (manual) -- NOT RUN:**
 1. Compile `designs/attn/*.cc` for a shipped family's flags from the tree before and after
