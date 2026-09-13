@@ -875,7 +875,10 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     # owed tokens and patches the slots' expert offsets (moebatch). A set without it runs the
     # routed experts on mx, one token at a time.
     E = spec.num_experts
-    mb_slots = [s for s in dict.fromkeys((E, E // 2, 32, 8)) if s % 8 == 0 and 0 < s <= E]
+    # A binary ladder down from E. The driver takes the shortest stream that holds what is
+    # left, so the rungs decide the padding: a 256-token block leaves ~306 visits a layer,
+    # which without a 64 rounds up to 256 + 128 and streams 78 experts nobody asked for.
+    mb_slots = [s for s in (E >> i for i in range(30)) if s >= 8 and s % 8 == 0]
     mb_args = ["pool", "mb_x", "mb_h", "mb_y"]
     check_buffer_args("moe_batch", mb_args)
     moe_batch = {"kernels": {str(s): f"mb_s{s}" for s in mb_slots}, "args": mb_args, "nt": MB_NT}

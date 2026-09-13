@@ -95,12 +95,14 @@ def test_the_route_names_the_token_batched_expert_streams():
     m = manifest(default_spec())
     for lt in (LINEAR, FULL):
         mb = m["layer_types"][lt]["gemm_block"]["moe_batch"]
-        # one stream per dispatch length, the shortest that holds the experts still owed tokens is run
-        assert mb == {"kernels": {"256": "mb_s256", "128": "mb_s128", "32": "mb_s32", "8": "mb_s8"},
+        # one stream per dispatch length, the shortest that holds the experts still owed tokens is
+        # run, so the ladder is binary down from the expert count and the padding stays small
+        assert mb == {"kernels": {"256": "mb_s256", "128": "mb_s128", "64": "mb_s64", "32": "mb_s32",
+                                  "16": "mb_s16", "8": "mb_s8"},
                       "args": ["pool", "mb_x", "mb_h", "mb_y"], "nt": 8}
-    # all four streams on one xclbin (the core program does not depend on the slot count)
+    # every stream on one xclbin (the core program does not depend on the slot count)
     assert m["contexts"]["mb"] == "mb_s256/final.xclbin"
-    for s in (256, 128, 32, 8):
+    for s in (256, 128, 64, 32, 16, 8):
         assert m["kernels"][f"mb_s{s}"] == {"context": "mb", "insts": f"mb_s{s}/insts.bin", "patch": "moebatch",
                                             "build": f"mb_s{s}"}
         b = m["builds"][f"mb_s{s}"]
