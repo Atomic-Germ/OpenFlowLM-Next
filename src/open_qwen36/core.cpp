@@ -3,6 +3,7 @@
 #include "open_qwen36/core.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -369,6 +370,13 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
 
 double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
     auto t0 = std::chrono::steady_clock::now();
+    // How long the HOST sat between the previous dispatch returning and this one
+    // starting. If the timeout only ever follows a long gap, the trigger is idleness
+    // rather than anything about the dispatch itself.
+    const double gap_ms = last_done_.time_since_epoch().count()
+                              ? std::chrono::duration<double, std::milli>(t0 - last_done_).count()
+                              : -1.0;
+    ++dispatches_;
     xrt::run r(*k.k);
     r.set_arg(0, kOpcode);
     r.set_arg(1, *k.instr);
@@ -377,10 +385,37 @@ double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
     for (const auto& a : args) r.set_arg(i++, buffer(a, layer));
     r.start();
     auto st = cfg_.timeout_ms ? r.wait(std::chrono::milliseconds(cfg_.timeout_ms)) : r.wait();
-    if (st != ERT_CMD_STATE_COMPLETED)
-        throw std::runtime_error("open_qwen36: kernel " + k.name + " at position " + std::to_string(pos_) +
-                                 " ended in ERT state " + std::to_string(static_cast<int>(st)) +
-                                 (st == ERT_CMD_STATE_TIMEOUT ? " (timeout)" : ""));
+    if (st != ERT_CMD_STATE_COMPLETED) {
+        // Is the command hung, or merely late? Throwing here has always thrown that
+        // question away with it. Wait again - OFLM_OPEN_TIMEOUT_RETRY_MS, default the
+        // same again - and say which it was. A command that completes on the second wait
+        // is a scheduling problem; one that never completes is the hardware.
+        unsigned extra = cfg_.timeout_ms;
+        if (const char* e = std::getenv("OFLM_OPEN_TIMEOUT_RETRY_MS")) extra = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+        std::fprintf(stderr,
+                     "open_qwen36: %s layer %d at position %d: ERT state %d after %.0f ms "
+                     "(dispatch #%llu, %.0f ms host gap before it)\n",
+                     k.name.c_str(), layer, pos_, static_cast<int>(st), ms_since(t0),
+                     static_cast<unsigned long long>(dispatches_), gap_ms);
+        std::fflush(stderr);
+        if (extra) {
+            auto st2 = r.wait(std::chrono::milliseconds(extra));
+            std::fprintf(stderr, "open_qwen36:   waited %u ms more: ERT state %d%s\n", extra,
+                         static_cast<int>(st2),
+                         st2 == ERT_CMD_STATE_COMPLETED ? " - it was LATE, not hung" : " - still not done");
+            std::fflush(stderr);
+            if (st2 == ERT_CMD_STATE_COMPLETED) {
+                last_done_ = std::chrono::steady_clock::now();
+                return ms_since(t0);
+            }
+        }
+        throw std::runtime_error("open_qwen36: kernel " + k.name + " layer " + std::to_string(layer) +
+                                 " at position " + std::to_string(pos_) + " ended in ERT state " +
+                                 std::to_string(static_cast<int>(st)) +
+                                 (st == ERT_CMD_STATE_TIMEOUT ? " (timeout)" : "") + ", dispatch #" +
+                                 std::to_string(dispatches_));
+    }
+    last_done_ = std::chrono::steady_clock::now();
     return ms_since(t0);
 }
 
