@@ -91,11 +91,6 @@ static void test_status_for() {
     std::printf("\n-- status_for --\n");
 
     eqi(status_for(json{{"choices", json::array()}}), 200, "a normal response keeps its status");
-    // THE ROW THAT ASSERTED THE BUG. It read 200 with the comment "a non-object
-    // 'error' is not an error body", which is false: 22 catch blocks in
-    // rest_handler.cpp emit exactly {"error": e.what()}. The rule and this test
-    // were written together, and both covered error OBJECTS while the server was
-    // emitting error BODIES.
     eqi(status_for(json{{"error", "a bare string"}}), 500,
         "a flat {\"error\": \"...\"} is 500 -- the shape the catch blocks use");
     eqi(status_for(json{{"error", "Max length reached"}}), 500,
@@ -114,7 +109,7 @@ static void test_status_for() {
         400, "string code + invalid_request_error -> 400");
     eqi(status_for(json{{"error", {{"type", "server_error"}, {"code", "model_load_failed"}}}}),
         500, "string code + server_error -> 500");
-    // The body /v1/* and /api/* now answer for a body that will not parse: 400,
+    // The body /v1/* and /api/* answer for a body that will not parse: 400,
     // OpenAI-shaped, same type the other invalid_request paths carry.
     const json bad_json = {{"error", {
         {"message", "Request body is not valid JSON."},
@@ -131,9 +126,6 @@ static void test_status_for() {
     eqi(status_for(json{{"error", {{"message", "no type, no code"}}}}), 500,
         "an error object with neither is still not a success");
 
-    // The property that matters more than any single row -- stated over error
-    // BODIES, not error objects. The narrower version passed while the flat shape
-    // sailed through at 200.
     const nlohmann::json bodies[] = {
         json{{"error", {{"code", 500}}}},
         json{{"error", {{"type", "server_error"}}}},
