@@ -120,7 +120,7 @@ void dnx_delta(float *__restrict ds) {
 ''',
     "dnx_row.cc": '''#include "dnx.h"
 extern "C" {
-void dnx_row(const float *__restrict S, float *__restrict ds, float *__restrict ye, int32_t blk, int32_t j) {
+void dnx_row(float *__restrict S, float *__restrict ds, float *__restrict ye, int32_t blk, int32_t j) {
   dnx_row_half(S, ds, ye, (unsigned)blk, (unsigned)(j >> 1), (unsigned)(j & 1));
 }
 }
@@ -346,6 +346,8 @@ void moe_silu32(const float *__restrict ms, float *__restrict h) {{
 ''',
         "moe_accfin.cc": f'''// slot < {ne}:  acc = (slot == 0 ? 0 : acc) + w[slot] * yd     (the routed weight, rw[8 + slot])
 // slot == {ne}: acc = xres + acc + sigmoid(xm . sgw) * yd        (the shared expert, rw[0]) = the block output
+// slot < 0:  acc = xres + acc                                    (the same close for a stream whose
+//            shared expert ran on the host and is already in xres -- mx.py)
 // ms: rw @0, xr @{C.MS_XR}, acc @{C.MS_ACC}, yd @{C.MS_YD}. No scalar float ops (soft-float library).
 #include "vecmath.h"
 
@@ -356,23 +358,26 @@ void moe_accfin(float *__restrict ms, int32_t slot) {{
   const float *__restrict xr = ms + {C.MS_XR};
   float *__restrict acc = ms + {C.MS_ACC};
   const float *__restrict y = ms + {C.MS_YD};
+  const bool close = slot < 0;
   const bool shared = slot >= {ne};
   v32b wh, wl;
-  split32(aie::broadcast<float, 32>(shared ? rw[0] : rw[8 + slot]), wh, wl);
+  split32(aie::broadcast<float, 32>(shared ? rw[0] : (close ? 0.f : rw[8 + slot])), wh, wl);
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < {C.ROWS_PC}; j += 32) {{
     accf32 a;
-    if (shared)
+    if (shared || close)
       a.from_vector(fadd32(aie::load_v<32>(xr + j), aie::load_v<32>(acc + j)));
     else if (slot == 0)
       a = aie::zeros<accfloat, 32>();
     else
       a.from_vector(aie::load_v<32>(acc + j));
-    v32b yh, yl;
-    split32(aie::load_v<32>(y + j), yh, yl);
-    a = aie::mac(a, yh, wh);
-    a = aie::mac(a, yh, wl);
-    a = aie::mac(a, yl, wh);
+    if (!close) {{
+      v32b yh, yl;
+      split32(aie::load_v<32>(y + j), yh, yl);
+      a = aie::mac(a, yh, wh);
+      a = aie::mac(a, yh, wl);
+      a = aie::mac(a, yl, wh);
+    }}
     aie::store_v(acc + j, a.template to_vector<float>());
   }}
 }}

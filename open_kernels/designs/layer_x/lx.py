@@ -382,12 +382,14 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             tg_s.finish()
             if STOP == 1:
                 pw.finish()
+                px.finish()
                 return
             # 4. DeltaNet on the main cores: S in place, o -> act[A_O]
             X.dn_sequence(pw, py, a_state, a_act, w_prods, y_conss, A_BYTES, A_VEC, A_O, STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES)
             py.finish()                                      # o is in DDR
             if STOP == 2:
                 pw.finish()
+                px.finish()
                 return
             # 5. post: og -> act[A_OG] (z from act, o from DeltaNet)
             pipe = Pipeline(3)

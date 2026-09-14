@@ -302,6 +302,7 @@ if(NOT OFLM_USE_HRX)
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/vision/vit.cpp")
 endif()
@@ -516,7 +517,13 @@ if(NOT OFLM_USE_HRX)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(oflm PUBLIC OpenMP::OpenMP_CXX)
     endif()
-
+    # The block prefill's host stages (open_qwen36/block_host.cpp) are written for the
+    # vectoriser; the same per-source flag the open embedding sources carry.
+    if(MSVC)
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+    endif()
 endif()
 
 if(WIN32)
