@@ -45,7 +45,7 @@ oflm run medgemma1.5:4b
 
 📺 Demo Video
 
-- [MedGemma:4B (Multimodal) on AMD Ryzen™ AI NPU — Demo Video](https://www.youtube.com/watch?v=KWzXZEOcgK4&list=PLf87s9UUZrJoDdz639Yc6w1UTyJ4cFHZ1&index=5&ab_channel=OpenFlowLM)  
+- [MedGemma:4B (Multimodal) on AMD Ryzen™ AI NPU -- Demo Video](https://www.youtube.com/watch?v=KWzXZEOcgK4&list=PLf87s9UUZrJoDdz639Yc6w1UTyJ4cFHZ1&index=5&ab_channel=OpenFlowLM)  
 - Prompts & images in the demo are from the [official paper (pp.12–13)](https://arxiv.org/abs/2507.05201)  
 - [Model page](https://deepmind.google/models/gemma/medgemma/)  
 
@@ -60,8 +60,8 @@ Always consult a licensed medical professional for healthcare decisions.
 
 🔐 **Why They Matter**
 
-- **Privacy First** — There is nothing more personal than your health!  
-- **Powered by NPU** — Leverages AMD Ryzen™ AI NPU for fast, low-power inference.  
-- **Healthcare Applications** — A concrete example of how local LLMs + NPUs enable privacy-preserving, research-driven healthcare workflows.
+- **Privacy First** -- There is nothing more personal than your health!  
+- **Powered by NPU** -- Leverages AMD Ryzen™ AI NPU for fast, low-power inference.  
+- **Healthcare Applications** -- A concrete example of how local LLMs + NPUs enable privacy-preserving, research-driven healthcare workflows.
 
 ---

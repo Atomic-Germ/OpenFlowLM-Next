@@ -43,12 +43,12 @@ The goal is to cleanly integrate this into the upstream OpenFlowLM repo, replaci
   - src/open_embedding/npu_matmul.cpp
 
 - Modify:
-  - src/include/AutoEmbeddingModel/auto_embedding_model.hpp — simplify to remove Q4NX dependency and embedding_model polymorphism
-  - src/include/AutoEmbeddingModel/all_embedding_model.hpp — remove factory switching, always instantiate OpenGemma_Embedding
-  - src/common/AutoEmbeddingModel/auto_embedding_model.cpp — simplify _shared_load_model() to use Engine directly
+  - src/include/AutoEmbeddingModel/auto_embedding_model.hpp -- simplify to remove Q4NX dependency and embedding_model polymorphism
+  - src/include/AutoEmbeddingModel/all_embedding_model.hpp -- remove factory switching, always instantiate OpenGemma_Embedding
+  - src/common/AutoEmbeddingModel/auto_embedding_model.cpp -- simplify _shared_load_model() to use Engine directly
 
 - Add (new adapter class):
-  - src/include/AutoEmbeddingModel/open_gemma_embedding.hpp — the OpenGemma_Embedding class wrapping open_embedding::Engine
+  - src/include/AutoEmbeddingModel/open_gemma_embedding.hpp -- the OpenGemma_Embedding class wrapping open_embedding::Engine
 
 
 #### 1.2 Class Hierarchy Simplification
@@ -123,7 +123,7 @@ The 24 NPU matmul artifacts (6 shapes x 2 pads x 2 files) need a home:
 - Option A: Bundle into the model directory under npu_matmul_f32/ (current pattern)
 - Option B: Shared location under xclbins/ alongside the closed xclbins
 
-Recommendation: Option A — keep them in the model directory. This is self-contained and matches how oflm-add installs embedding models. The closed xclbins/Embedding-Gemma-300M-NPU2/ directory (containing attn_full_mask.xclbin, mm.xclbin, mv.xclbin, sliding_attn.xclbin) becomes dead code and can be removed.
+Recommendation: Option A -- keep them in the model directory. This is self-contained and matches how oflm-add installs embedding models. The closed xclbins/Embedding-Gemma-300M-NPU2/ directory (containing attn_full_mask.xclbin, mm.xclbin, mv.xclbin, sliding_attn.xclbin) becomes dead code and can be removed.
 
 #### 1.7 Validation Strategy
 1. Build the modified upstream with open embedding only
@@ -171,9 +171,9 @@ This would require new xclbin compilations for the 4B shapes (2048x2048, 2048x81
 
 #### 2.4 Skill Document Extension
 The existing npu_offload_pipeline.md skill should be extended with:
-- Section 7: "Open Engine Pattern" — how to create a new open_*_engine.cpp following the embedding template
-- Section 8: "Causal LM Integration" — differences from embedding (KV cache, prefill/forward, lm_head)
-- Section 9: "Model-Specific Adaptations" — per-family notes (Gemma3 vs Qwen3 vs Llama3 architectural differences)
+- Section 7: "Open Engine Pattern" -- how to create a new open_*_engine.cpp following the embedding template
+- Section 8: "Causal LM Integration" -- differences from embedding (KV cache, prefill/forward, lm_head)
+- Section 9: "Model-Specific Adaptations" -- per-family notes (Gemma3 vs Qwen3 vs Llama3 architectural differences)
 
 ### Phase 3: Full Open Replacement Pipeline
 

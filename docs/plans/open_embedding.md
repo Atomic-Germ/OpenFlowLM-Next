@@ -18,7 +18,7 @@ NPU device	NPU2 (0000:c2:00.1)
 Artifacts:
 - Compiled shapes (12 xclbins): 6 shapes × 2 pads (M=512, M=2048)
 - Shapes: 768×768, 768×256, 768×1152, 1152×768, 768×3072, 3072×768
-- Output dtype: bf16_f32 (bf16 inputs, FP32 output) — eliminates output quantization
+- Output dtype: bf16_f32 (bf16 inputs, FP32 output) -- eliminates output quantization
 - Tile size: 64×32 (tile_n=32 for FP32 output memory fit)
 - Artifacts location: ~/.config/oflm/models/Embedding-Gemma-300M-NPU2/npu_matmul_f32/
 

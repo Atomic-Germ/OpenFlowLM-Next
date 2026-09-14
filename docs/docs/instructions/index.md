@@ -7,7 +7,7 @@ has_children: true
 
 # 🛠️ Instructions
 
-**OpenFlowLM (OFLM)** is a deeply optimized runtime for **local LLM inference on AMD NPUs** —  
+**OpenFlowLM (OFLM)** is a deeply optimized runtime for **local LLM inference on AMD NPUs** --  
 ultra-fast, power-efficient, and 100% offline.
 
 Its user interface and workflow follow a **familiar single-command CLI**, purpose-built for AMD's XDNA architecture.

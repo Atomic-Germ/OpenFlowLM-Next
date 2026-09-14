@@ -24,7 +24,7 @@ parent: Local Server (Server Mode)
 
 # 📡 How Does the OpenAI Standard Work?
 
-The **OpenAI API standard** defines a simple and powerful way for applications to communicate with language models — whether running in the cloud or locally.
+The **OpenAI API standard** defines a simple and powerful way for applications to communicate with language models -- whether running in the cloud or locally.
 
 It uses a **multi-role chat format**, which includes three types of messages:
 
@@ -57,7 +57,7 @@ The following endpoints are actively supported and maintained:
 
 # 🚀 Quick Test: Use OpenAI SDK with OpenFlowLM in Python
 
-You can try this instantly in any Python environment — including Jupyter Notebook. Follow the steps below by copying each block into a notebook cell.
+You can try this instantly in any Python environment -- including Jupyter Notebook. Follow the steps below by copying each block into a notebook cell.
 
 ---
 
@@ -117,7 +117,7 @@ gc.collect()
 
 - 🧠 You can replace `"llama3.2:1b"` with any other model available via `oflm run` or `oflm pull`.
 - 🖥 Make sure the OpenFlowLM server is running in the background (`oflm serve ...`).
-- 🔒 No real API key is needed — just pass `"oflm"` as a placeholder.
+- 🔒 No real API key is needed -- just pass `"oflm"` as a placeholder.
 - ⚡ OpenFlowLM runs fully offline and is optimized for AMD Ryzen™ AI NPUs.
 
 > ✅ This setup is perfect for quick offline LLM testing using standard OpenAI tooling.
@@ -126,7 +126,7 @@ gc.collect()
 
 # 🧪 More Examples
 
-🚀 Ah — that was easy, right?  
+🚀 Ah -- that was easy, right?  
 Now let’s kick things up a notch with some awesome next-level examples!
 
 ---
@@ -161,9 +161,9 @@ import gc
 gc.collect()
 ```
 
-> ⚠️ The OpenAI API (and OpenFlowLM server mode) is **stateless** — you must resend the full conversation each time. No KV cache is kept between turns.  
+> ⚠️ The OpenAI API (and OpenFlowLM server mode) is **stateless** -- you must resend the full conversation each time. No KV cache is kept between turns.  
 > 🌀 This means all previous messages are reprocessed (**prefill**), which adds latency for long chats.  
-> ⚡ **OpenFlowLM’s CLI mode** uses a **real KV cache**, making multi-turn responses much faster — especially with long conversations.  
+> ⚡ **OpenFlowLM’s CLI mode** uses a **real KV cache**, making multi-turn responses much faster -- especially with long conversations.  
 > 🧠 OpenFlowLM is optimized for **long sequences** with large KV caches, ideal for 32k–256k context windows.  
 <!-- > 🔧 We’re working on adding **stateful KV cache** to server mode. Stay tuned!   -->
 
@@ -208,7 +208,7 @@ gc.collect()
 
 ## 📄 Example: Use a File as the Prompt
 
-You can load a full `.txt` file as a prompt — useful for long documents or testing large context windows.
+You can load a full `.txt` file as a prompt -- useful for long documents or testing large context windows.
 
 👉 [Download the sample prompt](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/assets/alice_in_wonderland.txt)  
 
@@ -243,7 +243,7 @@ gc.collect()
 
 ## 📊 Example: Batch Requests (Multiple Prompts)
 
-Loop over a list of prompts and generate answers — useful for eval or bulk testing.
+Loop over a list of prompts and generate answers -- useful for eval or bulk testing.
 
 ```python
 # Batched prompts
@@ -277,7 +277,7 @@ gc.collect()
 
 ## 🧬 Example: Use Temperature, Top-p, and Presence Penalty
 
-Control randomness and creativity — for brainstorming or open-ended tasks.
+Control randomness and creativity -- for brainstorming or open-ended tasks.
 
 ```python
 # Change hyper parameters

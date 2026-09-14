@@ -25,7 +25,7 @@ The website content is stored in **Markdown files** (`.md` files) in this reposi
 - `team.md` = The team page
 - `models.md` = The models page
 
-You don't need to install anything or run code—you can edit these files directly on GitHub!
+You don't need to install anything or run code--you can edit these files directly on GitHub!
 
 ---
 

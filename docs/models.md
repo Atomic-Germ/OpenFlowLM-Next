@@ -9,7 +9,7 @@ sections:
     title: "Choose a recipe"
     body: |
       OpenFlowLM curates the most requested families and publishes tuned manifests under `oflm pull <model>`.
-      We validate every build on Ryzen™ AI laptops and provide matching cards—see them [here](/docs/models/).
+      We validate every build on Ryzen™ AI laptops and provide matching cards--see them [here](/docs/models/).
       The catalog already covers models spanning Qwen3.6 (MoE), Qwen3.5 (Vision), Gemma4 (omni), Qwen3, GPT-OSS-20B (MoE), DeepSeek-R1, Whisper
       (Audio), MedGemma (Medical), and other leading open families.
     ctas:
