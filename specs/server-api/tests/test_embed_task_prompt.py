@@ -27,8 +27,8 @@ TEXT = "The NPU runs the embedding model on device."
 
 
 def _body(raw):
-    # A server started without --embed answers 200 with a bare `null`, so "parsed to an object" is
-    # not something this file can assume.
+    # A server started without --embed used to answer 200 with a bare `null` (a 400 now, see
+    # SERVER-REQUEST-VALIDATION), so "parsed to an object" is not something this file can assume.
     try:
         parsed = json.loads(raw)
     except ValueError:
@@ -70,6 +70,8 @@ def _unavailable():
         return f"no server at {BASE}; start `oflm serve -e 1`"
     if _PROBE_STATUS == 404:
         return f"{BASE} serves no /v1/embeddings; start `oflm serve -e 1`"
+    if "no embedding model" in _err(_PROBE_BODY).get("message", ""):
+        return f"{BASE} was started without an embedding model; start `oflm serve -e 1`"
     if _err(_PROBE_BODY).get("code") == "model_not_found":
         return (f"the server does not have '{EMBED_MODEL}' loaded ({_err(_PROBE_BODY).get('message')}); "
                 f"set OFLM_TEST_EMBED_MODEL to the tag it was started with")

@@ -21,5 +21,10 @@ Browse detailed NPU benchmark results for each major model family supported by O
 - [Microsoft/Phi4](phi4_results/)
 - [Nanbeige4.1](nanbeige4.1_results/)
 - [SmolVLA](smolvla_results/)
+- [Embeddings](embeddings_results/)
 
-Each page includes decoding and prefill speed metrics (tokens per second) and notes about the test setup and hardware. 
+Each page includes decoding and prefill speed metrics (tokens per second) and notes about the test setup and hardware.
+
+The **Embeddings** page is the exception, and deliberately so: encoders have no
+first token and no prefill/decode split, so it sweeps BATCH SIZE instead of
+context length and reports texts/s, latency and the cost of not batching. 

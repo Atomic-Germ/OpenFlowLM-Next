@@ -1211,6 +1211,42 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# bench_embed: the pure half of `oflm bench-embed` -- the sweep plan, the stage
+# count, the task-name lookup, the corpus, and the batch slice. NO device, NO
+# weights, NO network. Every assertion there is a way the command could report a
+# number that looks fine and is not: a sweep that never reaches its own limit, a
+# config-supplied task read as no task, a custom corpus labelled built-in, a
+# shorthand tag that clears every check and then fails. None of them is a crash
+# and none changes a vector, so the smoke test cannot see any of them either.
+add_executable(benchmark_embed_test src/benchmark_embed_test.cpp)
+if(NOT WIN32)
+    target_compile_options(benchmark_embed_test PRIVATE -mavx -mavx2)
+endif()
+target_include_directories(benchmark_embed_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/server")
+# Same reason openai_compat_test needs these: model_list.hpp -> utils/utils.hpp ->
+# device_runtime.hpp, so the NPU RUNTIME HEADERS are needed to COMPILE even though
+# nothing here opens a device, and which ones depends on the backend.
+if(OFLM_USE_HRX)
+    target_compile_definitions(benchmark_embed_test PRIVATE OFLM_USE_HRX=1)
+    target_link_libraries(benchmark_embed_test PRIVATE hrx::hrx)
+elseif(XRT_INCLUDE_DIRS)
+    target_include_directories(benchmark_embed_test PRIVATE ${XRT_INCLUDE_DIRS})
+elseif(XRT_INCLUDE_DIR)
+    target_include_directories(benchmark_embed_test PRIVATE ${XRT_INCLUDE_DIR})
+endif()
+target_compile_definitions(benchmark_embed_test PRIVATE DISABLE_ABI_CHECK=1)
+if(MSVC)
+    target_compile_options(benchmark_embed_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(benchmark_embed_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
+endif()
+add_test(NAME bench_embed
+         COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.
 #   cmake --build --preset linux-package-rpm   # or -deb / -tgz
