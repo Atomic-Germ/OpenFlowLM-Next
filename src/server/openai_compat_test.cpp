@@ -351,12 +351,6 @@ static void test_resolve_task() {
 
 // ---------------------------------------------------------------------------
 // task_policy: required, refused, or fine.
-//
-// The bug: prompt_for() returns an empty prefix when the model declares no
-// prompts, so an explicit prompt_name on the BERT family came back 200 with an
-// UNPREFIXED vector. src/open_npue_adapter/README.md:288 says that is an error.
-// The trap next to it: an empty prompt table does NOT mean "no task concept" --
-// OpenGemma_Embedding declares no names and still prefixes per task.
 // ---------------------------------------------------------------------------
 static void test_task_policy() {
     using openai_compat::task_policy;
@@ -394,11 +388,6 @@ static void test_task_policy() {
 
 // ---------------------------------------------------------------------------
 // Errors in a streaming handler (#64).
-//
-// The bug: an exception out of generate() after tokens had streamed went through
-// send_response(). The 200 and the chunked headers were already on the wire, so the
-// body was never written (HttpSession skips write_response() once streaming) and the
-// stream was never ended -- the client waited for a [DONE] that did not come.
 // ---------------------------------------------------------------------------
 static void test_stream_errors() {
     using openai_compat::error_route;
