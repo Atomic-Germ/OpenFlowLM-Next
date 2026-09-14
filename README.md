@@ -1,4 +1,7 @@
 <p align="center">
+  <img width="64" height="64" alt="OFLM_small" src="https://github.com/user-attachments/assets/36d563a8-034e-49db-a0ce-af920420e40f" />
+</p>
+<p align="center">
   <img src="https://img.shields.io/badge/NPU-Optimized-red" />
 </p>
 
