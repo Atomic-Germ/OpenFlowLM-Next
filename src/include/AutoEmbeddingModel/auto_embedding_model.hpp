@@ -6,6 +6,8 @@
 /// \note This is a header file for the AutoEmbeddingModel class
 #pragma once
 
+#include <cstdint>
+#include <stdexcept>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -22,6 +24,17 @@
 
 using json = nlohmann::ordered_json;
 
+
+/// The model declares task prompts and none of them serves the requested task.
+///
+/// Typed because the refusal is deliberate -- prompt_for() raises it rather than
+/// pick a prefix, since a wrongly-prefixed embedding is correctly shaped and
+/// correctly normed. The HTTP layer has to tell it apart from a genuine failure,
+/// and re-deriving that from the message text would be guessing.
+class TaskPromptUnavailable : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 typedef enum : u8 {
     task_query = 0,
@@ -60,4 +73,60 @@ public:
 	
 	virtual void load_model(std::string model_path, json model_info, bool enable_preemption) {}
 	virtual std::vector<float> embed(std::string& text, embedding_task_type_t task_type) = 0;
+
+	/// \brief Embed several texts in one call. Returns them concatenated,
+	///        hidden() floats each, in the order given.
+	///
+	/// The default preserves what the REST handler USED to do -- one embed() call
+	/// per input -- so a backend that does not override this is unaffected by the
+	/// handler having moved to one batched call. Correct for every backend, fast
+	/// for none. A backend whose throughput lives in the batch
+	/// overrides it -- NpueEmbedding encodes a whole tier of sequences per
+	/// dispatch over a resident xclbin, so a single text pays for the tier
+	/// either way, and sixteen texts measure 405 ms looped against 70 ms
+	/// batched on bge-base.
+	///
+	/// \param tokens when non-null, set to the total token count, or to -1 for
+	///        a backend that does not report one. NOT 0: a zero reads as a real
+	///        count and becomes a 0 tok/s or a division by zero downstream,
+	///        which is the same fail-open shape as every other defect in this
+	///        seam -- a plausible number that nothing can flag.
+	virtual std::vector<float> embed_batch(const std::vector<std::string>& texts,
+	                                       embedding_task_type_t task_type,
+	                                       int64_t* tokens = nullptr) {
+		if (tokens) *tokens = -1;
+		std::vector<float> out;
+		for (const std::string& t : texts) {
+			std::string one = t;   // embed() takes a non-const reference
+			const std::vector<float> v = embed(one, task_type);
+			out.insert(out.end(), v.begin(), v.end());
+		}
+		return out;
+	}
+
+	/// \brief The width of one vector, or 0 when the backend does not report it.
+	///
+	/// Callers slicing an embed_batch() result pass this to
+	/// openai_compat::embedding_batch_dim(), which can then check the result
+	/// holds exactly one vector per input. With 0 it can only check that the
+	/// result divides evenly.
+	virtual size_t embedding_dim() const { return 0; }
+
+	/// \brief The task prompt names this model declares, empty when it has none.
+	///
+	/// A model that HAS them cannot be embedded without choosing one. The prefix
+	/// changes the vector materially -- nomic-embed-text measures cosine 0.914
+	/// between the same text under search_query and search_document -- and the
+	/// result is correctly shaped, correctly normed and deterministic either way,
+	/// so a caller that got the wrong one has nothing to detect it with. The REST
+	/// handler uses this to refuse rather than to pick.
+	virtual std::vector<std::string> prompt_names() const { return {}; }
+
+	/// Whether this backend applies a per-task prompt at all.
+	///
+	/// NOT the same as prompt_names() being non-empty: OpenGemma_Embedding
+	/// declares no names and still prefixes per task (open_task_prefix()),
+	/// while the BERT family has no task concept. Default false, so a new
+	/// backend refuses a prompt it would otherwise silently drop.
+	virtual bool supports_task_prompts() const { return false; }
 };

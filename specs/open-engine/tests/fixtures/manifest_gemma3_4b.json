@@ -93,6 +93,7 @@
   "head_dim": 256,
   "sliding_window": 1024
  },
+ "hf_config_defaults": {},
  "layout": {
   "hidden": 2560,
   "vocab": 262208,

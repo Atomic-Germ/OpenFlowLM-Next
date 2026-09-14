@@ -73,10 +73,10 @@ def test_gguf_metadata_gives_the_same_hyperparameters():
 
 
 def test_unknown_family_names_the_key():
-    with pytest.raises(SpecError, match="model_type 'phi3'"):
-        ModelSpec.from_hf_config(dict(HF_QWEN36, model_type="phi3"))
-    with pytest.raises(SpecError, match="general.architecture 'phi3'"):
-        ModelSpec.from_gguf_metadata({"general.architecture": "phi3"})
+    with pytest.raises(SpecError, match="model_type 'mamba'"):
+        ModelSpec.from_hf_config(dict(HF_QWEN36, model_type="mamba"))
+    with pytest.raises(SpecError, match="general.architecture 'mamba'"):
+        ModelSpec.from_gguf_metadata({"general.architecture": "mamba"})
 
 
 def test_missing_key_is_named():

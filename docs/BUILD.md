@@ -1,6 +1,5 @@
 # Build System
 
-<<<<<<< HEAD
 > "The code that matters." -- Keep it simple, clear, and focused.
 
 OpenFlowLM uses a **single-command CMake workflow** for building from source. The build system handles both the executable and kernel exports automatically.
@@ -8,7 +7,6 @@ OpenFlowLM uses a **single-command CMake workflow** for building from source. Th
 ---
 
 ## Quick Start
-=======
 Building the executable is not the whole job. The `oflm` binary also needs a
 set of compiled NPU kernels - the `.xclbin` and `insts.bin` files, known as
 design sets. Without them the binary starts up fine and then refuses to load
@@ -284,7 +282,6 @@ cmake --build build
 ## Development Workflow
 
 ### Quick Development
-=======
 The binary lands in `src/build/oflm.exe`, with `model_list.json`,
 `model_info.json` and the engine DLLs copied beside it by the build — it will
 not start without those, and Windows reports a missing DLL as a silent exit
@@ -404,6 +401,9 @@ cmake --build --preset linux-debug
 - Check environment variables
 - Verify kernel toolchain is active
 - Check file paths are absolute
+Three rules can pick that directory — `OFLM_OPEN_KERNELS_DIR`, then a set beside
+the model, then an `xclbins` root — and all three produce valid output. If you
+have just rebuilt kernels and want to be sure the new ones ran, read that line.
 
 ---
 
@@ -415,3 +415,13 @@ cmake --build --preset linux-debug
 - [Testing](../contributing/test-contributions.md)
 - [Documentation](../contributing/doc-contributions.md)
 - [Tools](../contributing/tool-contributions.md)
+- The Windows and embedding-set instructions above were run on this repository;
+  the Linux presets and the LLM kernel export are transcribed from the build
+  scripts' own documented usage.
+- The install layout and the environment variables were renamed with the
+  executable: `~/.oflm`, `share/oflm`, `lib/oflm`, `OFLM_*`. A pre-rename
+  install still works — `~/.flm` is searched after the oflm locations, and any
+  variable read through `utils::getenv_oflm` accepts its old `FLM_*` name and
+  prints a one-line notice naming the new one. `OFLM_OPEN_KERNELS_DIR` is the
+  exception: the open engine reads it with plain `getenv`, so `FLM_OPEN_KERNELS_DIR`
+  does nothing.

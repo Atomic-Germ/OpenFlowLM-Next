@@ -1,5 +1,5 @@
 # open_qwen36 — Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3,
-# HunYuan dense and IBM Granite on open XDNA2 kernels
+# HunYuan dense, IBM Granite and Phi-3 on open XDNA2 kernels
 
 The open replacement for the closed `qwen3_6_moe_npu` engine. It sits behind
 the app's `causal_lm` seam ([engine.hpp](engine.hpp)), so the tokenizer, chat
@@ -113,8 +113,9 @@ so an architecture's variants behave identically:
 | --- | --- | --- |
 | `OFLM_QWEN36_ENGINE` | `qwen3.6-moe` | `Qwen3_6_MOE` |
 | `OFLM_QWEN3_ENGINE` | `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528` | `Qwen3`, `Qwen3_IT`, `Qwen3_TK`, `DeepSeek_r1_0528_8b` |
-| `OFLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1` | `Llama3`, `DeepSeek_r1_8b` |
+| `OFLM_LLAMA_ENGINE` | `llama3.1`, `llama3.2`, `deepseek-r1`, `nanbeige4.1` | `Llama3`, `DeepSeek_r1_8b`, `Nanbeige` |
 | `OFLM_GEMMA_ENGINE` | `gemma3`, `gemma3-text` | `Gemma3`, `Gemma3_Text_Only` |
+| `OFLM_PHI4_ENGINE` | `phi4-mini-it` | `Phi4` |
 
 Kernels are per model directory, so a family entry only means the adapter will
 use whatever set is installed for that particular model. Images always go to the
@@ -537,9 +538,11 @@ on a memory-starved box, not the kernels.
 ## What is still not closed
 
 - **Batched prefill -- open on Granite, not yet on the other families.**
-  `FLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
+  `OFLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
   dispatches plus T attention dispatches instead of T decode steps (1.95x TTFT
-  on a 1005-token prompt). It needs a kernel set carrying a `gemm_block`
+  on a 1005-token prompt). It is read through `utils::getenv_oflm`, so the
+  pre-rename `FLM_OPEN_GEMM_BLOCK` still works and prints a one-line notice
+  naming the current variable. It needs a kernel set carrying a `gemm_block`
   program, which today is Granite only; every other family still goes through
   the decode step one token at a time. The route writes no M-RoPE position
   records, so a prompt that has had an image stays on the sequential path.
@@ -554,9 +557,9 @@ on a memory-starved box, not the kernels.
   (`vision/vit.cpp`, checked against transformers with the shipped weights to
   4e-6) and its rows enter the model as embedding vectors at their M-RoPE
   positions (`Core::step_embed`). The app's Qwen3.6 and Qwen3.5 model classes no
-  longer need the closed engine for images. `flm-test --vision` on the open
+  longer need the closed engine for images. `oflm-test --vision` on the open
   engine is the acceptance (OPEN-VISION-EMBED).
-- **The weight file** is still FLM's `.q4nx`. The GGUF path is a separate piece
+- **The weight file** is still OFLM's `.q4nx`. The GGUF path is a separate piece
   of work; this reader is ~150 lines and will go with it. The chunk format is read
   per tensor, so a container mixing q8 and q4_1 -- which is what the 35B fine-tunes
   ship, q8 attention and shared experts over q4_1 routed experts -- loads and packs;

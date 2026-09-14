@@ -1,4 +1,4 @@
-# open-engine: the open engine (Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense) and its model recipes
+# open-engine: the open engine (Qwen3.6-MoE, Qwen3.5 dense, Qwen3 dense, Llama 3, Gemma 3, HunYuan dense, Granite, Phi-3) and its model recipes
 
 Prefix `OPEN`. Home repo: openflowlm-next. Covers `src/open_qwen36/` (the
 resident engine behind the app's `causal_lm` seam) and `open_kernels/recipes/`
@@ -31,6 +31,8 @@ the offending key named.
 - `Manifest::load` on the checked-in fixture (`tests/fixtures/manifest_qwen36.json`) yields 40 layers, two layer types with the 27B's buffer sizes and three-step programs, four contexts, six kernels with their patch kinds (`ax0` attnpos, `lx1`/`ax1` moeroute2), the tail `ln` → `lm`, and the MoE pool geometry `stripe 163840, up 655360, down_core 81920, pool_down 335544320, share 503316480 / 503971840 / 504627200`.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
 - `manifest_version: 2` → refused by the parser.
+- An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
+- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH).
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
@@ -153,7 +155,7 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 2 x 4, RB 2; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. Every core's heads are whole og elements; RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
 
@@ -181,6 +183,23 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
+
+Until an og element was NHL wide, ACORES was the largest divisor of `NH / HPO`,
+so NHL was always exactly HPO. Splitting the og fifo frees the two families
+whose head count divides further than their og element count did:
+
+| family | geometry | step @ 2048, before -> after | greedy agreement |
+|---|---|---|---|
+| Gemma3-4B (hd 256) | 2 x 4 -> 4 x 2, RB 2 | 94.2 -> 86.4 ms (1.090x) | `818,236743` both ways, identical |
+| Phi4-mini (hd 128, 96-dim rotation) | 3 x 8 -> 6 x 4, RB 4 | 123 -> 117 ms (1.05x, n=4 each) | 250/250 identical |
+
+Phi-4-mini was not in the branch that made the change -- it landed on main
+first, and `attn_cores(NH)` reached it on the rebase. Position 0 is unchanged
+within a jitter of +-25% on that path (no attention work there); position 2048
+is stable to +-2% and is where the split shows. Every other dense family has
+`NHL == HPO` and rebuilds byte-identical.
 
 **Where the requirement came from (the observation, 2026-09-06):**
 
@@ -256,6 +275,7 @@ not a build input, and is not in the key.
 - The key is stable across calls and covers `recipes/qwen36moe.py`, `designs/layer_x/lx.py`, `designs/attn/attn.h`, `designs/gemv_q4/gemv_q4.h`, `designs/lm_head_q8/lm_head_q8.py`, `include/vecmath.h` (among others).
 - Appending a comment to `attn.h` or to `qwen36moe.py` changes the key; changing `rope_theta` or `quant` changes it; changing `extra` does not.
 - `designs/gemv_q4/gemv_q8.h` enters the key only for a spec with a q8 role (`KERNEL_SOURCES_Q8`): it is compiled by nothing else, so listing it unconditionally would move every shipped kernel set's key for a file none of them include.
+- `designs/gemm_q4_prefill/*` is in the key for the MoE family, since the GEMM xclbins of the block route are built from it (OPEN-PREFILL-BATCH).
 - The key takes `quant` in its canonical form, so a role map hashes (a q8 role changes the key) and an all-`q4_1` map hashes the bare string, byte for byte what the key hashed before roles existed.
 
 ### OPEN-PACK-PLAN: the packing plan reproduces the verified pool laws
@@ -676,6 +696,39 @@ the `llama_npu` DLL for both.
 
 **Result 2026-09-06 (Llama-3.2-3B-NPU2 and Llama-3.2-1B-NPU2):** both 3.2 shapes' first hardware run, and both containers materialise `lm_head.weight` despite `tie_word_embeddings: true`, as the acceptance criteria above assume. **3B** (3072 / 28 / 8192, 24 query heads over 8 kv heads -- GQA group 3, the first odd group, `OG_AOUT_ELEMS` 3): step 2 logits corr 0.999998 / 0.999995, argmax 2 / 2 matching the fp64 replica with top-5 identical at both positions, residual corr 1.000000 in all four layers at t0 and >= 0.999996 at t1, maxrel <= 5.3e-3; step 3 through the engine bit-identical to step 2 and reproduced; step 4 a coherent answer ending in `<|eot_id|>` at token 72 (334 ms/token). **1B** (2048 / 16 / 8192, head_dim 64 -- `E_A` 1024, `KV_ROW` 2048, `PTAB_ROW` 1024, one KV band per core, a 768-byte RoPE record in a 1024-byte position row): step 2 logits corr 0.999999 / 0.999994, argmax 1757 / 1757 matching, top-5 identical at both positions, residual corr 1.000000 in all four layers at t0 and >= 0.999996 at t1, maxrel <= 2.4e-3; step 3 bit-identical and reproduced; step 4 `<|eot_id|>` at token 92 (262 ms/token). The 1B is the run that decides head dim 64, since a wrong q/k rotation there gives fluent nonsense rather than a crash: position 0 does not rotate and position 1 does, and both are clean in every layer, so the rotation is right. Together these admit `gemv_q4` K = 3072 and K = 8192, `ln` width 3072, `lm_head_q4` K = 3072 and the attention combinations (128, 24, 8, 128, False, False, False) and (64, 32, 8, 64, False, False, False). Note `chat.py`'s default `--max-tokens 64` truncates both models mid-sentence; 200 is enough. Details: `.claude/plans/k-new-points-results.md`.
 
+**Nanbeige4.1-3B (2026-09-10).** Declares `model_type: llama` and is one for the
+recipe: 2560 / 32 / 10752, 20 query heads over 4 kv heads at head_dim 128 (GQA group
+5, two q heads per attention element), theta 7e7 with no scaling, eps 1e-5, an
+untied 166144-row head, a q4_1 container. Two catalogue points are new: the
+attention tuple `(128, 20, 4, 128, False, False, False)` and `gemv_q4` K = 10752
+(the widest activation table so far that still keeps two chunks per weight element:
+60032 of the core's 61440 bytes). The registry serves it through its own
+`Nanbeige` class, which selects the open engine under `OFLM_LLAMA_ENGINE`.
+
+**Acceptance criteria (unit, Nanbeige):** the derivation and layout in
+`tests/test_llama3.py::test_nanbeige41_3b_derives_and_lays_out_on_the_llama_recipe`
+-- band split `(5, 1, 5, 21, 5)`, `HPE 2`, `H_ELEMS 11`, `PER_CALL 2`, `TAB_BYTES 24192`,
+`LMHEAD_BANDS 2596`, `ELN 5120`, `E_A 1024`; `hf_config_check` without `head_dim`
+(a llama config may omit it).
+
+**Procedure (manual, Nanbeige):** as OPEN-FAMILY-QWEN3 with `Nanbeige4.1-3B-NPU2`,
+`out_nb`, prompt id 166100 (`<|im_start|>`); `chat.py` takes its ChatML template
+without injecting think tags (the model opens its own `<think>` block).
+`oflm-test --llm --model nanbeige4.1:3b` through `oflm serve`.
+
+**Result 2026-09-10:** slice logits corr 0.999999 / 0.999989, same argmax and top-5 at
+both positions, residual corr >= 0.999991 every layer; a 24-token decode chain extends
+this to every position 0-23 (logits corr 0.99995-0.999999 throughout, top-5 identical at
+21 of 24, a near-tie slot-5 swap at the rest); step 3 bit-identical to the harness,
+request 2 reproduced request 1; `chat.py` opens `<think>` and reasons coherently (the
+model has no off switch for it); `oflm serve` + `oflm-test --llm` PASS with a real
+generation budget (`--gen-lim 600`+; the reasoning chain can outrun a small one, which
+reads as an empty answer column rather than a failure).
+
+Nanbeige's adapter originally reached the closed engine's class through a `dynamic_cast`
+for checkpoint / restore, null on the open engine -- `oflm serve` segfaulted on the first
+request. Fixed to the `causal_lm` virtuals every other open-engine adapter already uses.
+
 ### OPEN-FAMILY-GEMMA3: Gemma 3 on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`)
 **Test category:** manual (needs the NPU and `OpenFlowLM/Gemma3-4B-NPU2`); the derivation, the two RoPE tables, the window's row counts and the 4B layout are unit-tested in `tests/test_gemma3.py`
@@ -989,6 +1042,135 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
 
+### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
+`designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `model/dense_probe.py`,
+`src/open_qwen36/manifest.hpp`, `manifest.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_phi4.cpp`)
+**Test category:** manual (needs the NPU and `FastFlowLM/Phi4-mini-Instruct-NPU2`); the
+derivation, the longrope tables, the per-row table switch, the layout and the manifest
+are unit-tested in `tests/test_phi3.py` and `src/open_qwen36/pools_test.cpp`
+
+A Phi-3 model (`model_type: phi3`; Phi-4-mini is one) shall run on the open kernels
+from its `config.json` alone through the dense recipe. Structurally it is Llama 3.2 3B's
+layer -- GQA 24 over 8 at head_dim 128 without q/k norms, silu FFN at 3072 / 8192, eps
+1e-5, a tied head the container materialises as `lm_head.weight` -- with two things no
+family before it had:
+
+- **A partial rotation.** `partial_rotary_factor 0.75` rotates 96 of the 128 head dims
+  and leaves the rest alone. The attention core's RoPE loop runs 32 pairs a step, so it
+  gains a 16-lane tail and the rule relaxes from "a multiple of 64" to "a multiple of 32"
+  (`attn.h`); a family whose rotation is a multiple of 64 compiles the same loop it did.
+  The replica and the position table already took `rotary_dim`; nothing else moves.
+- **longrope.** Two factor lists over the same theta, one per rotary pair -- the short one
+  up to `original_max_position_embeddings` (4096; on Phi-4-mini every short factor is
+  1.0), the long one above it -- and one attention scale on cos and sin,
+  `sqrt(1 + ln(factor) / ln(original))` with `factor = max_position_embeddings / original`
+  (1.190 here), applied regardless of which list is active. HF picks the list per forward
+  call from the running sequence length (`seq_len = max(position_ids) + 1 >
+  original_max_position_embeddings`); this engine computes one row per token as the
+  context grows (`Core::step`), so **both tables are baked into the manifest and the
+  position table switches per row** at `original_max_position_embeddings` (`switch_row`
+  on the ptab global; `long_inv_freq` beside `inv_freq`) instead of picking one table for
+  the whole resident buffer at export time. Row r therefore carries whichever table a real
+  forward call at sequence length r + 1 would have picked, and -- matching how a real KV
+  cache behaves -- that choice does not move once a row is written even if the
+  conversation later crosses the threshold. `original_max_position_embeddings` is
+  wherever the container states it (`rope_scaling` or the top level); the export's own
+  `--max-ctx` plays no part in the choice, only in how many rows exist. The scale rides on
+  the ptab global as `scale` (absent, 1.0, for every other family, whose manifests carry
+  neither key and are byte-for-byte unchanged) and both packers apply it unconditionally
+  as they write cos and sin.
+- **A load-time compatibility check that actually names the RoPE configuration.** Every
+  other family bakes `rope_theta` (and Llama 3's scaling) into the manifest without
+  checking the container agrees at load -- harmless there, because none of those tables
+  vary with anything but the shape fields `hf_config_check` already compares. Phi-3's do:
+  two same-shaped containers can be longrope fine-tunes extended to different context
+  lengths, with different factor lists and nothing else different, and loading one under
+  a kernel set built for the other would run and return plausible garbage. So `phi3`'s
+  `hf_config_check` also carries `rope_theta`, `rope_scaling` verbatim,
+  `original_max_position_embeddings`, and `max_position_embeddings` when it set the
+  attention scale (a `rope_scaling` without its own `factor`). HF lets a config omit
+  several of these (`head_dim`, `partial_rotary_factor`, `rope_scaling`), and
+  `Manifest::check_model` fails closed on an absent key -- so rather than emit a check
+  only when the source config spelled the key out (one-way: a kernel set built from a
+  full-rotation config would then accept a 0.75 container), the manifest also carries
+  **`hf_config_defaults`**, what an absent key means (`head_dim`: hidden / heads;
+  `partial_rotary_factor`: 1.0; `rope_scaling`: none; `original_max_position_embeddings`:
+  whatever the sub-object says). The checker compares the expected value against the
+  default when the key is absent, so an omitted optional field is accepted exactly when it
+  implies what the kernels were built for and refused otherwise, in both directions.
+  `hidden_act` other than silu is refused at derivation (the FFN kernel is silu).
+
+Only the HF derivation exists: a Phi-3 GGUF carries the factor lists as tensors
+(`rope_factors_{long,short}.weight`), not metadata. The `Phi4` class selects the open
+engine under `OFLM_PHI4_ENGINE`.
+
+**Acceptance criteria (unit):**
+- `rotary_dim` 96 derives from the factor; without one, the whole head, and the check
+  then names 1.0 (`test_refusals_and_defaults`); a non-silu `hidden_act` is refused.
+- The short and long inverse-frequency tables equal transformers'
+  `_compute_longrope_parameters` (the plain table divided by the list), the short list at
+  and below 4096, the long one above; `rope_scale()` equals its attention factor,
+  1.1902380714; a Llama spec's is 1.0 and its table ignores the context.
+- A `rope_scaling` type other than `longrope` is refused by name.
+- The layout: band split `(6, 2, 6, 16, 6)`, `HPE 4`, `OG_AOUT_ELEMS 3`, `ELN 6144`,
+  `E_A 2048`, `KV_ROW 4096`, `PTAB_ROW 2048`, `PER_CALL 2`, `TAB_BYTES 18432`,
+  `LMHEAD_BANDS 3126`; build dir `dense/build_phi3_h3072`.
+- The manifest's ptab global carries `scale`, the short `inv_freq`, `long_inv_freq` and
+  `switch_row = original_max_position_embeddings` -- all independent of the export's
+  `--max-ctx` (`test_layout_and_manifest`). `hf_config_check` carries
+  `partial_rotary_factor`, `head_dim`, `rope_theta`, the raw `rope_scaling`,
+  `original_max_position_embeddings` and (when it set the scale) `max_position_embeddings`;
+  `hf_config_defaults` carries what an absent `head_dim` / `partial_rotary_factor` /
+  `rope_scaling` / `original_max_position_embeddings` means. A container with a different
+  rotation, theta, longrope table or `max_position_embeddings` is refused at load by name;
+  one omitting `head_dim` is accepted; one omitting `partial_rotary_factor` is refused
+  against the 96-dim kernels (`test_the_compatibility_check_is_two_way_through_the_defaults`,
+  `manifest_test.cpp`'s phi3 block on `fixtures/manifest_phi4_mini_4b.json`). The
+  checked-in `recipes/specs/phi4-mini-4b.json` yields the same checks through
+  `export --spec` (`test_a_spec_loaded_from_json_still_emits_the_full_check`). A Llama
+  manifest has no `scale` / `long_inv_freq` / `switch_row` key and empty defaults.
+- `pack.ptab(..., scale)` multiplies cos and sin; given `long_inv_freq` + `switch_row` it
+  reads `inv_freq` for row r < switch_row and `long_inv_freq` for r >= switch_row, in the
+  SAME table (not two separate calls that happen to agree); the two are required together.
+  `pools::build_ptab` (C++) is byte-identical to `pack.ptab` on the same inputs, checked
+  both for a plain scale and for the full switch, by shared FNV-1a hash
+  (`src/open_qwen36/pools_test.cpp`'s `ptab_scale_tests` / `ptab_switch_tests`) -- this is
+  the actual production function `Core::Core()` calls to build the resident table, not a
+  reimplementation. `RowGlobal::switch_row` defaults to `kSwitchNever`, so an unrelated
+  family's table is unaffected by the field existing on the struct.
+- `replica_dense.rope` rotates only the first `rot` dims and scales the whole rotation;
+  `dense_decode` and `dense_probe.py` pick the table from `ctx = pos + 1` per call -- HF's
+  own `seq_len` rule -- so positions `original - 1` and `original` straddle the switch
+  exactly where the packer's `switch_row = original` does
+  (`test_dense_decode_picks_the_table_from_pos_plus_one`).
+
+**Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Phi4-mini-Instruct-NPU2`, `out_ph`,
+prompt id 200021 (`<|user|>`; the model has no bos); `chat.py` switches to
+`<|user|>...<|end|><|assistant|>` when the tokenizer has `<|user|>` and `<|end|>`.
+`oflm-test --llm --model phi4-mini-it:4b` through `oflm serve`. Two catalogue points
+enter with it: the attention tuple `(128, 24, 8, 96, False, False, False)` -- the first
+partial rotation on the dense design -- and nothing new for the GEMVs (3072 and 8192
+are Llama 3.2 3B's).
+
+**What the boundary itself is not covered by:** the 4-layer slice below exercises
+positions 0-1, both short-table rows (`original_max_position_embeddings` is 4096), so it
+cannot see the switch on real weights directly. What stands in for it: `build_ptab` is
+the identical function the engine calls at load, exercised at a row straddling a
+synthetic switch and cross-checked against the NumPy packer byte for byte (the
+acceptance criteria above); the hardware slice separately proves the engine correctly
+consumes whatever the table holds at the positions it was run at. Together these cover
+the mechanism end to end without a multi-thousand-token hardware decode.
+
+**Result 2026-09-10:** slice logits corr 0.999998 / 0.999990, same argmax and top-5 at
+both positions, residual corr >= 0.999995 every layer (layer 3's residual norm at
+position 0, 2807, is the family's attention-sink token; the replica agrees); step 3
+bit-identical to the harness, request 2 reproduced request 1; `chat.py` answers
+coherently, ending on `<|end|>` at token 50. Fast attention (`attnknobs.FAST_ATTENTION`)
+measured against the slow path afterward: identical correlation and residuals, decode
+190 -> 84 ms/token (2.3x). Re-run unchanged after the compatibility-check and per-row
+longrope fixes below (same corr, argmax, top-5 -- the new manifest fields are additive).
+
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
 **Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
@@ -1036,3 +1218,245 @@ engine. **The closed-engine comparison did not run**: the closed 1.0.4 DLL
 segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
 so on this box only the open engine can serve these files. Log:
 `.claude/plans/issue-16-hw-results.md`.
+
+### OPEN-PREFILL-BATCH: the block prefill route
+**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`, `designs/gemm_q4_prefill/`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
+**Test category:** manual (needs the NPU and `Qwen3.6-35B-A3B-NPU2`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
+
+A kernel set may carry a block prefill route: per layer type a `gemm_block`
+naming, by kind, the GEMM dispatches that replace the layer's projections for
+T = 256 tokens at once -- `dense` (0167/#32): the five-step chain with T
+single-token attention dispatches; `linear`: qkv|z then out, with the DeltaNet
+recurrence on the host between them; `full`: q|k|v|gate then o, with attention
+over the KV rows on the host -- the weight buffers those dispatches read as
+contiguous runs of the layer type's pack ops, and, for the MoE kinds, the
+MoE-only dispatch (`mx`, the second half of the whole-layer core program as its
+own xclbin) that runs the ROUTED experts for one token from the router record
+the host wrote. The shared expert is not in that dispatch: it is the same
+weights for every token of the block, so the route runs it once as two more
+GEMMs (up|gate, contiguous and band-law in the pool, then down) with silu and
+the sigmoid gate on the host, folds it into the residual the dispatch is
+handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Hardware contexts are shared: ONE GEMM xclbin
+for the whole route -- the core program depends on neither N nor K, the band
+count K/256 reaching each core as a runtime parameter the instruction stream
+writes -- and one `mx` xclbin for both layer
+types. `OFLM_OPEN_GEMM_BLOCK=1` (read through `getenv_oflm`, so the pre-rename
+`FLM_` export still works) selects the route; off by default so every existing
+measurement is unaffected. With it on the engine takes the route whenever the
+set carries it and the prompt has at least the crossover length (64 tokens;
+`OFLM_OPEN_GEMM_BLOCK_MIN` overrides), never for a prompt that has had an image. Only the real tokens of a padded block touch the
+state, write KV rows, run the MoE or advance the position, and the conv state,
+S and the KV rows leave the buffers as the sequential path would (bf16 where
+the kernels keep bf16). A projection streamed at q8 has no route -- the GEMM
+dequantises the q4_1 band law -- and such a manifest is the sequential one
+unchanged.
+
+**Acceptance criteria (unit):**
+- The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); one context `gemm` for every GEMM shape, plus `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes; a spec with `attn`, `linear`, `linear_out` or `shared` at q8 emits none of it and its manifest equals the sequential one.
+- The parser holds a route to its kind (`manifest_test.cpp`): 5 steps for dense, 2 for linear / full, every step a 3-argument run naming a declared weight buffer, weight ops inside the pack plan, `moe_kernel` declared with the moeroute2 patch, each refused by name otherwise.
+- The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
+- The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
+- The build key covers `designs/gemm_q4_prefill/*` (`test_prefill_batch.py`).
+
+**Procedure:**
+1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2` (WSL) builds `gemm_n12288_k2048`, `gemm_n2048_k4096`, `gemm_n9216_k2048`, `mx_linear` and `mx_full` beside the sequential set and writes the manifest with the route.
+2. Each GEMM shape through the harness: `python make_test.py --shape nN_kK --tokens 256`, `run_kernel.exe run_nN_kK_t256.cfg`, `python compare.py nN_kK_t256` -> PASS.
+3. `open_qwen36_cli --layers 4 --prefill-logits --dump-logits <dir>/y` with and without `--gemm-block` on a 19-token prompt: the same argmax and top-5 at every position except documented near ties (reference margin < 0.05 logits), corr > 0.999 per position.
+4. All 40 layers on a ~1000-token prompt with `--max-tokens 8`: the same greedy continuation, the last position's argmax and top-5 equal; TTFT with and without `--gemm-block` recorded.
+5. `flm-test --llm` through `flm serve` on `qwen3.6-moe:35b-a3b` with the route on.
+
+**Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`OFLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `OFLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
+
+**Result 2026-09-13 (the host stages):** the block line now splits `mid` into
+the DeltaNet's two halves and the attention's, which contradicted the standing
+assumption about where the host time went. At 256 tokens `mid` was 1040 ms a
+block and **856 of it was the DeltaNet's per-token half** -- the conv, the q/k
+norms and the alpha/beta projection -- against 111 ms for the delta rule on S
+that every plan had named as the expensive part. The per-token half was
+single-threaded because the conv was written as a ring buffer with a shift,
+which looks like a recurrence and is not: the conv reads a fixed four-tap
+window of the projection's own rows, so row r of token t's window is qkv row
+t - 3 + r and every token is independent. Over tokens under OpenMP it is
+**856 -> 165 ms**, bit-exact (`block_host_test.cpp` still matches
+`replica_block.py` on og, S and the conv state rows).
+
+Two host stages around the GEMMs went with it. `gemm()` returned its output by
+value, so each of the 160 dispatches a block allocated a vector and
+value-initialised it before the transpose overwrote every element -- 716 MB a
+block of zeroes written for nothing; the four buffers now live across layers
+(transpose stage **240 -> 126 ms**). And both layer kinds transposed the widest
+GEMM into a 12 MB buffer only to memcpy it apart immediately, so
+`transpose_parts` writes the column ranges into their destinations in one pass.
+
+Per 256-token block the host half went **1306 -> ~500 ms**: `mid` 1040 -> ~360
+(DeltaNet 165 + 111, attention 70-115 growing with the window), transpose 115,
+tail 75, shared expert 40. With `OPEN-MOE-BATCH`'s two changes of the same day,
+`open_qwen36_cli --gemm-block` on 2582 tokens went **57.7 -> 41.6 s (22 -> 16
+ms/token)** with the identical eight-token greedy continuation, and 512 tokens
+9.98 -> 7.50 s. `oflm-test --llm` passes through this tree's `oflm serve` on
+the route. Details: `.claude/plans/moe-stage-cost.md`, raw data in
+`.claude/plans/decode-run/logs/`.
+
+**Result 2026-09-13 (one GEMM context for the whole route):** the GEMM core
+program used to bake K in as the trip count of its band-group loop, so the route
+carried three GEMM xclbins and therefore three hardware contexts. The band count
+K/256 now reaches each core as a runtime parameter the instruction stream writes,
+and all five of the 35B's projection shapes are streams over **one** xclbin. All
+five build to the same 203231-byte image (equivalent under
+`export_qwen36_kernels.py`'s own `xclbin_equivalent`, build stamps only), pass
+the harness at rel_fro 2.17e-3 to 2.25e-3 against the fp64 reference, and are
+**bit-exact against the previous compile-time-K kernel** on the same vectors --
+the change moves where K comes from, not the arithmetic. The runtime bound costs
+64 bytes of program memory per core (+2048 B over 32 cores) against a 16 KB
+budget.
+
+A hardware context change costs 2.47 ms into the GEMM context, 2.49 into the
+attention one and 2.93 into the expert kernel's, measured with an interleaved
+baseline over three runs (`Core::bench_dispatch`'s context-switch probe takes its
+own baseline in the same loop, since subtracting one measured minutes earlier put
+box drift straight into the delta). It does **not** scale with the kernel: across
+the `mb_s*` ladder, 0.57 to 14.1 ms of work and 32x the streamed bytes, it is
+2.82-3.14 ms with no trend. A 256-token block made 210 changes and now makes 100.
+
+End to end on 2582 tokens, `open_qwen36_cli --gemm-block`, three runs each side:
+the **GEMM stage goes 1489 -> 1096 ms a block, a 393 ms saving** (spread 19 ms
+across the three baseline runs, 5 ms across the two clean collapsed runs), and
+prefill **43.1 -> 38.9 s** against the fastest baseline, with the identical
+eight-token greedy continuation. Per dispatch the mechanism is visible directly:
+every projection whose context change was removed drops 2.75-3.39 ms, while the
+two that still follow the expert dispatch are unchanged (-0.17 and +0.06). Note
+that a switch costs ~3.37 ms inside a block against the 2.47 the isolated probe
+reports, so the block-level saving is larger than a per-switch model predicts
+(393 against 273); the isolated probe understates it.
+
+The core reads its band count immediately after acquiring the first weight band,
+so the dataflow orders the read: that acquire cannot complete until the runtime
+has issued the fill, which it issues after the parameter writes. A
+`WorkerRuntimeBarrier` -- the idiom `npu_offload/gemm_rtp/gemm_pretiled.py` uses
+for the same job -- **deadlocks here**, because the runtime releases it once per
+dispatch while this worker body runs once per weight row-block group;
+`designs/attn_block` survives it only because its body runs exactly once per
+dispatch. Verified on mlir-aie 1.4.2 that the generated core keeps the
+`AcquireGreaterEqual` ahead of the parameter load; nothing in the source forces
+that ordering, so a toolchain that reordered it would hang the dispatch outright
+rather than return wrong numbers, and re-checking it is worth a moment on a
+toolchain bump. Details: `.claude/plans/gemm-context-collapse.md`, raw data in
+`.claude/plans/decode-run/logs/`.
+
+### OPEN-MOE-BATCH: the token-batched expert kernel
+**Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
+**Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`
+
+The block route's routed experts run on a token-batched kernel instead of
+one dispatch per token: a dispatch streams every slot's expert once for up
+to eight of its tokens, one expert per column with the four rows splitting
+its output rows, taking the product transposed (the eight tokens as the
+mmul's A rows, the weight as its B operand, whose 8 k x 8 rows block is a
+q4_1 chunk's raw nibble layout) so a weight tile costs a mask and a convert
+and the per-row scales ride along as vectors. The expert pools are read as
+packed: a 128-row stripe is two 64-row bands interleaved at k-tile
+granularity, so a band is a strided read and no repack exists. A kernel set
+carries one `mb` xclbin and one instruction stream per dispatch length
+(`gemm_block.moe_batch.kernels`, a binary ladder down from the expert count:
+256, 128, 64, 32, 16 and 8 slots for 256 experts), each slot compiled as its
+own expert and patched per dispatch (`moebatch`, moeroute2's table with every
+expert a placeholder). The route gathers each expert's tokens eight at a time
+into `mb_x`, runs the shortest stream that holds the experts still owed tokens,
+scatters `mb_y` back with the router weights, and goes round again until every
+token is served. The ladder has to be fine because an unused slot is not free:
+it streams a real expert's weights and the result is discarded, so the rungs
+decide how much of a dispatch is wasted; the shared
+expert stays outside it (`OPEN-PREFILL-BATCH`). A set without `moe_batch`,
+or `OFLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
+
+**Acceptance criteria (unit):**
+- The up / gate band tap is sizes [8, 10240] strides [20480, 1] at `(8 e + 2 (b // 2)) STRIPE + (b % 2) BAND`, the down band tap two elements at `POOL_DOWN + e 655360 + (b // 2) 40960 + (b % 2) BAND`, derived from `stripe_transpose`, `std_perm` and `down_perm` themselves (`test_moe_batch.py`).
+- The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s64 / mb_s32 / mb_s16 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots (`test_moe_batch.py`).
+- The parser (`manifest_test.cpp`): a stream a `moe_batch` names must exist with patch `moebatch`, its slot count a positive multiple of 8, its x / h / y declared globals; the fixture parses to those six streams on both kinds.
+
+**Procedure:** as `tests/test_moe_batch.py` documents -- the 64-expert harness run (`make_test.py --slots 64`, `compare.py s64`, gate rel_fro <= 5e-3 on y) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 with and without `OFLM_OPEN_MOE_BATCH=0`.
+
+**Result 2026-09-12 (Qwen3.6-35B-A3B-NPU2):** the harness at 64 experts PASSes at rel_fro 4.4e-4 (gate 5e-3; every slot's cosine >= 0.999995, every token column's >= 0.99997), 4.27 ms per run = 33 GB/s over the 143 MB streamed. Full model: the 4-layer check against the sequential path is argmax 19/19, top-5 19/19, corr >= 0.9993 per position, and against mx per token corr >= 0.99999. The 1020-token prompt at 40 layers, nothing else on the NPU: prefill **40.0 s -> 24.0 s (39 -> 23 ms/token)**, the same 8-token greedy continuation as mx per token (first token 248068). Per 256-token block the expert stage went 7.1-7.5 s to 1.78-1.87 s: two dispatches per layer (256 slots, then ~95 of the 128-slot stream; 342-363 visits per layer), the 256-slot dispatch 27-32 ms (19 GB/s against the harness's 33: the difference is the context switch and the host memory churn between dispatches, measured by `--bench` and written up in `.claude/plans/prefill-gap.md`, "What a dispatch actually costs"). The block is now GEMM 1.4 s, host 1.8-2.4 s (growing with the window), experts 1.8-2.1 s. At 2582 tokens (the length the closed kernels were measured at) the same run is 64.5 s, 25 ms/token: the expert stage and the GEMMs are flat per block (1.7-1.9 s and 1.38 s) while the host stage grows from 1.36 s in block 0 to 3.72 s in block 9 -- 262 ms per 256 rows of window, and by the last block half of it. Against stock FLM 1.0.2's closed `qwen3_6_moe_npu` (14.3 s at 972 tokens, 21.9 s at 2582) the open path is 1.6x behind at ~1000 tokens and 2.9x at 2582, where before this kernel it was 2.9x and 5.4x. The host stages are the next step (`.claude/plans/prefill-gap.md`). **Through `flm serve` (2026-09-12, kernel set with the two DeltaNet decode changes as well, `k35v4`):** `flm-test --llm` passes -- both answers coherent and on-topic, the follow-up served from the prompt cache, no dispatch error; the same two long prompts prefill in 21.8 s at 972 tokens (22 ms/token, from 41.8) and 71.2 s at 2582 (28 ms/token, from 119.3), client-side time to first token, decode about 8 tok/s. The closed kernels' 14.3 s and 21.9 s make that 1.5x and 3.3x behind.
+
+**Result 2026-09-13 (the read-back and the ladder):** two things were being
+thrown away, both found by logging what each dispatch actually carried
+(`OFLM_OPEN_MOE_BATCH_LOG=1`) against `--bench` for what it costs alone.
+
+The read-back staged the whole dispatch's `y` -- 20 MB a layer -- into a second
+buffer to un-interleave the C tiles, then read all of it back to scatter the
+rows into their tokens. A column belongs to exactly one token, so the two
+passes are one: reading the tiles straight into the token's row is the same
+arithmetic in the same order and drops 40 MB a layer. The read stage went
+**185 -> 31 ms** a block and the expert stage 2035 -> 1763, most of the second
+number being the host traffic that was slowing the next dispatch.
+
+The ladder was 256, 128, 32, 8. A 256-token block leaves ~306 visits in a layer
+(min 292, max 333 over 2048 expert-token pairs), so the driver ran 256 and then
+a 128 for the last ~50 -- and a padded slot streams a real expert's 2 MB for
+nothing. That was **20.3 %** of every block's expert traffic, about 6 GB. With
+64 and 16 in the ladder the same layer closes on a 64: padding **7.2 %**,
+expert stage 1763 -> 1625 ms a block. The streams ride the xclbin that is
+already there and took 30 s each to build.
+
+The stream rate itself is not the problem it was read as: `mb_s256` alone is
+16.3 ms for 256 slots = 63.6 us a slot = **30.9 GB/s**, flat from 32 slots up,
+against the lm head's 44 GB/s on contiguous q8. What a dispatch costs beyond
+that is ~2.9 ms of context switch and the host traffic around it, unchanged in
+shape from 2026-09-12. `.claude/plans/moe-stage-cost.md` has the decomposition
+and what is left.
+
+**Result 2026-09-13 (why the stream sat at 31 GB/s):** it was never the strided
+band reads. A build whose A taps read the pool contiguously -- same bytes, same
+footprint, wrong arithmetic -- comes back at 16.31 ms against the shipped
+16.33: no difference. Nulling the core's work through the *same strided taps*
+gives 11.36 ms = **44.3 GB/s**, the rate the lm head gets on contiguous q8, so
+the DMA was never the limit and the shim split, the two input channels and the
+fifo depths are all cleared with it. The kernel is core-bound.
+
+Most of what the core spent was one helper: `mb_rep8` built the mmul's 64-lane
+B operand out of 8-lane pieces, which the compiler lowers to a scalar extract
+and a push **per lane** -- about seventy per 32-k block, and most of the inner
+loop. Building the same vector by halving a 512-bit register and doubling back
+up (`concat`, `filter_even` / `filter_odd`) takes `mb_step_ug` from 258 to 168
+instructions. 256 slots alone **16.33 -> 14.21 ms (30.8 -> 35.4 GB/s)**, and in
+the engine a uniform 1.13-1.16x across the whole ladder: `mb_s256` 16.38 ->
+14.26, `mb_s8` 0.64 -> 0.58. About 110 ms off a 256-token block's expert stream.
+Output is byte-for-byte identical (`cmp` on the harness's y and h at 16 slots,
+not a tolerance), so no requirement moves.
+
+Applying the scales to the summed product instead of to every weight -- the
+change this started as, and algebraically the better one -- is a measured no:
+the raw partial and the running C need two accumulators per parity and four do
+not fit the file, so the kernel has to walk one parity at a time and re-read
+the nibbles. 30.4 ms against 16.3. It is ~24x more accurate (rel_fro 2.0e-05
+against 4.7e-04) and is recorded in `.claude/plans/moe-stream-rate.md` in case
+the register pressure is ever solved. 14.21 ms still stands against an 11.55 ms
+DMA floor; the remaining ~2.3 ms is the scale application.
+
+### OPEN-PREFILL-ATTN: the block attention's products on the NPU
+**Applies to:** openflowlm-next (`open_kernels/designs/attn_block/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,block_host,core}.cpp`)
+**Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_prefill_attn.py` documents the procedure); the recipe emission and the manifest schema are unit-tested in `tests/test_prefill_attn.py` and `src/open_qwen36/manifest_test.cpp`
+
+The block route's full-attention layers run their attention as two bf16 GEMM
+dispatches per kv head instead of on the host: the scores `Q K^T` (the kv
+head's group of query heads times the block's tokens as rows, the window's
+cached K rows as columns) and then `P V`, with the causal row softmax on the
+host between them. The kernel is the whole-array bf16 GEMM the embedding
+models run on (`npu_offload/gemm_rtp/gemm_pretiled.py`), built with its
+runtime loop bounds so one xclbin (`ag`) carries an instruction stream per
+256 rows of window up to `attn_block.l_max` for each product
+(`kernels_s`, `kernels_pv`); a window wider than that is taken in chunks with
+the running max and sum merged across them. The host keeps the q / k norms,
+RoPE, the KV-cache write, the causal mask, the softmax and the output gate;
+1/sqrt(hd) is folded into Q before the bf16 rounding (exact: a power of two at
+every head dim here), and the denominator counts the bf16-rounded P the kernel
+multiplies. A set without `attn_block`, or `OFLM_OPEN_ATTN_BLOCK=0`, runs
+`host::attention_block` as before.
+
+**Acceptance criteria (unit):**
+- The 35B emission: the full-attention type carries `attn_block` = `m` 2048, `hd` 256, `l_max` 4096, args `ag_a, ag_b, ag_c`, streams `ag_s<L>` / `ag_pv<L>` for L = 256 .. 4096 by 256 on context `ag`; the builds pass `AG_M`, `AG_K`, `AG_N` (K = hd, N = L for the scores; K = L, N = hd for the values); the globals are sized for the widest window; the linear type carries none (`test_prefill_attn.py`).
+- The parser (`manifest_test.cpp`): `m`, `hd` and `l_max` positive multiples of 256, three args that are declared globals, every window a positive multiple of 256 within `l_max`, `kernels_s` reaching `l_max`, and `kernels_s` / `kernels_pv` covering the same windows; the fixture parses to 16 windows of each on the full type only.
+
+**Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`.
+
+**Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.

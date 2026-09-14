@@ -40,14 +40,18 @@ MAC_S, MAC_T = 8, 8   # aie2p bf16 mac_dims (4,8,8): s=8, t=8
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--shape", default="qkv", choices=sorted(SHAPES))
+    ap.add_argument("--shape", default="qkv", help=f"one of {sorted(SHAPES)}, or nN_kK for a shape-keyed build "
+                                                    "(the engine's gemm_nN_kK contexts, build_nN_kK_t<T>)")
     ap.add_argument("--tokens", type=int, default=256, help="T, must be a multiple of tile_n*8")
     ap.add_argument("--tile-n", type=int, default=TILE_N, help="must match GQP_TILE_N the design was built with")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--runs", type=int, default=3, help="`run` lines in the cfg (timing)")
     a = ap.parse_args()
 
-    n_weight, k = SHAPES[a.shape]
+    if a.shape in SHAPES:
+        n_weight, k = SHAPES[a.shape]
+    else:
+        n_weight, k = (int(p[1:]) for p in a.shape.split("_"))
     T = a.tokens
     tile_n = a.tile_n
     if T % (tile_n * 8) != 0:

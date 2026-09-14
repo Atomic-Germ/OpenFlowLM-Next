@@ -81,8 +81,8 @@ std::string prompt_for(const std::vector<std::string>& names,
 
     std::string have;
     for (const auto& n : names) have += (have.empty() ? "" : ", ") + n;
-    throw std::runtime_error(
-        "NpueEmbedding: this model declares task prompts [" + have +
+    throw TaskPromptUnavailable(
+        "this model declares task prompts [" + have +
         "] and none of them matches the requested task. Refusing to pick one: "
         "a wrongly-prefixed embedding is correctly shaped and correctly "
         "normed, so nothing downstream could tell the answer is for a "
@@ -232,6 +232,10 @@ NpueEmbedding::NpueEmbedding(oflm_rt::device* npu_device_inst, std::string tag)
 }
 
 NpueEmbedding::~NpueEmbedding() = default;
+
+std::vector<std::string> NpueEmbedding::prompt_names() const {
+    return impl_->prompt_names;
+}
 
 void NpueEmbedding::load_model(std::string model_path, json model_info,
                                bool enable_preemption) {

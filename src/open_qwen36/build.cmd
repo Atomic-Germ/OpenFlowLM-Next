@@ -19,7 +19,7 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
    manifest_test.cpp manifest.cpp /Fe:out\manifest_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
-out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_hy_mt2_7b.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen35_9b.json
+out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_hy_mt2_7b.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen35_9b.json ..\..\specs\open-engine\tests\fixtures\manifest_phi4_mini_4b.json
 if errorlevel 1 goto :testfail
 echo [open_qwen36] pools_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
@@ -27,6 +27,14 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
    pools_test.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\pools_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
 out\pools_test.exe
+if errorlevel 1 goto :testfail
+echo [open_qwen36] block_host_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 ^
+   /I ".." /I "..\include" ^
+   block_host_test.cpp block_host.cpp /Fe:out\block_host_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+python ..\..\open_kernels\model\replica_block.py --fixture out\blockfix >nul
+out\block_host_test.exe out\blockfix
 if errorlevel 1 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
@@ -40,9 +48,13 @@ REM The two unit tests above need no XRT; the CLI does.
 if "%XRT_INCLUDE_DIR%"=="" goto :noxrt
 if "%XRT_LIB_DIR%"=="" goto :noxrt
 echo [open_qwen36] XRT_INCLUDE_DIR=%XRT_INCLUDE_DIR%
-cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+REM DISABLE_ABI_CHECK=1, matching ../CMakeLists.txt's flm target --
+REM without it xrt/detail/abi.h wants a generated version-slim.h that a raw
+REM C:\dev\XRT source checkout (no XRT build step run in it) never produces,
+REM and cl fails with C1083 before ever reaching this file's own code.
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   q4nx_file.cpp pools.cpp manifest.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   q4nx_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_qwen36_cli.exe /Fo:out\
 if errorlevel 1 goto :clfail
 echo [open_qwen36] OK -^> out\open_qwen36_cli.exe

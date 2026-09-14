@@ -47,6 +47,14 @@ HF_LLAMA32_1B = {
     "rope_scaling": {"factor": 32.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0,
                      "original_max_position_embeddings": 8192, "rope_type": "llama3"},
 }
+# FastFlowLM/Nanbeige4.1-3B-NPU2 config.json: `model_type: llama` with its own head count
+# (20 over 4 kv heads), a 166144-row head and theta 7e7, no scaling.
+HF_NANBEIGE41_3B = {
+    "model_type": "llama", "hidden_size": 2560, "intermediate_size": 10752, "num_hidden_layers": 32,
+    "num_attention_heads": 20, "num_key_value_heads": 4, "head_dim": 128, "rms_norm_eps": 1e-05,
+    "rope_theta": 70000000, "vocab_size": 166144, "tie_word_embeddings": False, "rope_scaling": None,
+    "hidden_act": "silu", "attention_bias": False,
+}
 
 
 def hf_llama3_inv_freq(theta, dim, factor, lo, hi, old):
@@ -192,3 +200,28 @@ def test_ptab_uses_the_inverse_frequencies():
     cos = t[2, 512:520].view(np.float32)
     sin = t[2, 520:528].view(np.float32)
     assert np.allclose(cos, np.cos([1.0, 0.5])) and np.allclose(sin, np.sin([1.0, 0.5]))
+
+
+def test_nanbeige41_3b_derives_and_lays_out_on_the_llama_recipe(monkeypatch):
+    """Nanbeige4.1-3B declares llama and is one: GQA 20 over 4 at head_dim 128 (a new
+    attention tuple), an FFN of 10752 (a new GEMV K), theta 7e7 unscaled, its own vocab."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    spec = ModelSpec.from_hf_config(HF_NANBEIGE41_3B, real_vocab=166144)
+    assert spec.family == "llama3" and spec.layer_types == tuple([DENSE] * 32)
+    assert (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (20, 4, 128, 128)
+    assert spec.attn_q_width == 2560 == spec.hidden and spec.attn_kv_width == 512
+    assert spec.rope_theta == 7e7 and spec.rope_scaling is None and spec.qk_norm is False
+    assert spec.rope_inv_freq() == [7e7 ** (-i / 64) for i in range(64)]
+    R = DR.recipe(spec)
+    L, G = R.layout, R.geo
+    assert (G.Q_PC, G.KV_PC, G.O_PC, G.UP_PC, G.DOWN_PC) == (5, 1, 5, 21, 5)
+    assert (G.HPE, G.HPO, G.Q_AIN_ELEMS, G.K_AIN_ELEMS, G.OG_AOUT_ELEMS) == (2, 4, 10, 2, 5)
+    assert (G.XN_ELEMS, G.OG_ELEMS, G.XM_ELEMS, G.H_ELEMS) == (2, 2, 2, 11)
+    assert (L.ELN, L.E_A, L.KV_ROW, L.PTAB_ROW) == (5120, 1024, 2048, 1024)
+    assert G.PER_CALL == 2 and G.TAB_BYTES == 24192 and G.KWIDE == 10752     # 60032 of the 61440-byte L1
+    assert L.CD_BYTES == 12288
+    assert L.LMHEAD_BANDS == 2596 and L.LMHEAD_BAND_BYTES == 102400 and DR.lm_rows(spec) == 166144
+    m = manifest(spec)
+    assert m["family"] == "llama3" and m["builds"]["dx"]["build_dir"] == "dense/build_llama3_h2560"
+    assert m["builds"]["lm_head_q4"]["env"]["LMHEAD_N"] == "166144"
+    assert m["hf_config_check"]["num_attention_heads"] == 20 and "head_dim" not in m["hf_config_check"]

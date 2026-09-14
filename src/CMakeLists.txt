@@ -287,6 +287,8 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tokenizers-cpp
 # Gather your sources
 # ———————————————————————————————————————————————
 file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "server/*.cpp" "pull/*.cpp")
+# Unit-test translation units carry their own main() and must never join the engine.
+list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
@@ -300,6 +302,7 @@ if(NOT OFLM_USE_HRX)
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/engine.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/vision/vit.cpp")
 endif()
@@ -514,7 +517,13 @@ if(NOT OFLM_USE_HRX)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(oflm PUBLIC OpenMP::OpenMP_CXX)
     endif()
-
+    # The block prefill's host stages (open_qwen36/block_host.cpp) are written for the
+    # vectoriser; the same per-source flag the open embedding sources carry.
+    if(MSVC)
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/block_host.cpp" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+    endif()
 endif()
 
 if(WIN32)
@@ -1173,6 +1182,77 @@ enable_testing()
 add_test(NAME oflm_smoke COMMAND $<TARGET_FILE:oflm> list)
 set_tests_properties(oflm_smoke PROPERTIES
     ENVIRONMENT "OFLM_CONFIG_PATH=${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# openai_compat: the OpenAI wire vocabulary (finish_reason, error bodies, HTTP
+# status) and the chat-model predicate. NO device, NO weights, NO network -- it
+# links nothing but nlohmann and reads model_list.json off disk, so it runs on a
+# build machine with no NPU. The smoke test above cannot cover any of this: every
+# defect it guards produces a WELL-FORMED wrong answer, and the server stays up.
+add_executable(openai_compat_test server/openai_compat_test.cpp)
+if(NOT WIN32)
+    target_compile_options(openai_compat_test PRIVATE -mavx -mavx2)
+endif()
+target_include_directories(openai_compat_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+# model_list.hpp -> utils/utils.hpp -> device_runtime.hpp, so the NPU RUNTIME HEADERS
+# are needed to compile even though nothing here links or opens a device -- and which
+# ones depends on the backend. Without this the test compiled only in an XRT build and
+# took device_runtime.hpp's XRT branch, with no XRT headers, in an HRX one.
+if(OFLM_USE_HRX)
+    target_compile_definitions(openai_compat_test PRIVATE OFLM_USE_HRX=1)
+    target_link_libraries(openai_compat_test PRIVATE hrx::hrx)
+elseif(XRT_INCLUDE_DIRS)
+    target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIRS})
+elseif(XRT_INCLUDE_DIR)
+    target_include_directories(openai_compat_test PRIVATE ${XRT_INCLUDE_DIR})
+endif()
+# DISABLE_ABI_CHECK for the same reason the engine sets it: an XRT REPO checkout
+# has no generated xrt/detail/version-slim.h, and abi.h includes it unguarded.
+target_compile_definitions(openai_compat_test PRIVATE DISABLE_ABI_CHECK=1)
+if(MSVC)
+    target_compile_options(openai_compat_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(openai_compat_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
+endif()
+add_test(NAME openai_compat
+         COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# bench_embed: the pure half of `oflm bench-embed` -- the sweep plan, the stage
+# count, the task-name lookup, the corpus, and the batch slice. NO device, NO
+# weights, NO network. Every assertion there is a way the command could report a
+# number that looks fine and is not: a sweep that never reaches its own limit, a
+# config-supplied task read as no task, a custom corpus labelled built-in, a
+# shorthand tag that clears every check and then fails. None of them is a crash
+# and none changes a vector, so the smoke test cannot see any of them either.
+add_executable(benchmark_embed_test src/benchmark_embed_test.cpp)
+if(NOT WIN32)
+    target_compile_options(benchmark_embed_test PRIVATE -mavx -mavx2)
+endif()
+target_include_directories(benchmark_embed_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/server")
+# Same reason openai_compat_test needs these: model_list.hpp -> utils/utils.hpp ->
+# device_runtime.hpp, so the NPU RUNTIME HEADERS are needed to COMPILE even though
+# nothing here opens a device, and which ones depends on the backend.
+if(OFLM_USE_HRX)
+    target_compile_definitions(benchmark_embed_test PRIVATE OFLM_USE_HRX=1)
+    target_link_libraries(benchmark_embed_test PRIVATE hrx::hrx)
+elseif(XRT_INCLUDE_DIRS)
+    target_include_directories(benchmark_embed_test PRIVATE ${XRT_INCLUDE_DIRS})
+elseif(XRT_INCLUDE_DIR)
+    target_include_directories(benchmark_embed_test PRIVATE ${XRT_INCLUDE_DIR})
+endif()
+target_compile_definitions(benchmark_embed_test PRIVATE DISABLE_ABI_CHECK=1)
+if(MSVC)
+    target_compile_options(benchmark_embed_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(benchmark_embed_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN __WINDOWS__)
+endif()
+add_test(NAME bench_embed
+         COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.

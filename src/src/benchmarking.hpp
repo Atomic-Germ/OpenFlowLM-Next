@@ -193,7 +193,7 @@ inline void write_bench_csv(const BenchmarkResults_t& results, const std::string
     out.close();
 }
 
-void print_result(const BenchmarkResults_t& results) {
+inline void print_result(const BenchmarkResults_t& results) {
     // Calculate number of stages (1k, 2k, 4k, ...)
     int stages;
     stages = results.decoding_speed.size();
@@ -246,7 +246,7 @@ void print_result(const BenchmarkResults_t& results) {
     std::cout << "\n";
 }
 
-BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_config_file, model_list& availble_models, int iterations){
+inline BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_config_file, model_list& availble_models, int iterations){
     BenchmarkResults_t results;
     json bench_config;
     // this is used for our benchmarking, not for public use.
@@ -275,6 +275,11 @@ BenchmarkResults_t run_benchmarks(std::string model_tag, std::string bench_confi
     }
     auto [new_tag, model_info] = availble_models.get_model_info(model_tag);
     std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(new_tag, availble_models, &npu_device_inst);
+    if (auto_model.second == nullptr) {
+        throw std::runtime_error("cannot benchmark '" + new_tag + "': it is either unknown to "
+                                 "this build or not a chat model. Refusing to benchmark a "
+                                 "substitute, which would report the wrong model's numbers.");
+    }
     auto_chat_engine = std::move(auto_model.second);
     int max_len = bench_config["max_length"];
     if (max_len < 8192)

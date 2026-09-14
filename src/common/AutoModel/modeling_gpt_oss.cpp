@@ -7,7 +7,10 @@
 #include "AutoModel/modeling_gpt_oss.hpp"   
 
 
-GPT_OSS::GPT_OSS(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "gpt-oss") {}
+// harmony always reasons, so unlike the base default this one starts on
+GPT_OSS::GPT_OSS(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "gpt-oss") {
+    this->enable_think = true;
+}
 
 void GPT_OSS::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->model_path = model_path;

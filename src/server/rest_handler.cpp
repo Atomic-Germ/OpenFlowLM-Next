@@ -20,6 +20,38 @@
 #include <random>
 #include "server.hpp"
 
+///@brief Report a handler's error on the transport the client is actually reading (#64)
+///@param stream what the handler's stream callback has already sent
+///@param wire the streaming format, used only once the stream is open
+///@param message the error text for an in-stream frame
+///@param body the error body to send when nothing is on the wire yet
+///@param send_response the non-streaming transport
+///@param sink the handler's own stream callback -- the one that updates `stream`
+///@note Which route applies is openai_compat::error_route(), unit-tested there.
+template <class FrameSink>
+static void send_error(const openai_compat::StreamState& stream,
+                       openai_compat::StreamWire wire,
+                       const std::string& message,
+                       const json& body,
+                       const std::function<void(const json&)>& send_response,
+                       FrameSink& sink) {
+    switch (openai_compat::error_route(stream)) {
+        case openai_compat::ErrorRoute::Body:
+            send_response(body);
+            return;
+        case openai_compat::ErrorRoute::Frame: {
+            const std::vector<std::string> frames = openai_compat::stream_error_frames(wire, message);
+            for (size_t i = 0; i < frames.size(); ++i) {
+                sink(frames[i], i + 1 == frames.size());
+            }
+            return;
+        }
+        case openai_compat::ErrorRoute::Unreportable:
+            header_print("OFLM", "Error after the stream ended; the client cannot be told: " + message);
+            return;
+    }
+}
+
 ///@brief Normalize messages by merging consecutive user messages (like Ollama does)
 ///@param messages the original messages
 ///@return normalized messages with consecutive user messages merged
@@ -369,7 +401,7 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
             header_print("Warning", "Default model tag '" << default_model_tag << "' is not supported. Falling back to 'llama3.2:1b'.");
             this->default_model_tag = "llama3.2:1b";
         }
-        if (!ensure_model_loaded(default_model_tag)) {
+        if (ensure_model_loaded(default_model_tag) != ModelLoad::Ok) {
             header_print("Error", "Failed to load default model: " + default_model_tag);
         }
     }
@@ -385,9 +417,65 @@ RestHandler::~RestHandler() = default;
 
 ///@brief Ensure the model is loaded
 ///@param model_tag the model tag
-bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
-    std::string ensure_tag = model_tag;
-    if (current_model_tag != ensure_tag) {
+RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model_tag,
+                                                        bool model_field_present) {
+    // Normalise FIRST, because both the comparison and the lookup below are exact.
+    // Clients send three spellings of one model -- "granite", "granite:3b" and
+    // "Ollama/granite:3b" -- and all_tags holds the first two only, while
+    // current_model_tag always holds the resolved "granite:3b". The prefixed form was
+    // therefore refused as unknown, and a bare "granite" compared unequal to the
+    // "granite:3b" it had itself just loaded: every bare-tag request after the first
+    // took the switch path below, evicted the model and reloaded it from disk. The
+    // only symptom was latency.
+    //
+    // rectify_model_tag() indexes config["models"][type], so it is only safe once the
+    // type is known to exist -- hence the support check around it rather than after.
+    std::string ensure_tag = this->supported_models.cut_tag(model_tag);
+    if (this->supported_models.is_model_supported(ensure_tag)) {
+        ensure_tag = this->supported_models.rectify_model_tag(ensure_tag);
+    }
+    // "model-faker" is the sentinel for `oflm serve` started without a chat model,
+    // and the handlers default `model` to current_model_tag -- so a request naming no
+    // model arrives here as the sentinel. Say so, rather than looking it up and
+    // reporting it as a typo.
+    switch (openai_compat::preflight(model_field_present, ensure_tag, current_model_tag,
+                                     auto_chat_engine != nullptr)) {
+        case openai_compat::Preflight::Ok:      return ModelLoad::Ok;
+        case openai_compat::Preflight::NoModel: return ModelLoad::NoModel;
+        case openai_compat::Preflight::BadModelValue:
+            header_print("ERROR", "request set 'model' to '" + ensure_tag +
+                                  "', which is not a model name -- refusing");
+            return ModelLoad::Unknown;
+        case openai_compat::Preflight::NeedsLoad: break;
+    }
+    {
+        // Checked BEFORE anything is unloaded. The old order reset the engine first
+        // and only then resolved the tag, so a request for a model that does not
+        // exist evicted the served one and was answered by the substitute.
+        if (!this->supported_models.is_model_supported(ensure_tag)) {
+            header_print("ERROR", "unknown model '" + ensure_tag + "' -- refusing; '" +
+                                  current_model_tag + "' stays loaded");
+            return ModelLoad::Unknown;
+        }
+        // ... and the same question one level down. `embed-gemma:300m` and
+        // `whisper-v3:turbo` ARE in the model list, so the check above passes them;
+        // the factory can only refuse them by returning null, and it is called after
+        // the loaded engine has already been reset. Asking here keeps the promise the
+        // comment above makes -- nothing is unloaded for a request that cannot be served.
+        if (!is_chat_model(ensure_tag, this->supported_models)) {
+            header_print("ERROR", "model '" + ensure_tag + "' is not a chat model -- refusing; '" +
+                                  current_model_tag + "' stays loaded");
+            return ModelLoad::NotChatModel;
+        }
+        // One request naming another model evicts the loaded one, and may pull it first.
+        // That is the intended behaviour, but it used to happen with no output at all --
+        // a typo in a client's model field took the served model off the NPU and cost a
+        // full reload, and the operator's only evidence was the latency.
+        if (!current_model_tag.empty() && current_model_tag != "model-faker") {
+            header_print("OFLM", "request asked for '" + ensure_tag + "' while '" +
+                                 current_model_tag + "' is loaded -- switching; the "
+                                 "previous model leaves the NPU and must be reloaded");
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (auto_chat_engine != nullptr) {
             auto_chat_engine.reset();
@@ -395,6 +483,17 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
         std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(ensure_tag, this->supported_models, &this->npu_device_inst);
         auto_chat_engine = std::move(auto_model.second);
         ensure_tag = auto_model.first;
+        if (auto_chat_engine == nullptr) {
+            // The factory's contract is null-on-failure and this was the one caller that
+            // did not honour it -- configure_parameter() below is a dereference. It was
+            // unreachable while null meant only "unsupported tag" (checked above); it
+            // stopped being unreachable the moment null also meant "not a chat model".
+            header_print("ERROR", "no engine for '" + ensure_tag + "'; nothing is loaded now");
+            this->current_model_tag = "model-faker";
+            return ModelLoad::NotChatModel;
+        }
+        // A request may name a model that is in the list but not on disk, or one an update
+        // has left behind - pull it before loading rather than failing the request.
         switch (downloader.is_model_downloaded(ensure_tag)) {
             case ModelDownloader::ModelStatus::Ready:
                 break;
@@ -403,12 +502,17 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
                 downloader.pull_model(ensure_tag, this->modelscope);
                 break;
             case ModelDownloader::ModelStatus::Incompatible:
-                return false;
-            }
+                header_print("ERROR", "model '" + ensure_tag + "' is not compatible with this "
+                                      "version of OpenFlowLM; nothing is loaded now");
+                this->auto_chat_engine.reset();
+                this->current_model_tag = "model-faker";
+                return ModelLoad::LoadFailed;
+        }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
         auto_chat_engine->configure_parameter("img_pre_resize", this->img_pre_resize);
         try {
             auto_chat_engine->load_model(supported_models.get_model_path(new_ensure_tag), model_info, ctx_length, preemption);
+            auto_chat_engine->snapshot_request_defaults();
         }
         catch (const std::exception& e) {
             header_print("ERROR", "Failed to load model: " + std::string(e.what()));
@@ -416,7 +520,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
             this->npu_device_inst.reset();
             this->npu_device_inst = oflm_rt::device(0);
             this->current_model_tag = "model-faker";
-            return false;
+            return ModelLoad::LoadFailed;
         }
         
         if (this->prefill_chunk_len == -1) {
@@ -424,7 +528,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
         }
         current_model_tag = ensure_tag;
     }
-    return true;
+    return ModelLoad::Ok;
 }
 
 ///@brief Ensure the asr model is loaded
@@ -499,6 +603,8 @@ void RestHandler::ensure_embed_model_loaded(const std::string& model_tag) {
 ///@param options the options JSON object
 ///@param request the request JSON object
 void RestHandler::configure_chat_engine_parameters(const json& options, const json& request) {
+    // a field the request leaves out means the model default, not the previous request's value
+    auto_chat_engine->reset_request_defaults();
     if (request.contains("temperature")) {
         float temperature = request["temperature"];
         auto_chat_engine->set_temperature(temperature);
@@ -542,7 +648,8 @@ void RestHandler::configure_chat_engine_parameters(const json& options, const js
     }
 }
 
-json RestHandler::build_nstream_response(std::string response_text) {
+json RestHandler::build_nstream_response(std::string response_text,
+                                         stop_reason_t stop_reason) {
     // Get tool info
     NonStreamResult result = auto_chat_engine->parse_nstream_content(response_text);
 
@@ -598,7 +705,8 @@ json RestHandler::build_nstream_response(std::string response_text) {
             {"index", 0},
             {"message", message},
             {"logprobs", nullptr},
-            {"finish_reason", is_tool_call ? "tool_calls" : "stop"}
+            {"finish_reason", is_tool_call ? "tool_calls"
+                                           : openai_compat::finish_reason(stop_reason)}
         }
     });
 }
@@ -611,7 +719,13 @@ void RestHandler::handle_show(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response) {
     try {
-        std::string model = request["model"];
+        // Checked before reading: POST /api/show {} killed the server (#70).
+        if (json err = openai_compat::require_field(request, "model", openai_compat::FieldType::String);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
+        std::string model = request["model"].get<std::string>();
         json info = {
             {"modelfile", ""},
             {"parameters", ""},
@@ -648,8 +762,19 @@ void RestHandler::handle_generate(const json& request,
                                  std::function<void(const json&)> send_response,
                                  StreamResponseCallback send_streaming_response,
                                  std::shared_ptr<CancellationToken> cancellation_token) {
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    auto ndjson_stream_callback = [&send_streaming_response, &stream_state](const json& data, bool is_final) {
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data, is_final); });
+        };
     try {
-        std::string prompt = request["prompt"];
+        // Checked before reading: POST /api/generate {} killed the server (#70).
+        if (json err = openai_compat::require_field(request, "prompt", openai_compat::FieldType::String);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
+        std::string prompt = request["prompt"].get<std::string>();
         bool stream = request.value("stream", true);
         std::string model = request.value("model", current_model_tag);
         json options = request.value("options", json::object());
@@ -657,9 +782,8 @@ void RestHandler::handle_generate(const json& request,
         int length_limit = request.value("max_tokens", 4096);
         auto load_start_time = time_utils::now();
         // TODO: Use Another Check Function avoid loading again
-        if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
-            send_response(error_response);
+        if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
+            send_response(openai_compat::model_error(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -673,12 +797,17 @@ void RestHandler::handle_generate(const json& request,
         if (stream) {
             // Streaming response using streaming_ostream
             auto total_start_time = time_utils::now();
-            streaming_ostream ostream(model, send_streaming_response, false);
+            streaming_ostream ostream(model, ndjson_stream_callback, false);
             uniformed_input.prompt = prompt;
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -693,7 +822,9 @@ void RestHandler::handle_generate(const json& request,
                 auto_chat_engine->generate(meta_info, length_limit, ostream);
             } catch (const std::exception& e) {
                 json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Ndjson, e.what(),
+                           error_response, send_response, ndjson_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -711,7 +842,12 @@ void RestHandler::handle_generate(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -750,7 +886,8 @@ void RestHandler::handle_generate(const json& request,
         }
     } catch (const std::exception& e) {
         json error_response = {{"error", e.what()}};
-        send_response(error_response);
+        send_error(stream_state, openai_compat::StreamWire::Ndjson, e.what(),
+                   error_response, send_response, ndjson_stream_callback);
     }
 }
 
@@ -763,6 +900,12 @@ void RestHandler::handle_chat(const json& request,
                              StreamResponseCallback send_streaming_response,
                              std::shared_ptr<CancellationToken> cancellation_token) {
     try {
+        // Checked before reading, like the other handlers (#70).
+        if (json err = openai_compat::require_field(request, "messages", openai_compat::FieldType::Array);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
         nlohmann::ordered_json messages = request["messages"];
         bool stream = request.value("stream", false);
         std::string model = request.value("model", current_model_tag);
@@ -770,9 +913,8 @@ void RestHandler::handle_chat(const json& request,
         int length_limit = options.value("num_predict", 4096);
 
         auto load_start_time = time_utils::now();
-        if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
-            send_response(error_response);
+        if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
+            send_response(openai_compat::model_error(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -794,7 +936,12 @@ void RestHandler::handle_chat(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -808,7 +955,12 @@ void RestHandler::handle_chat(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success){
-                    json error_response = {{"error", "Max length reached"}};
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -881,7 +1033,65 @@ void RestHandler::handle_embeddings(const json& request,
                                    std::function<void(const json&)> send_response,
                                    StreamResponseCallback send_streaming_response) {
     try {
-        std::string model = request["model"];
+        // VALIDATE `input` FIRST, and read every other field through a checked
+        // accessor. `std::string model = request["model"]` used to be the first
+        // statement here, on a `const json&`, with nothing checking that the key
+        // existed -- so `POST /v1/embeddings {}` did not answer the 400 the guard
+        // below promises. It KILLED THE SERVER PROCESS, after logging
+        // "NPU Locked!", i.e. while holding the NPU access lock. Reproduced at
+        // exit 139. The input guard was written for exactly that request and sat
+        // below the line that crashed before reaching it.
+        if (!request.is_object()) {
+            send_response(json{{"error", {
+                {"message", "the request body must be a JSON object."},
+                {"type", "invalid_request_error"},
+                {"param", ""},
+                {"code", "invalid_value"}}}});
+            return;
+        }
+        if (!request.contains("input")) {
+            send_response(json{{"error", {
+                {"message", "input is required: a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "missing_required_parameter"}}}});
+            return;
+        }
+        std::vector<std::string> inputs;
+
+        // `model` is OPTIONAL on this endpoint and stays that way: the mismatch
+        // check below is written as `!model.empty() && ...`, i.e. an absent model
+        // means "whatever this server loaded". What was missing was the type
+        // check and the presence check, not the field.
+        std::string model;
+        // `contains()` alone, deliberately: an explicit `null` is neither a
+        // string nor omitted, and the message below says so. The previous
+        // version skipped null before the type check, which accepted it and
+        // contradicted its own error text. A caller that means "whatever is
+        // loaded" omits the field.
+        if (request.contains("model")) {
+            if (!request["model"].is_string()) {
+                send_response(json{{"error", {
+                    {"message", "model must be a string naming the loaded embedding "
+                                "model, or be omitted."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "invalid_value"}}}});
+                return;
+            }
+            model = request["model"].get<std::string>();
+            // specs/server-api: an explicit "" is refused, as on the chat
+            // endpoints; only an omitted field means "whatever is loaded".
+            if (model.empty()) {
+                send_response(json{{"error", {
+                    {"message", "model is empty. Name the loaded embedding model, or "
+                                "omit the field to use it."},
+                    {"type", "invalid_request_error"},
+                    {"param", "model"},
+                    {"code", "model_not_found"}}}});
+                return;
+            }
+        }
 
         // THE `model` FIELD USED TO BE ECHOED AND OTHERWISE IGNORED, which is
         // the worst version of a wrong answer: the response ASSERTED it was
@@ -900,6 +1110,7 @@ void RestHandler::handle_embeddings(const json& request,
         //
         // It refuses now, and names what IS loaded. An unknown model is an
         // error every OpenAI client already understands.
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
         if (this->auto_embedding_engine) {
             const std::string loaded = this->auto_embedding_engine->get_current_model();
             if (!model.empty() && !loaded.empty() && model != loaded) {
@@ -916,47 +1127,221 @@ void RestHandler::handle_embeddings(const json& request,
                 return;
             }
         }
+#endif
 
-        std::vector<std::string> inputs;
-
-        if (request["input"].is_string()) {
-            inputs.push_back(request["input"].get<std::string>());
+        // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
+        // which one is chosen changes the vector materially -- measured on this server,
+        // search_query against search_document on the same text is cosine 0.914, not 1.
+        // This handler used to pass task_query unconditionally and ignore the request, so
+        // every DOCUMENT was embedded as a QUERY and no caller could tell: the vector is
+        // correctly shaped, correctly normed and deterministic either way.
+        // The task prompt. nomic-embed-text and friends prepend a per-task prefix, and
+        // which one is chosen changes the vector materially -- measured on this server,
+        // search_query against search_document on the same text is cosine 0.914, not 1.
+        // This handler used to pass task_query unconditionally and ignore the request, so
+        // every DOCUMENT was embedded as a QUERY and no caller could tell.
+        embedding_task_type_t task_type = embedding_task_type_t::task_query;
+        const std::string accepted = openai_compat::task_names_csv();
+        std::vector<std::string> declared;
+        bool supports_prompts = false;
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+        if (this->auto_embedding_engine) {
+            declared = this->auto_embedding_engine->prompt_names();
+            supports_prompts = this->auto_embedding_engine->supports_task_prompts();
         }
-        else if (request["input"].is_array()) {
-            for (const auto& item : request["input"]) {
-                inputs.push_back(item.get<std::string>());
+#endif
+        const openai_compat::TaskResolution tr = openai_compat::resolve_task(request);
+        using TRS = openai_compat::TaskResolution::Status;
+
+        const openai_compat::TaskPolicy policy =
+            openai_compat::task_policy(supports_prompts, !declared.empty(), tr.status != TRS::Absent);
+        if (policy == openai_compat::TaskPolicy::NotSupported) {
+            // prompt_for() returns an empty prefix for a model with no prompt table,
+            // so this used to answer 200 with an UNPREFIXED vector -- correctly
+            // shaped, correctly normed, and not what was asked for.
+            // src/open_npue_adapter/README.md: "model has no prompts, a prompt is
+            // given | error".
+            send_response(json{{"error", {
+                {"message", "model '" + model + "' has no task prompts; remove '" + tr.field +
+                            "'. Passing one would be ignored, and the vector would come back "
+                            "correctly shaped and unprefixed with nothing to show it."},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (policy == openai_compat::TaskPolicy::Required) {
+            std::string names;
+            for (const auto& n : declared) names += (names.empty() ? "" : ", ") + n;
+            // Quote the REST vocabulary, not `declared`: the validator only accepts
+            // the former, so naming the latter sent clients to values it refuses.
+            json err = { {"error", {
+                {"message", "this model requires a task prompt: pass 'prompt_name' as "
+                            "one of [" + accepted + "] (this model declares the prompts [" +
+                            names + "], which those names map onto). Refusing to pick one -- "
+                            "the prefix changes the vector (search_query against "
+                            "search_document on the same text is cosine 0.914 here), and the "
+                            "result is correctly shaped, correctly normed and deterministic "
+                            "either way, so nothing downstream can tell the wrong one was used."},
+                {"type", "invalid_request_error"},
+                {"param", "prompt_name"},
+                {"code", "missing_required_parameter"}
+            }} };
+            send_response(err);
+            return;
+        }
+        if (tr.status == TRS::NotAString) {
+            send_response(json{{"error", {
+                {"message", "'" + tr.field + "' must be a string, one of [" + accepted + "]"},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (tr.status == TRS::Unknown) {
+            send_response(json{{"error", {
+                {"message", "unknown " + tr.field + " '" + tr.value + "'. Known: [" + accepted +
+                            "]. Refusing to substitute one: an embedding under the wrong task "
+                            "prompt is correctly shaped and correctly normed, so nothing "
+                            "downstream can tell it is wrong."},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (tr.status == TRS::Conflict) {
+            send_response(json{{"error", {
+                {"message", "'prompt_name' and 'task_type' are aliases and disagree "
+                            "('task_type' says '" + tr.value + "'). Send one, or send the same "
+                            "task in both."},
+                {"type", "invalid_request_error"}, {"param", tr.field}, {"code", "invalid_value"}}}});
+            return;
+        }
+        if (tr.status == TRS::Ok) task_type = tr.task;
+
+        const json& input_field = request.at("input");
+        if (input_field.is_string()) {
+            inputs.push_back(input_field.get<std::string>());
+        }
+        else if (input_field.is_array()) {
+            for (size_t i = 0; i < input_field.size(); ++i) {
+                if (!input_field[i].is_string()) {
+                    send_response(json{{"error", {
+                        {"message", "input[" + std::to_string(i) + "] is not a string."
+                                    " input must be a string, or an array of strings."},
+                        {"type", "invalid_request_error"},
+                        {"param", "input[" + std::to_string(i) + "]"},
+                        {"code", "invalid_value"}}}});
+                    return;
+                }
+                inputs.push_back(input_field[i].get<std::string>());
             }
+        }
+        else {
+            // An empty ARRAY is deliberately still 200 with an empty list: that
+            // request is well formed and its answer is correct. This branch is
+            // for null, numbers, booleans and objects, which are not.
+            send_response(json{{"error", {
+                {"message", "input must be a string, or an array of strings."},
+                {"type", "invalid_request_error"},
+                {"param", "input"},
+                {"code", "invalid_value"}}}});
+            return;
         }
 
         json response;
+        // -1 means the backend did not report a count; see the usage field below.
+        int64_t prompt_tokens = -1;
         if (this->embed) {
             json embedding_data = json::array();
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
-            for (size_t i = 0; i < inputs.size(); ++i) {
-                std::cout << "Embedding input[" << i << "]: " << "\n" << inputs[i] << std::endl;
-                std::vector<float> embedding_result = this->auto_embedding_engine->embed(inputs[i], embedding_task_type_t::task_query);
-                embedding_data.push_back({
-                    {"object", "embedding"},
-                    {"embedding", embedding_result},
-                    {"index", i}
-                });
+            try {
+                // ONE call for the whole array, not one per input.
+                //
+                // AutoEmbeddingModel::embed_batch() defaults to exactly the loop
+                // this replaces, so a backend that does not override it behaves
+                // identically. NpueEmbedding does override it and encodes a whole
+                // tier of sequences per dispatch: measured 5-10x faster on all six
+                // of its models, peaking at 10.3x
+                // (docs/docs/benchmarks/embeddings_results.md).
+                //
+                // The vectors are BIT-IDENTICAL either way. Batching is a
+                // scheduling choice, not an arithmetic one, which is precisely why
+                // nothing here could ever have flagged the loop: no accuracy check,
+                // cosine or byte comparison can tell the slow path from the fast
+                // one. The only symptom was time, and the endpoint measured none.
+                if (!inputs.empty()) {
+                    const std::vector<float> flat =
+                        this->auto_embedding_engine->embed_batch(inputs, task_type,
+                                                                &prompt_tokens);
+                    // The vectors come back concatenated. A mis-split returns
+                    // correctly shaped, correctly normed, deterministic vectors for
+                    // the wrong inputs, which nothing downstream can see, so the
+                    // result is checked against the backend's own width: exactly
+                    // one vector per input. A backend that reports no width
+                    // (embedding_dim() == 0) only gets the divisibility check.
+                    // Shared with bench-embed; tested in benchmark_embed_test.cpp.
+                    const size_t dim = openai_compat::embedding_batch_dim(
+                        flat.size(), inputs.size(),
+                        this->auto_embedding_engine->embedding_dim());
+                    for (size_t i = 0; i < inputs.size(); ++i) {
+                        embedding_data.push_back({
+                            {"object", "embedding"},
+                            {"embedding", std::vector<float>(
+                                 flat.begin() + static_cast<std::ptrdiff_t>(i * dim),
+                                 flat.begin() + static_cast<std::ptrdiff_t>((i + 1) * dim))},
+                            {"index", i}
+                        });
+                    }
+                    // One line, not one per input with the text echoed back. The
+                    // old print put the full text of every request on the console.
+                    header_print("OFLM", "embedded " + std::to_string(inputs.size()) +
+                                         " input(s), " + std::to_string(dim) + " dims");
+                }
+            } catch (const TaskPromptUnavailable& e) {
+                // The model has prompts but none serves this task -- README.md:288's
+                // "model has prompts, task maps to none of them | error naming what the
+                // model does offer". The engine refuses on purpose; this used to reach
+                // the function-level catch as {"error": <string>} and go out as 200.
+                send_response(json{{"error", {
+                    {"message", std::string(e.what())},
+                    {"type", "invalid_request_error"},
+                    {"param", tr.field.empty() ? std::string("prompt_name") : tr.field},
+                    {"code", "invalid_value"}}}});
+                return;
             }
 #else
             throw std::runtime_error("Embedding models are not supported in this build");
 #endif
 
+            // WHICH MODEL PRODUCED THESE VECTORS. `model` is empty when the
+            // request omitted the field, and echoing "" tells a client nothing
+            // -- while this handler exists to stop a response asserting
+            // something it is not. An omitted model means "whatever is
+            // loaded", so name it rather than leaving the field blank.
+            std::string response_model = model;
+            if (response_model.empty() && this->auto_embedding_engine)
+                response_model = this->auto_embedding_engine->get_current_model();
+
             response = {
                 {"object", "list"},
                 {"data", embedding_data},
-                {"model", model},
+                {"model", response_model},
                 {"usage", {
-                    {"prompt_tokens", 0},
-                    {"total_tokens", 0}
+                    // A real count when the backend reports one. 0 still means
+                    // NOT REPORTED -- which is what every request got before this,
+                    // on both backends. embed_batch() yields -1 rather than 0 for a
+                    // backend that does not count, because a zero there would read
+                    // as a real number.
+                    {"prompt_tokens", prompt_tokens < 0 ? 0 : prompt_tokens},
+                    {"total_tokens",  prompt_tokens < 0 ? 0 : prompt_tokens}
                 }}
             };
         }
         else {
             header_print("Warning", "No embedding model loaded");
+            // Was a 200 with an empty body.
+            response = {{"error", {
+                {"message", "no embedding model is loaded: this server was started "
+                            "without one. Start oflm serve with --embed 1, and "
+                            "--embeddingmodel TAG to choose which."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}}}};
         }
         send_response(response);
     }
@@ -1135,7 +1520,20 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                                                StreamResponseCallback send_streaming_response,
                                                std::shared_ptr<CancellationToken> cancellation_token) {
     static std::string model_used_for_last_message = "model-faker";
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    // Passes the pre-formatted SSE string directly
+    auto openai_stream_callback = [&send_streaming_response, &stream_state](const std::string& data, bool is_final) {
+        json data_json = data;
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data_json, is_final); });
+        };
     try {
+        // Checked before reading, like the other handlers (#70).
+        if (json err = openai_compat::require_field(request, "messages", openai_compat::FieldType::Array);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
         // Extract OpenAI-style parameters
         json current_messages = request["messages"];
         std::string model = request.value("model", current_model_tag);
@@ -1145,9 +1543,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         json options = request.value("options", json::object());
 
         auto load_start_time = time_utils::now();
-        if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
-            send_response(error_response);
+        if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
+            send_response(openai_compat::model_error(why, model));
             return;
         }
         auto load_end_time = time_utils::now();
@@ -1195,13 +1592,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         meta_info.load_duration = (uint64_t)time_utils::duration_ns(load_start_time, load_end_time).first;
         meta_info.max_prefill_len = this->prefill_chunk_len;
         if (stream){
-            // Create a wrapper callback that passes the pre-formatted SSE string directly
             cancellation_token->reset();
             auto_chat_engine->reset_parser();
-            auto openai_stream_callback = [&send_streaming_response](const std::string& data, bool is_final) {
-                json data_json = data;
-                send_streaming_response(data_json, is_final);
-                };
             streaming_ostream_openai_chat ostream(model, auto_chat_engine.get(), openai_stream_callback);  // streaming in chat completion format
 
             header_print("OFLM", "Start prefill...");
@@ -1241,7 +1633,9 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 auto_chat_engine->generate(meta_info, length_limit, ostream, [&] { return cancellation_token->cancelled(); });
             } catch (const std::exception& e) {
                 json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                           error_response, send_response, openai_stream_callback);
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1299,7 +1693,10 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 return;
             }
             // check response_text
-            json choices = build_nstream_response(response_text);
+            // meta_info.stop_reason is MAX_LENGTH_REACHED when generation stopped at
+            // max_tokens. It was computed and then dropped, so every truncated answer
+            // reported finish_reason "stop" and no client could see the cut.
+            json choices = build_nstream_response(response_text, meta_info.stop_reason);
             response = {
                 {"id", "openflowlm-chat-completion"},
                 {"object", "chat.completion"},
@@ -1334,7 +1731,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                 {"code", 500}
             }}
         };
-        send_response(error_response);
+        send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                   error_response, send_response, openai_stream_callback);
     }
 }
 
@@ -1347,7 +1745,15 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                                         StreamResponseCallback send_streaming_response,
                                         std::shared_ptr<CancellationToken> cancellation_token) {
     try {
-        std::string model = request["model"];
+        // Checked before reading (#70).
+        for (const char* field : {"model", "file"}) {
+            if (json err = openai_compat::require_field(request, field, openai_compat::FieldType::String);
+                !err.is_null()) {
+                send_response(err);
+                return;
+            }
+        }
+        std::string model = request["model"].get<std::string>();
         std::string file_content = request["file"].get<std::string>();
         std::vector<uint8_t> audio_raw(file_content.begin(), file_content.end());
         bool stream = request.value("stream", false);
@@ -1385,6 +1791,13 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         }
         else {
             header_print("Warning", "No asr model loaded, cannot load audio file");
+            // Was a 200 with an empty body.
+            response = {{"error", {
+                {"message", "no speech model is loaded: this server was started without "
+                            "one. Start oflm serve with --asr 1."},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}}}};
         }
         send_response(response);
         //this->whisper_engine->clear_context();
@@ -1409,24 +1822,37 @@ void RestHandler::handle_openai_completion(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response,
     std::shared_ptr<CancellationToken> cancellation_token) {
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    // Passes the pre-formatted SSE string directly
+    auto openai_stream_callback = [&send_streaming_response, &stream_state](const std::string& data, bool is_final) {
+        json data_json = data;
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data_json, is_final); });
+        };
     try {
+        // Checked before reading: POST /v1/completions {} killed the server (#70).
+        if (json err = openai_compat::require_field(request, "prompt", openai_compat::FieldType::String);
+            !err.is_null()) {
+            send_response(err);
+            return;
+        }
         // Extract OpenAI-style parameters
-        std::string prompt = request["prompt"];
+        std::string prompt = request["prompt"].get<std::string>();
         std::string model = request.value("model", current_model_tag);
         std::string reasoning_effort = request.value("reasoning_effort", "medium");
         bool stream = request.value("stream", false);
         json options = request.value("options", json::object());
 
-        // direct return if model not supported
-        if (!supported_models.is_model_supported(model)) {
-            throw std::runtime_error("Model " + model + " is not supported.");
-        }
-       
+        // The is_model_supported() throw that used to sit here ran BEFORE
+        // ensure_model_loaded(), so /v1/completions never reached the structured
+        // model_not_found response below -- the outer catch turned an unknown model
+        // into a generic server_error. ensure_model_loaded() asks the same question
+        // and answers it properly.
+
         int length_limit = request.value("max_tokens", 4096);
 
-         if (!ensure_model_loaded(model)) {
-            json error_response = {{"error", "Failed to load " + model + " model!"}};
-            send_response(error_response);
+         if (const ModelLoad why = ensure_model_loaded(model, request.contains("model")); why != ModelLoad::Ok) {
+            send_response(openai_compat::model_error(why, model));
             return;
         }
 
@@ -1438,17 +1864,17 @@ void RestHandler::handle_openai_completion(const json& request,
         header_print("OFLM", "Start generating...");
 
         if (stream) {
-            // Create a wrapper callback that passes the pre-formatted SSE string directly
-            auto openai_stream_callback = [&send_streaming_response](const std::string& data, bool is_final) {
-                json data_json = data;
-                send_streaming_response(data_json, is_final);
-                };
             streaming_ostream_openai ostream(model, openai_stream_callback);  // streaming in completion format
             uniformed_input.prompt = prompt;
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success) {
-                    json error_response = { {"error", "Max length reached"} };
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -1463,7 +1889,9 @@ void RestHandler::handle_openai_completion(const json& request,
                 auto_chat_engine->generate(meta_info, length_limit, ostream);
             } catch (const std::exception& e) {
                 json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                           error_response, send_response, openai_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -1479,7 +1907,12 @@ void RestHandler::handle_openai_completion(const json& request,
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input);
                 if (!success) {
-                    json error_response = { {"error", "Max length reached"} };
+                    json error_response = {{"error", {
+                        {"message", "the prompt does not fit this model's context window"},
+                        {"type", "invalid_request_error"},
+                        {"param", "messages"},
+                        {"code", "context_length_exceeded"}
+                    }}};
                     send_response(error_response);
                     this->auto_chat_engine->clear_context();
                     return;
@@ -1511,7 +1944,7 @@ void RestHandler::handle_openai_completion(const json& request,
                         {"text", response_text},
                         {"index", 0},
                         {"logprobs", nullptr},
-                        {"finish_reason", "stop"}
+                        {"finish_reason", openai_compat::finish_reason(meta_info.stop_reason)}
                     }
                 })},
                 {"usage", {
@@ -1531,6 +1964,7 @@ void RestHandler::handle_openai_completion(const json& request,
                 {"code", 500}
             }}
         };
-        send_response(error_response);
+        send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                   error_response, send_response, openai_stream_callback);
     }
 }

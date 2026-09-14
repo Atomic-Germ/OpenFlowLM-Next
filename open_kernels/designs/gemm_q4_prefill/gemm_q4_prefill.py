@@ -36,6 +36,11 @@ Weight is NOT reused across T-tiles (T_TILES = T//tile_n//n_aie_cols > 1): a
 row's whole weight column is refetched from DRAM once per T-tile iteration
 (a real inefficiency above T=256, reported honestly rather than hidden).
 
+The core program does not depend on N or K: the band count K/256 is a runtime
+parameter, so at one T every shape is an instruction stream over one xclbin and
+one hardware context. T is still compiled in, and every set this repo emits is
+T=256. The rtp_bufs comment below says why that matters.
+
 Build (from this directory, mlir-aie env dot-sourced):
     GQP_N=2560 GQP_K=2560 GQP_T=256 python ../../build_design.py gemm_q4_prefill.py build_qkv_t256
 Test:
@@ -46,26 +51,23 @@ Test:
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker, kernels, str_to_dtype
+from aie.iron import (Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker,
+                      kernels, str_to_dtype)
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
 
 HERE = Path(__file__).parent
 
-# npue.py (tile_b/untile_b) already lives in THIS repo, synced from
-# NpuEmbeddings/experiments/m5-pretiled-gemm (tasks/0156, T63) -- reuse it
-# rather than re-deriving the pre-tiling logic.
-sys.path.insert(0, str(HERE.parents[2] / "npu_offload" / "gemm_rtp"))
-from npue import tile_b, untile_b  # noqa: E402
-
+# the activation's pre-tiling (npu_offload/gemm_rtp/npue.py's tile_b) is the
+# host's job -- make_test.py for the harness, core.cpp's tile_gemm_x in the
+# engine; this file only describes the layout it expects
 N_AIE_ROWS = 4
 N_AIE_COLS = 8
 M_TILE = 64        # weight rows per band / per matmul m-tile (= mac_dims-compatible, matches q4 band's 64 rows)
@@ -266,26 +268,63 @@ def gemm_q4_prefill(
     nib_bufs = [[Buffer(nib_ty, name=f"nib_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
     scratch_bufs = [[Buffer(scratch_ty, name=f"ascr_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
 
-    def core_fn(in_a, in_b, out_c, zero, matmul, nib_scr, a_scr, *dequants):
-        for _ in range_(NRB):
-            for _ in range_(T_TILES):
-                elem_out = out_c.acquire(1)
-                zero(elem_out)
-                for _ in range_(NBG):
-                    band = in_a.acquire(1)
-                    for ky in range(4):  # compile-time (Python) unroll: 4 distinct entry symbols
-                        dequants[ky](band, nib_scr, a_scr)
-                        elem_in_b = in_b.acquire(1)
-                        matmul(a_scr, elem_in_b, elem_out)
-                        in_b.release(1)
-                    in_a.release(1)
-                out_c.release(1)
+    # The band count K/256 was the only thing making each K its own image, and so its own
+    # hardware context - the block route pays ~2.5 ms every time it changes one. It arrives
+    # here instead, per core, written by the instruction stream. Slot 0 carries T_TILES for
+    # symmetry with gemm_pretiled, but core_fn still reads that one at build time.
+    # The initial value is ZEROS, not the real bounds: a shape-dependent initializer is baked
+    # into the static image and would be exactly the 8 bytes that keep two shapes apart. Same
+    # plumbing as npu_offload/gemm_rtp/gemm_pretiled.py's rtp=True path.
+    rtp_bufs = [[Buffer(np.ndarray[(2,), np.dtype[np.int32]], name=f"rtp_{row}_{col}",
+                        initial_value=np.zeros(2, dtype=np.int32), use_write_rtp=True)
+                 for col in range(n_aie_cols)] for row in range(n_aie_rows)]
+
+    # One weight row-block group per pass. The worker body already loops forever (IRON's
+    # while_true), and a core cannot see dispatch boundaries -- it blocks on the next
+    # element -- so the row-block count is a property of the instruction stream too.
+    def core_fn(in_a, in_b, out_c, zero, matmul, nib_scr, a_scr, my_rtp, *dequants):
+        for _ in range_(T_TILES):
+            elem_out = out_c.acquire(1)
+            zero(elem_out)
+
+            def one_band(band):
+                for ky in range(4):  # compile-time (Python) unroll: 4 distinct entry symbols
+                    dequants[ky](band, nib_scr, a_scr)
+                    elem_in_b = in_b.acquire(1)
+                    matmul(a_scr, elem_in_b, elem_out)
+                    in_b.release(1)
+
+            # DO NOT reach for a WorkerRuntimeBarrier here to order the rtp read. It is what
+            # gemm_pretiled.py's rtp=True path uses and it DEADLOCKS in this design: the
+            # runtime releases that barrier once per dispatch, but this body runs once per
+            # weight row-block group -- four times for a 1024-row projection -- so from the
+            # second group on the core waits on a release that never comes. Verified on
+            # hardware: barrier alone hangs (state 8), the rtp buffer alone is fine.
+            # attn_block gets away with the same idiom only because its body runs exactly
+            # once per dispatch. Two designs have now been written against that assumption.
+            #
+            # The ordering is free instead: acquire the first band BEFORE reading the count.
+            # That acquire cannot complete until the runtime has issued the fill, and it
+            # issues the fill after the rtp writes. Checked in the generated MLIR that the
+            # AcquireGreaterEqual stays ahead of the memref.load (mlir-aie 1.4.2); if a
+            # later toolchain hoists it the build hangs outright rather than going quietly
+            # wrong, which is the failure you want.
+            band = in_a.acquire(1)
+            n_bandgroups = my_rtp[1]
+            one_band(band)
+            in_a.release(1)
+            for _ in range_(n_bandgroups - 1):
+                band = in_a.acquire(1)
+                one_band(band)
+                in_a.release(1)
+            out_c.release(1)
 
     def _mk(row, col):
         return Worker(
             core_fn,
             [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(), C_l1l2_fifos[row][col].prod(),
-             zero_kernel, matmul_kernel, nib_bufs[row][col], scratch_bufs[row][col], *dequant_kernels],
+             zero_kernel, matmul_kernel, nib_bufs[row][col], scratch_bufs[row][col],
+             rtp_bufs[row][col], *dequant_kernels],
             stack_size=0x1000,
         )
 
@@ -347,6 +386,12 @@ def gemm_q4_prefill(
     C_conss = [f.cons() for f in C_l2l3_fifos]
 
     def sequence(a_W, a_X, c_Y, A_prod_hs, B_prod_hs, C_cons_hs):
+        # A use_write_rtp Buffer emits its write inline when assigned inside the sequence
+        # body; the barrier orders that write before the core reads it.
+        for row in range(n_aie_rows):
+            for col in range(n_aie_cols):
+                rtp_bufs[row][col][0] = T_TILES
+                rtp_bufs[row][col][1] = NBG
         for rbg in range(NRB):
             for ntile in range(T_TILES):
                 tg = TaskGroup()

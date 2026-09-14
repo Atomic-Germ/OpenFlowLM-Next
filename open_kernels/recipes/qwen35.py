@@ -218,7 +218,7 @@ def pack_plan(spec: ModelSpec) -> dict:
 
 
 # ---- the step program: ONE run per layer type (nothing is routed, so no part split)
-def programs(spec: ModelSpec) -> dict:
+def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     L = layout(spec)
     out: dict = {
         "contexts": {"ln": "ln/final.xclbin", "lm": "lm_head_q8/final.xclbin"},

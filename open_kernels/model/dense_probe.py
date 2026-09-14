@@ -79,13 +79,13 @@ def main() -> int:
     print("  v    ", corr(region(L.AD_KVN + kvh * hd * 4, kvh * hd, np.float32), v_raw))
     qn = m.bf16(pre + "self_attn.q_norm.weight") if spec.qk_norm else None
     kn = m.bf16(pre + "self_attn.k_norm.weight") if spec.qk_norm else None
-    inv = spec.rope_inv_freq()
+    inv, rsc = spec.rope_inv_freq(ctx=pos + 1), spec.rope_scale()   # HF's own seq_len = pos + 1 rule
     if spec.qk_norm:
-        q = RD.rope((RD.rms(q_raw.reshape(nh, hd), spec.norm_eps) * qn), pos, spec.rotary_dim, spec.rope_theta, inv)
-        k = RD.rope((RD.rms(k_raw.reshape(kvh, hd), spec.norm_eps) * kn), pos, spec.rotary_dim, spec.rope_theta, inv)
+        q = RD.rope((RD.rms(q_raw.reshape(nh, hd), spec.norm_eps) * qn), pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
+        k = RD.rope((RD.rms(k_raw.reshape(kvh, hd), spec.norm_eps) * kn), pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
     else:
-        q = RD.rope(q_raw.reshape(nh, hd).astype(np.float64), pos, spec.rotary_dim, spec.rope_theta, inv)
-        k = RD.rope(k_raw.reshape(kvh, hd).astype(np.float64), pos, spec.rotary_dim, spec.rope_theta, inv)
+        q = RD.rope(q_raw.reshape(nh, hd).astype(np.float64), pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
+        k = RD.rope(k_raw.reshape(kvh, hd).astype(np.float64), pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
     v = v_raw.reshape(kvh, hd).astype(np.float64)
     # at position 0 the attention output is v of the matching kv head
     if pos == 0:

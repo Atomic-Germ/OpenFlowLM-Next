@@ -122,6 +122,7 @@
    "full_attention"
   ]
  },
+ "hf_config_defaults": {},
  "layout": {
   "hidden": 4096,
   "vocab": 248320,
