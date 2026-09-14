@@ -114,6 +114,14 @@ static void test_status_for() {
         400, "string code + invalid_request_error -> 400");
     eqi(status_for(json{{"error", {{"type", "server_error"}, {"code", "model_load_failed"}}}}),
         500, "string code + server_error -> 500");
+    // The body /v1/* and /api/* now answer for a body that will not parse: 400,
+    // OpenAI-shaped, same type the other invalid_request paths carry.
+    const json bad_json = {{"error", {
+        {"message", "Request body is not valid JSON."},
+        {"type", "invalid_request_error"},
+        {"param", ""},
+        {"code", "invalid_request_body"}}}};
+    eqi(status_for(bad_json), 400, "malformed JSON body -> invalid_request_error -> 400");
     eqi(status_for(json{{"error", {{"type", "rate_limit_error"}}}}), 429, "rate_limit_error -> 429");
     eqi(status_for(json{{"error", {{"type", "not_found_error"}}}}), 404, "not_found_error -> 404");
     eqi(status_for(json{{"error", {{"type", "authentication_error"}}}}), 401, "authentication_error -> 401");

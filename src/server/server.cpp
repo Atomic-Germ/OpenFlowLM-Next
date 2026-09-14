@@ -672,9 +672,14 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             std::string content_type = std::string(req[http::field::content_type]);
 
             if (content_type.find("application/json") != std::string::npos) {
+                // is_json must reflect the content-type alone: the log parse below
+                // throws on a malformed body, and gating this on its success left an
+                // invalid JSON body unrecognised here -- so process_task() skipped
+                // parsing and the handler's own unguarded parse threw past its catch
+                // to the generic handler catch, answering HTTP 500 for a bad request.
+                is_json = true;
                 json request_json_log = json::parse(req.body());
                 brief_print_message_request(request_json_log);
-                is_json = true;
             }
             else if (content_type.find("multipart/form-data") != std::string::npos) {
                 // print some request info 
@@ -722,7 +727,11 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         }
         catch (const std::exception& e) {
             res_ref.result(http::status::bad_request);
-            res_ref.body() = safe_dump(json{ {"error", "Invalid JSON"} });
+            res_ref.body() = safe_dump(json{{"error", {
+                {"message", "Request body is not valid JSON."},
+                {"type", "invalid_request_error"},
+                {"param", ""},
+                {"code", "invalid_request_body"}}}});
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
 
