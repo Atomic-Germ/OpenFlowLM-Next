@@ -276,6 +276,44 @@ def supertile_perm(nrb: int, ncol128: int, rg: int) -> np.ndarray:
     return ((rb // rg) * ncol128 + q) * rg + (rb % rg)
 
 
+EXPERT_ROLES = ("gate", "up", "down")
+
+
+def expert_slabs(nslab: int) -> np.ndarray:
+    """[3, nslab] -- (role, the projection's own 128-row slab) -> the fused tensor's slab.
+
+    `q4nx-build` fuses one layer's gate, up and down for all its experts into a single
+    `ffn_gate_up_down_exps.weight`, shaped [E, 3*nslab, ncol128, rg, 2560]. The slabs are
+    NOT the three projections one after another: gate and up ALTERNATE every 128 rows over
+    the first 2*nslab, and only then does down follow as one contiguous block.
+
+    Nothing in the container names the order, and the two plausible readings -- this one and
+    three concatenated projections -- agree on down and differ on gate and up, so a packer
+    that guesses wrong swaps the two halves of every SwiGLU and still produces finite
+    activations. What settles it is that the converter writes each expert bias twice, into
+    byte 128 of every column-block-0 chunk as well as a named tensor: the bias distinguishes
+    gate from up from down BY VALUE, so the reading is measured rather than inferred
+    (OPEN-PACK-EXPERT-ORDER)."""
+    s = np.arange(nslab)
+    return np.stack([2 * s, 2 * s + 1, 2 * nslab + s])
+
+
+def expert_chunks(nslab: int, ncol128: int, rg: int = 4) -> np.ndarray:
+    """[3, nslab*rg, ncol128] -- (role, the projection's 32-row block, column block) ->
+    the file chunk index WITHIN one expert. Add `expert * 3 * nslab * ncol128 * rg` for the
+    expert's own.
+
+    Composes the slab order above with the supertile raster the same converter writes for
+    the attention projections, so the two cannot drift: a projection's row block `j` is its
+    slab `j // rg` at position `F = j % rg`, and that slab's place in the fused tensor is
+    what `expert_slabs` returns. A logical output row therefore decomposes exactly as
+    `(row // 128, (row % 128) // 32, row % 32)` -- slab, quarter, row in chunk."""
+    slab = expert_slabs(nslab)                                   # [3, nslab]
+    idx = supertile_perm(3 * nslab * rg, ncol128, rg)            # [rowblock, col] -> chunk
+    rb = slab[:, :, None] * rg + np.arange(rg)[None, None, :]    # [3, nslab, rg]
+    return idx[rb.reshape(3, nslab * rg)]
+
+
 def fuse_chunks(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """[n, 2560] + [n, 2560] -> [n, 5120]: the k-tile's low and high 128 columns as one
     pool chunk. Eight byte-slice copies and no arithmetic.

@@ -701,10 +701,63 @@ A0 B0 A1 B1, swapping the high half's `d` and `m`, writing the supertile as the 
 raster, and pointing the synthesised column block at the last real chunk each break at
 least one test. The suite is not passing by construction.
 
-**Not covered here.** The expert tensor's own slab order -- gate and up alternating every
-128 rows for slabs 0..45, then down at 46..68 -- is a separate law over the fused
-`ffn_gate_up_down_exps.weight`, and it lands with the MoE work (OPEN-PACK-EXPERT-ORDER in
-`.claude/plans/gptoss-bringup.md`). `std_fuse` is the attention projections and the head.
+**Not covered here.** The expert tensor's own slab order is a separate law over the fused
+`ffn_gate_up_down_exps.weight` (OPEN-PACK-EXPERT-ORDER). `std_fuse` is the attention
+projections and the head.
+
+### OPEN-PACK-EXPERT-ORDER: which slab of the fused expert tensor is gate, up and down
+**Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`)
+**Test category:** unit (`tests/test_expert_order.py`)
+
+`q4nx-build`'s GPT-OSS path fuses one layer's gate, up and down for every expert into a
+single `ffn_gate_up_down_exps.weight`, shaped `[E, 3 * nslab, ncol128, rg, 2560]` -- the
+shipped 20B's is `[32, 69, 23, 4, 2560]`. Nothing in the container names the three
+projections. The packer shall read the slabs as **gate and up alternating every 128 rows
+over the first `2 * nslab`, then down as one contiguous block**, and shall locate a
+projection's row block within that using the same supertile raster as the attention
+tensors (OPEN-PACK-CHUNK-FUSE), so a logical output row decomposes as
+`(row // 128, (row % 128) // 32, row % 32)` -- slab, quarter, row in chunk.
+
+**Why this needs measuring rather than reading off the shape.** The other plausible
+reading -- three projections concatenated -- agrees with this one on down and swaps gate
+and up. A packer that picks wrong feeds the clamped SwiGLU its two halves the wrong way
+round, which is finite, plausible and silent: `(up + 1) * gate * sigmoid(1.702 * gate)`
+evaluates perfectly well with the arguments exchanged, so nothing raises and only output
+quality moves.
+
+**The lever is the bias the converter writes twice.** `q4nx/models/gpt_oss.py` puts the
+32 bf16 output biases at byte 128 of every column-block-0 chunk AND ships the named
+`mlp.experts.{gate,up,down}_proj_bias` tensors. The duplicate distinguishes the three
+projections by VALUE, so the order is pinned with no ambiguity and no appeal to the
+converter's source.
+
+**Acceptance criteria:**
+- `expert_slabs(nslab)` is `[3, nslab]`, gate at `2s`, up at `2s + 1`, down at
+  `2 * nslab + s`, and uses every slab of `range(3 * nslab)` exactly once.
+- `expert_chunks(nslab, ncol128, rg)` is `[3, nslab * rg, ncol128]` and is a permutation of
+  one expert's whole chunk range -- a map that aliases would pack one slab's bytes over
+  another's with nothing raised.
+- Against the shipped container's own bytes, for all 69 slabs of two experts: the 128
+  biases carried in a projection's slab's four column-block-0 chunks equal the named
+  `*_proj_bias` rows `128s .. 128s + 127` for the role and slab the map predicts.
+- Four near-miss orders (three concatenated projections, gate and up exchanged, down
+  first, all three alternating) each fail to reproduce those biases, and so does reading
+  the tensor on the plain `rowblock * ncol + column` raster every other converter writes.
+- The three roles' biases are non-zero and pairwise different, so the check above cannot
+  pass on an order it did not measure.
+- The rows past the projections' real 2880 -- 64 of the last slab's 128 -- are zero in the
+  container, so a packer does not have to zero the tail itself.
+
+**Measured 2026-09-15** on `GPT-OSS-20B-NPU2`'s 14.4 GB container at layers 0, 7 and 23:
+every one of the 69 slabs matches exactly one (role, slab) pair, with no slab ambiguous at
+any of the three layers, and the expert stride holds at expert 31 as well as 0 and 1. The
+checked-in fixture (`make_gptoss_fixtures.py`, which also reproduces
+`gptoss_mxfp4_chunks.npz` byte for byte) carries experts 0 and 31, so the test needs
+neither the container nor the network.
+
+**Not covered here.** This is the SOURCE law -- where a given expert weight lives in the
+file. Where it then goes in the pool is the MoE block's layout, which is open
+(OPEN-MOE-WIDE-FF), so there is no `apply_op` kind for the experts yet.
 
 ### OPEN-FAMILY-QWEN36MOE: greedy agreement with the fp64 reference on the 27B
 **Applies to:** openflowlm-next (`src/open_qwen36/`)
@@ -1797,8 +1850,9 @@ not a format claim -- while the experts are MXFP4, 4-bit float with a shared E8M
 per 32, in one fused `ffn_gate_up_down_exps.weight` per layer. `config.json`'s own
 `modules_to_not_convert` names that split. The expert biases ship twice: as named tensors and
 inside each chunk's padding at byte 128. The projections and the head are packed by
-`std_fuse` (OPEN-PACK-CHUNK-FUSE) and the experts decode by OPEN-QUANT-MXFP4; the experts
-have no pack op yet. `.claude/plans/gptoss-bringup.md` has the decoded layouts and the
+`std_fuse` (OPEN-PACK-CHUNK-FUSE), the experts decode by OPEN-QUANT-MXFP4 and their slab
+order is settled by OPEN-PACK-EXPERT-ORDER; what the experts still have no pack op for is
+the destination, which waits on the MoE block's layout (OPEN-MOE-WIDE-FF). `.claude/plans/gptoss-bringup.md` has the decoded layouts and the
 ordered work.
 
 **What a recipe would still need** (not requirements yet; each earns its own when it is
