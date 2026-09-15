@@ -126,10 +126,11 @@ def save_json(path, data):
 
 
 def find_system_model_list():
-    exe = shutil.which("oflm")
+    exe = os.environ.get("OFLM_EXECUTABLE") or shutil.which("oflm")
     candidates = []
     if exe:
         candidates.append(Path(exe).parent / "model_list.json")
+        candidates.append((Path(exe).parent / ".." / "share" / "oflm" / "model_list.json").resolve())
     candidates += [Path(p) for p in SYSTEM_LIST_CANDIDATES]
     for c in candidates:
         if c.is_file():
@@ -142,7 +143,7 @@ def find_system_model_list():
 
 def find_system_xclbin_root():
     """Directory whose <root>/xclbins/ holds the per-model kernel folders."""
-    exe = shutil.which("oflm")
+    exe = os.environ.get("OFLM_EXECUTABLE") or shutil.which("oflm")
     candidates = []
     if exe:
         candidates.append(Path(exe).parent)
@@ -958,4 +959,3 @@ def main():
     print("Make sure your shell has these exports (add to ~/.bashrc):")
     print('    export OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json"')
     print('    export OFLM_XCLBIN_PATH="$HOME/.config/oflm"')
-
