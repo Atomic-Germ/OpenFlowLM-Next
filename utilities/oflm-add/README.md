@@ -1,6 +1,8 @@
 # oflm-add
 
-Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.
+Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM. The
+tool is bundled with OpenFlowLM and exposed as `oflm add`; the standalone
+`oflm-add` entry point remains available for tool-only installations.
 
 ## Installation
 
@@ -17,10 +19,10 @@ uv tool install . --force || pip install -e .
 ### From a Hugging Face repo (recommended)
 
 ```bash
-oflm-add Atomic-Germ/Qwen3.5-9B-Claude-4.8-Opus-NPU2 --tag qwen3.5-claude:9b
+oflm add Atomic-Germ/Qwen3.5-9B-Claude-4.8-Opus-NPU2 --tag qwen3.5-claude:9b
 ```
 
-The `--tag` argument must match the entry in OpenFlowLM's model registry (e.g., `qwen3.5-claude:9b`, `gptoss-distill:20b`). Run `oflm-add --help` to see all options.
+The `--tag` argument must match the entry in OpenFlowLM's model registry (e.g., `qwen3.5-claude:9b`, `gptoss-distill:20b`). Run `oflm add --help` to see all options.
 
 ### From a ModelScope repo
 
