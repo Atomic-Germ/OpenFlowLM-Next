@@ -54,6 +54,8 @@ open_kernels/designs/dense/*.cc
 open_kernels/designs/layer_x/*.cc
 open_kernels/designs/lm_head_q4/*.cc
 open_kernels/designs/gemv_q4/gemv_q4_prep_k*.cc
+open_kernels/designs/gemm_q4/*.cc
+open_kernels/designs/gemm_q4/layout_m*.txt
 
 # npu_offload/matmul generated fixtures (make_test.py) and run configs
 npu_offload/matmul/[abyr]_m*.bin
