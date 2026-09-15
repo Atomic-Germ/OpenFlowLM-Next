@@ -2,32 +2,33 @@ name: CMake Configure, Build, Test
 
 on:
   push:
-    branches: [ "main","feat/**","bugfix/**" ]
+    branches:
+      - main
+      - "feat/**"
+      - "bugfix/**"
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
 
 env:
   BUILD_TYPE: debug
+
+permissions:
+  contents: read
 
 jobs:
   config-build-test:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Pulls
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Submodules
-      uses: snickerbockers/submodules-init@v4
-    
-    - name: Sets up Ninja-build
-      uses: wirekang/setup-ninja@v1
-      with:
-        platform: linux
-
-    - name: Installs Deps
-      shell: bash
-      run: |
+      - name: Install dependencies
+        shell: bash
+        run: |
           sudo apt-get update
           sudo apt-get install -y \
             software-properties-common \
@@ -52,12 +53,19 @@ jobs:
             libxrt2 \
             libxrt-npu2
 
-    - name: Configures OpenFlowLM
-      run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}} -G Ninja -DCMAKE_CXX_FLAGS="-I/usr/include/xrt"
+      - name: Verify tools
+        run: |
+          cmake --version
+          ninja --version
+          g++ --version
 
-    - name: Builds
-      run: cmake --build ${{github.workspace}}/build
+      - name: Configure
+        run: |
+          cmake --preset linux-${{ env.BUILD_TYPE }} \
+            -DCMAKE_CXX_FLAGS="-I/usr/include/xrt"
 
-    - name: Test
-      working-directory: ${{github.workspace}}/build
-      run: ctest --preset linux-default
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
