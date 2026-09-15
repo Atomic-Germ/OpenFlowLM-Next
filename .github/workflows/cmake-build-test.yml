@@ -1,0 +1,27 @@
+name: CMake Configure, Build, Test
+
+on:
+  push:
+    branches: [ "main","feat/**","bugfix/**" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  BUILD_TYPE: debug
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configures
+      run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}}
+
+    - name: Builds
+      run: source ${{github.workspace}}/ironvenv/bin/activate && cmake --build ${{github.workspace}}/build
+
+    - name: Test
+      working-directory: ${{github.workspace}}/build
+      run: ctest --preset linux-default
