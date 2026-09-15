@@ -26,17 +26,32 @@ jobs:
         platform: linux
 
     - name: Installs Deps
-      uses: gerlero/apt-install@v1.3.12
-      with:
-        packages: libxrt-dev uuid-dev libreadline-dev libboost-all-dev libcurl4-openssl-dev libfftw3-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
-        cache: true
-        install-recommends: true
+      run:
+        sudo add-apt-repository -y ppa:amd-team/xrt
+        sudo apt-get update
+          sudo apt-get install -y \
+            libxrt-dev \
+            libxrt2 \
+            libxrt-npu2 \
+            libboost-all-dev \
+            uuid-dev \
+            libdrm-dev \
+            cmake \
+            g++ \
+            libreadline-dev \
+            libcurl4-openssl-dev \
+            libfftw3-dev \
+            libavformat-dev \
+            libavcodec-dev \
+            libavutil-dev \
+            libswscale-dev \
+            libswresample-dev
 
     - name: Configures OpenFlowLM
-      run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}} -G Ninja
+      run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}} -G Ninja -DCMAKE_CXX_FLAGS="-I/usr/include/xrt"
 
     - name: Builds
-      run: source /opt/xilinx/xrt/setup.sh && cmake --build ${{github.workspace}}/build
+      run: cmake --build ${{github.workspace}}/build
 
     - name: Test
       working-directory: ${{github.workspace}}/build
