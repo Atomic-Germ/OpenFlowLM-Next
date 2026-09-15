@@ -20,6 +20,7 @@ offset fails that test before it reaches a build.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
@@ -30,6 +31,7 @@ from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
 CHUNK_VALUES = 8192
 CHUNK_ROWS = 32
+CHUNK_COLS = CHUNK_VALUES // CHUNK_ROWS   # 256: the k-tile the band law and std_perm both count in
 Q8_CHUNK = 8704              # lm_head q8: 8192 int8 + 256 bf16 scales
 ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
@@ -66,8 +68,19 @@ def band_bytes(K: int) -> int:
 def per_band(K: int) -> int:
     """Chunks in one band, the GEMV's runtime band law (gemv_q4_pool_group_rt). The kernel
     derives K back from it as 256 * per_band / rs, so this counts CHUNKS, never w elements:
-    handing it the element count reads the activation table at half width."""
-    return band_bytes(K) // CHUNK
+    handing it the element count reads the activation table at half width.
+
+    The count has to be EVEN. At rs = 2 chunk i of a band covers row half i % 2 and k-tile
+    i // 2, two chunks per k-tile, so an odd count is a band no walk can consume. K = 2944 --
+    the width GPT-OSS's container actually ships -- is the case that made this worth saying:
+    band_bytes returns cleanly on it and hands back 23. The refusal is here rather than in a
+    catalogue entry so OPEN_KERNELS_UNVALIDATED cannot soften it (OPEN-WIDTH-PAD)."""
+    n = band_bytes(K) // CHUNK
+    if n % 2:
+        raise OpRangeError(f"a {K}-wide band is {n} chunks, an odd count: the rs=2 band law "
+                           f"puts two chunks on every k-tile, so a band is always even. "
+                           f"K must be a multiple of 256 (K={K} is {K % 256} over)")
+    return n
 
 
 # ---- the per-role weight format (OPEN-QUANT-Q8). A projection the container stores at q8
@@ -149,6 +162,13 @@ def pad_width(w: int, n_cores: int) -> int:
       * q4_bytes wants rows * cols a whole number of 8192-value chunks, and
         band_bytes(2880) does not - it raises before any core count matters.
 
+    At eight cores -- and at four -- the first rounding implies the second, because
+    BAND_ROWS * 8 is 512 and BAND_ROWS * 4 is 256. Below that it does not: rounding
+    2880 to BAND_ROWS * 1 left it at 2880, and to BAND_ROWS * 2 gave 2944, which is
+    the worst answer available. 2944 passes band_bytes, and then per_band is 23 and
+    pack.std_perm is non-injective. So the rounding is to lcm(BAND_ROWS * n_cores,
+    CHUNK_COLS), which is the same 512 at eight cores and 256 at one.
+
     No shipped family needs this: every one of them is already a multiple of 512,
     so pad_width returns their own width unchanged. It exists for GPT-OSS, whose
     2880 satisfies neither rule.
@@ -159,7 +179,7 @@ def pad_width(w: int, n_cores: int) -> int:
     over 2880 real channels scales every residual by sqrt(3072/2880), 3.3% high,
     on every layer. See OPEN-WIDTH-PAD for what this does and does not settle.
     """
-    return roundup(w, BAND_ROWS * n_cores)
+    return roundup(w, math.lcm(BAND_ROWS * n_cores, CHUNK_COLS))
 
 
 def ab_lanes(spec: ModelSpec) -> int:

@@ -31,9 +31,14 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q8")
+QUANT_FORMATS = ("q4_1", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
+# 2560 is deliberately NOT in that table: GPT-OSS ships both its q4_1 projections and its
+# MXFP4 experts at that size, so the byte count alone does not name the format and only the
+# dtype separates them. A caller that has the dtypes gets the right answer; one that does
+# not gets a refusal rather than a guess.
+AMBIGUOUS_CHUNK = {2560: {"I8": "q4_1", "U8": "mxfp4"}}
 
 
 class SpecError(ValueError):
@@ -280,39 +285,6 @@ def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
     if key not in d:
         raise SpecError(f"{what} lacks {key!r}")
     return d[key]
-
-
-def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, Any]) -> list[float]:
-    """YaRN's inverse frequencies (HF's _compute_yarn_parameters). Each rotary pair is either
-    left alone -- it completes few enough turns inside the original context that the model has
-    seen its whole range -- or divided by `factor`, which is plain position interpolation. The
-    pairs in between take a linear blend of the two, over the dim range where beta_fast and
-    beta_slow rotations fit in `original_max_position_embeddings`.
-
-    HF's `linear_ramp_factor` indexes its rot/2 pairs against bounds computed on the rot
-    scale; that asymmetry is reproduced here rather than corrected, because the position
-    table has to be the one the weights were trained against."""
-    import math
-    factor = float(sc["factor"])
-    orig = float(sc["original_max_position_embeddings"])
-    beta_fast = float(sc.get("beta_fast") or 32)
-    beta_slow = float(sc.get("beta_slow") or 1)
-
-    def corr(rotations: float) -> float:
-        return rot * math.log(orig / (rotations * 2 * math.pi)) / (2 * math.log(theta))
-
-    low, high = corr(beta_fast), corr(beta_slow)
-    if sc.get("truncate", True):
-        low, high = math.floor(low), math.ceil(high)
-    low, high = max(low, 0.0), min(high, rot - 1.0)
-    if low == high:
-        high += 0.001                      # HF prevents the singularity the same way
-    out = []
-    for i, f in enumerate(inv):
-        ramp = min(max((i - low) / (high - low), 0.0), 1.0)
-        extrap = 1.0 - ramp
-        out.append(f / factor * (1.0 - extrap) + f * extrap)
-    return out
 
 
 def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, Any]) -> list[float]:
@@ -1465,8 +1437,11 @@ for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 # GPT-OSS's routed experts, under the names q4nx-build writes them
 # (utilities/q4nx-build/configs/gpt-oss.json). No shared expert and no dense FFN.
+# The split names are what a GGUF source carries; q4nx-build's post_gpt_oss_process deletes
+# all three and writes the fused tensor, so a real container only ever shows the last one.
 ROLE_TENSORS["gptoss"] = {**_ATTN_HF, "ffn_up_exps.weight": "experts",
-                          "ffn_gate_exps.weight": "experts", "ffn_down_exps.weight": "experts"}
+                          "ffn_gate_exps.weight": "experts", "ffn_down_exps.weight": "experts",
+                          "ffn_gate_up_down_exps.weight": "experts"}
 
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
 _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",
@@ -1485,21 +1460,45 @@ def _collapse(found: dict[str, tuple[str, str]]) -> dict[str, str]:
     return {r: f for r, (f, _) in sorted(found.items()) if f != DEFAULT_QUANT}
 
 
-def quant_map_from_chunk_sizes(family: str, chunk_bytes: Mapping[str, int]) -> dict[str, str]:
-    """tensor name -> quantized chunk size (5120 = q4_1, 8704 = q8) -> the role map.
+def quant_map_from_chunk_sizes(family: str, chunk_bytes: Mapping[str, int],
+                               dtypes: Mapping[str, str] | None = None) -> dict[str, str]:
+    """tensor name -> quantized chunk size -> the role map.
 
     Only the roles that are NOT q4_1 come back, so a stock container derives `{}` and the
     spec keeps hashing as the bare string. A role whose tensors disagree is refused naming
-    the tensor that broke it -- half a projection at q8 is not something to guess about."""
+    the tensor that broke it -- half a projection at q8 is not something to guess about.
+
+    `dtypes` separates the two formats that share the 2560-byte chunk: GPT-OSS stores its
+    attention projections and its head as q4_1 and its fused expert tensor as MXFP4, both at
+    2560, and only the dtype tells them apart. Without it a 2560 chunk reads as q4_1, which
+    is right for every caller that only has integer tensors.
+
+    A tensor whose role the packer PLACES, at a chunk size this reader does not know, is
+    refused by name. It used to be skipped, which left the role sitting at the q4_1 default
+    and handed back a map describing a container that does not exist."""
     table = ROLE_TENSORS.get(family)
     if table is None:
         raise SpecError(f"no tensor-role table for family {family!r} (have {sorted(ROLE_TENSORS)})")
     found: dict[str, tuple[str, str]] = {}
     for name, ch in chunk_bytes.items():
         role = table.get(_LAYER_PREFIX.sub("", name))
-        fmt = CHUNK_FORMAT.get(int(ch))
-        if role is None or fmt is None:
-            continue                      # not a projection we place, or a size the packer will refuse
+        if role is None:
+            continue                      # not a projection we place
+        ch = int(ch)
+        fmt = CHUNK_FORMAT.get(ch)
+        if fmt is None and ch in AMBIGUOUS_CHUNK:
+            by_dtype = AMBIGUOUS_CHUNK[ch]
+            dt = dtypes.get(name) if dtypes is not None else None
+            fmt = by_dtype.get(dt)
+            if fmt is None:
+                raise SpecError(
+                    f"{name} fills the {role!r} role at {ch}-byte quant chunks, where the byte "
+                    f"count does not name the format: {', '.join(f'{k} is {v}' for k, v in by_dtype.items())}. "
+                    f"Got dtype {dt!r}; pass the container's dtypes to tell them apart")
+        if fmt is None:
+            raise SpecError(f"{name} fills the {role!r} role at {ch}-byte quant chunks, which "
+                            f"this reader does not know (it reads {sorted(CHUNK_FORMAT)} and "
+                            f"{sorted(AMBIGUOUS_CHUNK)}); refusing rather than assuming {DEFAULT_QUANT}")
         prev = found.get(role)
         if prev is None:
             found[role] = (fmt, name)

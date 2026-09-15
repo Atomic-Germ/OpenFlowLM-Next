@@ -40,10 +40,12 @@ FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "gran
 # stage of the layer and then report parity against a replica making the same mistake.
 NOT_IMPLEMENTED = {
     "gptoss": "the arithmetic is settled and tested (model/replica_gptoss.py) but no kernel "
-              "computes it: attn.h has no ATTN_SINK for the learned per-head sink; the "
-              "experts want a clamped SwiGLU, which moe_silu.cc does not do; o_proj, the "
-              "router and all three expert projections carry a bias no design has room for; "
-              "the MoE FFN has to compose with sliding-window layers, which no recipe does "
-              "today; and the engine needs YaRN position tables. "
-              "See .claude/plans/gptoss-moe-and-biases.md",
+              "computes it: the experts want a clamped SwiGLU, which moe_silu.cc does not "
+              "do; o_proj, the router and all three expert projections carry a bias no "
+              "design has room for; the MoE FFN has to compose with sliding-window layers, "
+              "which no recipe does today; and the expert intermediate equals hidden, which "
+              "qwen36moe's core layout does not survive. The packer reads the container's "
+              "attention projections and head now (std_fuse, OPEN-PACK-CHUNK-FUSE) but has "
+              "no op for the MXFP4 experts. ATTN_SINK landed at e0511bd7 and is no longer a "
+              "gap. See .claude/plans/gptoss-bringup.md",
 }

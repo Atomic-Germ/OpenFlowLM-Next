@@ -223,6 +223,55 @@ def test_the_quant_role_table_knows_gpt_oss_tensor_names():
         quant_map_from_chunk_sizes("gptoss", names)
 
 
+def test_the_role_table_knows_the_container_the_converter_actually_writes():
+    """The converter deletes ffn_{up,gate,down}_exps.weight and writes ONE fused
+    ffn_gate_up_down_exps.weight, so the role table has to name that."""
+    from recipes.spec import ROLE_TENSORS
+    assert "ffn_gate_up_down_exps.weight" in ROLE_TENSORS["gptoss"]
+    assert ROLE_TENSORS["gptoss"]["ffn_gate_up_down_exps.weight"] == "experts"
+
+
+def test_the_real_container_derives_mxfp4_experts_not_the_q4_1_default():
+    """The shipped container is 2560-byte chunks throughout, q4_1 for the attention
+    projections and the head (dtype I8) and MXFP4 for the fused expert tensor (dtype U8).
+
+    Before this landed the caller got {} -- the everything-is-q4_1 default -- for a
+    container whose experts are 4-bit FLOAT. A wrong answer with no error is the failure
+    shape this repo keeps relearning."""
+    from recipes.spec import quant_map_from_chunk_sizes
+    real = {"model.layers.3.ffn_gate_up_down_exps.weight": 2560,
+            "model.layers.3.self_attn.q_proj.weight": 2560,
+            "lm_head.weight": 2560}
+    dt = {"model.layers.3.ffn_gate_up_down_exps.weight": "U8",
+          "model.layers.3.self_attn.q_proj.weight": "I8",
+          "lm_head.weight": "I8"}
+    assert quant_map_from_chunk_sizes("gptoss", real, dt) == {"experts": "mxfp4"}
+
+
+def test_2560_without_dtypes_is_refused_rather_than_guessed():
+    """The byte count does not name the format at 2560 - GPT-OSS ships q4_1 projections and
+    MXFP4 experts at the same size. A caller with no dtypes gets a refusal naming both
+    readings, not the q4_1 default it would otherwise collapse to."""
+    from recipes.spec import quant_map_from_chunk_sizes
+    with pytest.raises(SpecError, match="does not name the format"):
+        quant_map_from_chunk_sizes("gptoss", {"model.layers.3.self_attn.q_proj.weight": 2560})
+
+
+def test_a_known_role_at_an_unknown_chunk_size_is_refused_by_name():
+    """The silent wrong this replaces: a role the packer places, at a chunk size it cannot
+    read, used to `continue` and leave the role at the q4_1 default."""
+    from recipes.spec import quant_map_from_chunk_sizes
+    with pytest.raises(SpecError, match="1280"):
+        quant_map_from_chunk_sizes("gptoss", {"model.layers.3.self_attn.q_proj.weight": 1280})
+
+
+def test_a_tensor_with_no_role_at_an_unknown_size_is_still_ignored():
+    """The refusal must not fire on tensors the packer never places - norms, biases and
+    anything else a container carries - or every model stops loading."""
+    from recipes.spec import quant_map_from_chunk_sizes
+    assert quant_map_from_chunk_sizes("gptoss", {"model.layers.3.input_layernorm.weight": 1280}) == {}
+
+
 # ---- the fixture itself
 
 

@@ -2,6 +2,7 @@
 /// \brief The packing-plan interpreter (see pools.hpp).
 #include "open_qwen36/pools.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -29,12 +30,27 @@ void bounds(const PackOp& op, uint64_t nbytes, size_t dst_bytes) {
              std::to_string(op.dst) + ", past the " + std::to_string(dst_bytes) + " B buffer");
 }
 
+/// Both band laws derive the file raster's column count as `in_dim / 256`, which FLOORS.
+/// At a width that is not a whole number of 256-column k-tiles -- GPT-OSS's container ships
+/// 2944 -- the k-tile index then runs past it and pool chunks alias onto each other: 1409
+/// distinct file chunks selected for 1472 slots, a corrupt pool with nothing raised. The
+/// recipe is not supposed to derive such a width (OPEN-WIDTH-PAD pads to the lcm), and this
+/// is the check that a manifest carrying one does not pack silently anyway.
+/// recipes/pack.py raises the same way, from `band_rowblock_ktile` and `q8_perm`.
+void ktiles_or_fail(const char* who, size_t in_dim) {
+    if (in_dim % 256)
+        fail(std::string(who) + ": in_dim=" + std::to_string(in_dim) + " is not a whole number of "
+             "256-column k-tiles (" + std::to_string(in_dim % 256) + " over); the file raster's "
+             "column count would floor and the pool chunks would alias onto each other");
+}
+
 /// pool chunk index -> file chunk index for a standard [out, in] matmul tensor:
 /// a band is 64 rows x in_dim = in_dim/128 chunks; inside its band chunk i covers
 /// row half i%2 and k-tile i/2 (gemv_q4.h's band law); file chunk f covers rows
 /// 32*(f/ncol), cols 256*(f%ncol). Same law as recipes/pack.py (which documents
 /// its equivalence with the form phlegm verified against OFLM's captured pools).
 std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
+    ktiles_or_fail("std_perm", in_dim);
     size_t ncol = in_dim / 256, per_band = in_dim / 128;
     std::vector<size_t> perm(nch);
     for (size_t c = 0; c < nch; ++c) {
@@ -45,8 +61,35 @@ std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
     return perm;
 }
 
+/// Two adjacent 2560-byte chunks -> one 5120-byte pool chunk. Eight byte-slice copies and
+/// no arithmetic: a 2560-byte chunk is q4_1 over 32 rows x 128 columns, four 32-column
+/// blocks instead of eight, so the meta index `b*32 + r` puts the low half's blocks at
+/// metas 0..127 and the high half's at 128..255, and the nibble raster's leading term
+/// `(r/16) * 512*nb` splits each source into two 1024-byte planes by row half -- which is
+/// why the nibbles interleave A0 B0 A1 B1 rather than concatenating.
+/// recipes/pack.py `fuse_chunks` is the same eight copies in NumPy.
+void fuse_chunk(const uint8_t* a, const uint8_t* b, uint8_t* out) {
+    std::memcpy(out + 0, a + 0, 256);            // d, columns 0..127
+    std::memcpy(out + 256, b + 0, 256);          // d, columns 128..255
+    std::memcpy(out + 512, a + 256, 256);        // m
+    std::memcpy(out + 768, b + 256, 256);
+    std::memcpy(out + 1024, a + 512, 1024);      // nibbles, rows 0..15
+    std::memcpy(out + 2048, b + 512, 1024);
+    std::memcpy(out + 3072, a + 1536, 1024);     // nibbles, rows 16..31
+    std::memcpy(out + 4096, b + 1536, 1024);
+}
+
+/// (32-row block, 128-column block) -> file chunk index in the supertile raster
+/// q4nx-build writes for GPT-OSS: row block `rb` is supertile `rb/rg` at position `rb%rg`,
+/// and its column block `q` lands at `(rb/rg * ncol128 + q) * rg + rb%rg`. Every other
+/// converter writes the plain `rb * ncol + q`, which this reduces to at rg = 1.
+size_t supertile_index(size_t rb, size_t q, size_t ncol128, size_t rg) {
+    return ((rb / rg) * ncol128 + q) * rg + rb % rg;
+}
+
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
+constexpr size_t Q4_HALF = 2560;     // GPT-OSS's chunk: the same layout over 32 rows x 128 columns
 constexpr size_t Q4K_CHUNK = 4736;   // 256 uint8 scales, 256 uint8 mins, 4096 B of nibbles, 32 bf16 S, 32 bf16 M
 constexpr size_t Q8H_SCALES = 256;   // a half-tile's 128 bf16 scales
 constexpr size_t Q8H_CODES = 4096;   // a half-tile's 4096 int8 codes
@@ -57,6 +100,7 @@ constexpr unsigned Q8H_ROWS = 16;
 /// band and k-tile c/4, so its source is file chunk (2*band + (c%4)/2) at half (c%4)%2
 /// (gemv_q8.h's band law; recipes/pack.py q8_perm is the same law in NumPy).
 std::vector<std::pair<size_t, unsigned>> q8_perm(size_t nch, size_t in_dim) {
+    ktiles_or_fail("q8_perm", in_dim);
     const size_t ncol = in_dim / 256, per_band = in_dim / 64;
     std::vector<std::pair<size_t, unsigned>> perm(nch);
     for (size_t c = 0; c < nch; ++c) {
@@ -114,8 +158,11 @@ const uint8_t* raw(const Q4nxFile& m, const std::string& name, size_t need, size
 
 /// What a chunk size the packer does not read probably is, for the refusal message.
 std::string chunk_guess(size_t ch) {
-    if (ch == 1280 || ch == 2560) return "a smaller chunk geometry (" + std::to_string(ch * 8192 / Q4_CHUNK) +
-                                         " values per chunk instead of 8192)";
+    if (ch == Q4_HALF)
+        return "GPT-OSS's 32-row x 128-column chunk, which the std_fuse op reads -- the file raster "
+               "is a supertile as well as half-width, so this tensor needs that op rather than this one";
+    if (ch == 1280) return "a smaller chunk geometry (" + std::to_string(ch * 8192 / Q4_CHUNK) +
+                           " values per chunk instead of 8192)";
     return "not a chunk format this packer knows";
 }
 
@@ -282,6 +329,55 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         const uint8_t* src = q4_source(m, name, op.chunk0, op.nch, ch, tmp);
         auto perm = std_perm(op.nch, op.in_dim);
         for (size_t c = 0; c < op.nch; ++c) std::memcpy(dst + op.dst + c * ch, src + perm[c] * ch, ch);
+    } else if (op.op == "std_fuse") {
+        // OPEN-PACK-CHUNK-FUSE: a std_perm band whose source chunks are half-width. The
+        // container holds 32 rows x 128 columns per chunk, in the supertile raster, so each
+        // pool chunk is the k-tile's two 128-column halves fused; a column block past the
+        // container's own width is synthesised as zeros, which is also the pad from the
+        // container's K to the pool's. recipes/pack.py `std_fuse` is the same interpreter.
+        const std::string name = with_layer(op.tensor, layer);
+        if (op.nch == 0 || op.in_dim == 0 || op.src_dim == 0)
+            fail("std_fuse " + name + " without nch / in_dim / src_dim");
+        const size_t rg = op.rg ? op.rg : 4;
+        if (op.in_dim % 256)
+            fail("std_fuse " + name + ": in_dim=" + std::to_string(op.in_dim) + " is not a whole "
+                 "number of 256-column k-tiles; the pool chunks would alias onto each other");
+        if (op.src_dim % 128)
+            fail("std_fuse " + name + ": src_dim=" + std::to_string(op.src_dim) + " is not a whole "
+                 "number of 128-column chunks");
+        if (op.src_dim > op.in_dim)
+            fail("std_fuse " + name + ": the container is " + std::to_string(op.src_dim) +
+                 " wide and the pool only " + std::to_string(op.in_dim) + "; a pool narrower than "
+                 "the container would drop columns");
+        const size_t src_ch = m.chunk_bytes(name);
+        if (src_ch != Q4_HALF)
+            fail(name + ": std_fuse reads " + std::to_string(Q4_HALF) + "-byte chunks (32 rows x "
+                 "128 columns) and the container stores it in " + std::to_string(src_ch) + "-byte ones");
+        bounds(op, op.nch * ch, dst_bytes);
+
+        const size_t per_band = op.in_dim / 128, ncol128 = op.src_dim / 128;
+        size_t nrb = 0;
+        for (size_t c = 0; c < op.nch; ++c) nrb = std::max(nrb, 2 * (c / per_band) + c % 2 + 1);
+        if (nrb % rg)
+            fail("std_fuse " + name + ": " + std::to_string(nrb) + " row blocks is not a whole "
+                 "number of " + std::to_string(rg) + "-row-block supertiles");
+        const size_t nsrc = nrb * ncol128;
+        size_t have = 0;
+        const uint8_t* src = raw(m, name, nsrc * Q4_HALF, &have);
+        if (have != nsrc * Q4_HALF)
+            fail(name + ": " + std::to_string(have / Q4_HALF) + " chunks of " + std::to_string(Q4_HALF) +
+                 " B, but a " + std::to_string(op.src_dim) + "-wide tensor covering " +
+                 std::to_string(op.nch) + " pool chunks needs exactly " + std::to_string(nsrc));
+
+        const std::vector<uint8_t> zero(Q4_HALF, 0);      // the synthesised column block
+        for (size_t c = 0; c < op.nch; ++c) {
+            const size_t rb = 2 * (c / per_band) + c % 2, kt = (c % per_band) / 2;
+            const uint8_t* lo = 2 * kt < ncol128 ? src + supertile_index(rb, 2 * kt, ncol128, rg) * Q4_HALF
+                                                 : zero.data();
+            const uint8_t* hi = 2 * kt + 1 < ncol128 ? src + supertile_index(rb, 2 * kt + 1, ncol128, rg) * Q4_HALF
+                                                     : zero.data();
+            fuse_chunk(lo, hi, dst + op.dst + c * ch);
+        }
     } else if (op.op == "q8_perm") {
         // The projection stays at q8: `nch` counts POOL half-tiles (5120 B each, twice the
         // q4_1 bytes of the same tensor) and `chunk0` is a SOURCE file-chunk offset, as it

@@ -155,9 +155,18 @@ def test_a_windowed_layer_sinks_over_the_window_only():
 
 def test_the_guard_is_off_by_default_and_no_family_raises_it():
     """A family without sinks has to compile what it compiled before. attn.h defaults the
-    flag to 0 and nothing emits it -- no recipe carries a SINK knob, so no build key moves.
-    The objects still have to be diffed before a GPT-OSS build ships; that is step 1 of the
-    procedure in the spec and it has NOT been run."""
+    flag to 0 and nothing emits it, so a family without sinks preprocesses to the same source.
+
+    The object diff -- step 1 of the procedure in the spec -- HAS now been run, twice on
+    separate trees. Every designs/attn/*.cc compiled for all 11 shipped families' real flag
+    sets at e0511bd7^ and at HEAD gives byte-identical objects: 127 identical, 0 differing,
+    plus 3 that do not compile on EITHER side because attn_stepb.cc:22 raises a deliberate
+    #error when ATTN_RB is unset. Peano lives in WSL at ~/ironenv142; the earlier "no
+    compiler on this machine" note is stale.
+
+    One caveat worth keeping: the diff shows the rebuild lands on the identical object, not
+    that no rebuild happens. recipes/cache.py hashes the source bytes, so every family's
+    build key did move when ATTN_SINK landed."""
     h = ATTN_H.read_text(encoding="utf-8")
     assert "#define ATTN_SINK 0" in h
     from recipes import dense as DR

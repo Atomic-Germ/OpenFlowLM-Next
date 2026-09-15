@@ -24,7 +24,7 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
+    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity
@@ -32,6 +32,9 @@ struct PackOp {
                                                                        ///< lmhead_q8, the hidden width
                                                                        ///< (q8_perm: nch counts POOL half-tiles,
                                                                        ///<  chunk0 counts SOURCE file chunks)
+    uint64_t src_dim = 0, rg = 0;            ///< std_fuse: the CONTAINER's own K (the pool's is
+                                             ///< in_dim, and may be padded above it), and the
+                                             ///< supertile height of the file raster
     uint64_t experts = 0, stripes = 0, stripe_bytes = 0, expert_bytes = 0;   ///< expert_stripes / expert_down
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
     uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)

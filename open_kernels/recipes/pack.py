@@ -44,7 +44,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from .catalogue import OpRangeError
+
 CH = 5120
+CH_HALF = 2560       # GPT-OSS's chunk: the same q4_1 layout over 32 rows x 128 columns
 Q8 = 8704            # a q8 chunk: 256 bf16 scales then 8192 int8 codes
 Q4K = 4736           # a Q4_K chunk (OFLM 1.0.3+): uint8 scales/mins, nibbles, one bf16 (S, M) per row
 BLOCK = 32           # values per quantisation block, along the input dim
@@ -219,13 +222,110 @@ def q8_perm(nch: int, in_dim: int):
     A band is still 64 output rows x in_dim, now `4 * in_dim/256` half-tiles; half-tile c
     inside its band covers rows 16*(c%4) of the band and k-tile c//4. The source is the
     container's raster (file chunk f = rows 32*(f//ncol), cols 256*(f%ncol)), so the 16-row
-    slice at band row 16*part lives in file chunk (2*band + part//2) at half part%2."""
+    slice at band row 16*part lives in file chunk (2*band + part//2) at half part%2.
+
+    `in_dim` has to tile the chunk here for the same reason it does in `std_perm`: `ncol`
+    floors, and at a width like 2944 the k-tile index runs past it and the half-tiles alias
+    onto the next row block's (OPEN-WIDTH-PAD)."""
+    if in_dim % 256:
+        raise OpRangeError(f"q8_perm: in_dim={in_dim} is not a whole number of 256-column "
+                           f"k-tiles ({in_dim % 256} over); the file raster's column count "
+                           f"would floor and the pool half-tiles would alias onto each other")
     ncol = in_dim // 256
     per_band = in_dim // 64
     c = np.arange(nch)
     band, cc = c // per_band, c % per_band
     part, kt = cc % 4, cc // 4
     return (2 * band + part // 2) * ncol + kt, part % 2
+
+
+def band_rowblock_ktile(nch: int, in_dim: int):
+    """pool chunk index -> (32-row block, 256-column k-tile).
+
+    The band law on its own, with no source raster in it: a band is 64 output rows x
+    in_dim, so `per_band = in_dim/128` chunks, and chunk i inside its band covers row half
+    `i % 2` and k-tile `i // 2` (gemv_q4.h). `std_perm` looks the pair up in the file's
+    plain raster and `std_fuse` in GPT-OSS's supertile one; keeping the law in one place is
+    what stops the two rasters from drifting apart on the half they share."""
+    if in_dim % 256:
+        raise OpRangeError(f"band law: in_dim={in_dim} is not a whole number of 256-column "
+                           f"k-tiles ({in_dim % 256} over); the file raster's column count "
+                           f"would floor and the pool chunks would alias onto each other")
+    per_band = in_dim // 128
+    c = np.arange(nch)
+    return 2 * (c // per_band) + (c % 2), (c % per_band) // 2
+
+
+def supertile_perm(nrb: int, ncol128: int, rg: int) -> np.ndarray:
+    """(32-row block, 128-column block) -> file chunk index, for the supertile raster.
+
+    Every other converter writes a plain raster -- chunk (rb, q) at `rb * ncol + q`.
+    `q4nx-build`'s GPT-OSS path groups `rg` consecutive row blocks into a supertile and
+    rasters the supertiles instead: row block `rb` is supertile `P = rb // rg` at position
+    `F = rb % rg`, and its column block `q` lands at `(P * ncol128 + q) * rg + F`. `rg` is
+    4 for the attention projections and the experts, 2 for the `lm_head`.
+
+    Returns [nrb, ncol128]. It is a permutation of `range(nrb * ncol128)` whenever `nrb` is
+    a multiple of `rg`, which the caller checks -- a partial supertile would put two row
+    blocks on one index."""
+    if rg <= 0 or nrb % rg:
+        raise OpRangeError(f"supertile_perm: {nrb} row blocks is not a whole number of "
+                           f"{rg}-row-block supertiles")
+    rb = np.arange(nrb)[:, None]
+    q = np.arange(ncol128)[None, :]
+    return ((rb // rg) * ncol128 + q) * rg + (rb % rg)
+
+
+def fuse_chunks(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """[n, 2560] + [n, 2560] -> [n, 5120]: the k-tile's low and high 128 columns as one
+    pool chunk. Eight byte-slice copies and no arithmetic.
+
+    A 2560-byte chunk is q4_1 in the ordinary layout over 32 rows x 128 columns -- four
+    32-column blocks instead of eight -- so the two halves interleave rather than
+    concatenate. The meta index is `b * 32 + r`, which puts A's four blocks at metas 0..127
+    and B's at 128..255; the nibble raster is `(r//16) * 512*nb + b * 512 + i * 16 + r%16`,
+    whose leading term splits each chunk into two 1024-byte planes by row half, so the
+    nibbles go A-plane-0, B-plane-0, A-plane-1, B-plane-1. Read back with the pool's own
+    `nib * d + m` at (row, block, lane), blocks 0..3 are A's and 4..7 are B's."""
+    a, b = _u8(a).reshape(-1, CH_HALF), _u8(b).reshape(-1, CH_HALF)
+    if a.shape != b.shape:
+        raise ValueError(f"fuse_chunks: {a.shape[0]} low-half chunks against {b.shape[0]} high")
+    out = np.empty((a.shape[0], CH), dtype=np.uint8)
+    out[:, 0:256], out[:, 256:512] = a[:, 0:256], b[:, 0:256]            # d
+    out[:, 512:768], out[:, 768:1024] = a[:, 256:512], b[:, 256:512]     # m
+    out[:, 1024:2048], out[:, 2048:3072] = a[:, 512:1536], b[:, 512:1536]      # rows 0..15
+    out[:, 3072:4096], out[:, 4096:5120] = a[:, 1536:2560], b[:, 1536:2560]    # rows 16..31
+    return out
+
+
+def fuse_perm(nch: int, in_dim: int, src_dim: int, rg: int):
+    """pool chunk index -> (low file chunk, high file chunk) in the supertile raster, with
+    `nsrc` -- one past the last real chunk -- standing for a column block the container does
+    not have.
+
+    The pool is `in_dim` wide and the container `src_dim`; GPT-OSS ships 2944 against a
+    padded 3072, which is 23 real 128-column blocks against the 24 the pool wants. The
+    missing block is synthesised as 2560 zero bytes, so the fuse and the pad are one pass
+    rather than a pack followed by a zero fill."""
+    if src_dim % 128:
+        raise OpRangeError(f"std_fuse: src_dim={src_dim} is not a whole number of "
+                           f"128-column chunks ({src_dim % 128} over)")
+    if src_dim > in_dim:
+        raise OpRangeError(f"std_fuse: the container is {src_dim} wide and the pool only "
+                           f"{in_dim}; a pool narrower than the container would drop columns")
+    rb, kt = band_rowblock_ktile(nch, in_dim)
+    ncol128 = src_dim // 128
+    nrb = int(rb.max()) + 1 if nch else 0
+    idx = supertile_perm(nrb, ncol128, rg)
+    nsrc = nrb * ncol128
+
+    def pick(q):
+        out = np.full(q.shape, nsrc, dtype=np.int64)
+        real = q < ncol128
+        out[real] = idx[rb[real], q[real]]
+        return out
+
+    return pick(2 * kt), pick(2 * kt + 1), nsrc
 
 
 def std_perm(nch: int, in_dim: int) -> np.ndarray:
@@ -237,13 +337,15 @@ def std_perm(nch: int, in_dim: int) -> np.ndarray:
     The law phlegm verified against OFLM's captured pools was written as
     cols = 1024*((c//8) % (in//1024)) + 256*((c//2) % 4); for in_dim a multiple of 1024
     that is this same k-tile order (tests/test_pack_plan.py checks the two agree there);
-    this form is the one that also holds for in_dim = 2560 or 9728."""
-    ncol = in_dim // 256
-    per_band = in_dim // 128
-    c = np.arange(nch)
-    rows0 = 64 * (c // per_band) + 32 * (c % 2)
-    cols0 = 256 * ((c % per_band) // 2)
-    return (rows0 // 32) * ncol + cols0 // 256
+    this form is the one that also holds for in_dim = 2560 or 9728.
+
+    `in_dim` must be a whole number of 256-column k-tiles, and that is checked rather than
+    assumed: `ncol` floors, so a width like GPT-OSS's shipped 2944 used to hand back an
+    index array that ALIASES -- 1409 distinct file chunks selected for 1472 pool slots --
+    and neither apply_op nor anything above it looked. A corrupt pool with nothing raised
+    is the one outcome worth a guard (OPEN-WIDTH-PAD)."""
+    rb, kt = band_rowblock_ktile(nch, in_dim)
+    return rb * (in_dim // 256) + kt
 
 
 def down_perm(nch: int = 128) -> np.ndarray:
@@ -266,9 +368,20 @@ def _u8(b) -> np.ndarray:
 
 
 def _chunk_guess(ch: int) -> str:
-    if ch in (1280, 2560):
+    if ch == CH_HALF:
+        return ("GPT-OSS's 32-row x 128-column chunk, which the `std_fuse` op reads -- the "
+                "file raster is a supertile as well as half-width, so this tensor needs that "
+                "op rather than this one (OPEN-PACK-CHUNK-FUSE)")
+    if ch == 1280:
         return f"a smaller chunk geometry ({ch * 8192 // CH} values per chunk instead of 8192)"
     return "not a chunk format this packer knows"
+
+
+def _chunk_bytes_of(m, name: str) -> int:
+    """The quantized chunk size the container stores `name` in; a container that cannot say
+    is read as q4_1, which is what every container predating `chunk_bytes_of` is."""
+    get = getattr(m, "chunk_bytes_of", None)
+    return (get(name) if callable(get) else 0) or CH
 
 
 def q4_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.ndarray:
@@ -280,8 +393,7 @@ def q4_chunks_of(m, name: str, raw, c0: int = 0, n: int | None = None) -> np.nda
     -- the message someone reads when they point the engine at a container this packer
     cannot use."""
     b = _u8(raw)
-    get = getattr(m, "chunk_bytes_of", None)
-    ch = (get(name) if callable(get) else 0) or CH
+    ch = _chunk_bytes_of(m, name)
     if ch not in (CH, Q8, Q4K):
         raise ValueError(f"{name}: {ch}-byte quant chunks; the packer reads {CH} (q4_1), {Q8} (q8) "
                          f"and {Q4K} (Q4_K) only -- {ch} is {_chunk_guess(ch)}")
@@ -390,6 +502,29 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
             raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
         n = op["nch"] * CH
         dst[op["dst"]:op["dst"] + n] = sel[std_perm(op["nch"], op["in_dim"])].reshape(-1)
+    elif kind == "std_fuse":
+        # OPEN-PACK-CHUNK-FUSE: a std_perm band whose source chunks are half-width. The
+        # container holds 32 rows x 128 columns per chunk in the supertile raster
+        # q4nx-build writes for GPT-OSS, so each pool chunk is the k-tile's two 128-column
+        # halves fused -- eight byte-slice copies, no arithmetic -- and a column block past
+        # the container's own width is synthesised as zeros, which is also the pad from the
+        # container's 2944 to the pool's 3072.
+        name = _name(op, "tensor", layer)
+        if not op.get("nch") or not op.get("in_dim") or not op.get("src_dim"):
+            raise ValueError(f"std_fuse {name} without nch / in_dim / src_dim")
+        src_ch = _chunk_bytes_of(m, name)
+        if src_ch != CH_HALF:
+            raise ValueError(f"{name}: std_fuse reads {CH_HALF}-byte chunks (32 rows x 128 "
+                             f"columns) and the container stores it in {src_ch}-byte ones")
+        raw = _u8(_raw(m, name)).reshape(-1, CH_HALF)
+        lo, hi, nsrc = fuse_perm(op["nch"], op["in_dim"], op["src_dim"], op.get("rg", 4))
+        if raw.shape[0] != nsrc:
+            raise ValueError(f"{name}: {raw.shape[0]} chunks of {CH_HALF} B, but a "
+                             f"{op['src_dim']}-wide tensor covering {op['nch']} pool chunks "
+                             f"needs exactly {nsrc}")
+        src = np.concatenate([raw, np.zeros((1, CH_HALF), np.uint8)])   # the synthesised block
+        n = op["nch"] * CH
+        dst[op["dst"]:op["dst"] + n] = fuse_chunks(src[lo], src[hi]).reshape(-1)
     elif kind == "q8_perm":
         # the q8 twin of std_perm: `nch` is the count of POOL half-tiles (5120 B each, twice
         # the q4_1 bytes of the same tensor); `chunk0` is a SOURCE file-chunk offset, as it is

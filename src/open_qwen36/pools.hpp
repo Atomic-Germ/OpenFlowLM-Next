@@ -30,7 +30,15 @@
 /// halves). A container whose tensor is not q8 where the manifest says q8 is refused by
 /// name: that is the check that the container agrees with the kernel set (OPEN-QUANT-Q8).
 ///
+/// A GPT-OSS source (2560-byte chunks, 32 rows x 128 columns) is not accepted by the q4 ops
+/// at all -- its file raster is a supertile rather than the plain one, so the chunk index law
+/// differs as well as the geometry. It has its own op, `std_fuse`, which locates the k-tile's
+/// two 128-column halves in that raster and fuses them into one pool chunk by eight byte-slice
+/// copies, synthesising an all-zero chunk for a column block past the container's own width --
+/// so the fuse and the pad from the container's K to the pool's are one pass (OPEN-PACK-CHUNK-FUSE).
+///
 /// Ops: std_perm (a standard [out, in] matmul tensor into 64-row band order),
+/// std_fuse (the same band order out of half-width chunks in the supertile raster),
 /// expert_stripes (routed up/gate as interleaved transposed stripes),
 /// expert_down (the routed down slices), put (small weights verbatim),
 /// q8_perm (the same tensor kept at q8: 16-row half-tiles in the q8 band order),
