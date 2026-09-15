@@ -16,8 +16,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: wirekang/setup-ninja
+      uses: wirekang/setup-ninja@v1
+      with:
+        platform: linux
+
     - name: Configures
-      run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}}
+      run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}} -G Ninja
 
     - name: Builds
       run: source ${{github.workspace}}/ironvenv/bin/activate && cmake --build ${{github.workspace}}/build
