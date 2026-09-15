@@ -9,6 +9,7 @@
 #include "server.hpp"
 #include "model_list.hpp"
 #include "model_downloader.hpp"
+#include "add_command.hpp"
 #include "update.hpp"
 #include "utils/utils.hpp"
 #include "program_args.hpp"
@@ -469,6 +470,14 @@ int main(int argc, char* argv[]) {
     // XRT backend: preload bundled XRT libraries from the executable directory.
     preload_bundled_libraries();
 #endif
+
+    // `add` owns a richer, repository-oriented option set than the runtime
+    // commands. Hand its arguments through unchanged before the common Boost
+    // parser can reject them; the bundled utility remains the single source of
+    // truth for registry and kernel-link behavior.
+    if (argc > 1 && std::string(argv[1]) == "add") {
+        return add_command::run(argc - 2, argv + 2);
+    }
     
     // Parse command line arguments using Boost Program Options
     program_args_t parsed_args;
