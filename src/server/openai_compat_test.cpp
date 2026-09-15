@@ -514,6 +514,43 @@ static void test_stream_errors() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// require_field: POST {} used to segfault four handlers (#70). Every rejection
+// must be a 400 by status_for(), or the fix just moves the failure.
+// ---------------------------------------------------------------------------
+static void test_require_field() {
+    std::printf("\n-- require_field --\n");
+    using openai_compat::FieldType;
+    using openai_compat::json;
+    auto code_of = [](const json& e) { return e["error"]["code"].get<std::string>(); };
+    auto param_of = [](const json& e) { return e["error"]["param"].get<std::string>(); };
+
+    ok(openai_compat::require_field(json{{"prompt", "hi"}}, "prompt", FieldType::String).is_null(),
+       "a string prompt passes");
+    ok(openai_compat::require_field(json{{"messages", json::array()}}, "messages", FieldType::Array).is_null(),
+       "an empty messages array passes (well formed)");
+
+    const json missing = openai_compat::require_field(json::object(), "prompt", FieldType::String);
+    eq(code_of(missing), "missing_required_parameter", "{} -> missing_required_parameter");
+    eq(param_of(missing), "prompt", "{} names the field");
+    eqi(openai_compat::status_for(missing), 400, "{} -> 400");
+
+    const json null_body = openai_compat::require_field(json(), "model", FieldType::String);
+    eqi(openai_compat::status_for(null_body), 400, "an empty body (null) -> 400");
+    const json array_body = openai_compat::require_field(json::array(), "model", FieldType::String);
+    eqi(openai_compat::status_for(array_body), 400, "a non-object body -> 400");
+
+    for (const json& bad : {json(nullptr), json(5), json::object(), json::array()}) {
+        const json e = openai_compat::require_field(json{{"prompt", bad}}, "prompt", FieldType::String);
+        eq(code_of(e), "invalid_value", "prompt " + bad.dump() + " -> invalid_value");
+        eqi(openai_compat::status_for(e), 400, "prompt " + bad.dump() + " -> 400");
+    }
+    for (const json& bad : {json(nullptr), json("hi"), json::object()}) {
+        const json e = openai_compat::require_field(json{{"messages", bad}}, "messages", FieldType::Array);
+        eq(code_of(e), "invalid_value", "messages " + bad.dump() + " -> invalid_value");
+    }
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -529,6 +566,7 @@ int main(int argc, char** argv) {
     test_resolve_task();
     test_task_policy();
     test_stream_errors();
+    test_require_field();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);

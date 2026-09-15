@@ -5,7 +5,7 @@ nav_order: 3
 parent: Local Server (Server Mode)
 ---
 
-# 🧠 Run Obsidian with OpenFlowLM — A Faster, Smarter Second Brain
+# 🧠 Run Obsidian with OpenFlowLM -- A Faster, Smarter Second Brain
 
 This guide walks you through setting up **Obsidian** (with *AI Providers* and *Local GPT* plug-ins) and **OpenFlowLM (OFLM)** to work seamlessly together.
 

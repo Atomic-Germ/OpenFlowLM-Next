@@ -36,8 +36,15 @@ src/xclbins/BERT-h*/
 .claude/
 CLAUDE.md
 
-# open_kernels build outputs and generated fixtures
+# open_kernels build outputs and generated fixtures. A build directory is what it
+# holds, not what it is called: an ablation or a kept reference copy is still one,
+# and `build*/` alone let 1552 files into a `git add -A` (2026-09-13). Ignore the
+# artifacts too, so a directory named anything at all cannot carry them in.
 open_kernels/designs/*/build*/
+open_kernels/designs/**/final.xclbin
+open_kernels/designs/**/final.prj/
+open_kernels/designs/**/insts.bin
+open_kernels/designs/**/insts.elf
 open_kernels/designs/*/*.bin
 open_kernels/designs/*/*.cfg
 open_kernels/designs/*/*.log

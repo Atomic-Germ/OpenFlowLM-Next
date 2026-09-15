@@ -45,6 +45,12 @@ python build_design.py designs/rot13/rot13.py          # -> designs/rot13/build/
 NPU1) and calls `DESIGN.specialize(**SPECIALIZE).compile(xclbin_path,
 inst_path, elf_path)`; a design module just exposes `DESIGN` and `SPECIALIZE`.
 
+`kernel_remarks.py <kernel.cc>` compiles one kernel the same way and prints what
+Peano made of it - cycles per loop body, and the two lower bounds (busiest slot,
+longest dependence cycle) any schedule has to respect. Seconds, no xclbin. Use it
+to tell "this loop is at its floor" from "the scheduler left something behind"
+before spending a build on a change.
+
 ## Running through phlegm
 
 `open-qwen-npu npu <config>` (the decode driver's config language) gained two

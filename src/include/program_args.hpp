@@ -29,6 +29,15 @@ struct program_args_t {
     std::string input_file_name = "";
     int iterations = 2;
 
+    // for bench-embed: the largest batch the sweep reaches. The sweep doubles
+    // 1, 2, 4 ... max_batch, so this picks the number of stages as well as the
+    // last one -- one run gives a curve, not a point.
+    int max_batch = 128;
+    // Which task prompt bench-embed applies, by its REST name (see
+    // openai_compat::task_names()). Empty means "query", which is what
+    // /v1/embeddings resolves to for a model that declares no prompts.
+    std::string prompt_name = "";
+
     // specific commands
     int img_pre_resize = 3;
 

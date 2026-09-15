@@ -53,7 +53,7 @@ sections:
   #     ---
 
   #     ### ⚡ The Vision
-  #     **OpenFlowLM — Real AI. Real Speed. Always On. All Day Power. On Your NPU.**
+  #     **OpenFlowLM -- Real AI. Real Speed. Always On. All Day Power. On Your NPU.**
 
   #     **See it in action:** [Watch Video](https://youtu.be/zKaaHw_IvsM)   
   #     **Learn more:** [openflowlm.com](https://www.openflowlm.com)   
@@ -75,11 +75,11 @@ sections:
 
   #     OpenFlowLM allows your system to handle things it used to struggle with:
 
-  #     * **🎮 Game Smarter:** Get an AI co-pilot that watches your screen and gives real-time strategy tips—**without stealing a single frame from your GPU.**
+  #     * **🎮 Game Smarter:** Get an AI co-pilot that watches your screen and gives real-time strategy tips--**without stealing a single frame from your GPU.**
   #     * **🗣️ Meet Smarter:** Live translation for international calls? Check. Perfect summaries of boring meetings? Check. You listen; the AI takes the notes.
   #     * **✍️ Your 24/7 Ghostwriter:** Writer’s block is dead. Generate emails, tweets, or essays instantly in the background while you browse the web.
   #     * **🧠 Your Private "Second Brain":** Drag in your messy files (PDFs, receipts, notes). Ask questions. Get answers. It’s like a genius archivist that lives inside your laptop.
-  #     * **✈️ Work offline:** Stuck on a plane? Your AI still works perfectly. Learn to code, plan a trip, or translate a menu at 30,000 feet—no internet required.
+  #     * **✈️ Work offline:** Stuck on a plane? Your AI still works perfectly. Learn to code, plan a trip, or translate a menu at 30,000 feet--no internet required.
 
   #     No GPU required.  
   #     No overheating.  
@@ -99,9 +99,9 @@ sections:
 
   #     ### The Bottom Line
 
-  #     The AI laptop era is officially real. With OpenFlowLM, NPUs finally deliver the on-device intelligence they were built for—efficiently, privately, and without compromise.
+  #     The AI laptop era is officially real. With OpenFlowLM, NPUs finally deliver the on-device intelligence they were built for--efficiently, privately, and without compromise.
 
-  #     **OpenFlowLM — the runtime software engine that makes NPUs truly useful. 🚀**
+  #     **OpenFlowLM -- the runtime software engine that makes NPUs truly useful. 🚀**
 
 ---
 

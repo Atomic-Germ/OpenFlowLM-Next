@@ -50,37 +50,83 @@ struct Step {
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
 };
 
-/// 0167/#32: the GEMM prefill route -- T tokens through a layer as 5
-/// whole-array bf16 GEMM dispatches (q4_1 dequantised on-core) with q|k|v
-/// FUSED into one ("qkv3"), T single-token attention dispatches between GEMM
-/// A' and GEMM O, and HOST-side fp64 RMSNorm / residual / SwiGLU between
-/// every GEMM stage (this route does NOT fuse norm/SwiGLU on-core; the
-/// sequential production path does). `program` holds exactly 5 Steps in
-/// FIXED order -- qkv3, o_proj, gate_proj, up_proj, down_proj -- each a plain
-/// "run" against a per-layer weight buffer (named "gqkv3_w"/"go_w"/
-/// "ggate_w"/"gup_w"/"gdown_w", built once at load_weights() time by Core,
-/// see core.cpp) and a pair of GLOBAL scratch buffers ("gemm_x_hid"/
-/// "gemm_x_ff" in, "gemm_y_qkv3"/"gemm_y_o"/"gemm_y_gate"/"gemm_y_up"/
-/// "gemm_y_down" out) the manifest's own `globals` section sizes, exactly
-/// like every other global. The attention half (kernel name fixed as "dxB")
-/// is NOT a Step in `program` -- Core drives it directly (T attnpos-patched
-/// dispatches through a GLOBAL "gact" T-wide scratch buffer, one shuttle
-/// in/out per token) because it sits strictly between program[0] (qkv3) and
-/// program[1] (o_proj), not appended to the list. Special-purpose and
-/// Granite-only on purpose, not a generalized N-stage interpreter.
+/// The block prefill route (OPEN-PREFILL-BATCH): T tokens through a layer's
+/// projections as whole-array bf16 GEMM dispatches (q4_1 dequantised on-core,
+/// open_kernels/designs/gemm_q4_prefill), with the stages between them on the
+/// host. Special-purpose per layer-type KIND, not a generalized interpreter:
+///
+///   dense  (0167/#32, Granite): 5 steps in FIXED order -- qkv3, o_proj,
+///          gate_proj, up_proj, down_proj -- with T single-token attention
+///          dispatches ("dxB", attnpos-patched, through a GLOBAL T-wide "gact")
+///          between the first two, and RMSNorm / residual / SwiGLU on the host.
+///   linear (the 35B's DeltaNet layers): 2 steps -- qkv|z fused, out_proj --
+///          with the conv + gated delta rule + gated norm on the host between
+///          them, then the norm and router on the host and the MoE block one
+///          token at a time on the sequential kernel (lx1).
+///   full   (the 35B's attention layers): 2 steps -- q|k|v|gate fused, o_proj --
+///          with the q/k norms, RoPE, attention over the KV rows and the gate
+///          on the host, then the same MoE tail on ax1.
+///
+/// Each step is a plain "run" of a GEMM kernel against three buffers: a
+/// per-layer weight buffer (named in `weights`, built once at load_weights()
+/// out of a contiguous run of the layer type's pack ops -- see core.cpp),
+/// a global x (bf16, tiled) and a global y (f32), both sized by the
+/// manifest's `globals` like every other global.
+struct GemmWeight {
+    std::string from;             ///< "pool" | "consts": which packed plan the ops index
+    std::vector<size_t> ops;      ///< indices into LayerType::pool / consts, in order, byte-contiguous
+};
+
+/// The token-batched expert kernel (OPEN-MOE-BATCH, open_kernels/designs/moe_batch):
+/// one dispatch streams every slot's expert once for up to `nt` of its tokens.
+/// `kernels` maps a slot count to its instruction stream (one xclbin for all); the
+/// driver takes the shortest stream that holds the experts still owed tokens,
+/// patches the slots' expert offsets (moebatch) and runs it against pool, x, h, y.
+struct MoeBatch {
+    std::map<size_t, std::string> kernels;   ///< slots -> kernel name
+    std::vector<std::string> args;           ///< pool, then the x / h / y globals
+    size_t nt = 0;                           ///< token slots per expert visit
+    bool present() const { return !kernels.empty(); }
+};
+
+/// Block attention as two bf16 GEMMs per kv head (OPEN-PREFILL-ATTN, open_kernels/designs/attn_block):
+/// scores Q K^T then P V, the row softmax on the host between them. One stream per 256 rows of
+/// window up to l_max on one xclbin; the host chunks a longer window and merges the softmax.
+struct AttnBlock {
+    std::map<size_t, std::string> kernels_s, kernels_pv;   ///< window rows -> the stream for that width
+    std::vector<std::string> args;                         ///< the a / b / c globals
+    size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
+    bool present() const { return !kernels_s.empty(); }
+};
+
 struct GemmBlockProgram {
-    uint64_t t = 0;              ///< 0 = no gemm-block program for this layer type
-    std::vector<Step> program;   ///< exactly 5 when t > 0: qkv3, o, gate, up, down (see above)
-    // The handful of model constants this route's HOST-side math needs that
-    // the rest of the manifest does not otherwise carry (RMSNorm eps; the
-    // q/k/v attention-width split and FFN width; the T=1 "act" buffer's
-    // AD_Q/AD_KVN/AD_OG byte offsets, open_kernels/recipes/dense.py's
-    // DenseLayout). Not model constants baked into THIS file (core.hpp's own
-    // rule) -- read from the manifest like everything else, just via new
-    // fields instead of a generic Step.
-    double eps = 0;
-    uint64_t qw = 0, kvw = 0, ff = 0;
-    uint64_t ad_q = 0, ad_kvn = 0, ad_og = 0;
+    uint64_t t = 0;               ///< 0 = no route for this layer type
+    std::string kind;             ///< dense | linear | full
+    std::vector<Step> program;
+    std::map<std::string, GemmWeight> weights;
+    double eps = 0;               ///< RMSNorm eps for the host norms
+    // dense: the q/k/v widths, the FFN width, the T=1 "act" byte offsets dxB reads
+    uint64_t qw = 0, kvw = 0, ff = 0, ad_q = 0, ad_kvn = 0, ad_og = 0;
+    // linear: the fused qkv width, the value width, the DeltaNet geometry, the state layout
+    uint64_t qkv_dim = 0, vw = 0, key_heads = 0, value_heads = 0, head_dim = 0, conv_kernel = 0;
+    uint64_t state_s_off = 0, s_head_bytes = 0, s_rows = 0;
+    // full: heads, kv heads, head dim, rotary dim (qw / kvw as above)
+    uint64_t nh = 0, kvh = 0, hd = 0, rot = 0;
+    // linear and full: the per-token MoE dispatch (moeroute2-patched, its own xclbin), its
+    // buffer args, and where in act it reads xm, the router record and the residual
+    std::string moe_kernel;
+    std::vector<std::string> moe_args;
+    uint64_t a_xm = 0, a_rout = 0, a_res = 0;
+    // linear and full: the shared expert, lifted out of the per-token dispatch and run once
+    // over the block -- up|gate (contiguous in the pool) then down, with silu and the sigmoid
+    // gate on the host, folded into the residual mx is handed. mx closes on xres + acc.
+    std::vector<Step> shared_program;
+    std::map<std::string, GemmWeight> shared_weights;
+    uint64_t shared_ff = 0;
+    // linear and full: the routed experts batched over the block (absent: mx per token)
+    MoeBatch moe_batch;
+    // full: the attention products on the NPU (absent: attention on the host)
+    AttnBlock attn_block;
 };
 
 struct LayerType {

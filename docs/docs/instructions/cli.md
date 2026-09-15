@@ -86,14 +86,14 @@ oflm pull llama3.2:3b --force
 
 You can override the default location by setting the `OFLM_MODEL_PATH` environment variable.
 
-**Windows** — Update the existing system environment variable:
+**Windows** -- Update the existing system environment variable:
 1. Open **Start** and search for **"Edit the system environment variables"**.
 2. Click **Environment Variables…**.
 3. Under **System variables**, find `OFLM_MODEL_PATH`, select it, and click **Edit…**.
 4. Update the value to your desired path (e.g., `D:\models\oflm`).
 5. Click **OK** and restart any open terminals for the change to take effect.
 
-**Linux** — Set temporarily for the current shell session:
+**Linux** -- Set temporarily for the current shell session:
 ```shell
 export OFLM_MODEL_PATH="/your/custom/path"
 ```
@@ -255,6 +255,8 @@ oflm serve llama3.2:1b --host 127.0.0.1
 
 ⚠️ Note: --host applies only to the current session. It does not modify the default host configuration (default: `127.0.0.1`).
 
+> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. (`bench`, `list`, `version`, `port` and `validate` still accept it; see #68.)
+
 ---
 
 ### 🌐 Cross-Origin Resource Sharing (CORS)
@@ -328,7 +330,7 @@ oflm run gemma3:4b --asr 1  # Load Whisper (whisper-large-v3-turbo) in the backg
 oflm serve gemma3:4b --asr 1  # Background-load Whisper and initialize the LLM (gemma3:4b) concurrently.
 ```
 
-> **Note:** ASR alone isn’t supported—an LLM must be present for end-to-end voice→text→LLM workflows.
+> **Note:** ASR alone isn’t supported--an LLM must be present for end-to-end voice→text→LLM workflows.
 
 See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
 
@@ -569,6 +571,51 @@ OFLM prints the results in your terminal and also saves them as a CSV file in th
             32k |      26.346 ±   0.037 |        1177.16 ±      1.53 |       26.38 ±      0.07
 ----------------------------------------------------------------------------------------------------
 ```
+
+### Embedding models: `bench-embed`
+
+`bench` is for chat models. Encoders have no first token and no
+prefill/decode split, and their sequence length is fixed by the compiled
+design rather than by the request -- so they get their own command, which
+sweeps **batch size** instead of context length.
+
+```shell
+oflm bench-embed bge-base:en-v1.5
+oflm bench-embed bge-base --max-batch 32 --bench-iterations 5
+oflm bench-embed nomic-embed-text:v1.5 --prompt-name query
+oflm bench-embed bge-base -i utilities/bench-configs/bench-embed-32.json
+```
+
+| flag | meaning |
+|---|---|
+| `--max-batch N` | largest batch swept; it doubles 1, 2, 4 ... N (default 128). Must be a power of two. |
+| `--bench-iterations N` | timed iterations per stage (default 2), after one discarded warm-up. |
+| `--prompt-name NAME` | the task prompt, by its REST name (`query`, `document`, `clustering`, ...). **Required** for a model that declares prompt names (nomic). **Refused** for one with no task-prompt concept at all (the bge sizes, MiniLM, gte). `embed-gemma:300m` is the exception: it declares no names and still honours tasks through a hardcoded per-task prefix, so it accepts the flag and needs none. |
+| `-i FILE` | a JSON config: `max_batch`, `iterations`, `task`, `texts`. |
+
+Every stage times **two paths over the same texts**: one batched call, and the
+same texts one at a time -- which is what a caller doing one request per text
+gets. `Speedup` is the ratio, and on the NPU-backed encoders it is 5-10x.
+
+```text
+[OFLM]  === Embedding Benchmark Results ===
+
+  Batch |         Batched (s) | Looped (s) |  Speedup |             Texts/s |          Tokens/s
+--------------------------------------------------------------------------------------------------
+      1 |      0.0253 +- 0.0008 |     0.0250 |    0.99x |        39.5 +-  1.2 |        1186 +-  36
+      8 |      0.0314 +- 0.0008 |     0.2018 |    6.43x |       255.0 +-  6.9 |        5451 +- 148
+     64 |      0.2056 +- 0.0020 |     1.5513 |    7.55x |       311.3 +-  3.0 |        6868 +-  65
+    128 |      0.5059 +- 0.0018 |     3.1064 |    6.14x |       253.0 +-  0.9 |        5582 +-  20
+--------------------------------------------------------------------------------------------------
+```
+
+Results also go to `bench_embed_<tag>_<date>[_<cpu>].csv` in the current
+folder, with a `#` provenance header naming the model, the task, the corpus and
+the identity-gate result.
+
+Full methodology, what it refuses and why, and what it does **not** measure:
+[`utilities/bench-configs/README.md`](https://github.com/Atomic-Germ/OpenFlowLM-Next/blob/main/utilities/bench-configs/README.md).
+Measured results for every model: [Benchmarks -> Embeddings](/docs/benchmarks/embeddings_results/).
 
 ---
 
