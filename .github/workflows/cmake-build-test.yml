@@ -10,7 +10,7 @@ env:
   BUILD_TYPE: debug
 
 jobs:
-  build:
+  config-build-test:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,17 +26,16 @@ jobs:
         platform: linux
 
     - name: Installs Deps
-      run:
-        add-apt-repository -y ppa:amd-team/xrt && \
-        apt-get update && \
-        apt-get install -y \
-            libxrt-dev \
-            libxrt2 \
-            libxrt-npu2 \
+      shell: bash
+      run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            software-properties-common \
             libboost-all-dev \
             uuid-dev \
             libdrm-dev \
             cmake \
+            ninja-build \
             g++ \
             libreadline-dev \
             libcurl4-openssl-dev \
@@ -44,8 +43,14 @@ jobs:
             libavformat-dev \
             libavcodec-dev \
             libavutil-dev \
-            libswscale-dev \
-            libswresample-dev
+            libswscale-dev
+
+          sudo add-apt-repository -y ppa:amd-team/xrt
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxrt-dev \
+            libxrt2 \
+            libxrt-npu2
 
     - name: Configures OpenFlowLM
       run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}} -G Ninja -DCMAKE_CXX_FLAGS="-I/usr/include/xrt"
