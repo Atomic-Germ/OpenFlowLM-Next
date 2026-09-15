@@ -61,7 +61,7 @@ jobs:
 
       - name: Configure
         run: |
-          cmake --preset linux-${{ env.BUILD_TYPE }} \
+          cmake -B build -G Ninja --preset linux-${{ env.BUILD_TYPE }} \
             -DCMAKE_CXX_FLAGS="-I/usr/include/xrt"
 
       - name: Build
