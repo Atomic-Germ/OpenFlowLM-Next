@@ -416,6 +416,8 @@ endif()
 
 
 add_executable(oflm ${SOURCES} ${HEADERS})
+target_compile_definitions(oflm PRIVATE
+    OFLM_ADD_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-add/oflm-add.py")
 
 if(WIN32)
     if(VCPKG_TOOLCHAIN)
@@ -917,6 +919,24 @@ else()
     endif()
 endif()
 
+# `oflm add` forwards to this bundled, stdlib-only implementation. Keeping the
+# package intact preserves one implementation of repository probing, strict
+# download verification, registry updates, and ModelSpec-based kernel linking.
+install(PROGRAMS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-add/oflm-add.py"
+    DESTINATION "${OFLM_SHARE_DESTINATION}/oflm-add")
+install(DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/../utilities/oflm-add/oflm_add"
+    DESTINATION "${OFLM_SHARE_DESTINATION}/oflm-add"
+    FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
+# The installer's automatic open-kernel match derives a ModelSpec through these
+# recipes. Ship the derivation code so an installed binary does not require a
+# source checkout or OPEN_KERNELS_DIR merely to find an already-built set.
+install(DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/recipes"
+    DESTINATION "${OFLM_SHARE_DESTINATION}/open_kernels"
+    FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
+
 # Directory holding the selected NPU runtime shared library, used by the Windows
 # dependency set, the portable XRT bundling, and the HRX dependency closure. HRX
 # ships libhrx via its imported target; XRT is a system/library-dir dependency.
@@ -1270,4 +1290,3 @@ set(CPACK_GENERATOR "TGZ")
 set(CPACK_SET_DESTDIR ON)
 set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 include(CPack)
-

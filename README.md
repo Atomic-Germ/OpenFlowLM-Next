@@ -1,4 +1,7 @@
 <p align="center">
+  <img width="64" height="64" alt="OFLM_small" src="https://github.com/user-attachments/assets/36d563a8-034e-49db-a0ce-af920420e40f" />
+</p>
+<p align="center">
   <img src="https://img.shields.io/badge/NPU-Optimized-red" />
 </p>
 
@@ -89,7 +92,7 @@ tuned kernels.
   
 ---
 
-💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community](https://discord.gg/z24t23HsHF)
+💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community](https://discord.gg/8RexzmW7))
 
 ---
 
