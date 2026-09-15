@@ -95,6 +95,27 @@ cd open_kernels/designs/gemv_q4 && /tmp/opencode/harness/run_kernel run_qkv_gguf
 - OPEN-MANIFEST + fixture tests pass (nested gguf manifests for
   qwen3/gemma3); full pytest suite 65 passed.
 
+### Gemma 3 12B f32-scale build (2026-09-15)
+
+The 15360-wide activation table makes the f32-scale `dx_f32` main tile 768 B
+too large with a 6 KiB stack. Keep the x FIFO at depth 2: lowering it to 1 is
+invalid because the worker acquires two x elements. The verified fix is a 5
+KiB stack on f32-scale main workers only; ordinary q4nx builds remain at 6 KiB.
+
+```sh
+PATH="$PWD/ironvenv/lib/python3.11/site-packages/llvm-aie/bin:/opt/xilinx/xrt/bin:$PATH" \
+OPEN_KERNELS_SPEC="$PWD/open_kernels/recipes/specs/gemma3-12b.json" \
+GEMV_SCALES_F32=1 ./ironvenv/bin/python open_kernels/build_design.py \
+  open_kernels/designs/dense/dx.py \
+  open_kernels/designs/dense/build_gemma3_h3840_f32
+```
+
+Verified with Python 3.11.15, mlir-aie 1.4.2, and Peano
+21.0.0.2026080301+c9c5ecb7. Build completed in 42.5 s:
+
+- `final.xclbin`: `5e00ea6231bdfff503942b4a9d3c82e39ad6e784411df515a8e6a7fb4208face`
+- `insts.bin`: `9315d04c8a86995b493c09d6308c5e508d0e8677b4472a0f1401b7082f4d1ceb`
+
 ## Gotchas learned here
 
 - **designs/dense/gen_kernels.py regenerates gemv_q4_gy.cc / gemv_q4_gms.cc

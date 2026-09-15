@@ -248,7 +248,7 @@ std::string GgufFile::gguf_name(const std::string& name) {
         dot("input_layernorm", ".attn_norm");
         dot("post_attention_layernorm", ".ffn_norm");
         dot("pre_feedforward_layernorm", ".pre_ffn_norm");                   // gemma3
-        dot("post_feedforward_layernorm", ".post_ffn_norm");                 // gemma3
+        dot("post_feedforward_layernorm", ".post_ffw_norm");                 // gemma3
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
         dot("mlp.down_proj", ".ffn_down");

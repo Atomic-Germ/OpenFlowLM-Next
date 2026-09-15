@@ -451,8 +451,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
-                                                  Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
-                              tile=Tile(c, 2), stack_size=0x1800))
+                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(ms_ty, name=f"ms{c}")] + KF,
+                               tile=Tile(c, 2), stack_size=0x1400 if F32 else 0x1800))
     def abufs(c):
         s = "" if c == 0 else str(c)
         return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),

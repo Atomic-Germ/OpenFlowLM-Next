@@ -180,7 +180,11 @@ def per_call(spec: ModelSpec) -> int:
     wide = max(spec.hidden, spec.attn_q_width, spec.intermediate)
     for pc in (2, 1):
         ch = chunk_bytes(pool_quant(spec))
-        l1 = tab_bytes(wide) + 2 * pc * ch + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + STACK
+        # Gemma 3 12B's f32-scale twin is 768 B over physical tile memory with
+        # the ordinary 6 KiB stack. The generated main-core body fits the 5 KiB
+        # stack used by dx.py for f32 builds, retaining the 4 KiB safety margin.
+        stack = 0x1400 if pool_quant(spec) == "q4_1_f32" else STACK
+        l1 = tab_bytes(wide) + 2 * pc * ch + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + stack
         if l1 <= L1_BUDGET:
             return pc
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")

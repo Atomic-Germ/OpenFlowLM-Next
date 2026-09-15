@@ -60,13 +60,17 @@ nlohmann::json derive_config(const GgufFile& g) {
     c["model_type"] = arch;
     c["hidden_size"] = u("embedding_length");
     c["num_hidden_layers"] = u("block_count");
-    c["vocab_size"] = u("vocab_size");
+    if (g.kv_has(arch + ".vocab_size"))
+        c["vocab_size"] = u("vocab_size");
+    else
+        c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
     c["num_attention_heads"] = u("attention.head_count");
     c["num_key_value_heads"] = u("attention.head_count_kv");
     c["intermediate_size"] = u("feed_forward_length");
     if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
-    if (g.kv_has(arch + ".attention.slide_window")) c["sliding_window"] = g.kv_u64(arch + ".attention.slide_window");
+    if (g.kv_has(arch + ".attention.sliding_window"))
+        c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
     return c;
 }
 

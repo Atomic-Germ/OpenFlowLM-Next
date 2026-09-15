@@ -58,7 +58,7 @@ uint16_t f32_to_f16(float f) {                       // truncating (test values 
 struct Blocks {
     std::vector<uint8_t> bytes;
     std::vector<float> values;                       // rows x cols
-    unsigned rows, cols, blk;
+    unsigned rows, cols, blk, type;
 };
 
 Blocks make_blocks(unsigned rows, unsigned cols, const std::string& type, std::mt19937_64& rng) {
@@ -70,6 +70,7 @@ Blocks make_blocks(unsigned rows, unsigned cols, const std::string& type, std::m
     out.rows = rows;
     out.cols = cols;
     out.blk = blk;
+    out.type = type == "Q4_0" ? 2u : type == "Q4_1" ? 3u : 8u;
     out.bytes.assign(static_cast<size_t>(rows) * nb * blk, 0);
     out.values.resize(static_cast<size_t>(rows) * cols);
     for (unsigned r = 0; r < rows; ++r) {
@@ -114,7 +115,7 @@ std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb,
         put_u32(f, type);
         put_u64(f, 0);
     };
-    put_tensor("blk.0.attn_q.weight", {512, 64}, 3);         // Q4_1
+    put_tensor("blk.0.attn_q.weight", {512, 64}, mm.type);
     put_tensor("token_embd.weight", {256, 32}, 8);           // Q8_0
     put_tensor("blk.0.attn_norm.weight", {512}, 0);          // F32
     // data section: 32-aligned right after the header; the tensor offsets are
@@ -177,7 +178,7 @@ std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb,
         const uint8_t* b = reinterpret_cast<const uint8_t*>(&v);
         f.insert(f.end(), b, b + 4);
     }
-    const fs::path out = dir / "test.gguf";
+    const fs::path out = dir / ("test-" + std::to_string(mm.type) + ".gguf");
     std::ofstream of(out, std::ios::binary);
     of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
     return out.string();
@@ -212,6 +213,7 @@ int main() {
         GgufFile::gguf_name("model.layers.3.mlp.down_proj.weight") != "blk.3.ffn_down.weight" ||
         GgufFile::gguf_name("model.layers.1.input_layernorm.weight") != "blk.1.attn_norm.weight" ||
         GgufFile::gguf_name("model.layers.2.self_attn.q_norm.weight") != "blk.2.attn_q_norm.weight" ||
+        GgufFile::gguf_name("model.layers.2.post_feedforward_layernorm.weight") != "blk.2.post_ffw_norm.weight" ||
         GgufFile::gguf_name("model.norm.weight") != "output_norm.weight") {
         std::printf("FAIL name map\n");
         return 1;
@@ -253,6 +255,34 @@ int main() {
     }
     std::printf("%s std_perm_gguf (%zu of %u values differ)\n", bad ? "FAIL" : "ok", bad, op.nch * 32u * 256u);
     if (bad) return 1;
+
+    // Q4_0 has a two-byte header (d only), unlike Q4_1's d+m header. Exercise
+    // the same pack path separately so its code offset cannot drift to +4.
+    {
+        const Blocks mm0 = make_blocks(64, 512, "Q4_0", rng);
+        GgufFile g0(write_gguf(dir, mm0, emb, norm));
+        std::vector<uint8_t> p0(static_cast<size_t>(op.nch) * 6144, 0);
+        pools::apply(op, g0, 0, p0.data(), p0.size(), 6144);
+        size_t bad0 = 0;
+        for (size_t c = 0; c < op.nch; ++c) {
+            const uint8_t* d = p0.data() + c * 6144;
+            const size_t per_band = 4;
+            const size_t rows0 = 64 * (c / per_band) + 32 * (c % 2);
+            const size_t cols0 = 256 * ((c % per_band) / 2);
+            for (size_t r = 0; r < 32; ++r)
+                for (size_t k = 0; k < 256; ++k) {
+                    const size_t kb = k / 32;
+                    const float df = *reinterpret_cast<const float*>(d + 4 * (kb * 32 + r));
+                    const size_t p = (r / 16) * 4096 + k * 16 + (r % 16);
+                    const uint8_t byte = d[2048 + (p >> 1)];
+                    const uint8_t nib = (p & 1) ? byte >> 4 : byte & 0xF;
+                    if (f32_bits(nib * df) != f32_bits(mm0.values[(rows0 + r) * mm0.cols + cols0 + k]))
+                        ++bad0;
+                }
+        }
+        std::printf("%s std_perm_gguf Q4_0 (%zu values differ)\n", bad0 ? "FAIL" : "ok", bad0);
+        if (bad0) return 1;
+    }
 
     // ---- pack_norm: f32 -> bf16 (RNE)
     {

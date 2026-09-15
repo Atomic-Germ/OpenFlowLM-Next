@@ -377,7 +377,7 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                     std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
                     // codes: block nibbles (two K per byte) -> two rows per byte at one K
                     for (size_t i = 0; i < 16; ++i) {
-                        const uint8_t byte = b[4 + i];
+                        const uint8_t byte = b[(has_min ? 4 : 2) + i];
                         const uint8_t lo = byte & 0xF, hi = byte >> 4;   // GGUF: value i | value i+16
                         const size_t p0 = rb * 4096 + (kb * 32 + i) * 16 + rl;
                         d[2048 + (p0 >> 1)] |= (p0 & 1) ? lo << 4 : lo;   // value j = lo

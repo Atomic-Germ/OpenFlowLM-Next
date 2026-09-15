@@ -102,7 +102,7 @@ static json derive_config_gguf(const open_qwen36::GgufFile& g) {
     c["rms_norm_eps"] = g.kv_f64(arch + ".attention.layer_norm_rms_epsilon");
     c["rope_theta"] = g.kv_f64(arch + ".rope.freq_base");
     c["rope_local_base_freq"] = g.kv_f64(arch + ".rope.freq_base_swa");
-    const auto& te = g.tensor("model.embed_tokens.weight");
+    const auto& te = g.tensor("token_embd.weight");
     c["vocab_size"] = (te.dims.size() >= 2) ? static_cast<uint64_t>(te.dims[1]) : 0u;
     c["query_pre_attn_scalar"] = g.kv_has(arch + ".query_pre_attn_scalar")
                                      ? g.kv_u64(arch + ".query_pre_attn_scalar") : 256u;
