@@ -20,12 +20,19 @@ jobs:
     - name: Submodules
       uses: snickerbockers/submodules-init@v4
     
-    - name: wirekang/setup-ninja
+    - name: Sets up Ninja-build
       uses: wirekang/setup-ninja@v1
       with:
         platform: linux
 
-    - name: Configures
+    - name: Installs Deps
+      uses: gerlero/apt-install@v1.3.12
+      with:
+        packages: libboost-all-dev
+        cache: true
+        install-recommends: true
+
+    - name: Configures OpenFlowLM
       run: cmake -B ${{github.workspace}}/build --preset linux-${{env.BUILD_TYPE}} -G Ninja
 
     - name: Builds
