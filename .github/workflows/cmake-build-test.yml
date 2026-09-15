@@ -28,7 +28,7 @@ jobs:
     - name: Installs Deps
       uses: gerlero/apt-install@v1.3.12
       with:
-        packages: libboost-all-dev libcurl4-openssl-dev libfftw3-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+        packages: libreadline-dev libboost-all-dev libcurl4-openssl-dev libfftw3-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
         cache: true
         install-recommends: true
 
