@@ -44,8 +44,11 @@ NOT_IMPLEMENTED = {
               "do; o_proj, the router and all three expert projections carry a bias no "
               "design has room for; the MoE FFN has to compose with sliding-window layers, "
               "which no recipe does today; and the expert intermediate equals hidden, which "
-              "qwen36moe's core layout does not survive. The packer reads the container's "
-              "attention projections and head now (std_fuse, OPEN-PACK-CHUNK-FUSE) but has "
-              "no op for the MXFP4 experts. ATTN_SINK landed at e0511bd7 and is no longer a "
-              "gap. See .claude/plans/gptoss-bringup.md",
+              "qwen36moe's core layout does not survive -- the stripe assignment, the core "
+              "scratch and the expert hidden's element count each refuse it by name "
+              "(OPEN-MOE-WIDE-FF). The packer reads the container's attention projections "
+              "and head (std_fuse, OPEN-PACK-CHUNK-FUSE) and knows where each expert's "
+              "gate, up and down live (OPEN-PACK-EXPERT-ORDER), but has no op that PLACES "
+              "them, because where they go waits on that layout. ATTN_SINK landed at "
+              "e0511bd7 and is no longer a gap. See .claude/plans/gptoss-bringup.md",
 }

@@ -179,18 +179,53 @@ def test_the_norm_width_2880_is_not_a_validated_ln_point():
     C.require("ln", width=3072)          # the pad lands on Phi-4-mini's point
 
 
-def test_padding_does_not_clear_the_moe_core_scratch():
-    """The one blocker no width fixes: the main core has to hold xm's activation
-    table and the expert h's at once, and at 3072/3072 they do not both fit."""
-    with pytest.raises(OpRangeError, match="does not fit past xm's in the core scratch"):
+def test_padding_does_not_clear_the_moe_stripe_assignment():
+    """The FIRST thing a padded GPT-OSS hits, and the one no width fixes.
+
+    `moe_sequence` splits one 128-row stripe across `n // stripes` cores. That needs the
+    stripe count to divide the core count, and it only ever does while the expert width is
+    a quarter of hidden or less: at ff == hidden the 24 stripes have to be shared out three
+    to a core instead, which is a different host sequence."""
+    with pytest.raises(OpRangeError, match="stripes per projection over"):
         M.common(padded(gptoss()))
+    assert padded(gptoss()).moe_intermediate // 128 == 24
+    assert N_CORES // 24 == 0, "`cps` is a zero divisor, not merely a small number"
+
+
+def test_padding_does_not_clear_the_moe_core_scratch():
+    """The second blocker: the main core has to hold xm's activation table and the expert
+    h's at once, and at 3072/3072 they do not both fit.
+
+    Reached here by giving the spec an expert width the stripe assignment accepts, so the
+    two refusals are pinned separately rather than one hiding behind the other."""
+    s = dataclasses.replace(padded(gptoss()), moe_intermediate=1024)
+    with pytest.raises(OpRangeError, match="does not fit past xm's in the core scratch"):
+        M.common(s)
     # The reservation is tab_bytes(wide), and `wide` is the 4096 q projection only when
     # has_full is set. GPT-OSS derives dense/dense_local layer types, so has_full is
-    # False and wide falls back to hidden: the two tables want 13824 B against 6912,
-    # twice over rather than 1.5 times. An earlier version of this comment compared
-    # against tab_bytes(4096) and understated the margin.
+    # False and wide falls back to hidden: at its own width the two tables want 13824 B
+    # against 6912, twice over rather than 1.5 times. An earlier version of this comment
+    # compared against tab_bytes(4096) and understated the margin.
     assert not padded(gptoss()).has_full
-    assert M.tab_bytes(3072) + M.tab_bytes(3072) > M.tab_bytes(3072)
+    assert M.tab_bytes(3072) + M.tab_bytes(3072) == 2 * M.tab_bytes(3072) == 13824
+
+
+def test_the_moe_tail_now_has_an_l1_budget_at_all():
+    """Until this landed only the DENSE tail computed a core's L1; the MoE tail took
+    PER_CALL = 2 on trust. The budget is arithmetic -- six buffers and a stack -- and the
+    shipped 27B sits inside it with room, so the check costs nothing it protects."""
+    c = M.common(load_spec(HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "qwen36-35b-a3b.json"))
+    l1 = M.core_l1(c.TAB_BYTES, c.MS_FLOATS, M.DN_SCRATCH_FLOATS)
+    assert l1 == 53376
+    assert l1 <= M.L1_BUDGET
+
+    # and a wider MoE spec is refused by name rather than overflowing inside aiecc: the
+    # 27B with twice the attention heads, which is the one input `tab` is sized from.
+    s = load_spec(HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "qwen36-35b-a3b.json")
+    wider = dataclasses.replace(s, num_heads=2 * s.num_heads)
+    assert wider.attn_q_width == 8192
+    with pytest.raises(OpRangeError, match="against a .* B budget"):
+        M.common(wider)
 
 
 def test_the_norm_divisor_is_why_a_padded_ln_would_be_wrong():

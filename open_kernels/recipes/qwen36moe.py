@@ -360,6 +360,20 @@ DN_SCRATCH_FLOATS = 1280               # `ds` (dnx.h)
 FFN_MS_FLOATS = 2 * BAND_ROWS          # `ms` for the dense tail: u[64] | g[64]
 
 
+def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int:
+    """A main core's L1 bytes for a given scratch layout.
+
+    Every main core carries the same six things and nothing else
+    (`designs/layer_x/xcommon.py core_buffers`, and the fifo depths in `lx.py` / `dx.py`):
+    the activation table, the `ms` and `ds` scratch buffers, then depth-2 fifos for the
+    weight elements, the x elements and the y elements, over a 0x1800 stack. Both tails
+    compute it here rather than each restating the sum, for the reason the band law is
+    shared -- two copies of a budget drift, and the one that drifts is the one no shipped
+    model exercises."""
+    return (tab + ms_floats * 4 + ds_floats * 4
+            + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
+
+
 def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
     """Chunks per weight element. The MoE tail is frozen at 2 (the shipped 27B kernels);
     the dense tail takes 1 when the widest activation table leaves no room for two 10 KB
@@ -368,10 +382,9 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
     if ffn != "dense":
         return PER_CALL
     wide = kwide(spec, ffn)
-    ds = DN_SCRATCH_FLOATS * 4 if spec.has_linear else 0
+    ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
     for pc in (2, 1):
-        l1 = tab_bytes(wide) + FFN_MS_FLOATS * 4 + ds + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK
-        if l1 <= L1_BUDGET:
+        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc) <= L1_BUDGET:
             return pc
     raise OpRangeError(f"qwen35: a {wide}-wide activation table does not leave room for the streams "
                        f"in a core's L1 ({tab_bytes(wide)} B of table, {L1_BUDGET} B budget)")
@@ -405,11 +418,31 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
     ms_floats = ms_yd + rows_pc
     if 8 + ne > 32:
         raise OpRangeError(f"moe: top-k {ne} does not fit the 32-float routing record")
+    spp = ff // 128
+    if not spp or spp > n or n % spp:
+        raise OpRangeError(
+            f"moe: an expert width of {ff} is {spp} stripes per projection over {n} cores. "
+            f"`moe_sequence` splits ONE 128-row stripe across `n // stripes` cores -- its "
+            f"`c // cps` and `c % cps` -- so the stripe count has to divide the core count. "
+            f"Here each core would own {spp / n:g} stripes instead and `cps` is {n // spp if spp else 0}. "
+            f"That is a different host sequence, not a different constant (OPEN-MOE-WIDE-FF).")
     wide = max(hid, spec.lin_value_width if spec.has_linear else 0, spec.attn_q_width if spec.has_full else 0)
     tab = tab_bytes(wide)
     h_tab = tab_bytes(hid)
     if h_tab + tab_bytes(ff) > tab:
-        raise OpRangeError("moe: the hidden h's table does not fit past xm's in the core scratch")
+        raise OpRangeError(
+            f"moe: the hidden h's table does not fit past xm's in the core scratch -- "
+            f"{h_tab} B for K={hid} plus {tab_bytes(ff)} B for K={ff} against a {tab} B "
+            f"reservation. `tab` is sized for the WIDEST K a core prepares, which collapses "
+            f"to the hidden itself on a family with neither linear-attention nor "
+            f"full-attention layers (OPEN-MOE-WIDE-FF).")
+    l1 = core_l1(tab, ms_floats, DN_SCRATCH_FLOATS)
+    if l1 > L1_BUDGET:
+        raise OpRangeError(
+            f"moe: a main core's scratch comes to {l1} B against a {L1_BUDGET} B budget, "
+            f"{l1 - L1_BUDGET} B over -- {tab} B of table, {ms_floats * 4} B of ms, "
+            f"{DN_SCRATCH_FLOATS * 4} B of ds. Program memory only aiecc can measure, but "
+            f"L1 is arithmetic, and until now nothing computed it for this tail.")
     dn_dim = spec.lin_value_dim if spec.has_linear else 0
     dn_rows = CALL_BYTES // (dn_dim * 4) if dn_dim else 0      # S rows per streamed 10 KB element
     dn_slices = roundup(dn_dim, dn_rows) // dn_rows if dn_dim else 0

@@ -1985,7 +1985,10 @@ clears three blockers and leaves a fourth, and the tests name each:
   earlier version of this paragraph recorded against 9216. `qwen36moe.common` refuses
   the padded spec either way. The 27B fits only because its expert width is 512
   against hidden 2048; GPT-OSS's expert width EQUALS its hidden, which is the deeper
-  problem and breaks three more parts of the MoE block besides this one.
+  problem and breaks three more parts of the MoE block besides this one
+  (OPEN-MOE-WIDE-FF, where they are enumerated and measured). **The scratch is no
+  longer the FIRST refusal**: since 2026-09-15 the stripe assignment is checked before
+  it, and that is the one a padded GPT-OSS hits.
 
 **And padding the norm would be wrong even where it builds.** `designs/ln/ln.h`
 divides the sum of squares by the width it was COMPILED at (`LN_N`), so a 3072-wide
@@ -2013,7 +2016,9 @@ at the model's own width.
 - `pad_width(2880, n) == 3072` for `n` in 1, 2, 4 and 8, and at each the result's
   `per_band` is even and its `std_perm` is injective over a full band pair.
 - `ln` at width 2880 is refused by the catalogue and at 3072 is not.
-- `qwen36moe.common` on the PADDED gpt-oss spec still raises, naming the core scratch.
+- `qwen36moe.common` on the PADDED gpt-oss spec still raises, naming the stripe
+  assignment; with an expert width that assignment accepts it raises again, naming the
+  core scratch. The two are pinned separately so neither hides behind the other.
 - sqrt(3072/2880) == 1.0328 to 5e-5, the factor a padded norm would put on every layer.
 
 **Still needs the NPU:** whether 8 cores beats 1 by enough to justify 6.7% more weight
@@ -2029,6 +2034,73 @@ through its own op rather than through `std_perm`, because the file raster is a
 supertile as well as half-width: OPEN-PACK-CHUNK-FUSE. The container also pads K to
 2944 on its own, which is what makes `band_bytes(2880)` the wrong refusal to reason
 about, and the pad from 2944 to the pool's 3072 falls out of the same op.
+
+### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
+**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
+`open_kernels/designs/layer_x/xcommon.py`)
+**Test category:** unit (`tests/test_width_pad.py`) for the refusals and the budget;
+`manual` for the rebuilt block, which needs the WSL toolchain and the NPU
+
+Qwen3.6's expert intermediate is a QUARTER of its hidden -- 512 against 2048 -- and
+`qwen36moe`'s hand-placed core layout assumes that ratio in more places than it states.
+GPT-OSS's expert intermediate EQUALS its hidden, 2880 against 2880, and each of the
+assumptions below shall be refused by name until the block is rebuilt, rather than
+producing a zero divisor, an over-budget core or a plausible wrong layout.
+
+**The stripe assignment, and it is the first refusal.** `moe_sequence` computes a core's
+source offset as `(2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR`, with
+`cps = n_cores // stripes_per_proj`. That splits ONE 128-row stripe across several cores,
+which only works while the stripe count DIVIDES the core count. At ff == hidden == 3072
+there are 24 stripes over 8 cores, `cps` is 0, and `c // cps` is a division by zero. The
+generalisation each core owning `24 // 8 = 3` stripes is a different host sequence, not a
+different constant.
+
+**The core scratch.** `tab` is sized `tab_bytes(widest K)`, and the expert hidden's table
+sits inside it past xm's. `wide` collapses to the hidden itself on a family with neither
+linear-attention nor full-attention layers -- which GPT-OSS is -- so the reservation is
+6912 while the two tables want 13824. Exactly twice over.
+
+**The expert hidden's element count.** `moe_sequence` broadcasts `h` as ONE 4096-byte act
+element. At ff 3072 it is 12288 bytes, exactly three. The drain side already scales (each
+core drains `HID_PC * 4`); only the broadcast fill assumes one.
+
+**The prep kernel's K.** `gemv_q4_prep_f32` builds h's table at the expert width, and the
+catalogue's validated `moe` point is `ff: 512`. K = 3072 is a new point and needs its own
+compare run.
+
+**The L1 budget, which did not exist for this tail.** Only the DENSE tail computed a main
+core's L1; the MoE tail took `PER_CALL = 2` on trust, and a layout that overflowed would
+have been found by aiecc, which does not print the shortfall. A main core holds exactly
+six things and a stack -- the table, `ms`, `ds`, then depth-2 fifos for the weight, x and
+y elements -- so the budget is arithmetic and `core_l1` is now the one place both tails
+compute it.
+
+**Measured 2026-09-15, which is what turns this from a wall into a sizing change.** At
+the padded 3072/3072 a main core comes to **56,960 bytes of the 61,440 budget, 4,480 to
+spare** -- against the shipped 27B's 53,376. But that margin exists only because GPT-OSS
+has no linear-attention layers: `DS_FLOATS` is a hard 1280 on the MoE path regardless, and
+keeping that 5,120-byte DeltaNet scratch on a core whose kernels never touch it puts the
+total at 62,080, **640 bytes over**. So the block fits, and one of the things that makes
+it fit is dropping a buffer the family does not use. That is a sizing decision, not a
+budget to be discovered during a build.
+
+**Acceptance criteria:**
+- `common()` on the padded GPT-OSS spec raises naming the stripes per projection and the
+  core count; the 24-over-8 count and `8 // 24 == 0` are asserted, so the message is
+  about a zero divisor rather than a tight fit.
+- With an expert width the stripe assignment accepts, `common()` raises again naming the
+  core scratch, and `tab_bytes(3072) * 2 == 13824`. The two refusals are pinned
+  separately so neither hides behind the other.
+- `core_l1` on the shipped 27B is 53,376 and is inside `L1_BUDGET`; a spec with twice the
+  27B's attention heads is refused naming the budget and the overshoot.
+- Both tails compute L1 through `core_l1`; the dense tail's `per_call` result is unchanged
+  for every spec in `recipes/specs/`.
+
+**Verification (manual), once the block is rebuilt.** The four assumptions above become
+four new catalogue points (`moe` at `ff` 3072 and `hidden` 3072, `gemv_q4` prep at
+K 3072), each needing a compare run against `replica_gptoss.moe_block` the way
+OPEN-FAMILY-QWEN36MOE's does. Until then this requirement is the refusals and the budget,
+which is what a recipe meets first.
 
 ### OPEN-EMBED-STRIDE: an embedding row is read at the container's width, not the buffer's
 **Applies to:** openflowlm-next (`src/open_qwen36/q4nx_file.cpp`, `core.cpp`,
