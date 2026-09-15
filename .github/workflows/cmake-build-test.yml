@@ -15,10 +15,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Checkout submodules
-      uses: textbook/git-checkout-submodule-action@2.1.1
-
+    - uses: Lori-Systems/submodule-checkout@v2
+    
     - name: wirekang/setup-ninja
       uses: wirekang/setup-ninja@v1
       with:
