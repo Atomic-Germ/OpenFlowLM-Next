@@ -14,8 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: Lori-Systems/submodule-checkout@v2
+    - name: Pulls
+      uses: actions/checkout@v4
+
+    - name: Submodules
+      uses: snickerbockers/submodules-init@v4
     
     - name: wirekang/setup-ninja
       uses: wirekang/setup-ninja@v1
