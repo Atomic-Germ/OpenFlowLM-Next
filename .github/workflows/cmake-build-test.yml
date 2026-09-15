@@ -28,7 +28,7 @@ jobs:
     - name: Installs Deps
       uses: gerlero/apt-install@v1.3.12
       with:
-        packages: libboost-all-dev, libcurl4-openssl-dev
+        packages: libboost-all-dev libcurl4-openssl-dev
         cache: true
         install-recommends: true
 
