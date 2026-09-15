@@ -23,6 +23,7 @@
 // common/utils.cpp.
 namespace utils {
 std::string find_xclbin_path();
+std::vector<std::string> xclbin_roots();
 }
 
 namespace open_embedding {
@@ -45,6 +46,77 @@ static float bf16_to_f32(uint16_t h) {
     uint32_t x = static_cast<uint32_t>(h) << 16;
     std::memcpy(&f, &x, 4);
     return f;
+}
+
+// Map the engine's HuggingFace-style weight names onto the GGUF (llama.cpp)
+// tensor names used by embeddinggemma-300M-GGUF. Unknown names pass through.
+static std::string gguf_tensor_name(const std::string& name) {
+    if (name == "embed_tokens.weight") return "token_embd.weight";
+    if (name == "norm.weight") return "output_norm.weight";
+    if (name == "2_Dense.linear.weight") return "dense_2.weight";
+    if (name == "3_Dense.linear.weight") return "dense_3.weight";
+    std::string n = name;
+    const std::string layers = "layers.";
+    if (n.rfind(layers, 0) == 0) {
+        const size_t dot = n.find('.', layers.size());
+        const std::string blk = "blk." + n.substr(layers.size(), dot - layers.size());
+        std::string rest = n.substr(dot + 1);
+        const auto swap = [&](const std::string& from, const std::string& to) {
+            const auto p = rest.find(from);
+            if (p != std::string::npos) rest.replace(p, from.size(), to);
+        };
+        swap("self_attn.q_proj", "attn_q");
+        swap("self_attn.k_proj", "attn_k");
+        swap("self_attn.v_proj", "attn_v");
+        swap("self_attn.o_proj", "attn_output");
+        swap("self_attn.q_norm", "attn_q_norm");
+        swap("self_attn.k_norm", "attn_k_norm");
+        swap("post_attention_layernorm", "post_attention_norm");
+        swap("input_layernorm", "attn_norm");
+        swap("pre_feedforward_layernorm", "ffn_norm");
+        swap("post_feedforward_layernorm", "post_ffw_norm");
+        swap("mlp.gate_proj", "ffn_gate");
+        swap("mlp.up_proj", "ffn_up");
+        swap("mlp.down_proj", "ffn_down");
+        return blk + "." + rest;
+    }
+    return n;
+}
+
+// Derive the engine config from a gemma-embedding GGUF's metadata. The GGUF
+// carries the transformer geometry but not every field the engine needs
+// (layer_types, query_pre_attn_scalar, bos/eos), so those are reconstructed.
+static json derive_config_gguf(const open_qwen36::GgufFile& g) {
+    const std::string arch = g.kv_str("general.architecture");
+    const auto u = [&](const std::string& k) { return g.kv_u64(arch + "." + k); };
+    json c;
+    c["model_type"] = arch;
+    c["hidden_size"] = u("embedding_length");
+    c["intermediate_size"] = u("feed_forward_length");
+    c["num_attention_heads"] = u("attention.head_count");
+    c["num_key_value_heads"] = u("attention.head_count_kv");
+    c["num_hidden_layers"] = u("block_count");
+    c["head_dim"] = u("attention.key_length");
+    c["max_position_embeddings"] = u("context_length");
+    c["sliding_window"] = u("attention.sliding_window");
+    c["rms_norm_eps"] = g.kv_f64(arch + ".attention.layer_norm_rms_epsilon");
+    c["rope_theta"] = g.kv_f64(arch + ".rope.freq_base");
+    c["rope_local_base_freq"] = g.kv_f64(arch + ".rope.freq_base_swa");
+    const auto& te = g.tensor("model.embed_tokens.weight");
+    c["vocab_size"] = (te.dims.size() >= 2) ? static_cast<uint64_t>(te.dims[1]) : 0u;
+    c["query_pre_attn_scalar"] = g.kv_has(arch + ".query_pre_attn_scalar")
+                                     ? g.kv_u64(arch + ".query_pre_attn_scalar") : 256u;
+    c["bos_token_id"] = 2;
+    c["eos_token_id"] = 1;
+    uint64_t period = g.kv_has("_sliding_window_pattern") ? g.kv_u64("_sliding_window_pattern") : 6u;
+    if (period == 0) period = 6;
+    const uint64_t nl = u("block_count");
+    std::vector<std::string> lt;
+    lt.reserve(static_cast<size_t>(nl));
+    for (uint64_t L = 0; L < nl; L++)
+        lt.push_back((L % period == period - 1) ? "full_attention" : "sliding_attention");
+    c["layer_types"] = lt;
+    return c;
 }
 
 // Projection tensors that the NPU backend can serve (2-D, [N,K] fp32).
@@ -83,11 +155,28 @@ static bool read_file(const std::string& path, std::string& out) {
 
 bool Engine::load(const std::string& model_dir) {
     model_dir_ = model_dir;
-    std::string cfg_path = (std::filesystem::path(model_dir) / "config.json").string();
-    std::string cfg_text;
-    if (!read_file(cfg_path, cfg_text) || !(cfg_ = json::parse(cfg_text, nullptr, false)).is_object()) {
-        std::fprintf(stderr, "open_embedding: cannot read %s\n", cfg_path.c_str());
-        return false;
+    const std::filesystem::path dir(model_dir);
+    const bool have_gguf = std::filesystem::exists(dir / "model.gguf");
+    if (have_gguf) {
+        gguf_ = std::make_unique<open_qwen36::GgufFile>((dir / "model.gguf").string());
+        cfg_ = derive_config_gguf(*gguf_);
+        if (!cfg_.is_object() || cfg_.value("hidden_size", 0u) == 0) {
+            std::fprintf(stderr, "open_embedding: cannot derive config from %s\n",
+                         (dir / "model.gguf").string().c_str());
+            return false;
+        }
+        use_gguf_ = true;
+        std::fprintf(stderr, "open_embedding: loading GGUF-direct (%s)\n",
+                     gguf_->kv_str("general.architecture").c_str());
+    } else {
+        std::string cfg_path = (dir / "config.json").string();
+        std::string cfg_text;
+        if (!read_file(cfg_path, cfg_text) ||
+            !(cfg_ = json::parse(cfg_text, nullptr, false)).is_object()) {
+            std::fprintf(stderr, "open_embedding: cannot read %s\n", cfg_path.c_str());
+            return false;
+        }
+        use_gguf_ = false;
     }
     hidden_         = cfg_.value("hidden_size", 0u);
     intermediate_   = cfg_.value("intermediate_size", 0u);
@@ -107,7 +196,11 @@ bool Engine::load(const std::string& model_dir) {
                      layer_types_.size(), num_layers_);
         return false;
     }
-    if (!load_weights()) return false;
+    if (use_gguf_) {
+        if (!load_weights_gguf()) return false;
+    } else {
+        if (!load_weights()) return false;
+    }
     load_npu();
     return true;
 }
@@ -139,20 +232,16 @@ std::string Engine::pick_npu_asset_dir() const {
         return local.string();
     }
 
-    // find_xclbin_path() throws when no xclbin tree is installed. The open
-    // engine must not hard-require one: no kernels simply means CPU-only.
-    std::string prefix;
-    try {
-        prefix = utils::find_xclbin_path();
-    } catch (const std::exception&) {
-        prefix.clear();
-    }
-    if (!prefix.empty()) {
+    // Scan every known xclbin root (the user tree, the install prefix, and the
+    // separately-shipped embedding design tree) rather than a single prefix: the
+    // open-kernel family may live in any of them. No kernels anywhere simply
+    // means CPU-only.
+    for (const std::string& root : utils::xclbin_roots()) {
         for (const char* family : {"Embedding-Gemma-300M-OpenNPU2", "embed-gemma"}) {
-            const fs::path cand = fs::path(prefix) / "xclbins" / family / "npu_matmul_f32";
+            const fs::path cand = fs::path(root) / "xclbins" / family / "npu_matmul_f32";
             if (has_kernels(cand)) {
                 std::fprintf(stderr, "open_embedding: using app family NPU kernels (%s)\n",
-                             family);
+                              family);
                 return cand.string();
             }
         }
@@ -368,6 +457,81 @@ bool Engine::load_weights() {
         }
         w_[name] = buf;
     }
+    return true;
+}
+
+bool Engine::load_weights_gguf() {
+    const std::filesystem::path dir(model_dir_);
+    // The tokenizer ships alongside the GGUF (the gemma tokenizer); the engine
+    // still needs a HuggingFace tokenizer.json to encode prompts.
+    std::string tok_path = (dir / "tokenizer.json").string();
+    std::string tok_blob;
+    if (!read_file(tok_path, tok_blob)) {
+        std::fprintf(stderr, "open_embedding: cannot read tokenizer.json next to the GGUF\n");
+        return false;
+    }
+    tok_ = tokenizers::Tokenizer::FromBlobJSON(tok_blob);
+    if (!tok_) {
+        std::fprintf(stderr, "open_embedding: tokenizer init failed\n");
+        return false;
+    }
+
+    // Engine weight names (HuggingFace convention) -> GGUF tensor names.
+    std::vector<std::string> names = {"embed_tokens.weight", "norm.weight",
+                                      "2_Dense.linear.weight", "3_Dense.linear.weight"};
+    for (size_t L = 0; L < num_layers_; L++) {
+        const std::string pfx = "layers." + std::to_string(L) + ".";
+        names.push_back(pfx + "input_layernorm.weight");
+        names.push_back(pfx + "self_attn.q_proj.weight");
+        names.push_back(pfx + "self_attn.k_proj.weight");
+        names.push_back(pfx + "self_attn.v_proj.weight");
+        names.push_back(pfx + "self_attn.q_norm.weight");
+        names.push_back(pfx + "self_attn.k_norm.weight");
+        names.push_back(pfx + "self_attn.o_proj.weight");
+        names.push_back(pfx + "post_attention_layernorm.weight");
+        names.push_back(pfx + "pre_feedforward_layernorm.weight");
+        names.push_back(pfx + "mlp.gate_proj.weight");
+        names.push_back(pfx + "mlp.up_proj.weight");
+        names.push_back(pfx + "mlp.down_proj.weight");
+        names.push_back(pfx + "post_feedforward_layernorm.weight");
+    }
+
+    std::vector<float> row;
+    for (const auto& name : names) {
+        const std::string gname = gguf_tensor_name(name);
+        if (!gguf_->has(gname)) {
+            std::fprintf(stderr, "open_embedding: GGUF missing %s (mapped from %s)\n",
+                         gname.c_str(), name.c_str());
+            return false;
+        }
+        const auto& info = gguf_->tensor(gname);
+        const size_t rank = info.dims.size();
+        if (rank != 1 && rank != 2) {
+            std::fprintf(stderr, "open_embedding: %s is not 1-D or 2-D\n", gname.c_str());
+            return false;
+        }
+        const size_t K = static_cast<size_t>(info.dims[0]);            // inner / in
+        const size_t N = (rank == 2) ? static_cast<size_t>(info.dims[1]) : 1u;  // outer / out
+        Tensor t;
+        t.file = "";
+        t.offset = 0;
+        t.shape = (rank == 2) ? std::vector<size_t>{N, K} : std::vector<size_t>{K};
+        tensors_[name] = t;
+
+        // Dequantize the GGUF into the engine's existing FP32 layout: 2-D
+        // weights become row-major [out, in] (== the safetensors layout), 1-D
+        // norm vectors become a flat [in] vector. load_npu() then builds the
+        // transposed [K, N] BF16 buffers the NPU kernel expects, unchanged.
+        std::vector<float>& w = w_[name];
+        w.assign(N * K, 0.0f);
+        row.resize(K);
+        for (size_t r = 0; r < N; r++) {
+            gguf_->embed_row(gname, r, K, row.data());
+            std::memcpy(w.data() + r * K, row.data(), K * sizeof(float));
+        }
+    }
+    head_mid_ = tensors_.at("2_Dense.linear.weight").shape.at(0);
+    std::fprintf(stderr, "open_embedding: GGUF weights loaded (%zu tensors)\n", tensors_.size());
     return true;
 }
 

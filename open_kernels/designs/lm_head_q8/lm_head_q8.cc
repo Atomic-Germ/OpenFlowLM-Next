@@ -3,8 +3,11 @@
 // the core's loop, so one entry point covers every group).
 #include "lm_head_q8.h"
 
+#define LMHEAD_Q8_WRAP__(PFX, NAME) PFX##NAME
+#define LMHEAD_Q8_WRAP(PFX, NAME) LMHEAD_Q8_WRAP__(PFX, NAME)
+
 extern "C" {
-void lm_head_q8_group(const uint8_t *__restrict t, const uint8_t *__restrict tab,
+void LMHEAD_Q8_WRAP(LMHEAD_Q8_PREFIX, _group)(const uint8_t *__restrict t, const uint8_t *__restrict tab,
                       float *__restrict y, int group) {
 #pragma clang loop unroll(disable)
   for (unsigned i = 0; i < kPerCall; ++i) {

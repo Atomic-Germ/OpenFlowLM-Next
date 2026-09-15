@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -190,6 +191,10 @@ struct Manifest {
     /// may omit (Phi-3's head_dim, partial_rotary_factor, rope_scaling, ...): check_model
     /// compares the expected value against this instead of refusing for the missing key.
     nlohmann::json hf_config_defaults = nlohmann::json::object();
+    /// The same kernel set for GGUF-direct weight files (f32-scale pool chunks,
+    /// open_kernels/gguf_pool.py): a complete manifest of its own, parsed with
+    /// this same code; the engine swaps it in when the model ships a .gguf.
+    std::unique_ptr<Manifest> gguf;
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);

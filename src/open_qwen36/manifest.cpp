@@ -60,15 +60,16 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
-        p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose") {
+    if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "put" ||
+        p.op == "expert_down" || p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
         if (p.up.empty() || p.gate.empty()) fail(where, "expert_stripes without up / gate");
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm")
+        need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "transpose") need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
     else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
     else if (p.op == "expert_down") need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
@@ -404,6 +405,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];
     }
+    if (j.contains("gguf")) m.gguf = std::make_unique<Manifest>(parse(j["gguf"], where + " gguf"));
     return m;
 }
 
@@ -416,6 +418,10 @@ std::vector<std::string> Manifest::files() const {
     std::vector<std::string> f;
     for (const auto& [k, v] : contexts) f.push_back(v);
     for (const auto& [k, v] : kernels) f.push_back(v.insts);
+    if (gguf) {
+        auto nested = gguf->files();
+        f.insert(f.end(), nested.begin(), nested.end());
+    }
     return f;
 }
 

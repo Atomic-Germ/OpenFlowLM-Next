@@ -28,9 +28,12 @@ from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
+CHUNK_F32 = 6144             # GGUF-direct (spec.quant "q4_1_f32"): the same tile, the fp16
+                             # block scales/mins widened EXACTLY to f32 (open_kernels/gguf_pool.py)
 CHUNK_VALUES = 8192
 CHUNK_ROWS = 32
 Q8_CHUNK = 8704              # lm_head q8: 8192 int8 + 256 bf16 scales
+Q8_CHUNK_F32 = 9216          # GGUF-direct: the same tile with f32 scales
 ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
 PER_CALL = 2                 # chunks per w element
@@ -47,32 +50,58 @@ AB_LANES = 32                # dn_glue.h's kV: the lanes of one alpha/beta W row
                              # W element stays 64 rows x 32 bf16 = 4 KB (see glue_ab_tile).
 
 
-def q4_bytes(rows: int, cols: int) -> int:
+def chunk_bytes(quant: str) -> int:
+    """The q4 pool chunk bytes for a scale layout: q4nx bf16 (5120) or GGUF-direct f32 (6144)."""
+    if quant == "q4_1":
+        return CHUNK
+    if quant == "q4_1_f32":
+        return CHUNK_F32
+    raise OpRangeError(f"quant={quant!r}: no open q4 pool chunk layout "
+                       f"(have q4_1, q4_1_f32)")
+
+
+def q8_chunk_bytes(quant: str) -> int:
+    """The lm_head q8 chunk bytes: q4nx bf16 scales (8704) or GGUF-direct f32 (9216)."""
+    if quant in ("q4_1", "q4_1_f32", "q8_0"):
+        return Q8_CHUNK
+    if quant == "q8_0_f32":
+        return Q8_CHUNK_F32
+    raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
+
+
+def q4_bytes(rows: int, cols: int, quant: str = "q4_1") -> int:
     n = rows * cols
     if n % CHUNK_VALUES:
         raise OpRangeError(f"q4 tensor [{rows}, {cols}] is not a whole number of {CHUNK_VALUES}-value chunks")
-    return n // CHUNK_VALUES * CHUNK
+    return n // CHUNK_VALUES * chunk_bytes(quant)
 
 
-def q4_chunks(rows: int, cols: int) -> int:
-    return q4_bytes(rows, cols) // CHUNK
+def q4_chunks(rows: int, cols: int, quant: str = "q4_1") -> int:
+    return q4_bytes(rows, cols, quant) // chunk_bytes(quant)
 
 
-def band_bytes(K: int) -> int:
+def band_bytes(K: int, quant: str = "q4_1") -> int:
     """One 64-row band of a K-wide standard-layout matrix: K/128 chunks."""
-    return q4_bytes(BAND_ROWS, K)
+    return q4_bytes(BAND_ROWS, K, quant)
 
 
 # ---- the per-role weight format (OPEN-QUANT-Q8). A projection the container stores at q8
 # is streamed as 16-row half-tiles of its chunks: the same 64-row band, twice the bytes,
 # four half-tiles per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h).
 def role_bytes(spec: ModelSpec, role: str, rows: int, cols: int) -> int:
-    return q4_bytes(rows, cols) * (2 if spec.quant_of(role) == "q8" else 1)
+    # a q8 role is twice the q4_1 band; q4_1 and q4_1_f32 (GGUF-direct) use their own chunk layout
+    q = spec.quant_of(role)
+    if q == "q8":
+        return q4_bytes(rows, cols) * 2
+    return q4_bytes(rows, cols, q)
 
 
 def role_chunks(spec: ModelSpec, role: str, rows: int, cols: int) -> int:
-    """Pool elements the projection occupies: q4_1 chunks, or q8 half-tiles (twice as many)."""
-    return role_bytes(spec, role, rows, cols) // CHUNK
+    """Pool elements the projection occupies: q4_1 / q4_1_f32 chunks, or q8 half-tiles (twice as many)."""
+    q = spec.quant_of(role)
+    if q == "q8":
+        return q4_chunks(rows, cols) * 2
+    return q4_chunks(rows, cols, q)
 
 
 def quant_check(spec: ModelSpec, who: str) -> None:
@@ -105,7 +134,14 @@ def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: 
     """The pack op for one weight projection: `std_perm` at q4_1 (unchanged), `q8_perm` at
     q8 (twice the pool elements, 16-row half-tiles). `chunk0` is a SOURCE file-chunk offset
     in either format, so the fused [q | gate] split reads the same way."""
-    op: dict = {"op": "q8_perm" if spec.quant_of(role) == "q8" else "std_perm", "tensor": tensor, "dst": dst}
+    q = spec.quant_of(role)
+    if q == "q4_1_f32":
+        pop = "std_perm_gguf"
+    elif q == "q8":
+        pop = "q8_perm"
+    else:
+        pop = "std_perm"
+    op: dict = {"op": pop, "tensor": tensor, "dst": dst}
     if chunk0 is not None:
         op["chunk0"] = chunk0
     op["nch"] = role_chunks(spec, role, rows, cols)
