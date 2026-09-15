@@ -87,7 +87,8 @@ Blocks make_blocks(unsigned rows, unsigned cols, const std::string& type, std::m
                     const uint8_t q = static_cast<uint8_t>(rng() % 16);
                     if (j < 16) p[has_min ? 4 + j : 2 + j] |= q;
                     else p[has_min ? 4 + (j - 16) : 2 + (j - 16)] |= static_cast<uint8_t>(q << 4);
-                    out.values[static_cast<size_t>(r) * cols + b * 32 + j] = df * q + mf;
+                    out.values[static_cast<size_t>(r) * cols + b * 32 + j] = df *
+                        (has_min ? static_cast<float>(q) : static_cast<float>(static_cast<int>(q) - 8)) + mf;
                 } else {
                     const int8_t q = static_cast<int8_t>(rng() % 256) - 128;
                     p[2 + j] = static_cast<uint8_t>(q);
@@ -213,6 +214,7 @@ int main() {
         GgufFile::gguf_name("model.layers.3.mlp.down_proj.weight") != "blk.3.ffn_down.weight" ||
         GgufFile::gguf_name("model.layers.1.input_layernorm.weight") != "blk.1.attn_norm.weight" ||
         GgufFile::gguf_name("model.layers.2.self_attn.q_norm.weight") != "blk.2.attn_q_norm.weight" ||
+        GgufFile::gguf_name("model.layers.2.pre_feedforward_layernorm.weight") != "blk.2.post_attention_norm.weight" ||
         GgufFile::gguf_name("model.layers.2.post_feedforward_layernorm.weight") != "blk.2.post_ffw_norm.weight" ||
         GgufFile::gguf_name("model.norm.weight") != "output_norm.weight") {
         std::printf("FAIL name map\n");
@@ -276,7 +278,7 @@ int main() {
                     const size_t p = (r / 16) * 4096 + k * 16 + (r % 16);
                     const uint8_t byte = d[2048 + (p >> 1)];
                     const uint8_t nib = (p & 1) ? byte >> 4 : byte & 0xF;
-                    if (f32_bits(nib * df) != f32_bits(mm0.values[(rows0 + r) * mm0.cols + cols0 + k]))
+                    if (f32_bits(nib * df - 8.f * df) != f32_bits(mm0.values[(rows0 + r) * mm0.cols + cols0 + k]))
                         ++bad0;
                 }
         }

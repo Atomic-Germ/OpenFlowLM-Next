@@ -2,6 +2,7 @@
 /// \brief manifest.json parsing and the model check (see manifest.hpp).
 #include "open_qwen36/manifest.hpp"
 
+#include <cmath>
 #include <fstream>
 #include <initializer_list>
 #include <stdexcept>
@@ -395,7 +396,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 fail(where, "layer type " + name + " gemm_block.attn_block: arg " + a + " is not a declared global");
     }
     const json& pack = need(j, "pack", where);
-    m.embed_tensor = get<std::string>(need(pack, "embed", where), "tensor", where + " pack.embed");
+    const json& embed = need(pack, "embed", where);
+    m.embed_tensor = get<std::string>(embed, "tensor", where + " pack.embed");
+    m.embed_scale = embed.value("scale", 1.0);
+    if (!(m.embed_scale > 0.0) || !std::isfinite(m.embed_scale))
+        fail(where, "pack.embed.scale must be finite and positive");
     m.norm_tensor = get<std::string>(need(pack, "norm", where), "tensor", where + " pack.norm");
     m.norm_bytes = get<size_t>(need(pack, "norm", where), "bytes", where + " pack.norm");
     for (const auto& o : need(need(pack, "lm_head", where), "ops", where + " pack.lm_head")) m.lmhead_ops.push_back(parse_op(o, where + " pack.lm_head"));

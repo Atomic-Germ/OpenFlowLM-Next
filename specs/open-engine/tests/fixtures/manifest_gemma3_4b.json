@@ -1793,7 +1793,8 @@
    },
    "embed": {
     "tensor": "model.embed_tokens.weight",
-    "dim": 2560
+    "dim": 2560,
+    "scale": 50.59644256269407
    },
    "norm": {
     "tensor": "model.norm.weight",

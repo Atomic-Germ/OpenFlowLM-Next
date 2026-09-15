@@ -97,14 +97,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
     // there); anything GGUF does not carry is refused with its name.
+    if (gguf_)
+        file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
     nlohmann::json j;
     std::ifstream cf(md / "config.json");
     // #24: config.json is optional for a GGUF -- the metadata carries it.
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        if (gguf_) {
+            const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
+            for (const auto& [key, value] : derived.items())
+                if (!j.contains(key)) j[key] = value;
+        }
     } else if (gguf_) {
-        file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
         j = derive_config(*static_cast<GgufFile*>(file_.get()));
         log("config.json absent; derived from the GGUF metadata");
     } else {
@@ -125,9 +131,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
                                          std::to_string(w_->rotary_dim / 2) + " rotary pairs");
         }
     }
-    if (gguf_) {
-        if (!file_) file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
-    } else if (!file_) {
+    if (!gguf_ && !file_) {
         file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
     }
     int total = static_cast<int>(w_->layers.size());
@@ -850,6 +854,13 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
 
 void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
 
+void Core::embedding_row(size_t token, float* out) const {
+    file_->embed_row(w_->embed_tensor, token, w_->hidden, out);
+    if (w_->embed_scale != 1.0)
+        for (size_t i = 0; i < w_->hidden; ++i)
+            out[i] = static_cast<float>(out[i] * w_->embed_scale);
+}
+
 void Core::step_embed(const float* x, bool want_logits, const int64_t mpos[3]) {
     if (!has_mrope()) throw std::runtime_error("open_qwen36: step_embed on a model without M-RoPE");
     step_impl(-1, x, want_logits, mpos);
@@ -884,7 +895,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     if (x)
         std::memcpy(xres.map<float*>(), x, w_->hidden * 4);
     else
-        file_->embed_row(w_->embed_tensor, static_cast<size_t>(token), w_->hidden, xres.map<float*>());
+        embedding_row(static_cast<size_t>(token), xres.map<float*>());
     if (cfg_.verbose && !x) {
         const float* e = xres.map<float*>();
         int nnan = 0;
@@ -1231,7 +1242,7 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
     {
         std::vector<float> row(w_->hidden);
         for (size_t tk = 0; tk < T; ++tk) {
-            file_->embed_row(w_->embed_tensor, static_cast<size_t>(ids[tk]), w_->hidden, row.data());
+            embedding_row(static_cast<size_t>(ids[tk]), row.data());
             for (size_t c = 0; c < w_->hidden; ++c) xres[tk * w_->hidden + c] = static_cast<double>(row[c]);
         }
     }
@@ -1269,7 +1280,7 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
     timing_ = StepTiming{};
     const size_t T = ids.size(), hid = w_->hidden;
     std::vector<float> xres(T * hid);
-    for (size_t t = 0; t < T; ++t) file_->embed_row(w_->embed_tensor, static_cast<size_t>(ids[t]), hid, xres.data() + t * hid);
+    for (size_t t = 0; t < T; ++t) embedding_row(static_cast<size_t>(ids[t]), xres.data() + t * hid);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
         if (kind == "linear") block_layer_linear(l, xres, T, t_real);

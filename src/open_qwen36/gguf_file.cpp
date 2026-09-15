@@ -79,13 +79,13 @@ uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
     // block quants: 18 B / 32 q4_0 | 20 B / 32 q4_1 | 34 B / 32 q8_0 |
     // 144 B / 256 q4_k | 210 B / 256 q6_k
     switch (t) {
-        case 0: case 6: case 30: return values * 4;      // f32 / bf16
-        case 1: return values * 2;                        // f16
+        case 0: return values * 4;                        // f32
+        case 1: case 30: return values * 2;               // f16 / bf16
         case 2: return values / 32 * 18;                  // q4_0
         case 3: return values / 32 * 20;                  // q4_1
         case 8: return values / 32 * 34;                  // q8_0
-        case 14: case 15: return values / 256 * 144;      // q4_k_s / q4_k_m
-        case 18: return values / 256 * 210;               // q6_k
+        case 12: return values / 256 * 144;               // q4_k
+        case 14: return values / 256 * 210;               // q6_k
         default: return 0;                                // unsupported
     }
 }
@@ -120,12 +120,13 @@ const char* GgufFile::type_name(Type t) {
         case Type::F32: return "F32"; case Type::F16: return "F16"; case Type::Q4_0: return "Q4_0";
         case Type::Q4_1: return "Q4_1"; case Type::Q5_0: return "Q5_0"; case Type::Q5_1: return "Q5_1";
         case Type::Q8_0: return "Q8_0"; case Type::Q8_1: return "Q8_1"; case Type::Q2_K: return "Q2_K";
-        case Type::Q3_K_S: return "Q3_K_S"; case Type::Q3_K_M: return "Q3_K_M"; case Type::Q3_K_L: return "Q3_K_L";
-        case Type::Q4_K_S: return "Q4_K_S"; case Type::Q4_K_M: return "Q4_K_M"; case Type::Q5_K_S: return "Q5_K_S";
-        case Type::Q5_K_M: return "Q5_K_M"; case Type::Q6_K: return "Q6_K"; case Type::IQ2_XXS: return "IQ2_XXS";
-        case Type::IQ2_XS: return "IQ2_XS"; case Type::Q2_K_S: return "Q2_K_S"; case Type::Q3_K_XS: return "Q3_K_XS";
-        case Type::IQ3_XXS: return "IQ3_XXS"; case Type::Q8_K: return "Q8_K"; case Type::IQ4_NL: return "IQ4_NL";
-        case Type::IQ4_XS: return "IQ4_XS"; case Type::BF16: return "BF16";
+        case Type::Q3_K: return "Q3_K"; case Type::Q4_K: return "Q4_K"; case Type::Q5_K: return "Q5_K";
+        case Type::Q6_K: return "Q6_K"; case Type::Q8_K: return "Q8_K"; case Type::IQ2_XXS: return "IQ2_XXS";
+        case Type::IQ2_XS: return "IQ2_XS"; case Type::IQ3_XXS: return "IQ3_XXS"; case Type::IQ1_S: return "IQ1_S";
+        case Type::IQ4_NL: return "IQ4_NL"; case Type::IQ3_S: return "IQ3_S"; case Type::IQ2_S: return "IQ2_S";
+        case Type::IQ4_XS: return "IQ4_XS"; case Type::I8: return "I8"; case Type::I16: return "I16";
+        case Type::I32: return "I32"; case Type::I64: return "I64"; case Type::F64: return "F64";
+        case Type::IQ1_M: return "IQ1_M"; case Type::BF16: return "BF16";
     }
     return "type?";
 }
@@ -247,7 +248,7 @@ std::string GgufFile::gguf_name(const std::string& name) {
         dot("self_attn.post_attention_layernorm", ".post_attention_norm");   // gemma3
         dot("input_layernorm", ".attn_norm");
         dot("post_attention_layernorm", ".ffn_norm");
-        dot("pre_feedforward_layernorm", ".pre_ffn_norm");                   // gemma3
+        dot("pre_feedforward_layernorm", ".post_attention_norm");            // gemma3
         dot("post_feedforward_layernorm", ".post_ffw_norm");                 // gemma3
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
@@ -340,15 +341,15 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             break;
         }
         case Type::Q4_0: {
-            // fp16 scale + 16 nibble bytes per block (min = 0)
+            // fp16 scale + 16 nibble bytes; GGML's values are d * (q - 8)
             const uint8_t* p = base + row * (dim / 32) * 18;
             for (size_t b = 0; b < dim / 32; ++b, p += 18) {
                 uint16_t u;
                 std::memcpy(&u, p, 2);
                 const float d = fp16_to_f32(u);
                 for (size_t j = 0; j < 16; ++j) {
-                    out[b * 32 + j] = d * (p[2 + j] & 0xF);
-                    out[b * 32 + 16 + j] = d * (p[2 + j] >> 4);
+                    out[b * 32 + j] = d * (static_cast<int>(p[2 + j] & 0xF) - 8);
+                    out[b * 32 + 16 + j] = d * (static_cast<int>(p[2 + j] >> 4) - 8);
                 }
             }
             break;
@@ -368,8 +369,7 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             }
             break;
         }
-        case Type::Q4_K_S:
-        case Type::Q4_K_M: {
+        case Type::Q4_K: {
             // super-block of 256: fp16 d, fp16 dmin, 12 bytes of 6-bit scales
             // (8 scale/min pairs over 8 blocks of 32), then 128 bytes of nibbles
             const uint8_t* p = base + row * (dim / 256) * 144;

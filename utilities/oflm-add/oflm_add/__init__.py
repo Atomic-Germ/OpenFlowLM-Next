@@ -109,6 +109,25 @@ def choose_gguf_file(names):
         return None, refused
     return cands[0][1], refused
 
+
+def root_file_names(tree):
+    """Root file names from an HF tree list or ModelScope's name-keyed dict."""
+    names = tree.keys() if isinstance(tree, dict) else (e.get("path") for e in tree)
+    return [n for n in names if n and "/" not in n]
+
+
+def repo_has_q4nx(tree, cache=None):
+    return "model.q4nx" in root_file_names(tree) or bool(
+        cache and (cache / "model.q4nx").is_file()
+    )
+
+
+def manifest_supports_gguf(path):
+    try:
+        return "gguf" in json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+
 SYSTEM_LIST_CANDIDATES = [
     "/opt/openflowlm/share/oflm/model_list.json",
     "/usr/share/oflm/model_list.json",
@@ -745,21 +764,15 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     if modelscope:
         domain, entries = ms_file_tree(repo_id)
         for fname in want_list:
-            if fname not in entries:
+            remote = gguf_name if fname == "model.gguf" else fname
+            if remote not in entries:
                 continue
             dest = target / fname
             if dest.is_file() and not force:
                 obtained.append(fname)
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
-            meta = entries[fname]
-            expected_size = meta.get("Size") or None
-            expected_sha = (meta.get("Sha256") or "").lower() or None
-            if not quiet:
-                gb = f" ({expected_size / 1e9:.2f} GB)" if expected_size else ""
-                log(f"Downloading {fname}{gb} from ModelScope ({domain})...")
-            remote = gguf_name if fname == "model.gguf" else fname
-            meta = entries.get(remote) or {}
+            meta = entries[remote]
             expected_size = meta.get("Size") or None
             expected_sha = (meta.get("Sha256") or "").lower() or None
             if not quiet:
@@ -1162,16 +1175,21 @@ def main():
     # repos that ship model.q4nx take the NPU2 path even if a gguf also sits
     # there (the converted container is the curated one).
     gguf_names = []
+    tree = {}
     if local_dir:
         gguf_names = [e.name for e in local_dir.iterdir() if e.is_file() and e.suffix == ".gguf"]
     else:
         try:
-            tree = ms_file_tree(repo)[1] if (args.modelscope or split_remote_repo(repo_arg)[0] == "modelscope") else hf_file_tree(repo)
-            gguf_names = [e.get("path") for e in tree if e.get("path") and "/" not in e["path"] and e["path"].endswith(".gguf")]
+            tree = ms_file_tree(repo)[1] if modelscope else hf_file_tree(repo)
+            gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
     gguf_name, gguf_refused = choose_gguf_file(gguf_names)
-    have_q4nx = (local_dir / "model.q4nx").is_file() if local_dir else False
+    if local_dir:
+        have_q4nx = (local_dir / "model.q4nx").is_file()
+    else:
+        cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
+        have_q4nx = repo_has_q4nx(tree, cache)
     gguf_mode = gguf_name is not None and not have_q4nx
 
     system_list = find_system_model_list()
@@ -1229,16 +1247,13 @@ def main():
                          + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
                          + "); installing the safetensors weights instead")
         else:
-            xk = None
-            sys_xcl = find_system_xclbin_root()
-            if xclbin_source and sys_xcl:
-                mj = sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
-                if mj.is_file():
-                    try:
-                        xk = json.loads(mj.read_text(encoding="utf-8"))
-                    except Exception:
-                        xk = None
-            if xk is None or "gguf" not in xk:
+            if args.open_kernels:
+                mj = Path(args.open_kernels) / "manifest.json"
+            else:
+                sys_xcl = find_system_xclbin_root()
+                mj = (sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
+                      if xclbin_source and sys_xcl else Path())
+            if not manifest_supports_gguf(mj):
                 gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
                              "have no GGUF-direct build (missing open_kernels gguf manifest); "
                              "rebuild them with utilities/build-all.sh -- "
@@ -1310,9 +1325,9 @@ def main():
                                   want=NPU_EMBED_FILES if npue_embed else None)
         else:
             if not args.quiet:
-                log(f"[INFO] Downloading model files from {'ModelScope' if args.modelscope else 'Hugging Face'}: {repo}")
+                log(f"[INFO] Downloading model files from {'ModelScope' if modelscope else 'Hugging Face'}: {repo}")
             target.mkdir(parents=True, exist_ok=True)
-            files = fetch_assets(repo, target, args.modelscope, verify=not args.no_verify, force=args.force,
+            files = fetch_assets(repo, target, modelscope, verify=not args.no_verify, force=args.force,
                                  quiet=args.quiet, gguf_name=gguf_name if gguf_mode else None,
                                  want=NPU_EMBED_FILES if npue_embed else None)
 
@@ -1351,7 +1366,7 @@ def main():
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []
-        if missing and not gguf_mode and gguf_refused and "model.safetensors" in missing:
+        if missing and not gguf_mode and gguf_refused and "model.q4nx" in missing:
             raise SystemExit(
                 f"Model is missing required files: {missing}\n"
                 "The repo carries only GGUF weights and they cannot be used directly: "

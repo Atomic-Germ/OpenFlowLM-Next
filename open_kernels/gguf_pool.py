@@ -4,8 +4,8 @@ Companion to ``q4_1_pack.py`` (which documents the bf16-scale chunk layout the
 shipping q4nx containers use). The direct-GGUF path is lossless in values:
 the pack is a byte permutation of the codes plus an EXACT fp16 -> f32 widening
 of the scales (every fp16 value is representable in f32: mantissa << 13,
-exponent + 112 -- no rounding), and Q4_0 sources get m = 0 (GGUF Q4_0 has no
-min). Nothing is requantized or narrowed.
+exponent + 112 -- no rounding). Q4_0's signed nibble law ``d * (q - 8)`` is
+represented losslessly as Q4_1-style ``d * q + m`` with ``m = -8*d``.
 
 Why f32 scales in the pool: XDNA2 has no fp16 vector type, so the kernel could
 only read GGUF's fp16 scales through ~200 extra integer vector ops per chunk
@@ -90,7 +90,7 @@ def unpack_q4(raw: np.ndarray, gguf_type: str = "Q4_1"):
     n, nb, b = raw.shape
     d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16).reshape(n, nb).astype(np.float32)
     m = (np.ascontiguousarray(raw[..., 2:4]).view(np.float16).reshape(n, nb).astype(np.float32)
-         if b == Q4_1_BYTES else np.zeros((n, nb), np.float32))
+         if b == Q4_1_BYTES else -8.0 * d)
     qs = raw[..., 4:20] if b == Q4_1_BYTES else raw[..., 2:18]
     q = np.concatenate([qs & 0xF, qs >> 4], axis=-1).reshape(n, nb * BLK)
     return d, m, q
@@ -184,7 +184,7 @@ def q8_chunk_bytes(raw: np.ndarray, r0: int, c0: int) -> np.ndarray:
 def pack_q4_pool(raw: np.ndarray, rs: int, gguf_type: str = "Q4_1") -> np.ndarray:
     """GGUF Q4 raw blocks uint8[n, nb, B] -> pool chunk bytes uint8[nch*6144].
 
-    Scales widened EXACTLY fp16 -> f32 (no rounding); Q4_0 gets zero mins.
+    Scales widen EXACTLY fp16 -> f32; Q4_0 gets the exact ``-8*d`` min.
     Codes are permuted only. No requantization.
     """
     assert raw.shape[-1] == (Q4_1_BYTES if gguf_type == "Q4_1" else Q4_0_BYTES)
@@ -197,8 +197,11 @@ def pack_q4_pool(raw: np.ndarray, rs: int, gguf_type: str = "Q4_1") -> np.ndarra
     for c in range(nch):
         r0, c0 = int(rows0[c]), int(cols0[c])
         out[c, 0:1024] = _chunk_d32(raw, r0, c0)
-        out[c, 1024:2048] = (_chunk_m32(raw, r0, c0) if gguf_type == "Q4_1"
-                             else np.zeros(1024, np.uint8))
+        if gguf_type == "Q4_1":
+            out[c, 1024:2048] = _chunk_m32(raw, r0, c0)
+        else:
+            d = out[c, 0:1024].view(np.float32)
+            out[c, 1024:2048] = np.ascontiguousarray(-8.0 * d).view(np.uint8)
         out[c, 2048:] = _codes_to_nibbles(q, r0, c0)
     return out.reshape(-1)
 

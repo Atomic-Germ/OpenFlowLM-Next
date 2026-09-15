@@ -285,6 +285,7 @@ private:
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
     void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos);
+    void embedding_row(size_t token, float* out) const;
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);

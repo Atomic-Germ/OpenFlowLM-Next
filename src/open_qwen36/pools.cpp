@@ -305,8 +305,8 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         // with fp16 scales -- the same conversion q4nx-build does offline. The
         // matmul body of the repo stays untouched (Q4_1 etc. go through the
         // byte-exact path below).
-        const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K_S ||
-                        t.type == GgufFile::Type::Q4_K_M || t.type == GgufFile::Type::Q6_K;
+        const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
+                        t.type == GgufFile::Type::Q6_K;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
             fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
                  "requantizes Q8_0/Q4_K/Q6_K (convert K-quants with q4nx-build otherwise)");
@@ -372,7 +372,8 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                     }
                     std::memcpy(&ud, b, 2);
                     if (has_min) std::memcpy(&um, b + 2, 2);
-                    const float df = fp16_to_f32(ud), mf = has_min ? fp16_to_f32(um) : 0.f;
+                    const float df = fp16_to_f32(ud);
+                    const float mf = has_min ? fp16_to_f32(um) : -8.f * df;
                     std::memcpy(d + 4 * (kb * 32 + r), &df, 4);
                     std::memcpy(d + 1024 + 4 * (kb * 32 + r), &mf, 4);
                     // codes: block nibbles (two K per byte) -> two rows per byte at one K
