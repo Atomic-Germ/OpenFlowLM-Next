@@ -28,6 +28,10 @@ FAST_GEOMETRY = {
     "granite42-3b.json": (5, 8, 4),   # 40 / 8 at hd 64: NHL == HPO (the measured family)
     "phi4-mini-4b.json": (6, 4, 4),   # 24 / 8 at hd 128, a 96-dim rotation: 6 cores of 4 (was 3 of 8;
                                       # measured 2026-09-12, 123 -> 117 ms at 2048, 250/250 identical)
+    "qwen25-3b.json": (4, 4, 4),      # 16 / 2 at hd 128: 4 cores of 4 heads. HPO is 2, so a core's
+                                      # og element is 2 heads wide and it emits two of them -- the
+                                      # kOGH split, on the narrowest attention element of any dense
+                                      # family (512 B). Measured 2026-09-12.
     "gemma3-12b.json": (4, 4, 1),     # 16 / 8 at hd 256: 4 cores of 4; RB 1, the block kernel does not
                                       # fit L1 beside more than two heads at hd 256
 }
@@ -65,7 +69,8 @@ def test_unmeasured_family_keeps_the_shipped_kernel(name, unvalidated, monkeypat
 
 
 @pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-4b.json", "llama31-8b.json", "hy-mt2-7b.json",
-                                  "gemma3-4b.json", "phi4-mini-4b.json", "gemma3-12b.json"])
+                                  "gemma3-4b.json", "phi4-mini-4b.json", "gemma3-12b.json",
+                                  "qwen25-3b.json"])
 def test_measured_family_is_on_the_path_without_the_probe(name, unvalidated, monkeypatch):
     """Granite (2026-09-07), Qwen3 (2026-09-08, the first HD-128 point: 5050 -> 258 ms at
     position 2048, 300/300 greedy tokens identical to the shipped kernel), and Phi-3

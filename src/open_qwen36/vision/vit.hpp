@@ -22,8 +22,11 @@ struct VitConfig {
     int depth = 27, hidden = 1152, heads = 16, head_dim = 72, inter = 4304, out = 2048;
     int patch = 16, temporal = 2, merge = 2, npos = 2304, channels = 3;
     float eps = 1e-6f;
-    /// From the model's config.json `vision_config` (FLM's QWEN3_6_MOE_VISION_* keys).
+    /// From the model's config.json `vision_config`: OFLM's per-family prefixes
+    /// (QWEN3_6_MOE_*, QWEN3_5_*) or the plain transformers keys.
     static VitConfig from_model_dir(const std::string& model_dir);
+    /// The same reading, from config.json's text - the half that needs no container.
+    static VitConfig from_config_text(const std::string& config_json);
     int patch_dim() const { return channels * temporal * patch * patch; }
 };
 

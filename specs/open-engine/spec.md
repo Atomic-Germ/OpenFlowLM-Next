@@ -202,7 +202,17 @@ in `FAST_ATTENTION`, export without the probe and install the set.
 | Hy-MT2-7B (hd 128) | 4 x 8, RB 4 | 3395 -> 165 ms (20.6x) | 43, then a 0.05-logit near-tie |
 | Gemma3-4B (hd 256) | 2 x 4, RB 2 | 512 -> 96 ms (5.3x; the local layers never grew) | 41, then a 0.06-logit near-tie |
 | Qwen3.5-0.8B (hd 256, gated; `ax`) | 4 x 2, RB 1 | 176 -> 70 ms (6 attention layers of 24) | 200/200, corr min 0.99993 |
+| Qwen2.5-3B (hd 128, q/k/v bias) | 4 x 4, RB 4 | 1605 -> 84 ms/token at 2048 (19.1x) | 143, then a 0.021-logit near-tie |
 | Qwen3.6-35B (hd 256, gated; `ax`), 16-layer prefix | 4 x 4, RB 1 | 217 -> 43 ms part0 (four attention layers) | 85 (100 tokens; corr spread from expert flips) |
+
+Qwen2.5 (2026-09-12) is the first family whose cores emit more than one og element:
+16 heads over 2 kv heads means `HPO` is 2, so a core owning 4 heads writes them through two
+2-head elements (`kOGH = min(NHL, HPO)`), on the narrowest attention element of any dense
+family at 512 B. Per-token cost across positions 0 / 256 / 1024 / 2048 went 60 / 270 / 839 /
+1605 ms on the shipped kernel and 64 / 65 / 69 / 84 ms on the probe -- 1.3x from end to end
+of the sweep, against the 2x the requirement allows. Decode over 250 tokens went 5.03 ->
+15.98 tok/s. Re-exporting with the probe unset reproduced the probe build: every instruction
+stream byte-identical, the xclbins differing only in build stamps.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
@@ -1215,6 +1225,28 @@ ships).
 - That hash equals the hash of the same geometry declared as `model_type: "qwen3"`.
 - Two configs differing only inside `vision_config` give the same `spec_hash()`.
 - A missing decoder field is refused by name, in either config shape.
+- Qwen3-VL-4B-Instruct-NPU2's own config.json derives the same `spec_hash()` as Qwen3-4B-NPU2's, so `oflm-add` links it to that bundle with no build of its own. (That is the hash over config.json; `recipes.load.spec_from_model_dir` also folds in the tokenizer's real vocab and the container's per-role weight formats, which need the files.)
+- That container is tagged `model_type: "qwen3"`, flat, with no `text_config` and no `vision_config` -- `_qwen3vl_hf` never runs for the model people pull, `_qwen3_hf` does.
+- Qwen/Qwen3-VL-4B-Instruct derives the same geometry at a different `rope_theta`.
+
+**The container's rope_theta disagrees with upstream: 1e6 against Qwen's 5e6.** Every
+other field matches. A kernel set built from the container rotates at 1e6, and so does
+the replica, so the two will agree with each other whether or not that is the right
+number -- the same trap OPEN-PACK-Q4-0 walked into. Settle it against text quality or
+against transformers with the original weights, not against the replica.
+
+**Adapters:** `Qwen3VL` (`model_list.json` family `qwen3vl`, `qwen3vl-it:4b`) selects the
+open engine when a kernel set is installed for its model and honours
+`OFLM_QWEN3VL_ENGINE=open|closed`, as the other adapters do. The vision dispatch in
+`Engine::prefill` reads a `qwen3vl_image_payload_t` under family `qwen3` -- Qwen3-VL's
+decoder derives as plain Qwen3, so its kernel set is a `qwen3` one and the family string
+does not say VL.
+
+**Images are not reachable for this family yet**, for three reasons, none of which is the
+decoder: the container carries no `vision_config` (OPEN-VISION-VIT-CONFIG), no
+`image_token_id` and no `rope_parameters.mrope_section`, which is what
+`Engine::prefill`'s existing refusal names; and Qwen3-VL's tower uses deepstack, which
+the host tower does not implement. Text-only is the reachable half.
 
 ### OPEN-FAMILY-QWEN2: Qwen2.5 is a dense spec with a bias on q, k and v
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`, `dense.py`)
@@ -1353,6 +1385,25 @@ being free there. Both are arithmetic over the spec and shall be checked as such
 **Result 2026-09-12 (Qwen2.5-3B-Instruct-NPU2):** passes, and admits the attention tuple
 `(128, 16, 2, 128, False, False, False, True)` and `gemv_q4` K 11264 to the catalogue.
 
+Step 3 ran the same day and PASSES: `oflm-test --llm --model qwen2.5-it:3b` through
+`oflm serve` on the rebuilt engine returns coherent on-topic answers in both stream
+rounds, 3862 and 3595 characters, the follow-up round reusing the prompt cache. It
+passes again on the fast attention path (OPEN-ATTN-CONTEXT) at 15.9 and 12.6 tok/s
+against 2.5 on the shipped kernel, which takes the suite from about forty minutes to
+about one.
+
+One caveat that has to travel with that result. The first attempt at the same two
+rounds died on the follow-up: the cache-reusing prefill of 16 tokens completed, the
+first decode step after it did not, and `Engine::guarded` poisoned the engine and
+rebuilt it (`core.cpp`'s per-dispatch wait, 60 s, `OFLM_OPEN_TIMEOUT_MS`). It has not
+happened since -- the passing run above plus two non-streamed two-turn repros at 120
+and 704 tokens of first-turn context. So it is intermittent, once in four, and NOT
+understood. Decode here runs 2.5 tok/s falling as the context grows, because Qwen2.5 is
+still on the slow attention path (OPEN-ATTN-CONTEXT), which puts a single dispatch far
+closer to the timeout than any measured family. Measuring this family onto the fast path
+is the first thing to try; if the failure survives that, it is a real defect and the 60 s
+wait is hiding it rather than causing it.
+
 Step 1: 44 attention translation units, built for the qwen3, hunyuan, MoE, llama3 and phi3
 flag sets from the tree before and after, every one byte-identical.
 
@@ -1375,6 +1426,159 @@ because they share a dequantiser; and the apparent bf16 KV-cache sensitivity in 
 run was an artefact of the misread weights and is not real. `qwen2` reaches the fast
 attention path the way every family does, by measurement, and has not been measured yet.
 
+### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
+**Test category:** unit (`tests/test_gptoss.py`)
+
+GPT-OSS extends a 4096-token pretraining context to 131072 with YaRN, which is a third way
+of stretching RoPE alongside the Llama 3 and longrope rules the spec already reads. Each
+rotary pair is either left alone -- it turns few enough times inside the original context
+that the model saw its whole range -- or divided by `factor`, which is plain position
+interpolation; the pairs between the two dims where `beta_fast` and `beta_slow` rotations
+fit take a linear blend. A `rope_scaling` (or `rope_parameters`) whose type is `yarn` shall
+derive that table, and `rope_scale()` shall return YaRN's attention factor,
+`0.1 * ln(factor) + 1`, which multiplies cos and sin.
+
+The blend is HF's `_compute_yarn_parameters` including its asymmetry -- the ramp indexes
+`rotary_dim / 2` pairs against bounds computed on the `rotary_dim` scale -- because the
+position table has to be the one the weights were trained against, not the tidier one.
+`mscale` / `mscale_all_dim` (DeepSeek's variant of the attention factor) is refused rather
+than ignored.
+
+**Acceptance criteria:**
+- GPT-OSS 20B's parameters (theta 150000, factor 32, beta 32/1, truncate false, original
+  context 4096, rotary dim 64) reproduce transformers' own table to fp32 precision: pair 0
+  is 1.0 (unscaled), pair 31 is `150000^(-31/32) / 32` (fully interpolated), pairs 16 and 17
+  are 4.564839e-4 and 1.2931869e-4.
+- `rope_scale()` is 1.3465735902799727; an explicit `attention_factor` wins over it; a
+  `factor` of 1 or less gives 1.0.
+- The branch is keyed on `rope_type`, so linear, longrope, Llama 3 and unscaled families
+  derive exactly what they derived before.
+
+### OPEN-FAMILY-GPTOSS: GPT-OSS derives a spec and has no recipe yet
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
+**Test category:** unit (`tests/test_gptoss.py`)
+
+A config whose `model_type` is `gpt_oss` shall derive a `ModelSpec` with `family` `gptoss`:
+GQA attention with no q/k norm and no gate, a sliding window on the layers HF marks
+`sliding_attention` and none on the ones it marks `full_attention`, YaRN RoPE, and an MoE
+FFN with no shared expert. Two keys mean something other than what they say and the
+derivation shall read them as they are meant:
+
+- `intermediate_size` is the EXPERT width. There is no dense FFN, so it becomes
+  `moe_intermediate` and `intermediate` stays 0.
+- `hidden_act` says `silu` and is wrong about it. The experts compute
+  `(up + 1) * gate * sigmoid(1.702 * gate)` with `gate` clipped above at 7 and `up` clipped
+  both ways, and `gate` and `up` interleaved down the expert's rows rather than split in
+  half. The spec records `activation == "clamped_swiglu"`; 1.702 and 7.0 are family
+  constants, not fields.
+
+GPT-OSS's `full_attention` is a plain dense layer and shall map to `dense`, NOT to the
+spec's `full_attention` layer type -- that one is the full half of Qwen3.6's linear/full
+alternation and has nothing to do with this family.
+
+The sink, the biases and the activation's constants are family properties for the same
+reason Qwen2's bias is: every GPT-OSS has them and `spec_hash()` covers every field.
+
+`recipes.families.family_module("gptoss")` shall raise `NotImplementedError` naming what is
+missing, and `gptoss` shall stay out of `FAMILIES` and `DENSE_FAMILIES`. Routing it to the
+dense or the MoE recipe would emit kernels that drop the sink and compute the wrong FFN, and
+then report parity against a reference carrying the same gaps -- which is exactly how
+OPEN-PACK-Q4-0 went unnoticed.
+
+**Acceptance criteria:**
+- gpt-oss-20b's fields derive `family == "gptoss"`, `(num_heads, num_kv_heads, head_dim) ==
+  (64, 8, 64)`, `rotary_dim == 64`, `(num_experts, experts_per_tok) == (32, 4)`,
+  `moe_intermediate == 2880`, `intermediate == 0`, `shared_expert_intermediate == 0`,
+  `qk_norm` and `attn_gate` false, `norm_eps == 1e-5`.
+- `layer_types` alternates `dense_local`, `dense` starting at `dense_local`, from the config's
+  list or, when it has none, from HF's own default; `sliding_window == 128`. An unknown layer
+  type name and a sliding layer with no window are each refused by name.
+- `head_dim` is read from the key when present -- GPT-OSS's is 64 while `hidden / heads` is
+  45 -- and a `hidden_size` that is not a multiple of the head count is refused naming
+  `head_dim`.
+- The older `rope_theta` + `rope_scaling` pair and transformers 5's single `rope_parameters`
+  object give the same `spec_hash()`. A missing `hidden_size`, `num_hidden_layers`,
+  `num_local_experts`, `num_experts_per_tok`, `vocab_size` or `rope_theta` is named.
+- `family_module("gptoss")` raises `NotImplementedError` whose message names the sink, the
+  clamped SwiGLU and the extra biases; `"gptoss"` is in neither `FAMILIES` nor
+  `DENSE_FAMILIES`.
+- `quant_map_from_chunk_sizes("gptoss", ...)` reads the tensor names `q4nx-build` writes
+  (`configs/gpt-oss.json`) and refuses a role at two formats.
+
+**What a recipe would still need** (not requirements yet; each earns its own when it is
+built): the sink (OPEN-ATTN-SINK), the clamped SwiGLU experts, a bias on `o_proj`, on the
+router and on all three expert projections -- OPEN-ATTN-QKV-BIAS covers none of those -- an
+MoE FFN on sliding-window layers, which no recipe composes today, and YaRN position tables in
+the engine.
+
+### OPEN-ATTN-SINK: a learned per-head attention sink logit
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`,
+`model/replica_dense.py`)
+**Test category:** unit (`tests/test_attn_sink.py`) for the math and the guard; manual (the
+procedure below, needs the NPU and a GPT-OSS container) for the numbers
+
+A family with attention sinks carries one learned scalar per head per layer that joins the
+softmax denominator and has no value vector behind it, so the head's output weights sum to
+less than one and it can decline to attend. Given a head's scores `s_t` (already divided by
+`sqrt(head_dim)`) and its sink `c`:
+
+    o_h = sum_t exp(s_t - M) V_t / ( exp(c - M) + sum_t exp(s_t - M) ),  M = max(c, max_t s_t)
+
+The sink is the raw stored scalar: GPT-OSS scales the q.k dots and concatenates the sink
+after that, so it is NOT divided by `sqrt(head_dim)`. `replica_dense.sink_softmax` is the
+fp64 reference.
+
+That is one more row of an online softmax whose score is `c` and whose V is zero, so on this
+codebase's attention core the whole change is the state `attn_init_impl` starts from --
+`m = c, l = 1` instead of `m = -1e30, l = 0`, with `oacc` still zero -- and the per-row
+kernels, the block kernel and `attn_fin_impl` are untouched. `attn_fin_impl` already divides
+by `ml[kMLS + h]`, which now carries the sink's 1.
+
+The sinks shall ride in the meta element after `qn | kn`, as bf16, NOT on a fifo of their
+own. They are one value per head for the whole layer -- 128 bytes at 64 heads -- where the
+q/k/v bias is one per channel and has to arrive in lockstep with the projection stream; a
+second fifo would cost two buffers and a descriptor per layer for data that fits in the meta
+element's unused room. `attn_meta_impl` widens this core's own heads into an `sk[NHL]` f32
+buffer, so `attn_init_impl` indexes it locally and needs no head offset; only `attn_meta` takes
+`h0`, and only under this guard.
+
+A family without sinks shall compile the attention it compiled before, byte for byte:
+`ATTN_SINK` defaults to 0 and `ATTN_SINK_IN_PARM` / `ATTN_SINK_OUT_PARM` / `ATTN_SINK_ARG` /
+`ATTN_SINK_H0_PARM` expand to nothing, the same trick `ATTN_H0_PARM` and `ATTN_BIAS_PARM`
+use -- an unused parameter changes the generated code.
+
+**Acceptance criteria (unit):**
+- A sink equal to the scores adds exactly one more equal share to the denominator: two
+  positions at score 0 with a sink at 0 give 1/3 each, and a sink at `ln 2` gives 1/4 each.
+- The reference equals GPT-OSS's own expression -- append the sink as one more column,
+  subtract the row max, softmax, drop the column -- and equals transformers'
+  `eager_attention_forward` on a GQA case (skipped where torch is absent).
+- A sink far below every score reproduces plain softmax exactly.
+- The weights sum to `1 - exp(c - M)/Z`, strictly between 0 and 1, and their ratios are the
+  ones plain softmax gives: the sink rescales and contributes no value.
+- The online form seeded `m = c, l = 1` equals the closed form over 512 positions with an
+  8-sigma score spread, and over a context where the sink holds the max at every row.
+- `ATTN_SINK` defaults to 0 in `attn.h`, no recipe emits it, and no recipe geometry carries a
+  SINK field.
+- `4 * HD + 2 * NH <= E_A` decides whether the sinks fit the meta element, equivalently
+  `NH <= HD * (KVH - 2)`; GPT-OSS 20B's `(64, 8, 64)` gives 384 bytes of a 1024-byte element,
+  and `attn.h` asserts the same inequality at compile time.
+
+**Procedure (manual) -- NOT RUN:**
+1. Compile `designs/attn/*.cc` for a shipped family's flags from the tree before and after
+   and diff the objects: every one must be byte-identical, as OPEN-ATTN-QKV-BIAS step 1 did.
+   Nothing here has been near a compiler; this is the first gate.
+2. Give the recipe a `SINK` knob and a `CD_SINK` consts slot of `NH * 2` bytes (`-1` for a
+   family without one, as `CD_QB` does), widen the meta fill from `4 * HD` to
+   `4 * HD + 2 * NH` bytes, and pack `self_attn.sinks.weight` into it.
+3. Export with `OPEN_KERNELS_UNVALIDATED=1`, pack, and run `model/make_decode.py` +
+   `compare_decode.py` at positions 0 and a few hundred against a replica that calls
+   `sink_softmax`: logits correlation > 0.9999 and the same argmax.
+4. A sink whose weight is zero must reproduce the no-sink answer to the bit, which separates
+   a wrong sink from a wrong anything-else.
+5. `oflm-test --llm` through `flm serve`, then add the tuple to `catalogue.py`.
+
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
 **Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
@@ -1385,7 +1589,7 @@ un-tiled and run as Qwen3-VL's vision tower: patch embed + bilinearly
 interpolated positions, 2-D RoPE attention over the whole image, GELU-tanh
 MLP, the 2x2 merger. The numpy forward matches transformers'
 `Qwen3VLVisionModel` loaded with the same weights; the host C++ port matches the
-numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
+numpy forward. The geometry is read as OPEN-VISION-VIT-CONFIG says.
 
 **Acceptance criteria:**
 - numpy vs transformers on a random 8 x 8 (unit) / 16 x 16 grid: corr > 0.99999, max error < 1e-3 of max.
@@ -1395,6 +1599,75 @@ numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
 **Result 2026-09-08 (35B tower, 27 blocks):** numpy vs transformers corr
 1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
 patches in 1.02 s (numpy 11.5 s).
+
+### OPEN-VISION-VIT-CONFIG: where the tower's geometry comes from, and which towers are refused
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/vit.cpp`)
+**Test category:** unit (`tests/test_vision_config.py` for the reference; `vit_test --configs`, run by `ctest -R OPEN-VISION-VIT-CONFIG`, for the C++ port -- neither needs a container)
+
+The tower's numbers come from `config.json`'s `vision_config`, in whichever of three
+shapes the container carries: OFLM's per-family prefixes `QWEN3_6_MOE_*` and `QWEN3_5_*`,
+or the plain transformers keys (`depth`, `hidden_size`, `num_heads`, `intermediate_size`,
+`out_hidden_size`, `patch_size`, `temporal_patch_size`, `spatial_merge_size`,
+`num_position_embeddings`), which is what a container that kept its source block ships --
+Qwen2.5-VL's does. The plain shape has no head dimension and no epsilon: `head_dim` is
+`hidden_size / num_heads` and the epsilon is LayerNorm's 1e-6, which is what transformers
+uses for this tower.
+
+A `vision_config` describing a tower this code does not implement shall be refused with
+the reason named, not run with the extra parts dropped -- dropping one gives image
+embeddings that look plausible and are wrong. Refused: a non-empty
+`deepstack_visual_indexes` (Qwen3-VL feeds three vision layers through extra mergers into
+the first decoder layers), `window_size` / `fullatt_block_indexes` (Qwen2.5-VL's windowed
+tower), and a `hidden_act` other than `gelu_pytorch_tanh`.
+
+A container with no `vision_config` at all shall say so and name every key set it looked
+for. **Qwen3-VL-4B-Instruct-NPU2 is such a container**: its closed `qwen3vl_npu` engine
+hardcodes the tower's numbers in C++ (`src/include/models/qwen3vl/qwen3vl_npu.hpp`, and
+the DLL contains none of the `*_VISION_*` key strings the other two do), so the shipped
+config.json carries the vision weights' file name and nothing about their shape.
+
+**Acceptance criteria:**
+- The 35B container's `QWEN3_6_MOE_*` block reads as 27 x 1152, 16 heads x 72, MLP 4304 -> 2048, patch 16, 2304 positions; a Qwen3.5 container's `QWEN3_5_*` block reads with `hidden == heads * head_dim`.
+- Qwen3.5-0.8B's HF config and its shipped container give the same tower (12 x 768, 12 heads x 64, MLP 3072 -> 1024), the HF one deriving `head_dim` and using eps 1e-6.
+- Qwen3-VL-4B-Instruct-NPU2's config.json is refused with a message naming `vision_config`.
+- Qwen/Qwen3-VL-4B-Instruct's config.json is refused with a message naming `deepstack`.
+- Qwen2.5-VL-3B-Instruct-NPU2's config.json is refused with a message naming `window`.
+
+### OPEN-VISION-VIT-WINDOWED: Qwen2.5-VL's tower attends inside windows
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit_qwen25.py`; `src/open_qwen36/vision/` once the port lands)
+**Test category:** unit (`tests/test_vision_vit_windowed.py`; the oracle needs torch and skips without it, the window math does not)
+
+Qwen2.5-VL's vision tower shall be reproduced as a numpy fp32 forward. It is not
+the tower OPEN-VISION-VIT-REF covers: most blocks attend only within a square
+window of `window_size / spatial_merge_size / patch_size` merge units, the
+blocks named by `fullatt_block_indexes` attend over the whole image, and the
+tower permutes its merge units so that windows are contiguous, runs the entire
+stack in that order, and restores the original row order after the merger. The
+rotary table is permuted with the tokens. The blocks use RMSNorm, a SwiGLU MLP
+with biases, and split q/k/v/o projections; there is no learned position table
+and the patch embed has no bias.
+
+The reference is checked against transformers' own
+`Qwen2_5_VisionTransformerPretrainedModel`, which builds the weights that the
+reference then reads -- nothing in this repo sits on both sides. The oracle's
+tower is initialised at `initializer_range = 0.4`, because at HF's default the
+residual stream dominates the output and a forward with the windows wrong still
+agrees to 2e-4; a test asserts that the windows-ignored forward fails, so that
+sensitivity cannot regress unnoticed.
+
+**Acceptance criteria:**
+- numpy vs transformers on a random 12 x 10 grid: corr > 0.99999, max error < 1e-4 of max, both with four windowed blocks and with every block full-attention.
+- A forward in which every block attends over the whole image gives corr < 0.9 against the same oracle.
+- `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`.
+- A grid that divides the window size evenly (8 x 8 patches) still pads a whole empty window, which collapses: index `0..15`, boundaries `[0, 64]`.
+- The merger's activation is the exact GELU, `x * Phi(x)` against the standard normal CDF, not the tanh approximation (which the oracle comparison cannot distinguish).
+
+**Result 2026-09-12:** numpy vs transformers corr 1.0000000, rel 6.0e-6; the
+windows-ignored control gives corr 0.646. The C++ port is designed but not
+written, and no Qwen2.5-VL container has been read -- the tensor names and
+layout in `load_weights` come from `utilities/q4nx-build`, and the published
+`vision_weights.q4nx` size does not reconcile with the expected geometry by
+52 MB. `.claude/plans/qwen25vl-windowed-vit.md`.
 
 ### OPEN-VISION-EMBED: the open engine takes an image payload
 **Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
@@ -1423,6 +1696,120 @@ segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
 so on this box only the open engine can serve these files. Log:
 `.claude/plans/issue-16-hw-results.md`.
 
+### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
+**Test category:** unit (`tests/test_lfm2.py`); the kernel and its hardware run are
+OPEN-SHORT-CONV-KERNEL's
+
+LFM2 is a hybrid: some layers are GQA attention, the rest replace the attention
+block entirely with a three-tap depthwise causal convolution. That makes the
+convolution a LAYER TYPE, not a parameter on an existing one, so `short_conv`
+joins `LAYER_TYPES` beside `linear_attention`, `full_attention`, `dense` and
+`dense_local`. A config whose `model_type` is `lfm2` shall derive a `ModelSpec`
+with `family` `lfm2`, `full_attention` at the indices the config names and
+`short_conv` everywhere else.
+
+Nothing about the convolution is a new `ModelSpec` field. Its width is the
+hidden size on every LFM2 that ships and its tap count is `conv_kernel`, the
+field gated DeltaNet already has; a config where either stops being true is
+refused by name rather than given a field, because `spec_hash()` covers every
+field and a new one would move every shipped model's hash for no kernel change.
+Adding a member to the `layer_types` tuple moves nothing, because no shipped
+spec uses the new value.
+
+The FFN width follows transformers' own rule (`Lfm2Config` lets `block_ff_dim`
+override `intermediate_size`, `Lfm2MLP` then takes two thirds of it and rounds
+up to `block_multiple_of`), not the raw `intermediate_size` key.
+
+The short-conv block's fused input projection and its output projection take
+the `linear` and `linear_out` quant roles a DeltaNet layer already has, so no
+role is added to `QUANT_ROLES`.
+
+`recipes.families.family_module("lfm2")` shall raise `NotImplementedError`
+naming the missing `designs/short_conv` and the unvalidated attention
+geometry, and `lfm2` shall stay out of `FAMILIES`. Routing the family to the
+nearest existing recipe would emit kernels that drop the convolution and then
+report parity against a replica making the same mistake.
+
+**Acceptance criteria:**
+- `model_type: "lfm2"` with LFM2-1.2B's config gives 16 layers, `full_attention` at 2, 5, 8, 10, 12, 14 and `short_conv` at the other ten; hidden 2048, 32 heads over 8 kv heads at head dim 64, full RoPE, `qk_norm` true, no gate, intermediate 8192, `conv_kernel` 3, eps 1e-5.
+- `layer_types: ["conv", "full_attention", ...]` derives the same `spec_hash()` as `full_attn_idxs`; a name the family does not have is refused by name.
+- `conv_dim` or `conv_dim_out` that is not `hidden_size` is refused naming the key; `conv_bias: true` likewise.
+- `block_ff_dim` 12288 gives intermediate 8192, which is what the container's gate / up projections hold; with `block_auto_adjust_ff_dim` false the width is taken as written.
+- Every checked-in spec under `recipes/specs/` hashes to what it hashed before `short_conv` existed, and no key named for the convolution appears in `to_dict()`.
+- `family_module("lfm2")` raises `NotImplementedError` naming `short_conv` and `designs/short_conv`; the dense and qwen35 recipes refuse an lfm2 spec by family.
+- `quant_map_from_chunk_sizes("lfm2", ...)` maps `shortconv.in_proj` to `linear` and `shortconv.out_proj` to `linear_out`; the installed container, all 4-bit, gives an empty map.
+
+**Container, read 2026-09-12** (`LFM2-1.2B-NPU2/model.q4nx`, 149 tensors): ten
+layers hold `shortconv.{in_proj, conv, out_proj}` and six hold
+`self_attn.{q,k,v,o}_proj` plus `q_norm` / `k_norm` at width 64; every layer
+holds `input_layernorm`, `post_attention_layernorm` and the three MLP
+projections. `shortconv.conv.weight` is bf16 `[2048, 3]` -- one row of three
+taps per channel, a depthwise `Conv1d` weight with its singleton input-channel
+axis squeezed out. The embedding is `model.token_embd.weight` (bf16) and the
+head is 4-bit, not q8. All 93 four-bit tensors are the signed quantiser the
+packer transcodes (OPEN-PACK-Q4-0).
+
+### OPEN-SHORT-CONV-REF: the fp64 reference for the short-conv block
+**Applies to:** openflowlm-next (`open_kernels/model/replica_lfm2.py`, `model/lfm2_forward.py`)
+**Test category:** unit (`tests/test_lfm2.py`)
+
+The reference for one token through a short-conv block shall be, in float64:
+
+    h = W_in @ x                             # 3 x hidden rows, in the order [B | C | u]
+    Bx = B * u
+    conv[c] = sum_k state[c, k] * w[c, k]    # state[:, taps-1] is this token's Bx
+    out = W_out @ (C * conv)
+
+with no bias and no normalisation inside the block, and with the conv cache
+holding `Bx` -- the gated product the convolution reduces over -- rather than
+the block input. The newest token pairs with the LAST tap; a transposed weight
+is the one orientation error that still produces plausible numbers, so it is
+asserted directly. An attention layer is the dense recipe's block unchanged and
+goes through `replica_dense.dense_decode`, not a second copy of the same math.
+
+**Acceptance criteria:**
+- Three hand-computed tokens through a two-channel, three-tap block reproduce exactly, output and cache both.
+- The cache after the first token holds `B * u`, not `x` and not `B`.
+- With only the first tap non-zero the first token's output is zero; with only the last tap it is the ungated-conv value.
+- The padded-convolution form over a whole prompt equals the one-token-at-a-time form bit for bit, and appending a token cannot change an earlier output.
+- A conv state of the wrong depth and an `in_proj` that is not three times hidden are refused by name.
+
+**Result 2026-09-12 (LFM2-1.2B, CPU, no NPU):** the whole model runs in fp64
+straight out of the container through `model/lfm2_forward.py` and answers
+coherently -- "What is the capital of France?" gives `The capital of France`
+greedily, with `Paris` second at the first position. A wrong tap order, a wrong
+layer schedule, a wrong `[B | C | u]` split or a misread weight format all
+produce noise here, so this is the offline evidence that the geometry above is
+right. About 30-40 s per token.
+
+### OPEN-SHORT-CONV-KERNEL: the short-conv layer on the NPU
+**Applies to:** openflowlm-next (`open_kernels/designs/short_conv/`, `recipes/lfm2.py`)
+**Test category:** manual (the procedure below; needs the NPU, a Linux kernel build and
+the LFM2 container)
+
+NOT IMPLEMENTED YET. The design, the element accounting and the reasoning are
+in `.claude/plans/lfm2-short-conv.md`; this requirement carries the procedure
+that will verify it, so the verification is fixed before the kernel is written
+rather than after.
+
+What the engine needs is only data: `manifest.cpp` looks a layer's type up by
+NAME (`layer_types.at(layers[layer])`) and a fixed-size state buffer is already
+the `"linear"` state kind, so a short-conv layer type and its 16 KB conv state
+need no C++ change. The whole gap is one design directory and one recipe
+module.
+
+**Verification procedure (manual):**
+1. Build the kernels in WSL with `PATH=~/xrt-tools/bin` and `LD_LIBRARY_PATH=~/xrt-tools/lib`: `OPEN_KERNELS_SPEC=<lfm2 spec> python build_design.py designs/short_conv/cx.py designs/short_conv/build_lfm2_cx_h2048`, and the attention layer's `dx`-style build beside it.
+2. `python -m recipes.manifest --model-dir <LFM2 dir> --out manifest.json`; check `layers` names the two types where the config's `full_attn_idxs` says, and that `layer_types.short_conv.buffers.state` is `{"kind": "linear", "bytes": 16384}`.
+3. Pack and run a slice: `open_kernels/model/make_decode.py --model-dir <dir> --layers 2` (one short-conv layer then one attention layer) against `open_kernels/model/lfm2_forward.py --layers 2`. The conv layer alone is the first thing to look at: a tap-order error shows as a residual that is right at position 0 and wrong from position 1.
+4. Whole model, position 0 and positions 1-3: logits corr against `lfm2_forward.py`, argmax and top-5 identical. The bar the other families cleared is corr > 0.9999 with identical argmax.
+5. `utilities/flm-test --llm --model lfm2:1.2b` through `flm serve`, plus a coherence read of the answer.
+6. Only then add `(64, 32, 8, 64, True, False, False, False)` to the `attn` combination set and the short-conv points to `catalogue.py`, with the date and this requirement's name.
+
+**Acceptance criteria:**
+- Steps 3 and 4 pass at the bar above, on the container at `LFM2-1.2B-NPU2`.
+- Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.
 ### OPEN-PREFILL-BATCH: the block prefill route
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`, `designs/gemm_q4_prefill/`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
 **Test category:** manual (needs the NPU and `Qwen3.6-35B-A3B-NPU2`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`

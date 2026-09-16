@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 
 #include "nlohmann/json.hpp"
@@ -238,29 +239,95 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
 
 }  // namespace
 
+namespace {
+
+const char* const kHfKeys =
+    "depth, hidden_size, num_heads, intermediate_size, out_hidden_size, patch_size, "
+    "temporal_patch_size, spatial_merge_size, num_position_embeddings";
+
+/// This is Qwen3-VL's full-attention tower without deepstack. A config describing anything
+/// else is named, not approximated - dropping a part gives image embeddings that look
+/// plausible and are wrong. Mirrors replica_vit.py's _refuse_towers_we_do_not_run.
+void refuse_towers_we_do_not_run(const nlohmann::json& v) {
+    const auto ds = v.find("deepstack_visual_indexes");
+    if (ds != v.end() && ds->is_array() && !ds->empty())
+        throw std::runtime_error("vit: vision_config deepstack_visual_indexes " + ds->dump() +
+                                 " - this tower feeds those layers through extra mergers into the first "
+                                 "decoder layers, which the host tower does not implement");
+    if (v.value("window_size", 0) != 0 || v.contains("fullatt_block_indexes"))
+        throw std::runtime_error("vit: vision_config window_size / fullatt_block_indexes - a windowed tower "
+                                 "(Qwen2.5-VL) is a different design from the full-attention one implemented here");
+    const std::string act = v.value("hidden_act", std::string("gelu_pytorch_tanh"));
+    if (act != "gelu_pytorch_tanh")
+        throw std::runtime_error("vit: vision_config hidden_act '" + act + "' - the tower's MLP is GELU-tanh");
+}
+
+}  // namespace
+
 VitConfig VitConfig::from_model_dir(const std::string& model_dir) {
     std::ifstream f(model_dir + "/config.json");
     if (!f) throw std::runtime_error("vit: cannot open " + model_dir + "/config.json");
-    nlohmann::json j;
-    f >> j;
-    const auto& v = j.at("vision_config");
-    // FLM prefixes the keys per family: QWEN3_6_MOE_* on the 35B, QWEN3_5_* on Qwen3.5 (same tower)
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return from_config_text(text);
+}
+
+VitConfig VitConfig::from_config_text(const std::string& config_json) {
+    const nlohmann::json j = nlohmann::json::parse(config_json);
+    const auto it = j.find("vision_config");
+    if (it == j.end() || !it->is_object() || it->empty())
+        throw std::runtime_error(
+            "vit: config.json has no vision_config, so this container does not say what its tower looks "
+            "like - Qwen3-VL-4B-Instruct-NPU2 is like this, its closed engine hardcodes the numbers. "
+            "Looked for QWEN3_6_MOE_VISION_NUM_LAYERS, QWEN3_5_VISION_NUM_LAYERS, and the plain keys: " +
+            std::string(kHfKeys));
+    const nlohmann::json& v = *it;
+    refuse_towers_we_do_not_run(v);
+    VitConfig c;
+    // OFLM prefixes the keys per family: QWEN3_6_MOE_* on the 35B, QWEN3_5_* on Qwen3.5 (same tower).
     const char* prefix = v.contains("QWEN3_6_MOE_VISION_NUM_LAYERS") ? "QWEN3_6_MOE_"
                          : v.contains("QWEN3_5_VISION_NUM_LAYERS") ? "QWEN3_5_" : nullptr;
-    if (!prefix) throw std::runtime_error("vit: config.json vision_config has neither QWEN3_6_MOE_* nor QWEN3_5_* keys");
-    auto g = [&](const char* k) { return v.at(std::string(prefix) + k); };
-    VitConfig c;
-    c.depth = g("VISION_NUM_LAYERS");
-    c.hidden = g("VISION_EMBED_DIM");
-    c.heads = g("VISION_NUM_HEADS");
-    c.head_dim = g("VISION_HEAD_DIM");
-    c.inter = g("VISION_MLP_INTERMEDIATE_SIZE");
-    c.out = g("VISION_OUT_HIDDEN_SIZE");
-    c.patch = g("PATCH_SIZE");
-    c.temporal = g("TEMPORAL_PATCH_SIZE");
-    c.merge = g("SPATIAL_MERGE_SIZE");
-    c.npos = g("VISION_NUM_POSITION_EMBEDDINGS");
-    c.eps = g("VISION_LAYER_NORM_EPSILON");
+    if (prefix) {
+        auto g = [&](const char* k) { return v.at(std::string(prefix) + k); };
+        c.depth = g("VISION_NUM_LAYERS");
+        c.hidden = g("VISION_EMBED_DIM");
+        c.heads = g("VISION_NUM_HEADS");
+        c.head_dim = g("VISION_HEAD_DIM");
+        c.inter = g("VISION_MLP_INTERMEDIATE_SIZE");
+        c.out = g("VISION_OUT_HIDDEN_SIZE");
+        c.patch = g("PATCH_SIZE");
+        c.temporal = g("TEMPORAL_PATCH_SIZE");
+        c.merge = g("SPATIAL_MERGE_SIZE");
+        c.npos = g("VISION_NUM_POSITION_EMBEDDINGS");
+        c.eps = g("VISION_LAYER_NORM_EPSILON");
+        c.channels = 3;
+    } else if (v.contains("depth")) {
+        auto h = [&](const char* k) {
+            if (!v.contains(k))
+                throw std::runtime_error("vit: vision_config has no " + std::string(k) +
+                                         " in the transformers-shaped block");
+            return v.at(k);
+        };
+        c.depth = h("depth");
+        c.hidden = h("hidden_size");
+        c.heads = h("num_heads");
+        if (c.heads <= 0 || c.hidden % c.heads)
+            throw std::runtime_error("vit: vision_config hidden_size " + std::to_string(c.hidden) +
+                                     " is not a multiple of num_heads " + std::to_string(c.heads));
+        // transformers has no head_dim or epsilon for this tower: hidden/heads, LayerNorm's default.
+        c.head_dim = c.hidden / c.heads;
+        c.inter = h("intermediate_size");
+        c.out = h("out_hidden_size");
+        c.patch = h("patch_size");
+        c.temporal = h("temporal_patch_size");
+        c.merge = h("spatial_merge_size");
+        c.npos = h("num_position_embeddings");
+        c.eps = v.value("layer_norm_eps", 1e-6f);
+        c.channels = v.value("in_channels", v.value("in_chans", 3));
+    } else {
+        throw std::runtime_error("vit: vision_config carries none of the key sets this tower is read from: "
+                                 "QWEN3_6_MOE_VISION_NUM_LAYERS, QWEN3_5_VISION_NUM_LAYERS, or " +
+                                 std::string(kHfKeys));
+    }
     if (c.hidden != c.heads * c.head_dim) throw std::runtime_error("vit: heads x head_dim != hidden");
     return c;
 }
