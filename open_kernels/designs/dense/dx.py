@@ -53,11 +53,12 @@ LX = HERE.parent / "layer_x"
 sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
-from recipes import dense as QR  # noqa: E402
+from recipes.families import for_spec  # noqa: E402
 from recipes.qwen36moe import BAND_ROWS, ELEM, band_bytes  # noqa: E402
 from aie.helpers.taplib import TensorAccessPattern  # noqa: E402
 
 SPEC = current_spec()
+QR = for_spec(SPEC)      # dense, or lfm2 for its attention layers
 R = QR.recipe(SPEC)
 L, G = R.layout, R.geo
 HID, FF, N_CORES = G.HID, G.FF, G.N_CORES

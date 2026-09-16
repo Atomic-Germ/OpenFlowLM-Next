@@ -34,6 +34,9 @@ FAST_GEOMETRY = {
                                       # family (512 B). Measured 2026-09-12.
     "gemma3-12b.json": (4, 4, 1),     # 16 / 8 at hd 256: 4 cores of 4; RB 1, the block kernel does not
                                       # fit L1 beside more than two heads at hd 256
+    "lfm2-1.2b.json": (4, 8, 4),      # 32 / 8 at hd 64, q/k normed: the Llama 3.2 1B shape with the
+                                      # norms. Only six of sixteen layers reach this kernel at all --
+                                      # the rest are short_conv. Measured 2026-09-13.
 }
 
 
@@ -70,7 +73,7 @@ def test_unmeasured_family_keeps_the_shipped_kernel(name, unvalidated, monkeypat
 
 @pytest.mark.parametrize("name", ["granite42-3b.json", "qwen3-4b.json", "llama31-8b.json", "hy-mt2-7b.json",
                                   "gemma3-4b.json", "phi4-mini-4b.json", "gemma3-12b.json",
-                                  "qwen25-3b.json"])
+                                  "qwen25-3b.json", "lfm2-1.2b.json"])
 def test_measured_family_is_on_the_path_without_the_probe(name, unvalidated, monkeypatch):
     """Granite (2026-09-07), Qwen3 (2026-09-08, the first HD-128 point: 5050 -> 258 ms at
     position 2048, 300/300 greedy tokens identical to the shipped kernel), and Phi-3

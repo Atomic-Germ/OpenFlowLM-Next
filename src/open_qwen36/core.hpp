@@ -167,6 +167,11 @@ public:
     /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
     /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
+
+    /// `n` bytes of a layer's `act` scratch at `off`, straight off the device. Bring-up
+    /// only: it is how you tell a stage that computes the wrong thing from a stage that
+    /// never ran, without inferring either from the logits.
+    void read_act(int layer, size_t off, size_t n, uint8_t* dst);
     /// T = gemm_block_t() tokens through every layer on the block route: the
     /// projections as whole-array GEMM dispatches, the stages between them
     /// per layer-type kind (dense: T single-token attention dispatches and

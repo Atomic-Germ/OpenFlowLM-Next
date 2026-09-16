@@ -63,6 +63,13 @@ def band_bytes(K: int) -> int:
     return q4_bytes(BAND_ROWS, K)
 
 
+def per_band(K: int) -> int:
+    """Chunks in one band, the GEMV's runtime band law (gemv_q4_pool_group_rt). The kernel
+    derives K back from it as 256 * per_band / rs, so this counts CHUNKS, never w elements:
+    handing it the element count reads the activation table at half width."""
+    return band_bytes(K) // CHUNK
+
+
 # ---- the per-role weight format (OPEN-QUANT-Q8). A projection the container stores at q8
 # is streamed as 16-row half-tiles of its chunks: the same 64-row band, twice the bytes,
 # four half-tiles per k-tile instead of two chunks (designs/gemv_q4/gemv_q8.h).

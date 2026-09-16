@@ -169,6 +169,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (128, 16, 8, 128, True, False, False, False),    # Qwen3-1.7B / 0.6B: a GQA group of 2 (OPEN-FAMILY-QWEN3)
                  (128, 24, 8, 128, False, False, False, False),   # Llama 3.2 3B: GQA group 3, OG_AOUT_ELEMS 3 (OPEN-FAMILY-LLAMA3)
                  (64, 32, 8, 64, False, False, False, False),     # Llama 3.2 1B: head dim 64 (OPEN-FAMILY-LLAMA3)
+                 (64, 32, 8, 64, True, False, False, False),      # LFM2-1.2B's six attention layers: the Llama 3.2 1B
+                                                                 # shape WITH q/k norms, 2026-09-13 (OPEN-SHORT-CONV-KERNEL)
                  (256, 16, 4, 64, True, True, False, False),      # Qwen3.5 4B: gated, partial RoPE 64 (OPEN-FAMILY-QWEN35)
                  (256, 8, 2, 64, True, True, False, False),       # Qwen3.5 2B / 0.8B: the same, 8 heads over 2 kv (OPEN-FAMILY-QWEN35)
                  (64, 40, 8, 64, False, False, False, False),    # Granite 4.2 3B (OPEN-FAMILY-GRANITE)
@@ -190,6 +192,12 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
              note="Qwen3-Next / 3.5 / 3.6 families only; heads/key_heads is the value heads per "
                   "key head (dn_glue.h kGrp) and 16 heads pack the alpha/beta projection padded "
                   "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass"),
+    Template("short_conv", "designs/short_conv/sc.h",
+             {"taps": values(3), "width": values(2048)},
+             note="LFM2's depthwise causal conv, which REPLACES attention in a layer. (3, 2048) is "
+                  "LFM2-1.2B, OPEN-SHORT-CONV-KERNEL's procedure through oflm serve on 2026-09-13; "
+                  "the core holds taps - 1 state rows, so another tap count is a design change, "
+                  "not a knob"),
     Template("ln", "designs/ln/ln.cc",
              {"width": values(1024, 2048, 2560, 3072, 3840, 4096)}),
                                 # LN_N; 1024 / 2048 take the fused single-core path (N <= 2048),

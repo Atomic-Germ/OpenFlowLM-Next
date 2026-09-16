@@ -16,21 +16,24 @@ def family_module(name: str) -> ModuleType:
     if name == "qwen35":
         from . import qwen35
         return qwen35
+    if name == "lfm2":
+        from . import lfm2
+        return lfm2
     if name in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
         from . import dense
         return dense
     if name in NOT_IMPLEMENTED:
         raise NotImplementedError(f"the open kernels have no recipe for {name!r} yet: "
                                   f"{NOT_IMPLEMENTED[name]}")
-    raise ValueError(f"no recipe for family {name!r} "
-                     f"(have qwen36moe, qwen35, qwen3, llama3, gemma3, hunyuan, granite, phi3, qwen2)")
+    raise ValueError(f"no recipe for family {name!r} (have {', '.join(FAMILIES)})")
 
 
 def for_spec(spec: ModelSpec) -> ModuleType:
     return family_module(spec.family)
 
 
-FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")
+FAMILIES = ("qwen36moe", "qwen35", "qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2",
+            "lfm2")
 
 # Families whose ModelSpec derives but whose kernels do not exist. Naming the gap here is
 # the point: routing such a model to the nearest recipe would emit kernels that drop a whole
@@ -42,9 +45,4 @@ NOT_IMPLEMENTED = {
               "projections carry a bias the dense one does not cover; the MoE FFN has to "
               "compose with sliding-window layers, which no recipe does today; and the "
               "engine needs YaRN position tables. See .claude/plans/gptoss-attention-sinks.md",
-    "lfm2": "ten of its sixteen layers replace attention with a short depthwise causal "
-            "convolution (the short_conv layer type), and no designs/short_conv exists to "
-            "run one. The fp64 reference and the element accounting are in "
-            ".claude/plans/lfm2-short-conv.md; the attention half also needs its geometry "
-            "(64, 32, 8, 64, True, False, False, False) validated in catalogue.py",
 }

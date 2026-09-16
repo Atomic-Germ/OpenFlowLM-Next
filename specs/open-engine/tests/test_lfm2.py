@@ -167,7 +167,9 @@ def test_no_shipped_models_hash_moved():
     Adding a member to the `layer_types` tuple cannot: no shipped spec uses it. These are
     the hashes at the commit before the short-conv layer type existed. qwen25-3b joined
     after, when Qwen2.5 was measured onto the fast attention path; its hash is the one the
-    engine logs for the installed container."""
+    engine logs for the installed container, and lfm2-1.2b joined the same way. The lfm2
+    entry is also the one spec here whose own family owns the new layer type, so it is
+    what would catch a `short_conv` change that moved the hash."""
     import pathlib
 
     from recipes.load import load_spec
@@ -182,6 +184,7 @@ def test_no_shipped_models_hash_moved():
         "qwen3-4b.json": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
         "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
         "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
+        "lfm2-1.2b.json": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
@@ -197,24 +200,32 @@ def test_the_conv_geometry_rides_on_fields_that_already_exist():
         assert key not in d, key
 
 
-# ---- routing: no kernels yet, so say so by name
-def test_lfm2_has_no_recipe_yet_and_the_error_names_the_gap():
+# ---- routing
+def test_lfm2_routes_to_its_own_recipe_not_the_dense_one():
+    """Routing it to `dense` would build a layer with attention where the conv belongs and
+    then report parity against a replica making the same mistake."""
+    from recipes import lfm2 as LR
+    assert families.family_module("lfm2") is LR
+
+
+def test_a_family_with_no_recipe_still_says_so_by_name():
+    """The NOT_IMPLEMENTED table is the standing rule's mechanism; lfm2 left it when the
+    design landed, and gptoss is what it holds now."""
     with pytest.raises(NotImplementedError) as e:
-        families.family_module("lfm2")
-    msg = str(e.value)
-    assert "lfm2" in msg and "short_conv" in msg
-    assert "designs/short_conv" in msg, "the error should name the design that is missing"
+        families.family_module("gptoss")
+    assert "gptoss" in str(e.value)
 
 
-def test_lfm2_is_not_in_the_implemented_family_list():
-    """FAMILIES is what `family_module` serves; an entry there means kernels exist."""
-    assert "lfm2" not in families.FAMILIES
+def test_lfm2_is_in_the_implemented_family_list():
+    """It joined when designs/short_conv landed; the catalogue points followed with the
+    hardware pass on 2026-09-13 (OPEN-SHORT-CONV-KERNEL)."""
+    assert "lfm2" in families.FAMILIES
 
 
-def test_for_spec_refuses_an_lfm2_spec_the_same_way():
+def test_for_spec_routes_an_lfm2_spec_to_its_own_recipe():
+    from recipes import lfm2 as LR
     spec = ModelSpec.from_hf_config(HF_LFM2_1_2B)
-    with pytest.raises(NotImplementedError, match="short_conv"):
-        families.for_spec(spec)
+    assert families.for_spec(spec) is LR
 
 
 def test_the_dense_and_qwen35_recipes_refuse_an_lfm2_spec():
@@ -225,14 +236,16 @@ def test_the_dense_and_qwen35_recipes_refuse_an_lfm2_spec():
         qwen35.recipe(spec)
 
 
-def test_the_attention_geometry_is_not_in_the_catalogue_yet():
-    """qk_norm at head dim 64 over 32 heads and 8 kv heads has not been run. Llama 3.2 1B's
-    tuple is the same shape WITHOUT the norms, which is exactly the near-miss OPEN-OP-RANGE
-    exists to catch."""
+def test_the_attention_geometry_entered_the_catalogue_as_a_whole_tuple():
+    """qk_norm at head dim 64 over 32 heads and 8 kv heads passed on 2026-09-13. Llama 3.2
+    1B's tuple is the same shape WITHOUT the norms, the near-miss OPEN-OP-RANGE exists to
+    catch, so the tuple is accepted with the norms and a gate on top is still refused."""
     from recipes.catalogue import require
-    with pytest.raises(OpRangeError, match=r"\(64, 32, 8, 64, True, False, False, False\)"):
+    require("attn", head_dim=64, num_heads=32, num_kv_heads=8, rotary_dim=64,
+            rope_theta=1e6, qk_norm=True, attn_gate=False)
+    with pytest.raises(OpRangeError, match=r"\(64, 32, 8, 64, True, True, False, False\)"):
         require("attn", head_dim=64, num_heads=32, num_kv_heads=8, rotary_dim=64,
-                rope_theta=1e6, qk_norm=True, attn_gate=False)
+                rope_theta=1e6, qk_norm=True, attn_gate=True)
 
 
 # ---- the per-role weight format
