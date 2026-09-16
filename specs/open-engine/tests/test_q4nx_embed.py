@@ -99,6 +99,29 @@ def test_embed_refuses_a_hidden_that_is_not_the_row_width(table):
         assert str(HIDDEN) in str(e.value)
 
 
+def test_the_replica_refuses_the_padded_width_the_ENGINE_zero_extends(table):
+    """OPEN-EMBED-STRIDE deliberately leaves the two readers different, and the difference
+    is worth a test of its own so nobody closes it by hand.
+
+    `Q4nxFile::bf16_row` (src/open_qwen36/q4nx_file.cpp) takes the stride from the
+    container's own trailing shape dimension and ZERO-EXTENDS to whatever width the caller
+    asked for, because the engine's residual buffer may be padded above the model's width
+    (OPEN-WIDTH-PAD puts GPT-OSS's 2880 at 3072). The fp64 replica has no padded buffer --
+    it computes at the model's own width throughout -- so for it a `hidden` wider than the
+    row is not a pad, it is a caller that has confused the two widths, and reading 3072
+    values from a 2880-wide row would be the original bug rather than the fix for it.
+
+    What the two readers must never do is disagree about a VALUE, and they do not: both
+    read row `n` at `n * row_width * 2`, and the engine's extra entries are zeros against
+    weights that are zero-padded at the same width."""
+    q, expected = table
+    with pytest.raises(ValueError) as e:
+        q.embed(0, HIDDEN + 64)
+    assert str(HIDDEN) in str(e.value) and "stride" in str(e.value)
+    # and the row it does return is the one the engine's first `row_width` entries hold
+    np.testing.assert_array_equal(q.embed(VOCAB - 1, HIDDEN), expected[VOCAB - 1])
+
+
 def test_embed_default_hidden_is_not_a_silent_guess(table):
     """`embed()`'s default is hidden=2048. On a table of another width that must raise
     rather than read 2048 values from an 8-wide row."""

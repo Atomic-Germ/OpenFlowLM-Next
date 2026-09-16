@@ -599,6 +599,168 @@ as at Q4_K. Unpinning it matches the shipped model and the sibling configs.
 Still open: the fp64 slice comparison, whose kernels are unchanged by this requirement, so
 their correlation is the one OPEN-FAMILY-QWEN35 already records.
 
+### OPEN-QUANT-MXFP4: the readers decode GPT-OSS's MXFP4 expert chunks
+**Applies to:** openflowlm-next (`open_kernels/model/mxfp4.py`)
+**Test category:** unit
+**Tests:** `tests/test_mxfp4_decode.py`
+
+GPT-OSS ships its experts as MXFP4 - 4-bit FLOAT, sixteen unevenly spaced levels sharing one
+E8M0 exponent byte per 32 values - where every other quantized form the engine reads is
+4-bit or 8-bit integer. The reader shall decode a 2560-byte MXFP4 chunk to a defined
+(32, 128) value array, and the branchless integer form the AIE tile computes shall agree
+with the table on every code.
+
+Layout, and the chunk is 32 rows by 128 columns: 128 E8M0 bytes at `[0, 128)` indexed
+`g*32 + r`; 384 pad bytes at `[128, 512)` of which bytes 128..191 carry 32 bf16 output biases
+in column block 0 only; 2048 nibble bytes at `[512, 2560)` indexed `(rg*64 + c)*16 + i`, with
+the even/odd column split the converter pre-applies. Value is
+`KVALUES[nibble] * 2^(e8m0 - 128)` with KVALUES twice the e2m1 levels - which makes them
+integers, and is what lets a GEMV keep its multiply integer (`.claude/plans/gptoss-mxfp4-gemv.md`).
+
+**Acceptance criteria:**
+- Eight real chunks cut from the shipped container - spanning gate, up and down slabs at four
+  column blocks, checked in as `fixtures/gptoss_mxfp4_chunks.npz` - decode element for
+  element to their recorded values, under both the table and the tile's integer formula.
+- `decode_int` equals `KVALUES` for all 16 codes, and four near-miss ladders (no doubling
+  above 6, either knee moved, plain linear) do not.
+- The sign bit is 0x08 and not 0x10.
+- Every decoded scale is exactly a power of two, since E8M0 carries no mantissa.
+- A column-block-0 chunk's padding holds a finite non-zero bias; a later column block's holds
+  zeros.
+- Raw codes and decoded values are not the same test: flipping every +0 code to -0 changes
+  the codes and changes no value. A test asserting code equality against upstream fails on a
+  decoder that is exact, because this container's GGUF source normalises the sign of zero -
+  about 7% of codes differ where no value does.
+
+**Verified by mutation 2026-09-14:** dropping the doubling above 6, swapping the row-split
+halves, and reshaping the scale array transposed each break two tests. The suite is not
+passing by construction.
+
+### OPEN-PACK-CHUNK-FUSE: two half-width chunks make one pool chunk
+**Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`)
+**Test category:** unit (`tests/test_chunk_fuse.py`, `src/open_qwen36/pools_test.cpp`)
+
+`q4nx-build/configs/gpt-oss.json` is the only config with `col_block_size` 128, so a
+GPT-OSS container holds 32 rows by 128 columns in each 2560-byte chunk where every other
+family holds 32 by 256 in 5120. The packer shall place such a tensor with its own op,
+`std_fuse`, which locates the k-tile's two 128-column halves in the container's supertile
+raster and fuses them into one pool chunk, synthesising an all-zero chunk for a column
+block past the container's own width.
+
+**It is q4_1, in the ordinary layout.** `d[128]` as bf16 at byte 0, `m[128]` at 256, 2048
+nibble bytes at 512 -- the same format the engine already reads, at half the columns. The
+`I8` dtype these tensors carry is how every quantized tensor ships in a `.q4nx` container,
+not a claim about the format; the experts at the same 2560 bytes are MXFP4 and ship as U8
+(OPEN-QUANT-FORMAT).
+
+**The fuse is eight byte-slice copies and no arithmetic.** The meta index is `b * 32 + r`,
+which puts the low half's four blocks at metas 0..127 and the high half's at 128..255; the
+nibble raster `(r // 16) * 512 * nb + b * 512 + i * 16 + (r % 16)` splits each source into
+two 1024-byte planes by row half. So the copies are d from A then B, m from A then B, then
+plane 0 from A, plane 0 from B, plane 1 from A, plane 1 from B -- interleaved, not
+concatenated, which is the mistake the layout invites.
+
+**The file raster is a supertile, and only this converter writes one.** Row block `rb` is
+supertile `rb // rg` at position `rb % rg`, and its column block `q` lands at
+`(rb // rg * ncol128 + q) * rg + rb % rg`; `rg` is 4 for the attention projections and the
+experts and 2 for the `lm_head`. At `rg = 1` it reduces to the plain `rb * ncol + q` every
+other family uses. Reading this container on the plain raster produces a full, plausible,
+wrong pool, which is why the test asserts the two rasters disagree rather than only that
+the supertile one round-trips.
+
+**The pad is the same pass.** K = 2944 is 23 column blocks, an odd count, so a 3072-wide
+pool's last k-tile has no high half in the container. It is synthesised as 2560 zero bytes,
+and `d = m = 0` reads as exactly 0.0 -- so the fuse and the 2944-to-3072 pad happen
+together rather than as a pack followed by a zero fill.
+
+**Acceptance criteria:**
+- A fused chunk read with the shipped `q4nx.dq_chunks_q4_1` has the low source's values at
+  blocks 0..7 -- 0..3 from the low half, 4..7 from the high -- against a half-width reader
+  written from the format definition rather than from the packer.
+- Three near-miss interleavings (plain concatenation, the two nibble planes exchanged, the
+  high half's `d` and `m` exchanged) each produce a different reading. The fuse is a byte
+  permutation: the pool chunk's bytes are exactly the two sources', each once.
+- `supertile_perm` is a permutation of `range(nrb * ncol128)`, is not the plain raster at
+  `rg` 4 or 2, and is the plain raster at `rg` 1. A partial supertile is refused.
+- `std_fuse` over a 2944-wide container into a 3072-wide pool places every pool chunk as
+  the band law's (row block, k-tile) located in the supertile raster, and the synthesised
+  24th column block reads back identically zero.
+- Packing the same fixture on the plain raster gives a different pool for most chunks --
+  the fixture discriminates.
+- The NumPy and C++ interpreters produce byte-identical pools over
+  `lcg_bytes(0x5EEDFACE, 8 * 23 * 2560)`: FNV-1a `0x21f7e3b732137cb2`, asserted on both
+  sides.
+- A container at 5120 is refused by `std_fuse`, naming both widths; a pool width that is
+  not a whole number of 256-column k-tiles is refused (OPEN-WIDTH-PAD's guard, shared
+  through `band_rowblock_ktile`); a source width that is not a whole number of 128-column
+  chunks is refused; a pool narrower than the container is refused; and a tensor whose
+  chunk count does not match the widths it claims is refused, naming the count it needs.
+- `test_pack_plan.py`'s frozen q4_1 pools are byte-identical before and after: `std_perm`
+  now defers to the shared band law rather than restating it, and the bytes do not move.
+
+**Verified by mutation 2026-09-15:** writing the nibble planes A0 A1 B0 B1 instead of
+A0 B0 A1 B1, swapping the high half's `d` and `m`, writing the supertile as the plain
+raster, and pointing the synthesised column block at the last real chunk each break at
+least one test. The suite is not passing by construction.
+
+**Not covered here.** The expert tensor's own slab order is a separate law over the fused
+`ffn_gate_up_down_exps.weight` (OPEN-PACK-EXPERT-ORDER). `std_fuse` is the attention
+projections and the head.
+
+### OPEN-PACK-EXPERT-ORDER: which slab of the fused expert tensor is gate, up and down
+**Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`)
+**Test category:** unit (`tests/test_expert_order.py`)
+
+`q4nx-build`'s GPT-OSS path fuses one layer's gate, up and down for every expert into a
+single `ffn_gate_up_down_exps.weight`, shaped `[E, 3 * nslab, ncol128, rg, 2560]` -- the
+shipped 20B's is `[32, 69, 23, 4, 2560]`. Nothing in the container names the three
+projections. The packer shall read the slabs as **gate and up alternating every 128 rows
+over the first `2 * nslab`, then down as one contiguous block**, and shall locate a
+projection's row block within that using the same supertile raster as the attention
+tensors (OPEN-PACK-CHUNK-FUSE), so a logical output row decomposes as
+`(row // 128, (row % 128) // 32, row % 32)` -- slab, quarter, row in chunk.
+
+**Why this needs measuring rather than reading off the shape.** The other plausible
+reading -- three projections concatenated -- agrees with this one on down and swaps gate
+and up. A packer that picks wrong feeds the clamped SwiGLU its two halves the wrong way
+round, which is finite, plausible and silent: `(up + 1) * gate * sigmoid(1.702 * gate)`
+evaluates perfectly well with the arguments exchanged, so nothing raises and only output
+quality moves.
+
+**The lever is the bias the converter writes twice.** `q4nx/models/gpt_oss.py` puts the
+32 bf16 output biases at byte 128 of every column-block-0 chunk AND ships the named
+`mlp.experts.{gate,up,down}_proj_bias` tensors. The duplicate distinguishes the three
+projections by VALUE, so the order is pinned with no ambiguity and no appeal to the
+converter's source.
+
+**Acceptance criteria:**
+- `expert_slabs(nslab)` is `[3, nslab]`, gate at `2s`, up at `2s + 1`, down at
+  `2 * nslab + s`, and uses every slab of `range(3 * nslab)` exactly once.
+- `expert_chunks(nslab, ncol128, rg)` is `[3, nslab * rg, ncol128]` and is a permutation of
+  one expert's whole chunk range -- a map that aliases would pack one slab's bytes over
+  another's with nothing raised.
+- Against the shipped container's own bytes, for all 69 slabs of two experts: the 128
+  biases carried in a projection's slab's four column-block-0 chunks equal the named
+  `*_proj_bias` rows `128s .. 128s + 127` for the role and slab the map predicts.
+- Four near-miss orders (three concatenated projections, gate and up exchanged, down
+  first, all three alternating) each fail to reproduce those biases, and so does reading
+  the tensor on the plain `rowblock * ncol + column` raster every other converter writes.
+- The three roles' biases are non-zero and pairwise different, so the check above cannot
+  pass on an order it did not measure.
+- The rows past the projections' real 2880 -- 64 of the last slab's 128 -- are zero in the
+  container, so a packer does not have to zero the tail itself.
+
+**Measured 2026-09-15** on `GPT-OSS-20B-NPU2`'s 14.4 GB container at layers 0, 7 and 23:
+every one of the 69 slabs matches exactly one (role, slab) pair, with no slab ambiguous at
+any of the three layers, and the expert stride holds at expert 31 as well as 0 and 1. The
+checked-in fixture (`make_gptoss_fixtures.py`, which also reproduces
+`gptoss_mxfp4_chunks.npz` byte for byte) carries experts 0 and 31, so the test needs
+neither the container nor the network.
+
+**Not covered here.** This is the SOURCE law -- where a given expert weight lives in the
+file. Where it then goes in the pool is the MoE block's layout, which is open
+(OPEN-MOE-WIDE-FF), so there is no `apply_op` kind for the experts yet.
+
 ### OPEN-FAMILY-QWEN36MOE: greedy agreement with the fp64 reference on the 27B
 **Applies to:** openflowlm-next (`src/open_qwen36/`)
 **Test category:** manual (needs the NPU and the model)
@@ -1641,15 +1803,59 @@ OPEN-PACK-Q4-0 went unnoticed.
 - `family_module("gptoss")` raises `NotImplementedError` whose message names the sink, the
   clamped SwiGLU and the extra biases; `"gptoss"` is in neither `FAMILIES` nor
   `DENSE_FAMILIES`.
+- **The adapter selects the open engine (manual).** `GPT_OSS::load_model` calls
+  `_shared_select_open_engine("OFLM_GPTOSS_ENGINE", "GPT-OSS")` like its twelve siblings,
+  and `checkpoint()` / `restore()` go through the `causal_lm` base pointer. Until this
+  landed, the class built `gpt_oss_npu` unconditionally, so an exported kernel set would
+  have been silently ignored, and the `dynamic_cast<gpt_oss_npu*>` behind it returns null
+  on the open engine with nothing checking it -- a null dereference on the first prompt.
+  Verify with `oflm serve gpt-oss:20b`: with no kernel set installed and
+  `OFLM_GPTOSS_ENGINE=open` the load fails with `OFLM_GPTOSS_ENGINE=open but no open
+  kernels were found for GPT-OSS-20B-NPU2`, before any weights are read; with the variable
+  unset it loads the closed DLL as before.
+
+  **Result 2026-09-14:** both arms confirmed on the shipped container. Forced-open refuses
+  by name; unset loads `gpt_oss_npu` and serves. No open kernel set exists for this family
+  yet, so the open arm cannot go further than the refusal -- that is the point of wiring it
+  now, since without it no future export is testable at all.
 - `quant_map_from_chunk_sizes("gptoss", ...)` reads the tensor names `q4nx-build` writes
   (`configs/gpt-oss.json`) and refuses a role at two formats.
+- **The real container derives `{"experts": "mxfp4"}`** (done 2026-09-14). The role table
+  names the fused `ffn_gate_up_down_exps.weight` the converter actually writes, and
+  `container_chunk_bytes` counts U8 as quantized alongside I8 - reading only I8 left the
+  expert tensor out of the map entirely, which is how a container with 4-bit-float experts
+  derived the everything-is-q4_1 default. Measured on the shipped 14.4 GB container: 97 I8
+  projections and 24 U8 expert tensors, all at 2560 bytes, giving exactly that map.
+- **2560 is ambiguous by byte count and is refused without dtypes.** GPT-OSS ships q4_1
+  projections and MXFP4 experts at the same chunk size, so `CHUNK_FORMAT` deliberately does
+  not contain 2560; `AMBIGUOUS_CHUNK` resolves it by dtype (I8 q4_1, U8 MXFP4) and raises
+  naming both readings when the caller has no dtypes. Guessing here would silently describe
+  a container that does not exist.
+- **A tensor whose role the packer PLACES, at a chunk size the reader does not know, is
+  refused by name.** It used to `continue`, leaving the role at the q4_1 default. Tensors
+  with no placed role - norms, biases - are still ignored, or every model would stop
+  loading. Shipped containers are unmoved: the all-q4_1 ones still derive `{}` and
+  Ornith-1.5's four q8 roles are unchanged, so no `spec_hash` moves.
 
 **The widths, before any of that.** Hidden 2880 is 45 bands of 64 and shares no factor above
 1 with the q width's 64 bands or the kv width's 8, so `dense.cores_for` gives GPT-OSS 20B a
 single core -- not the four Gemma 3 12B's 3840 gets, which measured nearly free, but an
 eighth of the array. Padding hidden and the expert width to 3072 gives 8, and the same pad
-makes the q4_1 chunk's 256 columns tile (2880 is 11.25 of them). No recipe derives a padded
-width today, and nothing below matters until one does.
+makes the q4_1 chunk's 256 columns tile (2880 is 11.25 of them). See OPEN-WIDTH-PAD.
+
+**The container, which was read after the paragraph above was written.** Every quantized
+tensor ships in a 2560-byte chunk covering 32 rows by 128 columns, where every other family
+is 5120 over 32 by 256; two adjacent chunks fuse into one pool chunk by byte copies alone.
+The container pads K to 2944 and `o_proj`'s output to 3072 itself. The attention projections
+and the `lm_head` are ordinary q4_1 -- their `I8` dtype is how every quantized tensor ships,
+not a format claim -- while the experts are MXFP4, 4-bit float with a shared E8M0 exponent
+per 32, in one fused `ffn_gate_up_down_exps.weight` per layer. `config.json`'s own
+`modules_to_not_convert` names that split. The expert biases ship twice: as named tensors and
+inside each chunk's padding at byte 128. The projections and the head are packed by
+`std_fuse` (OPEN-PACK-CHUNK-FUSE), the experts decode by OPEN-QUANT-MXFP4 and their slab
+order is settled by OPEN-PACK-EXPERT-ORDER; what the experts still have no pack op for is
+the destination, which waits on the MoE block's layout (OPEN-MOE-WIDE-FF). `.claude/plans/gptoss-bringup.md` has the decoded layouts and the
+ordered work.
 
 **What a recipe would still need** (not requirements yet; each earns its own when it is
 built): the padded widths above, the sink in the attention core (OPEN-ATTN-SINK), a
@@ -1714,14 +1920,39 @@ explicitly excludes.
   says the 1e-5 is transformers' rounding and not a missing piece.
 
 ### OPEN-WIDTH-PAD: the padded width a recipe may derive, and what it does not settle
-**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
+`open_kernels/recipes/pack.py`)
 **Test category:** unit (`tests/test_width_pad.py`)
 
 `pad_width(w, n_cores)` shall give the smallest width at or above `w` that a pool can
-be built at: a multiple of `BAND_ROWS * n_cores`, which is also a multiple of the q4_1
-chunk's 256 columns, so one rounding satisfies both the band law `dense.cores_for`
-applies and the whole-chunk rule `q4_bytes` enforces. At a family's OWN core count it
-is always the identity, so no shipped kernel set can move.
+be built at: a multiple of `lcm(BAND_ROWS * n_cores, 256)`, which satisfies at once the
+band law `dense.cores_for` applies and the 256-column k-tile both `q4_bytes` and the
+pack index law count in. At a family's OWN core count it is always the identity, so no
+shipped kernel set can move.
+
+`BAND_ROWS * n_cores` alone is enough at eight cores and at four, where it is 512 and
+256 -- already whole k-tiles -- and that is why one rounding was recorded as sufficient
+for as long as every shipped family got four or more. At one and two cores it is 64 and
+128, and the rounding lands short: 2880 stayed 2880 at one core and became **2944** at
+two, which is the worst width available. `band_bytes(2944)` returns cleanly, and only
+then do the two laws underneath disagree with it.
+
+So the two laws refuse for themselves rather than trusting the width they were handed:
+
+- `per_band(K)` shall raise on an odd chunk count. The GEMV runs `rs = 2` -- chunk `i`
+  of a band covers row half `i % 2` and k-tile `i // 2` -- so a band is always an even
+  number of chunks, and `per_band(2944)` returning 23 is a band no walk can consume.
+  The check is inside `per_band`, not in a catalogue entry, so
+  `OPEN_KERNELS_UNVALIDATED` cannot soften it.
+- The pack index laws -- `pack.std_perm`, `pack.q8_perm`, and their C++ twins in
+  `pools.cpp` -- shall raise when `in_dim` is not a whole number of 256-column k-tiles.
+  `ncol = in_dim // 256` floors, so at 2944 `std_perm` returned an index array that
+  ALIASES -- 1409 distinct file chunks selected for 1472 pool slots -- and nothing in
+  `apply_op` or above it looked. A corrupt pool with nothing raised is the outcome this
+  guard exists for. `q8_perm` floors identically and gets the same guard: leaving it out
+  would keep the corrupt pool reachable through every q8 projection. The C++ interpreter
+  gets it because the two must refuse the same things, not only produce the same bytes --
+  a manifest carrying a bad width would otherwise pack silently there.
 
 This exists for GPT-OSS-20B, whose hidden and expert widths are both 2880. The
 earlier record said 2880 "gets one core of eight". That is true and it understates the
@@ -1735,15 +1966,31 @@ clears three blockers and leaves a fourth, and the tests name each:
 - **Chunk arithmetic.** `band_bytes(2880)` raises before any core count matters -- a
   64-row band of a 2880-wide matrix is not a whole number of 8192-value chunks. This
   is raised inside `q4_bytes`, so `OPEN_KERNELS_UNVALIDATED` cannot soften it. 3072
-  is fine. **This, not the core count, is what stops a build first.**
+  is fine. **This was recorded as what stops a build first, and it is not**, because
+  the container does not ship 2880 on a quantized axis: it pads K to 2944 itself, and
+  `band_bytes(2944)` returns cleanly with `per_band` 23. 23 is odd, which breaks the
+  `rs=2` band law, and `pack.std_perm` then floored `2944 // 256` to 11 and returned a
+  non-injective index array -- 1409 distinct file chunks for 1472 pool slots, with no
+  guard in `apply_op` or anywhere else. The container's own width gave a silently
+  corrupt pool rather than a refusal, which makes this requirement's conclusion more
+  important, not less. **Both guards landed 2026-09-15** and are stated above; the
+  rounding is now an lcm so a low core count cannot produce 2944 in the first place.
 - **The norm's validated widths.** 2880 is outside `ln`'s validated set
   {1024, 2048, 2560, 3072, 3840, 4096}; 3072 is in it, on the point Phi-4-mini
   already uses.
 - **The MoE core scratch -- NOT fixed by any width.** The main core must hold xm's
   activation table and the expert h's at once, and `tab_bytes` is 2.25K, so at
-  3072/3072 the two want 13824 bytes against the 9216 the widest single width
-  reserves. `qwen36moe.common` refuses the padded spec too. The 27B fits only
-  because its expert width is 512 against hidden 2048.
+  3072/3072 the two want 13824 bytes. The reservation they want it against is
+  `tab_bytes(wide)`, and `wide` is the 4096 q projection only when `has_full` is set:
+  GPT-OSS derives `dense`/`dense_local` layer types, so `has_full` is False and `wide`
+  falls back to hidden, making the reservation 6912. Twice over, not the 1.5 times an
+  earlier version of this paragraph recorded against 9216. `qwen36moe.common` refuses
+  the padded spec either way. The 27B fits only because its expert width is 512
+  against hidden 2048; GPT-OSS's expert width EQUALS its hidden, which is the deeper
+  problem and breaks three more parts of the MoE block besides this one
+  (OPEN-MOE-WIDE-FF, where they are enumerated and measured). **The scratch is no
+  longer the FIRST refusal**: since 2026-09-15 the stripe assignment is checked before
+  it, and that is the one a padded GPT-OSS hits.
 
 **And padding the norm would be wrong even where it builds.** `designs/ln/ln.h`
 divides the sum of squares by the width it was COMPILED at (`LN_N`), so a 3072-wide
@@ -1761,14 +2008,151 @@ at the model's own width.
 - `cores_for` on gpt-oss-20b's own widths is 1, and 8 once hidden and the expert width
   are padded to 3072.
 - `band_bytes(2880)` raises naming the chunk rule; `band_bytes(3072) == 122880`.
+- `band_bytes(2944)` does NOT raise -- it returns 117760 -- and `per_band(2944)` does,
+  naming the 23 chunks. `per_band(3072) == 24`, `per_band(2048) == 16`.
+- `std_perm(1472, 2944)` raises naming 2944; `std_perm(1536, 3072)` returns 1536
+  distinct indices. `q8_perm(2944, ...)` raises the same way and `q8_perm(3072, ...)`
+  returns distinct (chunk, half) pairs.
+- `pools.cpp` refuses `std_perm` and `q8_perm` at `in_dim` 2944, each naming the op and
+  the byte count, and packs unchanged at a width that does tile (`pools_test.cpp`).
+- `pad_width(2880, n) == 3072` for `n` in 1, 2, 4 and 8, and at each the result's
+  `per_band` is even and its `std_perm` is injective over a full band pair.
 - `ln` at width 2880 is refused by the catalogue and at 3072 is not.
-- `qwen36moe.common` on the PADDED gpt-oss spec still raises, naming the core scratch.
+- `qwen36moe.common` on the PADDED gpt-oss spec still raises, naming the stripe
+  assignment; with an expert width that assignment accepts it raises again, naming the
+  core scratch. The two are pinned separately so neither hides behind the other.
 - sqrt(3072/2880) == 1.0328 to 5e-5, the factor a padded norm would put on every layer.
 
-**Still needs the model or the NPU:** whether 8 cores beats 1 by enough to justify
-6.7% more weight bytes (nothing in this tree measures 8-vs-1); and the container's
-chunk geometry -- `q4nx-build/configs/gpt-oss.json` is the only config with
-`col_block_size` 128 rather than 256, a 4096-value chunk the open packer refuses.
+**Still needs the NPU:** whether 8 cores beats 1 by enough to justify 6.7% more weight
+bytes. Nothing in this tree measures 8-vs-1.
+
+**The chunk geometry is settled and was the open question here.**
+`q4nx-build/configs/gpt-oss.json` is indeed the only config with `col_block_size` 128
+rather than 256. That makes a 2560-byte chunk of 32 rows by 128 columns, and it is
+q4_1 in the ordinary layout -- `d[128]` as bf16 at byte 0, `m[128]` at 256, 2048
+nibble bytes at 512 -- so two adjacent chunks fuse into one 5120-byte pool chunk by
+eight byte-slice copies with no arithmetic. **The packer reads it as of 2026-09-15**,
+through its own op rather than through `std_perm`, because the file raster is a
+supertile as well as half-width: OPEN-PACK-CHUNK-FUSE. The container also pads K to
+2944 on its own, which is what makes `band_bytes(2880)` the wrong refusal to reason
+about, and the pad from 2944 to the pool's 3072 falls out of the same op.
+
+### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
+**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
+`open_kernels/designs/layer_x/xcommon.py`)
+**Test category:** unit (`tests/test_width_pad.py`) for the refusals and the budget;
+`manual` for the rebuilt block, which needs the WSL toolchain and the NPU
+
+Qwen3.6's expert intermediate is a QUARTER of its hidden -- 512 against 2048 -- and
+`qwen36moe`'s hand-placed core layout assumes that ratio in more places than it states.
+GPT-OSS's expert intermediate EQUALS its hidden, 2880 against 2880, and each of the
+assumptions below shall be refused by name until the block is rebuilt, rather than
+producing a zero divisor, an over-budget core or a plausible wrong layout.
+
+**The stripe assignment, and it is the first refusal.** `moe_sequence` computes a core's
+source offset as `(2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR`, with
+`cps = n_cores // stripes_per_proj`. That splits ONE 128-row stripe across several cores,
+which only works while the stripe count DIVIDES the core count. At ff == hidden == 3072
+there are 24 stripes over 8 cores, `cps` is 0, and `c // cps` is a division by zero. The
+generalisation each core owning `24 // 8 = 3` stripes is a different host sequence, not a
+different constant.
+
+**The core scratch.** `tab` is sized `tab_bytes(widest K)`, and the expert hidden's table
+sits inside it past xm's. `wide` collapses to the hidden itself on a family with neither
+linear-attention nor full-attention layers -- which GPT-OSS is -- so the reservation is
+6912 while the two tables want 13824. Exactly twice over.
+
+**The expert hidden's element count.** `moe_sequence` broadcasts `h` as ONE 4096-byte act
+element. At ff 3072 it is 12288 bytes, exactly three. The drain side already scales (each
+core drains `HID_PC * 4`); only the broadcast fill assumes one.
+
+**The prep kernel's K.** `gemv_q4_prep_f32` builds h's table at the expert width, and the
+catalogue's validated `moe` point is `ff: 512`. K = 3072 is a new point and needs its own
+compare run.
+
+**The L1 budget, which did not exist for this tail.** Only the DENSE tail computed a main
+core's L1; the MoE tail took `PER_CALL = 2` on trust, and a layout that overflowed would
+have been found by aiecc, which does not print the shortfall. A main core holds exactly
+six things and a stack -- the table, `ms`, `ds`, then depth-2 fifos for the weight, x and
+y elements -- so the budget is arithmetic and `core_l1` is now the one place both tails
+compute it.
+
+**Measured 2026-09-15, which is what turns this from a wall into a sizing change.** At
+the padded 3072/3072 a main core comes to **56,960 bytes of the 61,440 budget, 4,480 to
+spare** -- against the shipped 27B's 53,376. But that margin exists only because GPT-OSS
+has no linear-attention layers: `DS_FLOATS` is a hard 1280 on the MoE path regardless, and
+keeping that 5,120-byte DeltaNet scratch on a core whose kernels never touch it puts the
+total at 62,080, **640 bytes over**. So the block fits, and one of the things that makes
+it fit is dropping a buffer the family does not use. That is a sizing decision, not a
+budget to be discovered during a build.
+
+**Acceptance criteria:**
+- `common()` on the padded GPT-OSS spec raises naming the stripes per projection and the
+  core count; the 24-over-8 count and `8 // 24 == 0` are asserted, so the message is
+  about a zero divisor rather than a tight fit.
+- With an expert width the stripe assignment accepts, `common()` raises again naming the
+  core scratch, and `tab_bytes(3072) * 2 == 13824`. The two refusals are pinned
+  separately so neither hides behind the other.
+- `core_l1` on the shipped 27B is 53,376 and is inside `L1_BUDGET`; a spec with twice the
+  27B's attention heads is refused naming the budget and the overshoot.
+- Both tails compute L1 through `core_l1`; the dense tail's `per_call` result is unchanged
+  for every spec in `recipes/specs/`.
+
+**Verification (manual), once the block is rebuilt.** The four assumptions above become
+four new catalogue points (`moe` at `ff` 3072 and `hidden` 3072, `gemv_q4` prep at
+K 3072), each needing a compare run against `replica_gptoss.moe_block` the way
+OPEN-FAMILY-QWEN36MOE's does. Until then this requirement is the refusals and the budget,
+which is what a recipe meets first.
+
+### OPEN-EMBED-STRIDE: an embedding row is read at the container's width, not the buffer's
+**Applies to:** openflowlm-next (`src/open_qwen36/q4nx_file.cpp`, `core.cpp`,
+`open_kernels/model/q4nx.py`)
+**Test category:** unit (`src/open_qwen36/pools_test.cpp`, `tests/test_q4nx_embed.py`)
+
+`Q4nxFile::bf16_row` shall take the source row stride from the tensor's own trailing shape
+dimension and zero-extend the row to the width the caller asked for, refusing a width
+NARROWER than the container's row.
+
+`Core::step_impl` passes the manifest's `hidden` as both the destination width and the
+source stride. That is the same number for every family shipped today. It stops being the
+same number the moment a recipe derives a padded buffer width (OPEN-WIDTH-PAD puts
+GPT-OSS's 2880 at 3072 against a `[201088, 2880]` embedding), and then row `n` is read
+`n * (3072 - 2880) * 2` bytes too far. The bounds check was computed at the padded stride
+as well, so it did not fire until row 188,519: **94% of the vocabulary came back silently
+wrong and the top 6% threw.** The final norm's own size check catches its case loudly; the
+embedding had nothing.
+
+**Why the container and not a manifest field.** The obvious fix is to carry the padded
+buffer width and the model's own width as two manifest fields and hand `bf16_row` both.
+The container already knows its row width, in the header it was read from, and a second
+copy in the manifest is a second thing that can disagree with it. Taking the stride from
+the tensor cannot be got wrong by a future recipe, and needs no manifest change, so no
+shipped manifest or fixture moves.
+
+**The Python replica deliberately does not zero-extend.** `Q4NX.embed` keeps refusing a
+`hidden` that is not the table's row width. The engine zero-extends because its residual
+buffer is padded; the fp64 replica computes at the model's own width throughout, so a
+wider `hidden` there is a caller confusing the two widths rather than a pad. The two never
+disagree about a value: both read row `n` at `n * row_width * 2`, and the engine's extra
+entries are zeros against weights zero-padded at the same width. `test_q4nx_embed.py` pins
+the asymmetry so it is not closed by hand.
+
+**Acceptance criteria:**
+- A synthetic `[7, 2880]` BF16 container read into a 3072-wide buffer returns row 5's own
+  bytes in `[0, 2880)` and zeros in `[2880, 3072)`. Reading at the padded stride would
+  return different values for most columns, and the test asserts that too, so the fixture
+  discriminates rather than merely agreeing.
+- Row 0 is unchanged by the fix (the offset is `row * stride`, so only rows above 0 moved)
+  -- which is why this was invisible to a single-token smoke test.
+- The last real row is readable into a padded buffer. Computed at the padded stride the
+  bounds check refused it; that is the loud half of the same bug.
+- A destination narrower than the container's row is refused, the message naming the
+  container's width.
+- A row past the end is refused, counted at the container's stride.
+- A caller whose width equals the container's reads exactly as before -- the shipped path
+  does not move.
+- `Q4NX.embed` refuses a `hidden` wider than the table's row, naming the width and the
+  stride.
 
 ### OPEN-ATTN-SINK: a learned per-head attention sink logit
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`,
@@ -1827,10 +2211,19 @@ use -- an unused parameter changes the generated code.
   `eager_attention_forward` given the same sinks; cutting it to a sliding window equals
   running it over the window's rows alone (OPEN-GPTOSS-FFN-REF).
 
-**Procedure (manual) -- NOT RUN:**
+**Procedure (manual) -- step 1 DONE, steps 2-4 outstanding:**
 1. Compile `designs/attn/*.cc` for a shipped family's flags from the tree before and after
    and diff the objects: every one must be byte-identical, as OPEN-ATTN-QKV-BIAS step 1 did.
-   Nothing here has been near a compiler; this is the first gate.
+
+   **Result 2026-09-13: passes.** Every `designs/attn/*.cc` compiled at `e0511bd7^` and at
+   `HEAD` under all 11 shipped families' real flag sets, plus two extra sets forcing
+   `ATTN_RB` 2 and 4 so `attn_stepb` is covered: **127 objects byte-identical, 0 differing**,
+   and 3 pairs that fail to compile on BOTH sides because `attn_stepb.cc:22` raises a
+   deliberate `#error` when `ATTN_RB` is unset -- symmetric, so not a difference. Run twice
+   on separate trees with the same result. Peano is in WSL at `~/ironenv142`; the earlier
+   "nothing here has been near a compiler" note was true when written and is not now.
+   The diff shows the rebuild lands on the identical object, NOT that no rebuild happens:
+   `recipes/cache.py` hashes the source bytes, so every family's build key did move.
 2. Give the recipe a `SINK` knob and a `CD_SINK` consts slot of `NH * 2` bytes (`-1` for a
    family without one, as `CD_QB` does), widen the meta fill from `4 * HD` to
    `4 * HD + 2 * NH` bytes, and pack `self_attn.sinks.weight` into it.

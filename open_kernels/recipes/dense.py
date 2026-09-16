@@ -97,9 +97,12 @@ class DenseRecipe:
 # families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
 # query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
 QKNORM_POST_ROPE = ("hunyuan",)
-# families whose q/k/v projections carry a per-channel bias (o_proj and the FFN do not).
-# Like the post-RoPE norm this is a family property, not a spec field: every Qwen2 has it,
-# and spec_hash() covers every field, so a field would move every shipped model's hash.
+# families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
+# is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
+# field, so a field would move every shipped model's hash.
+# o_proj and the FFN have none on the families listed here. GPT-OSS breaks both halves of
+# that - attention_bias covers its o_proj, and all three expert projections carry one - so
+# adding it here is not enough on its own; it needs a fourth consts slot (gptoss-bringup.md).
 QKV_BIAS_FAMILIES = ("qwen2",)
 DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")
 

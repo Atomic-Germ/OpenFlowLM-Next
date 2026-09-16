@@ -53,17 +53,28 @@ def tokenizer_vocab(tokenizer_json: Path) -> int | None:
     return max(ids) + 1 if ids else None
 
 
-def container_chunk_bytes(model_dir: Path) -> dict[str, int]:
+def container_chunk_bytes(model_dir: Path, with_dtypes: bool = False):
     """Every quantized tensor's chunk size, from `model.q4nx`'s safetensors header only
-    (an 8-byte length then the JSON). {} when there is no container to look at."""
+    (an 8-byte length then the JSON). {} when there is no container to look at.
+
+    U8 counts as quantized as well as I8: GPT-OSS's fused expert tensor is MXFP4 and ships
+    as U8, and reading only I8 left it out of the map entirely, which is how a container
+    with 4-bit-float experts derived the everything-is-q4_1 default. `with_dtypes` returns
+    (sizes, dtypes), which is what separates a 2560-byte q4_1 chunk from a 2560-byte MXFP4
+    one."""
     p = Path(model_dir) / "model.q4nx"
     if not p.is_file():
-        return {}
+        return ({}, {}) if with_dtypes else {}
     with open(p, "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
         hdr = json.loads(f.read(n))
-    return {k: int(v["shape"][-1]) for k, v in hdr.items()
-            if k != "__metadata__" and isinstance(v, dict) and v.get("dtype") == "I8" and v.get("shape")}
+    keep = {k: v for k, v in hdr.items()
+            if k != "__metadata__" and isinstance(v, dict)
+            and v.get("dtype") in ("I8", "U8") and v.get("shape")}
+    sizes = {k: int(v["shape"][-1]) for k, v in keep.items()}
+    if not with_dtypes:
+        return sizes
+    return sizes, {k: v["dtype"] for k, v in keep.items()}
 
 
 def narrow_to_buildable(spec: ModelSpec, m: dict[str, str], can: frozenset) -> dict[str, str]:
@@ -96,12 +107,12 @@ def quant_for(spec: ModelSpec, model_dir: Path):
     actually build. OPEN_KERNELS_FORCE_Q4_1 forces the fallback."""
     if os.environ.get("OPEN_KERNELS_FORCE_Q4_1"):
         return "q4_1"
-    sizes = container_chunk_bytes(model_dir)
+    sizes, dtypes = container_chunk_bytes(model_dir, with_dtypes=True)
     if not sizes:
         return spec.quant
     from .families import for_spec
     can = getattr(for_spec(spec), "Q8_ROLES", frozenset())
-    m = {r: f for r, f in quant_map_from_chunk_sizes(spec.family, sizes).items() if r in can}
+    m = {r: f for r, f in quant_map_from_chunk_sizes(spec.family, sizes, dtypes).items() if r in can}
     m = narrow_to_buildable(spec, m, can)
     return m or "q4_1"
 

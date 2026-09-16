@@ -35,9 +35,22 @@ q4_0 architectures land.
 
 There is also a second axis the census turned up — chunk *geometry*. Gemma3-1B
 and 270M use 1280-byte chunks (2048 values), gpt-oss and Whisper 2560 (4096
-values), gemma4 several sizes for its embedding tensors. Those are already
-refused (`q4nx_file.cpp:80`), which is correct; this plan only makes the
-refusal message say what was found rather than guessing "OFLM 1.0.3 / Q4_K?".
+values), gemma4 several sizes for its embedding tensors.
+
+**That paragraph used to say those were "already refused (`q4nx_file.cpp:80`),
+which is correct". Both halves are now wrong.** Nothing is refused at open any
+more — the q8 work moved the check to where a tensor is read, `pools.cpp:163`,
+and `q4nx_file.cpp`'s `chunk_bytes` just returns the trailing dimension. And
+refusing 2560 is not correct: it is the chunk GPT-OSS ships every quantized
+tensor in, q4_1 at 32 rows by 128 columns, and two adjacent ones fuse into one
+5120-byte pool chunk by byte copies alone.
+
+**That fuse landed 2026-09-15 as the `std_fuse` op** (OPEN-PACK-CHUNK-FUSE in
+`spec.md`), in both interpreters, byte-identical. The q4 ops still refuse 2560,
+because the file raster is a supertile as well as half-width and `std_perm`'s
+index law does not hold on it — but their message now names the op that does
+read it rather than calling it "a smaller chunk geometry". See
+`.claude/plans/gptoss-bringup.md`.
 
 ## Why it is cheap
 
@@ -181,7 +194,7 @@ Two consequences worth stating:
   call.
 * **A chunk size that is neither is refused where the tensor is read**, naming
   it, the byte count, and what the count probably is (8704 = q8, 4736 = Q4_K,
-  1280 / 2560 = a smaller chunk geometry).
+  1280 = a smaller chunk geometry, 2560 = GPT-OSS's, which `std_fuse` reads).
 
 ## The cost, and how it is reported
 
