@@ -2582,11 +2582,26 @@ sends are PNG.
   and a JPEG are refused.
 - Hostile inputs are refused by name, because images arrive base64 inside an HTTP
   request and none of these needs an attacker to do anything unusual: a header
-  declaring 65535 x 65535, a decompression bomb (200 MB of zeros in 200 KB), a
-  palette image with no PLTE, a palette index past the end of PLTE, and a zero
-  dimension. The bomb cannot work by construction -- the output buffer is sized from
-  the header, so inflate stops the moment it would exceed it -- and the test says so
-  rather than leaving it to be re-derived.
+  declaring 65535 x 65535, a header declaring 2^31 x 2^30, a header declaring
+  16384 x 16384, a decompression bomb (200 MB of zeros in 200 KB), a palette image
+  with no PLTE, a palette index past the end of PLTE, and a zero dimension. The bomb
+  cannot work by construction -- the output buffer is sized from the header, so
+  inflate stops the moment it would exceed it -- and the test says so rather than
+  leaving it to be re-derived.
+- Two ceilings on the IHDR, and the three size headers above are one test each
+  (added 2026-09-16, `vegah` on PR #92). **No side over 16384**, refused before
+  anything is computed from it, and **no more than 2^26 pixels**. The side cap is
+  arithmetic, not taste: PNG allows 2^31-1 a side and the header says what it says
+  whatever the file holds, so at 2^31 x 2^30 with 16-bit RGBA `(stride + 1) * h` is
+  exactly 2^64, wraps to a small number, and passes a budget that is checked after
+  the multiply -- after which `unfilter` sizes its row buffer from the same wrapped
+  product, gets zero, and the first scanline writes past the end of it. A side above
+  2^31 would also be reported back through an `int` as a negative width. The pixel
+  cap is taste, and generous: every vision path resizes to 12.8 megapixels before the
+  tower sees anything, and past the two together no surviving header costs more than
+  512 MB of filtered rows and 201 MB of RGB24. 65535 x 5000 -- legal sides, an inch
+  under the old 1 GB byte budget, and a gigabyte of allocation -- is refused on its
+  width.
 - 40,000 mangled inputs (byte flips, truncations, spliced noise over ten valid seeds)
   compiled with MSVC `/RTC1` produce no crash, and every input that DOES decode is
   self-consistent: `rgb.size() == width * height * 3`, so a caller sizing from the
@@ -2600,6 +2615,26 @@ sends are PNG.
 3. The server logs `Total images: 3`, not 1, and no `Skipping image that failed to load`.
 4. The first round's text-extraction check passes -- it can only pass by reading
    `paris.png`, whose text is the answer.
+
+**Result 2026-09-16:** `ctest -R OPEN-VISION-IMAGE-READ` passes 25 of 25, the two added
+cases being `adv_wrap` (2^31 x 2^30) and `adv_gigapixel` (16384 x 16384); `adv_huge`
+now answers on the side cap rather than the byte budget, which no longer exists.
+
+The crash was reproduced before it was fixed, because the fixtures alone do not
+reach it: the decoder's inflate refuses a stream that runs out early, so a 68-byte
+`adv_wrap` is turned away on the short IDAT and never gets to the arithmetic. Filling
+it does reach it -- 1 GiB of zeros, which deflates to a 4.7 MB PNG, small enough to
+base64 into a request. On the pre-fix decoder that file takes `decode_rgb24` to
+`0xC0000005`, an access violation, inside the first scanline's `memcpy`: `unfilter`
+had sized its row buffer to `height * stride`, which is 2^30 * 2^34 and so zero, and
+copied 17 GB into it. The same file on the fixed decoder returns false with
+"2147483648 x 1073741824 is past the 16384 pixel side limit" and allocates nothing.
+`adv_wrap` stays small and checked in: post-fix it is refused on the side, pre-fix on
+the short IDAT, so it still fails if the check is removed.
+
+The fuzz criterion above was not re-run. The change only refuses more headers, and
+refuses them before any allocation, so it cannot reach an input the corpus could not
+before.
 
 **Result 2026-09-13:** `ctest -R OPEN-VISION-IMAGE-READ` passes 23 of 23, and the fuzz run above found nothing. End to end on
 Qwen2.5-VL-3B through the open engine, `oflm-test --vision` passes all three rounds

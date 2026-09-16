@@ -185,7 +185,14 @@ int main(int argc, char** argv) {
     // something a caller can send. The bomb is the interesting one: the output
     // buffer is sized from the header, so 200 MB of zeros in 200 KB cannot
     // expand past it - inflate stops the moment it would.
-    expect_refused(dir, "adv_huge", "too large");
+    //
+    // adv_wrap is the one a budget alone does not catch: at 2^31 x 2^30 the
+    // size arithmetic wraps 64 bits and comes out small, so the sides have to
+    // be refused before anything is computed from them. adv_gigapixel has legal
+    // sides and 268 megapixels between them, which is the other check.
+    expect_refused(dir, "adv_huge", "side limit");
+    expect_refused(dir, "adv_wrap", "side limit");
+    expect_refused(dir, "adv_gigapixel", "too large");
     expect_refused(dir, "adv_bomb", "more pixel data than the header declares");
     expect_refused(dir, "adv_nopalette", "no PLTE");
     expect_refused(dir, "adv_palette_oob", "past the end of PLTE");

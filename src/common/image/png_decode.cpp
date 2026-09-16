@@ -7,6 +7,24 @@ namespace {
 
 constexpr uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
 
+// Two ceilings on what an IHDR may declare, doing different jobs.
+//
+// kMaxSide is arithmetic. PNG allows 2^31-1 a side, and the header says what it
+// says whatever the file actually holds; at that size (stride + 1) * h wraps 64
+// bits, so a budget checked after the multiply sees a small number and waves
+// the file through - 2^31 x 2^30 at 16-bit RGBA lands on exactly 2^64. unfilter
+// then sizes its row buffer from the same wrapped product, gets zero, and the
+// first scanline writes past the end of it. The width this function reports is
+// an int besides, so a side above 2^31 would hand the caller a negative one.
+//
+// kMaxPixels is policy. Every vision path here resizes to 12.8 megapixels
+// before the tower sees anything, so 67 is already several times more than any
+// caller can use, and past the two of them together no header survives that
+// would cost more than 512 MB of filtered rows and 201 MB of RGB24.
+
+constexpr uint32_t kMaxSide = 16384;
+constexpr uint64_t kMaxPixels = 1ull << 26;
+
 // ---------------------------------------------------------------- inflate
 //
 // RFC 1950/1951, enough of it for PNG's IDAT stream and no more. This is here
@@ -326,6 +344,17 @@ bool decode_rgb24(const uint8_t* data, size_t size, int& width, int& height,
 
     if (!have_ihdr) { err = "PNG: no IHDR"; return false; }
     if (w == 0 || h == 0) { err = "PNG: zero dimension"; return false; }
+    if (w > kMaxSide || h > kMaxSide) {
+        err = "PNG: " + std::to_string(w) + " x " + std::to_string(h) +
+              " is past the " + std::to_string(kMaxSide) + " pixel side limit";
+        return false;
+    }
+    const uint64_t pixels = static_cast<uint64_t>(w) * h;
+    if (pixels > kMaxPixels) {
+        err = "PNG: image too large (" + std::to_string(pixels) + " pixels, limit " +
+              std::to_string(kMaxPixels) + ")";
+        return false;
+    }
     if (interlace != 0) { err = "PNG: interlaced (Adam7) files are not supported"; return false; }
     if (idat.empty()) { err = "PNG: no image data"; return false; }
 
@@ -341,11 +370,11 @@ bool decode_rgb24(const uint8_t* data, size_t size, int& width, int& height,
     }
     if (color_type == 3 && depth == 16) { err = "PNG: palette images cannot be 16-bit"; return false; }
 
-    // Guard the allocation before doing it: 1 GB of pixels is already far past
-    // anything a vision prompt should carry.
+    // Both sizes are bounded by the two ceilings above, which is why neither is
+    // re-checked here: the largest header that gets this far is 67 megapixels
+    // with no side over 16384, and at 16-bit RGBA that is 512 MB of rows.
     const uint64_t stride64 = (static_cast<uint64_t>(w) * nch * depth + 7) / 8;
     const uint64_t raw64 = (stride64 + 1) * h;
-    if (raw64 > (1ull << 30)) { err = "PNG: image too large"; return false; }
 
     const size_t stride = static_cast<size_t>(stride64);
     std::vector<uint8_t> raw(static_cast<size_t>(raw64));

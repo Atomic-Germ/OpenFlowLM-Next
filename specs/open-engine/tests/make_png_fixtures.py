@@ -214,6 +214,14 @@ def main() -> int:
         print(f"  {name}.png  ({len(d)} bytes, declares {w}x{h})")
 
     raw("adv_huge", 65535, 65535, 8, 2, zlib.compress(bytes(16)))
+    # The header a max-dimension check is for (vegah, PR #92). Sides this big
+    # wrap the decoder's own size arithmetic: (stride + 1) * h is exactly 2^64
+    # here, which reads back as a small number, so a budget checked after the
+    # multiply passes it and the unfilter pass writes past a zero-length buffer.
+    raw("adv_wrap", 2**31, 2**30, 16, 6, zlib.compress(bytes(16)))
+    # Sides inside the limit, 268 megapixels between them: 805 MB of RGB24 that
+    # the pixel budget refuses rather than allocates.
+    raw("adv_gigapixel", 16384, 16384, 8, 2, zlib.compress(bytes(16)))
     # 200 MB of zeros in a couple of hundred KB. The output buffer is sized
     # from the header, so a bomb cannot expand past it - but say so in a test.
     raw("adv_bomb", 8, 8, 8, 2, zlib.compress(bytes(200 * 1024 * 1024), 9))
