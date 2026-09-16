@@ -110,8 +110,7 @@ class LM_Config{
         void _load_json(){
             std::ifstream file(this->model_path + "/config.json");
             if (!file.is_open()){
-                std::cerr << "Failed to open file: " << this->model_path << std::endl;
-                exit(1);
+                throw std::runtime_error("Failed to open file: " + this->model_path + "/config.json");
             }
             // read the json file as a string
             std::string json_str((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());

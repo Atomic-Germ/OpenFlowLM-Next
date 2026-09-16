@@ -187,11 +187,34 @@ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::str
     // `oflm list` (fast_check) cheap and everything else exact.
     const bool strict_integrity = uses_pinned_sources(model_info);
     auto missing_files = get_missing_files(new_model_tag);
+    // `files` is authoritative: the GGUF embedding (embed-gemma:300m) ships
+    // only `model.gguf` and has no `config.json` to gate on. Testing the
+    // missing set for `config.json` unconditionally made every such entry
+    // look "not missing" when its sole weight was absent, then
+    // `check_model_compatibility` called `LM_Config::from_pretrained` which
+    // does `open(<dir>/config.json)` and on failure did `exit(1)` -- that
+    // killed `oflm list` after 6 rows with "Failed to open file:
+    // ~/.config/oflm/models/embeddinggemma-300M-GGUF". Even now that the
+    // loader throws, a missing-config model must not reach the version check
+    // at all.
+    std::vector<std::string> model_files = model_info.value("files", std::vector<std::string>{});
+    const bool requires_config =
+        std::find(model_files.begin(), model_files.end(), "config.json") != model_files.end();
+    if (!requires_config) {
+        return missing_files.empty() ? ModelStatus::Ready : ModelStatus::Missing;
+    }
     bool is_config_file_missing = std::find(missing_files.begin(), missing_files.end(), "config.json") != missing_files.end();
     ModelStatus modelstatus = ModelStatus::Missing;
 
     if (!is_config_file_missing) {
-        modelstatus = check_model_compatibility(new_model_tag, sub_process_mode);
+        try {
+            modelstatus = check_model_compatibility(new_model_tag, sub_process_mode);
+        } catch (const std::exception& e) {
+            if (!sub_process_mode) {
+                header_print("WARNING", std::string("Skipping version check for ") + new_model_tag + ": " + e.what());
+            }
+            return ModelStatus::Missing;
+        }
 
         if (modelstatus == ModelStatus::Outdated) {
             if (!fast_check) {
