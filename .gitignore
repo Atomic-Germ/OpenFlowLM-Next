@@ -79,3 +79,6 @@ src/open_qwen36/out/
 # The trailing glob also covers the side-by-side variants an A/B leaves behind
 # (open_kernels_q4_1, open_kernels_q8): same binaries, same rule.
 src/xclbins/*/open_kernels*/
+
+# repro-open-timeout.sh output (server logs, per-attempt client logs)
+.repro-open-timeout/

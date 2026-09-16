@@ -138,6 +138,30 @@ def roundup(n: int, m: int) -> int:
     return (n + m - 1) // m * m
 
 
+def pad_width(w: int, n_cores: int) -> int:
+    """The smallest width at or above w that a pool can actually be built at.
+
+    Two rules have to hold at once and one rounding satisfies both, because
+    BAND_ROWS * 8 = 512 is itself a multiple of the chunk's 256 columns:
+
+      * dense.cores_for wants the width divisible by BAND_ROWS * n_cores, or the
+        family drops to fewer cores (GPT-OSS's 2880 falls all the way to one);
+      * q4_bytes wants rows * cols a whole number of 8192-value chunks, and
+        band_bytes(2880) does not - it raises before any core count matters.
+
+    No shipped family needs this: every one of them is already a multiple of 512,
+    so pad_width returns their own width unchanged. It exists for GPT-OSS, whose
+    2880 satisfies neither rule.
+
+    Padding a width is NOT the same as being able to build the family at it. The
+    norm in particular must keep dividing by the model's own width - ln.h divides
+    the sum of squares by the width it was COMPILED at (LN_N), so a 3072-wide norm
+    over 2880 real channels scales every residual by sqrt(3072/2880), 3.3% high,
+    on every layer. See OPEN-WIDTH-PAD for what this does and does not settle.
+    """
+    return roundup(w, BAND_ROWS * n_cores)
+
+
 def ab_lanes(spec: ModelSpec) -> int:
     """Columns of the packed alpha / beta projection: the value-head count rounded up to
     dn_glue's accumulator width. 32 heads (every validated model) is itself."""

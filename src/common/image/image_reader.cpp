@@ -6,6 +6,7 @@
 /// \note This is a source file for the image_reader functions
 
 #include "image/image_reader.hpp"
+#include "image/png_decode.hpp"
 #include "typedef.hpp"
 #include "base64.hpp"
 #include <iostream>
@@ -377,10 +378,36 @@ bool ImageReader::decode_bytes(const uint8_t* data, size_t size, image_data_t& o
         return false;
     }
 
+    // PNG goes through our own decoder first. vcpkg's ffmpeg leaves zlib out of
+    // its default features, so on a fresh Windows clone avcodec has no png
+    // decoder and every PNG silently turned into a skipped image. ffmpeg still
+    // gets a turn for what this one refuses, e.g. interlaced files.
+    if (codec_id == AV_CODEC_ID_PNG) {
+        int w = 0, h = 0;
+        std::vector<uint8_t> pixels;
+        std::string err;
+        if (image_png::decode_rgb24(data, size, w, h, pixels, err)) {
+            bytes buffer = memory_pool_.acquire(pixels.size());
+            if (buffer.size() == 0) {
+                std::cerr << "Error: Could not allocate output image buffer" << std::endl;
+                return false;
+            }
+            std::memcpy(buffer.data(), pixels.data(), pixels.size());
+            recycle(out_image);
+            out_image.width = w;
+            out_image.height = h;
+            out_image.pixels = std::move(buffer);
+            return true;
+        }
+        std::cerr << "Note: built-in PNG decoder declined (" << err << "); trying FFmpeg" << std::endl;
+    }
+
     reset_decode_resources();
 
     if (!ensure_decode_resources(codec_id)) {
-        std::cerr << "Error: Could not initialize FFmpeg decode objects" << std::endl;
+        const AVCodecDescriptor* d = avcodec_descriptor_get(static_cast<AVCodecID>(codec_id));
+        std::cerr << "Error: the linked FFmpeg has no decoder for " << (d ? d->name : "this format")
+                  << std::endl;
         return false;
     }
 

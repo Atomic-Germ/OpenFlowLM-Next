@@ -1267,6 +1267,47 @@ decoder: the container carries no `vision_config` (OPEN-VISION-VIT-CONFIG), no
 `Engine::prefill`'s existing refusal names; and Qwen3-VL's tower uses deepstack, which
 the host tower does not implement. Text-only is the reachable half.
 
+**Result 2026-09-13: the text half runs end to end, and the conditional is settled.**
+The hash question the plan left open -- whether the VL container agrees with Qwen3-4B on
+the two things a config.json cannot show -- is now answered on the shipped files, not
+inferred: pulled `FastFlowLM/Qwen3-VL-4B-Instruct-NPU2` (4.1 GB) and ran
+`spec_from_model_dir` on it and on the installed Qwen3-4B-NPU2. Both derive
+`sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd`: same tokenizer
+id count (151669), same per-role quant (q4_1), and the two config.json files differ only
+by the three vision file-name keys. So the family-bundle property holds for real -- a
+Qwen3-4B open kernel set was exported (WSL, ~1 min) and `oflm-add` linked the VL container
+to it by hash with no build of its own, logging
+`open kernels from 'Qwen3-4B-open': its manifest spec_hash matches this model's`.
+
+The procedure OPEN-FAMILY-QWEN3 defines, run against this container:
+
+- 4-layer slice at positions 0 and 1 against the fp64 reference: logits corr 0.999995 /
+  0.999996, argmax 39161 / 91278 matching, top-5 identical at both, residual corr
+  >= 0.999996 in every layer (maxrel <= 3.4e-3).
+- Through the engine (`open_qwen36_cli --dump-logits --twice`): BIT-IDENTICAL to the
+  harness at both positions (max abs diff 0.000e+00 over all 151936 logits), and
+  request 2 reproduced request 1.
+- Whole 36 layers through `chat.py`: a coherent two-sentence answer about NPUs ending at
+  `[eos]`, 62 ms/token.
+- `OFLM_QWEN3VL_ENGINE=open oflm serve qwen3vl-it:4b` logs
+  `Qwen3-VL on the open kernels`, and `oflm-test --llm --model qwen3vl-it:4b` PASSES both
+  streamed rounds. `OFLM_QWEN3VL_ENGINE=closed` still loads the DLL.
+
+**rope_theta:** the container's 1e6 produces coherent text at these lengths, so it is
+what the weights were converted for as far as this evidence goes. That is text quality,
+which is the right oracle; it is not a long-context result.
+
+**Images: refused, by name, as designed.** `oflm-test --vision --model qwen3vl-it:4b`
+returns `config.json carries no image_token_id / mrope_section for this model` on every
+round -- the refusal naming which of the gaps it hit, rather than a plausible answer.
+Two further findings that were not in the plan and that bound what a deepstack port could
+do: no installed kernel set carries a `gemm_block` program (all three, including the new
+Qwen3-4B one, log `GEMM-route prefill block size: 0`), so the batched-prefill route the
+deepstack design assumed does not exist for any shipped family and would be its own WSL
+kernel build; and this container's vision tensors are declared with a 2-D header shape
+that both `untile` implementations refuse, so even the tower geometry cannot be read off
+it yet. Images stay blocked on a converter change that is Atomic-Germ's call.
+
 ### OPEN-FAMILY-QWEN25VL: Qwen2.5-VL's decoder is a Qwen2.5 dense spec
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `src/common/AutoModel/modeling_qwen2vl.cpp`)
 **Test category:** unit (`tests/test_qwen25vl.py`); the tower is OPEN-VISION-VIT-WINDOWED's
@@ -1622,14 +1663,69 @@ explicitly excludes.
   every score gives plain GQA attention; a positive sink scales every channel of the head by
   one factor strictly between 0 and 1; the window agrees with
   `sliding_window_causal_mask_function`.
-- `cores_for` on gpt-oss-20b's own widths is 1, and 8 once hidden and the expert width are
-  padded to 3072.
 - Six decode steps through `gptoss_layer_step` land within 1e-5 of the last token of
   `GptOssDecoderLayer`'s own sequence forward, on a sliding layer with YaRN cos/sin. Zeroing
   the sinks, the o_proj bias, the router bias or any expert bias moves it by more than 1e-3
   of the answer, so the tolerance discriminates. Giving `GptOssRMSNorm` an fp64 variance --
   it computes in fp32 whatever the parameter dtype -- closes the gap to 1e-12, which is what
   says the 1e-5 is transformers' rounding and not a missing piece.
+
+### OPEN-WIDTH-PAD: the padded width a recipe may derive, and what it does not settle
+**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`)
+**Test category:** unit (`tests/test_width_pad.py`)
+
+`pad_width(w, n_cores)` shall give the smallest width at or above `w` that a pool can
+be built at: a multiple of `BAND_ROWS * n_cores`, which is also a multiple of the q4_1
+chunk's 256 columns, so one rounding satisfies both the band law `dense.cores_for`
+applies and the whole-chunk rule `q4_bytes` enforces. At a family's OWN core count it
+is always the identity, so no shipped kernel set can move.
+
+This exists for GPT-OSS-20B, whose hidden and expert widths are both 2880. The
+earlier record said 2880 "gets one core of eight". That is true and it understates the
+problem by one refusal and overstates what padding fixes by two. Padding to 3072
+clears three blockers and leaves a fourth, and the tests name each:
+
+- **Core count.** `cores_for` gives 2880 one core of eight; the padded width gives
+  eight. Gemma 3 12B is the precedent for living with fewer: its 3840 also misses
+  eight (it gets four) but everything still builds, and 8-vs-4 was measured as nearly
+  free. 8-vs-1 has never been measured.
+- **Chunk arithmetic.** `band_bytes(2880)` raises before any core count matters -- a
+  64-row band of a 2880-wide matrix is not a whole number of 8192-value chunks. This
+  is raised inside `q4_bytes`, so `OPEN_KERNELS_UNVALIDATED` cannot soften it. 3072
+  is fine. **This, not the core count, is what stops a build first.**
+- **The norm's validated widths.** 2880 is outside `ln`'s validated set
+  {1024, 2048, 2560, 3072, 3840, 4096}; 3072 is in it, on the point Phi-4-mini
+  already uses.
+- **The MoE core scratch -- NOT fixed by any width.** The main core must hold xm's
+  activation table and the expert h's at once, and `tab_bytes` is 2.25K, so at
+  3072/3072 the two want 13824 bytes against the 9216 the widest single width
+  reserves. `qwen36moe.common` refuses the padded spec too. The 27B fits only
+  because its expert width is 512 against hidden 2048.
+
+**And padding the norm would be wrong even where it builds.** `designs/ln/ln.h`
+divides the sum of squares by the width it was COMPILED at (`LN_N`), so a 3072-wide
+norm over 2880 real channels and 192 zeros scales every residual by
+sqrt(3072/2880) = 1.0328 -- 3.3% on every layer, a silent wrong answer, not a
+rounding difference. So "pad the width and zero the tail" is not on its own a way to
+build GPT-OSS: the norm needs either its own divisor knob or a validated `ln` point
+at the model's own width.
+
+**Acceptance criteria (unit):**
+- `pad_width(2880, 8) == 3072`, and no width between 2880 and 3072 satisfies the band
+  law, so 3072 really is the smallest.
+- `pad_width(w, cores_for(spec)) == w` for the hidden, dense intermediate, q width and
+  kv width of every spec in `recipes/specs/` -- the pad moves no shipped family.
+- `cores_for` on gpt-oss-20b's own widths is 1, and 8 once hidden and the expert width
+  are padded to 3072.
+- `band_bytes(2880)` raises naming the chunk rule; `band_bytes(3072) == 122880`.
+- `ln` at width 2880 is refused by the catalogue and at 3072 is not.
+- `qwen36moe.common` on the PADDED gpt-oss spec still raises, naming the core scratch.
+- sqrt(3072/2880) == 1.0328 to 5e-5, the factor a padded norm would put on every layer.
+
+**Still needs the model or the NPU:** whether 8 cores beats 1 by enough to justify
+6.7% more weight bytes (nothing in this tree measures 8-vs-1); and the container's
+chunk geometry -- `q4nx-build/configs/gpt-oss.json` is the only config with
+`col_block_size` 128 rather than 256, a 4096-value chunk the open packer refuses.
 
 ### OPEN-ATTN-SINK: a learned per-head attention sink logit
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`,
@@ -1873,6 +1969,39 @@ reference on 12 x 10, 16 x 24, 6 x 18 and 8 x 8 patch grids: corr 1.00000000, re
 towers. `ctest -R OPEN-VISION-VIT-WINDOWED` (the permutation, no container, no torch)
 passes. Suite 452 passed / 1 skipped.
 
+**Result 2026-09-13 (host arithmetic): the tower is 3.8x faster and slightly more
+accurate.** The ~35 s a 40 x 56 grid took was never an NPU problem. `linear()` and
+`attention()` in `vision/vit.cpp` had three defects between them, all host-side:
+
+- `linear()` swept every activation row once per 8-wide output block, so the whole
+  activation matrix -- 11 MB at that grid -- came back out of L3 160 times per
+  projection. It now runs a 128-row panel against all output blocks, which is under
+  a megabyte and stays in L2.
+- `attention()` accumulated each QK dot into ONE float, a serial dependency chain at
+  three or four cycles a multiply where `linear()` had eight independent ones.
+- `attention()` read V straight out of the interleaved qkv buffer at a stride of
+  3 x hidden floats -- 15 KB -- and the AV loop walks the whole segment once per
+  query, so a full-attention block re-read it n times with nothing able to prefetch.
+  q and k were already being re-laid contiguous for exactly this reason; v had been
+  left behind. It is re-laid now too.
+
+All three sites also take an AVX2 + FMA path chosen at RUNTIME. The binary's baseline
+ISA is unchanged: raising one translation unit's `/arch:` is the ODR hazard
+`src/CMakeLists.txt` records for `npue_embedding.cpp`, and `vit.cpp` shares inline
+headers with `pools.cpp` and `core.cpp`. A machine without AVX2 runs the scalar loops.
+
+Measured with `vit_test --windowed` on the shipped Qwen2.5-VL-3B container against the
+numpy reference, same binary options, same fixture:
+
+| patch grid | before | after | correlation | rel error before / after |
+|---|---|---|---|---|
+| 24 x 32 (192 rows) | 12.15 s | 3.23 s | 1.00000000 | 5.34e-05 / 1.94e-05 |
+| 40 x 56 (560 rows) | 37.09 s | 9.63 s | 1.00000000 | 8.19e-06 after (1.65e-05 before) |
+
+The accuracy improves because multiple accumulators round better than one serial
+chain, so the gate this requirement already sets is met more comfortably, not less.
+`ctest` in `src/open_qwen36/build_cli` stays 3 of 3.
+
 The tensor names are now confirmed from outside this repo: the closed
 `src/lib/hrx/libqwen2vl_npu.so` contains `model.visual.`, the four `attn.*_proj`, the three
 `mlp.*_proj`, `rmsnorm1` / `rmsnorm2`, `merger.ln_q` / `merger.mlp.0` / `merger.mlp.2` and
@@ -1948,24 +2077,110 @@ kernel set built for Qwen2.5-3B-Instruct (OPEN-FAMILY-QWEN25VL), and its logits 
 fp64 reference at corr 0.99999125 and 0.99999362 on the two scored positions, argmax and
 top-5 identical.
 
-Two failures in `oflm-test --vision` are NOT the engine's, and the closed engine was run on
+Two failures in `oflm-test --vision` were NOT the engine's, and the closed engine was run on
 the same box to say so: it fails all three rounds with a bad allocation while applying the
-chat template and returns nothing, where the open engine answers the first. The suite's
-other two images never reach either engine -- the same reader problem the 2026-09-08 entry
-below records, now pinned: the shipped `avcodec-63.dll` carries mjpeg, webp, bmp, gif and
-tiff decoders and **no png** one, and both remaining test images are PNG. The bad allocation
-is specific to that three-image round; the two-turn case above, with one decodable image,
-passes.
+chat template and returns nothing, where the open engine answered the first. The suite's
+other two images never reached either engine, because they are PNG and the reader could not
+decode one.
+
+> **Fixed 2026-09-13 (OPEN-VISION-IMAGE-READ).** The diagnosis above is half right and the
+> half it gets wrong changes whose problem it is. It is not what OFLM ships: upstream's
+> `avcodec-61.dll` decodes PNG and a copy is checked in at `src/lib/`. It is what we BUILD
+> against -- vcpkg's ffmpeg leaves `zlib` out of its default features, so the `avcodec-63.dll`
+> beside `src/build/oflm.exe` is configured `--disable-zlib` and has no png decoder or
+> encoder at all. That is every fresh Windows clone, not this machine. The reader now decodes
+> PNG itself and `oflm-test --vision` passes all three rounds; see that requirement.
 
 **Result 2026-09-08:** runs end to end through `flm serve` on Qwen3.5-0.8B and
 on the 35B (tower resident in 2.2 s, a 30 x 44-patch image -> 330 tokens in
 14.8 s on the CPU, prefill 516 tokens, the answer describes the image
 correctly, follow-up turns continue from the same (t, h, w) counter). The
 suite's other two images are dropped by the app's own reader before either
-engine. **The closed-engine comparison did not run**: the closed 1.0.4 DLL
+engine (fixed 2026-09-13, OPEN-VISION-IMAGE-READ). **The closed-engine comparison did not run**: the closed 1.0.4 DLL
 segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
 so on this box only the open engine can serve these files. Log:
 `.claude/plans/issue-16-hw-results.md`.
+
+### OPEN-VISION-IMAGE-READ: a PNG decodes whatever FFmpeg is linked
+**Applies to:** openflowlm-next (`src/common/image/png_decode.cpp`, `image_reader.cpp`)
+**Test category:** unit (`src/common/image/png_decode_test.cpp`, `ctest -R OPEN-VISION-IMAGE-READ`
+in `src/build`); the wiring into the reader is `e2e`, procedure below
+
+The image reader shall decode PNG without depending on the linked FFmpeg having a
+png decoder. `image_png::decode_rgb24` takes the file bytes and returns tightly
+packed RGB24 -- colour types 0, 2, 3, 4 and 6, bit depths 1, 2, 4, 8 and 16, all
+five row filters, all three deflate block types -- and refuses by name anything it
+does not implement, interlaced (Adam7) files in particular, at which point the
+reader still offers the file to FFmpeg. Alpha is dropped rather than composited
+and 16-bit samples are truncated to their high byte, which is what the FFmpeg path
+does through `sws_scale`.
+
+It carries its own inflate. Linking zlib would give `oflm.exe` a load-time import
+the Windows installers do not ship -- `src/inno/oflm.iss` and `src/wix/oflm.wxs`
+enumerate DLLs by name and list `zlib1.dll`, while vcpkg's zlib is `z.dll` -- so a
+decoder whose whole point is "works whatever is linked" would have added a link
+dependency to get there.
+
+**Why this is a requirement and not a build fix.** vcpkg's ffmpeg port has a
+`zlib` feature and it is not a default one, so the avcodec a fresh Windows clone
+links is configured `--disable-zlib` and has no png decoder. Upstream's shipped
+`avcodec-61.dll` does have one. The failure was invisible because a PNG that fails
+to decode is SKIPPED, not refused: `modeling_*.cpp` logs a line and prefills the
+remaining images, so the model answers confidently about images it never saw and a
+test can pass on one it imagined. Two of the three images `oflm-test --vision`
+sends are PNG.
+
+**Acceptance criteria (unit):**
+- Every generated fixture in `specs/open-engine/tests/fixtures/png/` decodes to its
+  `.rgb` byte for byte. The fixtures are written by `make_png_fixtures.py`, which
+  computes the expectation from the source pixels it encoded -- not from this
+  decoder -- and cross-checks every case against Pillow, an independent decoder.
+  Pillow agrees on all of them but 16-bit grayscale, where its own I;16 conversion
+  saturates at 255 instead of scaling.
+- Each generated fixture cycles all five row filters down its rows, and between them
+  the set covers stored, fixed-Huffman and dynamic-Huffman deflate blocks.
+- `paris.png` and `spectrogram.png`, the two `oflm-test` sends, decode to the sha256
+  Pillow gives, recorded in `fixtures/png/bundled.json`. They are read where they
+  already live rather than copied.
+- An interlaced file is refused with a message naming "interlaced"; a truncated file
+  and a JPEG are refused.
+- Hostile inputs are refused by name, because images arrive base64 inside an HTTP
+  request and none of these needs an attacker to do anything unusual: a header
+  declaring 65535 x 65535, a decompression bomb (200 MB of zeros in 200 KB), a
+  palette image with no PLTE, a palette index past the end of PLTE, and a zero
+  dimension. The bomb cannot work by construction -- the output buffer is sized from
+  the header, so inflate stops the moment it would exceed it -- and the test says so
+  rather than leaving it to be re-derived.
+- 40,000 mangled inputs (byte flips, truncations, spliced noise over ten valid seeds)
+  compiled with MSVC `/RTC1` produce no crash, and every input that DOES decode is
+  self-consistent: `rgb.size() == width * height * 3`, so a caller sizing from the
+  reported dimensions cannot walk off the buffer.
+- The test links no FFmpeg and no zlib, so it passes on a machine whose ffmpeg has
+  no png decoder -- which is the machine the bug is about.
+
+**Verification (e2e), for the reader wiring the unit test cannot reach:**
+1. `OFLM_QWEN2VL_ENGINE=open oflm serve qwen2.5vl-it:3b`
+2. `oflm-test --vision --model qwen2.5vl-it:3b`
+3. The server logs `Total images: 3`, not 1, and no `Skipping image that failed to load`.
+4. The first round's text-extraction check passes -- it can only pass by reading
+   `paris.png`, whose text is the answer.
+
+**Result 2026-09-13:** `ctest -R OPEN-VISION-IMAGE-READ` passes 23 of 23, and the fuzz run above found nothing. End to end on
+Qwen2.5-VL-3B through the open engine, `oflm-test --vision` passes all three rounds
+for the first time on this box -- text extraction, seagull and spectrogram -- where
+before the fix the same suite reported `Total images: 1`, failed text extraction, and
+passed the spectrogram check on a spectrogram the model had invented. The extracted
+text is "The capital of France is Paris...", which is what `paris.png` says.
+
+**Blast radius, and it is checked, not asserted.** `ImageReader` is shared, so this
+changes what `modeling_gemma3`, `gemma4e`, `gemma4_12b`, `qwen2vl`, `qwen3vl`,
+`qwen3_5vl`, `qwen3_5_omni` and `qwen3_6_moe` do with a PNG, on the closed engine as
+well as the open one: they prefill image rows where they used to prefill nothing. The
+CLOSED engine was run on Qwen3-VL-4B to confirm it benefits too -- `Total images: 3`,
+no `Skipping image that failed to load`, and all three `--vision` rounds pass, where
+the same binary before the fix failed text extraction and the model answered "you have
+only provided one image". No kernel, manifest, xclbin or spec hash moves.
+
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)

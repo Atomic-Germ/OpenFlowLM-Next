@@ -1,0 +1,12 @@
+{
+  "paris": {
+    "width": 1419,
+    "height": 287,
+    "sha256": "3a0e9d6cf8b27894a95d60686519567e9c590059750b955e5a36ec44ee3ad701"
+  },
+  "spectrogram": {
+    "width": 800,
+    "height": 512,
+    "sha256": "d9fb3345b1d2b82be6a2d333f7da862658cd18384abccb56467f36b56fd1fda2"
+  }
+}
