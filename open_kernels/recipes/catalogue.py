@@ -167,6 +167,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (256, 16, 8, 256, True, False, False, False),    # Gemma 3 12B: 16 heads over 8 kv, RB 1 (OPEN-FAMILY-GEMMA3)
                  (128, 32, 8, 128, True, False, True, False),     # Hy-MT2-7B, qk-norm AFTER RoPE (OPEN-FAMILY-HUNYUAN)
                  (128, 16, 8, 128, True, False, False, False),    # Qwen3-1.7B / 0.6B: a GQA group of 2 (OPEN-FAMILY-QWEN3)
+                 (128, 16, 8, 128, False, False, False, False),   # MiniCPM5-2B: 42-layer llama3, GQA group 2 (OPEN-FAMILY-LLAMA3)
                  (128, 24, 8, 128, False, False, False, False),   # Llama 3.2 3B: GQA group 3, OG_AOUT_ELEMS 3 (OPEN-FAMILY-LLAMA3)
                  (64, 32, 8, 64, False, False, False, False),     # Llama 3.2 1B: head dim 64 (OPEN-FAMILY-LLAMA3)
                  (64, 32, 8, 64, True, False, False, False),      # LFM2-1.2B's six attention layers: the Llama 3.2 1B

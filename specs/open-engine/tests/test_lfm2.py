@@ -169,7 +169,10 @@ def test_no_shipped_models_hash_moved():
     after, when Qwen2.5 was measured onto the fast attention path; its hash is the one the
     engine logs for the installed container, and lfm2-1.2b joined the same way. The lfm2
     entry is also the one spec here whose own family owns the new layer type, so it is
-    what would catch a `short_conv` change that moved the hash."""
+    what would catch a `short_conv` change that moved the hash. minicpm5-2b arrived from
+    main in #85 and is pinned at the value it hashes to here, which is the point: the
+    eleven that predate this branch did not move, so `qkv_bias` is a kernel knob and not
+    a ModelSpec field."""
     import pathlib
 
     from recipes.load import load_spec
@@ -185,6 +188,7 @@ def test_no_shipped_models_hash_moved():
         "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
         "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
         "lfm2-1.2b.json": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
+        "minicpm5-2b.json": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
