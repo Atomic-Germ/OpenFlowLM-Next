@@ -9,11 +9,13 @@
 /// widen the fp16 block scales EXACTLY to f32 (fp16 -> f32 is lossless; see
 /// open_kernels/gguf_pool.py), so the pool never requantizes or narrows.
 ///
-/// Matmul tensors the pack ops accept: Q4_0 / Q4_1 (Q8_0 for the q8 lm_head,
-/// MoE families). Anything else (the K-quants, IQ quants) is refused at pack
-/// time with a pointer to q4nx-build. The embedding row is dequantized per
-/// token on the host; Q4_K and Q6_K are supported there (they are what most
-/// quants use for token_embd), mirroring llama.cpp's dequant loops.
+/// Matmul tensors the pack ops accept: Q4_0 / Q4_1 exact, plus a host
+/// requant for Q8_0 / Q4_K / Q6_K (std_perm_gguf; Q8_0 also serves the q8
+/// lm_head, MoE families). Anything else (other K-quants, IQ quants) is
+/// refused at pack time with a pointer to q4nx-build. The embedding row is
+/// dequantized per token on the host; Q4_K and Q6_K are supported there
+/// (they are what most quants use for token_embd), mirroring llama.cpp's
+/// dequant loops.
 #pragma once
 
 #include <cstddef>

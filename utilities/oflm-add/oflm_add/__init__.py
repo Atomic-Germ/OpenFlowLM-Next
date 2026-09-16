@@ -42,7 +42,9 @@ import json
 import os
 import re
 import shutil
+import struct
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -58,8 +60,12 @@ ALL_FILES = REQUIRED_FILES + OPTIONAL_FILES
 # at q4nx-build.
 GGUF_FILES = ["config.json", "model.gguf", "tokenizer.json", "tokenizer_config.json"]
 GGUF_OPTIONAL = ["chat_template.jinja"]
-# preference order: 4.5-bit fits the NPU pools best, Q8_0 is the fallback
-GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q8_0"]
+# Quant families the open kernels ingest (pools.cpp std_perm_gguf): exact
+# pools for Q4_1/Q4_0/Q8_0, host requant for Q4_K/Q6_K (validated end to
+# end for Q6_K on gemma3-4b). Order is install preference: exact first,
+# then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
+# quality gain on the NPU path).
+GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 # Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
@@ -80,13 +86,38 @@ NPU_EMBED_FILES = [
     "config.json", "model.safetensors", "tokenizer.json",
     "tokenizer_config.json", "vocab.txt", "1_Pooling/config.json",
 ]
-GGUF_QUANT_RE = re.compile(r"(?:^|[.\-_ ])(I?Q[0-9](?:_[0-9A-Za-z]+)?)")
+# The quant must run to the end of the stem: 'Q4_0_4_4' is a different
+# tensor layout (ik_llama matmul shuffles), not Q4_0, and matching only a
+# prefix once installed exactly that as Q4_0 pools (silent garbage).
+GGUF_QUANT_RE = re.compile(r"[.\-_ ](I?Q[0-9](?:_[A-Za-z0-9]+)*)\.gguf$", re.IGNORECASE)
 
-def gguf_quant_of(name):
-    """The quant specifier in a llama.cpp-style weight file name, e.g.
-    'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked)."""
+def gguf_quant_suffix(name):
+    """The raw trailing quant-ish token of a GGUF file name, e.g.
+    'Model-Q4_K_M.gguf' -> 'Q4_K_M', 'Model-Q4_0_4_4.gguf' -> 'Q4_0_4_4'
+    (None when the stem ends in nothing quant-like)."""
     m = GGUF_QUANT_RE.search(name)
     return m.group(1) if m else None
+
+def gguf_quant_family(suffix):
+    """A raw suffix folded to its tensor family, or None when unknown.
+    K-subtype letters stay with their family ('Q4_K_M' -> 'Q4_K': the tensors
+    inside are plain Q4_K), but anything with a digit run past the family
+    ('Q4_0_4_4', 'Q4_K_L2'?) is a different layout, not a variant."""
+    if not suffix:
+        return None
+    q = suffix.upper()
+    for fam in GGUF_QUANT_PREFERENCE:
+        if q == fam:
+            return fam
+        if q.startswith(fam + "_") and re.fullmatch(r"[A-Z]+", q[len(fam) + 1:]):
+            return fam
+    return None
+
+def gguf_quant_of(name):
+    """The quant family in a llama.cpp-style weight file name, e.g.
+    'Peach-2.0-9B-8k-Roleplay.i1-Q4_1.gguf' -> 'Q4_1' (None if unmarked or
+    unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
+    return gguf_quant_family(gguf_quant_suffix(name))
 
 def choose_gguf_file(names):
     """Pick the best compatible *.gguf from a repo's root file names.
@@ -99,9 +130,10 @@ def choose_gguf_file(names):
         if re.search(r"-\d+-of-\d+\.gguf$", n):
             refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
             continue
-        q = gguf_quant_of(n)
+        suffix = gguf_quant_suffix(n)
+        q = gguf_quant_family(suffix)
         if q not in GGUF_QUANT_PREFERENCE:
-            refused[n] = f"quant {q or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
+            refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
             continue
         cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
     cands.sort()
@@ -158,6 +190,12 @@ FAMILY_ALIASES = [
     ("gemma3", "gemma3"),
     ("llama3", "llama3"),
     ("llama", "llama3"),
+    # Stock quant repos keep the upstream org/model prefix the fine-tune
+    # slugs drop: bartowski/Meta-Llama-3.1-8B-Instruct-GGUF,
+    # google/gemma-3-4b-it-GGUF, microsoft/Phi-4-mini-instruct-GGUF.
+    ("meta-llama", "llama3"),
+    ("gemma-3", "gemma3"),
+    ("phi-4", "phi4"),
     # Granite is its own family now (the dense recipe, head_dim 64 at hidden
     # 2560). It aliased onto llama3 because nothing served it; leaving that
     # would route a Granite directory to the Llama 3 AutoModel, whose sampler
@@ -593,8 +631,16 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
             repo_gen = fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)
         except Exception:
             repo_gen = None
-    for cand in [gc, repo_gen] + \
-                [fetch_from_repo(b, "generation_config.json", gc, modelscope=modelscope) for b in bases]:
+    # Base fetches here must not fail the install: a gated base (401/403)
+    # simply has no generation_config to offer, and the caller already fell
+    # back to the GGUF-embedded tokenizer when that happened.
+    base_gens = []
+    for b in bases:
+        try:
+            base_gens.append(fetch_from_repo(b, "generation_config.json", gc, modelscope=modelscope))
+        except Exception:
+            base_gens.append(None)
+    for cand in [gc, repo_gen] + base_gens:
         if cand and Path(cand).is_file():
             try:
                 g = json.loads(Path(cand).read_text(encoding="utf-8"))
@@ -1135,6 +1181,342 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
 
 # ---------------------------------------------------------------------- main
 
+# ------------------------------------------------------- GGUF introspection
+#
+# Stock quant repos (bartowski/*-GGUF and friends) ship ONLY the GGUFs: no
+# config, no tokenizer, and a README whose base_model is often a gated repo
+# (meta-llama/* answers 403 anonymously). Two stdlib-only readers make that
+# installable anyway:
+#
+#   1. read_gguf_inventory: header + KV + tensor infos from a byte prefix
+#      (Range request for remotes, head read for local files). Verifies the
+#      chosen file's tensor types are ones the NPU packers ingest AND match
+#      the filename claim -- the Q4_0_4_4 trap (ik_llama matmul shuffles
+#      misread as Q4_0) becomes a loud refusal instead of silent garbage.
+#   2. extract_tokenizer_from_gguf: tokenizer.json + tokenizer_config.json +
+#      chat_template.jinja from the GGUF's embedded tokenizer, the last
+#      resort when every base repo is unreachable or gated.
+#
+# ggml type numbers (llama.cpp ggml.h; cross-checked with
+# src/open_qwen36/gguf_file.hpp -- only metadata parsing needs these).
+GGML_TYPE_NAMES = {
+    0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1",
+    8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K",
+    13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS",
+    18: "IQ3_XXS", 19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S",
+    22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32",
+    27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 31: "Q4_0_4_4",
+    32: "Q4_0_4_8", 33: "Q4_0_8_8",
+}
+# Tensor types the NPU packers ingest (pools.cpp std_perm_gguf for the
+# quants, put/pack_norm for the small float weights).
+GGUF_ENGINE_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"}
+
+
+class _GgufTruncated(Exception):
+    """The byte prefix ends mid-structure; fetch more or give up."""
+
+
+class _GgufCursor:
+    def __init__(self, buf):
+        self.buf = buf
+        self.off = 0
+
+    def _take(self, n, what):
+        if self.off + n > len(self.buf):
+            raise _GgufTruncated(f"ends inside {what}")
+        out = self.buf[self.off:self.off + n]
+        self.off += n
+        return out
+
+    def u8(self):
+        return self._take(1, "u8")[0]
+
+    def u16(self):
+        return struct.unpack("<H", self._take(2, "u16"))[0]
+
+    def u32(self):
+        return struct.unpack("<I", self._take(4, "u32"))[0]
+
+    def u64(self):
+        return struct.unpack("<Q", self._take(8, "u64"))[0]
+
+    def i8(self):
+        return struct.unpack("<b", self._take(1, "i8"))[0]
+
+    def i16(self):
+        return struct.unpack("<h", self._take(2, "i16"))[0]
+
+    def i32(self):
+        return struct.unpack("<i", self._take(4, "i32"))[0]
+
+    def i64(self):
+        return struct.unpack("<q", self._take(8, "i64"))[0]
+
+    def f32(self):
+        return struct.unpack("<f", self._take(4, "f32"))[0]
+
+    def f64(self):
+        return struct.unpack("<d", self._take(8, "f64"))[0]
+
+    def bool(self):
+        return self.u8() != 0
+
+    def string(self):
+        # surrogateescape preserves non-UTF8 token bytes round-trip exactly.
+        return self._take(self.u64(), "string").decode("utf-8", "surrogateescape")
+
+    def value(self, typ):
+        readers = {0: self.u8, 1: self.i8, 2: self.u16, 3: self.i16,
+                   4: self.u32, 5: self.i32, 6: self.f32, 7: self.bool,
+                   10: self.u64, 11: self.i64, 12: self.f64}
+        if typ == 8:
+            return self.string()
+        if typ == 9:
+            etyp, count = self.u32(), self.u64()
+            if etyp == 8:
+                return [self.string() for _ in range(count)]
+            return [self.value(etyp) for _ in range(count)]
+        try:
+            return readers[typ]()
+        except KeyError:
+            raise ValueError(f"unknown GGUF metadata type {typ}")
+
+
+def parse_gguf_inventory(buf):
+    """(kv, [(name, type_number, dims)]) from a GGUF header prefix.
+    Raises _GgufTruncated when the prefix ends mid-structure, ValueError on
+    a bad magic/version. Tensor DATA is never touched."""
+    cur = _GgufCursor(buf)
+    if cur._take(4, "magic") != b"GGUF":
+        raise ValueError("not a GGUF file (bad magic)")
+    version = cur.u32()
+    if version not in (2, 3):
+        raise ValueError(f"unsupported GGUF version {version}")
+    n_tensors, n_kv = cur.u64(), cur.u64()
+    kv = {}
+    for _ in range(n_kv):
+        key = cur.string()
+        typ = cur.u32()
+        kv[key] = cur.value(typ)
+    tensors = []
+    for _ in range(n_tensors):
+        name = cur.string()
+        n_dims = cur.u32()
+        dims = [cur.u64() for _ in range(n_dims)]
+        tensors.append((name, cur.u32(), dims))
+        cur.u64()  # data offset; the payload itself is never read
+    return kv, tensors
+
+
+def gguf_prefix_bytes(source, limit):
+    """First `limit` bytes of a local path or an https URL (Range).
+    A server that ignores Range still yields a usable prefix: the read is
+    capped either way. Returns b"" when nothing could be read."""
+    if isinstance(source, Path) or (isinstance(source, str) and not source.startswith("http")):
+        try:
+            with open(source, "rb") as f:
+                return f.read(limit)
+        except OSError:
+            return b""
+    try:
+        req = urllib.request.Request(source, headers={**_hf_headers(), "Range": f"bytes=0-{limit - 1}"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            out = bytearray()
+            while len(out) < limit:
+                chunk = resp.read(min(1024 * 1024, limit - len(out)))
+                if not chunk:
+                    break
+                out += chunk
+            return bytes(out)
+    except Exception:
+        return b""
+
+
+def read_gguf_inventory(source, limit_mb=32):
+    """(kv, tensors) for a GGUF, or None when the prefix is unreachable or
+    too short to cover the metadata. `source` is a local path or URL."""
+    buf = gguf_prefix_bytes(source, int(limit_mb * 1024 * 1024))
+    if len(buf) < 24:
+        return None
+    try:
+        return parse_gguf_inventory(buf)
+    except _GgufTruncated:
+        return None
+    except ValueError:
+        return None
+
+
+def verify_gguf_choice(source, gguf_name, claimed_family):
+    """The chosen file really holds what its name claims, in types the
+    engine packs. Returns (ok, note): unreachable metadata warns and keeps
+    the filename claim; a type mismatch refuses loudly."""
+    inv = read_gguf_inventory(source)
+    if inv is None:
+        return True, "metadata unreachable; installing on the filename claim"
+    kv, tensors = inv
+    unknown = sorted({t for _, t, _ in tensors if t not in GGML_TYPE_NAMES})
+    if unknown:
+        return False, f"unknown ggml tensor types {unknown}; refusing (see q4nx-build)"
+    bad = sorted({GGML_TYPE_NAMES[t] for _, t, _ in tensors
+                   if GGML_TYPE_NAMES[t] not in GGUF_ENGINE_TYPES})
+    if bad:
+        return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
+                       "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
+    # The output projection is routinely a coarser quant than the body
+    # (Q8_0 over Q4_*); anything else must be the claimed family.
+    quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
+               if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
+    others = quants - {claimed_family, "Q8_0"}
+    if others:
+        return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
+                       f"{claimed_family}; refusing rather than packing the wrong layout")
+    arch = kv.get("general.architecture", "?")
+    return True, f"{len(tensors)} tensors ({arch}), quant {sorted(quants)}"
+
+
+def _bytes_to_unicode():
+    """The GPT-2 byte mapping HF tokenizer.json files store BPE vocabs in.
+    Printable bytes map to themselves; whitespace/controls map to U+0100 and
+    up. Applied uniformly it is bijective over byte strings, so encode/decode
+    round-trips exactly and the emitted file is self-consistent."""
+    keep = set(range(0x21, 0x7F)) | set(range(0xA1, 0xAD)) | set(range(0xAE, 0x100))
+    table, extra = {}, 0x100
+    for b in range(256):
+        if b in keep:
+            table[b] = chr(b)
+        else:
+            table[b] = chr(extra)
+            extra += 1
+    return table
+
+
+def _map_token(raw, table):
+    return "".join(table[b] for b in raw)
+
+
+def extract_tokenizer_from_gguf(gguf_path, target, force=False):
+    """tokenizer.json + tokenizer_config.json + chat_template.jinja from the
+    GGUF's embedded tokenizer. BPE (merges present) only: a mergeless
+    sentencepiece vocab cannot become a correct BPE file, and that raises.
+    Returns the written file names."""
+    # The vocab KV dominates the prefix; grow until the tensor infos parse.
+    buf, inv = b"", None
+    with open(gguf_path, "rb") as f:
+        for _ in range(4):  # 8/16/32/64 MB ceiling
+            chunk = f.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            buf += chunk
+            try:
+                inv = parse_gguf_inventory(buf)
+                break
+            except _GgufTruncated:
+                continue
+    if inv is None:
+        raise RuntimeError("could not parse the GGUF metadata (truncated header?)")
+    kv, _ = inv
+
+    model = kv.get("tokenizer.ggml.model", "llama")
+    tokens = kv.get("tokenizer.ggml.tokens")
+    merges = kv.get("tokenizer.ggml.merges") or []
+    if not tokens:
+        raise RuntimeError("the GGUF carries no tokenizer.ggml.tokens; fetch the tokenizer from the base repo")
+    if not merges:
+        raise RuntimeError(
+            f"the embedded tokenizer ({model}) has no merges (sentencepiece-style); "
+            "a BPE tokenizer.json cannot be derived from it -- fetch the tokenizer "
+            "from the base repo named in the GGUF repo's README")
+    types = kv.get("tokenizer.ggml.token_type") or [1] * len(tokens)
+    table = _bytes_to_unicode()
+
+    def raw(i):
+        return tokens[i].encode("utf-8", "surrogateescape")
+
+    vocab, added, unk_content = {}, [], None
+    for i, tok in enumerate(tokens):
+        typ = types[i] if i < len(types) else 1
+        if typ == 5:  # unused slot
+            continue
+        content = _map_token(raw(i), table)
+        if typ in (2, 3, 4):  # unknown / control / user-defined specials
+            added.append({"id": i, "content": content, "single_word": False,
+                          "lstrip": False, "rstrip": False, "normalized": False,
+                          "special": True})
+            if typ == 2:
+                unk_content = content
+            vocab[content] = i
+        else:  # normal (1) and byte (6) tokens live in the BPE vocab
+            vocab[content] = i
+    hf_merges = []
+    for m in merges:
+        raw_m = m.encode("utf-8", "surrogateescape")
+        # Pairs join on ONE space; a side may itself hold 0x20, so split right.
+        left, _, right = raw_m.decode("utf-8", "surrogateescape").rpartition(" ")
+        if not _:
+            continue
+        a = _map_token(left.encode("utf-8", "surrogateescape"), table)
+        b = _map_token(right.encode("utf-8", "surrogateescape"), table)
+        hf_merges.append(f"{a} {b}")
+
+    def tok_content(tid, default=None):
+        if tid is None or not (0 <= tid < len(tokens)):
+            return default
+        return _map_token(raw(tid), table)
+
+    bos_id = kv.get("tokenizer.ggml.bos_token_id")
+    eos_id = kv.get("tokenizer.ggml.eos_token_id")
+    unk_id = kv.get("tokenizer.ggml.unknown_token_id")
+    if eos_id is None:
+        raise RuntimeError("the GGUF names no eos token; fetch the tokenizer from the base repo")
+    eos_content = tok_content(eos_id)
+    bos_content = tok_content(bos_id)
+    if unk_content is None:
+        unk_content = tok_content(unk_id, eos_content)
+    template = kv.get("tokenizer.chat_template")
+
+    byte_level = {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": True}
+    byte_level_no_trim = {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False}
+    tokenizer_json = {
+        "version": "1.0",
+        "truncation": None, "padding": None,
+        "added_tokens": sorted(added, key=lambda t: t["id"]),
+        "normalizer": byte_level,
+        "pre_tokenizer": byte_level,
+        "post_processor": byte_level_no_trim,
+        "decoder": byte_level_no_trim,
+        "model": {"type": "BPE", "dropout": None, "unk_token": unk_content,
+                  "continuing_subword_prefix": "", "end_of_word_suffix": "",
+                  "fuse_unk": True, "byte_fallback": False,
+                  "vocab": vocab, "merges": hf_merges},
+    }
+    config_json = {
+        "bos_token": bos_content,
+        "eos_token": eos_content,
+        "unk_token": unk_content,
+        "bos_token_id": bos_id,
+        "eos_token_id": [eos_id],
+        "add_bos_token": bool(kv.get("tokenizer.ggml.add_bos_token", True)),
+        "tokenizer_class": "PreTrainedTokenizerFast",
+    }
+    if template:
+        config_json["chat_template"] = template
+
+    written = []
+    for name, doc in (("tokenizer.json", tokenizer_json), ("tokenizer_config.json", config_json)):
+        dest = target / name
+        if dest.is_file() and not force:
+            continue
+        dest.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        written.append(name)
+    if template:
+        dest = target / "chat_template.jinja"
+        if not dest.is_file() or force:
+            dest.write_text(template if template.endswith("\n") else template + "\n", encoding="utf-8")
+            written.append("chat_template.jinja")
+    return written
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
@@ -1192,6 +1574,24 @@ def main():
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
     gguf_mode = gguf_name is not None and not have_q4nx
+    if gguf_mode:
+        # The tensors must be what the name claims, in types the NPU packers
+        # ingest. Remote metadata is best-effort (Range); a local file is on
+        # disk, so a failed parse there refuses the file outright.
+        if local_dir:
+            gguf_source = str(local_dir / gguf_name)
+        elif modelscope:
+            domain = ms_file_tree(repo)[0]
+            gguf_source = f"https://{domain}/models/{repo}/resolve/master/{gguf_name}"
+        else:
+            gguf_source = f"https://huggingface.co/{repo}/resolve/main/{gguf_name}"
+        ok, note = verify_gguf_choice(gguf_source, gguf_name, gguf_quant_of(gguf_name))
+        if ok:
+            log(f"[INFO] {gguf_name}: {note}")
+        else:
+            log(f"[WARN] refusing {gguf_name}: {note}")
+            gguf_refused[gguf_name] = note
+            gguf_name, gguf_mode = None, False
 
     system_list = find_system_model_list()
     system_registry = load_json(system_list)
@@ -1283,8 +1683,12 @@ def main():
         print(f"xclbin source  : {xclbin_source or '(none)'}")
         if gguf_mode:
             print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
+            print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
+            bases = readme_base_model(repo, modelscope)
+            print(f"base model(s)  : {', '.join(bases) or '(none in README)'}")
+            print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
         elif npue_embed:
             print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
         elif gguf_refused:
@@ -1349,6 +1753,7 @@ def main():
             aux_missing.append("config.json")
         if aux_missing:
             bases = readme_base_model(repo, modelscope)
+            gated_warned = set()
             if bases:
                 log(f"[INFO] base model(s) from README.md: {', '.join(bases)}")
                 for f in aux_missing:
@@ -1356,13 +1761,37 @@ def main():
                     for b in bases:
                         try:
                             got = fetch_from_repo(b, f, target / f, modelscope=modelscope)
+                        except urllib.error.HTTPError as ex:
+                            if ex.code in (401, 403) and b not in gated_warned:
+                                gated_warned.add(b)
+                                log(f"[WARN] {b} is gated (HTTP {ex.code}); set HF_TOKEN "
+                                    "(huggingface-cli login) to fetch from it, or rely on "
+                                    "the GGUF-embedded tokenizer below")
+                            elif b not in gated_warned:
+                                log(f"[WARN] fetching {f} from {b} failed: {ex}")
+                            got = None
                         except Exception as ex:
                             log(f"[WARN] fetching {f} from {b} failed: {ex}")
                             got = None
                         if got:
                             log(f"[INFO]   {f} <- {b}")
                             break
-                missing = [f for f in required if not (target / f).is_file()]
+            else:
+                log("[WARN] no base_model in the GGUF repo README; tokenizer/config must "
+                    "come from the GGUF itself")
+            # Last resort: the GGUF embeds its own tokenizer (vocab, merges,
+            # specials, chat template). Curated base-repo files win when they
+            # exist; this covers gated or vanished bases with zero auth.
+            still = [f for f in ("tokenizer.json", "tokenizer_config.json")
+                     if not (target / f).is_file()]
+            if gguf_mode and still and (target / "model.gguf").is_file():
+                try:
+                    wrote = extract_tokenizer_from_gguf(target / "model.gguf", target)
+                except Exception as ex:
+                    log(f"[WARN] GGUF-embedded tokenizer unusable: {ex}")
+                else:
+                    log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
+            missing = [f for f in required if not (target / f).is_file()]
     normalize_tokenizer_config(target, repo, readme_base_model(repo, modelscope), modelscope)
     if missing:
         if gguf_mode and missing == ["config.json"]:
