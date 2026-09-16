@@ -15,6 +15,9 @@
 #include "nlohmann/json.hpp"
 #include "picosha2.h" 
 #include "sha1.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace download_utils {
 
@@ -256,10 +259,153 @@ std::string download_string(const std::string& url) {
     return response;
 }
 
+namespace {
+
+FILE* open_part_file(const std::filesystem::path& path, bool append) {
+#ifdef _WIN32
+    return _wfopen(path.c_str(), append ? L"ab" : L"wb");
+#else
+    return fopen(path.c_str(), append ? "ab" : "wb");
+#endif
+}
+
+bool promote_atomically(const std::filesystem::path& part,
+                        const std::filesystem::path& destination) {
+#ifdef _WIN32
+    return MoveFileExW(part.c_str(), destination.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    std::error_code error;
+    std::filesystem::rename(part, destination, error);
+    return !error;
+#endif
+}
+
+bool request_hash_matches(const DownloadRequest& request,
+                          const std::filesystem::path& path) {
+    const std::string actual = request.hash_algorithm == HashAlgorithm::Sha256
+        ? calculate_file_sha256(path.string())
+        : calculate_git_blob_oid(path.string());
+    return actual == request.expected_hash;
+}
+
+}  // namespace
+
+bool download_file_atomic(const DownloadRequest& request,
+                          std::function<void(double)> progress_cb) {
+    if (request.expected_hash.empty()) {
+        std::cerr << "Missing expected hash for: " << request.destination << std::endl;
+        return false;
+    }
+
+    std::error_code error;
+    std::filesystem::create_directories(request.destination.parent_path(), error);
+    if (error) {
+        std::cerr << "Failed to create download directory: " << error.message() << std::endl;
+        return false;
+    }
+
+    const std::filesystem::path part(request.destination.string() + ".part");
+    std::uint64_t offset = 0;
+    if (std::filesystem::exists(part, error)) {
+        offset = std::filesystem::file_size(part, error);
+        if (error) {
+            return false;
+        }
+        if (offset > request.expected_size) {
+            std::filesystem::remove(part, error);
+            if (error) {
+                return false;
+            }
+            offset = 0;
+        }
+    }
+
+    if (offset < request.expected_size) {
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            std::cerr << "Failed to initialize CURL" << std::endl;
+            return false;
+        }
+        FILE* fp = open_part_file(part, offset != 0);
+        if (!fp) {
+            curl_easy_cleanup(curl);
+            std::cerr << "Failed to open partial file for writing: " << part << std::endl;
+            return false;
+        }
+
+        g_progress_bar_shown = false;
+        hide_cursor();
+        curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data_to_file);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "OpenFlowLM/1.0");
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3600L);
+        if (offset != 0) {
+            curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
+                             static_cast<curl_off_t>(offset));
+        }
+        if (progress_cb) {
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progress_callback);
+        }
+
+        const CURLcode result = curl_easy_perform(curl);
+        fclose(fp);
+        curl_easy_cleanup(curl);
+        show_cursor();
+        if (g_progress_bar_shown) {
+            std::cout << std::endl;
+        }
+        if (result != CURLE_OK) {
+            std::cerr << "CURL error: " << curl_easy_strerror(result) << std::endl;
+            return false;  // Keep the partial file for the next resume attempt.
+        }
+    }
+
+    const std::uint64_t completed_size = std::filesystem::file_size(part, error);
+    if (error || completed_size != request.expected_size ||
+        !request_hash_matches(request, part)) {
+        std::filesystem::remove(part, error);
+        header_print("OFLM", "Downloaded file size or hash did not match.");
+        return false;
+    }
+
+    if (!promote_atomically(part, request.destination)) {
+        std::cerr << "Failed to atomically promote: " << request.destination << std::endl;
+        return false;
+    }
+    header_print("OFLM", "Download completed: " << request.destination.string());
+    return true;
+}
+
+static bool download_with_retry(const DownloadRequest& request,
+                                std::function<void(double)> progress_cb,
+                                int max_retries = 3) {
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
+        if (download_file_atomic(request, progress_cb)) {
+            return true;
+        }
+        header_print("OFLM", "Download failed (attempt " << (attempt + 1) << "/" << max_retries << ")");
+        if (attempt + 1 < max_retries) {
+            header_print("OFLM", "Retrying...");
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+    return false;
+}
+
 /// \brief Download multiple files with progress tracking
 /// \param downloads the downloads
 /// \param progress_cb the progress callback
 /// \return true if the files are downloaded, false otherwise
+/// \note Entries carrying expected_size + hash_algorithm (built for pinned
+///       file_sources models) take the atomic path: resume, size + hash
+///       verify, atomic promote. Anything else keeps the legacy advisory
+///       path, so older producers of this JSON are unaffected.
 bool download_multiple_files(const nlohmann::json downloads,
                            std::function<void(size_t, size_t)> progress_cb) {
     size_t total_files = downloads.size();
@@ -272,8 +418,6 @@ bool download_multiple_files(const nlohmann::json downloads,
         std::string url = file["url"];
         std::string local_path = file["localpath"];
         std::string filename = std::filesystem::path(url).filename().string();
-        std::string remote_oid = file["oid"];
-        bool is_lfs = file["is_lfs"];
 
         // cut "?download=true"
         if (filename.find("?download=true") != std::string::npos) {
@@ -288,7 +432,23 @@ bool download_multiple_files(const nlohmann::json downloads,
             }
         };
 
-        if (!download_with_retry(url, local_path, is_lfs, remote_oid, file_progress)) {
+        bool ok;
+        if (file.contains("expected_size") && file.contains("hash_algorithm")) {
+            DownloadRequest request{
+                url,
+                local_path,
+                file["expected_size"].get<std::uint64_t>(),
+                file.value("hash_algorithm", std::string()) == "sha256"
+                    ? HashAlgorithm::Sha256
+                    : HashAlgorithm::GitBlobSha1,
+                file.value("oid", std::string())};
+            ok = download_with_retry(request, file_progress);
+        } else {
+            std::string remote_oid = file["oid"];
+            bool is_lfs = file["is_lfs"];
+            ok = download_with_retry(url, local_path, is_lfs, remote_oid, file_progress);
+        }
+        if (!ok) {
             std::cerr << "Failed to download: " << url << std::endl;
             //show_cursor(); // Show cursor on error
             return false;
