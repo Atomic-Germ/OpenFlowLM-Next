@@ -25,6 +25,8 @@
 /// families, the expert block still one token at a time.
 #pragma once
 
+#include <chrono>
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -243,6 +245,11 @@ private:
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, gact, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;
+    /// Dispatch bookkeeping, for the intermittent dx timeout. A failure needs to say
+    /// which layer, how far into the run, and how long the host sat between dispatches -
+    /// "kernel dx at position N" alone does not separate a hung command from a late one.
+    uint64_t dispatches_ = 0;
+    std::chrono::steady_clock::time_point last_done_{};
     std::vector<int> mrope_section_;          ///< empty: no M-RoPE (every model but the VLMs)
     bool mrope_interleaved_ = false;
     int image_token_id_ = -1;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -434,6 +435,13 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
 
 std::pair<double, double> Core::run_split(Kern& k, const std::vector<std::string>& args, int layer) {
     auto t0 = std::chrono::steady_clock::now();
+    // How long the HOST sat between the previous dispatch returning and this one
+    // starting. If the timeout only ever follows a long gap, the trigger is idleness
+    // rather than anything about the dispatch itself.
+    const double gap_ms = last_done_.time_since_epoch().count()
+                              ? std::chrono::duration<double, std::milli>(t0 - last_done_).count()
+                              : -1.0;
+    ++dispatches_;
     xrt::run r(*k.k);
     r.set_arg(0, kOpcode);
     r.set_arg(1, *k.instr);
@@ -444,10 +452,48 @@ std::pair<double, double> Core::run_split(Kern& k, const std::vector<std::string
     auto t1 = std::chrono::steady_clock::now();
     r.start();
     auto st = cfg_.timeout_ms ? r.wait(std::chrono::milliseconds(cfg_.timeout_ms)) : r.wait();
-    if (st != ERT_CMD_STATE_COMPLETED)
-        throw std::runtime_error("open_qwen36: kernel " + k.name + " at position " + std::to_string(pos_) +
-                                 " ended in ERT state " + std::to_string(static_cast<int>(st)) +
-                                 (st == ERT_CMD_STATE_TIMEOUT ? " (timeout)" : ""));
+    if (st != ERT_CMD_STATE_COMPLETED) {
+        // Is the command hung, or merely late? Throwing here used to throw that question
+        // away with it. Wait a little longer and say which it was.
+        //
+        // Five seconds, not another sixty. On every occurrence measured so far the driver
+        // reported the command as never executed (no fault, nothing in flight), and a
+        // command the firmware is not running does not arrive late - so a long second
+        // wait buys nothing and costs a minute. Short enough to be free, long enough to
+        // catch a genuinely late one and say so. OFLM_OPEN_TIMEOUT_RETRY_MS overrides.
+        unsigned extra = 5000;
+        if (const char* e = std::getenv("OFLM_OPEN_TIMEOUT_RETRY_MS")) extra = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+        std::fprintf(stderr,
+                     "open_qwen36: %s layer %d at position %d: ERT state %d after %.0f ms "
+                     "(dispatch #%llu, %.0f ms host gap before it)\n",
+                     k.name.c_str(), layer, pos_, static_cast<int>(st), ms_since(t0),
+                     static_cast<unsigned long long>(dispatches_), gap_ms);
+        // The driver logs its own view of this, and it is the difference between "our
+        // dispatch was slow" and "the hardware context faulted". Every occurrence so far
+        // had a matching entry; three hours of clean running had none.
+        std::fprintf(stderr, "open_qwen36:   the NPU driver logs context errors as pci Event ID 3 in the Windows"
+                             " System log; look for one at this moment before blaming the dispatch\n");
+        std::fflush(stderr);
+        // Only a TIMEOUT can still be in flight. An abort or an error is final, and
+        // waiting on it just delays the rebuild by another minute.
+        if (extra && st == ERT_CMD_STATE_TIMEOUT) {
+            auto st2 = r.wait(std::chrono::milliseconds(extra));
+            std::fprintf(stderr, "open_qwen36:   waited %u ms more: ERT state %d%s\n", extra,
+                         static_cast<int>(st2),
+                         st2 == ERT_CMD_STATE_COMPLETED ? " - it was LATE, not hung" : " - still not done");
+            std::fflush(stderr);
+            if (st2 == ERT_CMD_STATE_COMPLETED) {
+                last_done_ = std::chrono::steady_clock::now();
+                return {submit, ms_since(t1)};
+            }
+        }
+        throw std::runtime_error("open_qwen36: kernel " + k.name + " layer " + std::to_string(layer) +
+                                 " at position " + std::to_string(pos_) + " ended in ERT state " +
+                                 std::to_string(static_cast<int>(st)) +
+                                 (st == ERT_CMD_STATE_TIMEOUT ? " (timeout)" : "") + ", dispatch #" +
+                                 std::to_string(dispatches_));
+    }
+    last_done_ = std::chrono::steady_clock::now();
     return {submit, ms_since(t1)};
 }
 
