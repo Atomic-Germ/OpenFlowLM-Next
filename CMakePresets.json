@@ -31,12 +31,46 @@
       }
     },
     {
+      "name": "fedora-default",
+      "displayName": "Fedora Default",
+      "description": "Fedora release build with XRT discovered through pkg-config",
+      "inherits": ["common-default", "common-install"],
+      "generator": "Ninja",
+      "binaryDir": "build",
+      "environment": {
+        "XILINX_XRT": "/opt/xilinx/xrt",
+        "PKG_CONFIG_PATH": "/opt/xilinx/xrt/lib/pkgconfig:$penv{PKG_CONFIG_PATH}",
+        "CMAKE_PREFIX_PATH": "/opt/xilinx/xrt:$penv{CMAKE_PREFIX_PATH}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OFLM_BUILD_KERNELS": "ON"
+      }
+    },
+    {
       "name": "linux-debug",
       "displayName": "Linux Debug",
       "description": "Debug build for development (engine only by default)",
       "inherits": ["common-default", "common-install"],
       "generator": "Ninja",
       "binaryDir": "build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OFLM_BUILD_KERNELS": "OFF"
+      }
+    },
+    {
+      "name": "fedora-debug",
+      "displayName": "Fedora Debug",
+      "description": "Fedora build for development (engine only by default)",
+      "inherits": ["common-default", "common-install"],
+      "generator": "Ninja",
+      "binaryDir": "build-debug",
+      "environment": {
+        "XILINX_XRT": "/opt/xilinx/xrt",
+        "PKG_CONFIG_PATH": "/opt/xilinx/xrt/lib/pkgconfig:$penv{PKG_CONFIG_PATH}",
+        "CMAKE_PREFIX_PATH": "/opt/xilinx/xrt:$penv{CMAKE_PREFIX_PATH}"
+      },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "OFLM_BUILD_KERNELS": "OFF"
