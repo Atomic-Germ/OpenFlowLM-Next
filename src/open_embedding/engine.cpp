@@ -153,16 +153,37 @@ static bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
+// The GGUF's local filename depends on how it arrived: `oflm add` stores
+// every weight canonically as model.gguf, while `oflm pull` keeps the
+// upstream filename (e.g. embeddinggemma-300M-Q8_0.gguf) so the manifest
+// record and the pinned download URL agree. Prefer the canonical name;
+// otherwise take the single *.gguf in the directory (empty when there is
+// none, or more than one).
+static std::string find_gguf(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (fs::exists(dir / "model.gguf", ec)) return (dir / "model.gguf").string();
+    std::string found;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().extension() == ".gguf") {
+            if (!found.empty()) return {};
+            found = it->path().string();
+        }
+    }
+    return found;
+}
+
 bool Engine::load(const std::string& model_dir) {
     model_dir_ = model_dir;
     const std::filesystem::path dir(model_dir);
-    const bool have_gguf = std::filesystem::exists(dir / "model.gguf");
+    const std::string gguf_path = find_gguf(dir);
+    const bool have_gguf = !gguf_path.empty();
     if (have_gguf) {
-        gguf_ = std::make_unique<open_qwen36::GgufFile>((dir / "model.gguf").string());
+        gguf_ = std::make_unique<open_qwen36::GgufFile>(gguf_path);
         cfg_ = derive_config_gguf(*gguf_);
         if (!cfg_.is_object() || cfg_.value("hidden_size", 0u) == 0) {
             std::fprintf(stderr, "open_embedding: cannot derive config from %s\n",
-                         (dir / "model.gguf").string().c_str());
+                         gguf_path.c_str());
             return false;
         }
         use_gguf_ = true;

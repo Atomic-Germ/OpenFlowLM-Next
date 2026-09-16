@@ -7,6 +7,9 @@
 ///       needs a model tree and is exercised by oflm-add's installer tests.
 #include "model_downloader.hpp"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -181,6 +184,122 @@ void test_malformed_tables_throw() {
     RequireThrows([&] { resolve_file_source(broken_sibling, "config.json", false); });
 }
 
+void WriteRegistry(const std::filesystem::path& list_path, const std::string& body) {
+    std::ofstream out(list_path);
+    out << body;
+}
+
+void test_remove_deletes_tree_and_links() {
+    // remove_model must delete the whole model tree -- nested head dirs and
+    // the open_kernels symlink (the link itself, never its target) -- plus
+    // the user-level xclbins symlink oflm-add created for the model name.
+    namespace fs = std::filesystem;
+    const fs::path sandbox = fs::temp_directory_path() / "oflm-remove-test";
+    std::error_code ec;
+    fs::remove_all(sandbox, ec);
+    fs::create_directories(sandbox, ec);
+    const fs::path store = sandbox / "store";
+    const fs::path list_path = sandbox / "model_list.json";
+    WriteRegistry(list_path, R"({
+        "model_path": "models",
+        "models": { "t": { "s": {
+            "name": "OflmRemoveTest-S",
+            "url": "https://example.invalid/T",
+            "file_url": "https://example.invalid/T/tree",
+            "ms_url": "",
+            "files": ["a.gguf", "sub/b.gguf"]
+        } } }
+    })");
+
+    std::string list_arg = list_path.string();
+    std::string store_arg = store.string();
+    model_list models(list_arg, store_arg);
+    ModelDownloader downloader(models);
+
+    const fs::path model_dir = store / "models" / "OflmRemoveTest-S";
+    const fs::path kernel_target = sandbox / "kernels";
+    fs::create_directories(model_dir / "sub", ec);
+    fs::create_directories(kernel_target, ec);
+    { std::ofstream(model_dir / "a.gguf") << "x"; }
+    { std::ofstream(model_dir / "sub" / "b.gguf") << "y"; }
+    { std::ofstream(kernel_target / "manifest.json") << "{}"; }
+    fs::create_directory_symlink(kernel_target, model_dir / "open_kernels", ec);
+    const bool links_ok = !ec;
+
+    const fs::path xroot = sandbox / "xclbins-home";
+    fs::create_directories(xroot / "xclbins", ec);
+    if (links_ok) {
+        fs::create_directory_symlink(kernel_target, xroot / "xclbins" / "OflmRemoveTest-S", ec);
+    }
+#ifdef _WIN32
+    _putenv_s("OFLM_XCLBIN_PATH", xroot.string().c_str());
+#else
+    setenv("OFLM_XCLBIN_PATH", xroot.string().c_str(), 1);
+#endif
+
+    TEST_REQUIRE(downloader.remove_model("t:s", true));
+    TEST_REQUIRE(!fs::exists(model_dir, ec));
+    // The symlink targets are data that removal must never follow into.
+    TEST_REQUIRE(fs::exists(kernel_target / "manifest.json", ec));
+    if (links_ok) {
+        TEST_REQUIRE(!fs::exists(xroot / "xclbins" / "OflmRemoveTest-S", ec));
+    }
+
+#ifdef _WIN32
+    _putenv_s("OFLM_XCLBIN_PATH", "");
+#else
+    unsetenv("OFLM_XCLBIN_PATH");
+#endif
+    fs::remove_all(sandbox, ec);
+}
+
+void test_remove_refuses_unknown_and_escape() {
+    namespace fs = std::filesystem;
+    const fs::path sandbox = fs::temp_directory_path() / "oflm-remove-guard-test";
+    std::error_code ec;
+    fs::remove_all(sandbox, ec);
+    fs::create_directories(sandbox, ec);
+    const fs::path store = sandbox / "store";
+    const fs::path list_path = sandbox / "model_list.json";
+    WriteRegistry(list_path, R"({
+        "model_path": "models",
+        "models": {
+            "t": { "s": {
+                "name": "OflmRemoveGuard-S",
+                "url": "https://example.invalid/T",
+                "file_url": "https://example.invalid/T/tree",
+                "ms_url": "",
+                "files": ["a.gguf"]
+            } },
+            "e": { "v": {
+                "name": "../../evil-bytes",
+                "url": "https://example.invalid/E",
+                "file_url": "https://example.invalid/E/tree",
+                "ms_url": "",
+                "files": ["a.gguf"]
+            } }
+        }
+    })");
+
+    std::string list_arg = list_path.string();
+    std::string store_arg = store.string();
+    model_list models(list_arg, store_arg);
+    ModelDownloader downloader(models);
+
+    // Unknown tags are refused: get_model_info falls back to a default entry
+    // instead of throwing, and removing that would delete the wrong model.
+    TEST_REQUIRE(!downloader.remove_model("nope:1b", true));
+
+    // A registry name escaping the models root is refused, never followed.
+    const fs::path evil = sandbox / "evil-bytes";
+    fs::create_directories(evil, ec);
+    { std::ofstream(evil / "a.gguf") << "victim"; }
+    TEST_REQUIRE(!downloader.remove_model("e:v", true));
+    TEST_REQUIRE(fs::exists(evil / "a.gguf", ec));
+
+    fs::remove_all(sandbox, ec);
+}
+
 }  // namespace
 
 int main() {
@@ -190,6 +309,8 @@ int main() {
     RunTest(test_pin_percent_encodes_filenames, "pin percent-encodes filenames");
     RunTest(test_modelscope_with_pins_is_rejected, "modelscope with pins is rejected");
     RunTest(test_malformed_tables_throw, "malformed tables throw");
+    RunTest(test_remove_deletes_tree_and_links, "remove deletes tree and links");
+    RunTest(test_remove_refuses_unknown_and_escape, "remove refuses unknown and escape");
     std::cout << "All downloader pinning tests passed\n";
     return 0;
 }

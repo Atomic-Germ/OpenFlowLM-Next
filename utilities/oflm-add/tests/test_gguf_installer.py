@@ -110,6 +110,306 @@ def test_stock_repo_names_derive_known_families():
     assert oflm_add.derive_family({}, "Phi-4-mini-instruct-GGUF") == "phi4"
 
 
+def test_embedding_gemma_repo_names_derive_embed_family():
+    # Hyphenated ("embedding-gemma-...") and fused ("embeddinggemma-...") hosts
+    # alike must resolve without --family.
+    assert oflm_add.derive_family({}, "embedding-gemma-300M-GGUF") == "embed-gemma"
+    assert oflm_add.derive_family({}, "embeddinggemma-300M-GGUF") == "embed-gemma"
+    assert oflm_add.derive_family({}, "embed-gemma-300m") == "embed-gemma"
+
+
+def test_gguf_arch_fallback_resolves_embed_family(tmp_path):
+    gguf = tmp_path / "quant-Q8_0.gguf"
+    gguf.write_bytes(_gguf_bytes([("general.architecture", (8, "gemma-embedding"))]))
+    assert oflm_add.family_from_gguf_arch(str(gguf)) == "embed-gemma"
+
+
+def test_gguf_arch_map_covers_common_families(tmp_path):
+    cases = {
+        "qwen3": "qwen3",
+        "qwen2": "qwen2",
+        "llama": "llama3",
+        "gemma3": "gemma3",
+        "phi4": "phi4",
+        "granite": "granite",
+        "hunyuan": "hunyuan",
+    }
+    for arch, family in cases.items():
+        gguf = tmp_path / f"{arch}-Q4_K_M.gguf"
+        gguf.write_bytes(_gguf_bytes([("general.architecture", (8, arch))]))
+        assert oflm_add.family_from_gguf_arch(str(gguf)) == family
+    # Unmapped arches and unreadable files yield None, not an error.
+    other = tmp_path / "other-Q4_K_M.gguf"
+    other.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen3moe"))]))
+    assert oflm_add.family_from_gguf_arch(str(other)) is None
+    assert oflm_add.family_from_gguf_arch(str(tmp_path / "missing.gguf")) is None
+
+
+def test_config_model_type_resolves_family():
+    assert oflm_add.family_from_config_dict({"model_type": "qwen3"}) == "qwen3"
+    assert oflm_add.family_from_config_dict({"model_type": "llama"}) == "llama3"
+    assert oflm_add.family_from_config_dict(
+        {"architectures": ["Qwen3ForCausalLM"]}) == "qwen3"
+    assert oflm_add.family_from_config_dict(
+        {"architectures": ["GraniteForCausalLM"]}) == "granite"
+    # Vision-language shapes never fold onto a text family.
+    assert oflm_add.family_from_config_dict({"model_type": "qwen2_5_vl"}) is None
+    # Unknown shapes and garbage yield None, not an error.
+    assert oflm_add.family_from_config_dict({"model_type": "mixtral"}) is None
+    assert oflm_add.family_from_config_dict({}) is None
+    assert oflm_add.family_from_config_dict(None) is None
+
+
+def test_derive_tag_accepts_size_guess():
+    assert oflm_add.derive_tag("My-Finetune-Q4_K_M", None, "4.4b") == "my-finetune:4.4b"
+    try:
+        oflm_add.derive_tag("My-Finetune-Q4_K_M")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("sizeless slug without a guess must raise")
+
+
+def test_gguf_size_token_math():
+    assert oflm_add.gguf_size_token(2_500_000_000, "Q4_K") == "4.4b"
+    assert oflm_add.gguf_size_token(333_590_944, "Q8_0") == "0.3b"
+    assert oflm_add.gguf_size_token(0, "Q4_K") is None
+    assert oflm_add.gguf_size_token(2_500_000_000, "IQ2_M") is None
+    assert oflm_add.size_token_from_bytes(4_400_000_000) == "4.4b"
+    assert oflm_add.size_token_from_bytes(None) is None
+
+
+def test_gguf_byte_size_prefers_local_stat(tmp_path):
+    gguf = tmp_path / "m-Q4_K_M.gguf"
+    gguf.write_bytes(b"x" * 1024)
+    assert oflm_add.gguf_byte_size("Org/M", False, tmp_path, None,
+                                   "m-Q4_K_M.gguf", []) == 1024
+    # HF tree listing (lfs size wins, plain size otherwise).
+    tree = [{"path": "m-Q4_K_M.gguf",
+             "lfs": {"oid": "a" * 64, "size": 2048}, "size": 2048}]
+    assert oflm_add.gguf_byte_size("Org/M", False, None, None,
+                                   "m-Q4_K_M.gguf", tree) == 2048
+    # ModelScope dict listing.
+    ms = {"m-Q4_K_M.gguf": {"Size": 4096}}
+    assert oflm_add.gguf_byte_size("Org/M", True, None, None,
+                                   "m-Q4_K_M.gguf", ms) == 4096
+    assert oflm_add.gguf_byte_size("Org/M", False, None, None,
+                                   "absent.gguf", tree) is None
+
+
+def test_base_chain_climbs_and_stops_cycles(monkeypatch):
+    frontmatters = {
+        "User/Quant": ["User/Finetune"],
+        "User/Finetune": ["google/base", "User/Quant"],  # cycle back up
+        "google/base": [],
+    }
+    monkeypatch.setattr(oflm_add, "readme_base_model",
+                        lambda repo, ms=False: frontmatters.get(repo, []))
+    assert oflm_add.readme_base_chain("User/Quant") == ["User/Finetune", "google/base"]
+
+
+def test_peek_config_prefers_local_and_climbs(monkeypatch, tmp_path):
+    cfg = {"model_type": "qwen3", "hidden_size": 2560,
+           "num_hidden_layers": 28, "vocab_size": 152064}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    got = oflm_add.peek_config_dict("Org/M", False, bases=["Org/Base"],
+                                    local_dirs=[tmp_path])
+    assert got["model_type"] == "qwen3"
+    # No local file: the repo itself, then its bases, first hit wins.
+    monkeypatch.setattr(oflm_add, "fetch_from_repo",
+                        lambda r, f, dest, **kw: None if r == "Org/M" else dest)
+    monkeypatch.setattr(oflm_add, "load_json", lambda p: {"model_type": "llama"})
+    got = oflm_add.peek_config_dict("Org/M", False, bases=["Org/Base"],
+                                    local_dirs=[tmp_path / "empty"])
+    assert got["model_type"] == "llama"
+
+
+def _dry_run_argv(repo, tmp_path):
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    return (["oflm-add", str(repo), "--system-list", str(system_list),
+             "--config", str(tmp_path / "user_list.json"),
+             "--models-root", str(tmp_path / "models"),
+             "--dry-run", "--quiet"], system_list)
+
+
+def test_named_local_q4nx_dry_run_unchanged(tmp_path, capsys, monkeypatch):
+    """A well-named local q4nx repo plans exactly as before the heuristics.
+
+    Guards the legacy path: name alias family, name size tag, official kernel
+    match -- no detection fallback may fire here."""
+    from pathlib import Path as _Path
+    argv, system_list = _dry_run_argv(tmp_path / "Qwen3-4B-Custom-NPU2", tmp_path)
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "Qwen3-4B-Custom-NPU2"
+    repo.mkdir()
+    (repo / "model.q4nx").write_bytes(b"q4nx")
+    (repo / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    (repo / "tokenizer.json").write_text("{}")
+    (repo / "tokenizer_config.json").write_text("{}")
+    monkeypatch.setattr("sys.argv", argv)
+    oflm_add.main()
+    out = capsys.readouterr().out
+    assert "details.family : qwen3" in out
+    assert "tag            : qwen3-custom:4b" in out
+    assert "official match : qwen3:4b" in out
+    assert "GGUF-direct" not in out
+
+
+def test_chaotic_local_q4nx_dry_run_peeks_config(tmp_path, capsys, monkeypatch):
+    """A marker-less local q4nx repo resolves via its own config.json.
+
+    Family from model_type, tag size from the geometry estimate -- fully
+    offline, so the peek must prefer the local file and do no network."""
+    argv, system_list = _dry_run_argv(tmp_path / "ChaoticFinetune", tmp_path)
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "ChaoticFinetune"
+    repo.mkdir()
+    (repo / "model.q4nx").write_bytes(b"q4nx")
+    (repo / "config.json").write_text(json.dumps({
+        "model_type": "qwen3", "hidden_size": 2560, "num_hidden_layers": 28,
+        "intermediate_size": 9728, "vocab_size": 152064}))
+    (repo / "tokenizer.json").write_text("{}")
+    (repo / "tokenizer_config.json").write_text("{}")
+    monkeypatch.setattr("sys.argv", argv)
+    oflm_add.main()
+    out = capsys.readouterr().out
+    assert "details.family : qwen3" in out
+    assert "chaoticfinetune:5b" in out
+    assert "official match : qwen3:4b" in out
+
+
+def test_named_local_q4nx_full_install_registers(tmp_path, capsys, monkeypatch):
+    """A local q4nx repo installs end to end: files copied, registry written.
+
+    Fully offline (a README without frontmatter keeps the base chain local).
+    This is the legacy path the GGUF automation must not disturb."""
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "Qwen3-4B-Custom-NPU2"
+    repo.mkdir()
+    (repo / "model.q4nx").write_bytes(b"q4nx")
+    (repo / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    (repo / "tokenizer.json").write_text("{}")
+    (repo / "tokenizer_config.json").write_text("{}")
+    (repo / "README.md").write_text("# local test repo\n")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["oflm-add", str(repo), "--system-list", str(system_list),
+         "--config", str(tmp_path / "user_list.json"),
+         "--models-root", str(tmp_path / "models"),
+         "--xclbin-dir", str(tmp_path / "xclbins"), "--quiet"])
+    oflm_add.main()
+    target = tmp_path / "models" / "Qwen3-4B-Custom-NPU2"
+    for name in ("model.q4nx", "config.json", "tokenizer.json",
+                 "tokenizer_config.json"):
+        assert (target / name).is_file()
+    registry = json.loads((tmp_path / "user_list.json").read_text())
+    entry = registry["models"]["qwen3-custom"]["4b"]
+    assert entry["name"] == "Qwen3-4B-Custom-NPU2"
+    assert entry["details"]["family"] == "qwen3"
+    assert entry["details"]["format"] == "NPU2"
+    assert entry["size"] == 4_000_000_000
+    assert sorted(entry["files"]) == ["config.json", "model.q4nx",
+                                      "tokenizer.json", "tokenizer_config.json"]
+
+
+def test_user_install_never_touches_curated_list_or_kernels(tmp_path, monkeypatch):
+    """The oflm-add invariant: a user install writes only user paths.
+
+    The curated list is read, never written; kernel blobs are symlinked, never
+    copied or downloaded; reinstalling a curated model lands under a different
+    tag instead of overwriting it. A fake system root (via OFLM_EXECUTABLE)
+    stands in for the install tree so the whole link flow runs offline."""
+    import os
+    from pathlib import Path as _Path
+    checkout_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not checkout_list.is_file():
+        return
+    curated = tmp_path / "system_list.json"
+    curated.write_bytes(checkout_list.read_bytes())
+    before = curated.read_bytes()
+
+    # Fake install tree: <root>/share/oflm/xclbins/<official>/...
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    shipped = tmp_path / "share" / "oflm" / "xclbins" / "Qwen3-4B-NPU2"
+    shipped.mkdir(parents=True)
+    (shipped / "kernel.xclbin").write_bytes(b"kernels")
+    monkeypatch.setenv("OFLM_EXECUTABLE", str(fakebin / "oflm"))
+
+    repo = tmp_path / "Qwen3-4B-Custom-NPU2"
+    repo.mkdir()
+    (repo / "model.q4nx").write_bytes(b"q4nx")
+    (repo / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    (repo / "tokenizer.json").write_text("{}")
+    (repo / "tokenizer_config.json").write_text("{}")
+    (repo / "README.md").write_text("# local test repo\n")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["oflm-add", str(repo), "--system-list", str(curated),
+         "--config", str(tmp_path / "user_list.json"),
+         "--models-root", str(tmp_path / "models"),
+         "--xclbin-dir", str(tmp_path / "xclbins"), "--quiet"])
+    oflm_add.main()
+
+    # Curated list byte-identical; shipped kernels still a real dir, intact.
+    assert curated.read_bytes() == before
+    assert shipped.is_dir() and not shipped.is_symlink()
+    assert (shipped / "kernel.xclbin").read_bytes() == b"kernels"
+    # Both user links are symlinks into the shipped tree -- no blob was
+    # copied or downloaded anywhere under the user paths.
+    for name in ("Qwen3-4B-Custom-NPU2", "Qwen3-4B-NPU2"):
+        link = tmp_path / "xclbins" / name
+        assert link.is_symlink(), name
+        assert os.readlink(link) == str(shipped)
+    blobs = [p for p in (tmp_path / "xclbins").rglob("*")
+             if p.is_file() and not p.is_symlink()]
+    assert blobs == []
+    # ... and the model lives under its own tag: the user list is a full
+    # overlay seeded from the curated one, so the curated qwen3:4b entry must
+    # be untouched while qwen3-custom:4b carries the install.
+    registry = json.loads((tmp_path / "user_list.json").read_text())
+    system = json.loads(before.decode())
+    assert registry["models"]["qwen3"]["4b"] == system["models"]["qwen3"]["4b"]
+    assert registry["models"]["qwen3-custom"]["4b"]["name"] == "Qwen3-4B-Custom-NPU2"
+
+
+def test_chaotic_local_gguf_dry_run_detects_family_and_size(tmp_path, capsys,
+                                                            monkeypatch):
+    """A local dir with no family/size markers still plans an install.
+
+    Family comes from the GGUF architecture, the tag size from its bytes and
+    quant -- the llama.cpp-style automation for chaotic slugs. Fully offline:
+    --dry-run returns before any download, --system-list points at the repo
+    checkout (skipped when absent)."""
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "MyCoolFinetune"
+    repo.mkdir()
+    kv = [("general.architecture", (8, "qwen3"))]
+    gguf = repo / "mycool-Q4_K_M.gguf"
+    gguf.write_bytes(_gguf_bytes(kv, [("w", 12, [8, 8]), ("n", 0, [8])]))
+    with open(gguf, "r+b") as f:  # sparse: stat sees ~2.5 GB, reads stay small
+        f.truncate(2_500_000_000)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["oflm-add", str(repo), "--system-list", str(system_list),
+         "--config", str(tmp_path / "user_list.json"),
+         "--models-root", str(tmp_path / "models"), "--dry-run", "--quiet"])
+    oflm_add.main()
+    out = capsys.readouterr().out
+    assert "details.family : qwen3" in out
+    assert "mycoolfinetune:4.4b" in out
+    assert "official match : qwen3:4b" in out
+
+
 def _gguf_bytes(kv_items, tensors=()):
     """Minimal GGUF v3 prefix: header + KV + tensor infos (no payload)."""
     import struct

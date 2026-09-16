@@ -1130,6 +1130,9 @@ for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3"):
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
 _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",
               "attn_output.weight": "attn",
+              # Qwen3-Next linear layers fuse q/k/v into one tensor; the full
+              # layers keep the split names (same roles either way).
+              "attn_qkv.weight": "linear",
               "ffn_up.weight": "ffn", "ffn_gate.weight": "ffn", "ffn_down.weight": "ffn",
               "ffn_up_exps.weight": "experts", "ffn_gate_exps.weight": "experts",
               "ffn_down_exps.weight": "experts",

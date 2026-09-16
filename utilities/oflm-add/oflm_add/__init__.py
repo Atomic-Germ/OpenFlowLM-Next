@@ -37,6 +37,7 @@ you need in your shell rc afterwards is:
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -44,6 +45,7 @@ import re
 import shutil
 import struct
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -202,6 +204,7 @@ FAMILY_ALIASES = [
     # defaults and chat-template probe are the wrong ones -- and the closed
     # llama_npu refuses hidden_size 2560 outright.
     ("granite", "granite"),
+    ("hunyuan", "hunyuan"),
     ("crow", "qwen3.5"),
     ("huihui", "qwen3.5"),
     ("qwythos", "qwen3.5"),
@@ -219,6 +222,7 @@ FAMILY_ALIASES = [
     ("whisper-v3", "whisper-v3"),
     ("whisper", "whisper-v3"),
     ("embed-gemma", "embed-gemma"),
+    ("embedding-gemma", "embed-gemma"),
     ("embeddinggemma", "embed-gemma"),
     # NPU-embedding (NpuEmbeddings) families: HF safetensors checkpoints, no GGUF.
     ("bge", "bge"),
@@ -227,6 +231,39 @@ FAMILY_ALIASES = [
     ("minilm", "minilm"),
     ("gte", "gte"),
 ]
+
+# GGUF general.architecture -> runtime details.family, consulted when the repo
+# name matches no FAMILY_ALIASES prefix. The name alias above covers the known
+# embedding-gemma hosts, but any other repo serving a gemma-embedding GGUF
+# (arbitrary org/name) should still resolve without --family. Only arches
+# whose shapes an engine here serves are mapped; anything else (moe variants
+# with different geometry, one-off merges) must say --family explicitly rather
+# than link the wrong kernels.
+GGUF_ARCH_FAMILIES = {
+    "gemma-embedding": "embed-gemma",
+    "qwen3": "qwen3",
+    "qwen2": "qwen2",
+    "llama": "llama3",
+    "gemma3": "gemma3",
+    "phi4": "phi4",
+    "granite": "granite",
+    "hunyuan": "hunyuan",
+}
+
+# HuggingFace config.json model_type -> runtime details.family, same role as
+# the GGUF map for repos whose names carry no family marker (chaotic finetune
+# slugs). Conservative for the same reason: an unmapped model_type refuses
+# with a --family hint instead of guessing.
+CONFIG_MODEL_FAMILIES = {
+    "qwen3": "qwen3",
+    "qwen2": "qwen2",
+    "llama": "llama3",
+    "gemma3": "gemma3",
+    "phi4": "phi4",
+    "granite": "granite",
+    "hunyuan": "hunyuan",
+    "gpt_oss": "gpt-oss",
+}
 
 
 def log(msg):
@@ -323,15 +360,21 @@ def _extract_size(bare):
     return size, rest
 
 
-def derive_tag(dir_name, explicit=None):
+def derive_tag(dir_name, explicit=None, size_guess=None):
     if explicit:
         return explicit
     size, rest = _extract_size(_strip_npu2(dir_name))
     if not size:
-        raise SystemExit(
-            f"Could not derive a size from '{dir_name}' (no 'NNb' marker). "
-            "Pass --tag name:size."
-        )
+        # Chaotic repo slugs ("My-Finetune-Q4_K_M") carry no size marker; a
+        # byte-derived guess keeps the install working (kernel matching keys
+        # off the tag size). The bucket stays repo-derived, so two customs of
+        # the same size never collide.
+        if not size_guess:
+            raise SystemExit(
+                f"Could not derive a size from '{dir_name}' (no 'NNb' marker). "
+                "Pass --tag name:size."
+            )
+        size, rest = size_guess, _strip_npu2(dir_name)
     tokens = [t for t in re.split(r"[-_ ]+", rest) if t]
     if not tokens:
         raise SystemExit("Could not derive a tag from the repo name. Pass --tag name:size.")
@@ -728,6 +771,68 @@ def readme_base_model(repo_id, modelscope=False):
     return _parse_base_model_frontmatter(text)
 
 
+def readme_base_chain(repo_id, modelscope=False, max_depth=3):
+    """All base models reachable by climbing README frontmatter, in order.
+
+    A quant repo names its finetune; the finetune names ITS base; only the
+    base carries the tokenizer/config files. Each level is tried in order, so
+    the closest repo wins per file. Cycles and repeats are visited once, and
+    the climb stops after max_depth levels -- every level is a network fetch.
+    """
+    ordered, seen, frontier = [], set(), [repo_id]
+    for _ in range(max_depth):
+        nxt = []
+        for repo in frontier:
+            if repo in seen:
+                continue
+            seen.add(repo)
+            for base in readme_base_model(repo, modelscope):
+                if base not in seen and base not in ordered:
+                    ordered.append(base)
+                    nxt.append(base)
+        frontier = nxt
+        if not frontier:
+            break
+    return ordered
+
+
+def peek_config_dict(repo_id, modelscope=False, bases=(), local_dirs=()):
+    """config.json contents for detection only (family/size guesses), or None.
+
+    Local files first (the install dir, an HF/MS cache snapshot): no network.
+    Then the repo itself, then its base-model chain -- stock quant repos carry
+    no config, but the checkpoint they quantize does. Nothing here is
+    installed; the real fetch happens later and is verified there."""
+    for local in local_dirs:
+        if not local:
+            continue
+        cfg = Path(local) / "config.json"
+        if cfg.is_file():
+            try:
+                return load_json(cfg)
+            except Exception:
+                pass
+    try:
+        with tempfile.TemporaryDirectory(prefix="oflm-add-peek-") as tmp:
+            dest = Path(tmp) / "config.json"
+            for repo in [repo_id, *bases]:
+                if not repo:
+                    continue
+                try:
+                    got = fetch_from_repo(repo, "config.json", dest,
+                                          modelscope=modelscope, force=True)
+                except Exception:
+                    got = None
+                if got:
+                    try:
+                        return load_json(got)
+                    except Exception:
+                        return None
+    except Exception:
+        pass
+    return None
+
+
 def fetch_from_repo(repo_id, fname, dest, modelscope=False, force=False):
     """One auxiliary file from another repo (local HF cache first, then remote).
 
@@ -903,16 +1008,81 @@ def estimate_size(config_path):
         cfg = load_json(config_path)
     except Exception:
         return None
-    hidden = cfg.get("hidden_size")
-    layers = cfg.get("num_hidden_layers")
-    if not hidden or not layers:
+    return estimate_size_dict(cfg)
+
+
+def estimate_size_dict(cfg):
+    """Registry 'size' (bytes) from an already-parsed config.json dict."""
+    if not isinstance(cfg, dict):
         return None
-    intermediate = cfg.get("intermediate_size")
-    per_layer = 12 * hidden * hidden
-    if intermediate:
-        per_layer += 3 * hidden * intermediate
-    total = per_layer * layers + 2 * hidden * (cfg.get("vocab_size") or hidden)
-    return max(int(round(total / 1e9 * 2) / 2 * 1e9), 1_000_000_000)
+    try:
+        hidden = cfg.get("hidden_size")
+        layers = cfg.get("num_hidden_layers")
+        if not hidden or not layers:
+            return None
+        intermediate = cfg.get("intermediate_size")
+        per_layer = 12 * hidden * hidden
+        if intermediate:
+            per_layer += 3 * hidden * intermediate
+        total = per_layer * layers + 2 * hidden * (cfg.get("vocab_size") or hidden)
+        return max(int(round(total / 1e9 * 2) / 2 * 1e9), 1_000_000_000)
+    except Exception:
+        return None
+
+
+def size_token_from_bytes(num_bytes):
+    """A tag size marker ('4.4b', '0.3b') from a byte count, or None."""
+    if not num_bytes:
+        return None
+    return f"{round(num_bytes / 1e9, 1):g}b"
+
+
+# Bytes per parameter for the GGUF quants the open kernels ingest, used to
+# guess a registry size for repos whose names carry no size marker. Only an
+# install-time tag/kernel-matching hint (logged as a guess); the real weights
+# are verified by hash, never by this number.
+GGUF_BYTES_PER_PARAM = {
+    "Q4_0": 0.5625,
+    "Q4_1": 0.625,
+    "Q8_0": 1.0625,
+    "Q4_K": 0.5625,
+    "Q6_K": 0.8125,
+}
+
+
+def gguf_size_token(gguf_bytes, quant):
+    """A tag size marker from a GGUF's byte size and quant family, or None."""
+    bpp = GGUF_BYTES_PER_PARAM.get(quant)
+    if not gguf_bytes or not bpp:
+        return None
+    return size_token_from_bytes(gguf_bytes / bpp)
+
+
+def gguf_byte_size(repo, modelscope, local_dir, cache_dir, gguf_name, tree):
+    """On-disk or listed byte size of the chosen GGUF, or None.
+
+    Local files (install dir, HF/MS cache snapshot) stat first: no network.
+    Otherwise the size comes from the repo tree listing already fetched for
+    the GGUF scan."""
+    for d in (local_dir, cache_dir):
+        if d is None:
+            continue
+        cand = Path(d) / gguf_name
+        try:
+            if cand.is_file():
+                return cand.stat().st_size
+        except OSError:
+            pass
+    try:
+        if modelscope and isinstance(tree, dict):
+            return (tree.get(gguf_name) or {}).get("Size") or None
+        if isinstance(tree, list):
+            for entry in tree:
+                if entry.get("path") == gguf_name:
+                    return (entry.get("lfs") or {}).get("size") or entry.get("size")
+    except Exception:
+        pass
+    return None
 
 
 def link_npue_design(system_prefixes, user_root, design_family, force=False, quiet=False):
@@ -939,7 +1109,11 @@ def link_npue_design(system_prefixes, user_root, design_family, force=False, qui
 
 
 def build_entry(base_entry, dir_name, files, size):
-    entry = dict(base_entry) if base_entry else {}
+    # Deep copy: the new entry shares no nested objects with the registry it
+    # was seeded from, so stamping details below cannot corrupt the curated
+    # entry it was derived from (a shallow dict() copy once leaked
+    # details.format/family back into the overlay's official entry).
+    entry = copy.deepcopy(base_entry) if base_entry else {}
     entry["name"] = dir_name
     entry["files"] = list(files)
     entry["url"] = ""
@@ -1347,6 +1521,51 @@ def read_gguf_inventory(source, limit_mb=32):
         return None
 
 
+def family_from_gguf_arch(gguf_source):
+    """details.family from a GGUF's general.architecture, or None.
+
+    The repo name is the primary signal (FAMILY_ALIASES); this covers repos
+    whose names say nothing about the model (an arbitrary host of an
+    embedding-gemma quant). Unreachable metadata yields None, not an error."""
+    inv = read_gguf_inventory(gguf_source)
+    arch = inv[0].get("general.architecture") if inv else None
+    if not arch:
+        return None
+    return GGUF_ARCH_FAMILIES.get(str(arch).strip().lower())
+
+
+def family_from_config_dict(cfg):
+    """details.family from a HuggingFace config.json dict, or None.
+
+    model_type first (exact); then the architectures list, substring-matched
+    against FAMILY_ALIASES so Qwen3ForCausalLM-style class names resolve.
+    Neither fires for unknown shapes -- the caller must ask for --family."""
+    if not isinstance(cfg, dict):
+        return None
+    model_type = cfg.get("model_type")
+    if isinstance(model_type, str):
+        lowered_type = model_type.strip().lower()
+        # Vision-language checkpoints need their vision weights and their own
+        # kernels; never fold one silently onto a text family. Unknown VL
+        # shapes refuse here so the caller passes --family explicitly.
+        if "vl" in lowered_type and lowered_type not in CONFIG_MODEL_FAMILIES:
+            return None
+        family = CONFIG_MODEL_FAMILIES.get(lowered_type)
+        if family:
+            return family
+    archs = cfg.get("architectures") or []
+    if isinstance(archs, str):
+        archs = [archs]
+    for arch in archs:
+        if not isinstance(arch, str):
+            continue
+        lowered = arch.lower()
+        for prefix, family in FAMILY_ALIASES:
+            if prefix.lower() in lowered:
+                return family
+    return None
+
+
 def verify_gguf_choice(source, gguf_name, claimed_family):
     """The chosen file really holds what its name claims, in types the
     engine packs. Returns (ok, note): unreachable metadata warns and keeps
@@ -1559,6 +1778,8 @@ def main():
     # there (the converted container is the curated one).
     gguf_names = []
     tree = {}
+    gguf_source = None
+    cache = None
     if local_dir:
         gguf_names = [e.name for e in local_dir.iterdir() if e.is_file() and e.suffix == ".gguf"]
     else:
@@ -1593,13 +1814,55 @@ def main():
             gguf_refused[gguf_name] = note
             gguf_name, gguf_mode = None, False
 
-    system_list = find_system_model_list()
+    system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
     user_list = user_registry_path(args.config)
     models_root = models_root_dir(args.models_root)
     target = models_root / dir_name
 
-    family = derive_family(system_registry, dir_name, args.family)
+    # Detection caches: the failure paths below may each need the base-model
+    # chain and a peeked config.json; fetch each at most once per install.
+    base_chain = None
+    peeked = None
+    peeked_done = False
+
+    def get_base_chain():
+        nonlocal base_chain
+        if base_chain is None:
+            base_chain = readme_base_chain(repo if not local_dir else repo_arg,
+                                            modelscope)
+        return base_chain
+
+    def get_peeked_config():
+        nonlocal peeked, peeked_done
+        if not peeked_done:
+            peeked_done = True
+            peeked = peek_config_dict(None if local_dir else repo, modelscope,
+                                      bases=get_base_chain(),
+                                      local_dirs=[d for d in (local_dir, cache) if d])
+        return peeked
+
+    try:
+        family = derive_family(system_registry, dir_name, args.family)
+    except SystemExit:
+        # No name marker, and no official entry can supply the family yet
+        # (that matching happens below). Climb the content instead, cheapest
+        # first: the GGUF header names its architecture; otherwise a
+        # config.json -- the repo's own, else its base-model chain's -- names
+        # its model_type. llama.cpp resolves the same way, from the file, not
+        # the repo slug.
+        family = None
+        if args.family is None:
+            if gguf_source is not None:
+                family = family_from_gguf_arch(gguf_source)
+                if family:
+                    log(f"[INFO] family '{family}' from the GGUF architecture")
+            if family is None:
+                family = family_from_config_dict(get_peeked_config())
+                if family:
+                    log(f"[INFO] family '{family}' from config.json model_type")
+        if family is None:
+            raise
     npue_embed = family in NPU_EMBED_FAMILIES
     if npue_embed:
         # NPU-embedding (NpuEmbeddings) model: the authoritative registry entry
@@ -1624,7 +1887,29 @@ def main():
     else:
         official = match_official_entry(system_registry, dir_name)
         base_entry = official[3] if official else None
-        tag = derive_tag(dir_name, args.tag)
+        try:
+            tag = derive_tag(dir_name, args.tag)
+        except SystemExit:
+            # Chaotic slugs carry no size marker: guess from the GGUF's bytes
+            # and quant, else from the peeked config's geometry. Kernel
+            # matching keys off the tag size, so a logged guess beats a
+            # refusal; --tag still overrides.
+            if args.tag is not None:
+                raise
+            size_guess = None
+            if gguf_mode:
+                size_guess = gguf_size_token(
+                    gguf_byte_size(repo, modelscope, local_dir, cache,
+                                   gguf_name, tree),
+                    gguf_quant_of(gguf_name))
+            if size_guess is None:
+                size_guess = size_token_from_bytes(
+                    estimate_size_dict(get_peeked_config()))
+            if size_guess is None:
+                raise
+            log(f"[INFO] tag size '{size_guess}' guessed for '{dir_name}'; "
+                "pass --tag to override")
+            tag = derive_tag(dir_name, None, size_guess)
         bucket, size_token = tag.split(":", 1)
         size_value = (base_entry or {}).get("size") or size_from_tag(tag)
         official, official_note = resolve_official(system_registry, dir_name, family, size_value)
@@ -1686,7 +1971,7 @@ def main():
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
-            bases = readme_base_model(repo, modelscope)
+            bases = get_base_chain()
             print(f"base model(s)  : {', '.join(bases) or '(none in README)'}")
             print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
         elif npue_embed:
@@ -1747,12 +2032,16 @@ def main():
         # GGUF-quant repos (mradermacher etc.) often ship only the GGUF: take the
         # tokenizer/config files from the original model the README names.
         # config.json too: the curated config beats the GGUF-derived one (and
-        # Granite's folded multipliers exist only there).
+        # Granite's folded multipliers exist only there). The chain climbs past
+        # the quant repo: a quant of a finetune of a base tries each level in
+        # order until every file resolves.
         aux_missing = [f for f in missing if f != "model.gguf"]
         if not (target / "config.json").is_file():
             aux_missing.append("config.json")
+        if not (target / "chat_template.jinja").is_file():
+            aux_missing.append("chat_template.jinja")
         if aux_missing:
-            bases = readme_base_model(repo, modelscope)
+            bases = get_base_chain()
             gated_warned = set()
             if bases:
                 log(f"[INFO] base model(s) from README.md: {', '.join(bases)}")
@@ -1792,7 +2081,7 @@ def main():
                 else:
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
-    normalize_tokenizer_config(target, repo, readme_base_model(repo, modelscope), modelscope)
+    normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []

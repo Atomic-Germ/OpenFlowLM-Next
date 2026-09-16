@@ -188,7 +188,7 @@ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::str
     const bool strict_integrity = uses_pinned_sources(model_info);
     auto missing_files = get_missing_files(new_model_tag);
     // `files` is authoritative: the GGUF embedding (embed-gemma:300m) ships
-    // only `model.gguf` and has no `config.json` to gate on. Testing the
+    // weights + tokenizer files and has no `config.json` to gate on. Testing the
     // missing set for `config.json` unconditionally made every such entry
     // look "not missing" when its sole weight was absent, then
     // `check_model_compatibility` called `LM_Config::from_pretrained` which
@@ -689,50 +689,104 @@ std::pair<nlohmann::json, float> ModelDownloader::build_download_list(
 /// \brief Remove a model and all its files
 /// \param model_tag the model tag
 /// \return true if the model was successfully removed, false otherwise
+/// \note Recursive: model directories routinely hold subdirectories (the
+///       1_Pooling/2_Dense heads, a local npu_matmul_f32 set) and symlinks
+///       (the open_kernels link oflm-add creates). remove_all deletes links
+///       themselves, never their targets. The resolved directory must stay
+///       inside the models root, so a hostile or hand-edited registry entry
+///       whose name escapes it (a ".." segment) is refused, never followed.
+///       Unknown tags are refused too: get_model_info falls back to a default
+///       entry instead of throwing, and removing that would delete the wrong
+///       model. The user-level xclbins symlink for the model (also an
+///       oflm-add dropping, and only ever a symlink) is removed alongside.
 bool ModelDownloader::remove_model(const std::string& model_tag, bool sub_process_mode) {
     try {
+        // Membership first: get_model_info falls back to a default entry
+        // (asserting on a registry without one) instead of throwing, so only
+        // resolve tags the registry actually carries. Otherwise a typo could
+        // delete the wrong model.
+        std::string probe = model_tag;
+        if (const auto slash = probe.find('/'); slash != std::string::npos) {
+            probe = probe.substr(slash + 1);
+        }
+        if (!supported_models.is_model_supported(probe)) {
+            header_print("ERROR", "Model not found: " + model_tag);
+            model_not_found(model_tag);
+            return false;
+        }
         // Check if model exists in supported models by trying to get its info
+        std::string new_model_tag;
+        nlohmann::json model_info;
         try {
-            supported_models.get_model_info(model_tag);
+            std::tie(new_model_tag, model_info) = supported_models.get_model_info(model_tag);
         } catch (const std::exception& e) {
             header_print("ERROR", "Model not found: " + model_tag);
             model_not_found(model_tag);
             return false;
         }
-        
+
         // Get model path
-        std::string model_path = supported_models.get_model_path(model_tag);
-        
+        std::string model_path = supported_models.get_model_path(new_model_tag);
+
+        std::error_code ec;
+        const auto root =
+            std::filesystem::weakly_canonical(supported_models.get_model_root_path(), ec);
+        if (ec) {
+            header_print("ERROR", "Could not resolve models directory: " + ec.message());
+            return false;
+        }
+        const auto target = std::filesystem::weakly_canonical(model_path, ec);
+        if (ec) {
+            header_print("ERROR", "Could not resolve model directory: " + ec.message());
+            return false;
+        }
+        const auto rel = std::filesystem::relative(target, root, ec);
+        if (ec || rel.empty() || rel.begin()->string() == "..") {
+            header_print("ERROR", "Refusing to remove outside the models directory: " + model_path);
+            return false;
+        }
+
         // Check if model directory exists
-        if (!std::filesystem::exists(model_path)) {
-            header_print("OFLM", "Model directory does not exist: " + model_path);
+        if (!std::filesystem::exists(target, ec)) {
+            if (!sub_process_mode)
+                header_print("OFLM", "Model directory does not exist: " + model_path);
             return true; // Consider it already removed
         }
 
         if (!sub_process_mode) {
-            header_print("OFLM", "Removing model: " + model_tag);
+            header_print("OFLM", "Removing model: " + new_model_tag);
             header_print("OFLM", "Path: " + model_path);
         }
-        
-        // Remove all files in the model directory
-        size_t removed_files = 0;
-        for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-            if (entry.is_regular_file()) {
-                std::filesystem::remove(entry.path());
-                removed_files++;
-            }
-        }
-        
-        // Remove the model directory itself
-        if (std::filesystem::remove(model_path)) {
-            if(!sub_process_mode)
-                header_print("OFLM", "Successfully removed " + std::to_string(removed_files) + " files and model directory.");
-            return true;
-        } else {
-            header_print("ERROR", "Failed to remove model directory: " + model_path);
+
+        // Remove the whole tree: weights, nested head directories, and the
+        // open_kernels symlink (the link itself, not the kernels it points at).
+        const std::uintmax_t removed = std::filesystem::remove_all(target, ec);
+        if (ec) {
+            header_print("ERROR", "Failed to remove model directory: " + model_path +
+                                  " (" + ec.message() + ")");
             return false;
         }
-        
+        if (!sub_process_mode)
+            header_print("OFLM", "Successfully removed " + std::to_string(removed) +
+                                 " entries and model directory.");
+
+        // Drop the user-level xclbins symlink oflm-add created for this model
+        // name, when one exists. Only symlinks are ever touched here: a real
+        // directory (the system kernels) is left alone.
+        const std::string link_name = model_info.value("name", std::string());
+        if (!link_name.empty()) {
+            for (const auto& xclbin_root : utils::xclbin_roots()) {
+                std::error_code link_ec;
+                const auto link =
+                    std::filesystem::path(xclbin_root) / "xclbins" / link_name;
+                if (std::filesystem::is_symlink(link, link_ec)) {
+                    std::filesystem::remove(link, link_ec);
+                    if (!link_ec && !sub_process_mode)
+                        header_print("OFLM", "Removed xclbins link: " + link.string());
+                }
+            }
+        }
+        return true;
     } catch (const std::exception& e) {
         header_print("ERROR", "Exception during model removal: " + std::string(e.what()));
         return false;
