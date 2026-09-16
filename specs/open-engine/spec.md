@@ -58,6 +58,29 @@ closed-kernel install is unchanged and the command that would build one is print
 - `--open-kernels DIR` uses `DIR` without searching, and is refused when `DIR` has no `manifest.json`.
 - `--xclbin-from` and `--no-xclbin` keep their existing behaviour.
 
+### OPEN-ADD-SYSTEM-REGISTRY: `oflm-add` finds the registry a real install ships
+**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py`)
+**Test category:** unit
+**Tests:** `utilities/oflm-add/tests/test_system_registry.py`
+
+`oflm-add` reads the official `model_list.json` for its defaults, and looks for it
+beside the installed engine. The released engine installs as `flm`, not `oflm`, so
+both names shall be searched -- `oflm` first, so a checkout build wins on a machine
+that has both. `--system-list` shall be used when given, rather than searching, and
+refused by path when it names something that is not a file. A refusal shall name the
+paths actually tried, since the point of the message is to tell someone where to
+look.
+
+The same applies to the xclbins root: an engine directory found under either name.
+
+**Acceptance criteria:**
+- `--system-list PATH` returns `PATH` with nothing on `PATH` to find; a `PATH` that
+  is not a file raises, naming it.
+- With only `flm` on `PATH`, the list beside it is found.
+- With both, the one beside `oflm` wins.
+- `find_system_xclbin_root` finds `<dir>/xclbins` beside an installed `flm`.
+- The refusal names every candidate it tried and `--system-list`.
+
 ### OPEN-LAYOUT-FREEZE: the recipe reproduces the shipped 27B kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`, `designs/layer_x/`)
 **Test category:** unit (constants) + manual (the rebuild)
@@ -1257,6 +1280,9 @@ before it, both misread the container identically and every comparison passed.
 - The transcode gives `min == -8 * d` exactly, and every nibble's `(q ^ 8) - 8` is the
   signed value it stood for.
 - `pools.cpp`'s `q4_0_to_q4_1_chunks` agrees with `pack.q4_0_to_q4_1` byte for byte.
+- A reader that handles one quant format only names the format it got rather than
+  reshaping into it: `Q4NX.lmhead_logits` is the q8 head and refuses a 4-bit one, which
+  17 q4_1 chunks would otherwise pass as 10 q8 chunks.
 
 ### OPEN-ATTN-QKV-BIAS: a per-channel bias on the q, k and v projections
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `designs/dense/dx.py`,

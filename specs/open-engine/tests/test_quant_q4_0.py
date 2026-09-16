@@ -98,3 +98,28 @@ def test_the_packer_transcodes_a_signed_tensor_on_the_way_into_the_pool():
     assert out.shape == (1, 5120)
     assert not np.array_equal(out[0], c), "it is not passed through"
     assert np.array_equal(out[0], q4_0_to_q4_1(c.reshape(1, 5120))[0])
+
+
+class FakeQ8Head:
+    """A container whose lm_head is 4-bit, standing in for `Q4NX` at the one method."""
+
+    def __init__(self, chunk_bytes, nch):
+        self.cb = chunk_bytes
+        self.hidden = 2048
+        self.bytes = np.zeros(nch * chunk_bytes, np.uint8)
+
+    def chunk_bytes_of(self, name):
+        return self.cb
+
+    def raw(self, name):
+        return self.bytes
+
+
+def test_the_q8_head_reader_refuses_a_four_bit_head():
+    """17 q4_1 chunks are exactly 10 q8 chunks, so the reshape succeeds and the reader
+    silently answers with the wrong weights unless it checks (OPEN-PACK-Q4-0)."""
+    from q4nx import Q4NX
+    f = FakeQ8Head(5120, 17)
+    with pytest.raises(ValueError) as e:
+        Q4NX.lmhead_logits(f, np.zeros(2048, np.float32))
+    assert "lm_head.weight" in str(e.value) and "5120" in str(e.value)

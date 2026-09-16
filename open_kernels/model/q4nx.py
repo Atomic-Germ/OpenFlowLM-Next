@@ -292,7 +292,11 @@ class Q4NX:
         stride = 128 * cb
         b = np.frombuffer(self.raw(name), dtype=np.uint8)
         out_dim, in_dim = (2048, 512) if kind == "down" else (512, 2048)
-        return self.dq_tile(b[e * stride:(e + 1) * stride], out_dim, in_dim, cb, self.requant_of(name))
+        # Ask about the whole tensor, not the one expert's slice, so a stamp on the tensor
+        # is seen and every expert reads the same format.
+        signed = cb == CHUNK_Q4 and _is_signed_q4(self, name, b.reshape(-1, CHUNK_Q4))
+        return self.dq_tile(b[e * stride:(e + 1) * stride], out_dim, in_dim, cb,
+                            self.requant_of(name), signed)
 
     def shared_w(self, layer, kind):
         out_dim, in_dim = (2048, 512) if kind == "down" else (512, 2048)
@@ -302,6 +306,13 @@ class Q4NX:
         """Stream the q8 lm_head against hidden hn[hidden] -> logits[vocab]. `self.hidden`
         (set by the caller; 2048 by default, the 27B's) says how many 256-wide k-tiles a
         chunk row spans -- 16 of them for a Qwen3.5 dense model at HID 4096."""
+        # A 4-bit head reshaped as q8 is not always a shape error - 17 q4_1 chunks are
+        # exactly 10 q8 ones - so check rather than let it read the wrong weights.
+        cb = self.chunk_bytes_of("lm_head.weight")
+        if cb != CHUNK_Q8:
+            raise ValueError(f"lm_head.weight is in {cb}-byte chunks, not q8 ({CHUNK_Q8}); "
+                             f"this reader is the q8 head - a 4-bit head goes through "
+                             f"replica_dense.lmhead_q4_logits")
         lmb = np.frombuffer(self.raw("lm_head.weight"), dtype=np.uint8).reshape(-1, CHUNK_Q8)
         nch = lmb.shape[0]
         hn = np.asarray(hn, np.float32)
