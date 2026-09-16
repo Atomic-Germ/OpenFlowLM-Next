@@ -325,6 +325,166 @@ def geometry_from_tensors(shapes: dict, patch: int = 16, temporal: int = 2) -> d
     return cfg
 
 
+# ---- reading a shipped container
+
+# Qwen3-VL-4B-Instruct-NPU2 does NOT use the 35B's [nt, kt, 64, 256] tiling. Its linears
+# are declared two-dimensional as [elements / 32768, 32768], and the order inside is tiles
+# of 64 output rows by 512 input columns, row-major within a tile and row-major over the
+# tiles. Nothing is padded: every tensor's element count is exactly out * in.
+#
+# That was checked, not inferred. All 315 tensors of the shipped vision_weight.q4nx were
+# compared element for element against Qwen/Qwen3-VL-4B-Instruct's own safetensors: 314
+# match exactly under the rule below, and the 315th (pos_embed.weight) is stored at its
+# natural shape and matches directly. The bf16 values are identical, so the container is
+# upstream's weights reordered, not requantised.
+FLAT_TILE_N, FLAT_TILE_K = 64, 512
+FLAT_ROW = FLAT_TILE_N * FLAT_TILE_K       # 32768, the container's declared row width
+
+
+def is_flat_tiled(shape) -> bool:
+    """Is this tensor in the [elements / 32768, 32768] form rather than its own shape?"""
+    return len(shape) == 2 and shape[1] == FLAT_ROW
+
+
+def untile_flat(t: np.ndarray, n_out: int, k_in: int) -> np.ndarray:
+    """[elements / 32768, 32768] -> [n_out, k_in]."""
+    if n_out % FLAT_TILE_N or k_in % FLAT_TILE_K:
+        raise ValueError(f"vision_weight: [{n_out}, {k_in}] is not a whole number of "
+                         f"{FLAT_TILE_N}x{FLAT_TILE_K} tiles")
+    if t.size != n_out * k_in:
+        raise ValueError(f"vision_weight: {t.size} elements for [{n_out}, {k_in}]")
+    nt, kt = n_out // FLAT_TILE_N, k_in // FLAT_TILE_K
+    w = t.reshape(nt, kt, FLAT_TILE_N, FLAT_TILE_K).transpose(0, 2, 1, 3)
+    return np.ascontiguousarray(w.reshape(n_out, k_in))
+
+
+def geometry_from_flat(shapes: dict, patch: int = 16, temporal: int = 2) -> dict:
+    """Geometry for a container in the flat-tiled form.
+
+    A [R, 32768] shape gives only an element count, so a width has to come from somewhere.
+    `hidden` does: patch_embed.proj.weight keeps its natural five-dimensional shape.
+    Everything else divides out of that exactly, because nothing is padded.
+
+    Two numbers are still not here, for the reasons geometry_from_tensors gives: the head
+    count (qkv is [3 * hidden, hidden] at any split) and which blocks the deepstack mergers
+    hang off (the names say how many, never which).
+    """
+    s = {k.split("model.visual.")[-1]: tuple(v) for k, v in shapes.items()}
+
+    def elems(name):
+        if name not in s:
+            raise ValueError(f"vision_weight: no {name}; cannot derive the tower's geometry")
+        return int(np.prod(s[name]))
+
+    pe = s.get("patch_embed.proj.weight")
+    if pe is None:
+        raise ValueError("vision_weight: no patch_embed.proj.weight")
+    hidden = pe[0]
+    patch_dim = int(np.prod(pe[1:]))
+    channels, rem = divmod(patch_dim, temporal * patch * patch)
+    if rem or channels != 3:
+        raise ValueError(f"vision_weight: patch_embed row of {patch_dim} is not "
+                         f"channels x {temporal} x {patch}^2 for 3 channels")
+    depth = 1 + max((int(k.split(".")[1]) for k in s if k.startswith("blocks.")), default=-1)
+    if not depth:
+        raise ValueError("vision_weight: no blocks.N.* tensors")
+
+    inter, rem = divmod(elems("blocks.0.mlp.linear_fc1.weight"), hidden)
+    if rem:
+        raise ValueError("vision_weight: mlp.linear_fc1 is not a multiple of hidden")
+    sq = elems("merger.linear_fc1.weight")
+    width = int(math.isqrt(sq))
+    if width * width != sq:
+        raise ValueError("vision_weight: merger.linear_fc1 is not square")
+    merge_sq, rem = divmod(width, hidden)
+    if rem or int(math.isqrt(merge_sq)) ** 2 != merge_sq:
+        raise ValueError(f"vision_weight: merger width {width} is not hidden {hidden} "
+                         "times a square merge factor")
+    out, rem = divmod(elems("merger.linear_fc2.weight"), width)
+    if rem:
+        raise ValueError("vision_weight: merger.linear_fc2 is not a multiple of the merged width")
+    n_deepstack = 1 + max((int(k.split(".")[1]) for k in s
+                           if k.startswith("deepstack_merger_list.")), default=-1)
+    return dict(depth=depth, hidden=hidden, inter=inter, out=out,
+                npos=s["pos_embed.weight"][0], merge=int(math.isqrt(merge_sq)),
+                patch=patch, temporal=temporal, channels=channels, eps=1e-6,
+                n_deepstack=n_deepstack, exact=True)
+
+
+def read_header(path) -> dict:
+    """The safetensors header of a .q4nx, without reading a weight byte."""
+    import json
+    import struct
+
+    with open(path, "rb") as fh:
+        n = struct.unpack("<Q", fh.read(8))[0]
+        hdr = json.loads(fh.read(n))
+    return {k: v for k, v in hdr.items() if k != "__metadata__"}
+
+
+def load_container(model_dir, cfg: dict, file_name: str = "vision_weight.q4nx") -> dict:
+    """The whole tower plus its deepstack mergers, as vit_forward_deepstack wants them.
+
+    `cfg` needs `heads` and `deepstack` on top of what the file determines; neither is
+    recoverable from the weights, see geometry_from_flat.
+    """
+    import json
+    import struct
+
+    path = Path(model_dir) / file_name
+    with open(path, "rb") as fh:
+        n = struct.unpack("<Q", fh.read(8))[0]
+        hdr = json.loads(fh.read(n))
+    base = 8 + n
+    blob = np.memmap(path, dtype=np.uint8, mode="r")
+
+    def get(name, out=None, inn=None):
+        m = hdr[name]
+        a, b = m["data_offsets"]
+        v = blob[base + a: base + b].view(np.uint16)
+        v = (v.astype(np.uint32) << 16).view(np.float32)
+        if out is None:
+            return np.asarray(v.reshape(m["shape"]), np.float64)
+        if is_flat_tiled(m["shape"]):
+            return np.asarray(untile_flat(v, out, inn), np.float64)
+        return np.asarray(v.reshape(out, inn), np.float64)
+
+    p = "model.visual."
+    H, I, O = cfg["hidden"], cfg["inter"], cfg["out"]
+    W = H * cfg["merge"] ** 2
+    w = {
+        "patch_w": get(p + "patch_embed.proj.weight").reshape(H, -1),
+        "patch_b": get(p + "patch_embed.proj.bias"),
+        "pos": get(p + "pos_embed.weight"),
+        "merger": {
+            "ln_w": get(p + "merger.norm.weight"), "ln_b": get(p + "merger.norm.bias"),
+            "fc1_w": get(p + "merger.linear_fc1.weight", W, W),
+            "fc1_b": get(p + "merger.linear_fc1.bias"),
+            "fc2_w": get(p + "merger.linear_fc2.weight", O, W),
+            "fc2_b": get(p + "merger.linear_fc2.bias"),
+        },
+        "blocks": [], "deepstack": [],
+    }
+    for i in range(cfg["depth"]):
+        b = f"{p}blocks.{i}."
+        w["blocks"].append({
+            "ln1_w": get(b + "norm1.weight"), "ln1_b": get(b + "norm1.bias"),
+            "ln2_w": get(b + "norm2.weight"), "ln2_b": get(b + "norm2.bias"),
+            "qkv_w": get(b + "attn.qkv.weight", 3 * H, H), "qkv_b": get(b + "attn.qkv.bias"),
+            "proj_w": get(b + "attn.proj.weight", H, H), "proj_b": get(b + "attn.proj.bias"),
+            "fc1_w": get(b + "mlp.linear_fc1.weight", I, H), "fc1_b": get(b + "mlp.linear_fc1.bias"),
+            "fc2_w": get(b + "mlp.linear_fc2.weight", H, I), "fc2_b": get(b + "mlp.linear_fc2.bias"),
+        })
+    for j in range(len(cfg["deepstack"])):
+        d = f"{p}deepstack_merger_list.{j}."
+        w["deepstack"].append({
+            "ln_w": get(d + "norm.weight"), "ln_b": get(d + "norm.bias"),
+            "fc1_w": get(d + "linear_fc1.weight", W, W), "fc1_b": get(d + "linear_fc1.bias"),
+            "fc2_w": get(d + "linear_fc2.weight", O, W), "fc2_b": get(d + "linear_fc2.bias"),
+        })
+    return w
+
+
 # ---- reading a shipped container (UNVERIFIED: no Qwen3-VL container has been on this box)
 
 

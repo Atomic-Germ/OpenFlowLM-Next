@@ -35,6 +35,11 @@ struct VitConfig {
     float eps = 1e-6f;
     int window = 0;             // window edge in pixels, Qwen2.5-VL only
     std::vector<int> fullatt;   // blocks that attend over the whole image, Qwen2.5-VL only
+    /// Qwen3-VL only: the blocks whose hidden state feeds an extra merger, whose output is
+    /// added onto the decoder's residual after the matching decoder layer. Empty means the
+    /// plain tower. The container ships no vision_config at all, so these come from the
+    /// model's published config -- see VitConfig::qwen3vl_from_tensors.
+    std::vector<int> deepstack;
     /// From the model's config.json `vision_config`: OFLM's per-family prefixes
     /// (QWEN3_6_MOE_*, QWEN3_5_*) or the plain transformers keys.
     static VitConfig from_model_dir(const std::string& model_dir);
@@ -48,6 +53,12 @@ struct VitConfig {
     /// engine calls this; the two readers above stay narrow so each keeps refusing the
     /// tower it cannot run (OPEN-VISION-VIT-CONFIG).
     static VitConfig for_model_dir(const std::string& model_dir);
+    /// Qwen3-VL-4B-Instruct-NPU2 carries NO vision_config. Everything but two numbers is
+    /// determined by the weight file's own tensor shapes; `heads` and `deepstack` are not,
+    /// at any tiling, so they are arguments rather than guesses. Every derived number is
+    /// checked against the shapes, so a wrong argument is refused rather than believed.
+    static VitConfig qwen3vl_from_tensors(const std::string& vision_q4nx_path, int heads,
+                                          const std::vector<int>& deepstack);
     int patch_dim() const { return channels * temporal * patch * patch; }
     /// A window's edge in merge units: 112 px / 2 patches per unit / 14 px per patch = 4.
     int window_side() const { return window / merge / patch; }
@@ -72,12 +83,23 @@ struct VitBlock {
     Linear q, k, v, gate, up, down;                  // Qwen2.5-VL; proj is its o_proj
 };
 
+/// The tower's own merger, and the deepstack ones. The only structural difference is
+/// where the norm sits: the tower's normalises each patch across `hidden` and then
+/// reshapes into merge groups; a deepstack merger reshapes first and normalises across
+/// the whole `hidden * merge^2` row. The two norms are therefore different WIDTHS, which
+/// is what stops the wrong one being used silently.
+struct Merger {
+    std::vector<float> ln_w, ln_b;
+    Linear fc1, fc2;
+};
+
 struct VitWeights {
     Linear patch;                       // [hidden, C*T*P*P]
     std::vector<float> pos;             // [npos, hidden]; empty on Qwen2.5-VL
     std::vector<VitBlock> blocks;
     std::vector<float> merger_ln_w, merger_ln_b;
     Linear merger_fc1, merger_fc2;      // [4 hidden, 4 hidden], [out, 4 hidden]
+    std::vector<Merger> deepstack;      // one per cfg.deepstack index, Qwen3-VL only
 };
 
 /// Read and un-tile the container, per cfg.family. ~0.85 GB resident as bf16 for the 35B,
@@ -89,5 +111,12 @@ VitWeights load_vit(const std::string& vision_q4nx_path, const VitConfig& cfg);
 /// [grid_h * grid_w / merge^2, out] row-major, in that same order - the windowed tower's
 /// permutation is undone before it returns.
 std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const float* pixels, int grid_h, int grid_w);
+
+/// The same forward, also returning the deepstack features when cfg.deepstack is set.
+/// `deepstack_out` receives one [grid_h * grid_w / merge^2, out] block per index, in the
+/// order cfg.deepstack lists them. With no indexes this is exactly vit_forward.
+std::vector<float> vit_forward_deepstack(const VitConfig& cfg, const VitWeights& w, const float* pixels,
+                                         int grid_h, int grid_w,
+                                         std::vector<std::vector<float>>* deepstack_out);
 
 }  // namespace open_qwen36::vision

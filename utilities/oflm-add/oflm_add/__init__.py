@@ -840,6 +840,73 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
 
 # ---------------------------------------------------------------------- main
 
+
+# --------------------------------------------------------------- vision.json
+#
+# Some containers ship a vision tower and none of the numbers needed to read it.
+# Qwen3-VL-4B-Instruct-NPU2 is the one that found this: no `vision_config`, no
+# `image_token_id`, no `mrope_section`. Most of the tower's geometry falls out of
+# the weight file's own tensor shapes, but two numbers never do -- the attention
+# head count (qkv is [3 * hidden, hidden] at any split) and which blocks the
+# deepstack mergers hang off -- and neither does the decoder's M-RoPE section.
+#
+# They cannot be added to config.json. `pull` compares every registry-listed file
+# against a REMOTE manifest's byte count and treats a difference as a truncated
+# download, so an edited config.json is silently replaced -- on this model that is
+# a 4 GB re-pull. vision.json is not in that list, so it survives.
+#
+# The durable fix is `q4nx-build` writing the keys into the container it converts,
+# which is Atomic-Germ's call; see .claude/plans/draft-issue-71-comment.md.
+
+VISION_DEFAULTS = {
+    # keyed by the container's own directory name
+    "Qwen3-VL-4B-Instruct-NPU2": {
+        "vision_heads": 16,
+        "vision_deepstack_indexes": [5, 11, 17],
+        "rope_scaling": {"rope_type": "default",
+                         "mrope_section": [24, 20, 20],
+                         "mrope_interleaved": True},
+    },
+}
+
+
+def write_vision_sidecar(target, dir_name, quiet=False):
+    """Write vision.json when the container declares a tower but omits how to read it.
+
+    Never overwrites one that is already there, and never writes for a container
+    whose config.json carries a vision_config -- those describe themselves.
+    """
+    cfg_path = Path(target) / "config.json"
+    if not cfg_path.is_file():
+        return
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return
+    if not isinstance(cfg, dict) or "vision_model_weight" not in cfg:
+        return                                   # not a VLM container
+    if cfg.get("vision_config"):
+        return                                   # it describes itself
+    side = Path(target) / "vision.json"
+    if side.exists():
+        if not quiet:
+            log(f"[INFO] vision.json already present: {side}")
+        return
+    known = VISION_DEFAULTS.get(dir_name)
+    if known is None:
+        if not quiet:
+            log(f"[WARN] {dir_name} ships a vision tower but no vision_config, and there is no "
+                f"known entry for it. Images will be refused until {side} names "
+                f"vision_heads and vision_deepstack_indexes (see the model's published config).")
+        return
+    body = dict(known)
+    body["_note"] = (f"What {dir_name} omits. config.json cannot hold this: pull re-fetches any "
+                     f"registry-listed file whose size changes. Written by oflm-add.")
+    side.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    if not quiet:
+        log(f"[INFO] Wrote {side} ({dir_name} carries no vision_config)")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
@@ -973,6 +1040,8 @@ def main():
             force=args.force,
             quiet=args.quiet,
         )
+
+    write_vision_sidecar(target, dir_name, quiet=args.quiet)
 
     print()
     print(f"Done: {dir_name} installed to {target}")
