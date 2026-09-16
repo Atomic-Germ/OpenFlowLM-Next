@@ -16,14 +16,23 @@ Qwen2VL::Qwen2VL(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, 
 
 void Qwen2VL::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
-    
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    // lm_config->get<std::string>("model_type", "") == qwen2
-    this->lm_engine = std::make_unique<qwen2vl_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
-    //free the q4nx
-    this->q4nx.reset();
+    // The engine: the open kernels when a set is installed for this model, the closed
+    // DLL otherwise (AutoModel::_shared_select_open_engine). The decoder derives as plain
+    // qwen2, so the set it links to is a Qwen2.5-3B one; the windowed tower comes from
+    // this container's own vision_config.
+    auto open_engine = this->_shared_select_open_engine("OFLM_QWEN2VL_ENGINE", "Qwen2.5-VL");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<qwen2vl_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+
+        this->lm_engine->load_weights(*this->q4nx);
+        //free the q4nx
+        this->q4nx.reset();
+    }
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
     this->sampler.reset();

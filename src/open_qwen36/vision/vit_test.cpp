@@ -7,6 +7,14 @@
 //   vit_test --configs <fixtures_dir>   (OPEN-VISION-VIT-CONFIG, needs no container)
 // Reads the checked-in container configs and checks the geometry against the same
 // expectations tests/test_vision_config.py holds replica_vit.py to.
+//
+//   vit_test --window-index             (OPEN-VISION-VIT-WINDOWED, needs nothing at all)
+// Qwen2.5-VL's window permutation against the values worked out by hand from the geometry
+// -- the same ones tests/test_vision_vit_windowed.py pins the numpy reference to.
+//
+//   vit_test --windowed <model_dir> <fixture>   (OPEN-VISION-VIT-WINDOWED, numeric)
+//   python open_kernels/model/replica_vit_qwen25.py --fixture DIR   writes both.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -78,17 +86,60 @@ static int config_tests(const std::string& fixtures) {
     return g_failed == 0 ? 0 : 1;
 }
 
-int main(int argc, char** argv) {
-    if (argc >= 3 && std::string(argv[1]) == "--configs") return config_tests(argv[2]);
-    if (argc < 3) { std::fprintf(stderr, "usage: vit_test <model_dir> <fixture_dir> | vit_test --configs <fixtures_dir>\n"); return 2; }
+/// Qwen2.5-VL's window permutation, against numbers derived from the geometry by hand.
+static int window_index_tests() {
     using namespace open_qwen36::vision;
-    const std::string md = argv[1], fx = argv[2];
+    VitConfig c;
+    c.family = VitFamily::Qwen25VL;
+    c.merge = 2;
+    c.patch = 14;
+    c.window = 112;
+    check(c.window_side() == 4, "112 px / 2 patches per merge unit / 14 px per patch = 4 units a side");
+
+    std::vector<int> idx, cu;
+    window_index(c, 12, 10, idx, cu);
+    const std::vector<int> want = {0,  1,  2,  3,  5,  6,  7,  8, 10, 11, 12, 13, 15, 16, 17, 18,
+                                  4,  9,  14, 19, 20, 21, 22, 23, 25, 26, 27, 28, 24, 29};
+    check(idx == want, "12 x 10 patches -> 6 x 5 merge units in four windows, two partial");
+    check(cu == std::vector<int>({0, 64, 80, 112, 120}), "its segment boundaries are in patches: 64, 80, 112, 120");
+
+    window_index(c, 8, 8, idx, cu);
+    std::vector<int> ident(16);
+    for (int i = 0; i < 16; ++i) ident[i] = i;
+    check(idx == ident && cu == std::vector<int>({0, 64}),
+          "a grid that divides still pads whole empty windows, which collapse away");
+
+    bool perm = true;
+    for (const auto& gr : std::vector<std::pair<int, int>>{{12, 10}, {8, 8}, {2, 2}, {16, 24}, {6, 18}}) {
+        window_index(c, gr.first, gr.second, idx, cu);
+        std::vector<int> sorted = idx;
+        std::sort(sorted.begin(), sorted.end());
+        for (size_t i = 0; i < sorted.size(); ++i) perm = perm && sorted[i] == static_cast<int>(i);
+        perm = perm && static_cast<int>(sorted.size()) == gr.first / 2 * (gr.second / 2);
+        perm = perm && cu.front() == 0 && cu.back() == gr.first * gr.second;
+        for (size_t i = 1; i < cu.size(); ++i) perm = perm && cu[i] > cu[i - 1];
+    }
+    check(perm, "on five grids it is a permutation of the merge units with increasing boundaries");
+    return g_failed == 0 ? 0 : 1;
+}
+
+int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "--window-index") return window_index_tests();
+    if (argc >= 3 && std::string(argv[1]) == "--configs") return config_tests(argv[2]);
+    const bool windowed = argc >= 4 && std::string(argv[1]) == "--windowed";
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: vit_test <model_dir> <fixture_dir> | vit_test --windowed <model_dir> <fixture_dir>"
+                             " | vit_test --configs <fixtures_dir> | vit_test --window-index\n");
+        return 2;
+    }
+    using namespace open_qwen36::vision;
+    const std::string md = argv[windowed ? 2 : 1], fx = argv[windowed ? 3 : 2];
     nlohmann::json g;
     std::ifstream(fx + "/grid.json") >> g;
     const int gh = g.at("h"), gw = g.at("w");
-    const VitConfig cfg = VitConfig::from_model_dir(md);
+    const VitConfig cfg = windowed ? VitConfig::qwen25_from_model_dir(md) : VitConfig::from_model_dir(md);
     auto t0 = std::chrono::steady_clock::now();
-    const VitWeights w = load_vit(md + "/vision_weight.q4nx", cfg);
+    const VitWeights w = load_vit(md + (windowed ? "/vision_weights.q4nx" : "/vision_weight.q4nx"), cfg);
     auto t1 = std::chrono::steady_clock::now();
     std::printf("weights: %d blocks in %.1f s\n", cfg.depth, std::chrono::duration<double>(t1 - t0).count());
     const std::vector<float> px = read_f32(fx + "/pixels.bin"), ref = read_f32(fx + "/ref.bin");

@@ -1267,6 +1267,41 @@ decoder: the container carries no `vision_config` (OPEN-VISION-VIT-CONFIG), no
 `Engine::prefill`'s existing refusal names; and Qwen3-VL's tower uses deepstack, which
 the host tower does not implement. Text-only is the reachable half.
 
+### OPEN-FAMILY-QWEN25VL: Qwen2.5-VL's decoder is a Qwen2.5 dense spec
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `src/common/AutoModel/modeling_qwen2vl.cpp`)
+**Test category:** unit (`tests/test_qwen25vl.py`); the tower is OPEN-VISION-VIT-WINDOWED's
+and the end-to-end run is OPEN-VISION-EMBED's
+
+Qwen2.5-VL's decoder is Qwen2.5 dense. A config whose `model_type` is `qwen2_5_vl` or
+`qwen2_5_vl_text` shall derive a `ModelSpec` with `family` `qwen2` and the same
+hyperparameters a plain Qwen2.5 of that geometry derives, so the model links to a Qwen2.5
+kernel bundle rather than building its own. M-RoPE changes only the position records the
+engine builds and the tower is read separately by `VitConfig`; neither reaches the spec.
+Both config shapes are accepted: the decoder nested under `text_config` (raw HF) and
+flattened at the top level (the container OFLM ships).
+
+The `Qwen2VL` adapter shall select the open engine whenever a kernel set is installed for
+its model and honour `OFLM_QWEN2VL_ENGINE=open|closed`, as every other adapter with an open
+path does.
+
+**Acceptance criteria:**
+- `model_type: "qwen2_5_vl"` with the shipped 3B's fields derives `family == "qwen2"`, 36 dense layers, hidden 2048, intermediate 11264, 16 heads over 2 kv heads at head dim 128, full RoPE at theta 1e6, and a q/k/v bias.
+- That spec's `spec_hash()` equals the one `Qwen2.5-3B-Instruct-NPU2` derives, through `spec_from_model_dir` -- which folds in the tokenizer's id count and the container's per-role weight formats, not only config.json.
+- A kernel set exported for either model declares `model_type` `["qwen2", "qwen2_5_vl", "qwen2_5_vl_text"]`, so `Manifest::check_model` accepts both containers.
+
+**Result 2026-09-13 (the shipped 3B): PASS, and it needed no kernel build.** Both
+containers derive `sha256:e32bfd7e950c` through `spec_from_model_dir`, so `oflm-add` linked
+the installed Qwen2.5-3B set to the VL model by spec hash with nothing rebuilt -- the
+family-bundle property, on a second real container rather than in principle. The one thing
+that did have to move is the manifest's accepted `model_type` list, which is why the set was
+re-exported. Greedy decode through `open_qwen36_cli` on the VL container answers "The capital
+of France is Paris." and then emits `<|im_end|>`, at 15.5 tok/s.
+
+Note the two containers do NOT share a weight format: Qwen2.5-3B stores the signed 4-bit
+quantiser (every block min exactly zero, OPEN-PACK-Q4-0) and Qwen2.5-VL stores real q4_1.
+The packer detects that per tensor, so one kernel set serves both -- which is the property
+being claimed, and it would have been invisible had only one of them been tried.
+
 ### OPEN-FAMILY-QWEN2: Qwen2.5 is a dense spec with a bias on q, k and v
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`, `dense.py`)
 **Test category:** unit (`tests/test_qwen2.py`); the hardware run is OPEN-ATTN-QKV-BIAS's
@@ -1488,9 +1523,9 @@ derivation shall read them as they are meant:
   `moe_intermediate` and `intermediate` stays 0.
 - `hidden_act` says `silu` and is wrong about it. The experts compute
   `(up + 1) * gate * sigmoid(1.702 * gate)` with `gate` clipped above at 7 and `up` clipped
-  both ways, and `gate` and `up` interleaved down the expert's rows rather than split in
-  half. The spec records `activation == "clamped_swiglu"`; 1.702 and 7.0 are family
-  constants, not fields.
+  both ways, and -- in HF's own safetensors -- `gate` and `up` interleaved down the expert's
+  rows rather than split in half. The spec records `activation == "clamped_swiglu"`; 1.702
+  and 7.0 are family constants, not fields, and OPEN-GPTOSS-FFN-REF is the arithmetic.
 
 GPT-OSS's `full_attention` is a plain dense layer and shall map to `dense`, NOT to the
 spec's `full_attention` layer type -- that one is the full half of Qwen3.6's linear/full
@@ -1525,17 +1560,83 @@ OPEN-PACK-Q4-0 went unnoticed.
 - `quant_map_from_chunk_sizes("gptoss", ...)` reads the tensor names `q4nx-build` writes
   (`configs/gpt-oss.json`) and refuses a role at two formats.
 
+**The widths, before any of that.** Hidden 2880 is 45 bands of 64 and shares no factor above
+1 with the q width's 64 bands or the kv width's 8, so `dense.cores_for` gives GPT-OSS 20B a
+single core -- not the four Gemma 3 12B's 3840 gets, which measured nearly free, but an
+eighth of the array. Padding hidden and the expert width to 3072 gives 8, and the same pad
+makes the q4_1 chunk's 256 columns tile (2880 is 11.25 of them). No recipe derives a padded
+width today, and nothing below matters until one does.
+
 **What a recipe would still need** (not requirements yet; each earns its own when it is
-built): the sink (OPEN-ATTN-SINK), the clamped SwiGLU experts, a bias on `o_proj`, on the
-router and on all three expert projections -- OPEN-ATTN-QKV-BIAS covers none of those -- an
-MoE FFN on sliding-window layers, which no recipe composes today, and YaRN position tables in
-the engine.
+built): the padded widths above, the sink in the attention core (OPEN-ATTN-SINK), a
+clamped-SwiGLU expert kernel and room for the three expert biases and the router's, a bias on
+`o_proj` -- which OPEN-ATTN-QKV-BIAS explicitly excludes -- an MoE FFN on sliding-window
+layers, which no recipe composes today, and YaRN position tables in the engine. The
+arithmetic for all of it is settled and tested (OPEN-GPTOSS-FFN-REF); what is left is
+kernels. `.claude/plans/gptoss-moe-and-biases.md` has the element and stream accounting.
+
+### OPEN-GPTOSS-FFN-REF: the fp64 reference for GPT-OSS's experts, router and sink attention
+**Applies to:** openflowlm-next (`open_kernels/model/replica_gptoss.py`)
+**Test category:** unit (`tests/test_gptoss_ffn.py`; the transformers comparisons skip
+without torch)
+
+`replica_gptoss` is the oracle for the four things GPT-OSS does that no family in this tree
+does, and it shall agree with transformers' own modules rather than with anything of ours --
+the fp64 replica and the kernels read weights through the same dequantiser, so they can agree
+perfectly while both being wrong, which is how OPEN-PACK-Q4-0 hid for two sessions.
+
+**The clamped SwiGLU.** `clamped_swiglu(gate, up)` is `(up + 1) * gate * sigmoid(1.702 *
+gate)` with `gate` clipped above at 7 and `up` clipped both ways. The asymmetry is
+deliberate: a very negative gate still shuts the channel, where a symmetric clamp would floor
+it at -7 and leak. `1.702` and `7.0` are family constants.
+
+**The fused row order.** HF stores one `gate_up_proj` per expert with gate at the even output
+rows and up at the odd. `split_gate_up` / `fuse_gate_up` are that rule, and they run down a
+named axis so a packer holding `[experts, 2 * moe_intermediate, hidden]` can use them. A GGUF
+source has the split done already -- `q4nx-build/configs/gpt-oss.json` maps `ffn_gate_exps`
+and `ffn_up_exps` as separate tensors -- so which side does the de-interleave depends on the
+source, and the reference works from the split pair either way.
+
+**The biases.** `expert_ffn` carries one on each of gate, up and down; `route` carries one on
+the router. `gptoss_layer_step` carries one on `o_proj` as well, which OPEN-ATTN-QKV-BIAS
+explicitly excludes.
+
+**Sink attention, windowed.** `sink_attention` is the GQA loop around
+`replica_dense.sink_softmax`, cut to the window `window_start` gives. HF's sliding rule is
+`kv_idx > q_idx - sliding_window`, so a 128-row window admits 128 rows including this token.
+
+**Acceptance criteria:**
+- `clamped_swiglu` equals `GptOssExperts._apply_gate` on the fused row order; the clamps are
+  asymmetric; an `up` of -1 zeroes the channel and an `up` of 0 passes the gate through;
+  `alpha` and `limit` equal transformers' own.
+- `split_gate_up` takes the even entries as gate down any axis, and `fuse_gate_up` inverts it;
+  a mismatched pair is refused.
+- `expert_ffn` from a split pair equals one transformers expert computed from the fused
+  tensor; each of the three biases moves the output.
+- `route` picks the same experts and the same weights as `GptOssTopKRouter`, including the
+  tie-break; softmaxing the top-k equals renormalising the full softmax, which is why the
+  existing router core's shape still fits.
+- `moe_block` equals `GptOssMLP`; forcing the expert choice keeps the reference's own
+  weights and follows the forced order.
+- `sink_attention` equals `eager_attention_forward` with the same sinks; a sink far below
+  every score gives plain GQA attention; a positive sink scales every channel of the head by
+  one factor strictly between 0 and 1; the window agrees with
+  `sliding_window_causal_mask_function`.
+- `cores_for` on gpt-oss-20b's own widths is 1, and 8 once hidden and the expert width are
+  padded to 3072.
+- Six decode steps through `gptoss_layer_step` land within 1e-5 of the last token of
+  `GptOssDecoderLayer`'s own sequence forward, on a sliding layer with YaRN cos/sin. Zeroing
+  the sinks, the o_proj bias, the router bias or any expert bias moves it by more than 1e-3
+  of the answer, so the tolerance discriminates. Giving `GptOssRMSNorm` an fp64 variance --
+  it computes in fp32 whatever the parameter dtype -- closes the gap to 1e-12, which is what
+  says the 1e-5 is transformers' rounding and not a missing piece.
 
 ### OPEN-ATTN-SINK: a learned per-head attention sink logit
 **Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`,
-`model/replica_dense.py`)
-**Test category:** unit (`tests/test_attn_sink.py`) for the math and the guard; manual (the
-procedure below, needs the NPU and a GPT-OSS container) for the numbers
+`model/replica_dense.py`, `model/replica_gptoss.py`)
+**Test category:** unit (`tests/test_attn_sink.py`, `tests/test_gptoss_ffn.py`) for the math
+and the guard; manual (the procedure below, needs the NPU and a GPT-OSS container) for the
+numbers
 
 A family with attention sinks carries one learned scalar per head per layer that joins the
 softmax denominator and has no value vector behind it, so the head's output weights sum to
@@ -1583,6 +1684,9 @@ use -- an unused parameter changes the generated code.
 - `4 * HD + 2 * NH <= E_A` decides whether the sinks fit the meta element, equivalently
   `NH <= HD * (KVH - 2)`; GPT-OSS 20B's `(64, 8, 64)` gives 384 bytes of a 1024-byte element,
   and `attn.h` asserts the same inequality at compile time.
+- `replica_gptoss.sink_attention` puts the GQA loop around it and equals
+  `eager_attention_forward` given the same sinks; cutting it to a sliding window equals
+  running it over the window's rows alone (OPEN-GPTOSS-FFN-REF).
 
 **Procedure (manual) -- NOT RUN:**
 1. Compile `designs/attn/*.cc` for a shipped family's flags from the tree before and after
@@ -1599,8 +1703,8 @@ use -- an unused parameter changes the generated code.
 5. `oflm-test --llm` through `flm serve`, then add the tuple to `catalogue.py`.
 
 ### OPEN-VISION-VIT-REF: the vision tower, reference and host port
-**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
-**Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `replica_deepstack.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit.py`, needing the container and torch and skipping without them; `tests/test_vision_deepstack.py`, needing only torch); the C++ port is checked by `vit_test.exe` (procedure below)
 
 The shipped `vision_weight.q4nx` -- every linear pre-tiled for the closed
 engine's `vision_mm` as `[n/64][k/256][64][256]` bf16, zero-padded -- shall be
@@ -1619,9 +1723,36 @@ numpy forward. The geometry is read as OPEN-VISION-VIT-CONFIG says.
 1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
 patches in 1.02 s (numpy 11.5 s).
 
+**Deepstack.** The forward above is the tower with `deepstack_visual_indexes`
+empty, which is the 35B. Qwen3-VL uses deepstack: extra mergers hang off the
+blocks that list names (5, 11 and 17 on the 4B), and each one's output is a
+second set of image rows for the decoder to absorb, not part of the tower's
+output. `replica_deepstack.py` is their fp64 reference. Two things about them
+differ from the tower's own merger and shall be reproduced, not approximated:
+
+- A deepstack merger normalises **after** the merge shuffle
+  (`use_postshuffle_norm=True`): it reshapes `[n, hidden]` to
+  `[n / merge^2, hidden * merge^2]` and runs one LayerNorm across the whole
+  merged row. The tower's merger normalises each patch across `hidden` first.
+  The two are not interchangeable -- their LayerNorms are different widths.
+- An index names the block a feature is taken **after**. Its activation is
+  `nn.GELU()`, the exact one, as the tower merger's is.
+
+**Acceptance criteria (deepstack):**
+- numpy vs transformers on a random 8 x 12 grid, three taps: the merged output and every deepstack feature at corr > 0.99999, max error < 1e-3 of max.
+- Taking each feature one block early gives corr < 0.99 against the same oracle, so the tap position cannot drift unnoticed.
+- A deepstack merger's LayerNorm is `hidden * merge^2` wide and the tower merger's is `hidden` wide, read off transformers' own `state_dict`; running either through the other's path raises rather than returning plausible numbers.
+- Every merger's output is `out_hidden_size` wide -- the decoder's hidden size, not the tower's.
+
+**Result 2026-09-13 (random 6-block tower, taps at 1, 3, 5, 8 x 12 grid):**
+numpy vs transformers corr 1.00000000 on the merged output and all three
+features, rel 2.6e-6 to 4.3e-6; the tap-one-block-early control gives at worst
+0.9092. No container was involved and none is needed. The C++ port is designed
+and not written: `.claude/plans/qwen3vl-deepstack.md`.
+
 ### OPEN-VISION-VIT-CONFIG: where the tower's geometry comes from, and which towers are refused
 **Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/vit.cpp`)
-**Test category:** unit (`tests/test_vision_config.py` for the reference; `vit_test --configs`, run by `ctest -R OPEN-VISION-VIT-CONFIG`, for the C++ port -- neither needs a container)
+**Test category:** unit (`tests/test_vision_config.py` for the reference and `tests/test_vision_deepstack.py` for what the weight file can supply instead; `vit_test --configs`, run by `ctest -R OPEN-VISION-VIT-CONFIG`, for the C++ port -- none of them needs a container)
 
 The tower's numbers come from `config.json`'s `vision_config`, in whichever of three
 shapes the container carries: OFLM's per-family prefixes `QWEN3_6_MOE_*` and `QWEN3_5_*`,
@@ -1645,7 +1776,36 @@ hardcodes the tower's numbers in C++ (`src/include/models/qwen3vl/qwen3vl_npu.hp
 the DLL contains none of the `*_VISION_*` key strings the other two do), so the shipped
 config.json carries the vision weights' file name and nothing about their shape.
 
+Note what that header does and does not hold: it fixes the *preprocessing* --
+`QWEN3_PATCH_SIZE` 16, `QWEN3_TEMPORAL_PATCH_SIZE` 2, the merge sizes, the
+rescale mean and standard deviation, the edge limits -- and says nothing about
+depth, hidden size, head count or MLP width. Those the closed engine gets from
+the weight file and its xclbins.
+
+So the open tower has two possible sources and needs both. `vision_weight.q4nx`'s
+tensor shapes give back depth, hidden size, MLP width, output width, position
+count, merge factor and channel count, plus how many deepstack mergers there
+are (`replica_deepstack.geometry_from_tensors`). Two numbers are not in the
+weights at any tiling:
+
+- **the head count** -- the qkv projection is `[3 * hidden, hidden]` for every
+  split, so a tower with twice the heads has byte-identical tensor shapes;
+- **the deepstack indexes** -- the merger names say there are three, never which
+  blocks they hang off.
+
+Those shall come from a `vision_config`, which means `q4nx-build` writing one
+into the containers it converts (the source block carries all of it, and
+`inject_oflm_keys` now keeps it). For a container that already shipped without
+one, the refusal stands: a guessed head count gives image embeddings that look
+plausible and are wrong, which is the failure this requirement exists to
+prevent. Reading a tiled linear back gives a bound, not a width -- the 35B's
+4304-wide MLP reads as 4352 -- so the derivation reports whether its numbers are
+exact.
+
 **Acceptance criteria:**
+- `geometry_from_tensors` over transformers' own `state_dict` shapes recovers depth, hidden, MLP width, output width, position count, merge factor and channel count, and the deepstack merger count.
+- It returns no head count and no deepstack indexes, and two towers differing only in those have identical tensor shapes.
+- Over the closed engine's `[n/64][k/256][64][256]` tiling it reports its widths as inexact.
 - The 35B container's `QWEN3_6_MOE_*` block reads as 27 x 1152, 16 heads x 72, MLP 4304 -> 2048, patch 16, 2304 positions; a Qwen3.5 container's `QWEN3_5_*` block reads with `hidden == heads * head_dim`.
 - Qwen3.5-0.8B's HF config and its shipped container give the same tower (12 x 768, 12 heads x 64, MLP 3072 -> 1024), the HF one deriving `head_dim` and using eps 1e-6.
 - Qwen3-VL-4B-Instruct-NPU2's config.json is refused with a message naming `vision_config`.
@@ -1653,10 +1813,11 @@ config.json carries the vision weights' file name and nothing about their shape.
 - Qwen2.5-VL-3B-Instruct-NPU2's config.json is refused with a message naming `window`.
 
 ### OPEN-VISION-VIT-WINDOWED: Qwen2.5-VL's tower attends inside windows
-**Applies to:** openflowlm-next (`open_kernels/model/replica_vit_qwen25.py`; `src/open_qwen36/vision/` once the port lands)
-**Test category:** unit (`tests/test_vision_vit_windowed.py`; the oracle needs torch and skips without it, the window math does not)
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit_qwen25.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit_windowed.py`; the oracle needs torch and skips without it, the window math and the container arithmetic do not. The C++ window permutation is `vit_test --window-index`, run by `ctest -R OPEN-VISION-VIT-WINDOWED`, which needs neither torch nor a container; the C++ forward is checked numerically by `vit_test --windowed`, procedure below)
 
-Qwen2.5-VL's vision tower shall be reproduced as a numpy fp32 forward. It is not
+Qwen2.5-VL's vision tower shall be reproduced as a numpy fp32 forward and as a host C++
+port beside the full-attention tower OPEN-VISION-VIT-REF covers. It is not
 the tower OPEN-VISION-VIT-REF covers: most blocks attend only within a square
 window of `window_size / spatial_merge_size / patch_size` merge units, the
 blocks named by `fullatt_block_indexes` attend over the whole image, and the
@@ -1674,19 +1835,64 @@ residual stream dominates the output and a forward with the windows wrong still
 agrees to 2e-4; a test asserts that the windows-ignored forward fails, so that
 sensitivity cannot regress unnoticed.
 
+The C++ port reads the tower's geometry through `VitConfig::qwen25_from_config_text`, which
+is separate from the full-attention reader OPEN-VISION-VIT-CONFIG describes -- that one
+still refuses a windowed `vision_config`, because the tower it configures cannot run one.
+It is checked against `replica_vit_qwen25.py --fixture`, which writes a synthetic
+`vision_weights.q4nx` in the shipped layout (the converter's names, both dims of every
+vision_mm matrix padded to 256 and tiled) from weights transformers built, so the port runs
+end to end with no container on the box. That checks the forward, not the names: only
+opening a shipped container can do that.
+
+**The container holds one tensor the tower does not read.** Its published size did not
+reconcile: with transformers' geometry and the tiling every other shipped container uses,
+`vision_weights.q4nx` should be 1,377,729,112 bytes and it is 1,430,158,096. The
+difference, 52,428,984, is exactly 1600 vision_mm tiles (50 MiB, one more 5120 x 5120 bf16
+matrix) plus 184 bytes of header, and could not be padding, because a tiled weight grows
+only by whole 32,768-byte tiles. Reading the header settled it: the file holds **519**
+tensors, the 518 this tower reads plus one named `identity`, a 5120 x 5120 bf16 identity
+matrix stored tiled like any weight -- the same shape as `merger.mlp.0.weight`. The closed
+engine presumably multiplies by it to move data through `vision_mm` where the arithmetic is
+a copy. Both loaders skip it and both refuse any other unaccounted tensor, because a
+missing piece reads as plausible numbers rather than as an error.
+
 **Acceptance criteria:**
 - numpy vs transformers on a random 12 x 10 grid: corr > 0.99999, max error < 1e-4 of max, both with four windowed blocks and with every block full-attention.
 - A forward in which every block attends over the whole image gives corr < 0.9 against the same oracle.
-- `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`.
+- `window_index(12, 10, merge=2, window=112, patch=14)` is the hand-derived permutation with segment boundaries `[0, 64, 80, 112, 120]`, in the numpy reference and in the C++ port.
 - A grid that divides the window size evenly (8 x 8 patches) still pads a whole empty window, which collapses: index `0..15`, boundaries `[0, 64]`.
 - The merger's activation is the exact GELU, `x * Phi(x)` against the standard normal CDF, not the tanh approximation (which the oracle comparison cannot distinguish).
+- The container size model reproduces Gemma3-4B's, Qwen3.5-0.8B/9B's and the 35B's `vision_weight.q4nx` exactly, accounts for Qwen2.5-3B's `model.q4nx` data to the byte, and reproduces Qwen2.5-VL-3B's `vision_weights.q4nx` exactly at 1,430,158,096 once `identity` is counted.
+- Every one of the 519 names, dtypes and shapes the model predicts is in the shipped file's own header, and `identity` is the only tensor outside the `model.visual.` prefix.
+- `load_weights` never reads `identity`, and a container with any other tensor count is refused by name.
+- `vit_test --windowed <fixture> <fixture>`: corr > 0.99999, max error < 1e-3 of max against `replica_vit_qwen25.py --fixture`.
 
-**Result 2026-09-12:** numpy vs transformers corr 1.0000000, rel 6.0e-6; the
-windows-ignored control gives corr 0.646. The C++ port is designed but not
-written, and no Qwen2.5-VL container has been read -- the tensor names and
-layout in `load_weights` come from `utilities/q4nx-build`, and the published
-`vision_weights.q4nx` size does not reconcile with the expected geometry by
-52 MB. `.claude/plans/qwen25vl-windowed-vit.md`.
+**Result 2026-09-13:** the C++ port lands. `vit_test --windowed` against the numpy
+reference on 12 x 10, 16 x 24, 6 x 18 and 8 x 8 patch grids: corr 1.00000000, rel 5.0e-6 to
+8.8e-6, the reference itself corr 1.0000000 rel 6.0e-6 against transformers on the same
+towers. `ctest -R OPEN-VISION-VIT-WINDOWED` (the permutation, no container, no torch)
+passes. Suite 452 passed / 1 skipped.
+
+The tensor names are now confirmed from outside this repo: the closed
+`src/lib/hrx/libqwen2vl_npu.so` contains `model.visual.`, the four `attn.*_proj`, the three
+`mlp.*_proj`, `rmsnorm1` / `rmsnorm2`, `merger.ln_q` / `merger.mlp.0` / `merger.mlp.2` and
+`patch_embed.proj.weight`, with no `blocks.` segment and no other vision tensor name. One
+shape was wrong and is fixed: `merger.ln_q` is `[hidden]`, since it normalises before the
+2 x 2 concat.
+
+**Result 2026-09-13, on the shipped container.** It was pulled and opened. Every predicted
+name, dtype and shape matches the file's own header, all 519 of them, and the size model
+is exact. Two things only a real container could show, both now fixed: the 50 MiB is the
+`identity` tensor above, and `replica_vit_qwen25.vision_config` was reading OFLM's prefixed
+key names (`*_VISION_NUM_LAYERS`) where this family's container keeps the plain transformers
+block (`depth`, `hidden_size`, `window_size`, `fullatt_block_indexes`, ...) -- the C++
+reader had it right and the numpy one did not. With the real weights loaded, the numpy
+tower agrees with transformers' `Qwen2_5_VisionTransformerPretrainedModel` at **corr
+1.00000000** (rel 1.7e-6 to 4.4e-5) on 12 x 10, 8 x 8 and 6 x 18 grids, the oracle holding
+this container's own weights rather than random ones; and the C++ port agrees with the numpy
+tower on the same container at **corr 1.00000000**, rel 5.9e-6. So the chain from
+transformers to the shipped bytes to the host port is closed.
+`.claude/plans/qwen25vl-container-size.md`, `.claude/plans/qwen25vl-windowed-vit.md`.
 
 ### OPEN-VISION-EMBED: the open engine takes an image payload
 **Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
@@ -1701,9 +1907,55 @@ generated tokens inheriting it; a request without images is the unchanged
 text path. The model classes read their preprocessing constants from
 `config.json` and no longer require the closed engine for images.
 
+**Deepstack.** A tower with `deepstack_visual_indexes` produces one extra set of
+image rows per index, and those are added into the decoder's residual stream
+rather than stepped through it. Feature `j` shall be added **after** decoder
+layer `j` has run -- transformers gates this as
+`layer_idx in range(len(deepstack_visual_embeds))` and applies it to
+`hidden_states` after the layer, so three features cover layers 0, 1 and 2. The
+add touches the image tokens' rows only, in prompt order, one feature row per
+image token; text rows are untouched, which is what keeps a text-only request
+after an image request unchanged.
+
+Folding feature 0 into the input embedding instead is a different computation
+and shall not be done: it would pass the feature through layer 0's attention
+and MLP before the residual stream ever sees it.
+
+This is host-side work for the first feature only. Features 1 and 2 land between
+decoder layers, and the dense layer program has no input for a per-row addend,
+so the open engine cannot run a deepstack model on the NPU without either a new
+kernel input or a break in the layer loop. `.claude/plans/qwen3vl-deepstack.md`
+weighs the two.
+
+**Acceptance criteria (deepstack, unit -- `tests/test_vision_deepstack.py`):**
+- `deepstack_layer_map(3) == [0, 1, 2]`.
+- The injection leaves every non-image row bit-identical and does not mutate its input.
+- A mask whose True count differs from the feature's row count is refused by name, as is a feature whose width is not the decoder's hidden size.
+
 **Acceptance criteria (e2e):**
 - `flm-test --vision --model qwen3.6-moe:35b` (and a Qwen3.5 VL size) passes on the open engine with the answer on the fixed test image matching the closed engine's.
 - A text-only request after an image request answers as before (the position records are restored on `clear_context`).
+- Qwen2.5-VL-3B answers correctly about a decodable image and about that image in a following text-only turn.
+
+**Result 2026-09-13 (Qwen2.5-VL-3B, the windowed tower): PASS.** `oflm serve
+qwen2.5vl-it:3b` loads on the open kernels -- 36 pools resident, the tower in 1.4 s -- and a
+689 x 480 JPEG becomes a 40 x 56 patch grid, 560 tokens, in about 35 s on the host CPU.
+Asked what is in it, the model answers "The image shows a seagull standing on top of a
+lamppost", which is what the photograph shows; a text-only follow-up in the same
+conversation answers "Blue" to a question about the sky, so the image rows and the M-RoPE
+counter carry across the turn as this requirement says they must. The decoder runs on a
+kernel set built for Qwen2.5-3B-Instruct (OPEN-FAMILY-QWEN25VL), and its logits match the
+fp64 reference at corr 0.99999125 and 0.99999362 on the two scored positions, argmax and
+top-5 identical.
+
+Two failures in `oflm-test --vision` are NOT the engine's, and the closed engine was run on
+the same box to say so: it fails all three rounds with a bad allocation while applying the
+chat template and returns nothing, where the open engine answers the first. The suite's
+other two images never reach either engine -- the same reader problem the 2026-09-08 entry
+below records, now pinned: the shipped `avcodec-63.dll` carries mjpeg, webp, bmp, gif and
+tiff decoders and **no png** one, and both remaining test images are PNG. The bad allocation
+is specific to that three-image round; the two-turn case above, with one decodable image,
+passes.
 
 **Result 2026-09-08:** runs end to end through `flm serve` on Qwen3.5-0.8B and
 on the 35B (tower resident in 2.2 s, a 30 x 44-patch image -> 330 tokens in

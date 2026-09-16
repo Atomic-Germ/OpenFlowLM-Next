@@ -1,0 +1,3581 @@
+{
+ "file": "vision_weights.q4nx",
+ "file_bytes": 1430158096,
+ "header_bytes": 56072,
+ "read": "2026-09-13 (HTTP range request, first 56080 bytes)",
+ "repo": "FastFlowLM/Qwen2.5-VL-3B-Instruct-NPU2",
+ "tensors": {
+  "identity": [
+   "BF16",
+   [
+    80,
+    20,
+    16384
+   ]
+  ],
+  "model.visual.0.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.0.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.0.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.0.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.0.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.0.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.0.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.0.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.0.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.0.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.0.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.0.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.0.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.0.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.0.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.0.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.1.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.1.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.1.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.1.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.1.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.1.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.1.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.1.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.1.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.1.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.10.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.10.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.10.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.10.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.10.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.10.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.10.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.10.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.10.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.10.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.11.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.11.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.11.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.11.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.11.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.11.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.11.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.11.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.11.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.11.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.12.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.12.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.12.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.12.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.12.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.12.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.12.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.12.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.12.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.12.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.13.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.13.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.13.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.13.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.13.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.13.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.13.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.13.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.13.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.13.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.14.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.14.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.14.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.14.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.14.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.14.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.14.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.14.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.14.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.14.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.15.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.15.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.15.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.15.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.15.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.15.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.15.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.15.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.15.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.15.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.16.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.16.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.16.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.16.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.16.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.16.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.16.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.16.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.16.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.16.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.17.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.17.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.17.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.17.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.17.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.17.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.17.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.17.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.17.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.17.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.18.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.18.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.18.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.18.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.18.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.18.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.18.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.18.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.18.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.18.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.19.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.19.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.19.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.19.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.19.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.19.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.19.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.19.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.19.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.19.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.2.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.2.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.2.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.2.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.2.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.2.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.2.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.2.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.2.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.2.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.20.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.20.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.20.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.20.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.20.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.20.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.20.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.20.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.20.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.20.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.21.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.21.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.21.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.21.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.21.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.21.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.21.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.21.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.21.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.21.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.22.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.22.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.22.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.22.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.22.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.22.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.22.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.22.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.22.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.22.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.23.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.23.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.23.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.23.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.23.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.23.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.23.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.23.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.23.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.23.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.24.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.24.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.24.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.24.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.24.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.24.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.24.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.24.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.24.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.24.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.25.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.25.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.25.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.25.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.25.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.25.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.25.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.25.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.25.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.25.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.26.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.26.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.26.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.26.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.26.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.26.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.26.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.26.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.26.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.26.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.27.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.27.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.27.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.27.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.27.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.27.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.27.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.27.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.27.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.27.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.28.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.28.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.28.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.28.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.28.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.28.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.28.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.28.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.28.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.28.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.29.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.29.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.29.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.29.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.29.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.29.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.29.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.29.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.29.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.29.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.3.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.3.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.3.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.3.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.3.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.3.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.3.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.3.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.3.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.3.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.30.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.30.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.30.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.30.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.30.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.30.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.30.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.30.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.30.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.30.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.31.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.31.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.31.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.31.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.31.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.31.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.31.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.31.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.31.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.31.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.4.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.4.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.4.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.4.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.4.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.4.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.4.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.4.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.4.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.4.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.5.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.5.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.5.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.5.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.5.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.5.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.5.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.5.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.5.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.5.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.6.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.6.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.6.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.6.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.6.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.6.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.6.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.6.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.6.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.6.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.7.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.7.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.7.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.7.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.7.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.7.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.7.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.7.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.7.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.7.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.8.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.8.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.8.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.8.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.8.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.8.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.8.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.8.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.8.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.8.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.attn.k_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.attn.k_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.9.attn.o_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.attn.o_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.9.attn.q_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.attn.q_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.9.attn.v_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.attn.v_proj.weight": [
+   "BF16",
+   [
+    20,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.9.mlp.down_proj.bias": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.mlp.down_proj.weight": [
+   "BF16",
+   [
+    20,
+    14,
+    16384
+   ]
+  ],
+  "model.visual.9.mlp.gate_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.9.mlp.gate_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.9.mlp.up_proj.bias": [
+   "BF16",
+   [
+    3420
+   ]
+  ],
+  "model.visual.9.mlp.up_proj.weight": [
+   "BF16",
+   [
+    56,
+    5,
+    16384
+   ]
+  ],
+  "model.visual.9.rmsnorm1.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.9.rmsnorm2.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.merger.ln_q.weight": [
+   "BF16",
+   [
+    1280
+   ]
+  ],
+  "model.visual.merger.mlp.0.bias": [
+   "BF16",
+   [
+    5120
+   ]
+  ],
+  "model.visual.merger.mlp.0.weight": [
+   "BF16",
+   [
+    80,
+    20,
+    16384
+   ]
+  ],
+  "model.visual.merger.mlp.2.bias": [
+   "BF16",
+   [
+    2048
+   ]
+  ],
+  "model.visual.merger.mlp.2.weight": [
+   "BF16",
+   [
+    32,
+    20,
+    16384
+   ]
+  ],
+  "model.visual.patch_embed.proj.weight": [
+   "BF16",
+   [
+    1280,
+    3,
+    2,
+    14,
+    14
+   ]
+  ]
+ }
+}

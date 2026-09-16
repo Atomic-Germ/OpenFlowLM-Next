@@ -16,9 +16,15 @@ grid. That needs no container and no download, so it is what
 
     python open_kernels/model/replica_vit_qwen25.py [--grid 12 10] [--fixture OUT]
     python open_kernels/model/replica_vit_qwen25.py --model-dir DIR [--grid 12 10]
+    python open_kernels/model/replica_vit_qwen25.py --container-size
+
+`--fixture` also writes a synthetic `vision_weights.q4nx` in the shipped layout, which is
+what `vit_test --windowed` runs the C++ port against.
 
 `load_weights` reads a shipped `vision_weights.q4nx`. It has never been run against a real
-container -- see the plan's validation section.
+container: the names are confirmed by the strings in `src/lib/hrx/libqwen2vl_npu.so`, but
+the published container is 50 MiB larger than this tower needs and must not be loaded until
+its header has been read. `.claude/plans/qwen25vl-container-size.md`.
 """
 from __future__ import annotations
 
@@ -234,20 +240,27 @@ def hf_forward(m, pixels: np.ndarray, grid_h: int, grid_w: int) -> np.ndarray:
 # ---- reading a shipped container (UNVERIFIED: no Qwen2.5-VL container has been on this box)
 
 def vision_config(model_dir: Path) -> dict:
-    """`config.json`'s vision_config. The key prefix is whatever FLM stamped on this family;
-    the geometry keys are the same names the Qwen3-VL tower reads."""
+    """`config.json`'s vision_config, in the plain transformers keys.
+
+    The shipped 3B keeps its source block verbatim -- `depth`, `hidden_size`, `num_heads`,
+    `intermediate_size`, `out_hidden_size`, `patch_size`, `temporal_patch_size`,
+    `spatial_merge_size`, `window_size`, `fullatt_block_indexes` -- unlike the Qwen3.5 and
+    3.6 towers, whose containers carry OFLM's prefixed names. This read the prefixed form
+    until the container arrived on 2026-09-13 and had none of those keys.
+    `src/open_qwen36/vision/vit.cpp: qwen25_from_config_text` reads the same set."""
     v = json.loads((Path(model_dir) / "config.json").read_text())["vision_config"]
-    pre = next((p for p in ("QWEN2_5_VL_", "QWEN2VL_", "QWEN2_VL_") if f"{p}VISION_NUM_LAYERS" in v), None)
-    if pre is None:
-        raise RuntimeError(f"vision_config has no *_VISION_NUM_LAYERS key; it holds {sorted(v)[:8]}...")
-    g = lambda k: v[pre + k]  # noqa: E731
-    cfg = dict(depth=g("VISION_NUM_LAYERS"), hidden=g("VISION_EMBED_DIM"), heads=g("VISION_NUM_HEADS"),
-               inter=g("VISION_MLP_INTERMEDIATE_SIZE"), out=g("VISION_OUT_HIDDEN_SIZE"),
-               patch=g("PATCH_SIZE"), temporal=g("TEMPORAL_PATCH_SIZE"), merge=g("SPATIAL_MERGE_SIZE"),
-               window=g("VISION_WINDOW_SIZE"), eps=v.get(pre + "VISION_LAYER_NORM_EPSILON", 1e-6),
-               channels=3)
-    cfg["head_dim"] = v.get(pre + "VISION_HEAD_DIM", cfg["hidden"] // cfg["heads"])
-    cfg["fullatt"] = tuple(g("VISION_FULLATT_BLOCK_INDEXES"))
+    missing = [k for k in ("depth", "hidden_size", "num_heads", "intermediate_size", "out_hidden_size",
+                           "patch_size", "temporal_patch_size", "spatial_merge_size", "window_size",
+                           "fullatt_block_indexes") if k not in v]
+    if missing:
+        raise RuntimeError(f"vision_config is missing {missing}; it holds {sorted(v)}")
+    cfg = dict(depth=v["depth"], hidden=v["hidden_size"], heads=v["num_heads"],
+               inter=v["intermediate_size"], out=v["out_hidden_size"], patch=v["patch_size"],
+               temporal=v["temporal_patch_size"], merge=v["spatial_merge_size"],
+               window=v["window_size"], eps=v.get("rms_norm_eps", 1e-6),
+               channels=v.get("in_channels", v.get("in_chans", 3)))
+    cfg["head_dim"] = cfg["hidden"] // cfg["heads"]
+    cfg["fullatt"] = tuple(v["fullatt_block_indexes"])
     return cfg
 
 
@@ -260,9 +273,130 @@ def untile(t: np.ndarray, n_out: int, k_in: int) -> np.ndarray:
     return np.ascontiguousarray(w[:n_out, :k_in])
 
 
+def tile(w: np.ndarray) -> np.ndarray:
+    """The inverse: [n_out, k_in] -> [n/64, k/256, 64 * 256], both dims padded up to 256
+    (`_multi_modal_mm_weight_rearrange` pads to max(MM_N, MM_K), not to each separately)."""
+    pad = max(TILE_N, TILE_K)
+    n, k = w.shape
+    np_, kp = -(-n // pad) * pad, -(-k // pad) * pad
+    q = np.zeros((np_, kp), w.dtype)
+    q[:n, :k] = w
+    return q.reshape(np_ // TILE_N, TILE_N, kp // TILE_K, TILE_K).transpose(0, 2, 1, 3).reshape(
+        np_ // TILE_N, kp // TILE_K, TILE_N * TILE_K)
+
+
+def tiled_shape(n_out: int, k_in: int) -> list:
+    pad = max(TILE_N, TILE_K)
+    return [-(-n_out // pad) * pad // TILE_N, -(-k_in // pad) * pad // TILE_K, TILE_N * TILE_K]
+
+
+# ---- what the shipped container should weigh
+
+ELEMENT_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "I8": 1}
+
+
+def data_bytes(tensors) -> int:
+    """The tensor data alone, which is all the geometry decides -- safetensors packs it with
+    no gaps and no alignment."""
+    return sum(ELEMENT_BYTES[d] * math.prod(s) for _, d, s in tensors)
+
+
+def safetensors_bytes(tensors) -> int:
+    """The size of the file safetensors would write for `tensors`, to the byte.
+
+    8-byte header length, then the JSON header (no whitespace, space-padded so the data
+    starts 8-byte aligned), then the data. The entries are written in the order the writer
+    inserted them, which every vision container on disk has sorted by name -- and the order
+    only shifts how many digits the offsets take, a few hundred bytes over a whole file.
+    This reproduces Gemma3-4B's, Qwen3.5-0.8B/9B's and the 35B's vision_weight.q4nx exactly.
+    """
+    off, parts = 0, []
+    for name, dtype, shape in sorted(tensors):
+        nb = ELEMENT_BYTES[dtype] * math.prod(shape)
+        parts.append(f'{json.dumps(name)}:{{"dtype":"{dtype}","shape":{json.dumps(shape, separators=(",", ":"))},'
+                     f'"data_offsets":[{off},{off + nb}]}}')
+        off += nb
+    head = len(("{" + ",".join(parts) + "}").encode())
+    return 8 + head + (-head % 8) + off
+
+
+def container_tensors(cfg: dict) -> list:
+    """Every tensor `vision_weights.q4nx` holds, as (name, dtype, shape).
+
+    The names are the converter's (`utilities/q4nx-build/configs/qwen2vl.json`) and are
+    confirmed independently by the strings in the closed `src/lib/hrx/libqwen2vl_npu.so`,
+    which reads exactly this set and nothing else. The shapes follow transformers'
+    `Qwen2_5_VisionTransformerPretrainedModel` with the vision_mm tiling applied to the
+    nine matrices that go through that kernel.
+
+    Plus `identity`, which is not the tower's. The shipped container holds 519 tensors: the
+    518 above and one 5120 x 5120 bf16 identity matrix under that name, tiled like any
+    other weight. It is what made the file 50 MiB larger than the tower accounts for, and
+    the closed engine presumably multiplies by it to move data through `vision_mm` where
+    the arithmetic is a copy. This reference never reads it; it is here so the size model
+    reconciles and so `load_weights` does not refuse the real file over a tensor it does
+    not need. Header read 2026-09-13, fixture in
+    `specs/open-engine/tests/fixtures/qwen25vl_vision_header.json`.
+    """
+    H, I, O, U = cfg["hidden"], cfg["inter"], cfg["out"], cfg["merge"] ** 2
+    p = "model.visual."
+    t = [(p + "patch_embed.proj.weight", "BF16",
+          [H, cfg["channels"], cfg["temporal"], cfg["patch"], cfg["patch"]]),
+         (p + "merger.ln_q.weight", "BF16", [H]),        # normalises before the 2x2 concat
+         (p + "merger.mlp.0.weight", "BF16", tiled_shape(H * U, H * U)),
+         (p + "merger.mlp.0.bias", "BF16", [H * U]),
+         (p + "merger.mlp.2.weight", "BF16", tiled_shape(O, H * U)),
+         (p + "merger.mlp.2.bias", "BF16", [O]),
+         ("identity", "BF16", tiled_shape(H * U, H * U))]   # not the tower's; see the docstring
+    for i in range(cfg["depth"]):
+        b = f"{p}{i}."
+        for n in ("q", "k", "v", "o"):
+            t += [(f"{b}attn.{n}_proj.weight", "BF16", tiled_shape(H, H)),
+                  (f"{b}attn.{n}_proj.bias", "BF16", [H])]
+        t += [(b + "mlp.gate_proj.weight", "BF16", tiled_shape(I, H)), (b + "mlp.gate_proj.bias", "BF16", [I]),
+              (b + "mlp.up_proj.weight", "BF16", tiled_shape(I, H)), (b + "mlp.up_proj.bias", "BF16", [I]),
+              (b + "mlp.down_proj.weight", "BF16", tiled_shape(H, I)), (b + "mlp.down_proj.bias", "BF16", [H]),
+              (b + "rmsnorm1.weight", "BF16", [H]), (b + "rmsnorm2.weight", "BF16", [H])]
+    return t
+
+
+def qwen3vl_container_tensors(cfg: dict) -> list:
+    """The same for the full-attention tower (`replica_vit.py`'s), which is only here as
+    the calibration case: its containers are on disk and in the registry, so it is what
+    says whether the size model above is right before it is pointed at a file nobody has."""
+    H, I, O, U = cfg["hidden"], cfg["inter"], cfg["out"], cfg["merge"] ** 2
+    p = "model.visual."
+    t = [(p + "patch_embed.proj.weight", "BF16",
+          [H, cfg["channels"], cfg["temporal"], cfg["patch"], cfg["patch"]]),
+         (p + "patch_embed.proj.bias", "BF16", [H]),
+         (p + "pos_embed.weight", "BF16", [cfg["npos"], H]),
+         (p + "merger.norm.weight", "BF16", [H]), (p + "merger.norm.bias", "BF16", [H]),
+         (p + "merger.linear_fc1.weight", "BF16", tiled_shape(H * U, H * U)),
+         (p + "merger.linear_fc1.bias", "BF16", [H * U]),
+         (p + "merger.linear_fc2.weight", "BF16", tiled_shape(O, H * U)),
+         (p + "merger.linear_fc2.bias", "BF16", [O])]
+    for i in range(cfg["depth"]):
+        b = f"{p}blocks.{i}."
+        t += [(b + "attn.qkv.weight", "BF16", tiled_shape(3 * H, H)), (b + "attn.qkv.bias", "BF16", [3 * H]),
+              (b + "attn.proj.weight", "BF16", tiled_shape(H, H)), (b + "attn.proj.bias", "BF16", [H]),
+              (b + "mlp.linear_fc1.weight", "BF16", tiled_shape(I, H)), (b + "mlp.linear_fc1.bias", "BF16", [I]),
+              (b + "mlp.linear_fc2.weight", "BF16", tiled_shape(H, I)), (b + "mlp.linear_fc2.bias", "BF16", [H])]
+        for n in ("norm1", "norm2"):
+            t += [(f"{b}{n}.weight", "BF16", [H]), (f"{b}{n}.bias", "BF16", [H])]
+    return t
+
+
 def load_weights(model_dir: Path, cfg: dict) -> dict:
     import q4nx
-    f = q4nx.Q4NX(str(Path(model_dir) / "vision_weights.q4nx"))
+    path = Path(model_dir) / "vision_weights.q4nx"
+    want, got = safetensors_bytes(container_tensors(cfg)), path.stat().st_size
+    if got != want:
+        raise RuntimeError(
+            f"{path} is {got} bytes where this tower accounts for {want} ({got - want:+d}). The shipped 3B "
+            f"container reconciles exactly at {want}; a different size means a different tower or a "
+            f"different tiling, so list the file's tensor names, dtypes and shapes before trusting this "
+            f"loader. .claude/plans/qwen25vl-container-size.md")
+    f = q4nx.Q4NX(str(path))
     p = "model.visual."
     H, I, O, U = cfg["hidden"], cfg["inter"], cfg["out"], cfg["merge"] ** 2
     patch = f.bf16(p + "patch_embed.proj.weight")
@@ -289,13 +423,73 @@ def load_weights(model_dir: Path, cfg: dict) -> dict:
     return w
 
 
+# ---- the fixture the C++ port is checked against
+
+def round_to_bf16(w: dict) -> dict:
+    """Every weight through bf16 and back. The container stores bf16, so without this the
+    C++ port would be compared against a reference that saw more precision than it did."""
+    import torch
+    f = lambda a: torch.from_numpy(np.ascontiguousarray(a, np.float32)).to(torch.bfloat16).float().numpy()  # noqa: E731
+    out = {k: f(v) for k, v in w.items() if k != "blocks"}
+    out["blocks"] = [{k: f(v) for k, v in b.items()} for b in w["blocks"]]
+    return out
+
+
+def write_container(out: Path, cfg: dict, w: dict) -> None:
+    """A synthetic `vision_weights.q4nx` and config.json in the shipped layout: the tensor
+    names the converter writes, both dims of every vision_mm matrix padded up to 256 and
+    tiled. That lets `vit_test --windowed` exercise the real loader with no container on the
+    box -- it does NOT check those names against a shipped file, which only reading one can.
+    """
+    import torch
+    from safetensors.torch import save_file
+    bf = lambda a: torch.from_numpy(np.ascontiguousarray(a, np.float32)).to(torch.bfloat16)  # noqa: E731
+    H, O = cfg["hidden"], cfg["out"]
+    p = "model.visual."
+    t = {p + "patch_embed.proj.weight": bf(w["patch_w"]).reshape(
+             H, cfg["channels"], cfg["temporal"], cfg["patch"], cfg["patch"]),
+         p + "merger.ln_q.weight": bf(w["merger_ln_w"]),
+         p + "merger.mlp.0.weight": bf(tile(w["merger_fc1_w"])),
+         p + "merger.mlp.0.bias": bf(w["merger_fc1_b"]),
+         p + "merger.mlp.2.weight": bf(tile(w["merger_fc2_w"])),
+         p + "merger.mlp.2.bias": bf(w["merger_fc2_b"])}
+    for i, b in enumerate(w["blocks"]):
+        q = f"{p}{i}."
+        for n, k in (("q", "q"), ("k", "k"), ("v", "v"), ("o", "o")):
+            t[f"{q}attn.{n}_proj.weight"] = bf(tile(b[k + "_w"]))
+            t[f"{q}attn.{n}_proj.bias"] = bf(b[k + "_b"])
+        for n in ("gate", "up", "down"):
+            t[f"{q}mlp.{n}_proj.weight"] = bf(tile(b[n + "_w"]))
+            t[f"{q}mlp.{n}_proj.bias"] = bf(b[n + "_b"])
+        t[q + "rmsnorm1.weight"] = bf(b["ln1_w"])
+        t[q + "rmsnorm2.weight"] = bf(b["ln2_w"])
+    save_file(t, str(out / "vision_weights.q4nx"))
+    (out / "config.json").write_text(json.dumps({
+        "vision_model_weight": "vision_weights.q4nx",
+        "vision_config": {"depth": cfg["depth"], "hidden_size": H, "num_heads": cfg["heads"],
+                          "intermediate_size": cfg["inter"], "out_hidden_size": O, "patch_size": cfg["patch"],
+                          "temporal_patch_size": cfg["temporal"], "spatial_merge_size": cfg["merge"],
+                          "in_chans": cfg["channels"], "hidden_act": "silu",
+                          "window_size": cfg["window"], "fullatt_block_indexes": list(cfg["fullatt"])},
+    }, indent=1))
+    assert (out / "vision_weights.q4nx").stat().st_size == safetensors_bytes(container_tensors(cfg)), \
+        "the size model and the writer disagree about this container"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=None, help="a shipped container; omit for a random small tower")
     ap.add_argument("--grid", type=int, nargs=2, default=(12, 10), help="patch grid h w (multiples of the merge size)")
     ap.add_argument("--fixture", default=None, help="write pixels.bin / grid.json / ref.bin here for the C++ port")
+    ap.add_argument("--container-size", action="store_true",
+                    help="what vision_weights.q4nx should weigh for the 3B, against the registry")
     a = ap.parse_args()
     gh, gw = a.grid
+    if a.container_size:
+        want = 1430158096          # src/model_info.json, qwen2.5vl-it:3b -- and the shipped file
+        got = safetensors_bytes(container_tensors(QWEN25VL_3B))
+        print(f"modelled {got}  registry {want}  difference {want - got}")
+        return 0
     if a.model_dir:
         cfg = vision_config(Path(a.model_dir))
         t0 = time.time()
@@ -316,10 +510,16 @@ def main() -> int:
     if a.fixture:
         out = Path(a.fixture)
         out.mkdir(parents=True, exist_ok=True)
+        # the container stores bf16, so the reference the port is compared against has to
+        # run the rounded weights; the oracle comparison below keeps the fp32 ones
+        wq = round_to_bf16(w)
+        yq = vit_forward_np(wq, cfg, pixels, gh, gw)
         pixels.tofile(out / "pixels.bin")
-        y.astype(np.float32).tofile(out / "ref.bin")
-        (out / "grid.json").write_text(json.dumps({"h": gh, "w": gw, "n": gh * gw, "out": int(y.shape[1])}))
-        print(f"fixture -> {out}")
+        yq.astype(np.float32).tofile(out / "ref.bin")
+        (out / "grid.json").write_text(json.dumps({"h": gh, "w": gw, "n": gh * gw, "out": int(yq.shape[1])}))
+        if not a.model_dir:
+            write_container(out, cfg, wq)
+        print(f"fixture -> {out}  (vit_test --windowed {out} {out})")
     if m is None:
         print("no oracle for a container run: build one with transformers and the same weights")
         return 0
