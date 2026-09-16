@@ -46,15 +46,15 @@ Instead of directly adding the model to your app via C++ or Python, it’s often
 | **Easy integration** | No need to worry about device-specific code (CPU, GPU, NPU). Just send simple API calls. |
 | **Saves memory** | The server loads the model **once** and shares it across apps. No need for every app to load its own copy. |
 | **Cleaner architecture** | Keeps model logic (streaming, tool use, error handling) separate from your app logic. |
-| **Cloud-to-local transition** | You can prototype your app using OpenAI cloud models, then later switch to a local model — without changing your code much. |
+| **Cloud-to-local transition** | You can prototype your app using OpenAI cloud models, then later switch to a local model -- without changing your code much. |
 
-> In short: **Local LLM servers let your apps talk to big models running directly on your machine — cleanly and efficiently.**
+> In short: **Local LLM servers let your apps talk to big models running directly on your machine -- cleanly and efficiently.**
 
 ---
 
 ## 🌐 What is the OpenAI API Standard?
 
-Every LLM server — whether local or cloud — needs a way to receive prompts and return completions. That’s where **APIs** come in.
+Every LLM server -- whether local or cloud -- needs a way to receive prompts and return completions. That’s where **APIs** come in.
 
 ### ✅ The OpenAI API is the most common standard.
 
@@ -66,7 +66,7 @@ Why?
 
 > Even though OpenAI runs their own cloud-based LLMs, their **API design is public** and **free to adopt**.
 
-That means local servers like Ollama and OpenFlowLM — and your own custom servers — can all **pretend to be OpenAI** to your app.
+That means local servers like Ollama and OpenFlowLM -- and your own custom servers -- can all **pretend to be OpenAI** to your app.
 
 ### 🔁 Why does this matter?
 
@@ -74,6 +74,6 @@ It makes switching between cloud and local effortless:
 
 - You can build your app using OpenAI’s cloud models.
 - Later, switch to a local LLM (for privacy, cost, or speed).
-- Your app won’t need to change — it keeps using the same API.
+- Your app won’t need to change -- it keeps using the same API.
 
 ---

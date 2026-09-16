@@ -98,7 +98,65 @@ int main(int argc, char** argv) {
     check(m.embed_tensor == "model.embed_tokens.weight" && m.norm_tensor == "model.norm.weight" && m.lmhead_ops.size() == 1 &&
           m.lmhead_ops[0].op == "lmhead_q8" && m.lmhead_ops[0].tensor == "lm_head.weight" && m.lmhead_ops[0].chunk_bytes == 8704, "tensor names");
     check(m.has_moe, "the 27B manifest carries the MoE geometry");
-    check(m.files().size() == 10, "10 files named (4 xclbin + 6 insts)");
+    // the block prefill route (OPEN-PREFILL-BATCH)
+    const auto& lg = lin.gemm_block;
+    const auto& fg = full.gemm_block;
+    check(lg.t == 256 && lg.kind == "linear" && lg.program.size() == 2 && lg.program[0].kernel == "gemm_n12288_k2048" &&
+          lg.program[1].kernel == "gemm_n2048_k4096" && lg.program[0].args[0] == "gqkvz_w" && lg.program[1].args[2] == "gemm_y_n2048",
+          "linear route: two GEMM steps");
+    check(lg.weights.at("gqkvz_w").from == "pool" && lg.weights.at("gqkvz_w").ops == std::vector<size_t>{5, 6} &&
+          lg.weights.at("gout_w").from == "consts" && lg.weights.at("gout_w").ops == std::vector<size_t>{10},
+          "linear route: qkv|z out of the pool, out_proj out of the consts");
+    check(lg.qkv_dim == 8192 && lg.vw == 4096 && lg.key_heads == 16 && lg.value_heads == 32 && lg.head_dim == 128 &&
+          lg.conv_kernel == 4 && lg.s_rows == 140 && lg.a_rout == 176128 && lg.eps == 1e-6, "linear route: the DeltaNet geometry");
+    check(lg.moe_kernel == "mx_linear" && fg.moe_kernel == "mx_full" && lg.moe_args.size() == 6 && lg.moe_args[4] == "act" &&
+          m.kernels.at("mx_linear").patch == "moeroute2" && m.kernels.at("mx_full").context == "mx",
+          "the per-token MoE dispatch of each kind");
+    check(fg.t == 256 && fg.kind == "full" && fg.program.size() == 2 && fg.program[0].kernel == "gemm_n9216_k2048" &&
+          fg.weights.at("gqkvg_w").ops == std::vector<size_t>{5, 6, 7, 8} && fg.weights.at("go_w").ops == std::vector<size_t>{9} &&
+          fg.qw == 4096 && fg.kvw == 512 && fg.nh == 16 && fg.kvh == 2 && fg.hd == 256 && fg.rot == 64 && fg.a_rout == 83968,
+          "full route: q|k|v|gate then o, the attention geometry");
+    check(m.contexts.count("gemm") && m.kernels.at("gemm_n9216_k2048").context == "gemm" &&
+          m.kernels.at("gemm_n1024_k2048").context == "gemm" &&
+          m.kernels.at("gemm_n2048_k512").context == "gemm" &&
+          m.kernels.at("gemm_n2048_k4096").context == "gemm" &&
+          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 8 &&
+          m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
+          m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
+          "route contexts, kernels and globals");
+    check(m.files().size() == 59, "59 files named (8 xclbin + 51 insts: the route adds one GEMM context whatever K, the MoE one, seven "
+                                  "streams, the token-batched expert kernel one context and six streams, and the attention GEMM one "
+                                  "context and 32 streams)");
+    // the attention products on the NPU (OPEN-PREFILL-ATTN): a stream per 256 rows of window, both
+    // products, on one xclbin; full attention only
+    const auto& ab = fg.attn_block;
+    check(ab.present() && !lg.attn_block.present() && ab.m == 2048 && ab.hd == 256 && ab.l_max == 4096 &&
+          ab.args == std::vector<std::string>{"ag_a", "ag_b", "ag_c"} && ab.kernels_s.size() == 16 &&
+          ab.kernels_pv.size() == 16 && ab.kernels_s.at(256) == "ag_s256" && ab.kernels_s.at(4096) == "ag_s4096" &&
+          ab.kernels_pv.at(2048) == "ag_pv2048",
+          "attn_block: 16 windows of 256 rows for each product, three buffer args, 2048 rows of head dim 256");
+    check(m.kernels.at("ag_s256").context == "ag" && m.kernels.at("ag_pv4096").context == "ag" &&
+          m.kernels.at("ag_s256").patch.empty() && m.contexts.at("ag") == "ag_s256/final.xclbin" &&
+          m.globals.at("ag_a") == 2048 * 4096 * 2 && m.globals.at("ag_b") == 4096 * 256 * 2 && m.globals.at("ag_c") == 2048 * 4096 * 4,
+          "attn_block: every stream on the ag context, no patch, the a / b / c globals sized for the widest window");
+    // the token-batched expert kernel (OPEN-MOE-BATCH): a binary ladder of stream lengths on one
+    // xclbin, the same on both kinds
+    const auto& mbk = lg.moe_batch;
+    check(mbk.present() && mbk.nt == 8 && mbk.args == std::vector<std::string>{"pool", "mb_x", "mb_h", "mb_y"} &&
+          mbk.kernels.size() == 6 && mbk.kernels.at(256) == "mb_s256" && mbk.kernels.at(128) == "mb_s128" &&
+          mbk.kernels.at(64) == "mb_s64" && mbk.kernels.at(32) == "mb_s32" && mbk.kernels.at(16) == "mb_s16" &&
+          mbk.kernels.at(8) == "mb_s8" && fg.moe_batch.kernels == mbk.kernels,
+          "moe_batch: 256 down to 8 slot streams, four buffer args, eight token slots");
+    check(m.kernels.at("mb_s256").patch == "moebatch" && m.kernels.at("mb_s8").context == "mb" &&
+          m.contexts.at("mb") == "mb_s256/final.xclbin" && m.globals.at("mb_x") == 256 * 2048 * 8 * 2 &&
+          m.globals.at("mb_h") == 256 * 512 * 8 * 2 && m.globals.at("mb_y") == 256 * 2048 * 8 * 4,
+          "moe_batch: the streams' patch and context, the x / h / y globals sized for the longest");
+    // the shared expert runs over the block, not per token: up|gate (contiguous pool ops) then down
+    const auto& sp = lg.shared_program;
+    check(sp.size() == 2 && sp[0].kernel == "gemm_n1024_k2048" && sp[1].kernel == "gemm_n2048_k512" &&
+          lg.shared_ff == 512 && lg.shared_weights.at("gshare_w").ops.size() == 2 &&
+          lg.shared_weights.at("gsdown_w").ops.size() == 1,
+          "linear route: the shared expert as two GEMMs over the block");
 
     // ---- the model check
     json ok = matching_config(m);
@@ -138,6 +196,36 @@ int main(int argc, char** argv) {
     }
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
+    refused_manifest(argv[1], "op 99", "a route weight past the pack plan is refused at load", [](json& j) {
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["ops"] = {99};
+    });
+    refused_manifest(argv[1], "moeroute2", "a route whose MoE dispatch lacks the patch table is refused at load", [](json& j) {
+        j["kernels"]["mx_linear"].erase("patch");
+    });
+    refused_manifest(argv[1], "moebatch", "a moe_batch stream without the patch table is refused at load", [](json& j) {
+        j["kernels"]["mb_s32"].erase("patch");
+    });
+    refused_manifest(argv[1], "multiple of 8", "a moe_batch slot count that is not a round of columns is refused", [](json& j) {
+        auto& k = j["layer_types"]["full_attention"]["gemm_block"]["moe_batch"]["kernels"];
+        k["12"] = k["8"];
+    });
+    refused_manifest(argv[1], "not a declared global", "a moe_batch naming an undeclared buffer is refused", [](json& j) {
+        j["layer_types"]["linear_attention"]["gemm_block"]["moe_batch"]["args"][3] = "mb_z";
+    });
+    refused_manifest(argv[1], "multiple of 256", "an attention stream whose window is not a round of columns is refused", [](json& j) {
+        auto& k = j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["kernels_s"];
+        k["300"] = k["256"];
+    });
+    refused_manifest(argv[1], "different windows", "attention streams that do not pair up per window are refused", [](json& j) {
+        j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["kernels_pv"].erase("512");
+    });
+    refused_manifest(argv[1], "not a declared global", "an attn_block naming an undeclared buffer is refused", [](json& j) {
+        j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["args"][2] = "ag_z";
+    });
+    refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
+        auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];
+        p.push_back(p[1]);
+    });
     refused_manifest(argv[1], "nch", "a std_perm without nch is refused at load", [](json& j) {
         for (auto& lt : j["layer_types"])
             for (auto& o : lt["pack"]["pool"])

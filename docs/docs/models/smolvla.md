@@ -17,7 +17,7 @@ parent: Models
 
 📝 **Note:**
 
-- SmolVLA is a robotics policy model that maps camera images and language instructions directly to robot actions — it does not run in OFLM's standard CLI or Server chat modes.
+- SmolVLA is a robotics policy model that maps camera images and language instructions directly to robot actions -- it does not run in OFLM's standard CLI or Server chat modes.
 - For detailed usage instructions, please refer to:
     - HuggingFace: [OpenFlowLM/smolvla-NPU2](https://huggingface.co/OpenFlowLM/smolvla-NPU2)
     - ModelScope: [amd/smolvla](https://modelscope.cn/models/amd/smolvla)

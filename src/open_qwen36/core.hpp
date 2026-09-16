@@ -17,10 +17,12 @@
 /// headers so it can be built and tested on its own (cli.cpp); engine.hpp
 /// adapts it to the app's `causal_lm` seam.
 ///
-/// Prefill is decode-as-prefill: the prompt goes through `step()` one token at
-/// a time from zeroed state with logits skipped, which is exact for this
-/// architecture (each layer's state update sees one token at a time) and is
-/// the only prefill the open kernels have.
+/// Prefill is decode-as-prefill -- the prompt through `step()` one token at a
+/// time, exact for this architecture -- unless the kernel set carries the
+/// block route (manifest.hpp's GemmBlockProgram): then `step_gemm_block()`
+/// takes 256 tokens at a time through the projections as GEMMs, with the
+/// stages between them on the host (block_host.hpp) and, on the MoE
+/// families, the expert block still one token at a time.
 #pragma once
 
 #include <cstddef>
@@ -36,6 +38,7 @@
 #include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
 
+#include "open_qwen36/block_host.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -61,8 +64,34 @@ struct Snapshot {
     std::vector<std::vector<uint8_t>> kv;      ///< per attention layer: rows [0, pos)
 };
 
+/// One kernel's dispatches over a block: what it cost where it actually runs.
+struct DispatchStat {
+    int calls = 0;
+    double ms = 0, min_ms = 1e18;
+    void add(double t) {
+        ++calls;
+        ms += t;
+        min_ms = t < min_ms ? t : min_ms;
+    }
+};
+
 struct StepTiming {
     double part0_ms = 0, part1_ms = 0, route_ms = 0, lmhead_ms = 0, total_ms = 0;
+    // The block route's stages, split finely enough to say which one to work on.
+    // part1_ms is mid + tail; route_ms is the four moe_* below.
+    double mid_ms = 0;        ///< the DeltaNet recurrence, or the attention itself
+    double dn_conv_ms = 0;    ///< of mid: DeltaNet's per-token half (conv, q/k norms, alpha/beta)
+    double dn_rule_ms = 0;    ///< of mid: DeltaNet's delta rule on S, per head over the block
+    double attn_ms = 0;       ///< of mid: the attention layers' host half
+    double gemm_tile_ms = 0;  ///< x into the GEMM's tiled bf16 activation layout
+    double gemm_tr_ms = 0;    ///< the GEMM's [N, T] output back to [T, N], allocation included
+    double tail_ms = 0;       ///< residual, post-norm, router
+    double state_ms = 0;      ///< the state BO syncs (the KV read grows with position)
+    double moe_prep_ms = 0;   ///< xm / the router record / the residual into act
+    double moe_patch_ms = 0;  ///< moe2_apply and the instruction sync
+    double moe_run_ms = 0;    ///< the mx dispatch itself
+    double moe_read_ms = 0;   ///< xres back
+    double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
 };
 
 class Core {
@@ -105,22 +134,54 @@ public:
     bool mrope_active() const { return mrope_on_; }
     /// config.json's image_token_id (-1 when the model has none).
     int image_token_id() const { return image_token_id_; }
-    /// 0167/#32: the GEMM-route batched-prefill block size (manifest.hpp's
-    /// GemmBlockProgram), or 0 when the loaded kernel set has none / its
-    /// layer types disagree -- refuses rather than guesses.
+    /// Time every kernel the layer's block route names under conditions the route puts them
+    /// in, to say where a dispatch's time goes. Writes its table to stderr; needs
+    /// load_weights(), and the buffers' contents do not affect the timing.
+    ///
+    /// What the probes found on the 35B (2026-09-12), each against the same kernel run back
+    /// to back with nothing else happening:
+    ///   cycling every layer's weights   free
+    ///   a 30 ms idle gap                +0.1 to +0.7 ms
+    ///   the expert patch + its sync     free (the sync of an 800 KB stream is 0.03 ms)
+    ///   the host reading the output     free
+    ///   a change of hardware context    +2.8 ms, flat, whatever the kernel's size
+    ///   ~48 MB of host memory churn     +3.7 ms on the smallest, +14.7 on the widest
+    /// The last two together reproduce what the same dispatches cost in a real block
+    /// (OFLM_OPEN_DISPATCH_LOG prints that). Churn scales with what the kernel streams,
+    /// which is what dirty cache lines being written back during the stream would do.
+    void bench_dispatch(int layer, int reps);
+    /// The same for decode's dispatches -- the per-token program, which the block route never
+    /// runs. Three probes: each kernel repeated on one layer, the same cycling every layer of
+    /// its type, and the real 40-layer walk in order. The walk's total is the floor a decode
+    /// step cannot go below. Call it after a step so the attnpos and route patches hold real
+    /// values; it leaves the state and the KV window meaningless, so exit afterwards.
+    void bench_decode(int reps);
+    /// One kernel, on one layer, over and over, with the arguments its own program gives it.
+    /// For a half-program kernel (lx0, ax0) this HANGS unless the build is self-contained --
+    /// the second half is what drains its fifos -- so it is for timing a truncated build
+    /// (LX_STOP), not for the shipped kernels; bench_decode replays whole layers instead.
+    void bench_kernel(const std::string& name, int reps, int layer, int warm_token);
+    /// Per-kernel dispatch counts and times since the last call, then cleared. Empty unless
+    /// dispatch accounting is on (OFLM_OPEN_DISPATCH_LOG).
+    std::map<std::string, DispatchStat> take_dispatch_stats();
+    /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
+    /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
-    /// T tokens through every layer as 5 GEMM dispatches (q|k|v fused,
-    /// o_proj, gate_proj, up_proj, down_proj) plus T single-token attnpos-
-    /// patched attention dispatches between GEMM A' and GEMM O, with
-    /// HOST-side fp64 RMSNorm/residual/SwiGLU between every GEMM stage (see
-    /// manifest.hpp's GemmBlockProgram docstring for the full chain).
-    /// `ids.size()` must equal gemm_block_t(); the caller pads a short tail
-    /// with any in-range token id (hardware-proven exact: the real columns'
-    /// output does not depend on what the padding columns carry) and passes
-    /// the REAL count as `t_real` so position only advances by the real
-    /// tokens. Logits, like step(), only for the (t_real-1)th token, only
-    /// when asked.
+    /// T = gemm_block_t() tokens through every layer on the block route: the
+    /// projections as whole-array GEMM dispatches, the stages between them
+    /// per layer-type kind (dense: T single-token attention dispatches and
+    /// host norms / SwiGLU; linear: the DeltaNet recurrence on the host; full:
+    /// attention on the host; the MoE block one token at a time). The caller
+    /// pads a short tail with any in-range id and passes the REAL count as
+    /// `t_real`: only those tokens touch the state, and only they advance the
+    /// position. Logits, like step(), only for the last real token, only when
+    /// asked.
     void step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
+    /// read back with block_logits() -- what a position-for-position diff against the
+    /// sequential path needs. Off by default; costs a tail per token.
+    void set_block_logits_all(bool on) { block_logits_all_ = on; }
+    const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
@@ -148,7 +209,8 @@ private:
         std::unique_ptr<xrt::kernel> k;
         std::unique_ptr<xrt::bo> instr;
         std::vector<uint32_t> words;
-        std::vector<stream_patch::MoePatch> moe2;
+        std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
+        size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         uint32_t* iw() { return instr->map<uint32_t*>(); }
@@ -176,29 +238,31 @@ private:
     int64_t mrope_pos_ = 0;
     size_t ptab_dirty_ = 0;                    ///< rows [0, dirty) hold per-request records; reset() restores them
 
-    // ---- 0167/#32: the GEMM-route block (see manifest.hpp's GemmBlockProgram)
+    // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
-    // Per-layer, dedicated (byte-0-based) weight buffers built ONCE in
-    // load_weights() by copying the already-packed pool bytes at the q/k/v,
-    // o, up, gate, down PackOp offsets (Manifest::layer_type(l).pool[0..6],
-    // fixed order per open_kernels/recipes/dense.py's pack_plan/programs) --
-    // NOT sub-ranges of pools_[l] passed with an offset: the GEMM kernels
-    // (gemm_q4_prefill.py) were traced expecting their "w" arg to start at
-    // byte 0 of its own bound buffer, and an XRT device-side sub-buffer view
-    // is an untested mechanism in this tree -- so this pays a one-time
-    // ~1.9 GB extra resident-memory cost (5 buffers/layer x 40 layers) for a
-    // mechanism already proven on hardware, rather than an unvalidated one.
-    // q/k/v are concatenated because they are ALREADY byte-contiguous in
-    // the existing pool layout (POOL_K immediately follows POOL_Q+QB, POOL_V
-    // immediately follows POOL_K+KB -- confirmed against a real manifest.json,
-    // not assumed), so this is a single memcpy, no interleaving.
-    std::vector<xrt::bo> gqkv3_w_, go_w_, ggate_w_, gup_w_, gdown_w_;   ///< per layer, only when gemm_block.t > 0
-    // Host-resident copies of input_layernorm.weight / post_attention_layernorm.weight
-    // (bf16, hidden elements each), captured once from the SAME host buffer
-    // pack_consts() just wrote (before its device sync) -- this route's
-    // RMSNorm runs on the HOST in fp64 (rmsnorm_host() below), so it needs
-    // these as host floats, not a device buffer.
-    std::vector<std::vector<uint16_t>> ln_w_bf16_, post_ln_w_bf16_;    ///< per layer, only when gemm_block.t > 0
+    bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
+    bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
+    bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
+    std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
+    std::map<std::string, DispatchStat> dispatch_stats_;
+    // Per weight name, per layer: a dedicated buffer holding a contiguous run of
+    // the packed pool / consts bytes (the GEMM kernels read their weight from
+    // byte 0 of their own buffer; an XRT sub-buffer view is untested here).
+    // Built once in load_weights() from the same host bytes the pool upload uses.
+    std::map<std::string, std::vector<xrt::bo>> gemm_w_;
+    // dense: the two norm weights (bf16) the host RMSNorm reads, captured from consts
+    std::vector<std::vector<uint16_t>> ln_w_bf16_, post_ln_w_bf16_;
+    // linear / full: the small per-layer tensors the host stages read, straight from the file
+    struct HostConsts {
+        std::vector<float> ln, postln, router;          ///< [hid], [hid], [hid, E]
+        std::vector<float> convw, Wa, Wb, A, dtb, nw;   ///< linear: [taps, nch], [hid, lanes] x2, [heads] x2, [head_dim]
+        size_t lanes = 0;
+        std::vector<float> qn, kn;                      ///< full: [hd] x2
+        std::vector<float> sgw;                         ///< the shared expert's sigmoid gate, [hid]
+    };
+    std::vector<HostConsts> hc_;                       ///< per layer, filled for a linear / full route
+    bool block_logits_all_ = false;
+    std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
     StepTiming timing_;
@@ -211,44 +275,73 @@ private:
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);
+    /// run()'s two halves for the bench: building the xrt::run and setting its arguments,
+    /// then start() to wait(). The sum is what run() returns.
+    std::pair<double, double> run_split(Kern& k, const std::vector<std::string>& args, int layer);
     void route(Kern& k, int layer, uint64_t act_off);
     void log(const std::string& s) const;
 
-    // ---- 0167/#32: the GEMM-route block's own helpers (core.cpp)
-    /// The byte {offset, length} of `lt.pool[idx]` (idx: 0=q 1=k 2=v 3=o
-    /// 4=up 5=gate 6=down, per open_kernels/recipes/dense.py's pack_plan
-    /// order) inside a layer's packed pool buffer. length = nch * chunk_bytes,
-    /// the SAME formula gemm_q4_prefill.py's own `pool_bytes = n_weight * k *
-    /// 5 // 8` computes (cross-checked against a real manifest.json).
-    std::pair<size_t, size_t> pool_region(const LayerType& lt, int idx) const;
+    // ---- the block route's helpers (core.cpp)
+    /// The byte {offset, length} of pack op `idx` of `lt.pool` (from "pool") or `lt.consts`
+    /// ("consts"): a band-law (std_perm) projection, length = nch * chunk_bytes.
+    std::pair<size_t, size_t> op_region(const LayerType& lt, const std::string& from, size_t idx) const;
+    /// The consts tensor whose name ends in `suffix`, with the layer index filled in.
+    std::string const_tensor(const LayerType& lt, const std::string& suffix, int layer) const;
+    /// One GEMM step over x [T, K] (f32 row-major): tile, upload, run, download y as [T, N].
+    /// `out` is grown if it is short and then fully overwritten; pass a buffer that lives
+    /// across layers, so the 12 MB the widest GEMM returns is allocated once, not 40 times
+    /// a block.
+    void gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
+              std::vector<float>& out);
+    /// The same dispatch without the transpose: y stays [N, T] in the output buffer and the
+    /// mapping is returned, so a caller that is going to slice the output can transpose
+    /// straight into its own arrays. Valid until the next GEMM on the same buffer.
+    const float* gemm_run(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer);
+    /// The tail (final norm, lm_head) for one residual row into logits_host_.
+    void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
     /// T-wide scratch buffer (`wide`, e.g. "gact") and an ordinary T=1
-    /// per-layer scratch buffer (`scratch1`, e.g. "act") -- a map+memcpy+sync
-    /// round trip, the same idiom open_kernels/harness/run_kernel.cpp's
-    /// `copy` directive uses, validated on hardware before this was wired
-    /// into the engine.
+    /// per-layer scratch buffer (`scratch1`, e.g. "act").
     void shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch);
     /// out[t,:] = x[t,:] / sqrt(mean(x[t,:]^2) + eps) * w[:], reduction and
-    /// the final multiply both in fp64 (trap 11: fp32 is not a safe
-    /// reduction width at this hidden size). w is bf16 (hidden elements);
-    /// out is written as fp32 (ready for tile_gemm_x).
+    /// the final multiply both in fp64. w is bf16 (hidden elements).
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
                              const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out);
-    /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64,
-    /// MAC 8x8) -- a local port of the SAME algorithm
-    /// open_npue/npue_pack.cpp's tile_b implements (internal linkage there,
-    /// not callable from here -- copied rather than exported, see this
-    /// route's own history in tasks/0167 for why). Writes K*T bf16 elements
-    /// (raw bits) to `out`.
+    /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64, MAC 8x8, tile_n 32)
+    /// -- the layout gemm_q4_prefill.py streams its activation in.
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
-    /// One layer of the GEMM-route chain (manifest.hpp's GemmBlockProgram
-    /// docstring): entry RMSNorm -> GEMM A' (qkv3) -> T dxB dispatches at
-    /// positions [pos_, pos_+T) -> GEMM O -> residual + post-attn RMSNorm ->
-    /// GEMM gate + GEMM up -> host SwiGLU -> GEMM down -> residual. `xres` is
-    /// T*hidden fp64, updated in place (this layer's output becomes the next
-    /// layer's input) -- positions come from the member `pos_`, unchanged by
-    /// this call (the caller advances it once per BLOCK, not per layer).
+    /// The scalar original of tile_gemm_x, kept only as the reference host::tile_x is checked against.
+    static void tile_gemm_x_reference(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
+    /// One dense layer of the route (0167/#32): entry RMSNorm -> GEMM qkv3 -> T dxB
+    /// dispatches -> GEMM o -> residual + post-attn RMSNorm -> GEMM gate, up -> host
+    /// SwiGLU -> GEMM down -> residual. `xres` is T*hidden fp64, updated in place.
     void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
+    /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
+    void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the
+    /// sigmoid gate on the host, added into res [T, hid] in place.
+    void shared_expert_block(int l, const float* xm, float* res, size_t T, size_t t_real);
+    /// A linear-attention layer of the block route: GEMM qkv|z -> host DeltaNet (state in
+    /// place through t_real tokens) -> GEMM out -> residual, norm, router -> the MoE per token.
+    void block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real);
+    /// A full-attention layer: GEMM q|k|v|gate -> host attention over the KV rows (rows
+    /// [pos_, pos_ + t_real) written) -> GEMM o -> the same tail.
+    void block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real);
+    /// The MoE block for one token on the sequential kernel (lx1 / ax1): xm, the router
+    /// record and the residual into `act`, route + run, the new residual out of `xres`.
+    void moe_token(int l, const float* xm, const float* res, const float* probs, const int32_t* idx, const float* w,
+                   float* out);
+    /// The routed experts over the whole block on the token-batched kernel (OPEN-MOE-BATCH):
+    /// xm / res [T, hid], the router's idx / w [T, topk] for the first t_real tokens; out [T, hid]
+    /// = res + the weighted expert outputs (padding rows carried as res).
+    void moe_block(int l, const float* xm, const float* res, const int32_t* idx, const float* w, size_t T, size_t t_real,
+                   float* out);
+    /// The full-attention layer's attention over the block as GEMM dispatches (OPEN-PREFILL-ATTN):
+    /// per kv head, the group's queries against the window's K rows for the scores, the row
+    /// softmax on the host, then against the V rows. Q [T, nh*hd] as attention_prep leaves it,
+    /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated.
+    void attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
+                       size_t kv_row_elems, float* og);
 };
 
 }  // namespace open_qwen36

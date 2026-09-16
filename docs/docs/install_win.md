@@ -17,7 +17,7 @@ has_children: false
 
 ## 🚨 CRITICAL: NPU Driver Requirement
 
-You must have the **latest** AMD NPU driver — **version number >= 32.0.203.311** — installed for OpenFlowLM to work correctly. Earlier versions are no longer supported.
+You must have the **latest** AMD NPU driver -- **version number >= 32.0.203.311** -- installed for OpenFlowLM to work correctly. Earlier versions are no longer supported.
 
 <!-- > ⚙️ **Tip:** Upgrade to the new NPU Driver **32.0.203.311** for over 5–10% speed boost across all models and context lengths. [Download and Install](https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers) *(AMD account required)*   -->
 - Check via:  
@@ -80,7 +80,7 @@ oflm run llama3.2:1b
 > - During installation, you can select a different base folder (e.g., if you choose `C:\Users\<USER>\Documents\oflm`, models will be saved under `C:\Users\<USER>\Documents\oflm\models\`).
 > - ⚠️ If HuggingFace is not directly accessible in your region, you can manually download the model (e.g., [hf-mirror](https://hf-mirror.com/models?search=openflowlm)) and place it in the directory.
 
-🎉🚀 OpenFlowLM (OFLM) is ready — your NPU is unlocked and you can start chatting with models right away!
+🎉🚀 OpenFlowLM (OFLM) is ready -- your NPU is unlocked and you can start chatting with models right away!
 
 Open **Task Manager** (`Ctrl + Shift + Esc`). Go to the **Performance** tab → click **NPU** to monitor usage.  
 

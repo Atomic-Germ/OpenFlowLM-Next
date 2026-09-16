@@ -28,6 +28,14 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
 if errorlevel 1 goto :clfail
 out\pools_test.exe
 if errorlevel 1 goto :testfail
+echo [open_qwen36] block_host_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 ^
+   /I ".." /I "..\include" ^
+   block_host_test.cpp block_host.cpp /Fe:out\block_host_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+python ..\..\open_kernels\model\replica_block.py --fixture out\blockfix >nul
+out\block_host_test.exe out\blockfix
+if errorlevel 1 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^
@@ -44,9 +52,9 @@ REM DISABLE_ABI_CHECK=1, matching ../CMakeLists.txt's flm target --
 REM without it xrt/detail/abi.h wants a generated version-slim.h that a raw
 REM C:\dev\XRT source checkout (no XRT build step run in it) never produces,
 REM and cl fails with C1083 before ever reaching this file's own code.
-cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj ^
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   q4nx_file.cpp pools.cpp manifest.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   q4nx_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_qwen36_cli.exe /Fo:out\
 if errorlevel 1 goto :clfail
 echo [open_qwen36] OK -^> out\open_qwen36_cli.exe

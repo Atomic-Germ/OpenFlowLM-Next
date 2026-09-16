@@ -29,7 +29,7 @@ sections:
       href: "https://youtu.be/sZt1WyNoL2U?si=7U3z6u6E9KF6G_Dd"
       kicker: "GPT-OSS on NPU"
       body: |
-        Run large-scale chat and reasoning workloads directly on your Ryzen™ AI NPU with stable, low-power performance—
+        Run large-scale chat and reasoning workloads directly on your Ryzen™ AI NPU with stable, low-power performance--
         ideal for long-running sessions and experimentation.
 
   - type: media
@@ -44,7 +44,7 @@ sections:
       href: "https://youtu.be/BLd2j9dPw40?si=5GzOW2FlZgGVp8Xi"
       kicker: "Gemma3 (Vision) on NPU"
       body: |
-        Understand and describe images instantly — OpenFlowLM runs Google Gemma3 fully on the NPU for fast, private, and efficient vision inference.
+        Understand and describe images instantly -- OpenFlowLM runs Google Gemma3 fully on the NPU for fast, private, and efficient vision inference.
 
   - type: media
     variant: alt

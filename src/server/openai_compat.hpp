@@ -11,6 +11,8 @@
 /// to it without a server, a device or a model.
 #pragma once
 
+#include <cstddef>
+#include <stdexcept>
 #include <string>
 
 #include <utility>
@@ -181,6 +183,46 @@ inline std::string task_names_csv() {
     return s;
 }
 
+/// The width of one embedding inside a concatenated batch result.
+///
+/// embed_batch() returns every vector end to end, so the caller has to slice.
+/// The failure that matters is not a crash: a wrong width, or a wrong order,
+/// hands a caller a correctly shaped, correctly normed, deterministic vector
+/// for somebody else's text, and nothing downstream can detect it.
+///
+/// `expected_dim` is the backend's own vector width
+/// (AutoEmbeddingModel::embedding_dim()). When it is known the result must be
+/// exactly `n_inputs * expected_dim` floats, which also catches a backend that
+/// returns a whole number of vectors but the wrong number of them -- half a
+/// batch divides evenly. When it is 0 the backend does not report a width, and
+/// the only check left is that the result divides; that cannot catch the
+/// half-a-batch case.
+inline size_t embedding_batch_dim(size_t flat_size, size_t n_inputs,
+                                  size_t expected_dim = 0) {
+    if (n_inputs == 0)
+        throw std::runtime_error(
+            "embedding_batch_dim: asked for the vector width of zero inputs");
+    if (expected_dim != 0) {
+        if (flat_size != n_inputs * expected_dim)
+            throw std::runtime_error(
+                "embedding backend returned " + std::to_string(flat_size) +
+                " floats for " + std::to_string(n_inputs) + " inputs, but its"
+                " vectors are " + std::to_string(expected_dim) + " wide, so it"
+                " should have returned " + std::to_string(n_inputs * expected_dim) +
+                ". Refusing to slice: a mis-split returns correctly shaped,"
+                " correctly normed vectors for the wrong inputs.");
+        return expected_dim;
+    }
+    if (flat_size == 0 || flat_size % n_inputs != 0)
+        throw std::runtime_error(
+            "embedding backend returned " + std::to_string(flat_size) +
+            " floats for " + std::to_string(n_inputs) +
+            " inputs, which does not divide evenly. Refusing to guess the"
+            " vector width: a mis-split returns correctly shaped, correctly"
+            " normed vectors for the wrong inputs.");
+    return flat_size / n_inputs;
+}
+
 /// The outcome of reading a request's task prompt.
 struct TaskResolution {
     enum class Status { Ok, Absent, NotAString, Unknown, Conflict };
@@ -235,6 +277,105 @@ inline TaskPolicy task_policy(bool supports_prompts, bool declares_names, bool t
     if (task_given && !supports_prompts) return TaskPolicy::NotSupported;
     if (!task_given && declares_names)   return TaskPolicy::Required;
     return TaskPolicy::Ok;
+}
+
+/// What a streaming response has already handed to the transport (#64).
+///
+/// The first frame sends the 200 and the chunked headers, so from then on
+/// send_response() cannot reach the client: HttpSession skips write_response() for a
+/// streaming session, so an error body went nowhere and the connection was never
+/// terminated -- or, for a queued request, a second HTTP response was written into
+/// the chunked body. The final frame ends the stream, and it is also what advances
+/// the NPU queue, so nothing may follow it either.
+struct StreamState {
+    bool opened = false;  ///< a frame has been, or was being, handed to the transport
+    bool closed = false;  ///< a final frame's send has RETURNED
+};
+
+/// Send one frame through `send()` and record it in `s`.
+///
+/// `opened` is set before the send, because once a send has started the headers may be
+/// on the wire. `closed` is set only after it returns: a final send that throws has
+/// neither ended the stream nor advanced the NPU queue, so the error must still go
+/// in-stream. Marking it closed first dropped that error as unreportable, and the queue
+/// never moved again. Exceptions propagate unchanged.
+template <class Send>
+inline void send_tracked(StreamState& s, bool is_final, Send&& send) {
+    s.opened = true;
+    send();
+    if (is_final) s.closed = true;
+}
+
+/// Where an error raised by a streaming handler has to go.
+enum class ErrorRoute {
+    Body,         ///< nothing is on the wire yet: an ordinary error body, with its status
+    Frame,        ///< the stream is open: report in-stream, then end the stream
+    Unreportable  ///< the stream has ended: there is no transport left to report on
+};
+
+inline ErrorRoute error_route(const StreamState& s) {
+    if (!s.opened) return ErrorRoute::Body;
+    return s.closed ? ErrorRoute::Unreportable : ErrorRoute::Frame;
+}
+
+/// The two streaming formats this server speaks.
+enum class StreamWire {
+    Sse,     ///< /v1/*: `data: <json>\n\n` events, terminated by `data: [DONE]`
+    Ndjson   ///< /api/*: one JSON object per line, no terminator event
+};
+
+/// The frames that report `message` inside an open stream, in order. The caller sends
+/// the last one as final.
+///
+/// SSE carries OpenAI's error object, which is what its clients look for in a stream
+/// (openai-python raises APIError on a data event with an "error" key), followed by
+/// [DONE] so a client waiting for the terminator gets one. NDJSON carries Ollama's
+/// `{"error": "<text>"}`, the shape its client checks for on every line.
+///
+/// Serialised with error_handler_t::replace: `message` is an exception's what(), and
+/// a json::parse_error quotes the bytes it choked on. A strict dump() would throw on
+/// invalid UTF-8 from inside the catch block that is reporting it.
+inline std::vector<std::string> stream_error_frames(StreamWire wire, const std::string& message) {
+    if (wire == StreamWire::Sse) {
+        const json body = {{"error", {
+            {"message", message},
+            {"type", "server_error"},
+            {"code", 500}
+        }}};
+        return {"data: " + body.dump(-1, ' ', false, json::error_handler_t::replace) + "\n\n",
+                "data: [DONE]\n\n"};
+    }
+    const json body = {{"error", message}};
+    return {body.dump(-1, ' ', false, json::error_handler_t::replace) + "\n"};
+}
+
+/// The JSON type a required request field must have.
+enum class FieldType { String, Array };
+
+/// Check a required field BEFORE a handler reads it.
+///
+/// `request["x"]` on a const json without the key is undefined behaviour, and on
+/// this build it segfaults: `POST {}` took the server down on /api/show,
+/// /api/generate and /v1/completions (#70). Returns an empty json when the field
+/// is present with the right type, otherwise the 400 body to send.
+inline json require_field(const json& request, const char* field, FieldType type) {
+    const char* want = type == FieldType::String ? "a string" : "an array";
+    if (!request.is_object())
+        return json{{"error", {
+            {"message", "the request body must be a JSON object."},
+            {"type", "invalid_request_error"}, {"param", ""}, {"code", "invalid_value"}}}};
+    if (!request.contains(field))
+        return json{{"error", {
+            {"message", std::string(field) + " is required and must be " + want + "."},
+            {"type", "invalid_request_error"}, {"param", field},
+            {"code", "missing_required_parameter"}}}};
+    const json& v = request[field];
+    const bool right = type == FieldType::String ? v.is_string() : v.is_array();
+    if (!right)
+        return json{{"error", {
+            {"message", std::string(field) + " must be " + want + "."},
+            {"type", "invalid_request_error"}, {"param", field}, {"code", "invalid_value"}}}};
+    return json();
 }
 
 }  // namespace openai_compat

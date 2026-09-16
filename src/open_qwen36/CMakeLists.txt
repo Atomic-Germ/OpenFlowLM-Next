@@ -34,7 +34,7 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
@@ -50,7 +50,11 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-foreach(t open_qwen36_cli manifest_test vit_test)
+# block_host_test (no XRT): the block prefill's host stages against replica_block.py's fixture
+add_executable(block_host_test block_host_test.cpp block_host.cpp)
+target_include_directories(block_host_test PRIVATE ${_inc})
+
+foreach(t open_qwen36_cli manifest_test vit_test block_host_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)

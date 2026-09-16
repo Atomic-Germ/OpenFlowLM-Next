@@ -156,10 +156,15 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // that gets diagnosed as a different bug entirely (review on #39).
             // getenv_oflm, not getenv, so a pre-rename FLM_* export still works (#41).
             const std::string gemm_block_env = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK");
+            // A block costs its full-width GEMMs however few real tokens it holds, so a
+            // short prompt is cheaper one token at a time; the crossover is measured, not
+            // derived (Qwen3.6-35B: ~64 tokens), OFLM_OPEN_GEMM_BLOCK_MIN overrides it.
+            size_t min_prompt = 64;
+            if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
-            if (gemm_block_env == "1" && !core_->mrope_active()) {
+            if (gemm_block_env == "1" && ids.size() >= min_prompt && !core_->mrope_active()) {
                 const size_t GT = core_->gemm_block_t();
                 if (GT > 0) {
                     size_t i = 0;
@@ -172,6 +177,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                     }
                     return logits_view();
                 }
+                return logits_view();
             }
             for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
             return logits_view();

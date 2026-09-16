@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oflm-test"
-version = "0.6.2"
+version = "0.7.0"
 description = "A comprehensive testing framework for OpenFlowLM that validates the functionality of various AI model categories including Language, Embedding, Audio, and Vision models."
 readme = "README.md"
 requires-python = ">=3.12"
