@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
-LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL)      # dense_local: a dense layer with sliding-window attention
+SHORT_CONV = "short_conv"                             # LFM2: a short depthwise causal conv INSTEAD of attention
+LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a dense layer with sliding-window attention
+# Adding a member here is free: `layer_types` is one field and no shipped spec uses the new
+# value, so no hash moves. Adding a dataclass FIELD is not - spec_hash() covers every field.
 
 # ---- the per-role weight format (OPEN-QUANT-Q8). A container stores each tensor at
 # q4_1 (5120-byte chunks) or q8 (8704), and which of the two a projection is decides
@@ -28,9 +31,14 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL)      # dense_local: a dense lay
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q8")
+QUANT_FORMATS = ("q4_1", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
+# 2560 is deliberately NOT in that table: GPT-OSS ships both its q4_1 projections and its
+# MXFP4 experts at that size, so the byte count alone does not name the format and only the
+# dtype separates them. A caller that has the dtypes gets the right answer; one that does
+# not gets a refusal rather than a guess.
+AMBIGUOUS_CHUNK = {2560: {"I8": "q4_1", "U8": "mxfp4"}}
 
 
 class SpecError(ValueError):
@@ -39,7 +47,7 @@ class SpecError(ValueError):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    family: str                       # the recipe: "qwen36moe" | "qwen35" | "qwen3" | "llama3" | "gemma3" | "hunyuan" | "granite" | "phi3"
+    family: str                       # the recipe: "qwen36moe" | "qwen35" | "qwen3" | "llama3" | "gemma3" | "hunyuan" | "granite" | "phi3" | "qwen2" | "gptoss" (no recipe yet)
     hidden: int
     num_layers: int
     layer_types: tuple[str, ...]      # per layer: LINEAR | FULL | DENSE
@@ -112,6 +120,10 @@ class ModelSpec:
     def has_local(self) -> bool:
         return DENSE_LOCAL in self.layer_types
 
+    @property
+    def has_short_conv(self) -> bool:
+        return SHORT_CONV in self.layer_types
+
     # ---- the weight format, per role
     @property
     def quant_map(self) -> dict[str, str]:
@@ -169,6 +181,8 @@ class ModelSpec:
             long = ctx is not None and ctx > float(sc["original_max_position_embeddings"])
             fac = sc["long_factor"] if long else sc["short_factor"]
             return [f / float(x) for f, x in zip(inv, fac)]
+        if sc and sc.get("rope_type") == "yarn":
+            return _yarn_inv_freq(inv, self.rotary_dim, self.rope_theta, sc)
         if sc:
             factor = float(sc["factor"])
             lo, hi = float(sc["low_freq_factor"]), float(sc["high_freq_factor"])
@@ -189,11 +203,17 @@ class ModelSpec:
 
     def rope_scale(self) -> float:
         """What cos and sin are multiplied by: longrope's attention factor
-        sqrt(1 + ln(factor) / ln(original_max_position_embeddings)), 1.0 for everyone else."""
+        sqrt(1 + ln(factor) / ln(original_max_position_embeddings)), yarn's
+        0.1 * ln(factor) + 1, 1.0 for everyone else."""
         import math
         sc = self.rope_scaling
         if sc and sc.get("rope_type") == "longrope":
             return math.sqrt(1.0 + math.log(float(sc["factor"])) / math.log(float(sc["original_max_position_embeddings"])))
+        if sc and sc.get("rope_type") == "yarn":
+            if sc.get("attention_factor") is not None:
+                return float(sc["attention_factor"])
+            factor = float(sc["factor"])
+            return 1.0 if factor <= 1.0 else 0.1 * math.log(factor) + 1.0
         return 1.0
 
     # ---- serialisation
@@ -265,6 +285,39 @@ def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
     if key not in d:
         raise SpecError(f"{what} lacks {key!r}")
     return d[key]
+
+
+def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, Any]) -> list[float]:
+    """YaRN's inverse frequencies (HF's _compute_yarn_parameters). Each rotary pair is either
+    left alone -- it completes few enough turns inside the original context that the model has
+    seen its whole range -- or divided by `factor`, which is plain position interpolation. The
+    pairs in between take a linear blend of the two, over the dim range where beta_fast and
+    beta_slow rotations fit in `original_max_position_embeddings`.
+
+    HF's `linear_ramp_factor` indexes its rot/2 pairs against bounds computed on the rot
+    scale; that asymmetry is reproduced here rather than corrected, because the position
+    table has to be the one the weights were trained against."""
+    import math
+    factor = float(sc["factor"])
+    orig = float(sc["original_max_position_embeddings"])
+    beta_fast = float(sc.get("beta_fast") or 32)
+    beta_slow = float(sc.get("beta_slow") or 1)
+
+    def corr(rotations: float) -> float:
+        return rot * math.log(orig / (rotations * 2 * math.pi)) / (2 * math.log(theta))
+
+    low, high = corr(beta_fast), corr(beta_slow)
+    if sc.get("truncate", True):
+        low, high = math.floor(low), math.ceil(high)
+    low, high = max(low, 0.0), min(high, rot - 1.0)
+    if low == high:
+        high += 0.001                      # HF prevents the singularity the same way
+    out = []
+    for i, f in enumerate(inv):
+        ramp = min(max((i - low) / (high - low), 0.0), 1.0)
+        extrap = 1.0 - ramp
+        out.append(f / factor * (1.0 - extrap) + f * extrap)
+    return out
 
 
 def _layer_types_hf(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
@@ -440,6 +493,251 @@ def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         attn_gate=False,
         intermediate=_need(cfg, "intermediate_size"),
         norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+def _qwen3vl_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen3-VL: the decoder is Qwen3 dense, so it derives as one and links to a Qwen3
+    bundle of the same geometry. M-RoPE only changes the position table the engine hands
+    the kernels, so it does not reach the spec, and neither does the tower -- the vision
+    side is VitConfig's, read from `vision_config`.
+
+    Raw HF nests the decoder under `text_config`; the container OFLM ships flattens it."""
+    inner = cfg.get("text_config")
+    text = {**inner, "model_type": cfg["model_type"]} if isinstance(inner, Mapping) else cfg
+    return _qwen3_hf(text, real_vocab)
+
+
+def _qwen25vl_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen2.5-VL: the decoder is Qwen2.5 dense, so it derives as one and links to a Qwen2
+    bundle of the same geometry -- the 3B's text half hashes to exactly what the shipped
+    Qwen2.5-3B-Instruct container does. M-RoPE only changes the position records the engine
+    builds, never the kernels, so it does not reach the spec; the tower is VitConfig's, read
+    from `vision_config`, which this family's container carries in the plain transformers
+    keys.
+
+    OFLM's container flattens the decoder to the top level; raw HF nests it under
+    `text_config`."""
+    inner = cfg.get("text_config")
+    text = {**inner, "model_type": cfg["model_type"]} if isinstance(inner, Mapping) else cfg
+    return _qwen2_hf(text, real_vocab)
+
+
+def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """Qwen2.5 dense: GQA without q/k norms, full RoPE, silu-gated FFN. The one thing that
+    sets it apart -- a per-channel bias on q/k/v -- is a family property the dense recipe
+    carries (`dense.QKV_BIAS_FAMILIES`, attn.h's ATTN_QKV_BIAS), not a field here."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hidden = _need(cfg, "hidden_size")
+    # Qwen2.5's configs predate the key; Qwen3's always carry it.
+    if "head_dim" in cfg:
+        hd = cfg["head_dim"]
+    elif hidden % heads:
+        raise SpecError(f"qwen2: no head_dim in config.json and hidden_size {hidden} is not "
+                        f"a multiple of num_attention_heads {heads}")
+    else:
+        hd = hidden // heads
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="qwen2",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(cfg, "rope_theta")),
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+_LFM2_LAYER_NAMES = {"conv": SHORT_CONV, SHORT_CONV: SHORT_CONV, FULL: FULL}
+
+
+def _lfm2_layer_types(cfg: Mapping[str, Any], n: int) -> tuple[str, ...]:
+    """LFM2 says which layers keep attention one of two ways: `layer_types`, the list
+    `Lfm2Config` builds ("conv" / "full_attention"), or `full_attn_idxs`, the index list the
+    container ships. Either way the rest are short-conv layers."""
+    if "layer_types" in cfg:
+        lt = list(cfg["layer_types"])
+        if len(lt) != n:
+            raise SpecError(f"layer_types has {len(lt)} entries, num_hidden_layers is {n}")
+        bad = sorted({t for t in lt if t not in _LFM2_LAYER_NAMES})
+        if bad:
+            raise SpecError(f"lfm2: layer_types: {bad} is not a layer type this family has "
+                            f"(have {sorted(_LFM2_LAYER_NAMES)})")
+        return tuple(_LFM2_LAYER_NAMES[t] for t in lt)
+    idxs = set(_need(cfg, "full_attn_idxs"))
+    return tuple(FULL if l in idxs else SHORT_CONV for l in range(n))
+
+
+def _lfm2_ff_dim(cfg: Mapping[str, Any]) -> int:
+    """The FFN width, by transformers' own rule: `block_ff_dim` overrides `intermediate_size`
+    (`Lfm2Config.__post_init__`), then `Lfm2MLP` takes two thirds of it, applies the
+    multiplier and rounds up to `block_multiple_of`. The 1.2B's 12288 lands on 8192, which is
+    what its gate / up projections hold -- reading `intermediate_size` raw would have worked
+    here by luck and given 5632 on a container that ships only the unadjusted width."""
+    ff = int(cfg["block_ff_dim"] if "block_ff_dim" in cfg else _need(cfg, "intermediate_size"))
+    if not cfg.get("block_auto_adjust_ff_dim", True):
+        return ff
+    ff = int(2 * ff / 3)
+    mult = cfg.get("block_ffn_dim_multiplier")
+    if mult is not None:
+        ff = int(mult * ff)
+    m = int(cfg.get("block_multiple_of", 256))
+    return m * ((ff + m - 1) // m)
+
+
+def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """LFM2: a hybrid where the layers that are not attention run a short depthwise causal
+    convolution instead. Attention is GQA with q/k RMSNorm over the head, full RoPE and no
+    gate -- the dense recipe's shape -- and every layer carries the same silu-gated FFN.
+
+    The conv is `conv_L_cache` taps wide over `conv_dim` channels, and `conv_dim` is the
+    hidden size on every LFM2 that ships, so it rides on `hidden` and `conv_kernel` (the
+    field DeltaNet already has) rather than on a new field that would move every shipped
+    model's hash. A config where that stops being true is refused by name."""
+    n = _need(cfg, "num_hidden_layers")
+    hidden = _need(cfg, "hidden_size")
+    heads = _need(cfg, "num_attention_heads")
+    hd = cfg.get("head_dim") or (hidden // heads if hidden % heads == 0 else None)
+    if hd is None:
+        raise SpecError(f"lfm2: no head_dim in config.json and hidden_size {hidden} is not a "
+                        f"multiple of num_attention_heads {heads}")
+    for key in ("conv_dim", "conv_dim_out"):
+        w = cfg.get(key, hidden)
+        if w != hidden:
+            raise SpecError(f"lfm2: {key} {w} is not hidden_size {hidden}; the short conv is "
+                            f"hidden-wide on every LFM2 that ships and ModelSpec has no "
+                            f"separate conv width")
+    if cfg.get("conv_bias"):
+        raise SpecError("lfm2: conv_bias is set; the short-conv block this recipe implements "
+                        "has no bias (no LFM2 container ships one)")
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="lfm2",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=_lfm2_layer_types(cfg, n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(_need(cfg, "rope_theta")),
+        qk_norm=True,
+        attn_gate=False,
+        conv_kernel=int(cfg.get("conv_L_cache", 3)),
+        intermediate=_lfm2_ff_dim(cfg),
+        norm_eps=float(cfg.get("norm_eps", cfg.get("rms_norm_eps", 1e-5))),
+        quant="q4_1",
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
+
+# GPT-OSS's own layer-type names. `full_attention` here means a plain dense layer, NOT the
+# spec's FULL -- that one is the full-attention half of Qwen3.6's linear/full alternation.
+_GPTOSS_LAYER_TYPES = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
+
+
+def _gptoss_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """GPT-OSS: GQA attention over an MoE FFN, a 128-row sliding window on every other layer,
+    YaRN RoPE, and a learned per-head attention sink (`self_attn.sinks`, one scalar per head
+    per layer) that joins the softmax denominator with no value vector behind it.
+
+    Two config keys mean something other than what they say. `intermediate_size` is the
+    EXPERT width -- there is no dense FFN, so `intermediate` stays 0 and `moe_intermediate`
+    takes it. And `hidden_act` says silu while the experts compute a clamped SwiGLU:
+    `(up + 1) * gate * sigmoid(1.702 * gate)` with gate clipped above at 7 and up clipped
+    both ways, gate and up interleaved down the expert's rows rather than split in half. The
+    activation records what they do; alpha and the limit are family constants, not fields.
+
+    The sink and the biases are family properties for the same reason the Qwen2 bias is:
+    every GPT-OSS has them and `spec_hash()` covers every field. There is no recipe for this
+    family yet -- `families.family_module("gptoss")` says what is missing."""
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hidden = _need(cfg, "hidden_size")
+    rope = cfg.get("rope_parameters") or {}
+    theta = rope.get("rope_theta", cfg.get("rope_theta"))
+    if theta is None:
+        raise SpecError("gptoss: config.json lacks 'rope_theta' (top level or rope_parameters)")
+    sc = cfg.get("rope_scaling") or {k: v for k, v in rope.items() if k != "rope_theta"} or None
+    if sc:
+        kind = sc.get("rope_type", sc.get("type"))
+        if kind != "yarn":
+            raise SpecError(f"gptoss: rope_scaling type {kind!r} is not supported (yarn only)")
+        if sc.get("mscale") or sc.get("mscale_all_dim"):
+            raise SpecError("gptoss: yarn mscale / mscale_all_dim is not supported "
+                            "(the attention factor comes from 'factor' alone)")
+        for key in ("factor", "original_max_position_embeddings"):
+            if sc.get(key) is None:
+                raise SpecError(f"gptoss: yarn rope_scaling lacks {key!r}")
+        canon = {"rope_type": "yarn", "factor": float(sc["factor"]),
+                 "beta_fast": float(sc.get("beta_fast") or 32), "beta_slow": float(sc.get("beta_slow") or 1),
+                 "truncate": bool(sc.get("truncate", True)),
+                 "original_max_position_embeddings": int(sc["original_max_position_embeddings"])}
+        if sc.get("attention_factor") is not None:
+            canon["attention_factor"] = float(sc["attention_factor"])
+        sc = canon
+    if "head_dim" in cfg and cfg["head_dim"]:
+        hd = cfg["head_dim"]
+    elif hidden % heads:
+        raise SpecError(f"gptoss: no head_dim in config.json and hidden_size {hidden} is not "
+                        f"a multiple of num_attention_heads {heads}")
+    else:
+        hd = hidden // heads
+    if "layer_types" in cfg:
+        raw = tuple(cfg["layer_types"])
+        if len(raw) != n:
+            raise SpecError(f"gptoss: layer_types has {len(raw)} entries, num_hidden_layers is {n}")
+        bad = sorted({t for t in raw if t not in _GPTOSS_LAYER_TYPES})
+        if bad:
+            raise SpecError(f"gptoss: layer_types: unknown layer type(s) {bad} "
+                            f"(have {sorted(_GPTOSS_LAYER_TYPES)})")
+        layers = tuple(_GPTOSS_LAYER_TYPES[t] for t in raw)
+    else:
+        # HF's own default: the sliding layer comes first (configuration_gpt_oss.py)
+        layers = tuple(DENSE_LOCAL if l % 2 == 0 else DENSE for l in range(n))
+    window = int(cfg.get("sliding_window") or 0)
+    if DENSE_LOCAL in layers and window <= 0:
+        raise SpecError("gptoss: the sliding_attention layers need a positive 'sliding_window'")
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="gptoss",
+        hidden=hidden,
+        num_layers=n,
+        layer_types=layers,
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(theta),
+        rope_scaling=sc,
+        sliding_window=window,
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=0,
+        activation="clamped_swiglu",
+        num_experts=_need(cfg, "num_local_experts"),
+        experts_per_tok=_need(cfg, "num_experts_per_tok"),
+        moe_intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-5)),
         quant="q4_1",
         extra={"model_type": cfg["model_type"], "source": "hf_config"},
     )
@@ -1083,17 +1381,22 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 # exactly as `gemma3_text` and `qwen3_5_text` do for their towers.
 HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_next": _qwen36moe_hf, "qwen3_5": _qwen35_hf,
-               "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "llama": _llama3_hf,
+               "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
+               "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
+               "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
-               "granite": _granite_hf, "phi3": _phi3_hf}
+               "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
+               "gpt_oss": _gptoss_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
               _qwen35_gguf: "qwen35",
-              _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3",
+              _qwen3_hf: "qwen3", _qwen3_gguf: "qwen3", _qwen3vl_hf: "qwen3", _qwen2_hf: "qwen2",
+              _qwen25vl_hf: "qwen2",
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
-              _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3"}
+              _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
+              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1124,8 +1427,21 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
     "qwen36moe": {**_ATTN_HF, **_LIN_HF, **_MOE_HF},
     "qwen35": {**_ATTN_HF, **_LIN_HF, **_FFN_HF},
 }
-for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3"):
+# LFM2's short-conv block has the same two roles a DeltaNet layer does -- a fused input
+# projection and an output projection -- so it reuses them rather than adding roles that
+# would appear in every family's quant map.
+ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
+                        "shortconv.in_proj.weight": "linear",
+                        "shortconv.out_proj.weight": "linear_out"}
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
+# GPT-OSS's routed experts, under the names q4nx-build writes them
+# (utilities/q4nx-build/configs/gpt-oss.json). No shared expert and no dense FFN.
+# The split names are what a GGUF source carries; q4nx-build's post_gpt_oss_process deletes
+# all three and writes the fused tensor, so a real container only ever shows the last one.
+ROLE_TENSORS["gptoss"] = {**_ATTN_HF, "ffn_up_exps.weight": "experts",
+                          "ffn_gate_exps.weight": "experts", "ffn_down_exps.weight": "experts",
+                          "ffn_gate_up_down_exps.weight": "experts"}
 
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
 _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",
@@ -1144,21 +1460,45 @@ def _collapse(found: dict[str, tuple[str, str]]) -> dict[str, str]:
     return {r: f for r, (f, _) in sorted(found.items()) if f != DEFAULT_QUANT}
 
 
-def quant_map_from_chunk_sizes(family: str, chunk_bytes: Mapping[str, int]) -> dict[str, str]:
-    """tensor name -> quantized chunk size (5120 = q4_1, 8704 = q8) -> the role map.
+def quant_map_from_chunk_sizes(family: str, chunk_bytes: Mapping[str, int],
+                               dtypes: Mapping[str, str] | None = None) -> dict[str, str]:
+    """tensor name -> quantized chunk size -> the role map.
 
     Only the roles that are NOT q4_1 come back, so a stock container derives `{}` and the
     spec keeps hashing as the bare string. A role whose tensors disagree is refused naming
-    the tensor that broke it -- half a projection at q8 is not something to guess about."""
+    the tensor that broke it -- half a projection at q8 is not something to guess about.
+
+    `dtypes` separates the two formats that share the 2560-byte chunk: GPT-OSS stores its
+    attention projections and its head as q4_1 and its fused expert tensor as MXFP4, both at
+    2560, and only the dtype tells them apart. Without it a 2560 chunk reads as q4_1, which
+    is right for every caller that only has integer tensors.
+
+    A tensor whose role the packer PLACES, at a chunk size this reader does not know, is
+    refused by name. It used to be skipped, which left the role sitting at the q4_1 default
+    and handed back a map describing a container that does not exist."""
     table = ROLE_TENSORS.get(family)
     if table is None:
         raise SpecError(f"no tensor-role table for family {family!r} (have {sorted(ROLE_TENSORS)})")
     found: dict[str, tuple[str, str]] = {}
     for name, ch in chunk_bytes.items():
         role = table.get(_LAYER_PREFIX.sub("", name))
-        fmt = CHUNK_FORMAT.get(int(ch))
-        if role is None or fmt is None:
-            continue                      # not a projection we place, or a size the packer will refuse
+        if role is None:
+            continue                      # not a projection we place
+        ch = int(ch)
+        fmt = CHUNK_FORMAT.get(ch)
+        if fmt is None and ch in AMBIGUOUS_CHUNK:
+            by_dtype = AMBIGUOUS_CHUNK[ch]
+            dt = dtypes.get(name) if dtypes is not None else None
+            fmt = by_dtype.get(dt)
+            if fmt is None:
+                raise SpecError(
+                    f"{name} fills the {role!r} role at {ch}-byte quant chunks, where the byte "
+                    f"count does not name the format: {', '.join(f'{k} is {v}' for k, v in by_dtype.items())}. "
+                    f"Got dtype {dt!r}; pass the container's dtypes to tell them apart")
+        if fmt is None:
+            raise SpecError(f"{name} fills the {role!r} role at {ch}-byte quant chunks, which "
+                            f"this reader does not know (it reads {sorted(CHUNK_FORMAT)} and "
+                            f"{sorted(AMBIGUOUS_CHUNK)}); refusing rather than assuming {DEFAULT_QUANT}")
         prev = found.get(role)
         if prev is None:
             found[role] = (fmt, name)

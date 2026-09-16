@@ -30,7 +30,15 @@
 /// halves). A container whose tensor is not q8 where the manifest says q8 is refused by
 /// name: that is the check that the container agrees with the kernel set (OPEN-QUANT-Q8).
 ///
+/// A GPT-OSS source (2560-byte chunks, 32 rows x 128 columns) is not accepted by the q4 ops
+/// at all -- its file raster is a supertile rather than the plain one, so the chunk index law
+/// differs as well as the geometry. It has its own op, `std_fuse`, which locates the k-tile's
+/// two 128-column halves in that raster and fuses them into one pool chunk by eight byte-slice
+/// copies, synthesising an all-zero chunk for a column block past the container's own width --
+/// so the fuse and the pad from the container's K to the pool's are one pass (OPEN-PACK-CHUNK-FUSE).
+///
 /// Ops: std_perm (a standard [out, in] matmul tensor into 64-row band order),
+/// std_fuse (the same band order out of half-width chunks in the supertile raster),
 /// expert_stripes (routed up/gate as interleaved transposed stripes),
 /// expert_down (the routed down slices), put (small weights verbatim),
 /// q8_perm (the same tensor kept at q8: 16-row half-tiles in the q8 band order),
@@ -74,6 +82,11 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 /// q4k_to_q4_1` is the same in NumPy; pools_test and tests/test_quant_q4k.py hash the
 /// same vectors (OPEN-QUANT-Q4K).
 void q4k_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
+
+/// Signed-nibble chunks -> q4_1, in place of the same 5120 bytes: flip bit 3 of every
+/// nibble (two's complement becomes offset binary) and write min = -8 * d. Exact both
+/// ways. recipes/pack.py q4_0_to_q4_1 must agree byte for byte (OPEN-PACK-Q4-0).
+void q4_0_to_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 /// One container q8 chunk (8704 B: scales[256] bf16 then codes[8192] int8, 32 rows x 256 K)
 /// -> its 16-row half-tile `half` (5120 B: scales[128] bf16 at [0, 256), codes[4096] int8 at
 /// [256, 4352), zero pad). Rows 16*half .. 16*half+15. The container's row-block stride is

@@ -1002,6 +1002,13 @@ def inject_oflm_keys(config: dict, q4nx_config: dict, output_dir: Path, oflm_ver
             else:
                 vc = {k: v for k, v in vision_config.items()
                       if k not in ("vision_file", "vision_MM_K", "vision_MM_N")}
+                # An arch config that declares no tower keys at all (qwen3vl.json has only
+                # the vision_mm tile sizes) would otherwise replace the source's own
+                # vision_config with nothing, shipping the weights with no shape to read
+                # them by. Keep the source block and let the arch keys win over it.
+                src_vc = config.get("vision_config")
+                if isinstance(src_vc, dict) and src_vc and all(k.endswith("_xclbin_name") for k in vc):
+                    vc = {**src_vc, **vc}
             # The projector emits into the LM hidden size; size variants share
             # one arch config, so always take this from the assembled model.
             out_key = next((k for k in vc if k.endswith("_VISION_OUT_HIDDEN_SIZE")), None)

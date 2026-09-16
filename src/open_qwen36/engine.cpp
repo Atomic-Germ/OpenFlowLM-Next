@@ -7,11 +7,14 @@
 
 #include "models/qwen3_5vl/qwen3_5vl_npu.hpp"       // qwen3_5vl_image_payload_t
 #include "models/qwen3_6_moe/qwen3_6_moe_npu.hpp"   // qwen3_6_moe_image_payload_t
+#include "models/qwen3vl/qwen3vl_npu.hpp"           // qwen3vl_image_payload_t
+#include "models/qwen2vl/qwen2vl_npu.hpp"           // qwen2vl_image_payload_t
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
@@ -104,6 +107,11 @@ buffer<bf16> Engine::logits_view() {
     return buffer<bf16>(logits_.data(), logits_.size());
 }
 
+void Engine::note_failure(const char* what) {
+    std::fprintf(stderr, "open_qwen36: request failed: %s\n", what ? what : "(no message)");
+    std::fflush(stderr);
+}
+
 void Engine::ensure_alive() {
     if (!poisoned_) return;
     std::fprintf(stderr, "open_qwen36: a kernel failed on the last request; rebuilding the engine\n");
@@ -122,7 +130,7 @@ buffer<bf16> Engine::forward(int id) {
 void Engine::ensure_vit() {
     if (vit_) return;
     auto t0 = std::chrono::steady_clock::now();
-    vcfg_ = vision::VitConfig::from_model_dir(cfg_.model_dir);
+    vcfg_ = vision::VitConfig::for_model_dir(cfg_.model_dir);
     std::string file = "vision_weight.q4nx";
     {
         std::ifstream cf(cfg_.model_dir + "/config.json");
@@ -197,6 +205,13 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     const std::string& fam = core_->manifest().family;
     if (fam == "qwen36moe") return prefill_images(ids, *static_cast<const qwen3_6_moe_image_payload_t*>(payload));
     if (fam == "qwen35") return prefill_images(ids, *static_cast<const qwen3_5vl_image_payload_t*>(payload));
+    // Qwen3-VL's decoder derives as plain Qwen3, so its kernel set is a qwen3 one and the
+    // family string does not say "VL" - only the payload does.
+    if (fam == "qwen3") return prefill_images(ids, *static_cast<const qwen3vl_image_payload_t*>(payload));
+    // Qwen2.5-VL likewise: its decoder derives as plain qwen2 and shares a kernel set with
+    // Qwen2.5-3B-Instruct, so the family says qwen2 and the windowed tower comes from the
+    // container's own vision_config.
+    if (fam == "qwen2") return prefill_images(ids, *static_cast<const qwen2vl_image_payload_t*>(payload));
     throw std::runtime_error("open_qwen36: family " + fam + " has no vision path");
 }
 
@@ -206,6 +221,10 @@ buffer<bf16> Engine::prefill_images(std::vector<int>& ids, const Payload& p_) {
     ensure_vit();
     const size_t hidden = core_->manifest().hidden, pd = static_cast<size_t>(vcfg_.patch_dim());
     std::vector<std::vector<float>> embs;
+    // Qwen3-VL only: one [tokens, hidden] block per deepstack tap, per image. Empty for
+    // every other family, and vit_forward_deepstack is exactly vit_forward when the
+    // config lists no taps.
+    std::vector<std::vector<std::vector<float>>> deeps;
     size_t off = 0;
     for (const auto& im : p->images) {
         const size_t n = static_cast<size_t>(im.grid_h) * im.grid_w;
@@ -215,10 +234,16 @@ buffer<bf16> Engine::prefill_images(std::vector<int>& ids, const Payload& p_) {
         for (size_t k = 0; k < n * pd; ++k) px[k] = static_cast<float>(p->_data__processed[off + k]);
         off += n * pd;
         auto t0 = std::chrono::steady_clock::now();
-        embs.push_back(vision::vit_forward(vcfg_, *vit_, px.data(), im.grid_h, im.grid_w));
+        std::vector<std::vector<float>> deep;
+        embs.push_back(vision::vit_forward_deepstack(vcfg_, *vit_, px.data(), im.grid_h, im.grid_w, &deep));
+        for (const auto& f : deep)
+            if (f.size() != n / 4 * hidden)
+                throw std::runtime_error("open_qwen36: a deepstack feature is not [tokens, hidden]");
+        deeps.push_back(std::move(deep));
         if (embs.back().size() != n / 4 * hidden)
             throw std::runtime_error("open_qwen36: the vision tower's width does not match the model's hidden size");
-        std::fprintf(stderr, "open_qwen36: image %dx%d patches -> %zu tokens in %.2f s\n", im.grid_h, im.grid_w, n / 4,
+        std::fprintf(stderr, "open_qwen36: image %dx%d patches -> %zu tokens%s in %.2f s\n", im.grid_h, im.grid_w, n / 4,
+                     deeps.back().empty() ? "" : (" + " + std::to_string(deeps.back().size()) + " deepstack").c_str(),
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
     return guarded([&] {
@@ -239,7 +264,16 @@ buffer<bf16> Engine::prefill_images(std::vector<int>& ids, const Payload& p_) {
                 base = core_->mrope_pos();
             }
             const int64_t mpos[3] = {base, base + static_cast<int64_t>(j) / gw, base + static_cast<int64_t>(j) % gw};
-            core_->step_embed(embs[img].data() + j * hidden, last, mpos);
+            // Gather this row's deepstack features into one contiguous block, feature k at
+            // offset k * hidden, which is the order step_impl adds them in.
+            std::vector<float> ds;
+            if (!deeps[img].empty()) {
+                ds.resize(deeps[img].size() * hidden);
+                for (size_t k = 0; k < deeps[img].size(); ++k)
+                    std::memcpy(ds.data() + k * hidden, deeps[img][k].data() + j * hidden, hidden * sizeof(float));
+            }
+            core_->step_embed(embs[img].data() + j * hidden, last, mpos, ds.empty() ? nullptr : ds.data(),
+                              static_cast<int>(deeps[img].size()));
             if (++j == static_cast<size_t>(gh * gw)) {
                 core_->mrope_advance(std::max(gh, gw));
                 ++img;

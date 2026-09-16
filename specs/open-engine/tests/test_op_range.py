@@ -19,8 +19,8 @@ def test_the_27b_is_inside_every_validated_set():
 def test_an_unvalidated_attention_geometry_is_refused_as_a_whole_tuple():
     spec = dataclasses.replace(default_spec(), head_dim=64, rotary_dim=64)
     with pytest.raises(OpRangeError, match=r"attn: \('head_dim', 'num_heads', 'num_kv_heads', "
-                                          r"'rotary_dim', 'qk_norm', 'attn_gate', 'qk_norm_post_rope'\) = "
-                                          r"\(64, 16, 2, 64, True, True, False\) is outside the "
+                                          r"'rotary_dim', 'qk_norm', 'attn_gate', 'qk_norm_post_rope', 'qkv_bias'\) = "
+                                          r"\(64, 16, 2, 64, True, True, False, False\) is outside the "
                                           r"validated combinations"):
         Q.recipe(spec)
 
@@ -33,7 +33,7 @@ def test_a_never_run_combination_of_validated_values_is_refused():
     heads is the same kind of never-run combination and is still refused."""
     require("attn", head_dim=128, num_heads=16, num_kv_heads=8, rotary_dim=128,
             rope_theta=1e6, qk_norm=True, attn_gate=False, qk_norm_post_rope=False)
-    with pytest.raises(OpRangeError, match=r"\(128, 16, 4, 128, True, False, False\) is outside"):
+    with pytest.raises(OpRangeError, match=r"\(128, 16, 4, 128, True, False, False, False\) is outside"):
         require("attn", head_dim=128, num_heads=16, num_kv_heads=4, rotary_dim=128,
                 rope_theta=1e6, qk_norm=True, attn_gate=False, qk_norm_post_rope=False)
 
@@ -50,7 +50,7 @@ def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take
 def test_an_unvalidated_gemv_k_is_refused():
     with pytest.raises(OpRangeError, match=r"gemv_q4: K=5120 is outside the validated set "
                                           r"\{1024, 2048, 2560, 3072, 3584, 3840, 4096, 6144, 8192, 9216, 9728, 10240, 10752, "
-                                          r"12288, 14336, 15360\}"):
+                                          r"11264, 12288, 14336, 15360\}"):
         require("gemv_q4", K=5120)
 
 

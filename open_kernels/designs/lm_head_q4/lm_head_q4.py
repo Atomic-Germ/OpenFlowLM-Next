@@ -40,7 +40,12 @@ def _ensure_gy() -> Path:
     """The gemv_q4_gy band entry, generated here rather than borrowed from a
     sibling design's gen_kernels.py output. lm_head_q4 always streams PER_CALL
     chunks per weight element, so the wrapper is fixed and belongs to this
-    design; it is a generated TU (git-ignored), not source."""
+    design; it is a generated TU (git-ignored), not source.
+
+    Borrowing was tried and does not work: designs/dense and designs/layer_x write
+    theirs per spec and delete them again for a spec that does not need one, so the
+    file is simply absent half the time - on 2026-09-08 Gemma's lm_head failed to
+    build right after a Qwen3.5 export, for exactly that reason."""
     src = f'''#define GEMV_PER_CALL {PER_CALL}
 #include "gemv_q4.h"
 // A band into its y element: runtime band law (per_band chunks, row split rs).

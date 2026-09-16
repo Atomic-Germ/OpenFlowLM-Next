@@ -188,7 +188,8 @@ def main() -> int:
     # and disagrees with tokenizer_config.json's own bos (<|end_of_text|>).
     tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen35": 248045, "qwen3": 151644,
                                                 "llama3": 128000, "gemma3": 2, "hunyuan": 127958,
-                                                "granite": 100264, "phi3": 200021}[spec.family]
+                                                "granite": 100264, "phi3": 200021,
+                                                "qwen2": 151644}[spec.family]     # <|im_start|>, as Qwen3
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:

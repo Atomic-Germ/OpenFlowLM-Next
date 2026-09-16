@@ -7,6 +7,7 @@
 ///   open_qwen36_cli --model <dir> --kernels <dir (manifest.json + xclbins)> --ids 1,2,3 [--max-tokens N]
 ///       [--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice]
 ///       [--at-position P] [--ids-file <path>] [--gemm-block] [--prefill-logits]
+///       [--dump-act <layer>:<off>:<bytes>:<path>]   bring-up: a slice of a layer's act scratch
 ///
 /// The prompt ids are prefilled by sequential decode (logits skipped), then
 /// greedy decode runs for --max-tokens. Each produced id is printed on its
@@ -29,6 +30,7 @@
 /// pairs (correlation / argmax / top-5).
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,13 +88,33 @@ struct Args {
     std::string dump_prefix;
     bool twice = false;
     int repeat = 1;
+    int gap_ms = 0;
     int at_position = 0;
     bool gemm_block = false;        // 0167/#32: prefill via step_gemm_block()
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
+    std::string dump_act;           // bring-up: "<layer>:<off>:<bytes>:<path>"
     int bench = 0;                  // --bench N: time the route's dispatches instead of running a prompt
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
 };
+
+/// Write a slice of a layer's act scratch to a file, so a bring-up run can compare one
+/// stage's output against the reference instead of inferring it from the logits.
+void dump_act_slice(Core& core, const std::string& spec) {
+    int layer = 0; long long off = 0, n = 0;
+    char path[512] = {0};
+    if (std::sscanf(spec.c_str(), "%d:%lld:%lld:%511s", &layer, &off, &n, path) != 4 || n <= 0) {
+        std::fprintf(stderr, "--dump-act wants <layer>:<off>:<bytes>:<path>, got %s\n", spec.c_str());
+        return;
+    }
+    std::vector<uint8_t> buf(static_cast<size_t>(n));
+    core.read_act(layer, static_cast<size_t>(off), buf.size(), buf.data());
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", path); return; }
+    std::fwrite(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    std::fprintf(stderr, "wrote %lld B of layer %d act at %lld -> %s\n", n, layer, off, path);
+}
 
 Args parse(int argc, char** argv) {
     Args a;
@@ -118,12 +140,19 @@ Args parse(int argc, char** argv) {
         else if (k == "--twice") a.twice = true;
         else if (k == "--repeat") a.repeat = std::atoi(val().c_str());
         else if (k == "--at-position") a.at_position = std::atoi(val().c_str());
+        else if (k == "--dump-act") a.dump_act = val();            // "<layer>:<off>:<n>:<path>"
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--prefill-logits") a.prefill_logits = true;
         else if (k == "--bench") a.bench = std::atoi(val().c_str());
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else if (k == "--bench-kernel") a.bench_kernel = val();
+        // The server has a host gap right here that the CLI does not: between the last
+        // prefill dispatch and the first decode one it samples, detokenises and writes
+        // the first SSE chunk to a socket. Every dx timeout so far has landed on that
+        // dispatch, so this makes the gap reproducible without the server.
+        else if (k == "--gap-ms") a.gap_ms = std::atoi(val().c_str());
+        else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -198,6 +227,10 @@ std::vector<int> request(Core& core, const Args& a) {
         if (!a.dump_prefix.empty() && want) dump_pos(a.dump_prefix, static_cast<int>(i), core.logits());
         if (!a.dump_prefix.empty() && last) dump(a.dump_prefix, dumped++, core.logits());  // preserve the original _t<i> convention
     }
+    if (a.gap_ms > 0) {
+        std::fprintf(stderr, "idling %d ms before the first decode dispatch\n", a.gap_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(a.gap_ms));
+    }
     double prefill_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
     std::fprintf(stderr, "prefill %zu tokens: %.0f ms (%.0f ms/token)\n", a.ids.size(), prefill_ms, prefill_ms / a.ids.size());
 
@@ -231,6 +264,11 @@ std::vector<int> request(Core& core, const Args& a) {
 
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
+    // The server reads this (engine.cpp); the CLI is the tool you reach for when a
+    // dispatch times out, so it should honour the same knob - and a small value is how
+    // the timeout path itself gets exercised without waiting for a real one.
+    if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS"))
+        a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     try {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);
@@ -260,6 +298,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         std::vector<int> first = request(core, a);
+        if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;
         for (int r = 1; r < reps; ++r) {
             // The app checkpoints after the prompt and restores before the next

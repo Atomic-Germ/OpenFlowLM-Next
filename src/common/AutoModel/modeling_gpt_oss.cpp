@@ -15,10 +15,19 @@ GPT_OSS::GPT_OSS(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, 
 void GPT_OSS::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->model_path = model_path;
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    this->lm_engine = std::make_unique<gpt_oss_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-    this->lm_engine->load_weights(*this->q4nx);
-    this->q4nx.reset();
+
+    // The engine: the open kernels when a set is installed for this model, the closed
+    // DLL otherwise (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("OFLM_GPTOSS_ENGINE", "GPT-OSS");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<gpt_oss_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        this->q4nx.reset();
+    }
     this->tokenizer = std::make_unique<Tokenizer>(model_path);
 
     this->setup_tokenizer(model_path);
@@ -82,17 +91,18 @@ bool GPT_OSS::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
     this->profiler_list[TKOEN_ENCODE_TIME].stop(tokens.size());
     
     // hardware
+    // checkpoint/restore are pure virtuals on causal_lm, so go through the base pointer -
+    // a dynamic_cast to gpt_oss_npu is null on the open engine and nothing checked it.
     int restore_idx = -1;
-    gpt_oss_npu *gpt_oss_engine = dynamic_cast<gpt_oss_npu*>(this->lm_engine.get());
     if (meta_info.restore_allowed) {
-        restore_idx = gpt_oss_engine->restore();
+        restore_idx = this->lm_engine->restore();
         this->total_tokens = restore_idx;
         this->token_history = checkpoint_his; // restore the token history to be consistent with the restored KV cache, which is crucial for correct functioning of _shared_insert's prefix-matching logic
     }
     bool success = this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
 
     checkpoint_his = token_history;
-    int checkpoint_idx = gpt_oss_engine->checkpoint();
+    int checkpoint_idx = this->lm_engine->checkpoint();
 
     return success;
 }

@@ -8,6 +8,17 @@
 // HunYuan's order (query_layernorm AFTER apply_rotary_pos_emb). RoPE is orthogonal and the
 // rotary dim is the whole head there, so the RMS is the same either way; what moves is the
 // per-dim weight, which does not commute with the pair rotation.
+// ATTN_QKV_BIAS adds a per-channel bias to q, k and v first -- q = q + bq before the norm --
+// which is Qwen2's shape (its q/k/v projections carry one; o_proj and the FFN do not). The
+// bias arrives as its own fifo element beside the projection's, bf16 and already in the
+// same channel order, so the add is one vector pass and nothing downstream changes.
+// ATTN_SINK adds a learned per-head logit to the softmax denominator with no value vector
+// behind it, which is GPT-OSS's shape: the head can spend some of its weight on nothing, so
+// its output weights sum to less than one. That is one more row of the online softmax whose
+// score is the logit and whose V is zero, so the whole of it is the state attn_init starts
+// from -- m = sink, l = 1 -- and the row loop is untouched. The sinks are one bf16 per head
+// for the whole layer, so they ride in the meta element after qn | kn rather than on a fifo.
+// Reference: open_kernels/model/replica_dense.py sink_softmax.
 //   for head h (kv head h / (NH/KVH)): s_t = q'_h . K_t / sqrt(HD) over t in [0, pos] (cache rows + new)
 //   o_h = softmax(s) V  (online softmax, fp32 accumulators), og_h = o_h [* sigmoid(gate_h)]
 // RoPE over the first ROT dims of each head, half-split pairs (i, i + ROT/2); cos/sin for
@@ -22,7 +33,8 @@
 // Elements: the attention core's fifo element is ONE cache-row half, E_A = KVH * HD bf16
 // bytes (1 KB for the 27B, 2 KB for Qwen3-4B). So a q / k / v / gate element of fp32 heads
 // carries kHPE = KVH/2 heads, an og element kHPO = KVH heads, and a cache row is two elements
-// (K_t, V_t). meta = two elements: [qn bf16[HD] @0 | kn @HD*2] (per layer) and the position
+// (K_t, V_t). meta = two elements: [qn bf16[HD] @0 | kn @HD*2 | sinks bf16[NH] @4*HD, only
+// with ATTN_SINK] (per layer) and the position
 // record [int32 pos @0 | int32 nf @4 | cos f32[ROT/2] @512 | sin f32[ROT/2] @512 + 2*ROT]
 // (ptab row pos; nf = the number of cache rows streamed). pb (int32[4]) = [pos, nf, rows seen]:
 // attn_meta fills it, the core loops nf times, attn_step masks rows t >= pos (the whole-layer
@@ -57,6 +69,15 @@
 #if ATTN_QKNORM_POST && !ATTN_QKNORM
 #error "ATTN_QKNORM_POST needs ATTN_QKNORM"
 #endif
+#ifndef ATTN_QKV_BIAS
+#define ATTN_QKV_BIAS 0      // 1: q/k/v carry a per-channel bias, added before the norm (Qwen2)
+#endif
+#ifndef ATTN_SINK
+#define ATTN_SINK 0          // 1: a learned per-head logit joins the softmax denominator with no
+#endif                       // value vector behind it, so a head can attend to nothing (GPT-OSS)
+#ifndef ATTN_PTAB_SPLIT
+#define ATTN_PTAB_SPLIT 0    // 1: the position record is wider than a fifo element, so cos / sin
+#endif                       // arrive in a second one (Qwen2.5-3B: a 1024 B record, 512 B elements)
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
@@ -87,6 +108,7 @@ static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW
 #else
 #define ATTN_QT float
 #endif
+static constexpr unsigned kEA = kKVH * kHD * 2;   // one fifo element: half a KV cache row
 static constexpr unsigned kHPE = kKVH / 2;    // fp32 heads per element
 static constexpr unsigned kHPO = kKVH;        // bf16 og heads per element
 static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kKVH % 2 == 0 && kNH % kKVH == 0 &&
@@ -154,20 +176,80 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #define ATTN_H0_DECL
 #define ATTN_H0_ARG , h0
 #endif
+// The second half of the position record is an argument only where the record needs one.
+#if ATTN_PTAB_SPLIT
+#define ATTN_PTAB2_PARM , const uint8_t *__restrict m2
+#define ATTN_PTAB2_ARG , m2
+#else
+#define ATTN_PTAB2_PARM
+#define ATTN_PTAB2_ARG
+#endif
+
+// The bias element is a kernel ARGUMENT only for a family that has one, for the same
+// reason h0 is: an unused parameter changes the generated code.
+#if ATTN_QKV_BIAS
+#define ATTN_BIAS_PARM , const bfloat16 *__restrict be
+#define ATTN_BIAS_ARG , be
+#else
+#define ATTN_BIAS_PARM
+#define ATTN_BIAS_ARG
+#endif
+
+// The sinks are one bf16 per head for the WHOLE layer -- 128 bytes at 64 heads -- where the
+// q/k/v bias is one per channel. So they ride in the meta element's spare room after qn | kn
+// rather than on a fifo of their own; attn_meta widens its own f32 copy into `sk` and
+// attn_init seeds the running max from it. Only meta needs the head offset, and only when a
+// family has sinks AND splits attention, so h0 arrives under this guard rather than the
+// general one -- an unused parameter changes the generated code (ATTN_H0_PARM).
+#if ATTN_SINK
+static_assert(4 * kHD + 2 * kNH <= kEA,
+              "attn.h: qn | kn | sinks must fit one meta element (NH <= HD * (KVH - 2))");
+#define ATTN_SINK_OUT_PARM , float *__restrict sk
+#define ATTN_SINK_IN_PARM , const float *__restrict sk
+#define ATTN_SINK_ARG , sk
+#define ATTN_SINK_H0_PARM ATTN_H0_PARM
+#define ATTN_SINK_H0_ARG ATTN_H0_ARG
+#define ATTN_SINK_H0_DECL ATTN_H0_DECL
+#else
+#define ATTN_SINK_OUT_PARM
+#define ATTN_SINK_IN_PARM
+#define ATTN_SINK_ARG
+#define ATTN_SINK_H0_PARM
+#define ATTN_SINK_H0_ARG
+#define ATTN_SINK_H0_DECL
+#endif
+
 // kNHL % kHPO was required while a core had to own WHOLE og elements. It now owns
 // kOGH = min(kNHL, kHPO) heads per element, so the requirement is the weaker one that
 // its heads tile the element evenly -- which holds trivially when kOGH == kNHL.
 static_assert(kNH % kNHL == 0 && kNHL % kOGH == 0,
               "attn.h: the local head count must divide NH and be a whole number of og elements");
 
-static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1,
+static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *__restrict m1 ATTN_PTAB2_PARM,
                                   bfloat16 *__restrict qn, bfloat16 *__restrict kn,
-                                  float *__restrict cs, int32_t *__restrict pb) {
+                                  float *__restrict cs, int32_t *__restrict pb
+                                  ATTN_SINK_OUT_PARM ATTN_SINK_H0_PARM) {
   const bfloat16 *q = (const bfloat16 *)m0;
   for (unsigned j = 0; j < kHD; j += kV) aie::store_v(qn + j, aie::load_v<kV>(q + j));
   const bfloat16 *k = (const bfloat16 *)(m0 + kHD * 2);
   for (unsigned j = 0; j < kHD; j += kV) aie::store_v(kn + j, aie::load_v<kV>(k + j));
+#if ATTN_SINK
+  ATTN_SINK_H0_DECL
+  // NH bf16 sinks follow kn in the same element; this core keeps only its own heads, so
+  // attn_init indexes sk locally and needs no head offset of its own. Widened to f32
+  // because it seeds the running max, which is f32. One scalar per head: a loop, not a
+  // vector pass, and it runs once per layer per token.
+  const bfloat16 *sn = (const bfloat16 *)(m0 + 4 * kHD);
+  for (unsigned hl = 0; hl < kNHL; ++hl) sk[hl] = (float)sn[kSplit ? ((unsigned)h0 + hl) : hl];
+#endif
+  // cos[ROT/2] then sin[ROT/2], one contiguous 4 * ROT block at record offset 512. On a
+  // family whose element is narrower than the record that block sits in a later element,
+  // which the design hands over as m2 (the recipe checks it does not straddle two).
+#if ATTN_PTAB_SPLIT
+  const float *c = (const float *)(m2 + 512 % kEA);
+#else
   const float *c = (const float *)(m1 + 512);
+#endif
   for (unsigned j = 0; j < kRot; j += kV) aie::store_v(cs + j, aie::load_v<kV>(c + j));
   const int32_t *p = (const int32_t *)m1;
   pb[0] = p[0];
@@ -246,6 +328,22 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
 #endif
 }
 
+#if ATTN_QKV_BIAS
+// One element's worth of channels: d = x + b. The projection's bias is per-channel and
+// sits in the same order the GEMV wrote its rows, so the element boundary is the same on
+// both sides and there is no head arithmetic here. b is bf16 -- the container's own dtype
+// for it, as for the q/k norms -- widened into the fp32 accumulator, so the add is exact.
+static constexpr unsigned kEL = kHPE * kHD;
+static inline void add_bias_e(const float *__restrict x, const bfloat16 *__restrict b,
+                              float *__restrict d) {
+  for (unsigned j = 0; j < kEL; j += kV) {
+    accN<kV> a;
+    a.from_vector(aie::load_v<kV>(x + j));
+    aie::store_v(d + j, aie::add(a, aie::load_v<kV>(b + j)).template to_vector<float>());
+  }
+}
+#endif
+
 static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict dst) {
   for (unsigned j = 0; j < kHD; j += kV) {
     accf32 a;
@@ -260,15 +358,22 @@ static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict 
 // bf16 halves and mac twice. q does not change over the context, so that split was being
 // recomputed for every cached row: NH * P times per token instead of NH. Hoisting it here
 // leaves the inner loop two macs and no split, and the arithmetic is bit-identical.
-static inline void attn_q_impl(const float *__restrict qe, const bfloat16 *__restrict qn,
+static inline void attn_q_impl(const float *__restrict qe ATTN_BIAS_PARM, const bfloat16 *__restrict qn,
                                const float *__restrict cs, ATTN_QT *__restrict qs, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
+#if ATTN_QKV_BIAS
+  alignas(128) float qb[kEL];
+  add_bias_e(qe, be, qb);
+  const float *__restrict qsrc = qb;
+#else
+  const float *__restrict qsrc = qe;
+#endif
 #if !ATTN_VEXP
-  for (unsigned i = 0; i < kHPE; ++i) norm_rope(qe + i * kHD, qn, cs, qs + ((unsigned)e * kHPE + i) * kHD);
+  for (unsigned i = 0; i < kHPE; ++i) norm_rope(qsrc + i * kHD, qn, cs, qs + ((unsigned)e * kHPE + i) * kHD);
 #else
   alignas(128) float t[kHD];
   for (unsigned i = 0; i < kHPE; ++i) {
-    norm_rope(qe + i * kHD, qn, cs, t);
+    norm_rope(qsrc + i * kHD, qn, cs, t);
     bfloat16 *qh = qs + ((unsigned)e * kHPE + i) * kHD;
     for (unsigned j = 0; j < kHD; j += kV) {
       vbN<kV> h, l;
@@ -290,26 +395,48 @@ static inline void attn_q_impl(const float *__restrict qe, const bfloat16 *__res
 #endif
 }
 // k element e -> bf16 kout (the cache row half); v element e -> bf16 vout
-static inline void attn_k_impl(const float *__restrict ke, const bfloat16 *__restrict kn,
+static inline void attn_k_impl(const float *__restrict ke ATTN_BIAS_PARM, const bfloat16 *__restrict kn,
                                const float *__restrict cs, float *__restrict tmp,
                                bfloat16 *__restrict kout, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
+#if ATTN_QKV_BIAS
+  alignas(128) float kb[kEL];
+  add_bias_e(ke, be, kb);
+  const float *__restrict ksrc = kb;
+#else
+  const float *__restrict ksrc = ke;
+#endif
   for (unsigned i = 0; i < kHPE; ++i) {
-    norm_rope(ke + i * kHD, kn, cs, tmp);
+    norm_rope(ksrc + i * kHD, kn, cs, tmp);
     to_bf16_hd(tmp, kout + (e * kHPE + i) * kHD);
   }
 }
-static inline void attn_v_impl(const float *__restrict ve, bfloat16 *__restrict vout, int e) {
+static inline void attn_v_impl(const float *__restrict ve ATTN_BIAS_PARM, bfloat16 *__restrict vout, int e) {
   aie::set_rounding(aie::rounding_mode::conv_even);
-  for (unsigned i = 0; i < kHPE; ++i) to_bf16_hd(ve + i * kHD, vout + (e * kHPE + i) * kHD);
+#if ATTN_QKV_BIAS
+  alignas(128) float vb[kEL];
+  add_bias_e(ve, be, vb);
+  const float *__restrict vsrc = vb;
+#else
+  const float *__restrict vsrc = ve;
+#endif
+  for (unsigned i = 0; i < kHPE; ++i) to_bf16_hd(vsrc + i * kHD, vout + (e * kHPE + i) * kHD);
 }
 
-static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml) {
+static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml ATTN_SINK_IN_PARM) {
 #if ATTN_VEXP
   aie::set_rounding(aie::rounding_mode::conv_even);   // for every row of this token; the
 #endif                                                // non-VEXP row kernel still sets its own
   for (unsigned j = 0; j < kNHL * kHD; j += kV) aie::store_v(oacc + j, aie::zeros<float, kV>());
+#if ATTN_SINK
+  // A sink is one more row of the softmax whose value vector is zero, so it is entirely a
+  // starting state: m = the learned logit, l = exp(sink - sink) = 1, o still zero. Nothing
+  // in the row loop or the finish moves - attn_fin_impl already divides by ml[kMLS + h],
+  // which now carries the sink's 1.
+  for (unsigned h = 0; h < kNHL; ++h) { ml[h] = sk[h]; ml[kMLS + h] = 1.f; }
+#else
   for (unsigned h = 0; h < kNHL; ++h) { ml[h] = -1e30f; ml[kMLS + h] = 0.f; }
+#endif
 #if ATTN_VEXP
   // The padding lanes are exponentiated with the rest; -1e30 keeps them at
   // exp(-inf) = 0 rather than whatever the stack held.

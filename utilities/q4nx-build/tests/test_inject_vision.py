@@ -68,6 +68,19 @@ class InjectVisionConfigTest(unittest.TestCase):
             result["vision_config"]["vision_mm_engine_xclbin_name"], "vision_mm.xclbin"
         )
 
+    def test_an_arch_config_with_no_tower_keys_keeps_the_source_block(self):
+        """qwen3vl.json declares only the vision_mm tile sizes, which are stripped -- so
+        without this the source's own vision_config is replaced by nothing and the
+        container ships the vision weights with no shape to read them by."""
+        q4nx_config = {"vision_config": {"vision_file": "vision_weight.q4nx",
+                                         "vision_MM_K": 512, "vision_MM_N": 64}}
+        hf_vc = {"depth": 24, "hidden_size": 1024, "num_heads": 16, "intermediate_size": 4096,
+                 "out_hidden_size": 2560, "patch_size": 16, "temporal_patch_size": 2,
+                 "spatial_merge_size": 2, "num_position_embeddings": 2304}
+        config = {"model_type": "qwen3_vl", "hidden_size": 2560, "vision_config": dict(hf_vc)}
+        result = inject_oflm_keys(config, q4nx_config, self.out, oflm_version=None)
+        self.assertEqual(result["vision_config"], hf_vc)
+
     def test_no_vision_weight_leaves_config_text_only(self):
         (self.out / "vision_weight.q4nx").unlink()
         config = {"model_type": "qwen3_5", "hidden_size": 2048, "vision_config": dict(SKELETON_VC)}

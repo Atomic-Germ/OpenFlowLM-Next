@@ -110,7 +110,7 @@ def test_the_post_rope_point_is_in_the_catalogue():
     fails on a set GROWING, which is never a regression. 32 is the neighbour
     now, and this comment is the reason it may have to move again."""
     DR.recipe(ModelSpec.from_hf_config(HF_HY_MT2_7B))              # no env override needed
-    with pytest.raises(OpRangeError, match=r"= \(64, 32, 8, 64, True, False, True\) is outside "
+    with pytest.raises(OpRangeError, match=r"= \(64, 32, 8, 64, True, False, True, False\) is outside "
                                             r"the validated combinations"):
         DR.recipe(ModelSpec.from_hf_config(dict(HF_HY_MT2_7B, head_dim=64, attention_head_dim=64)))
 

@@ -19,23 +19,26 @@ cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /b
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
    manifest_test.cpp manifest.cpp /Fe:out\manifest_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
+set "WHICH=manifest_test"
 out\manifest_test.exe ..\..\specs\open-engine\tests\fixtures\manifest_qwen36.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_gemma3_4b.json ..\..\specs\open-engine\tests\fixtures\manifest_hy_mt2_7b.json ..\..\specs\open-engine\tests\fixtures\manifest_qwen35_9b.json ..\..\specs\open-engine\tests\fixtures\manifest_phi4_mini_4b.json
-if errorlevel 1 goto :testfail
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] pools_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
    pools_test.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\pools_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
+set "WHICH=pools_test"
 out\pools_test.exe
-if errorlevel 1 goto :testfail
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] block_host_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 ^
    /I ".." /I "..\include" ^
    block_host_test.cpp block_host.cpp /Fe:out\block_host_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
 python ..\..\open_kernels\model\replica_block.py --fixture out\blockfix >nul
+set "WHICH=block_host_test"
 out\block_host_test.exe out\blockfix
-if errorlevel 1 goto :testfail
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^
@@ -69,5 +72,8 @@ exit /b 1
 echo [open_qwen36] compile FAILED
 exit /b 1
 :testfail
-echo [open_qwen36] manifest_test FAILED
+REM `if errorlevel 1` is a >= test and MISSES a negative exit code, which is what a
+REM crashed test binary returns (0xC0000409 from MSVC's abort on an uncaught throw),
+REM so a crash used to pass the build silently. `neq 0` catches both.
+echo [open_qwen36] %WHICH% FAILED (exit %errorlevel%)
 exit /b 1

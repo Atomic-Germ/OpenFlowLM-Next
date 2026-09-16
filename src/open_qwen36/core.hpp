@@ -25,6 +25,8 @@
 /// families, the expert block still one token at a time.
 #pragma once
 
+#include <chrono>
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -116,7 +118,14 @@ public:
     /// One step whose input is a hidden vector instead of a token -- an image token's
     /// embedding from the vision tower -- at the M-RoPE position `mpos` = (t, h, w). The
     /// (t, h, w) counter is not advanced; the caller does that per image (mrope_advance).
-    void step_embed(const float* x, bool want_logits, const int64_t mpos[3]);
+    /// One pre-computed row (an image patch) instead of a token id.
+    ///
+    /// `deepstack` is Qwen3-VL's: `n_deepstack` rows of `hidden` floats, feature j being
+    /// added onto the residual AFTER decoder layer j has run - which is where transformers
+    /// puts it, and is not the same as folding feature 0 into the input embedding. nullptr
+    /// for every other VLM.
+    void step_embed(const float* x, bool want_logits, const int64_t mpos[3],
+                    const float* deepstack = nullptr, int n_deepstack = 0);
     const std::vector<float>& logits() const { return logits_host_; }
 
     /// M-RoPE (Qwen3-VL, config.json rope_parameters.mrope_section): once a request has
@@ -167,6 +176,11 @@ public:
     /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
     /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
+
+    /// `n` bytes of a layer's `act` scratch at `off`, straight off the device. Bring-up
+    /// only: it is how you tell a stage that computes the wrong thing from a stage that
+    /// never ran, without inferring either from the logits.
+    void read_act(int layer, size_t off, size_t n, uint8_t* dst);
     /// T = gemm_block_t() tokens through every layer on the block route: the
     /// projections as whole-array GEMM dispatches, the stages between them
     /// per layer-type kind (dense: T single-token attention dispatches and
@@ -231,6 +245,11 @@ private:
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, gact, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;
+    /// Dispatch bookkeeping, for the intermittent dx timeout. A failure needs to say
+    /// which layer, how far into the run, and how long the host sat between dispatches -
+    /// "kernel dx at position N" alone does not separate a hung command from a late one.
+    uint64_t dispatches_ = 0;
+    std::chrono::steady_clock::time_point last_done_{};
     std::vector<int> mrope_section_;          ///< empty: no M-RoPE (every model but the VLMs)
     bool mrope_interleaved_ = false;
     int image_token_id_ = -1;
@@ -271,7 +290,8 @@ private:
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
-    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos);
+    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
+                   const float* deepstack = nullptr, int n_deepstack = 0);
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);

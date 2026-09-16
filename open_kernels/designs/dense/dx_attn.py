@@ -65,6 +65,15 @@ L, G = R.layout, R.geo
 E_A = L.E_A
 QW, KVW = G.QW, G.KVW
 HID = G.HID
+if G.QKVB:
+    # dx.py streams the q/k/v bias on a second fifo; this file's attention phase is a
+    # verbatim copy of the version without one, so it would drop the bias silently.
+    raise ValueError("dx_attn.py: this spec's q/k/v projections carry a bias and this "
+                     "design has no bias stream (copy dx.py's abias fifo across first)")
+if G.PTAB_ELEMS > 1:
+    # same reason: the copy acquires one element for the position record.
+    raise ValueError("dx_attn.py: this spec's position record is wider than an attention "
+                     "element and this design still acquires one (copy dx.py's meta block)")
 
 # ---- verbatim from dx.py: ATTN_FLAGS / ACORES / NHL / RB (same derivation,
 # same module-level constants dx.py's own attention kernels are compiled

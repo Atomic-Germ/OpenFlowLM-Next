@@ -42,6 +42,8 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.nch = j.value("nch", 0ull);
     p.in_dim = j.value("in_dim", 0ull);
     p.chunk0 = j.value("chunk0", 0ull);
+    p.src_dim = j.value("src_dim", 0ull);
+    p.rg = j.value("rg", 0ull);
     p.experts = j.value("experts", 0ull);
     p.stripes = j.value("stripes", 0ull);
     p.stripe_bytes = j.value("stripe_bytes", 0ull);
@@ -69,6 +71,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         fail(where, "unknown pack op '" + p.op + "'");
     }
     if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose") need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
     else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
     else if (p.op == "expert_down") need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});

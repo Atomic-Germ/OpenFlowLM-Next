@@ -41,7 +41,11 @@ RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the u
 # attention).
 # phi3 (2026-09-10, Phi4-mini: hd 128 with a 96-dim rotation, measured on the fast path
 # against its slow-path pass -- see specs OPEN-FAMILY-PHI3).
-FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3")
+# lfm2 (2026-09-13, the first HYBRID measured: only six of sixteen layers are attention and
+# the ten conv ones were already flat, so the sweep moves 527 -> 35.6 ms at position 2048
+# purely on those six; 250/250 greedy tokens identical, corr min 0.9999413).
+FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3",
+                  "qwen2", "lfm2")
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):
 # six columns for the split, whatever the head count.
 MAX_ATTN_CORES = 6

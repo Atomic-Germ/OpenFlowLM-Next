@@ -133,13 +133,28 @@ std::vector<float> Q4nxFile::f32(const std::string& name) const {
 void Q4nxFile::bf16_row(const std::string& name, size_t row, size_t dim, float* out) const {
     const TensorMeta& t = meta(name);
     if (t.dtype != "BF16") throw std::runtime_error("q4nx: " + name + " is " + t.dtype + ", not BF16");
-    if ((row + 1) * dim * 2 > t.end - t.start) throw std::runtime_error("q4nx: row " + std::to_string(row) + " past " + name);
-    const uint8_t* p = map_ + data_base_ + t.start + row * dim * 2;
-    for (size_t i = 0; i < dim; ++i) {
+    // The SOURCE stride is the container's own row, from the tensor's trailing shape
+    // dimension -- never `dim`, which is the width of the buffer the caller wants the row
+    // in. A recipe may pad that above the model's own (OPEN-WIDTH-PAD puts GPT-OSS's 2880
+    // at 3072), and using the padded width as the stride reads row `n` from `n * (pad -
+    // real) * 2` bytes too far. The bounds check below was computed at that stride too, so
+    // it only fired near the top of the vocabulary: most of the table came back silently
+    // wrong and the rest threw (OPEN-EMBED-STRIDE).
+    const size_t src = t.shape.empty() ? dim : t.shape.back();
+    if (src == 0) throw std::runtime_error("q4nx: " + name + " has a zero row width");
+    if (dim < src)
+        throw std::runtime_error("q4nx: " + name + " stores " + std::to_string(src) +
+                                 " values per row and only " + std::to_string(dim) +
+                                 " were asked for; that would drop the rest of the row");
+    if ((row + 1) * src * 2 > t.end - t.start)
+        throw std::runtime_error("q4nx: row " + std::to_string(row) + " past " + name);
+    const uint8_t* p = map_ + data_base_ + t.start + row * src * 2;
+    for (size_t i = 0; i < src; ++i) {
         uint16_t u;
         std::memcpy(&u, p + 2 * i, 2);
         out[i] = bf16_to_f32(u);
     }
+    for (size_t i = src; i < dim; ++i) out[i] = 0.0f;   // the padded tail of the residual stream
 }
 
 }  // namespace open_qwen36

@@ -20,6 +20,7 @@ offset fails that test before it reaches a build.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
@@ -30,6 +31,7 @@ from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
 CHUNK_VALUES = 8192
 CHUNK_ROWS = 32
+CHUNK_COLS = CHUNK_VALUES // CHUNK_ROWS   # 256: the k-tile the band law and std_perm both count in
 Q8_CHUNK = 8704              # lm_head q8: 8192 int8 + 256 bf16 scales
 ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
@@ -61,6 +63,24 @@ def q4_chunks(rows: int, cols: int) -> int:
 def band_bytes(K: int) -> int:
     """One 64-row band of a K-wide standard-layout matrix: K/128 chunks."""
     return q4_bytes(BAND_ROWS, K)
+
+
+def per_band(K: int) -> int:
+    """Chunks in one band, the GEMV's runtime band law (gemv_q4_pool_group_rt). The kernel
+    derives K back from it as 256 * per_band / rs, so this counts CHUNKS, never w elements:
+    handing it the element count reads the activation table at half width.
+
+    The count has to be EVEN. At rs = 2 chunk i of a band covers row half i % 2 and k-tile
+    i // 2, two chunks per k-tile, so an odd count is a band no walk can consume. K = 2944 --
+    the width GPT-OSS's container actually ships -- is the case that made this worth saying:
+    band_bytes returns cleanly on it and hands back 23. The refusal is here rather than in a
+    catalogue entry so OPEN_KERNELS_UNVALIDATED cannot soften it (OPEN-WIDTH-PAD)."""
+    n = band_bytes(K) // CHUNK
+    if n % 2:
+        raise OpRangeError(f"a {K}-wide band is {n} chunks, an odd count: the rs=2 band law "
+                           f"puts two chunks on every k-tile, so a band is always even. "
+                           f"K must be a multiple of 256 (K={K} is {K % 256} over)")
+    return n
 
 
 # ---- the per-role weight format (OPEN-QUANT-Q8). A projection the container stores at q8
@@ -129,6 +149,37 @@ def tab_bytes(K: int) -> int:
 
 def roundup(n: int, m: int) -> int:
     return (n + m - 1) // m * m
+
+
+def pad_width(w: int, n_cores: int) -> int:
+    """The smallest width at or above w that a pool can actually be built at.
+
+    Two rules have to hold at once and one rounding satisfies both, because
+    BAND_ROWS * 8 = 512 is itself a multiple of the chunk's 256 columns:
+
+      * dense.cores_for wants the width divisible by BAND_ROWS * n_cores, or the
+        family drops to fewer cores (GPT-OSS's 2880 falls all the way to one);
+      * q4_bytes wants rows * cols a whole number of 8192-value chunks, and
+        band_bytes(2880) does not - it raises before any core count matters.
+
+    At eight cores -- and at four -- the first rounding implies the second, because
+    BAND_ROWS * 8 is 512 and BAND_ROWS * 4 is 256. Below that it does not: rounding
+    2880 to BAND_ROWS * 1 left it at 2880, and to BAND_ROWS * 2 gave 2944, which is
+    the worst answer available. 2944 passes band_bytes, and then per_band is 23 and
+    pack.std_perm is non-injective. So the rounding is to lcm(BAND_ROWS * n_cores,
+    CHUNK_COLS), which is the same 512 at eight cores and 256 at one.
+
+    No shipped family needs this: every one of them is already a multiple of 512,
+    so pad_width returns their own width unchanged. It exists for GPT-OSS, whose
+    2880 satisfies neither rule.
+
+    Padding a width is NOT the same as being able to build the family at it. The
+    norm in particular must keep dividing by the model's own width - ln.h divides
+    the sum of squares by the width it was COMPILED at (LN_N), so a 3072-wide norm
+    over 2880 real channels scales every residual by sqrt(3072/2880), 3.3% high,
+    on every layer. See OPEN-WIDTH-PAD for what this does and does not settle.
+    """
+    return roundup(w, math.lcm(BAND_ROWS * n_cores, CHUNK_COLS))
 
 
 def ab_lanes(spec: ModelSpec) -> int:
@@ -309,6 +360,20 @@ DN_SCRATCH_FLOATS = 1280               # `ds` (dnx.h)
 FFN_MS_FLOATS = 2 * BAND_ROWS          # `ms` for the dense tail: u[64] | g[64]
 
 
+def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int:
+    """A main core's L1 bytes for a given scratch layout.
+
+    Every main core carries the same six things and nothing else
+    (`designs/layer_x/xcommon.py core_buffers`, and the fifo depths in `lx.py` / `dx.py`):
+    the activation table, the `ms` and `ds` scratch buffers, then depth-2 fifos for the
+    weight elements, the x elements and the y elements, over a 0x1800 stack. Both tails
+    compute it here rather than each restating the sum, for the reason the band law is
+    shared -- two copies of a budget drift, and the one that drifts is the one no shipped
+    model exercises."""
+    return (tab + ms_floats * 4 + ds_floats * 4
+            + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
+
+
 def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
     """Chunks per weight element. The MoE tail is frozen at 2 (the shipped 27B kernels);
     the dense tail takes 1 when the widest activation table leaves no room for two 10 KB
@@ -317,10 +382,9 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
     if ffn != "dense":
         return PER_CALL
     wide = kwide(spec, ffn)
-    ds = DN_SCRATCH_FLOATS * 4 if spec.has_linear else 0
+    ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
     for pc in (2, 1):
-        l1 = tab_bytes(wide) + FFN_MS_FLOATS * 4 + ds + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK
-        if l1 <= L1_BUDGET:
+        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc) <= L1_BUDGET:
             return pc
     raise OpRangeError(f"qwen35: a {wide}-wide activation table does not leave room for the streams "
                        f"in a core's L1 ({tab_bytes(wide)} B of table, {L1_BUDGET} B budget)")
@@ -354,11 +418,31 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
     ms_floats = ms_yd + rows_pc
     if 8 + ne > 32:
         raise OpRangeError(f"moe: top-k {ne} does not fit the 32-float routing record")
+    spp = ff // 128
+    if not spp or spp > n or n % spp:
+        raise OpRangeError(
+            f"moe: an expert width of {ff} is {spp} stripes per projection over {n} cores. "
+            f"`moe_sequence` splits ONE 128-row stripe across `n // stripes` cores -- its "
+            f"`c // cps` and `c % cps` -- so the stripe count has to divide the core count. "
+            f"Here each core would own {spp / n:g} stripes instead and `cps` is {n // spp if spp else 0}. "
+            f"That is a different host sequence, not a different constant (OPEN-MOE-WIDE-FF).")
     wide = max(hid, spec.lin_value_width if spec.has_linear else 0, spec.attn_q_width if spec.has_full else 0)
     tab = tab_bytes(wide)
     h_tab = tab_bytes(hid)
     if h_tab + tab_bytes(ff) > tab:
-        raise OpRangeError("moe: the hidden h's table does not fit past xm's in the core scratch")
+        raise OpRangeError(
+            f"moe: the hidden h's table does not fit past xm's in the core scratch -- "
+            f"{h_tab} B for K={hid} plus {tab_bytes(ff)} B for K={ff} against a {tab} B "
+            f"reservation. `tab` is sized for the WIDEST K a core prepares, which collapses "
+            f"to the hidden itself on a family with neither linear-attention nor "
+            f"full-attention layers (OPEN-MOE-WIDE-FF).")
+    l1 = core_l1(tab, ms_floats, DN_SCRATCH_FLOATS)
+    if l1 > L1_BUDGET:
+        raise OpRangeError(
+            f"moe: a main core's scratch comes to {l1} B against a {L1_BUDGET} B budget, "
+            f"{l1 - L1_BUDGET} B over -- {tab} B of table, {ms_floats * 4} B of ms, "
+            f"{DN_SCRATCH_FLOATS * 4} B of ds. Program memory only aiecc can measure, but "
+            f"L1 is arithmetic, and until now nothing computed it for this tail.")
     dn_dim = spec.lin_value_dim if spec.has_linear else 0
     dn_rows = CALL_BYTES // (dn_dim * 4) if dn_dim else 0      # S rows per streamed 10 KB element
     dn_slices = roundup(dn_dim, dn_rows) // dn_rows if dn_dim else 0
@@ -689,6 +773,13 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
     kv["POOL_BYTES"] = roundup(end, MB)
 
     ptab_row = max(PTAB_ROW, e_a)
+    if ptab_row != e_a:
+        # ax.py acquires ONE element for the record, as the dense design did until
+        # recipes/dense.py's _ptab_check. A wider record would leave the rest of it in
+        # the stream to be read as q. No MoE geometry reaches this; say so rather than
+        # let the next one find out on hardware.
+        raise OpRangeError(f"qwen36moe: a {ptab_row}-byte position record does not fit one "
+                           f"{e_a}-byte attention element (see recipes/dense.py _ptab_check)")
     band = 128 * hid // CHUNK_VALUES * Q8_CHUNK
     bands = spec.vocab // 128
     kv.update(KV_ROW=kv_row, PTAB_ROW=ptab_row, MAX_CTX=max_ctx, KV_BYTES=max_ctx * kv_row,

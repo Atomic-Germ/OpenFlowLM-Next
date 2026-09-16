@@ -102,6 +102,12 @@ def main() -> int:
         prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
         ids = tk.encode(prompt, add_special_tokens=False).ids
         IM_END, EOT = ids_of("<|im_end|>", "<|endoftext|>")
+    elif tk.token_to_id("<think>") is None:
+        # Qwen2.5: ChatML, and no reasoning block to open -- its tokenizer has no think
+        # tags at all, so the branch below would refuse it rather than answer.
+        prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
+        ids = tk.encode(prompt, add_special_tokens=False).ids
+        IM_END, EOT = ids_of("<|im_end|>", "<|endoftext|>")
     else:
         prompt = f"<|im_start|>user\n{a.message}<|im_end|>\n<|im_start|>assistant\n"
         IM_START, IM_END, EOT, THINK, END_THINK, NL, NLNL = special_ids(tk)

@@ -5,8 +5,9 @@ HF-faithful math in float64 from the same `.q4nx` bytes the NPU pools are
 packed from (q4nx.py dequantizes the chunks), so a disagreement is the kernels'
 or the packing's, not a difference of source weights:
 
-  * x = rms(res) * ln_w; q k v projections; q/k RMSNorm over the head with the
-    stored weights; RoPE over the first rotary_dim dims (the whole head, or 96
+  * x = rms(res) * ln_w; q k v projections (plus their bias, on a family that has
+    one); q/k RMSNorm over the head with the stored weights; RoPE over the first
+    rotary_dim dims (the whole head, or 96
     of 128 on Phi-3, half-split pairs, the model's theta and scaling); GQA
     softmax attention over the KV cache; o_proj; residual.
     HunYuan norms after the rotation instead (recipes.dense.QKNORM_POST_ROPE),
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from q4nx import CHUNK_Q4, dq_chunks_q4_1
+from q4nx import CHUNK_Q4, dq_chunks_q4_1, q4_1_chunks_of
 
 
 def rms(x, eps=1e-6):
@@ -35,6 +36,21 @@ def silu(x):
 
 def gelu_tanh(x):
     return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x ** 3)))
+
+
+def sink_softmax(s, sink):
+    """Softmax over a head's scores with one extra learned logit in the denominator that has
+    no value vector behind it -- GPT-OSS's per-head attention sink. The weights come back
+    over the real positions only, so they sum to less than one and the head can attend to
+    nothing at all.
+
+    `sink` is the raw stored scalar: the scores are already divided by sqrt(head_dim) when it
+    joins them, so it is not scaled here either.
+    """
+    s = np.asarray(s, dtype=np.float64)
+    m = max(float(s.max()) if s.size else -np.inf, float(sink))
+    e = np.exp(s - m)
+    return e / (e.sum() + np.exp(float(sink) - m))
 
 
 def rope(t, p, rot, theta, inv_freq=None, scale=1.0):
@@ -55,7 +71,7 @@ def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
     kept only so callers built for the older single-table selection still pass; longrope's
     factor list is picked per call from `pos` -- HF's own `seq_len = pos + 1` rule -- matching
     the kernel set's per-row selection (recipes.dense.programs, OPEN-FAMILY-PHI3)."""
-    from recipes.dense import QKNORM_POST_ROPE
+    from recipes.dense import QKNORM_POST_ROPE, qkv_bias
     from recipes.spec import DENSE_LOCAL
     pre = f"model.layers.{layer}."
     hid, nh, kvh, hd, ff = spec.hidden, spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.intermediate
@@ -68,15 +84,21 @@ def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
     Wv = m.matmul_w(pre + "self_attn.v_proj.weight", kvh * hd, hid)
     Wo = m.matmul_w(pre + "self_attn.o_proj.weight", hid, nh * hd)
     post = spec.family in QKNORM_POST_ROPE          # the norm weight multiplies after RoPE
-    q = (x @ Wq.T).reshape(nh, hd).astype(np.float64)
-    k = (x @ Wk.T).reshape(kvh, hd).astype(np.float64)
+    # Qwen2 puts a per-channel bias on q, k and v (not on o_proj, not on the FFN).
+    bq, bk, bv = 0.0, 0.0, 0.0
+    if qkv_bias(spec):
+        bq = m.bf16(pre + "self_attn.q_proj.bias")
+        bk = m.bf16(pre + "self_attn.k_proj.bias")
+        bv = m.bf16(pre + "self_attn.v_proj.bias")
+    q = (x @ Wq.T + bq).reshape(nh, hd).astype(np.float64)
+    k = (x @ Wk.T + bk).reshape(kvh, hd).astype(np.float64)
     if spec.qk_norm:
         qn = m.bf16(pre + "self_attn.q_norm.weight")
         kn = m.bf16(pre + "self_attn.k_norm.weight")
         q, k = rms(q, eps), rms(k, eps)
         if not post:
             q, k = q * qn, k * kn
-    v = (x @ Wv.T).reshape(kvh, hd).astype(np.float64)
+    v = (x @ Wv.T + bv).reshape(kvh, hd).astype(np.float64)
     q = rope(q, pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
     k = rope(k, pos, spec.rotary_dim, spec.rope_theta, inv, rsc)
     if spec.qk_norm and post:
@@ -109,9 +131,13 @@ def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
 
 
 def lmhead_q4_logits(m, hn, spec, block=2048):
-    """logits[vocab] = W_lm[vocab, hidden] @ hn from the q4_1 chunks in the file's raster order."""
+    """logits[vocab] = W_lm[vocab, hidden] @ hn from the q4_1 chunks in the file's raster order.
+
+    Through `q4_1_chunks_of`, not the raw bytes: a container that stores the signed
+    quantiser instead has to be transcoded here exactly as it is on the way into the pool,
+    or the head reads one format while the layers read the other (OPEN-PACK-Q4-0)."""
     hid = spec.hidden
-    raw = np.frombuffer(m.raw("lm_head.weight"), dtype=np.uint8).reshape(-1, CHUNK_Q4)
+    raw = q4_1_chunks_of(m, "lm_head.weight")
     ncol = hid // 256
     nch = raw.shape[0]
     hn = np.asarray(hn, np.float64)

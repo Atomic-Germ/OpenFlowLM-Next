@@ -5,7 +5,8 @@
 ///        both sides build the SAME synthetic q8 chunks from the LCG below and
 ///        both assert the same FNV-1a hash of the result, so a divergence in
 ///        either implementation fails one of the two tests.
-// Traces: OPEN-PACK-PLAN, OPEN-FAMILY-QWEN35 (canonical spec: specs/open-engine/spec.md)
+// Traces: OPEN-PACK-PLAN, OPEN-FAMILY-QWEN35, OPEN-PACK-CHUNK-FUSE, OPEN-WIDTH-PAD, OPEN-EMBED-STRIDE
+//         (canonical spec: specs/open-engine/spec.md)
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -43,6 +44,10 @@ constexpr uint64_t Q8_POOL_FNV1A = 0x8d4a3cf75e4cbffaull;
 // in beside a q4_1 tensor (OPEN-QUANT-Q4K). tests/test_quant_q4k.py asserts both.
 constexpr uint64_t Q4K_TRANSCODE_FNV1A = 0x685dc049ec1ca2d7ull;
 constexpr uint64_t Q4K_POOL_FNV1A = 0xb02083912551d9d3ull;
+// The pool `std_fuse` writes over lcg_bytes(0x5EEDFACE, 8 * 23 * 2560) at a 2944-wide
+// container into a 3072-wide pool (OPEN-PACK-CHUNK-FUSE).
+// specs/open-engine/tests/test_chunk_fuse.py asserts this number on the same bytes.
+constexpr uint64_t FUSE_POOL_FNV1A = 0x21f7e3b732137cb2ull;
 
 int failures = 0;
 
@@ -143,8 +148,11 @@ std::vector<size_t> band_perm(size_t nch, size_t in_dim) {
 /// one differ only in what they hold.
 struct Tensor {
     const char* name;
-    size_t ch;
+    size_t ch;                    ///< BYTES per row (for an I8 quantized tensor, the chunk width)
     const std::vector<uint8_t>* data;
+    const char* dtype = "I8";     ///< "BF16" for the embedding / norm tensors
+    size_t cols = 0;              ///< the shape's trailing dim; defaults to `ch`, which is
+                                  ///< right for I8 and half the byte count for BF16
 };
 
 std::string write_container(const std::string& stem, const std::vector<Tensor>& ts) {
@@ -152,9 +160,10 @@ std::string write_container(const std::string& stem, const std::vector<Tensor>& 
     size_t off = 0;
     for (size_t i = 0; i < ts.size(); ++i) {
         const size_t n = ts[i].data->size();
-        hdr += (i ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"I8\",\"shape\":[" +
-               std::to_string(n / ts[i].ch) + "," + std::to_string(ts[i].ch) + "],\"data_offsets\":[" +
-               std::to_string(off) + "," + std::to_string(off + n) + "]}";
+        const size_t cols = ts[i].cols ? ts[i].cols : ts[i].ch;
+        hdr += (i ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"" + ts[i].dtype +
+               "\",\"shape\":[" + std::to_string(n / ts[i].ch) + "," + std::to_string(cols) +
+               "],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + n) + "]}";
         off += n;
     }
     hdr += "}";
@@ -412,6 +421,255 @@ void q4k_container_tests() {
 /// mismatch on the scaled path could have reached hardware unnoticed.
 constexpr uint64_t PTAB_SCALE_FNV1A = 0x091cd4029a9681a8ull;
 
+/// OPEN-EMBED-STRIDE: one row of a BF16 embedding whose container width is NARROWER than
+/// the buffer the caller wants it in. `Core::step_impl` passes the manifest's `hidden` as
+/// both the destination width and the source stride, so on a family whose buffer width is
+/// padded above the model's own (OPEN-WIDTH-PAD puts GPT-OSS's 2880 at 3072) every row but
+/// the first was read from the wrong offset -- and the bounds check, computed at the padded
+/// stride, only fires near the top of the vocabulary, so most of it was silently wrong.
+/// The stride now comes from the container's own trailing shape dimension.
+void embed_stride_tests() {
+    std::printf("  -- OPEN-EMBED-STRIDE\n");
+    const size_t ROWS = 7, SRC = 2880, DST = 3072;
+
+    // The fixture is written as bf16 BIT PATTERNS and the expected float derived from them,
+    // so no value has to survive a round trip: 0x3C00..0x3FFF is finite and normal, and the
+    // pattern varies with both row and column.
+    auto bits = [](size_t r, size_t c) {
+        return static_cast<uint16_t>(0x3C00u + ((r * 9176u + c * 37u + (c >> 3)) & 0x03FFu));
+    };
+    auto as_float = [](uint16_t b) {
+        const uint32_t u = static_cast<uint32_t>(b) << 16;
+        float v;
+        std::memcpy(&v, &u, 4);
+        return v;
+    };
+    auto want = [&](size_t r, size_t c) { return as_float(bits(r, c)); };
+    std::vector<uint8_t> emb(ROWS * SRC * 2);
+    for (size_t r = 0; r < ROWS; ++r)
+        for (size_t c = 0; c < SRC; ++c) {
+            const uint16_t b = bits(r, c);
+            std::memcpy(emb.data() + (r * SRC + c) * 2, &b, 2);
+        }
+    const char* NAME = "model.embed_tokens.weight";
+    const std::string path = write_container("open_qwen36_embed_stride",
+                                             {{NAME, SRC * 2, &emb, "BF16", SRC}});
+    open_qwen36::Q4nxFile f(path);
+
+    // The discriminating row: at the padded stride, row 5 would start at 5*3072*2 = 30720
+    // instead of 5*2880*2 = 28800, and the tensor is 40320 bytes, so the old bounds check
+    // (6*3072*2 = 36864) passes and hands back the wrong values with nothing raised.
+    std::vector<float> out(DST, -1.0f);
+    f.bf16_row(NAME, 5, DST, out.data());
+    bool ok = true;
+    for (size_t c = 0; c < SRC && ok; ++c) ok = out[c] == want(5, c);
+    check(ok, "bf16_row: a narrow row is read at the CONTAINER's stride, not the caller's width");
+    bool zeroed = true;
+    for (size_t c = SRC; c < DST && zeroed; ++c) zeroed = out[c] == 0.0f;
+    check(zeroed, "bf16_row: the padded tail is zeroed, not left as whatever was in the buffer");
+
+    // It is a real discrimination: the padded stride lands on other bytes entirely.
+    check(want(5, 0) != want(6, 0), "the fixture distinguishes rows");
+    size_t ndiff = 0;
+    for (size_t c = 0; c < SRC; ++c) {
+        uint16_t b;
+        std::memcpy(&b, emb.data() + (5 * DST + c) * 2, 2);       // what the old code read
+        if (as_float(b) != out[c]) ++ndiff;
+    }
+    const bool differs = ndiff > SRC / 2;
+    check(differs, "bf16_row: reading at the padded stride really would return other values");
+
+    // Row 0 was always right, which is why this hid: only the stride multiplies.
+    std::vector<float> row0(DST, -1.0f);
+    f.bf16_row(NAME, 0, DST, row0.data());
+    ok = true;
+    for (size_t c = 0; c < SRC && ok; ++c) ok = row0[c] == want(0, c);
+    check(ok, "bf16_row: row 0 is unchanged (the offset is row * stride, so only row > 0 moved)");
+
+    // An exact-width read is the shipped path and must not move.
+    std::vector<float> exact(SRC, -1.0f);
+    f.bf16_row(NAME, 3, SRC, exact.data());
+    ok = true;
+    for (size_t c = 0; c < SRC && ok; ++c) ok = exact[c] == want(3, c);
+    check(ok, "bf16_row: a caller whose width equals the container's reads exactly as before");
+
+    // A width NARROWER than the container's row is a dropped channel, not a pad.
+    bool threw = false;
+    std::string msg;
+    try {
+        std::vector<float> narrow(SRC - 64);
+        f.bf16_row(NAME, 0, SRC - 64, narrow.data());
+    } catch (const std::exception& e) {
+        threw = true;
+        msg = e.what();
+    }
+    check(threw && msg.find("2880") != std::string::npos,
+          "bf16_row: a destination narrower than the container's row is refused, naming both widths"
+          + std::string(threw ? " (\"" + msg + "\")" : ""));
+
+    // The bounds check is at the container's stride: row 6 is the last one. Computed at
+    // the PADDED stride it fires here instead -- the loud half of the same bug, and the
+    // reason only the top of a real vocabulary ever threw.
+    threw = false;
+    try {
+        f.bf16_row(NAME, ROWS - 1, DST, out.data());
+    } catch (const std::exception& e) {
+        threw = true;
+        msg = e.what();
+    }
+    check(!threw, "bf16_row: the LAST real row is readable into a padded buffer" +
+                      std::string(threw ? " (got \"" + msg + "\")" : ""));
+
+    threw = false;
+    try {
+        f.bf16_row(NAME, ROWS, DST, out.data());
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(threw, "bf16_row: a row past the end is refused, counted at the container's stride");
+    // The container stays mapped for the life of `f`, so the temp file is left where the
+    // other container tests in this file leave theirs.
+}
+
+// ---- OPEN-PACK-CHUNK-FUSE: GPT-OSS's 2560-byte chunks, in the supertile raster, fused
+// into the pool's 5120-byte ones. `src_dim` 2944 is 23 column blocks against the 24 a
+// 3072-wide pool wants, so the 24th is synthesised as zeros and the fuse and the pad are
+// one pass. specs/open-engine/tests/test_chunk_fuse.py builds the same bytes and asserts
+// the same hash.
+constexpr size_t F_IN_DIM = 3072, F_SRC_DIM = 2944;
+constexpr size_t F_NCOL128 = F_SRC_DIM / 128;      // 23
+constexpr size_t F_NRB = 8;                        // row blocks = 4 bands
+constexpr size_t F_NCH = F_NRB / 2 * (F_IN_DIM / 128);   // 4 bands of 24 pool chunks
+constexpr size_t Q4_HALF_CH = 2560;
+const char* F_NAME = "model.layers.0.self_attn.q_proj.weight";
+
+open_qwen36::PackOp fuse_op(uint64_t nch, uint64_t in_dim, uint64_t src_dim, uint64_t rg) {
+    open_qwen36::PackOp op;
+    op.op = "std_fuse";
+    op.tensor = F_NAME;
+    op.dst = 0;
+    op.nch = nch;
+    op.in_dim = in_dim;
+    op.src_dim = src_dim;
+    op.rg = rg;
+    return op;
+}
+
+void chunk_fuse_tests() {
+    std::printf("  -- OPEN-PACK-CHUNK-FUSE\n");
+    const std::vector<uint8_t> src = lcg_bytes(0x5EEDFACEu, F_NRB * F_NCOL128 * Q4_HALF_CH);
+    const std::string path = write_container("open_qwen36_fuse_test",
+                                             {{F_NAME, Q4_HALF_CH, &src}});
+    open_qwen36::Q4nxFile f(path);
+    check(f.chunk_bytes(F_NAME) == Q4_HALF_CH, "the container's chunk width is read as 2560");
+
+    std::vector<uint8_t> pool(F_NCH * 5120);
+    open_qwen36::pools::apply(fuse_op(F_NCH, F_IN_DIM, F_SRC_DIM, 4), f, 0, pool.data(), pool.size(), 5120);
+
+    // Every pool chunk holds the k-tile's two halves, located by the supertile law, with an
+    // all-zero high half at the last k-tile. Recomputed here rather than reached into
+    // pools.cpp, so the test asserts the law independently.
+    const size_t per_band = F_IN_DIM / 128;
+    bool placed = true, zeroed = true;
+    size_t nsynth = 0;
+    for (size_t c = 0; c < F_NCH && placed && zeroed; ++c) {
+        const size_t rb = 2 * (c / per_band) + c % 2, kt = (c % per_band) / 2;
+        const uint8_t* out = pool.data() + c * 5120;
+        for (unsigned half = 0; half < 2; ++half) {
+            const size_t q = 2 * kt + half;
+            const size_t meta = half ? 256 : 0, m_off = half ? 768 : 512;
+            const size_t n0 = half ? 2048 : 1024, n1 = half ? 4096 : 3072;
+            if (q >= F_NCOL128) {                       // the synthesised column block
+                ++nsynth;
+                for (size_t i = 0; i < 256 && zeroed; ++i) zeroed = out[meta + i] == 0 && out[m_off + i] == 0;
+                for (size_t i = 0; i < 1024 && zeroed; ++i) zeroed = out[n0 + i] == 0 && out[n1 + i] == 0;
+                continue;
+            }
+            const uint8_t* a = src.data() + (((rb / 4) * F_NCOL128 + q) * 4 + rb % 4) * Q4_HALF_CH;
+            placed = placed && std::memcmp(out + meta, a + 0, 256) == 0
+                            && std::memcmp(out + m_off, a + 256, 256) == 0
+                            && std::memcmp(out + n0, a + 512, 1024) == 0
+                            && std::memcmp(out + n1, a + 1536, 1024) == 0;
+        }
+    }
+    check(placed, "std_fuse: every pool chunk is its k-tile's two halves, in the supertile raster");
+    check(zeroed && nsynth == 2 * (F_NRB / 2),
+          "std_fuse: the column block past the container's width is synthesised as zeros");
+
+    const uint64_t got = fnv1a(pool.data(), pool.size());
+    std::printf("      fuse pool fnv1a = 0x%016llx\n", static_cast<unsigned long long>(got));
+    check(got == FUSE_POOL_FNV1A, "std_fuse pool: byte-identical to the NumPy packer");
+
+    // A container at the ordinary 5120 is not a std_fuse source: the geometry AND the
+    // raster differ, so falling through to the q4_1 path would place real bytes wrongly.
+    const std::vector<uint8_t> wide = lcg_bytes(0x11111111u, 8 * 5120);
+    const std::string wpath = write_container("open_qwen36_fuse_test_wide", {{F_NAME, 5120, &wide}});
+    open_qwen36::Q4nxFile wf(wpath);
+    std::string msg;
+    try {
+        std::vector<uint8_t> p2(2 * 5120);
+        open_qwen36::pools::apply(fuse_op(2, 512, 512, 4), wf, 0, p2.data(), p2.size(), 5120);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    check(msg.find("2560-byte chunks") != std::string::npos,
+          "std_fuse over a 5120-byte container is refused, naming both widths (\"" + msg + "\")");
+
+    // And the guards the width rule puts on std_perm hold here too.
+    msg.clear();
+    try {
+        std::vector<uint8_t> p3(F_NCH * 5120);
+        open_qwen36::pools::apply(fuse_op(F_NCH, F_SRC_DIM, F_SRC_DIM, 4), f, 0, p3.data(), p3.size(), 5120);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    check(msg.find("256-column k-tiles") != std::string::npos,
+          "std_fuse: a pool width that does not tile the chunk is refused (\"" + msg + "\")");
+}
+
+/// OPEN-WIDTH-PAD, the C++ half: both band laws floor `in_dim / 256`, so a manifest
+/// carrying a width that does not tile the chunk would pack a pool whose chunks alias onto
+/// each other -- full, plausible and wrong. recipes/pack.py raises on the same widths; the
+/// two interpreters must refuse the same things, not only produce the same bytes.
+void ktile_guard_tests() {
+    std::printf("  -- OPEN-WIDTH-PAD (the packer's half)\n");
+    const std::vector<uint8_t> q4 = lcg_bytes(0x2468ACEu, 64 * Q4_CH);
+    const std::vector<uint8_t> q8 = q8_vector(64);
+    const std::string path = write_container("open_qwen36_ktile_test",
+                                             {{Q4_NAME, Q4_CH, &q4}, {Q8_NAME, Q8_CH, &q8}});
+    open_qwen36::Q4nxFile f(path);
+    std::vector<uint8_t> pool(64 * Q4_CH);
+
+    // The q8 arm needs a q8 tensor: `apply` checks the container's format before it reaches
+    // the band law, so a q4_1 source would be refused for the other reason first.
+    for (const auto& arm : {std::make_pair("std_perm", Q4_NAME), std::make_pair("q8_perm", Q8_NAME)}) {
+        std::string msg;
+        try {
+            open_qwen36::PackOp p;
+            p.op = arm.first;
+            p.tensor = arm.second;
+            p.dst = 0;
+            p.nch = 46;
+            p.in_dim = 2944;                      // the width GPT-OSS's container ships
+            open_qwen36::pools::apply(p, f, 0, pool.data(), pool.size(), Q4_CH);
+        } catch (const std::exception& e) {
+            msg = e.what();
+        }
+        check(msg.find("256-column k-tiles") != std::string::npos && msg.find(arm.first) != std::string::npos,
+              std::string(arm.first) + ": a width that does not tile the chunk is refused, naming it (\"" + msg + "\")");
+    }
+
+    // and a width that does tile still packs, so the guard is not refusing everything
+    open_qwen36::PackOp ok = std_perm_op(Q4_NAME, 0);
+    bool threw = false;
+    try {
+        open_qwen36::pools::apply(ok, f, 0, pool.data(), pool.size(), Q4_CH);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(!threw, "std_perm at a width that does tile the chunk is untouched");
+}
+
 void ptab_scale_tests() {
     open_qwen36::Manifest m;
     m.rotary_dim = 8;
@@ -508,6 +766,7 @@ void ptab_switch_tests() {
 }  // namespace
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);   // a crash must not swallow the results so far
     // ---- requant_q4_1 on 12 shared chunks
     const size_t NCH = 12;
     std::vector<uint8_t> src = q8_vector(NCH);
@@ -578,6 +837,9 @@ int main() {
     q4k_container_tests();
     ptab_scale_tests();
     ptab_switch_tests();
+    ktile_guard_tests();
+    chunk_fuse_tests();
+    embed_stride_tests();
 
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
