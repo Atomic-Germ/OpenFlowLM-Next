@@ -54,6 +54,12 @@ std::vector<std::string> legacy_flm_directories() {
     return v;
 }
 
+namespace {
+// Defined below with the rest of the xclbin-root helpers; declared here because
+// find_model_list (which precedes them) must consult the user registry.
+std::vector<std::string> user_oflm_directories();
+}
+
 std::string find_model_list() {
     std::string install_prefix = CMAKE_INSTALL_PREFIX;
 
@@ -76,6 +82,24 @@ std::string find_model_list() {
         return "model_list.json";
     }
 
+    // User-level registry written by `oflm add`: it mirrors the shipped registry
+    // and adds the models the user installed, so it must win over the frozen copy
+    // in the install tree or a just-added model would be invisible. This is also
+    // what lets `oflm add` take effect with no OFLM_CONFIG_PATH export in the
+    // user's shell.
+    for (const std::string& d : user_oflm_directories()) {
+        std::string user_path = d + "/model_list.json";
+        if (std::filesystem::exists(user_path)) {
+            return user_path;
+        }
+    }
+    for (const std::string& d : legacy_flm_directories()) {
+        std::string legacy_path = d + "/model_list.json";
+        if (std::filesystem::exists(legacy_path)) {
+            return legacy_path;
+        }
+    }
+
     // Relocatable installed bundle, independent of its original prefix.
     std::string bundle_path = exe_dir + "/../share/oflm/model_list.json";
     if (std::filesystem::exists(bundle_path)) {
@@ -89,7 +113,8 @@ std::string find_model_list() {
     }
 
     // If not found, throw an error
-    throw std::runtime_error("model_list.json not found. Please set OFLM_CONFIG_PATH or place it next to the executable.");
+    throw std::runtime_error("model_list.json not found. Reinstall OpenFlowLM, or set OFLM_CONFIG_PATH "
+                             "if you are running from a non-standard location.");
 }
 
 std::string find_model_info() {
@@ -149,7 +174,8 @@ std::string find_model_info() {
 #endif
 
     // If not found, throw an error
-    throw std::runtime_error("model_info.json not found. Please set OFLM_MODELINFO_PATH or place it next to the executable.");
+    throw std::runtime_error("model_info.json not found. Reinstall OpenFlowLM, or set OFLM_MODELINFO_PATH "
+                             "if you are running from a non-standard location.");
 }
 
 namespace {
@@ -243,7 +269,27 @@ std::string find_xclbin_path() {
     for (const std::string& c : closed_path_roots()) {
         if (!c.empty() && std::filesystem::exists(c + "/xclbins")) return c;
     }
-    throw std::runtime_error("xclbins not found. Please set OFLM_XCLBIN_PATH or place it next to the executable.");
+    throw std::runtime_error("xclbins not found. Reinstall OpenFlowLM, or set OFLM_XCLBIN_PATH "
+                             "if you are running from a non-standard location.");
+}
+
+std::string find_xclbin_root_for(const std::string& model_name) {
+    // The closed engines take exactly one root and load
+    // <root>/xclbins/<model>/... under it, so a single winner cannot serve a
+    // shipped model (kernels in the install tree) and a user-added model
+    // (kernels symlinked under ~/.config/oflm) at the same time. Pick the root
+    // that actually carries THIS model's directory, searched most specific first.
+    if (!model_name.empty()) {
+        std::error_code ec;
+        for (const std::string& r : xclbin_roots()) {
+            if (std::filesystem::exists(std::filesystem::path(r) / "xclbins" / model_name, ec)) {
+                return r;
+            }
+        }
+    }
+    // No root carries this model's directory (CPU-only model, or a layout that
+    // predates the per-model split): keep the historical single-winner behavior.
+    return find_xclbin_path();
 }
 
 std::string get_executable_directory() {

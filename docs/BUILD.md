@@ -46,8 +46,9 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 
 | Preset | Purpose | Description |
 |---|---|---|
-| `linux-default` | Full distribution | Builds executable + open NPU kernels (default) |
+| `linux-default` | Full distribution | Builds executable + open NPU kernels + bundled utilities (default) |
 | `linux-debug` | Debug development | Engine only, kernels OFF (fast iteration) |
+| `fedora-default` | Fedora release | Like `linux-default`, with XRT discovered through pkg-config |
 | `linux-portable` | Portable bundle | Bundles XRT/XDNA libraries |
 | `windows-default` | Windows build | Visual Studio build (engine only; kernels Linux-only) |
 
@@ -70,8 +71,9 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 
 | Preset | Output |
 |---|---|
+| `linux-package` | Host-native `.rpm` + portable `.tar.gz` (one command) |
 | `linux-package-tgz` | `.tar.gz` distribution |
-| `linux-package-deb` | `.deb` package |
+| `linux-package-deb` | `.deb` package (build on Debian/Ubuntu or in a Debian container) |
 | `linux-package-rpm` | `.rpm` package |
 
 ### Workflow Presets
@@ -79,6 +81,7 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 | Preset | Steps |
 |---|---|
 | `linux-default` | Configure + Build + Test (one command) |
+| `linux-package` | Configure + Build + Test + Package RPM/TGZ (one command) |
 
 ---
 
@@ -99,11 +102,31 @@ cmake --install build
 - Engine shared libraries
 - Open kernel xclbins (all families)
 - Model registry files
+- Bundled utilities (`oflm-test`, `q4nx-build`) and their launchers
 
 **Output:**
 - Binary in `build/bin/oflm`
 - Kernels in `src/xclbins/`
 - Installed to `/opt/openflowlm`
+- `/usr/bin/oflm` symlink + `/etc/profile.d/openflowlm.sh`, so `oflm` is on
+  `PATH` immediately after install with no shell-rc editing. (Set
+  `-DOFLM_INSTALL_PATH_PLUMBING=OFF` to skip these for an engine-only dev
+  install.)
+
+**One command for engine, kernels, tests, and packages:**
+
+```bash
+cmake --workflow --preset linux-package
+```
+
+This configures, builds, tests, and emits the host-native `.rpm` and portable
+`.tar.gz` into `build/packages/`. Packages depend on the system XRT (`xrt-base`
+on Fedora, `libxrt-npu2` on Ubuntu), matching the runtime-prerequisite flow.
+
+`.deb` is intentionally **not** part of this preset: a DEB is only valid when
+built on Debian/Ubuntu, since the engine binary carries the build host's glibc,
+FFmpeg and Boost sonames. Produce it with `linux-package-deb` on an Ubuntu host
+or inside a Debian container.
 
 ### 2. Engine-Only Build
 
