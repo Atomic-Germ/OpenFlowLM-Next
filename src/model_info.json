@@ -24,8 +24,7 @@
             "size": 3082933512,
             "lfs": {
                 "oid": "bf79cc2b19c9038ee0b8cd6ef9d48e45aa155dfa531f932824d52480bf863108",
-                "size": 3082933512,
-                "pointerSize": 135
+                "size": 3082933512
             },
             "xetHash": "1b4913527f5ed13c62a12b0c15c71154958aaae114dc2f6f12319ba4174aa24a",
             "path": "model.q4nx"
@@ -36,8 +35,7 @@
             "size": 18451122,
             "lfs": {
                 "oid": "1d8f0326910136aca20831249220b38ce5299527647bc8c6b65404485c479740",
-                "size": 18451122,
-                "pointerSize": 133
+                "size": 18451122
             },
             "xetHash": "2c68a9c786691bc21d613f3413f23dd4fed45b5facbbc97b3232a9210631e02d",
             "path": "tokenizer.json"
@@ -68,52 +66,48 @@
             "size": 698331,
             "lfs": {
                 "oid": "cb8e7bef68c19797d9f57c163ba8943fa3bd474af6c9e82c0c4a7554852afd4a",
-                "size": 698331,
-                "pointerSize": 131
+                "size": 698331
             },
             "xetHash": "94e2075d396c4f2dda0095618c7deb1fe35d31f42765464162cf067757292db1",
             "path": "attn.xclbin"
         },
         {
             "type": "file",
-            "oid": "e72b1f0df99fb714b4b3d96dab8cea5fddba5b5e",
-            "size": 1010,
+            "oid": "b003e695680e9f41202b54ceedafd7ea833dbd65",
+            "size": 1662,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "2a4f0f4223c1168de4ce474aa934a700af35f151",
-            "size": 449931,
+            "oid": "4d0d718506c769bd1246e00821117b743e69fd3c",
+            "size": 302379,
             "lfs": {
-                "oid": "f33ddafa4c4a630875a8226ca0c3fb5ae698b1e65e3534242fe547ded89aa6d6",
-                "size": 449931,
-                "pointerSize": 131
+                "oid": "9f6ff116ac1f0dd1f258eb67af5ae45a6f21e11eb6ab6bdd975cafd04127cd2b",
+                "size": 302379
             },
-            "xetHash": "777ac85aece763868a7287697525baf530a12ae1ce2ea37bfb8e444ac59deffa",
+            "xetHash": "f0ce0aa37215e6fbd64f162e32ee37d88aa39e197f8f20558bcc0d23b5513c84",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -122,8 +116,7 @@
             "size": 3292269616,
             "lfs": {
                 "oid": "69a92edb4d47572409954d4dd8e9951bda072f724e18b7493cd8d9fe148993fc",
-                "size": 3292269616,
-                "pointerSize": 135
+                "size": 3292269616
             },
             "xetHash": "ea3669923ab528a6b3435352b60b8061763142b1da9a28fb1894f95486b6c397",
             "path": "model.q4nx"
@@ -134,8 +127,7 @@
             "size": 11422654,
             "lfs": {
                 "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                "size": 11422654,
-                "pointerSize": 133
+                "size": 11422654
             },
             "xetHash": "693ec4b3922b0bd306bf7b4989e115ffbfeb7b0c08b31bc6d956818c6bb07f61",
             "path": "tokenizer.json"
@@ -152,8 +144,7 @@
             "size": 242043,
             "lfs": {
                 "oid": "6abbd4157ea07d048bfb1b717a9c6f72044c07d7b60169bd921a4d9a9acfdda0",
-                "size": 242043,
-                "pointerSize": 131
+                "size": 242043
             },
             "xetHash": "3203a7730e4c8e061781df1646e59b8e9d80f0273e945e3fdabae568effa36fe",
             "path": "vision_attn.xclbin"
@@ -164,8 +155,7 @@
             "size": 486939,
             "lfs": {
                 "oid": "6610fe4912cfe065781879f2a896d981015d49ab98dac27a41a012f580c4f8a2",
-                "size": 486939,
-                "pointerSize": 131
+                "size": 486939
             },
             "xetHash": "8416f84e46a2da8a93566385579a49298dcc5214761f4280bc35e89da7d01c9c",
             "path": "vision_mm.xclbin"
@@ -176,8 +166,7 @@
             "size": 830730584,
             "lfs": {
                 "oid": "ed6e10528c3245652c47418cd4ca7ab69de247f853f9c50e5212bf5073af004c",
-                "size": 830730584,
-                "pointerSize": 134
+                "size": 830730584
             },
             "xetHash": "f8fff59c6a53427d8070c255c960893b2d8685e2e4de5117498ea711eb9a40ba",
             "path": "vision_weight.q4nx"
@@ -202,8 +191,7 @@
             "size": 951607832,
             "lfs": {
                 "oid": "48d4632ee75ba1fdf40b8369d5961b1edfc86152e51d585aa6bd37b31f6f4895",
-                "size": 951607832,
-                "pointerSize": 134
+                "size": 951607832
             },
             "xetHash": "90c4f39e6908591ca9e04a3c425a3b677498226519890caf16441dfa4fd08796",
             "path": "audio_weight.q4nx"
@@ -226,8 +214,7 @@
             "size": 4671875302,
             "lfs": {
                 "oid": "aaca4bf5592804f0752c9f5fb7b4cce2f517fd869ef1d8181b209c8b6dbf2a87",
-                "size": 4671875302,
-                "pointerSize": 135
+                "size": 4671875302
             },
             "xetHash": "bb04ca22fc4ff8ba66da6df265edb2e786d372819062ae864a07eb2ec3bcac01",
             "path": "model.q4nx"
@@ -238,8 +225,7 @@
             "size": 32169626,
             "lfs": {
                 "oid": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
-                "size": 32169626,
-                "pointerSize": 133
+                "size": 32169626
             },
             "xetHash": "c62336ad134cad6f154d84eb0e5a5fa9ca17cd665ef3ba5ac4fd02b1486760b4",
             "path": "tokenizer.json"
@@ -250,8 +236,7 @@
             "size": 2138,
             "lfs": {
                 "oid": "e592c513cc86edf9962b9a4072f034c20f3c1facfbb2f1c60de8391774c4786e",
-                "size": 2138,
-                "pointerSize": 129
+                "size": 2138
             },
             "xetHash": "c90c8ccb1f65ddd48c2f692f0d79ca739beda1ebf247754476a7085f24caece8",
             "path": "tokenizer_config.json"
@@ -262,8 +247,7 @@
             "size": 337159264,
             "lfs": {
                 "oid": "40afff1f6328316add06a1b890f7835f8df246efdebbea84d84ebf513e1c3de6",
-                "size": 337159264,
-                "pointerSize": 134
+                "size": 337159264
             },
             "xetHash": "56f36ff8463a41c7c409f861fab05e599cc924e872c40582ca0f1ca192bfaa00",
             "path": "vision_weight.q4nx"
@@ -288,8 +272,7 @@
             "size": 956326424,
             "lfs": {
                 "oid": "944fbd6cca496801437df8f98ed4c592f6a3b9b1d097d95b0723b218d4e27c47",
-                "size": 956326424,
-                "pointerSize": 134
+                "size": 956326424
             },
             "xetHash": "366e484bb9b24eedb0c577b8ea6c99c917bb15975d2bdb07f0a493bed470bfeb",
             "path": "audio_weight.q4nx"
@@ -312,8 +295,7 @@
             "size": 7142621252,
             "lfs": {
                 "oid": "356d155beeee7f8a6008163957963e3df609bbb1c2d6b9c18ba1859906aab924",
-                "size": 7142621252,
-                "pointerSize": 135
+                "size": 7142621252
             },
             "xetHash": "1d132fc07fae6fb60892ae6555291e25cde1fcb2ab8aa27b566f4ecc40052a41",
             "path": "model.q4nx"
@@ -324,8 +306,7 @@
             "size": 32169626,
             "lfs": {
                 "oid": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
-                "size": 32169626,
-                "pointerSize": 133
+                "size": 32169626
             },
             "xetHash": "c62336ad134cad6f154d84eb0e5a5fa9ca17cd665ef3ba5ac4fd02b1486760b4",
             "path": "tokenizer.json"
@@ -336,8 +317,7 @@
             "size": 2138,
             "lfs": {
                 "oid": "e592c513cc86edf9962b9a4072f034c20f3c1facfbb2f1c60de8391774c4786e",
-                "size": 2138,
-                "pointerSize": 129
+                "size": 2138
             },
             "xetHash": "c90c8ccb1f65ddd48c2f692f0d79ca739beda1ebf247754476a7085f24caece8",
             "path": "tokenizer_config.json"
@@ -348,8 +328,7 @@
             "size": 956326592,
             "lfs": {
                 "oid": "9b943744723fb611adb54c2d4e74f3c0ccaf763d8cec0f2156903c91a5dc1d65",
-                "size": 956326592,
-                "pointerSize": 134
+                "size": 956326592
             },
             "xetHash": "3710dcbad9cd8d4eb57a3d49b43743ec518e5d85e290fb8736da0f03b6effa45",
             "path": "vision_weight.q4nx"
@@ -444,20 +423,19 @@
         },
         {
             "type": "file",
-            "oid": "db33e9e2c8037affef3db18d9d1b62589b6fbcc7",
-            "size": 3098,
+            "oid": "775e4b9a4ac8617ad249aec6504d7ff24ab42cc4",
+            "size": 3099,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "804f8fda9017be57f15310a047ca963498175840",
-            "size": 560985936,
+            "oid": "fd1fba816a84a00c1a6ac0b8f4af7005ea656932",
+            "size": 1109359296,
             "lfs": {
-                "oid": "787428ffe87be5e3e5a8fcaf241844b69896ca0c74a41f2432c436739f7ba4e4",
-                "size": 560985936,
-                "pointerSize": 134
+                "oid": "bb4d42950cf8932380c95babaa5844bb7fe2a19b759ea2fa807a55afc4d40a36",
+                "size": 1109359296
             },
-            "xetHash": "09ea79992caac2c4bab5b2a43b1e305a711ccf15816ae1598993a4a304f1f34c",
+            "xetHash": "1099c48058050081ab5a3e9ca0db18eb166eaf6896ab69af0835fec651c7ee57",
             "path": "model.q4nx"
         },
         {
@@ -466,8 +444,7 @@
             "size": 12807982,
             "lfs": {
                 "oid": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
-                "size": 12807982,
-                "pointerSize": 133
+                "size": 12807982
             },
             "xetHash": "655d3f6803c619aa34c31a027ce74a315eaa200aad3fca5b968dcdf6485bfba2",
             "path": "tokenizer.json"
@@ -478,8 +455,7 @@
             "size": 16788,
             "lfs": {
                 "oid": "485aad30cae5f2280d6050a01f9160c435ee5aeabaf4fda7dd59b76ccc8b1f4c",
-                "size": 16788,
-                "pointerSize": 130
+                "size": 16788
             },
             "xetHash": "3257d2a6bd11b5851c4d3a68de12db185cefcb46ad943c7f2f234d36c8b79198",
             "path": "tokenizer_config.json"
@@ -490,8 +466,7 @@
             "size": 201202552,
             "lfs": {
                 "oid": "94e6b19043bf1d07645ee1e0a44b44016abb881801027b39656b7f7872f8fc18",
-                "size": 201202552,
-                "pointerSize": 134
+                "size": 201202552
             },
             "xetHash": "daae7d46886afd99630cc0c18b0053cee319f08a99e39d94a4db57ef7e4c18a3",
             "path": "vision_weight.q4nx"
@@ -506,32 +481,31 @@
         },
         {
             "type": "file",
-            "oid": "2efa49d346c547ea81cd3d1310f414df25934f45",
-            "size": 62814,
+            "oid": "4a85459673edc98d06aca2ce3412fb59a4a4b8a9",
+            "size": 62867,
             "path": "README.md"
         },
         {
             "type": "file",
-            "oid": "45ef1dd503212998639ffa79508ca2bb88a66406",
-            "size": 7545,
+            "oid": "0a2996ea8ab9c5a939f4eb327dccad3765e38f70",
+            "size": 29063,
             "path": "chat_template.jinja"
         },
         {
             "type": "file",
-            "oid": "b82ca5fcc6744bebcf52bcdfe62488ba91069d5a",
+            "oid": "5db1c02fa1b533cb311295e20d05672d2f52337d",
             "size": 2968,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "a259467c60059574939a49eaa17457693d1ef915",
-            "size": 1339269144,
+            "oid": "f1322812e4682d940e1e4627a090cc8603cc5328",
+            "size": 2453710024,
             "lfs": {
-                "oid": "cb07e36b8997f1ee680317b46fb6b3ded1544ddbc54d44404d4d3a4a84ca1ee2",
-                "size": 1339269144,
-                "pointerSize": 135
+                "oid": "8aa859043dd57fdd5b950d20969b318600c330034883f9a92ee2abce093f2a9f",
+                "size": 2453710024
             },
-            "xetHash": "8eaa9dea048c0e8c9feda27a89ad16776cd019eac91b769c8e9428cfaa36d90f",
+            "xetHash": "9e59380d01ef221e616fef4f7646a541f12a869fedf2d384bb654c366b1d0b9e",
             "path": "model.q4nx"
         },
         {
@@ -540,22 +514,20 @@
             "size": 12807982,
             "lfs": {
                 "oid": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
-                "size": 12807982,
-                "pointerSize": 133
+                "size": 12807982
             },
             "xetHash": "655d3f6803c619aa34c31a027ce74a315eaa200aad3fca5b968dcdf6485bfba2",
             "path": "tokenizer.json"
         },
         {
             "type": "file",
-            "oid": "c31cf3ceb18b28742b019f09c58beacefdb26847",
-            "size": 16791,
+            "oid": "cb38cffd0ebb3a8196c73d17daed9c97b0147b48",
+            "size": 8766,
             "lfs": {
-                "oid": "613f1afe2956c1288f548c052476a936fd6d908da9e0f98a07f48e55e662e232",
-                "size": 16791,
-                "pointerSize": 130
+                "oid": "8081a97bc57d3f61ef693b8971fcbd5f16ba33661b29512cc726cf318e375218",
+                "size": 8766
             },
-            "xetHash": "62dd786c99791874b100d9cfc696015d362b2a73766f1dcc4b89186e6259f3a2",
+            "xetHash": "1cdb461c0f0c197920e910ce78ed7cf67de8f1d03e5cc6af4d94b0dda70ba35c",
             "path": "tokenizer_config.json"
         },
         {
@@ -564,8 +536,7 @@
             "size": 662866216,
             "lfs": {
                 "oid": "508c9381e69173b838650cc0b97a81196eb438be692999436be7d518ffd4ebf2",
-                "size": 662866216,
-                "pointerSize": 134
+                "size": 662866216
             },
             "xetHash": "c479d2be31af0c569b4e49c1320dd243e5487bcc30f6be6429a641d0dddc5dae",
             "path": "vision_weight.q4nx"
@@ -592,20 +563,19 @@
         },
         {
             "type": "file",
-            "oid": "a9c69893a7b32540f592d1eded3b0ffd2ca510fa",
+            "oid": "1c9b7c2d3488243d1251d085d9ad011c8eb131d9",
             "size": 3189,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "fc9917b127091f6b98ea04b372aa8eb50ea84eae",
-            "size": 2750560152,
+            "oid": "23d0343a3611d6df085b8de9132eacbdf781fac4",
+            "size": 4299177104,
             "lfs": {
-                "oid": "a7d2d49a589d5cff79d48838d2bab4b0745e30e86189aec98ad1e51dff49ffe2",
-                "size": 2750560152,
-                "pointerSize": 135
+                "oid": "11161f32dbfb417fa409ce56be155e3fb4b892eb25f3977694d61a0dee80aad2",
+                "size": 4299177104
             },
-            "xetHash": "ba647b28ed937be63522f8edb987efa3fb20f0d5beb7251160613cfa97f3433c",
+            "xetHash": "ceceab5edc7c55822d1ba475bf3ef88232372d6c32886654bba7be382440f600",
             "path": "model.q4nx"
         },
         {
@@ -614,8 +584,7 @@
             "size": 12807982,
             "lfs": {
                 "oid": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
-                "size": 12807982,
-                "pointerSize": 133
+                "size": 12807982
             },
             "xetHash": "655d3f6803c619aa34c31a027ce74a315eaa200aad3fca5b968dcdf6485bfba2",
             "path": "tokenizer.json"
@@ -626,8 +595,7 @@
             "size": 16791,
             "lfs": {
                 "oid": "613f1afe2956c1288f548c052476a936fd6d908da9e0f98a07f48e55e662e232",
-                "size": 16791,
-                "pointerSize": 130
+                "size": 16791
             },
             "xetHash": "62dd786c99791874b100d9cfc696015d362b2a73766f1dcc4b89186e6259f3a2",
             "path": "tokenizer_config.json"
@@ -638,8 +606,7 @@
             "size": 667061544,
             "lfs": {
                 "oid": "d98ef088a39a63553a06f34f3a557d98980f72892c84d2b77eff4667c4aa9ea4",
-                "size": 667061544,
-                "pointerSize": 134
+                "size": 667061544
             },
             "xetHash": "813e9596d99caac326757177a0c1a543377e8da91b44e8574701174a5750ab32",
             "path": "vision_weight.q4nx"
@@ -666,20 +633,19 @@
         },
         {
             "type": "file",
-            "oid": "a8b37b51970b2dc277c11e512cb1e9045ea72286",
+            "oid": "07e238b610334b74731ebfc181bb8786a509db70",
             "size": 3364,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "1a8b474eaee891278a8ac346457190907181d62b",
-            "size": 7132498128,
+            "oid": "f2465daa43a3dfbd04acc8e585d6581dca498e0f",
+            "size": 7632668880,
             "lfs": {
-                "oid": "fe0b2dd8b8e2bf7d5d6800591ee247a1bd5540d5fe1b1d4b39964b2f27d7116e",
-                "size": 7132498128,
-                "pointerSize": 135
+                "oid": "723eb522214d7b242c108ccaf4be95a8a5c421e3bb55159d8a5b47816bff824d",
+                "size": 7632668880
             },
-            "xetHash": "d68a1fdbddea3ab0a7ab6fd284c4321927fb089bafb097d73d50c57c5daceb03",
+            "xetHash": "54dceb3529e83345359961c5fed2bbb352eebbdd26ff7980a146708e3be16613",
             "path": "model.q4nx"
         },
         {
@@ -688,8 +654,7 @@
             "size": 12807982,
             "lfs": {
                 "oid": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
-                "size": 12807982,
-                "pointerSize": 133
+                "size": 12807982
             },
             "xetHash": "655d3f6803c619aa34c31a027ce74a315eaa200aad3fca5b968dcdf6485bfba2",
             "path": "tokenizer.json"
@@ -700,8 +665,7 @@
             "size": 16791,
             "lfs": {
                 "oid": "759a820945af6436b68553caac35ffb2dc0da017f7de4fbe9ae562602e2cc225",
-                "size": 16791,
-                "pointerSize": 130
+                "size": 16791
             },
             "xetHash": "55e44af9d4666c2278beb471ad863108cb5104a8cfec066f48936de194bb1444",
             "path": "tokenizer_config.json"
@@ -712,8 +676,7 @@
             "size": 1027737360,
             "lfs": {
                 "oid": "07979ede48dd92aea3f1bb1cc8f6245151cb446c0edef1516f5edb41c6f1d646",
-                "size": 1027737360,
-                "pointerSize": 135
+                "size": 1027737360
             },
             "xetHash": "b7cbafceaa573a2941b9a5f4a7cb8404c010951a4028181869abbdf721b81bcd",
             "path": "vision_weight.q4nx"
@@ -722,32 +685,31 @@
     "qwen3.6-moe:35b-a3b": [
         {
             "type": "file",
-            "oid": "f6a7527cede01bc2f044b1799ac812c33fca468b",
-            "size": 1673,
+            "oid": "912dd0d4b807d02809963ec6b69ddcab607c2a67",
+            "size": 2032,
             "path": ".gitattributes"
         },
         {
             "type": "file",
-            "oid": "a8755d827c0a7b614c246c4060dfd58ab352a8ff",
-            "size": 7764,
+            "oid": "0a2996ea8ab9c5a939f4eb327dccad3765e38f70",
+            "size": 29063,
             "path": "chat_template.jinja"
         },
         {
             "type": "file",
-            "oid": "663d99f07e89c5b6f89e7224b6afc20f42d6744e",
+            "oid": "f9ed77a2ab8fe8cc9c8bdcef826b5c47aee8abd1",
             "size": 4017,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "db25d01273739895f09231927a1a6b3ab2ef31c2",
-            "size": 21044871704,
+            "oid": "7a297a15e5d0794778386bd77d890e27145f7f69",
+            "size": 23235412536,
             "lfs": {
-                "oid": "a763f82ad34f09af85615c600265fa26be5723176e483ef22cd1ec735f12d175",
-                "size": 21044871704,
-                "pointerSize": 136
+                "oid": "688f1e153d10ad0bc2d9ab6a4931cf3d91e9f26c8f817ebb8a2d60a56a3cf8de",
+                "size": 23235412536
             },
-            "xetHash": "d05bb288d6a1e6ceb55210d2a04bcec9c4e80eebd296e100ed91a168397fea3b",
+            "xetHash": "779be277c11ece1b66d968b9a3bf770b9161219d660a471d2d0d84dc87e63907",
             "path": "model.q4nx"
         },
         {
@@ -756,8 +718,7 @@
             "size": 12807982,
             "lfs": {
                 "oid": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
-                "size": 12807982,
-                "pointerSize": 133
+                "size": 12807982
             },
             "xetHash": "655d3f6803c619aa34c31a027ce74a315eaa200aad3fca5b968dcdf6485bfba2",
             "path": "tokenizer.json"
@@ -774,8 +735,7 @@
             "size": 1008858888,
             "lfs": {
                 "oid": "11845c3c112ccb481382763e7e1838cca103b100a73bbd98b7a61cc12861323e",
-                "size": 1008858888,
-                "pointerSize": 135
+                "size": 1008858888
             },
             "xetHash": "860599816a63700e42eb8e141c2c5f83cd1af1426de148725b0dca76a2c1bf11",
             "path": "vision_weight.q4nx"
@@ -784,8 +744,8 @@
     "lfm2:1.2b": [
         {
             "type": "file",
-            "oid": "e8825b49610d68531dd9cace712410596f7daf35",
-            "size": 1611,
+            "oid": "2c8e9fb9dad2bfbe25dcecb9a2c07185a98d4c48",
+            "size": 1859,
             "path": ".gitattributes"
         },
         {
@@ -794,8 +754,7 @@
             "size": 695259,
             "lfs": {
                 "oid": "8642c5efe753743be96ca0797cfd5b74017568484c396ccd3398d1841593516e",
-                "size": 695259,
-                "pointerSize": 131
+                "size": 695259
             },
             "xetHash": "7ddc1fc3d02baa4cccb33521f59dd9482cc8e64ede508fe7bb9539bd15380442",
             "path": "attn.xclbin"
@@ -812,34 +771,31 @@
             "size": 118475,
             "lfs": {
                 "oid": "f9d88c51852f29af30c67ef7a503b941c26a73263920f05ebaee9456c3bfc00b",
-                "size": 118475,
-                "pointerSize": 131
+                "size": 118475
             },
             "xetHash": "e0a0d0937b6a5c5996ea029534af7f082ebcdb020a829325594b58e993b54dbd",
             "path": "conv.xclbin"
         },
         {
             "type": "file",
-            "oid": "6622acdeeeb0b9f9e39056f2797f786015206954",
-            "size": 119579,
+            "oid": "9d14011f3497947552c6e1c48ebbc61720f6c90d",
+            "size": 114059,
             "lfs": {
-                "oid": "293fa5d1c05d8f6b046166b69ec7792621ec8212173dfb077737bd403076ffe5",
-                "size": 119579,
-                "pointerSize": 131
+                "oid": "b7a506003e9038b15cfa0b2b7d2d376d2eb818286f0f906857f379681c757efd",
+                "size": 114059
             },
-            "xetHash": "3b01e21f7edd7ec1daeeb12e5706aed7acc6fee77892e0aeb68e8a5db93c3dd3",
+            "xetHash": "af55771b4695fbe9126baadb0e80e1fe92e1fb590cb97fc1be23e1e74e4c4786",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "f9810aead6c1bda8eeb020ec89c9c87ddf83e055",
-            "size": 357835,
+            "oid": "e0187d5a777e50ffedcc9790b927f3d4b64ec32c",
+            "size": 323867,
             "lfs": {
-                "oid": "312ea5bfbf1017f5b73a60124ce79af36dcf3ded09c29da56383924979b3de87",
-                "size": 357835,
-                "pointerSize": 131
+                "oid": "8957a6c25e6c8e5beda515428f704fd48b4eed6b1a41f45e3aff35b5ba39450e",
+                "size": 323867
             },
-            "xetHash": "28a44baaacdec7beb6ecd480b9689188f3630cd3a8cd9715e18865238f803c0a",
+            "xetHash": "973a7f4575819941a38e2115c19efe9f3e320c02fbde0490a95ab0cf5d13294a",
             "path": "layer.xclbin"
         },
         {
@@ -848,8 +804,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -860,8 +815,7 @@
             "size": 1000093016,
             "lfs": {
                 "oid": "2755ab40cd927e3cc2c7068a5108d7ab4b85600e6dd320f97003b7223fde0e2f",
-                "size": 1000093016,
-                "pointerSize": 135
+                "size": 1000093016
             },
             "xetHash": "5984f09fd27eda6a24a4010aaa22dbb992e49122792b74cb8733de5a39ccb9cd",
             "path": "model.q4nx"
@@ -996,8 +950,7 @@
             "size": 695259,
             "lfs": {
                 "oid": "8642c5efe753743be96ca0797cfd5b74017568484c396ccd3398d1841593516e",
-                "size": 695259,
-                "pointerSize": 131
+                "size": 695259
             },
             "xetHash": "7ddc1fc3d02baa4cccb33521f59dd9482cc8e64ede508fe7bb9539bd15380442",
             "path": "attn.xclbin"
@@ -1014,8 +967,7 @@
             "size": 118475,
             "lfs": {
                 "oid": "f9d88c51852f29af30c67ef7a503b941c26a73263920f05ebaee9456c3bfc00b",
-                "size": 118475,
-                "pointerSize": 131
+                "size": 118475
             },
             "xetHash": "e0a0d0937b6a5c5996ea029534af7f082ebcdb020a829325594b58e993b54dbd",
             "path": "conv.xclbin"
@@ -1032,8 +984,7 @@
             "size": 119579,
             "lfs": {
                 "oid": "293fa5d1c05d8f6b046166b69ec7792621ec8212173dfb077737bd403076ffe5",
-                "size": 119579,
-                "pointerSize": 131
+                "size": 119579
             },
             "xetHash": "3b01e21f7edd7ec1daeeb12e5706aed7acc6fee77892e0aeb68e8a5db93c3dd3",
             "path": "dequant.xclbin"
@@ -1044,8 +995,7 @@
             "size": 357835,
             "lfs": {
                 "oid": "124834f5421b5962ec46044daa8371eb55193f5273ac249ad43e591ba717ec0f",
-                "size": 357835,
-                "pointerSize": 131
+                "size": 357835
             },
             "xetHash": "d1ede3e06102901bc7dc7932f2d35591f0ea30ab7573b2a76000bce448ce0b56",
             "path": "layer.xclbin"
@@ -1056,8 +1006,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -1068,8 +1017,7 @@
             "size": 1874619128,
             "lfs": {
                 "oid": "5597c05315d4ef32757f2dbe35c8498a7e8f3326542daaf76a601767ff9c599c",
-                "size": 1874619128,
-                "pointerSize": 135
+                "size": 1874619128
             },
             "xetHash": "836083ac69b8532b479993eabcb5ec59311b63a9a97ac1808ba80fd3d6d74081",
             "path": "model.q4nx"
@@ -1106,8 +1054,7 @@
             "size": 695259,
             "lfs": {
                 "oid": "8642c5efe753743be96ca0797cfd5b74017568484c396ccd3398d1841593516e",
-                "size": 695259,
-                "pointerSize": 131
+                "size": 695259
             },
             "xetHash": "7ddc1fc3d02baa4cccb33521f59dd9482cc8e64ede508fe7bb9539bd15380442",
             "path": "attn.xclbin"
@@ -1124,8 +1071,7 @@
             "size": 118475,
             "lfs": {
                 "oid": "f9d88c51852f29af30c67ef7a503b941c26a73263920f05ebaee9456c3bfc00b",
-                "size": 118475,
-                "pointerSize": 131
+                "size": 118475
             },
             "xetHash": "e0a0d0937b6a5c5996ea029534af7f082ebcdb020a829325594b58e993b54dbd",
             "path": "conv.xclbin"
@@ -1136,8 +1082,7 @@
             "size": 119579,
             "lfs": {
                 "oid": "293fa5d1c05d8f6b046166b69ec7792621ec8212173dfb077737bd403076ffe5",
-                "size": 119579,
-                "pointerSize": 131
+                "size": 119579
             },
             "xetHash": "3b01e21f7edd7ec1daeeb12e5706aed7acc6fee77892e0aeb68e8a5db93c3dd3",
             "path": "dequant.xclbin"
@@ -1148,8 +1093,7 @@
             "size": 357835,
             "lfs": {
                 "oid": "312ea5bfbf1017f5b73a60124ce79af36dcf3ded09c29da56383924979b3de87",
-                "size": 357835,
-                "pointerSize": 131
+                "size": 357835
             },
             "xetHash": "28a44baaacdec7beb6ecd480b9689188f3630cd3a8cd9715e18865238f803c0a",
             "path": "layer.xclbin"
@@ -1160,8 +1104,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -1172,8 +1115,7 @@
             "size": 1000093016,
             "lfs": {
                 "oid": "b341d42021e617a59d8c8227517b20ae5f171cd0bf5f199379facba5bc198e70",
-                "size": 1000093016,
-                "pointerSize": 135
+                "size": 1000093016
             },
             "xetHash": "eb8b262e1155c42131a7254b0daf015166773259ae6d42f5bb37dc4d0ee32c58",
             "path": "model.q4nx"
@@ -1222,8 +1164,7 @@
             "size": 1000093016,
             "lfs": {
                 "oid": "b9c4bacba8ed7251acc0dced95b2f145b7fe20bf837e3ac69ebb8851687ee2db",
-                "size": 1000093016,
-                "pointerSize": 135
+                "size": 1000093016
             },
             "xetHash": "f736b22381a15603b2d8183bb708eea0c8a5b2b5445f74a09ec37d024a0c712e",
             "path": "model.q4nx"
@@ -1260,8 +1201,7 @@
             "size": 527083,
             "lfs": {
                 "oid": "5a83098ca9a3392330e666c7fe2d1bc155d12b0226fa5fa75e973cf0c14ef558",
-                "size": 527083,
-                "pointerSize": 131
+                "size": 527083
             },
             "xetHash": "9a020176f703abf99a9811441cc27937a37c19273cf880c98a8289947fe68833",
             "path": "attn.xclbin"
@@ -1278,8 +1218,7 @@
             "size": 121115,
             "lfs": {
                 "oid": "ef2c9238930cebf503303b3d12f6ac6119f6c8c2b7b83796008404e007224094",
-                "size": 121115,
-                "pointerSize": 131
+                "size": 121115
             },
             "xetHash": "cca8d2c02c0b72710b9eb13f52e1526e3f20689e1d6b71b1a185c92a89498e88",
             "path": "dequant.xclbin"
@@ -1290,8 +1229,7 @@
             "size": 433995,
             "lfs": {
                 "oid": "419d20a6d68475a9e4f47731eb2a6b0c8388630cb319fa4a1e57cabad25bc1e5",
-                "size": 433995,
-                "pointerSize": 131
+                "size": 433995
             },
             "xetHash": "515e92e950b111fad65d1e9def056034ffc4d4f08b9564c7207e26f23c2f848c",
             "path": "layer.xclbin"
@@ -1302,8 +1240,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -1314,8 +1251,7 @@
             "size": 3627014968,
             "lfs": {
                 "oid": "13b91962618b76f6ff205c1fe5afa20ce6a656df82ce877dcd3db1874ece21c8",
-                "size": 3627014968,
-                "pointerSize": 135
+                "size": 3627014968
             },
             "xetHash": "ee82b98c8ffd3a8dd8ddb0b67ed515240a6b5988c3886e131224ee6e0a8e4855",
             "path": "model.q4nx"
@@ -1326,8 +1262,7 @@
             "size": 15524095,
             "lfs": {
                 "oid": "382cc235b56c725945e149cc25f191da667c836655efd0857b004320e90e91ea",
-                "size": 15524095,
-                "pointerSize": 133
+                "size": 15524095
             },
             "xetHash": "1513210f64796127a6e0a11f88e04f1d530c2601dea12f1e96852aebcbcc7599",
             "path": "tokenizer.json"
@@ -1342,43 +1277,47 @@
     "embed-gemma:300m": [
         {
             "type": "file",
-            "oid": "c327f2acb00149676ade24a75e11eb6ebbd367f9ee050267ba56829d2979f702",
+            "oid": "83c1a1282f54382f1857da54fdfd0b8a254d675b",
             "size": 9437272,
-            "path": "2_Dense/model.safetensors"
+            "path": "2_Dense/model.safetensors",
+            "xetHash": "f0c1c47d336fb258ab1e1227a197d6c681b8b15256a1d3d28991a08bee7210b5"
         },
         {
             "type": "file",
-            "oid": "ffb6cc5162e11e2ce6bc2367e121ee3bbbc4e82e1ee26826bd7573d4948d81b8",
+            "oid": "1608fa650159ea056f4c5e0a463380d4f7e4532b",
             "size": 9437272,
-            "path": "3_Dense/model.safetensors"
+            "path": "3_Dense/model.safetensors",
+            "xetHash": "d4c6bfa2d443d76d76014fcc2504e98910fda29b97e3f8fc1d8f0c3e523b30af"
         },
         {
             "type": "file",
-            "oid": "8f863f76e2d9c710cc833dc92efa898c9adfd41031c786507cc6b0e49c2e3e68",
+            "oid": "aca32ef8dacddfbe15dc12c0427a9153d5c2b0f4",
             "size": 1488,
             "path": "config.json"
         },
         {
             "type": "file",
-            "oid": "cbf5a78393b6a033e0b8a63a57549964f7ed5c6fbeb4ba0694214f36123f2fd2",
+            "oid": "2dc7e60a200a63efe9a5bc7e88cfd7f6fafd9d21",
             "size": 1211486072,
-            "path": "model.safetensors"
+            "path": "model.safetensors",
+            "xetHash": "86b1c967d4c0a58aa046a553a55c71822e598773533af9af5ab2b0756b54b833"
         },
         {
             "type": "file",
-            "oid": "6852f8d561078cc0cebe70ca03c5bfdd0d60a45f9d2e0e1e4cc05b68e9ec329e",
+            "oid": "ce92c780ef05f4d85d4fb4e44dae88946c4154f6",
             "size": 33385008,
-            "path": "tokenizer.json"
+            "path": "tokenizer.json",
+            "xetHash": "54a250b3b7c81482286dfd8f776cbfdfd7e2889cf6c1674679395abd967cdd60"
         },
         {
             "type": "file",
-            "oid": "9076840490613047bc9115963ee96b7702018b0d26ba644240bf856efda93118",
+            "oid": "33786d29ae85b05bc37772cd10876d66afbe905e",
             "size": 1155346,
             "path": "tokenizer_config.json"
         },
         {
             "type": "file",
-            "oid": "1c1c8955cbf586a0cf5d1bce7cc47cdae09552ada3cd5f1d483ff17c3e5465de",
+            "oid": "517c881b69c677fc0dd0835cc4de2d8770f2c8e5",
             "size": 42837,
             "path": "weights_manifest.json"
         }
@@ -1386,8 +1325,8 @@
     "whisper-v3:turbo": [
         {
             "type": "file",
-            "oid": "5796826707abeb89fd8deccd569361f2bda4db56",
-            "size": 1947,
+            "oid": "d68292fba88dd9e6b9e9988e456d2d9ca464be25",
+            "size": 1845,
             "path": ".gitattributes"
         },
         {
@@ -1408,8 +1347,7 @@
             "size": 137051,
             "lfs": {
                 "oid": "5f711363051bcd6a688031ce917a53b8f4e088b1f4eda53bf352e9581443d749",
-                "size": 137051,
-                "pointerSize": 131
+                "size": 137051
             },
             "xetHash": "7b6dbc9b7981f0a7f7513d0d67cdf0f5036a5f65f1a2f07dae94c7e05f010f89",
             "path": "decoder_mv.xclbin"
@@ -1420,8 +1358,7 @@
             "size": 383083,
             "lfs": {
                 "oid": "adc23d80f7ecd77e7567bf2b14ed143630f8286bb3e7b6a2a85223ac9e6f4ae2",
-                "size": 383083,
-                "pointerSize": 131
+                "size": 383083
             },
             "xetHash": "fea3f0bd4f02ac4333274f7c9260a51bd98c12fb2d7652469ef0cdd9eb1ddfac",
             "path": "encoder_attn.xclbin"
@@ -1432,8 +1369,7 @@
             "size": 114667,
             "lfs": {
                 "oid": "e9bfd2ee346dbdcd074aaf595e86b2f8e7505bb383276506ed6a1e0280f2cb6a",
-                "size": 114667,
-                "pointerSize": 131
+                "size": 114667
             },
             "xetHash": "db55cbd24f6b94afe2bcc784f2e7a5663474a0ac27038c703d9dc49317caf944",
             "path": "encoder_dequant.xclbin"
@@ -1444,8 +1380,7 @@
             "size": 163211,
             "lfs": {
                 "oid": "b40727f1fe20be8981863491b992247d1f64cfbef40949569be2f5d557d4e639",
-                "size": 163211,
-                "pointerSize": 131
+                "size": 163211
             },
             "xetHash": "3a64177b4d948fecc72eb4b74a9e3654b3616169f8beaeed8af8d4d891c41962",
             "path": "encoder_mm.xclbin"
@@ -1456,8 +1391,7 @@
             "size": 650175128,
             "lfs": {
                 "oid": "8fb97604bf5762ee26efa696cfc9eb70724110358c7b4ca628a7973bf8a16291",
-                "size": 650175128,
-                "pointerSize": 134
+                "size": 650175128
             },
             "xetHash": "4382b3b0b88482d08e82ee1bc21078797f31d7d9acb3f06680851ad747b9eff5",
             "path": "model.q4nx"
@@ -1480,8 +1414,7 @@
             "size": 153355,
             "lfs": {
                 "oid": "2053faba39db087c3045e1dda8c27702001a7af58229d4016d9e8c2c3e45027a",
-                "size": 153355,
-                "pointerSize": 131
+                "size": 153355
             },
             "xetHash": "19964e9256900812f889f983df1c0f11b1742dfc3d61684dc7e7b16fcfa0dceb",
             "path": "whisper_head.xclbin"
@@ -1506,8 +1439,7 @@
             "size": 456971,
             "lfs": {
                 "oid": "3aeebce88b8e03235090892244c446071c9035d804664227a164377a8042bf72",
-                "size": 456971,
-                "pointerSize": 131
+                "size": 456971
             },
             "xetHash": "20edf4621d52ddc2cc5ce930e03cb1ac423a9a1c9d066b5c74c4bdde8c91df74",
             "path": "attn.xclbin"
@@ -1524,34 +1456,31 @@
             "size": 103915,
             "lfs": {
                 "oid": "5b529e9c91b0d9def4c5394a21920c0ba01f3d83568dde40f04e4f27034cc714",
-                "size": 103915,
-                "pointerSize": 131
+                "size": 103915
             },
             "xetHash": "7f499637200450191afc10a9ff1575f5c129e6793ef316a2f4b19af0e023164e",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "dd2a8503eeb5b4b976713b6bd6756ecf94b86476",
-            "size": 220811,
+            "oid": "52140b3757781f2bb2713307da3525e558c23d06",
+            "size": 173707,
             "lfs": {
-                "oid": "0b171d034ff667277ba3da376f78e93b87de8c26eb32eb21faec2975e6af35df",
-                "size": 220811,
-                "pointerSize": 131
+                "oid": "1a4f03948734154b299af2c3aae96745f93f6fd976b7ba50bb82ccda2558746a",
+                "size": 173707
             },
-            "xetHash": "a33fdb808eab9055fe8a9a4dcde15d7ea7f0bcf3fecba5b05d2cbf8f1e21d38e",
+            "xetHash": "b8de6e8b37bb05af92b4388224858f1126cfb704fb1f1e87a47a12fad3c6b810",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "51e38e80690025e5b8db0147bec79a206659ddd0",
-            "size": 230667,
+            "oid": "6aba6de235d2801633d459717c1f21f1dfdeb46e",
+            "size": 143115,
             "lfs": {
-                "oid": "849fc83823442b4e872846d18f54c7340853373dd917930c8c889412ff23d0f4",
-                "size": 230667,
-                "pointerSize": 131
+                "oid": "14bd1d261343485684abf317c13c6d3eb581c79260437f39d979632b117dadea",
+                "size": 143115
             },
-            "xetHash": "88b6cbc6f64adf17e506b4ad6872c9a90e836f6243105e74bd3ddcb95605fa6b",
+            "xetHash": "3f5f1dc76417e39e21a20dd4611e7970feb172408adce0be06bf80739ca4c495",
             "path": "lm_head.xclbin"
         },
         {
@@ -1560,8 +1489,7 @@
             "size": 218699,
             "lfs": {
                 "oid": "2962eefe324053f9a3dac247d1ec7f27737a76eeb9e346fc1296ca1269a22ccb",
-                "size": 218699,
-                "pointerSize": 131
+                "size": 218699
             },
             "xetHash": "d41299d2afdc300f6b54824e4a72663067941abeee5cdcbe368b0ffa97a273e2",
             "path": "mm.xclbin"
@@ -1572,8 +1500,7 @@
             "size": 1229131768,
             "lfs": {
                 "oid": "c55853849301739de816f8c8ed411c1025a2a2c01d08c30b99eb277db1951b58",
-                "size": 1229131768,
-                "pointerSize": 135
+                "size": 1229131768
             },
             "xetHash": "d18e1d18eb0f505374a6a59e1ca9b017203ce034e4345c01d798ec6db0b9d62d",
             "path": "model.q4nx"
@@ -1584,8 +1511,7 @@
             "size": 33384568,
             "lfs": {
                 "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
-                "size": 33384568,
-                "pointerSize": 133
+                "size": 33384568
             },
             "xetHash": "fa66c8c017ade193f7cc37a2b421a1fc461563e803f179a496f7bdda2ec42c21",
             "path": "tokenizer.json"
@@ -1600,8 +1526,8 @@
     "gemma3:4b": [
         {
             "type": "file",
-            "oid": "616731466cfd77541dd6592f98746b19919a33a4",
-            "size": 1658,
+            "oid": "90adb20d209ab3dbe65edbd05edeb8e6c7f9999c",
+            "size": 2025,
             "path": ".gitattributes"
         },
         {
@@ -1612,14 +1538,13 @@
         },
         {
             "type": "file",
-            "oid": "bdedbd78a039afe6dfc3784a8949b541d489aab1",
+            "oid": "ef3a12c8751cfb1b970b31890fe7f9c00afb5fd5",
             "size": 464683,
             "lfs": {
-                "oid": "d815c18b01f1d6f95995c1ca8166c7a8d9c0d1a1a4985c5832e62978f40512ac",
-                "size": 464683,
-                "pointerSize": 131
+                "oid": "ad5ee7122d17040e7cbde995fe3a13fb38c77cd64921605c9b61e703fe85e070",
+                "size": 464683
             },
-            "xetHash": "55242784680188ee11712edb6f8b54a0b6a4c3ccda9797652242673788f6b0be",
+            "xetHash": "4d5a4a833304bf7ff3a25e6edca8a8ccd2eae052641cbd8e469e6d983af0445c",
             "path": "attn.xclbin"
         },
         {
@@ -1630,50 +1555,46 @@
         },
         {
             "type": "file",
-            "oid": "59ea2b3d52fc0b9160d9d266ddc08d962f369d64",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "c7a392a444613b0d281f4f2d05f1f7d1d34eb26a6824ac44dbe1f871209b505f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "fe5439a54f6949a920f9920aa2161a6ddd218304eb297c6af6ecbf28ec27515d",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "272ac2458a16bf5637e938f07817a38f49823e70",
-            "size": 386123,
+            "oid": "61e335c1b098791f613c6c4537e778b7fdf9a532",
+            "size": 282955,
             "lfs": {
-                "oid": "47916465929055229947c4fd8ae2592b3b2b4c5721492ad00a9e5815f6f19aaf",
-                "size": 386123,
-                "pointerSize": 131
+                "oid": "a8662204bd8636a57e2ee298dff9e638e8ad257866f218cd5a7b0e3bea34f125",
+                "size": 282955
             },
-            "xetHash": "15de369389fc18fcc0d8fa1e13f8971d2274dfd96fcb91a73ca1b83cced5cf9d",
+            "xetHash": "933673ef5e792f045cd16fa2b6ede17f9ce9591b6cebd7e0804f555da477f8f2",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "0d7ac4830f96e456d926d71d26bccef49d02bf42",
-            "size": 352011,
+            "oid": "adf494bb141005779eab434803276f3b74cce410",
+            "size": 153355,
             "lfs": {
-                "oid": "83795e011941dd21c935d32be26399808fff49c73f486fedaa7edd30c540c897",
-                "size": 352011,
-                "pointerSize": 131
+                "oid": "dd505faa35eb3c528ed492cb62cbc52b3f808a94896d79fe84a4bd426b209d7f",
+                "size": 153355
             },
-            "xetHash": "eb3f23372e228cae667627afc9ef97514f50d4f156f095a6d6e70e4db3a5ad6f",
+            "xetHash": "c917ea1e65a7416a545bd968cc29c3b989528d7eada26bfc5f9c90bf462a1bc6",
             "path": "lm_head.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -1682,8 +1603,7 @@
             "size": 3768226744,
             "lfs": {
                 "oid": "06cb8f39d3f84850c3e1938de304605cf842fddbb5fef946fa88140d811ff117",
-                "size": 3768226744,
-                "pointerSize": 135
+                "size": 3768226744
             },
             "xetHash": "492c7c9fe6b7cfe03c5223468dc8cb84fa40b8c26470931afc5c4b7f8c687291",
             "path": "model.q4nx"
@@ -1694,8 +1614,7 @@
             "size": 33384568,
             "lfs": {
                 "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
-                "size": 33384568,
-                "pointerSize": 133
+                "size": 33384568
             },
             "xetHash": "fa66c8c017ade193f7cc37a2b421a1fc461563e803f179a496f7bdda2ec42c21",
             "path": "tokenizer.json"
@@ -1712,22 +1631,20 @@
             "size": 254971,
             "lfs": {
                 "oid": "c8094b4b46ba801f04af0d3db721ea7609ab3d5916b412edf4f68b912bf5ca69",
-                "size": 254971,
-                "pointerSize": 131
+                "size": 254971
             },
             "xetHash": "a73f09290ed90f2e610cc74fd87c0b38ed5f0fd52fac11d31f935f3b9398e9ec",
             "path": "vision_attn.xclbin"
         },
         {
             "type": "file",
-            "oid": "1fa26821944a762b33991ed195e607116a8142ab",
-            "size": 516123,
+            "oid": "fc612c2a51541dd642d67c89cfff829aa682a53b",
+            "size": 387099,
             "lfs": {
-                "oid": "e0b511bc64cbc43955ef78056593a1fa9848b7adcf7af43b6e6a259733de9c42",
-                "size": 516123,
-                "pointerSize": 131
+                "oid": "72ac5cd86916bd0b77440d190db7ca7958cc94926a3bab94e86a062e1874d049",
+                "size": 387099
             },
-            "xetHash": "8d458883cc9e0f9fafb695c70b4a7be96b56e7ad21e691d5a9318255b05522ae",
+            "xetHash": "1f18bdddb954cdbebbef44c570f66632d58465882f923734f521207bfd6fd2c6",
             "path": "vision_mm.xclbin"
         },
         {
@@ -1736,8 +1653,7 @@
             "size": 973721768,
             "lfs": {
                 "oid": "2ad25d01edb6b31bab7e487e496f4652cc098738d8a726d69854fb5408d351e6",
-                "size": 973721768,
-                "pointerSize": 134
+                "size": 973721768
             },
             "xetHash": "103a05ccfc9457f3d42f6feadf91e8e48acc1e6e20eed801e35190d13865f707",
             "path": "vision_weight.q4nx"
@@ -1768,8 +1684,7 @@
             "size": 3768226744,
             "lfs": {
                 "oid": "f6830040ef421ba11dd84e8c28d85421b09b158be11a444878b2f4136275946c",
-                "size": 3768226744,
-                "pointerSize": 135
+                "size": 3768226744
             },
             "xetHash": "9c30109ec068beb222616ba455e44c58581d969cd877ef85bff2af56fc41f666",
             "path": "model.q4nx"
@@ -1780,8 +1695,7 @@
             "size": 33384568,
             "lfs": {
                 "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
-                "size": 33384568,
-                "pointerSize": 133
+                "size": 33384568
             },
             "xetHash": "c4c7aa84fb94a696d78f2bde62590a25b6741b7365ed842f9310b5dcab71d95d",
             "path": "tokenizer.json"
@@ -1798,8 +1712,7 @@
             "size": 973721768,
             "lfs": {
                 "oid": "2ad25d01edb6b31bab7e487e496f4652cc098738d8a726d69854fb5408d351e6",
-                "size": 973721768,
-                "pointerSize": 134
+                "size": 973721768
             },
             "xetHash": "103a05ccfc9457f3d42f6feadf91e8e48acc1e6e20eed801e35190d13865f707",
             "path": "vision_weight.q4nx"
@@ -1892,8 +1805,7 @@
             "size": 3768226744,
             "lfs": {
                 "oid": "e5a8f359246a9d65820d1b703e8cd1104bb157b51705afd25f5ba8874312dfbe",
-                "size": 3768226744,
-                "pointerSize": 135
+                "size": 3768226744
             },
             "xetHash": "41aa7bbbc4db456ba44602b7e37d03ad31e496301bf4a96719d23c469f1e205f",
             "path": "model.q4nx"
@@ -1904,8 +1816,7 @@
             "size": 33384568,
             "lfs": {
                 "oid": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
-                "size": 33384568,
-                "pointerSize": 133
+                "size": 33384568
             },
             "xetHash": "c4c7aa84fb94a696d78f2bde62590a25b6741b7365ed842f9310b5dcab71d95d",
             "path": "tokenizer.json"
@@ -1922,8 +1833,7 @@
             "size": 973721768,
             "lfs": {
                 "oid": "42cf19691a0c0dd093527c541d5554bb47f11fbe32e265873f8663e320786700",
-                "size": 973721768,
-                "pointerSize": 134
+                "size": 973721768
             },
             "xetHash": "c31c9b2b05bf28fbbd99c3c63ebe9b849442304f28f2956b211b89711271085a",
             "path": "vision_weight.q4nx"
@@ -1932,8 +1842,8 @@
     "llama3.2:1b": [
         {
             "type": "file",
-            "oid": "325bffdaa640c873a2ee20c05f83bf959c9fcc07",
-            "size": 139,
+            "oid": "2f6c03980bb66b3ab76f0deb839302f5381c7ce3",
+            "size": 343,
             "path": ".gitattributes"
         },
         {
@@ -1948,8 +1858,7 @@
             "size": 695259,
             "lfs": {
                 "oid": "8642c5efe753743be96ca0797cfd5b74017568484c396ccd3398d1841593516e",
-                "size": 695259,
-                "pointerSize": 131
+                "size": 695259
             },
             "xetHash": "5a548cd6fd3011ebbbc58b6abb0278b858f916dca0bd82635935804cd4245897",
             "path": "attn.xclbin"
@@ -1962,26 +1871,24 @@
         },
         {
             "type": "file",
-            "oid": "0a7f7d5d83888a4f11d5ec7bcefb0dd3237cbee0",
-            "size": 121115,
+            "oid": "1c15cdacd05032c25b664bc5293792702a7b6a47",
+            "size": 115691,
             "lfs": {
-                "oid": "ef2c9238930cebf503303b3d12f6ac6119f6c8c2b7b83796008404e007224094",
-                "size": 121115,
-                "pointerSize": 131
+                "oid": "171e48055c262c07e7232be872e1a7a4ae92a1158ab8a1d455bb4d61c2a7fd3c",
+                "size": 115691
             },
-            "xetHash": "cca8d2c02c0b72710b9eb13f52e1526e3f20689e1d6b71b1a185c92a89498e88",
+            "xetHash": "be15b3643ffd268c1f3fd9126f2ec21b0074175bf114fe1162a5eaa1540664e4",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "7834b0c889e72362a115ba9b9dc2c936a27f80bc",
-            "size": 432203,
+            "oid": "e78fde7853c62df5fc81eae9c27c37f8f67dad7c",
+            "size": 314219,
             "lfs": {
-                "oid": "61d6999d571e5c75aad59088b67a10cd2e34dd32a448952f546542b6079ca9d1",
-                "size": 432203,
-                "pointerSize": 131
+                "oid": "442024679a2e0762605f5c3d8c626b3b72007d9f2d4f08f35ce0753ace2c1e5c",
+                "size": 314219
             },
-            "xetHash": "9c5d3cac9050be99a1aabdb2a846de5041d15386f0eaae47534eadb6ef1001d9",
+            "xetHash": "9c39adef07539ae1ac50fd889accd20f1c87003f458ad12abd21503334a4df17",
             "path": "layer.xclbin"
         },
         {
@@ -1990,8 +1897,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -2002,8 +1908,7 @@
             "size": 1297830152,
             "lfs": {
                 "oid": "80a05efc90c54839e3ba6badc4988048fe5854de7c49fc1abfd86a61792c0448",
-                "size": 1297830152,
-                "pointerSize": 135
+                "size": 1297830152
             },
             "xetHash": "dd40944a10f885e72ed8b9d1373b39ad129f1dc4e1fdb133ed3188db6eceaf03",
             "path": "model.q4nx"
@@ -2014,8 +1919,7 @@
             "size": 9085657,
             "lfs": {
                 "oid": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
-                "size": 9085657,
-                "pointerSize": 132
+                "size": 9085657
             },
             "xetHash": "5cdea387e5b8478fd9d75abfa38e9ec5fdd6c2bf542a433c3cb4e487d5d44323",
             "path": "tokenizer.json"
@@ -2030,8 +1934,8 @@
     "llama3.2:3b": [
         {
             "type": "file",
-            "oid": "77392f5e64a6bffb73d56f8a605958584b6e10b2",
-            "size": 139,
+            "oid": "b22e93aa11198a57671a3d113d4928ff6d170919",
+            "size": 343,
             "path": ".gitattributes"
         },
         {
@@ -2046,8 +1950,7 @@
             "size": 527083,
             "lfs": {
                 "oid": "5a83098ca9a3392330e666c7fe2d1bc155d12b0226fa5fa75e973cf0c14ef558",
-                "size": 527083,
-                "pointerSize": 131
+                "size": 527083
             },
             "xetHash": "9a020176f703abf99a9811441cc27937a37c19273cf880c98a8289947fe68833",
             "path": "attn.xclbin"
@@ -2060,26 +1963,24 @@
         },
         {
             "type": "file",
-            "oid": "0a7f7d5d83888a4f11d5ec7bcefb0dd3237cbee0",
-            "size": 121115,
+            "oid": "1c15cdacd05032c25b664bc5293792702a7b6a47",
+            "size": 115691,
             "lfs": {
-                "oid": "ef2c9238930cebf503303b3d12f6ac6119f6c8c2b7b83796008404e007224094",
-                "size": 121115,
-                "pointerSize": 131
+                "oid": "171e48055c262c07e7232be872e1a7a4ae92a1158ab8a1d455bb4d61c2a7fd3c",
+                "size": 115691
             },
-            "xetHash": "cca8d2c02c0b72710b9eb13f52e1526e3f20689e1d6b71b1a185c92a89498e88",
+            "xetHash": "be15b3643ffd268c1f3fd9126f2ec21b0074175bf114fe1162a5eaa1540664e4",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "ccada50176abd5622c77a8a2f16de7dcb1176fd2",
-            "size": 445627,
+            "oid": "54958c7395b2813fd2eb75bb4da5a5c6c3543f98",
+            "size": 330203,
             "lfs": {
-                "oid": "1157aa2425b6e42834535b97979449fce75c7229021db6c09e4d49cb95bab1a4",
-                "size": 445627,
-                "pointerSize": 131
+                "oid": "d8cb12155f5630dd3c212d625bd26d7dccbaff956f890a31315707bcac8273af",
+                "size": 330203
             },
-            "xetHash": "f89282f2e916eba946ace92c57b606bebbafddc1a6cabbfe5247b1832383257d",
+            "xetHash": "5d0c52938f2312de29a8a49a75c1123c6dc0d33731b5d630086d90648fd29d43",
             "path": "layer.xclbin"
         },
         {
@@ -2088,8 +1989,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -2100,8 +2000,7 @@
             "size": 2796243472,
             "lfs": {
                 "oid": "b654a76e90b9c35089e3afdc69ae3a2b41edd7a0cb5b2e9a55192de1eb1b877f",
-                "size": 2796243472,
-                "pointerSize": 135
+                "size": 2796243472
             },
             "xetHash": "1318f15c77f1c1c01ee009272dae3178a1d369ac79c75bdbc6f08f0277946b18",
             "path": "model.q4nx"
@@ -2112,8 +2011,7 @@
             "size": 9085657,
             "lfs": {
                 "oid": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
-                "size": 9085657,
-                "pointerSize": 132
+                "size": 9085657
             },
             "xetHash": "80c34dc4389484a4f17792435a48f77379d602c55e81d56659fad04eac07fa2e",
             "path": "tokenizer.json"
@@ -2128,8 +2026,8 @@
     "llama3.1:8b": [
         {
             "type": "file",
-            "oid": "325bffdaa640c873a2ee20c05f83bf959c9fcc07",
-            "size": 139,
+            "oid": "2f6c03980bb66b3ab76f0deb839302f5381c7ce3",
+            "size": 343,
             "path": ".gitattributes"
         },
         {
@@ -2144,8 +2042,7 @@
             "size": 698331,
             "lfs": {
                 "oid": "cb8e7bef68c19797d9f57c163ba8943fa3bd474af6c9e82c0c4a7554852afd4a",
-                "size": 698331,
-                "pointerSize": 131
+                "size": 698331
             },
             "xetHash": "94e2075d396c4f2dda0095618c7deb1fe35d31f42765464162cf067757292db1",
             "path": "attn.xclbin"
@@ -2158,26 +2055,24 @@
         },
         {
             "type": "file",
-            "oid": "0a7f7d5d83888a4f11d5ec7bcefb0dd3237cbee0",
-            "size": 121115,
+            "oid": "1c15cdacd05032c25b664bc5293792702a7b6a47",
+            "size": 115691,
             "lfs": {
-                "oid": "ef2c9238930cebf503303b3d12f6ac6119f6c8c2b7b83796008404e007224094",
-                "size": 121115,
-                "pointerSize": 131
+                "oid": "171e48055c262c07e7232be872e1a7a4ae92a1158ab8a1d455bb4d61c2a7fd3c",
+                "size": 115691
             },
-            "xetHash": "cca8d2c02c0b72710b9eb13f52e1526e3f20689e1d6b71b1a185c92a89498e88",
+            "xetHash": "be15b3643ffd268c1f3fd9126f2ec21b0074175bf114fe1162a5eaa1540664e4",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "8fa52296664f14a4b2dfb1846d98cd486e990fb1",
-            "size": 445275,
+            "oid": "31ee345c0b4cca48f71fa02eef8456d7537db278",
+            "size": 331659,
             "lfs": {
-                "oid": "5da50779ddd8d208d225e238c2e3d239d3b4a2c644b1ed7ed251a9cc7f136f6b",
-                "size": 445275,
-                "pointerSize": 131
+                "oid": "da989ed295cbd49c07b185ba99ab867da07eff6cc44bc8f9f452b0b0ff0389bd",
+                "size": 331659
             },
-            "xetHash": "24db465b062163405ee928d3a2f28abfcb7fa5388155d4e7a6f2afb9404d2c0e",
+            "xetHash": "62c947f98ed246db203409d20fcca7a4e68bffd5bc117b37b64c82e1d3c9957d",
             "path": "layer.xclbin"
         },
         {
@@ -2186,8 +2081,7 @@
             "size": 347675,
             "lfs": {
                 "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
-                "size": 347675,
-                "pointerSize": 131
+                "size": 347675
             },
             "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
@@ -2198,8 +2092,7 @@
             "size": 5741650592,
             "lfs": {
                 "oid": "0c03021f1cd21e43376234817b34ad32ccf07dca94785ede7640833d15169d8a",
-                "size": 5741650592,
-                "pointerSize": 135
+                "size": 5741650592
             },
             "xetHash": "dfb8f727f2363ebe8ea13e4889e1116bde8abd202f4475fe418c4f226c705666",
             "path": "model.q4nx"
@@ -2210,8 +2103,7 @@
             "size": 9085657,
             "lfs": {
                 "oid": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
-                "size": 9085657,
-                "pointerSize": 132
+                "size": 9085657
             },
             "xetHash": "80c34dc4389484a4f17792435a48f77379d602c55e81d56659fad04eac07fa2e",
             "path": "tokenizer.json"
@@ -2248,8 +2140,7 @@
             "size": 5741650592,
             "lfs": {
                 "oid": "d98b2b5f4482f018ec4e0855afd46d5234f479d834e467f57a1e5930755f5196",
-                "size": 5741650592,
-                "pointerSize": 135
+                "size": 5741650592
             },
             "xetHash": "b9b48a892ad1439c42c0a5170c460089056160b7e01fbb15655654d7880b05a7",
             "path": "model.q4nx"
@@ -2260,8 +2151,7 @@
             "size": 17209530,
             "lfs": {
                 "oid": "d91915040cfac999d8c55f4b5bc6e67367c065e3a7a4e4b9438ce1f256addd86",
-                "size": 17209530,
-                "pointerSize": 133
+                "size": 17209530
             },
             "xetHash": "85ad5c8944ff5c073c022c58ae980d26c3527c588935c913dd82f733e95103c6",
             "path": "tokenizer.json"
@@ -2292,8 +2182,7 @@
             "size": 698331,
             "lfs": {
                 "oid": "cb8e7bef68c19797d9f57c163ba8943fa3bd474af6c9e82c0c4a7554852afd4a",
-                "size": 698331,
-                "pointerSize": 131
+                "size": 698331
             },
             "xetHash": "94e2075d396c4f2dda0095618c7deb1fe35d31f42765464162cf067757292db1",
             "path": "attn.xclbin"
@@ -2304,8 +2193,7 @@
             "size": 5975382360,
             "lfs": {
                 "oid": "bcb97a33126d9ac327a6532a8bd73ab6572583f03d5b77afd655bda0c54cc7d4",
-                "size": 5975382360,
-                "pointerSize": 135
+                "size": 5975382360
             },
             "xetHash": "591feeb8620c702e72ae61985f26a9b5ec6ffd1b83d37241a934b7055f8fa4be",
             "path": "bkmodel.q4nx"
@@ -2318,38 +2206,35 @@
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "9d47419db927a228d3a1c05d3200335b8da6230d",
-            "size": 449163,
+            "oid": "f18d63f05608d3dada64f2e683584ce7d074e0bd",
+            "size": 305467,
             "lfs": {
-                "oid": "29e49fd0b53818ec36a0fd2d9b959cebf375e5d85d7d95d412f8bc512b14d883",
-                "size": 449163,
-                "pointerSize": 131
+                "oid": "341fe16c586d02f526e9ca05a1514892d30d8c9d41f852f07fb1c3bc9cc7d886",
+                "size": 305467
             },
-            "xetHash": "3941169edca4181b8ff5d2def77dddd44d78e547e05b26db12cbba8d554f781e",
+            "xetHash": "f858cdf9d3c53e9fed865ae7e06f9b251399c09d9e31f45a3380f8a7eb7487b6",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -2358,8 +2243,7 @@
             "size": 5975382360,
             "lfs": {
                 "oid": "8ae484afc5674fb8405effaef0f608a6cd2a8c64b2e9cd8a9c51ebdda83bccff",
-                "size": 5975382360,
-                "pointerSize": 135
+                "size": 5975382360
             },
             "xetHash": "436ec0fd796cc3f125fd579e0c9f4d7bc0b9df8ac0378ec203c8f3c696a47131",
             "path": "model.q4nx"
@@ -2396,8 +2280,7 @@
             "size": 355915,
             "lfs": {
                 "oid": "7fef95ff22e540bf4c98c7013efcfc7a8cae5d1a2e5d9e02cab63ae6156ff620",
-                "size": 355915,
-                "pointerSize": 131
+                "size": 355915
             },
             "xetHash": "f0055124c866e4b2cc0f9f9f2c7620f369fdd54144054c702e4d7507764a3349",
             "path": "attn.xclbin"
@@ -2410,38 +2293,35 @@
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "d0316ee1935f5cfd8e92c5b1f0b59a94e38d5d63",
-            "size": 450395,
+            "oid": "0475b9b0d10297a9918a4a7d83e0dd7210703ce4",
+            "size": 307451,
             "lfs": {
-                "oid": "e8d7a552e2fc5cef5ae8b3a4674278eb73fe243a4f35d1168bc854fd45883bef",
-                "size": 450395,
-                "pointerSize": 131
+                "oid": "288ae1338438aed8afef17c09f2c3f02eed90239cd818ced015d11d37a22b6f2",
+                "size": 307451
             },
-            "xetHash": "d1c89d0e5f53dd112326b6353d2991cfb8198e2e1d986312d6ad4bbab4ebc0ff",
+            "xetHash": "9532b1699cee4fe20ac077a12be2844cc7d24c2d0cb8be2fe871ee58606fd06d",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -2450,8 +2330,7 @@
             "size": 683820832,
             "lfs": {
                 "oid": "db8dec4dff653817218ff920c5d25d28d1805512906485e654f03980053fa667",
-                "size": 683820832,
-                "pointerSize": 134
+                "size": 683820832
             },
             "xetHash": "d3152f7d2337e1006c5189400d97aefb647063ccbd277f9fd551d048ccac6c26",
             "path": "model.q4nx"
@@ -2462,8 +2341,7 @@
             "size": 11422654,
             "lfs": {
                 "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                "size": 11422654,
-                "pointerSize": 133
+                "size": 11422654
             },
             "xetHash": "6aec39639a0a2d1ca966356b8c2b8426a484f80ff80731f44fa8482040713bdf",
             "path": "tokenizer.json"
@@ -2494,8 +2372,7 @@
             "size": 355915,
             "lfs": {
                 "oid": "7fef95ff22e540bf4c98c7013efcfc7a8cae5d1a2e5d9e02cab63ae6156ff620",
-                "size": 355915,
-                "pointerSize": 131
+                "size": 355915
             },
             "xetHash": "f0055124c866e4b2cc0f9f9f2c7620f369fdd54144054c702e4d7507764a3349",
             "path": "attn.xclbin"
@@ -2508,38 +2385,35 @@
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "754227f5cf089f776a679adb95241f4976030597",
-            "size": 449627,
+            "oid": "20d92a2ebac626211fd57f51846aaa794a17ec87",
+            "size": 301819,
             "lfs": {
-                "oid": "f1ded89beae26378bfe2a7eae4728805ab0059d52831beed732903857188aa1b",
-                "size": 449627,
-                "pointerSize": 131
+                "oid": "a1f694abd4bc29a788353a5c4b151204b297cb7e71f7f14d950ef329587da231",
+                "size": 301819
             },
-            "xetHash": "46478ee40b81125588b275e54e8f43e7c4fb4d43af5459d9d57426fdc8396bb7",
+            "xetHash": "f43baf69d6c6c61d95a9f4bd6e885be49db219314ed1cbb7f5ba41388571ee53",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -2548,8 +2422,7 @@
             "size": 1697894568,
             "lfs": {
                 "oid": "b1c1fe9d6c4a6d0ceab667b4971dd22f372abc8d320b5b58f861ac74736cb157",
-                "size": 1697894568,
-                "pointerSize": 135
+                "size": 1697894568
             },
             "xetHash": "362206c65e7e2b55c9dd531cdd7e35d17f316769f9e88ae12c525ff9e3fa5f92",
             "path": "model.q4nx"
@@ -2560,8 +2433,7 @@
             "size": 11422654,
             "lfs": {
                 "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                "size": 11422654,
-                "pointerSize": 133
+                "size": 11422654
             },
             "xetHash": "6aec39639a0a2d1ca966356b8c2b8426a484f80ff80731f44fa8482040713bdf",
             "path": "tokenizer.json"
@@ -2592,8 +2464,7 @@
             "size": 698331,
             "lfs": {
                 "oid": "cb8e7bef68c19797d9f57c163ba8943fa3bd474af6c9e82c0c4a7554852afd4a",
-                "size": 698331,
-                "pointerSize": 131
+                "size": 698331
             },
             "xetHash": "94e2075d396c4f2dda0095618c7deb1fe35d31f42765464162cf067757292db1",
             "path": "attn.xclbin"
@@ -2606,38 +2477,35 @@
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "2a4f0f4223c1168de4ce474aa934a700af35f151",
-            "size": 449931,
+            "oid": "4d0d718506c769bd1246e00821117b743e69fd3c",
+            "size": 302379,
             "lfs": {
-                "oid": "f33ddafa4c4a630875a8226ca0c3fb5ae698b1e65e3534242fe547ded89aa6d6",
-                "size": 449931,
-                "pointerSize": 131
+                "oid": "9f6ff116ac1f0dd1f258eb67af5ae45a6f21e11eb6ab6bdd975cafd04127cd2b",
+                "size": 302379
             },
-            "xetHash": "777ac85aece763868a7287697525baf530a12ae1ce2ea37bfb8e444ac59deffa",
+            "xetHash": "f0ce0aa37215e6fbd64f162e32ee37d88aa39e197f8f20558bcc0d23b5513c84",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -2646,8 +2514,7 @@
             "size": 3292269616,
             "lfs": {
                 "oid": "095b851cdfad1c04af1fcbf7eb37a5db9d4872028706ff34d54ad347ef2275b9",
-                "size": 3292269616,
-                "pointerSize": 135
+                "size": 3292269616
             },
             "xetHash": "aa072a4504cf0ac2d92886c20039bc646c1b4fd32ba9f1c4e6a360fa4f078375",
             "path": "model.q4nx"
@@ -2658,8 +2525,7 @@
             "size": 11422654,
             "lfs": {
                 "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                "size": 11422654,
-                "pointerSize": 133
+                "size": 11422654
             },
             "xetHash": "6aec39639a0a2d1ca966356b8c2b8426a484f80ff80731f44fa8482040713bdf",
             "path": "tokenizer.json"
@@ -2690,8 +2556,7 @@
             "size": 698331,
             "lfs": {
                 "oid": "cb8e7bef68c19797d9f57c163ba8943fa3bd474af6c9e82c0c4a7554852afd4a",
-                "size": 698331,
-                "pointerSize": 131
+                "size": 698331
             },
             "xetHash": "94e2075d396c4f2dda0095618c7deb1fe35d31f42765464162cf067757292db1",
             "path": "attn.xclbin"
@@ -2704,38 +2569,35 @@
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "9d47419db927a228d3a1c05d3200335b8da6230d",
-            "size": 449163,
+            "oid": "f18d63f05608d3dada64f2e683584ce7d074e0bd",
+            "size": 305467,
             "lfs": {
-                "oid": "29e49fd0b53818ec36a0fd2d9b959cebf375e5d85d7d95d412f8bc512b14d883",
-                "size": 449163,
-                "pointerSize": 131
+                "oid": "341fe16c586d02f526e9ca05a1514892d30d8c9d41f852f07fb1c3bc9cc7d886",
+                "size": 305467
             },
-            "xetHash": "3941169edca4181b8ff5d2def77dddd44d78e547e05b26db12cbba8d554f781e",
+            "xetHash": "f858cdf9d3c53e9fed865ae7e06f9b251399c09d9e31f45a3380f8a7eb7487b6",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -2744,8 +2606,7 @@
             "size": 5975382360,
             "lfs": {
                 "oid": "bcb97a33126d9ac327a6532a8bd73ab6572583f03d5b77afd655bda0c54cc7d4",
-                "size": 5975382360,
-                "pointerSize": 135
+                "size": 5975382360
             },
             "xetHash": "591feeb8620c702e72ae61985f26a9b5ec6ffd1b83d37241a934b7055f8fa4be",
             "path": "model.q4nx"
@@ -2756,8 +2617,7 @@
             "size": 11422654,
             "lfs": {
                 "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                "size": 11422654,
-                "pointerSize": 133
+                "size": 11422654
             },
             "xetHash": "6aec39639a0a2d1ca966356b8c2b8426a484f80ff80731f44fa8482040713bdf",
             "path": "tokenizer.json"
@@ -2788,8 +2648,7 @@
             "size": 698331,
             "lfs": {
                 "oid": "cb8e7bef68c19797d9f57c163ba8943fa3bd474af6c9e82c0c4a7554852afd4a",
-                "size": 698331,
-                "pointerSize": 131
+                "size": 698331
             },
             "xetHash": "94e2075d396c4f2dda0095618c7deb1fe35d31f42765464162cf067757292db1",
             "path": "attn.xclbin"
@@ -2802,38 +2661,35 @@
         },
         {
             "type": "file",
-            "oid": "41de586a558bc23549b2ea945b1ae27097e98483",
-            "size": 114059,
+            "oid": "ce7d32cad0510d7bb597c2faac22998f1185f37e",
+            "size": 115179,
             "lfs": {
-                "oid": "e94b5273cf5af237721a14d443316c647dd79f9b1809f66ed2f5f6b7ce86cb5f",
-                "size": 114059,
-                "pointerSize": 131
+                "oid": "a1be8893482f4d6f3634621e9f1c52355ce082cb768300ead02a54b05026b74c",
+                "size": 115179
             },
-            "xetHash": "e2dca5d9e66de89aef118bddc3159645e3b7d5e29cf8629f2398a711a0a6039b",
+            "xetHash": "27a4fa64079b396375df8298a2073c02fa692e83af2c3483467ccb3ab53a3ef0",
             "path": "dequant.xclbin"
         },
         {
             "type": "file",
-            "oid": "2a4f0f4223c1168de4ce474aa934a700af35f151",
-            "size": 449931,
+            "oid": "4d0d718506c769bd1246e00821117b743e69fd3c",
+            "size": 302379,
             "lfs": {
-                "oid": "f33ddafa4c4a630875a8226ca0c3fb5ae698b1e65e3534242fe547ded89aa6d6",
-                "size": 449931,
-                "pointerSize": 131
+                "oid": "9f6ff116ac1f0dd1f258eb67af5ae45a6f21e11eb6ab6bdd975cafd04127cd2b",
+                "size": 302379
             },
-            "xetHash": "777ac85aece763868a7287697525baf530a12ae1ce2ea37bfb8e444ac59deffa",
+            "xetHash": "f0ce0aa37215e6fbd64f162e32ee37d88aa39e197f8f20558bcc0d23b5513c84",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "812446bf3157b110eaa76298e5eafe35795d6153",
-            "size": 507419,
+            "oid": "287787289b9f59e69cff134e3fe085b52d3a4d4f",
+            "size": 347675,
             "lfs": {
-                "oid": "aba4dbcb8b033dac2abe9a16ebf173296a7cc365c5bca6a09dee5c344ab82efe",
-                "size": 507419,
-                "pointerSize": 131
+                "oid": "b1e88cd899e3fbef3b402ecaf2ab644f21cca2ee85dafe6e2521d89222c5a644",
+                "size": 347675
             },
-            "xetHash": "fa3c0a6e25da1a0ec16acb93967499e2354aacb50e4dc43940aca60d36d91007",
+            "xetHash": "bf0f64640884bdd22a8c268bcb9f33a34cb51f8c9a7cdcaccf6471de5488f743",
             "path": "mm.xclbin"
         },
         {
@@ -2842,10 +2698,9 @@
             "size": 3292269616,
             "lfs": {
                 "oid": "8224e0c35c76d7f1dc1f135d0032fd5a92f167235cf762eb9754fa1806206756",
-                "size": 3292269616,
-                "pointerSize": 135
+                "size": 3292269616
             },
-            "xetHash": "32a4ecff07ec818e427f3b3fe1733eb72308e39c4d418e7a6f64f4f52f97985f",
+            "xetHash": "2161d13857b9bcfe71e6bd730c0c7b5a83da6e9eb2287c0c6eb2230b9a7e8801",
             "path": "model.q4nx"
         },
         {
@@ -2854,10 +2709,9 @@
             "size": 11422654,
             "lfs": {
                 "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                "size": 11422654,
-                "pointerSize": 133
+                "size": 11422654
             },
-            "xetHash": "6aec39639a0a2d1ca966356b8c2b8426a484f80ff80731f44fa8482040713bdf",
+            "xetHash": "693ec4b3922b0bd306bf7b4989e115ffbfeb7b0c08b31bc6d956818c6bb07f61",
             "path": "tokenizer.json"
         },
         {
@@ -2968,8 +2822,8 @@
     "gpt-oss:20b": [
         {
             "type": "file",
-            "oid": "be324efdbf2a899dbdd429b2ab4e490dc9d0d74a",
-            "size": 1658,
+            "oid": "cd8ff75f90abcd9b0085304bb8337ee270f05d37",
+            "size": 1974,
             "path": ".gitattributes"
         },
         {
@@ -2984,8 +2838,7 @@
             "size": 592363,
             "lfs": {
                 "oid": "c06af042aa2d48b87d218f3d8b07e4e817c35bca81e0e711d711ae358eeb6ac8",
-                "size": 592363,
-                "pointerSize": 131
+                "size": 592363
             },
             "xetHash": "aef4e58f4be7e10e2fb41f5901c68845a893e3d27c1bf19bb9cb9f34c27d743e",
             "path": "attn.xclbin"
@@ -3010,50 +2863,46 @@
         },
         {
             "type": "file",
-            "oid": "16c2a050aad9bd3678009334b318dc3f39284237",
+            "oid": "662673eeacab32bcbad4186adea7646444393756",
             "size": 146027,
             "lfs": {
-                "oid": "9de9637f74587b9a444d1562a2650fee3466f4f10164c1d4a0281534f0842378",
-                "size": 146027,
-                "pointerSize": 131
+                "oid": "34fd55521f428495a3acce97d91645ee8cc8996a9a7b980d68f1b655c4e88f14",
+                "size": 146027
             },
-            "xetHash": "a6e6ce953271a6b320738c96f1dcf71c5a0ff4f9f72e7e08f9d07ae485431275",
+            "xetHash": "78719ee7b6a131ba665bccbe12d6dcef98be08c24f41ef8bf0633192f0b25b37",
             "path": "expert.xclbin"
         },
         {
             "type": "file",
-            "oid": "ce43dd52dbc66a5d437bb751965ef37a145d57a6",
-            "size": 562427,
+            "oid": "03ae6bb7fae8550ca86a4471a505ab8446826ec7",
+            "size": 452987,
             "lfs": {
-                "oid": "f1645934cb95ce216e43e13d371b606926c123621cda3d8a1b310882d0b58c2c",
-                "size": 562427,
-                "pointerSize": 131
+                "oid": "b78eaf56dc153134fa2fe34313d9d8d71761f1c10d05b552cc2190f5defdf029",
+                "size": 452987
             },
-            "xetHash": "6e15a41b72955ca0a380a05fc69f4c1505e20fb5d34fc61fe9b5a5feedafe1e0",
+            "xetHash": "479ef8d85742dfb77368ed59339e3ec300a3c2959d7cf3d3271e96e83c0806fa",
             "path": "layer.xclbin"
         },
         {
             "type": "file",
-            "oid": "ef809c25c0ea6c963081f1fc0b11d51e1c5a4182",
-            "size": 526875,
+            "oid": "bdd11fa685cbc5a707d9b69ba451d34902a35346",
+            "size": 543675,
             "lfs": {
-                "oid": "7dd60d1f1405f05fc46d1c0cf1ce31e4f8390abe902851ae018842807c60102a",
-                "size": 526875,
-                "pointerSize": 131
+                "oid": "99a9f2b47a09f2e129ee057f7b4b0e95955e7bfa1e48a99172bbd3992adc369a",
+                "size": 543675
             },
-            "xetHash": "78ae0e6d3949ec0cee693b1e56aa559c29aa26062c5c1091c456eab7cb39ca2f",
+            "xetHash": "51e16fe35a1f22075e8dbbd5f1cae5d8720d4c8f4dab17dd63c291f70837df5e",
             "path": "mm.xclbin"
         },
         {
             "type": "file",
-            "oid": "c87e3eb3c206134f0e9702e5cb86cded5a6f6faf",
-            "size": 14446724984,
+            "oid": "11289f514961ff35507dc203a05afd41285282d5",
+            "size": 11971526656,
             "lfs": {
-                "oid": "77999a24839af21f01f35bc397e0aed3e6020ee38e7fffe4ac41bfe97ad18377",
-                "size": 14446724984,
-                "pointerSize": 136
+                "oid": "51a4b187720625da0c69299fd1543e71ca8979b13ec58c173f0eec1185516d28",
+                "size": 11971526656
             },
-            "xetHash": "bc4fd823722b15f4c334379f987a72e38e04631f1ade4756177b0f96f35106cb",
+            "xetHash": "324cd4b23142c12ddaf7700e39e85fcb78bad1decaf7fde0355570aa0cba66ce",
             "path": "model.q4nx"
         },
         {
@@ -3074,8 +2923,7 @@
             "size": 27868175,
             "lfs": {
                 "oid": "4bb8ed14222fdea2ea7dd5483c05932cedbb57487f68aa9ce1076d0abef0b966",
-                "size": 27868175,
-                "pointerSize": 133
+                "size": 27868175
             },
             "xetHash": "64c3d7330f764de8e730d2ecd92ea15b5c295c2c816e64f2f90e751f865b3253",
             "path": "tokenizer.json"
@@ -3234,8 +3082,7 @@
             "size": 2586811952,
             "lfs": {
                 "oid": "c2f1dcb6fe1e819cc50547f091096f4849890b2fb170d031ff7d790ea0c5e2ce",
-                "size": 2586811952,
-                "pointerSize": 135
+                "size": 2586811952
             },
             "xetHash": "1ddd3d7aa7f032f5900d10f492c730f4083320fa69014c3cde81807d45381409",
             "path": "model.q4nx"
@@ -3256,8 +3103,8 @@
     "qwen2.5vl-it:3b": [
         {
             "type": "file",
-            "oid": "90c2dcec997fd71bd4fe83c2905c16781a62a54d",
-            "size": 1622,
+            "oid": "7612f41920439791e05dd33d39e52bfa5b240b34",
+            "size": 1677,
             "path": ".gitattributes"
         },
         {
@@ -3274,8 +3121,8 @@
         },
         {
             "type": "file",
-            "oid": "7fb07476c0436d1af216960bc43555ec1be0a989",
-            "size": 1529,
+            "oid": "86b1dba2c288b8af22db03620d94ee278fc73fd9",
+            "size": 1527,
             "path": "config.json"
         },
         {
@@ -3284,8 +3131,7 @@
             "size": 2586811952,
             "lfs": {
                 "oid": "b14472749674e3af1c6cbcea7f1ef3540942b6aeb85760608e694c96020a2027",
-                "size": 2586811952,
-                "pointerSize": 135
+                "size": 2586811952
             },
             "xetHash": "e6fcec79d7f12afa5c454c238daffdedf07e757a1f3881201f3d80077f7a07ea",
             "path": "model.q4nx"
