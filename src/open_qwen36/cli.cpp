@@ -96,7 +96,29 @@ struct Args {
     int bench = 0;                  // --bench N: time the route's dispatches instead of running a prompt
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
+    std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
 };
+
+/// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
+/// (src/src/main.cpp). The app has always done this and this CLI never did, so a
+/// standalone measurement silently inherited whatever mode the last app run left
+/// behind -- and the mode is worth about 2x on this hardware, which made open and
+/// closed numbers taken minutes apart incomparable for reasons neither engine
+/// controlled. Anything measured here now starts from a stated mode.
+void set_power_mode(const std::string& mode) {
+    if (mode == "none") return;
+    if (mode != "default" && mode != "powersaver" && mode != "balanced" && mode != "performance" && mode != "turbo") {
+        std::fprintf(stderr, "invalid --pmode %s (default, powersaver, balanced, performance, turbo, none)\n", mode.c_str());
+        std::exit(2);
+    }
+#ifdef _WIN32
+    const std::string cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + mode + " > NUL 2>&1";
+#else
+    const std::string cmd = "xrt-smi configure --pmode " + mode + " > /dev/null 2>&1";
+#endif
+    const int rc = std::system(cmd.c_str());
+    std::fprintf(stderr, "NPU power mode: %s%s\n", mode.c_str(), rc == 0 ? "" : " (xrt-smi failed; mode is whatever it was)");
+}
 
 /// Write a slice of a layer's act scratch to a file, so a bring-up run can compare one
 /// stage's output against the reference instead of inferring it from the logits.
@@ -147,6 +169,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--bench") a.bench = std::atoi(val().c_str());
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else if (k == "--bench-kernel") a.bench_kernel = val();
+        else if (k == "--pmode") a.pmode = val();
         // The server has a host gap right here that the CLI does not: between the last
         // prefill dispatch and the first decode one it samples, detokenises and writes
         // the first SSE chunk to a socket. Every dx timeout so far has landed on that
@@ -159,7 +182,7 @@ Args parse(int argc, char** argv) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--prefill-logits] [--bench N] [--bench-decode N] "
-                             "[--bench-kernel NAME:REPS[:LAYER]]\n");
+                             "[--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE]\n");
         std::exit(2);
     }
     return a;
@@ -269,6 +292,7 @@ int main(int argc, char** argv) {
     // the timeout path itself gets exercised without waiting for a real one.
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS"))
         a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
+    set_power_mode(a.pmode);
     try {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);
