@@ -275,7 +275,9 @@
  "contexts": {
   "dx": "dx/final.xclbin",
   "ln": "ln/final.xclbin",
-  "lm": "lm_head_q4/final.xclbin"
+  "lm": "lm_head_q4/final.xclbin",
+  "dxa": "dx_attn/final.xclbin",
+  "gemm": "gemm_n2560_k2048/final.xclbin"
  },
  "kernels": {
   "ln": {
@@ -301,6 +303,40 @@
    "patch": "attnpos",
    "build": "dx",
    "window": 1024
+  },
+  "dxB": {
+   "context": "dxa",
+   "insts": "dx_attn/insts.bin",
+   "patch": "attnpos",
+   "build": "dx_attn",
+   "window": 0
+  },
+  "dxB_local": {
+   "context": "dxa",
+   "insts": "dx_attn/insts.bin",
+   "patch": "attnpos",
+   "build": "dx_attn",
+   "window": 1024
+  },
+  "gemm_n2560_k2048": {
+   "context": "gemm",
+   "insts": "gemm_n2560_k2048/insts.bin",
+   "build": "gemm_n2560_k2048"
+  },
+  "gemm_n2560_k10240": {
+   "context": "gemm",
+   "insts": "gemm_n2560_k10240/insts.bin",
+   "build": "gemm_n2560_k10240"
+  },
+  "gemm_n4096_k2560": {
+   "context": "gemm",
+   "insts": "gemm_n4096_k2560/insts.bin",
+   "build": "gemm_n4096_k2560"
+  },
+  "gemm_n10240_k2560": {
+   "context": "gemm",
+   "insts": "gemm_n10240_k2560/insts.bin",
+   "build": "gemm_n10240_k2560"
   }
  },
  "layer_types": {
@@ -327,6 +363,109 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "dense",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k2560",
+      "args": [
+       "gqkv3_w",
+       "gemm_x_k2560",
+       "gemm_y_n4096"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2560_k2048",
+      "args": [
+       "go_w",
+       "gemm_x_k2048",
+       "gemm_y_n2560"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k2560",
+      "args": [
+       "ggate_w",
+       "gemm_x_k2560",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k2560",
+      "args": [
+       "gup_w",
+       "gemm_x_k2560",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2560_k10240",
+      "args": [
+       "gdown_w",
+       "gemm_x_k10240",
+       "gemm_y_n2560"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkv3_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1,
+       2
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       3
+      ]
+     },
+     "ggate_w": {
+      "from": "pool",
+      "ops": [
+       5
+      ]
+     },
+     "gup_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     },
+     "gdown_w": {
+      "from": "pool",
+      "ops": [
+       6
+      ]
+     }
+    },
+    "qw": 2048,
+    "kvw": 1024,
+    "ff": 10240,
+    "ad_q": 8192,
+    "ad_kvn": 16384,
+    "ad_og": 24576,
+    "attn_kernel": "dxB",
+    "attn_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "sandwich": true,
+    "act": "gelu_tanh"
+   },
    "pack": {
     "pool": [
      {
@@ -442,6 +581,109 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "dense",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k2560",
+      "args": [
+       "gqkv3_w",
+       "gemm_x_k2560",
+       "gemm_y_n4096"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2560_k2048",
+      "args": [
+       "go_w",
+       "gemm_x_k2048",
+       "gemm_y_n2560"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k2560",
+      "args": [
+       "ggate_w",
+       "gemm_x_k2560",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k2560",
+      "args": [
+       "gup_w",
+       "gemm_x_k2560",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2560_k10240",
+      "args": [
+       "gdown_w",
+       "gemm_x_k10240",
+       "gemm_y_n2560"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkv3_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1,
+       2
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       3
+      ]
+     },
+     "ggate_w": {
+      "from": "pool",
+      "ops": [
+       5
+      ]
+     },
+     "gup_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     },
+     "gdown_w": {
+      "from": "pool",
+      "ops": [
+       6
+      ]
+     }
+    },
+    "qw": 2048,
+    "kvw": 1024,
+    "ff": 10240,
+    "ad_q": 8192,
+    "ad_kvn": 16384,
+    "ad_og": 24576,
+    "attn_kernel": "dxB_local",
+    "attn_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab_local"
+    ],
+    "sandwich": true,
+    "act": "gelu_tanh"
+   },
    "pack": {
     "pool": [
      {
@@ -832,7 +1074,14 @@
     0.00010746078283213175
    ],
    "window": 1024
-  }
+  },
+  "gact": 34603008,
+  "gemm_x_k2048": 1048576,
+  "gemm_y_n2560": 2621440,
+  "gemm_x_k10240": 5242880,
+  "gemm_x_k2560": 1310720,
+  "gemm_y_n4096": 4194304,
+  "gemm_y_n10240": 10485760
  },
  "builds": {
   "dx": {
@@ -855,6 +1104,47 @@
     "LMHEAD_N": "262208",
     "LMHEAD_K": "2560",
     "LMHEAD_CORES": "8"
+   }
+  },
+  "dx_attn": {
+   "design": "dense/dx_attn.py",
+   "build_dir": "dense/build_dxa_gemma3_h2560",
+   "env": {}
+  },
+  "gemm_n2560_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2560_k2048_t256",
+   "env": {
+    "GQP_N": "2560",
+    "GQP_K": "2048",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n2560_k10240": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2560_k10240_t256",
+   "env": {
+    "GQP_N": "2560",
+    "GQP_K": "10240",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n4096_k2560": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n4096_k2560_t256",
+   "env": {
+    "GQP_N": "4096",
+    "GQP_K": "2560",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n10240_k2560": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n10240_k2560_t256",
+   "env": {
+    "GQP_N": "10240",
+    "GQP_K": "2560",
+    "GQP_T": "256"
    }
   }
  },

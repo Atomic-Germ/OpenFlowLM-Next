@@ -232,7 +232,17 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 g.ad_q = get<uint64_t>(gj, "ad_q", gw);
                 g.ad_kvn = get<uint64_t>(gj, "ad_kvn", gw);
                 g.ad_og = get<uint64_t>(gj, "ad_og", gw);
-                if (!m.kernels.count("dxB")) fail(gw, "gemm_block present but this manifest declares no dxB kernel");
+                // A layer type with its own sliding window (Gemma 3's dense_local) names its
+                // own attention kernel and table; everyone else defaults to today's dxB / ptab.
+                g.attn_kernel = gj.value("attn_kernel", std::string("dxB"));
+                g.attn_args = gj.value("attn_args", std::vector<std::string>{"pool", "xres", "consts", "state", "act", "ptab"});
+                g.sandwich = gj.value("sandwich", false);
+                g.act = gj.value("act", std::string("silu"));
+                if (g.attn_args.size() != 6) fail(gw, "attn_args wants exactly 6 buffer names, has " + std::to_string(g.attn_args.size()));
+                auto ak = m.kernels.find(g.attn_kernel);
+                if (ak == m.kernels.end()) fail(gw, "gemm_block present but this manifest declares no " + g.attn_kernel + " kernel");
+                if (ak->second.patch != "attnpos") fail(gw, "attn_kernel " + g.attn_kernel + " is not built with the attnpos patch table");
+                if (g.act != "silu" && g.act != "gelu_tanh") fail(gw, "act must be silu or gelu_tanh, is " + g.act);
                 // #39's hand-built sets carry no weights map: the dense recipe's pack order is q k v o up gate down
                 if (g.weights.empty())
                     g.weights = {{"gqkv3_w", {"pool", {0, 1, 2}}}, {"go_w", {"pool", {3}}}, {"gup_w", {"pool", {4}}},
