@@ -33,10 +33,31 @@ static constexpr unsigned kRows = 32;        // output rows per chunk
 static constexpr unsigned kKBlocks = 8;      // 32-wide K blocks per chunk
 static constexpr unsigned kKInBlock = 32;
 static constexpr unsigned kTileK = 256;      // K per chunk
+
+// Chunk layout selector (GGUF-direct pools, open_kernels/gguf_pool.py), the
+// lm_head twin of gemv_q4.h's GEMV_Q4_SCALES_F32:
+//   0 (default, q4nx): 256 bf16 scales at [0:512), codes at [512:8704).
+//   1 (GGUF-direct): the scales are the GGUF Q8_0 block scales widened
+//     EXACTLY to f32 at [0:1024), codes at [1024:9216). The RNE accum
+//     convert back to bf16 keeps the numerics identical to the q4nx chunks.
+#ifndef LMHEAD_SCALES_F32
+#define LMHEAD_SCALES_F32 0
+#endif
+#if LMHEAD_SCALES_F32
+static constexpr unsigned kScaleBytes = 1024;
+static constexpr unsigned kTileBytes = 9216;
+#else
 static constexpr unsigned kScaleBytes = 512;
-static constexpr unsigned kRowBlockStride = 4096;  // in codes
 static constexpr unsigned kTileBytes = 8704;
+#endif
+static constexpr unsigned kRowBlockStride = 4096;  // in codes
 static constexpr unsigned kRowSplit = 4;     // 32-row quarters per 128-row band
+
+// Entry-point symbol prefix (see gemv_q4.h): a GGUF-direct build is compiled
+// with -DLMHEAD_Q8_PREFIX=lm_head_q8s32 (and LMHEAD_SCALES_F32=1).
+#ifndef LMHEAD_Q8_PREFIX
+#define LMHEAD_Q8_PREFIX lm_head_q8
+#endif
 
 #ifndef LMHEAD_PER_CALL
 #define LMHEAD_PER_CALL 2
@@ -60,6 +81,22 @@ static constexpr unsigned kPerCall = LMHEAD_PER_CALL;
 // permutation, unlike the q4 kernel), and per K block:
 //   y[r] += scale[kb][r] * 2^-s[kb] * part[r]   (bf16 hi/lo split)
 // Runtime kt/first, noinline + inline (COMDAT): one body in program memory.
+#if LMHEAD_SCALES_F32
+// f32 plane -> bf16 lanes, round-to-nearest-even in INTEGER ops ((u + 0x7FFF +
+// ((u>>16) & 1)) >> 16, the same law q4nx_file.hpp's f32_to_bf16 uses). The
+// accum-roundtrip float convert mis-schedules inside this kernel's kb loop.
+static inline aie::vector<bfloat16, kRows> load_scale(const float *__restrict p) {
+  const aie::vector<uint32_t, kRows> w = aie::load_v<kRows>((const uint32_t *)p);
+  const aie::vector<uint32_t, kRows> r =
+      aie::add(w, aie::add(aie::bit_and((uint32_t)0x10000, w), (uint32_t)0x7FFF));
+  return aie::pack(aie::downshift(r, 16)).template cast_to<bfloat16>();
+}
+#else
+static inline aie::vector<bfloat16, kRows> load_scale(const bfloat16 *__restrict p) {
+  return aie::load_v<kRows>(p);
+}
+#endif
+
 static constexpr unsigned kK = LMHEAD_K;
 __attribute__((noinline)) inline void gemv_q8_tile(const uint8_t *__restrict tile,
                                                    const uint8_t *__restrict tab,
@@ -68,7 +105,11 @@ __attribute__((noinline)) inline void gemv_q8_tile(const uint8_t *__restrict til
   event0();
   aie::set_rounding(aie::rounding_mode::conv_even);
 
+#if LMHEAD_SCALES_F32
+  const float *__restrict s = (const float *)tile;
+#else
   const bfloat16 *__restrict s = (const bfloat16 *)tile;
+#endif
   const uint8_t *__restrict c0 = tile + kScaleBytes;              // rows 0..15: byte k*16 + r
   const uint8_t *__restrict c1 = c0 + kRowBlockStride;            // rows 16..31
   const int16_t *__restrict xi = (const int16_t *)tab + kt * kTileK;
@@ -110,7 +151,7 @@ __attribute__((noinline)) inline void gemv_q8_tile(const uint8_t *__restrict til
     part.from_vector(aie::to_float<float>(vi, sh[kb]));
     const aie::vector<bfloat16, kRows> hi = part.template to_vector<bfloat16>();
     const aie::vector<bfloat16, kRows> lo = aie::sub(part, hi).template to_vector<bfloat16>();
-    const aie::vector<bfloat16, kRows> sv = aie::load_v<kRows>(s + kb * kRows);
+    const aie::vector<bfloat16, kRows> sv = load_scale(s + kb * kRows);
     acc = aie::mac(acc, hi, sv);
     acc = aie::mac(acc, lo, sv);
   }

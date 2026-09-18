@@ -50,9 +50,36 @@ static constexpr unsigned kBandRows = 64;     // output rows per pool band
 static constexpr unsigned kKBlocks = 8;       // 32-wide K blocks per chunk
 static constexpr unsigned kKInBlock = 32;
 static constexpr unsigned kTileK = 256;       // K per chunk
+
+// Chunk layout selector (GGUF-direct pools, open_kernels/gguf_pool.py):
+//   0 (default, q4nx): d/m planes hold bf16 scales at [0:512) / [512:1024),
+//     codes at [1024:5120).
+//   1 (GGUF-direct): the same planes hold the GGUF block scales/mins widened
+//     EXACTLY to f32 (fp16 -> f32 is lossless; the pack permutes codes only),
+//     at [0:1024) / [1024:2048), codes at [2048:6144). The scales come back
+//     to bf16 through the same RNE accum convert the epilogue already uses,
+//     so the numerics are bit-identical to the q4nx chunks; the POOL keeps
+//     the GGUF scale values exactly.
+#ifndef GEMV_Q4_SCALES_F32
+#define GEMV_Q4_SCALES_F32 0
+#endif
+#if GEMV_Q4_SCALES_F32
+static constexpr unsigned kDBytes = 1024;
+static constexpr unsigned kMetaBytes = 2048;
+static constexpr unsigned kTileBytes = 6144;
+#else
 static constexpr unsigned kDBytes = 512;
 static constexpr unsigned kMetaBytes = 1024;
 static constexpr unsigned kTileBytes = 5120;
+#endif
+
+// Entry-point symbol prefix: the q4nx build exposes gemv_q4_p<P>b<B>r<R>_k<N>
+// / _g; a GGUF-direct build of the same design is compiled with
+// -DGEMV_Q4_PREFIX=gemv_q4s32 (and GEMV_Q4_SCALES_F32=1) so both variants can
+// ship in one kernel-set directory.
+#ifndef GEMV_Q4_PREFIX
+#define GEMV_Q4_PREFIX gemv_q4
+#endif
 
 // Chunks per entry-point call (one ObjectFifo element = kPerCall * 5120 B,
 // double-buffered in L1), chunks per pool band (= ROWSPLIT * K/256), and the
@@ -106,6 +133,20 @@ static constexpr unsigned kRowSplit = GEMV_ROWSPLIT;
 //   int16 xi[K] | int32 s[K/32] | bf16 xs_hi[K/32] | bf16 xs_lo[K/32]
 // ---------------------------------------------------------------------------
 
+#if GEMV_Q4_SCALES_F32
+// f32 plane -> bf16 lanes via the native RNE convert (conv_even, set below):
+// the same result a q4nx chunk's pre-narrowed bf16 scales give.
+static inline aie::vector<bfloat16, kRows> load_scale(const float *__restrict p) {
+  aie::accum<accfloat, kRows> t;
+  t.from_vector(aie::load_v<kRows>(p));
+  return t.template to_vector<bfloat16>();
+}
+#else
+static inline aie::vector<bfloat16, kRows> load_scale(const bfloat16 *__restrict p) {
+  return aie::load_v<kRows>(p);
+}
+#endif
+
 // One chunk against the k-tile `kt` of the table. `first` starts the band
 // accumulator, `last` writes y back in row order (see the lane-order note).
 // K (the table's) is a runtime argument: one body for every K in a design.
@@ -125,8 +166,13 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
   aie::set_rounding(aie::rounding_mode::conv_even);
   const unsigned NB = K / 32;
 
+#if GEMV_Q4_SCALES_F32
+  const float *__restrict dp = (const float *)tile;
+  const float *__restrict mp = (const float *)(tile + kDBytes);
+#else
   const bfloat16 *__restrict dp = (const bfloat16 *)tile;
   const bfloat16 *__restrict mp = (const bfloat16 *)(tile + kDBytes);
+#endif
   const uint8_t *__restrict nib0 = tile + kMetaBytes;          // rows 0..15
   const uint8_t *__restrict nib1 = tile + kMetaBytes + 2048;   // rows 16..31
   const int16_t *__restrict xi = (const int16_t *)tab + kt * kTileK;
@@ -177,8 +223,8 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     const aie::vector<bfloat16, kRows> hi = part.template to_vector<bfloat16>();
     const aie::vector<bfloat16, kRows> lo = aie::sub(part, hi).template to_vector<bfloat16>();
 
-    const aie::vector<bfloat16, kRows> d32 = aie::load_v<kRows>(dp + kb * kRows);
-    const aie::vector<bfloat16, kRows> m32 = aie::load_v<kRows>(mp + kb * kRows);
+    const aie::vector<bfloat16, kRows> d32 = load_scale(dp + kb * kRows);
+    const aie::vector<bfloat16, kRows> m32 = load_scale(mp + kb * kRows);
     auto [de, dod] = aie::interleave_unzip(d32, d32, 1);
     auto [me, mo] = aie::interleave_unzip(m32, m32, 1);
     const aie::vector<bfloat16, kRows> dperm = aie::concat(de.template extract<16>(0), dod.template extract<16>(0));
@@ -246,24 +292,25 @@ static inline void gemv_q4_pool_group_rt(const uint8_t *__restrict chunks,
   }
 }
 
-#define GEMV_Q4_ENTRY__(P, B, R, N)                                         \
-  void gemv_q4_p##P##b##B##r##R##_k##N(const uint8_t *__restrict t,         \
-                                       const uint8_t *__restrict tab,       \
-                                       float *__restrict y) {               \
-    gemv_q4_pool_group(t, tab, N, y);                                       \
+#define GEMV_Q4_ENTRY___(PFX, P, B, R, N)                                    \
+  void PFX##_p##P##b##B##r##R##_k##N(const uint8_t *__restrict t,           \
+                                     const uint8_t *__restrict tab,          \
+                                     float *__restrict y) {                  \
+    gemv_q4_pool_group(t, tab, N, y);                                        \
   }
-
-#define GEMV_Q4_ENTRY_(P, B, R, N) GEMV_Q4_ENTRY__(P, B, R, N)
+#define GEMV_Q4_ENTRY__(PFX, P, B, R, N) GEMV_Q4_ENTRY___(PFX, P, B, R, N)
+#define GEMV_Q4_ENTRY_(P, B, R, N) GEMV_Q4_ENTRY__(GEMV_Q4_PREFIX, P, B, R, N)
 #define GEMV_Q4_ENTRY(N) GEMV_Q4_ENTRY_(GEMV_PER_CALL, GEMV_PER_BAND, GEMV_ROWSPLIT, N)
 // One entry point per (PER_CALL, PER_BAND, ROWSPLIT) with the group AND the
 // band (y + band * band_rows) as RUNTIME arguments (from range_ loops):
 // gemv_q4_p<P>b<B>r<R>_g. Keeps the core program compact (16 KB).
-#define GEMV_Q4_GROUP_ENTRY__(P, B, R)                                       \
-  void gemv_q4_p##P##b##B##r##R##_g(const uint8_t *__restrict t,            \
-                                    const uint8_t *__restrict tab,          \
-                                    float *__restrict y, int32_t group,     \
-                                    int32_t band) {                         \
+#define GEMV_Q4_GROUP_ENTRY___(PFX, P, B, R)                                 \
+  void PFX##_p##P##b##B##r##R##_g(const uint8_t *__restrict t,              \
+                                  const uint8_t *__restrict tab,            \
+                                  float *__restrict y, int32_t group,       \
+                                  int32_t band) {                           \
     gemv_q4_pool_group(t, tab, (unsigned)group, y + band * kBandRows * kRowSplit / 2); \
   }
-#define GEMV_Q4_GROUP_ENTRY_(P, B, R) GEMV_Q4_GROUP_ENTRY__(P, B, R)
+#define GEMV_Q4_GROUP_ENTRY__(PFX, P, B, R) GEMV_Q4_GROUP_ENTRY___(PFX, P, B, R)
+#define GEMV_Q4_GROUP_ENTRY_(P, B, R) GEMV_Q4_GROUP_ENTRY__(GEMV_Q4_PREFIX, P, B, R)
 #define GEMV_Q4_GROUP_ENTRY() GEMV_Q4_GROUP_ENTRY_(GEMV_PER_CALL, GEMV_PER_BAND, GEMV_ROWSPLIT)

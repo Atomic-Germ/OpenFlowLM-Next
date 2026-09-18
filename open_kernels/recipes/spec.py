@@ -31,7 +31,7 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q8", "mxfp4")
+QUANT_FORMATS = ("q4_1", "q4_1_f32", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
 # 2560 is deliberately NOT in that table: GPT-OSS ships both its q4_1 projections and its
@@ -1446,6 +1446,9 @@ ROLE_TENSORS["gptoss"] = {**_ATTN_HF, "ffn_up_exps.weight": "experts",
 _GGUF_BLOCK = re.compile(r"^blk\.\d+\.")
 _GGUF_ROLE = {"attn_q.weight": "attn", "attn_k.weight": "attn", "attn_v.weight": "attn",
               "attn_output.weight": "attn",
+              # Qwen3-Next linear layers fuse q/k/v into one tensor; the full
+              # layers keep the split names (same roles either way).
+              "attn_qkv.weight": "linear",
               "ffn_up.weight": "ffn", "ffn_gate.weight": "ffn", "ffn_down.weight": "ffn",
               "ffn_up_exps.weight": "experts", "ffn_gate_exps.weight": "experts",
               "ffn_down_exps.weight": "experts",
