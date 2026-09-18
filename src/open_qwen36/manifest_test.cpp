@@ -276,10 +276,32 @@ int main(int argc, char** argv) {
             const auto& lt = d.layer_types.at("dense");
             check(lt.program.size() == 1 && lt.program[0].op == "run" && lt.program[0].kernel == "dx" && lt.program[0].args.size() == 6 &&
                   lt.state_kind == "kv" && lt.state_row == 4096, "qwen3: one run per layer");
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 3, "qwen3: kernels");
+            // dx / ln / lm plus the block prefill route's two: the attention dispatch's own
+            // xclbin ("dxa") and the ONE context every projection shape streams over ("gemm").
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 5, "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
+            // ---- the dense block prefill route (OPEN-PREFILL-BATCH, kind "dense")
+            const auto& dg = lt.gemm_block;
+            check(dg.t == 256 && dg.kind == "dense" && dg.program.size() == 5, "qwen3: a 5-step dense route at T = 256");
+            check(dg.qw == 4096 && dg.kvw == 1024 && dg.ff == 9728, "qwen3: the route's projection widths");
+            // the fixed step order the engine reads: qkv3, o, gate, up, down
+            check(dg.program[0].kernel == "gemm_n6144_k2560" && dg.program[0].args[0] == "gqkv3_w" &&
+                  dg.program[1].kernel == "gemm_n2560_k4096" && dg.program[1].args[0] == "go_w" &&
+                  dg.program[2].kernel == "gemm_n9728_k2560" && dg.program[2].args[0] == "ggate_w" &&
+                  dg.program[3].kernel == "gemm_n9728_k2560" && dg.program[3].args[0] == "gup_w" &&
+                  dg.program[4].kernel == "gemm_n2560_k9728" && dg.program[4].args[0] == "gdown_w",
+                  "qwen3: the route's steps are qkv3, o, gate, up, down over their own shapes");
+            // q, k and v are three consecutive pool ops, so the fused projection is one memcpy
+            check(dg.weights.at("gqkv3_w").from == "pool" && dg.weights.at("gqkv3_w").ops == std::vector<size_t>{0, 1, 2} &&
+                  dg.weights.at("ggate_w").ops == std::vector<size_t>{5} && dg.weights.at("gup_w").ops == std::vector<size_t>{4},
+                  "qwen3: the route's weight buffers name the pack ops they stream");
+            check(d.kernels.at("dxB").patch == "attnpos" && d.kernels.at("dxB").window == 0 &&
+                  d.kernels.at("dxB").context == "dxa", "qwen3: the route's attention dispatch is attnpos-patched");
+            // every projection shape is an instruction stream over ONE hardware context
+            check(d.kernels.at("gemm_n6144_k2560").context == "gemm" && d.kernels.at("gemm_n2560_k9728").context == "gemm",
+                  "qwen3: one GEMM context for every shape");
             json ok = matching_config(d);
             d.check_model(ok, "qwen3");
             check(true, "qwen3: a matching config.json is accepted");

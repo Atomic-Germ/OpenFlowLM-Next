@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, MB, band_bytes, proj_op, q4_chunks,
+from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, GEMM_T, MB, _op_index, band_bytes, proj_op, q4_chunks,
                         mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
@@ -363,6 +363,102 @@ def pack_plan(spec: ModelSpec) -> dict:
     }
 
 
+# ---- the block prefill route (OPEN-PREFILL-BATCH, kind "dense") ---------------------
+def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
+    """Per layer type the `gemm_block` the engine reads -- kind "dense": the five-step chain
+    (qkv3, o, gate, up, down) with T single-token attention dispatches between the first two
+    -- plus the contexts / kernels / globals / builds the route adds. None means the
+    sequential path, byte for byte what it was, for one of the two reasons below.
+
+    The block size, the GEMM design and the one-context-per-route rule are the 35B route's
+    (`qwen36moe.gemm_route`); what differs is the kind, and that the FFN here is dense rather
+    than a set of experts, so the whole layer is five dispatches and a handful of host stages."""
+    # A projection streamed at q8 has no route: the GEMM dequantises the q4_1 band law only
+    # (OPEN-PREFILL-BATCH), so such a spec keeps exactly the sequential manifest it had.
+    if any(spec.quant_of(r) == "q8" for r in Q8_ROLES):
+        return None
+    # The engine's dense route drives ONE attention kernel ("dxB") against ONE position
+    # table ("ptab") for every layer (core.cpp `step_gemm_block_layer`), so a spec with a
+    # second layer type -- Gemma 3's sliding-window `dense_local`, which carries its own
+    # window patch and its own table -- cannot be served by it, and `gemm_block_t_` would
+    # read 0 anyway (core.cpp refuses a mixed manifest rather than guess whose T applies).
+    # Giving that family a route is an engine change (a per-layer-type attention kernel and
+    # table), not a recipe one; until then its prefill stays sequential and correct.
+    if sorted(set(spec.layer_types)) != [DENSE]:
+        return None
+    L, G, T = layout(spec, max_ctx), geometry(spec), GEMM_T
+    hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
+    pool = pack_plan(spec)["layer_types"][DENSE]["pool"]
+    shapes: set[tuple[int, int]] = set()
+
+    def ctx(N: int, K: int) -> str:
+        # gemm_q4_prefill tiles N into 256-row blocks (4 rows x 64-row bands) and reads K as
+        # 256-wide band groups, so both dims are multiples of 256 or the design will not build.
+        if N % 256 or K % 256:
+            raise OpRangeError(f"gemm route: [{N}, {K}] is not a multiple of 256 in both dims")
+        shapes.add((N, K))
+        return f"gemm_n{N}_k{K}"
+
+    def run(N: int, K: int, w: str) -> dict:
+        return {"op": "run", "kernel": ctx(N, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
+
+    # The five steps in the FIXED order the engine reads them (manifest.hpp's
+    # GemmBlockProgram): qkv3, o, gate, up, down. q, k and v are three consecutive pack ops
+    # at one pool offset, so the fused input projection is ONE dispatch over their bytes;
+    # each FFN projection is one op. Every `ops` list must be byte-contiguous in the pool --
+    # the engine builds each weight buffer with a single memcpy and says so if it is not.
+    program = [run(qw + 2 * kvw, hid, "gqkv3_w"), run(hid, qw, "go_w"),
+               run(ff, hid, "ggate_w"), run(ff, hid, "gup_w"), run(hid, ff, "gdown_w")]
+    weights = {
+        "gqkv3_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight"),
+                                            _op_index(pool, "self_attn.k_proj.weight"),
+                                            _op_index(pool, "self_attn.v_proj.weight")]},
+        "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]},
+        "ggate_w": {"from": "pool", "ops": [_op_index(pool, "mlp.gate_proj.weight")]},
+        "gup_w": {"from": "pool", "ops": [_op_index(pool, "mlp.up_proj.weight")]},
+        "gdown_w": {"from": "pool", "ops": [_op_index(pool, "mlp.down_proj.weight")]},
+    }
+    out: dict = {
+        "layer_types": {DENSE: {"kind": "dense", "t": T, "eps": spec.norm_eps,
+                                "program": program, "weights": weights,
+                                "qw": qw, "kvw": kvw, "ff": ff,
+                                "ad_q": L.AD_Q, "ad_kvn": L.AD_KVN, "ad_og": L.AD_OG}},
+        "contexts": {}, "kernels": {}, "globals": {}, "builds": {},
+    }
+    qh = spec.quant_hash()
+    sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
+    # The attention half of the layer as its own dispatch (designs/dense/dx_attn.py: dx.py's
+    # single-token attention phase and nothing else, same kernels and same placeholder
+    # offsets), so the SAME attnpos patch the sequential layer uses drives it once per token
+    # of the block. `pool` and `xres` are dummy arguments there -- the engine passes the
+    # layer's six in the sequential order and the design ignores the two it does not read.
+    args = ["pool", "xres", "consts", "state", "act", "ptab"]
+    check_buffer_args("dxB", args)
+    out["contexts"]["dxa"] = "dx_attn/final.xclbin"
+    out["kernels"]["dxB"] = {"context": "dxa", "insts": "dx_attn/insts.bin", "patch": "attnpos",
+                             "build": "dx_attn", "window": 0}
+    out["builds"]["dx_attn"] = {"design": "dense/dx_attn.py",
+                                "build_dir": f"dense/build_dxa_{spec.family}_h{hid}{sfx}", "env": {}}
+    # The T-wide attention scratch: the engine writes every token's q/k/v into it, then
+    # shuttles one token's slice in and out of the layer's own `act` around each dxB
+    # dispatch (core.cpp `shuttle_buf`), and reads all T og rows back out at the end.
+    out["globals"]["gact"] = T * L.AD_BYTES
+    # ONE hardware context for every projection shape: the GEMM core program depends on
+    # neither N nor K (the band count K/256 reaches each core as a runtime parameter), so
+    # each shape is an instruction stream over one xclbin. Changing context costs ~2.5 ms
+    # and the shapes alternate, so this is worth more here than anywhere else in the route.
+    for N, K in sorted(shapes):
+        name = f"gemm_n{N}_k{K}"
+        out["contexts"].setdefault("gemm", f"{name}/final.xclbin")
+        out["kernels"][name] = {"context": "gemm", "insts": f"{name}/insts.bin", "build": name}
+        out["globals"][f"gemm_x_k{K}"] = K * T * 2      # bf16, pre-tiled [K, T]
+        out["globals"][f"gemm_y_n{N}"] = N * T * 4      # f32 [N, T]
+        out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
+                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}",
+                               "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}}
+    return out
+
+
 def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     """One design serves every dense layer type; a layer type with a sliding window gets its own
     kernel entry (the same instruction stream, its own instruction BO, patched with its window)
@@ -412,6 +508,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": kn, "args": args}],
         }
+    r = gemm_route(spec, max_ctx)
+    if r:
+        for k in ("contexts", "kernels", "globals"):
+            out[k].update(r[k])
+        for lt, gb in r["layer_types"].items():
+            out["layer_types"][lt]["gemm_block"] = gb
     return out
 
 
@@ -419,12 +521,16 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     n = cores_for(spec)
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
-    return {
+    b = {
         "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}", "env": {}},
         "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
     }
+    r = gemm_route(spec)
+    if r:
+        b.update(r["builds"])
+    return b
 
 
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
@@ -512,6 +618,8 @@ KERNEL_SOURCES = [
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q4/*.py",
+    # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
+    "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
