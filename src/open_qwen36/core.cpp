@@ -1048,20 +1048,30 @@ void Core::tail_logits(const float* row) {
     timing_.lmhead_ms = ms_since(t1);
 }
 
-void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch) {
+void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
+                       size_t region_off, size_t region_bytes) {
     // `wide` is an explicit argument rather than a fixed per-layer buffer
     // because the GEMM route's T-wide attention scratch ("gact") is a
     // GLOBAL, not per-layer (act_bytes is uniform across every Granite dense
     // layer, so a per-layer copy would only cost memory).
-    const size_t off = token * act_bytes;
+    //
+    // Only [region_off, region_off + region_bytes) moves. The attention dispatch reads
+    // q / k / v and writes og and touches nothing else in `act` (designs/dense/dx_attn.py
+    // says so in its own header), so shuttling the WHOLE buffer moved about nine bytes
+    // for every one that mattered -- 590 KB per token per layer, which at T x layers
+    // dispatches a block is gigabytes of sync traffic for nothing. region_bytes == 0
+    // keeps the original whole-buffer behaviour for any other caller.
+    const size_t n = region_bytes ? region_bytes : act_bytes;
+    const size_t r = region_bytes ? region_off : 0;
+    const size_t off = token * act_bytes + r;
     if (wide_to_scratch) {
-        wide.sync(XCL_BO_SYNC_BO_FROM_DEVICE, act_bytes, off);
-        std::memcpy(scratch1.map<uint8_t*>(), wide.map<uint8_t*>() + off, act_bytes);
-        scratch1.sync(XCL_BO_SYNC_BO_TO_DEVICE, act_bytes, 0);
+        wide.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, off);
+        std::memcpy(scratch1.map<uint8_t*>() + r, wide.map<uint8_t*>() + off, n);
+        scratch1.sync(XCL_BO_SYNC_BO_TO_DEVICE, n, r);
     } else {
-        scratch1.sync(XCL_BO_SYNC_BO_FROM_DEVICE, act_bytes, 0);
-        std::memcpy(wide.map<uint8_t*>() + off, scratch1.map<uint8_t*>(), act_bytes);
-        wide.sync(XCL_BO_SYNC_BO_TO_DEVICE, act_bytes, off);
+        scratch1.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, r);
+        std::memcpy(wide.map<uint8_t*>() + off, scratch1.map<uint8_t*>() + r, n);
+        wide.sync(XCL_BO_SYNC_BO_TO_DEVICE, n, off);
     }
 }
 
@@ -1071,12 +1081,16 @@ void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, cons
     // reduction over 2560+ terms is not a safe correctness metric at this
     // width). out[t,k] = x[t,k]/sqrt(mean_k(x^2)+eps)*w[k].
     out.assign(T * hid, 0.f);
-    for (size_t t = 0; t < T; ++t) {
-        const double* row = &x[t * hid];
+    // Over tokens, which are independent: each row's reduction and its own rms stay
+    // exactly where they were, so this is bit-exact against the serial form (the same
+    // argument, and the same gate, as the 35B's host DeltaNet conv).
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        const double* row = &x[static_cast<size_t>(t) * hid];
         double ss = 0;
         for (size_t k = 0; k < hid; ++k) ss += row[k] * row[k];
         const double rms = std::sqrt(ss / static_cast<double>(hid) + eps);
-        float* orow = &out[t * hid];
+        float* orow = &out[static_cast<size_t>(t) * hid];
         for (size_t k = 0; k < hid; ++k) {
             const double w = static_cast<double>(bf16_to_f32(w_bf16[k]));
             orow[k] = static_cast<float>((row[k] / rms) * w);
@@ -1129,17 +1143,21 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     // both landing in part1_ms.
     auto run_gemm = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N, std::vector<float>& y_out) {
         const Step& s = gb.program[idx];
+        auto tt = std::chrono::steady_clock::now();
         std::vector<uint16_t> xt;
         tile_gemm_x(x, T, K, xt);
         xrt::bo& xb = buffer(s.args[1], 0);
         std::memcpy(xb.map<uint8_t*>(), xt.data(), xt.size() * 2);
         xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xt.size() * 2, 0);
+        timing_.gemm_tile_ms += ms_since(tt);
         Kern& k = kerns_.at(s.kernel);
         timing_.part0_ms += run(k, s.args, l);
+        tt = std::chrono::steady_clock::now();
         xrt::bo& yb = buffer(s.args[2], 0);
         yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
         y_out.assign(N * T, 0.f);
         std::memcpy(y_out.data(), yb.map<uint8_t*>(), N * T * 4);
+        timing_.gemm_tr_ms += ms_since(tt);
     };
 
     // ---- entry RMSNorm, GEMM A' (qkv3, real q|k|v pool weight, ONE dispatch) ----
@@ -1158,9 +1176,13 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         // Fill gact's Q/K/V region for every token from y_qkv3's columns
         // (f32 bytes, matching the T=1 "act" buffer's own AD_Q/AD_KVN format
         // -- the SAME format Core::step() writes there today).
-        std::vector<uint8_t> host_gact(T * AD, 0);
-        for (size_t tk = 0; tk < T; ++tk) {
-            uint8_t* base = host_gact.data() + tk * AD;
+        auto tq = std::chrono::steady_clock::now();
+        uint8_t* gbase = gact.map<uint8_t*>();
+        std::memset(gbase, 0, T * AD);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t) {
+            const size_t tk = static_cast<size_t>(t);
+            uint8_t* base = gbase + tk * AD;
             float* qd = reinterpret_cast<float*>(base + gb.ad_q);
             float* kd = reinterpret_cast<float*>(base + gb.ad_kvn);
             float* vd = reinterpret_cast<float*>(base + gb.ad_kvn + kvw * 4);
@@ -1168,30 +1190,43 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
             for (size_t c = 0; c < kvw; ++c) kd[c] = y_qkv3[(qw + c) * T + tk];
             for (size_t c = 0; c < kvw; ++c) vd[c] = y_qkv3[(qw + kvw + c) * T + tk];
         }
-        std::memcpy(gact.map<uint8_t*>(), host_gact.data(), T * AD);
         gact.sync(XCL_BO_SYNC_BO_TO_DEVICE, T * AD, 0);
+        timing_.gemm_tr_ms += ms_since(tq);
     }
+    // The attention dispatch reads q / k / v and writes og, so only those two ranges of a
+    // token's slice move between the wide scratch and the layer's own act. q, k and v are
+    // laid out consecutively (ad_q -> ad_kvn -> ad_og), so the read side is one range.
+    const size_t qkv_off = gb.ad_q, qkv_bytes = gb.ad_og - gb.ad_q, og_bytes = qw * 2;
     {
         Kern& dxb = kerns_.at("dxB");
         const std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
         for (size_t tk = 0; tk < T; ++tk) {
             const uint64_t pos = static_cast<uint64_t>(pos_) + tk;
+            auto tp = std::chrono::steady_clock::now();
             stream_patch::attn_apply(dxb.iw(), dxb.attn, pos, dxb.geom);
             dxb.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-            shuttle_buf(gact, act1, tk, AD, /*wide_to_scratch=*/true);
+            timing_.moe_patch_ms += ms_since(tp);
+            auto ts = std::chrono::steady_clock::now();
+            shuttle_buf(gact, act1, tk, AD, /*wide_to_scratch=*/true, qkv_off, qkv_bytes);
+            timing_.moe_prep_ms += ms_since(ts);
             timing_.route_ms += run(dxb, attn_args, l);
-            shuttle_buf(gact, act1, tk, AD, /*wide_to_scratch=*/false);
+            ts = std::chrono::steady_clock::now();
+            shuttle_buf(gact, act1, tk, AD, /*wide_to_scratch=*/false, gb.ad_og, og_bytes);
+            timing_.moe_read_ms += ms_since(ts);
         }
     }
     // ---- read back AD_OG (bf16, qw elements/token) as [T,qw] f32 -----------
     std::vector<float> og(T * qw, 0.f);
     {
-        gact.sync(XCL_BO_SYNC_BO_FROM_DEVICE, T * AD, 0);
-        const uint8_t* base = gact.map<uint8_t*>();
-        for (size_t tk = 0; tk < T; ++tk) {
+        auto to = std::chrono::steady_clock::now();
+        const uint8_t* base = gact.map<uint8_t*>();   // the og ranges are already host-side
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t) {
+            const size_t tk = static_cast<size_t>(t);
             const uint16_t* src = reinterpret_cast<const uint16_t*>(base + tk * AD + gb.ad_og);
             for (size_t c = 0; c < qw; ++c) og[tk * qw + c] = bf16_to_f32(src[c]);
         }
+        timing_.mid_ms += ms_since(to);
     }
 
     // ---- GEMM O (o_proj, real weight, reusing the "qkv"-shaped context) ---
@@ -1199,9 +1234,14 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     run_gemm(1, og, qw, hid, y_o);
 
     // ---- host: residual add, post-attention RMSNorm ------------------------
+    auto th = std::chrono::steady_clock::now();
     std::vector<double> res1(T * hid);
-    for (size_t tk = 0; tk < T; ++tk)
-        for (size_t c = 0; c < hid; ++c) res1[tk * hid + c] = xres[tk * hid + c] + static_cast<double>(y_o[c * T + tk]);
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t)
+        for (size_t c = 0; c < hid; ++c)
+            res1[static_cast<size_t>(t) * hid + c] =
+                xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+    timing_.tail_ms += ms_since(th);
     std::vector<float> xm;
     rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm);
 
@@ -1211,19 +1251,29 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     run_gemm(3, xm, hid, ff, y_up);
 
     // ---- host SwiGLU: silu(gate) * up ---------------------------------------
+    th = std::chrono::steady_clock::now();
     std::vector<float> h(T * ff);
-    for (size_t tk = 0; tk < T; ++tk)
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        const size_t tk = static_cast<size_t>(t);
         for (size_t c = 0; c < ff; ++c) {
             const double g = static_cast<double>(y_gate[c * T + tk]);
             const double u = static_cast<double>(y_up[c * T + tk]);
             h[tk * ff + c] = static_cast<float>((g / (1.0 + std::exp(-g))) * u);
         }
+    }
+    timing_.tail_ms += ms_since(th);
 
     // ---- GEMM down_proj, then residual -> next layer's xres -----------------
     std::vector<float> y_down;  // [hid, T]
     run_gemm(4, h, ff, hid, y_down);
-    for (size_t tk = 0; tk < T; ++tk)
-        for (size_t c = 0; c < hid; ++c) xres[tk * hid + c] = res1[tk * hid + c] + static_cast<double>(y_down[c * T + tk]);
+    th = std::chrono::steady_clock::now();
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t)
+        for (size_t c = 0; c < hid; ++c)
+            xres[static_cast<size_t>(t) * hid + c] =
+                res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+    timing_.tail_ms += ms_since(th);
 }
 
 void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits) {
