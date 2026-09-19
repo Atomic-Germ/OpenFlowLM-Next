@@ -1761,6 +1761,13 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         }
         std::string model = request["model"].get<std::string>();
         std::string file_content = request["file"].get<std::string>();
+        if (file_content.empty()) {
+            send_response(json{{"error", {
+                {"message", "file is required and must contain the audio to transcribe."},
+                {"type", "invalid_request_error"}, {"param", "file"},
+                {"code", "invalid_value"}}}});
+            return;
+        }
         std::vector<uint8_t> audio_raw(file_content.begin(), file_content.end());
         bool stream = request.value("stream", false);
         json response;
