@@ -20,8 +20,12 @@ The kernels are **built, not checked in** (`.gitignore`:
 skill found Windows' own `xclbinutil.exe` / `aiebu-asm.exe` (from a downloaded
 XRT SDK, not a WSL build) and `iron_setup.py` (mlir-aie's own cross-platform
 setup script) build and run this same toolchain with no WSL and no source
-build -- see that skill's "Build" section and mlir-aie's
-`docs/buildHostWinNative.md`. The WSL recipe below still works; it just isn't
+build -- see that skill's "Build" section, `docs/BUILD.md` ("2. The NPU
+kernels") and mlir-aie's `docs/buildHostWinNative.md`. Same 1.4.2 pin as the
+WSL recipe below, and it is the checkout that carries it: `iron_setup.py`
+installs the release wheel matching the TAG it finds, so check mlir-aie out at
+`v1.4.2` before running it or you get the rolling wheel and an IRON API these
+designs do not import against. The WSL recipe below still works; it just isn't
 the easier path anymore.
 
 ## Build (WSL, mlir-aie 1.4.2)
