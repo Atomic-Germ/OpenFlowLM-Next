@@ -41,6 +41,11 @@ from .qwen36moe import (CHUNK, ELEM, MB, mixed_check, proj_op, q4_chunks, quant_
                         require_gemv, role_bytes, roundup)
 from .spec import FULL, SHORT_CONV, ModelSpec
 
+# The attention layers ARE dense layers (designs/dense/dx.py runs them unchanged), so the
+# chunk geometry a design reads off the family module is the dense one.
+band_bytes = D.band_bytes   # noqa: F401  (dx.py: band_bytes(K, quant))
+chunk_bytes = D.chunk_bytes  # noqa: F401  (dx.py: chunk_bytes(quant))
+
 TAPS = 3                      # LFM2's conv_L_cache; the [hidden, 3] weight confirms it
 EMBED = "model.token_embd.weight"
 
