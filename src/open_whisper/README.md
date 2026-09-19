@@ -1,12 +1,17 @@
-# open_whisper (phase 2b, issue #72)
+# open_whisper (phase 2b encoder + phase 3 decoder, issue #72)
 
-A C++ Whisper-large-v3-turbo **encoder** that runs every matrix product on
-the NPU through the already-built `whisper_gemm` kernel set (one xclbin,
-seven instruction streams, one `hw_context`) and everything else -- im2col,
-LayerNorm, GELU, bidirectional attention, bias, residual, bf16 rounding --
-on the host in fp32. No decoder, not wired into `oflm.exe` (this is a
-standalone build, like `../open_qwen36/build.cmd`), no NPU performance
-claims (see the note at the bottom).
+A C++ Whisper-large-v3-turbo engine. The **encoder** (phase 2b) runs every
+matrix product on the NPU through the already-built `whisper_gemm` kernel set
+(one xclbin, seven instruction streams, one `hw_context`) and everything else
+-- im2col, LayerNorm, GELU, bidirectional attention, bias, residual, bf16
+rounding -- on the host in fp32. The **decoder** (phase 3) is 4 layers, entirely
+on the host in fp32, with no NPU dispatch at all: it is a KV-cache generation
+loop over d_model 1280, 20 heads x 64, FFN 5120, vocab 51866 (tied to
+`embed_tokens` -- there is no `lm_head` tensor), reading its cross-attention
+K/V straight from the encoder's fixed `Encoder::xkv()`. Not wired into
+`oflm.exe` (this is a standalone build, like `../open_qwen36/build.cmd`), no
+NPU performance claims (see the note at the bottom -- the decoder has none to
+make in the first place, since it never touches the array).
 
 ## Files
 
@@ -29,7 +34,19 @@ claims (see the note at the bottom).
 - `encoder.hpp/.cpp` -- `class Encoder`: stages all 131 weight buffers once,
   runs the stem + 32 layers + final LayerNorm + cross-KV, with a `StageHook`
   for capturing intermediates and `run_layer_from()` for teacher forcing.
-- `cli.cpp` -> `open_whisper_cli.exe` -- the gate itself.
+- `decoder.hpp/.cpp` -- `class Decoder` (phase 3): reads the container's
+  decoder tensors at their natural `[out, in]` bf16 layout (no NPU tiling --
+  the decoder never dispatches), keeps them bf16 and widens on the fly per
+  dot product (`linear()`/`dot_bf16()`, ported with attribution from
+  `open_qwen36/vision/vit.cpp`'s `linear()`/`widen_avx2`), and runs one
+  `step()` per token: embed + position, 4 layers of (causal self-attention
+  over a growing KV cache, cross-attention over the encoder's fixed K/V,
+  GELU FFN), final LayerNorm, then the tied head (`logits = h . embed_tokens^T`).
+  `clear_context()` resets the self-attention cache and position counter only
+  -- cross-attention K/V (`set_encoder_output()`) survives it, since it is
+  fixed for the whole 30 s window.
+- `cli.cpp` -> `open_whisper_cli.exe` -- the gate itself, `--decode hf|host`
+  for the decoder.
 - `build.cmd` -- standalone MSVC build, modelled on `../open_qwen36/build.cmd`.
 
 ## Build
@@ -47,7 +64,7 @@ build.cmd
 ```
 set PATH=C:\Xilinx\XRT;%PATH%
 out\open_whisper_cli.exe --model <model_dir> --kernels <kernel_set_dir> ^
-    --golden <clip>.safetensors [--forced]
+    --golden <clip>.safetensors [--forced] [--decode hf|host]
 ```
 
 `--model` is an `oflm-open-whisper-v1` container directory (e.g.
@@ -63,6 +80,24 @@ K/V), then (with `--forced`) each layer run in isolation from the golden
 `enc.hidden.<i>`, and finally host-side stage timers (all labelled "host
 wall clock", never an NPU performance claim). Exit code is nonzero if
 `enc.out`'s cosine is below 0.99 or any output contains NaN/Inf.
+
+`--decode hf|host` additionally runs the phase-3 decoder gate on that
+protocol's golden token sequence (`open_kernels/model/whisper_goldens.py`'s
+`hf.tokens`/`hf.logits` or `host.tokens`/`host.logits`), mirroring
+`open_kernels/model/whisper_decode_check.py`'s protocol in C++ with a KV
+cache: teacher-forced argmax agreement and logits cosine over the
+free-running region (the forced prefix -- `[SOT, lang, transcribe,
+<|0.00|>]` for `hf`, `[SOT, transcribe]` for `host`, per
+`whisper_goldens.py` -- is a prompt, not a prediction, so it is excluded),
+then a from-scratch greedy free-run from that prefix compared token for
+token against the golden path. Also prints whether logits
+`[vocab, vocab_padded) = [51866, 51872)` are `-inf` on every step (the host
+sampler's padded width; the pad must never win an argmax or a sample), and
+decode timers (embed/layer_norm/linear/attention/gelu, ms/token, tok/s --
+host wall clock; the decoder never dispatches to the NPU, so there is no
+NPU-side split to report). Exit code is nonzero unless argmax agreement is
+100% and the free-run matches the golden path exactly, in addition to the
+encoder's own PASS condition above.
 
 ## The bug this phase actually found: never write into a device-mapped buffer
 
@@ -119,6 +154,50 @@ Both clips pass, and every figure sits at `replica_whisper.py`'s bf16 ceiling:
 
 Two runs of each are identical to all eight printed digits.
 
+## Decode gate (phase 3, 2026-09-20, idle machine)
+
+`--decode hf` and `--decode host`, on the encoder output measured above (so
+these numbers already carry the encoder's own bf16-ceiling error). All six
+runs (3 clips x 2 protocols) pass: **100% teacher-forced argmax agreement**
+and an **exact free-run token match** against the golden path.
+
+| | Recording | Demos_sample-data_journal | nvidia |
+|---|---|---|---|
+| hf: tokens / argmax agreement | 9 / 5/5 | 32 / 28/28 | 97 / 93/93 |
+| hf: logits cosine mean / min | 0.99997547 / 0.99988179 | 0.99997601 / 0.99979626 | 0.99997313 / 0.99957159 |
+| hf: free-run | MATCHES (9 tok) | MATCHES (32 tok) | MATCHES (97 tok) |
+| host: tokens / argmax agreement | 8 / 5/5 | 31 / 28/28 | 96 / 93/93 |
+| host: logits cosine mean / min | 0.99997247 / 0.99986626 | 0.99997768 / 0.99980397 | 0.99997296 / 0.99969309 |
+| host: free-run | MATCHES (8 tok) | MATCHES (31 tok) | MATCHES (96 tok) |
+
+`vocab pad [51866,51872)` reads `-inf` on every step in every run. Two runs
+of `--decode hf` on `nvidia` agree on every printed cosine, agreement count
+and free-run result to all eight digits; only the (labelled) host wall-clock
+timers differ between runs, as expected.
+
+
+## The one clip where bf16 changes a token, and why the gate still passes
+
+`output_voice_clone` under the **host** protocol is the one (clip, protocol) pair of the
+twelve where the free-run does not reproduce transformers' float64 path: it diverges at
+token index 17, `316` (" A") where float64 says `497` (" R"), and teacher-forced argmax
+agreement is 40/41 instead of 41/41.
+
+That is the **datapath**, not this engine. The numpy replica
+(`open_kernels/model/replica_whisper.py`, bf16 operands, no NPU) fed to the exact float64
+decoder diverges at the **same index, to the same token**, and ends on the same 43-token
+path. Two independent implementations of the same bf16 datapath take the same turn.
+
+So the bf16 token path is recorded rather than argued about:
+
+```
+python open_kernels/model/whisper_decode_check.py --model-dir <hf snapshot>     --goldens <goldens> --enc-dir <goldens>/replica_bf16_enc --proto both     --write-baseline <goldens>/bf16_token_baseline.json
+```
+
+and `--baseline <file>` makes the gate accept a free-run that matches that path exactly,
+while still printing the float64 divergence. A gate that can never pass is one its reader
+learns to skip.
+
 ## Performance
 
 Not measured as a claim. `cli.cpp` prints host-side stage timers labelled
@@ -126,3 +205,11 @@ Not measured as a claim. `cli.cpp` prints host-side stage timers labelled
 followed by NPU dispatch (submit+wait, itself dominated by hardware but
 still a host observation, not a hardware trace). No number here is an NPU
 performance claim.
+
+The decoder never touches the NPU: `--decode`'s own timers (also host wall
+clock) show ~13-14 ms/token, ~70-77 tok/s, split across
+embed/layer_norm/linear/attention/gelu -- `linear` (the per-layer projections
+plus the 51866-wide tied head) and `attention` (cross-attention over 1500
+encoder rows, every layer, every step) dominate. This is a plain,
+single-threaded-per-call generation loop with no batching or speculative
+decoding; it exists to gate correctness, not to claim a decode rate.

@@ -29,7 +29,10 @@ def main() -> int:
     ap.add_argument("--model-dir", required=True, type=Path)
     ap.add_argument("--goldens", required=True, type=Path)
     ap.add_argument("--enc-dir", required=True, type=Path, help="<clip>.enc_out.npy files")
-    ap.add_argument("--proto", default="hf", choices=("hf", "host"))
+    ap.add_argument("--proto", default="hf", choices=("hf", "host", "both"))
+    ap.add_argument("--write-baseline", type=Path, default=None,
+                    help="write the token path this encoder output produces, per clip and "
+                         "protocol, as the bf16 datapath's own reference (see below)")
     args = ap.parse_args()
 
     import torch
@@ -41,14 +44,17 @@ def main() -> int:
     model = WhisperForConditionalGeneration.from_pretrained(args.model_dir, torch_dtype=torch.float32)
     model = model.double().eval()
     meta = json.loads((args.goldens / "meta.json").read_text(encoding="utf-8"))
-    prefix_len = 4 if args.proto == "hf" else 3
+    protos = ("hf", "host") if args.proto == "both" else (args.proto,)
+    baseline: dict = {}
     all_ok = True
-    for name in meta["clips"]:
+    for proto, name in [(p, n) for p in protos for n in meta["clips"]]:
+      prefix_len = 4 if proto == "hf" else 3
+      if True:
         f = args.enc_dir / f"{name}.enc_out.npy"
         if not f.is_file():
             continue
         g = load_file(str(args.goldens / f"{name}.safetensors"))
-        gold = [int(t) for t in g[f"{args.proto}.tokens"]]
+        gold = [int(t) for t in g[f"{proto}.tokens"]]
         out = torch.from_numpy(np.load(f).astype(np.float64))[None]
 
         # teacher-forced along the golden path: one pass, argmax at every position
@@ -68,11 +74,23 @@ def main() -> int:
                       past_key_values=o.past_key_values, use_cache=True)
         same = ids == gold
         all_ok &= same
-        print(f"{'SAME' if same else 'DIFF'} {name}: forced argmax {agree}/{len(steps)}, "
-              f"free-run {len(ids)} vs golden {len(gold)} tokens", flush=True)
+        first_diff = next((i for i, (a, b) in enumerate(zip(ids, gold)) if a != b),
+                          None if len(ids) == len(gold) else min(len(ids), len(gold)))
+        baseline.setdefault(name, {})[proto] = {
+            "tokens": ids, "matches_fp64": same, "first_divergence": first_diff,
+            "forced_argmax": [agree, len(steps)]}
+        print(f"{'SAME' if same else 'DIFF'} {name} [{proto}]: forced argmax {agree}/{len(steps)}, "
+              f"free-run {len(ids)} vs golden {len(gold)} tokens"
+              + ("" if same else f", first divergence at {first_diff}"), flush=True)
         if not same:
             print("   golden:", tok.decode(gold, skip_special_tokens=True)[:200])
             print("   got   :", tok.decode(ids, skip_special_tokens=True)[:200])
+    if args.write_baseline:
+        args.write_baseline.write_text(
+            json.dumps({"format": "oflm-open-whisper-bf16-token-baseline-v1",
+                        "model_sha256": meta.get("model_sha256", ""),
+                        "clips": baseline}, indent=1) + "\n", encoding="utf-8")
+        print(f"wrote {args.write_baseline}")
     return 0 if all_ok else 1
 
 
