@@ -202,7 +202,9 @@
  "contexts": {
   "dx": "dx/final.xclbin",
   "ln": "ln/final.xclbin",
-  "lm": "lm_head_q4/final.xclbin"
+  "lm": "lm_head_q4/final.xclbin",
+  "dxa": "dx_attn/final.xclbin",
+  "gemm": "gemm_n4096_k4096/final.xclbin"
  },
  "kernels": {
   "ln": {
@@ -221,6 +223,33 @@
    "patch": "attnpos",
    "build": "dx",
    "window": 0
+  },
+  "dxB": {
+   "context": "dxa",
+   "insts": "dx_attn/insts.bin",
+   "patch": "attnpos",
+   "build": "dx_attn",
+   "window": 0
+  },
+  "gemm_n4096_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n4096_k4096/insts.bin",
+   "build": "gemm_n4096_k4096"
+  },
+  "gemm_n4096_k14336": {
+   "context": "gemm",
+   "insts": "gemm_n4096_k14336/insts.bin",
+   "build": "gemm_n4096_k14336"
+  },
+  "gemm_n6144_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n6144_k4096/insts.bin",
+   "build": "gemm_n6144_k4096"
+  },
+  "gemm_n14336_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n14336_k4096/insts.bin",
+   "build": "gemm_n14336_k4096"
   }
  },
  "layer_types": {
@@ -247,6 +276,98 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "dense",
+    "t": 256,
+    "eps": 1e-05,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n6144_k4096",
+      "args": [
+       "gqkv3_w",
+       "gemm_x_k4096",
+       "gemm_y_n6144"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k4096",
+      "args": [
+       "go_w",
+       "gemm_x_k4096",
+       "gemm_y_n4096"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n14336_k4096",
+      "args": [
+       "ggate_w",
+       "gemm_x_k4096",
+       "gemm_y_n14336"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n14336_k4096",
+      "args": [
+       "gup_w",
+       "gemm_x_k4096",
+       "gemm_y_n14336"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k14336",
+      "args": [
+       "gdown_w",
+       "gemm_x_k14336",
+       "gemm_y_n4096"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkv3_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1,
+       2
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       3
+      ]
+     },
+     "ggate_w": {
+      "from": "pool",
+      "ops": [
+       5
+      ]
+     },
+     "gup_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     },
+     "gdown_w": {
+      "from": "pool",
+      "ops": [
+       6
+      ]
+     }
+    },
+    "qw": 4096,
+    "kvw": 1024,
+    "ff": 14336,
+    "ad_q": 8192,
+    "ad_kvn": 24576,
+    "ad_og": 32768
+   },
    "pack": {
     "pool": [
      {
@@ -427,7 +548,13 @@
     1.1547819846894587e-07
    ],
    "window": 0
-  }
+  },
+  "gact": 50331648,
+  "gemm_x_k4096": 2097152,
+  "gemm_y_n4096": 4194304,
+  "gemm_x_k14336": 7340032,
+  "gemm_y_n6144": 6291456,
+  "gemm_y_n14336": 14680064
  },
  "builds": {
   "dx": {
@@ -450,6 +577,47 @@
     "LMHEAD_N": "128192",
     "LMHEAD_K": "4096",
     "LMHEAD_CORES": "8"
+   }
+  },
+  "dx_attn": {
+   "design": "dense/dx_attn.py",
+   "build_dir": "dense/build_dxa_hunyuan_h4096",
+   "env": {}
+  },
+  "gemm_n4096_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n4096_k4096_t256",
+   "env": {
+    "GQP_N": "4096",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n4096_k14336": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n4096_k14336_t256",
+   "env": {
+    "GQP_N": "4096",
+    "GQP_K": "14336",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n6144_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n6144_k4096_t256",
+   "env": {
+    "GQP_N": "6144",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n14336_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n14336_k4096_t256",
+   "env": {
+    "GQP_N": "14336",
+    "GQP_K": "4096",
+    "GQP_T": "256"
    }
   }
  },

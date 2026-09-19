@@ -322,7 +322,10 @@ private:
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
     /// T-wide scratch buffer (`wide`, e.g. "gact") and an ordinary T=1
     /// per-layer scratch buffer (`scratch1`, e.g. "act").
-    void shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch);
+    /// Move one token's slice between the T-wide scratch and a layer's own `act`.
+    /// `region_bytes` limits it to [region_off, +region_bytes) of the slice; 0 moves all of it.
+    void shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
+                     size_t region_off = 0, size_t region_bytes = 0);
     /// out[t,:] = x[t,:] / sqrt(mean(x[t,:]^2) + eps) * w[:], reduction and
     /// the final multiply both in fp64. w is bf16 (hidden elements).
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
