@@ -151,11 +151,30 @@ The cross K/V computed by the last `encode_audio()` stay, because the host calls
 - Free-running greedy under the host's own protocol reproduces the float64 transcript on
   the golden clips. Differences from the **closed** engine are reported, not treated as
   failures.
-- `oflm-test` gains a case that actually exercises `/v1/audio/transcriptions`; today its
-  audio task posts `chat.completions`, which Whisper refuses as a non-chat model, so
-  nothing tests transcription at all.
-
 **Status:** not started.
+
+### OPEN-WHISPER-ENDPOINT: something tests /v1/audio/transcriptions
+**Applies to:** `src/server/server.cpp`, `src/server/rest_handler.cpp`, `utilities/oflm-test`
+**Test category:** integration (through `oflm serve --asr 1`)
+**Acceptance criteria:**
+- A clip of clear speech comes back as text containing what is said in it.
+- A request with a missing or empty `file`, or a missing `model`, is refused with **400**
+  and an OpenAI-shaped error naming the field. This is the client's error; a 5xx here means
+  the request reached something that threw instead of being validated
+  (`SERVER-REQUEST-VALIDATION`).
+- The response names a model.
+
+**Measured 2026-09-20:** the suite exists (`oflm-test`'s transcription task, run as part of
+`--audio`) and passes 3/3 against the closed engine. It was written because the audio suite
+posts `chat.completions` with `input_audio`, which Whisper refuses as a non-chat model, so
+**nothing exercised the endpoint at all**.
+
+It found one defect immediately: the route built its JSON with `parts["file"]`, and
+`std::map::operator[]` default-constructs a missing part, so an absent file read as a
+present string of the right type and died in the audio decoder as **HTTP 500**. Fixed by
+passing on only the parts that are there, and refusing an empty file. Verified both ways:
+the pre-fix binary answers 500 (which T2 now judges FAIL), the fixed one answers 400
+`missing_required_parameter`.
 
 ### OPEN-WHISPER-HOST-PROTOCOL: the language token the host never feeds
 **Applies to:** `src/common/whisper/modeling_whisper.cpp`
