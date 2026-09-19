@@ -16,6 +16,14 @@ The kernels are **built, not checked in** (`.gitignore`:
 3. `../../../open_kernels/PROVENANCE.md` — where the designs come from, licences,
    what is generated vs. tracked.
 
+**Native Windows now works too, and is simpler:** `open-granite-kernels`'s
+skill found Windows' own `xclbinutil.exe` / `aiebu-asm.exe` (from a downloaded
+XRT SDK, not a WSL build) and `iron_setup.py` (mlir-aie's own cross-platform
+setup script) build and run this same toolchain with no WSL and no source
+build -- see that skill's "Build" section and mlir-aie's
+`docs/buildHostWinNative.md`. The WSL recipe below still works; it just isn't
+the easier path anymore.
+
 ## Build (WSL, mlir-aie 1.4.2)
 
 ```

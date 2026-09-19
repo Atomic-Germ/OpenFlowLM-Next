@@ -275,7 +275,13 @@ cmake -B build --preset windows-default
 cmake --build build
 ```
 
-**Note:** Windows builds are engine-only; NPU kernel export is Linux-only.
+**Note:** the commands above build the engine only. The NPU kernels themselves
+(both the embedding and the language-model sets) build natively on Windows
+too -- see "2. The NPU kernels" below, and mlir-aie's own
+[`docs/buildHostWinNative.md`](https://github.com/Xilinx/mlir-aie/blob/main/docs/buildHostWinNative.md)
+for the toolchain setup (a downloaded XRT SDK zip and `iron_setup.py`; no WSL,
+no source build). `utilities/export-kernels.py`'s own orchestration is
+Linux-only (its path handling is POSIX-specific), not the build it drives.
 
 ---
 
