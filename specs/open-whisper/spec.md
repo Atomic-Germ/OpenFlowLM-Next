@@ -129,8 +129,33 @@ natively on Windows): all seven xclbins identical up to 70-78 bytes in 11-14 sho
   the bf16 replica's for that clip and layer, less a stated margin.
 - The kernel set is refused when its marker, its geometry check or its B layout disagrees
   with the container.
+- **No host code writes into a buffer the device writes.** A GEMM's C buffer is mapped
+  from the device; a host write there leaves dirty cache lines whose write-back lands on
+  top of a later dispatch's result.
+- Two runs of the same clip give the same numbers.
 
-**Status:** in progress.
+**Measured 2026-09-20** (idle machine, `open_whisper_cli --golden ... [--forced]`), both
+clips at the replica's bf16 ceiling and identical across runs to eight digits:
+
+| | Demos_sample-data_journal (replica) | nvidia (replica) |
+|---|---|---|
+| conv1 / conv2 | 0.99999785 / 0.99999992 (same) | 0.99999890 / 0.99999995 (same) |
+| chained `enc.hidden.1` | 0.99999810 (0.99999810) | 0.99999814 (0.99999814) |
+| chained `enc.hidden.32` | 0.99987223 (0.99988110) | 0.99991683 (0.99984733) |
+| `enc.out` | **0.99828836** (0.99822134) | **0.99906620** (0.99905335) |
+| cross K/V worst | 0.99788008 | 0.99901179 |
+| teacher-forced, all 32 layers | >= 0.99999827 | >= 0.99999825 |
+
+Host wall clock, labelled as such and not an NPU figure: 4.4-4.8 s per 30 s window,
+attention ~4.3 s of it, NPU submit+wait ~1.6 s.
+
+**The C-buffer rule is in this list because breaking it is silent.** In-place bias on the
+C buffer produced single wrong ROWS (one row at cosine 0.78 inside a matrix reading
+0.9998), at an unpredictable layer, in whole 64-byte-aligned runs -- and serialising the
+host made it disappear without fixing it. Three probes separate the layers and are kept in
+the engine: `--stress N` (512 dispatches cycling four streams and 32 weight slots:
+identical), `OW_VERIFY_A=1` (the operand read back off the device: always correct) and
+`OW_DOUBLE_CHECK=1` (the same dispatch twice: caught it).
 
 ### OPEN-WHISPER-CROSSKV: the encoded window survives clear_context
 **Applies to:** `src/open_whisper/`
