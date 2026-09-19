@@ -3013,14 +3013,30 @@ two additions the other six did not: a per-layer-type `attn_kernel` / `attn_args
 window layers get their own `dxB_local` sharing `dxB`'s stream, per the acceptance criterion
 above) and the `sandwich` / `act` fields for its sandwich norms and GeGLU-tanh, both unit-tested
 (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`, all 602 spec
-tests and the manifest/block_host/vit C++ tests passing). **Gemma 3's hardware gate has not run**
--- unlike Qwen3-4B above, no kernel set with the route has been built and measured for it. It
-needs both gates `closing-the-kernel-gap.md` §9.6.3 names: the usual argmax/top-5 comparison,
-on a prompt past 1024 tokens so the sliding window actually engages (a shorter one never
-exercises it), AND a decode-after-block-prefill comparison, since the block route writes the KV
-rows the sequential path's `dx`/`dx_local` decode against afterward -- a RoPE- or norm-ordering
-mismatch would corrupt decode while leaving prefill logits perfect, which the first gate alone
-would not catch. Details: `.claude/plans/closing-the-kernel-gap.md` §9, `.claude/plans/gemma3-block-prefill.md`.
+tests and the manifest/block_host/vit C++ tests passing). Details: `.claude/plans/closing-the-kernel-gap.md` §9.
+
+**Result 2026-09-18 (Gemma 3 on hardware, and the dx_attn hang it found):** the first
+`dxB` dispatch on Gemma3-4B timed out (ERT state 8), reproducibly, with or without the
+sliding-window kernel -- so not the per-layer-type plumbing. `designs/dense/dx_attn.py` had
+been copied from `dx.py` before dx.py's og handling changed: it still put core 0's og on the
+KV-row fifo and emitted `NHL // HPO` og elements per core, which is **zero** when a core owns
+fewer heads than an og element carries. Gemma 3 (NHL 2, HPO 4) and Phi-4-mini (4, 8) are
+both such geometries; the six families the route had run on all have NHL >= HPO. dx_attn.py
+now matches dx.py (kOGH = min(NHL, HPO) heads per element, one og fifo per core), and every
+dense family's dx_attn build key moves. Gates, same box, same sitting, a 1290-token random-id
+prompt so the sliding window is past its 1024 rows, block route against the sequential path:
+Gemma3-4B all 34 layers **8/8 greedy tokens identical after the prefill, 66.8 s vs 86.6 s
+(1.30x)**; 6 layers over all 1290 positions argmax 1274/1290, top-5 1230/1290, min corr
+0.99927, 32/32 greedy. The control on the same prompt, Qwen3-4B (hd 128) on its re-exported
+set: argmax 1276/1290, top-5 1205/1290, min corr 0.99989, 32/32 greedy, 10.8 s vs 19.9 s at 6
+layers -- the same flip profile (top-2 margins of hundredths of a logit, the route's bf16
+GEMM), so no regression on the hd-128 path and Gemma's deviation is in family. Phi4-mini, whose
+route had never run, now does: 16/16 greedy at 4 layers, 6.0 s vs 12.1 s. The decode gate is
+the one that matters for a sliding-window family -- the block route writes the KV rows
+`dx_local` decodes against afterward -- and it passes at full depth. The 1.30x against
+Qwen3-4B's 1.66x is expected: past 1024 rows the sequential path's local layers already attend
+over a capped window, so the route has less to win there. Details:
+`.claude/plans/gemma3-block-prefill.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
