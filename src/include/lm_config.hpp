@@ -83,6 +83,10 @@ class LM_Config{
     protected:
         /// \brief resolve model_path / model_name / exec_path
         void _resolve_paths(const std::string& model_name){
+            // model_path / model_name are needed before exec_path: the closed
+            // engine's kernel root is chosen per model.
+            this->model_path = model_name;
+            this->model_name = std::filesystem::path(model_name).filename().string();
             // #define DEV_BUILD
             #ifdef DEV_BUILD
             #ifdef __WINDOWS__
@@ -97,13 +101,14 @@ class LM_Config{
                 // Leave exec_path empty and let kernel lookup fail later, only
                 // if a model actually needs kernels from there.
                 try {
-                    this->exec_path = utils::find_xclbin_path();
+                    // Per-model: oflm-add links a user-added model's kernels under
+                    // the user config dir while shipped models live in the install
+                    // tree, and the closed engines can only take one root.
+                    this->exec_path = utils::find_xclbin_root_for(this->model_name);
                 } catch (const std::exception&) {
                     this->exec_path.clear();
                 }
             #endif
-            this->model_path = model_name;
-            this->model_name = std::filesystem::path(model_name).filename().string();
         }
 
         /// \brief read model_path/config.json into _json_config
