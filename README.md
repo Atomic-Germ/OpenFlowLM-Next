@@ -131,7 +131,8 @@ For detailed instructions, see [docs/BUILD.md](docs/BUILD.md).
 - Ninja (recommended)
 
 The full Linux build also compiles the open NPU kernel xclbins -- the `open_kernels`
-families (Qwen3.6-MoE, Qwen3.5/3 dense, Llama 3, Gemma 3, HunYuan, Granite) and the
+families (Qwen3.6-MoE, Qwen3.5/3 dense, Qwen2.5, LFM2 hybrid, Llama 3.1, Gemma 3
+4B/12B, HunYuan, Granite 4.2, Phi-4-mini, MiniCPM5) and the
 `open_npue` BERT embedding design sets -- which needs:
 
 - **XRT** installed on the host (the AMD NPU runtime; `/opt/xilinx/xrt`), including its
@@ -153,7 +154,9 @@ See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions.
 
 **Presets:**
 - **Linux full distribution:** `cmake --preset linux-default`
+- **Linux full distribution (Fedora):** `cmake --preset fedora-default`
 - **Linux debug (engine only):** `cmake --preset linux-debug`
+- **Linux debug (Fedora, engine only):** `cmake --preset fedora-debug`
 - **Linux portable:** `cmake --preset linux-portable`
 - **Windows:** `cmake --preset windows-default`
 

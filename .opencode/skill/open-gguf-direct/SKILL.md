@@ -37,7 +37,7 @@ extending to MoE, or changing the pack ops.
   (model.layers.N.self_attn.q_proj.weight) to llama.cpp names
   (blk.N.attn_q.weight); pools' `std_perm_gguf` accepts Q4_0/Q4_1 only;
   `put`/`pack_norm` convert f32/f16 small weights to the bf16 consts blob.
-- **flm-add**: repos with llama.cpp-style GGUFs install one compatible file
+- **oflm-add**: repos with llama.cpp-style GGUFs install one compatible file
   as `model.gguf` (preference Q4_1 > Q4_0 > Q8_0; multi-part and other quants
   refused with reasons). Registry entries keep format "NPU2" and add
   `details.weights = "gguf"`; q4nx models stay *-NPU2, GGUF installs are
@@ -115,6 +115,16 @@ Verified with Python 3.11.15, mlir-aie 1.4.2, and Peano
 
 - `final.xclbin`: `5e00ea6231bdfff503942b4a9d3c82e39ad6e784411df515a8e6a7fb4208face`
 - `insts.bin`: `9315d04c8a86995b493c09d6308c5e508d0e8677b4472a0f1401b7082f4d1ceb`
+
+### Qwen2.5 / LFM2 estate (2026-09-18)
+
+The dense recipe's Qwen2.5 and LFM2 spec exports now build cleanly, which
+closes the last gap in the GGUF-direct end-to-end story for the dense
+families: `dx_attn.py` streams the q/k/v bias and the 1024-byte split position
+records (`ATTN_QKV_BIAS` / `ATTN_PTAB_SPLIT`), and `lfm2.py` re-exports
+`band_bytes`/`chunk_bytes` from the dense recipe. The f32-scale (`*_f32`)
+GGUF twins export in the same build, so a Qwen2.5-3B or LFM2 container shipped
+as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
 
 ## Gotchas learned here
 
