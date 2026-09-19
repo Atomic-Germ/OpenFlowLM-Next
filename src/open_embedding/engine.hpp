@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "nlohmann/json.hpp"
+#include "open_qwen36/gguf_file.hpp"
 #include "tokenizers_cpp.h"
 
 namespace open_embedding {
@@ -50,6 +51,7 @@ public:
     std::vector<float> embed_with_prefix(const std::string& text, const std::string& task_prefix);
 
     bool track_layers_ = false;
+    bool use_gguf_ = false;
     std::vector<std::vector<float>> track_;
     const std::string& model_dir() const { return model_dir_; }
     std::vector<int32_t> debug_ids(const std::string& text, task_type_t task, std::string* pfx);
@@ -82,6 +84,8 @@ private:
     std::unordered_map<std::string, std::vector<uint16_t>> w_bf16_;
     /// NPU2 BF16 matmul backend (null when off or unavailable).
     std::shared_ptr<NpuMatmul> npu_;
+    /// GGUF weight file (non-null only on the GGUF-direct load path).
+    std::unique_ptr<open_qwen36::GgufFile> gguf_;
 
     /// Resolve a manifest-recorded path. Distributable packages record paths
     /// relative to the model directory; older manifests carry absolute builder
@@ -92,6 +96,7 @@ private:
     /// Locate npu_matmul_f32 assets: model-local first, then app family dir.
     std::string pick_npu_asset_dir() const;
     bool load_weights();
+    bool load_weights_gguf();
     bool load_npu();
     const std::vector<float>& weight(const std::string& name) const;
     std::vector<float> transformer(std::vector<int32_t> ids);

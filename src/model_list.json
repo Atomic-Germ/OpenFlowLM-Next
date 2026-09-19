@@ -505,28 +505,38 @@
         },
         "embed-gemma": {
             "300m": {
-                "name": "Embedding-Gemma-300M-OpenNPU2",
-                "url": "https://huggingface.co/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
-                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2/tree/main",
+                "name": "embeddinggemma-300M-GGUF",
+                "url": "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF",
+                "file_url": "https://huggingface.co/api/models/ggml-org/embeddinggemma-300M-GGUF/tree/main",
                 "ms_url": "",
                 "size": 300000000,
                 "oflm_min_version": "0.9.15",
                 "files": [
-                    "config.json",
-                    "model.safetensors",
+                    "embeddinggemma-300M-Q8_0.gguf",
                     "tokenizer.json",
-                    "tokenizer_config.json",
-                    "2_Dense/model.safetensors",
-                    "3_Dense/model.safetensors",
-                    "weights_manifest.json"
+                    "tokenizer_config.json"
                 ],
+                "file_sources": {
+                    "embeddinggemma-300M-Q8_0.gguf": {
+                        "url": "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF",
+                        "revision": "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12"
+                    },
+                    "tokenizer.json": {
+                        "url": "https://huggingface.co/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
+                        "revision": "a27e83dfcca99957d68449f90c3976a8b97bc2dc"
+                    },
+                    "tokenizer_config.json": {
+                        "url": "https://huggingface.co/Atomic-Germ/Embedding-Gemma-300M-OpenNPU2",
+                        "revision": "a27e83dfcca99957d68449f90c3976a8b97bc2dc"
+                    }
+                },
                 "default_context_length": 2048,
                 "details": {
                     "format": "NPU2",
                     "family": "embed-gemma",
                     "think": false,
                     "parameter_size": "300M",
-                    "quantization_level": "none"
+                    "quantization_level": "Q8_0"
                 },
                 "label": [
                     "embeddings"
