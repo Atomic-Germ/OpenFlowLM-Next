@@ -176,7 +176,18 @@ The cross K/V computed by the last `encode_audio()` stay, because the host calls
 - Free-running greedy under the host's own protocol reproduces the float64 transcript on
   the golden clips. Differences from the **closed** engine are reported, not treated as
   failures.
-**Status:** not started.
+**Measured 2026-09-20** (the decoder; end to end is phase 3b and still open):
+`open_whisper_cli --decode hf|host --baseline <file>` over six clips x two protocols,
+**12/12 pass**. Eleven reproduce transformers' float64 token path exactly, with
+teacher-forced argmax agreement 5/5 to 114/114 and logits cosine mean 0.99995-0.99999
+(min 0.99897). The twelfth, `output_voice_clone` under the host protocol, diverges at
+token 17 (`316` where float64 says `497`) -- and **the numpy replica diverges at the same
+index to the same token**, so that is the bf16 datapath, not this engine. That path is
+recorded by `whisper_decode_check.py --write-baseline` and the gate accepts it while still
+printing the float64 difference: a gate that cannot pass is one its reader learns to skip
+(T64).
+
+Decode cost, host wall clock and not an NPU figure: 12.5-14.6 ms/token, 69-80 tok/s.
 
 ### OPEN-WHISPER-ENDPOINT: something tests /v1/audio/transcriptions
 **Applies to:** `src/server/server.cpp`, `src/server/rest_handler.cpp`, `utilities/oflm-test`
