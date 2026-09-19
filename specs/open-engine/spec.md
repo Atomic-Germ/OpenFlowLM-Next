@@ -32,7 +32,7 @@ the offending key named.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
 - `manifest_version: 2` → refused by the parser.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
-- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH).
+- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
@@ -2863,13 +2863,24 @@ on the slow path. LFM2 joined the fast one later the same day and the sweep is
 flat -- OPEN-ATTN-CONTEXT carries the numbers.
 - Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.
 ### OPEN-PREFILL-BATCH: the block prefill route
-**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`, `designs/gemm_q4_prefill/`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
-**Test category:** manual (needs the NPU and `Qwen3.6-35B-A3B-NPU2`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
+**Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
+**Test category:** manual (needs the NPU; `Qwen3.6-35B-A3B-NPU2` for the MoE kinds, a dense family's own kernel set for `dense`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `tests/test_gemma3.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
 
 A kernel set may carry a block prefill route: per layer type a `gemm_block`
 naming, by kind, the GEMM dispatches that replace the layer's projections for
 T = 256 tokens at once -- `dense` (0167/#32): the five-step chain with T
-single-token attention dispatches; `linear`: qkv|z then out, with the DeltaNet
+single-token attention dispatches, run through the kernel and buffer args its
+own `attn_kernel` / `attn_args` name (default `dxB`, so every dense layer
+type shares one attention kernel and position table unless it says
+otherwise); a layer type with its own sliding window (Gemma 3's
+`dense_local`) names its own kernel entry -- the same instruction stream,
+patched with its own window, per `stream_patch`'s existing `attnpos`
+mechanism -- and its own table, exactly as the sequential path's `dx` /
+`dx_local` already do. The `dense` kind also carries `sandwich` and `act`, so
+a family whose residual chain norms the attention and FFN outputs before they
+join the residual (Gemma 3's sandwich norms) and whose FFN gates a
+GeGLU-tanh rather than a SiLU is served by the same route and the same
+five-step program; `linear`: qkv|z then out, with the DeltaNet
 recurrence on the host between them; `full`: q|k|v|gate then o, with attention
 over the KV rows on the host -- the weight buffers those dispatches read as
 contiguous runs of the layer type's pack ops, and, for the MoE kinds, the
@@ -2900,6 +2911,7 @@ unchanged.
 - The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
 - The build key covers `designs/gemm_q4_prefill/*` (`test_prefill_batch.py`).
+- The dense kind's recipe (`dense.py gemm_route`) emits one `gemm_block` per layer type present, sharing the five-step program, weight map and widths (`layout`/`geometry` don't vary by layer type) but each naming its own `attn_kernel` / `attn_args`: a family with one layer type gets the schema's defaults (`dxB` / `...,"ptab"`); Gemma 3's two get `dxB` / `ptab` for `dense` and a second kernel entry `dxB_local` / `ptab_local` -- the SAME `dx_attn/insts.bin` stream, patched with the family's sliding window -- for `dense_local`, plus `sandwich: true` and `act: "gelu_tanh"` on both (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`). A family combining sandwich norms with a non-gelu-tanh activation, or the reverse, gets no route (`tests/test_gemma3.py`) -- the host chain only implements the two pairings above.
 
 **Procedure:**
 1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2` (WSL) builds `gemm_n12288_k2048`, `gemm_n2048_k4096`, `gemm_n9216_k2048`, `mx_linear` and `mx_full` beside the sequential set and writes the manifest with the route.
@@ -2985,6 +2997,46 @@ that ordering, so a toolchain that reordered it would hang the dispatch outright
 rather than return wrong numbers, and re-checking it is worth a moment on a
 toolchain bump. Details: `.claude/plans/gemm-context-collapse.md`, raw data in
 `.claude/plans/decode-run/logs/`.
+
+**Result 2026-09-18 (the dense kind, seven of eight families; Gemma 3 completes the set in code):**
+`recipes/dense.py` now emits the `dense` kind's route for every dense-shaped family in the
+catalogue (Qwen3, Llama 3, Granite, Phi-3, Qwen2, HunYuan, and Gemma 3's two layer types) --
+the C++ side (`step_gemm_block_layer`) already implemented it end to end; the recipe was the
+only missing piece for the first six. Paired against the closed engine on one box, one sitting,
+a 981-token Qwen3-4B prompt: TTFT **1.98 s closed / 64.55 s open sequential (32.8x) -> 38.82 s
+with the route (19.6x)**, argmax and top-5 agreeing 19/19 against the sequential path at
+correlation >= 0.9999559, decode unaffected. The route's own instrumentation says why the gain
+is 1.66x and not more: the five projection GEMMs are 17 % of prefill and flat per block, exactly
+as designed; 74 % is the T single-token attention dispatches, unbatched here (`OPEN-PREFILL-ATTN`
+is the fix, and it is now the largest term in dense prefill as well as in decode). Gemma 3 needed
+two additions the other six did not: a per-layer-type `attn_kernel` / `attn_args` (its sliding
+window layers get their own `dxB_local` sharing `dxB`'s stream, per the acceptance criterion
+above) and the `sandwich` / `act` fields for its sandwich norms and GeGLU-tanh, both unit-tested
+(`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`, all 602 spec
+tests and the manifest/block_host/vit C++ tests passing). Details: `.claude/plans/closing-the-kernel-gap.md` §9.
+
+**Result 2026-09-18 (Gemma 3 on hardware, and the dx_attn hang it found):** the first
+`dxB` dispatch on Gemma3-4B timed out (ERT state 8), reproducibly, with or without the
+sliding-window kernel -- so not the per-layer-type plumbing. `designs/dense/dx_attn.py` had
+been copied from `dx.py` before dx.py's og handling changed: it still put core 0's og on the
+KV-row fifo and emitted `NHL // HPO` og elements per core, which is **zero** when a core owns
+fewer heads than an og element carries. Gemma 3 (NHL 2, HPO 4) and Phi-4-mini (4, 8) are
+both such geometries; the six families the route had run on all have NHL >= HPO. dx_attn.py
+now matches dx.py (kOGH = min(NHL, HPO) heads per element, one og fifo per core), and every
+dense family's dx_attn build key moves. Gates, same box, same sitting, a 1290-token random-id
+prompt so the sliding window is past its 1024 rows, block route against the sequential path:
+Gemma3-4B all 34 layers **8/8 greedy tokens identical after the prefill, 66.8 s vs 86.6 s
+(1.30x)**; 6 layers over all 1290 positions argmax 1274/1290, top-5 1230/1290, min corr
+0.99927, 32/32 greedy. The control on the same prompt, Qwen3-4B (hd 128) on its re-exported
+set: argmax 1276/1290, top-5 1205/1290, min corr 0.99989, 32/32 greedy, 10.8 s vs 19.9 s at 6
+layers -- the same flip profile (top-2 margins of hundredths of a logit, the route's bf16
+GEMM), so no regression on the hd-128 path and Gemma's deviation is in family. Phi4-mini, whose
+route had never run, now does: 16/16 greedy at 4 layers, 6.0 s vs 12.1 s. The decode gate is
+the one that matters for a sliding-window family -- the block route writes the KV rows
+`dx_local` decodes against afterward -- and it passes at full depth. The 1.30x against
+Qwen3-4B's 1.66x is expected: past 1024 rows the sequential path's local layers already attend
+over a capped window, so the route has less to win there. Details:
+`.claude/plans/gemma3-block-prefill.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)

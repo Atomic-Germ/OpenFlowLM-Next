@@ -367,8 +367,13 @@ def pack_plan(spec: ModelSpec) -> dict:
 def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     """Per layer type the `gemm_block` the engine reads -- kind "dense": the five-step chain
     (qkv3, o, gate, up, down) with T single-token attention dispatches between the first two
-    -- plus the contexts / kernels / globals / builds the route adds. None means the
-    sequential path, byte for byte what it was, for one of the two reasons below.
+    -- plus the contexts / kernels / globals / builds the route adds. A layer type with its own
+    sliding window (Gemma 3's `dense_local`) gets its own attention kernel and position table,
+    named in its `gemm_block` (`attn_kernel`, `attn_args`, mirroring `programs()`'s dx/dx_local
+    split below); the five GEMM steps, the weight map, the widths and the shared `gact` scratch
+    and GEMM contexts are identical across layer types, since `layout()`/`geometry()` don't vary
+    by layer type. None means the sequential path, byte for byte what it was, for one of the
+    reasons below.
 
     The block size, the GEMM design and the one-context-per-route rule are the 35B route's
     (`qwen36moe.gemm_route`); what differs is the kind, and that the FFN here is dense rather
@@ -377,18 +382,21 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     # (OPEN-PREFILL-BATCH), so such a spec keeps exactly the sequential manifest it had.
     if any(spec.quant_of(r) == "q8" for r in Q8_ROLES):
         return None
-    # The engine's dense route drives ONE attention kernel ("dxB") against ONE position
-    # table ("ptab") for every layer (core.cpp `step_gemm_block_layer`), so a spec with a
-    # second layer type -- Gemma 3's sliding-window `dense_local`, which carries its own
-    # window patch and its own table -- cannot be served by it, and `gemm_block_t_` would
-    # read 0 anyway (core.cpp refuses a mixed manifest rather than guess whose T applies).
-    # Giving that family a route is an engine change (a per-layer-type attention kernel and
-    # table), not a recipe one; until then its prefill stays sequential and correct.
-    if sorted(set(spec.layer_types)) != [DENSE]:
+    # This route only knows the dense layer shape (`dense`, and Gemma 3's sliding-window
+    # `dense_local`) -- a hybrid family's short_conv / full_attention / linear_attention layer
+    # types (LFM2, the 35B) get no route here; their own recipe, where they have one, covers them.
+    if not set(spec.layer_types) <= {DENSE, DENSE_LOCAL}:
+        return None
+    # The block route's host chain (core.cpp step_gemm_block_layer) knows exactly two
+    # (activation, residual/norm chain) pairings: plain SiLU (every family without sandwich
+    # norms) and Gemma 3's GeGLU-tanh + sandwich norms. A family combining sandwich norms with
+    # a different activation, or vice versa, has no route yet -- fail closed rather than emit
+    # one the host chain would compute wrong.
+    if spec.sandwich_norms != (spec.activation == "gelu_tanh"):
         return None
     L, G, T = layout(spec, max_ctx), geometry(spec), GEMM_T
     hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
-    pool = pack_plan(spec)["layer_types"][DENSE]["pool"]
+    plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
     def ctx(N: int, K: int) -> str:
@@ -407,41 +415,51 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     # at one pool offset, so the fused input projection is ONE dispatch over their bytes;
     # each FFN projection is one op. Every `ops` list must be byte-contiguous in the pool --
     # the engine builds each weight buffer with a single memcpy and says so if it is not.
+    # (Identical for every layer type: pack_plan's pool op order doesn't vary by layer type.)
     program = [run(qw + 2 * kvw, hid, "gqkv3_w"), run(hid, qw, "go_w"),
                run(ff, hid, "ggate_w"), run(ff, hid, "gup_w"), run(hid, ff, "gdown_w")]
-    weights = {
-        "gqkv3_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight"),
-                                            _op_index(pool, "self_attn.k_proj.weight"),
-                                            _op_index(pool, "self_attn.v_proj.weight")]},
-        "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]},
-        "ggate_w": {"from": "pool", "ops": [_op_index(pool, "mlp.gate_proj.weight")]},
-        "gup_w": {"from": "pool", "ops": [_op_index(pool, "mlp.up_proj.weight")]},
-        "gdown_w": {"from": "pool", "ops": [_op_index(pool, "mlp.down_proj.weight")]},
-    }
-    out: dict = {
-        "layer_types": {DENSE: {"kind": "dense", "t": T, "eps": spec.norm_eps,
-                                "program": program, "weights": weights,
-                                "qw": qw, "kvw": kvw, "ff": ff,
-                                "ad_q": L.AD_Q, "ad_kvn": L.AD_KVN, "ad_og": L.AD_OG}},
-        "contexts": {}, "kernels": {}, "globals": {}, "builds": {},
-    }
+
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
-    # The attention half of the layer as its own dispatch (designs/dense/dx_attn.py: dx.py's
-    # single-token attention phase and nothing else, same kernels and same placeholder
-    # offsets), so the SAME attnpos patch the sequential layer uses drives it once per token
-    # of the block. `pool` and `xres` are dummy arguments there -- the engine passes the
-    # layer's six in the sequential order and the design ignores the two it does not read.
-    args = ["pool", "xres", "consts", "state", "act", "ptab"]
-    check_buffer_args("dxB", args)
-    out["contexts"]["dxa"] = "dx_attn/final.xclbin"
-    out["kernels"]["dxB"] = {"context": "dxa", "insts": "dx_attn/insts.bin", "patch": "attnpos",
-                             "build": "dx_attn", "window": 0}
-    out["builds"]["dx_attn"] = {"design": "dense/dx_attn.py",
-                                "build_dir": f"dense/build_dxa_{spec.family}_h{hid}{sfx}", "env": {}}
+    out: dict = {"layer_types": {}, "contexts": {"dxa": "dx_attn/final.xclbin"}, "kernels": {}, "globals": {},
+                "builds": {"dx_attn": {"design": "dense/dx_attn.py",
+                                       "build_dir": f"dense/build_dxa_{spec.family}_h{hid}{sfx}", "env": {}}}}
+    for lt in sorted(set(spec.layer_types)):
+        local = lt == DENSE_LOCAL
+        pool = plans[lt]["pool"]
+        weights = {
+            "gqkv3_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight"),
+                                                _op_index(pool, "self_attn.k_proj.weight"),
+                                                _op_index(pool, "self_attn.v_proj.weight")]},
+            "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]},
+            "ggate_w": {"from": "pool", "ops": [_op_index(pool, "mlp.gate_proj.weight")]},
+            "gup_w": {"from": "pool", "ops": [_op_index(pool, "mlp.up_proj.weight")]},
+            "gdown_w": {"from": "pool", "ops": [_op_index(pool, "mlp.down_proj.weight")]},
+        }
+        # The attention half of the layer as its own dispatch (designs/dense/dx_attn.py: dx.py's
+        # single-token attention phase and nothing else, same kernels and same placeholder
+        # offsets), so the SAME attnpos patch the sequential layer uses drives it once per token
+        # of the block. `pool` and `xres` are dummy arguments there -- the engine passes the
+        # layer's six in the sequential order and the design ignores the two it does not read.
+        # A layer type with a sliding window gets its OWN kernel entry -- same instruction
+        # stream, its own window patch -- and its own table, exactly as the sequential path's
+        # dx/dx_local split above.
+        kn = "dxB_local" if local else "dxB"
+        tab = "ptab_local" if local else "ptab"
+        args = ["pool", "xres", "consts", "state", "act", tab]
+        check_buffer_args(kn, args)
+        out["kernels"][kn] = {"context": "dxa", "insts": "dx_attn/insts.bin", "patch": "attnpos",
+                              "build": "dx_attn", "window": spec.sliding_window if local else 0}
+        out["layer_types"][lt] = {"kind": "dense", "t": T, "eps": spec.norm_eps,
+                                  "program": program, "weights": weights,
+                                  "qw": qw, "kvw": kvw, "ff": ff,
+                                  "ad_q": L.AD_Q, "ad_kvn": L.AD_KVN, "ad_og": L.AD_OG,
+                                  "attn_kernel": kn, "attn_args": args,
+                                  "sandwich": spec.sandwich_norms, "act": spec.activation}
     # The T-wide attention scratch: the engine writes every token's q/k/v into it, then
-    # shuttles one token's slice in and out of the layer's own `act` around each dxB
-    # dispatch (core.cpp `shuttle_buf`), and reads all T og rows back out at the end.
+    # shuttles one token's slice in and out of the layer's own `act` around each attention
+    # dispatch (core.cpp `shuttle_buf`), and reads all T og rows back out at the end. Shared
+    # across layer types -- AD_BYTES doesn't vary by layer type.
     out["globals"]["gact"] = T * L.AD_BYTES
     # ONE hardware context for every projection shape: the GEMM core program depends on
     # neither N nor K (the band count K/256 reaches each core as a runtime parameter), so
