@@ -19,6 +19,7 @@
 #endif
 
 #include "host_ops.hpp"
+#include "kernels.hpp"
 #include "nlohmann/json.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
@@ -66,6 +67,7 @@ std::vector<float> load_f32(const open_qwen36::Q4nxFile &f, const std::string &n
 std::vector<uint16_t> load_bf16_raw(const open_qwen36::Q4nxFile &f, const std::string &name,
                                     int64_t out, int64_t in) {
   require_shape(f, name, {static_cast<size_t>(out), static_cast<size_t>(in)});
+  require_bf16(f, name);   // the dtype, not just the byte count -- see kernels.hpp
   size_t nbytes = 0;
   const uint8_t *raw = f.raw(name, &nbytes);
   const size_t want = static_cast<size_t>(out) * static_cast<size_t>(in);

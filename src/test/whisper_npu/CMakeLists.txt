@@ -12,6 +12,11 @@ add_npu_test(
     SOURCES
         "${CMAKE_SOURCE_DIR}/../../common/whisper/modeling_whisper.cpp"
         "${CMAKE_SOURCE_DIR}/../../common/whisper/modeling_whisper_audio.cpp"
+        # Whisper::load_model() calls make_whisper_engine(); without these two this
+        # target no longer links. whisper_engine_select.cpp compiles closed-only
+        # unless OFLM_USE_OPEN_WHISPER is defined, which this target does not define.
+        "${CMAKE_SOURCE_DIR}/../../common/whisper/whisper_engine_select.cpp"
+        "${CMAKE_SOURCE_DIR}/../../common/whisper/whisper_engine_closed.cpp"
 )
 
 # Configure runtime linking to support both static Boost and dynamic tokenizers_cpp

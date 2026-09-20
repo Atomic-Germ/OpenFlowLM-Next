@@ -30,13 +30,32 @@ REM reaching this file's own code (see ..\open_qwen36\build.cmd).
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
    /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
-   weights.cpp kernels.cpp host_ops.cpp encoder.cpp decoder.cpp cli.cpp ^
+   weights.cpp kernels.cpp guards.cpp host_ops.cpp encoder.cpp decoder.cpp cli.cpp ^
    "..\open_npue\npu_device.cpp" "..\open_qwen36\q4nx_file.cpp" ^
    "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_whisper_cli.exe /Fo:out\
 if errorlevel 1 goto :clfail
+
+REM The guards: no device, no XRT, no 1.6 GB container -- guards.cpp and the
+REM safetensors reader are all it needs, which is why guards.cpp is its own
+REM translation unit. Built and RUN here, because a test nothing runs is the
+REM same failure one step earlier.
+echo [open_whisper] guards_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
+   /DDISABLE_ABI_CHECK=1 /bigobj ^
+   /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
+   guards_test.cpp guards.cpp "..\open_qwen36\q4nx_file.cpp" ^
+   /Fe:out\guards_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+out\guards_test.exe out
+if errorlevel 1 goto :testfail
+
 echo [open_whisper] OK -^> out\open_whisper_cli.exe
 exit /b 0
+
+:testfail
+echo [open_whisper] guards_test FAILED
+exit /b 1
 
 :noxrt
 echo [open_whisper] %XRT_LIB_DIR%\xrt_coreutil.lib not found -- set XRT_LIB_DIR

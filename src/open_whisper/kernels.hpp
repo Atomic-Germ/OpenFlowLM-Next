@@ -12,6 +12,7 @@
 #include <string>
 
 #include "npu_device.hpp"
+#include "open_qwen36/q4nx_file.hpp"
 
 namespace ow {
 
@@ -21,6 +22,26 @@ struct StreamShape {
   int64_t M = 0, K = 0, N = 0;
   size_t instr_slot = 0;   // Design::bind_instr() argument
 };
+
+const char *op_name(Op op);
+
+// The shape each stream must have: whisper-large-v3-turbo's geometry with its 1500 frames
+// padded to 1536. open_kernels/designs/whisper_gemm/whisper_gemm.py's STREAMS is the other
+// copy, and the exporter builds every stream from it.
+StreamShape expected_shape(Op op);
+
+// Refuse a stream whose recorded shape is not that one. design.json is DATA: the engine
+// sizes its A and C buffers from the geometry it was compiled for, while run() takes its
+// transfer sizes from these fields -- so a stale or hand-edited design.json would memcpy
+// and DMA the wrong number of bytes instead of being refused. Free function, so the guard
+// is reachable without a device (guards_test.cpp).
+void check_stream_shape(const std::string &where, Op op, int64_t M, int64_t K, int64_t N);
+
+// Refuse a tensor whose dtype is not BF16 before it is read as bf16 BITS. The decoder's
+// raw loader keeps the bits rather than going through Q4nxFile::bf16(), which checks the
+// dtype itself -- so without this any other two-byte dtype (F16, I16) satisfies a byte
+// count and is then read as bf16: finite, plausible, wrong logits.
+void require_bf16(const open_qwen36::Q4nxFile &f, const std::string &name);
 
 // Finds the kernel set directory (OFLM_WHISPER_KERNELS_DIR env var, else
 // <model_dir>/open_kernels, else throws), validates whisper_kernels.json

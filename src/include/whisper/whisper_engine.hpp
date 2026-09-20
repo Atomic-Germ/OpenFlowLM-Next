@@ -37,9 +37,13 @@ public:
 
 /// \brief Build the engine for a Whisper model directory.
 ///
-/// OFLM_WHISPER_ENGINE=open|closed forces one. Unset, the closed engine is used, because it
-/// is the only one this build has; a request for one that is not available is an error that
-/// names it, never a quiet fallback -- the two engines would both return a transcript.
+/// OFLM_WHISPER_ENGINE=open|closed forces one. UNSET, the model directory decides: the
+/// open engine when it holds `model.open.safetensors` AND a kernel set resolves, the
+/// closed engine when it holds `model.q4nx`, and an error naming both when neither is
+/// there. A request for an engine this build or this directory cannot provide is an error
+/// that names what is missing, never a quiet fallback -- both engines return a transcript,
+/// so a fallback would be invisible. The selector logs which rule fired
+/// (whisper_engine_select.cpp).
 std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_path,
                                                     Whisper_Config& config,
                                                     oflm_rt::device* device,

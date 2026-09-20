@@ -29,19 +29,6 @@ bool exists(const std::string &path) {
   return static_cast<bool>(fs);
 }
 
-const char *op_name(Op op) {
-  switch (op) {
-    case Op::Conv1: return "conv1";
-    case Op::Conv2: return "conv2";
-    case Op::Qkv:   return "qkv";
-    case Op::O:     return "o";
-    case Op::Fc1:   return "fc1";
-    case Op::Fc2:   return "fc2";
-    case Op::Xkv:   return "xkv";
-    default: return "?";
-  }
-}
-
 }  // namespace
 
 std::string KernelSet::resolve_dir(const std::string &kernels_dir_hint,
@@ -155,6 +142,7 @@ KernelSet::KernelSet(npue::npu::Device &dev, const std::string &kernels_dir_hint
     sh.M = s.value("M", int64_t{0});
     sh.K = s.value("K", int64_t{0});
     sh.N = s.value("N", int64_t{0});
+    check_stream_shape(dir_ + "/design.json", which, sh.M, sh.K, sh.N);
     const int64_t declared_slot = s.value("slot", int64_t{-1});
 
     if (declared_slot == 0) {

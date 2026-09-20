@@ -402,6 +402,7 @@ if(NOT OFLM_USE_HRX)
     set(OPEN_WHISPER_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/weights.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/kernels.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/guards.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/host_ops.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/encoder.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/decoder.cpp"
@@ -413,7 +414,7 @@ if(NOT OFLM_USE_HRX)
     # includes "npu_device.hpp" (open_npue/npu_device.hpp) as a bare filename,
     # relying on the include path rather than a relative "../open_npue/" spelling
     # (open_whisper/build.cmd's standalone build passes the same -I). Scoping
-    # this to these six files, rather than adding open_npue to the target's
+    # this to these files, rather than adding open_npue to the target's
     # global include path, keeps the "same basename, different file" hazard
     # OPEN_NPUE_SOURCES's own comment describes from reappearing here.
     set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
