@@ -167,7 +167,14 @@ def q4_chunk_bytes(raw: np.ndarray, r0: int, c0: int, gguf_type: str = "Q4_1") -
     q = unpack_q4(raw, gguf_type)[2]
     out = np.empty(CH_Q4, np.uint8)
     out[0:1024] = _chunk_d32(raw, r0, c0)
-    out[1024:2048] = _chunk_m32(raw, r0, c0) if gguf_type == "Q4_1" else np.zeros(1024, np.uint8)
+    if gguf_type == "Q4_1":
+        out[1024:2048] = _chunk_m32(raw, r0, c0)
+    else:
+        # Q4_0's min is -8*d, NOT zero: its nibbles are offset binary, so zeroing
+        # the min plane puts every weight in the block 8*d too high and a block
+        # that should straddle zero lands entirely on one side of it. pack_q4_pool
+        # has always written it; this helper had not, and nothing called it.
+        out[1024:2048] = np.ascontiguousarray(-8.0 * out[0:1024].view(np.float32)).view(np.uint8)
     out[2048:] = _codes_to_nibbles(q, r0, c0)
     return out
 
