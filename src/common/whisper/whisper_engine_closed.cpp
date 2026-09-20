@@ -1,10 +1,17 @@
 /// \file whisper_engine_closed.cpp
-/// \brief The prebuilt whisper_npu behind the whisper_engine seam, and the engine selector
+/// \brief The prebuilt whisper_npu behind the whisper_engine seam
+/// \note The engine SELECTOR (make_whisper_engine(), the public factory
+///       whisper_engine.hpp declares) moved to whisper_engine_select.cpp when
+///       the open engine was wired in (phase 3b, issue #72) -- that file
+///       decides open vs. closed and calls make_closed_whisper_engine() below
+///       for the closed side. This file keeps only the closed engine itself,
+///       so it stays buildable (and reviewable) independently of whether
+///       OFLM_USE_OPEN_WHISPER is defined.
 #include "whisper/whisper_engine.hpp"
 #include "whisper/whisper_npu.hpp"
 #include "tensor_utils/q4_npu_eXpress.hpp"
-#include "utils/utils.hpp"
-#include <stdexcept>
+#include <memory>
+#include <string>
 
 namespace {
 
@@ -38,14 +45,11 @@ private:
 
 } // namespace
 
-std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_path,
-                                                    Whisper_Config& config,
-                                                    oflm_rt::device* device,
-                                                    bool enable_preemption) {
-    const std::string want = utils::getenv_oflm("OFLM_WHISPER_ENGINE");
-    if (!want.empty() && want != "closed") {
-        throw std::runtime_error("OFLM_WHISPER_ENGINE=" + want +
-                                 ": this build has only the closed Whisper engine");
-    }
+/// \brief Build the closed engine. Declared in whisper_engine_select.cpp, which is the
+///        only caller -- this is not part of the public whisper_engine.hpp seam.
+std::unique_ptr<whisper_engine> make_closed_whisper_engine(const std::string& model_path,
+                                                           Whisper_Config& config,
+                                                           oflm_rt::device* device,
+                                                           bool enable_preemption) {
     return std::make_unique<whisper_engine_closed>(model_path, config, device, enable_preemption);
 }

@@ -801,4 +801,23 @@ void Whisper::_preprocess_audio(buffer<bf16>& mel_features, std::vector<float>& 
             mel_features[m * n_frames + f] = (bf16)v;
         }
     }
+
+    // OFLM_WHISPER_DUMP_MEL=<path>: this window's mel as fp32 [n_mels, n_frames],
+    // one file per window (<path>.<n>.f32). Both engines' accuracy gates are fed a
+    // mel produced by transformers' own feature extractor, so nothing compares THIS
+    // code's output against it -- and a mel that is close but not equal returns a
+    // transcript that is plausible and different.
+    if (const char* dump = std::getenv("OFLM_WHISPER_DUMP_MEL")) {
+        if (*dump) {
+            static int window = 0;
+            const std::string path = std::string(dump) + "." + std::to_string(window++) + ".f32";
+            if (FILE* fp = std::fopen(path.c_str(), "wb")) {
+                std::vector<float> out(static_cast<size_t>(n_mels) * static_cast<size_t>(n_frames));
+                for (size_t i = 0; i < out.size(); ++i) out[i] = (float)mel_features[i];
+                std::fwrite(out.data(), sizeof(float), out.size(), fp);
+                std::fclose(fp);
+                header_print("OFLM", "wrote mel " << path);
+            }
+        }
+    }
 }

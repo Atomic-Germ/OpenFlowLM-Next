@@ -57,11 +57,27 @@ TS_BEGIN = 50365                          # <|0.00|>
 
 
 def decode_audio(path: Path) -> np.ndarray:
+    """openai/whisper's own `load_audio` command, verbatim, then s16 -> float.
+
+    THE OUTPUT SAMPLE FORMAT CHANGES THE DOWNMIX GAIN. `-ac 1` to **f32le** is
+    exactly sqrt(2) louder than `-ac 1` to **s16le** on a correlated stereo
+    source: libswresample normalises the stereo->mono matrix to preserve power
+    for float output and to preserve amplitude for integer output. Measured on
+    a dual-mono clip: rms 0.068495 (f32le) against 0.048433 (s16le), ratio
+    1.414214.
+
+    That is not a cosmetic difference for Whisper: the mel is log-scaled and
+    then clamped against its own maximum, so a global gain shifts every value
+    by log10(2)/4 = 0.0753 and the transcript changes. This oracle used f32le
+    at first, which made its goldens disagree with the runtime's own FFmpeg
+    path (s16, via libswresample) and made live transcripts look wrong when
+    they were not.
+    """
     raw = subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
-         "-f", "f32le", "-ac", "1", "-ar", str(SR), "-"],
+         "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(SR), "-"],
         check=True, capture_output=True).stdout
-    return np.frombuffer(raw, dtype=np.float32).copy()
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def sha256(path: Path) -> str:
