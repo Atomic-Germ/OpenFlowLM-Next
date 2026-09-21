@@ -385,6 +385,69 @@ if(NOT OFLM_USE_HRX)
     endif()
 endif()
 
+# ———————————————————————————————————————————————
+# open_whisper: the open Whisper-large-v3-turbo engine (phase 2b/3, issue #72)
+# ———————————————————————————————————————————————
+#
+# NPU GEMM (open_whisper/kernels.cpp, over open_npue/npu_device.hpp/.cpp,
+# already added above) for every matrix product, host fp32 for everything
+# else. XRT only, exactly like open_qwen36 and open_npue above: it drives the
+# kernel set through xrt::hw_context directly.
+#
+# cli.cpp is EXCLUDED -- it is open_whisper/build.cmd's own standalone gate
+# binary (open_whisper_cli.exe) and carries its own main(); it must never join
+# the oflm target's link, or the build fails with a duplicate main() (or, if
+# it somehow didn't, oflm.exe would silently gain a second CLI's argv parsing).
+if(NOT OFLM_USE_HRX)
+    set(OPEN_WHISPER_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/weights.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/kernels.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/guards.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/host_ops.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/encoder.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/decoder.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/engine_adapter.cpp"
+    )
+    list(APPEND SOURCES ${OPEN_WHISPER_SOURCES})
+
+    # Same reasoning as OPEN_NPUE_SOURCES above: open_whisper/kernels.hpp
+    # includes "npu_device.hpp" (open_npue/npu_device.hpp) as a bare filename,
+    # relying on the include path rather than a relative "../open_npue/" spelling
+    # (open_whisper/build.cmd's standalone build passes the same -I). Scoping
+    # this to these files, rather than adding open_npue to the target's
+    # global include path, keeps the "same basename, different file" hazard
+    # OPEN_NPUE_SOURCES's own comment describes from reappearing here.
+    set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/open_npue")
+
+    # /arch:AVX2 is load-bearing here for the same reason as open_npue's copy
+    # of this comment: host_ops.cpp's bf16 rounding and attention inner loops
+    # are behind #if defined(__AVX2__) with a correct (slower) scalar #else,
+    # and MSVC x64 defines no __AVX2__ without the flag. /openmp is what makes
+    # host_ops.cpp's and decoder.cpp's `#pragma omp parallel for` row-parallel
+    # loops actually parallel rather than silently sequential.
+    if(MSVC)
+        set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "/arch:AVX2;/openmp")
+    else()
+        # -fopenmp ONLY when CMake can also link OpenMP. The link dependency
+        # (OpenMP::OpenMP_CXX) is added further down, gated on this same
+        # find_package -- so compiling with the flag when it fails would define
+        # _OPENMP, emit calls into libgomp and fail at link, on a build where the
+        # scalar fallback these sources already carry would have worked. Cached,
+        # so calling it here and again below costs nothing.
+        find_package(OpenMP QUIET)
+        set(OPEN_WHISPER_FLAGS "-mavx2;-mfma")
+        if(OpenMP_CXX_FOUND)
+            list(APPEND OPEN_WHISPER_FLAGS "-fopenmp")
+        else()
+            message(STATUS "open_whisper: no OpenMP -- host loops build sequential")
+        endif()
+        set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "${OPEN_WHISPER_FLAGS}")
+    endif()
+endif()
+
 # Exclude files that depend on missing libraries for Linux
 if(NOT WIN32)
     # list(FILTER SOURCES EXCLUDE REGEX ".*modeling_gemma3\\.cpp$")
@@ -512,6 +575,10 @@ if(NOT OFLM_USE_HRX)
     # Qwen3.6-MoE on the open kernels (open_qwen36/); the closed engine stays
     # reachable with OFLM_QWEN36_ENGINE=closed.
     target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_QWEN36=1)
+    # The open Whisper engine (open_whisper/); gates whisper_engine_select.cpp's
+    # #ifdef so an OFLM_USE_HRX build (which never adds OPEN_WHISPER_SOURCES
+    # above) still compiles with only the closed adapter reachable.
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_WHISPER=1)
     target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
     # The vision tower runs on the host (open_qwen36/vision/vit.cpp): threads over OpenMP
     # where the compiler has it, a single thread otherwise (the pragmas are then ignored).

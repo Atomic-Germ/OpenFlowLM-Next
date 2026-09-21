@@ -51,6 +51,7 @@ class Runner {
         bool modelscope;
         int prefill_chunk_len;
         bool asr;
+        std::string asr_model_tag;
         bool asr_supported;
         bool embed;
         model_list supported_models;
