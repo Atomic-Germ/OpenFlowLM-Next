@@ -98,6 +98,10 @@ POOL_BYTES = int(os.environ.get("MB_POOL_BYTES", 512 << 20))
 # MB_CONTIG=1: the weight taps walk the pool in order instead of by band stride. Same bytes,
 # same footprint, wrong arithmetic - a probe for whether the stride costs stream rate.
 CONTIG = os.environ.get("MB_CONTIG") == "1"
+# Compile flags every kernel in the design takes. MB_SHARE_NG is a shape (one dequantised
+# weight shared across the slot's sub-tiles, MB_NG accumulators live); the other two are
+# timing ablations whose output is garbage.
+FLAGS = ("MB_NULL_MM", "MB_NULL_DQ", "MB_SHARE_NG")
 X_BYTES = SLOTS * HID * NT * 2
 H_BYTES = SLOTS * FF * NT * 2
 Y_BYTES = SLOTS * HID * NT * 4
@@ -127,9 +131,10 @@ assert POOL_DOWN + EXPERTS * DOWN_BYTES <= POOL_BYTES
 def _srchash() -> int:
     parts = [f.read_bytes() for f in sorted(HERE.glob("*.cc")) + sorted(HERE.glob("*.h")) + [HERE / "moe_batch.py"]]
     parts += [(HERE.parent.parent / "include" / "vecmath.h").read_bytes()]
-    # NT reaches the kernels as a -D, not as source, so it has to be hashed in by hand or two
-    # widths would share a compiled core program.
+    # NT and the -D flags reach the kernels as command line, not as source, so they have to be
+    # hashed in by hand or two shapes would share a compiled core program.
     parts += [f"NT={NT}".encode()]
+    parts += [f"{v}=1".encode() for v in FLAGS if os.environ.get(v) == "1"]
     return int(hashlib.sha1(b"".join(parts)).hexdigest()[:8], 16)
 
 
@@ -157,7 +162,7 @@ def moe_batch(pool: In, x: In, h: Out, y: Out, *, slots: CompileTime[int], srcha
     # exactly the bands mb_zero_ug had stopped clearing.)
     # Timing-only ablations (output garbage): MB_NULL_MM=1 skips the core work and leaves the
     # streams, MB_NULL_DQ=1 keeps the product but drops the q4_1 scales.
-    flags = [f"-DMB_NT={NT}"] + [f"-D{v}" for v in ("MB_NULL_MM", "MB_NULL_DQ") if os.environ.get(v) == "1"]
+    flags = [f"-DMB_NT={NT}"] + [f"-D{v}" for v in FLAGS if os.environ.get(v) == "1"]
     step_ug = ExternalFunction("mb_step_ug", source_file=str(HERE / "mb_step_ug.cc"),
                                arg_types=[band_ty, b_ty, ug_ty, np.int32, np.int32], include_dirs=inc, compile_flags=flags)
     step_dn = ExternalFunction("mb_step_dn", source_file=str(HERE / "mb_step_dn.cc"),

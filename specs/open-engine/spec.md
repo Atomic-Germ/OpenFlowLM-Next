@@ -2922,6 +2922,12 @@ block-major.
   route, with `OFLM_OPEN_LAYER_MAJOR=0`, and for any layer type whose kind is not `linear` or
   `full`; `step_gemm_prompt()` throws rather than silently running the wrong schedule, and
   throws for a prompt that would run past the context capacity.
+- The engine says out loud when the OpenMP wait policy could not be applied. vcomp reads
+  `OMP_WAIT_POLICY` when it loads, so the static initialiser that sets it only works if vcomp
+  is delay-loaded (`/DELAYLOAD:VCOMP140.DLL`); a build without that runs the host workers
+  spinning through every dispatch and is ~20 % slower at prefill with nothing to show for it.
+  `Core`'s constructor checks whether vcomp was already in the process when the initialiser
+  ran and prints a named WARNING if it was, so the flag cannot be dropped silently.
 
 **Procedure:**
 1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2` (WSL) builds `gemm_n12288_k2048`, `gemm_n2048_k4096`, `gemm_n9216_k2048`, `mx_linear` and `mx_full` beside the sequential set and writes the manifest with the route.
@@ -3008,6 +3014,82 @@ slightly SLOWER (4.589 against 4.501 ms before the `mac` change) because the
 compiler already eliminates the repeats and the narrower unrolled window costs
 more than the hoist saves; and the remaining body is 352 bundles against a
 Peano resource floor of 266, so there is perhaps 20 % more in scheduling.
+
+**Result 2026-09-21 (the wait policy the binary never applied, and the host stages):**
+the engine has set `OMP_WAIT_POLICY=PASSIVE` from a static initialiser since
+2026-09-20 and **never once applied it**. vcomp reads the variable when the DLL
+LOADS, and an implicitly linked DLL loads before any static initialiser in the
+exe runs, so the initialiser set a variable the runtime had already read past --
+every measurement since was taken with the workers spin-waiting through each
+dispatch, and the 38.55 -> 29.93 s the plan credits to A.1 came from setting the
+variable in the shell. What proved it: the same trick for `OMP_NUM_THREADS` put
+10 in the environment and `omp_get_max_threads()` still returned 24; then, same
+binary at 2582 tokens, **20.5 s with the variable unset against 17.1 s with it
+set from outside**. `/DELAYLOAD:VCOMP140.DLL delayimp.lib` moves vcomp's load to
+the first call into it, which is after the initialiser: three alternating runs
+at 2582 tokens give **16.8 s mean against 21.1 s with `OFLM_OPEN_OMP_PASSIVE=0`**.
+Both build paths carry the flag, and the engine now checks at construction
+whether vcomp was already loaded when the initialiser ran and warns by name if
+it was, so a link line that drops it cannot cost 20 % of the prefill in silence.
+
+The "in-block penalty" -- every dispatch at 1.4-1.6x its `--bench` minimum -- is
+the array's clock, and the probes say so three ways. Cycling all thirty linear
+layers' weights costs 0.13 ms on `mb_s256`, so it is not cold memory. Two
+thousand back-to-back `mb_s256` dispatches hold 12.36-12.48 ms over 25 s with no
+drift, so it is not thermal. `bench_dispatch` grew a SLEEPING 30 ms gap beside
+its busy one, and under `--pmode performance` the two cost the same (`mb_s256`
+12.4 -> 19-21 ms, `gemm_n12288` 6.5 -> 10.3) while under `--pmode turbo` both
+cost 0.1 ms -- so an idle NPU loses clock whatever the CPU is doing. The rest is
+the host cores: with the workers spinning, `mb_s256` inside a prefill is 17.5 ms
+and **the same dispatch repeated immediately, with no host work in front of it,
+is still 17.5**, which is the package and not the work before it. With PASSIVE
+actually in force the host thread count stops mattering the way it appeared to
+(2582 tokens: 17.6 s at the runtime's own count against 19.5 at ten), so the
+count stays the runtime's own and `OFLM_OPEN_OMP_THREADS` is only a knob.
+
+Five host stages, each bit-exact and each measured as alternating pairs: the
+per-(layer, block) scratch is reused rather than freshly allocated and
+zero-filled (30 MB a call, 440 calls; **26.5 -> 25.4 s**); the [N, T] -> [T, N]
+transpose is an AVX2 8x8 register network instead of a four-byte-at-a-time
+blocked loop (**`gemm tr` 1448 -> 583 ms**, 23.4 -> 22.6 s); DeltaNet's causal
+conv runs its taps as contiguous passes over the channels with the
+carried-state test hoisted out of the channel loop, so it vectorises
+(**`dn conv` 1.75 -> 1.45 s**); the shared expert stops copying 8 MB of its
+input per call to satisfy a `std::vector` parameter and its silu, its output
+gate and both layer kinds' residual add stop being serial (**shared 550 ->
+62 ms**, 21.5 -> 21.0 s); and the delta rule stores S once a token instead of
+twice, recomputing `Si[j] * dc` in the second pass rather than writing 64 KB in
+the first (**stage 1.40 -> 1.25 s**). The gate throughout is a 600-token,
+40-layer prefill diffed position for position against the previous binary:
+**600 of 600 identical, max |diff| 0.0** after each change and at the end.
+
+**End to end, `open_qwen36_cli --gemm-block`, three repeats on one resident
+weight load, best of three:**
+
+| tokens | `--pmode performance` | `--pmode turbo` | closed, same box, same day |
+|---|---|---|---|
+| 662 | 4.75 s | 4.63 s | 12.39 s |
+| 1122 | 7.95 | 7.63 | 15.20 |
+| 2102 | 14.52 | 13.73 | 18.92 |
+| 2582 / 2593 | 18.27 | 16.69 | 21.34 |
+| 3642 | -- | ~22.8 (fitted) | 23.05 |
+| 4096 | 28.91 | 25.75 | ~24.6 (fitted) |
+
+2582 tokens went **26.70 -> 16.69 s** across the session and 1122 went
+**13.55 -> 7.63**. Fitted, the open prefill is 0.6 s + N / 164 tok/s against
+closed's 10.0 s + N / 280 (re-taken today over five lengths x three cycles,
+best of three per length; the 2026-09-20 fit was 9.93 + N / 280.3, so the line
+reproduces across days even though the same box's decode rate doubled between
+them). They cross at about **3600-3700 tokens**: below that the open route is
+ahead -- 2x at 1122 -- and at 4096, the context capacity, it is about 5 %
+behind. Two caveats on that comparison: closed's figure is the server's own
+prefill timer and carries a ~10 s fixed term whatever the length (662 tokens
+cost it 12.4 s where its own marginal rate says 2.4), where ours is a CLI
+prefill with the weights already resident, so the open side through
+`oflm serve` is the remaining like-for-like check; and closed sets
+`performance` itself at startup, so the `performance` column is the
+like-for-like one -- it wins at every length below 4096 as well. Details:
+`.claude/plans/prefill-parity-2026-09-21.md`.
 
 **Result 2026-09-13 (one GEMM context for the whole route):** the GEMM core
 program used to bake K in as the trip count of its band-group loop, so the route

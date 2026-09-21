@@ -80,16 +80,30 @@ static inline aie::vector<bfloat16, 64> mb_scale(const bfloat16 *__restrict p, u
 // pays alongside a wider MB_NT -- which in turn only pays once the core is cheap. Reading the
 // pool contiguously instead of by band stride (MB_CONTIG) is NOT a lever: it moves the stream
 // floor 0.779 -> 0.768, 1.4 %.
+// The number of 8-token sub-tiles one pass carries, and so how many mmul accumulators are
+// live at once. 1 is the shape B(3) settled on and the only one that fits beside the dequant
+// temporary; MB_SHARE_NG builds the alternative, where a pass carries the whole slot and one
+// dequantised weight feeds every sub-tile, for the A-B that says which way the register file
+// falls. Sharing saves the dequant and costs a spill; at MB_NT 16 the spill is dearer.
+#ifdef MB_SHARE_NG
+#define MB_PASS_NG MB_NG
+#else
+#define MB_PASS_NG 1
+#endif
+
+// One PARITY of a band's 64 rows x MB_PASS_NG sub-tiles of tokens, starting at sub-tile `s0`:
+// C += the k-tile `ky` of W's product with the A tile `xa`. The even rows live in the chunk's
+// low nibbles and the odd in the high, and the two are taken as separate passes over the same
+// nibble bytes rather than interleaved in one.
 template <bool ODD>
 static inline void mb_step_parity(const uint8_t *__restrict nibp, const bfloat16 *__restrict dp,
                                   const bfloat16 *__restrict mp, unsigned ky, const bfloat16 *__restrict xa,
-                                  float *__restrict cp) {
+                                  float *__restrict cp, unsigned s0) {
   using MMUL = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
-  // MB_NG of these, one per 8-token sub-tile of the slot. At MB_NG = 1 (MB_NT = 8) that is
-  // the single live accumulator this shape is built around; a wider slot spends the room
-  // again, which is why MB_NT is not 16 today (the recipe's MB_NT says the rest).
-  MMUL acc[MB_NG];
-  for (unsigned s = 0; s < MB_NG; ++s) acc[s] = MMUL(aie::load_v<64>(cp + s * 64));
+  // At MB_PASS_NG = 1 this is the single live accumulator the shape is built around: the
+  // dequantisation of each k-block needs one more, and the file holds about two.
+  MMUL acc[MB_PASS_NG];
+  for (unsigned s = 0; s < MB_PASS_NG; ++s) acc[s] = MMUL(aie::load_v<64>(cp + s * 64));
   // NOT unrolled: fully unrolling this as well was 3 % faster at 16 slots (0.868 vs 0.895)
   // and then crashed Peano at the real slot count -- "Register not in mBMs", the aie2p code
   // emitter refusing a register the allocator had picked for the bigger body. A compiler
@@ -115,29 +129,45 @@ static inline void mb_step_parity(const uint8_t *__restrict nibp, const bfloat16
       se = aie::mac(se, n, d);
       const aie::vector<bfloat16, 64> w = se.template to_vector<bfloat16>();
 #endif
-      for (unsigned s = 0; s < MB_NG; ++s) acc[s].mac(aie::load_v<64>(xa + (i * MB_NG + s) * 64), w);
+      for (unsigned s = 0; s < MB_PASS_NG; ++s)
+        acc[s].mac(aie::load_v<64>(xa + (i * MB_NG + s0 + s) * 64), w);
     }
   }
-  for (unsigned s = 0; s < MB_NG; ++s) aie::store_v(cp + s * 64, acc[s].template to_vector<float>());
+  for (unsigned s = 0; s < MB_PASS_NG; ++s) aie::store_v(cp + s * 64, acc[s].template to_vector<float>());
 }
 
 // C[band's 64 rows x MB_NT tokens] += k-tile ky of W[band] times the A tile `xa`: the band's
-// four 16-row groups, each a pair of parity passes over the same 64 bytes of nibbles.
+// four 16-row groups, each a pair of parity passes over the same 64 bytes of nibbles, and
+// -- above MB_NT 8 -- one such pair per 8-token sub-tile of the slot.
+//
+// Repeating the pair per sub-tile repeats the dequantisation with it, which is the trade a
+// wider slot makes: the weight STREAM is what halves per token, and the dequant work per
+// token is unchanged. Sharing one dequantised weight across the sub-tiles instead (the
+// arithmetically tidier answer, MB_SHARE_NG) needs MB_NG accumulators live and spills; see
+// the note above mb_step_parity.
 static inline void mb_step_tile(const uint8_t *__restrict band, unsigned ky, const bfloat16 *__restrict xa,
                                 float *__restrict c) {
 #ifdef MB_NULL_MM
   return;   // timing ablation: the streams without any core work
 #endif
-  AIE_LOOP_RANGE(4, 4)
-  for (unsigned g = 0; g < 4; ++g) {
-    const uint8_t *__restrict chunk = band + (g >> 1) * MB_CHUNK;
-    const unsigned half = g & 1;
-    const uint8_t *__restrict nibp = chunk + MB_NIB + half * 2048 + ky * 512;
-    const bfloat16 *__restrict dp = reinterpret_cast<const bfloat16 *>(chunk) + half * 16;
-    const bfloat16 *__restrict mp = reinterpret_cast<const bfloat16 *>(chunk + 512) + half * 16;
-    float *__restrict cb = c + (g * 2 * MB_NG) * 64;
-    mb_step_parity<false>(nibp, dp, mp, ky, xa, cb);
-    mb_step_parity<true>(nibp, dp, mp, ky, xa, cb + MB_NG * 64);
+  // The sub-tile pass is the OUTER loop, and is not unrolled: unrolling it, or nesting it
+  // inside the row-group loop, emits MB_NG copies of the pair and a 16-row group's pair is
+  // most of the core's 16 KB of program memory already ("Overflow of program memory" at
+  // MB_NT 16, from the loader, not the compiler). Outside and rolled, the code is the same
+  // size at every width and runs the same body MB_NG times.
+  AIE_LOOP_RANGE(1, MB_NG / MB_PASS_NG)
+  for (unsigned s0 = 0; s0 < MB_NG; s0 += MB_PASS_NG) {
+    AIE_LOOP_RANGE(4, 4)
+    for (unsigned g = 0; g < 4; ++g) {
+      const uint8_t *__restrict chunk = band + (g >> 1) * MB_CHUNK;
+      const unsigned half = g & 1;
+      const uint8_t *__restrict nibp = chunk + MB_NIB + half * 2048 + ky * 512;
+      const bfloat16 *__restrict dp = reinterpret_cast<const bfloat16 *>(chunk) + half * 16;
+      const bfloat16 *__restrict mp = reinterpret_cast<const bfloat16 *>(chunk + 512) + half * 16;
+      float *__restrict cb = c + (g * 2 * MB_NG) * 64;
+      mb_step_parity<false>(nibp, dp, mp, ky, xa, cb + s0 * 64, s0);
+      mb_step_parity<true>(nibp, dp, mp, ky, xa, cb + (MB_NG + s0) * 64, s0);
+    }
   }
 }
 

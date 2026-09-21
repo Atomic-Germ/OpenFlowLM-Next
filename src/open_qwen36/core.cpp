@@ -18,6 +18,12 @@
 
 #include <omp.h>
 
+#include <omp.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
 
@@ -82,12 +88,18 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 // this initialiser. Measured at 2582 tokens: 20.5 s with the variable unset against
 // 17.1 s with it set from outside, the same binary. Any build of this file that drops
 // the delay-load silently loses that.
+bool g_omp_policy_too_late = false;   ///< vcomp was already loaded when we set the variable
+
 struct OmpWaitPolicy {
     OmpWaitPolicy() {
         if (std::getenv("OMP_WAIT_POLICY")) return;
         const char* off = std::getenv("OFLM_OPEN_OMP_PASSIVE");
         if (off && std::string(off) == "0") return;
 #ifdef _WIN32
+        // The check that makes the delay-load's absence loud. If vcomp is already in the
+        // process at this point it has read its configuration and the _putenv below is a
+        // no-op -- which is exactly the state this binary shipped in and nobody noticed.
+        g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
         _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
 #else
         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
@@ -130,6 +142,12 @@ void Core::log(const std::string& s) const {
 Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     omp_threads_ = static_cast<int>(omp_thread_budget());
     apply_thread_budget();
+    if (g_omp_policy_too_late)
+        std::fprintf(stderr, "open_qwen36: WARNING: VCOMP140.DLL was already loaded before "
+                             "OMP_WAIT_POLICY could be set, so the host workers will SPIN through "
+                             "every dispatch and the prefill will be ~20%% slower. Link with "
+                             "/DELAYLOAD:VCOMP140.DLL, or set OMP_WAIT_POLICY=PASSIVE in the "
+                             "environment before starting.\n");
     log("host threads: " + std::to_string(omp_get_max_threads()) + " (OMP_WAIT_POLICY=" +
         std::string(std::getenv("OMP_WAIT_POLICY") ? std::getenv("OMP_WAIT_POLICY") : "unset") + ")");
     // ---- the kernel set's manifest, and the model it must agree with
