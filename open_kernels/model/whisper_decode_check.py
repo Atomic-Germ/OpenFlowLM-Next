@@ -35,6 +35,21 @@ def main() -> int:
                          "protocol, as the bf16 datapath's own reference (see below)")
     args = ap.parse_args()
 
+    # Which clips can actually be checked, decided BEFORE the model is loaded. A missing
+    # file used to be skipped silently, so a typo in --enc-dir checked nothing and still
+    # exited 0 -- a gate that passes without measuring anything. Deciding it here also
+    # means a wrong path costs a second rather than the minute the float64 model takes.
+    meta = json.loads((args.goldens / "meta.json").read_text(encoding="utf-8"))
+    protos = ("hf", "host") if args.proto == "both" else (args.proto,)
+    clips = [n for n in meta["clips"] if (args.enc_dir / f"{n}.enc_out.npy").is_file()]
+    missing = [n for n in meta["clips"] if n not in clips]
+    for n in missing:
+        print(f"MISSING {args.enc_dir / (n + '.enc_out.npy')}", flush=True)
+    if not clips:
+        print(f"nothing to check: no <clip>.enc_out.npy in {args.enc_dir}", flush=True)
+        return 1
+    all_ok = not missing
+
     import torch
     from safetensors.numpy import load_file
     from transformers import WhisperForConditionalGeneration, WhisperTokenizer
@@ -43,16 +58,11 @@ def main() -> int:
     tok = WhisperTokenizer.from_pretrained(args.model_dir)
     model = WhisperForConditionalGeneration.from_pretrained(args.model_dir, torch_dtype=torch.float32)
     model = model.double().eval()
-    meta = json.loads((args.goldens / "meta.json").read_text(encoding="utf-8"))
-    protos = ("hf", "host") if args.proto == "both" else (args.proto,)
     baseline: dict = {}
-    all_ok = True
-    for proto, name in [(p, n) for p in protos for n in meta["clips"]]:
+    for proto, name in [(p, n) for p in protos for n in clips]:
       prefix_len = 4 if proto == "hf" else 3
       if True:
         f = args.enc_dir / f"{name}.enc_out.npy"
-        if not f.is_file():
-            continue
         g = load_file(str(args.goldens / f"{name}.safetensors"))
         gold = [int(t) for t in g[f"{proto}.tokens"]]
         out = torch.from_numpy(np.load(f).astype(np.float64))[None]

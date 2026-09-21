@@ -6,8 +6,9 @@ The oracle is `WhisperForConditionalGeneration` loaded from the HF checkpoint
 (openai/whisper-large-v3-turbo, stored fp16) and promoted to float64, so every figure the
 engine is later compared against carries no rounding of its own. It needs torch and
 transformers; run it from a reference venv, not from the IRON one. Audio is decoded with
-the ffmpeg CLI to 16 kHz mono f32le, so a mel difference and a decode difference never
-hide in each other.
+openai/whisper's own ffmpeg command -- 16 kHz mono **s16le**, then /32768 -- because the
+output sample format changes the stereo downmix gain (see decode_audio() below), and an
+oracle that does not consume the runtime's own audio measures a different clip.
 
 Per clip, the FIRST 30 s window only -- that is the engine's unit (encode_audio takes one
 [128][3000] mel):
