@@ -553,11 +553,16 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L = layout(spec, max_ctx)
-    return {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
-            "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES, "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
-            "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
-            "rope_inv_freq": spec.rope_inv_freq()}     # the global table's short/base table; each ptab
-            # global carries its own (both tables, for a longrope family -- see programs())
+    lay = {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
+           "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES, "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
+           "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
+           "rope_inv_freq": spec.rope_inv_freq()}     # the global table's short/base table; each ptab
+    # global carries its own (both tables, for a longrope family -- see programs())
+    if os.environ.get("KVSLICE") == "1":                # per-core KV planes: dx.py and dx_attn.py are built with the same knob
+        g = geometry(spec)
+        lay["kv_planes"] = g.ACORES
+        lay["kv_plane_bytes"] = L.KV_BYTES // g.ACORES
+    return lay
 
 
 def _phi3_raw_scaling(spec: ModelSpec):

@@ -23,7 +23,7 @@ void attn_stepb(const bfloat16 *__restrict K0, const bfloat16 *__restrict V0,
 #endif
   pb[2] += (int32_t)kRB;
 #if !ATTN_NULL
-  attn_rowb_impl(K, V, qs, oacc, ml ATTN_H0_ARG);
+  attn_rowb_impl(K, V, qs, oacc, ml ATTN_H0_ARG ATTN_SL_ARG(true));
 #else
   (void)K; (void)V; (void)qs; (void)oacc; (void)ml;   // the probe covers the block path too
 #endif

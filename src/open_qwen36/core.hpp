@@ -213,6 +213,12 @@ public:
 
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
+    /// The KV cache is per-core planes (manifest layout.kv_planes > 1) rather than row-major rows.
+    bool kv_planar() const { return man_.kv_planes > 1; }
+    /// Rows [first, first + n) of an attention layer's cache in the ROW-MAJOR logical layout ([K_t | V_t] per row),
+    /// whatever the device layout is. Snapshots and the row accessors go through these.
+    void kv_read_rows(int layer, size_t first, size_t n, uint8_t* dst);
+    void kv_write_rows(int layer, size_t first, size_t n, const uint8_t* src);
 
     const Q4nxFile& file() const { return *file_; }
 

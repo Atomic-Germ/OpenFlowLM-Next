@@ -145,9 +145,16 @@ NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position r
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
-    if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
+    if _k not in ("ATTN_RB", "ATTN_FAST", "KVSLICE"):   # RB is in the flags above via G.RB; FAST picks G itself; KVSLICE is read below.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+# KVSLICE=1: each attention core gets only ITS kv heads' rows, on its own shim channel, instead of every core taking the whole
+# row off one broadcast stream (which adds compute but no DMA bandwidth). The KV buffer becomes ACORES planes, plane c at
+# c * KV_BYTES / ACORES, each row of a plane [K_c | V_c]; so every window fill is still one 1-D BD (patched like before, one per
+# plane) and the new row is scattered by one strided drain. The engine must know the layout: manifest layout.kv_planes.
+KVSLICE = os.environ.get("KVSLICE") == "1"
+if KVSLICE:
+    assert ACORES > 1 and RB > 1 and not QKVB and G.KVH % ACORES == 0, "KVSLICE needs split attention, RB > 1 and no qkv bias"
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
@@ -164,6 +171,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     u8_ln = np.ndarray[(ELN,), np.dtype[np.uint8]]
     u8_a = np.ndarray[(E_A,), np.dtype[np.uint8]]
     u8_ab = np.ndarray[(E_A // 2,), np.dtype[np.uint8]]    # the same heads of a bf16 bias
+    E_S = E_A // ACORES if KVSLICE else E_A                # one core's slice of a K (or V) row
+    u8_s = np.ndarray[(E_S,), np.dtype[np.uint8]]
+    KV_PLANE = L.KV_BYTES // ACORES                        # bytes of one plane of the KV buffer (KVSLICE)
+    KV_SLROW = L.KV_ROW // ACORES                          # one row of one plane: [K_c | V_c]
     pool_ty = np.ndarray[(L.POOL_BYTES,), np.dtype[np.uint8]]
     xres_ty = np.ndarray[(HID,), np.dtype[np.float32]]
     consts_ty = np.ndarray[(L.CD_BYTES,), np.dtype[np.uint8]]
@@ -213,10 +224,12 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []                       # only a split needs the head offset
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
-    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
-    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
-                  ATTN_FLAGS) if RB > 1 else None)
+    SLF = ATTN_FLAGS + ["-DATTN_KVSLICE=1"] if KVSLICE else ATTN_FLAGS   # every TU that instantiates attn_row_impl takes it
+    SLT = u8_s if KVSLICE else u8_a
+    f_step = ef("attn_step", ATTN / "attn_step.cc", [SLT, SLT, fq, foacc, fml, pb_ty] + h0_arg, SLF)
+    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, SLF)
+    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [SLT] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
+                  SLF) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
 
     # ---- fifos
@@ -225,7 +238,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     of_x = ObjectFifo(x_ty, name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)      # one output element at a time (8 KB elements at 4096 wide)
-    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))   # a block is acquired at once
+    of_ain = ObjectFifo(u8_a, name="ain", depth=(max(4, 1 + NPTAB + 1) if KVSLICE else max(4, 2 * RB + 2, 1 + NPTAB + 1)))   # a block is acquired at once
+    of_kv = [ObjectFifo(u8_s, name=f"kv{c}", depth=4 * RB) for c in range(ACORES)] if KVSLICE else []
     # Attention over ACORES cores: heads are independent, so each core owns NHL of
     # them and drains its own og element. Separate fifos + separate drains at
     # offsets is the pattern the GEMV cores already use below; a memtile join()
@@ -375,7 +389,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
 
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in=None):
+              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in=None, kvin=None):
+        win = kvin if kvin is not None else ain               # the fifo the KV window rows arrive on
         # [qn | kn] then the position record, which is NPTAB elements wide: every family
         # until Qwen2.5-3B had exactly one, and acquiring fewer elements than the fill
         # delivers would leave the rest to be read as q.
@@ -424,14 +439,14 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         f_init(oacc, ml)
         if RB > 1:
             for _ in range_(pb[4]):                             # whole blocks of RB rows
-                e = ain.acquire(2 * RB)
+                e = win.acquire(2 * RB)
                 args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
                 f_stepb(*args)
-                ain.release(2 * RB)
+                win.release(2 * RB)
             for _ in range_(pb[5]):                             # what did not fill a block
-                e = ain.acquire(2)
+                e = win.acquire(2)
                 f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
-                ain.release(2)
+                win.release(2)
         else:
             for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
                 e = ain.acquire(2)
@@ -446,7 +461,18 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # One shape of worker body per combination of knobs, not one with defaulted arguments:
     # a family that does not block, or has no bias, must present IRON the exact function it
     # presented before. The bias fifo is the worker's SECOND argument, before the drains.
-    if QKVB and RB > 1:
+    if KVSLICE:
+        def attn_body(ain, kvin, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, None, kvin)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, kvin, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, None, kvin)
+            return body
+    elif QKVB and RB > 1:
         def attn_body(ain, bias_in, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
             _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, bias_in)
@@ -506,11 +532,12 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
     bcons = (lambda: [of_abias.cons()]) if QKVB else (lambda: [])
-    workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
+    kvc = (lambda c: [of_kv[c].cons()]) if KVSLICE else (lambda c: [])
+    workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + kvc(0) + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
                           tile=Tile(2, 3), stack_size=0x1800))
     # The rest of the attention cores: same broadcast stream in, their own og out.
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + bcons() + [of_og[c].prod()] + abufs(c) + afns,
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + kvc(c) + bcons() + [of_og[c].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, 3), stack_size=0x1800))
 
     BB_H, BB_Q, BB_F = (role_band_bytes("attn", HID), role_band_bytes("attn", QW),
@@ -518,7 +545,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     BB_UG = role_band_bytes("ffn", HID)          # the FFN's up | gate bands (K = HID)
     YB = BAND_ROWS * 4
 
-    def _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs, abias_p):
+    def _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs, abias_p, kv_ps=None):
         # 1. layer-entry norm: xn -> act
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -543,7 +570,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             return
         # 3. attention: meta + record now, q / k / v after the GEMVs, the window, the new row out
         pa_out, pa_in = Pipeline(3), Pipeline(3)
-        pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
+        if kv_ps:                                                            # [K'_c | V'_c] scattered to row pos of each plane
+            pa_out.drain(aout_c, a_kv, TensorAccessPattern((1, L.KV_BYTES), KV_SLROW, [1, 2, ACORES, E_S], [0, E_S, KV_PLANE, 1]))
+        else:
+            pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
 
         for c in range(ACORES):                                             # heads NHL*c ..
             pa_out.drain(og_cs[c], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
@@ -557,7 +587,11 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_QB, QW * 2))
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_KB, KVW * 2))
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_VB, KVW * 2))
-        pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
+        if kv_ps:                                                            # each core's own window slice, on its own shim channel
+            for c in range(ACORES):
+                pa_in.fill(kv_ps[c], a_kv, bt(L.KV_BYTES, c * KV_PLANE, KV_SLROW))
+        else:
+            pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
         # 4. o projection against og
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_O + c * G.O_PC * BB_Q, G.O_PC * BB_Q))
@@ -643,6 +677,10 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, abias_p, aout_c, og_cs):
             _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
                       ain_p, aout_c, og_cs, abias_p)
+    elif KVSLICE:
+        def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs, kv_ps):
+            _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
+                      ain_p, aout_c, og_cs, None, kv_ps)
     else:
         def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
             _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
@@ -657,7 +695,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_ain.prod(tile=Tile(2, 0))] + bprod + [of_aout.cons(tile=Tile(1, 0)),
-                            [of_og[c].cons(tile=Tile(2 + c, 0)) for c in range(ACORES)]])
+                            [of_og[c].cons(tile=Tile(2 + c, 0)) for c in range(ACORES)]]
+                           + ([[of_kv[c].prod(tile=Tile(4 + c, 0)) for c in range(ACORES)]] if KVSLICE else []))   # cols 4.. have a free MM2S channel
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

@@ -370,6 +370,10 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
         act_.push_back(alloc(lt.act_bytes));
+        if (lt.state_kind == "kv" && kv_planar() && cfg_.max_ctx * lt.state_row != man_.kv_planes * man_.kv_plane_bytes)
+            throw std::runtime_error("open_qwen36: the KV planes were compiled for " +
+                                     std::to_string(man_.kv_planes * man_.kv_plane_bytes / lt.state_row) +
+                                     " rows; --max-ctx must match (got " + std::to_string(cfg_.max_ctx) + ")");
         state_.push_back(alloc(lt.state_kind == "kv" ? cfg_.max_ctx * lt.state_row : lt.state_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
@@ -1694,6 +1698,7 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }
+    if (kv_planar()) throw std::runtime_error("open_qwen36: the host full-attention block does not support a per-core-plane KV cache");
     // the KV rows: [0, pos_) read, [pos_, pos_ + t_real) written by the host attention
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row;
@@ -1864,7 +1869,9 @@ Snapshot Core::checkpoint() const {
         if (lt.state_kind == "kv") {
             size_t n = static_cast<size_t>(pos_) * lt.state_row;
             std::vector<uint8_t> rows(n);
-            if (n) {
+            if (n && kv_planar()) {
+                const_cast<Core*>(this)->kv_read_rows(l, 0, static_cast<size_t>(pos_), rows.data());
+            } else if (n) {
                 bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, 0);
                 std::memcpy(rows.data(), bo.map<uint8_t*>(), n);
             }
@@ -1885,7 +1892,9 @@ void Core::restore(const Snapshot& s) {
         const LayerType& lt = *types_[l];
         if (lt.state_kind == "kv") {
             const auto& rows = s.kv.at(ia++);
-            if (!rows.empty()) {
+            if (!rows.empty() && kv_planar()) {
+                kv_write_rows(l, 0, rows.size() / lt.state_row, rows.data());
+            } else if (!rows.empty()) {
                 std::memcpy(state_[l].map<uint8_t*>(), rows.data(), rows.size());
                 state_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, rows.size(), 0);
             }
@@ -1905,9 +1914,55 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
     if (layer < 0 || layer >= nl_ || !is_attention_layer(layer)) throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " has no KV cache");
     if (row < 0 || static_cast<size_t>(row) >= cfg_.max_ctx) throw std::runtime_error("open_qwen36: KV row out of range");
     const size_t kv_row = types_[layer]->state_row;
+    if (kv_planar()) {
+        std::vector<uint8_t> one(kv_row);
+        kv_read_rows(layer, static_cast<size_t>(row), 1, one.data());
+        std::memcpy(out, one.data() + (value ? kv_row / 2 : 0), kv_row / 2);
+        return;
+    }
     size_t off = static_cast<size_t>(row) * kv_row + (value ? kv_row / 2 : 0);
     state_[layer].sync(XCL_BO_SYNC_BO_FROM_DEVICE, kv_row / 2, off);
     std::memcpy(out, state_[layer].map<uint8_t*>() + off, kv_row / 2);
+}
+
+// Plane c holds core c's kv heads: plane c, row r = [K_c | V_c] at c * plane_bytes + r * slice, slice = kv_row / planes,
+// K_c and V_c each slice / 2 bytes. Row-major logical row r = [K_t | V_t], K_t = K_0 .. K_{P-1} in head order.
+void Core::kv_read_rows(int layer, size_t first, size_t n, uint8_t* dst) {
+    const size_t row = types_[layer]->state_row;
+    if (!kv_planar()) {
+        state_[layer].sync(XCL_BO_SYNC_BO_FROM_DEVICE, n * row, first * row);
+        std::memcpy(dst, state_[layer].map<uint8_t*>() + first * row, n * row);
+        return;
+    }
+    const size_t P = man_.kv_planes, slice = row / P, half = slice / 2;
+    for (size_t c = 0; c < P; ++c) {
+        const size_t off = c * man_.kv_plane_bytes + first * slice;
+        state_[layer].sync(XCL_BO_SYNC_BO_FROM_DEVICE, n * slice, off);
+        const uint8_t* src = state_[layer].map<uint8_t*>() + off;
+        for (size_t r = 0; r < n; ++r) {
+            std::memcpy(dst + r * row + c * half, src + r * slice, half);                    // K_c
+            std::memcpy(dst + r * row + row / 2 + c * half, src + r * slice + half, half);   // V_c
+        }
+    }
+}
+
+void Core::kv_write_rows(int layer, size_t first, size_t n, const uint8_t* src) {
+    const size_t row = types_[layer]->state_row;
+    if (!kv_planar()) {
+        std::memcpy(state_[layer].map<uint8_t*>() + first * row, src, n * row);
+        state_[layer].sync(XCL_BO_SYNC_BO_TO_DEVICE, n * row, first * row);
+        return;
+    }
+    const size_t P = man_.kv_planes, slice = row / P, half = slice / 2;
+    for (size_t c = 0; c < P; ++c) {
+        const size_t off = c * man_.kv_plane_bytes + first * slice;
+        uint8_t* dst = state_[layer].map<uint8_t*>() + off;
+        for (size_t r = 0; r < n; ++r) {
+            std::memcpy(dst + r * slice, src + r * row + c * half, half);
+            std::memcpy(dst + r * slice + half, src + r * row + row / 2 + c * half, half);
+        }
+        state_[layer].sync(XCL_BO_SYNC_BO_TO_DEVICE, n * slice, off);
+    }
 }
 
 void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {

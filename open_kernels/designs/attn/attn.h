@@ -81,6 +81,9 @@
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
+#ifndef ATTN_KVSLICE
+#define ATTN_KVSLICE 0   // 1: the streamed K/V window is ONE core's slice of the row (see dx.py KVSLICE)
+#endif
 #ifndef ATTN_NULL
 #define ATTN_NULL 0          // PROBE ONLY: consume the cached rows without computing. Wrong answers,
 #endif                       // but it prices the fifo traffic against the arithmetic on top of it.
@@ -175,6 +178,19 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #define ATTN_H0_PARM , int h0
 #define ATTN_H0_DECL
 #define ATTN_H0_ARG , h0
+#endif
+// KVSLICE: the streamed window arrives as ONE core's slice (kKVH / ACORES heads) while the new row's kout / vout stay
+// full-width. Both callers share ONE body of attn_row_impl / attn_rowb_impl -- they are noinline inline, so a per-TU macro
+// would give two same-named bodies and the linker would keep one (the new-row step would silently take the slice's
+// indexing on every core but the first) -- so `sl` selects the local kv-head index at run time.
+#if ATTN_KVSLICE
+#define ATTN_SL_PARM , bool sl
+#define ATTN_SL_ARG(v) , v
+#define ATTN_KVLOC(x) ((x) - ((sl && kSplit) ? ((unsigned)h0 / (kNH / kKVH)) : 0u))
+#else
+#define ATTN_SL_PARM
+#define ATTN_SL_ARG(v)
+#define ATTN_KVLOC(x) (x)
 #endif
 // The second half of the position record is an argument only where the record needs one.
 #if ATTN_PTAB_SPLIT
@@ -464,7 +480,7 @@ static inline void attn_init_impl(float *__restrict oacc, float *__restrict ml A
 // mistake in it already.
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
                                   const ATTN_QT *__restrict qs, float *__restrict oacc,
-                                  float *__restrict ml ATTN_H0_PARM) {
+                                  float *__restrict ml ATTN_H0_PARM ATTN_SL_PARM) {
   ATTN_H0_DECL
   // No set_rounding here: it is core-wide state, attn_init_impl sets it once per
   // token, and nothing between that and the last row touches it. It was being
@@ -485,7 +501,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 #endif                      // program memory (the 35B's ax, 2026-09-08); the loop stays a loop there
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
-    const unsigned kvh = h / (kNH / kKVH);
+    const unsigned kvh = ATTN_KVLOC(h / (kNH / kKVH));
     const bfloat16 *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     // Two accumulators, not one: the hi and lo terms are independent, so this is
@@ -550,7 +566,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   AIE_LOOP_UNROLL_FULL      // at HD 256 four heads unrolled over eight head-dim steps overflow
 #endif                      // program memory (the 35B's ax, 2026-09-08); the loop stays a loop there
   for (unsigned hl = 0; hl < kNHL; ++hl) {
-    const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
+    const unsigned kvh = ATTN_KVLOC((kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH));
     const bfloat16 *v = Vt + kvh * kHD;
     const bfloat16 bhh = bh[hl], bll = bl[hl];
     float *o = oacc + hl * kHD;
@@ -591,12 +607,12 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 // one position: K_t, V_t bf16[KVH * HD]
 __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict Kt, const bfloat16 *__restrict Vt,
                                   const ATTN_QT *__restrict qs, float *__restrict oacc,
-                                  float *__restrict ml ATTN_H0_PARM) {
+                                  float *__restrict ml ATTN_H0_PARM ATTN_SL_PARM) {
   ATTN_H0_DECL
   aie::set_rounding(aie::rounding_mode::conv_even);
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all
-    const unsigned kvh = h / (kNH / kKVH);
+    const unsigned kvh = ATTN_KVLOC(h / (kNH / kKVH));
     const float *q = qs + h * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     const bfloat16 *v = Vt + kvh * kHD;
@@ -642,7 +658,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__restrict Kb,
                                    const bfloat16 *const *__restrict Vb,
                                    const ATTN_QT *__restrict qs, float *__restrict oacc,
-                                   float *__restrict ml ATTN_H0_PARM) {
+                                   float *__restrict ml ATTN_H0_PARM ATTN_SL_PARM) {
   ATTN_H0_DECL
   alignas(128) float sv[kPV], mnv[kPV];
   alignas(128) bfloat16 ph[kPV], pl[kPV];
@@ -659,7 +675,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
 #endif                      // at HD 256 it overflows program memory even at RB 2 (Gemma3-4B)
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;
-    const unsigned kvh = h / (kNH / kKVH);
+    const unsigned kvh = ATTN_KVLOC(h / (kNH / kKVH));
     const bfloat16 *q = qs + h * kHD;
     AIE_LOOP_UNROLL_FULL
     for (unsigned r = 0; r < kRB; ++r) {
@@ -717,7 +733,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   AIE_LOOP_UNROLL_FULL      // at RB 4 the fully-unrolled body crashes clang (and does not fit);
 #endif                      // at HD 256 it overflows program memory even at RB 2 (Gemma3-4B)
   for (unsigned hl = 0; hl < kNHL; ++hl) {
-    const unsigned kvh = (kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH);
+    const unsigned kvh = ATTN_KVLOC((kSplit ? ((unsigned)h0 + hl) : hl) / (kNH / kKVH));
     float *o = oacc + hl * kHD;
     const bfloat16 ahh = ah[hl], all = al[hl];
     // The rescale is its own two-iteration loop rather than a second copy of the
@@ -755,7 +771,7 @@ static inline void attn_step_impl(const bfloat16 *__restrict Kt, const bfloat16 
   pb[2] = t + 1;
   if (t >= pb[0]) return;
 #if !ATTN_NULL
-  attn_row_impl(Kt, Vt, qs, oacc, ml ATTN_H0_ARG);
+  attn_row_impl(Kt, Vt, qs, oacc, ml ATTN_H0_ARG ATTN_SL_ARG(true));
 #else
   (void)Kt; (void)Vt; (void)qs; (void)oacc; (void)ml;
 #endif

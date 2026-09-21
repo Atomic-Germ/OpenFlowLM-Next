@@ -23,7 +23,9 @@ from .spec import ModelSpec
 # skips a build whose key the destination already has -- so a probe build could be
 # shipped as a real one, silently. `probe_env()` is what cache.py folds in to stop that;
 # it returns {} when nothing is set, so an ordinary build's key is unchanged.
-PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST")
+# KVSLICE is not a probe but a layout option (per-core KV planes, designs/dense/dx.py); it changes the compiled kernels and the
+# manifest, so it belongs in the build key. The designs do not pass it to the compiler.
+PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "KVSLICE")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 

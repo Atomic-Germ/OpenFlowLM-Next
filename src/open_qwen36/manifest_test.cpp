@@ -3,10 +3,12 @@
 ///        model whose config.json disagrees with it is refused with the key named.
 ///        No XRT, no hardware: `manifest_test <fixtures/manifest_qwen36.json>`.
 // Traces: OPEN-MANIFEST (canonical spec: specs/open-engine/spec.md)
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "open_qwen36/manifest.hpp"
 
@@ -56,6 +58,69 @@ json matching_config(const Manifest& m) {
 }
 
 }  // namespace
+
+
+// ---- attnpos patch table: synthetic instruction streams (no device). The stream format is the one attn_table() walks: a
+// 4-word header, then ops; op 1 = a BD blockwrite (word 2 = the BD's register), op 0x81 = an address patch (word 6 = its
+// register, word 8 = the buffer arg, word 10 = the static offset, bit 31 = the firmware-translation flag).
+namespace synth {
+using Stream = std::vector<uint32_t>;
+void bd(Stream& w, uint32_t reg) { size_t i = w.size(); w.resize(i + 12, 0); w[i] = 1; w[i + 2] = reg; w[i + 4] = 0xdead; }
+void patch(Stream& w, uint32_t reg, uint32_t arg, uint32_t off) { size_t i = w.size(); w.resize(i + 12, 0); w[i] = 0x81; w[i + 6] = reg; w[i + 8] = arg; w[i + 10] = off; }
+constexpr uint32_t kFlag = 0x80000000u;
+}  // namespace synth
+
+void test_attn_patches() {
+    using namespace synth;
+    namespace sp = stream_patch;
+    // ---- row-major cache (planes == 1): one window fill at 0, the new-row drain at one row, the record at arg 5
+    {
+        Stream w(4, 0);
+        patch(w, 10, 3, 2048);                    // new row -> row 1 of the cache (the stream is built for position 1)
+        patch(w, 20, 5, 1024 | kFlag);            // the position record
+        bd(w, 100); patch(w, 104, 3, 0);          // the window: rows [0, nf)
+        sp::AttnGeometry g; g.kv_row = 2048; g.ptab_row = 1024;
+        auto t = sp::attn_table(w, "rowmajor", g);
+        check(t.size() == 4, "planes 1: four patches (length, drain, record, offset)");
+        sp::attn_apply(w.data(), t, /*pos*/ 5, g);
+        // nf = 5 rows, a BD length is in words; drain at row 5; record at row 5 keeps its flag; the window starts at row 0
+        check(w[4 + 12 + 12 + 4] == 5 * 2048 / 4 && w[4 + 10] == 5 * 2048 && w[4 + 12 + 10] == ((5 * 1024) | kFlag) && w[4 + 12 + 12 + 12 + 10] == 0,
+              "planes 1: window length / drain / record / window offset");
+    }
+    // ---- four planes: the drain is one plane row (a strided BD), each core's window fill sits at its own plane offset
+    {
+        const uint32_t plane = 1u << 20;
+        Stream w(4, 0);
+        patch(w, 10, 3, 512);                     // [K' | V'] scattered to row 1 of every plane (kv_row 2048 / 4 planes)
+        patch(w, 20, 5, 1024 | kFlag);
+        for (uint32_t c = 0; c < 4; ++c) { bd(w, 100 + 40 * c); patch(w, 104 + 40 * c, 3, c * plane); }
+        sp::AttnGeometry g; g.kv_row = 2048; g.ptab_row = 1024; g.planes = 4;
+        auto t = sp::attn_table(w, "planes4", g);
+        check(t.size() == 2 + 2 * 4, "planes 4: one drain, one record, and a length + offset patch per plane");
+        sp::attn_apply(w.data(), t, /*pos*/ 5, g);
+        bool ok = w[4 + 10] == 5 * 512 && w[4 + 12 + 10] == ((5 * 1024) | kFlag);
+        for (uint32_t c = 0; c < 4; ++c) {
+            const size_t base = 4 + 24 + c * 24;   // bd op, then its patch op
+            ok = ok && w[base + 4] == 5 * 512 / 4 && w[base + 12 + 10] == c * plane;
+        }
+        check(ok, "planes 4: every plane's window is nf * slice-row long and starts at its own plane");
+        // a sliding window: position 5 with a 3-row window attends to rows [3, 5): nf = 2, each plane's offset moves by start * slice-row
+        g.window = 3;
+        sp::attn_apply(w.data(), t, 5, g);
+        ok = true;
+        for (uint32_t c = 0; c < 4; ++c) {
+            const size_t base = 4 + 24 + c * 24;
+            ok = ok && w[base + 4] == 2 * 512 / 4 && w[base + 12 + 10] == c * plane + 3 * 512;
+        }
+        check(ok, "planes 4: a sliding window moves each plane's offset by start * slice-row");
+        // a stream with the wrong number of window fills for the declared planes is refused
+        Stream few(4, 0);
+        patch(few, 10, 3, 512); patch(few, 20, 5, 1024 | kFlag);
+        for (uint32_t c = 0; c < 3; ++c) { bd(few, 100 + 40 * c); patch(few, 104 + 40 * c, 3, c * plane); }
+        try { sp::attn_table(few, "three", g); check(false, "planes 4: three window fills (accepted)"); }
+        catch (const std::runtime_error& e) { check(std::string(e.what()).find("expected 4") != std::string::npos, std::string("planes 4: three window fills are refused: ") + e.what()); }
+    }
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -473,6 +538,28 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             check(false, std::string("phi3 fixture: ") + e.what());
         }
+    }
+
+
+    // ---- per-core KV planes (KVSLICE): a manifest may declare them; the fixture is a row-major cache
+    {
+        check(m.kv_planes == 0 && m.attn.planes == 1 && m.attn.slice_row() == m.kv_row, "the fixture has no kv_planes: a row-major cache");
+        std::ifstream f(argv[1]);
+        json j = json::parse(f);
+        j["layout"]["kv_planes"] = 4;
+        j["layout"]["kv_plane_bytes"] = 1u << 21;
+        try {
+            Manifest s = Manifest::parse(j, "sliced");
+            check(s.kv_planes == 4 && s.kv_plane_bytes == (1u << 21) && s.attn.planes == 4 && s.attn.slice_row() == s.kv_row / 4,
+                  "kv_planes 4 / kv_plane_bytes are read, and the patch geometry follows");
+        } catch (const std::exception& e) {
+            check(false, std::string("kv_planes 4 (refused): ") + e.what());
+        }
+        refused_manifest(argv[1], "kv_plane_bytes", "kv_planes without kv_plane_bytes is refused",
+                         [](json& x) { x["layout"]["kv_planes"] = 4; });
+        refused_manifest(argv[1], "multiple of kv_planes", "a kv_row that kv_planes does not divide is refused",
+                         [](json& x) { x["layout"]["kv_planes"] = 3; x["layout"]["kv_plane_bytes"] = 1; });
+        test_attn_patches();
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);

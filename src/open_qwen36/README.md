@@ -359,6 +359,47 @@ Qwen3-4B rebuilt on these kernels gives identical `insts.bin` for all three sets
 and xclbins differing only in build stamps. The knobs are per-geometry, not
 per-family, so another family joins by measuring the same way -- not by
 declaring itself.
+## Per-core KV planes (`KVSLICE=1`, dense attention, 2026-09-21)
+
+The context term above is still there after the vector softmax: on Qwen3-0.6B a layer costs 0.42 ms at position 0 and grows by
+~0.55 ms per 1000 cached rows (1.0 ms at 1024, 2.7 at 4000). Half of that slope is *streaming*, and the streaming is a
+bottleneck of the dataflow, not of the arithmetic: the KV rows reach the four attention cores through ONE `ObjectFifo`
+(`ain`) produced on one shim tile and broadcast, so the extra cores add compute but no DMA bandwidth. (`ATTN_NULL=1`, which
+streams but skips the row compute, costs ~0.30 of the ~0.54 us/row; doubling the fifo depth changes nothing.)
+
+`KVSLICE=1` gives each attention core only ITS kv heads' rows, on its own shim channel:
+
+- the KV buffer becomes `ACORES` planes, plane `c` at `c * KV_BYTES / ACORES`, each row of a plane `[K_c | V_c]` (`kv_row / ACORES`
+  bytes), so every window fill is still one 1-D BD, patched exactly like the row-major one (window length and offset), once per plane;
+- the new row is scattered to all planes by one strided 3-D drain;
+- `attn_row_impl` / `attn_rowb_impl` index the slice locally. They take a run-time `bool sl` (window kernels `true`, the new-row
+  step `false`) rather than a per-TU macro: the routines are `noinline inline`, so two same-named bodies would be merged by the linker
+  and the new-row step would silently take the slice's indexing on every core but the first (a build that "worked" and was wrong
+  for cores 1-3);
+- `dx.py` and `dx_attn.py` take the knob; `recipes/dense.py` writes `layout.kv_planes` / `kv_plane_bytes` into the manifest; the
+  knob is in `PROBE_VARS`, so it is in the build key (a sliced export is never mistaken for a plain one).
+
+```
+KVSLICE=1 python open_kernels/export_qwen36_kernels.py --model-dir <Qwen3-0.6B-NPU2 dir> --out <out>
+```
+
+The engine reads `kv_planes`: `stream_patch::AttnGeometry::planes` patches the window per plane, `Core::kv_read_rows /
+kv_write_rows` present the row-major logical view to the snapshot and `kv_row` code (so snapshots are layout-independent), the host
+full-attention block refuses a planar cache, and `--max-ctx` must equal the capacity the planes were compiled for.
+
+Measured on Qwen3-0.6B (Strix, Linux + XRT), greedy, against the stock engine: dumped logits **byte-identical** on 9-, 300- and
+2000-token prompts and across `--twice` (checkpoint/restore); per layer 0.97 -> 0.77 ms at position 1024, 1.53 -> 1.14 at 2048,
+2.65 -> 1.79 at 4000; decode 46.9 -> 52.7 tok/s at 300 tokens and 20.6 -> 27.3-28.0 at 2000 (two runs), prefill of 2000 tokens 53.8 -> 42.2 s.
+With the knob unset every `insts.bin` and every attention kernel object is byte-identical to before.
+
+The block-prefill route (`--gemm-block`, the `dx_attn` dispatch) takes the same knob and is byte-identical too: 300 and 2000
+tokens (eight blocks) plus 16 decode steps, and across `--twice`, sliced vs plain; a 2000-token block prefill goes 43.4 -> 31.4 s and
+the decode after it 21.1 -> 27.9 tok/s. This was verified on top of #101 (before it, `dx_attn` hangs on its first dispatch whenever
+`NHL < HPO`, which is Qwen3-0.6B's shape, with or without this change).
+
+Limits: dense geometry with `ACORES > 1`, `RB > 1` and no qkv bias (the Qwen3-0.6B shape; other shapes are untried), and
+shim columns 4.. must have a free MM2S channel.
+
 ## A seventh family: Qwen3.5 dense (2026-09-06)
 
 A Qwen3.5 dense layer is a Qwen3.6-MoE layer with the MoE block replaced by a

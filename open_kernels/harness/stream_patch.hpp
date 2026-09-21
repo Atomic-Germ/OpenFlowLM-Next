@@ -51,6 +51,9 @@ struct AttnGeometry {
     uint64_t kv_row = 2048;
     uint64_t ptab_row = 1024;
     uint64_t window = 0;             ///< rows of a sliding window (0 = every cached row); Gemma's local layers
+    unsigned planes = 1;             ///< KV planes (per-core slices); 1 = the row-major cache [K_t | V_t]
+    /// One row of ONE plane: the whole row when the cache is row-major, else [K_c | V_c] for one core's heads.
+    uint64_t slice_row() const { return kv_row / planes; }
 };
 
 /// The cached rows position `pos` attends to: [start, pos), streamed as nf rows (>= 1: position 0
@@ -94,6 +97,7 @@ struct AttnPatch {
     size_t word;
     uint8_t kind;
     uint32_t flags;
+    uint64_t base = 0;               ///< kind 3 with planes > 1: the plane's static offset (c * plane bytes)
 };
 
 /// `moeroute`'s table: the moe_experts design's weight fills, built against a
@@ -166,12 +170,16 @@ inline std::vector<AttnPatch> attn_table(const std::vector<uint32_t>& w, const s
         uint32_t reg = w[i + 6], arg = w[i + 8];
         uint64_t off = w[i + 10] & 0x7fffffffu;
         uint32_t flags = w[i + 10] & 0x80000000u;
-        if (arg == 3 && off == 0) {
+        // Row-major: the window fill is at offset 0, the new row's drain at one row. Planes: the drain is at one plane row
+        // (a strided BD scattering [K'|V'] into every plane) and each core's window fill sits at its own plane offset.
+        const uint64_t drain_off = g.planes > 1 ? g.slice_row() : g.kv_row;
+        const bool is_window = g.planes > 1 ? (arg == 3 && off != drain_off) : (arg == 3 && off == 0);
+        if (is_window) {
             if (!have_bd || bd_write + 2 >= w.size() || w[bd_write + 2] + 4 != reg)
                 throw std::runtime_error("attnpos: " + kn + ": no BD write before the KV window fill");
-            t.push_back({bd_write + 4, 0, 0});
-            t.push_back({i + 10, 3, flags});
-        } else if (arg == 3 && off == g.kv_row) {
+            t.push_back({bd_write + 4, 0, 0, 0});
+            t.push_back({i + 10, 3, flags, off});
+        } else if (arg == 3 && off == drain_off) {
             t.push_back({i + 10, 1, flags});
         } else if (arg == 3) {
             throw std::runtime_error("attnpos: " + kn + ": unexpected kv transfer at offset " + std::to_string(off));
@@ -182,9 +190,11 @@ inline std::vector<AttnPatch> attn_table(const std::vector<uint32_t>& w, const s
     for (uint8_t kind = 0; kind < 4; ++kind) {
         size_t n = 0;
         for (const auto& p : t) n += (p.kind == kind);
-        if (n != 1)
+        const size_t want = (kind == 0 || kind == 3) ? g.planes : 1;   // one window fill per plane
+        if (n != want)
             throw std::runtime_error("attnpos: " + kn + ": " + std::to_string(n) + " patches of kind " +
-                                     std::to_string(kind) + ", expected 1 (window length, row drain, record fill, window offset)");
+                                     std::to_string(kind) + ", expected " + std::to_string(want) +
+                                     " (window length, row drain, record fill, window offset)");
     }
     return t;
 }
@@ -226,10 +236,11 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
     uint64_t start, nf;
     attn_window(pos, g.window, &start, &nf);
     for (const auto& p : table) {
-        uint64_t v = p.kind == 0   ? nf * g.kv_row / 4  // a BD length is in words
-                     : p.kind == 1 ? pos * g.kv_row
+        const uint64_t sr = g.slice_row();                // == kv_row when the cache is row-major
+        uint64_t v = p.kind == 0   ? nf * sr / 4        // a BD length is in words
+                     : p.kind == 1 ? pos * sr
                      : p.kind == 2 ? pos * g.ptab_row
-                                   : start * g.kv_row;
+                                   : p.base + start * sr;
         iw[p.word] = static_cast<uint32_t>(v) | p.flags;
     }
 }

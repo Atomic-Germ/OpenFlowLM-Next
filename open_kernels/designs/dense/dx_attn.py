@@ -85,9 +85,13 @@ ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f
 if G.RB > 1:
     ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL, same as dx.py
-    if _k != "ATTN_RB":
+    if _k not in ("ATTN_RB", "KVSLICE"):
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+import os as _os_kv
+KVSLICE = _os_kv.environ.get("KVSLICE") == "1"   # per-core KV planes; must match the dx.py build (same buffer layout)
+if KVSLICE:
+    assert ACORES > 1 and RB > 1 and G.KVH % ACORES == 0, "KVSLICE needs split attention and RB > 1"
 # og elements, as dx.py has them now: attn_fin writes kOGH = min(NHL, HPO) heads per element,
 # and each core -- core 0 included -- emits its own N_OG of them on its own fifo. The earlier
 # form this file was copied from put core 0's og on the KV-row fifo (so an og element had to
@@ -123,6 +127,10 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     # declared (harmless -- this dispatch configures no DMA against them at
     # all, confirmed by their absence from `sequence_attn` below).
     u8_a = np.ndarray[(E_A,), np.dtype[np.uint8]]
+    E_S = E_A // ACORES if KVSLICE else E_A
+    u8_s = np.ndarray[(E_S,), np.dtype[np.uint8]]
+    KV_PLANE = L.KV_BYTES // ACORES
+    KV_SLROW = L.KV_ROW // ACORES
     pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
@@ -155,21 +163,25 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a, brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
-    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
-    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
-                  ATTN_FLAGS) if RB > 1 else None)
+    SLF = ATTN_FLAGS + ["-DATTN_KVSLICE=1"] if KVSLICE else ATTN_FLAGS
+    SLT = u8_s if KVSLICE else u8_a
+    f_step = ef("attn_step", ATTN / "attn_step.cc", [SLT, SLT, fq, foacc, fml, pb_ty] + h0_arg, SLF)
+    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, SLF)
+    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [SLT] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
+                  SLF) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
 
     # ---- fifos, as dx.py: ain, the KV-row fifo (core 0's two cache rows ONLY), and one og
     # fifo per attention core
-    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2))
+    of_ain = ObjectFifo(u8_a, name="ain", depth=(4 if KVSLICE else max(4, 2 * RB + 2)))
+    of_kv = [ObjectFifo(u8_s, name=f"kv{c}", depth=4 * RB) for c in range(ACORES)] if KVSLICE else []
     of_aout = ObjectFifo(brow, name="aout", depth=2)
     of_og = [ObjectFifo(og_ty, name=f"og{c}", depth=2) for c in range(ACORES)]
 
     # ---- verbatim from dx.py: _attn / attn_body / make_attn_body
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0):
+              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, kvin=None):
+        win = kvin if kvin is not None else ain               # the fifo the KV window rows arrive on
         e = ain.acquire(2)                                      # [qn | kn], the position record
         f_meta(e[0], e[1], qn, kn, cs, pb)
         ain.release(2)
@@ -197,14 +209,14 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
         f_init(oacc, ml)
         if RB > 1:
             for _ in range_(pb[4]):                             # whole blocks of RB rows
-                e = ain.acquire(2 * RB)
+                e = win.acquire(2 * RB)
                 args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
                 f_stepb(*args)
-                ain.release(2 * RB)
+                win.release(2 * RB)
             for _ in range_(pb[5]):                             # what did not fill a block
-                e = ain.acquire(2)
+                e = win.acquire(2)
                 f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
-                ain.release(2)
+                win.release(2)
         else:
             for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
                 e = ain.acquire(2)
@@ -216,7 +228,18 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
             f_fin(oacc, ml, o, hp)
             ogout.release(1)
 
-    if RB > 1:
+    if KVSLICE:
+        def attn_body(ain, kvin, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, kvin)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, kvin, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, kvin)
+            return body
+    elif RB > 1:
         def attn_body(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
             _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0)
@@ -248,13 +271,14 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
 
-    workers = [Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
+    kvc = (lambda c: [of_kv[c].cons()]) if KVSLICE else (lambda c: [])
+    workers = [Worker(attn_body, fn_args=[of_ain.cons()] + kvc(0) + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
                       tile=Tile(2, 3), stack_size=0x1800)]
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c].prod()] + abufs(c) + afns,
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + kvc(c) + [of_og[c].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, 3), stack_size=0x1800))
 
-    def sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs):
+    def sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs, kv_ps=None):
         # a_pool / c_xres: unused dummies, kept only for buffer-argument
         # position (see dx_attn()'s own comment).
         # 0167 stage 12 / #32: verbatim (minus the o-proj/GEMV lines, which
@@ -265,7 +289,10 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
         # dispatch already is (attn_table() wants exactly one patch of each
         # of its four kinds; this dispatch's shape supplies exactly that).
         pa_out, pa_in = Pipeline(3), Pipeline(3)
-        pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
+        if kv_ps:                                                            # [K'_c | V'_c] scattered to row pos of each plane
+            pa_out.drain(aout_c, a_kv, TensorAccessPattern((1, L.KV_BYTES), KV_SLROW, [1, 2, ACORES, E_S], [0, E_S, KV_PLANE, 1]))
+        else:
+            pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
         for c in range(ACORES):                                             # heads NHL*c ..
             pa_out.drain(og_cs[c], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
         pa_in.fill(ain_p, a_consts, bt(L.CD_BYTES, L.CD_META, E_A))            # [qn | kn]
@@ -273,14 +300,19 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_Q, QW * 4))
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN, KVW * 4))
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN + KVW * 4, KVW * 4))
-        pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
+        if kv_ps:
+            for c in range(ACORES):
+                pa_in.fill(kv_ps[c], a_kv, bt(L.KV_BYTES, c * KV_PLANE, KV_SLROW))
+        else:
+            pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
         pa_out.finish()                                           # og (and the new cache row) are in DDR
         pa_in.finish()
 
     rt = Runtime(sequence_attn,
                  [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
                   of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
-                  [of_og[c].cons(tile=Tile(2 + c, 0)) for c in range(ACORES)]])
+                  [of_og[c].cons(tile=Tile(2 + c, 0)) for c in range(ACORES)]]
+                 + ([[of_kv[c].prod(tile=Tile(4 + c, 0)) for c in range(ACORES)]] if KVSLICE else []))
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

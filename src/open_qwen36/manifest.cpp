@@ -163,6 +163,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     }
     m.attn.kv_row = m.kv_row;
     m.attn.ptab_row = m.ptab_row;
+    m.kv_planes = lay.value("kv_planes", 0ull);
+    m.kv_plane_bytes = lay.value("kv_plane_bytes", 0ull);
+    if (m.kv_planes > 1) {
+        if (m.kv_row % m.kv_planes) fail(lw, "kv_row is not a multiple of kv_planes");
+        if (!m.kv_plane_bytes) fail(lw, "kv_planes without kv_plane_bytes");
+        m.attn.planes = static_cast<unsigned>(m.kv_planes);
+    }
 
     m.layers = get<std::vector<std::string>>(j, "layers", where);
     if (m.layers.empty()) fail(where, "no layers");
