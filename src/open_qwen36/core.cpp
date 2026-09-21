@@ -216,6 +216,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
+    moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
@@ -868,13 +869,48 @@ void Core::bench_kernel(const std::string& name, int reps, int layer, int warm_t
     if (!args)
         for (const Step& s : man_.tail)
             if (s.kernel == name) args = &s.args;
+    // the block route's kernels too: the prefill's own dispatches are the ones worth holding
+    // at full rate for a whole prefill's worth of seconds (see the window report below)
+    const GemmBlockProgram& gb = types_[layer]->gemm_block;
+    if (!args)
+        for (const auto* prog : {&gb.program, &gb.shared_program})
+            for (const Step& s : *prog)
+                if (s.kernel == name) args = &s.args;
+    if (!args)
+        for (const auto& [slots, kn] : gb.moe_batch.kernels)
+            if (kn == name) args = &gb.moe_batch.args;
+    if (!args)
+        for (int l = 0; l < nl_ && !args; ++l) {
+            const AttnBlock& ab = types_[l]->gemm_block.attn_block;
+            if (!ab.present()) continue;
+            for (const auto* m : {&ab.kernels_s, &ab.kernels_pv})
+                for (const auto& [len, kn] : *m)
+                    if (kn == name) args = &ab.args;
+        }
     if (!args) throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " does not run " + name);
 
     run_split(k, *args, layer);                             // the first call of a context pays for it
+    // Windowed, because the question this answers is whether the rate HOLDS. A prefill is tens
+    // of seconds of back-to-back dispatches, and every in-block figure is ~1.4x the same
+    // kernel's `--bench` minimum even under `--pmode turbo`. If that is the package heating up
+    // rather than anything the engine does between dispatches, it shows here as the window
+    // minimum drifting up under a load with no host work in it at all.
     BenchStat st;
+    BenchStat win;
+    const int W = reps >= 200 ? reps / 20 : 0;
+    const auto tb0 = std::chrono::steady_clock::now();
+    if (W)
+        std::fprintf(stderr, "\nopen_qwen36: %s on layer %d, %d reps in windows of %d\n  %8s %9s %9s\n",
+                     name.c_str(), layer, reps, W, "at s", "win min", "win mean");
     for (int i = 0; i < reps; ++i) {
         const auto [submit, wait] = run_split(k, *args, layer);
         st.add(submit, wait);
+        if (!W) continue;
+        win.add(submit, wait);
+        if ((i + 1) % W == 0) {
+            std::fprintf(stderr, "  %8.1f %9.3f %9.3f\n", ms_since(tb0) / 1000.0, win.min, win.mean());
+            win = BenchStat{};
+        }
     }
     std::fprintf(stderr, "\nopen_qwen36: %s on layer %d, %d reps: %.3f min, %.3f mean, %.3f submit (context %s)\n\n",
                  name.c_str(), layer, reps, st.min, st.mean(), st.mean_submit(), man_.kernels.at(name).context.c_str());
@@ -1555,10 +1591,12 @@ void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
     const size_t pos0 = static_cast<size_t>(pos_);
     // The padded rows carry the last real id, exactly as the block-major caller padded
     // the tail block; they never touch the state and never reach the position.
+    auto tsetup = std::chrono::steady_clock::now();
     std::vector<float> xres(TOT * hid);
     for (size_t t = 0; t < TOT; ++t)
         file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[std::min(t, N - 1)]), hid, xres.data() + t * hid);
     moe_stage_resize(TOT);
+    timing_.setup_ms += ms_since(tsetup);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
         for (size_t b = 0; b < B; ++b) {
@@ -1768,7 +1806,9 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hd * L * 2, 0);
             timing_.mid_ms += ms_since(th);
             timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
-            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * L * 4, 0);
+            th = std::chrono::steady_clock::now();
+            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * L * 4, 0);   // the whole M x L score matrix
+            timing_.sync_ms += ms_since(th);
             th = std::chrono::steady_clock::now();
             host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos, m, lsum, acc, ba.map<uint16_t*>());
             host::tile_rows_as_b(kv + c0 * kv_row_elems + kvw + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
@@ -1776,7 +1816,9 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
             timing_.mid_ms += ms_since(th);
             timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
+            th = std::chrono::steady_clock::now();
             bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * hd * 4, 0);
+            timing_.sync_ms += ms_since(th);
             th = std::chrono::steady_clock::now();
             const float* c = bc.map<float*>();
             for (size_t i = 0; i < M * hd; ++i) acc[i] += c[i];
@@ -1941,6 +1983,15 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         timing_.moe_patch_ms += ms_since(t1);
         const double run_ms = run(mk, mb.args, l);
         timing_.moe_run_ms += run_ms;
+        // Why the same dispatch costs 17.4 ms here and 12.4 ms under `--bench`: run it a
+        // SECOND time, same stream, same buffers, no host work in between. If the repeat is
+        // the bench's figure then what the first one pays for is the host work before it; if
+        // both are 17.4 the hardware really is in a different state during a prefill.
+        if (moe_redispatch_) {
+            const double again = run(mk, mb.args, l);
+            std::fprintf(stderr, "open_qwen36: layer %d moe redispatch: %.3f then %.3f ms\n", l, run_ms, again);
+        }
+
         if (log_passes)
             std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, n, visits.size(),
                          kname->c_str(), run_ms);

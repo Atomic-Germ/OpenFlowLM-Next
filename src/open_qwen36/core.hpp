@@ -91,6 +91,7 @@ struct StepTiming {
     double tail_ms = 0;       ///< residual, post-norm, router
     double state_ms = 0;      ///< the state BO syncs (the KV read grows with position)
     double sync_ms = 0;       ///< the GEMM globals' host<->device syncs around each dispatch
+    double setup_ms = 0;      ///< the prompt's embedding rows and the MoE staging buffers, once a request
     double moe_prep_ms = 0;   ///< xm / the router record / the residual into act
     double moe_patch_ms = 0;  ///< moe2_apply and the instruction sync
     double moe_run_ms = 0;    ///< the mx dispatch itself
@@ -278,6 +279,7 @@ private:
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
+    bool moe_redispatch_ = false;  ///< OFLM_OPEN_MOE_REDISPATCH: run each MoE pass twice and print both
     std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of

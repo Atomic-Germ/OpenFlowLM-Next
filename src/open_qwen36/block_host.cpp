@@ -9,6 +9,8 @@
 #include "open_qwen36/block_host.hpp"
 
 #include <algorithm>
+#include <immintrin.h>
+#include <omp.h>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -53,24 +55,87 @@ void rmsnorm_rows(const float* x, size_t T, size_t d, const float* w, double eps
     for (long long t = 0; t < static_cast<long long>(T); ++t) rms_vec(x + t * d, d, w, eps, out + t * d);
 }
 
+namespace {
+
+/// One 8x8 float tile, src rows `sstride` apart, dst rows `dstride` apart.
+///
+/// The scalar loop this replaces walks one side of every 32x32 block four bytes at a time --
+/// 32 separate cache lines touched per source row -- and reached about 10 GB/s over sixteen
+/// threads on a 2582-token prefill's 16 GB of transposes. The AVX2 network reads eight whole
+/// 32-byte rows, shuffles them in registers and writes eight whole 32-byte rows, so both
+/// sides move in vector-width runs and the only scattered access left is one cache line per
+/// row of a tile. It is pure data movement, so the result is identical to the last bit.
+inline void t8x8(const float* src, size_t sstride, float* dst, size_t dstride) {
+    __m256 r0 = _mm256_loadu_ps(src + 0 * sstride), r1 = _mm256_loadu_ps(src + 1 * sstride);
+    __m256 r2 = _mm256_loadu_ps(src + 2 * sstride), r3 = _mm256_loadu_ps(src + 3 * sstride);
+    __m256 r4 = _mm256_loadu_ps(src + 4 * sstride), r5 = _mm256_loadu_ps(src + 5 * sstride);
+    __m256 r6 = _mm256_loadu_ps(src + 6 * sstride), r7 = _mm256_loadu_ps(src + 7 * sstride);
+    const __m256 u0 = _mm256_unpacklo_ps(r0, r1), u1 = _mm256_unpackhi_ps(r0, r1);
+    const __m256 u2 = _mm256_unpacklo_ps(r2, r3), u3 = _mm256_unpackhi_ps(r2, r3);
+    const __m256 u4 = _mm256_unpacklo_ps(r4, r5), u5 = _mm256_unpackhi_ps(r4, r5);
+    const __m256 u6 = _mm256_unpacklo_ps(r6, r7), u7 = _mm256_unpackhi_ps(r6, r7);
+    const __m256 s0 = _mm256_shuffle_ps(u0, u2, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 s1 = _mm256_shuffle_ps(u0, u2, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 s2 = _mm256_shuffle_ps(u1, u3, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 s3 = _mm256_shuffle_ps(u1, u3, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 s4 = _mm256_shuffle_ps(u4, u6, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 s5 = _mm256_shuffle_ps(u4, u6, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 s6 = _mm256_shuffle_ps(u5, u7, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 s7 = _mm256_shuffle_ps(u5, u7, _MM_SHUFFLE(3, 2, 3, 2));
+    _mm256_storeu_ps(dst + 0 * dstride, _mm256_permute2f128_ps(s0, s4, 0x20));
+    _mm256_storeu_ps(dst + 1 * dstride, _mm256_permute2f128_ps(s1, s5, 0x20));
+    _mm256_storeu_ps(dst + 2 * dstride, _mm256_permute2f128_ps(s2, s6, 0x20));
+    _mm256_storeu_ps(dst + 3 * dstride, _mm256_permute2f128_ps(s3, s7, 0x20));
+    _mm256_storeu_ps(dst + 4 * dstride, _mm256_permute2f128_ps(s0, s4, 0x31));
+    _mm256_storeu_ps(dst + 5 * dstride, _mm256_permute2f128_ps(s1, s5, 0x31));
+    _mm256_storeu_ps(dst + 6 * dstride, _mm256_permute2f128_ps(s2, s6, 0x31));
+    _mm256_storeu_ps(dst + 7 * dstride, _mm256_permute2f128_ps(s3, s7, 0x31));
+}
+
+/// dst[t * width + n] = src[n * T + t] for n in [0, width), t in [0, T): one thread's slice of
+/// the N axis, 8x8 tiles where both sides are whole tiles and scalar at the edges.
+void transpose_range(const float* src, size_t T, size_t width, size_t n0, size_t n1, float* dst) {
+    constexpr size_t B = 64;                       // cache block, a whole number of 8x8 tiles
+    for (size_t nb = n0; nb < n1; nb += B)
+        for (size_t tb = 0; tb < T; tb += B) {
+            const size_t ne = std::min(nb + B, n1), te = std::min(tb + B, T);
+            size_t n = nb;
+            for (; n + 8 <= ne; n += 8) {
+                size_t t = tb;
+                for (; t + 8 <= te; t += 8) t8x8(src + n * T + t, T, dst + t * width + n, width);
+                for (; t < te; ++t)
+                    for (size_t i = 0; i < 8; ++i) dst[t * width + n + i] = src[(n + i) * T + t];
+            }
+            for (; n < ne; ++n)
+                for (size_t t = tb; t < te; ++t) dst[t * width + n] = src[n * T + t];
+        }
+}
+
+}  // namespace
+
 void transpose(const float* y, size_t N, size_t T, float* out) {
-    constexpr size_t B = 32;
+    const long long nthr = omp_get_max_threads();
+    const size_t chunk = (N / 8 + nthr - 1) / nthr * 8;   // whole tiles per thread
 #pragma omp parallel for
-    for (long long nb = 0; nb < static_cast<long long>(N); nb += B)
-        for (size_t tb = 0; tb < T; tb += B)
-            for (size_t n = nb; n < std::min(static_cast<size_t>(nb) + B, N); ++n)
-                for (size_t t = tb; t < std::min(tb + B, T); ++t) out[t * N + n] = y[n * T + t];
+    for (long long i = 0; i < nthr; ++i) {
+        const size_t a = std::min(static_cast<size_t>(i) * chunk, N);
+        transpose_range(y, T, N, a, std::min(a + chunk, N), out);
+    }
 }
 
 void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_t n_parts) {
-    constexpr size_t B = 32;
-    for (size_t p = 0; p < n_parts; ++p) {
-        const TransposePart& q = parts[p];
+    // One parallel region for every part, not one each: a full-attention layer asks for four
+    // ranges and four regions is four thread wake-ups, which under OMP_WAIT_POLICY=PASSIVE is
+    // four times the wake-up and four chances for the NPU to see the cores come up.
+    // (MSVC's OpenMP ignores `collapse`, so the two axes are flattened by hand.)
+    const long long nthr = omp_get_max_threads();
 #pragma omp parallel for
-        for (long long nb = 0; nb < static_cast<long long>(q.width); nb += B)
-            for (size_t tb = 0; tb < T; tb += B)
-                for (size_t n = nb; n < std::min(static_cast<size_t>(nb) + B, q.width); ++n)
-                    for (size_t t = tb; t < std::min(tb + B, T); ++t) q.dst[t * q.width + n] = y[(q.off + n) * T + t];
+    for (long long j = 0; j < static_cast<long long>(n_parts) * nthr; ++j) {
+        const TransposePart& q = parts[j / nthr];
+        const long long i = j % nthr;
+        const size_t chunk = (q.width / 8 + nthr - 1) / nthr * 8;
+        const size_t a = std::min(static_cast<size_t>(i) * chunk, q.width);
+        transpose_range(y + q.off * T, T, q.width, a, std::min(a + chunk, q.width), q.dst);
     }
 }
 
@@ -118,15 +183,26 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
 #pragma omp for
         for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
             const size_t t = static_cast<size_t>(tt);
-            for (size_t j = 0; j < nch; ++j) {
-                float acc = 0;
-                for (size_t r = 0; r < g.taps; ++r) {
-                    const long long s = tt - static_cast<long long>(pre) + static_cast<long long>(r);
-                    acc += convw[r * nch + j] *
-                           (s < 0 ? carry[(static_cast<size_t>(s) + pre) * nch + j] : bf16r(qkv[static_cast<size_t>(s) * nch + j]));
+            // The taps as `taps` contiguous passes over the channels rather than a strided
+            // inner loop of depth `taps` inside the channel loop. Each pass reads one whole
+            // row of qkv and one of convw in order, and the "is this row carried state or
+            // qkv" test sits outside the channel loop instead of inside it -- which is what
+            // lets the vectoriser take the bf16 round trip and the multiply-add at all. The
+            // accumulation order over r is unchanged and c starts at zero exactly as `acc`
+            // did, so every bit of the result is the same.
+            std::fill(c.begin(), c.end(), 0.f);
+            for (size_t r = 0; r < g.taps; ++r) {
+                const long long s = tt - static_cast<long long>(pre) + static_cast<long long>(r);
+                const float* __restrict cw = convw + r * nch;
+                if (s < 0) {
+                    const float* __restrict v = carry.data() + (static_cast<size_t>(s) + pre) * nch;
+                    for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * v[j];
+                } else {
+                    const float* __restrict v = qkv + static_cast<size_t>(s) * nch;
+                    for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
                 }
-                c[j] = silu(acc);
             }
+            for (size_t j = 0; j < nch; ++j) c[j] = silu(c[j]);
             for (size_t hh = 0; hh < g.key_heads; ++hh)
                 for (int which = 0; which < 2; ++which) {
                     const float* src = c.data() + which * key_w + hh * dim;
