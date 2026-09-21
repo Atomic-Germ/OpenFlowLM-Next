@@ -222,12 +222,13 @@ std::vector<int> request(Core& core, const Args& a) {
         std::fprintf(stderr, "  %s [%zu,%zu) t_real=%zu: %.1f ms (GEMM %.1f, host %.1f, per-token %.1f, lm_head %.1f)\n",
                      what, n0, n1, t_real, tm.total_ms, tm.part0_ms, tm.part1_ms, tm.route_ms, tm.lmhead_ms);
         std::fprintf(stderr,
-                     "      mid %.1f (dn conv %.1f, dn rule %.1f, attn %.1f), gemm tile %.1f, gemm tr %.1f,"
-                     " tail %.1f, shared %.1f, state %.1f"
-                     " | moe prep %.1f, patch %.1f, run %.1f, read %.1f\n",
-                     tm.mid_ms, tm.dn_conv_ms, tm.dn_rule_ms, tm.attn_ms, tm.gemm_tile_ms, tm.gemm_tr_ms,
-                     tm.tail_ms, tm.shared_ms, tm.state_ms,
-                     tm.moe_prep_ms, tm.moe_patch_ms, tm.moe_run_ms, tm.moe_read_ms);
+                     "      mid %.1f (dn conv %.1f, dn rule %.1f, attn %.1f), prenorm %.1f, gemm tile %.1f,"
+                     " gemm tr %.1f, tail %.1f, shared %.1f, state %.1f, sync %.1f"
+                     " | moe prep %.1f, patch %.1f, run %.1f, read %.1f | residue %.1f\n",
+                     tm.mid_ms, tm.dn_conv_ms, tm.dn_rule_ms, tm.attn_ms, tm.prenorm_ms, tm.gemm_tile_ms,
+                     tm.gemm_tr_ms, tm.tail_ms, tm.shared_ms, tm.state_ms, tm.sync_ms,
+                     tm.moe_prep_ms, tm.moe_patch_ms, tm.moe_run_ms, tm.moe_read_ms,
+                     tm.total_ms - tm.part0_ms - tm.part1_ms - tm.route_ms - tm.lmhead_ms);
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
                          d.calls, d.ms, d.ms / d.calls, d.min_ms);

@@ -85,10 +85,12 @@ struct StepTiming {
     double dn_conv_ms = 0;    ///< of mid: DeltaNet's per-token half (conv, q/k norms, alpha/beta)
     double dn_rule_ms = 0;    ///< of mid: DeltaNet's delta rule on S, per head over the block
     double attn_ms = 0;       ///< of mid: the attention layers' host half
+    double prenorm_ms = 0;    ///< the layer's input RMSNorm, ahead of its first GEMM
     double gemm_tile_ms = 0;  ///< x into the GEMM's tiled bf16 activation layout
     double gemm_tr_ms = 0;    ///< the GEMM's [N, T] output back to [T, N], allocation included
     double tail_ms = 0;       ///< residual, post-norm, router
     double state_ms = 0;      ///< the state BO syncs (the KV read grows with position)
+    double sync_ms = 0;       ///< the GEMM globals' host<->device syncs around each dispatch
     double moe_prep_ms = 0;   ///< xm / the router record / the residual into act
     double moe_patch_ms = 0;  ///< moe2_apply and the instruction sync
     double moe_run_ms = 0;    ///< the mx dispatch itself
@@ -305,6 +307,29 @@ private:
     MoeStage moe_;
     /// Size moe_ for `rows` tokens. Never shrinks: a request's blocks are all the same width.
     void moe_stage_resize(size_t rows);
+    /// The host scratch a single (layer, block) needs, kept across calls. A fresh
+    /// std::vector per call is tens of MB a layer -- the pre-norm rows, the GEMM output's
+    /// transposed parts, the mid stage's output -- and `std::vector<float> v(n)` both
+    /// zero-fills it and hands back pages the allocator has decommitted, so every touch is
+    /// a fault. That traffic is not free even where it is not the critical path: the
+    /// dispatch bench's churn probe reads ~48 MB of host memory traffic as +1.5 ms on the
+    /// next wide GEMM. Every buffer here is fully written before it is read.
+    struct BlockScratch {
+        std::vector<float> xn;          ///< [T, hid] pre-norm rows
+        std::vector<float> part[4];     ///< the GEMM output's transposed parts: qkv/z, or q/k/v/gate
+        std::vector<float> og;          ///< [T, vw] or [T, qw] mid-stage output
+        std::vector<float> qrope;       ///< full: attention_prep's normed, roped queries
+        std::vector<uint16_t> qb;       ///< attention_npu: one KV group's queries as bf16
+        std::vector<float> m, lsum, acc;///< attention_npu: the merged softmax's running state
+        std::vector<size_t> pos;        ///< attention_npu: each product row's absolute position
+        /// `v` grown to at least `n` (never shrunk) and its data pointer.
+        template <class T>
+        static T* fit(std::vector<T>& v, size_t n) {
+            if (v.size() < n) v.resize(n);
+            return v.data();
+        }
+    };
+    BlockScratch bs_;
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
