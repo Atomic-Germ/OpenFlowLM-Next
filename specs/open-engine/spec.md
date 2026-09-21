@@ -2927,7 +2927,11 @@ block-major.
   is delay-loaded (`/DELAYLOAD:VCOMP140.DLL`); a build without that runs the host workers
   spinning through every dispatch and is ~20 % slower at prefill with nothing to show for it.
   `Core`'s constructor checks whether vcomp was already in the process when the initialiser
-  ran and prints a named WARNING if it was, so the flag cannot be dropped silently.
+  ran and prints a named WARNING if it was, so the flag cannot be dropped silently. The flag
+  is necessary and NOT sufficient: in `oflm.exe` eight implicitly linked closed model DLLs
+  import vcomp themselves, so the warning fires there and the variable has to come from the
+  environment (2026-09-21 result below). The criterion is that the warning is accurate, not
+  that it never fires.
 
 **Procedure:**
 1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2` (WSL) builds `gemm_n12288_k2048`, `gemm_n2048_k4096`, `gemm_n9216_k2048`, `mx_linear` and `mx_full` beside the sequential set and writes the manifest with the route.
@@ -3090,6 +3094,86 @@ prefill with the weights already resident, so the open side through
 `performance` itself at startup, so the `performance` column is the
 like-for-like one -- it wins at every length below 4096 as well. Details:
 `.claude/plans/prefill-parity-2026-09-21.md`.
+
+**Result 2026-09-21 (the dispatch log re-taken with PASSIVE in force):** every
+per-kernel in-block figure recorded before the delay-load fix above — including
+the 1.4-1.6x "in-block penalty" — was measured with the workers spinning.
+Re-taken on the fixed binary, `OFLM_OPEN_DISPATCH_LOG=1 --gemm-block` on a
+2582-token prompt against `--bench 20` on a linear and a full-attention layer of
+the same binary, the penalty is **gone on the kernels that carry the run**:
+`mb_s256` 13.407 ms mean against a 12.447 solo minimum (**1.08x**, 400 calls,
+5.36 s of the 19.46 s prefill), `gemm_n12288_k2048` 7.351 against 6.357
+(**1.16x**), `gemm_n9216_k2048` 5.539 against 4.816 (1.15x). The old figure
+survives only on the three narrow GEMMs — `gemm_n2048_k4096` 3.200 against
+2.027 (1.58x), `gemm_n1024_k2048` 1.45x, `gemm_n2048_k512` 1.46x — which
+together are 2.06 s of the 5.09 s of GEMM dispatch. Summed over every dispatch,
+**1.88 s of the 19.46 s run sits above the bench floor, 9.7 %**, where the
+2026-09-20 reading put it near 6 s.
+
+Two thirds of what remains is one avoidable thing. The layer-major schedule
+amortises a hardware context switch across all eleven blocks for the expert
+kernel and the qkv GEMM, which is why those are at 1.08x; it does not for the
+ten full-attention layers, where each (layer, block) runs `gemm_n9216_k2048` ->
+2x `ag_s` + 2x `ag_pv` -> `gemm_n2048_k4096` and so leaves the `gemm` context
+and re-enters it 110 times each way. This binary's context-switch probe prices
+a switch into `ag` at +2.55 ms and staying inside `gemm` at +0.03, which
+accounts for the whole `ag_*` excess (356 ms) and ~308 ms of
+`gemm_n2048_k4096`'s 516: **~0.66 s, 3.4 % of the prefill, recoverable by
+hoisting the attention dispatches out of the per-block loop** (all eleven
+blocks' `q|k|v|gate`, then all the attention, then all the `o` GEMMs — two
+switches a layer instead of twenty-two). Causality needs no new mask, since
+`ag_s` is dispatched with the window length `(b + 1) * 256` and so reads
+exactly blocks 0..b whatever later KV rows are already written; the cost is
+~23 MB of scratch to hold each block's attention output until its `o` GEMM. Not
+done.
+
+Also from the re-taken log: dispatch logging itself costs ~1.2 s at this speed
+(19.46 and 20.37 s on two repeats against 18.27 best-of-three without it), so a
+logged run is no longer a timing run; and **host compute is now the larger half
+of the prefill** — 11.46 s of the 19.46 is dispatch and the other 8.0 s is CPU,
+3.13 s of it DeltaNet, with nothing overlapping.
+
+**Result 2026-09-21 (step 5, and the wait policy the SERVER cannot apply):**
+`oflm-test --llm` passes 5 of 5 on `qwen3.6-moe:35b-a3b` through this tree's
+`oflm serve` with `OFLM_QWEN36_ENGINE=open` and `OFLM_OPEN_GEMM_BLOCK=1` — both
+modes, both prompts, the context-retention check — on a server carrying the
+layer-major schedule, which had never been exercised through the server path
+before. The load logs `Qwen3.6-MoE on the open kernels`,
+`block prefill route: T = 256` and `prefill schedule: layer-major`.
+
+It also prints the delay-load WARNING, and it is right to: **`oflm.exe` carries
+`/DELAYLOAD:VCOMP140.DLL` and still cannot apply `OMP_WAIT_POLICY` from inside
+the process**, because eight of the closed NPU model DLLs it links implicitly
+(`qwen3_6_moe_npu`, `qwen3_5vl_npu`, `qwen3_5_omni_npu`, `qwen3vl_npu`,
+`gemma_npu`, `gemma4e_npu`, `gemma4_12b_npu`, `gpt_oss_npu`) import vcomp
+themselves, so it is in the process before any code in the exe runs. Delay-loading
+vcomp from the exe is necessary and not sufficient; the CLI has no such dependency,
+which is why the same flag works there. Measured on the same binary and kernels,
+with the variable set in the environment before launch against not set, four
+rotating cycles per length, the server's own `prefill_speed_tps`: **2593 tokens
+17.43 s against 24.14, and 1.34-1.39x at every length from 182 up** — more than
+the 20 % the CLI saw.
+
+**With PASSIVE the server matches the CLI to within 2 %** (662 tokens 4.79 s
+against 4.75, 1122 7.84 against 7.95, 2102 14.18 against 14.52, 2593 17.43
+against 18.27 at 2582), which answers the standing caveat that the open figures
+were CLI-only while the closed ones came from a server timer: they were not
+flattering themselves, and the capacity the server loads at (32768 against the
+CLI's 4096) costs nothing measurable. Fitted, the open prefill through the
+server is **0.46 s + N / 153 tok/s**. Read off the same timer as closed, the
+open route is **2.6x faster at 662 tokens, 1.94x at 1122, 1.33x at 2102, 1.22x
+at 2593**, level at 3062 (20.76 s) and 12.6 % behind at 3642 (25.96 against
+23.05) -- **a crossover near 3100 tokens**, not the ~3700 the CLI-against-server
+comparison implied. Without PASSIVE, which is what a default build of the server
+does today, the fit is 0.39 s + N / 109 and the crossover falls to **about 1700
+tokens**. The closed column is the same day's measurement on this box through
+stock FLM's own server and was not re-taken; note also that the closed engine's
+host work is OpenMP too, so it was measured with its own workers spinning.
+
+Not fixed. The candidates are delay-loading those eight DLLs as well (which
+changes how the closed path fails when one is missing, and they are upstream's),
+a guarded re-exec at the top of `main` with the variable set, or documenting the
+variable and having the launcher export it.
 
 **Result 2026-09-13 (one GEMM context for the whole route):** the GEMM core
 program used to bake K in as the trip count of its band-group loop, so the route
