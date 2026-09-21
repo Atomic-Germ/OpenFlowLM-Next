@@ -41,9 +41,11 @@
 #include "xrt/xrt_kernel.h"
 
 #include "open_qwen36/block_host.hpp"
+#include "open_qwen36/gguf_file.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 
 namespace open_qwen36 {
@@ -95,6 +97,12 @@ struct StepTiming {
     double moe_read_ms = 0;   ///< xres back
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
 };
+
+/// The config.json fields a manifest checks, derived from a GGUF's metadata
+/// (the llama-family `<arch>.embedding_length` keys). A key the model does not
+/// carry is refused by name; families whose config carries GGUF-invisible
+/// fields (Granite's folded multipliers) need their config.json.
+nlohmann::json derive_config(const GgufFile& g);
 
 class Core {
 public:
@@ -205,8 +213,11 @@ public:
     bool is_attention_layer(int l) const { return types_[l]->state_kind == "kv"; }
     const StepTiming& last_timing() const { return timing_; }
     const Manifest& manifest() const { return man_; }
-    size_t vocab() const { return man_.vocab; }
-    size_t real_vocab() const { return man_.real_vocab; }
+    /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
+    const Manifest& weights() const { return w_ ? *w_ : man_; }
+    bool is_gguf() const { return gguf_; }
+    size_t vocab() const { return weights().vocab; }
+    size_t real_vocab() const { return weights().real_vocab; }
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
@@ -214,7 +225,7 @@ public:
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
-    const Q4nxFile& file() const { return *file_; }
+    const WeightFile& file() const { return *file_; }
 
 private:
     struct Kern {
@@ -232,7 +243,9 @@ private:
 
     CoreConfig cfg_;
     Manifest man_;
-    std::unique_ptr<Q4nxFile> file_;
+    const Manifest* w_ = nullptr;              ///< the weights view (man_ or man_.gguf.get())
+    bool gguf_ = false;                        ///< the weights are a GGUF (model.gguf)
+    std::unique_ptr<WeightFile> file_;
     int nl_ = 0;
     std::vector<const LayerType*> types_;      ///< per layer
 
@@ -290,8 +303,9 @@ private:
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
-    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
+void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                    const float* deepstack = nullptr, int n_deepstack = 0);
+    void embedding_row(size_t token, float* out) const;
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);

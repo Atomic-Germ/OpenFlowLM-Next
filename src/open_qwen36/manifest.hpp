@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,7 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
+    std::string op;                          ///< std_perm | std_perm_gguf | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity
@@ -186,6 +187,7 @@ struct Manifest {
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;
+    double embed_scale = 1.0;                 ///< applied to token lookup only; never the tied lm_head
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
     nlohmann::json hf_config_check;
@@ -193,6 +195,10 @@ struct Manifest {
     /// may omit (Phi-3's head_dim, partial_rotary_factor, rope_scaling, ...): check_model
     /// compares the expected value against this instead of refusing for the missing key.
     nlohmann::json hf_config_defaults = nlohmann::json::object();
+    /// The same kernel set for GGUF-direct weight files (f32-scale pool chunks,
+    /// open_kernels/gguf_pool.py): a complete manifest of its own, parsed with
+    /// this same code; the engine swaps it in when the model ships a .gguf.
+    std::unique_ptr<Manifest> gguf;
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);

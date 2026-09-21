@@ -47,16 +47,20 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 | Preset | Purpose | Description |
 |---|---|---|
 | `linux-default` | Full distribution | Builds executable + open NPU kernels (default) |
+| `fedora-default` | Full distribution (Fedora) | XRT discovered via pkg-config; builds executable + open NPU kernels |
 | `linux-debug` | Debug development | Engine only, kernels OFF (fast iteration) |
+| `fedora-debug` | Debug development (Fedora) | Engine only, kernels OFF (fast iteration) |
 | `linux-portable` | Portable bundle | Bundles XRT/XDNA libraries |
-| `windows-default` | Windows build | Visual Studio build (engine only; kernels Linux-only) |
+| `windows-default` | Windows build | Visual Studio build (engine only; kernels always OFF on Windows) |
 
 ### Build Presets
 
 | Preset | Description |
 |---|---|
 | `linux-default` | Build the configured preset |
+| `fedora-default` | Build the configured preset |
 | `linux-debug` | Debug build |
+| `fedora-debug` | Debug build |
 | `linux-portable` | Portable build |
 | `windows-default` | Windows build |
 
@@ -79,6 +83,14 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 | Preset | Steps |
 |---|---|
 | `linux-default` | Configure + Build + Test (one command) |
+
+Kernel export is owned by the build, not by hand. The `-default` presets
+configure `OFLM_BUILD_KERNELS=ON`, and building them runs
+`utilities/export-kernels.py` for every spec in `open_kernels/recipes/specs/`
+(an incremental per-spec `build_key` cache). The `-debug` presets set it `OFF`,
+and on Windows it is always `OFF` regardless of preset (`src/CMakeLists.txt`).
+What lands in `src/xclbins/` after a `-default` build is the distribution asset
+set -- build it and ship it, do not re-run the export by hand.
 
 ---
 
@@ -128,21 +140,27 @@ cmake --install --preset linux-debug
 Export only specific kernel families.
 
 ```bash
-# Build only Qwen3.5 4B kernel
-cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-4b
+# Build only Qwen3.5 9B kernel
+cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-9b
 
 # Build specific kernel composition
 cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
 ```
 
-**Available specs:**
-- `qwen3-4b` -- Qwen3 dense 4B (all sizes)
+**Available specs** -- the twelve `open_kernels/recipes/specs/*.json`, all built by
+default:
+- `qwen3-4b` -- Qwen3 dense 4B
+- `qwen35-9b` -- Qwen3.5 dense 9B
+- `qwen36-35b-a3b` -- Qwen3.6-MoE 35B-A3B
 - `gemma3-4b` -- Gemma3 dense 4B
-- `llama-8b` -- Llama 3.1 8B
+- `gemma3-12b` -- Gemma3 dense 12B
+- `llama31-8b` -- Llama 3.1 8B
 - `hy-mt2-7b` -- Hy-MT2-7B
-- `granite-3b` -- IBM Granite 4.2 3B
-- `qwen35-4b` -- Qwen3.5 dense 4B
-- `qwen36-moe` -- Qwen3.6-MoE
+- `granite42-3b` -- IBM Granite 4.2 3B
+- `qwen25-3b` -- Qwen2.5 3B (q/k/v bias attention, split position records)
+- `lfm2-1.2b` -- LFM2-1.2B hybrid (SSM short-convolution layers)
+- `phi4-mini-4b` -- Phi-4-mini
+- `minicpm5-2b` -- MiniCPM5 2B
 
 ### 4. Build Open NPUE Kernels Only
 
@@ -150,7 +168,7 @@ Build only the BERT embedding kernels (open_npue).
 
 ```bash
 cmake -B build --preset linux-debug  # First, build engine only
-cmake -B --build --preset linux-default  # Then build kernels
+cmake --build --preset linux-default  # Then build kernels
 ```
 
 **Note:** Open NPUE kernels require the NPU present on the build host.
@@ -300,7 +318,7 @@ before `main()`.
 `apt install` line for the development packages this build needs, and the
 driver and XRT setup.
 
-Other presets: `linux-portable`, `linux-snap`, `windows-vs18`.
+Other presets: `linux-portable`.
 
 ---
 

@@ -1342,45 +1342,33 @@
     "embed-gemma:300m": [
         {
             "type": "file",
-            "oid": "c327f2acb00149676ade24a75e11eb6ebbd367f9ee050267ba56829d2979f702",
-            "size": 9437272,
-            "path": "2_Dense/model.safetensors"
+            "oid": "348a491efd217d3af9bbded8890b3dc4f6ba6092",
+            "size": 333590944,
+            "lfs": {
+                "oid": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+                "size": 333590944,
+                "pointerSize": 134
+            },
+            "xetHash": "9d3a58b91b634fdcebab88da61e696ba4a5512eee4182581a60f8c59234dc1f4",
+            "path": "embeddinggemma-300M-Q8_0.gguf"
         },
         {
             "type": "file",
-            "oid": "ffb6cc5162e11e2ce6bc2367e121ee3bbbc4e82e1ee26826bd7573d4948d81b8",
-            "size": 9437272,
-            "path": "3_Dense/model.safetensors"
-        },
-        {
-            "type": "file",
-            "oid": "8f863f76e2d9c710cc833dc92efa898c9adfd41031c786507cc6b0e49c2e3e68",
-            "size": 1488,
-            "path": "config.json"
-        },
-        {
-            "type": "file",
-            "oid": "cbf5a78393b6a033e0b8a63a57549964f7ed5c6fbeb4ba0694214f36123f2fd2",
-            "size": 1211486072,
-            "path": "model.safetensors"
-        },
-        {
-            "type": "file",
-            "oid": "6852f8d561078cc0cebe70ca03c5bfdd0d60a45f9d2e0e1e4cc05b68e9ec329e",
+            "oid": "ce92c780ef05f4d85d4fb4e44dae88946c4154f6",
             "size": 33385008,
+            "lfs": {
+                "oid": "6852f8d561078cc0cebe70ca03c5bfdd0d60a45f9d2e0e1e4cc05b68e9ec329e",
+                "size": 33385008,
+                "pointerSize": 133
+            },
+            "xetHash": "54a250b3b7c81482286dfd8f776cbfdfd7e2889cf6c1674679395abd967cdd60",
             "path": "tokenizer.json"
         },
         {
             "type": "file",
-            "oid": "9076840490613047bc9115963ee96b7702018b0d26ba644240bf856efda93118",
+            "oid": "33786d29ae85b05bc37772cd10876d66afbe905e",
             "size": 1155346,
             "path": "tokenizer_config.json"
-        },
-        {
-            "type": "file",
-            "oid": "1c1c8955cbf586a0cf5d1bce7cc47cdae09552ada3cd5f1d483ff17c3e5465de",
-            "size": 42837,
-            "path": "weights_manifest.json"
         }
     ],
     "whisper-v3:turbo": [

@@ -213,6 +213,17 @@ with reproducible upstream builds or package-manager dependencies:
 
 ## Execution Order
 
+> **Status 2026-09-18.** The open engine has run well past the checkpoint this
+> list lives at. Step 5 is done (Gemma3-1B causal first, then the whole dense
+> recipe); steps 6 and 7 are realised for the families named there -- Llama3,
+> Nanbeige, Phi4, Qwen2.5, Qwen3, Gemma3, HunYuan, Granite and LFM2 ride
+> `open_kernels/designs/dense`, and Qwen3.5 / Qwen3.6 the qwen35/qwen36
+> hybrid/MoE recipes. All twelve kernel specs export cleanly in the build and
+> ship in the distribution. The list below is the original sequencing, kept for
+> history; the live per-family status and hardware evidence is in
+> [`specs/open-engine/spec.md`](../specs/open-engine/spec.md), and the
+> per-family guidance in the family skills (`.opencode/skill/`).
+
 1. Establish shared open model/tensor interfaces in `utilities/q4nx-build` and
    the C++ runtime; keep safetensors as the canonical open weight source.
 2. Productize the open GEMM compiler/runtime: shape inventory input, family

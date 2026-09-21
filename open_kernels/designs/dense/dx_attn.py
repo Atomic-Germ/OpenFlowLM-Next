@@ -23,12 +23,14 @@ ALREADY-VALIDATED T=1 machinery verbatim, patched to each token's own
 position via the SAME attnpos mechanism production decode already uses
 thousands of times per process. This file IS that dispatch.
 
-Args: consts (the layer's [lnw | postln | qn kn] blob -- only CD_META is
-read), kv (the layer's KV cache row store, InOut: window read + new-row
-write), act (InOut: reads AD_Q/AD_KVN -- q/k/v written by a prior Dispatch A
-call into the SAME per-token slice of a T-wide act buffer -- and writes
-AD_OG), ptab (the RoPE position table; the record row read is the
-placeholder position 1, patched by attnpos before each of the T calls).
+Args: consts (the layer's [lnw | postln | qn kn] blob -- CD_META for the
+[qn | kn] acquire, plus CD_QB / CD_KB / CD_VB when the family's q/k/v
+projections carry a bias), kv (the layer's KV cache row store, InOut:
+window read + new-row write), act (InOut: reads AD_Q/AD_KVN -- q/k/v
+written by a prior Dispatch A call into the SAME per-token slice of a
+T-wide act buffer -- and writes AD_OG), ptab (the RoPE position table; the
+record row read is the placeholder position 1, patched by attnpos before
+each of the T calls).
 No `pool`, no `xres`: this dispatch does no GEMV and touches no residual.
 
 Build (Windows, iron_env.ps1 dot-sourced): OPEN_KERNELS_SPEC=<spec>
@@ -65,15 +67,8 @@ L, G = R.layout, R.geo
 E_A = L.E_A
 QW, KVW = G.QW, G.KVW
 HID = G.HID
-if G.QKVB:
-    # dx.py streams the q/k/v bias on a second fifo; this file's attention phase is a
-    # verbatim copy of the version without one, so it would drop the bias silently.
-    raise ValueError("dx_attn.py: this spec's q/k/v projections carry a bias and this "
-                     "design has no bias stream (copy dx.py's abias fifo across first)")
-if G.PTAB_ELEMS > 1:
-    # same reason: the copy acquires one element for the position record.
-    raise ValueError("dx_attn.py: this spec's position record is wider than an attention "
-                     "element and this design still acquires one (copy dx.py's meta block)")
+QKVB = G.QKVB
+NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM   # elements per position record; which holds cos / sin
 
 # ---- verbatim from dx.py: ATTN_FLAGS / ACORES / NHL / RB (same derivation,
 # same module-level constants dx.py's own attention kernels are compiled
@@ -84,6 +79,10 @@ ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f
               f"-DATTN_EPS={G.EPS:g}f", f"-DATTN_VEXP={G.VEXP}", f"-DATTN_NHL={G.NHL}"]
 if G.RB > 1:
     ATTN_FLAGS.append(f"-DATTN_RB={G.RB}")
+if QKVB:                                               # same as dx.py: only a family with a bias sees the flag
+    ATTN_FLAGS.append("-DATTN_QKV_BIAS=1")
+if NPTAB > 1:                                          # same as dx.py
+    ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL, same as dx.py
     if _k != "ATTN_RB":
         ATTN_FLAGS.append(f"-D{_k}={_v}")
@@ -115,6 +114,7 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     # declared (harmless -- this dispatch configures no DMA against them at
     # all, confirmed by their absence from `sequence_attn` below).
     u8_a = np.ndarray[(E_A,), np.dtype[np.uint8]]
+    u8_ab = np.ndarray[(E_A // 2,), np.dtype[np.uint8]]    # the same heads of a bf16 bias (dx.py)
     pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
@@ -140,10 +140,11 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     # ---- verbatim from dx.py: the attention kernel declarations (same
     # symbols, same source files, same ATTN_FLAGS -- these ARE dx.py's own
     # f_meta..f_fin, not a reimplementation).
-    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a, bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
-    f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a, bhd, fcs, fq, i32], ATTN_FLAGS)
-    f_k = ef("attn_k", ATTN / "attn_k.cc", [u8_a, bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
-    f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a, brow, i32], ATTN_FLAGS)
+    f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a] + ([u8_a] if NPTAB > 1 else []) + [bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
+    bz = [u8_ab] if QKVB else []                            # the bias element, when the family has one (dx.py)
+    f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a] + bz + [bhd, fcs, fq, i32], ATTN_FLAGS)
+    f_k = ef("attn_k", ATTN / "attn_k.cc", [u8_a] + bz + [bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
+    f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []
     f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
@@ -153,29 +154,51 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, brow, i32], ATTN_FLAGS)
 
     # ---- fifos, verbatim from dx.py
-    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2))
+    of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))
     of_aout = ObjectFifo(brow, name="aout", depth=2)
     of_og = [ObjectFifo(brow, name=f"og{c}", depth=2) for c in range(1, ACORES)]
+    # The bias stream, from dx.py verbatim: its own fifo rather than more elements on
+    # `ain` -- the core needs bias element i beside projection element i, and one fifo
+    # would mean either interleaving the fills or holding the whole bias in core L1.
+    of_abias = ObjectFifo(u8_ab, name="abias", depth=4) if QKVB else None
 
     N_OG = NHL // G.HPO
 
     # ---- verbatim from dx.py: _attn / attn_body / make_attn_body
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0):
-        e = ain.acquire(2)                                      # [qn | kn], the position record
-        f_meta(e[0], e[1], qn, kn, cs, pb)
-        ain.release(2)
+              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in=None):
+        e = ain.acquire(1 + NPTAB)                              # [qn | kn] then the position record, NPTAB elements wide
+        if NPTAB > 1:
+            f_meta(e[0], e[1], e[1 + CSE], qn, kn, cs, pb)
+        else:
+            f_meta(e[0], e[1], qn, kn, cs, pb)
+        ain.release(1 + NPTAB)
         for h in range_(G.Q_AIN_ELEMS):
             e = ain.acquire(1)
-            f_q(e, qn, cs, qs, h)
+            if bias_in is None:
+                f_q(e, qn, cs, qs, h)
+            else:
+                b = bias_in.acquire(1)
+                f_q(e, b, qn, cs, qs, h)
+                bias_in.release(1)
             ain.release(1)
         for h in range_(G.K_AIN_ELEMS):
             e = ain.acquire(1)
-            f_k(e, kn, cs, tmp, kout, h)
+            if bias_in is None:
+                f_k(e, kn, cs, tmp, kout, h)
+            else:
+                b = bias_in.acquire(1)
+                f_k(e, b, kn, cs, tmp, kout, h)
+                bias_in.release(1)
             ain.release(1)
         for h in range_(G.K_AIN_ELEMS):
             e = ain.acquire(1)
-            f_v(e, vout, h)
+            if bias_in is None:
+                f_v(e, vout, h)
+            else:
+                b = bias_in.acquire(1)
+                f_v(e, b, vout, h)
+                bias_in.release(1)
             ain.release(1)
         if aout is not None:                                    # core 0 owns the cache row
             o = aout.acquire(1)
@@ -208,7 +231,33 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
             f_fin(oacc, ml, o, hp)
             ogout.release(1)
 
-    if RB > 1:
+    # One shape of worker body per combination of knobs, not one with defaulted arguments
+    # (dx.py's own rule): a family that does not block, or has no bias, must present IRON
+    # the exact function it presented before. The bias fifo is the worker's SECOND
+    # argument, before the drains.
+    if QKVB and RB > 1:
+        def attn_body(ain, bias_in, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, bias_in)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, bias_in, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in)
+            return body
+    elif QKVB:
+        def attn_body(ain, bias_in, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                  f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, 0, bias_in)
+
+        def make_attn_body(c):
+            h0 = c * NHL
+            def body(ain, bias_in, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                      f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, h0, bias_in)
+            return body
+    elif RB > 1:
         def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
             _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0)
@@ -239,14 +288,15 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
                 Buffer(pb_ty, name=f"pb{s}")]
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+    bcons = (lambda: [of_abias.cons()]) if QKVB else (lambda: [])
 
-    workers = [Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
+    workers = [Worker(attn_body, fn_args=[of_ain.cons()] + bcons() + [of_aout.prod()] + abufs(0) + afns,
                       tile=Tile(2, 3), stack_size=0x1800)]
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + bcons() + [of_og[c - 1].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, 3), stack_size=0x1800))
 
-    def sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs):
+    def _sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs, abias_p):
         # a_pool / c_xres: unused dummies, kept only for buffer-argument
         # position (see dx_attn()'s own comment).
         # 0167 stage 12 / #32: verbatim (minus the o-proj/GEMV lines, which
@@ -266,13 +316,30 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_Q, QW * 4))
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN, KVW * 4))
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN + KVW * 4, KVW * 4))
+        if abias_p is not None:                                   # one bias element per q / k / v element
+            pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_QB, QW * 2))
+            pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_KB, KVW * 2))
+            pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_VB, KVW * 2))
         pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
         pa_out.finish()                                           # og (and the new cache row) are in DDR
         pa_in.finish()
 
+    # The bias fill lands between the q/k/v and the window on another fifo, so the
+    # Runtime must hand an extra arg over ABI (same shape-selection dx.py uses).
+    if QKVB:
+        def sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, abias_p, aout_c, og_cs):
+            _sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs, abias_p)
+    else:
+        def sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs):
+            _sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs, None)
+
+    # Tile(0, 0) is free in this design's shim map (ain owns (2, 0), aout (1, 0),
+    # og (3..acores, 0)) and carries exactly the MM2S channel the bias needs; dx.py
+    # makes the same allocation on its own free column.
+    bprod = [of_abias.prod(tile=Tile(0, 0))] if QKVB else []
     rt = Runtime(sequence_attn,
                  [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
-                  of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
+                  of_ain.prod(tile=Tile(2, 0))] + bprod + [of_aout.cons(tile=Tile(1, 0)),
                   [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
