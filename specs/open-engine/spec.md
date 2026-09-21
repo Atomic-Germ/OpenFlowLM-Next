@@ -3175,6 +3175,29 @@ changes how the closed path fails when one is missing, and they are upstream's),
 a guarded re-exec at the top of `main` with the variable set, or documenting the
 variable and having the launcher export it.
 
+**Result 2026-09-21 (both engines back to back, one afternoon):** the comparisons
+above pair an open reading from one run with a closed reading from another, which
+is what `measuring-closed-engine` warns against, so both were then measured
+back to back: same container (stock FLM 1.0.2 serving hardlinks to the same
+`model.q4nx`), same prompts, same script, 48 generated tokens, four rotating
+cycles per length, best of four off each server's own `usage` timer. Prefill,
+open against closed: **1.94 s against 14.19 at 182 tokens (7.3x), 8.95 against
+18.85 at 1122 (2.1x), 20.96 against 24.15 at 2593 (1.15x)**. Decode, open against
+closed: **8.38 against 14.17 tok/s at 182 tokens of context, 7.87 against 14.83 at
+1122, 7.00 against 14.46 at 2593 — closed is 1.7-2.1x ahead and the gap widens
+with context.** Decode has had no work since 2026-09-13.
+
+Fitted on this pair, closed prefill is **14.8 s + N / 279 tok/s** against the
+10.0 + N/280 of the earlier run the same day. **The marginal rate reproduces to
+within half a percent; the fixed term moved by half again** — and since the
+crossover is set almost entirely by that fixed term it is not a stable number
+(3100 tokens against one reading, past 4800 against the other). The short-prompt
+ratios are the robust statistic; a crossover should be quoted as "past 3000
+tokens" or not at all. Our own open figure also moved within the afternoon
+(20.96 s at 2593 against 17.43 two hours earlier, same binary and configuration,
+the only difference being 48 generated tokens per request instead of 8), which the
+pairing absorbs but which is worth knowing before quoting any single number.
+
 **Result 2026-09-13 (one GEMM context for the whole route):** the GEMM core
 program used to bake K in as the trip count of its band-group loop, so the route
 carried three GEMM xclbins and therefore three hardware contexts. The band count
