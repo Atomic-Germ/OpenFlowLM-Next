@@ -5,8 +5,12 @@
 // its own translation unit, pulling in no XRT and no device, so guards_test.cpp
 // can link it alone and every refusal is reachable without hardware.
 // SPDX-License-Identifier: MIT
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+
+#include "nlohmann/json.hpp"
 
 #include "kernels.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -49,6 +53,41 @@ void check_stream_shape(const std::string &where, Op op, int64_t M, int64_t K, i
         std::to_string(K) + "x" + std::to_string(N) + ", but this engine is built for " +
         std::to_string(w.M) + "x" + std::to_string(w.K) + "x" + std::to_string(w.N) +
         " -- refusing to dispatch against a kernel set of a different geometry");
+}
+
+// The B layout the weights must be tiled with, read from design.json. Every one of the
+// four fields is REQUIRED: the caller tiles its weights with what this returns and the
+// KernelSet constructor then compares design.json against those same values, so a
+// defaulted field would be a guess checked against itself. (It is not one today -- the
+// constructor's own reader defaults to -1, so an absent field mismatches and is refused --
+// but that is one edit away from being true, and a tiling tuple nobody wrote down is not
+// a tuple.)
+KernelSet::BLayout KernelSet::read_b_layout(const std::string &kernels_dir) {
+  const std::string path = kernels_dir + "/design.json";
+  std::ifstream fs(path, std::ios::binary);
+  if (!fs) throw std::runtime_error("cannot open " + path);
+  std::stringstream ss;
+  ss << fs.rdbuf();
+  const nlohmann::json design_js = nlohmann::json::parse(ss.str());
+  if (!design_js.contains("b_layout"))
+    throw std::runtime_error(path + ": no b_layout");
+  const auto &bl = design_js["b_layout"];
+  auto need = [&](const char *key) -> int64_t {
+    if (!bl.contains(key) || !bl[key].is_number_integer())
+      throw std::runtime_error(std::string(path) + ": b_layout['" + key +
+                               "'] is missing -- the tiling tuple must be recorded, not assumed");
+    const int64_t v = bl[key].get<int64_t>();
+    if (v <= 0)
+      throw std::runtime_error(std::string(path) + ": b_layout['" + key + "'] is " +
+                               std::to_string(v) + ", expected a positive value");
+    return v;
+  };
+  BLayout out;
+  out.tile_k = need("tile_k");
+  out.tile_n = need("tile_n");
+  out.mac_s = need("mac_s");
+  out.mac_t = need("mac_t");
+  return out;
 }
 
 void require_bf16(const open_qwen36::Q4nxFile &f, const std::string &name) {

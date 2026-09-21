@@ -430,8 +430,21 @@ if(NOT OFLM_USE_HRX)
         set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
             COMPILE_OPTIONS "/arch:AVX2;/openmp")
     else()
+        # -fopenmp ONLY when CMake can also link OpenMP. The link dependency
+        # (OpenMP::OpenMP_CXX) is added further down, gated on this same
+        # find_package -- so compiling with the flag when it fails would define
+        # _OPENMP, emit calls into libgomp and fail at link, on a build where the
+        # scalar fallback these sources already carry would have worked. Cached,
+        # so calling it here and again below costs nothing.
+        find_package(OpenMP QUIET)
+        set(OPEN_WHISPER_FLAGS "-mavx2;-mfma")
+        if(OpenMP_CXX_FOUND)
+            list(APPEND OPEN_WHISPER_FLAGS "-fopenmp")
+        else()
+            message(STATUS "open_whisper: no OpenMP -- host loops build sequential")
+        endif()
         set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
-            COMPILE_OPTIONS "-mavx2;-mfma;-fopenmp")
+            COMPILE_OPTIONS "${OPEN_WHISPER_FLAGS}")
     endif()
 endif()
 

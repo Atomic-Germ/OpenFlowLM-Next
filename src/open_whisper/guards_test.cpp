@@ -12,6 +12,7 @@
 // SPDX-License-Identifier: MIT
 #include <cstdio>
 #include <cstdint>
+#include <stdexcept>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -126,6 +127,52 @@ void test_weight_dtype(const std::string &tmp_dir) {
   std::remove(f16_path.c_str());
 }
 
+// design.json carrying one b_layout object, so read_b_layout() can be pointed at a
+// directory holding exactly the field set under test.
+void write_design(const std::string &dir, const std::string &b_layout) {
+  std::ofstream f(dir + "/design.json", std::ios::binary);
+  f << "{\"name\":\"whisper_gemm\",\"b_layout\":" << b_layout << "}";
+}
+
+void test_b_layout(const std::string &tmp_dir) {
+  std::printf("-- b_layout tuple --\n");
+  const std::string full =
+      "{\"kind\":\"block_panel\",\"tile_k\":64,\"tile_n\":32,\"order\":\"k,n,kt,nt\","
+      "\"inner\":\"s,t\",\"mac_s\":8,\"mac_t\":8,\"dtype\":\"BF16\"}";
+  write_design(tmp_dir, full);
+  expect_ok([&] {
+    const ow::KernelSet::BLayout b = ow::KernelSet::read_b_layout(tmp_dir);
+    if (b.tile_k != 64 || b.tile_n != 32 || b.mac_s != 8 || b.mac_t != 8)
+      throw std::runtime_error("read back the wrong tuple");
+  }, "reads the shipped tuple (64, 32, 8, 8)");
+
+  // Each field in turn, absent. The weights are tiled with whatever this returns, and
+  // the KernelSet constructor then checks design.json against those same values -- so a
+  // defaulted field would be a guess compared with itself.
+  for (const char *key : {"tile_k", "tile_n", "mac_s", "mac_t"}) {
+    std::string one = full;
+    const std::string needle = std::string("\"") + key + "\":";
+    const size_t at = one.find(needle);
+    const size_t end = one.find(',', at);
+    one.erase(at, end - at + 1);
+    write_design(tmp_dir, one);
+    expect_throw([&] { (void)ow::KernelSet::read_b_layout(tmp_dir); }, key,
+                 std::string("refuses a b_layout with no ") + key);
+  }
+
+  std::string zero = full;
+  const size_t at = zero.find("\"mac_t\":8");
+  zero.replace(at, std::string("\"mac_t\":8").size(), "\"mac_t\":0");
+  write_design(tmp_dir, zero);
+  expect_throw([&] { (void)ow::KernelSet::read_b_layout(tmp_dir); }, "positive",
+               "refuses mac_t = 0");
+
+  write_design(tmp_dir, "{}");
+  expect_throw([&] { (void)ow::KernelSet::read_b_layout(tmp_dir); }, "missing",
+               "refuses an empty b_layout");
+  std::remove((tmp_dir + "/design.json").c_str());
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -133,6 +180,7 @@ int main(int argc, char **argv) {
   std::printf("== open_whisper guards ==\n");
   try {
     test_stream_shapes();
+    test_b_layout(tmp_dir);
     test_weight_dtype(tmp_dir);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "guards_test: unexpected exception: %s\n", e.what());
