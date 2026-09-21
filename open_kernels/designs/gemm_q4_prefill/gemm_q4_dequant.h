@@ -53,6 +53,7 @@
 //   pack_q4_1_pool(rs=2) pool bytes.
 //
 #include <aie_api/aie.hpp>
+#include "aie_kernel_utils.h"
 #include <stdint.h>
 
 static constexpr unsigned GQD_M = 64;    // rows per band = m (one AIE row's m-tile)
@@ -255,6 +256,112 @@ __attribute__((noinline)) inline void gqd_dequant_block(
   }
 }
 
+// ---------------------------------------------------------------------------
+// One fused pass, in the pool's own orientation (0167 stage 17 / prefill-parity C).
+//
+// The two passes above walk the band twice: a gather that transposes raw nibble
+// bytes into a row-major uint8 scratch, and a dequant that reads that scratch 16
+// elements at a time, with the row's d and m arriving as SCALAR loads and
+// broadcasts because in row-major order the scale is constant along the vector.
+// Ablated on hardware (n8192 k2048 T256, the numbers are in the spec): the gather
+// costs 0.50 ms and the dequant 1.87 of a 5.98 ms dispatch -- 39 % of the GEMM
+// spent turning q4_1 into bf16.
+//
+// It is cheaper in the orientation the pool is already in. A 64-byte contiguous
+// read of the nibble area is 8 k x 8 row-pairs (byte = k * 8 + rp, the low nibble
+// row 2rp and the high row 2rp+1), and in THAT orientation the 8 rows' scales are
+// eight strided entries of one 16-wide load -- a vector, not eight scalars. That
+// is exactly the shape designs/moe_batch/moe_batch.h works in, and `gqd_scale`
+// below is its `mb_scale` (read that file before writing a third form of this).
+//
+// So: mask, convert, scale and add in 64-lane vectors with no scalar work at all,
+// then `aie::transpose` the RESULT into row order and `interleave_zip` the even
+// and odd rows back together -- which lands four whole (4 rows x 8 k) A-operand
+// blocks, 32 contiguous bf16 each, for four stores instead of sixteen. The
+// uint8 scratch disappears with the gather pass, and so does its 4 KB of L1.
+//
+// The scale is applied as one `mac` seeded with m rather than Pass 2's multiply-
+// round-add, so n * d + m rounds to bf16 ONCE instead of twice. That is both
+// faster (4.501 -> 4.474 ms) and closer to the reference: rel_fro on the n8192
+// k2048 T256 fixture goes 2.202e-3 -> 1.684e-3, maxrel 2.205e-3 -> 1.769e-3.
+//
+// Measured on that fixture, minima of three runs of the whole dispatch:
+//
+//   two passes (gather + dequant), as shipped     5.977 ms
+//   this                                          4.474      -25.1 %
+//   neither pass's compute (GQD_NULL_*)           3.621      the matmul and the streams
+//
+// so the q4_1 -> bf16 cost went 2.356 -> 0.853 ms, 2.8x. GQD_TWO_PASS builds the
+// old path for an A-B.
+// ---------------------------------------------------------------------------
+
+// One parity's row scales from the 16 of a (32-k block, 16-row) group, laid out to
+// match a [8 k][8 row-pair] nibble load: lane k * 8 + rp is row 2rp's scale (2rp + 1
+// for ODD). D16 folds the odd rows' x16 -- their nibbles arrive from the 0xF0 mask
+// unshifted -- into the scale. Verbatim from designs/moe_batch/moe_batch.h's
+// mb_scale; the two designs read the same pool bytes the same way.
+template <bool ODD, bool D16>
+static inline aie::vector<bfloat16, 64> gqd_scale(const bfloat16 *__restrict p, unsigned kb) {
+  const aie::vector<bfloat16, 16> v16 = aie::load_v<16>(p + kb * 32);
+  const aie::vector<bfloat16, 32> v32 = aie::concat(v16, v16);
+  aie::vector<bfloat16, 16> h = ODD ? aie::filter_odd(v32, 1) : aie::filter_even(v32, 1);
+  if constexpr (ODD && D16) h = aie::mul(h, (bfloat16)0.0625f).to_vector<bfloat16>();
+  const aie::vector<bfloat16, 32> h32 = aie::concat(h, h);
+  return aie::concat(h32, h32);
+}
+
+// k-slice `ky` (0..3) of `band` -> `scratch`, the bf16 A operand mm.cc reads:
+// contiguous (GQD_R=4 rows x GQD_S=8 k) blocks, block index = row_block * 8 + col_block.
+__attribute__((noinline)) inline void gqd_fused_ky(const uint8_t *__restrict band, unsigned ky,
+                                                   bfloat16 *__restrict scratch) {
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  AIE_LOOP_RANGE(2, 2)
+  for (unsigned part = 0; part < 2; ++part) {          // the band's two stacked chunks
+    const uint8_t *__restrict chunk = band + part * GQD_CHUNK_BYTES;
+    AIE_LOOP_RANGE(2, 2)
+    for (unsigned half = 0; half < 2; ++half) {        // the chunk's two 16-row nibble halves
+      const bfloat16 *__restrict dp = reinterpret_cast<const bfloat16 *>(chunk + GQD_D_OFF) + half * 16;
+      const bfloat16 *__restrict mp = reinterpret_cast<const bfloat16 *>(chunk + GQD_M_OFF) + half * 16;
+      const uint8_t *__restrict nibp = chunk + GQD_META_BYTES + half * 2048;
+      const unsigned ib0 = part * 8 + half * 4;        // first 4-row block these 16 rows fill
+      // The four scale vectors are built inside this loop although d and m only change
+      // every 32 k: hoisting them into a kb loop around it was MEASURED slightly slower
+      // (4.589 against 4.501 ms), because the compiler already eliminates the repeats and
+      // the narrower unrolled window costs more than the hoist saves.
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned sub = 0; sub < GQD_COLA; ++sub) {  // 8 k at a time = one A-operand column block
+        const unsigned k0 = ky * GQD_K64 + sub * GQD_S;
+        const unsigned kb = k0 / 32;                   // d / m are constant over a 32-k block
+        const aie::vector<bfloat16, 64> d_e = gqd_scale<false, false>(dp, kb);
+        const aie::vector<bfloat16, 64> d_o = gqd_scale<true, true>(dp, kb);
+        const aie::vector<bfloat16, 64> m_e = gqd_scale<false, false>(mp, kb);
+        const aie::vector<bfloat16, 64> m_o = gqd_scale<true, false>(mp, kb);
+        // 64 contiguous bytes = 8 k x 8 row-pairs, lane (k - k0) * 8 + rp
+        const aie::vector<uint8_t, 64> q = aie::load_v<64>(nibp + k0 * 8);
+        const aie::vector<bfloat16, 64> ne = aie::to_float<bfloat16>(aie::bit_and((uint8_t)0x0F, q), 0);
+        const aie::vector<bfloat16, 64> no = aie::to_float<bfloat16>(aie::bit_and((uint8_t)0xF0, q), 0);
+        aie::accum<accfloat, 64> se, so;
+        se.from_vector(m_e);
+        so.from_vector(m_o);
+        se = aie::mac(se, ne, d_e);
+        so = aie::mac(so, no, d_o);
+        const aie::vector<bfloat16, 64> we = se.to_vector<bfloat16>();
+        const aie::vector<bfloat16, 64> wo = so.to_vector<bfloat16>();
+        // [k][row-pair] -> [row-pair][k], then zip the even and odd rows back into
+        // natural row order: 8-element groups te0, to0, te1, to1, ... = rows 0, 1, 2, 3, ...
+        const aie::vector<bfloat16, 64> te = aie::transpose(we, GQD_S, GQD_S);
+        const aie::vector<bfloat16, 64> to = aie::transpose(wo, GQD_S, GQD_S);
+        const auto z = aie::interleave_zip(te, to, GQD_S);
+        bfloat16 *__restrict dst = scratch + sub * (GQD_R * GQD_S);
+        aie::store_v(dst + (ib0 + 0) * GQD_COLA * (GQD_R * GQD_S), z.first.template extract<32>(0));
+        aie::store_v(dst + (ib0 + 1) * GQD_COLA * (GQD_R * GQD_S), z.first.template extract<32>(1));
+        aie::store_v(dst + (ib0 + 2) * GQD_COLA * (GQD_R * GQD_S), z.second.template extract<32>(0));
+        aie::store_v(dst + (ib0 + 3) * GQD_COLA * (GQD_R * GQD_S), z.second.template extract<32>(1));
+      }
+    }
+  }
+}
+
 // One entry point: dequantise k-slice `ky` (0..3) of `band` (10240 B, one
 // pool-order band-k-group) into `scratch` (bf16[64*64], block-ordered A
 // operand). `nib_scr` is a caller-provided uint8[64*64] scratch buffer
@@ -268,11 +375,18 @@ __attribute__((noinline)) inline void gqd_dequant_ky(
     bfloat16 *__restrict scratch) {
   event0();
   aie::set_rounding(aie::rounding_mode::conv_even);
+#ifdef GQD_TWO_PASS
 #ifndef GQD_NULL_GATHER
   gqd_gather_nibbles(band, ky, nib_scr);
 #endif
 #ifndef GQD_NULL_DEQUANT
   gqd_dequant_block(band, ky, nib_scr, scratch);
+#endif
+#else
+  (void)nib_scr;
+#if !defined(GQD_NULL_GATHER) && !defined(GQD_NULL_DEQUANT)
+  gqd_fused_ky(band, ky, scratch);
+#endif
 #endif
   event1();
 }

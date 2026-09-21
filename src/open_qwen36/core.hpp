@@ -191,6 +191,19 @@ public:
     /// position. Logits, like step(), only for the last real token, only when
     /// asked.
     void step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    /// The WHOLE prompt on the block route, layer-major: every T-wide block through
+    /// layer l's projections and host stages before layer l + 1, with the layer's MoE
+    /// run ONCE over every token of the prompt instead of once per block. Same
+    /// operations in the same order per layer, so bit-exact against the block-major
+    /// loop above; what changes is how many times each expert's 1.97 MB is streamed
+    /// (at 2582 tokens: ~81 of its tokens a layer instead of ~8, so the visits an
+    /// expert costs fall by the same factor). The caller passes the prompt unpadded;
+    /// the tail block is padded here with the last id, exactly as the caller did.
+    /// Only for the MoE kinds (linear / full) -- layer_major_ok() says so.
+    void step_gemm_prompt(const std::vector<int>& ids, bool want_logits);
+    /// Whether step_gemm_prompt() can run this kernel set: a block route whose every
+    /// layer is a MoE kind, and OFLM_OPEN_LAYER_MAJOR not set to 0.
+    bool layer_major_ok() const;
     /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
     /// read back with block_logits() -- what a position-for-position diff against the
     /// sequential path needs. Off by default; costs a tail per token.
@@ -261,6 +274,7 @@ private:
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
+    bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
     std::map<std::string, DispatchStat> dispatch_stats_;
@@ -280,6 +294,17 @@ private:
         std::vector<float> sgw;                         ///< the shared expert's sigmoid gate, [hid]
     };
     std::vector<HostConsts> hc_;                       ///< per layer, filled for a linear / full route
+    /// What a MoE layer's attention half leaves for its expert block: the residual, its
+    /// post-attention norm and the router's top-k. Rows are a block on the block-major
+    /// route and the whole padded prompt on the layer-major one; held here rather than
+    /// on the stack so the 20-70 MB is allocated once per request, not once per layer.
+    struct MoeStage {
+        std::vector<float> res, xm, probs, w;
+        std::vector<int32_t> idx;
+    };
+    MoeStage moe_;
+    /// Size moe_ for `rows` tokens. Never shrinks: a request's blocks are all the same width.
+    void moe_stage_resize(size_t rows);
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
@@ -344,12 +369,22 @@ private:
     /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the
     /// sigmoid gate on the host, added into res [T, hid] in place.
     void shared_expert_block(int l, const float* xm, float* res, size_t T, size_t t_real);
-    /// A linear-attention layer of the block route: GEMM qkv|z -> host DeltaNet (state in
-    /// place through t_real tokens) -> GEMM out -> residual, norm, router -> the MoE per token.
-    void block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real);
+    /// A linear-attention layer of the block route, everything up to the MoE: GEMM qkv|z
+    /// -> host DeltaNet (state in place through t_real tokens) -> GEMM out -> residual,
+    /// norm, router -> the shared expert. `xres` is THIS block's T rows; the router's
+    /// output lands in moe_ at row `row0`. The DeltaNet state is read off the device only
+    /// on the layer's `first` block and written back only on its `last`: in between the
+    /// host map is the only thing that touches it. The MoE itself is block_layer_moe().
+    void block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_t row0, bool first, bool last);
     /// A full-attention layer: GEMM q|k|v|gate -> host attention over the KV rows (rows
-    /// [pos_, pos_ + t_real) written) -> GEMM o -> the same tail.
-    void block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real);
+    /// [pos0, pos0 + t_real) written) -> GEMM o -> the same tail. `pos0` is the block's
+    /// first position, which is pos_ on the block-major route and pos_ + row0 on the
+    /// layer-major one; the cached rows below it are pulled off the device on `first` only.
+    void block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t pos0, size_t row0, bool first);
+    /// The routed experts for whatever the layer's attention half staged in moe_: the
+    /// token-batched kernel over rows [0, t_real) of `rows`, or mx one token at a time.
+    /// `xres` (rows * hidden) is overwritten with the layer's output.
+    void block_layer_moe(int l, size_t rows, size_t t_real, float* xres);
     /// The MoE block for one token on the sequential kernel (lx1 / ax1): xm, the router
     /// record and the residual into `act`, route + run, the new residual out of `xres`.
     void moe_token(int l, const float* xm, const float* res, const float* probs, const int32_t* idx, const float* w,

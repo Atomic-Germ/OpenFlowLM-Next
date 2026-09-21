@@ -918,7 +918,18 @@ def pack_plan(spec: ModelSpec) -> dict:
 # (designs/layer_x/mx.py), because lx1 / ax1 are the second half of a per-token core program
 # and cannot run alone.
 GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 columns
-MB_NT = 8             # moe_batch.py's token slots per expert visit: one bf16 MAC tile wide
+# moe_batch.py's token slots per expert visit, in bf16 MAC tiles of 8: the number of an
+# expert's tokens that one streaming of its 1.97 MB serves. The driver reads it back out of
+# the manifest, so the design and the host cannot drift apart, and mb_x / mb_h / mb_y below
+# scale with it.
+#
+# It stays at 8 although 16 builds and passes (.claude/plans/prefill-parity.md, B(1)): the
+# kernel turned out to be core-bound, not DMA-bound -- at 16 slots its weight stream alone is
+# 0.86-0.91 ms whatever the width and the whole dispatch is already 1.105 ms at 8 -- so 16
+# bought 4 % of the expert stage and nothing of the prefill, in exchange for doubling
+# mb_x / mb_h / mb_y and spending the core's last 4 KB of L1. Raise it once the core rate is
+# up (the plan's B(3)); the design and the driver are ready for it.
+MB_NT = 8
 ATTN_LMAX = 4096      # the widest attention GEMM stream (rows of window); a longer window is chunked on the host
 GEMM_ROLES = ("attn", "linear", "linear_out", "shared")   # the projections the route streams
 
@@ -1057,8 +1068,9 @@ def gemm_route(spec: ModelSpec) -> dict | None:
         name = f"mb_s{s}"
         out["kernels"][name] = {"context": "mb", "insts": f"{name}/insts.bin", "patch": "moebatch", "build": name}
         out["builds"][name] = {"design": "moe_batch/moe_batch.py", "build_dir": f"moe_batch/build_s{s}{sfx}",
-                               "env": {"MB_SLOTS": str(s), "MB_HID": str(hid), "MB_FF": str(ff), "MB_EXPERTS": str(E),
-                                       "MB_POOL_DOWN": str(L.POOL_DOWN), "MB_POOL_BYTES": str(L.POOL_BYTES)}}
+                               "env": {"MB_SLOTS": str(s), "MB_NT": str(MB_NT), "MB_HID": str(hid), "MB_FF": str(ff),
+                                       "MB_EXPERTS": str(E), "MB_POOL_DOWN": str(L.POOL_DOWN),
+                                       "MB_POOL_BYTES": str(L.POOL_BYTES)}}
     out["globals"]["mb_x"] = mb_slots[0] * hid * MB_NT * 2
     out["globals"]["mb_h"] = mb_slots[0] * ff * MB_NT * 2
     out["globals"]["mb_y"] = mb_slots[0] * hid * MB_NT * 4
