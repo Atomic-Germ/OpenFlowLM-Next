@@ -279,6 +279,11 @@ private:
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
+    int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count
+    /// Put omp_threads_ in force for the CALLING thread: omp_set_num_threads sets a
+    /// per-thread ICV, and the server can reach a prefill from a thread the constructor
+    /// never ran on.
+    void apply_thread_budget() const;
     bool moe_redispatch_ = false;  ///< OFLM_OPEN_MOE_REDISPATCH: run each MoE pass twice and print both
     std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
     std::map<std::string, DispatchStat> dispatch_stats_;

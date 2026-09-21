@@ -16,6 +16,8 @@
 #include <map>
 #include <stdexcept>
 
+#include <omp.h>
+
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
 
@@ -66,11 +68,20 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 // PASSIVE costs the host stages one wake-up per parallel region (+7 %) and gives back
 // 19 % of the block: 2582-token prefill 38.55 -> 29.93 s. Bit-exact either way.
 //
-// It has to be an environment variable: MSVC's VCOMP140.DLL reads OMP_WAIT_POLICY when
-// the runtime initialises, which is the process's FIRST parallel region -- hence a
-// static initialiser rather than anything in Core's constructor, which the server can
-// reach after some other OpenMP user has already brought vcomp up. A policy already in
-// the environment wins, and OFLM_OPEN_OMP_PASSIVE=0 turns this off.
+// It has to be an environment variable: MSVC's VCOMP140.DLL reads OMP_WAIT_POLICY when it
+// initialises, and there is no API for it. A policy already in the environment wins, and
+// OFLM_OPEN_OMP_PASSIVE=0 turns this off.
+//
+// **The link line is part of this.** vcomp initialises when it LOADS, not at the first
+// parallel region, and an implicitly linked DLL loads before any of the exe's static
+// initialisers run -- so setting the variable here reached a runtime that had already
+// read it, and for a year the binary carried a PASSIVE it never applied. What proved it:
+// the same trick for OMP_NUM_THREADS set the variable to 10 and `omp_get_max_threads()`
+// still said 24. Delay-loading vcomp (`/DELAYLOAD:VCOMP140.DLL delayimp.lib`, see
+// build.cmd and CMakeLists.txt) moves its load to the first call into it, which is after
+// this initialiser. Measured at 2582 tokens: 20.5 s with the variable unset against
+// 17.1 s with it set from outside, the same binary. Any build of this file that drops
+// the delay-load silently loses that.
 struct OmpWaitPolicy {
     OmpWaitPolicy() {
         if (std::getenv("OMP_WAIT_POLICY")) return;
@@ -85,13 +96,42 @@ struct OmpWaitPolicy {
 };
 const OmpWaitPolicy g_omp_wait_policy;
 
+/// Host threads for the block route's stages, or 0 to leave the runtime alone.
+///
+/// How MANY threads is a separate question from whether they spin, and once the policy
+/// above is really in force it is a settled one. While the workers still spun through
+/// every dispatch, fewer of them was faster: at the runtime's own count every dispatch ran
+/// at 1.4x its `--bench` rate (`mb_s256` 17.5 ms against 12.4, and the same dispatch
+/// repeated with no host work in front of it still 17.5), at ten threads every one was at
+/// its own rate, and 2582 tokens went 20.4 -> 18.9 s. With PASSIVE applied the ordering
+/// reverses -- 17.6 s at the full count against 19.5 at ten -- because sleeping workers
+/// cost the package nothing and the host stages want every core. So the default is the
+/// runtime's own count; OFLM_OPEN_OMP_THREADS stays as a knob for a box where it isn't.
+///
+/// This one cannot go through the environment even with the delay-load: vcomp latches its
+/// thread count the first time anything asks, which is inside the Core already.
+unsigned omp_thread_budget() {
+    if (std::getenv("OMP_NUM_THREADS")) return 0;      // the environment has already decided
+    if (const char* e = std::getenv("OFLM_OPEN_OMP_THREADS"))
+        return static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    return 0;
+}
+
 }  // namespace
+
+void Core::apply_thread_budget() const {
+    if (omp_threads_ > 0 && omp_get_max_threads() != omp_threads_) omp_set_num_threads(omp_threads_);
+}
 
 void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
 }
 
 Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
+    omp_threads_ = static_cast<int>(omp_thread_budget());
+    apply_thread_budget();
+    log("host threads: " + std::to_string(omp_get_max_threads()) + " (OMP_WAIT_POLICY=" +
+        std::string(std::getenv("OMP_WAIT_POLICY") ? std::getenv("OMP_WAIT_POLICY") : "unset") + ")");
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
     fs::path md(cfg_.model_dir);
@@ -1443,6 +1483,7 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
 }
 
 void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits) {
+    apply_thread_budget();
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_gemm_block before load_weights");
     const size_t T = ids.size();
     if (T == 0) return;
@@ -1581,6 +1622,7 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
 // expert), and a token's expert output does not depend on which other tokens share its
 // slot, so the result is bit-for-bit the block-major one.
 void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
+    apply_thread_budget();
     if (!layer_major_ok()) throw std::runtime_error("open_qwen36: step_gemm_prompt on a kernel set without a MoE block route");
     if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
     auto t0 = std::chrono::steady_clock::now();
