@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -186,6 +187,44 @@ inline std::vector<AttnPatch> attn_table(const std::vector<uint32_t>& w, const s
             throw std::runtime_error("attnpos: " + kn + ": " + std::to_string(n) + " patches of kind " +
                                      std::to_string(kind) + ", expected 1 (window length, row drain, record fill, window offset)");
     }
+    return t;
+}
+
+/// Bytes this instruction stream moves between DDR and the array, per host
+/// buffer argument.
+///
+/// Every DDR transfer is a BD blockwrite (op 1: eight registers from +4, the
+/// FIRST of them the transfer length in WORDS) followed by the DDR patch
+/// (op 0x81) that points it at a buffer argument -- `attn_table` above relies
+/// on exactly that pairing to find the KV window fill's length, and
+/// `attn_apply` writes `nf * kv_row / 4` into it. Summing the pairs is a
+/// dispatch's own DMA traffic, which is what a GB/s reading needs.
+///
+/// Read it AFTER patching (`iw()`, not `words`): a runtime-sized transfer --
+/// the KV window is the one that matters -- then counts what this position
+/// actually streams, not what the stream was compiled for.
+///
+/// A patch this cannot pair with a blockwrite is skipped rather than guessed
+/// at, so the total is a floor. Validate a design's number against something
+/// independently known (the q8 lm head's vocab x K, a projection's pack-op
+/// chunk count) before quoting a rate off it.
+inline std::map<uint32_t, uint64_t> ddr_bytes(const uint32_t* w, size_t n) {
+    std::map<uint32_t, uint64_t> per_arg;
+    size_t bd_write = 0;
+    bool have_bd = false;
+    for (size_t i = 4; i < n; i += op_len(w[i])) {
+        if (w[i] == 1) { bd_write = i; have_bd = true; continue; }
+        if (w[i] != 0x81 || i + 11 >= n) continue;
+        if (!have_bd || bd_write + 4 >= n || w[bd_write + 2] + 4 != w[i + 6]) continue;
+        per_arg[w[i + 8]] += static_cast<uint64_t>(w[bd_write + 4]) * 4;
+    }
+    return per_arg;
+}
+
+/// The same, totalled over every buffer argument.
+inline uint64_t ddr_bytes_total(const uint32_t* w, size_t n) {
+    uint64_t t = 0;
+    for (const auto& kv : ddr_bytes(w, n)) t += kv.second;
     return t;
 }
 
