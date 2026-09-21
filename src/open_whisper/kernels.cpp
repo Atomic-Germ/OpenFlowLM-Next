@@ -51,8 +51,12 @@ KernelSet::BLayout KernelSet::read_b_layout(const std::string &kernels_dir) {
   BLayout out;
   out.tile_k = bl.value("tile_k", int64_t{0});
   out.tile_n = bl.value("tile_n", int64_t{0});
-  out.mac_s = bl.value("mac_s", int64_t{8});
-  out.mac_t = bl.value("mac_t", int64_t{8});
+  if (!bl.contains("mac_s") || !bl.contains("mac_t"))
+    throw std::runtime_error(kernels_dir + "/design.json: b_layout mac_s/mac_t missing");
+  out.mac_s = bl.at("mac_s").get<int64_t>();
+  out.mac_t = bl.at("mac_t").get<int64_t>();
+  if (out.mac_s <= 0 || out.mac_t <= 0)
+    throw std::runtime_error(kernels_dir + "/design.json: b_layout mac_s/mac_t must be positive");
   if (out.tile_k <= 0 || out.tile_n <= 0)
     throw std::runtime_error(kernels_dir + "/design.json: b_layout tile_k/tile_n missing");
   return out;
