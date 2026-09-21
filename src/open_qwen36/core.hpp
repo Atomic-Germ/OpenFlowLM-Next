@@ -321,6 +321,7 @@ private:
         std::vector<float> part[4];     ///< the GEMM output's transposed parts: qkv/z, or q/k/v/gate
         std::vector<float> og;          ///< [T, vw] or [T, qw] mid-stage output
         std::vector<float> qrope;       ///< full: attention_prep's normed, roped queries
+        std::vector<float> sh;          ///< the shared expert's silu(gate) * up
         std::vector<uint16_t> qb;       ///< attention_npu: one KV group's queries as bf16
         std::vector<float> m, lsum, acc;///< attention_npu: the merged softmax's running state
         std::vector<size_t> pos;        ///< attention_npu: each product row's absolute position
@@ -363,12 +364,12 @@ private:
     /// `out` is grown if it is short and then fully overwritten; pass a buffer that lives
     /// across layers, so the 12 MB the widest GEMM returns is allocated once, not 40 times
     /// a block.
-    void gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
+    void gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
               std::vector<float>& out);
     /// The same dispatch without the transpose: y stays [N, T] in the output buffer and the
     /// mapping is returned, so a caller that is going to slice the output can transpose
     /// straight into its own arrays. Valid until the next GEMM on the same buffer.
-    const float* gemm_run(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer);
+    const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL

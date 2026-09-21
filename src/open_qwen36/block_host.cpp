@@ -254,14 +254,17 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
             const float* qq = Q.data() + t * key_w + (h / grp) * dim;
             const float* v = V.data() + t * vw + h * dim;
             const float dc = decay[t * g.value_heads + h], bt = beta[t * g.value_heads + h];
+            // The decay is applied twice and stored once instead of stored twice: the first
+            // pass only needs the decayed value to accumulate tv, and recomputing Si[j] * dc
+            // in the second pass is one multiply against a whole 64 KB write of S per token
+            // per head. Same operands, same operation, so the same float -- and the second
+            // pass then adds the same k delta to the same number the first pass would have
+            // left there.
             std::fill(tv.begin(), tv.end(), 0.f);
             for (size_t i = 0; i < dim; ++i) {
-                float* Si = Sh + i * dim;
+                const float* Si = Sh + i * dim;
                 const float ki = kk[i];
-                for (size_t j = 0; j < dim; ++j) {
-                    Si[j] *= dc;
-                    tv[j] += ki * Si[j];
-                }
+                for (size_t j = 0; j < dim; ++j) tv[j] += ki * (Si[j] * dc);
             }
             for (size_t j = 0; j < dim; ++j) delta[j] = bt * (v[j] - tv[j]);
             std::fill(o.begin(), o.end(), 0.f);
@@ -269,8 +272,9 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
                 float* Si = Sh + i * dim;
                 const float ki = kk[i], qi = qq[i];
                 for (size_t j = 0; j < dim; ++j) {
-                    Si[j] += ki * delta[j];
-                    o[j] += Si[j] * qi;
+                    const float s = Si[j] * dc + ki * delta[j];
+                    Si[j] = s;
+                    o[j] += s * qi;
                 }
             }
             for (size_t j = 0; j < dim; ++j) o[j] *= inv_sqrt;
@@ -368,7 +372,10 @@ void attention_prep(const AttnGeom& g, const float* q, const float* k, const flo
         throw std::runtime_error("open_qwen36: attention_prep: inconsistent geometry");
     const float scale = 1.0f / std::sqrt(static_cast<float>(g.hd));
     std::fill(Q, Q + g.T * qw, 0.f);
-#pragma omp parallel for
+#pragma omp parallel
+    {
+    std::vector<float> kh(kvw);                 // once a thread, not once a token
+#pragma omp for
     for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
         const size_t t = static_cast<size_t>(tt), p = g.pos0 + t;
         for (size_t h = 0; h < g.nh; ++h) {
@@ -377,7 +384,6 @@ void attention_prep(const AttnGeom& g, const float* q, const float* k, const flo
             rope(dst, half, inv_freq, static_cast<double>(p));
             for (size_t j = 0; j < g.hd; ++j) dst[j] *= scale;
         }
-        std::vector<float> kh(kvw);
         for (size_t h = 0; h < g.kvh; ++h) {
             rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
             rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p));
@@ -386,6 +392,7 @@ void attention_prep(const AttnGeom& g, const float* q, const float* k, const flo
             kv[p * kv_row_elems + j] = f32_to_bf16(kh[j]);
             kv[p * kv_row_elems + kvw + j] = f32_to_bf16(v[t * kvw + j]);
         }
+    }
     }
 }
 
