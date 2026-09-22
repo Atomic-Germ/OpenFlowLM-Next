@@ -63,13 +63,27 @@ static constexpr uint32_t kOndvPoolDown = 335544320u;
 static constexpr uint32_t kOndvQueue[kOndvCores] = {
     0x1D21Cu, 0x1D214u, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D214u, 0x1D214u, 0x1D214u};
 
-// One routed slot's five words: rewrite the descriptor's DDR address and push it.
-static inline void ondv_words(int32_t *w, unsigned bd, uint32_t queue, uint64_t addr) {
-  w[0] = ondv_hdr(ondv_bd_w1(bd), 2);
-  w[1] = (int32_t)(uint32_t)(addr & 0xFFFFFFFCu);        // w1: addr_low, bits 1:0 zero
-  w[2] = (int32_t)(uint32_t)((addr >> 32) & 0xFFFFu);    // w2: addr_high[15:0]
-  w[3] = ondv_hdr(queue, 1);
-  w[4] = (int32_t)(0x80000000u | bd);
+// One routed slot's control words for one column: three address packets (one per
+// descriptor) and ONE push packet -- the three pushes all target the same task-queue
+// register, so a single 3-beat write enqueues BD 8, 9 and 10 in order. That is 13 words
+// per (slot, column) and FOUR shim descriptors, which is what makes a wave fit a tile's
+// 16-BD pool (three columns x 4 + the three pinned routed descriptors = 15).
+static inline void ondv_words(int32_t *w, unsigned queue, uint64_t up, uint64_t gate,
+                              uint64_t down) {
+  const uint32_t addr[3] = {(uint32_t)(up & 0xFFFFFFFCu), (uint32_t)(gate & 0xFFFFFFFCu),
+                            (uint32_t)(down & 0xFFFFFFFCu)};
+  const uint32_t hi[3] = {(uint32_t)((up >> 32) & 0xFFFFu), (uint32_t)((gate >> 32) & 0xFFFFu),
+                          (uint32_t)((down >> 32) & 0xFFFFu)};
+  const unsigned bd[3] = {kOndvBdUp, kOndvBdGate, kOndvBdDown};
+  for (unsigned i = 0; i < 3; ++i) {
+    w[i * 3 + 0] = ondv_hdr(ondv_bd_w1(bd[i]), 2);
+    w[i * 3 + 1] = (int32_t)addr[i];
+    w[i * 3 + 2] = (int32_t)hi[i];
+  }
+  w[9] = ondv_hdr(queue, 3);                       // push BD 8, 9, 10 in one packet
+  w[10] = (int32_t)(0x80000000u | kOndvBdUp);
+  w[11] = (int32_t)(0x80000000u | kOndvBdGate);
+  w[12] = (int32_t)(0x80000000u | kOndvBdDown);
 }
 
 // The expert's byte offset of routed slot k's up stripe for column c (xcommon.moe_sequence's
@@ -81,21 +95,20 @@ static inline uint32_t ondv_down_off(unsigned expert, unsigned c) {
   return kOndvPoolDown + expert * kOndvUpBytes + c * kOndvDownCore;
 }
 
-// Emit the whole stream: for every routed slot k and column c, 15 words --
-// up(5), gate(5), down(5) -- at out[(k*kOndvCores + c)*15]. `idx` is the router's
-// top-8 index output (out + kE, int32[8]); (base_hi<<32|base_lo) is the pool BO's
-// DDR address (bo.address() + 0x8000_0000) with no offset.
+// Emit the whole stream: for every routed slot k and column c, 13 words --
+// [up addr(3)][gate addr(3)][down addr(3)][push(4)] -- at out[(k*kOndvCores + c)*13].
+// `idx` is the router's top-8 index output (out + kE, int32[8]);
+// (base_hi<<32|base_lo) is the pool BO's DDR address (bo.address() + 0x8000_0000)
+// with no offset.
 static inline void ondv_ctrl_impl(const int32_t *__restrict idx, uint32_t base_lo, uint32_t base_hi,
                                   int32_t *__restrict out) {
   const uint64_t base = ((uint64_t)base_hi << 32) | (uint64_t)base_lo;
   for (unsigned k = 0; k < kOndvRouted; ++k) {
     const unsigned e = (unsigned)idx[k];
     for (unsigned c = 0; c < kOndvCores; ++c) {
-      int32_t *w = out + (k * kOndvCores + c) * 15;
       const uint32_t up = ondv_up_off(e, c);
-      ondv_words(w + 0, kOndvBdUp, kOndvQueue[c], base + up);
-      ondv_words(w + 5, kOndvBdGate, kOndvQueue[c], base + up + kOndvStripe);
-      ondv_words(w + 10, kOndvBdDown, kOndvQueue[c], base + ondv_down_off(e, c));
+      ondv_words(out + (k * kOndvCores + c) * 13, kOndvQueue[c], base + up, base + up + kOndvStripe,
+                 base + ondv_down_off(e, c));
     }
   }
 }
