@@ -391,6 +391,21 @@ int main(int argc, char **argv) {
     std::printf("  bias add     %8.1f ms\n", t.bias * 1e3);
     std::printf("  residual add %8.1f ms\n", t.residual * 1e3);
     std::printf("  attention    %8.1f ms\n", t.attention * 1e3);
+    // OW_ATTN_PHASES=1 splits that into the two GEMMs a kernel set could take and
+    // the softmax that stays on the host whichever way they go. Summed across
+    // threads, so these are CPU-seconds and total more than the wall time above.
+    {
+      const auto &ph = t.attn_phases;
+      const double tot = ph.scores + ph.softmax + ph.values;
+      if (tot > 0) {
+        std::printf("    Q.K^T      %8.1f ms  (%.1f%% of attention CPU time)\n",
+                   ph.scores * 1e3, 100.0 * ph.scores / tot);
+        std::printf("    softmax    %8.1f ms  (%.1f%%)  -- stays on the host\n",
+                   ph.softmax * 1e3, 100.0 * ph.softmax / tot);
+        std::printf("    P.V        %8.1f ms  (%.1f%%)\n",
+                   ph.values * 1e3, 100.0 * ph.values / tot);
+      }
+    }
     std::printf("  npu in-sync  %8.1f ms  (host wall clock: memcpy + sync_to_device)\n",
                t.npu_in * 1e3);
     std::printf("  npu dispatch %8.1f ms  (host wall clock: submit+wait, dominated by "

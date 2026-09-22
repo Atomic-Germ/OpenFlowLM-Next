@@ -3,6 +3,7 @@
 #include "host_ops.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -200,7 +201,7 @@ inline void axpy8(float *y, const float *x, float alpha, int64_t n) {
 }  // namespace
 
 void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t heads,
-              int64_t head_dim, float *out) {
+              int64_t head_dim, float *out, AttnPhases *phases) {
   zero_pad_rows(out, t, m_padded, d);
   const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
   const int64_t stride = 3 * d;
@@ -212,7 +213,14 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
   // thread. It was serial for a while over a non-determinism that turned out
   // to be the C-buffer write-back described above layer_norm(), not a race.
   const int64_t work = heads * t;
-#pragma omp parallel
+  const bool timed = phases != nullptr;
+  double acc_s = 0, acc_m = 0, acc_v = 0;
+  auto tick = [timed]() {
+    return timed ? std::chrono::duration<double>(
+                       std::chrono::steady_clock::now().time_since_epoch()).count()
+                 : 0.0;
+  };
+#pragma omp parallel reduction(+ : acc_s, acc_m, acc_v)
   {
     std::vector<float> scores(static_cast<size_t>(t));
 #pragma omp for schedule(dynamic, 8)
@@ -220,6 +228,7 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
       const int64_t h = idx / t;
       const int64_t t1 = idx % t;
       {
+        const double c0 = tick();
         const float *qrow = qkv + t1 * stride + h * head_dim;
         float mx = -std::numeric_limits<float>::infinity();
         for (int64_t t2 = 0; t2 < t; ++t2) {
@@ -228,12 +237,16 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
           scores[static_cast<size_t>(t2)] = s;
           if (s > mx) mx = s;
         }
+        const double c1 = tick();
+        acc_s += c1 - c0;
         float sum = 0.f;
         for (int64_t t2 = 0; t2 < t; ++t2) {
           const float e = std::exp(scores[static_cast<size_t>(t2)] - mx);
           scores[static_cast<size_t>(t2)] = e;
           sum += e;
         }
+        const double c2 = tick();
+        acc_m += c2 - c1;
         const float inv = 1.0f / sum;
         float *orow = out + t1 * d + h * head_dim;
         std::memset(orow, 0, static_cast<size_t>(head_dim) * sizeof(float));
@@ -242,8 +255,14 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
           const float *vrow = qkv + t2 * stride + 2 * d + h * head_dim;
           axpy8(orow, vrow, p, head_dim);
         }
+        acc_v += tick() - c2;
       }
     }
+  }
+  if (phases) {
+    phases->scores += acc_s;
+    phases->softmax += acc_m;
+    phases->values += acc_v;
   }
 }
 

@@ -84,7 +84,17 @@ void im2col(const float *x, int64_t t_in, int64_t c, int64_t stride,
 // softmax with max-subtraction in fp32. Writes rows [0,t) of `out`
 // ([m_padded, d]); rows [t, m_padded) of `out` are zeroed (they are never a
 // query here, but the buffer feeds a fixed-M GEMM next).
+//
+// `phases`, when given, accumulates the three parts separately in seconds: the
+// scores GEMM (Q.K^T), the row softmax, and the value GEMM (P.V). Off unless a
+// pointer is passed -- it costs three clock reads per (head, query row) -- and it
+// exists to price moving the two GEMMs onto the array, because whatever the
+// softmax costs stays on the host either way and is the Amdahl term.
+struct AttnPhases {
+  double scores = 0, softmax = 0, values = 0;
+};
+
 void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
-              int64_t heads, int64_t head_dim, float *out);
+              int64_t heads, int64_t head_dim, float *out, AttnPhases *phases = nullptr);
 
 }  // namespace ow

@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "host_ops.hpp"
 #include "kernels.hpp"
 #include "npu_device.hpp"
 #include "weights.hpp"
@@ -27,6 +28,10 @@ namespace ow {
 struct Timers {
   double im2col = 0, bf16 = 0, layer_norm = 0, gelu = 0, bias = 0, residual = 0;
   double attention = 0;
+  // attention(), split: the two GEMMs a kernel set could take, and the softmax
+  // that stays on the host whatever happens to them. Only filled when
+  // OW_ATTN_PHASES=1, because the split costs about 2% of the call.
+  AttnPhases attn_phases;
   double npu_in = 0, npu_dispatch = 0, npu_out = 0;
   double total = 0;
 };

@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -78,7 +79,12 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   // attention, then x += gemm(attn, o.B) + o.bias
   std::vector<float> attn(static_cast<size_t>(m_padded) * static_cast<size_t>(D));
   t0 = now_s();
-  attention(qkv.data(), m_padded, real_rows, D, H, HD, attn.data());
+  static const bool phase_split = [] {
+    const char *e = std::getenv("OW_ATTN_PHASES");
+    return e && *e && *e != '0';
+  }();
+  attention(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
+            phase_split ? &timers.attn_phases : nullptr);
   timers.attention += now_s() - t0;
 
   t0 = now_s();
