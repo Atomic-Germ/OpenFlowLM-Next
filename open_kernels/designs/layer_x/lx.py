@@ -453,7 +453,9 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 # the pool base the router forms the retarget addresses against, and the
                 # control stream it emits -- two plain DDR round trips (the config is the
                 # router's LAST input element, so no extra shim channel)
-                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
+                tg_c = TaskGroup()
+                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_c)
+                tg_c.finish()
                 pcf = Pipeline(1)
                 pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
                 pcf.finish()

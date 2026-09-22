@@ -42,9 +42,10 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, PacketFlow, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
+from aie.dialects._aie_enum_gen import AIETileType, WireBundle
 from aie.iron.kernel import ExternalFunction
 
 HERE = Path(__file__).parent
@@ -70,6 +71,8 @@ Q_PC, KV_PC, O_PC = D.Q_PC, D.KV_PC, D.O_PC             # bands per core: q (and
 QW, KVW, O_K = D.QW, D.KVW, D.O_K
 DENSE = X.KIND == "dense"                               # the Qwen3.5 composition: a dense FFN tail
 PART = int(os.environ.get("AX_PART", 0))
+if X.ONDV:
+    PART = 0          # the fused path ignores the part split: ONE stream runs the whole layer
 if DENSE and PART:
     sys.exit("ax.py: the dense tail is one instruction stream; AX_PART must be 0")
 XN_ELEMS = X.FFN.XN_ELEMS if DENSE else 1               # 4 KB x elements the xn arrives in
@@ -92,6 +95,12 @@ ACORES, NHL, RB = D.ACORES, D.NHL, D.RB
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
 def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, part: CompileTime[int] = 0,
        srchash: CompileTime[int] = 0):
+    # the shipped design: the routed experts' fills are enqueued by the host and moeroute2
+    # repoints them between the two dispatches (see ax_ondv for the fused path)
+    return _ax_build(pool, xres, consts, kv, act, ptab, None, None, part=part, srchash=srchash, ondv=False)
+
+
+def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=0, ondv=False):
     t = X.types()
     tl = X.ln_types()
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
@@ -147,6 +156,14 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     # Attention over ACORES cores: heads are independent, so each core owns NHL of them
     # and drains its own og element(s) -- the pattern dx.py uses.
     of_og = [ObjectFifo(b512, name=f"og{c}", depth=2) for c in range(1, ACORES)]
+    of_octrl = ObjectFifo(u8_4k if "u8_4k" in tl else u8_ln, name="octrl", depth=1) if ondv else None
+    # the control streams' source tiles (hoisted: the placer dedups a shim tile's channel
+    # requirements by logical-tile OP) and which source each column's stream comes from
+    src_of_col = [0, 0, 0, 1, 1, 1, 2, 2]
+    # ax's shim budget differs from lx's: (3,0), (4,0), (5,0) all keep MM2S ch1 free
+    octrl_src = [Tile(3, 0, tile_type=AIETileType.ShimNOCTile),
+                 Tile(4, 0, tile_type=AIETileType.ShimNOCTile),
+                 Tile(5, 0, tile_type=AIETileType.ShimNOCTile)] if ondv else None
 
     def main_body(win, xin, yout, *args):
         B, K = X.unpack_args(args)
@@ -254,7 +271,8 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
-                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]],
+                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
+                              + ([of_octrl.prod(), L["ondv_ctrl"]] if ondv else []),
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
@@ -350,11 +368,19 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         px.finish()
         pa_in.finish()
 
-    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
+    def sequence(*a):
+        if ondv:
+            (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_cfg, a_octrl) = a[:8]
+            (lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs) = a[8:16]
+            octrl_c = a[16]
+        else:
+            (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab) = a[:6]
+            (lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs) = a[6:14]
+            a_cfg = a_octrl = octrl_c = None
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
                            ain_p, aout_c, og_cs)
-        elif part == 0:
+        elif part == 0 or ondv:
             tg_ln = TaskGroup()
             lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
             lni.fill(a_consts, tap=bt(CA_BYTES, CA_LNW, ELEM), wait=True, group=tg_ln)
@@ -401,24 +427,60 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             lno.drain(a_act, tap=bt(AA_BYTES, AA_ROUT, ELEM), wait=True, group=tg_r)
             tg_ln2.finish()
             tg_r.finish()
+            if ondv:
+                # the pool base the router forms the retarget addresses against (its last
+                # input element), and the control stream it emits
+                tg_c = TaskGroup()
+                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_c)
+                tg_c.finish()
+                pcf = Pipeline(1)
+                pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
+                pcf.finish()
             pw.finish()
             pa_in.finish()
             tg_x.finish()
+            if ondv:
+                # the rest of the layer, one stream (see lx.py; the routing is identical)
+                X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
+                               AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW,
+                               ondv=(a_octrl, octrl_src, src_of_col))
         else:
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                           AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW)
+                           AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW,
+                           ondv=(a_octrl, octrl_src, src_of_col) if ondv else None)
 
-    rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
-                            of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                            [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_x.prod(tile=Tile(1, 0)),
-                            [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
-                            [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]])
+    rt_args = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty]
+    if ondv:
+        rt_args += [np.ndarray[(ELEM,), np.dtype[np.uint8]], np.ndarray[(ELEM,), np.dtype[np.uint8]]]
+    rt_args += [of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
+                [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                of_x.prod(tile=Tile(1, 0)),
+                [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
+                of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
+                [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]]
+    if ondv:
+        rt_args += [of_octrl.cons(tile=Tile(2, 0))]   # (2,0) S2MM ch1 is free in ax
+    rt = Runtime(sequence, rt_args)
+    if ondv and os.environ.get("ONDV_NO_FLOWS") != "1":
+        # eight packet routes: the router's control stream to each column's TileControl,
+        # emitted from the free MM2S ch1 of (5,0), (6,0), (7,0)
+        for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
+            rt.add_flow(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
+                                   dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),
+                                   src_port=WireBundle.DMA, src_channel=1,
+                                   dst_port=WireBundle.TileControl, dst_channel=0,
+                                   shim_symbol=f"octrl{3 + src_of_col[c]}_shim_alloc" if c in (0, 3, 6) else None))
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
-DESIGN = ax
+@iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
+def ax_ondv(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, cfg: In, octrl: Out, *,
+            part: CompileTime[int] = 0, srchash: CompileTime[int] = 0):
+    """The fused whole-layer path for the full-attention layers (see lx_ondv)."""
+    return _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, part=part, srchash=srchash, ondv=True)
+
+
+DESIGN = ax_ondv if X.ONDV else ax
 _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + [(HERE / "xcommon.py").read_bytes()] + X.source_hash_inputs()
                 + sorted(f.read_bytes() for f in ATTN.glob("*.cc")) + sorted(f.read_bytes() for f in ATTN.glob("*.h"))
                 + sorted(f.read_bytes() for f in X.RT.glob("*.cc"))
