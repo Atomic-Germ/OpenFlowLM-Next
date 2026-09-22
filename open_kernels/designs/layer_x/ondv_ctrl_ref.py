@@ -87,8 +87,8 @@ def words(bd: int, queue: int, addr: int) -> list[int]:
 def emit_stream(idx: list[int], base: int) -> list[int]:
     """The full stream: out[(k*8 + c)*15 + ...] = up(5), gate(5), down(5)."""
     out = []
-    for k in range(ONDV_ROUTED):
-        for c in range(ONDV_CORES):
+    for c in range(ONDV_CORES):          # column-major: one column's slots are contiguous
+        for k in range(ONDV_ROUTED):
             q = ONDV_QUEUE[c]
             up = up_off(idx[k], c)
             out += words(BD_UP, q, base + up)

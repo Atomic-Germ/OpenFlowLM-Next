@@ -91,7 +91,9 @@ static inline void ondv_ctrl_impl(const int32_t *__restrict idx, uint32_t base_l
   for (unsigned k = 0; k < kOndvRouted; ++k) {
     const unsigned e = (unsigned)idx[k];
     for (unsigned c = 0; c < kOndvCores; ++c) {
-      int32_t *w = out + (k * kOndvCores + c) * 15;
+      // COLUMN-major: column c's 8 slots (8 x 15 words) are contiguous, so one packet BD
+      // per column can carry them (the corrected, core-sourced control shape)
+      int32_t *w = out + (c * kOndvRouted + k) * 15;
       const uint32_t up = ondv_up_off(e, c);
       ondv_words(w + 0, kOndvBdUp, kOndvQueue[c], base + up);
       ondv_words(w + 5, kOndvBdGate, kOndvQueue[c], base + up + kOndvStripe);
