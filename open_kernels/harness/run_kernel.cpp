@@ -49,6 +49,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "xrt/xrt_bo.h"
@@ -511,6 +512,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     Host h;
+    const char* rc_env = std::getenv("HARNESS_RETRY_CONTENTION");
+    const int retry_contention = rc_env ? std::atoi(rc_env) : 0;
     h.base = cfg.parent_path();
     if (const char* kg = std::getenv("HARNESS_KEEP_GOING")) h.keep_going = std::strcmp(kg, "1") == 0;
     if (const char* tm = std::getenv("HARNESS_TIMEOUT_MS")) h.timeout_ms = std::strtoul(tm, nullptr, 10);
@@ -520,9 +523,27 @@ int main(int argc, char** argv) {
     try {
         while (std::getline(f, line)) {
             ++lineno;
-            if (!h.exec(line)) {
-                std::printf("RUN FAILED at line %d\n", lineno);
-                return 1;
+            // The NPU is shared. Contention surfaces as xrt's "qds_device::wait()
+            // unexpected command state" -- measured on the KNOWN-GOOD shipped lx0 kernel
+            // while a peer's job held accel0 -- so a run failure of that shape is retried
+            // (HARNESS_RETRY_CONTENTION, default 0) rather than reported as a design fault.
+            int attempts = 1 + retry_contention;
+            for (;;) {
+                try {
+                    if (h.exec(line)) break;
+                    std::printf("RUN FAILED at line %d\n", lineno);
+                    return 1;
+                } catch (const std::exception& e) {
+                    const std::string what = e.what();
+                    if (--attempts > 0 && what.find("unexpected command state") != std::string::npos) {
+                        std::printf("contention (\"%s\"); retrying line %d (%d attempt(s) left)\n",
+                                    what.c_str(), lineno, attempts);
+                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        continue;
+                    }
+                    std::printf("ERROR line %d: %s\n  %s\n", lineno, e.what(), line.c_str());
+                    return 1;
+                }
             }
         }
     } catch (const std::exception& e) {
