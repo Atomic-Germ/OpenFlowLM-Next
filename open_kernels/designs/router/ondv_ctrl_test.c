@@ -12,7 +12,7 @@
 
 #include "ondv_ctrl.h"
 
-extern "C" void ondv_ctrl(const int32_t *idx, uint32_t base_lo, uint32_t base_hi, int32_t *out);
+extern "C" void ondv_ctrl(const uint8_t *rout, const uint32_t *cfg, int32_t *out);
 
 static int read_i32(const char *path, int32_t *buf, size_t n) {
   FILE *f = fopen(path, "rb");
@@ -46,7 +46,24 @@ int main(int argc, char **argv) {
     return 2;
   }
   int32_t got[N];
-  ondv_ctrl(idx, (uint32_t)base, (uint32_t)(base >> 32), got);
+  ondv_ctrl_impl(idx, (uint32_t)base, (uint32_t)(base >> 32), got);
+
+  // the ExternalFunction entry reads idx out of the router's 4 KB output at +1024 B and
+  // the base out of a 2-word config element -- checked against ondv_ctrl_impl directly
+  {
+    static uint8_t rout[4096];
+    static uint32_t cfg[2];
+    int32_t via_entry[N];
+    for (int i = 0; i < 8; ++i) ((int32_t *)(rout + 1024))[i] = idx[i];
+    cfg[0] = (uint32_t)base;
+    cfg[1] = (uint32_t)(base >> 32);
+    ondv_ctrl(rout, cfg, via_entry);
+    for (int i = 0; i < N; ++i)
+      if (via_entry[i] != got[i]) {
+        fprintf(stderr, "ondv_ctrl_test: FAIL (entry differs from impl at word %d)\n", i);
+        return 1;
+      }
+  }
 
   int bad = 0;
   for (int i = 0; i < N; ++i) {
