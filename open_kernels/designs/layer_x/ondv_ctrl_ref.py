@@ -59,6 +59,44 @@ def retarget_enqueue(bd: int, addr: int, channel: int = 1) -> list[int]:
     return [hdr(bd_w1_reg(bd), 2), low, high, hdr(MM2S_QUEUE[channel], 1), 0x80000000 | bd]
 
 
+# ---- the 35B recipe's MoE geometry and the whole-stream generator -------------
+# Mirrors designs/router/ondv_ctrl.h; designs/router/ondv_ctrl_test.c checks the two
+# agree word for word (they are deliberately independent transcriptions).
+ONDV_CORES, ONDV_ROUTED = 8, 8
+ONDV_SPP, ONDV_CPS = 4, 2
+ONDV_STRIPE, ONDV_PAIR = 163840, 10240
+ONDV_UP_BYTES, ONDV_DOWN_CORE = 655360, 81920
+ONDV_POOL_DOWN = 335544320
+# each column's w fifo's MM2S channel, from the built design's shim_dma_allocation table
+ONDV_QUEUE = [0x1D21C, 0x1D214, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D214, 0x1D214, 0x1D214]
+ONDV_STREAM_WORDS = 8 * 8 * 15                # slots x columns x (up, gate, down)
+
+
+def up_off(expert: int, c: int) -> int:
+    return (2 * ONDV_SPP * expert + 2 * (c // ONDV_CPS)) * ONDV_STRIPE + (c % ONDV_CPS) * ONDV_PAIR
+
+
+def down_off(expert: int, c: int) -> int:
+    return ONDV_POOL_DOWN + expert * ONDV_UP_BYTES + c * ONDV_DOWN_CORE
+
+
+def words(bd: int, queue: int, addr: int) -> list[int]:
+    return [hdr(bd_w1_reg(bd), 2), addr & 0xFFFFFFFC, (addr >> 32) & 0xFFFF, hdr(queue, 1), 0x80000000 | bd]
+
+
+def emit_stream(idx: list[int], base: int) -> list[int]:
+    """The full stream: out[(k*8 + c)*15 + ...] = up(5), gate(5), down(5)."""
+    out = []
+    for k in range(ONDV_ROUTED):
+        for c in range(ONDV_CORES):
+            q = ONDV_QUEUE[c]
+            up = up_off(idx[k], c)
+            out += words(BD_UP, q, base + up)
+            out += words(BD_GATE, q, base + up + ONDV_STRIPE)
+            out += words(BD_DOWN, q, base + down_off(idx[k], c))
+    return out
+
+
 def _selftest() -> None:
     # The documented rule, checked against the two spikes whose comments compute it
     # by hand: core_ctrlpkt.mlir 'hdr(0x1D214,1): popcount(0x1D214)=7 (odd) -> bit31=0'
@@ -86,4 +124,16 @@ def _selftest() -> None:
 
 
 if __name__ == "__main__":
-    _selftest()
+    import struct
+    import sys
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "dump":
+        # dump <path> <base> <idx0,..,idx7> -- the expected stream for the C test
+        path, base = sys.argv[2], int(sys.argv[3], 0)
+        idxs = [int(x, 0) for x in sys.argv[4].split(",")]
+        ws = emit_stream(idxs, base)
+        with open(path, "wb") as f:
+            f.write(struct.pack(f"<{len(ws)}I", *[w & 0xFFFFFFFF for w in ws]))
+        print(f"ondv_ctrl_ref: wrote {len(ws)} words to {path}")
+    else:
+        _selftest()

@@ -1,0 +1,72 @@
+// Host check: the router control-word kernel agrees word for word with the Python
+// reference (designs/layer_x/ondv_ctrl_ref.py), on both a small base and a base whose
+// high word is non-zero (the pool BO sits above 4 GB on this box, so addr_hi matters).
+//
+//   python3 ../layer_x/ondv_ctrl_ref.py dump /tmp/ondv_a.bin 0x80000000 0,1,2,3,4,5,6,7
+//   python3 ../layer_x/ondv_ctrl_ref.py dump /tmp/ondv_b.bin 0x1_40000000 255,0,17,3,9,64,128,200
+//   ./ondv_ctrl_test /tmp/ondv_a.bin 0x80000000 0,1,2,3,4,5,6,7
+//   ./ondv_ctrl_test /tmp/ondv_b.bin 0x140000000 255,0,17,3,9,64,128,200
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ondv_ctrl.h"
+
+extern "C" void ondv_ctrl(const int32_t *idx, uint32_t base_lo, uint32_t base_hi, int32_t *out);
+
+static int read_i32(const char *path, int32_t *buf, size_t n) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return -1;
+  size_t got = fread(buf, sizeof(int32_t), n, f);
+  fclose(f);
+  return got == n ? 0 : -1;
+}
+
+int main(int argc, char **argv) {
+  if (argc != 4) {
+    fprintf(stderr, "usage: %s <expected.bin> <base> <idx0,..,idx7>\n", argv[0]);
+    return 2;
+  }
+  const char *path = argv[1];
+  const unsigned long long base = strtoull(argv[2], NULL, 0);
+  int32_t idx[8];
+  int k = 0;
+  char *s = strdup(argv[3]);
+  for (char *t = strtok(s, ","); t && k < 8; t = strtok(NULL, ",")) idx[k++] = (int32_t)strtol(t, NULL, 0);
+  free(s);
+  if (k != 8) {
+    fprintf(stderr, "need 8 indices\n");
+    return 2;
+  }
+
+  enum { N = 8 * 8 * 15 };
+  int32_t want[N];
+  if (read_i32(path, want, N) != 0) {
+    fprintf(stderr, "cannot read %zu int32 from %s\n", (size_t)N, path);
+    return 2;
+  }
+  int32_t got[N];
+  ondv_ctrl(idx, (uint32_t)base, (uint32_t)(base >> 32), got);
+
+  int bad = 0;
+  for (int i = 0; i < N; ++i) {
+    if (want[i] != got[i]) {
+      if (bad < 8)
+        fprintf(stderr, "word %3d (%s k%u c%u): got 0x%08X want 0x%08X\n", i,
+                (i % 15) < 5 ? "up" : (i % 15) < 10 ? "gate" : "down", i / 120, (i / 15) % 8,
+                (unsigned)got[i], (unsigned)want[i]);
+      ++bad;
+    }
+  }
+  if (bad) {
+    fprintf(stderr, "ondv_ctrl_test: FAIL (%d/%d words differ)\n", bad, N);
+    return 1;
+  }
+  // a couple of structural assertions the reference cannot express
+  if ((got[1] & 3u) != 0u) {
+    fprintf(stderr, "ondv_ctrl_test: FAIL (w1 addr_low has low bits set)\n");
+    return 1;
+  }
+  printf("ondv_ctrl_test: PASS (%d words, base=0x%llX)\n", N, base);
+  return 0;
+}
