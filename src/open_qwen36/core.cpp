@@ -463,7 +463,15 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
         act_.push_back(alloc(lt.act_bytes));
-        state_.push_back(alloc(lt.state_kind == "kv" ? cfg_.max_ctx * lt.state_row : lt.state_bytes));
+        // A blocked attention kernel (manifest `rb` > 1) streams its padded window up to row
+        // pos + rb - 2 (stream_patch::attn_apply), which at the last position is past the
+        // context capacity by rb - 2 rows. The slack is allocated -- and zeroed, so the rows
+        // the kernel masks multiply as exact zeros -- rather than clamped: a shorter stream
+        // than the kernel's block count deadlocks the fifo.
+        uint64_t kv_slack = 0;
+        for (const auto& [kn, kd] : man_.kernels)
+            if (kd.patch == "attnpos" && kd.rb > 2) kv_slack = std::max<uint64_t>(kv_slack, kd.rb - 2);
+        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
