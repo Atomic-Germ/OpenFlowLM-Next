@@ -2905,6 +2905,24 @@ the kernels keep bf16). A projection streamed at q8 has no route -- the GEMM
 dequantises the q4_1 band law -- and such a manifest is the sequential one
 unchanged.
 
+On a MoE kernel set the blocks are run **layer-major**: every T-wide block of
+the prompt goes through layer l's projections and host stages before layer
+l + 1 starts, and the layer's expert block then runs ONCE over every token of
+the prompt instead of once per block. An expert is therefore streamed for all
+of its tokens in the prompt rather than for the eight or so it owns in one
+block. Nothing about a layer's arithmetic changes -- the device state (KV rows,
+DeltaNet S and conv rows) is still written block by block in position order,
+and layer l still reads the residual layer l - 1 produced for the same block,
+because layer l - 1 finished every block first -- so the ordering is exactly
+the block-major one per layer; what the result does depend on is which tokens
+share an expert's dispatch, since `OPEN-MOE-BATCH` is not invariant to that
+(see its own result). The schedule also lets a layer read its DeltaNet state
+off the device once per prompt instead of once per block, and stops the
+full-attention layers pulling the whole KV window back for every block.
+`OFLM_OPEN_LAYER_MAJOR=0` (or `--block-major` on the CLI) takes the
+block-at-a-time loop; a `dense` layer type has no layer-major form and stays
+block-major.
+
 **Acceptance criteria (unit):**
 - The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); one context `gemm` for every GEMM shape, plus `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes; a spec with `attn`, `linear`, `linear_out` or `shared` at q8 emits none of it and its manifest equals the sequential one.
 - The parser holds a route to its kind (`manifest_test.cpp`): 5 steps for dense, 2 for linear / full, every step a 3-argument run naming a declared weight buffer, weight ops inside the pack plan, `moe_kernel` declared with the moeroute2 patch, each refused by name otherwise.
@@ -2912,6 +2930,20 @@ unchanged.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
 - The build key covers `designs/gemm_q4_prefill/*` (`test_prefill_batch.py`).
 - The dense kind's recipe (`dense.py gemm_route`) emits one `gemm_block` per layer type present, sharing the five-step program, weight map and widths (`layout`/`geometry` don't vary by layer type) but each naming its own `attn_kernel` / `attn_args`: a family with one layer type gets the schema's defaults (`dxB` / `...,"ptab"`); Gemma 3's two get `dxB` / `ptab` for `dense` and a second kernel entry `dxB_local` / `ptab_local` -- the SAME `dx_attn/insts.bin` stream, patched with the family's sliding window -- for `dense_local`, plus `sandwich: true` and `act: "gelu_tanh"` on both (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`). A family combining sandwich norms with a non-gelu-tanh activation, or the reverse, gets no route (`tests/test_gemma3.py`) -- the host chain only implements the two pairings above.
+- Layer-major is refused where it has no meaning: `layer_major_ok()` is false without a block
+  route, with `OFLM_OPEN_LAYER_MAJOR=0`, and for any layer type whose kind is not `linear` or
+  `full`; `step_gemm_prompt()` throws rather than silently running the wrong schedule, and
+  throws for a prompt that would run past the context capacity.
+- The engine says out loud when the OpenMP wait policy could not be applied. vcomp reads
+  `OMP_WAIT_POLICY` when it loads, so the static initialiser that sets it only works if vcomp
+  is delay-loaded (`/DELAYLOAD:VCOMP140.DLL`); a build without that runs the host workers
+  spinning through every dispatch and is ~20 % slower at prefill with nothing to show for it.
+  `Core`'s constructor checks whether vcomp was already in the process when the initialiser
+  ran and prints a named WARNING if it was, so the flag cannot be dropped silently. The flag
+  is necessary and NOT sufficient: in `oflm.exe` eight implicitly linked closed model DLLs
+  import vcomp themselves, so the warning fires there and the variable has to come from the
+  environment (2026-09-21 result below). The criterion is that the warning is accurate, not
+  that it never fires.
 
 **Procedure:**
 1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2` (WSL) builds `gemm_n12288_k2048`, `gemm_n2048_k4096`, `gemm_n9216_k2048`, `mx_linear` and `mx_full` beside the sequential set and writes the manifest with the route.
@@ -2919,6 +2951,12 @@ unchanged.
 3. `open_qwen36_cli --layers 4 --prefill-logits --dump-logits <dir>/y` with and without `--gemm-block` on a 19-token prompt: the same argmax and top-5 at every position except documented near ties (reference margin < 0.05 logits), corr > 0.999 per position.
 4. All 40 layers on a ~1000-token prompt with `--max-tokens 8`: the same greedy continuation, the last position's argmax and top-5 equal; TTFT with and without `--gemm-block` recorded.
 5. `flm-test --llm` through `flm serve` on `qwen3.6-moe:35b-a3b` with the route on.
+6. Layer-major against block-major, same binary and same kernels: a multi-block prompt through
+   a prefix that contains a full-attention layer, `--prefill-logits --dump-logits` both ways,
+   diffed position for position. With `OFLM_OPEN_MOE_BATCH=0` (the per-token expert dispatch)
+   the two must be **byte-identical** -- that is what says the schedule itself changed nothing.
+   With the batched expert kernel they are not, and the gate is instead that both sit the same
+   distance from the per-token run: equal max |diff| and equal argmax-flip count against it.
 
 **Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`OFLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `OFLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
 
@@ -2951,6 +2989,226 @@ ms/token)** with the identical eight-token greedy continuation, and 512 tokens
 9.98 -> 7.50 s. `oflm-test --llm` passes through this tree's `oflm serve` on
 the route. Details: `.claude/plans/moe-stage-cost.md`, raw data in
 `.claude/plans/decode-run/logs/`.
+
+**Result 2026-09-20 (the q4_1 dequant, in the pool's own orientation):** the
+block route's GEMM was spending **39 % of every dispatch turning q4_1 into
+bf16**, in two passes over the band: a gather that transposed raw nibble bytes
+into a row-major uint8 scratch, then a dequant that read that scratch sixteen
+elements at a time with the row's `d` and `m` arriving as scalar loads and
+broadcasts. Ablated with the design's own `GQP_NULL_GATHER` / `GQP_NULL_DEQUANT`
+on the checked-in n8192 k2048 T256 fixture, minima of three runs: the whole
+dispatch 5.977 ms, the gather 0.498 of it, the dequant 1.867, leaving 3.621 for
+the matmul and the streams.
+
+It is far cheaper in the orientation the pool is already packed in. A 64-byte
+contiguous read of the nibble area is 8 k x 8 row-pairs, and in that orientation
+the eight rows' scales are eight strided entries of one 16-wide load -- a
+vector, not eight scalars. That is exactly the shape `designs/moe_batch` works
+in, and the scale builder is now the same function (`gqd_scale`, `mb_scale`'s
+twin). So the fused pass masks, converts, scales and adds in 64-lane vectors
+with no scalar work at all, then `aie::transpose`es the RESULT into row order
+and `interleave_zip`s the even and odd rows back together -- which lands four
+whole (4 rows x 8 k) A-operand blocks, 32 contiguous bf16 each, for four stores
+instead of sixteen. The gather pass disappears entirely, and the scale is
+applied as one `mac` seeded with `m` so that `n * d + m` rounds to bf16 once
+instead of twice.
+
+**The dispatch goes 5.977 -> 4.474 ms, 25.1 %; the q4_1 -> bf16 cost itself
+2.356 -> 0.853 ms, 2.8x.** It is also more accurate, from the single rounding:
+rel_fro against the fp64 reference 2.202e-3 -> **1.684e-3** (gate 5e-3), maxrel
+2.205e-3 -> 1.769e-3. On the 35B at 2582 tokens, kernel sets run one after the
+other, the **GEMM stage goes 10.56 -> 7.88 s (24 %)** and the whole prefill
+28.75 -> 25.79 s. Against the sequential path the two dequants are the same
+distance out (worst per-position corr 0.9974 either way over 120 positions, 3
+argmax flips for the old and 2 for the new), so the route's own spread is
+unchanged. `GQD_TWO_PASS` rebuilds the old path for an A-B; the uint8 scratch
+it needs is still allocated, and can go with it.
+
+Two things tried and not kept: **hoisting the scale builds** into a k-block loop
+around the column-block loop, although `d` and `m` only change every 32 k, was
+slightly SLOWER (4.589 against 4.501 ms before the `mac` change) because the
+compiler already eliminates the repeats and the narrower unrolled window costs
+more than the hoist saves; and the remaining body is 352 bundles against a
+Peano resource floor of 266, so there is perhaps 20 % more in scheduling.
+
+**Result 2026-09-21 (the wait policy the binary never applied, and the host stages):**
+the engine has set `OMP_WAIT_POLICY=PASSIVE` from a static initialiser since
+2026-09-20 and **never once applied it**. vcomp reads the variable when the DLL
+LOADS, and an implicitly linked DLL loads before any static initialiser in the
+exe runs, so the initialiser set a variable the runtime had already read past --
+every measurement since was taken with the workers spin-waiting through each
+dispatch, and the 38.55 -> 29.93 s the plan credits to A.1 came from setting the
+variable in the shell. What proved it: the same trick for `OMP_NUM_THREADS` put
+10 in the environment and `omp_get_max_threads()` still returned 24; then, same
+binary at 2582 tokens, **20.5 s with the variable unset against 17.1 s with it
+set from outside**. `/DELAYLOAD:VCOMP140.DLL delayimp.lib` moves vcomp's load to
+the first call into it, which is after the initialiser: three alternating runs
+at 2582 tokens give **16.8 s mean against 21.1 s with `OFLM_OPEN_OMP_PASSIVE=0`**.
+Both build paths carry the flag, and the engine now checks at construction
+whether vcomp was already loaded when the initialiser ran and warns by name if
+it was, so a link line that drops it cannot cost 20 % of the prefill in silence.
+
+The "in-block penalty" -- every dispatch at 1.4-1.6x its `--bench` minimum -- is
+the array's clock, and the probes say so three ways. Cycling all thirty linear
+layers' weights costs 0.13 ms on `mb_s256`, so it is not cold memory. Two
+thousand back-to-back `mb_s256` dispatches hold 12.36-12.48 ms over 25 s with no
+drift, so it is not thermal. `bench_dispatch` grew a SLEEPING 30 ms gap beside
+its busy one, and under `--pmode performance` the two cost the same (`mb_s256`
+12.4 -> 19-21 ms, `gemm_n12288` 6.5 -> 10.3) while under `--pmode turbo` both
+cost 0.1 ms -- so an idle NPU loses clock whatever the CPU is doing. The rest is
+the host cores: with the workers spinning, `mb_s256` inside a prefill is 17.5 ms
+and **the same dispatch repeated immediately, with no host work in front of it,
+is still 17.5**, which is the package and not the work before it. With PASSIVE
+actually in force the host thread count stops mattering the way it appeared to
+(2582 tokens: 17.6 s at the runtime's own count against 19.5 at ten), so the
+count stays the runtime's own and `OFLM_OPEN_OMP_THREADS` is only a knob.
+
+Five host stages, each bit-exact and each measured as alternating pairs: the
+per-(layer, block) scratch is reused rather than freshly allocated and
+zero-filled (30 MB a call, 440 calls; **26.5 -> 25.4 s**); the [N, T] -> [T, N]
+transpose is an AVX2 8x8 register network instead of a four-byte-at-a-time
+blocked loop (**`gemm tr` 1448 -> 583 ms**, 23.4 -> 22.6 s); DeltaNet's causal
+conv runs its taps as contiguous passes over the channels with the
+carried-state test hoisted out of the channel loop, so it vectorises
+(**`dn conv` 1.75 -> 1.45 s**); the shared expert stops copying 8 MB of its
+input per call to satisfy a `std::vector` parameter and its silu, its output
+gate and both layer kinds' residual add stop being serial (**shared 550 ->
+62 ms**, 21.5 -> 21.0 s); and the delta rule stores S once a token instead of
+twice, recomputing `Si[j] * dc` in the second pass rather than writing 64 KB in
+the first (**stage 1.40 -> 1.25 s**). The gate throughout is a 600-token,
+40-layer prefill diffed position for position against the previous binary:
+**600 of 600 identical, max |diff| 0.0** after each change and at the end.
+
+**End to end, `open_qwen36_cli --gemm-block`, three repeats on one resident
+weight load, best of three:**
+
+| tokens | `--pmode performance` | `--pmode turbo` | closed, same box, same day |
+|---|---|---|---|
+| 662 | 4.75 s | 4.63 s | 12.39 s |
+| 1122 | 7.95 | 7.63 | 15.20 |
+| 2102 | 14.52 | 13.73 | 18.92 |
+| 2582 / 2593 | 18.27 | 16.69 | 21.34 |
+| 3642 | -- | ~22.8 (fitted) | 23.05 |
+| 4096 | 28.91 | 25.75 | ~24.6 (fitted) |
+
+2582 tokens went **26.70 -> 16.69 s** across the session and 1122 went
+**13.55 -> 7.63**. Fitted, the open prefill is 0.6 s + N / 164 tok/s against
+closed's 10.0 s + N / 280 (re-taken today over five lengths x three cycles,
+best of three per length; the 2026-09-20 fit was 9.93 + N / 280.3, so the line
+reproduces across days even though the same box's decode rate doubled between
+them). They cross at about **3600-3700 tokens**: below that the open route is
+ahead -- 2x at 1122 -- and at 4096, the context capacity, it is about 5 %
+behind. Two caveats on that comparison: closed's figure is the server's own
+prefill timer and carries a ~10 s fixed term whatever the length (662 tokens
+cost it 12.4 s where its own marginal rate says 2.4), where ours is a CLI
+prefill with the weights already resident, so the open side through
+`oflm serve` is the remaining like-for-like check; and closed sets
+`performance` itself at startup, so the `performance` column is the
+like-for-like one -- it wins at every length below 4096 as well. Details:
+`.claude/plans/prefill-parity-2026-09-21.md`.
+
+**Result 2026-09-21 (the dispatch log re-taken with PASSIVE in force):** every
+per-kernel in-block figure recorded before the delay-load fix above — including
+the 1.4-1.6x "in-block penalty" — was measured with the workers spinning.
+Re-taken on the fixed binary, `OFLM_OPEN_DISPATCH_LOG=1 --gemm-block` on a
+2582-token prompt against `--bench 20` on a linear and a full-attention layer of
+the same binary, the penalty is **gone on the kernels that carry the run**:
+`mb_s256` 13.407 ms mean against a 12.447 solo minimum (**1.08x**, 400 calls,
+5.36 s of the 19.46 s prefill), `gemm_n12288_k2048` 7.351 against 6.357
+(**1.16x**), `gemm_n9216_k2048` 5.539 against 4.816 (1.15x). The old figure
+survives only on the three narrow GEMMs — `gemm_n2048_k4096` 3.200 against
+2.027 (1.58x), `gemm_n1024_k2048` 1.45x, `gemm_n2048_k512` 1.46x — which
+together are 2.06 s of the 5.09 s of GEMM dispatch. Summed over every dispatch,
+**1.88 s of the 19.46 s run sits above the bench floor, 9.7 %**, where the
+2026-09-20 reading put it near 6 s.
+
+Two thirds of what remains is one avoidable thing. The layer-major schedule
+amortises a hardware context switch across all eleven blocks for the expert
+kernel and the qkv GEMM, which is why those are at 1.08x; it does not for the
+ten full-attention layers, where each (layer, block) runs `gemm_n9216_k2048` ->
+2x `ag_s` + 2x `ag_pv` -> `gemm_n2048_k4096` and so leaves the `gemm` context
+and re-enters it 110 times each way. This binary's context-switch probe prices
+a switch into `ag` at +2.55 ms and staying inside `gemm` at +0.03, which
+accounts for the whole `ag_*` excess (356 ms) and ~308 ms of
+`gemm_n2048_k4096`'s 516: **~0.66 s, 3.4 % of the prefill, recoverable by
+hoisting the attention dispatches out of the per-block loop** (all eleven
+blocks' `q|k|v|gate`, then all the attention, then all the `o` GEMMs — two
+switches a layer instead of twenty-two). Causality needs no new mask, since
+`ag_s` is dispatched with the window length `(b + 1) * 256` and so reads
+exactly blocks 0..b whatever later KV rows are already written; the cost is
+~23 MB of scratch to hold each block's attention output until its `o` GEMM. Not
+done.
+
+Also from the re-taken log: dispatch logging itself costs ~1.2 s at this speed
+(19.46 and 20.37 s on two repeats against 18.27 best-of-three without it), so a
+logged run is no longer a timing run; and **host compute is now the larger half
+of the prefill** — 11.46 s of the 19.46 is dispatch and the other 8.0 s is CPU,
+3.13 s of it DeltaNet, with nothing overlapping.
+
+**Result 2026-09-21 (step 5, and the wait policy the SERVER cannot apply):**
+`oflm-test --llm` passes 5 of 5 on `qwen3.6-moe:35b-a3b` through this tree's
+`oflm serve` with `OFLM_QWEN36_ENGINE=open` and `OFLM_OPEN_GEMM_BLOCK=1` — both
+modes, both prompts, the context-retention check — on a server carrying the
+layer-major schedule, which had never been exercised through the server path
+before. The load logs `Qwen3.6-MoE on the open kernels`,
+`block prefill route: T = 256` and `prefill schedule: layer-major`.
+
+It also prints the delay-load WARNING, and it is right to: **`oflm.exe` carries
+`/DELAYLOAD:VCOMP140.DLL` and still cannot apply `OMP_WAIT_POLICY` from inside
+the process**, because eight of the closed NPU model DLLs it links implicitly
+(`qwen3_6_moe_npu`, `qwen3_5vl_npu`, `qwen3_5_omni_npu`, `qwen3vl_npu`,
+`gemma_npu`, `gemma4e_npu`, `gemma4_12b_npu`, `gpt_oss_npu`) import vcomp
+themselves, so it is in the process before any code in the exe runs. Delay-loading
+vcomp from the exe is necessary and not sufficient; the CLI has no such dependency,
+which is why the same flag works there. Measured on the same binary and kernels,
+with the variable set in the environment before launch against not set, four
+rotating cycles per length, the server's own `prefill_speed_tps`: **2593 tokens
+17.43 s against 24.14, and 1.34-1.39x at every length from 182 up** — more than
+the 20 % the CLI saw.
+
+**With PASSIVE the server matches the CLI to within 2 %** (662 tokens 4.79 s
+against 4.75, 1122 7.84 against 7.95, 2102 14.18 against 14.52, 2593 17.43
+against 18.27 at 2582), which answers the standing caveat that the open figures
+were CLI-only while the closed ones came from a server timer: they were not
+flattering themselves, and the capacity the server loads at (32768 against the
+CLI's 4096) costs nothing measurable. Fitted, the open prefill through the
+server is **0.46 s + N / 153 tok/s**. Read off the same timer as closed, the
+open route is **2.6x faster at 662 tokens, 1.94x at 1122, 1.33x at 2102, 1.22x
+at 2593**, level at 3062 (20.76 s) and 12.6 % behind at 3642 (25.96 against
+23.05) -- **a crossover near 3100 tokens**, not the ~3700 the CLI-against-server
+comparison implied. Without PASSIVE, which is what a default build of the server
+does today, the fit is 0.39 s + N / 109 and the crossover falls to **about 1700
+tokens**. The closed column is the same day's measurement on this box through
+stock FLM's own server and was not re-taken; note also that the closed engine's
+host work is OpenMP too, so it was measured with its own workers spinning.
+
+Not fixed. The candidates are delay-loading those eight DLLs as well (which
+changes how the closed path fails when one is missing, and they are upstream's),
+a guarded re-exec at the top of `main` with the variable set, or documenting the
+variable and having the launcher export it.
+
+**Result 2026-09-21 (both engines back to back, one afternoon):** the comparisons
+above pair an open reading from one run with a closed reading from another, which
+is what `measuring-closed-engine` warns against, so both were then measured
+back to back: same container (stock FLM 1.0.2 serving hardlinks to the same
+`model.q4nx`), same prompts, same script, 48 generated tokens, four rotating
+cycles per length, best of four off each server's own `usage` timer. Prefill,
+open against closed: **1.94 s against 14.19 at 182 tokens (7.3x), 8.95 against
+18.85 at 1122 (2.1x), 20.96 against 24.15 at 2593 (1.15x)**. Decode, open against
+closed: **8.38 against 14.17 tok/s at 182 tokens of context, 7.87 against 14.83 at
+1122, 7.00 against 14.46 at 2593 — closed is 1.7-2.1x ahead and the gap widens
+with context.** Decode has had no work since 2026-09-13.
+
+Fitted on this pair, closed prefill is **14.8 s + N / 279 tok/s** against the
+10.0 + N/280 of the earlier run the same day. **The marginal rate reproduces to
+within half a percent; the fixed term moved by half again** — and since the
+crossover is set almost entirely by that fixed term it is not a stable number
+(3100 tokens against one reading, past 4800 against the other). The short-prompt
+ratios are the robust statistic; a crossover should be quoted as "past 3000
+tokens" or not at all. Our own open figure also moved within the afternoon
+(20.96 s at 2593 against 17.43 two hours earlier, same binary and configuration,
+the only difference being 48 generated tokens per request instead of 8), which the
+pairing absorbs but which is worth knowing before quoting any single number.
 
 **Result 2026-09-13 (one GEMM context for the whole route):** the GEMM core
 program used to bake K in as the trip count of its band-group loop, so the route
@@ -3044,11 +3302,14 @@ over a capped window, so the route has less to win there. Details:
 
 The block route's routed experts run on a token-batched kernel instead of
 one dispatch per token: a dispatch streams every slot's expert once for up
-to eight of its tokens, one expert per column with the four rows splitting
-its output rows, taking the product transposed (the eight tokens as the
+to `nt` of its tokens, one expert per column with the four rows splitting
+its output rows, taking the product transposed (eight tokens as the
 mmul's A rows, the weight as its B operand, whose 8 k x 8 rows block is a
 q4_1 chunk's raw nibble layout) so a weight tile costs a mask and a convert
-and the per-row scales ride along as vectors. The expert pools are read as
+and the per-row scales ride along as vectors. `nt` is a whole number of those
+eight-row mmul tiles and is declared in the manifest, so the design's `MB_NT`
+and the driver's gather / scatter cannot drift apart; every buffer, every core
+loop and the `mb_x` / `mb_h` / `mb_y` globals scale with it. The expert pools are read as
 packed: a 128-row stripe is two 64-row bands interleaved at k-tile
 granularity, so a band is a strided read and no repack exists. A kernel set
 carries one `mb` xclbin and one instruction stream per dispatch length
@@ -3066,12 +3327,110 @@ or `OFLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
 
 **Acceptance criteria (unit):**
 - The up / gate band tap is sizes [8, 10240] strides [20480, 1] at `(8 e + 2 (b // 2)) STRIPE + (b % 2) BAND`, the down band tap two elements at `POOL_DOWN + e 655360 + (b // 2) 40960 + (b % 2) BAND`, derived from `stripe_transpose`, `std_perm` and `down_perm` themselves (`test_moe_batch.py`).
-- The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s64 / mb_s32 / mb_s16 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots (`test_moe_batch.py`).
+- The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s64 / mb_s32 / mb_s16 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_NT` (the same number the manifest declares), `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots at that `nt` (`test_moe_batch.py`).
 - The parser (`manifest_test.cpp`): a stream a `moe_batch` names must exist with patch `moebatch`, its slot count a positive multiple of 8, its x / h / y declared globals; the fixture parses to those six streams on both kinds.
 
 **Procedure:** as `tests/test_moe_batch.py` documents -- the 64-expert harness run (`make_test.py --slots 64`, `compare.py s64`, gate rel_fro <= 5e-3 on y) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 with and without `OFLM_OPEN_MOE_BATCH=0`.
 
 **Result 2026-09-12 (Qwen3.6-35B-A3B-NPU2):** the harness at 64 experts PASSes at rel_fro 4.4e-4 (gate 5e-3; every slot's cosine >= 0.999995, every token column's >= 0.99997), 4.27 ms per run = 33 GB/s over the 143 MB streamed. Full model: the 4-layer check against the sequential path is argmax 19/19, top-5 19/19, corr >= 0.9993 per position, and against mx per token corr >= 0.99999. The 1020-token prompt at 40 layers, nothing else on the NPU: prefill **40.0 s -> 24.0 s (39 -> 23 ms/token)**, the same 8-token greedy continuation as mx per token (first token 248068). Per 256-token block the expert stage went 7.1-7.5 s to 1.78-1.87 s: two dispatches per layer (256 slots, then ~95 of the 128-slot stream; 342-363 visits per layer), the 256-slot dispatch 27-32 ms (19 GB/s against the harness's 33: the difference is the context switch and the host memory churn between dispatches, measured by `--bench` and written up in `.claude/plans/prefill-gap.md`, "What a dispatch actually costs"). The block is now GEMM 1.4 s, host 1.8-2.4 s (growing with the window), experts 1.8-2.1 s. At 2582 tokens (the length the closed kernels were measured at) the same run is 64.5 s, 25 ms/token: the expert stage and the GEMMs are flat per block (1.7-1.9 s and 1.38 s) while the host stage grows from 1.36 s in block 0 to 3.72 s in block 9 -- 262 ms per 256 rows of window, and by the last block half of it. Against stock FLM 1.0.2's closed `qwen3_6_moe_npu` (14.3 s at 972 tokens, 21.9 s at 2582) the open path is 1.6x behind at ~1000 tokens and 2.9x at 2582, where before this kernel it was 2.9x and 5.4x. The host stages are the next step (`.claude/plans/prefill-gap.md`). **Through `flm serve` (2026-09-12, kernel set with the two DeltaNet decode changes as well, `k35v4`):** `flm-test --llm` passes -- both answers coherent and on-topic, the follow-up served from the prompt cache, no dispatch error; the same two long prompts prefill in 21.8 s at 972 tokens (22 ms/token, from 41.8) and 71.2 s at 2582 (28 ms/token, from 119.3), client-side time to first token, decode about 8 tok/s. The closed kernels' 14.3 s and 21.9 s make that 1.5x and 3.3x behind.
+
+**Result 2026-09-20 (the core program's shape: one parity at a time):** the
+expert dispatch was spending a third of its inner loop spilling registers, and
+the fix is a loop order, not an algorithm. A 64-lane f32 mmul accumulator is
+256 B and the accumulator file holds about two of them. The kernel kept the
+even and odd output rows' accumulators live together and dequantised each
+k-block into a third (`se.from_vector(m); mac(se, n, d)`), so the allocator
+spilled a whole accumulator per k-block. In the emitted code (`kernel_remarks.py`
+and the disassembly's spill count) the inner loop was **88 bundles of which 40
+carried a spill or a reload**, against an MII floor of 54.
+
+Taking one parity at a time leaves one output accumulator live, the dequant
+temporary fits beside it, and the same loop is **41 bundles with zero spills**,
+MII 39. The second pass re-reads the nibbles and the activations out of L1,
+which is far cheaper than the spill traffic it replaces. Fully unrolling the
+k-block loop on top is worth another 1 %. At 16 slots (31.5 MB of expert
+weights), minima of three runs:
+
+| | ms |
+|---|---|
+| interleaved parities, no loop hints (what shipped) | 0.979 |
+| one parity per pass | 0.903 |
+| + the k-block loop unrolled | **0.892** |
+| the weight stream alone (`MB_NULL_MM`) | 0.779 |
+
+The exposed core time falls **0.190 -> 0.116 ms, 39 %**, and the dispatch is
+within 15 % of its own DMA cost. The output is **bit-identical**: a 600-token,
+4-layer run matches the previous kernel at every one of 600 positions, because
+nothing about the arithmetic or its order changed, only which registers hold it.
+
+On the 35B at 2582 tokens, the two kernel sets run one after the other, the
+**expert dispatches themselves go 10.06 -> 8.98 s, 10.8 %**, with every other
+stage of the run unchanged to within noise (the host gather 470 -> 465 ms, the
+scatter 446 -> 448). Whole prefill 30.1 -> 28.4-29.5 s.
+
+Three things this rules out, each measured rather than argued. **The band
+stride is not a lever**: reading the pool contiguously (`MB_CONTIG`) moves the
+stream floor 0.779 -> 0.768, 1.4 %. **Unrolling the k-tile loop as well is
+not shippable**: it is 3 % faster at 16 slots and then crashes Peano at the
+real slot count (`Register not in mBMs`, the aie2p code emitter refusing a
+register the allocator picked for the bigger body) -- a compiler crash that
+only appears at one `MB_SLOTS` is not worth 3 %. **And the width still does
+not pay**: `MB_NT` 16 shares one dequantised weight across two sub-tiles but
+needs two accumulators, and the emitted code is the same bundle count per
+token as `MB_NT` 8, so the DMA halves and the dispatch does not.
+
+What is left of the core is the mmul: aie2p's native bf16 `mac_dims` is
+(4, 8, 8), so `mmul<8, 8, 8>` is emulated and each mac carries eight
+`vextbcst` operand builds -- 32 of the inner loop's 154 operations were
+operand broadcast. The native shape is the next lever, and it only pays
+alongside a wider `MB_NT`, which only pays once the core is cheap.
+
+**Result 2026-09-20 (the slot width, and what this kernel is actually bound by):**
+the token slot width became a parameter (`MB_NT`, a whole number of 8-row mmul
+tiles; the manifest's `nt`) so that an expert's 1.97 MB could be streamed for
+sixteen of its tokens instead of eight. It builds, it is numerically clean, and
+**it is not worth turning on**, for a reason worth writing down: this kernel is
+core-bound, not DMA-bound, and halving its DDR traffic therefore buys nothing.
+
+The design's own ablations say it directly. At 16 slots (31.5 MB of expert
+weights, the same bytes at either width), minima of three runs:
+
+| | `MB_NT` 8 | `MB_NT` 16 |
+|---|---|---|
+| the streams alone (`MB_NULL_MM`) | 0.862 ms | 0.906 ms |
+| plus the nibble unpack and the product (`MB_NULL_DQ`) | 0.871 | 1.522 |
+| the whole dispatch | **1.105** | **1.874** |
+
+The weight stream costs 0.86-0.91 ms whichever width, which is the 36 GB/s this
+kernel has always read; the whole dispatch at `MB_NT` 8 is already past it. So
+at 8 the core work is about balanced with the stream and at 16 it is plainly
+exposed: 1.70x the time for 2x the tokens, i.e. 15 % better per token, and the
+arithmetic rate is 0.86 TFLOPS (1.06 with the scales dropped) against the 2.2 the
+plain-bf16 attention GEMM reaches on the same array.
+
+Sharing the dequantised weight across the sub-tiles is the obvious answer and
+**both ways of arranging it are slower**, because two accumulators per parity is
+already what the accumulator file holds: innermost sub-tile loop with the
+parities interleaved (4 accumulators live) 2.036 ms, one parity per pass (2
+live, two passes over the nibbles) 2.506 ms, against 1.874 for redoing the
+dequant per sub-tile. All three produce the same output to the last bit.
+
+End to end on the 35B at 2582 tokens the expert stage went 11.24 -> 10.83 s
+(4 %) and total prefill did not move (31.09 s against 30.57 at `MB_NT` 8,
+inside the box's own drift across three repeats). So the recipe stays at 8 and
+the parameter stays: raising it is one line once the core rate is up, which is
+the thing actually worth working on.
+
+Two things checked along the way. Rebuilding the six streams at `MB_NT` 8 after
+all this gives **byte-identical instruction streams** to the shipped set and a
+bit-identical 600-token, 4-layer run, so the parameterisation is a genuine
+no-op at the old width. And the harness at 16 experts passes at `MB_NT` 16 with
+rel_fro 4.5e-4 (gate 5e-3), every token column's cosine >= 0.99998 -- the wider
+slot is correct, it is simply not faster. One trap: every kernel in this design
+sizes its buffers off `MB_NT`, so every one of them needs the `-D`. With only
+the two product kernels getting it, `mb_zero_ug` cleared half the accumulator it
+used to clear and h came back NaN from exactly the bands it had stopped
+touching. Details: `.claude/plans/prefill-parity-results.md`.
 
 **Result 2026-09-13 (the read-back and the ladder):** two things were being
 thrown away, both found by logging what each dispatch actually carried

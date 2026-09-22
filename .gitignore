@@ -69,6 +69,7 @@ npu_offload/matmul/[abyr]_m*.bin
 npu_offload/matmul/ref_m*.bin
 npu_offload/matmul/run_m*.cfg
 src/open_qwen36/out/
+src/open_whisper/out/
 
 # Open Qwen3.6-MoE kernel sets -- BUILT, not checked in.
 #

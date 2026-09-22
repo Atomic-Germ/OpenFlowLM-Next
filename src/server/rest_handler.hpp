@@ -133,6 +133,7 @@ private:
     std::string default_model_tag;
     bool modelscope;
     bool asr;
+    std::string asr_model_tag;
     bool embed;
     // Which embedding model --embed loads, from --embeddingmodel.
     // Empty means embed-gemma:300m, so an existing command line keeps

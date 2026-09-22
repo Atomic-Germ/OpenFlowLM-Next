@@ -21,6 +21,9 @@ struct program_args_t {
     // default, embed-gemma:300m, so an existing command line is
     // unchanged. See all_embedding_model.hpp for the registry.
     std::string embedding_model = "";
+    // Which Whisper model --asr loads. Empty means whisper-v3:turbo, the
+    // only one the registry has always carried.
+    std::string asr_model = "";
     bool json_output = false;
     int ctx_length = -1; // let model decide
     int prefill_chunk_len = -1; // let model decide

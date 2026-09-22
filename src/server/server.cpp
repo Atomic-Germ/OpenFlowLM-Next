@@ -1079,9 +1079,15 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
                 std::map<std::string, MultipartPart> parts = parse_multipart(req);
-                json request_json;
-                request_json["model"] = parts["model"].content;
-                request_json["file"] = parts["file"].content;
+                json request_json = json::object();
+                // Only the parts that are actually there. `parts["file"]` would
+                // default-construct an empty one, which then reads as a present
+                // field of the right type and dies in the audio decoder as a 500
+                // instead of being refused as missing (SERVER-REQUEST-VALIDATION).
+                for (const char* field : {"model", "file"}) {
+                    auto it = parts.find(field);
+                    if (it != parts.end()) request_json[field] = it->second.content;
+                }
                 rest_handler->handle_openai_audio_transcriptions(request_json, send_response, send_streaming_response, cancellation_token);
         });
 
