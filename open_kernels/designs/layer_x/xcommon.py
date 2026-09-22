@@ -70,6 +70,14 @@ BAND16, BAND32 = C.BAND16, C.BAND32   # K=HID / K=2*HID band bytes
 N_HDR = C.N_HDR
 ROWS_PC, HID_PC = C.ROWS_PC, C.HID_PC # MoE rows per core, hidden per core
 OS = ["-Os"]                          # main-core kernels: size over speed (the GEMV is DMA-bound)
+# timing-only ablation (output garbage): LX_NULL_GEMV=1 compiles the q4 / q8 GEMV tile body
+# to a zero store -- the GEMV twin of LX_NULL_DN below -- and leaves every stream, fifo and
+# DMA (so insts.bin) exactly as it was, to tell a stream limit from a compute one.
+# It goes on EVERY main-core translation unit rather than only the GEMV entries: the tile
+# body is `noinline inline` (COMDAT), so a TU that compiled the real body beside one that
+# compiled the null body is an ODR violation the linker resolves either way.
+if os.environ.get("LX_NULL_GEMV") == "1":
+    OS = OS + ["-DGEMV_NULL"]
 
 # scratch layouts (floats) -- gen_kernels.py writes the same offsets into the kernel TUs
 MS_FLOATS = C.MS_FLOATS
