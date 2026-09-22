@@ -524,7 +524,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_UP + c * HALF, HALF))
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_HP + c * HID_PC * 4, HID_PC * 4))
-        if ondv is not None and e < NE:
+        if ondv is not None and e < NE and os.environ.get("ONDV_NO_CTRL_BD") != "1":
             # retarget + enqueue this wave's up | gate (the cores are blocked on them)
             ondv_recycle(ondv_stream(ondv[0], ondv[1], ondv[2], e, 0), 4)
         pipe_y.finish(*y_conss)                           # the hidden parts are in DDR
@@ -549,7 +549,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                                    DOWN_PER_CORE * DOWN_BAND))
         if ondv is not None:
-            if e < NE:
+            if e < NE and os.environ.get("ONDV_NO_CTRL_BD") != "1":
                 # the down descriptor exists now, so its 3 words can be retargeted + pushed
                 ondv_recycle(ondv_stream(ondv[0], ondv[1], ondv[2], e, 1), 2)
             # Freeing here, at the END of the wave, is what keeps the pinned ids ours: the
