@@ -173,6 +173,14 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
             if (gemm_block_env == "1" && ids.size() >= min_prompt && !core_->mrope_active()) {
+                // B(2) of .claude/plans/prefill-parity.md: on a MoE kernel set, run the
+                // whole prompt through each layer before the next, so the layer's expert
+                // pass sees every token that wants an expert instead of one block's worth.
+                // Bit-exact against the block loop below; OFLM_OPEN_LAYER_MAJOR=0 takes it.
+                if (core_->layer_major_ok()) {
+                    core_->step_gemm_prompt(ids, true);
+                    return logits_view();
+                }
                 const size_t GT = core_->gemm_block_t();
                 if (GT > 0) {
                     size_t i = 0;

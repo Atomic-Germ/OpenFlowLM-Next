@@ -585,6 +585,15 @@ if(NOT OFLM_USE_HRX)
     find_package(OpenMP QUIET)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(oflm PUBLIC OpenMP::OpenMP_CXX)
+        # vcomp reads OMP_WAIT_POLICY when it LOADS, and an implicitly linked DLL loads
+        # before any static initialiser in this binary runs -- so core.cpp's PASSIVE
+        # initialiser set a variable the runtime had already read past. Delay-loading
+        # vcomp moves its load to the first call into it, which is after that. Worth
+        # 20.5 -> 17.1 s on a 2582-token prefill; see the note above OmpWaitPolicy.
+        if(MSVC)
+            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL")
+            target_link_libraries(oflm PRIVATE delayimp)
+        endif()
     endif()
     # The block prefill's host stages (open_qwen36/block_host.cpp) are written for the
     # vectoriser; the same per-source flag the open embedding sources carry.
