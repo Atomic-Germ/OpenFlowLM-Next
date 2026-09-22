@@ -69,7 +69,7 @@ ONDV_UP_BYTES, ONDV_DOWN_CORE = 655360, 81920
 ONDV_POOL_DOWN = 335544320
 # each column's w fifo's MM2S channel, from the built design's shim_dma_allocation table
 ONDV_QUEUE = [0x1D21C, 0x1D214, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D214, 0x1D214, 0x1D214]
-ONDV_STREAM_WORDS = 8 * 8 * 13                # slots x columns x (3 addr packets + 1 push)
+ONDV_STREAM_WORDS = 8 * 8 * 15                # slots x columns x (up, gate, down)
 
 
 def up_off(expert: int, c: int) -> int:
@@ -80,24 +80,20 @@ def down_off(expert: int, c: int) -> int:
     return ONDV_POOL_DOWN + expert * ONDV_UP_BYTES + c * ONDV_DOWN_CORE
 
 
-def column_words(queue: int, up: int, gate: int, down: int) -> list[int]:
-    """13 words for one (slot, column): three address packets then ONE push packet (the
-    three pushes share the task-queue register, so one 3-beat write enqueues BD 8/9/10)."""
-    out = []
-    for bd, addr in ((BD_UP, up), (BD_GATE, gate), (BD_DOWN, down)):
-        out += [hdr(bd_w1_reg(bd), 2), addr & 0xFFFFFFFC, (addr >> 32) & 0xFFFF]
-    out += [hdr(queue, 3), 0x80000000 | BD_UP, 0x80000000 | BD_GATE, 0x80000000 | BD_DOWN]
-    return out
+def words(bd: int, queue: int, addr: int) -> list[int]:
+    return [hdr(bd_w1_reg(bd), 2), addr & 0xFFFFFFFC, (addr >> 32) & 0xFFFF, hdr(queue, 1), 0x80000000 | bd]
 
 
 def emit_stream(idx: list[int], base: int) -> list[int]:
-    """The full stream: out[(k*8 + c)*13 + ...] = up addr(3), gate addr(3), down addr(3), push(4)."""
+    """The full stream: out[(k*8 + c)*15 + ...] = up(5), gate(5), down(5)."""
     out = []
     for k in range(ONDV_ROUTED):
         for c in range(ONDV_CORES):
+            q = ONDV_QUEUE[c]
             up = up_off(idx[k], c)
-            out += column_words(ONDV_QUEUE[c], base + up, base + up + ONDV_STRIPE,
-                                base + down_off(idx[k], c))
+            out += words(BD_UP, q, base + up)
+            out += words(BD_GATE, q, base + up + ONDV_STRIPE)
+            out += words(BD_DOWN, q, base + down_off(idx[k], c))
     return out
 
 

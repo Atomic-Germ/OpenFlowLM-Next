@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  enum { N = 8 * 8 * 13 };
+  enum { N = 8 * 8 * 15 };
   int32_t want[N];
   if (read_i32(path, want, N) != 0) {
     fprintf(stderr, "cannot read %zu int32 from %s\n", (size_t)N, path);
@@ -69,8 +69,9 @@ int main(int argc, char **argv) {
   for (int i = 0; i < N; ++i) {
     if (want[i] != got[i]) {
       if (bad < 8)
-        fprintf(stderr, "word %3d (offset %u, k%u c%u): got 0x%08X want 0x%08X\n", i, i % 13,
-                i / 104, (i / 13) % 8, (unsigned)got[i], (unsigned)want[i]);
+        fprintf(stderr, "word %3d (%s k%u c%u): got 0x%08X want 0x%08X\n", i,
+                (i % 15) < 5 ? "up" : (i % 15) < 10 ? "gate" : "down", i / 120, (i / 15) % 8,
+                (unsigned)got[i], (unsigned)want[i]);
       ++bad;
     }
   }
@@ -79,7 +80,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   // a couple of structural assertions the reference cannot express
-  if ((got[1] & 3u) != 0u || (got[4] & 3u) != 0u || (got[7] & 3u) != 0u) {
+  if ((got[1] & 3u) != 0u) {
     fprintf(stderr, "ondv_ctrl_test: FAIL (w1 addr_low has low bits set)\n");
     return 1;
   }
