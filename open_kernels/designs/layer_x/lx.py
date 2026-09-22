@@ -38,9 +38,10 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, PacketFlow, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
+from aie.dialects._aie_enum_gen import AIETileType, WireBundle
 from aie.iron.kernel import ExternalFunction
 
 HERE = Path(__file__).parent
@@ -163,7 +164,6 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     of_pout = ObjectFifo(u8_2k, name="pout", depth=2)      # og per group
     # on-device routing (lx_ondv): the router core's control stream, and the pool-base
     # config it is generated against
-    of_ocfg = ObjectFifo(tl["u8_cfg"], name="ocfg", depth=1) if ondv else None
     of_octrl = ObjectFifo(u8_4k, name="octrl", depth=1) if ondv else None
 
     # ---- cores
@@ -251,7 +251,7 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
                                L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
-                              + ([of_octrl.prod(), of_ocfg.cons(), L["ondv_ctrl"]] if ondv else []),
+                              + ([of_octrl.prod(), L["ondv_ctrl"]] if ondv else []),
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
@@ -357,9 +357,14 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         px.finish()
 
     def sequence(*a):
-        (a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-         side_p, gact_p, gout_c, pin_p, pout_c) = a[:15]
-        a_cfg, a_octrl, cfg_p, octrl_c = (a[15], a[16], a[17], a[18]) if ondv else (None, None, None, None)
+        if ondv:
+            (a_pool, c_xres, a_consts, a_state, a_act, a_cfg, a_octrl) = a[:7]
+            (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[7:17]
+            cfg_p, octrl_c = lni, a[17]
+        else:
+            (a_pool, c_xres, a_consts, a_state, a_act) = a[:5]
+            (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[5:15]
+            a_cfg = a_octrl = octrl_c = cfg_p = None
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
                            side_p, gact_p, gout_c, pin_p, pout_c)
@@ -433,9 +438,10 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
             tg_r.finish()
             if ondv:
                 # the pool base the router forms the retarget addresses against, and the
-                # control stream it emits -- both plain DDR round trips, no host patch
+                # control stream it emits -- two plain DDR round trips (the config is the
+                # router's LAST input element, so no extra shim channel)
+                lni.fill(cfg_p, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
                 pcf = Pipeline(1)
-                pcf.fill(cfg_p, a_cfg, bt(32, 0, 8))
                 pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
                 pcf.finish()
             pw.finish()
@@ -445,20 +451,40 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
                            A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW)
 
-    rt_args = [pool_ty, xres_ty, consts_ty, state_ty, act_ty,
-               of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-               [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
-               of_x.prod(tile=Tile(1, 0)),
-               [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
-               of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
-               of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0))]
+    rt_args = [pool_ty, xres_ty, consts_ty, state_ty, act_ty]
     if ondv:
-        # the fused path's two extra DDR round trips: the pool-base config in, the
-        # router's control stream out (the driver writes the former, the control
-        # streams read the latter)
-        rt_args += [tl["u8_cfg"], np.ndarray[(ELEM,), np.dtype[np.uint8]],
-                    of_ocfg.prod(tile=Tile(5, 0)), of_octrl.cons(tile=Tile(5, 0))]
+        # two extra DDR buffers: the pool-base config in (filled into the router's input
+        # stream) and the router's control stream out
+        rt_args += [np.ndarray[(ELEM,), np.dtype[np.uint8]], np.ndarray[(ELEM,), np.dtype[np.uint8]]]
+    rt_args += [of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
+                [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                of_x.prod(tile=Tile(1, 0)),
+                [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
+                of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
+                of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0))]
+    if ondv:
+        # (4,0) S2MM ch1 is the one free S2MM on a column that has no second MM2S to
+        # give: the router's control stream comes back here
+        rt_args += [of_octrl.cons(tile=Tile(4, 0))]
     rt = Runtime(sequence, rt_args)
+    if ondv and os.environ.get("ONDV_NO_FLOWS") != "1":
+        # The router's control stream reaches a column's TileControl by a packet route.
+        # Columns 0-4 have no free MM2S channel (lni+w0, w1+x, side+w2, gact+w3, pin+w4),
+        # so the stream is emitted from the free ch1 of (5,0), (6,0), (7,0) -- a packet
+        # stream may cross tiles (designs/expert_fetch/ondv_flow_cross_probe.py) -- and
+        # fanned to all eight columns' TileControl, one pkt_id each.        # ONE Tile object per source column: the placer dedups channel requirements by
+        # (logical-tile op, channel), so a fresh Tile() per flow would ask for a channel
+        # each time instead of sharing one.
+        octrl_src = [Tile(5, 0, tile_type=AIETileType.ShimNOCTile),
+                     Tile(6, 0, tile_type=AIETileType.ShimNOCTile),
+                     Tile(7, 0, tile_type=AIETileType.ShimNOCTile)]
+        src_of_col = [0, 0, 0, 1, 1, 1, 2, 2]
+        for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
+            rt.add_flow(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
+                                   dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),
+                                   src_port=WireBundle.DMA, src_channel=1,
+                                   dst_port=WireBundle.TileControl, dst_channel=0,
+                                   shim_symbol=f"octrl{5 + src_of_col[c]}_shim_alloc" if c in (0, 3, 6) else None))
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

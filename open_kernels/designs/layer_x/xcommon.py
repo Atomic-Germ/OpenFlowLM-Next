@@ -569,9 +569,10 @@ def ln_types():
     t = dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
              racc=np.ndarray[(SPEC.num_experts,), np.dtype[np.float32]])
     if ONDV:
-        # the router core's L1 is nearly full: the pool-base config is 8 bytes, so give it
-        # its own 32-byte element instead of a 4 KB one
-        t["u8_cfg"] = np.ndarray[(32,), np.dtype[np.uint8]]
+        # the router core's L1 is tight and every column's second MM2S channel is spoken
+        # for, so the pool-base config rides the router's existing input stream (a last
+        # 4 KB element) rather than a fifo of its own
+        t.pop("u8_cfg", None)
     return t
 
 
@@ -598,7 +599,7 @@ def ln_kernels(inc, t):
         # (designs/router/ondv_ctrl.{h,cc}); u8_4k for [rout | idx | w], the 2-word config
         # and the 8x8x15-word control stream
         k["ondv_ctrl"] = ExternalFunction("ondv_ctrl", source_file=str(RT / "ondv_ctrl.cc"),
-                                          arg_types=[u, t["u8_cfg"], u], include_dirs=inc + [str(RT)])
+                                          arg_types=[u, u, u], include_dirs=inc + [str(RT)])
     return k
 
 
@@ -627,12 +628,13 @@ def ln_body(ain, aout, f_nr, f_lny, f_lnx):
         ain.release(5)
 
 
-def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf, octrl=None, cfg_in=None, f_oc=None):
+def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf, octrl=None, f_oc=None):
     """in: [x0 x1 w] -> out [xn];  in: [x0 x1 w a0 a1] -> out [y0 y1 xm];  in: W x256 -> out [rout]
 
     With MOE_ONDEVICE_ROUTE the same core also emits the control stream: `octrl` is
-    drained to DDR and `cfg_in` carries [base_lo, base_hi] (the pool BO's DDR address),
-    so the fused layer needs no host between the router and the routed experts."""
+    drained to DDR, and the router's last input element is the [base_lo, base_hi] pool
+    BO address, so the fused layer needs no host between the router and the routed
+    experts."""
     e = ain.acquire(3)
     o = aout.acquire(1)
     f_nr(e[0], e[1], e[2], o)
@@ -651,12 +653,13 @@ def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf, octrl=None,
     o = aout.acquire(1)
     f_rf(acc, o)                                               # o = [p | idx | w]
     if f_oc is not None:
-        # on-device routing: idx (in `o`) + the pool base -> the control stream
-        ce = cfg_in.acquire(1)
+        # on-device routing: idx (in `o`) + the pool base (the router's last input
+        # element) -> the control stream
+        ce = ain.acquire(1)
         cb = octrl.acquire(1)
         f_oc(o, ce, cb)
         octrl.release(1)
-        cfg_in.release(1)
+        ain.release(1)
     aout.release(1)
 
 
