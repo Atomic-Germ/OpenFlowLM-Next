@@ -117,6 +117,7 @@ private:
   // cosines would catch, and do.
   std::vector<float> s_h_, s_qkv_, s_attn_, s_o_out_, s_fc1_h_, s_fc2_out_;
   std::vector<uint16_t> s_a_bf_, s_a_bf2_;
+  std::vector<float> s_attn_scratch_;   // 3 * t * d, attention()'s head gather
 };
 
 }  // namespace ow

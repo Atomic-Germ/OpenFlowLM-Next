@@ -94,7 +94,18 @@ struct AttnPhases {
   double scores = 0, softmax = 0, values = 0;
 };
 
+// `scratch` must hold 3 * t * d floats. The kernel gathers each head's Q, K and
+// V into it contiguously before computing, because in `qkv` consecutive K rows
+// are 3*d floats apart -- 15 KB at d = 1280 -- so every dot product of a 64-wide
+// head row touched a fresh cache line and the whole 23 MB tensor was re-streamed
+// once per query row. Gathered, one head's K is 384 KB and stays in L2 while
+// a block of query rows is scored against it.
+//
+// The arithmetic is UNCHANGED: each output element accumulates over t2 in the
+// same increasing order as before, so the result is bit-identical to the
+// row-at-a-time version. Only the order in which memory is touched differs.
 void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
-              int64_t heads, int64_t head_dim, float *out, AttnPhases *phases = nullptr);
+              int64_t heads, int64_t head_dim, float *out, float *scratch,
+              AttnPhases *phases = nullptr);
 
 }  // namespace ow

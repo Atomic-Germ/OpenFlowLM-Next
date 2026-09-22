@@ -67,6 +67,8 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   s_a_bf_.resize(n_d);
   s_fc1_h_.resize(static_cast<size_t>(m_padded) * static_cast<size_t>(FFN));
   s_a_bf2_.resize(static_cast<size_t>(m_padded) * static_cast<size_t>(FFN));
+  s_attn_scratch_.resize(static_cast<size_t>(3) * static_cast<size_t>(real_rows) *
+                        static_cast<size_t>(D));
   std::vector<float> &h = s_h_;
   std::vector<uint16_t> &a_bf = s_a_bf_;
   std::vector<float> &qkv = s_qkv_;
@@ -98,7 +100,7 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
     return e && *e && *e != '0';
   }();
   attention(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
-            phase_split ? &timers.attn_phases : nullptr);
+            s_attn_scratch_.data(), phase_split ? &timers.attn_phases : nullptr);
   timers.attention += now_s() - t0;
 
   t0 = now_s();

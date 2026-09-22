@@ -201,18 +201,33 @@ inline void axpy8(float *y, const float *x, float alpha, int64_t n) {
 }  // namespace
 
 void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t heads,
-              int64_t head_dim, float *out, AttnPhases *phases) {
+              int64_t head_dim, float *out, float *scratch, AttnPhases *phases) {
   zero_pad_rows(out, t, m_padded, d);
   const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
   const int64_t stride = 3 * d;
+  const int64_t hd = head_dim;
 
-  // MSVC's OpenMP is stuck at 2.0, which has no `collapse` -- flatten the
-  // (head, query row) index space into one loop by hand instead.
-  //
-  // Every (head, query row) output slice is disjoint, so this is safe to
-  // thread. It was serial for a while over a non-determinism that turned out
-  // to be the C-buffer write-back described above layer_norm(), not a race.
-  const int64_t work = heads * t;
+  // scratch layout: head-major [h][q|k|v][t][head_dim], each slice contiguous.
+  const int64_t slice = t * hd;
+  auto Q = [&](int64_t h) { return scratch + (h * 3 + 0) * slice; };
+  auto K = [&](int64_t h) { return scratch + (h * 3 + 1) * slice; };
+  auto V = [&](int64_t h) { return scratch + (h * 3 + 2) * slice; };
+
+  const int64_t gather_work = heads * t;
+#pragma omp parallel for schedule(static)
+  for (int64_t idx = 0; idx < gather_work; ++idx) {
+    const int64_t h = idx / t, t1 = idx % t;
+    const float *row = qkv + t1 * stride + h * hd;
+    std::memcpy(Q(h) + t1 * hd, row, static_cast<size_t>(hd) * sizeof(float));
+    std::memcpy(K(h) + t1 * hd, row + d, static_cast<size_t>(hd) * sizeof(float));
+    std::memcpy(V(h) + t1 * hd, row + 2 * d, static_cast<size_t>(hd) * sizeof(float));
+  }
+
+  // A block of query rows is scored against each K row in turn, so K (and then
+  // V) is read once per block rather than once per query row.
+  constexpr int64_t QB = 8;
+  const int64_t n_blocks = (t + QB - 1) / QB;
+  const int64_t work = heads * n_blocks;
   const bool timed = phases != nullptr;
   double acc_s = 0, acc_m = 0, acc_v = 0;
   auto tick = [timed]() {
@@ -222,41 +237,55 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
   };
 #pragma omp parallel reduction(+ : acc_s, acc_m, acc_v)
   {
-    std::vector<float> scores(static_cast<size_t>(t));
-#pragma omp for schedule(dynamic, 8)
-    for (int64_t idx = 0; idx < work; ++idx) {
-      const int64_t h = idx / t;
-      const int64_t t1 = idx % t;
-      {
-        const double c0 = tick();
-        const float *qrow = qkv + t1 * stride + h * head_dim;
+    std::vector<float> s(static_cast<size_t>(QB) * static_cast<size_t>(t));
+    std::vector<float> acc(static_cast<size_t>(QB) * static_cast<size_t>(head_dim));
+#pragma omp for schedule(dynamic, 1)
+    for (int64_t b = 0; b < work; ++b) {
+      const int64_t h = b / n_blocks;
+      const int64_t q0 = (b % n_blocks) * QB;
+      const int64_t nq = std::min<int64_t>(QB, t - q0);
+      const float *qh = Q(h), *kh = K(h), *vh = V(h);
+
+      const double c0 = tick();
+      for (int64_t t2 = 0; t2 < t; ++t2) {
+        const float *krow = kh + t2 * hd;
+        for (int64_t qi = 0; qi < nq; ++qi)
+          s[static_cast<size_t>(qi) * t + t2] = dot8(qh + (q0 + qi) * hd, krow, hd) * scale;
+      }
+      const double c1 = tick();
+      acc_s += c1 - c0;
+
+      // Row softmax, unchanged: max, exp, normalise, in that order.
+      float inv[QB];
+      for (int64_t qi = 0; qi < nq; ++qi) {
+        float *sr = &s[static_cast<size_t>(qi) * t];
         float mx = -std::numeric_limits<float>::infinity();
-        for (int64_t t2 = 0; t2 < t; ++t2) {
-          const float *krow = qkv + t2 * stride + d + h * head_dim;
-          const float s = dot8(qrow, krow, head_dim) * scale;
-          scores[static_cast<size_t>(t2)] = s;
-          if (s > mx) mx = s;
-        }
-        const double c1 = tick();
-        acc_s += c1 - c0;
+        for (int64_t t2 = 0; t2 < t; ++t2)
+          if (sr[t2] > mx) mx = sr[t2];
         float sum = 0.f;
         for (int64_t t2 = 0; t2 < t; ++t2) {
-          const float e = std::exp(scores[static_cast<size_t>(t2)] - mx);
-          scores[static_cast<size_t>(t2)] = e;
+          const float e = std::exp(sr[t2] - mx);
+          sr[t2] = e;
           sum += e;
         }
-        const double c2 = tick();
-        acc_m += c2 - c1;
-        const float inv = 1.0f / sum;
-        float *orow = out + t1 * d + h * head_dim;
-        std::memset(orow, 0, static_cast<size_t>(head_dim) * sizeof(float));
-        for (int64_t t2 = 0; t2 < t; ++t2) {
-          const float p = scores[static_cast<size_t>(t2)] * inv;
-          const float *vrow = qkv + t2 * stride + 2 * d + h * head_dim;
-          axpy8(orow, vrow, p, head_dim);
-        }
-        acc_v += tick() - c2;
+        inv[qi] = 1.0f / sum;
       }
+      const double c2 = tick();
+      acc_m += c2 - c1;
+
+      // P.V. Each output element still accumulates over t2 in increasing order,
+      // which is what keeps this bit-identical to the row-at-a-time version.
+      std::memset(acc.data(), 0, static_cast<size_t>(nq) * static_cast<size_t>(hd) * sizeof(float));
+      for (int64_t t2 = 0; t2 < t; ++t2) {
+        const float *vrow = vh + t2 * hd;
+        for (int64_t qi = 0; qi < nq; ++qi)
+          axpy8(&acc[static_cast<size_t>(qi) * hd], vrow,
+                s[static_cast<size_t>(qi) * t + t2] * inv[qi], hd);
+      }
+      for (int64_t qi = 0; qi < nq; ++qi)
+        std::memcpy(out + (q0 + qi) * d + h * hd, &acc[static_cast<size_t>(qi) * hd],
+                    static_cast<size_t>(hd) * sizeof(float));
+      acc_v += tick() - c2;
     }
   }
   if (phases) {
