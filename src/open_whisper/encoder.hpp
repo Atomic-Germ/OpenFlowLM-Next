@@ -33,6 +33,12 @@ struct Timers {
   // OW_ATTN_PHASES=1, because the split costs about 2% of the call.
   AttnPhases attn_phases;
   double npu_in = 0, npu_dispatch = 0, npu_out = 0;
+  // The StageHook's own cost, which is GATE work and not part of an encode:
+  // cli.cpp compares every stage against a float64 golden, 42 tensors of
+  // [1500, 1280]. It runs inside encode(), so before this bucket existed it sat
+  // in `total` unattributed -- about a quarter of it -- and flattered every
+  // other bucket's share. Zero when no hook is passed, which is production.
+  double hook = 0;
   double total = 0;
 };
 
@@ -96,6 +102,21 @@ private:
 
   std::vector<float> enc_out_;   // [1500, 1280], set by encode()
   std::vector<float> xkv_;       // [1500, 10240], set by encode()
+
+  // run_layer()'s scratch, allocated on the first layer and reused by every
+  // layer and every later call. It used to be eight local std::vectors, which
+  // is 106 MB per layer and 3.4 GB across 32 -- all value-initialised by the
+  // vector constructor and then immediately overwritten, and none of it inside
+  // any stage timer, so it was most of ENCODE's unattributed time.
+  //
+  // Reuse is safe because every one of these is written in full before it is
+  // read: layer_norm and gelu_bias write all m_padded rows, bf16_fill writes
+  // its whole size, three are a full-size memcpy of a GEMM's C, and attention
+  // writes rows [0, t) and then zero_pad_rows clears the rest. Nothing here
+  // can carry a previous layer's rows forward -- which the per-layer golden
+  // cosines would catch, and do.
+  std::vector<float> s_h_, s_qkv_, s_attn_, s_o_out_, s_fc1_h_, s_fc2_out_;
+  std::vector<uint16_t> s_a_bf_, s_a_bf2_;
 };
 
 }  // namespace ow

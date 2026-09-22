@@ -413,7 +413,19 @@ int main(int argc, char **argv) {
                t.npu_dispatch * 1e3);
     std::printf("  npu out-sync %8.1f ms  (host wall clock: sync_from_device)\n",
                t.npu_out * 1e3);
-    std::printf("  TOTAL        %8.1f ms  (host wall clock, end to end)\n", t.total * 1e3);
+    std::printf("  golden cmp   %8.1f ms  (GATE ONLY: float64 comparison of 42 stage "
+               "tensors; not part of an encode)\n",
+               t.hook * 1e3);
+    const double enc_only = t.total - t.hook;
+    std::printf("  ENCODE       %8.1f ms  (host wall clock, total minus the gate)\n",
+               enc_only * 1e3);
+    const double named = t.im2col + t.bf16 + t.layer_norm + t.gelu + t.bias + t.residual +
+                        t.attention + t.npu_in + t.npu_dispatch + t.npu_out;
+    std::printf("  unattributed %8.1f ms  (%.1f%% of ENCODE -- named buckets sum to %.1f ms)\n",
+               (enc_only - named) * 1e3,
+               enc_only > 0 ? 100.0 * (enc_only - named) / enc_only : 0.0, named * 1e3);
+    std::printf("  TOTAL        %8.1f ms  (host wall clock, end to end, gate included)\n",
+               t.total * 1e3);
 
   } catch (const std::exception &e) {
     std::fprintf(stderr, "open_whisper_cli: FAILED: %s\n", e.what());
