@@ -42,15 +42,24 @@ subtitle hallucination. Matching it would mean matching a lossy reference.
 - The bf16-operand replica is the **ceiling** any engine built on the bf16 GEMM can reach.
   Gates are calibrated from it, never set in advance.
 
-**Measured 2026-09-19** (float64 cosine over the 1500 real rows, six clips):
-`enc.out` **0.99571-0.99930**, cross K/V min 0.99454-0.99906, per-layer chained
-0.99966-0.99999, teacher-forced >= 0.9999980. That reproduces whisper-xdna's independent
-finding that 0.999 on `enc.out` is not reachable at 32-layer depth in bf16.
-The final LayerNorm amplifies the relative error about 3x (1.5-2.6e-2 before, 3.8-9.3e-2
-after).
+**Measured 2026-09-22**, on the corrected audio (float64 cosine over the 1500 real rows,
+six clips): `enc.out` **0.99600-0.99943**, cross K/V min 0.99485-0.99922, conv stem
+0.9999979-0.9999999. That reproduces whisper-xdna's independent finding that 0.999 on
+`enc.out` is not reachable at 32-layer depth in bf16. The final LayerNorm amplifies the
+relative error about 3x.
 
-**And it costs no tokens:** with the exact decoder on the bf16 replica's encoder output,
-all six transcripts are token-identical to float64 and 296/296 teacher-forced steps agree.
+**It costs a few tokens, and the number depends on the implementation.** With the exact
+decoder on the numpy replica's encoder output, 8 of 12 (clip, protocol) pairs are
+token-identical to float64 and 4 diverge. The earlier claim here -- "it costs no tokens",
+1 of 12 -- was measured against goldens built from **louder audio** (trap 28) and is
+withdrawn.
+
+**And the two bf16 implementations do not diverge on the same pairs.** The NPU engine
+matches float64 on 11 of 12, including three pairs where the numpy replica does not; the
+replica's fourth is the one the engine also takes. Both are bf16-operand paths, and they
+differ in accumulation order and in how attention is computed, so on a clip where a token
+is marginal they land on opposite sides of it. A bf16 "ceiling" is therefore a property of
+a datapath, not a single number two implementations must agree on.
 
 ### OPEN-WHISPER-SEAM: one engine interface, and no silent fallback between engines
 **Applies to:** `src/include/whisper/whisper_engine.hpp`, `src/common/whisper/whisper_engine_closed.cpp`
@@ -134,17 +143,17 @@ natively on Windows): all seven xclbins identical up to 70-78 bytes in 11-14 sho
   top of a later dispatch's result.
 - Two runs of the same clip give the same numbers.
 
-**Measured 2026-09-20** (idle machine, `open_whisper_cli --golden ... [--forced]`), both
-clips at the replica's bf16 ceiling and identical across runs to eight digits:
+**Measured 2026-09-22** on the corrected audio (`open_whisper_cli --golden ... --forced`),
+both clips at the replica's bf16 ceiling:
 
 | | Demos_sample-data_journal (replica) | nvidia (replica) |
 |---|---|---|
-| conv1 / conv2 | 0.99999785 / 0.99999992 (same) | 0.99999890 / 0.99999995 (same) |
-| chained `enc.hidden.1` | 0.99999810 (0.99999810) | 0.99999814 (0.99999814) |
-| chained `enc.hidden.32` | 0.99987223 (0.99988110) | 0.99991683 (0.99984733) |
-| `enc.out` | **0.99828836** (0.99822134) | **0.99906620** (0.99905335) |
-| cross K/V worst | 0.99788008 | 0.99901179 |
-| teacher-forced, all 32 layers | >= 0.99999827 | >= 0.99999825 |
+| conv1 / conv2 | 0.99999823 / 0.99999993 (same) | 0.99999860 / 0.99999993 (same) |
+| chained `enc.hidden.1` | 0.99999813 | 0.99999812 |
+| chained `enc.hidden.32` | 0.99988115 | 0.99992415 |
+| `enc.out` | **0.99810825** (0.99799226) | **0.99943178** (0.99922097) |
+| cross K/V worst | 0.99759194 | 0.99937406 |
+| teacher-forced, all 32 layers | >= 0.99999829 | >= 0.99999827 |
 
 Host wall clock, labelled as such and not an NPU figure: 4.4-4.8 s per 30 s window,
 attention ~4.3 s of it, NPU submit+wait ~1.6 s.
@@ -176,16 +185,14 @@ The cross K/V computed by the last `encode_audio()` stay, because the host calls
 - Free-running greedy under the host's own protocol reproduces the float64 transcript on
   the golden clips. Differences from the **closed** engine are reported, not treated as
   failures.
-**Measured 2026-09-20** (the decoder; end to end is phase 3b and still open):
-`open_whisper_cli --decode hf|host --baseline <file>` over six clips x two protocols,
-**12/12 pass**. Eleven reproduce transformers' float64 token path exactly, with
-teacher-forced argmax agreement 5/5 to 114/114 and logits cosine mean 0.99995-0.99999
-(min 0.99897). The twelfth, `output_voice_clone` under the host protocol, diverges at
-token 17 (`316` where float64 says `497`) -- and **the numpy replica diverges at the same
-index to the same token**, so that is the bf16 datapath, not this engine. That path is
-recorded by `whisper_decode_check.py --write-baseline` and the gate accepts it while still
-printing the float64 difference: a gate that cannot pass is one its reader learns to skip
-(T64).
+**Measured 2026-09-22** on the corrected audio: `open_whisper_cli --decode hf|host
+--baseline <file>` over six clips x two protocols, **12/12 pass**. Eleven reproduce
+transformers' float64 token path exactly, with teacher-forced argmax agreement 5/5 to
+114/114. The twelfth, `Demos_sample-data_journal` under the transformers protocol,
+diverges at token 5 and **matches the recorded bf16 path exactly** -- so that is the
+datapath, not this engine. `whisper_decode_check.py --write-baseline` records that path
+and the gate accepts it while still printing the float64 difference: a gate that cannot
+pass is one its reader learns to skip (T64).
 
 Decode cost, host wall clock and not an NPU figure: 12.5-14.6 ms/token, 69-80 tok/s.
 
