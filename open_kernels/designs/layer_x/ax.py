@@ -424,15 +424,19 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
             lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
             tg_r = TaskGroup()
             lni.fill(a_consts, tap=bt(CA_BYTES, CA_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
+            if ondv:
+                # The router's LAST input element, and it must be issued BEFORE the rout
+                # drain: the core holds the rout element until it has emitted the control
+                # stream, and it cannot emit that until it has the pool base -- so a drain
+                # first and a config after it deadlocks (measured: ERT timeout, and the
+                # run completes once the fill moves here).
+                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
             lno.drain(a_act, tap=bt(AA_BYTES, AA_ROUT, ELEM), wait=True, group=tg_r)
             tg_ln2.finish()
             tg_r.finish()
             if ondv:
                 # the pool base the router forms the retarget addresses against (its last
                 # input element), and the control stream it emits
-                tg_c = TaskGroup()
-                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_c)
-                tg_c.finish()
                 pcf = Pipeline(1)
                 pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
                 pcf.finish()

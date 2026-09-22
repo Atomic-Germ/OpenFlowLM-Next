@@ -447,21 +447,25 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
             tg_ln.finish()
             tg_r = TaskGroup()
             lni.fill(a_consts, tap=bt(C_BYTES, C_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
+            if ondv:
+                # The router's LAST input element, and it must be issued BEFORE the rout
+                # drain: the core holds the rout element until it has emitted the control
+                # stream, and it cannot emit that until it has the pool base -- so a drain
+                # first and a config after it deadlocks (measured: ERT timeout, and the
+                # run completes once the fill moves here).
+                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
             lno.drain(a_act, tap=bt(A_BYTES, A_ROUT, ELEM), wait=True, group=tg_r)
             tg_r.finish()
             if ondv:
                 # the pool base the router forms the retarget addresses against, and the
                 # control stream it emits -- two plain DDR round trips (the config is the
                 # router's LAST input element, so no extra shim channel)
-                tg_c = TaskGroup()
-                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_c)
-                tg_c.finish()
                 pcf = Pipeline(1)
                 pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
                 pcf.finish()
             pw.finish()
             px.finish()
-            if ondv:
+            if ondv and os.environ.get("ONDV_SKIP_MOE") != "1":
                 # the rest of the layer, one stream: the routed fills are configured but
                 # never enqueued and the control stream retargets + pushes them on-device
                 X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
