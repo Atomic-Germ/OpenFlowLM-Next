@@ -3,9 +3,9 @@ context (phase 2 "whole-layer context"; the linear-layer twin is lx.py):
 
     ln -> gemv q | gate | k | v -> attn -> gemv o -> ln (+residual) -> router -> MoE
 
-Same recipe as lx: 8 main cores (Tile(c, 2)) with the w / x / y streams run
-every GEMV then the MoE; the ln + router core (Tile(0, 3)) and the attention
-core (Tile(2, 3), attn.py's verbatim) are the helpers. Two instruction streams
+Same recipe as lx: 8 main cores (Tile(c, mrow)) with the w / x / y streams run
+every GEMV then the MoE; the ln + router core (Tile(0, hrow)) and the attention
+core (Tile(2, hrow), attn.py's verbatim) are the helpers. Two instruction streams
 on one xclbin (CompileTime `part`): 0 = everything up to the router, 1 = the
 MoE (after the driver's `moeroute2`).
 
@@ -86,7 +86,7 @@ for _k, _v in probe_env().items():                     # ATTN_NULL / ATTN_ABL: s
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via D.RB; FAST picks D itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 # The fast attention path (recipes/attnknobs.py, the same split designs/dense/dx.py
-# builds): ACORES cores at Tile(2 + c, 3), each owning NHL heads and draining its own og
+# builds): ACORES cores at Tile(2 + c, hrow), each owning NHL heads and draining its own og
 # element(s); RB cached rows per kernel call. At the defaults (1, NH, 1) every shape below
 # is the one this design always had, and the 27B / 35B kernels compile byte for byte.
 ACORES, NHL, RB = D.ACORES, D.NHL, D.RB
@@ -97,10 +97,10 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
        srchash: CompileTime[int] = 0):
     # the shipped design: the routed experts' fills are enqueued by the host and moeroute2
     # repoints them between the two dispatches (see ax_ondv for the fused path)
-    return _ax_build(pool, xres, consts, kv, act, ptab, None, None, part=part, srchash=srchash, ondv=False)
+    return _ax_build(pool, xres, consts, kv, act, ptab, None, None, part=part, srchash=srchash, ondv=False, mrow=2, hrow=3)
 
 
-def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=0, ondv=False):
+def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=0, ondv=False, mrow=2, hrow=3):
     t = X.types()
     tl = X.ln_types()
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
@@ -267,17 +267,17 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
             return body
 
     workers = [Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
-                      tile=Tile(0, 3), stack_size=0x1800)
+                      tile=Tile(0, hrow), stack_size=0x1800)
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
                                L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
                               + ([of_octrl.prod(), L["ondv_ctrl"]] if ondv else []),
-                      tile=Tile(0, 3), stack_size=0x1800)]
+                      tile=Tile(0, hrow), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
                               fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), *X.worker_args(X.core_buffers(t, c), K)],
-                              tile=Tile(c, 2), stack_size=0x1800))
+                              tile=Tile(c, mrow), stack_size=0x1800))
     def abufs(c):
         s = "" if c == 0 else str(c)
         return [Buffer(b256, name=f"qn{s}"), Buffer(b256, name=f"kn{s}"), Buffer(f64, name=f"cs{s}"),
@@ -287,11 +287,11 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
     workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
-                          tile=Tile(2, 3), stack_size=0x1800))
+                          tile=Tile(2, hrow), stack_size=0x1800))
     # The rest of the attention cores: same broadcast stream in, their own og out.
     for c in range(1, ACORES):
         workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
-                              tile=Tile(2 + c, 3), stack_size=0x1800))
+                              tile=Tile(2 + c, hrow), stack_size=0x1800))
 
     bt = X.bt
     BB_HID, BB_O = X.role_band_bytes("attn", HID), X.role_band_bytes("attn", O_K)
@@ -477,7 +477,7 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
 def ax_ondv(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, cfg: In, octrl: Out, *,
             part: CompileTime[int] = 0, srchash: CompileTime[int] = 0):
     """The fused whole-layer path for the full-attention layers (see lx_ondv)."""
-    return _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, part=part, srchash=srchash, ondv=True)
+    return _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, part=part, srchash=srchash, ondv=True, mrow=2, hrow=3)
 
 
 DESIGN = ax_ondv if X.ONDV else ax

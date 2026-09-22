@@ -4,12 +4,12 @@ context (phase 2 "whole-layer context", .claude/plans/open-kernels-phase2-whole-
     ln -> gemv qkv | z -> glue -> [DeltaNet: its own context, for now] -> post -> gemv out
        -> ln (+residual) -> router -> MoE (8 routed experts + shared + combine)
 
-The 8 main cores (one per column, Tile(c, 2)) run every GEMV and the MoE in
+The 8 main cores (one per column, Tile(c, mrow)) run every GEMV and the MoE in
 one core program fed by three streams each: w (10 KB elements from the shim:
 weights, the MoE header, experts), x (4 KB elements broadcast from the shim:
 xn, og, xm, the expert hidden h) and y (256 B elements to the shim: band
 results, the hidden parts, the block output). Helper cores: ln + router
-(Tile(0, 3)), post (Tile(1, 3)), glue (Tile(2, 3)). Shim budget: 13 fills,
+(Tile(0, hrow)), post (Tile(1, hrow)), glue (Tile(2, hrow)). Shim budget: 13 fills,
 11 drains. Cores do not know about dispatch boundaries -- they block on the
 next element -- so one xclbin serves THREE instruction streams (CompileTime
 `part`): 0 = ln -> qkv|z -> glue (the DeltaNet step runs in between, in
@@ -112,10 +112,10 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
        stop: CompileTime[int] = 99, srchash: CompileTime[int] = 0):
     # the shipped design: the routed experts' fills are enqueued by the host and
     # moeroute2 repoints them between the two dispatches (see lx_ondv for the fused path)
-    return _lx_build(pool, xres, consts, state, act, None, None, part=part, stop=stop, srchash=srchash, ondv=False)
+    return _lx_build(pool, xres, consts, state, act, None, None, part=part, stop=stop, srchash=srchash, ondv=False, mrow=2, hrow=3)
 
 
-def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, srchash=0, ondv=False):
+def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, srchash=0, ondv=False, mrow=2, hrow=3):
     t = X.types()
     tl = X.ln_types()
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
@@ -255,25 +255,25 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
             ain.release(2)
 
     workers = [Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
-                      tile=Tile(0, 3), stack_size=0x1800)
+                      tile=Tile(0, hrow), stack_size=0x1800)
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
                                L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
                               + ([of_octrl.prod(), L["ondv_ctrl"]] if ondv else []),
-                      tile=Tile(0, 3), stack_size=0x1800)]
+                      tile=Tile(0, hrow), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
                               fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), *X.worker_args(X.core_buffers(t, c), K)],
-                              tile=Tile(c, 2), stack_size=0x1800))
+                              tile=Tile(c, mrow), stack_size=0x1800))
     workers.append(Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), Buffer(nw_ty, name="nwb"), post_fn, post_copy],
-                          tile=Tile(1, 3), stack_size=0x1800))
+                          tile=Tile(1, hrow), stack_size=0x1800))
     workers.append(Worker(glue_body,
                           fn_args=[of_side.cons(), of_gact.cons(), of_gout.prod(),
                                    Buffer(f32, name="acc_a"), Buffer(f32, name="acc_b"), Buffer(f32, name="decay"),
                                    Buffer(f32, name="beta"), Buffer(fqk, name="qk"), Buffer(fvt, name="vt"), Buffer(fxn, name="xnb"),
                                    f_ab, f_small, f_conv, f_emit, f_copy],
-                          tile=Tile(2, 3), stack_size=0x1800))
+                          tile=Tile(2, hrow), stack_size=0x1800))
 
     bt = X.bt
     BB_HID, BB_OUT = X.role_band_bytes("linear", HID), X.role_band_bytes("linear_out", OUT_K)
@@ -515,7 +515,7 @@ def lx_ondv(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, cfg: In
     Two extra DDR buffers: `cfg` carries [base_lo, base_hi] = the MoE pool BO's DDR
     address (bo.address() + 0x8000_0000; the driver writes it, one per layer), and
     `octrl` receives the 8x8x15-word control stream the router emits."""
-    return _lx_build(pool, xres, consts, state, act, cfg, octrl, part=part, stop=stop, srchash=srchash, ondv=True)
+    return _lx_build(pool, xres, consts, state, act, cfg, octrl, part=part, stop=stop, srchash=srchash, ondv=True, mrow=2, hrow=3)
 
 
 DESIGN = lx_ondv if X.ONDV else lx
