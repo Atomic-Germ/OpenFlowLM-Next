@@ -159,10 +159,13 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # 4.32 -> 3.75 at 4000 -- the per-row cost fell only ~15 %, so what the block
         # amortises was never most of it (an ATTN_NULL build puts the walk ~80 % arithmetic).
         # 48 identical greedy tokens after 1122 of prompt, then a 0.045-logit near-tie.
+        # ... and FOUR there since 2026-09-22 (Track E): the attention core's soft-float
+        # (__mulsf3 / __divsf3 for three scalar operations) went to attn.h ATTN_INTFP's
+        # integer routines, bit-identical, which is what makes RB 4 fit with room to spare.
         # An unmeasured gated family keeps 1.
         gated256 = spec.head_dim >= 256 and spec.attn_gate
         block_ok = gated256 and spec.family in BLOCK_ONLY_MEASURED
-        cap = 4 if spec.head_dim < 256 else (2 if block_ok else (1 if (spec.attn_gate or nhl > 2) else 2))
+        cap = 4 if (spec.head_dim < 256 or block_ok) else (1 if (spec.attn_gate or nhl > 2) else 2)
         rb = max((r for r in (4, 2, 1) if r <= cap and (r * block_lanes(nhl)) in (8, 16, 32)), default=1)
         rb = _probe_rb(rb, nhl)
         # The retirement is the block kernel's OWN cost model, so it follows rb: an

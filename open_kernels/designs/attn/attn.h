@@ -105,6 +105,18 @@
 // ATTN_NHL < 8. 0 = the path every other family compiles, byte for byte.
 #define ATTN_BLOCK_ONLY 0
 #endif
+#ifndef ATTN_INTFP
+// 1: the three scalar float operations the core cannot do natively -- the RMS scale and
+// the Newton steps of norm_rope's 1/sqrt, and attn_fin_impl's 1/l -- go through
+// scalar_fp.h's integer routines instead of compiler-rt's __mulsf3 / __divsf3. Same
+// IEEE round-to-nearest-even results bit for bit (utilities/scalar_fp_test.cpp), ~1.8 KB
+// less program memory. On with the block-only path, the one core that needs the room;
+// 0 = the path every other family compiles, byte for byte.
+#define ATTN_INTFP ATTN_BLOCK_ONLY
+#endif
+#if ATTN_INTFP
+#include "scalar_fp.h"
+#endif
 #if ATTN_BLOCK_ONLY && (ATTN_RB < 2 || !ATTN_VEXP)
 #error "attn.h: ATTN_BLOCK_ONLY needs the block kernel (ATTN_RB > 1) on the vector-softmax path (ATTN_VEXP)"
 #endif
@@ -307,7 +319,16 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
   }
+#if ATTN_INTFP
+  // vecmath.h's srsqrt, step for step, with each product through smul_rn
+  const float ms = smul_rn(aie::reduce_add(ss.template to_vector<float>()), 1.0f / kHD) + ATTN_EPS;
+  const float hx = smul_rn(0.5f, ms);
+  float inv = aie::invsqrt(ms);
+  inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
+  inv = smul_rn(inv, 1.5f - smul_rn(smul_rn(hx, inv), inv));
+#else
   const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + ATTN_EPS);
+#endif
   const bfloat16 ih = (bfloat16)inv;
   const bfloat16 il = (bfloat16)(inv - (float)ih);
   for (unsigned j = 0; j < kHD; j += kV) {
@@ -817,7 +838,11 @@ __attribute__((noinline)) inline void attn_fin_impl(const float *__restrict oacc
   aie::set_rounding(aie::rounding_mode::conv_even);
   for (unsigned i = 0; i < kOGH; ++i) {
     const unsigned h = kOGH * hp + i;
+#if ATTN_INTFP
+    const float inv = srecip_rn(ml[kMLS + h]);   // l >= 1: normal, and so is 1/l
+#else
     const float inv = 1.0f / ml[kMLS + h];
+#endif
     const float *o = oacc + h * kHD;
 #if ATTN_GATE
     const float *g = (i < kHPE) ? (g0 + i * kHD) : (g1 + (i - kHPE) * kHD);

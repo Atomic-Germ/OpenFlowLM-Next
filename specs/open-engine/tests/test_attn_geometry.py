@@ -115,7 +115,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # through attn_stepb and the block masks the padding rows. Qwen3.5 is the same head dim and
 # gate but has not been compared on it, so it keeps RB 1: this list is measurement, not
 # declaration, exactly like FAST_ATTENTION.
-MOE_FAST = {"qwen36-35b-a3b.json": (4, 4, 2, 1), "qwen35-9b.json": (4, 4, 1, 0)}
+MOE_FAST = {"qwen36-35b-a3b.json": (4, 4, 4, 1), "qwen35-9b.json": (4, 4, 1, 0)}
 
 
 @pytest.mark.parametrize("name", sorted(MOE_FAST))
@@ -150,7 +150,7 @@ def test_block_only_needs_the_manifest_to_carry_rb(unvalidated, monkeypatch):
     the manifest beside the kernel and is absent when nothing blocks."""
     monkeypatch.delenv("ATTN_FAST", raising=False)
     p = Q36.programs(load_spec(SPECS / "qwen36-35b-a3b.json"))
-    assert p["kernels"]["ax0"]["rb"] == 2
+    assert p["kernels"]["ax0"]["rb"] == 4
     assert "rb" not in p["kernels"]["ax1"] and "rb" not in p["kernels"]["lx0"]
 
 
