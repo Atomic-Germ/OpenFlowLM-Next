@@ -178,9 +178,28 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 2 with the single-row kernel retired; Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+- **Retiring the single-row kernel** (`attn.h ATTN_BLOCK_ONLY`, set only by
+  `designs/layer_x/ax.py`) is what lets head dim 256 WITH the output gate block at
+  all: the gate's exponential and reciprocal are on the attention core, and a plain
+  `ATTN_RB=2` overflows its 16 KB of program memory beside the single-row path. On
+  that path every row goes through `attn_stepb`, including the new position's: the
+  driver streams `RB*ceil((valid+1)/RB) - 1` cached rows, the kernel runs `pb[4] =
+  pb[0] / RB` full blocks off the fifo and peels the last one (`attn_stepb_new`,
+  whose final slot is the new row from core scratch), and the padding rows between
+  `pos` and the end of that block are masked with `-1e30` -- the same mechanism the
+  kernel already uses for padding LANES. A family joins by the same rule
+  `FAST_ATTENTION` uses, measurement not declaration: `BLOCK_ONLY_MEASURED` holds
+  `qwen36moe` only, and Qwen3.5 keeps RB 1 at the same head dim and gate until
+  someone runs the compare. `BLOCK` follows `RB`: an `ATTN_RB=1` probe on a measured
+  family gets the single-row kernel back.
+- The rows-per-call travels in the manifest beside the kernel (`kernels.ax0.rb`) and
+  `stream_patch::attn_apply` pads the streamed row count from it. It has to: the
+  kernel derives its own block count from the same position record, and a kernel
+  built one way against a driver patching the other way deadlocks on the `ain` fifo
+  rather than answering wrongly. Absent means 1.
 
 **Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
 directory; one decode step at positions 0 / 256 / 1024 / 2048 through

@@ -153,8 +153,9 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # ... and, since 2026-09-22, TWO at 256 with the gate on a family that has been
         # measured on the block-only path (BLOCK_ONLY_MEASURED): there the single-row
         # kernel is not built at all, which frees about a kilobyte of program memory --
-        # the 35B's attention cores went 14,256 -> 15,472 of 16,384 bytes, and `ax0` at
-        # 4000 tokens of context went 4.27 -> 1.10 ms. An unmeasured gated family keeps 1.
+        # the tightest of the 35B's four attention cores was at 14,256 of 16,384 bytes
+        # with the single-row kernel and PENDING_SIZE with the block one. `ax0` at
+        # PENDING_MS. An unmeasured gated family keeps 1.
         gated256 = spec.head_dim >= 256 and spec.attn_gate
         block_ok = gated256 and spec.family in BLOCK_ONLY_MEASURED
         cap = 4 if spec.head_dim < 256 else (2 if block_ok else (1 if (spec.attn_gate or nhl > 2) else 2))

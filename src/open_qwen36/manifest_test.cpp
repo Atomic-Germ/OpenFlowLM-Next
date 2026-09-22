@@ -103,9 +103,16 @@ int main(int argc, char** argv) {
         check(rows(0, 2) == 1 && rows(1, 2) == 1 && rows(2, 2) == 3 && rows(3, 2) == 3 &&
               rows(4, 2) == 5 && rows(1000, 2) == 1001, "attn_apply: rows padded to whole blocks of 2");
         check(rows(0, 1) == 1 && rows(2, 1) == 2 && rows(1000, 1) == 1000, "attn_apply: rb 1 is the window's own count");
-        bool top = true;
-        for (uint64_t pos = 0; pos < 64; ++pos) top = top && rows(pos, 2) - 1 <= pos;
+        bool top = true, fits = true;
+        for (uint64_t pos = 0; pos < 64; ++pos) {
+            top = top && rows(pos, 2) - 1 <= pos;
+            // What attn_meta_impl will do with the same position: pb[4] = pb[0] / kRB full
+            // blocks off the fifo, then one peeled block of kRB - 1 more. If that is not
+            // exactly what the fill delivers, the core blocks forever on an acquire.
+            for (uint64_t rb = 2; rb <= 4; rb *= 2) fits = fits && rb * (pos / rb) + rb - 1 == rows(pos, rb);
+        }
         check(top, "attn_apply: the padded window never reads past the position's own row");
+        check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
     }
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
