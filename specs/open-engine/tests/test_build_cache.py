@@ -67,23 +67,25 @@ def _granite_spec():
 
 
 def test_a_probe_build_does_not_share_a_key_with_a_real_one(monkeypatch):
-    """ATTN_NULL / ATTN_ABL / ATTN_RB change the compiled kernel, and build_key
-    hashes sources + spec + quant -- which cannot see an environment variable.
-    Without them in the key, exporting a probe and then a real build reuses the
-    probe's artifacts, because export_qwen36_kernels.py skips a build whose key
-    the destination already carries. That ships a kernel set computing nothing,
-    silently."""
-    for var in ("ATTN_NULL", "ATTN_ABL", "ATTN_RB"):
+    """ATTN_NULL / ATTN_ABL / ATTN_RB and the layer_x LX_NULL_DN / LX_NULL_GEMV
+    change the compiled kernel, and build_key hashes sources + spec + quant --
+    which cannot see an environment variable. Without them in the key, exporting
+    a probe and then a real build reuses the probe's artifacts, because
+    export_qwen36_kernels.py skips a build whose key the destination already
+    carries. That ships a kernel set computing nothing, silently."""
+    probes = (("ATTN_NULL", "1"), ("ATTN_ABL", "1"), ("ATTN_RB", "2"),
+              ("LX_NULL_DN", "1"), ("LX_NULL_GEMV", "1"))
+    for var, _ in probes:
         monkeypatch.delenv(var, raising=False)
     spec = _granite_spec()
     clean = build_key(spec)
 
     keys = {clean}
-    for var, value in (("ATTN_NULL", "1"), ("ATTN_ABL", "1"), ("ATTN_RB", "2")):
+    for var, value in probes:
         monkeypatch.setenv(var, value)
         keys.add(build_key(spec))
         monkeypatch.delenv(var)
-    assert len(keys) == 4, "each probe must give the key a value of its own"
+    assert len(keys) == 1 + len(probes), "each probe must give the key a value of its own"
 
     # ...and with nothing set the key must be exactly where it was, so adding
     # this did not invalidate every already-built set in the tree.
