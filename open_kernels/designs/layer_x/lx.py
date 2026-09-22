@@ -38,7 +38,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernel import ExternalFunction
@@ -107,6 +107,12 @@ def rows3(t: int):
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
 def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: CompileTime[int] = 0,
        stop: CompileTime[int] = 99, srchash: CompileTime[int] = 0):
+    # the shipped design: the routed experts' fills are enqueued by the host and
+    # moeroute2 repoints them between the two dispatches (see lx_ondv for the fused path)
+    return _lx_build(pool, xres, consts, state, act, None, None, part=part, stop=stop, srchash=srchash, ondv=False)
+
+
+def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, srchash=0, ondv=False):
     t = X.types()
     tl = X.ln_types()
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
@@ -155,6 +161,10 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     of_gout = ObjectFifo(u8_2k, name="gout", depth=3)
     of_pin = ObjectFifo(u8_4k, name="pin", depth=2)        # [nw][o g][z g]...
     of_pout = ObjectFifo(u8_2k, name="pout", depth=2)      # og per group
+    # on-device routing (lx_ondv): the router core's control stream, and the pool-base
+    # config it is generated against
+    of_ocfg = ObjectFifo(tl["u8_cfg"], name="ocfg", depth=1) if ondv else None
+    of_octrl = ObjectFifo(u8_4k, name="octrl", depth=1) if ondv else None
 
     # ---- cores
     def main_body(win, xin, yout, *args):
@@ -240,7 +250,8 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
-                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]],
+                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
+                              + ([of_octrl.prod(), of_ocfg.cons(), L["ondv_ctrl"]] if ondv else []),
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
@@ -345,7 +356,10 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         pw.finish()
         px.finish()
 
-    def sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c):
+    def sequence(*a):
+        (a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
+         side_p, gact_p, gout_c, pin_p, pout_c) = a[:15]
+        a_cfg, a_octrl, cfg_p, octrl_c = (a[15], a[16], a[17], a[18]) if ondv else (None, None, None, None)
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
                            side_p, gact_p, gout_c, pin_p, pout_c)
@@ -417,6 +431,13 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             lni.fill(a_consts, tap=bt(C_BYTES, C_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
             lno.drain(a_act, tap=bt(A_BYTES, A_ROUT, ELEM), wait=True, group=tg_r)
             tg_r.finish()
+            if ondv:
+                # the pool base the router forms the retarget addresses against, and the
+                # control stream it emits -- both plain DDR round trips, no host patch
+                pcf = Pipeline(1)
+                pcf.fill(cfg_p, a_cfg, bt(32, 0, 8))
+                pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
+                pcf.finish()
             pw.finish()
             px.finish()
         else:
@@ -424,17 +445,36 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
                            A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW)
 
-    rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, state_ty, act_ty,
-                            of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                            [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_x.prod(tile=Tile(1, 0)),
-                            [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
-                            of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0))])
+    rt_args = [pool_ty, xres_ty, consts_ty, state_ty, act_ty,
+               of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
+               [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+               of_x.prod(tile=Tile(1, 0)),
+               [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
+               of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
+               of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0))]
+    if ondv:
+        # the fused path's two extra DDR round trips: the pool-base config in, the
+        # router's control stream out (the driver writes the former, the control
+        # streams read the latter)
+        rt_args += [tl["u8_cfg"], np.ndarray[(ELEM,), np.dtype[np.uint8]],
+                    of_ocfg.prod(tile=Tile(5, 0)), of_octrl.cons(tile=Tile(5, 0))]
+    rt = Runtime(sequence, rt_args)
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
-DESIGN = lx
+@iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
+def lx_ondv(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, cfg: In, octrl: Out, *,
+            part: CompileTime[int] = 0, stop: CompileTime[int] = 99, srchash: CompileTime[int] = 0):
+    """The fused whole-layer path: the router helper core emits the routed-expert
+    retarget+enqueue control words on-device, so the layer is ONE instruction stream.
+
+    Two extra DDR buffers: `cfg` carries [base_lo, base_hi] = the MoE pool BO's DDR
+    address (bo.address() + 0x8000_0000; the driver writes it, one per layer), and
+    `octrl` receives the 8x8x15-word control stream the router emits."""
+    return _lx_build(pool, xres, consts, state, act, cfg, octrl, part=part, stop=stop, srchash=srchash, ondv=True)
+
+
+DESIGN = lx_ondv if X.ONDV else lx
 _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.read_bytes() for f in HERE.glob("*.h"))
                 + [(HERE / "xcommon.py").read_bytes()] + X.source_hash_inputs()
                 + sorted(f.read_bytes() for f in GLUE.glob("*.cc")) + sorted(f.read_bytes() for f in GLUE.glob("*.h"))

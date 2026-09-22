@@ -566,8 +566,13 @@ def ln_types():
     (8 KB at HID 4096) and splits the outputs one per call, as designs/dense/dx.py does."""
     if KIND == "dense":
         return dict(u8_ln=np.ndarray[(ELN,), np.dtype[np.uint8]])
-    return dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
-                racc=np.ndarray[(SPEC.num_experts,), np.dtype[np.float32]])
+    t = dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
+             racc=np.ndarray[(SPEC.num_experts,), np.dtype[np.float32]])
+    if ONDV:
+        # the router core's L1 is nearly full: the pool-base config is 8 bytes, so give it
+        # its own 32-byte element instead of a 4 KB one
+        t["u8_cfg"] = np.ndarray[(32,), np.dtype[np.uint8]]
+    return t
 
 
 def ln_kernels(inc, t):
@@ -588,6 +593,12 @@ def ln_kernels(inc, t):
     k["rcopy"] = ExternalFunction("router_copy_x", source_file=str(RT / "router_copy.cc"), arg_types=[u, t["xb"]], include_dirs=inc)
     k["racc"] = ExternalFunction("router_acc", source_file=str(RT / "router.cc"), arg_types=[u, t["xb"], t["racc"], np.int32], include_dirs=inc)
     k["rfin"] = ExternalFunction("router_fin", source_file=str(RT / "router_fin.cc"), arg_types=[t["racc"], u], include_dirs=inc)
+    if ONDV:
+        # on-device routing: the router's own top-8 -> the retarget+enqueue control words
+        # (designs/router/ondv_ctrl.{h,cc}); u8_4k for [rout | idx | w], the 2-word config
+        # and the 8x8x15-word control stream
+        k["ondv_ctrl"] = ExternalFunction("ondv_ctrl", source_file=str(RT / "ondv_ctrl.cc"),
+                                          arg_types=[u, t["u8_cfg"], u], include_dirs=inc + [str(RT)])
     return k
 
 
@@ -616,8 +627,12 @@ def ln_body(ain, aout, f_nr, f_lny, f_lnx):
         ain.release(5)
 
 
-def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf):
-    """in: [x0 x1 w] -> out [xn];  in: [x0 x1 w a0 a1] -> out [y0 y1 xm];  in: W x256 -> out [rout]"""
+def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf, octrl=None, cfg_in=None, f_oc=None):
+    """in: [x0 x1 w] -> out [xn];  in: [x0 x1 w a0 a1] -> out [y0 y1 xm];  in: W x256 -> out [rout]
+
+    With MOE_ONDEVICE_ROUTE the same core also emits the control stream: `octrl` is
+    drained to DDR and `cfg_in` carries [base_lo, base_hi] (the pool BO's DDR address),
+    so the fused layer needs no host between the router and the routed experts."""
     e = ain.acquire(3)
     o = aout.acquire(1)
     f_nr(e[0], e[1], e[2], o)
@@ -634,7 +649,14 @@ def ln_router_body(ain, aout, xs, acc, f_nr, f_ln, f_rc, f_ra, f_rf):
         f_ra(e, xs, acc, rb)
         ain.release(1)
     o = aout.acquire(1)
-    f_rf(acc, o)
+    f_rf(acc, o)                                               # o = [p | idx | w]
+    if f_oc is not None:
+        # on-device routing: idx (in `o`) + the pool base -> the control stream
+        ce = cfg_in.acquire(1)
+        cb = octrl.acquire(1)
+        f_oc(o, ce, cb)
+        octrl.release(1)
+        cfg_in.release(1)
     aout.release(1)
 
 
