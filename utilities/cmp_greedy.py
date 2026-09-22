@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 
 
-def load(prefix: Path, i: int) -> np.ndarray | None:
-    p = Path(str(prefix) + f"_t{i}.bin")
+def load(prefix: Path, i: int, kind: str = "t") -> np.ndarray | None:
+    p = Path(str(prefix) + f"_{kind}{i}.bin")
     if not p.is_file():
         return None
     return np.fromfile(p, np.float32)
@@ -31,13 +31,20 @@ def main() -> int:
     ap.add_argument("ref")
     ap.add_argument("new")
     ap.add_argument("--n", type=int, default=64)
+    ap.add_argument("--kind", default="t", choices=("t", "p"),
+                    help="t = the decode loop's _t<i> dumps (greedy, each run feeds itself); "
+                         "p = --prefill-logits' _p<position> dumps (teacher-forced: both runs see "
+                         "the same ids, so a difference never compounds)")
+    ap.add_argument("--start", type=int, default=0, help="first index (a _p dump is position-numbered)")
     a = ap.parse_args()
 
     first_div = None
     rows = []
-    for i in range(a.n):
-        r, n = load(Path(a.ref), i), load(Path(a.new), i)
+    for i in range(a.start, a.start + a.n):
+        r, n = load(Path(a.ref), i, a.kind), load(Path(a.new), i, a.kind)
         if r is None or n is None:
+            if a.kind == "p":
+                continue
             break
         if r.shape != n.shape:
             print(f"t{i}: shape {r.shape} vs {n.shape}")
@@ -62,6 +69,14 @@ def main() -> int:
         print(f"{i:>4} {ar:>8} {an:>8} {corr:>12.7f} {mx:>10.5f} {gap:>9.5f}{flag}")
     cmin = min(r[3] for r in rows)
     print(f"\n{len(rows)} positions, corr min {cmin:.7f}")
+    if a.kind == "p":
+        # Teacher-forced, so each position stands alone. The block-only walk masks a
+        # padding row only when the cached-row count is EVEN; a masking bug shows up as
+        # the even positions being systematically worse than the odd ones.
+        for par, name in ((0, "even (a padding row masked)"), (1, "odd (no padding)")):
+            c = [r[3] for r in rows if r[0] % 2 == par]
+            if c:
+                print(f"  {name:30s} n={len(c):3d}  corr min {min(c):.7f}  median {float(np.median(c)):.7f}")
     if first_div is None:
         print(f"IDENTICAL: {len(rows)}/{len(rows)} argmax agree")
         return 0
