@@ -107,7 +107,7 @@ def rows3(t: int):
     return TensorAccessPattern((1, STATE_BYTES), t * TILE * 2, [1, 1, CONV_ROWS, TILE * 2], [0, 0, NCH * 2, 1])
 
 
-@iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
+@iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"] + (["--generate-ctrl-pkt-overlay"] if os.environ.get("ONDV_CTRL_OVERLAY") == "1" else []))
 def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: CompileTime[int] = 0,
        stop: CompileTime[int] = 99, srchash: CompileTime[int] = 0):
     # the shipped design: the routed experts' fills are enqueued by the host and
@@ -518,7 +518,7 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
-@iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
+@iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"] + (["--generate-ctrl-pkt-overlay"] if os.environ.get("ONDV_CTRL_OVERLAY") == "1" else []))
 def lx_ondv(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, cfg: In, octrl: Out, *,
             part: CompileTime[int] = 0, stop: CompileTime[int] = 99, srchash: CompileTime[int] = 0):
     """The fused whole-layer path: the router helper core emits the routed-expert
