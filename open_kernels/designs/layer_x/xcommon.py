@@ -500,10 +500,21 @@ def dn_body(win, yout, B, K):
 
 def dn_sequence(pipe_w, pipe_y, a_state, a_act, w_prods, y_conss, A_BYTES, A_VEC, A_O, STATE_BYTES, STATE_S_OFF,
                 S_HEAD_BYTES):
-    """Per core, per head: the record, S twice (pass 1, pass 2), S' back in place, o -> act[A_O]."""
+    """Per head, per core: the record, S twice (pass 1, pass 2), S' back in place, o -> act[A_O].
+
+    HEAD-major, not core-major. Each endpoint's transfers are issued in exactly the order
+    they always were (so every core consumes and produces the same element sequence), but
+    the Pipeline throttle (3 outstanding per shim channel) turns its 4th transfer on an
+    endpoint into a WAIT on that endpoint's oldest. Issued core-major, core 0's own queue
+    filled first, and the stream stopped on core 0's head-0..2 drains -- i.e. until core 0
+    had finished three of its four heads -- before it issued a single transfer for core 1.
+    The eight cores ran their DeltaNet heads one after another, about 25 head-times where
+    4 do. Head-major, the wait for core c's head h-1 comes after every core's head h-1 has
+    been issued, so the cores run their heads side by side and the waits resolve together.
+    """
     rec, ohb = R.linear.RECORD_BYTES, R.linear.O_HEAD_BYTES
-    for c in range(N_CORES):
-        for h in range(DN_HEADS_PC):
+    for h in range(DN_HEADS_PC):
+        for c in range(N_CORES):
             hd = c * DN_HEADS_PC + h
             pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_VEC + hd * rec, CALL_BYTES))
             pipe_w.fill(w_prods[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
