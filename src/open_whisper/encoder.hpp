@@ -37,10 +37,11 @@ struct Timers {
   // each shape's own DRAM traffic rather than against one aggregate.
   double npu_disp_op[static_cast<size_t>(Op::Count)] = {};
   // The StageHook's own cost, which is GATE work and not part of an encode:
-  // cli.cpp compares every stage against a float64 golden, 42 tensors of
-  // [1500, 1280]. It runs inside encode(), so before this bucket existed it sat
-  // in `total` unattributed -- about a quarter of it -- and flattered every
-  // other bucket's share. Zero when no hook is passed, which is production.
+  // cli.cpp compares every stage against a float64 golden, 43 tensors (conv1,
+  // conv2, 32 layer outputs, enc.out, 8 decoder cross-attention K/V), all
+  // [1500, 1280] but conv1's 3000 rows. It runs inside encode(), so before this
+  // bucket existed it sat in `total` unattributed -- about a quarter of it --
+  // and flattered every other bucket's share. Zero when no hook is passed, which is production.
   double hook = 0;
   double total = 0;
 };

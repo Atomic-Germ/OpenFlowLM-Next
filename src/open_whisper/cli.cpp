@@ -446,9 +446,9 @@ int main(int argc, char **argv) {
                t.npu_dispatch > 0 ? tot_bytes / 1e9 / t.npu_dispatch : 0.0);
     std::printf("  npu out-sync %8.1f ms  (host wall clock: sync_from_device)\n",
                t.npu_out * 1e3);
-    std::printf("  golden cmp   %8.1f ms  (GATE ONLY: float64 comparison of 42 stage "
+    std::printf("  golden cmp   %8.1f ms  (GATE ONLY: float64 comparison of %zu stage "
                "tensors; not part of an encode)\n",
-               t.hook * 1e3);
+               t.hook * 1e3, rows.size());
     const double enc_only = t.total - t.hook;
     std::printf("  ENCODE       %8.1f ms  (host wall clock, total minus the gate)\n",
                enc_only * 1e3);
