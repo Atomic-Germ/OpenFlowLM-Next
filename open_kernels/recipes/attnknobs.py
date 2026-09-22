@@ -155,8 +155,9 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # kernel is not built at all, and that pays for the block kernel: the tightest of
         # the 35B's four attention cores went 14,256 -> 15,248 of 16,384 bytes (a plain
         # ATTN_RB=2 beside the single-row kernel overflowed). `ax0` alone, clean box,
-        # alternated pairs: 0.94 -> 0.67 ms at position 1, 4.32 -> 3.75 at 4000 -- the
-        # per-row cost fell only ~15 %, so what the block amortises was never most of it.
+        # alternated pairs: ~0.7 ms at position 1 either way, 1.63 -> 1.50 at 1024 and
+        # 4.32 -> 3.75 at 4000 -- the per-row cost fell only ~15 %, so what the block
+        # amortises was never most of it (an ATTN_NULL build puts the walk ~80 % arithmetic).
         # 48 identical greedy tokens after 1122 of prompt, then a 0.045-logit near-tie.
         # An unmeasured gated family keeps 1.
         gated256 = spec.head_dim >= 256 and spec.attn_gate

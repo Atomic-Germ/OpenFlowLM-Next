@@ -255,6 +255,47 @@ end, since it is the round that starts with the first one's answer in context.
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
 
+**Measured (2026-09-22, the 35B at RB 2 with the single-row kernel retired):**
+`ax0` was the only decode dispatch that grew with the prompt, and the 35B was the one
+fast family with no row block: at head dim 256 with the output gate, the block kernel
+did not fit beside the single-row one in the attention core's 16 KB. Retiring the
+single-row kernel pays for it -- the tightest of the four attention cores went 14,256 ->
+15,248 bytes -- and every other family's attention translation units are token-identical
+to what they were (`utilities/attn_pp_identical.sh`: 29/29 at Gemma3-4B, Qwen3-4B and the
+35B's previous flags). `ax0` alone, minimum of 20, clean box, the reference set and the
+candidate alternated per position:
+
+| position | 1 | 256 | 1024 | 2048 | 4000 |
+|---|---|---|---|---|---|
+| RB 1 (reference set) | 0.94* | 0.95 | 1.63 | 2.57 | 4.32 ms |
+| RB 2, block-only | 0.67 | 0.86 | 1.50 | 2.25 | 3.75 ms |
+
+\* the first dispatch of the hold; RB 1 reads 0.71 at position 1 elsewhere, and the
+blocked kernels 0.63-0.67, so position 1 is roughly unchanged.
+
+Greedy continuation after the 1122-token prompt (block prefill, so the prefill KV is
+identical): 48 identical tokens, then a flip at a 0.045-logit near-tie that every blocked
+variant hits at the same position. Teacher-forced over 64 positions: 64/64 argmax, and
+positions 0 and 2 -- each with a masked padding row -- bit-identical to RB 1; the even
+(masked) and odd positions have the same median corr (0.99929 / 0.99920), so the mask
+adds nothing. The corr spread elsewhere (min 0.984) is the routed experts flipping on
+near-ties, as recorded for this family's first fast-attention pass.
+
+What it did NOT do is make the walk flat, and the reason is now measured rather than
+guessed. The block amortises q reloads, the accumulator rescale and the exponential;
+those were only ~15 % of a row (0.90 -> 0.77 us/row). An `ATTN_NULL` build (every fifo
+transfer kept, no arithmetic) puts `ax0` at 1.28 ms at 4000, so the walk is ~80 %
+arithmetic and ~0.16 us/row of stream, and the 2026-09-22 target of 1.2 ms at 4000 is
+the stream floor itself. `kernel_remarks --arch aie2p` says no loop in the block kernel
+is software-pipelined; per (head, row) the score costs ~90 cycles of which the
+`reduce_add` is 66. RB 4 fits with 32 bytes to spare and reaches 3.05-3.2 ms at 4000,
+correct by the same gates, but is not adopted on that margin. An `aie::mmul` score phase
+(commit 57addcca) fits and is correct but is slower: building its A tile from four
+128-bit K loads is shuffle-bound (223 bundles per four k-steps against a ResMII of 116).
+The remaining levers are a K layout that makes that tile one load, pipelining the
+reduction, and the `ain` stream's own rate. Detail:
+`.claude/plans/decode-gap-2026-09-22/track-a.md`.
+
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
 Until an og element was NHL wide, ACORES was the largest divisor of `NH / HPO`,
