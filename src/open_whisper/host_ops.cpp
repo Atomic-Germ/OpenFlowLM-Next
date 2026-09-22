@@ -239,6 +239,20 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
   {
     std::vector<float> s(static_cast<size_t>(QB) * static_cast<size_t>(t));
     std::vector<float> acc(static_cast<size_t>(QB) * static_cast<size_t>(head_dim));
+    // DYNAMIC, and the obvious-looking alternative was measured and is worse.
+    // `b` is head-major, so schedule(static) gives each thread a contiguous run
+    // inside ONE head and keeps that head's K and V (384 KB each) in its private
+    // cache -- which is the wrong optimisation, because it then has one thread
+    // per head and 24 different heads live at once. Under dynamic the threads
+    // move through the same head together and share one copy. Measured on the
+    // nvidia golden: attention 1548.0 ms dynamic, 1892.9 ms static. The shared
+    // cache beats the private one here.
+    //
+    // A vectorised exp for the softmax below was also built and REJECTED: 1 ulp
+    // against expf (measured 1.192e-07), 3.0x on the softmax phase and 1.18x on
+    // attention -- and it cost one of the twelve golden token paths, because
+    // this encoder amplifies one ulp into a token flip. See
+    // tasks/0179 Part 17 and its rejected/vector-exp.patch.
 #pragma omp for schedule(dynamic, 1)
     for (int64_t b = 0; b < work; ++b) {
       const int64_t h = b / n_blocks;
