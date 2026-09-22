@@ -71,6 +71,24 @@ N_HDR = C.N_HDR
 ROWS_PC, HID_PC = C.ROWS_PC, C.HID_PC # MoE rows per core, hidden per core
 OS = ["-Os"]                          # main-core kernels: size over speed (the GEMV is DMA-bound)
 
+# ---- on-device routed-expert routing (the fused whole-layer path)
+# MOE_ONDEVICE_ROUTE=1 turns the routed slots' fills into descriptors that are
+# CONFIGURED but never enqueued (ironutil.Pipeline.configure): the router helper
+# core retargets + enqueues them through the shim's own TileControl port
+# (designs/expert_fetch), so ONE instruction stream runs attention + router +
+# routed experts + shared expert and 40 per-ctx ELFs batch into ONE xrt::runlist
+# submit. Off (the default) the fills are enqueued here and the driver's
+# moeroute2 patches their addresses between the two dispatches -- byte-identical
+# to the shipped path, so the flag is the only thing that moves.
+ONDV = os.environ.get("MOE_ONDEVICE_ROUTE") == "1"
+
+# The physical BD indices the fused path pins the routed-expert descriptors to.
+# Deliberately high (a routed descriptor is pinned, so aiecc reserves it for the
+# whole sequence) and few (they are reused expert to expert, freed and re-pinned,
+# so three per channel cover the two up|gate fills plus the later down fill); the
+# managed fills use the low indices and never reach these.
+ONDV_BD_UP, ONDV_BD_GATE, ONDV_BD_DOWN = 8, 9, 10
+
 # scratch layouts (floats) -- gen_kernels.py writes the same offsets into the kernel TUs
 MS_FLOATS = C.MS_FLOATS
 DS_FLOATS = C.DS_FLOATS
@@ -433,22 +451,44 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_ROUT, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_consts, bt(C_BYTES, C_SGW, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_RES + c * ROWS_PC * 4, CALL_BYTES))
+    prev_down = []                                    # ONDV: the previous expert's down descriptors
     for e in range(nx):
+        upg = []                                      # ONDV: this expert's up | gate descriptors
         for c in range(N_CORES):
             if e < NE:
                 up = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
-                pipe_w.fill(w_prods[c], a_pool, half_tap(up))
-                pipe_w.fill(w_prods[c], a_pool, half_tap(up + STRIPE))
+                if ONDV:
+                    # configured, never enqueued: the router retargets these at the
+                    # chosen expert and pushes them (the fused-layer path), and the
+                    # pinned BD indices are what its control packets address
+                    upg.append(pipe_w.configure(w_prods[c], a_pool, half_tap(up), bd_id=ONDV_BD_UP))
+                    upg.append(pipe_w.configure(w_prods[c], a_pool, half_tap(up + STRIPE), bd_id=ONDV_BD_GATE))
+                else:
+                    pipe_w.fill(w_prods[c], a_pool, half_tap(up))
+                    pipe_w.fill(w_prods[c], a_pool, half_tap(up + STRIPE))
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_UP + c * HALF, HALF))
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_HP + c * HID_PC * 4, HID_PC * 4))
         pipe_y.finish(*y_conss)                           # the hidden parts are in DDR
+        if ONDV:
+            # the core has consumed this expert's up | gate (and, by now, the previous
+            # expert's down): return those descriptors, or a shim tile's 16-BD pool
+            # overflows at the eighth expert
+            for t in upg:
+                pipe_w.free(t)
+            for t in prev_down:
+                pipe_w.free(t)
+            prev_down = []
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, ELEM))
         for c in range(N_CORES):
             if e < NE:
-                pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_DOWN + e * UP_BYTES + c * DOWN_PER_CORE * DOWN_BAND,
-                                                   DOWN_PER_CORE * DOWN_BAND))
+                dn = bt(POOL_BYTES, POOL_DOWN + e * UP_BYTES + c * DOWN_PER_CORE * DOWN_BAND,
+                        DOWN_PER_CORE * DOWN_BAND)
+                if ONDV:
+                    prev_down.append(pipe_w.configure(w_prods[c], a_pool, dn, bd_id=ONDV_BD_DOWN))
+                else:
+                    pipe_w.fill(w_prods[c], a_pool, dn)
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                                    DOWN_PER_CORE * DOWN_BAND))
@@ -456,7 +496,10 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
         pipe_y.drain(y_conss[c], c_xres, bt(HID, c * ROWS_PC, ROWS_PC))   # the block output = the new residual
     pipe_w.finish()
     pipe_x.finish()
-    pipe_y.finish()
+    pipe_y.finish()                                   # the block output is in DDR
+    if ONDV:
+        for t in prev_down:                           # the last expert's down is consumed now
+            pipe_w.free(t)
 
 
 # ---- DeltaNet on the main cores (dnx.h): S slices ride the w stream, S' rows leave through y
