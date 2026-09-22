@@ -83,6 +83,8 @@ CONVW_ELEMS = SPEC.conv_kernel * TILE * 2 // ELEM       # 4 KB side elements hol
 GLUE_NHEAD_DEFAULT = 32                                 # dn_glue.h's #ifndef DNGLUE_NHEAD value
 DENSE = X.KIND == "dense"                     # the Qwen3.5 composition: a dense FFN tail, ONE stream
 PART = int(os.environ.get("LX_PART", 0))
+if X.ONDV:
+    PART = 0          # the fused path ignores the part split: ONE stream runs the whole layer
 STOP = int(os.environ.get("LX_STOP", 99))     # debug: truncate part 0 after the glue (1) / DeltaNet (2)
 if DENSE and PART:
     sys.exit("lx.py: the dense tail is one instruction stream; LX_PART must be 0")
@@ -367,15 +369,19 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         if ondv:
             (a_pool, c_xres, a_consts, a_state, a_act, a_cfg, a_octrl) = a[:7]
             (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[7:17]
-            cfg_p, octrl_c = lni, a[17]
+            octrl_c = a[17]
         else:
             (a_pool, c_xres, a_consts, a_state, a_act) = a[:5]
             (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[5:15]
-            a_cfg = a_octrl = octrl_c = cfg_p = None
+            a_cfg = a_octrl = octrl_c = None
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
                            side_p, gact_p, gout_c, pin_p, pout_c)
-        elif part == 0:
+        elif part == 0 or ondv:
+            # With MOE_ONDEVICE_ROUTE this is the WHOLE layer in ONE instruction stream:
+            # the router core emits the control stream, so there is no host between it and
+            # the routed experts and no second dispatch. Without it, `part` still selects
+            # the half of the layer the driver dispatches and moeroute2 patches between.
             # 1. layer-entry norm: xn -> act[A_XN]
             tg_ln = TaskGroup()
             lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -447,12 +453,18 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 # the pool base the router forms the retarget addresses against, and the
                 # control stream it emits -- two plain DDR round trips (the config is the
                 # router's LAST input element, so no extra shim channel)
-                lni.fill(cfg_p, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
+                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
                 pcf = Pipeline(1)
                 pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
                 pcf.finish()
             pw.finish()
             px.finish()
+            if ondv:
+                # the rest of the layer, one stream: the routed fills are configured but
+                # never enqueued and the control stream retargets + pushes them on-device
+                X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
+                               A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW,
+                               ondv=(a_octrl, octrl_src, src_of_col))
         else:
             # 8. the MoE block (moeroute2 has pointed the routed slots' fills at the router's choice)
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
