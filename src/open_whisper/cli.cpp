@@ -325,6 +325,10 @@ int main(int argc, char **argv) {
 
     std::printf("-- chained (this encoder's own state feeds the next layer) --\n");
     enc.encode(mel.data(), hook);
+    // The summary below describes THIS encode. run_layer_from() below goes
+    // through run_layer() and would add the --forced passes to the stage and
+    // NPU buckets but not to `total`, so take the timers before it runs.
+    ow::Timers t = enc.timers;
 
     if (args.forced) {
       std::printf("-- teacher-forced (golden enc.hidden.<i> feeds layer i alone) --\n");
@@ -383,9 +387,8 @@ int main(int argc, char **argv) {
     }
 
     std::printf("-- host stage timers (host wall clock; NOT an NPU performance claim) --\n");
-    const auto &t = enc.timers;
     for (size_t o = 0; o < static_cast<size_t>(ow::Op::Count); ++o)
-      const_cast<ow::Timers &>(t).npu_dispatch += t.npu_disp_op[o];
+      t.npu_dispatch += t.npu_disp_op[o];
     std::printf("  im2col       %8.1f ms\n", t.im2col * 1e3);
     std::printf("  bf16 round   %8.1f ms\n", t.bf16 * 1e3);
     std::printf("  layer_norm   %8.1f ms\n", t.layer_norm * 1e3);
