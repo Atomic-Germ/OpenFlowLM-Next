@@ -97,6 +97,7 @@ struct Kernel {
     std::unique_ptr<xrt::kernel> classic;
     std::unique_ptr<xrt::bo> instr;
     size_t nwords = 0;
+    std::string ctxname;   // whose hw_context a runlist of this kernel must use
     // ELF
     std::unique_ptr<xrt::elf> elf;
     std::unique_ptr<xrt::module> mod;
@@ -116,12 +117,21 @@ struct Buf {
     size_t size = 0;  // requested bytes (the BO itself is padded)
 };
 
+// A runlist is bound to ONE hw_context, i.e. one xclbin UUID -- that is why the 35B's
+// two layer types have to live in one xclbin before 40 layers can be one submit.
+struct RunList {
+    std::string ctxname;
+    std::unique_ptr<xrt::runlist> rl;
+    std::vector<xrt::run> runs;   // xrt::runlist::add does not take ownership
+};
+
 struct Host {
     fs::path base;
     std::unique_ptr<xrt::device> dev;
     std::map<std::string, xrt::hw_context> ctxs;
     std::map<std::string, Kernel> kernels;
     std::map<std::string, Buf> bufs;
+    std::map<std::string, RunList> runlists;
     int runs = 0;
     bool keep_going = false;
     unsigned timeout_ms = 60000;
@@ -221,6 +231,7 @@ struct Host {
             auto instp = resolve(need(it, "kernelx insts.bin"));
             Kernel k;
             k.classic = std::make_unique<xrt::kernel>(ctx(xn), "MLIR_AIE");
+            k.ctxname = xn;
             auto insts = read_file(instp);
             if (insts.size() % 4) throw std::runtime_error("insts.bin not word-sized");
             k.nwords = insts.size() / 4;
@@ -240,6 +251,7 @@ struct Host {
             k.elf = std::make_unique<xrt::elf>(elfp.string());
             k.mod = std::make_unique<xrt::module>(*k.elf);
             k.ext = std::make_unique<xrt::ext::kernel>(ctx(xn), *k.mod, "MLIR_AIE");
+            k.ctxname = xn;
             std::printf("kernel %s (%s)\n", name.c_str(), elfp.string().c_str());
             kernels[name] = std::move(k);
         } else if (cmd == "buf") {
@@ -291,6 +303,81 @@ struct Host {
                         static_cast<int>(st), ms);
             if (st != ERT_CMD_STATE_COMPLETED) {
                 std::printf("run %s FAILED (state %d)%s\n", kn.c_str(), static_cast<int>(st),
+                            keep_going ? "; continuing (HARNESS_KEEP_GOING)" : "");
+                return keep_going;
+            }
+        } else if (cmd == "poolbase") {
+            // write a buffer's device address (XRT's DDR view = bo.address() + 0x8000_0000)
+            // into another buffer: the fused kernel's router forms the retarget addresses
+            // against the pool BO, and that address is only known once the BO exists.
+            auto dst = need(it, "poolbase dst");
+            size_t off = num(need(it, "poolbase offset"), "poolbase offset");
+            auto src = need(it, "poolbase src");
+            uint64_t addr = buf(src).bo.address() + 0x80000000ull;
+            Buf& b = buf(dst);
+            if (off + 8 > b.size) throw std::runtime_error("poolbase: dst buffer too small");
+            uint32_t lo = static_cast<uint32_t>(addr), hi = static_cast<uint32_t>(addr >> 32);
+            auto* m = b.bo.map<uint8_t*>();
+            std::memcpy(m + off, &lo, 4);
+            std::memcpy(m + off + 4, &hi, 4);
+            b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            std::printf("poolbase %s+%zu <- %s @ 0x%llx\n", dst.c_str(), off, src.c_str(),
+                        static_cast<unsigned long long>(addr));
+        } else if (cmd == "runlist") {
+            auto name = need(it, "runlist name");
+            runlists.erase(name);
+            runlists[name] = RunList{};
+            std::printf("runlist %s (empty; its context is the first kernel added)\n", name.c_str());
+        } else if (cmd == "runlist_add") {
+            auto name = need(it, "runlist_add name");
+            auto kn = need(it, "runlist_add kernel");
+            std::vector<std::string> names;
+            for (std::string s; it >> s;) names.push_back(s);
+            if (names.empty()) throw std::runtime_error("runlist_add: needs at least one buffer");
+            Kernel& k = kernel(kn);
+            auto found = runlists.find(name);
+            if (found == runlists.end()) throw std::runtime_error("runlist_add: no such runlist " + name);
+            RunList& r = found->second;
+            if (r.rl == nullptr) {
+                r.ctxname = k.ctxname;
+                r.rl = std::make_unique<xrt::runlist>(ctx(k.ctxname));
+            } else if (r.ctxname != k.ctxname) {
+                throw std::runtime_error("runlist_add: " + kn + " is in xclbin " + k.ctxname +
+                                         " but runlist " + name + " is in " + r.ctxname +
+                                         " -- a runlist is bound to ONE hw_context");
+            }
+            xrt::run run = k.classic ? xrt::run(*k.classic) : xrt::run(*k.ext);
+            run.set_arg(0, kOpcode);
+            if (k.classic) {
+                run.set_arg(1, *k.instr);
+                run.set_arg(2, static_cast<int>(k.nwords));
+            } else {
+                run.set_arg(1, 0);
+                run.set_arg(2, 0);
+            }
+            for (size_t i = 0; i < names.size(); ++i) run.set_arg(static_cast<int>(3 + i), buf(names[i]).bo);
+            r.runs.push_back(std::move(run));
+            r.rl->add(r.runs.back());
+        } else if (cmd == "runlist_exec") {
+            auto name = need(it, "runlist_exec name");
+            auto found = runlists.find(name);
+            if (found == runlists.end() || found->second.rl == nullptr)
+                throw std::runtime_error("runlist_exec: no such non-empty runlist " + name);
+            RunList& r = found->second;
+            auto t0 = std::chrono::steady_clock::now();
+            r.rl->execute();
+            r.rl->wait();
+            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            ++runs;
+            int bad = 0;
+            for (auto& run : r.runs)
+                if (run.state() != ERT_CMD_STATE_COMPLETED) ++bad;
+            // ONE execute for the whole list: that is the `one xrt::runlist submit` the
+            // objective asks for, and %.3f ms is the per-token number.
+            std::printf("runlist_exec %s [%zu runs] -> %d incomplete (%.3f ms)\n", name.c_str(),
+                        r.runs.size(), bad, ms);
+            if (bad) {
+                std::printf("runlist_exec %s FAILED (%d runs not completed)%s\n", name.c_str(), bad,
                             keep_going ? "; continuing (HARNESS_KEEP_GOING)" : "");
                 return keep_going;
             }
