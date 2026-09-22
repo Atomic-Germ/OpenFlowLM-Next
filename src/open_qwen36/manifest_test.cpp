@@ -311,6 +311,10 @@ int main(int argc, char** argv) {
             check(true, "qwen3: a matching config.json is accepted");
             json bad = ok; bad["intermediate_size"] = 12288;
             refused(d, bad, "intermediate_size", "qwen3: an 8B config is refused by name");
+            // attnpos alone does not make a kernel the attention-only dispatch: the sequential
+            // dx is attnpos-patched too, and would run the whole layer per token of the block
+            refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
+                             [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
         }
@@ -345,6 +349,8 @@ int main(int argc, char** argv) {
                   g.kernels.at("dxB").context == g.kernels.at("dxB_local").context,
                   "gemma3: dxB / dxB_local share a stream and context, own windows");
             check(g.contexts.size() == 5, "gemma3: kernels (dx/ln/lm plus the route's dxa and gemm)");
+            refused_manifest(argv[3], "not the attention-only", "gemma3: an attn_kernel sharing dx's stream (dx_local) is refused",
+                             [](json& j) { j["layer_types"]["dense_local"]["gemm_block"]["attn_kernel"] = "dx_local"; });
             uint64_t s0, n0, s1, n1;
             stream_patch::attn_window(1500, 1024, &s0, &n0);
             stream_patch::attn_window(0, 1024, &s1, &n1);

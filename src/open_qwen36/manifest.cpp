@@ -371,6 +371,21 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     }
     for (const auto& l : m.layers)
         if (!m.layer_types.count(l)) fail(where, "layers names unknown layer type " + l);
+    // A dense route's attn_kernel must be the attention-only dx_attn stream. attnpos alone
+    // does not say so -- the sequential dx is attnpos-patched too and takes the same six
+    // arguments -- so refuse any attn_kernel whose instruction stream a sequential program
+    // runs: it would execute the whole layer once per token of the block.
+    for (const auto& [name, t] : m.layer_types) {
+        const GemmBlockProgram& g = t.gemm_block;
+        if (!g.t || g.kind != "dense") continue;
+        const std::string& ai = m.kernels.at(g.attn_kernel).insts;
+        for (const auto& [on, ot] : m.layer_types)
+            for (const auto& s : ot.program)
+                if (m.kernels.at(s.kernel).insts == ai)
+                    fail(where + " layer type " + name + " gemm_block",
+                         "attn_kernel " + g.attn_kernel + " runs " + ai + ", the sequential layer stream of " + on +
+                             "'s " + s.kernel + ", not the attention-only dx_attn one");
+    }
     m.tail = parse_program(need(j, "tail", where), where + " tail");
     for (const auto& s : m.tail) check_step(m, s, where, "tail");
     for (const auto& [k, v] : need(j, "globals", where).items()) {

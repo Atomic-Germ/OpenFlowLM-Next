@@ -1,4 +1,4 @@
-# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-QWEN2, OPEN-ATTN-QKV-BIAS (canonical spec: specs/open-engine/spec.md)
+# Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-QWEN2, OPEN-ATTN-QKV-BIAS, OPEN-PREFILL-BATCH (canonical spec: specs/open-engine/spec.md)
 """Qwen2.5 dense: GQA without q/k norms, full RoPE, silu-gated FFN, and a per-channel bias
 on q, k and v that the other dense families do not have. The bias is a family property, not
 a spec field -- every Qwen2 has one -- so it lives in the recipe: three slots at the end of
@@ -132,6 +132,22 @@ def test_the_geometry_is_in_the_catalogue_now_that_hardware_has_run_it():
     DR.recipe(ModelSpec.from_hf_config({**HF_QWEN25_3B, "intermediate_size": 11264}))
     with pytest.raises(OpRangeError, match=r"gemv_q4: K=11008"):
         DR.recipe(ModelSpec.from_hf_config(HF_QWEN25_3B))
+
+
+def test_no_block_prefill_route_while_dx_attn_lacks_the_bias_and_wide_record(monkeypatch):
+    """dx_attn.py (the block route's attention dispatch) refuses a q/k/v bias and a position
+    record wider than one element; Qwen2 has both. Each alone still gets no route, and the
+    manifest is the sequential one, so the export never tries to build dx_attn."""
+    from recipes.manifest import manifest
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")   # the 3B's sequential gemv K is not catalogued
+    spec = ModelSpec.from_hf_config(HF_QWEN25_3B)
+    assert DR.gemm_route(spec) is None
+    bias_only = ModelSpec.from_hf_config({**HF_QWEN25_3B, "num_key_value_heads": 4})
+    assert DR.geometry(bias_only).PTAB_ELEMS == 1 and DR.geometry(bias_only).QKVB
+    assert DR.gemm_route(bias_only) is None
+    m = manifest(spec)
+    assert "dxa" not in m["contexts"] and "dx_attn" not in m.get("builds", {})
+    assert not any("gemm_block" in lt for lt in m["layer_types"].values())
 
 
 def test_other_families_still_route():

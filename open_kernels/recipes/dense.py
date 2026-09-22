@@ -395,6 +395,11 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     if spec.sandwich_norms != (spec.activation == "gelu_tanh"):
         return None
     L, G, T = layout(spec, max_ctx), geometry(spec), GEMM_T
+    # The attention dispatch (designs/dense/dx_attn.py) has no q/k/v bias stream and acquires
+    # a one-element position record, and refuses at build time otherwise -- so Qwen2 (both)
+    # keeps the sequential route rather than failing its export on dx_attn.
+    if G.QKVB or G.PTAB_ELEMS > 1:
+        return None
     hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
