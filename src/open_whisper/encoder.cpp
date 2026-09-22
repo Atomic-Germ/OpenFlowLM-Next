@@ -87,7 +87,7 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   bf16_fill(a_bf.data(), h.data(), a_bf.size());
   timers.bf16 += now_s() - t0;
   const float *qkv_c = kernels_->run(Op::Qkv, a_bf.data(), S.qkv, &timers.npu_in,
-                                     &timers.npu_dispatch, &timers.npu_out);
+                                     &timers.npu_disp_op[static_cast<size_t>(Op::Qkv)], &timers.npu_out);
   std::memcpy(qkv.data(), qkv_c, qkv.size() * sizeof(float));
   t0 = now_s();
   add_bias(qkv.data(), W.qkv_bias.data(), m_padded, 3 * D);
@@ -107,7 +107,7 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   bf16_fill(a_bf.data(), attn.data(), a_bf.size());
   timers.bf16 += now_s() - t0;
   const float *o_c = kernels_->run(Op::O, a_bf.data(), S.o, &timers.npu_in,
-                                   &timers.npu_dispatch, &timers.npu_out);
+                                   &timers.npu_disp_op[static_cast<size_t>(Op::O)], &timers.npu_out);
   t0 = now_s();
   std::memcpy(o_out.data(), o_c, o_out.size() * sizeof(float));
   add_bias(o_out.data(), W.o_bias.data(), m_padded, D);
@@ -125,7 +125,7 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   bf16_fill(a_bf.data(), h.data(), a_bf.size());
   timers.bf16 += now_s() - t0;
   const float *fc1_c = kernels_->run(Op::Fc1, a_bf.data(), S.fc1, &timers.npu_in,
-                                     &timers.npu_dispatch, &timers.npu_out);
+                                     &timers.npu_disp_op[static_cast<size_t>(Op::Fc1)], &timers.npu_out);
   t0 = now_s();
   // The C buffer is READ-ONLY here on purpose -- see gelu_bias() in host_ops.hpp.
   gelu_bias(fc1_c, m_padded, FFN, W.fc1_bias.data(), fc1_h.data());
@@ -135,7 +135,7 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   bf16_fill(a_bf2.data(), fc1_h.data(), a_bf2.size());
   timers.bf16 += now_s() - t0;
   const float *fc2_c = kernels_->run(Op::Fc2, a_bf2.data(), S.fc2, &timers.npu_in,
-                                     &timers.npu_dispatch, &timers.npu_out);
+                                     &timers.npu_disp_op[static_cast<size_t>(Op::Fc2)], &timers.npu_out);
   std::memcpy(fc2_out.data(), fc2_c, fc2_out.size() * sizeof(float));
   t0 = now_s();
   add_bias(fc2_out.data(), W.fc2_bias.data(), m_padded, D);
@@ -173,7 +173,7 @@ void Encoder::encode(const float *mel, const StageHook &hook) {
   bf16_fill(a1_bf.data(), a1.data(), a1.size());
   timers.bf16 += now_s() - t0;
   const float *c1 = kernels_->run(Op::Conv1, a1_bf.data(), conv1_slot_, &timers.npu_in,
-                                  &timers.npu_dispatch, &timers.npu_out);
+                                  &timers.npu_disp_op[static_cast<size_t>(Op::Conv1)], &timers.npu_out);
   std::vector<float> h1(static_cast<size_t>(3000) * static_cast<size_t>(D));
   t0 = now_s();
   // Only the first 3000 rows are ever used downstream, and the C buffer is
@@ -191,7 +191,7 @@ void Encoder::encode(const float *mel, const StageHook &hook) {
   bf16_fill(a2_bf.data(), a2.data(), a2.size());
   timers.bf16 += now_s() - t0;
   const float *c2 = kernels_->run(Op::Conv2, a2_bf.data(), conv2_slot_, &timers.npu_in,
-                                  &timers.npu_dispatch, &timers.npu_out);
+                                  &timers.npu_disp_op[static_cast<size_t>(Op::Conv2)], &timers.npu_out);
   std::vector<float> x(static_cast<size_t>(M) * static_cast<size_t>(D));
   t0 = now_s();
   gelu_bias(c2, M, D, weights_->conv2_bias.data(), x.data());
@@ -224,7 +224,7 @@ void Encoder::encode(const float *mel, const StageHook &hook) {
   bf16_fill(out_bf.data(), out_full.data(), out_bf.size());
   timers.bf16 += now_s() - t0;
   const float *xkv_c = kernels_->run(Op::Xkv, out_bf.data(), xkv_slot_, &timers.npu_in,
-                                     &timers.npu_dispatch, &timers.npu_out);
+                                     &timers.npu_disp_op[static_cast<size_t>(Op::Xkv)], &timers.npu_out);
   const int64_t xkv_n = 2 * NDEC * D;
   xkv_.assign(static_cast<size_t>(T) * static_cast<size_t>(xkv_n), 0.f);
   t0 = now_s();

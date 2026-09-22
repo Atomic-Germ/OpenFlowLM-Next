@@ -63,15 +63,21 @@ def xclbin_identical_mod_uuid(a: bytes, b: bytes):
     return same(a, b)
 
 
-def build_stream(name: str, out: Path, force: bool) -> Path:
+def build_stream(name: str, out: Path, force: bool, bfp16: bool) -> Path:
     M, K, N = wg.STREAMS[name]
     bdir = out / "build" / name
     if not force and (bdir / "final.xclbin").is_file() and (bdir / "insts.bin").is_file():
         stamp = bdir / "shape.json"
-        if stamp.is_file() and json.loads(stamp.read_text()) == {"M": M, "K": K, "N": N}:
+        if stamp.is_file() and json.loads(stamp.read_text()) == {
+                "M": M, "K": K, "N": N, "bfp16": bfp16}:
             print(f"  {name:6s} {M}x{K}x{N}  (kept)")
             return bdir
-    env = dict(os.environ, WG_M=str(M), WG_K=str(K), WG_N=str(N))
+    # WG_BFP16 is SET here, never inherited: an exporter that let the environment
+    # decide its datapath would record whatever this function was written to assume
+    # (see the emulate_bfp16 note below), which is how the two sets became
+    # indistinguishable in the first place.
+    env = dict(os.environ, WG_M=str(M), WG_K=str(K), WG_N=str(N),
+               WG_BFP16="1" if bfp16 else "0")
     t0 = time.time()
     r = subprocess.run([sys.executable, str(HERE / "build_design.py"), str(DESIGN), str(bdir)],
                        env=env, cwd=str(HERE), capture_output=True, text=True)
@@ -79,7 +85,8 @@ def build_stream(name: str, out: Path, force: bool) -> Path:
         sys.stdout.write(r.stdout[-4000:])
         sys.stderr.write(r.stderr[-4000:])
         raise SystemExit(f"build of stream {name} failed (exit {r.returncode})")
-    (bdir / "shape.json").write_text(json.dumps({"M": M, "K": K, "N": N}))
+    (bdir / "shape.json").write_text(
+        json.dumps({"M": M, "K": K, "N": N, "bfp16": bfp16}))
     print(f"  {name:6s} {M}x{K}x{N}  built in {time.time() - t0:.0f} s")
     return bdir
 
@@ -89,6 +96,11 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--only", default=None, help="comma-separated stream names (debugging)")
     ap.add_argument("--force", action="store_true", help="rebuild streams already built")
+    ap.add_argument("--emulate-bfp16", action="store_true",
+                    help="compile the bf16 matmul onto the MMAC unit via bfp16 emulation. "
+                         "NOT the shipped datapath: measured 1.71x on the array and "
+                         "1.16x on the encoder, and it costs 2 of 6 golden token paths "
+                         "(enc.out cosine 0.99943 -> 0.99303). See specs/open-whisper.")
     args = ap.parse_args()
 
     names = list(wg.STREAMS) if not args.only else args.only.split(",")
@@ -99,7 +111,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     print(f"whisper kernel set -> {out}")
-    dirs = {n: build_stream(n, out, args.force) for n in names}
+    dirs = {n: build_stream(n, out, args.force, args.emulate_bfp16) for n in names}
 
     ref_name = names[0]
     ref = (dirs[ref_name] / "final.xclbin").read_bytes()
@@ -130,7 +142,11 @@ def main() -> int:
         "buffers": [max(M * K * 2 for M, K, _ in shapes),
                     max(K * N * 2 for _, K, N in shapes),
                     max(M * N * 4 for M, _, N in shapes)],
-        "c_dtype": "f32", "a_dtype": "bf16", "emulate_bfp16": False,
+        # THE VALUE THAT WAS BUILT, never the one this exporter assumes. It was a
+        # hardcoded False until 2026-09-22, so a bfp16 set declared itself bf16 --
+        # two sets that differ in 2 of 6 golden token paths were indistinguishable
+        # by their own metadata, which is the failure design.json exists to prevent.
+        "c_dtype": "f32", "a_dtype": "bf16", "emulate_bfp16": bool(args.emulate_bfp16),
         "b_layout_hash": layout_hash(b_layout), "b_layout": b_layout,
         "cols": wg.N_COLS,
         "tile": {"m": wg.M_TILE, "k": wg.K_TILE, "n": wg.N_TILE},
@@ -142,6 +158,7 @@ def main() -> int:
     marker = {"format": FORMAT, "design": "design.json",
               "streams": [s["op"] for s in streams],
               "complete": names == list(wg.STREAMS),
+              "emulate_bfp16": bool(args.emulate_bfp16),
               "hf_config_check": HF_CONFIG_CHECK}
     (out / "whisper_kernels.json").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     print(f"  toolchain  mlir_aie {tc['mlir_aie_version']}, peano {tc['peano_version']}")

@@ -384,6 +384,8 @@ int main(int argc, char **argv) {
 
     std::printf("-- host stage timers (host wall clock; NOT an NPU performance claim) --\n");
     const auto &t = enc.timers;
+    for (size_t o = 0; o < static_cast<size_t>(ow::Op::Count); ++o)
+      const_cast<ow::Timers &>(t).npu_dispatch += t.npu_disp_op[o];
     std::printf("  im2col       %8.1f ms\n", t.im2col * 1e3);
     std::printf("  bf16 round   %8.1f ms\n", t.bf16 * 1e3);
     std::printf("  layer_norm   %8.1f ms\n", t.layer_norm * 1e3);
@@ -408,9 +410,37 @@ int main(int argc, char **argv) {
     }
     std::printf("  npu in-sync  %8.1f ms  (host wall clock: memcpy + sync_to_device)\n",
                t.npu_in * 1e3);
-    std::printf("  npu dispatch %8.1f ms  (host wall clock: submit+wait, dominated by "
-               "hardware -- see docs on trace-based NPU numbers)\n",
+    std::printf("  npu dispatch %8.1f ms  (host wall clock: submit+wait, dominated by hardware)\n",
                t.npu_dispatch * 1e3);
+    // Per stream, against the DRAM traffic the design actually moves.
+    // gemm_pretiled.py's fill loop streams A once and C once, but B ONCE PER
+    // ROW BLOCK -- b_reuse is off because it does not build at 8 columns
+    // (T48 / tasks-0046: the mem tile has A(1) + B(1) + C(4 rows) = 6 of 6
+    // channels, and the C join is what spends them). With
+    // n_row_blocks = M / (m * n_aie_rows) = M / 256:
+    //     bytes = M*K*2  +  n_row_blocks * K*N*2  +  M*N*4
+    // The array's measured shim roof is ~45.5 GB/s (NpuEmbeddings T45), so
+    // the GB/s column says how close each shape runs to the memory system.
+    double tot_bytes = 0;
+    for (size_t o = 0; o < static_cast<size_t>(ow::Op::Count); ++o) {
+      const ow::Op op = static_cast<ow::Op>(o);
+      const ow::StreamShape sh = ow::expected_shape(op);
+      const bool per_layer = !(op == ow::Op::Conv1 || op == ow::Op::Conv2 ||
+                               op == ow::Op::Xkv);
+      const double calls = per_layer ? 32.0 : 1.0;
+      const double nrb = static_cast<double>(sh.M) / 256.0;
+      const double bytes = calls * (static_cast<double>(sh.M) * sh.K * 2.0 +
+                                    nrb * static_cast<double>(sh.K) * sh.N * 2.0 +
+                                    static_cast<double>(sh.M) * sh.N * 4.0);
+      tot_bytes += bytes;
+      const double ms = t.npu_disp_op[o] * 1e3;
+      std::printf("    %-6s %8.1f ms  %4.0f calls  %7.2f GB  %6.1f GB/s\n",
+                 ow::op_name(op), ms, calls, bytes / 1e9,
+                 ms > 0 ? bytes / 1e9 / (ms / 1e3) : 0.0);
+    }
+    std::printf("    %-6s %8.1f ms              %7.2f GB  %6.1f GB/s  (shim roof ~45.5)\n",
+               "TOTAL", t.npu_dispatch * 1e3, tot_bytes / 1e9,
+               t.npu_dispatch > 0 ? tot_bytes / 1e9 / t.npu_dispatch : 0.0);
     std::printf("  npu out-sync %8.1f ms  (host wall clock: sync_from_device)\n",
                t.npu_out * 1e3);
     std::printf("  golden cmp   %8.1f ms  (GATE ONLY: float64 comparison of 42 stage "

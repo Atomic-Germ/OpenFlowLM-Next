@@ -33,6 +33,9 @@ struct Timers {
   // OW_ATTN_PHASES=1, because the split costs about 2% of the call.
   AttnPhases attn_phases;
   double npu_in = 0, npu_dispatch = 0, npu_out = 0;
+  // Dispatch time split by stream, so the array's cost can be compared against
+  // each shape's own DRAM traffic rather than against one aggregate.
+  double npu_disp_op[static_cast<size_t>(Op::Count)] = {};
   // The StageHook's own cost, which is GATE work and not part of an encode:
   // cli.cpp compares every stage against a float64 golden, 42 tensors of
   // [1500, 1280]. It runs inside encode(), so before this bucket existed it sat
