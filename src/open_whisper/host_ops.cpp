@@ -289,6 +289,8 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d, int64_t
 
       // P.V. Each output element still accumulates over t2 in increasing order,
       // which is what keeps this bit-identical to the row-at-a-time version.
+      // The `* inv` normalisation rides in here and is timed as P.V: it is
+      // 1/head_dim of this loop's work, and an array P.V would carry it too.
       std::memset(acc.data(), 0, static_cast<size_t>(nq) * static_cast<size_t>(hd) * sizeof(float));
       for (int64_t t2 = 0; t2 < t; ++t2) {
         const float *vrow = vh + t2 * hd;

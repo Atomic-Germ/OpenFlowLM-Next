@@ -87,9 +87,12 @@ void im2col(const float *x, int64_t t_in, int64_t c, int64_t stride,
 //
 // `phases`, when given, accumulates the three parts separately in seconds: the
 // scores GEMM (Q.K^T), the row softmax, and the value GEMM (P.V). Off unless a
-// pointer is passed -- it costs three clock reads per (head, query row) -- and it
-// exists to price moving the two GEMMs onto the array, because whatever the
-// softmax costs stays on the host either way and is the Amdahl term.
+// pointer is passed -- it costs four clock reads per (head, block of 8 query
+// rows) -- and it exists to price moving the two GEMMs onto the array, because
+// whatever the softmax costs stays on the host either way and is the Amdahl term.
+// The softmax phase ends at 1/sum; the multiply by it is fused into P.V's
+// scalar (t multiplies per row against P.V's t*head_dim MACs), which is also
+// where an array P.V would carry it -- as one scale of each output row.
 struct AttnPhases {
   double scores = 0, softmax = 0, values = 0;
 };

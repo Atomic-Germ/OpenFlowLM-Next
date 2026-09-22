@@ -130,8 +130,16 @@ def main() -> int:
              "torch": torch.__version__, "clips": {}}
     meta_path = args.out / "meta.json"
     if meta_path.is_file():
-        index = json.loads(meta_path.read_text(encoding="utf-8"))
-        index["clips"] = index.get("clips", {})
+        old = json.loads(meta_path.read_text(encoding="utf-8"))
+        # The index names ONE model for all its clips, and whisper_decode_check.py copies
+        # that hash into its baseline -- so merging clips from other weights would file
+        # them under the wrong model. Refuse rather than mix.
+        if old.get("model_sha256") != index["model_sha256"]:
+            raise SystemExit(
+                f"{meta_path} was built from model_sha256 {old.get('model_sha256', 'UNRECORDED')}, "
+                f"but {args.model_dir} is {index['model_sha256']}; use a different --out")
+        old["clips"] = old.get("clips", {})
+        index = old
 
     for clip in args.clips:
         t0 = time.perf_counter()
