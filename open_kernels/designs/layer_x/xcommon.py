@@ -440,11 +440,65 @@ def moe_body(win, ain, yout, B, K, nx=NX):
         yout.release(1)
 
 
+# ---- the on-device router's control stream (the fused whole-layer path)
+# One (slot, column) block is 15 words: two packets per retarget (a 3-word address write,
+# then a 2-word queue push). Phase 0 sends up|gate, phase 1 down -- phase separation is not
+# cosmetic: the descriptors are pinned and reused wave to wave, and re-writing one while its
+# transfer is in flight would be a race, so the down descriptor is configured only after the
+# wave's `pipe_y.finish()` has shown the core consumed up|gate.
+ONDV_COLS = N_CORES
+ONDV_WORDS = 15
+ONDV_CH = 1                                        # the control streams' MM2S channel
+# The spans are BYTE counts into the ui8 control buffer (a 15-word block = 60 B):
+ONDV_PHASE = (((0, 12), (12, 8), (20, 12), (32, 8)),   # phase 0: up addr|push, gate addr|push
+              ((40, 12), (52, 8)))                     # phase 1: down addr|push
+
+
+def ondv_stream(a_octrl, src_tiles, src_of_col, e, phase):
+    """Stream expert wave `e`'s control packets, one shim descriptor per packet.
+
+    Each is stamped with its column's pkt_id so the PacketFlow routes it to that column's
+    TileControl, and reads its words out of the router's control buffer. Returns the started
+    tasks for `ondv_recycle`."""
+    from aie.dialects._aie_enum_gen import DMAChannelDir
+    from aie.dialects.aie import EndOp
+    from aie.dialects.aiex import bds, dma_configure_task, dma_start_task, shim_dma_bd
+
+    tasks = []
+    for c in range(ONDV_COLS):
+        base = (e * ONDV_COLS + c) * ONDV_WORDS * 4
+        for off, words in ONDV_PHASE[phase]:
+            t = dma_configure_task(src_tiles[src_of_col[c]].op, DMAChannelDir.MM2S, ONDV_CH,
+                                   issue_token=True)
+            with bds(t) as bd:
+                with bd[0]:
+                    shim_dma_bd(a_octrl.op, offset=base + off, sizes=[1, 1, 1, words],
+                                strides=[0, 0, 0, 1], packet=(0, c))
+                    EndOp()
+            dma_start_task(t)
+            tasks.append(t)
+    return tasks
+
+
+def ondv_recycle(tasks, per_col):
+    """Await a phase's control transfers (the last per column implies the rest) and return
+    their descriptors: a tile holds 16 and a wave's control descriptors nearly fill it."""
+    from aie.dialects.aiex import dma_await_task, dma_free_task
+
+    for i in range(per_col - 1, len(tasks), per_col):
+        dma_await_task(tasks[i])
+    dma_free_task(*tasks)
+
+
 def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                 A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW, nx=NX):
+                 A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW, nx=NX, ondv=None):
     """Host sequence of the MoE block (one instruction-stream part). Routed slot j's fills carry
     placeholder pool offsets (expert j); moeroute2 rewrites them from the router output.
-    nx must match the body's: NE drops the shared expert's fills with its slot."""
+    nx must match the body's: NE drops the shared expert's fills with its slot.
+
+    With MOE_ONDEVICE_ROUTE (`ondv = (a_octrl, src_tiles, src_of_col)`) the routed fills are
+    configured but never enqueued, and the router's control stream retargets and pushes them
+    on-device; the descriptor bookkeeping is in the comments below."""
     spp, cps = C.STRIPES_PER_PROJ, C.CORES_PER_STRIPE
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, ELEM))
     for c in range(N_CORES):
@@ -470,28 +524,41 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_UP + c * HALF, HALF))
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_HP + c * HID_PC * 4, HID_PC * 4))
+        if ondv is not None and e < NE:
+            # retarget + enqueue this wave's up | gate (the cores are blocked on them)
+            ondv_recycle(ondv_stream(ondv[0], ondv[1], ondv[2], e, 0), 4)
         pipe_y.finish(*y_conss)                           # the hidden parts are in DDR
-        if ONDV:
-            # the core has consumed this expert's up | gate (and, by now, the previous
-            # expert's down): return those descriptors, or a shim tile's 16-BD pool
-            # overflows at the eighth expert
-            for t in upg:
-                pipe_w.free(t)
+        if ondv is not None:
+            # the previous wave's down descriptor is long consumed (the core finished that
+            # expert before this wave's up | gate, whose y-finish is the line above), so Bd
+            # 10 is free again for this wave to pin
             for t in prev_down:
                 pipe_w.free(t)
             prev_down = []
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, ELEM))
+        down_t = []                                   # ONDV: this expert's down descriptors
         for c in range(N_CORES):
             if e < NE:
                 dn = bt(POOL_BYTES, POOL_DOWN + e * UP_BYTES + c * DOWN_PER_CORE * DOWN_BAND,
                         DOWN_PER_CORE * DOWN_BAND)
                 if ONDV:
-                    prev_down.append(pipe_w.configure(w_prods[c], a_pool, dn, bd_id=ONDV_BD_DOWN))
+                    down_t.append(pipe_w.configure(w_prods[c], a_pool, dn, bd_id=ONDV_BD_DOWN))
                 else:
                     pipe_w.fill(w_prods[c], a_pool, dn)
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                                    DOWN_PER_CORE * DOWN_BAND))
+        if ondv is not None:
+            if e < NE:
+                # the down descriptor exists now, so its 3 words can be retargeted + pushed
+                ondv_recycle(ondv_stream(ondv[0], ondv[1], ondv[2], e, 1), 2)
+            # Freeing here, at the END of the wave, is what keeps the pinned ids ours: the
+            # core has consumed this wave's up | gate (the y-finish above) and is past the
+            # previous wave's down (that wave's y-finish came first), and no unpinned
+            # configure runs between a free and the next wave's re-pin.
+            for t in upg:
+                pipe_w.free(t)
+            prev_down = down_t
     for c in range(N_CORES):
         pipe_y.drain(y_conss[c], c_xres, bt(HID, c * ROWS_PC, ROWS_PC))   # the block output = the new residual
     pipe_w.finish()

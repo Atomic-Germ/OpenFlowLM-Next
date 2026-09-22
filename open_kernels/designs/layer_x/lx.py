@@ -165,6 +165,13 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     # on-device routing (lx_ondv): the router core's control stream, and the pool-base
     # config it is generated against
     of_octrl = ObjectFifo(u8_4k, name="octrl", depth=1) if ondv else None
+    # the control streams' source tiles (hoisted: the placer dedups a shim tile's channel
+    # requirements by logical-tile OP, so one Tile object per source column, reused by every
+    # PacketFlow from it) and which source each column's stream comes from
+    src_of_col = [0, 0, 0, 1, 1, 1, 2, 2]
+    octrl_src = [Tile(5, 0, tile_type=AIETileType.ShimNOCTile),
+                 Tile(6, 0, tile_type=AIETileType.ShimNOCTile),
+                 Tile(7, 0, tile_type=AIETileType.ShimNOCTile)] if ondv else None
 
     # ---- cores
     def main_body(win, xin, yout, *args):
@@ -449,7 +456,8 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         else:
             # 8. the MoE block (moeroute2 has pointed the routed slots' fills at the router's choice)
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                           A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW)
+                           A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW,
+                           ondv=(a_octrl, octrl_src, src_of_col) if ondv else None)
 
     rt_args = [pool_ty, xres_ty, consts_ty, state_ty, act_ty]
     if ondv:
@@ -475,10 +483,6 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         # fanned to all eight columns' TileControl, one pkt_id each.        # ONE Tile object per source column: the placer dedups channel requirements by
         # (logical-tile op, channel), so a fresh Tile() per flow would ask for a channel
         # each time instead of sharing one.
-        octrl_src = [Tile(5, 0, tile_type=AIETileType.ShimNOCTile),
-                     Tile(6, 0, tile_type=AIETileType.ShimNOCTile),
-                     Tile(7, 0, tile_type=AIETileType.ShimNOCTile)]
-        src_of_col = [0, 0, 0, 1, 1, 1, 2, 2]
         for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
             rt.add_flow(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
                                    dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),

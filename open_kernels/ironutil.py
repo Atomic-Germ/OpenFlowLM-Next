@@ -124,8 +124,20 @@ class Pipeline:
         so the router core can address it. Returns the unmanaged Task so the caller
         can return the descriptor to the tile's 16-BD pool once the core has
         consumed the transfer (``free``) -- a descriptor is active from configure
-        until free, enqueued or not."""
-        return configure_only_fill(prod, tensor, tap, bd_id=bd_id)
+        until free, enqueued or not.
+
+        It still goes through ``_issue``, so the oldest managed fill's TaskGroup is
+        finished (awaited and its descriptor returned) when the channel is at capacity:
+        without that the MoE header fills hold three descriptors for the whole block, and
+        a wave's pinned routed descriptors plus its control descriptors no longer fit a
+        tile's 16."""
+        box: dict = {}
+
+        def _fn(_tg):
+            box["t"] = configure_only_fill(prod, tensor, tap, bd_id=bd_id)
+
+        self._issue(prod, _fn)
+        return box["t"]
 
     def free(self, task):
         """Return a ``configure``d descriptor to the pool (``dma_free_task``).
