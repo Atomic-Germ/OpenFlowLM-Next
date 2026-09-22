@@ -173,6 +173,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.insts = get<std::string>(v, "insts", where + " kernel " + k);
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
+        d.rb = v.value("rb", 1ull);
+        if (d.rb == 0 || (d.rb & (d.rb - 1)) != 0)
+            fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " is not a power of two");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);

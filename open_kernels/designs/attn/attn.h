@@ -91,6 +91,23 @@
 #ifndef ATTN_RB
 #define ATTN_RB 1            // cached rows per kernel call (see attn_rowb_impl); 1 = one row, as before
 #endif
+#ifndef ATTN_BLOCK_ONLY
+// 1: EVERY row goes through the block kernel, including the new position's, and the
+// single-row path (attn_step / attn_step_new / attn_row_impl) is not built at all.
+// That retirement is what pays for the block kernel on a core that is also carrying the
+// output gate's exponential and reciprocal -- the 35B's attention core, where a plain
+// ATTN_RB=2 overflows the 16 KB of program memory by itself (attn-block-rb2.md).
+// The design streams RB*ceil((valid+1)/RB) - 1 cached rows so that cached + new is a
+// whole number of blocks, runs pb[4] full blocks off the fifo and peels the last one
+// (attn_stepb_new), whose final slot is the new row from core-local scratch. The rows
+// between `pos` and the end of that last block are padding: attn_stepb_new masks them
+// with -1e30, the same mechanism the kernel already uses for the padding LANES at
+// ATTN_NHL < 8. 0 = the path every other family compiles, byte for byte.
+#define ATTN_BLOCK_ONLY 0
+#endif
+#if ATTN_BLOCK_ONLY && (ATTN_RB < 2 || !ATTN_VEXP)
+#error "attn.h: ATTN_BLOCK_ONLY needs the block kernel (ATTN_RB > 1) on the vector-softmax path (ATTN_VEXP)"
+#endif
 #ifndef ATTN_NHL
 #define ATTN_NHL ATTN_NH     // heads THIS core owns; < ATTN_NH splits attention over several cores
 #endif
@@ -256,7 +273,16 @@ static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *_
   pb[1] = p[1];
   pb[2] = 0;
   pb[3] = 0;
-#if ATTN_RB > 1
+#if ATTN_BLOCK_ONLY
+  // The FULL blocks taken off the fifo. The walk covers pos + 1 rows (pb[0] cached and
+  // the new one) in ceil((pb[0] + 1) / kRB) blocks, the last of which is peeled because
+  // its final slot is the new row; so the fifo runs that count minus one, which is
+  // pb[0] / kRB. The host streams kRB * (pb[0] / kRB + 1) - 1 cached rows to match
+  // (stream_patch::attn_apply). Unsigned so a power-of-two kRB is a shift, not a signed
+  // divide with its sign correction -- pb[0] is a row count and never negative.
+  // pb[1] (the unpadded nf) and pb[5] are unused here: nothing counts single rows.
+  pb[4] = (int32_t)((uint32_t)p[0] / kRB);
+#elif ATTN_RB > 1
   // How the nf streamed rows divide into whole blocks and a remainder. When the
   // window carries a dummy row -- only at position 0, where nf is 1 and pos is 0 --
   // every row goes down the one-at-a-time path, which is the only one that masks.
@@ -637,12 +663,23 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 //     free on this core (narrowing the exp from 32 lanes to 8 was worth ~1%), so
 //     four rows' exponentials cost about what one row's did.
 //
-// Every row in a block is real: attn_meta_impl sends any window containing the
-// position-0 dummy down the one-row path instead.
+// Every row in a block is real, EXCEPT on the block-only path (ATTN_BLOCK_ONLY), where
+// the peeled last block may carry padding rows between `pos` and the new position's row.
+// `nv` is then the number of leading slots that are real and slots [nv, kRB - 1) are
+// masked; the final slot is the new row and is never masked, and the full-block call
+// passes nv = kRB so the loop is empty. Without the flag attn_meta_impl sends any window
+// containing the position-0 dummy down the one-row path instead and there is no `nv`.
+#if ATTN_BLOCK_ONLY
+#define ATTN_NV_PARM , unsigned nv
+#define ATTN_NV_ARG , nv
+#else
+#define ATTN_NV_PARM
+#define ATTN_NV_ARG
+#endif
 __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__restrict Kb,
                                    const bfloat16 *const *__restrict Vb,
                                    const ATTN_QT *__restrict qs, float *__restrict oacc,
-                                   float *__restrict ml ATTN_H0_PARM) {
+                                   float *__restrict ml ATTN_NV_PARM ATTN_H0_PARM) {
   ATTN_H0_DECL
   alignas(128) float sv[kPV], mnv[kPV];
   alignas(128) bfloat16 ph[kPV], pl[kPV];
@@ -678,6 +715,17 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   // q carries no 1/sqrt(HD) at this head dim (ATTN_SCALE_IN_Q): one vector multiply
   // scales the whole block's scores
   aie::store_v(sv, fmulN<kPV>(aie::load_v<kPV>(sv), aie::broadcast<float, kPV>(kScale)));
+#endif
+#if ATTN_BLOCK_ONLY
+  // The padding ROWS of a peeled last block, masked exactly as the padding LANES are:
+  // -1e30 never wins the max below and exponentiates to zero, so the row contributes
+  // nothing to l and nothing to o. Its K and V are read and multiplied by that zero --
+  // they are cache rows at or past `pos`, written by an earlier token or zeroed at
+  // allocation (Core::alloc), never uninitialised, so the product is a real zero and
+  // not a NaN. The loop stops one short of kRB: the last slot is the new position's
+  // row. Taken only on the last call of a token, and at kRB 2 it is one compare.
+  for (unsigned r = nv; r + 1 < kRB; ++r)
+    aie::store_v(sv + r * kNL, aie::broadcast<float, kNL>(-1e30f));
 #endif
 
   // the block's max per head, then one update of (m, l) for the whole block

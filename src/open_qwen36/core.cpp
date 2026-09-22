@@ -346,6 +346,7 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.attn = stream_patch::attn_table(k.words, name, man_.attn);
         k.geom = man_.attn;
         k.geom.window = d.window;
+        k.geom.rb = d.rb;
     }
 }
 
@@ -500,9 +501,12 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
 
 void Core::reset() {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: reset before load_weights");
-    // The linear layers' state must start at zero. The KV rows need not: the
-    // window read is [0, max(pos, 1)) and row 0 at position 0 is a dummy the
-    // kernel masks.
+    // The linear layers' state must start at zero. The KV rows need not: the window
+    // read is [0, max(pos, 1)) and row 0 at position 0 is a dummy the kernel masks.
+    // A blocked attention kernel (manifest `rb`) reads a few rows at or past `pos` as
+    // padding and multiplies them by an exact zero, so their CONTENT does not matter --
+    // but it must not be a NaN, which Core::alloc's memset and any earlier token's real
+    // k'/v' both guarantee.
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
         if (lt.state_kind != "linear") continue;

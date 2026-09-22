@@ -27,6 +27,17 @@ PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 
+# Head dim 256 WITH the output gate -- the ax.py families -- had no row block at all until
+# 2026-09-22, because the gate's exponential and reciprocal already sit on the attention
+# core and the block kernel would not fit beside them AND the single-row kernel. Retiring
+# the single-row kernel entirely (attn.h ATTN_BLOCK_ONLY: every row, including the new
+# position's, goes through attn_stepb, and the block masks the padding rows) is what pays
+# for it. Like FAST_ATTENTION this list is measurement, not declaration -- the retirement
+# changes the softmax's rounding, so a family joins after a greedy-continuation compare.
+# Qwen3.5 (the same head dim and gate on ax.py, 2 or 4 heads a core) is NOT here: nobody
+# has run that compare, and until someone does it keeps RB 1 and its single-row kernel.
+BLOCK_ONLY_MEASURED = ("qwen36moe",)
+
 # Measured: granite (2026-09-07, hd 64); qwen3 (2026-09-08, the first hd 128 point --
 # 5050 -> 258 ms at position 2048, 300/300 greedy tokens identical to the shipped kernel);
 # llama3 (2026-09-08, same shape without the qk norm -- 4024 -> 427 ms at 2048 on a loaded
@@ -55,6 +66,7 @@ MAX_ATTN_CORES = 6
 class AttnKnobs:
     VEXP: int; MLS: int                  # batched softmax exponentials; the ml stride
     ACORES: int; NHL: int; RB: int       # attention cores; heads each owns; cached rows per call
+    BLOCK: int = 0                       # 1: the single-row kernel is retired (attn.h ATTN_BLOCK_ONLY)
 
 
 def probe_env() -> dict[str, str]:
@@ -123,6 +135,7 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
     nhl = nh // acores
     mls = ((nhl + 31) // 32) * 32 if vexp else nhl
     rb = 1
+    block = 0
     if vexp:
         # Four rows at head dim 64 / 128; two at 256, where the block kernel's unrolled
         # score and V loops are twice as long per row and four rows overflow the core's
@@ -137,7 +150,17 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # available memory`, before any program-memory limit is reached. RB 1 builds and
         # costs little: RB 1 -> 2 measured 1.22x of the attention ARITHMETIC on granite,
         # and that arithmetic is ~18% of a decode step.
-        cap = 4 if spec.head_dim < 256 else (1 if (spec.attn_gate or nhl > 2) else 2)
+        # ... and, since 2026-09-22, TWO at 256 with the gate on a family that has been
+        # measured on the block-only path (BLOCK_ONLY_MEASURED): there the single-row
+        # kernel is not built at all, which frees about a kilobyte of program memory --
+        # the 35B's attention cores went 14,256 -> 15,472 of 16,384 bytes, and `ax0` at
+        # 4000 tokens of context went 4.27 -> 1.10 ms. An unmeasured gated family keeps 1.
+        gated256 = spec.head_dim >= 256 and spec.attn_gate
+        block_ok = gated256 and spec.family in BLOCK_ONLY_MEASURED
+        cap = 4 if spec.head_dim < 256 else (2 if block_ok else (1 if (spec.attn_gate or nhl > 2) else 2))
         rb = max((r for r in (4, 2, 1) if r <= cap and (r * block_lanes(nhl)) in (8, 16, 32)), default=1)
         rb = _probe_rb(rb, nhl)
-    return AttnKnobs(VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb)
+        # The retirement is the block kernel's OWN cost model, so it follows rb: an
+        # ATTN_RB=1 probe on a measured family gets the single-row kernel back.
+        block = 1 if (block_ok and rb > 1) else 0
+    return AttnKnobs(VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb, BLOCK=block)

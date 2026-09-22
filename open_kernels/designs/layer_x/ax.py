@@ -79,6 +79,8 @@ ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATT
               f"-DATTN_VEXP={D.VEXP}", f"-DATTN_NHL={D.NHL}"]
 if D.RB > 1:                                           # attn.h defaults it to 1; adding the flag
     ATTN_FLAGS.append(f"-DATTN_RB={D.RB}")             # would change every other family's build line
+if D.BLOCK:                                            # the single-row path retired: see attn.h
+    ATTN_FLAGS.append("-DATTN_BLOCK_ONLY=1")           # only this design sets it: designs/dense/dx.py
 for _k, _v in probe_env().items():                     # ATTN_NULL / ATTN_ABL: see attn.h. In the build key.
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via D.RB; FAST picks D itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")
@@ -87,6 +89,11 @@ for _k, _v in probe_env().items():                     # ATTN_NULL / ATTN_ABL: s
 # element(s); RB cached rows per kernel call. At the defaults (1, NH, 1) every shape below
 # is the one this design always had, and the 27B / 35B kernels compile byte for byte.
 ACORES, NHL, RB = D.ACORES, D.NHL, D.RB
+# BLOCK: every cached row AND the new position's row go through attn_stepb, so attn_step /
+# attn_step_new are not built at all. That is what buys the block kernel its room on a core
+# that is also carrying the output gate's exponential and reciprocal (the 35B: a plain
+# ATTN_RB=2 overflows 16 KB of program memory on its own). recipes/attnknobs.py decides.
+BLOCK = bool(D.BLOCK)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -131,9 +138,12 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     f_k = af("attn_k", [u8_1k, b256, f64, f256, b512, np.int32])
     f_v = af("attn_v", [u8_1k, b512, np.int32])
     f_init = af("attn_init", [foacc, fml])
-    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg)
-    f_stepn = af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg)
+    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg) if not BLOCK else None
+    f_stepn = af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg) if not BLOCK else None
     f_stepb = af("attn_stepb", [u8_1k] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg) if RB > 1 else None
+    # The peeled last block: RB - 1 fifo rows and the new position's k'/v' from core scratch.
+    f_stepbn = (af("attn_stepb_new", [u8_1k] * (2 * (RB - 1)) + [b512, b512, fq, foacc, fml, pb_ty] + h0_arg)
+                if BLOCK else None)
     f_fin = af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32])
 
     # ---- fifos
@@ -171,7 +181,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     N_OG = NHL // D.HPO          # og elements this core emits (all of them when ACORES == 1)
 
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              fm, fq, fk, fv, fi, fs, fsn, ff, fsb, c):
+              fm, fq, fk, fv, fi, fs, fsn, ff, fsb, fsbn, c):
         h0 = c * NHL
         e = ain.acquire(2)                                      # [qn | kn], the position record
         fm(e[0], e[1], qn, kn, cs, pb)
@@ -198,7 +208,23 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 o[j] = vout[j]
             aout.release(1)
         fi(oacc, ml)
-        if RB > 1:
+        if BLOCK:
+            # pb[4] full blocks off the fifo, then ONE peeled block of RB - 1 fifo rows and
+            # the new position's row. The host streams exactly RB * (pb[4] + 1) - 1 cached
+            # rows (stream_patch::attn_apply), so the two counts cannot drift apart: the
+            # padding rows between `pos` and the end of the last block are real transfers
+            # the kernel masks. There is no single-row path left to fall back on.
+            for _ in range_(pb[4]):
+                e = ain.acquire(2 * RB)
+                args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
+                fsb(*args)
+                ain.release(2 * RB)
+            e = ain.acquire(2 * (RB - 1))
+            args = [e[i] for i in range(2 * (RB - 1))] + [kout, vout, qs, oacc, ml, pb] + \
+                   ([h0] if ACORES > 1 else [])
+            fsbn(*args)
+            ain.release(2 * (RB - 1))
+        elif RB > 1:
             for _ in range_(pb[4]):                             # whole blocks of RB rows
                 e = ain.acquire(2 * RB)
                 args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
@@ -208,12 +234,13 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 e = ain.acquire(2)
                 fs(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else fs(e[0], e[1], qs, oacc, ml, pb)
                 ain.release(2)
+            fsn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else fsn(kout, vout, qs, oacc, ml)
         else:
             for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
                 e = ain.acquire(2)
                 fs(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else fs(e[0], e[1], qs, oacc, ml, pb)
                 ain.release(2)
-        fsn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else fsn(kout, vout, qs, oacc, ml)
+            fsn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else fsn(kout, vout, qs, oacc, ml)
         # The gate arrives for EVERY og element on the broadcast stream (two elements per
         # og element, in head order), so each core consumes all of them and computes only
         # its own N_OG. The pass-through counts are Python constants: nothing to trace.
@@ -230,23 +257,32 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             ain.acquire(2)
             ain.release(2)
 
-    # Two shapes of worker body, not one with a defaulted argument: a family that
-    # does not block must present IRON the exact function it presented before.
-    if RB > 1:
+    # Three shapes of worker body, not one with defaulted arguments: a family that does
+    # not block must present IRON the exact function it presented before, and the
+    # block-only path presents no single-row kernel at all.
+    if BLOCK:
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, ff, fsb, fsbn):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, None, None, ff, fsb, fsbn, 0)
+
+        def make_attn_body(c):
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, ff, fsb, fsbn):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, None, None, ff, fsb, fsbn, c)
+            return body
+    elif RB > 1:
         def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb):
-            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb, 0)
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb, None, 0)
 
         def make_attn_body(c):
             def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb):
-                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb, c)
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, fsb, None, c)
             return body
     else:
         def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff):
-            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, 0)
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, None, 0)
 
         def make_attn_body(c):
             def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff):
-                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, c)
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, None, c)
             return body
 
     workers = [Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
@@ -267,7 +303,8 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 Buffer(b512, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
                 Buffer(pb_ty, name=f"pb{s}")]
 
-    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+    afns = ([f_meta, f_q, f_k, f_v, f_init, f_fin, f_stepb, f_stepbn] if BLOCK else
+            [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else []))
     workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
                           tile=Tile(2, 3), stack_size=0x1800))
     # The rest of the attention cores: same broadcast stream in, their own og out.

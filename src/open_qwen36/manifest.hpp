@@ -147,6 +147,10 @@ struct KernelDesc {
     std::string insts;                       ///< relative path of insts.bin
     std::string patch;                       ///< "" | moeroute2 | attnpos
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
+    /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
+    /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
+    /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
+    uint64_t rb = 1;
 };
 
 /// A global sized max_ctx x row: the position record table(s).
