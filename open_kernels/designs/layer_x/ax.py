@@ -100,7 +100,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     return _ax_build(pool, xres, consts, kv, act, ptab, None, None, part=part, srchash=srchash, ondv=False, mrow=2, hrow=3)
 
 
-def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=0, ondv=False, mrow=2, hrow=3):
+def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=0, ondv=False, mrow=2, hrow=3, pieces=False):
     t = X.types()
     tl = X.ln_types()
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
@@ -461,15 +461,22 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
     if ondv:
         rt_args += [of_octrl.cons(tile=Tile(2, 0))]   # (2,0) S2MM ch1 is free in ax
     rt = Runtime(sequence, rt_args)
+    flows = []
     if ondv and os.environ.get("ONDV_NO_FLOWS") != "1":
         # eight packet routes: the router's control stream to each column's TileControl,
         # emitted from the free MM2S ch1 of (5,0), (6,0), (7,0)
         for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
-            rt.add_flow(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
+            flows.append(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
                                    dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),
                                    src_port=WireBundle.DMA, src_channel=1,
                                    dst_port=WireBundle.TileControl, dst_channel=0,
                                    shim_symbol=f"octrl{3 + src_of_col[c]}_shim_alloc" if c in (0, 3, 6) else None))
+    for f in flows:
+        rt.add_flow(f)
+    if pieces:
+        # the merged design (lax.py) needs the parts, not a Program: one xclbin must hold
+        # both layer types, and only the instruction stream differs between them
+        return workers, rt_args, flows, sequence
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

@@ -115,7 +115,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     return _lx_build(pool, xres, consts, state, act, None, None, part=part, stop=stop, srchash=srchash, ondv=False, mrow=2, hrow=3)
 
 
-def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, srchash=0, ondv=False, mrow=2, hrow=3):
+def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, srchash=0, ondv=False, mrow=2, hrow=3, pieces=False):
     t = X.types()
     tl = X.ln_types()
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
@@ -489,6 +489,7 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         # give: the router's control stream comes back here
         rt_args += [of_octrl.cons(tile=Tile(4, 0))]
     rt = Runtime(sequence, rt_args)
+    flows = []
     if ondv and os.environ.get("ONDV_NO_FLOWS") != "1":
         # The router's control stream reaches a column's TileControl by a packet route.
         # Columns 0-4 have no free MM2S channel (lni+w0, w1+x, side+w2, gact+w3, pin+w4),
@@ -498,11 +499,17 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         # (logical-tile op, channel), so a fresh Tile() per flow would ask for a channel
         # each time instead of sharing one.
         for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
-            rt.add_flow(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
+            flows.append(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
                                    dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),
                                    src_port=WireBundle.DMA, src_channel=1,
                                    dst_port=WireBundle.TileControl, dst_channel=0,
                                    shim_symbol=f"octrl{5 + src_of_col[c]}_shim_alloc" if c in (0, 3, 6) else None))
+    for f in flows:
+        rt.add_flow(f)
+    if pieces:
+        # the merged design (lax.py) needs the parts, not a Program: one xclbin must hold
+        # both layer types, and only the instruction stream differs between them
+        return workers, rt_args, flows, sequence
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
