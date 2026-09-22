@@ -62,6 +62,7 @@
 #include "xrt/experimental/xrt_xclbin.h"
 
 #include "stream_patch.hpp"
+#include "ondv_ctrl.h"   // designs/router: the on-device router's control-word generator
 
 namespace fs = std::filesystem;
 
@@ -323,6 +324,32 @@ struct Host {
             b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             std::printf("poolbase %s+%zu <- %s @ 0x%llx\n", dst.c_str(), off, src.c_str(),
                         static_cast<unsigned long long>(addr));
+        } else if (cmd == "ondvctrl") {
+            // Fill a buffer with the on-device router's control words using the SAME
+            // generator the router core runs, for a given pool BO and top-8 index list.
+            // This isolates the packet path (control BDs -> TileControl -> retarget +
+            // enqueue) from the router core's ability to emit the words.
+            auto dst = need(it, "ondvctrl dst");
+            auto pl = need(it, "ondvctrl pool");
+            std::string idxs;
+            it >> idxs;
+            int32_t idx[8];
+            int k = 0;
+            for (size_t pp = 0; pp < idxs.size() && k < 8;) {
+                size_t q = idxs.find(',', pp);
+                if (q == std::string::npos) q = idxs.size();
+                idx[k++] = static_cast<int32_t>(std::strtol(idxs.substr(pp, q - pp).c_str(), nullptr, 0));
+                pp = q + 1;
+            }
+            if (k != 8) throw std::runtime_error("ondvctrl: need 8 comma-separated indices");
+            uint64_t addr = buf(pl).bo.address() + 0x80000000ull;
+            Buf& b = buf(dst);
+            if (b.size < 8u * 8u * 15u * 4u) throw std::runtime_error("ondvctrl: dst buffer too small");
+            ondv_ctrl_impl(idx, static_cast<uint32_t>(addr), static_cast<uint32_t>(addr >> 32),
+                           reinterpret_cast<int32_t*>(b.bo.map<uint8_t*>()));
+            b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            std::printf("ondvctrl %s <- pool %s @ 0x%llx, idx %s\n", dst.c_str(), pl.c_str(),
+                        static_cast<unsigned long long>(addr), idxs.c_str());
         } else if (cmd == "runlist") {
             auto name = need(it, "runlist name");
             runlists.erase(name);

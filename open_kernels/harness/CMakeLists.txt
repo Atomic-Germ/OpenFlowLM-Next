@@ -25,7 +25,7 @@ if(NOT DEFINED XRT_INCLUDE_DIR OR NOT DEFINED XRT_LIB_DIR)
 endif()
 
 add_executable(run_kernel run_kernel.cpp)
-target_include_directories(run_kernel PRIVATE "${XRT_INCLUDE_DIR}")
+target_include_directories(run_kernel PRIVATE "${XRT_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../designs/router")
 target_link_directories(run_kernel PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(run_kernel PRIVATE xrt_coreutil)
 if(MSVC)

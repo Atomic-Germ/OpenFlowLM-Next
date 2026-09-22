@@ -460,9 +460,10 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 # the pool base the router forms the retarget addresses against, and the
                 # control stream it emits -- two plain DDR round trips (the config is the
                 # router's LAST input element, so no extra shim channel)
-                pcf = Pipeline(1)
-                pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
-                pcf.finish()
+                if os.environ.get("ONDV_NO_OCTRL_DRAIN") != "1":
+                    pcf = Pipeline(1)
+                    pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
+                    pcf.finish()
             pw.finish()
             px.finish()
             if ondv and os.environ.get("ONDV_SKIP_MOE") != "1":
