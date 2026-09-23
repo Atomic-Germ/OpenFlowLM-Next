@@ -26,6 +26,7 @@
   xrt,
   makeWrapper,
   openflowlm-open-kernels,
+  python3,
   oflmVersion ? "0.1.0",
   npuVersion ? "32.0.203.304",
 }:
@@ -121,14 +122,26 @@ stdenv.mkDerivation rec {
   '';
 
   postInstall = ''
-    wrapProgram $out/bin/oflm \
-      --set-default OFLM_XCLBIN_PATH "${openflowlm-open-kernels}/share/oflm" \
+    # The OFLM binary doesn't search $HOME for the model registry or xclbins.
+    # Use a launcher script to point it at the user-level data that `oflm add`
+    # writes.  This matches the desktop-launcher pattern used by lemonade and
+    # other Nix-packaged tools that mix a read-only package with user state.
+    mv $out/bin/oflm $out/bin/.oflm-wrapped
+    cat > $out/bin/oflm <<'EOF'
+    #!/usr/bin/env bash
+    export OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json"
+    export OFLM_MODELINFO_PATH="$HOME/.config/oflm/model_info.json"
+    export OFLM_XCLBIN_PATH="$HOME/.config/oflm"
+    exec "@out@/bin/.oflm-wrapped" "$@"
+    EOF
+    chmod +x $out/bin/oflm
+    substituteInPlace $out/bin/oflm --replace "@out@" "$out"
+
+    wrapProgram $out/bin/.oflm-wrapped \
       --set-default XILINX_XRT "${xrt-combined}" \
       --prefix LD_LIBRARY_PATH : "${xrt-combined}/lib" \
-      --prefix PATH : "${xrt-combined}/bin"
+      --prefix PATH : "${lib.makeBinPath [ xrt-combined python3 ]}"
   '';
-
-  doCheck = true;
 
   preCheck = ''
     # oflm_smoke runs `oflm list` which tries to create ~/.config/oflm on

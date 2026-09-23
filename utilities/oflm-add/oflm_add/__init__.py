@@ -172,13 +172,17 @@ def find_system_xclbin_root():
     return None
 
 
+
+
+
 def user_xclbin_dir(arg):
-    """Resolve the user-level xclbins directory (where symlinks are added)."""
-    if arg:
-        base = Path(arg)
-    else:
-        env = os.environ.get("OFLM_XCLBIN_PATH")
-        base = Path(env) if env else Path.home() / ".config" / "oflm"
+    """Resolve the user-level xclbins directory (where symlinks are added).
+
+    Intentionally ignores OFLM_XCLBIN_PATH: that variable is a runtime search
+    path for the engine (and may point at a read-only Nix store path), not a
+    writable destination for oflm-add.
+    """
+    base = Path(arg) if arg else Path.home() / ".config" / "oflm"
     return base if base.name == "xclbins" else base / "xclbins"
 
 
