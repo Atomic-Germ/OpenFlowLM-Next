@@ -15,58 +15,11 @@
 }:
 
 let
-  pyVersion = "3.12";
-  pySite = "lib/python${pyVersion}/site-packages";
-
-  mlirAieWheel = fetchurl {
-    url = "https://github.com/Xilinx/mlir-aie/releases/download/v1.4.3/mlir_aie-1.4.3-cp312-cp312-manylinux_2_35_x86_64.whl";
-    sha256 = "sha256-TYwjpbYXHdEWLHjFYPCkjK1llpC1vlMNUWZrf/9ScoE=";
-  };
-
-  llvmAieWheel = fetchurl {
-    url = "https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026092301%2B02be6fd8-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-    sha256 = "sha256-bi0uvoa/Z12aGcIhzUMCMtMUw5EEiUTeP8QVB5JANK4=";
-  };
-
-  pyDeps = with python312Packages; [
-    aiofiles
-    cloudpickle
-    mdurl
-    ml-dtypes
-    numpy
-    pygments
-    rich
-  ];
-
-  ironvenv = stdenv.mkDerivation {
-    pname = "openflowlm-ironvenv";
-    version = "1.4.3-20260923";
-
-    nativeBuildInputs = [ python312 unzip ];
-    src = ./.;
-    dontUnpack = true;
-
-    installPhase = ''
-      ${python312}/bin/python -m venv $out
-      export SITE="$out/${pySite}"
-
-      ${unzip}/bin/unzip -q -d "$SITE" ${mlirAieWheel}
-      ${unzip}/bin/unzip -q -d "$SITE" ${llvmAieWheel}
-
-      # Link nixpkgs Python deps into the venv so imports resolve without
-      # re-installing them or relying on .pth files.
-      ${lib.concatStringsSep "\n" (map (pkg: "ln -s ${pkg}/${pySite}/* \"$SITE/\"") pyDeps)}
-
-      # The wheel drops the aie package under mlir_aie/python; make it
-      # importable without relying on aie.pth.
-      ln -s "$SITE/mlir_aie/python/aie" "$SITE/aie"
-
-      mkdir -p $out/nix-support
-      echo "OpenFlowLM IRON toolchain venv (Python 3.12)" > $out/nix-support/hydra-build-products
-    '';
-
-    meta.platforms = [ "x86_64-linux" ];
-  };
+  env = lib.callPackageWith (
+    {
+      inherit lib stdenv fetchurl python312 python312Packages xrt git makeWrapper unzip zlib patchelf;
+    }
+  ) ./open-kernels-env.nix {};
 in
 
 stdenv.mkDerivation rec {
@@ -90,8 +43,8 @@ stdenv.mkDerivation rec {
         && !(base == ".git");
   };
 
-  nativeBuildInputs = [ git makeWrapper python312 stdenv.cc.cc.lib patchelf ];
-  buildInputs = [ xrt ironvenv ];
+  nativeBuildInputs = env.nativeTools ++ [ env.ironvenv ];
+  buildInputs = env.runtimeLibs;
 
   buildPhase = ''
     export HOME=$TMPDIR
@@ -100,21 +53,21 @@ stdenv.mkDerivation rec {
     # utilities/export-kernels.py expects a writable venv at ./ironvenv with
     # its own bin/python. Copy the nix-provided venv and add a python symlink.
     rm -rf ironvenv
-    cp -R ${ironvenv} ironvenv
+    cp -R ${env.ironvenv} ironvenv
     chmod -R +w ironvenv
     ln -sf ${python312}/bin/python ironvenv/bin/python
 
-    export PEANO_INSTALL_DIR="$PWD/ironvenv/${pySite}/llvm-aie"
-    export PATH="$PEANO_INSTALL_DIR/bin:${xrt}/opt/xilinx/xrt/bin:$PATH"
-    export PYTHONPATH="$PWD/ironvenv/${pySite}:${xrt}/opt/xilinx/xrt/python''${PYTHONPATH:+:$PYTHONPATH}"
-    export LD_LIBRARY_PATH="${lib.makeLibraryPath [ stdenv.cc.cc.lib zlib xrt ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export PEANO_INSTALL_DIR="$PWD/ironvenv/${env.env.PEANO_INSTALL_DIR}"
+    export PATH="$PWD/ironvenv/${env.pySite}/llvm-aie/bin:$PWD/ironvenv/${env.pySite}/mlir_aie/bin:${xrt}/opt/xilinx/xrt/bin:$PATH"
+    export PYTHONPATH="$PWD/ironvenv/${env.pySite}:${xrt}/opt/xilinx/xrt/python''${PYTHONPATH:+:$PYTHONPATH}"
+    export LD_LIBRARY_PATH="${env.env.LD_LIBRARY_PATH}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
     # The manylinux llvm-aie/mlir-aie wheels ship x86_64 executables that
     # hard-code /lib64/ld-linux-x86-64.so.2.  In the Nix sandbox /lib64 is
     # unavailable, so patch the interpreter to the stdenv linker and add the
     # C++ runtime + zlib to the RUNPATH without destroying the wheel's own
     # library search paths (e.g. mlir_aie.libs/libcrypto-...so.3).
-    for dir in "$PEANO_INSTALL_DIR/bin" "$PWD/ironvenv/${pySite}/mlir_aie/bin"; do
+    for dir in "$PEANO_INSTALL_DIR/bin" "$PWD/ironvenv/${env.pySite}/mlir_aie/bin"; do
       if [ -d "$dir" ]; then
         for bin in "$dir/"*; do
           if [ -f "$bin" ] && [ -x "$bin" ]; then
