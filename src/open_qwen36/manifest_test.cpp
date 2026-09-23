@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
     check(m.kernels.at("ax0").patch == "attnpos" && m.kernels.at("lx1").patch == "moeroute2" && m.kernels.at("ln").patch.empty(), "kernel patch kinds");
     // attnpos pads the streamed row count to whole blocks of `rb` (attn.h ATTN_BLOCK_ONLY);
     // every other kernel is unblocked and the field is absent from its manifest entry.
-    check(m.kernels.at("ax0").rb == 2 && m.kernels.at("lx1").rb == 1, "attn rows per call");
+    check(m.kernels.at("ax0").rb == 4 && m.kernels.at("lx1").rb == 1, "attn rows per call");
     {
         // The blocked walk covers the cached rows AND the new position's row in whole
         // blocks of `rb`, taking the new row as the last block's final slot -- so the
