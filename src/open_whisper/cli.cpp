@@ -457,6 +457,19 @@ int main(int argc, char **argv) {
                    ph.values * 1e3, 100.0 * ph.values / tot);
       }
     }
+    // OW_ATTN=npu only: the NPU attention path's own three stages. Zero on
+    // the default host path.
+    {
+      const auto &fp = t.fa_phases;
+      const double fa_tot = fp.repack + fp.dispatch + fp.scatter;
+      if (fa_tot > 0) {
+        std::printf("    fa repack    %8.1f ms\n", fp.repack * 1e3);
+        std::printf("    fa dispatch  %8.1f ms  (host wall clock: sync_to_device + "
+                   "submit+wait, dominated by hardware)\n", fp.dispatch * 1e3);
+        std::printf("    fa readback  %8.1f ms  (sync_from_device + scatter)\n",
+                   fp.scatter * 1e3);
+      }
+    }
     std::printf("  npu in-sync  %8.1f ms  (host wall clock: memcpy + sync_to_device)\n",
                t.npu_in * 1e3);
     std::printf("  npu dispatch %8.1f ms  (host wall clock: submit+wait, dominated by hardware)\n",

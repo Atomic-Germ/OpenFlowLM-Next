@@ -30,7 +30,7 @@ REM reaching this file's own code (see ..\open_qwen36\build.cmd).
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
    /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
-   weights.cpp kernels.cpp guards.cpp host_ops.cpp encoder.cpp decoder.cpp cli.cpp ^
+   weights.cpp kernels.cpp guards.cpp host_ops.cpp fa_attention.cpp encoder.cpp decoder.cpp cli.cpp ^
    "..\open_npue\npu_device.cpp" "..\open_qwen36\q4nx_file.cpp" ^
    "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_whisper_cli.exe /Fo:out\

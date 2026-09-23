@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "fa_attention.hpp"
 #include "host_ops.hpp"
 #include "kernels.hpp"
 #include "npu_device.hpp"
@@ -32,6 +33,9 @@ struct Timers {
   // that stays on the host whatever happens to them. Only filled when
   // OW_ATTN_PHASES=1, because the split costs about 2% of the call.
   AttnPhases attn_phases;
+  // OW_ATTN=npu only: the NPU attention path's own three stages (repack,
+  // dispatch, readback+scatter). Zero on the default host path.
+  FaPhases fa_phases;
   double npu_in = 0, npu_dispatch = 0, npu_out = 0;
   // Dispatch time split by stream, so the array's cost can be compared against
   // each shape's own DRAM traffic rather than against one aggregate.
@@ -98,6 +102,12 @@ private:
   std::unique_ptr<npue::npu::Device> device_;
   std::unique_ptr<Weights> weights_;
   std::unique_ptr<KernelSet> kernels_;
+
+  // OW_ATTN=npu (default: unset/host -- see attn() in encoder.cpp). Resident
+  // for the Encoder's lifetime, same as kernels_'s Design: F1/trap 7b say a
+  // design that reloads per call has already lost. Null on the default path.
+  std::unique_ptr<FaAttention> fa_attn_;
+  bool use_fa_attn_ = false;
 
   // Staged B slots, filled once at construction.
   size_t conv1_slot_ = 0, conv2_slot_ = 0, xkv_slot_ = 0;

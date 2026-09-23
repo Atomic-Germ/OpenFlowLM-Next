@@ -12,6 +12,20 @@
 
 namespace ow {
 namespace {
+
+// OW_ATTN: unset, empty or "host" keeps the existing host_ops.cpp
+// attention(); "npu" dispatches AMD's MLIR-AIR fused FlashAttention kernel
+// instead (fa_attention.hpp). Any other value is REFUSED rather than read as
+// "host": a misspelt "npu" would otherwise run the host path while the
+// operator believes they are measuring the array.
+bool fa_attn_requested() {
+  const char *e = std::getenv("OW_ATTN");
+  if (!e || !*e) return false;
+  const std::string v(e);
+  if (v == "host") return false;
+  if (v == "npu") return true;
+  throw std::runtime_error("OW_ATTN is '" + v + "': expected 'host' or 'npu'");
+}
 double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -52,6 +66,19 @@ Encoder::Encoder(const std::string &model_dir, const std::string &kernels_dir_hi
   }
   std::printf("  staged     %zu weight buffers on the device\n",
              3 + layer_slots_.size() * 4);
+
+  use_fa_attn_ = fa_attn_requested();
+  if (use_fa_attn_) {
+    const char *fa_dir = std::getenv("OW_FA_DIR");
+    if (!fa_dir || !*fa_dir)
+      throw std::runtime_error("OW_ATTN=npu requires OW_FA_DIR (a directory "
+                               "holding air.xclbin + air.insts.bin)");
+    std::printf("  attention  NPU (OW_ATTN=npu)\n");
+    fa_attn_ = std::make_unique<FaAttention>(*device_, fa_dir);
+  } else {
+    std::printf("  attention  host (default; set OW_ATTN=npu for the MLIR-AIR "
+               "FlashAttention kernel)\n");
+  }
 }
 
 void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_padded) {
@@ -99,8 +126,13 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
     const char *e = std::getenv("OW_ATTN_PHASES");
     return e && *e && *e != '0';
   }();
-  attention(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
-            s_attn_scratch_.data(), phase_split ? &timers.attn_phases : nullptr);
+  if (use_fa_attn_) {
+    fa_attn_->run(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
+                 &timers.fa_phases);
+  } else {
+    attention(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
+             s_attn_scratch_.data(), phase_split ? &timers.attn_phases : nullptr);
+  }
   timers.attention += now_s() - t0;
 
   t0 = now_s();
