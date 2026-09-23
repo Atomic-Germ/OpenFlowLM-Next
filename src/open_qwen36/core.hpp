@@ -176,6 +176,8 @@ public:
     /// per differing rep, the first step and the first layer (in walk order) and buffer that
     /// moved. Returns the number of reps that differed. Leaves the engine reset.
     int det_step(int reps, const std::vector<int>& ids, bool full);
+    /// How many router reads found the record not landed yet and waited for it (since load).
+    uint64_t late_route_reads() const { return route_late_; }
     /// One kernel, on one layer, over and over, with the arguments its own program gives it.
     /// For a half-program kernel (lx0, ax0) this HANGS unless the build is self-contained --
     /// the second half is what drains its fifos -- so it is for timing a truncated build
@@ -357,6 +359,13 @@ private:
     bool route_check_ = false;                 ///< OFLM_ROUTE_CHECK: re-read every router record, count changes
     uint64_t route_checks_ = 0, route_stale_ = 0;
     std::vector<std::pair<int, std::vector<uint8_t>>> route_log_;
+    /// OPEN-REQUEST-ISOLATION: the router idx slot is armed with a sentinel before each step
+    /// and route() re-syncs until the dispatch's record replaces it (OFLM_OPEN_ROUTE_SENTINEL=0
+    /// turns this off, for the A/B only).
+    static constexpr uint32_t kRouteSentinel = 0xFFFFFFFFu;
+    bool route_sentinel_ = true;
+    uint64_t route_reads_ = 0, route_late_ = 0;
+    void arm_route_records();
 
     xrt::hw_context& context(const std::string& name);
     void load_kernel(const std::string& name, const KernelDesc& d);

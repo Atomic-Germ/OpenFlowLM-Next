@@ -309,6 +309,9 @@ std::vector<int> request(Core& core, const Args& a) {
         tok = argmax(core.logits(), core.real_vocab());
     }
     double dec_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+    if (core.late_route_reads())
+        std::fprintf(stderr, "late router reads caught so far: %llu\n",
+                     static_cast<unsigned long long>(core.late_route_reads()));
     if (out.size() > 1)
         std::fprintf(stderr, "decode %zu tokens: %.0f ms/token (%.2f tok/s)\n", out.size() - 1, dec_ms / (out.size() - 1),
                      1000.0 * (out.size() - 1) / dec_ms);

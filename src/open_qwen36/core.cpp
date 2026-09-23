@@ -282,6 +282,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     route_check_ = std::getenv("OFLM_ROUTE_CHECK") != nullptr;
+    if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
@@ -1218,6 +1219,9 @@ int Core::det_step(int reps, const std::vector<int>& ids, bool full) {
         }
     }
     std::fprintf(stderr, "open_qwen36: det_step: %d of %d reps differed from the reference\n", bad, reps);
+    std::fprintf(stderr, "open_qwen36: late router reads caught (OFLM_OPEN_ROUTE_SENTINEL=%d): %llu of %llu\n",
+                 route_sentinel_ ? 1 : 0, static_cast<unsigned long long>(route_late_),
+                 static_cast<unsigned long long>(route_reads_));
     if (route_check_)
         std::fprintf(stderr, "open_qwen36: route check: %llu of %llu router reads changed on a re-read\n",
                      static_cast<unsigned long long>(route_stale_), static_cast<unsigned long long>(route_checks_));
@@ -1244,6 +1248,33 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     }
     uint32_t idx[8];
     std::memcpy(idx, act.map<uint8_t*>() + off, 32);
+    // OPEN-REQUEST-ISOLATION. The wait on this layer's first dispatch returning is NOT
+    // enough for the host to see the router record it wrote: roughly one read in 3000 (in
+    // the periods where it happens at all) still returns the PREVIOUS step's idx, and a
+    // re-sync microseconds later returns the new one (repeat-bug.md). The previous step's
+    // idx is a valid expert list, so nothing downstream notices -- the step just runs the
+    // wrong experts. arm_route_records() overwrote the slot with a sentinel before this
+    // step's dispatches, so a read that still shows it has not landed yet: sync again.
+    if (route_sentinel_) {
+        auto armed = [&] {
+            for (unsigned s = 0; s < man_.moe.topk; ++s)
+                if (idx[s] == kRouteSentinel) return true;
+            return false;
+        };
+        ++route_reads_;
+        if (armed()) {
+            ++route_late_;
+            const auto tw = std::chrono::steady_clock::now();
+            do {
+                if (ms_since(tw) > 1000.0)
+                    throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " at position " +
+                                             std::to_string(pos_) + ": the router record never landed (1 s after its "
+                                             "dispatch completed)");
+                act.sync(XCL_BO_SYNC_BO_FROM_DEVICE, 32, off);
+                std::memcpy(idx, act.map<uint8_t*>() + off, 32);
+            } while (armed());
+        }
+    }
     if (route_check_) {
         // read it again twice: at once, and a millisecond later, both through a fresh sync
         uint32_t again[8], later[8];
@@ -1265,6 +1296,20 @@ void Core::route(Kern& k, int layer, uint64_t act_off) {
     stream_patch::moe2_apply(k.iw(), k.moe2, idx, man_.moe);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     timing_.route_ms += ms_since(t0);
+}
+
+void Core::arm_route_records() {
+    // Every router record's idx slot -> the sentinel, so route() can tell a record this step's
+    // dispatch wrote from one it has not landed yet. Called with nothing outstanding; the
+    // first dispatch of each layer overwrites the whole record before anything reads it.
+    for (int l = 0; l < nl_; ++l)
+        for (const Step& s : types_[l]->program) {
+            if (s.op == "run") continue;
+            const size_t off = s.act_off + man_.rout_idx_off;
+            uint32_t* p = reinterpret_cast<uint32_t*>(act_[l].map<uint8_t*>() + off);
+            for (int i = 0; i < 8; ++i) p[i] = kRouteSentinel;
+            act_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, 32, off);
+        }
 }
 
 void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
@@ -1323,6 +1368,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         stream_patch::attn_apply(k.iw(), k.attn, static_cast<uint64_t>(pos_), k.geom);
         k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     }
+    if (route_sentinel_) arm_route_records();
     for (int l = 0; l < nl_; ++l) {
         int nrun = 0;
         for (const Step& s : types_[l]->program) {
