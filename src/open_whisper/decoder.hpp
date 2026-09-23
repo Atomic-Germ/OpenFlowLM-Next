@@ -27,6 +27,8 @@
 #include <string>
 #include <vector>
 
+#include "decoder_quant.hpp"
+
 namespace ow {
 
 // y = x . W^T + b, W kept as bf16 [out, in] (the container's own layout, not
@@ -138,6 +140,15 @@ private:
   const float *xkv_ = nullptr;                        // [1500, 10240], NOT owned
   int64_t pos_ = 0;
 
+  // OPTIONAL, env-selected precision variants (task 0180 Part 8, see
+  // decoder_quant.hpp) -- read ONCE in the constructor. All three default to
+  // the value that makes step() take EXACTLY the pre-existing code path with
+  // EXACTLY the pre-existing arithmetic; only a non-default value activates
+  // any of the code decoder_quant.{hpp,cpp} adds.
+  XkvPrecision xkv_precision_ = XkvPrecision::FP32;
+  WeightPrecision weight_precision_ = WeightPrecision::BF16;
+  HeadPrecision head_precision_ = HeadPrecision::BF16;
+
   // Cross-attention K/V, gathered head-contiguous once per window by
   // set_encoder_output() -- xkv_'s own fused-row layout puts a 64-float head
   // slice 10240 floats (40 KB) apart from the next row's same head, so
@@ -147,7 +158,31 @@ private:
   // only the addresses attend_one reads change. Sized on first use because
   // DecoderGeometry has no `1500` of its own (that is the encoder's frame
   // count, not decoder geometry) -- see set_encoder_output().
+  //
+  // Exactly ONE of the next two is ever populated, selected once at
+  // construction by xkv_precision_: the fp32 buffer (default, UNCHANGED from
+  // before this task) or the bf16 buffer (OW_DEC_XKV=bf16, half the bytes).
   std::vector<float> xkv_gathered_;
+  std::vector<uint16_t> xkv_gathered_bf16_;
+
+  // Per-layer int8 linears (OW_DEC_W=int8) -- parallel to layers_'s own bf16
+  // Linear fields, quantized once at load from the SAME bf16 bits layers_
+  // already holds. Empty unless weight_precision_ == INT8; layers_ itself is
+  // always fully loaded regardless (it is also what quantize_int8_rows_bf16
+  // reads from), so OW_DEC_W never changes which tensors are read off disk,
+  // only which representation step() dispatches through.
+  struct LayerInt8 {
+    QLinear self_q, self_k, self_v, self_out;
+    QLinear cross_q, cross_out;
+    QLinear fc1, fc2;
+  };
+  std::vector<LayerInt8> layers_int8_;
+
+  // Tied head, int8 (OW_DEC_HEAD=int8 or int8x) -- quantized once from
+  // embed_tokens_.w. The embedding LOOKUP (step()'s very first read, token
+  // id -> row) always reads embed_tokens_ itself (bf16), never this: only
+  // the 51866-row OUTPUT sweep is affected by OW_DEC_HEAD.
+  QLinear head_int8_;
 
   // attend_one's scores scratch, one row per HEAD ([n_heads][1500]) --
   // preallocated once here so parallelising attend_one across heads needs no

@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -318,6 +319,37 @@ Decoder::Decoder(const std::string &model_dir) {
     L.ln_final_b = load_f32(f, p + "final_layer_norm.bias", {static_cast<size_t>(D)});
   }
 
+  // OPTIONAL precision variants (task 0180 Part 8): read once, strict --
+  // print the VALUE PARSED, not the intention, matching encoder.cpp's own
+  // OW_ATTN startup line.
+  xkv_precision_ = parse_xkv_precision();
+  weight_precision_ = parse_weight_precision();
+  head_precision_ = parse_head_precision();
+  std::printf("  decoder    xkv=%s weights=%s head=%s\n", ow::to_string(xkv_precision_),
+             ow::to_string(weight_precision_), ow::to_string(head_precision_));
+
+  if (weight_precision_ == WeightPrecision::INT8) {
+    layers_int8_.resize(static_cast<size_t>(DG::n_layers));
+    for (int64_t l = 0; l < DG::n_layers; ++l) {
+      const auto &W = layers_[static_cast<size_t>(l)];
+      auto &Q = layers_int8_[static_cast<size_t>(l)];
+      Q.self_q = quantize_int8_rows_bf16(W.self_q.w.data(), W.self_q.b, W.self_q.out, W.self_q.in);
+      Q.self_k = quantize_int8_rows_bf16(W.self_k.w.data(), W.self_k.b, W.self_k.out, W.self_k.in);
+      Q.self_v = quantize_int8_rows_bf16(W.self_v.w.data(), W.self_v.b, W.self_v.out, W.self_v.in);
+      Q.self_out =
+          quantize_int8_rows_bf16(W.self_out.w.data(), W.self_out.b, W.self_out.out, W.self_out.in);
+      Q.cross_q = quantize_int8_rows_bf16(W.cross_q.w.data(), W.cross_q.b, W.cross_q.out, W.cross_q.in);
+      Q.cross_out =
+          quantize_int8_rows_bf16(W.cross_out.w.data(), W.cross_out.b, W.cross_out.out, W.cross_out.in);
+      Q.fc1 = quantize_int8_rows_bf16(W.fc1.w.data(), W.fc1.b, W.fc1.out, W.fc1.in);
+      Q.fc2 = quantize_int8_rows_bf16(W.fc2.w.data(), W.fc2.b, W.fc2.out, W.fc2.in);
+    }
+  }
+  if (head_precision_ == HeadPrecision::INT8 || head_precision_ == HeadPrecision::INT8X) {
+    head_int8_ = quantize_int8_rows_bf16(embed_tokens_.w.data(), embed_tokens_.b, embed_tokens_.out,
+                                         embed_tokens_.in);
+  }
+
   self_k_cache_.assign(static_cast<size_t>(DG::n_layers),
                        std::vector<float>(static_cast<size_t>(DG::max_target_positions) *
                                          static_cast<size_t>(D)));
@@ -354,13 +386,41 @@ void Decoder::set_encoder_output(const float *xkv_1500x10240) {
   const int64_t D = DG::d_model, H = DG::n_heads, HD = DG::head_dim, L = DG::n_layers;
   const int64_t XKV_STRIDE = 2 * L * D;
   const int64_t LEN = 1500;
+  const int64_t blocks = L * 2 * H;   // one block per (layer, k-or-v, head)
+  const double t0 = now_s();
+
+  if (xkv_precision_ == XkvPrecision::BF16) {
+    // OW_DEC_XKV=bf16: same gather, same addresses, but each 64-float row is
+    // converted to bf16 (RNE, host_ops.hpp's bf16_fill) on the way in rather
+    // than memcpy'd -- halves xkv_gathered_'s 61.4 MB. This branch touches
+    // NOTHING the fp32 branch below reads or writes.
+    if (xkv_gathered_bf16_.empty())
+      xkv_gathered_bf16_.assign(static_cast<size_t>(L) * 2 * static_cast<size_t>(H) *
+                                    static_cast<size_t>(LEN) * static_cast<size_t>(HD),
+                                0);
+#pragma omp parallel for schedule(static)
+    for (int64_t idx = 0; idx < blocks; ++idx) {
+      const int64_t l = idx / (2 * H);
+      const int64_t kv = (idx / H) % 2;   // 0 = K, 1 = V
+      const int64_t h = idx % H;
+      const float *src = xkv_ + (2 * l + kv) * D + h * HD;
+      uint16_t *dst = xkv_gathered_bf16_.data() +
+                     (static_cast<size_t>(l) * 2 + static_cast<size_t>(kv)) * static_cast<size_t>(H) *
+                         static_cast<size_t>(LEN) * static_cast<size_t>(HD) +
+                     static_cast<size_t>(h) * static_cast<size_t>(LEN) * static_cast<size_t>(HD);
+      for (int64_t t = 0; t < LEN; ++t)
+        bf16_fill(dst + t * HD, src + t * XKV_STRIDE, static_cast<size_t>(HD));
+    }
+    timers.xkv_gather += now_s() - t0;
+    return;
+  }
+
+  // Default (OW_DEC_XKV unset or "fp32"): UNCHANGED from before this task.
   if (xkv_gathered_.empty())
     xkv_gathered_.assign(static_cast<size_t>(L) * 2 * static_cast<size_t>(H) *
                              static_cast<size_t>(LEN) * static_cast<size_t>(HD),
                          0.f);
 
-  const double t0 = now_s();
-  const int64_t blocks = L * 2 * H;   // one block per (layer, k-or-v, head)
 #pragma omp parallel for schedule(static)
   for (int64_t idx = 0; idx < blocks; ++idx) {
     const int64_t l = idx / (2 * H);
@@ -407,7 +467,14 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     timers.layer_norm += now_s() - t0;
 
     t0 = now_s();
-    linear_qkv(h_.data(), W.self_q, W.self_k, W.self_v, q_.data(), k_.data(), v_.data());
+    if (weight_precision_ == WeightPrecision::INT8) {
+      const auto &Qi = layers_int8_[static_cast<size_t>(l)];
+      linear_int8(h_.data(), Qi.self_q, q_.data());
+      linear_int8(h_.data(), Qi.self_k, k_.data());
+      linear_int8(h_.data(), Qi.self_v, v_.data());
+    } else {
+      linear_qkv(h_.data(), W.self_q, W.self_k, W.self_v, q_.data(), k_.data(), v_.data());
+    }
     {
       const double d = now_s() - t0;
       timers.linear += d;
@@ -432,7 +499,10 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     }
 
     t0 = now_s();
-    linear(attn_.data(), W.self_out, tmp_.data());
+    if (weight_precision_ == WeightPrecision::INT8)
+      linear_int8(attn_.data(), layers_int8_[static_cast<size_t>(l)].self_out, tmp_.data());
+    else
+      linear(attn_.data(), W.self_out, tmp_.data());
     {
       const double d = now_s() - t0;
       timers.linear += d;
@@ -447,7 +517,10 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     timers.layer_norm += now_s() - t0;
 
     t0 = now_s();
-    linear(h_.data(), W.cross_q, q_.data());
+    if (weight_precision_ == WeightPrecision::INT8)
+      linear_int8(h_.data(), layers_int8_[static_cast<size_t>(l)].cross_q, q_.data());
+    else
+      linear(h_.data(), W.cross_q, q_.data());
     {
       const double d = now_s() - t0;
       timers.linear += d;
@@ -459,7 +532,15 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     // head_stride = 1500*HD (distance between head blocks). Same values as
     // xkv_ + 2*l*D / xkv_ + (2*l+1)*D at stride XKV_STRIDE would have given --
     // see set_encoder_output()'s gather comment.
-    {
+    if (xkv_precision_ == XkvPrecision::BF16) {
+      const int64_t HB = 1500 * HD;
+      const uint16_t *Kg = xkv_gathered_bf16_.data() +
+                          (static_cast<size_t>(l) * 2 + 0) * static_cast<size_t>(H) * static_cast<size_t>(HB);
+      const uint16_t *Vg = xkv_gathered_bf16_.data() +
+                          (static_cast<size_t>(l) * 2 + 1) * static_cast<size_t>(H) * static_cast<size_t>(HB);
+      attend_one_xkv_bf16(q_.data(), Kg, HD, HB, Vg, HD, HB, 1500, H, HD, scale, attn_.data(),
+                          attn_scores_scratch_.data(), attn_scratch_stride_);
+    } else {
       const int64_t HB = 1500 * HD;
       const float *Kg = xkv_gathered_.data() + (static_cast<size_t>(l) * 2 + 0) *
                                                    static_cast<size_t>(H) * static_cast<size_t>(HB);
@@ -475,7 +556,10 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     }
 
     t0 = now_s();
-    linear(attn_.data(), W.cross_out, tmp_.data());
+    if (weight_precision_ == WeightPrecision::INT8)
+      linear_int8(attn_.data(), layers_int8_[static_cast<size_t>(l)].cross_out, tmp_.data());
+    else
+      linear(attn_.data(), W.cross_out, tmp_.data());
     {
       const double d = now_s() - t0;
       timers.linear += d;
@@ -489,7 +573,10 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     timers.layer_norm += now_s() - t0;
 
     t0 = now_s();
-    linear(h_.data(), W.fc1, ff_.data());
+    if (weight_precision_ == WeightPrecision::INT8)
+      linear_int8(h_.data(), layers_int8_[static_cast<size_t>(l)].fc1, ff_.data());
+    else
+      linear(h_.data(), W.fc1, ff_.data());
     {
       const double d = now_s() - t0;
       timers.linear += d;
@@ -499,7 +586,10 @@ void Decoder::step(int32_t token_id, float *logits_out) {
     gelu(ff_.data(), 1, FFN, ff_.data());
     timers.gelu += now_s() - t0;
     t0 = now_s();
-    linear(ff_.data(), W.fc2, tmp_.data());
+    if (weight_precision_ == WeightPrecision::INT8)
+      linear_int8(ff_.data(), layers_int8_[static_cast<size_t>(l)].fc2, tmp_.data());
+    else
+      linear(ff_.data(), W.fc2, tmp_.data());
     {
       const double d = now_s() - t0;
       timers.linear += d;
@@ -516,7 +606,23 @@ void Decoder::step(int32_t token_id, float *logits_out) {
   // with -inf so a caller sampling over the padded width can never pick one
   // of the six unused ids.
   t0 = now_s();
-  linear(h_.data(), embed_tokens_, logits_out);
+  if (head_precision_ == HeadPrecision::BF16) {
+    linear(h_.data(), embed_tokens_, logits_out);
+  } else {
+    // int8 / int8x: every logit from the int8 approximation first...
+    linear_int8(h_.data(), head_int8_, logits_out);
+    if (head_precision_ == HeadPrecision::INT8X) {
+      // ...then the K=64 rows the int8 pass ranked highest are recomputed
+      // EXACTLY against embed_tokens_'s own bf16 bits (the same tensor and
+      // the same dot_bf16-shaped kernel the HeadPrecision::BF16 branch
+      // above uses) and overwritten in place -- see
+      // recompute_top_k_exact()'s header comment for why this keeps greedy
+      // argmax exact unless the true maximum falls outside the int8 top-64.
+      // embed_tokens_ has no bias tensor (load_linear_nobias), so `bias` is
+      // null here, matching linear()'s own zero-bias vector for this Linear.
+      recompute_top_k_exact(h_.data(), DG::vocab, D, 64, embed_tokens_.w.data(), nullptr, logits_out);
+    }
+  }
   {
     const double d = now_s() - t0;
     timers.linear += d;

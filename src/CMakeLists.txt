@@ -404,6 +404,7 @@ if(NOT OFLM_USE_HRX)
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/kernels.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/guards.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/host_ops.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/decoder_quant.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/encoder.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/fa_attention.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/decoder.cpp"
