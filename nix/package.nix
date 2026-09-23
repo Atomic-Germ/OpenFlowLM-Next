@@ -57,7 +57,7 @@ stdenv.mkDerivation rec {
   version = oflmVersion;
 
   src = lib.sources.cleanSourceWith {
-    src = ./.;
+    src = ../.;
     filter = path: type:
       let
         base = baseNameOf path;
