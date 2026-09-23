@@ -64,6 +64,14 @@ N = int(os.environ.get("WG_N", 3840))
 if M % (M_TILE * 4) or K % K_TILE or N % (N_TILE * N_COLS):
     sys.exit(f"whisper_gemm: M={M} K={K} N={N} must tile by ({M_TILE * 4}, {K_TILE}, {N_TILE * N_COLS})")
 
+# WG_BFP16=1 compiles the bf16 matmul onto the MMAC unit via bfp16 emulation
+# instead of the fp32 vector unit. It is a CompileTime argument (trap 7e: anything
+# that changes the generated design must be, never derived in the generator), and
+# it changes the numerics -- the A and B tiles are quantised to a shared-exponent
+# block format -- so it is a per-model accuracy decision, not a free switch.
+BFP16 = os.environ.get("WG_BFP16", "") not in ("", "0")
+
 DESIGN = pretiled_array
 SPECIALIZE = dict(M=M, K=K, N=N, m=M_TILE, k=K_TILE, n=N_TILE, n_aie_cols=N_COLS,
-                  dtype_in_str="bf16", dtype_out_str="f32", rtp=True, tg_depth=TG_DEPTH)
+                  dtype_in_str="bf16", dtype_out_str="f32", rtp=True, tg_depth=TG_DEPTH,
+                  emulate_bf16_mmul_with_bfp16=BFP16)

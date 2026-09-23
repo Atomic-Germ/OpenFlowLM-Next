@@ -57,6 +57,14 @@ LANG_LO, LANG_HI = 50259, 50358          # inclusive, as _sample_in_language
 TS_BEGIN = 50365                          # <|0.00|>
 
 
+# openai/whisper's own load_audio arguments, kept as data so every clip can record
+# which decode produced it (see meta.json's "audio_decode"). The sample format is
+# load-bearing -- see decode_audio() -- so a golden set mixing two of them is a set
+# whose clips are not comparable, and that has happened once already.
+DECODE_ARGS = ["-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(SR)]
+AUDIO_DECODE = "ffmpeg " + " ".join(DECODE_ARGS) + "; int16/32768"
+
+
 def decode_audio(path: Path) -> np.ndarray:
     """openai/whisper's own `load_audio` command, verbatim, then s16 -> float.
 
@@ -75,8 +83,7 @@ def decode_audio(path: Path) -> np.ndarray:
     they were not.
     """
     raw = subprocess.run(
-        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
-         "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(SR), "-"],
+        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path)] + DECODE_ARGS + ["-"],
         check=True, capture_output=True).stdout
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -114,9 +121,25 @@ def main() -> int:
         == (1280, 32, 4, 128, 51866), "not whisper-large-v3-turbo's geometry"
 
     args.out.mkdir(parents=True, exist_ok=True)
+    # MERGE into an existing index rather than replacing it, so a run over one clip does
+    # not erase the others -- the whole set is too slow and too memory-hungry to always
+    # regenerate in one process (a six-clip run was killed half way once, leaving a set
+    # whose halves came from different decodes).
     index = {"model_dir": str(args.model_dir),
              "model_sha256": sha256(args.model_dir / "model.safetensors"),
              "torch": torch.__version__, "clips": {}}
+    meta_path = args.out / "meta.json"
+    if meta_path.is_file():
+        old = json.loads(meta_path.read_text(encoding="utf-8"))
+        # The index names ONE model for all its clips, and whisper_decode_check.py copies
+        # that hash into its baseline -- so merging clips from other weights would file
+        # them under the wrong model. Refuse rather than mix.
+        if old.get("model_sha256") != index["model_sha256"]:
+            raise SystemExit(
+                f"{meta_path} was built from model_sha256 {old.get('model_sha256', 'UNRECORDED')}, "
+                f"but {args.model_dir} is {index['model_sha256']}; use a different --out")
+        old["clips"] = old.get("clips", {})
+        index = old
 
     for clip in args.clips:
         t0 = time.perf_counter()
@@ -152,6 +175,7 @@ def main() -> int:
             t[f"dec.{l}.xv"] = layer.encoder_attn.v_proj(out)[0].float().numpy()
 
         meta: dict = {"clip": clip.name, "clip_sha256": sha256(clip),
+                      "audio_decode": AUDIO_DECODE,
                       "seconds": len(pcm) / SR, "window_seconds": len(first) / SR}
 
         def step(ids: list[int]) -> np.ndarray:
@@ -218,8 +242,15 @@ def main() -> int:
         print(f"{name}: {meta['hf']['language']} {meta['hf']['n_tokens']} tok, "
               f"{meta['elapsed_s']} s -- {meta['hf']['text'][:80]!r}", flush=True)
 
-    (args.out / "meta.json").write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n",
-                                        encoding="utf-8")
+    # A set whose clips were not all decoded the same way is not comparable with itself.
+    decodes = {c.get("audio_decode", "UNRECORDED") for c in index["clips"].values()}
+    if len(decodes) > 1:
+        print("WARNING: this golden set mixes audio decodes, so its clips are not "
+              "comparable with each other:", flush=True)
+        for cname, c in sorted(index["clips"].items()):
+            print(f"    {cname:34s} {c.get('audio_decode', 'UNRECORDED')}", flush=True)
+    meta_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n",
+                         encoding="utf-8")
     return 0
 
 
