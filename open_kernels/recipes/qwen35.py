@@ -80,6 +80,9 @@ def _check(spec: ModelSpec) -> None:
                 key_heads=spec.lin_key_heads, conv_kernel=spec.conv_kernel)
         if spec.lin_key_dim != spec.lin_value_dim:
             raise OpRangeError("qwen35: DeltaNet key and value head dims must match")
+        if M.ab_banks(spec) > 1:
+            raise OpRangeError("qwen35: not implemented: wide DeltaNet glue DMA scheduling; "
+                               "the banked worker needs compile/place validation before dispatch")
         require_gemv(spec, "linear", spec.hidden, spec.lin_qkv_dim // n, pc)
         require_gemv(spec, "linear", spec.hidden, spec.lin_value_width // n, pc)
         require_gemv(spec, "linear_out", spec.lin_value_width, spec.hidden // n, pc)
