@@ -83,11 +83,37 @@ its cores simply block on an empty fifo (idle, zero extra code):
   shim S2MM = `lno` 1 + `y` 8 + `gout`/`pout` 1 + `aout` 1 + `og` 3 = **15 <= 16**
   (per-shim placement still to be checked column by column).
 
+### Dispatch primitive (what the toolchain rules in/out)
+
+* Shim MM2S is **exactly 2 per `ShimNOCTile`** (checked against mlir-aie's own npu2
+  target: every `shim_dma_allocation` in its reference MLIR uses channel 0 or 1 only).
+  8 columns -> 16, so per-layer-type `w` streams are arithmetically impossible.
+* `aie.iron` `ObjectFifo.repeat_count` lowers to a **static** attribute
+  (`op.set_repeat_count(...)`), not a control-text field, so a memtile `split()` cannot
+  be runtime-muted that way.
+* The remaining candidates, both low level:
+  1. a memtile `(c,1)` as a 2-hop DMA `shim(c,0) -> memtile buffer -> core`, with the
+     memtile's MM2S BD destination (row 2 or row 5) configured per run by the control
+     text -- i.e. the `ironutil.configure_only_fill` / `TileDma` + `Bd` pattern the ONDV
+     path already uses, extended to hand-managed locks and raw buffers on the core side;
+  2. raw `TileDma` `Bd`s on **one** `shim(c,0)` MM2S channel with two destinations, only
+     the selected one started per run (same hand-managed locks).
+
+Either way the `w` and `x` fifos stop being `ObjectFifo`s and are driven explicitly.
+`lx` and `ax`'s main bodies stay byte-identical.
+
 ### The 112 B is not recoverable by re-optimising
 
 Rebuilding `lx` with the main-core TUs at `-O2` gives 16256 B (16 B smaller); `-Oz`
-fails the aiecc pipeline outright. There is no meaningful headroom to buy, so the main
-programs must be used exactly as they are.
+fails the aiecc pipeline outright, and moving only the GEMV TUs to `-Oz`/`-O2` changes
+nothing (16272 B). The size is the IRON/lock scaffolding, not the kernels. **The main
+programs must be used exactly as they are.**
+
+### The 35B is genuinely hybrid
+
+`layer_types` is the Qwen3-Next 3:1 pattern (3 x `linear_attention`, 1 x
+`full_attention`, x10 = 40 layers), so a per-token runlist needs both `lx` and `ax` and
+the merge is unavoidable -- it cannot be side-stepped by one layer type.
 
 ### Dispatch primitive
 
