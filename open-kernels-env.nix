@@ -6,7 +6,9 @@
   fetchurl,
   python312,
   python312Packages,
-  xrt,
+  pkgs ? null,
+  xrt ? pkgs.xrt,
+  xrt-plugin-amdxdna ? pkgs.xrt-plugin-amdxdna,
   git,
   makeWrapper,
   unzip,
@@ -17,6 +19,22 @@
 let
   pyVersion = "3.12";
   pySite = "lib/python${pyVersion}/site-packages";
+
+  # XRT needs the amdxdna plugin next to its lib/ to enumerate NPU devices.
+  # nix-amd-ai ships xrt and xrt-plugin-amdxdna separately; combine them the
+  # same way the nix-amd-ai NixOS module does.
+  xrtPrefix = "${xrt}/opt/xilinx/xrt";
+  xrtCombined = stdenv.mkDerivation {
+    pname = "xrt-combined";
+    version = xrt.version;
+    phases = [ "installPhase" ];
+    installPhase = ''
+      mkdir -p $out
+      cp -rs ${xrtPrefix}/* $out/
+      chmod -R u+w $out/lib
+      ln -sf ${xrt-plugin-amdxdna}/opt/xilinx/xrt/lib/libxrt_driver_xdna* $out/lib/
+    '';
+  };
 
   mlirAieWheel = fetchurl {
     url = "https://github.com/Xilinx/mlir-aie/releases/download/v1.4.3/mlir_aie-1.4.3-cp312-cp312-manylinux_2_35_x86_64.whl";
@@ -73,15 +91,16 @@ let
   };
 in
 {
-  inherit pyVersion pySite pyDeps nativeTools runtimeLibs ironvenv;
+  inherit pyVersion pySite pyDeps nativeTools runtimeLibs ironvenv xrtCombined;
 
   env = {
     # Standard environment variables needed by export scripts at run time.
-    XILINX_XRT = "${xrt}/opt/xilinx/xrt";
+    # Use the combined XRT so the amdxdna plugin is discoverable next to lib/.
+    XILINX_XRT = "${xrtCombined}";
     # Relative to the in-repo materialized venv; callers prepend $PWD/ironvenv/.
     PEANO_INSTALL_DIR = "${pySite}/llvm-aie";
     PATH = "${pySite}/llvm-aie/bin:${pySite}/mlir_aie/bin";
     PYTHONPATH = "${pySite}";
-    LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
+    LD_LIBRARY_PATH = lib.makeLibraryPath ([ xrtCombined ] ++ runtimeLibs);
   };
 }

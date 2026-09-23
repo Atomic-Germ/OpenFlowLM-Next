@@ -17,7 +17,7 @@
 
 let
   env = pkgs.lib.callPackageWith {
-    inherit lib stdenv fetchurl python312 python312Packages xrt git makeWrapper unzip zlib patchelf;
+    inherit lib stdenv fetchurl python312 python312Packages xrt git makeWrapper unzip zlib patchelf pkgs;
   } ./open-kernels-env.nix {};
 in
 
@@ -25,7 +25,7 @@ pkgs.mkShell {
   name = "open-kernels-dev";
 
   nativeBuildInputs = env.nativeTools;
-  buildInputs = env.runtimeLibs ++ [ env.ironvenv ];
+  buildInputs = env.runtimeLibs ++ [ env.ironvenv env.xrtCombined ];
 
   shellHook = ''
     export XILINX_XRT="${env.env.XILINX_XRT}"
@@ -39,8 +39,12 @@ pkgs.mkShell {
       echo "[open-kernels-dev] materializing ironvenv..."
       cp -R ${env.ironvenv} "$PWD/ironvenv"
       chmod -R +w "$PWD/ironvenv"
-      ln -sf ${python312}/bin/python "$PWD/ironvenv/bin/python"
     fi
+    # The copied venv may contain absolute symlinks to the Python used at
+    # build time; ensure the bin/python entry points at the shell's Python.
+    ln -sf ${python312}/bin/python "$PWD/ironvenv/bin/python"
+    if [ -e "$PWD/ironvenv/bin/python3" ]; then rm -f "$PWD/ironvenv/bin/python3"; fi
+    ln -s python "$PWD/ironvenv/bin/python3"
 
     echo "[open-kernels-dev] XRT at $XILINX_XRT"
     echo "[open-kernels-dev] aiecc at $(which aiecc)"

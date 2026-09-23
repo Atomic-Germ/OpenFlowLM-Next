@@ -66,8 +66,10 @@ XRT_ROOT = Path("/opt/xilinx/xrt")
 XRT_BIN = XRT_ROOT / "bin"
 XRT_PY = XRT_ROOT / "python"
 
-# pyxrt is built for 3.11 by the installed XRT; pin the venv to match.
-PYTHON = "3.11"
+# Use the Python major.minor of the interpreter running this script.
+# The nix-amd-ai XRT currently ships pyxrt for 3.12, so the dev shell
+# and package build both use Python 3.12.
+PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def venv_python() -> Path:
@@ -82,7 +84,14 @@ def llvm_aie_bin() -> Path | None:
 def ensure_venv() -> Path:
     py = venv_python()
     if py.is_file():
-        return py
+        # If the existing venv can import the IRON "aie" package, trust it
+        # (e.g. the Nix dev shell materialized it). Otherwise fall through and
+        # recreate it.
+        try:
+            subprocess.run([str(py), "-c", "import aie"], check=True, capture_output=True)
+            return py
+        except subprocess.CalledProcessError:
+            pass
     print("-- creating ironvenv (mlir-aie + Peano toolchain)", flush=True)
     if shutil.which("uv"):
         subprocess.run(["uv", "venv", "--python", PYTHON, str(VENV)], check=True)
@@ -160,9 +169,15 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="rebuild even when the build cache is current")
     ap.add_argument("--skip-bert", action="store_true",
                     help="skip open_npue BERT embedding sets (they need an NPU at build time)")
+    ap.add_argument("--bert-only", action="store_true",
+                    help="only build open_npue BERT embedding sets, skip open_kernels dense specs")
     ap.add_argument("-j", "--jobs", type=int, default=max(1, os.cpu_count() // 2),
-                    help="parallel kernel-set builds within each spec (default: os.cpu_count()//2)")
+                   help="parallel kernel-set builds within each spec (default: os.cpu_count()//2)")
     a = ap.parse_args()
+
+    if a.skip_bert and a.bert_only:
+        print("FATAL: --skip-bert and --bert-only are mutually exclusive", file=sys.stderr)
+        return 1
 
     skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
 
@@ -199,12 +214,14 @@ def main() -> int:
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
     # ---- the two kernel families ---------------------------------------------
-    specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
-    if not specs:
-        print("FATAL: no kernel specs found", file=sys.stderr)
-        return 1
+    n_failed = 0
+    if not a.bert_only:
+        specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
+        if not specs:
+            print("FATAL: no kernel specs found", file=sys.stderr)
+            return 1
+        n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
-    n_failed = export_open_kernels(py, specs, a.force, a.jobs)
     if not a.skip_bert:
         n_failed += export_bert_sets(py, a.force)
 
@@ -212,8 +229,11 @@ def main() -> int:
     if n_failed:
         print(f"kernel export failed: {n_failed} item(s)", flush=True)
         return 1
-    suffix = " + BERT design sets" if not a.skip_bert else ""
-    print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
+    if a.bert_only:
+        print("kernel export ok: BERT design sets", flush=True)
+    else:
+        suffix = " + BERT design sets" if not a.skip_bert else ""
+        print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 
 

@@ -17,7 +17,7 @@
 let
   env = lib.callPackageWith (
     {
-      inherit lib stdenv fetchurl python312 python312Packages xrt git makeWrapper unzip zlib patchelf;
+      inherit lib stdenv fetchurl python312 python312Packages xrt git makeWrapper unzip zlib patchelf pkgs;
     }
   ) ./open-kernels-env.nix {};
 in
@@ -58,8 +58,8 @@ stdenv.mkDerivation rec {
     ln -sf ${python312}/bin/python ironvenv/bin/python
 
     export PEANO_INSTALL_DIR="$PWD/ironvenv/${env.env.PEANO_INSTALL_DIR}"
-    export PATH="$PWD/ironvenv/${env.pySite}/llvm-aie/bin:$PWD/ironvenv/${env.pySite}/mlir_aie/bin:${xrt}/opt/xilinx/xrt/bin:$PATH"
-    export PYTHONPATH="$PWD/ironvenv/${env.pySite}:${xrt}/opt/xilinx/xrt/python''${PYTHONPATH:+:$PYTHONPATH}"
+    export PATH="$PWD/ironvenv/${env.pySite}/llvm-aie/bin:$PWD/ironvenv/${env.pySite}/mlir_aie/bin:${env.xrtCombined}/bin:$PATH"
+    export PYTHONPATH="$PWD/ironvenv/${env.pySite}:${env.xrtCombined}/python''${PYTHONPATH:+:$PYTHONPATH}"
     export LD_LIBRARY_PATH="${env.env.LD_LIBRARY_PATH}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
     # The manylinux llvm-aie/mlir-aie wheels ship x86_64 executables that
