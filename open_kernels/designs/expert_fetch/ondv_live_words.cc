@@ -15,6 +15,8 @@
 // AIE2 and must stay 0 (a token per push back-pressures the channel).
 #include <stdint.h>
 
+#define WS 4096u   // the probe's slab descriptor length in 32-bit words (16 KB)
+
 static inline int32_t lp_parity(uint32_t w) {
   unsigned pc = 0;
   for (uint32_t v = w; v; v &= v - 1u) ++pc;
@@ -37,14 +39,19 @@ void ondv_live_words(const uint32_t *__restrict cfg, int32_t *__restrict w,
                      int32_t bd, int32_t queue) {
   const uint32_t pkt = 15u;
   w[0] = lp_stream_hdr(pkt);                                 // stream header
-  w[1] = lp_ctrl_hdr(0x1D000u + 0x20u * (uint32_t)bd + 4u, 2); // ctrl: write w1, 2 beats
-  w[2] = (int32_t)(cfg[0] & 0xFFFFFFFCu);
-  w[3] = (int32_t)(cfg[1] & 0xFFFFu);                        // addr_high[15:0]
-  w[4] = lp_stream_hdr(pkt);                                 // stream header
-  w[5] = lp_ctrl_hdr(0x1D000u + 0x20u * (uint32_t)bd + 28u, 1); // ctrl: write w7 (Valid_BD), 1 beat
-  w[6] = (int32_t)0x02000000u;                               // re-arm Valid_BD
-  w[7] = lp_stream_hdr(pkt);                                 // stream header
-  w[8] = lp_ctrl_hdr((uint32_t)queue, 1);                    // ctrl: queue push, 1 beat
-  w[9] = (int32_t)((uint32_t)bd & 0xFu);
+  w[1] = lp_ctrl_hdr(0x1D000u + 0x20u * (uint32_t)bd + 0u, 4); // ctrl: write w0..w3, 4 beats
+  w[2] = (int32_t)WS;                                        // w0 Buffer_Length
+  w[3] = (int32_t)(cfg[0] & 0xFFFFFFFCu);                    // w1 addr_low
+  w[4] = (int32_t)(cfg[1] & 0xFFFFu);                        // w2 addr_high[15:0]
+  w[5] = 0;                                                  // w3
+  w[6] = lp_stream_hdr(pkt);                                 // stream header
+  w[7] = lp_ctrl_hdr(0x1D000u + 0x20u * (uint32_t)bd + 16u, 4); // ctrl: write w4..w7, 4 beats
+  w[8] = 0;                                                  // w4
+  w[9] = 0;                                                  // w5
+  w[10] = 0;                                                 // w6
+  w[11] = (int32_t)0x02000000u;                              // w7 Valid_BD
+  w[12] = lp_stream_hdr(pkt);                                // stream header
+  w[13] = lp_ctrl_hdr((uint32_t)queue, 1);                   // ctrl: queue push, 1 beat
+  w[14] = (int32_t)((uint32_t)bd & 0xFu);
 }
 }

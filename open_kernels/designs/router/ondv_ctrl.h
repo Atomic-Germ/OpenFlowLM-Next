@@ -53,7 +53,9 @@ static inline int32_t ondv_stream_hdr() {
 }
 
 // BD n registers live at 0x1D000 + 0x20*n: w0 len @+0, w1 addr_low @+4, w2 addr_high @+8.
+static inline uint32_t ondv_bd_w0(unsigned bd) { return 0x1D000u + 0x20u * bd + 0u; }
 static inline uint32_t ondv_bd_w1(unsigned bd) { return 0x1D000u + 0x20u * bd + 4u; }
+static inline uint32_t ondv_bd_w4(unsigned bd) { return 0x1D000u + 0x20u * bd + 16u; }
 // w7 (offset +28) holds Valid_BD [25] -- the hardware clears it when the BD completes,
 // so a re-push must re-set it or the descriptor is a no-op on the second wave.
 static inline uint32_t ondv_bd_w7(unsigned bd) { return 0x1D000u + 0x20u * bd + 28u; }
@@ -100,20 +102,35 @@ static constexpr uint32_t kOndvPoolDown = 335544320u;
 static constexpr uint32_t kOndvQueue[kOndvCores] = {
     0x1D21Cu, 0x1D214u, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D214u, 0x1D214u, 0x1D214u};
 
-// One routed slot's TEN words: stream hdr, retarget ctrl hdr + 2 address words, stream
-// hdr, Valid_BD ctrl hdr + the valid word, stream hdr, queue-push ctrl hdr + the bd word.
-static constexpr unsigned kOndvWords = 10;
-static inline void ondv_words(int32_t *w, unsigned bd, uint32_t queue, uint64_t addr) {
+// One routed slot's FIFTEEN words: stream hdr, "write w0..w3" ctrl hdr + 4 data, stream
+// hdr, "write w4..w7" ctrl hdr + 4 data, stream hdr, queue-push ctrl hdr + the bd word.
+// The WHOLE BD register file must be rewritten: re-pushing with only the address (w1/w2)
+// and Valid_BD (w7) changed is silently ignored on AIE2 (hardware-verified: a 2-BD chain
+// hangs, rewriting w0..w7 makes the re-push deliver). Only w1/w2 (the address) differ per
+// expert wave; w0/w3/w4/w5/w6/w7 are the descriptor's constant configuration.
+static constexpr unsigned kOndvWords = 15;
+// The routed descriptors' constant words, decoded from the built design's TXN (the
+// dma_configure_task_for that configures BD 8/9/10).
+static constexpr uint32_t kOndvLen  = 0x5000u;                                       // 20480 words = 81920 B
+static constexpr uint32_t kOndvUpW3 = 0x28000000u, kOndvUpW4 = 0xC040027Fu, kOndvUpW5 = 0x20013FFu;
+static constexpr uint32_t kOndvDnW3 = 0x0u,        kOndvDnW4 = 0xC0000000u, kOndvDnW5 = 0x2000000u;
+static inline void ondv_words(int32_t *w, unsigned bd, uint32_t queue, uint64_t addr,
+                              uint32_t w3, uint32_t w4, uint32_t w5) {
   w[0] = ondv_stream_hdr();                              // stream header (routing)
-  w[1] = ondv_hdr(ondv_bd_w1(bd), 2);                    // ctrl: write w1, 2 beats
-  w[2] = (int32_t)(uint32_t)(addr & 0xFFFFFFFCu);        // w1: addr_low, bits 1:0 zero
-  w[3] = (int32_t)(uint32_t)((addr >> 32) & 0xFFFFu);    // w2: addr_high[15:0]
-  w[4] = ondv_stream_hdr();                              // stream header (routing)
-  w[5] = ondv_hdr(ondv_bd_w7(bd), 1);                    // ctrl: write w7 (Valid_BD), 1 beat
-  w[6] = (int32_t)kOndvValidBd;                          // re-arm the descriptor
-  w[7] = ondv_stream_hdr();                              // stream header (routing)
-  w[8] = ondv_hdr(queue, 1);                             // ctrl: push queue, 1 beat
-  w[9] = (int32_t)bd;                                    // queue push: Start_BD_ID (no token)
+  w[1] = ondv_hdr(ondv_bd_w0(bd), 4);                    // ctrl: write w0..w3, 4 beats
+  w[2] = (int32_t)kOndvLen;                              // w0: Buffer_Length (words)
+  w[3] = (int32_t)(uint32_t)(addr & 0xFFFFFFFCu);        // w1: addr_low, bits 1:0 zero
+  w[4] = (int32_t)(uint32_t)((addr >> 32) & 0xFFFFu);    // w2: addr_high[15:0]
+  w[5] = (int32_t)w3;                                    // w3: descriptor stride word
+  w[6] = ondv_stream_hdr();                              // stream header (routing)
+  w[7] = ondv_hdr(ondv_bd_w4(bd), 4);                    // ctrl: write w4..w7, 4 beats
+  w[8] = (int32_t)w4;                                    // w4
+  w[9] = (int32_t)w5;                                    // w5
+  w[10] = 0;                                             // w6 (no iteration)
+  w[11] = (int32_t)kOndvValidBd;                         // w7: Valid_BD = 1
+  w[12] = ondv_stream_hdr();                             // stream header (routing)
+  w[13] = ondv_hdr(queue, 1);                            // ctrl: push queue, 1 beat
+  w[14] = (int32_t)bd;                                   // queue push: Start_BD_ID (no token)
 }
 
 // The expert's byte offset of routed slot k's up stripe for column c (xcommon.moe_sequence's
@@ -141,9 +158,9 @@ static inline void ondv_ctrl_col_impl(const int32_t *__restrict idx, uint32_t ba
     const unsigned e = (unsigned)idx[k];
     const uint32_t up = ondv_up_off(e, col);
     int32_t *w = out + k * (3u * kOndvWords);
-    ondv_words(w + 0 * kOndvWords, kOndvBdUp, queue, base + up);
-    ondv_words(w + 1 * kOndvWords, kOndvBdGate, queue, base + up + kOndvStripe);
-    ondv_words(w + 2 * kOndvWords, kOndvBdDown, queue, base + ondv_down_off(e, col));
+    ondv_words(w + 0 * kOndvWords, kOndvBdUp, queue, base + up, kOndvUpW3, kOndvUpW4, kOndvUpW5);
+    ondv_words(w + 1 * kOndvWords, kOndvBdGate, queue, base + up + kOndvStripe, kOndvUpW3, kOndvUpW4, kOndvUpW5);
+    ondv_words(w + 2 * kOndvWords, kOndvBdDown, queue, base + ondv_down_off(e, col), kOndvDnW3, kOndvDnW4, kOndvDnW5);
   }
 }
 
@@ -157,9 +174,9 @@ static inline void ondv_ctrl_impl(const int32_t *__restrict idx, uint32_t base_l
       // per column can carry them (the corrected, core-sourced control shape)
       int32_t *w = out + (c * kOndvRouted + k) * (3u * kOndvWords);
       const uint32_t up = ondv_up_off(e, c);
-      ondv_words(w + 0 * kOndvWords, kOndvBdUp, kOndvQueue[c], base + up);
-      ondv_words(w + 1 * kOndvWords, kOndvBdGate, kOndvQueue[c], base + up + kOndvStripe);
-      ondv_words(w + 2 * kOndvWords, kOndvBdDown, kOndvQueue[c], base + ondv_down_off(e, c));
+      ondv_words(w + 0 * kOndvWords, kOndvBdUp, kOndvQueue[c], base + up, kOndvUpW3, kOndvUpW4, kOndvUpW5);
+      ondv_words(w + 1 * kOndvWords, kOndvBdGate, kOndvQueue[c], base + up + kOndvStripe, kOndvUpW3, kOndvUpW4, kOndvUpW5);
+      ondv_words(w + 2 * kOndvWords, kOndvBdDown, kOndvQueue[c], base + ondv_down_off(e, c), kOndvDnW3, kOndvDnW4, kOndvDnW5);
     }
   }
 }

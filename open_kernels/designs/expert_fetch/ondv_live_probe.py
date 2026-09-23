@@ -78,7 +78,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     cfg_ty = np.ndarray[(2,), np.dtype[np.uint32]]
     go_ty = np.ndarray[(4,), np.dtype[np.uint32]]
     out_ty = np.ndarray[(2,), np.dtype[np.uint32]]
-    ctrl_ty = np.ndarray[(12,), np.dtype[np.uint32]]
+    ctrl_ty = np.ndarray[(16,), np.dtype[np.uint32]]
     inc = include_dirs()
     f_words = ExternalFunction("ondv_live_words", source_file=str(HERE / "ondv_live_words.cc"),
                                arg_types=[go_ty, ctrl_ty, np.int32, np.int32], include_dirs=inc)
@@ -122,7 +122,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
 
     bds = []
     for i in range(CHAIN):
-        bds.append(Bd(buffer=ctrl, length=40,
+        bds.append(Bd(buffer=ctrl, length=60,
                       acquires=[Acquire(pktlk[i])], releases=[Release(pktdn)],
                       next=(i + 1) if i + 1 < CHAIN else 0))
     dma = TileDma(tile=core, channels=[
