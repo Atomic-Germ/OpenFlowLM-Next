@@ -85,6 +85,24 @@ static inline uint32_t ondv_down_off(unsigned expert, unsigned c) {
 // up(5), gate(5), down(5) -- at out[(k*kOndvCores + c)*15]. `idx` is the router's
 // top-8 index output (out + kE, int32[8]); (base_hi<<32|base_lo) is the pool BO's
 // DDR address (bo.address() + 0x8000_0000) with no offset.
+// One COLUMN's 120 words (8 slots x 15) -- the per-column entry the unblock needs: each main
+// core emits its OWN column's control words to its OWN shim's TileControl (a core's packet
+// reaches its own column on the South port), so no cross-column routing, no control overlay
+// and no shim MM2S channel are required.
+static inline void ondv_ctrl_col_impl(const int32_t *__restrict idx, uint32_t base_lo,
+                                      uint32_t base_hi, unsigned col,
+                                      int32_t *__restrict out) {
+  const uint64_t base = ((uint64_t)base_hi << 32) | (uint64_t)base_lo;
+  for (unsigned k = 0; k < kOndvRouted; ++k) {
+    const unsigned e = (unsigned)idx[k];
+    const uint32_t up = ondv_up_off(e, col);
+    int32_t *w = out + k * 15;
+    ondv_words(w + 0, kOndvBdUp, kOndvQueue[col], base + up);
+    ondv_words(w + 5, kOndvBdGate, kOndvQueue[col], base + up + kOndvStripe);
+    ondv_words(w + 10, kOndvBdDown, kOndvQueue[col], base + ondv_down_off(e, col));
+  }
+}
+
 static inline void ondv_ctrl_impl(const int32_t *__restrict idx, uint32_t base_lo, uint32_t base_hi,
                                   int32_t *__restrict out) {
   const uint64_t base = ((uint64_t)base_hi << 32) | (uint64_t)base_lo;

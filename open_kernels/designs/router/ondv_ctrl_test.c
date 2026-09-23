@@ -79,6 +79,20 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ondv_ctrl_test: FAIL (%d/%d words differ)\n", bad, N);
     return 1;
   }
+  // the per-column entry (the unblock's shape) must equal each column's slice of the
+  // column-major full stream
+  {
+    int32_t colout[8 * 15];
+    for (int c = 0; c < 8; ++c) {
+      ondv_ctrl_col_impl(idx, (uint32_t)base, (uint32_t)(base >> 32), (unsigned)c, colout);
+      for (int i = 0; i < 8 * 15; ++i)
+        if (colout[i] != got[c * 8 * 15 + i]) {
+          fprintf(stderr, "ondv_ctrl_test: FAIL (column %d word %d differs from the full stream)\n", c, i);
+          return 1;
+        }
+    }
+  }
+
   // a couple of structural assertions the reference cannot express
   if ((got[1] & 3u) != 0u) {
     fprintf(stderr, "ondv_ctrl_test: FAIL (w1 addr_low has low bits set)\n");

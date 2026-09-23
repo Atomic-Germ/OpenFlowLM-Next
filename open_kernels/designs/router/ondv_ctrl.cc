@@ -15,4 +15,12 @@ void ondv_ctrl(const uint8_t *__restrict rout, const uint32_t *__restrict cfg,
                int32_t *__restrict out) {
   ondv_ctrl_impl((const int32_t *)(rout + kOndvIdxOff), cfg[0], cfg[1], out);
 }
+
+// The per-column entry the unblock uses: column `col`'s 120 words only (see ondv_ctrl.h).
+// One main core runs this for its own column and sends the result to its own shim's
+// TileControl with a packet-stamped BD on its own MM2S.
+void ondv_ctrl_col(const uint8_t *__restrict rout, const uint32_t *__restrict cfg,
+                   int32_t col, int32_t *__restrict out) {
+  ondv_ctrl_col_impl((const int32_t *)(rout + kOndvIdxOff), cfg[0], cfg[1], (unsigned)col, out);
+}
 }
