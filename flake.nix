@@ -21,8 +21,11 @@
           overlays = [ inputs.nix-amd-ai.overlays.default ];
         };
       in {
-        packages.oflm = pkgs.callPackage ./package.nix {};
-        packages.default = config.packages.oflm;
+        packages = {
+          oflm = pkgs.callPackage ./package.nix {};
+          openflowlm-open-kernels = pkgs.callPackage ./open-kernels.nix {};
+          default = config.packages.oflm;
+        };
 
         apps.default = {
           type = "app";
