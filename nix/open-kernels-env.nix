@@ -97,7 +97,8 @@ in
     # Standard environment variables needed by export scripts at run time.
     # Use the combined XRT so the amdxdna plugin is discoverable next to lib/.
     XILINX_XRT = "${xrtCombined}";
-    # Relative to the in-repo materialized venv; callers prepend $PWD/ironvenv/.
+    # The venv is materialized at $TMPDIR/ironvenv by callers; keep these
+    # paths relative so they can be prefixed to the chosen venv location.
     PEANO_INSTALL_DIR = "${pySite}/llvm-aie";
     PATH = "${pySite}/llvm-aie/bin:${pySite}/mlir_aie/bin";
     PYTHONPATH = "${pySite}";
