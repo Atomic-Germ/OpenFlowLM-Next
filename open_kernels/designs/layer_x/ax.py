@@ -42,10 +42,11 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, PacketFlow, Program, Runtime, TaskGroup, Worker
+from aie.iron import (Acquire, Bd, Buffer, CompileTime, DmaChannel, In, InOut, Lock, ObjectFifo, Out,
+                      PacketFlow, Program, Release, Runtime, TaskGroup, TileDma, Worker)
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
-from aie.dialects._aie_enum_gen import AIETileType, WireBundle
+from aie.dialects._aie_enum_gen import AIETileType, DMAChannelDir, WireBundle
 from aie.iron.kernel import ExternalFunction
 
 HERE = Path(__file__).parent
@@ -130,6 +131,10 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
     inc = include_dirs() + [str(GEMV), str(ATTN), str(X.LN), str(X.LINL), str(X.RT), str(HERE.parent / "moe_experts")]
     K = X.kernels(inc, t)
     L = X.ln_kernels(inc, tl)
+    if ondv:
+        f_oc = ExternalFunction("ondv_ctrl_col", source_file=str(X.RT / "ondv_ctrl_col.cc"),
+                                arg_types=[t["x"], t["x"], np.int32, tl["u8_ctrl"]],
+                                include_dirs=inc + [str(X.RT)])
 
     def af(sym, args):
         return ExternalFunction(sym, source_file=str(ATTN / f"{sym}.cc"), arg_types=args, include_dirs=inc, compile_flags=ATTN_FLAGS)
@@ -156,14 +161,14 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
     # Attention over ACORES cores: heads are independent, so each core owns NHL of them
     # and drains its own og element(s) -- the pattern dx.py uses.
     of_og = [ObjectFifo(b512, name=f"og{c}", depth=2) for c in range(1, ACORES)]
-    of_octrl = ObjectFifo(u8_4k if "u8_4k" in tl else u8_ln, name="octrl", depth=1) if ondv else None
-    # the control streams' source tiles (hoisted: the placer dedups a shim tile's channel
-    # requirements by logical-tile OP) and which source each column's stream comes from
-    src_of_col = [0, 0, 0, 1, 1, 1, 2, 2]
-    # ax's shim budget differs from lx's: (3,0), (4,0), (5,0) all keep MM2S ch1 free
-    octrl_src = [Tile(3, 0, tile_type=AIETileType.ShimNOCTile),
-                 Tile(4, 0, tile_type=AIETileType.ShimNOCTile),
-                 Tile(5, 0, tile_type=AIETileType.ShimNOCTile)] if ondv else None
+    # on-device routing (ax_ondv): eight per-column emitter cores at row 4 (see lx.py)
+    emitter_tile = [Tile(c, 4, tile_type=AIETileType.CoreTile) for c in range(N_CORES)] if ondv else None
+    # the shim tile each column's w fifo lives on; the control packets must reach THIS
+    # shim's TileControl (the routed descriptors BD 8/9/10 are written on its w channel)
+    shim_w = [Tile(c, 0, tile_type=AIETileType.ShimNOCTile) for c in range(N_CORES)]
+    ctrlw = [Buffer(tl["u8_ctrl"], name=f"ctrlw{c}", tile=emitter_tile[c]) for c in range(N_CORES)] if ondv else None
+    pktlk = [[Lock(emitter_tile[c], init=0, name=f"pktlk{c}_{i}") for i in range(X.NE + 1)] for c in range(N_CORES)] if ondv else None
+    pktdone = [Lock(emitter_tile[c], init=0, name=f"pktdone{c}") for c in range(N_CORES)] if ondv else None
 
     def main_body(win, xin, yout, *args):
         B, K = X.unpack_args(args)
@@ -271,8 +276,7 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
-                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
-                              + ([of_octrl.prod(), L["ondv_ctrl"]] if ondv else []),
+                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]],
                       tile=Tile(0, hrow), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
@@ -292,6 +296,31 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
     for c in range(1, ACORES):
         workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, hrow), stack_size=0x1800))
+    if ondv:
+        # x-broadcast elements before the two on-device-routing elements (rout + cfg):
+        # part 0's xn + og, then moe_sequence's xm. The per-wave h elements follow.
+        N_X_SKIP = XN_ELEMS + OG_ELEMS + 1
+
+        def _emitter_body(c):
+            def emitter_body(xin, ctrl, f_oc_col, *locks):
+                for _ in range_(N_X_SKIP):
+                    e = xin.acquire(1)
+                    xin.release(1)
+                r = xin.acquire(1)
+                cfg = xin.acquire(1)
+                f_oc_col(r, cfg, c, ctrl)
+                xin.release(2)
+                locks[0].release(1)
+                for e in range(X.NE):
+                    h = xin.acquire(1)
+                    xin.release(1)
+                    locks[e + 1].release(1)
+            return emitter_body
+
+        for c in range(N_CORES):
+            workers.append(Worker(_emitter_body(c),
+                                  fn_args=[of_x.cons(), ctrlw[c], f_oc, *pktlk[c]],
+                                  tile=emitter_tile[c], stack_size=0x1800))
 
     bt = X.bt
     BB_HID, BB_O = X.role_band_bytes("attn", HID), X.role_band_bytes("attn", O_K)
@@ -370,13 +399,12 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
 
     def sequence(*a):
         if ondv:
-            (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_cfg, a_octrl) = a[:8]
-            (lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs) = a[8:16]
-            octrl_c = a[16]
+            (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_cfg) = a[:7]
+            (lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs) = a[7:15]
         else:
             (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab) = a[:6]
             (lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs) = a[6:14]
-            a_cfg = a_octrl = octrl_c = None
+            a_cfg = None
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
                            ain_p, aout_c, og_cs)
@@ -424,22 +452,9 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
             lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
             tg_r = TaskGroup()
             lni.fill(a_consts, tap=bt(CA_BYTES, CA_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
-            if ondv:
-                # The router's LAST input element, and it must be issued BEFORE the rout
-                # drain: the core holds the rout element until it has emitted the control
-                # stream, and it cannot emit that until it has the pool base -- so a drain
-                # first and a config after it deadlocks (measured: ERT timeout, and the
-                # run completes once the fill moves here).
-                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
             lno.drain(a_act, tap=bt(AA_BYTES, AA_ROUT, ELEM), wait=True, group=tg_r)
             tg_ln2.finish()
             tg_r.finish()
-            if ondv:
-                # the pool base the router forms the retarget addresses against (its last
-                # input element), and the control stream it emits
-                pcf = Pipeline(1)
-                pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
-                pcf.finish()
             pw.finish()
             pa_in.finish()
             tg_x.finish()
@@ -447,34 +462,43 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
                 # the rest of the layer, one stream (see lx.py; the routing is identical)
                 X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
                                AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW,
-                               ondv=(a_octrl, octrl_src, src_of_col))
+                               ondv=(a_cfg,))
         else:
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                           AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW,
-                           ondv=(a_octrl, octrl_src, src_of_col) if ondv else None)
+                           AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW)
 
     rt_args = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty]
     if ondv:
-        rt_args += [np.ndarray[(ELEM,), np.dtype[np.uint8]], np.ndarray[(ELEM,), np.dtype[np.uint8]]]
+        rt_args += [np.ndarray[(ELEM,), np.dtype[np.uint8]]]
     rt_args += [of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                [of_w[c].prod(tile=shim_w[c] if ondv else Tile(c, 0)) for c in range(N_CORES)],
                 of_x.prod(tile=Tile(1, 0)),
                 [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                 of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
                 [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]]
-    if ondv:
-        rt_args += [of_octrl.cons(tile=Tile(2, 0))]   # (2,0) S2MM ch1 is free in ax
     rt = Runtime(sequence, rt_args)
     flows = []
-    if ondv and os.environ.get("ONDV_NO_FLOWS") != "1":
-        # eight packet routes: the router's control stream to each column's TileControl,
-        # emitted from the free MM2S ch1 of (5,0), (6,0), (7,0)
-        for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
-            flows.append(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
-                                   dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),
-                                   src_port=WireBundle.DMA, src_channel=1,
-                                   dst_port=WireBundle.TileControl, dst_channel=0,
-                                   shim_symbol=f"octrl{3 + src_of_col[c]}_shim_alloc" if c in (0, 3, 6) else None))
+    if ondv:
+        for c in range(N_CORES):
+            for lk in pktlk[c]:
+                rt.add_lock(lk)
+            rt.add_lock(pktdone[c])
+            bds = [Bd(buffer=ctrlw[c], offset=0, length=56,
+                      acquires=[Acquire(pktlk[c][0])], releases=[Release(pktdone[c])], next=1)]
+            for k in range(1, X.NE):
+                bds.append(Bd(buffer=ctrlw[c], offset=84 * k - 28, length=84,
+                              acquires=[Acquire(pktlk[c][k])], releases=[Release(pktdone[c])],
+                              next=k + 1))
+            bds.append(Bd(buffer=ctrlw[c], offset=644, length=28,
+                          acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
+            rt.add_tile_dma(TileDma(
+                tile=emitter_tile[c],
+                channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
+            flows.append(PacketFlow(pkt_id=15, src=emitter_tile[c],
+                                    src_port=WireBundle.DMA, src_channel=1,
+                                    dst=shim_w[c],
+                                    dst_port=WireBundle.TileControl, dst_channel=0,
+                                    keep_pkt_header=True))
     for f in flows:
         rt.add_flow(f)
     if pieces:
@@ -485,10 +509,10 @@ def _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, *, part=0, srchash=
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
-def ax_ondv(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, cfg: In, octrl: Out, *,
+def ax_ondv(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, cfg: In, *,
             part: CompileTime[int] = 0, srchash: CompileTime[int] = 0):
     """The fused whole-layer path for the full-attention layers (see lx_ondv)."""
-    return _ax_build(pool, xres, consts, kv, act, ptab, cfg, octrl, part=part, srchash=srchash, ondv=True, mrow=2, hrow=3)
+    return _ax_build(pool, xres, consts, kv, act, ptab, cfg, None, part=part, srchash=srchash, ondv=True, mrow=2, hrow=3)
 
 
 DESIGN = ax_ondv if X.ONDV else ax

@@ -111,16 +111,16 @@ static inline uint32_t ondv_down_off(unsigned expert, unsigned c) {
 // reaches its own column on the South port), so no cross-column routing, no control overlay
 // and no shim MM2S channel are required.
 static inline void ondv_ctrl_col_impl(const int32_t *__restrict idx, uint32_t base_lo,
-                                      uint32_t base_hi, unsigned col,
+                                      uint32_t base_hi, unsigned col, uint32_t queue,
                                       int32_t *__restrict out) {
   const uint64_t base = ((uint64_t)base_hi << 32) | (uint64_t)base_lo;
   for (unsigned k = 0; k < kOndvRouted; ++k) {
     const unsigned e = (unsigned)idx[k];
     const uint32_t up = ondv_up_off(e, col);
     int32_t *w = out + k * (3u * kOndvWords);
-    ondv_words(w + 0 * kOndvWords, kOndvBdUp, kOndvQueue[col], base + up);
-    ondv_words(w + 1 * kOndvWords, kOndvBdGate, kOndvQueue[col], base + up + kOndvStripe);
-    ondv_words(w + 2 * kOndvWords, kOndvBdDown, kOndvQueue[col], base + ondv_down_off(e, col));
+    ondv_words(w + 0 * kOndvWords, kOndvBdUp, queue, base + up);
+    ondv_words(w + 1 * kOndvWords, kOndvBdGate, queue, base + up + kOndvStripe);
+    ondv_words(w + 2 * kOndvWords, kOndvBdDown, queue, base + ondv_down_off(e, col));
   }
 }
 
