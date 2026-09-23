@@ -2,6 +2,7 @@
   lib,
   stdenv,
   fetchFromGitHub,
+  pkgs,
   cmake,
   ninja,
   pkg-config,
@@ -22,6 +23,8 @@
   rustc,
   rustPlatform,
   xrt,
+  makeWrapper,
+  openflowlm-open-kernels,
   oflmVersion ? "0.1.0",
   npuVersion ? "32.0.203.304",
 }:
@@ -37,6 +40,16 @@ let
     hash = "sha256-r10QIeYnNaudFuHCdOWwTIHMRFqSf1p2ck33nmUEGj8=";
     fetchSubmodules = true;
   };
+
+  # XRT's plugin loader resolves libxrt_driver_xdna next to libxrt_core.
+  # Combine XRT with the amdxdna plugin so `oflm` works without relying on
+  # the NixOS module's session variables.
+  xrt-combined = pkgs.runCommand "xrt-combined" {} ''
+    mkdir -p $out
+    cp -rs ${xrt}/opt/xilinx/xrt/* $out/
+    chmod -R u+w $out/lib
+    ln -sf ${pkgs.xrt-plugin-amdxdna}/opt/xilinx/xrt/lib/libxrt_driver_xdna* $out/lib/
+  '';
 
   in
 stdenv.mkDerivation rec {
@@ -78,6 +91,7 @@ stdenv.mkDerivation rec {
     cargo
     rustc
     rustPlatform.cargoSetupHook
+    makeWrapper
   ];
 
   buildInputs = [
@@ -94,6 +108,8 @@ stdenv.mkDerivation rec {
     readline
     ncurses
   ];
+
+  propagatedBuildInputs = [ openflowlm-open-kernels ];
 
   cmakeFlags = [
     "-DOFLM_VERSION=${version}"
@@ -116,8 +132,16 @@ stdenv.mkDerivation rec {
   '';
 
   preConfigure = ''
-    export XILINX_XRT="${xrt}/opt/xilinx/xrt"
-    export PKG_CONFIG_PATH="${xrt}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export XILINX_XRT="${xrt-combined}"
+    export PKG_CONFIG_PATH="${xrt-combined}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  '';
+
+  postInstall = ''
+    wrapProgram $out/bin/oflm \
+      --set-default OFLM_XCLBIN_PATH "${openflowlm-open-kernels}/share/oflm" \
+      --set-default XILINX_XRT "${xrt-combined}" \
+      --prefix LD_LIBRARY_PATH : "${xrt-combined}/lib" \
+      --prefix PATH : "${xrt-combined}/bin"
   '';
 
   doCheck = true;

@@ -11,6 +11,11 @@
   unzip,
   zlib,
   patchelf,
+  # BERT embedding sets need pyxrt + an NPU at build time.  In a sandboxed
+  # Nix build that means __noChroot, which is not allowed when sandbox=true.
+  # Default to skipping BERT so the package builds everywhere; NPU hosts can
+  # override with skipBert = false (or use the openflowlm-open-kernels-with-bert
+  # / oflm-with-bert flake packages).
   skipBert ? true,
   # Three dense specs currently fail with the upstream 1.4.3/20260923
   # mlir-aie + Peano toolchain on Python 3.12:
