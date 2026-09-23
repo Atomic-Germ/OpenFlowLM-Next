@@ -168,6 +168,14 @@ public:
     /// step cannot go below. Call it after a step so the attnpos and route patches hold real
     /// values; it leaves the state and the KV window meaningless, so exit afterwards.
     void bench_decode(int reps);
+    /// Determinism probe (OPEN-REQUEST-ISOLATION): the same request -- reset(), seek to the
+    /// entry position, step each of `ids` (forced, not sampled) -- `reps` times, each step's
+    /// output compared bit for bit against a reference run. `full` reads back every buffer a
+    /// step writes (each layer's act, the KV row, a hash of the recurrent state, xres / xresf /
+    /// hn); otherwise only the logits, which leaves the timing exactly a decode loop's. Prints,
+    /// per differing rep, the first step and the first layer (in walk order) and buffer that
+    /// moved. Returns the number of reps that differed. Leaves the engine reset.
+    int det_step(int reps, const std::vector<int>& ids, bool full);
     /// One kernel, on one layer, over and over, with the arguments its own program gives it.
     /// For a half-program kernel (lx0, ax0) this HANGS unless the build is self-contained --
     /// the second half is what drains its fifos -- so it is for timing a truncated build
@@ -343,6 +351,12 @@ private:
 
     std::vector<float> logits_host_;
     StepTiming timing_;
+    /// det_step: every router record route() read this step (probs, idx, weights), per layer
+    /// in walk order. Off (and empty) outside det_step.
+    bool route_log_on_ = false;
+    bool route_check_ = false;                 ///< OFLM_ROUTE_CHECK: re-read every router record, count changes
+    uint64_t route_checks_ = 0, route_stale_ = 0;
+    std::vector<std::pair<int, std::vector<uint8_t>>> route_log_;
 
     xrt::hw_context& context(const std::string& name);
     void load_kernel(const std::string& name, const KernelDesc& d);

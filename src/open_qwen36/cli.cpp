@@ -17,6 +17,10 @@
 /// request a second time on the same resident engine (state reset check).
 /// --at-position P first seeks to position P with no cache rows in between
 /// (a capacity check: the attention window then spans P rows).
+/// --det-step N [--det-full] steps the --ids (forced, from --at-position) N times on one
+/// resident engine and compares every step's logits (--det-full: every buffer) bit for
+/// bit against a reference pass (OPEN-REQUEST-ISOLATION); exit 1 if any rep moved.
+/// OFLM_ROUTE_CHECK=1 re-reads each router record and counts reads that changed.
 ///
 /// 0167/#32: --gemm-block prefills via Core::step_gemm_block() (T tokens per
 /// layer as 5 whole-array GEMM dispatches plus T attention dispatches, the
@@ -97,6 +101,8 @@ struct Args {
     int bench = 0;                  // --bench N[:LAYER]: time the route's dispatches instead of running a prompt
     int bench_layer = 0;            // which layer's route -- the 35B's two types run different GEMM shapes
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
+    int det_step = 0;               // --det-step N: the --ids steps from --at-position, N times, compared
+    bool det_full = false;          // --det-full: compare every buffer a step writes, not only the logits
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
 };
@@ -176,6 +182,8 @@ Args parse(int argc, char** argv) {
             if (c != std::string::npos) a.bench_layer = std::atoi(v.substr(c + 1).c_str());
         }
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
+        else if (k == "--det-step") a.det_step = std::atoi(val().c_str());
+        else if (k == "--det-full") a.det_full = true;
         else if (k == "--bench-kernel") a.bench_kernel = val();
         else if (k == "--pmode") a.pmode = val();
         // The server has a host gap right here that the CLI does not: between the last
@@ -354,6 +362,12 @@ int main(int argc, char** argv) {
             core.bench_decode(a.bench_decode);
             std::printf("DONE\n");
             return 0;
+        }
+        if (a.det_step) {
+            if (a.at_position > 0) core.seek(a.at_position);
+            const int bad = core.det_step(a.det_step, a.ids, a.det_full);
+            std::printf(bad ? "NONDETERMINISTIC\n" : "DONE\n");
+            return bad ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
