@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <locale>
 #include <random>
+#include <cstdio>
 #include "server.hpp"
 
 ///@brief Report a handler's error on the transport the client is actually reading (#64)
@@ -1773,13 +1774,29 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         json response;
         if (this->asr) {
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+            // task 0180 Part B: request-level timers, host wall clock (rule 1:
+            // not an NPU performance claim). audio_decode covers ffmpeg
+            // demux+decode+resample to 16kHz mono s16le (modeling_whisper_audio.cpp's
+            // _load_audio) -- not further split, see the task report for why.
+            const auto t_req0 = std::chrono::steady_clock::now();
             this->whisper_engine->load_audio(audio_raw);
+            const auto t_audio_decoded = std::chrono::steady_clock::now();
             header_print("OFLM", "Transforming audio to text...");
             // Show text
             std::cout << "Audio content: " << std::flush;
             std::pair<std::string, std::string> audio_result = this->whisper_engine->generate(Whisper::whisper_task_type_t::e_transcribe, true, false, std::cout);
             std::string audio_context = audio_result.first;
             std::cout << std::endl;
+            const auto t_generated = std::chrono::steady_clock::now();
+            const double audio_decode_ms =
+                std::chrono::duration<double, std::milli>(t_audio_decoded - t_req0).count();
+            const double generate_ms =
+                std::chrono::duration<double, std::milli>(t_generated - t_audio_decoded).count();
+            std::printf("[oflm] request stages (host wall clock; NOT an NPU perf claim): "
+                        "audio_decode=%.1fms generate=%.1fms (generate breaks down into the "
+                        "'[oflm] hf request stages' line above, under OFLM_WHISPER_PROTOCOL=hf)\n",
+                        audio_decode_ms, generate_ms);
+            std::fflush(stdout);
 #else
             throw std::runtime_error("ASR models are not supported in this build");
             std::string audio_context;

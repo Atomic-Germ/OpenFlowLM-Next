@@ -6,6 +6,20 @@
 /// \note This is a source file for the modeling_whisper class
 #include "whisper/modeling_whisper.hpp"
 #include <cstdlib>
+#include <chrono>
+#include <cstdio>
+
+// task 0180 Part B: end-to-end request profiling, timing only (no arithmetic
+// changed). Host wall clock throughout -- these are stage buckets inside one
+// /v1/audio/transcriptions request, printed to the server's own stdout log
+// once per request, not an NPU performance claim (rule 1).
+namespace {
+double now_s_whisper() {
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
 
 
 Whisper::Whisper(oflm_rt::device* npu_device_inst){
@@ -350,6 +364,14 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
     std::string result;
     std::string language_detected;
 
+    // task 0180 Part B: per-request stage timers (host wall clock; NOT an NPU
+    // performance claim -- rule 1). Accumulated across every window this
+    // request opens (almost always one, for the <=30s clips this was profiled
+    // on) and printed once at the end of this function.
+    double t_preprocess = 0, t_encode = 0, t_decode = 0, t_logits_copy = 0,
+           t_logits_proc = 0, t_argmax = 0, t_tok_decode = 0;
+    int64_t n_decode_steps = 0;
+
     while (current_idx < length) {
         if (l_this_round == 0) {
             break;
@@ -360,23 +382,38 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         std::vector<float> audio_chunk(static_cast<size_t>(l_this_round));
         audio_chunk.insert(audio_chunk.begin(), this->audio_buffer.data() + current_idx,
                             this->audio_buffer.data() + current_idx + l_this_round);
+        double t0 = now_s_whisper();
         _preprocess_audio(mel_feature, audio_chunk);
+        t_preprocess += now_s_whisper() - t0;
 
+        t0 = now_s_whisper();
         this->engine->encode_audio(mel_feature);
+        t_encode += now_s_whisper() - t0;
         this->engine->clear_context();
 
         // [SOT] -> detect_language -> FEED the language token (the legacy protocol
         // never did the feed; see the function comment above).
+        t0 = now_s_whisper();
         buffer<bf16> logits_buf = this->engine->decode_audio(start_of_transcript);
+        t_decode += now_s_whisper() - t0;
+        ++n_decode_steps;
+        t0 = now_s_whisper();
         std::vector<float> sot_logits = to_float_vec(logits_buf);
+        t_logits_copy += now_s_whisper() - t0;
         const int lang_id = whisper_hf::detect_language(sot_logits, lang_ids, vocab_size);
         language_detected = this->tokenizer->run_time_decoder(lang_id);
 
+        t0 = now_s_whisper();
         logits_buf = this->engine->decode_audio(lang_id);  // context: [SOT, lang]
+        t_decode += now_s_whisper() - t0; ++n_decode_steps;
+        t0 = now_s_whisper();
         logits_buf = this->engine->decode_audio(task_token);  // context: [SOT, lang, task]
+        t_decode += now_s_whisper() - t0; ++n_decode_steps;
         int begin_index = 3;
         if (!enable_time_stamp) {
+            t0 = now_s_whisper();
             logits_buf = this->engine->decode_audio(no_time_stamp_token);  // + [notimestamps]
+            t_decode += now_s_whisper() - t0; ++n_decode_steps;
             begin_index = 4;
         }
 
@@ -388,17 +425,25 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         const int max_new_tokens = std::max(0, gc.max_length - begin_index);
 
         for (int step = 0; step < max_new_tokens; ++step) {
+            t0 = now_s_whisper();
             std::vector<float> logits = to_float_vec(logits_buf);
+            t_logits_copy += now_s_whisper() - t0;
             const bool at_begin_index = generated.empty();
 
+            t0 = now_s_whisper();
             whisper_hf::apply_suppress_tokens_at_begin(logits, gc.begin_suppress_tokens, at_begin_index, vocab_size);
             whisper_hf::apply_suppress_tokens(logits, gc.suppress_tokens, vocab_size);
             if (enable_time_stamp) {
                 ts_proc.apply(logits, generated, vocab_size);
             }
+            t_logits_proc += now_s_whisper() - t0;
+            t0 = now_s_whisper();
             const int token = whisper_hf::argmax(logits, vocab_size);
+            t_argmax += now_s_whisper() - t0;
 
+            t0 = now_s_whisper();
             std::string token_str = this->tokenizer->run_time_decoder(token);
+            t_tok_decode += now_s_whisper() - t0;
             if (token < gc.eos_token_id) {
                 // an ordinary text token
                 result += token_str;
@@ -417,7 +462,10 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
             if (token == gc.eos_token_id) {
                 break;
             }
+            t0 = now_s_whisper();
             logits_buf = this->engine->decode_audio(token);
+            t_decode += now_s_whisper() - t0;
+            ++n_decode_steps;
         }
 
         if (l_this_round < WINDOW_SAMPLES) {
@@ -443,6 +491,22 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         l_this_round = std::min(WINDOW_SAMPLES, length - current_idx);
         l_this_round = std::max(l_this_round, 0);
     }
+
+    // task 0180 Part B: per-request stage breakdown, host wall clock, printed
+    // once per request. `decode` includes the decoder's own host+NPU compute
+    // AND engine_adapter.cpp's fp32->bf16 round of the returned logits (the
+    // two are not separated -- see the task report); `logits copy` is the
+    // matching bf16->fp32 copy of all vocab_padded elements back into
+    // std::vector<float> on the caller's side (to_float_vec()), i.e. the
+    // "51872 logits processed on the host per step" the task asked to measure.
+    std::printf("[oflm] hf request stages (host wall clock; NOT an NPU perf claim): "
+                "preprocess=%.1fms encode=%.1fms decode=%.1fms (%lld steps, %.3fms/step) "
+                "logits_copy=%.1fms logits_proc=%.1fms argmax=%.1fms tok_decode=%.1fms\n",
+                t_preprocess * 1e3, t_encode * 1e3, t_decode * 1e3,
+                static_cast<long long>(n_decode_steps),
+                n_decode_steps > 0 ? (t_decode * 1e3) / static_cast<double>(n_decode_steps) : 0.0,
+                t_logits_copy * 1e3, t_logits_proc * 1e3, t_argmax * 1e3, t_tok_decode * 1e3);
+    std::fflush(stdout);
 
     return std::make_pair(result, langmap::to_language_name(language_detected));
 }
