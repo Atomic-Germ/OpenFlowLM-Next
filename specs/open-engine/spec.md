@@ -315,8 +315,8 @@ RB 2: the 64-token greedy continuation after the 1122-token prompt is 64/64 iden
 RB 2's, and against the reference both flip at the same position-49 near-tie (gap 0.045)
 with corr min before it 0.988466 (RB 2: 0.988460). Tightest attention core 15,248 ->
 14,208 bytes (2,176 free). `ax0` in the real walk, minimum of 20 over 3 alternated
-rounds, measured on the one-context layer image (`sets/k35e2` vs `sets/k35int2`; that
-image lands separately, and its attention cores compile the same program as `ax.py`'s):
+rounds, measured on the one-context layer image (OPEN-DECODE-ONE-CONTEXT; `sets/k35e2`
+vs `sets/k35int2`), whose attention cores compile the same program as `ax.py`'s:
 
 | position | 1 | 1024 | 2048 | 4000 |
 |---|---|---|---|---|
@@ -3555,3 +3555,80 @@ multiplies. A set without `attn_block`, or `OFLM_OPEN_ATTN_BLOCK=0`, runs
 **Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`.
 
 **Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.
+
+### OPEN-DECODE-ONE-CONTEXT: the decode layer loop runs in one hardware context
+**Applies to:** openflowlm-next (`open_kernels/designs/layer_x/ux.py` + `xlayer.py`, `open_kernels/recipes/qwen36moe.py` `one_context()` / `merged_image()`)
+**Test category:** test (the recipe emission, `tests/test_one_context.py`) + manual (the hardware claim below)
+
+For the qwen36moe family (the 35B and the 27B), the export's four layer kernels
+`lx0`, `lx1`, `ax0` and `ax1` are, **by default**, four instruction streams over
+ONE image (`ux.py`), and the manifest points all four at one context, `layer`.
+The layer walk then changes hardware context zero times instead of 20; only `ln`
+and `lm` at the tail keep their own. The main cores run lx's program with the two
+numbers that differ between the layer types (GEMV band count, DeltaNet head
+count) read from RTP words, so a full-attention layer runs the DeltaNet loop zero
+times. Every kernel's arithmetic and every DDR byte are unchanged, so the gate is
+bit-exact. The engine needs nothing new: it opens the contexts the manifest names.
+
+- **Rollback:** `OPEN_LAYER_ONE_CTX=0` at export builds the two-context `lx` / `ax`
+  layout (`lx.py`, `ax.py`) under the same set names. The variable is export-only;
+  nothing reads it at run time (the engine follows the manifest). It is in the
+  build key, so the two layouts never share one.
+- **A spec with a q8 projection role keeps two contexts** (`merged_image()`): the
+  merged main cores have room for one GEMV entry only. (Aside, 2026-09-23: that q8
+  shape's two-context `lx0` already overflows its main cores by 224 B on main at
+  c23b1a57 -- Ornith-1.5, and Aquila-mini by the same spec -- so it has no
+  buildable layer set; this requirement does not change that.)
+- **Known constraint:** the merged main cores are at 16256 of 16384 B of program
+  memory (128 B free). Any main-core growth -- a new stage, a wider prep, another
+  kernel entry -- has to be paid for elsewhere first, or it breaks the default build.
+- **One copy of every shared fragment:** the glue / post / attention helper cores,
+  the norm helper, the fifos and both part-0 host sequences live in
+  `layer_x/xlayer.py` and are called by `lx.py`, `ax.py` and `ux.py` alike, so an
+  edit to either layer type reaches both layouts. Moving them there changed no
+  compiled byte (2026-09-23 result below).
+
+**Verification (manual):**
+1. Export (default, or `OPEN_LAYER_ONE_CTX=1`) into a copy of a reference set; every
+   core's `.text` must fit 16384 B (aiecc fails the build otherwise; the main
+   cores are the tight ones).
+2. Bit-exact against the two-context set (`OPEN_LAYER_ONE_CTX=0`) under the same
+   CLI: `open_qwen36_cli --model <35B> --kernels <set> --pmode performance --layers 4
+   --ids 248045,846,198,760,28758,8427,4821,303,411,20012,369,264,2526,1287,314,4471,34523,440,836
+   --max-tokens 1 --prefill-logits --dump-logits <prefix> --quiet`, and the same at
+   `--layers 8` (a linear layer after a full one on the same image), compared
+   position by position: **max |diff| 0.0**. Then `gap-table/ids_1122.txt` with
+   `--gemm-block --max-tokens 64 --dump-logits`: the same 64 token ids and
+   **max |diff| 0.0** at every one.
+3. `--bench-decode 20` at positions 1 and 1024, alternated against the
+   two-context set: the walk's `ax0` penalty against its one-layer figure goes to
+   noise.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, 40 layers, quiet box, `sets/k35int` =
+this image + the layer_x issue order + the divide->shift GEMV fix, against
+`sets/k35b3` = the same without this image, 2 alternated rounds, `--pmode
+performance`).** Main cores 16256 of 16384 B (128 free). Both gates max |diff| 0.0,
+64/64 tokens identical. Min / mean ms:
+
+| | `k35b3` pos 1 | `k35int` pos 1 | `k35b3` pos 1024 | `k35int` pos 1024 |
+|---|---|---|---|---|
+| step, sum of 82 dispatches | 74.3 / 96.5 | 65.7 / 70.7 | 83.4 / 97.3 | 74.9 / 80.8 |
+| real step, serial (min / median) | 85.2 / 94.5 | 69.1 / 70.3 | 94.1 / 96.5 | 78.7 / 83.0 |
+
+Detail: `.claude/plans/decode-gap-2026-09-22/integration.md` and `track-d.md`.
+
+**Result 2026-09-23: default on, after the xlayer refactor.** (1) The refactor moved no
+compiled byte: `export_qwen36_kernels.py --check` of every layer_x set built before and
+after it -- the 35B and the 27B each in both layouts plus `mx_linear` / `mx_full`, and the
+Qwen3.5 dense `lx` / `ax` for the 0.8B and the 9B spec -- reports every `insts.bin`
+byte-identical and every xclbin identical apart from build stamps (48 files), and the MLIR
+of every stream is identical too. (2) The 27B (`Qwen3.6-27B-A2.8B-open`, 30 layers, full
+attention at 2, 5, 8, ...) on its one-context set against its two-context set, same CLI:
+19 ids at `--layers 4` and `--layers 8`, and 1122 tokens + a 64-token `--gemm-block`
+continuation, **max |diff| 0.0** on every dumped position, 64/64 tokens identical.
+`oflm serve` on the one-context set, `oflm-test --llm`: **PASS 5/5**. `--bench-decode 20`,
+2 alternated rounds, real step wall min / median ms on the serial route: position 1
+two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; position
+1024 79.3-80.3 / 80.5-83.0 against 62.9-63.6 / 64.4 (the walk's `ax0` penalty, +0.95 ms
+a call on two contexts, goes to noise). Detail:
+`.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.
