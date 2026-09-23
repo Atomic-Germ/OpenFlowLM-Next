@@ -70,6 +70,32 @@ int main(int argc, char** argv) {
         return 1;
     }
     // ---- what the recipe wrote for the 27B
+    // Only exercise the new pack-op schema; this synthetic manifest is not a
+    // claim that a 48-head kernel has been built or validated.
+    {
+        json j;
+        std::ifstream(argv[1]) >> j;
+        auto& ops = j["layer_types"]["linear_attention"]["pack"]["consts"];
+        ops.push_back({{"op", "transpose_banked"}, {"tensor", "ab"}, {"dst", 0},
+                       {"rows", 48}, {"cols", 5120}, {"elem", 2}});
+        try {
+            auto banked = Manifest::parse(j, "banked AB test");
+            check(banked.layer_types.at("linear_attention").consts.back().op == "transpose_banked",
+                  "transpose_banked: manifest accepts dedicated AB operation");
+        } catch (const std::exception& e) {
+            check(false, std::string("transpose_banked manifest: ") + e.what());
+        }
+        for (const char* field : {"tensor", "rows", "cols", "elem"}) {
+            auto bad = j;
+            bad["layer_types"]["linear_attention"]["pack"]["consts"].back().erase(field);
+            bool refused = false;
+            try { Manifest::parse(bad, "banked AB test"); }
+            catch (const std::exception& e) {
+                refused = std::string(e.what()).find(field) != std::string::npos;
+            }
+            check(refused, std::string("transpose_banked: missing field named: ") + field);
+        }
+    }
     check(m.version == 1 && m.family == "qwen36moe", "version 1, family qwen36moe");
     check(m.layers.size() == 40 && m.layers[3] == "full_attention" && m.layers[0] == "linear_attention", "40 layers, attention every 4th");
     check(m.hidden == 2048 && m.vocab == 248320 && m.real_vocab == 248070, "hidden / vocab / real vocab");

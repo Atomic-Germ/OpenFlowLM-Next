@@ -395,6 +395,14 @@ refused at load rather than falling back to 2048.
 - The `lmhead_q8` order at K = 2048 / 2560 / 4096 is the law above, and at K = 2048 it is byte for byte the shipped 27B one (`tests/test_pack_plan.py`); an `lmhead_q8` op without `in_dim` is refused by both the NumPy packer and the manifest parser, naming the field.
 - A `std_perm` without `nch` / `in_dim`, or a `transpose` without `rows` / `cols` / `elem`, is refused by the manifest parser naming the field.
 - `transpose` takes an optional `dst_rows`: the destination row is widened to that many values and the tail zeroed (`[16, hid] -> [hid, 32]` with columns 16..31 zero, the 16-head DeltaNet's alpha / beta). It appears in a plan ONLY when it differs from `rows`, so a 32-head family's plan, manifest and build key do not move; `dst_rows` narrower than `rows` is refused by both packers. Both produce the same bytes (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
+- `transpose_banked` is the dedicated wide-head AB operation: `[heads, hidden]`
+  becomes `[ceil(heads/32), hidden, 32]`, with unused tail lanes zeroed. It
+  requires `tensor`, `rows`, `cols`, `elem`, and uses `dst` as a byte offset.
+  At 48 heads and hidden 5120, each bank is 327680 bytes (80 side tiles).
+  Python and C++ test every element, heads 31/32/47, padding and destination
+  bounds. Qwen3.5 plans select it only above 32 heads; existing plans retain
+  `transpose`. This packing capability does not validate a wide-head NPU
+  kernel. See `tests/test_qwen35_27b.py` and `plans/qwen35-27b-bringup.md`.
 - `model/q4nx.py` reads each q8 tensor the way the POOL holds it: as the container's own q8 when `native_q8(name)` (the projections the plan streams with `q8_perm`), else as the packer's q4_1. So a slice comparison measures the kernels whichever path a projection is on. `make_decode.py --requant` swings the whole run -- spec, plan, pools and reference -- onto the fallback for the A/B.
 - A `q8_perm` half-tile round-trips exactly: dequantizing the two half-tiles of a chunk gives the same values as dequantizing the chunk, value for value. The band law matches a brute-force placement against the dequantized source matrix, and a q8 projection occupies exactly twice the q4_1 bytes.
 - The NumPy and C++ packers produce the same `q8_perm` pool bytes (the same FNV-1a in `tests/test_quant_q8.py` and `src/open_qwen36/pools_test.cpp`), and a `q8_perm` without `nch` / `in_dim` is refused by the manifest parser naming the field.
