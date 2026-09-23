@@ -1,6 +1,7 @@
 //===- decoder_quant.cpp --------------------------------------*- C++ -*-===//
 // open_whisper -- see decoder_quant.hpp. SPDX-License-Identifier: MIT
 #include "decoder_quant.hpp"
+#include "host_ops.hpp"   // ow::omp_threads()
 
 #include <algorithm>
 #include <cmath>
@@ -173,7 +174,7 @@ inline float dot_int8_row_avx2(const float *x, const int8_t *w, int64_t n) {
 
 void linear_int8(const float *x, const QLinear &W, float *y) {
   const int64_t out = W.out, in = W.in;
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t ob = 0; ob < out; ob += 4) {
     const int64_t rows = std::min<int64_t>(4, out - ob);
 #if defined(__AVX2__)
@@ -287,7 +288,7 @@ void attend_one_xkv_bf16(const float *q, const uint16_t *k_base, int64_t k_row_s
                          int64_t k_head_stride, const uint16_t *v_base, int64_t v_row_stride,
                          int64_t v_head_stride, int64_t len, int64_t heads, int64_t head_dim,
                          float scale, float *out, float *scores_scratch, int64_t scores_stride) {
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t h = 0; h < heads; ++h) {
     float *scores = scores_scratch + h * scores_stride;
     const float *qh = q + h * head_dim;

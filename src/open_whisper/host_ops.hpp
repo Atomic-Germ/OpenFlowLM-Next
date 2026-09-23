@@ -127,6 +127,24 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
 // believes it is running the fast path).
 bool host_fast_enabled();
 
+// omp_threads(): the team size every OpenMP region in this engine uses, via a
+// num_threads() clause rather than omp_set_num_threads() -- the latter is
+// process-wide and would also resize every other engine inside oflm.exe.
+//
+// Why not the default (all 24 logical CPUs): after each region MSVC's OpenMP
+// workers spin, and with a thread on every logical CPU the thread blocked in
+// xrt::run::wait() is woken late. Measured (task 0180 Part 17, nvidia, fast
+// config, 3 runs): npu dispatch 1038 ms at 24 threads, 939 at 12, 819 with
+// OMP_WAIT_POLICY=PASSIVE -- which in turn costs the decoder 59% on its ~40
+// small regions per step. One thread per physical core keeps the spin (the
+// decoder wants it) and leaves the SMT siblings free for the waiter.
+//
+// Default: std::thread::hardware_concurrency() / 2, at least 1.
+// OW_OMP_THREADS=<n> overrides; anything that is not a positive integer throws.
+// Every region here writes disjoint outputs (the one reduction sums timers), so
+// the team size changes scheduling only, never a value.
+int omp_threads();
+
 // Vectorised float32 erf (AVX2 bulk, scalar double-erf tail for n % 8 != 0).
 // See host_ops.cpp for the algorithm and its attribution. `erf_scalar_ref` is
 // the double-precision reference (std::erf, rounded once) used by the test to

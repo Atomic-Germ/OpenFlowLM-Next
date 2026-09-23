@@ -81,7 +81,7 @@ void repack_qkv(const float *qkv, int64_t m_padded, int64_t seq_pad, int64_t t,
   (void)m_padded;  // == seq_pad, asserted by the caller
 
   const int64_t work = heads * t;
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t idx = 0; idx < work; ++idx) {
     const int64_t h = idx / t, t1 = idx % t;
     const float *row = qkv + t1 * stride + h * hd;
@@ -116,7 +116,7 @@ void repack_qkv_bias_fast(const float *qkv, int64_t m_padded, int64_t seq_pad, i
   (void)m_padded;  // == seq_pad, asserted by the caller
 
   const int64_t work = heads * t;
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t idx = 0; idx < work; ++idx) {
     const int64_t h = idx / t, t1 = idx % t;
     const float *row = qkv + t1 * stride + h * hd;
@@ -152,7 +152,7 @@ void scatter_output(const uint16_t *o_bf, int64_t seq_pad, int64_t t, int64_t d,
                     int64_t heads, int64_t hd, float *out) {
   const size_t per_head = static_cast<size_t>(seq_pad) * static_cast<size_t>(hd);
   const int64_t work = heads * t;
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t idx = 0; idx < work; ++idx) {
     const int64_t h = idx / t, t1 = idx % t;
     const size_t off = static_cast<size_t>(h) * per_head + static_cast<size_t>(t1) * hd;

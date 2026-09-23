@@ -61,7 +61,7 @@ echo [open_whisper] decoder_quant_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
    /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
-   decoder_quant_test.cpp decoder_quant.cpp "..\open_qwen36\q4nx_file.cpp" ^
+   decoder_quant_test.cpp decoder_quant.cpp host_ops.cpp "..\open_qwen36\q4nx_file.cpp" ^
    /Fe:out\decoder_quant_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
 out\decoder_quant_test.exe

@@ -269,7 +269,7 @@ void Encoder::encode(const float *mel, const StageHook &hook) {
   // Stem: conv1 (M=3072, K=384) -> keep 3000 rows -> conv2 (M=1536, K=3840).
   std::vector<float> mel_tm(static_cast<size_t>(3000) * static_cast<size_t>(n_mel));
   double t0 = now_s();
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t t = 0; t < 3000; ++t)
     for (int64_t c = 0; c < n_mel; ++c) mel_tm[static_cast<size_t>(t * n_mel + c)] = mel[c * 3000 + t];
 

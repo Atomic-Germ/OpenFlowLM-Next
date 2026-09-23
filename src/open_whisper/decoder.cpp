@@ -166,7 +166,7 @@ inline float dot_bf16(const float *x, const uint16_t *w, int64_t n) {
 // is mostly bookkeeping either way, so one function serves both rather than
 // adding a size-dependent branch.
 void linear(const float *x, const Linear &W, float *y) {
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t o = 0; o < W.out; ++o) y[static_cast<size_t>(o)] = dot_bf16(x, W.w.data() + o * W.in, W.in) + W.b[static_cast<size_t>(o)];
 }
 
@@ -180,7 +180,7 @@ void linear(const float *x, const Linear &W, float *y) {
 void linear_qkv(const float *x, const Linear &Wq, const Linear &Wk, const Linear &Wv, float *q,
                 float *k, float *v) {
   const int64_t out = Wq.out;   // == Wk.out == Wv.out == d_model, asserted by the caller's geometry
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t o = 0; o < 3 * out; ++o) {
     if (o < out) {
       q[static_cast<size_t>(o)] = dot_bf16(x, Wq.w.data() + o * Wq.in, Wq.in) + Wq.b[static_cast<size_t>(o)];
@@ -214,7 +214,7 @@ void attend_one(const float *q, const float *k_base, int64_t k_row_stride, int64
                 const float *v_base, int64_t v_row_stride, int64_t v_head_stride, int64_t len,
                 int64_t heads, int64_t head_dim, float scale, float *out, float *scores_scratch,
                 int64_t scores_stride) {
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t h = 0; h < heads; ++h) {
     // One scratch row per HEAD, not per thread: indexing by
     // omp_get_thread_num() would overflow if the team grew past the count
@@ -398,7 +398,7 @@ void Decoder::set_encoder_output(const float *xkv_1500x10240) {
       xkv_gathered_bf16_.assign(static_cast<size_t>(L) * 2 * static_cast<size_t>(H) *
                                     static_cast<size_t>(LEN) * static_cast<size_t>(HD),
                                 0);
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
     for (int64_t idx = 0; idx < blocks; ++idx) {
       const int64_t l = idx / (2 * H);
       const int64_t kv = (idx / H) % 2;   // 0 = K, 1 = V
@@ -421,7 +421,7 @@ void Decoder::set_encoder_output(const float *xkv_1500x10240) {
                              static_cast<size_t>(LEN) * static_cast<size_t>(HD),
                          0.f);
 
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(::ow::omp_threads())
   for (int64_t idx = 0; idx < blocks; ++idx) {
     const int64_t l = idx / (2 * H);
     const int64_t kv = (idx / H) % 2;   // 0 = K, 1 = V
