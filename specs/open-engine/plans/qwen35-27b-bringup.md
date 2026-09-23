@@ -104,16 +104,98 @@ without bypassing that gate. No manifest advertised for 27B, no catalogue or
 `MIXED_CORE_FITS` changes, no new engine family. Recipe source hashes will
 change as designed; this does not imply any existing generated layout changed.
 
+## Phase 4: wide glue worker (2026-09-23)
+
+Implemented the geometry-gated wide worker in `designs/layer_x/lx.py`:
+
+- `ab_banks(spec) = ceil(value_heads / 32)` in the existing shared recipe.
+- `xn_side` ObjectFifo exists only for the dense wide path, with depth 1.
+  It is appended to worker/runtime handles only for that path. Physical shim
+  placement is intentionally left to phase 5; no per-FIFO shim allowance is assumed.
+- For each bank: alpha's 3 xn chunks and 80 weight tiles, beta's same replay,
+  then small parameters. Two `acc[32]` buffers are reused. Decay/beta each hold
+  48 floats. xn is copied into the existing private chunk and released before
+  weight consumption, so it needs only one FIFO slot.
+- The existing conv and record-emission loop follows both banks unchanged.
+- `glue_small_bank.h/.cc` provides the bank-aware helper needed by this worker
+  (the addressing part of phase 6). A is read at `base+h`, dt_bias at
+  `NHEAD+base+h`, and the accumulators at `h`; the final bank handles 16 lanes.
+  The existing `dn_glue.h`, `glue_small.cc`, `glue_ab_e.cc` and `dnx.h` are untouched.
+- A wide recipe with a small enough FFN now fails explicitly with
+  `not implemented: wide DeltaNet glue DMA scheduling`, including in
+  unvalidated mode. The host sequence has a second explicit guard. The real
+  17408 FFN still hits the earlier L1 gate. Neither route silently uses the
+  legacy host sequence with the new consumer order.
+
+Declared glue-core storage (not the main-core segmented FFN budget):
+
+| Allocation | Bytes |
+|---|---:|
+| side, depth 2 | 8192 |
+| xn_side, depth 1 | 4096 |
+| gact, depth 5 | 10240 |
+| gout, depth 3 | 6144 |
+| acc_a / acc_b, 32 floats each | 256 |
+| decay / beta, 48 floats each | 384 |
+| qk / vt / xnb | 24576 |
+| stack | 6144 |
+| **Total declared** | **60032** |
+
+Declared headroom against the 61440-byte recipe budget is 1408 bytes. A
+depth-2 xn FIFO would raise the total to 64128. This sums source declarations;
+IRON alignment, bookkeeping, placement and program memory are **NOT VALIDATED**.
+The generated allocation report in phase 5 must take precedence.
+
+TDD: before implementation, the new tests gave **4 failures / 4 passes**:
+missing wide input, missing bank geometry, missing explicit DMA guard, and
+missing C++ helper. After implementation and expanded regression checks:
+
+- `test_qwen35_wide_glue.py`: **14 passed**. Tests execute the actual worker
+  body, check stream depletion/acquire-release balance, exact integer-data
+  GEMV sums, reused accumulator identities, both banks, and all 48 records.
+  Legacy worker cases cover 0.8B / 2B / 4B / 9B and the MoE path. Type/FIFO
+  declaration tests cover legacy topology, wide widths and declared L1.
+- Existing Qwen3.5 + 27B + wide-glue tests: **66 passed**.
+- Full open-engine: **586 passed, 47 skipped, 2 failed**. The same two
+  pre-existing missing-SciPy vision failures; no new failures.
+- The production small-helper header compiles and runs with host scalar math
+  under GCC undefined/bounds sanitizers, checking all heads, both A/dt_bias
+  arrays, inactive accumulator NaNs and output canaries. This is not a test
+  of AIE vecmath approximation error.
+- The standalone C++ helper test also **PASS in Docker**.
+
+Reproduce:
+
+```bash
+python3 -m pytest specs/open-engine/tests/test_qwen35_wide_glue.py \
+  specs/open-engine/tests/test_qwen35.py specs/open-engine/tests/test_qwen35_27b.py -q
+g++ -std=c++17 -O2 -Wall -Wextra -Iopen_kernels/designs/dn_glue \
+  specs/open-engine/tests/fixtures/glue_small_bank_test.cpp -o /tmp/oflm-glue-small-bank-test
+/tmp/oflm-glue-small-bank-test
+docker run --rm --network none --read-only --tmpfs /tmp \
+  --mount type=bind,src=/tmp/oflm-glue-small-bank-test,dst=/tests/glue-small-bank,readonly \
+  --entrypoint /tests/glue-small-bank q38rocm-qwen38-server:latest
+```
+
+Files changed: shared recipe bank count, qwen35 dispatch guard, `lx.py`, new
+`dn_glue/glue_small_bank.h/.cc`, `tests/test_qwen35_wide_glue.py`,
+`tests/fixtures/glue_small_bank_test.cpp`, canonical spec and this report.
+No xclbins/libraries were built. Source-based cache keys change intentionally;
+legacy layout fixtures and interpreted worker behavior still pass, but binary
+identity has not been established by a rebuild.
+
 ## Next work and outstanding gates
 
-Phase 4 starts with a dedicated xn ObjectFifo on the wide path. Keep AB
-accumulators at 32 floats; decay/beta need storage for the real 48 heads.
-The bank-aware small helper must index A at `base+h` and dt_bias at
-`NHEAD+base+h`, while indexing the reused accumulator at `h`.
-Hardware scheduling must be compiled and placed before interpreting the
-logical 7 weight / 12 xn fills as physically feasible.
+Phase 5: implement and compile/place the wide host schedule (7 logical weight
+fills and 12 xn fills). The temporary wide-dispatch guards above must be
+replaced only with a working bring-up schedule. Prepare IRON/Peano first;
+the repository's `ironvenv` is still absent. To isolate glue before segmented
+FFN exists, use a dedicated glue design or an explicitly synthetic narrower
+FFN geometry, never label that the full 27B build. Capture actual shim/L1
+diagnostics and preserve all legacy limits. Establish scheduling feasibility
+before hardware execution; CPU tests do not validate physical resources.
 
-The remaining phases are not implemented: bank-aware glue/DMA, segmented
+The remaining phases are not implemented: host DMA, segmented
 FFN, primitive and real-layer numerical bring-up, converter registration,
 model packaging and chat checks. In particular the GEMV accumulator is in
 even/odd lane order between tiles and only zipped to row order on `last`;

@@ -56,6 +56,7 @@ from layout import (A_BYTES, A_O, A_OG, A_OUT, A_QKV, A_RES, A_ROUT, A_VEC, A_XM
                     POOL_QKV, POOL_Z, SIDE_ALPHA, SIDE_BETA, SIDE_CONV, SIDE_SMALL,
                     STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES, R, SPEC)
 import xcommon as X  # noqa: E402
+from recipes.qwen36moe import ab_banks  # noqa: E402
 
 D = R.linear
 if D is None:
@@ -81,6 +82,8 @@ VALUE_TILES = NT - KEY_TILES                            # tiles of the value gro
 CONVW_ELEMS = SPEC.conv_kernel * TILE * 2 // ELEM       # 4 KB side elements holding one tile's conv taps
 GLUE_NHEAD_DEFAULT = 32                                 # dn_glue.h's #ifndef DNGLUE_NHEAD value
 DENSE = X.KIND == "dense"                     # the Qwen3.5 composition: a dense FFN tail, ONE stream
+AB_BANKS = ab_banks(SPEC)
+WIDE_GLUE = DENSE and AB_BANKS > 1
 PART = int(os.environ.get("LX_PART", 0))
 STOP = int(os.environ.get("LX_STOP", 99))     # debug: truncate part 0 after the glue (1) / DeltaNet (2)
 if DENSE and PART:
@@ -91,7 +94,7 @@ OG_ELEMS = D.OG_ELEMS
 # core holds ONE 4 KB half at a time, so the projection is walked half by half). A tile is 64
 # rows, a half carries up to 2048 of them, and at HID 2560 the two halves are 32 and 8.
 AB_TILES = [min(ELEM // 2, HID - h * (ELEM // 2)) // 64 for h in range(XN_ELEMS)]
-assert sum(AB_TILES) == AB_ELEMS, (AB_TILES, AB_ELEMS)
+assert sum(AB_TILES) * AB_BANKS == AB_ELEMS, (AB_TILES, AB_BANKS, AB_ELEMS)
 # dn_glue's head count. Passed ONLY when it differs from the header default, so the shipped
 # 27B's five glue TUs keep the compile command they were built with (the DNX_PAD lesson).
 GLUE_FLAGS = {} if NHEAD == GLUE_NHEAD_DEFAULT else {"compile_flags": [f"-DDNGLUE_NHEAD={NHEAD}"]}
@@ -119,6 +122,8 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     act_ty = np.ndarray[(A_BYTES,), np.dtype[np.uint8]]
     nw_ty = np.ndarray[(SPEC.lin_value_dim,), np.dtype[bfloat16]]
     f32 = np.ndarray[(NHEAD,), np.dtype[np.float32]]
+    # Wide models retain full decay/beta arrays but reuse ONE 32-lane AB pair.
+    f_acc = np.ndarray[(32,), np.dtype[np.float32]] if WIDE_GLUE else f32
     fqk = np.ndarray[(2 * D.KEY_WIDTH,), np.dtype[np.float32]]
     fvt = np.ndarray[(TILE,), np.dtype[np.float32]]
     # The glue core's private copy of the layer-entry norm output. On the dense path it is
@@ -130,9 +135,13 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     K = X.kernels(inc, t)
     L = X.ln_kernels(inc, tl)
     f_ab = (ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
-                             arg_types=[u8_4k, fxn, f32, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
+                             arg_types=[u8_4k, fxn, f_acc, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
             ExternalFunction("glue_ab", source_file=str(GLUE / "glue_ab.cc"), arg_types=[u8_4k, fxn, f32, np.int32], include_dirs=inc, **GLUE_FLAGS))
-    f_small = ExternalFunction("glue_small_fn", source_file=str(GLUE / "glue_small.cc"), arg_types=[u8_4k, f32, f32, f32, f32], include_dirs=inc, **GLUE_FLAGS)
+    f_small = (ExternalFunction("glue_small_bank_fn", source_file=str(GLUE / "glue_small_bank.cc"),
+                                arg_types=[u8_4k, f_acc, f_acc, f32, f32, np.int32, np.int32],
+                                include_dirs=inc, **GLUE_FLAGS) if WIDE_GLUE else
+               ExternalFunction("glue_small_fn", source_file=str(GLUE / "glue_small.cc"),
+                                arg_types=[u8_4k, f32, f32, f32, f32], include_dirs=inc, **GLUE_FLAGS))
     f_conv = ExternalFunction("glue_conv", source_file=str(GLUE / "glue_conv.cc"),
                               arg_types=[u8_2k, u8_2k, u8_2k, u8_2k, u8_2k, u8_4k, u8_4k, u8_2k, u8_2k, u8_2k, fqk, fvt, np.int32, np.int32],
                               include_dirs=inc, **GLUE_FLAGS)
@@ -151,6 +160,9 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)        # [x0 x1 w] | [x0 x1 w a0 a1] | W x256
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1 if DENSE else 3)   # dense: one output element per call
     of_side = ObjectFifo(u8_4k, name="side", depth=2)
+    # One slot suffices: copy/release xn before consuming its weight tiles. A
+    # second slot would cost another 4096 B on the already crowded glue core.
+    of_xn_side = ObjectFifo(u8_4k, name="xn_side", depth=1) if WIDE_GLUE else None
     of_gact = ObjectFifo(u8_2k, name="gact", depth=5)
     of_gout = ObjectFifo(u8_2k, name="gout", depth=3)
     of_pin = ObjectFifo(u8_4k, name="pin", depth=2)        # [nw][o g][z g]...
@@ -182,8 +194,24 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         # part 1: the MoE block
         X.moe_body(win, xin, yout, B, K)
 
-    def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall, fconv, femit, fcopy):
-        if DENSE:
+    def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall, fconv, femit, fcopy,
+                  *wide_inputs):
+        if WIDE_GLUE:
+            xin = wide_inputs[0]
+            for bank in range(AB_BANKS):
+                for acc in (acc_a, acc_b):
+                    for h, ntiles in enumerate(AB_TILES):
+                        e0 = xin.acquire(1)
+                        fcopy(e0, xn, 0)
+                        xin.release(1)
+                        for tile in range_(ntiles):
+                            ww = sin.acquire(1)
+                            fab(ww, xn, acc, tile, 1 if h == 0 else 0)
+                            sin.release(1)
+                sm = sin.acquire(1)
+                fsmall(sm, acc_a, acc_b, decay, beta, bank * 32, min(32, NHEAD - bank * 32))
+                sin.release(1)
+        elif DENSE:
             # One accumulator at a time, one 4 KB half of the xn at a time: copy the half in
             # (so the fifo element can be released -- release(n) frees the OLDEST n), then run
             # that half's weight tiles off the same fifo. `first` resets the accumulator in the
@@ -206,9 +234,10 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
                     ww = sin.acquire(1)
                     fab(ww, xn, acc, tile)
                     sin.release(1)
-        sm = sin.acquire(1)
-        fsmall(sm, acc_a, acc_b, decay, beta)
-        sin.release(1)
+        if not WIDE_GLUE:
+            sm = sin.acquire(1)
+            fsmall(sm, acc_a, acc_b, decay, beta)
+            sin.release(1)
         for base, ntiles in ((0, KEY_TILES), (KEY_TILES, VALUE_TILES)):
             for tt in range_(ntiles):
                 ww = sin.acquire(CONVW_ELEMS)
@@ -250,9 +279,10 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
                           tile=Tile(1, 3), stack_size=0x1800))
     workers.append(Worker(glue_body,
                           fn_args=[of_side.cons(), of_gact.cons(), of_gout.prod(),
-                                   Buffer(f32, name="acc_a"), Buffer(f32, name="acc_b"), Buffer(f32, name="decay"),
+                                   Buffer(f_acc, name="acc_a"), Buffer(f_acc, name="acc_b"), Buffer(f32, name="decay"),
                                    Buffer(f32, name="beta"), Buffer(fqk, name="qk"), Buffer(fvt, name="vt"), Buffer(fxn, name="xnb"),
-                                   f_ab, f_small, f_conv, f_emit, f_copy],
+                                   f_ab, f_small, f_conv, f_emit, f_copy,
+                                   *([of_xn_side.cons()] if WIDE_GLUE else [])],
                           tile=Tile(2, 3), stack_size=0x1800))
 
     bt = X.bt
@@ -261,9 +291,13 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
 
     # ---- host sequences (one per instruction stream)
     def dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                       side_p, gact_p, gout_c, pin_p, pout_c):
+                       side_p, gact_p, gout_c, pin_p, pout_c, *wide_producers):
         """ONE instruction stream: the MoE stream's steps 1-6 with the router dropped, then
         designs/dense/dx.py's steps 5-7 (residual + norm, the FFN, the output residual)."""
+        if WIDE_GLUE:
+            # Phase 5 must establish physical DMA/shim feasibility. Never feed the
+            # banked worker with the legacy interleaved xn/weights sequence.
+            raise NotImplementedError("wide DeltaNet glue DMA scheduling is not implemented")
         # 1. layer-entry norm: xn -> act[A_XN]
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -345,10 +379,11 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         pw.finish()
         px.finish()
 
-    def sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c):
+    def sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c,
+                 *wide_producers):
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                           side_p, gact_p, gout_c, pin_p, pout_c)
+                           side_p, gact_p, gout_c, pin_p, pout_c, *wide_producers)
         elif part == 0:
             # 1. layer-entry norm: xn -> act[A_XN]
             tg_ln = TaskGroup()
@@ -438,7 +473,8 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
-                            of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0))])
+                            of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0)),
+                            *([of_xn_side.prod()] if WIDE_GLUE else [])])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 

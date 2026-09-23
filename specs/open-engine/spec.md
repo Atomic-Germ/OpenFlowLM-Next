@@ -1130,6 +1130,20 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
 - **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. The value head's key head is `h / (lin_value_heads / lin_key_heads)` -- 2 value heads per key head at 32, one at 16.
 - **The alpha / beta projection is padded to the accumulator's 32 lanes**, not narrowed: a W element stays 64 rows x 32 bf16 = 4 KB, `AB_ELEMS` is `hidden / 64` whatever the head count, and a 16-head model's `transpose` op carries `dst_rows` so columns 16..31 are zero. `dt_bias` sits at `lin_value_heads` floats inside `small`, not at a fixed 32.
 - **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048) / 64` weight tiles, which is 32 and 8 at HID 2560. The side channel's fills are `2 + 4 * ceil(hidden*2 / 4096)` and the recipe refuses a hidden width whose count exceeds `LIMITS["shim_fills"]`, naming the number.
+- **Wide glue worker (unvalidated, dispatch not implemented yet).** Above 32
+  value heads the dense path has `ceil(heads/32)` sequential AB banks and a
+  dedicated depth-1 `xn_side` FIFO. Each bank consumes alpha then beta, each
+  replaying all xn chunks, then one small-parameter element. Two 32-float
+  accumulators are reused; decay/beta span the actual head count. A banked
+  helper uses local accumulator indices but global A/dt_bias/output indices
+  and processes only the active tail lanes. Existing <=32-head and MoE worker
+  paths retain their original streams. The 48-head worker consumes 12 xn
+  chunks and continues to six value tiles / 48 records. These contracts are
+  tested by executing the actual Python worker with checked FIFO substitutes
+  and compiling the actual small-helper indexing loop with host math in
+  `tests/test_qwen35_wide_glue.py`. They do not establish IRON placement or
+  NPU numerical correctness. Wide recipe dispatch remains explicitly refused
+  until the host DMA schedule is implemented and its physical resources checked.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
