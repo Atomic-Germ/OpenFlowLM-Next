@@ -87,7 +87,8 @@ ONDV = os.environ.get("MOE_ONDEVICE_ROUTE") == "1"
 # whole sequence) and few (they are reused expert to expert, freed and re-pinned,
 # so three per channel cover the two up|gate fills plus the later down fill); the
 # managed fills use the low indices and never reach these.
-ONDV_BD_UP, ONDV_BD_GATE, ONDV_BD_DOWN = 8, 9, 10
+ONDV_BD_UP, ONDV_BD_GATE, ONDV_BD_DOWN = (int(_v) for _v in
+                                             os.environ.get("ONDV_BDS", "8,9,10").split(","))
 
 # scratch layouts (floats) -- gen_kernels.py writes the same offsets into the kernel TUs
 MS_FLOATS = C.MS_FLOATS
@@ -508,23 +509,28 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
     (the router's top-8 and the pool base) rides the x broadcast right after the MoE header,
     so the control words are sent before the main cores need the weights."""
     spp, cps = C.STRIPES_PER_PROJ, C.CORES_PER_STRIPE
+    # ONDV_HOST_PUSH: diagnostic -- enqueue the routed slots' placeholders from the host
+    # (as the non-fused path would) instead of leaving them to the emitters' packets, so
+    # the ONDV MoE sequence can be run with the packet path out of the picture.
+    host_push = ONDV and os.environ.get("ONDV_HOST_PUSH") == "1"
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, ELEM))
     for c in range(N_CORES):
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_ROUT, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_consts, bt(C_BYTES, C_SGW, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_RES + c * ROWS_PC * 4, CALL_BYTES))
     if ONDV:
-        # Configure the three pinned routed descriptors ONCE (placeholder expert 0): their
-        # length/stride is the same for every expert, so only the address (w1/w2) changes per
-        # wave, and that is exactly what the emitters' control packets rewrite. The descriptors
-        # stay pinned for the whole block (never freed; the control packets own them).
-        for c in range(N_CORES):
-            up0 = (2 * spp * 0 + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
-            pipe_w.configure(w_prods[c], a_pool, half_tap(up0), bd_id=ONDV_BD_UP)
-            pipe_w.configure(w_prods[c], a_pool, half_tap(up0 + STRIPE), bd_id=ONDV_BD_GATE)
-            pipe_w.configure(w_prods[c], a_pool,
-                             bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
-                                DOWN_PER_CORE * DOWN_BAND), bd_id=ONDV_BD_DOWN)
+        if not host_push:
+            # Configure the three pinned routed descriptors ONCE (placeholder expert 0): their
+            # length/stride is the same for every expert, so only the address (w1/w2) changes per
+            # wave, and that is exactly what the emitters' control packets rewrite. The descriptors
+            # stay pinned for the whole block (never freed; the control packets own them).
+            for c in range(N_CORES):
+                up0 = (2 * spp * 0 + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
+                pipe_w.configure(w_prods[c], a_pool, half_tap(up0), bd_id=ONDV_BD_UP)
+                pipe_w.configure(w_prods[c], a_pool, half_tap(up0 + STRIPE), bd_id=ONDV_BD_GATE)
+                pipe_w.configure(w_prods[c], a_pool,
+                                 bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
+                                    DOWN_PER_CORE * DOWN_BAND), bd_id=ONDV_BD_DOWN)
         # the two on-device-routing x elements (rout + cfg) arrive BEFORE the waves so the
         # emitters can generate + send the control words in time; the main cores skip them
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_ROUT, ELEM))
@@ -534,7 +540,10 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
             if e < NE:
                 # routed slot: the descriptors were configured once above; the emitters'
                 # control packets retarget + push them per wave. Nothing to configure here.
-                pass
+                if host_push:
+                    up0 = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
+                    pipe_w.fill(w_prods[c], a_pool, half_tap(up0))
+                    pipe_w.fill(w_prods[c], a_pool, half_tap(up0 + STRIPE))
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_UP + c * HALF, HALF))
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
@@ -543,7 +552,10 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, ELEM))
         for c in range(N_CORES):
             if e < NE:
-                pass                                     # down descriptor configured once above
+                if host_push:
+                    pipe_w.fill(w_prods[c], a_pool,
+                                bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
+                                   DOWN_PER_CORE * DOWN_BAND))
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                                    DOWN_PER_CORE * DOWN_BAND))

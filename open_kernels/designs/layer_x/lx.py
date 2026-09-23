@@ -145,7 +145,10 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         # control buffer (120 words + slack)
         f_oc = ExternalFunction("ondv_ctrl_col", source_file=str(X.RT / "ondv_ctrl_col.cc"),
                                 arg_types=[t["x"], t["x"], np.int32, tl["u8_ctrl"]],
-                                include_dirs=inc + [str(X.RT)])
+                                include_dirs=inc + [str(X.RT)],
+                                compile_flags=[f"-DONDV_BD_UP={X.ONDV_BD_UP}",
+                                               f"-DONDV_BD_GATE={X.ONDV_BD_GATE}",
+                                               f"-DONDV_BD_DOWN={X.ONDV_BD_DOWN}"])
     f_ab = (ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
                              arg_types=[u8_4k, fxn, f32, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
             ExternalFunction("glue_ab", source_file=str(GLUE / "glue_ab.cc"), arg_types=[u8_4k, fxn, f32, np.int32], include_dirs=inc, **GLUE_FLAGS))
@@ -321,12 +324,13 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                         done.acquire(1)
             return emitter_body
 
-        for c in range(N_CORES):
-            eargs = [of_x.cons(), ctrlw[c], f_oc, *pktlk[c]]
-            if os.environ.get("ONDV_DONE_ACQ") == "1":
-                eargs.append(pktdone[c])
-            workers.append(Worker(_emitter_body(c), fn_args=eargs,
-                                  tile=emitter_tile[c], stack_size=0x1800))
+        if os.environ.get("ONDV_NO_EMITTERS") != "1":
+            for c in range(N_CORES):
+                eargs = [of_x.cons(), ctrlw[c], f_oc, *pktlk[c]]
+                if os.environ.get("ONDV_DONE_ACQ") == "1":
+                    eargs.append(pktdone[c])
+                workers.append(Worker(_emitter_body(c), fn_args=eargs,
+                                      tile=emitter_tile[c], stack_size=0x1800))
 
     bt = X.bt
     BB_HID, BB_OUT = X.role_band_bytes("linear", HID), X.role_band_bytes("linear_out", OUT_K)

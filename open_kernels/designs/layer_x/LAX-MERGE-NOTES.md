@@ -130,6 +130,31 @@ probe; it did not fix the hang (tested, though every attempt that session also h
 peer contention). With the hook unset the build is unchanged: `insts.elf` is byte-
 identical to `build_emitter` and every core program keeps its size.
 
+### The fault is the packet push, and only the packet push
+
+`ONDV_HOST_PUSH=1` (the host enqueues the routed slots' placeholder descriptors, as the
+non-fused path would) plus `ONDV_NO_EMITTERS=1` completes in a clean window:
+**`state 4`, zero contention** (`build_lx_hp`). So the ONDV MoE sequence, the main
+body, the pre-MoE path and the pinned-descriptor layout are all correct; what fails is
+the emitters' TileControl push, which the one-emitter probe (`build_live`) performs
+successfully. Two candidate causes were tested and did **not** fix it:
+
+* `ONDV_DONE_ACQ=1` -- pair every packet BD's `release(pktdone)` with an `acquire` in
+  the emitter (the probe's pattern). No change.
+* `ONDV_BDS=13,14,15` -- move the pinned descriptors off BDs 8/9/10 in case the `w`
+  channel's own pipeline descriptors collide with them (both `xcommon.ONDV_BD_*` and
+  `ondv_ctrl.h`'s `kOndvBd*`, now `#ifndef`-overridable). No change.
+
+All three hooks are env-gated and unset by default. One pre-existing discrepancy worth
+knowing: `build_emitter`'s row-3 helper cores (ln/router, post, glue) are 32 B larger
+than a fresh build of the same sources (`0x27d0` vs `0x27b0` etc.), so the recorded
+state-4 build is not exactly reproducible from the tree as it stands.
+
+Remaining leads for the push: the `cfg` element the emitters read (`cfg[0..1]` pool
+base, `cfg[2+col]` queue) versus the probe's `poolbase`-written `cfg`; whether the 9-BD
+packet chain makes the shim's task queue overflow (the probe sends a single 28-B BD); and
+whether the `Pipeline.configure` descriptors are still live when the packet arrives.
+
 ## Local run artifacts (gitignored, like every other design `.cfg`/`.bin`)
 
 `qmap_lax.bin` (32 B, little-endian u32 per column) -- the merged design's `w{c}`
