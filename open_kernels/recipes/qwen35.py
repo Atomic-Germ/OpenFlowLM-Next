@@ -162,7 +162,9 @@ def pack_plan(spec: ModelSpec) -> dict:
         # when it differs from `rows`: an extra key would move every existing family's plan,
         # its manifest and its build key for a value they already have.
         lanes = ab_lanes(spec)
-        pad = {"dst_rows": lanes} if lanes != heads else {}
+        banked = heads > M.AB_LANES
+        transpose = "transpose_banked" if banked else "transpose"
+        pad = {"dst_rows": lanes} if lanes != heads and not banked else {}
         plan["layer_types"][LINEAR] = {
             "pool": ffn_pool + [
                 proj_op(spec, "linear", pre + "linear_attn.qkv_proj.weight", L.POOL_QKV, nch, hid, hid),
@@ -171,10 +173,10 @@ def pack_plan(spec: ModelSpec) -> dict:
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.C_LNW, "cap": L.ELN},
                 # the container's q8 alpha / beta come with a bf16 [heads, hidden] copy; the glue
-                # reads [hidden, heads], which is what the 35B's container already stores (R4)
-                {"op": "transpose", "tensor": pre + "linear_attn.ssm_alpha_proj.bf16.weight",
+                # reads 32-lane rows: bank-major above 32 heads, legacy transpose otherwise.
+                {"op": transpose, "tensor": pre + "linear_attn.ssm_alpha_proj.bf16.weight",
                  "dst": side + L.SIDE_ALPHA, "rows": heads, "cols": hid, "elem": 2, **pad},
-                {"op": "transpose", "tensor": pre + "linear_attn.ssm_beta_proj.bf16.weight",
+                {"op": transpose, "tensor": pre + "linear_attn.ssm_beta_proj.bf16.weight",
                  "dst": side + L.SIDE_BETA, "rows": heads, "cols": hid, "elem": 2, **pad},
                 {"op": "put", "tensor": pre + "linear_attn.ssm_a", "dst": side + L.SIDE_SMALL,
                  "cap": heads * 4},
