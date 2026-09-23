@@ -9,11 +9,14 @@
 # Run from WSL, from the repo root, with the reference sources extracted first:
 #
 #   mkdir -p ppcheck_old
-#   for f in attn.h attn_stepb.cc; do
+#   for f in attn.h attn_stepb.cc; do   # every file the change touched
 #     git show <ref>:open_kernels/designs/attn/$f > ppcheck_old/$f
 #   done
 #   wsl -d Ubuntu-24.04 -- bash -lc 'source ~/ironenv142/bin/activate &&
 #     bash <repo>/utilities/attn_pp_identical.sh'
+#
+# On a Windows checkout with core.autocrlf the working copy of this file has CRLF line
+# endings and bash under WSL dies on line 1; strip the CRs (or check it out with LF).
 #
 # Add a family by adding its ATTN_* flags below -- they are recipes/attnknobs.py's
 # geometry for that spec, which `python -c "from recipes import dense; ..."` prints.
@@ -24,7 +27,7 @@ OUT=/tmp/ppcheck
 rm -rf $OUT; mkdir -p $OUT/old $OUT/new
 cp $A/*.cc $A/*.h $OUT/new/
 cp $A/*.cc $A/*.h $OUT/old/
-cp $W/ppcheck_old/attn.h $W/ppcheck_old/attn_stepb.cc $OUT/old/   # the reference set
+cp $W/ppcheck_old/* $OUT/old/   # the reference set: every file the change touched
 rm -f $OUT/old/attn_stepb_new.cc
 
 eval "$(python - <<'PY'
@@ -54,13 +57,18 @@ for name in "gemma3-4b|$G3" "qwen3-4b|$Q3" "qwen36-35b-rb1|$Q36"; do
     ok=1
     for v in old new; do
       "$CLANG" -E -P $BASE -I$OUT/$v $flags "$OUT/$v/$tu" -o "$OUT/$tag.$tu.$v.i" || ok=0
-      [ $ok = 1 ] && sed -i "s|$OUT/$v|DIR|g" "$OUT/$tag.$tu.$v.i"
+      # An empty macro expansion leaves a stray space (`int e )`): compare TOKENS, not
+      # bytes -- whitespace collapsed and dropped beside punctuation. Anything that would
+      # change the compiled code changes a token.
+      [ $ok = 1 ] && sed -i "s|$OUT/$v|DIR|g" "$OUT/$tag.$tu.$v.i" &&         tr -s '[:space:]' ' ' < "$OUT/$tag.$tu.$v.i" | sed 's/ *\([][(){},;:<>=*&+-]\) *//g' > "$OUT/$tag.$tu.$v.t"
     done
     [ $ok = 1 ] || { echo "PP FAILED $tag $tu"; fail=1; continue; }
-    if cmp -s "$OUT/$tag.$tu.old.i" "$OUT/$tag.$tu.new.i"; then
+    if cmp -s "$OUT/$tag.$tu.old.t" "$OUT/$tag.$tu.new.t"; then
       echo "same  $tag  $tu"
     else
-      echo "DIFF  $tag  $tu"; diff "$OUT/$tag.$tu.old.i" "$OUT/$tag.$tu.new.i" | head -20; fail=1
+      echo "DIFF  $tag  $tu"; diff <(tr ";" "
+" < "$OUT/$tag.$tu.old.t") <(tr ";" "
+" < "$OUT/$tag.$tu.new.t") | head -20; fail=1
     fi
   done
 done
