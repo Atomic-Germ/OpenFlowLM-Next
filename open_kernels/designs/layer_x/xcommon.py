@@ -538,11 +538,12 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
             # stay pinned for the whole block (never freed; the control packets own them).
             for c in ONDV_EMITTER_COLS:
                 up0 = (2 * spp * 0 + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
-                pipe_w.configure(w_prods[c], a_pool, half_tap(up0), bd_id=ONDV_BD_UP)
-                pipe_w.configure(w_prods[c], a_pool, half_tap(up0 + STRIPE), bd_id=ONDV_BD_GATE)
-                pipe_w.configure(w_prods[c], a_pool,
-                                 bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
-                                    DOWN_PER_CORE * DOWN_BAND), bd_id=ONDV_BD_DOWN)
+                if not (host_push and os.environ.get("ONDV_FORCE_CONFIGURE") != "1"):
+                    pipe_w.configure(w_prods[c], a_pool, half_tap(up0), bd_id=ONDV_BD_UP)
+                    pipe_w.configure(w_prods[c], a_pool, half_tap(up0 + STRIPE), bd_id=ONDV_BD_GATE)
+                    pipe_w.configure(w_prods[c], a_pool,
+                                     bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
+                                        DOWN_PER_CORE * DOWN_BAND), bd_id=ONDV_BD_DOWN)
         # the two on-device-routing x elements (rout + cfg) arrive BEFORE the waves so the
         # emitters can generate + send the control words in time; the main cores skip them
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_ROUT, ELEM))
