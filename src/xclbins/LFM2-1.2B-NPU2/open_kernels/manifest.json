@@ -1,0 +1,498 @@
+{
+ "manifest_version": 1,
+ "family": "lfm2",
+ "spec": {
+  "family": "lfm2",
+  "hidden": 2048,
+  "num_layers": 16,
+  "layer_types": [
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "full_attention",
+   "short_conv",
+   "full_attention",
+   "short_conv"
+  ],
+  "vocab": 65536,
+  "real_vocab": 64400,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 64,
+  "rotary_dim": 64,
+  "rope_theta": 1000000.0,
+  "rope_scaling": null,
+  "rope_local_theta": 0.0,
+  "sliding_window": 0,
+  "qk_norm": true,
+  "attn_gate": false,
+  "lin_key_heads": 0,
+  "lin_value_heads": 0,
+  "lin_key_dim": 0,
+  "lin_value_dim": 0,
+  "conv_kernel": 3,
+  "intermediate": 8192,
+  "activation": "silu",
+  "sandwich_norms": false,
+  "num_experts": 0,
+  "experts_per_tok": 0,
+  "moe_intermediate": 0,
+  "shared_expert_intermediate": 0,
+  "norm_eps": 1e-05,
+  "quant": "q4_1",
+  "extra": {
+   "model_type": "lfm2",
+   "source": "hf_config",
+   "model": "LFM2-1.2B-NPU2"
+  }
+ },
+ "spec_hash": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
+ "build_key": "sha256:345197a56cb1fd8204b938ff8250670b8803027c96dd5ea1ad3ebc7f1cc115f9",
+ "max_ctx_default": 4096,
+ "hf_config_check": {
+  "model_type": [
+   "lfm2"
+  ],
+  "hidden_size": 2048,
+  "num_hidden_layers": 16,
+  "vocab_size": 65536,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "intermediate_size": 8192
+ },
+ "hf_config_defaults": {},
+ "layout": {
+  "hidden": 2048,
+  "vocab": 65536,
+  "real_vocab": 64400,
+  "chunk_bytes": 5120,
+  "pool_bytes": 41943040,
+  "lmhead_pool_bytes": 83886080,
+  "kv_row": 2048,
+  "ptab_row": 1024,
+  "rotary_dim": 64,
+  "rope_theta": 1000000.0,
+  "rope_inv_freq": [
+   1.0,
+   0.6493816315762113,
+   0.4216965034285822,
+   0.27384196342643613,
+   0.1778279410038923,
+   0.11547819846894582,
+   0.07498942093324558,
+   0.04869675251658631,
+   0.03162277660168379,
+   0.02053525026457146,
+   0.01333521432163324,
+   0.008659643233600654,
+   0.005623413251903491,
+   0.003651741272548377,
+   0.0023713737056616554,
+   0.001539926526059492,
+   0.001,
+   0.0006493816315762113,
+   0.00042169650342858224,
+   0.0002738419634264361,
+   0.00017782794100389227,
+   0.00011547819846894582,
+   7.498942093324559e-05,
+   4.869675251658631e-05,
+   3.1622776601683795e-05,
+   2.0535250264571462e-05,
+   1.333521432163324e-05,
+   8.659643233600654e-06,
+   5.623413251903491e-06,
+   3.651741272548377e-06,
+   2.3713737056616552e-06,
+   1.539926526059492e-06
+  ]
+ },
+ "layers": [
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "full_attention",
+  "short_conv",
+  "full_attention",
+  "short_conv"
+ ],
+ "contexts": {
+  "dx": "dx/final.xclbin",
+  "ln": "ln/final.xclbin",
+  "lm": "lm_head_q4/final.xclbin",
+  "cx": "short_conv/final.xclbin"
+ },
+ "kernels": {
+  "ln": {
+   "context": "ln",
+   "insts": "ln/insts.bin",
+   "build": "ln"
+  },
+  "lm": {
+   "context": "lm",
+   "insts": "lm_head_q4/insts.bin",
+   "build": "lm_head_q4"
+  },
+  "dx": {
+   "context": "dx",
+   "insts": "dx/insts.bin",
+   "patch": "attnpos",
+   "build": "dx",
+   "window": 0
+  },
+  "cx": {
+   "context": "cx",
+   "insts": "short_conv/insts.bin",
+   "build": "short_conv"
+  }
+ },
+ "layer_types": {
+  "full_attention": {
+   "buffers": {
+    "consts": 24576,
+    "act": 131072,
+    "state": {
+     "kind": "kv",
+     "row": 2048
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "dx",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ]
+    }
+   ],
+   "pack": {
+    "pool": [
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+      "dst": 0,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+      "dst": 2621440,
+      "nch": 128,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+      "dst": 3276800,
+      "nch": 128,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+      "dst": 3932160,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.up_proj.weight",
+      "dst": 6553600,
+      "nch": 2048,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+      "dst": 17039360,
+      "nch": 2048,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.down_proj.weight",
+      "dst": 27525120,
+      "nch": 2048,
+      "in_dim": 8192
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+      "dst": 4096,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.self_attn.q_norm.weight",
+      "dst": 8192,
+      "cap": 128
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.self_attn.k_norm.weight",
+      "dst": 8320,
+      "cap": 128
+     }
+    ]
+   }
+  },
+  "short_conv": {
+   "buffers": {
+    "consts": 24576,
+    "act": 131072,
+    "state": {
+     "kind": "linear",
+     "bytes": 16384
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "cx",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act"
+     ]
+    }
+   ],
+   "pack": {
+    "pool": [
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.shortconv.in_proj.weight",
+      "dst": 0,
+      "chunk0": 0,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.shortconv.in_proj.weight",
+      "dst": 2621440,
+      "chunk0": 512,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.shortconv.in_proj.weight",
+      "dst": 5242880,
+      "chunk0": 1024,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.shortconv.out_proj.weight",
+      "dst": 7864320,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.up_proj.weight",
+      "dst": 10485760,
+      "nch": 2048,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+      "dst": 20971520,
+      "nch": 2048,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.down_proj.weight",
+      "dst": 31457280,
+      "nch": 2048,
+      "in_dim": 8192
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+      "dst": 4096,
+      "cap": 4096
+     },
+     {
+      "op": "transpose",
+      "tensor": "model.layers.{l}.shortconv.conv.weight",
+      "dst": 12288,
+      "rows": 2048,
+      "cols": 3,
+      "elem": 2
+     }
+    ]
+   }
+  }
+ },
+ "tail": [
+  {
+   "op": "run",
+   "kernel": "ln",
+   "args": [
+    "xres",
+    "zero",
+    "normw",
+    "xresf",
+    "hn"
+   ]
+  },
+  {
+   "op": "run",
+   "kernel": "lm",
+   "args": [
+    "lmpool",
+    "hn",
+    "logits"
+   ]
+  }
+ ],
+ "globals": {
+  "xres": 8192,
+  "zero": 8192,
+  "normw": 4096,
+  "xresf": 8192,
+  "hn": 4096,
+  "logits": 262144,
+  "lmpool": 83886080,
+  "ptab": {
+   "per_row": 1024,
+   "inv_freq": [
+    1.0,
+    0.6493816315762113,
+    0.4216965034285822,
+    0.27384196342643613,
+    0.1778279410038923,
+    0.11547819846894582,
+    0.07498942093324558,
+    0.04869675251658631,
+    0.03162277660168379,
+    0.02053525026457146,
+    0.01333521432163324,
+    0.008659643233600654,
+    0.005623413251903491,
+    0.003651741272548377,
+    0.0023713737056616554,
+    0.001539926526059492,
+    0.001,
+    0.0006493816315762113,
+    0.00042169650342858224,
+    0.0002738419634264361,
+    0.00017782794100389227,
+    0.00011547819846894582,
+    7.498942093324559e-05,
+    4.869675251658631e-05,
+    3.1622776601683795e-05,
+    2.0535250264571462e-05,
+    1.333521432163324e-05,
+    8.659643233600654e-06,
+    5.623413251903491e-06,
+    3.651741272548377e-06,
+    2.3713737056616552e-06,
+    1.539926526059492e-06
+   ],
+   "window": 0
+  }
+ },
+ "builds": {
+  "dx": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_lfm2_h2048",
+   "env": {}
+  },
+  "ln": {
+   "design": "ln/ln.py",
+   "build_dir": "ln/build_2048_1e-05",
+   "env": {
+    "LN_N": "2048",
+    "LN_EPS": "1e-05"
+   }
+  },
+  "lm_head_q4": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_65536",
+   "env": {
+    "LMHEAD_N": "65536",
+    "LMHEAD_K": "2048",
+    "LMHEAD_CORES": "8"
+   }
+  },
+  "short_conv": {
+   "design": "short_conv/cx.py",
+   "build_dir": "short_conv/build_h2048_t3",
+   "env": {
+    "SC_HID": "2048",
+    "SC_TAPS": "3"
+   }
+  }
+ },
+ "pack": {
+  "pool_bytes": 41943040,
+  "chunk_bytes": 5120,
+  "lm_head": {
+   "pool_bytes": 83886080,
+   "ops": [
+    {
+     "op": "std_perm",
+     "tensor": "lm_head.weight",
+     "dst": 0,
+     "nch": 16384,
+     "in_dim": 2048
+    }
+   ]
+  },
+  "embed": {
+   "tensor": "model.token_embd.weight",
+   "dim": 2048
+  },
+  "norm": {
+   "tensor": "model.norm.weight",
+   "bytes": 4096
+  }
+ }
+}
