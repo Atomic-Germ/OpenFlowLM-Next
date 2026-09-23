@@ -303,18 +303,29 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 cfg = xin.acquire(1)        # the 2-word pool base
                 f_oc_col(r, cfg, c, ctrl)
                 xin.release(2)
+                # ONDV_DONE_ACQ: the working one-emitter probe (designs/expert_fetch/
+                # ondv_live_probe.py) pairs every packet BD's release(pktdone) with an
+                # acquire in the core. The shipped emitter only releases the shared done
+                # lock, so the BD's release has no matching acquire.
+                done = locks[X.NE + 1] if len(locks) > X.NE + 1 else None
                 locks[0].release(1)         # slot 0's up|gate (BD 8/9)
+                if done is not None:
+                    done.acquire(1)
                 for e in range(X.NE):       # Python-unrolled: h_0 .. h_7
                     h = xin.acquire(1)
                     xin.release(1)
                     # h_k fires slot k's down AND slot k+1's up|gate (one 15-word packet),
                     # except h_{NE-1} fires only the last down (a 5-word packet)
                     locks[e + 1].release(1)
+                    if done is not None:
+                        done.acquire(1)
             return emitter_body
 
         for c in range(N_CORES):
-            workers.append(Worker(_emitter_body(c),
-                                  fn_args=[of_x.cons(), ctrlw[c], f_oc, *pktlk[c]],
+            eargs = [of_x.cons(), ctrlw[c], f_oc, *pktlk[c]]
+            if os.environ.get("ONDV_DONE_ACQ") == "1":
+                eargs.append(pktdone[c])
+            workers.append(Worker(_emitter_body(c), fn_args=eargs,
                                   tile=emitter_tile[c], stack_size=0x1800))
 
     bt = X.bt

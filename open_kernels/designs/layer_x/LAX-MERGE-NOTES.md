@@ -109,6 +109,27 @@ in metadata), so either the array/driver no longer supports the packet push or t
 recorded run predates a regression. Device verification of `lax` (numerics, and the
 40-layer token) is blocked on that until it is resolved.
 
+### Where the fused hang is (bisect, 2026-09-23)
+
+Same session, same box, three results with the current sources:
+
+| build | flow | result |
+|---|---|---|
+| `lx0` (shipped first half) | classic | `state 4`, 3.4 ms |
+| `expert_fetch/build_live` (1 emitter) | ELF | `state 4`, out=1 |
+| `lx.py` with `ONDV_SKIP_MOE=1` | ELF | **`state 4`, 4.65 ms** |
+| `lx.py` (full, incl. the MoE) | ELF/classic | TDR, no completion |
+
+The skipped-MoE build still has all 8 emitters, the 8 packet `PacketFlow`s and the 8
+pinned per-column `ctrlw` buffers -- it only omits `moe_sequence(..., ondv=(cfg,))`. So
+the emitters and the pre-MoE path are fine and **the fault is inside the ONDV MoE
+sequence** (the routed-expert retarget+push), which is also exactly what the one-emitter
+probe exercises and passes. `lx.py` now carries an env-gated `ONDV_DONE_ACQ=1` hook that
+pairs every packet BD's `release(pktdone)` with an `acquire` in the emitter, matching the
+probe; it did not fix the hang (tested, though every attempt that session also hit
+peer contention). With the hook unset the build is unchanged: `insts.elf` is byte-
+identical to `build_emitter` and every core program keeps its size.
+
 ## Local run artifacts (gitignored, like every other design `.cfg`/`.bin`)
 
 `qmap_lax.bin` (32 B, little-endian u32 per column) -- the merged design's `w{c}`
