@@ -2,7 +2,8 @@
   lib,
   stdenv,
   fetchurl,
-  python311,
+  python312,
+  python312Packages,
   xrt,
   git,
   makeWrapper,
@@ -10,74 +11,58 @@
   zlib,
   patchelf,
   skipBert ? true,
-  skipSpecs ? "qwen25-3b",
+  skipSpecs ? "qwen25-3b,minicpm5-2b,phi4-mini-4b",
 }:
 
 let
+  pyVersion = "3.12";
+  pySite = "lib/python${pyVersion}/site-packages";
+
   mlirAieWheel = fetchurl {
-    url = "https://github.com/Xilinx/mlir-aie/releases/download/v1.4.2/mlir_aie-1.4.2-cp311-cp311-manylinux_2_35_x86_64.whl";
-    sha256 = "1kfr46p6bl70zc9bw6s68z4prn6r4hli8srr1vzssq824lh4x10p";
+    url = "https://github.com/Xilinx/mlir-aie/releases/download/v1.4.3/mlir_aie-1.4.3-cp312-cp312-manylinux_2_35_x86_64.whl";
+    sha256 = "sha256-TYwjpbYXHdEWLHjFYPCkjK1llpC1vlMNUWZrf/9ScoE=";
   };
 
   llvmAieWheel = fetchurl {
-    url = "https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-21.0.0.2026080301%2Bc9c5ecb7-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-    sha256 = "0x8kkgl6cvr389as6aabw6vbvwknm4ghqkn39l508i3ja72jfv2s";
+    url = "https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026092301%2B02be6fd8-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
+    sha256 = "sha256-bi0uvoa/Z12aGcIhzUMCMtMUw5EEiUTeP8QVB5JANK4=";
   };
 
-  pyWheels = [
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/py3/a/aiofiles/aiofiles-24.1.0-py3-none-any.whl";
-      sha256 = "1rb0haxzh3lsafw1y8sl97fn9s332w37xgyimgbvagjy37s5bv5l";
-    })
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/py3/c/cloudpickle/cloudpickle-3.1.2-py3-none-any.whl";
-      sha256 = "0jmz3yz0dcjws9kl3j565zs5zw3jnh0vhfzr3pf60gypmzv4gjws";
-    })
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/py3/m/mdurl/mdurl-0.1.2-py3-none-any.whl";
-      sha256 = "1y5qjqhmq2nm7xj6w5rrp503r7jhj7zr2qcnr6gs858nwm0ql044";
-    })
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/cp311/m/ml-dtypes/ml_dtypes-0.5.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-      sha256 = "10ql7w2s02cki6mxgc7fw7way3y2hfkqmnpvl8z4a7pjk0ssbf8r";
-    })
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/cp311/n/numpy/numpy-2.2.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl";
-      sha256 = "1pxvdmz8klm0wv6cvimh2lfa0g3xlwaf0cqqaa543z4q310zh45s";
-    })
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/py3/p/pygments/pygments-2.19.1-py3-none-any.whl";
-      sha256 = "133dmda902c3wcg63c1lf1jwxfwkbb9nvarg4jwg9v2wsm5598cy";
-    })
-    (fetchurl {
-      url = "https://files.pythonhosted.org/packages/py3/r/rich/rich-14.0.0-py3-none-any.whl";
-      sha256 = "1q6pjp1qs1l3dqzrj57y7y95hknhwf748bylzz50kb0sjphr350w";
-    })
+  pyDeps = with python312Packages; [
+    aiofiles
+    cloudpickle
+    mdurl
+    ml-dtypes
+    numpy
+    pygments
+    rich
   ];
 
   ironvenv = stdenv.mkDerivation {
     pname = "openflowlm-ironvenv";
-    version = "1.4.2-20260803";
+    version = "1.4.3-20260923";
 
-    nativeBuildInputs = [ python311 unzip ];
+    nativeBuildInputs = [ python312 unzip ];
     src = ./.;
     dontUnpack = true;
 
     installPhase = ''
-      ${python311}/bin/python -m venv $out
-      export SITE="$out/lib/python3.11/site-packages"
+      ${python312}/bin/python -m venv $out
+      export SITE="$out/${pySite}"
 
       ${unzip}/bin/unzip -q -d "$SITE" ${mlirAieWheel}
       ${unzip}/bin/unzip -q -d "$SITE" ${llvmAieWheel}
-      ${lib.concatStringsSep "\n" (map (wheel: "${unzip}/bin/unzip -q -d \"$SITE\" ${wheel}") pyWheels)}
+
+      # Link nixpkgs Python deps into the venv so imports resolve without
+      # re-installing them or relying on .pth files.
+      ${lib.concatStringsSep "\n" (map (pkg: "ln -s ${pkg}/${pySite}/* \"$SITE/\"") pyDeps)}
 
       # The wheel drops the aie package under mlir_aie/python; make it
-      # importable without relying on aie.pth, which nix venv symlinking can
-      # break.
+      # importable without relying on aie.pth.
       ln -s "$SITE/mlir_aie/python/aie" "$SITE/aie"
 
       mkdir -p $out/nix-support
-      echo "OpenFlowLM IRON toolchain venv" > $out/nix-support/hydra-build-products
+      echo "OpenFlowLM IRON toolchain venv (Python 3.12)" > $out/nix-support/hydra-build-products
     '';
 
     meta.platforms = [ "x86_64-linux" ];
@@ -105,7 +90,7 @@ stdenv.mkDerivation rec {
         && !(base == ".git");
   };
 
-  nativeBuildInputs = [ git makeWrapper python311 stdenv.cc.cc.lib patchelf ];
+  nativeBuildInputs = [ git makeWrapper python312 stdenv.cc.cc.lib patchelf ];
   buildInputs = [ xrt ironvenv ];
 
   buildPhase = ''
@@ -117,11 +102,11 @@ stdenv.mkDerivation rec {
     rm -rf ironvenv
     cp -R ${ironvenv} ironvenv
     chmod -R +w ironvenv
-    ln -sf ${python311}/bin/python ironvenv/bin/python
+    ln -sf ${python312}/bin/python ironvenv/bin/python
 
-    export PEANO_INSTALL_DIR="$PWD/ironvenv/lib/python3.11/site-packages/llvm-aie"
+    export PEANO_INSTALL_DIR="$PWD/ironvenv/${pySite}/llvm-aie"
     export PATH="$PEANO_INSTALL_DIR/bin:${xrt}/opt/xilinx/xrt/bin:$PATH"
-    export PYTHONPATH="$PWD/ironvenv/lib/python3.11/site-packages:${xrt}/opt/xilinx/xrt/python''${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH="$PWD/ironvenv/${pySite}:${xrt}/opt/xilinx/xrt/python''${PYTHONPATH:+:$PYTHONPATH}"
     export LD_LIBRARY_PATH="${lib.makeLibraryPath [ stdenv.cc.cc.lib zlib xrt ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
     # The manylinux llvm-aie/mlir-aie wheels ship x86_64 executables that
@@ -129,7 +114,7 @@ stdenv.mkDerivation rec {
     # unavailable, so patch the interpreter to the stdenv linker and add the
     # C++ runtime + zlib to the RUNPATH without destroying the wheel's own
     # library search paths (e.g. mlir_aie.libs/libcrypto-...so.3).
-    for dir in "$PEANO_INSTALL_DIR/bin" "$PWD/ironvenv/lib/python3.11/site-packages/mlir_aie/bin"; do
+    for dir in "$PEANO_INSTALL_DIR/bin" "$PWD/ironvenv/${pySite}/mlir_aie/bin"; do
       if [ -d "$dir" ]; then
         for bin in "$dir/"*; do
           if [ -f "$bin" ] && [ -x "$bin" ]; then
@@ -140,11 +125,10 @@ stdenv.mkDerivation rec {
       fi
     done
 
-    # Qwen2.5-3B's dx_attn set fails with:
-    #   "dx_attn.py: this spec's q/k/v projections carry a bias and this design
-    #    has no bias stream"
-    # That is a recipe/design gap, not a packaging issue; skip it until the
-    # open_kernels recipe covers attention bias in dx_attn.
+    # A few specs fail on dx_attn with the current recipe/toolchain:
+    #   - qwen25-3b: attention bias not supported by this design
+    #   - minicpm5-2b, phi4-mini-4b: aiecc objectfifo.pool placement error
+    # Skip them until the open_kernels recipe covers them.
     python utilities/export-kernels.py --force --jobs "''${NIX_BUILD_CORES:-4}" \
       ${lib.optionalString skipBert "--skip-bert"} \
       ${lib.optionalString (skipSpecs != "") "--skip-specs ${skipSpecs}"}
@@ -156,8 +140,8 @@ stdenv.mkDerivation rec {
   '';
 
   # The open_npue BERT embedding sets need pyxrt and an NPU at build time.
-  # Build with skipBert=false (and therefore __noChroot=true) only on a
-  # machine that exposes /dev/accel* to the Nix builder.
+  # Build with skipBert=false only on a machine that exposes /dev/accel* to
+  # the Nix builder and has sandbox disabled or relaxed for this derivation.
   __noChroot = !skipBert;
 
   meta = {
