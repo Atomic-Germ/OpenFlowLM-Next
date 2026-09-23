@@ -141,9 +141,22 @@ successfully. Two candidate causes were tested and did **not** fix it:
 
 * `ONDV_DONE_ACQ=1` -- pair every packet BD's `release(pktdone)` with an `acquire` in
   the emitter (the probe's pattern). No change.
-* `ONDV_BDS=13,14,15` -- move the pinned descriptors off BDs 8/9/10 in case the `w`
-  channel's own pipeline descriptors collide with them (both `xcommon.ONDV_BD_*` and
-  `ondv_ctrl.h`'s `kOndvBd*`, now `#ifndef`-overridable). No change.
+* `ONDV_BDS=13,14,15` -- move the pinned descriptors off BDs 8/9/10. No change, and it
+  cannot help: MLIR-AIE's `AIEAssignBufferDescriptorIDs` and
+  `AIEAssignRuntimeSequenceBDIDs` both *reserve* explicit `bd_id`s first and hard-error
+  ("assigned bd_id N is already used by another BD on this tile") on overlap, so an
+  auto-assigned fill can never silently clobber a pinned descriptor. That theory is dead.
+
+Remaining structural differences from the working one-emitter probe, ALL now tested in
+clean windows and all still failing: the emitter's tile row (4 and 5); emitter count
+(1 and 8, `ONDV_EMITTER_COLS`); the pinned-descriptor BD ids (8/9/10 vs 13/14/15 -- and
+this cannot matter, see above); the `w` fifo depth (2 and 8, `ONDV_W_DEPTH`, in case a
+single 81920-B pinned BD overflows a depth-2 buffer the way the probe's single-element
+descriptor fits its depth-1 one); the packet-done lock pairing; and both on-device
+enqueue mechanisms (per-column emitters, and the older router->DDR `octrl`->shim-MM2S
+stream: `run_fused`, `run_hostctl`, `run_id15`, all still TDR). The isolated probe keeps
+passing in the same window every time, and host-enqueue keeps completing, so the fault
+is specific to a pinned descriptor being pushed inside the full design.
 
 All three hooks are env-gated and unset by default. One pre-existing discrepancy worth
 knowing: `build_emitter`'s row-3 helper cores (ln/router, post, glue) are 32 B larger
@@ -154,7 +167,6 @@ Remaining leads for the push: the `cfg` element the emitters read (`cfg[0..1]` p
 base, `cfg[2+col]` queue) versus the probe's `poolbase`-written `cfg`; whether the 9-BD
 packet chain makes the shim's task queue overflow (the probe sends a single 28-B BD); and
 whether the `Pipeline.configure` descriptors are still live when the packet arrives.
-
 ## Demonstrated on-device: the merged runlist (2026-09-23)
 
 With the packet path stubbed out of the picture (`ONDV_HOST_PUSH=1`, `ONDV_NO_EMITTERS=1`

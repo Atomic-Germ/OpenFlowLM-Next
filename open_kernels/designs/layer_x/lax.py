@@ -193,7 +193,11 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                                  arg_types=[u8_4k, nw_ty], include_dirs=inc)
 
     # ---- fifos
-    of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=2) for c in range(N_CORES)]
+    # depth >= a routed band (8 elements) so a pinned routed descriptor, which transfers
+    # a whole 81920-B band in ONE BD, fits the fifo the way the one-emitter probe's
+    # single-element descriptor fits its depth-1 fifo (ONDV_W_DEPTH overrides)
+    of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=int(os.environ.get("ONDV_W_DEPTH", 2)))
+            for c in range(N_CORES)]
     of_y = [ObjectFifo(t["y"], name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(t["x"], name="x", depth=2)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
@@ -207,7 +211,8 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
     of_ain = ObjectFifo(u8_1k, name="ain", depth=max(4, 2 * RB + 2))
     of_aout = ObjectFifo(b512, name="aout", depth=2)
     of_og = [ObjectFifo(b512, name=f"og{c}", depth=2) for c in range(1, ACORES)]
-    emitter_tile = [Tile(c, 4, tile_type=AIETileType.CoreTile) for c in range(N_CORES)] if ondv else None
+    emitter_tile = [Tile(c, int(os.environ.get("ONDV_EMITTER_ROW", 4)), tile_type=AIETileType.CoreTile)
+                    for c in range(N_CORES)] if ondv else None
     shim_w = [Tile(c, 0, tile_type=AIETileType.ShimNOCTile) for c in range(N_CORES)]
     ctrlw = [Buffer(tl["u8_ctrl"], name=f"ctrlw{c}", tile=emitter_tile[c]) for c in range(N_CORES)] if ondv else None
     pktlk = [[Lock(emitter_tile[c], init=0, name=f"pktlk{c}_{i}") for i in range(X.NE + 1)] for c in range(N_CORES)] if ondv else None

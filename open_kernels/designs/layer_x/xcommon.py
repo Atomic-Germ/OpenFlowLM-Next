@@ -89,6 +89,13 @@ ONDV = os.environ.get("MOE_ONDEVICE_ROUTE") == "1"
 # managed fills use the low indices and never reach these.
 ONDV_BD_UP, ONDV_BD_GATE, ONDV_BD_DOWN = (int(_v) for _v in
                                              os.environ.get("ONDV_BDS", "8,9,10").split(","))
+# Which columns run an emitter core. Columns that do not get their routed fills from the
+# host instead (a bisect knob: ONDV_EMITTER_COLS=0 tests one packet push in the full
+# design, where the one-emitter probe build_live succeeds but all eight TDR).
+ONDV_EMITTER_COLS = tuple(sorted({int(_v) for _v in
+                                  os.environ.get("ONDV_EMITTER_COLS",
+                                                 ",".join(str(_c) for _c in range(C.N_CORES))).split(",")
+                                  if _v.strip() != ""}))
 
 # scratch layouts (floats) -- gen_kernels.py writes the same offsets into the kernel TUs
 MS_FLOATS = C.MS_FLOATS
@@ -513,6 +520,11 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
     # (as the non-fused path would) instead of leaving them to the emitters' packets, so
     # the ONDV MoE sequence can be run with the packet path out of the picture.
     host_push = ONDV and os.environ.get("ONDV_HOST_PUSH") == "1"
+
+    def _host_push(c: int) -> bool:
+        """Does this column take its routed placeholders from the host? Either the whole
+        design does (ONDV_HOST_PUSH), or just the columns with no emitter core."""
+        return host_push or (ONDV and c not in ONDV_EMITTER_COLS)
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, ELEM))
     for c in range(N_CORES):
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_ROUT, CALL_BYTES))
@@ -524,7 +536,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
             # length/stride is the same for every expert, so only the address (w1/w2) changes per
             # wave, and that is exactly what the emitters' control packets rewrite. The descriptors
             # stay pinned for the whole block (never freed; the control packets own them).
-            for c in range(N_CORES):
+            for c in ONDV_EMITTER_COLS:
                 up0 = (2 * spp * 0 + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
                 pipe_w.configure(w_prods[c], a_pool, half_tap(up0), bd_id=ONDV_BD_UP)
                 pipe_w.configure(w_prods[c], a_pool, half_tap(up0 + STRIPE), bd_id=ONDV_BD_GATE)
@@ -540,7 +552,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
             if e < NE:
                 # routed slot: the descriptors were configured once above; the emitters'
                 # control packets retarget + push them per wave. Nothing to configure here.
-                if host_push:
+                if _host_push(c):
                     up0 = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
                     pipe_w.fill(w_prods[c], a_pool, half_tap(up0))
                     pipe_w.fill(w_prods[c], a_pool, half_tap(up0 + STRIPE))
@@ -552,7 +564,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, ELEM))
         for c in range(N_CORES):
             if e < NE:
-                if host_push:
+                if _host_push(c):
                     pipe_w.fill(w_prods[c], a_pool,
                                 bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                    DOWN_PER_CORE * DOWN_BAND))

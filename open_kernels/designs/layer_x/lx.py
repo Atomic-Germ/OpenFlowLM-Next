@@ -165,7 +165,11 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     post_copy = ExternalFunction("post_copy_nw", source_file=str(POST / "post_copy.cc"), arg_types=[u8_4k, nw_ty], include_dirs=inc)
 
     # ---- fifos
-    of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=2) for c in range(N_CORES)]
+    # depth >= a routed band (8 elements) so a pinned routed descriptor, which transfers
+    # a whole 81920-B band in ONE BD, fits the fifo the way the one-emitter probe's
+    # single-element descriptor fits its depth-1 fifo (ONDV_W_DEPTH overrides)
+    of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=int(os.environ.get("ONDV_W_DEPTH", 2)))
+            for c in range(N_CORES)]
     of_y = [ObjectFifo(t["y"], name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(t["x"], name="x", depth=2)           # broadcast; og is acquired as 2 elements
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)        # [x0 x1 w] | [x0 x1 w a0 a1] | W x256
@@ -180,7 +184,8 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     # shim TileControl. ONE shared CoreTile object per column so the Worker, the Buffer, the
     # Lock, the TileDma and the PacketFlow all land on the SAME logical tile (the placer
     # dedups channel requirements by logical-tile op).
-    emitter_tile = [Tile(c, 4, tile_type=AIETileType.CoreTile) for c in range(N_CORES)] if ondv else None
+    emitter_tile = [Tile(c, int(os.environ.get("ONDV_EMITTER_ROW", 4)), tile_type=AIETileType.CoreTile)
+                    for c in range(N_CORES)] if ondv else None
     # the shim tile each column's w fifo lives on. The packet flow's destination MUST be this
     # SAME Tile object (not a fresh Tile(c, 0)): the routed descriptors (BD 8/9/10) are written
     # on this shim's w channel, so the control packets must reach THIS shim's TileControl.
@@ -325,7 +330,7 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
             return emitter_body
 
         if os.environ.get("ONDV_NO_EMITTERS") != "1":
-            for c in range(N_CORES):
+            for c in X.ONDV_EMITTER_COLS:
                 eargs = [of_x.cons(), ctrlw[c], f_oc, *pktlk[c]]
                 if os.environ.get("ONDV_DONE_ACQ") == "1":
                     eargs.append(pktdone[c])
@@ -538,7 +543,7 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
         # column's shim TileControl (pkt_id 15 = the placer's controller_id). A core's
         # packet reaches its own column on South -- the legal in-column arrival -- so no
         # cross-column routing, no control overlay and no shim MM2S channel are needed.
-        for c in range(N_CORES):
+        for c in X.ONDV_EMITTER_COLS:
             for lk in pktlk[c]:
                 rt.add_lock(lk)
             rt.add_lock(pktdone[c])
