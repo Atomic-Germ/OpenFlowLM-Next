@@ -528,27 +528,28 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 rt.add_lock(lk)
             rt.add_lock(pktdone[c])
             # 9 packet BDs per emitter, chained in firing order and paced by the acquire
-            # locks the emitter releases: slot 0's up|gate (40 B), then per slot k>=1 a
-            # 60-B packet holding slot k-1's down (20 B) + slot k's up|gate (40 B), and
-            # finally slot NE-1's down (20 B). Each reads its column's ctrlw slice at a
-            # byte offset; the down_{k-1}|up|gate_k words are contiguous (offset 60k-20).
-            bds = [Bd(buffer=ctrlw[c], offset=0, length=40,
-                      acquires=[Acquire(pktlk[c][0])], releases=[Release(pktdone[c])],
-                      packet=(0, 15), next=1)]
+            # locks the emitter releases: slot 0's up|gate (56 B), then per slot k>=1 an
+            # 84-B packet holding slot k-1's down (28 B) + slot k's up|gate (56 B), and
+            # finally slot NE-1's down (28 B). Each reads its column's ctrlw slice at a
+            # byte offset; the down_{k-1}|up|gate_k words are contiguous (offset 84k-28).
+            # The BDs are NOT packet-stamped: the control stream carries its own stream
+            # headers (ondv_ctrl.h) and the flow below keeps them.
+            bds = [Bd(buffer=ctrlw[c], offset=0, length=56,
+                      acquires=[Acquire(pktlk[c][0])], releases=[Release(pktdone[c])], next=1)]
             for k in range(1, X.NE):
-                bds.append(Bd(buffer=ctrlw[c], offset=60 * k - 20, length=60,
+                bds.append(Bd(buffer=ctrlw[c], offset=84 * k - 28, length=84,
                               acquires=[Acquire(pktlk[c][k])], releases=[Release(pktdone[c])],
-                              packet=(0, 15), next=k + 1))
-            bds.append(Bd(buffer=ctrlw[c], offset=460, length=20,
-                          acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])],
-                          packet=(0, 15), next=0))
+                              next=k + 1))
+            bds.append(Bd(buffer=ctrlw[c], offset=644, length=28,
+                          acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
             rt.add_tile_dma(TileDma(
                 tile=emitter_tile[c],
                 channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
             flows.append(PacketFlow(pkt_id=15, src=emitter_tile[c],
                                     src_port=WireBundle.DMA, src_channel=1,
                                     dst=shim_w[c],
-                                    dst_port=WireBundle.TileControl, dst_channel=0))
+                                    dst_port=WireBundle.TileControl, dst_channel=0,
+                                    keep_pkt_header=True))
     for f in flows:
         rt.add_flow(f)
     if pieces:

@@ -621,9 +621,10 @@ def ln_types():
     t = dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
              racc=np.ndarray[(SPEC.num_experts,), np.dtype[np.float32]])
     if ONDV:
-        # the per-column emitter core's control buffer: 8 slots x 15 words = 480 B of words
-        # (the emitter's packet BD sends 480 of the 512 B); the kernel's 4th arg is this type
-        t["u8_ctrl"] = np.ndarray[(512,), np.dtype[np.uint8]]
+        # the per-column emitter core's control buffer: 8 slots x 3 matrices x 7 words
+        # (stream hdr + ctrl hdr + 2 addr / stream hdr + ctrl hdr + 1 push) = 168 words
+        # = 672 B; 1024 B is the padded type. The kernel's 4th arg is this type.
+        t["u8_ctrl"] = np.ndarray[(1024,), np.dtype[np.uint8]]
     return t
 
 

@@ -24,12 +24,29 @@
 #include <stdint.h>
 
 // ---- TileControl packet words ------------------------------------------------
-static inline int32_t ondv_hdr(uint32_t address, unsigned beats) {
-  uint32_t w = (((beats - 1u) & 3u) << 20) | (address & 0xFFFFFu);
+// A control packet's WIRE form (mlir-aie lib/Targets/AIETargetNPU.cpp
+// AIETranslateControlPacketsToUI32Vec):
+//   stream_header(1 word) + ctrl_header(1 word) + data(size words)
+// The stream header carries the DESTINATION shim's controller_id
+// ((pkt_type & 7) << 12 | (pkt_id & 0xff)); the stream switch parses it out of the DATA
+// stream, so the BD is NOT packet-stamped and every control header must be preceded by
+// one. (A packet-stamped BD with no stream header is the spike's shape and does not
+// deliver here: the descriptor is never retargeted.) The ctrl header itself is ondv_hdr.
+static inline int32_t ondv_parity(uint32_t w) {
   unsigned pc = 0;
   for (uint32_t v = w; v; v &= v - 1u) ++pc;
   if ((pc & 1u) == 0u) w |= 0x80000000u;
   return (int32_t)w;
+}
+
+static inline int32_t ondv_hdr(uint32_t address, unsigned beats) {
+  return ondv_parity((((beats - 1u) & 3u) << 20) | (address & 0xFFFFFu));
+}
+
+// The destination shims' controller_id is 15 for every column (the placer's value).
+static constexpr unsigned kOndvPktId = 15;
+static inline int32_t ondv_stream_hdr() {
+  return ondv_parity(/*pkt_type 0*/ (unsigned)(kOndvPktId & 0xffu));
 }
 
 // BD n registers live at 0x1D000 + 0x20*n: w0 len @+0, w1 addr_low @+4, w2 addr_high @+8.
@@ -63,13 +80,17 @@ static constexpr uint32_t kOndvPoolDown = 335544320u;
 static constexpr uint32_t kOndvQueue[kOndvCores] = {
     0x1D21Cu, 0x1D214u, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D214u, 0x1D214u, 0x1D214u};
 
-// One routed slot's five words: rewrite the descriptor's DDR address and push it.
+// One routed slot's SEVEN words: stream hdr, retarget ctrl hdr + 2 address words, stream
+// hdr, queue-push ctrl hdr + the 0x8000_0000|bd data word.
+static constexpr unsigned kOndvWords = 7;
 static inline void ondv_words(int32_t *w, unsigned bd, uint32_t queue, uint64_t addr) {
-  w[0] = ondv_hdr(ondv_bd_w1(bd), 2);
-  w[1] = (int32_t)(uint32_t)(addr & 0xFFFFFFFCu);        // w1: addr_low, bits 1:0 zero
-  w[2] = (int32_t)(uint32_t)((addr >> 32) & 0xFFFFu);    // w2: addr_high[15:0]
-  w[3] = ondv_hdr(queue, 1);
-  w[4] = (int32_t)(0x80000000u | bd);
+  w[0] = ondv_stream_hdr();                              // stream header (routing)
+  w[1] = ondv_hdr(ondv_bd_w1(bd), 2);                    // ctrl: write w1, 2 beats
+  w[2] = (int32_t)(uint32_t)(addr & 0xFFFFFFFCu);        // w1: addr_low, bits 1:0 zero
+  w[3] = (int32_t)(uint32_t)((addr >> 32) & 0xFFFFu);    // w2: addr_high[15:0]
+  w[4] = ondv_stream_hdr();                              // stream header (routing)
+  w[5] = ondv_hdr(queue, 1);                             // ctrl: push queue, 1 beat
+  w[6] = (int32_t)(0x80000000u | bd);
 }
 
 // The expert's byte offset of routed slot k's up stripe for column c (xcommon.moe_sequence's
@@ -96,10 +117,10 @@ static inline void ondv_ctrl_col_impl(const int32_t *__restrict idx, uint32_t ba
   for (unsigned k = 0; k < kOndvRouted; ++k) {
     const unsigned e = (unsigned)idx[k];
     const uint32_t up = ondv_up_off(e, col);
-    int32_t *w = out + k * 15;
-    ondv_words(w + 0, kOndvBdUp, kOndvQueue[col], base + up);
-    ondv_words(w + 5, kOndvBdGate, kOndvQueue[col], base + up + kOndvStripe);
-    ondv_words(w + 10, kOndvBdDown, kOndvQueue[col], base + ondv_down_off(e, col));
+    int32_t *w = out + k * (3u * kOndvWords);
+    ondv_words(w + 0 * kOndvWords, kOndvBdUp, kOndvQueue[col], base + up);
+    ondv_words(w + 1 * kOndvWords, kOndvBdGate, kOndvQueue[col], base + up + kOndvStripe);
+    ondv_words(w + 2 * kOndvWords, kOndvBdDown, kOndvQueue[col], base + ondv_down_off(e, col));
   }
 }
 
@@ -111,11 +132,11 @@ static inline void ondv_ctrl_impl(const int32_t *__restrict idx, uint32_t base_l
     for (unsigned c = 0; c < kOndvCores; ++c) {
       // COLUMN-major: column c's 8 slots (8 x 15 words) are contiguous, so one packet BD
       // per column can carry them (the corrected, core-sourced control shape)
-      int32_t *w = out + (c * kOndvRouted + k) * 15;
+      int32_t *w = out + (c * kOndvRouted + k) * (3u * kOndvWords);
       const uint32_t up = ondv_up_off(e, c);
-      ondv_words(w + 0, kOndvBdUp, kOndvQueue[c], base + up);
-      ondv_words(w + 5, kOndvBdGate, kOndvQueue[c], base + up + kOndvStripe);
-      ondv_words(w + 10, kOndvBdDown, kOndvQueue[c], base + ondv_down_off(e, c));
+      ondv_words(w + 0 * kOndvWords, kOndvBdUp, kOndvQueue[c], base + up);
+      ondv_words(w + 1 * kOndvWords, kOndvBdGate, kOndvQueue[c], base + up + kOndvStripe);
+      ondv_words(w + 2 * kOndvWords, kOndvBdDown, kOndvQueue[c], base + ondv_down_off(e, c));
     }
   }
 }
