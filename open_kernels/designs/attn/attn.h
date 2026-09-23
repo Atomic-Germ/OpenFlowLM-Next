@@ -117,6 +117,16 @@
 #if ATTN_INTFP
 #include "scalar_fp.h"
 #endif
+#ifndef ATTN_TREE
+// 1: the block kernel's score phase reduces its RB x NHL dot products as ONE tree across
+// all of them (attn_rowb_impl) instead of one aie::reduce_add per (row, head), and its
+// score and PV loops read the K / V rows through restrict parameters (attn_score2,
+// attn_pv) so the scheduler may overlap them with the stores. The tree pairs lanes
+// exactly as reduce_add does (i with i + half, halving), so every score is the same sum
+// in the same order: bit-identical. On with the block-only path; 0 = the path every other
+// family compiles, byte for byte.
+#define ATTN_TREE ATTN_BLOCK_ONLY
+#endif
 #if ATTN_BLOCK_ONLY && (ATTN_RB < 2 || !ATTN_VEXP)
 #error "attn.h: ATTN_BLOCK_ONLY needs the block kernel (ATTN_RB > 1) on the vector-softmax path (ATTN_VEXP)"
 #endif
@@ -697,6 +707,74 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
 #define ATTN_NV_PARM
 #define ATTN_NV_ARG
 #endif
+#if ATTN_TREE
+// One level of the tree over two vectors that each hold whole items of 2 * step lanes:
+// every item's lanes i and i + step are added, a's items first. reduce_add's own order.
+static inline __attribute__((always_inline)) v32f attn_tree2(const v32f &a, const v32f &b, unsigned step) {
+  accf32 x;
+  x.from_vector(aie::concat(aie::filter_even(a, step), aie::filter_even(b, step)));
+  return aie::add(x, aie::concat(aie::filter_odd(a, step), aie::filter_odd(b, step))).template to_vector<float>();
+}
+template <unsigned N>
+static inline __attribute__((always_inline)) vfN<N / 2> attn_tree1(const vfN<N> &a, unsigned step) {
+  accN<N / 2> x;
+  x.from_vector(aie::filter_even(a, step));
+  return aie::add(x, aie::filter_odd(a, step)).template to_vector<float>();
+}
+// One cached K row against two heads that share its kv head: the (hi, lo) dot products
+// of each, summed lane-wise, then the FIRST level of reduce_add's halving tree for both
+// at once -- lanes i and i + 16 of each head's 32 -- packed into one vector, head a in
+// lanes [0, 16) and head b in [16, 32). The parameters are restrict so the scheduler
+// knows these loads cannot alias anything the caller stores.
+static inline __attribute__((always_inline)) v32f attn_score2(const bfloat16 *__restrict k,
+                                                                const bfloat16 *__restrict qa,
+                                                                const bfloat16 *__restrict qb) {
+  accf32 a0 = aie::zeros<accfloat, kV>(), a1 = aie::zeros<accfloat, kV>();
+  accf32 b0 = aie::zeros<accfloat, kV>(), b1 = aie::zeros<accfloat, kV>();
+  ATTN_UNROLL_HD
+  for (unsigned j = 0; j < kHD; j += kV) {
+    const vbN<kV> kj = aie::load_v<kV>(k + j);
+    a0 = aie::mac(a0, aie::load_v<kV>(qa + j), kj);
+    a1 = aie::mac(a1, aie::load_v<kV>(qa + kQW + j), kj);
+    b0 = aie::mac(b0, aie::load_v<kV>(qb + j), kj);
+    b1 = aie::mac(b1, aie::load_v<kV>(qb + kQW + j), kj);
+  }
+  return attn_tree2(aie::add(a0, a1).template to_vector<float>(), aie::add(b0, b1).template to_vector<float>(), 16);
+}
+// o += sum_r V_r * p_r for one head, rows in order and each p as its (hi, lo) bf16 pair --
+// attn_rowb_impl's accumulation exactly, with the V rows and o as restrict parameters.
+static inline __attribute__((always_inline)) void attn_pv(float *__restrict o,
+    const bfloat16 *__restrict v0, const bfloat16 *__restrict v1,
+    const bfloat16 *__restrict v2, const bfloat16 *__restrict v3,
+    const bfloat16 *__restrict ph, const bfloat16 *__restrict pl) {
+  bfloat16 h[kRB], l[kRB];
+  AIE_LOOP_UNROLL_FULL
+  for (unsigned r = 0; r < kRB; ++r) { h[r] = ph[r * kNL]; l[r] = pl[r * kNL]; }
+  const bfloat16 *vr[4] = {v0, v1, v2, v3};
+  // Four head-dim slices at a time, as four accumulators written in one block: the
+  // compiler cannot prove o + j and o + j + 32 apart across a store (20-bit pointers, a
+  // 32-bit index), so a loop over single slices ran every slice's eight macs as one
+  // serial chain after the last slice's store. Each slice still accumulates its rows in
+  // order, hi then lo -- the same sums as before.
+  static_assert(kHD % (4 * kV) == 0, "attn_pv: four slices a block");
+  for (unsigned jb = 0; jb < kHD; jb += 4 * kV) {
+    accf32 c[4];
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned u = 0; u < 4; ++u) c[u].from_vector(aie::load_v<kV>(o + jb + u * kV));
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned r = 0; r < kRB; ++r) {
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned u = 0; u < 4; ++u) {
+        const vbN<kV> vj = aie::load_v<kV>(vr[r] + jb + u * kV);
+        c[u] = aie::mac(c[u], vj, h[r]);
+        c[u] = aie::mac(c[u], vj, l[r]);
+      }
+    }
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned u = 0; u < 4; ++u) aie::store_v(o + jb + u * kV, c[u].template to_vector<float>());
+  }
+}
+#endif
 __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__restrict Kb,
                                    const bfloat16 *const *__restrict Vb,
                                    const ATTN_QT *__restrict qs, float *__restrict oacc,
@@ -706,6 +784,40 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   alignas(128) bfloat16 ph[kPV], pl[kPV];
   alignas(128) bfloat16 ah[kMLS], al[kMLS];
   alignas(128) int32_t grew_i[kMLS];
+#if ATTN_TREE
+  // Scores as one reduction tree across the block. The tree's leaves are the kRB * kNHL
+  // (row, head) dot products in ROW-MAJOR order, so level 1 pairs two heads of one row
+  // (attn_score2) and the root comes out as sv's rows. Every level adds lanes i and
+  // i + step within an item, halving, which is what aie::reduce_add does inside one
+  // vector: the same additions in the same order, so the same scores to the bit. One
+  // vector add per level per pair instead of five serial steps per (row, head).
+  static_assert(kNHL == 4 && kNL == 8 && (kRB == 2 || kRB == 4) && (kNH / kKVH) % kNHL == 0,
+                "attn.h ATTN_TREE: written for 4 heads a core sharing one kv head, RB 2 or 4");
+  {
+    const unsigned hb = kSplit ? (unsigned)h0 : 0u;
+    const unsigned kvh = hb / (kNH / kKVH);         // one kv head for all of the core's heads
+    const bfloat16 *q0 = qs + hb * kHD;
+    v32f z[2 * kRB];                                // level 1: [row r: heads 0,1 | heads 2,3]
+    for (unsigned hp = 0; hp < 2; ++hp) {
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned r = 0; r < kRB; ++r)
+        z[2 * r + hp] = attn_score2(Kb[r] + kvh * kHD, q0 + 2 * hp * kHD, q0 + (2 * hp + 1) * kHD);
+    }
+    v32f w[kRB];                                    // level 2: one row's four heads, 8 lanes each
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned r = 0; r < kRB; ++r) w[r] = attn_tree2(z[2 * r], z[2 * r + 1], 8);
+    vfN<kNHL * kRB> root;                           // levels 3.. : 4 lanes, 2, 1
+#if ATTN_RB == 4
+    root = attn_tree1<32>(attn_tree2(attn_tree2(w[0], w[1], 4), attn_tree2(w[2], w[3], 4), 2), 1);
+#else
+    root = attn_tree1<16>(attn_tree1<32>(attn_tree2(w[0], w[1], 4), 2), 1);
+#endif
+    // [row][head] at 4 heads a row -> sv's [row][kNL = 8], the padding lanes -1e30
+    const auto zz = aie::interleave_zip(root, aie::broadcast<float, kNHL * kRB>(-1e30f), 4);
+    aie::store_v(sv, zz.first);
+    aie::store_v(sv + kNHL * kRB, zz.second);
+  }
+#else
 #if ATTN_NHL < 8
   // the padding lanes [kNHL, kNL) of every row: -1e30 never wins a max and exponentiates to 0
   AIE_LOOP_UNROLL_FULL
@@ -732,6 +844,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
       sv[r * kNL + hl] = aie::reduce_add(aie::add(d0, d1).template to_vector<float>());
     }
   }
+#endif
 #if !ATTN_SCALE_IN_Q
   // q carries no 1/sqrt(HD) at this head dim (ATTN_SCALE_IN_Q): one vector multiply
   // scales the whole block's scores
@@ -759,7 +872,20 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   for (unsigned r = 0; r < kRB; ++r) aie::store_v(mnv + r * kNL, mn);
 
   alignas(128) float pvf[kPV];
+#if ATTN_TREE
+  // ONE exponential for the block's scores and the rescale factor. vexpN is lane-wise, so
+  // where a lane sits does not change its result: the four real lanes of a's argument ride
+  // in row 0's padding lanes [4, 8) (whatever lands there is never read -- ph / pl / lsum
+  // only use a row's first kNHL lanes) and come back out with one shuffle. The 8-lane
+  // exponential, ~240 bundles a block and 960 bytes of program, is gone.
+  const vfN<kNL> earg = faddN<kNL>(fsubN<kNL>(m, mn), fsubN<kNL>(smax, mn));
+  const vfN<kPV> eup = aie::shuffle_up(earg.template grow<kPV>(), kNHL);
+  const vfN<kPV> pv = vexpN<kPV>(aie::select(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)), eup,
+                                             aie::mask<kPV>::from_uint32(((1u << kNHL) - 1u) << kNHL)));
+  const vfN<kNL> e = aie::shuffle_down(pv, kNHL).template extract<kNL>(0);
+#else
   const vfN<kPV> pv = vexpN<kPV>(fsubN<kPV>(aie::load_v<kPV>(sv), aie::load_v<kPV>(mnv)));
+#endif
   aie::store_v(pvf, pv);
   vbN<kPV> t0, t1;
   splitN<kPV>(pv, t0, t1);
@@ -767,7 +893,9 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
   aie::store_v(pl, t1);
 
   // a = exp(m - mn): one of (m - mn) and (smax - mn) is zero, so one exp gives both
+#if !ATTN_TREE
   const vfN<kNL> e = vexpN<kNL>(faddN<kNL>(fsubN<kNL>(m, mn), fsubN<kNL>(smax, mn)));
+#endif
   const auto grew = aie::gt(smax, m);
   const vfN<kNL> a = aie::select(aie::broadcast<float, kNL>(1.0f), e, grew);
   vfN<kNL> lsum = aie::load_v<kNL>(pvf);
@@ -800,6 +928,10 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
         aie::store_v(o + j, acc.template to_vector<float>());
       }
     }
+#if ATTN_TREE
+    attn_pv(o, Vb[0] + kvh * kHD, Vb[1] + kvh * kHD, Vb[kRB > 2 ? 2 : 0] + kvh * kHD,
+            Vb[kRB > 2 ? 3 : 0] + kvh * kHD, ph + hl, pl + hl);
+#else
     ATTN_UNROLL_HD
     for (unsigned j = 0; j < kHD; j += kV) {
       accf32 acc;
@@ -812,6 +944,7 @@ __attribute__((noinline)) inline void attn_rowb_impl(const bfloat16 *const *__re
       }
       aie::store_v(o + j, acc.template to_vector<float>());
     }
+#endif
   }
 }
 #endif
