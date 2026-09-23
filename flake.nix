@@ -24,6 +24,7 @@
         packages = {
           oflm = pkgs.callPackage ./package.nix {};
           openflowlm-open-kernels = pkgs.callPackage ./open-kernels.nix {};
+          openflowlm-open-kernels-with-bert = pkgs.callPackage ./open-kernels.nix { skipBert = false; };
           default = config.packages.oflm;
         };
 
