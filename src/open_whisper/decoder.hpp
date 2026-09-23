@@ -129,6 +129,12 @@ public:
 
   int64_t position() const { return pos_; }
 
+  // The three OW_DEC_* precision knobs' resolved values, for the startup
+  // summary (engine_adapter.cpp's config_summary()).
+  XkvPrecision xkv_precision() const { return xkv_precision_; }
+  WeightPrecision weight_precision() const { return weight_precision_; }
+  HeadPrecision head_precision() const { return head_precision_; }
+
   DecoderTimers timers;
 
 private:

@@ -162,13 +162,26 @@ void scatter_output(const uint16_t *o_bf, int64_t seq_pad, int64_t t, int64_t d,
 
 }  // namespace
 
+bool fa_kernel_present(const std::string &fa_dir) {
+  return file_exists(fa_dir + "/air.xclbin") && file_exists(fa_dir + "/air.insts.bin") &&
+         file_exists(fa_dir + "/fa.json");
+}
+
 FaAttention::FaAttention(npue::npu::Device &dev, const std::string &fa_dir) {
   xclbin_path_ = fa_dir + "/air.xclbin";
   const std::string insts_path = fa_dir + "/air.insts.bin";
   if (!file_exists(xclbin_path_))
-    throw std::runtime_error("OW_FA_DIR: missing " + xclbin_path_);
+    throw std::runtime_error("FA kernel at " + fa_dir + ": missing air.xclbin");
   if (!file_exists(insts_path))
-    throw std::runtime_error("OW_FA_DIR: missing " + insts_path);
+    throw std::runtime_error("FA kernel at " + fa_dir + ": missing air.insts.bin");
+  // fa.json records what the build actually was -- read and checked against
+  // this engine's own geometry BEFORE the xclbin is loaded, so a mismatched
+  // kernel is refused rather than dispatched against the wrong shape
+  // (CLAUDE.md rule 8's class: a declared shape that nothing checks is
+  // cosmetic). This guard does not care which toolchain built the kernel
+  // (mlir-aie or MLIR-AIR) -- only that fa.json says so.
+  info_ = read_fa_kernel_info(fa_dir);
+  check_fa_geometry("FA kernel at " + fa_dir, info_);
   xclbin_bytes_ = file_size(xclbin_path_);
   xclbin_hash_ = fnv1a_hex(xclbin_path_);
 
@@ -192,6 +205,11 @@ FaAttention::FaAttention(npue::npu::Device &dev, const std::string &fa_dir) {
 
   std::printf("  fa attn    %s (%zu B, fnv1a %s)\n", xclbin_path_.c_str(),
              xclbin_bytes_, xclbin_hash_.c_str());
+  std::printf("  fa kernel  %s (%s, fp32_state=%s, mlir-aie %s, peano %s)\n",
+             (fa_dir + "/fa.json").c_str(),
+             info_.emulate_bfp16 ? "bf16 via bfp16 emulation" : "bf16",
+             info_.fp32_state ? "yes" : "no", info_.mlir_aie_version.c_str(),
+             info_.peano_version.c_str());
 }
 
 namespace {

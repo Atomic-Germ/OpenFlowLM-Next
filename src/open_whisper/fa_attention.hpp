@@ -1,12 +1,18 @@
 //===- fa_attention.hpp --------------------------------------*- C++ -*-===//
 //
-// open_whisper -- OPTIONAL bidirectional attention on the NPU, via AMD's
-// MLIR-AIR fused FlashAttention example (externalrepos/mlir-air,
-// programming_examples/flash_attention/kernel_fusion_based_whisper), built
-// separately with its own toolchain (C:\air\airenv) into an xclbin+insts.bin
-// pair that carries no design.json of this project's own. Selected by
-// OW_ATTN=npu (default is host, host_ops.cpp's attention()); OW_FA_DIR names
-// the directory holding air.xclbin + air.insts.bin.
+// open_whisper -- OPTIONAL bidirectional attention on the NPU, via a fused
+// FlashAttention kernel built from AMD's MLIR-AIR example (externalrepos/
+// mlir-air, programming_examples/flash_attention/kernel_fusion_based_whisper)
+// or an equivalent, into an xclbin+insts.bin pair that carries no
+// design.json of this project's own -- only fa.json (see fa_guards.hpp),
+// which records what the build actually was rather than this engine
+// assuming it, and is checked, not trusted.
+//
+// OW_ATTN selects: "auto" (default) uses it when found, else host; "npu"
+// requires it, refusing otherwise; "host" never uses it. The kernel is
+// found at <kernels_dir>/fa/ (air.xclbin, air.insts.bin, fa.json) unless
+// OW_FA_DIR overrides the directory. See fa_guards.hpp for the parsing and
+// the geometry guard, and encoder.cpp for where OW_ATTN is resolved.
 //
 // The kernel is fixed-shape: H=20, dk=dv=64, lq=lk=1536, non-causal, built
 // for Whisper's exact geometry (Geometry::n_heads/head_dim/max_src_pos, and
@@ -22,9 +28,16 @@
 #include <string>
 #include <vector>
 
+#include "fa_guards.hpp"
 #include "npu_device.hpp"
 
 namespace ow {
+
+// True iff `fa_dir` holds all three files a FlashAttention kernel needs
+// (air.xclbin, air.insts.bin, fa.json) -- an existence probe only, used by
+// OW_ATTN=auto/npu's resolution in encoder.cpp before committing to either
+// path. Does not open or parse any of them.
+bool fa_kernel_present(const std::string &fa_dir);
 
 // Same shape as host_ops.hpp's AttnPhases, for the NPU path's own three
 // stages: repacking Q/K/V into the kernel's layout, the dispatch itself
@@ -36,10 +49,17 @@ struct FaPhases {
 
 class FaAttention {
 public:
-  // `fa_dir` must hold air.xclbin and air.insts.bin, at the fixed shape
-  // documented above (H=20, dk=dv=64, lq=lk=1536). Throws if either file is
-  // missing or the buffer count the xclbin exposes is not 4 (Q, K, V, O).
+  // `fa_dir` must hold air.xclbin, air.insts.bin and fa.json, at the fixed
+  // shape documented above (H=20, dk=dv=64, lq=lk=1536, valid_len=1500).
+  // Throws if any file is missing, if fa.json is malformed or incomplete
+  // (fa_guards.hpp's read_fa_kernel_info), or if fa.json's own geometry does
+  // not match this engine's (check_fa_geometry) -- never assumed from the
+  // fixed shape alone.
   FaAttention(npue::npu::Device &dev, const std::string &fa_dir);
+
+  // The parsed fa.json this instance was built from -- what the build
+  // actually was, for the startup summary (engine_adapter.cpp).
+  const FaKernelInfo &kernel_info() const { return info_; }
 
   // Same signature and same contract as host_ops.hpp's attention(): `qkv` is
   // [m_padded, 3*d] fp32 row-major (Q|K|V blocks of `d` columns each, head h
@@ -77,6 +97,7 @@ private:
   std::string xclbin_path_;
   size_t xclbin_bytes_ = 0;
   std::string xclbin_hash_;
+  FaKernelInfo info_;
 
   // Repack/scatter scratch, sized once at construction and reused across
   // layers -- same reasoning as Encoder's own s_* scratch members.

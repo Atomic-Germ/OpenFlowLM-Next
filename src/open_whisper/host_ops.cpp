@@ -23,15 +23,18 @@
 
 namespace ow {
 
-// OW_HOST_FAST: unset, empty or "0" keeps every exact op above; "1" is the
-// only other accepted value. Strict, like encoder.cpp's OW_ATTN parser --
-// a typo must throw, not silently measure the exact path while the operator
-// believes they asked for the fast one.
+// OW_HOST_FAST: default changed 2026-09-23 (task 0180 Part 15) -- the fused
+// ops are bit-identical or WER-indistinguishable from the exact path
+// (host_ops_fast_test.cpp; H3/H4 vs H0 on 1200 utterances) and took
+// ENCODE 1990 -> 1621 ms on the nvidia clip, so unset now behaves as "1". "0" restores every exact op
+// above. Strict either way, like encoder.cpp's OW_ATTN parser -- a typo
+// must throw, not silently measure a different path while the operator
+// believes they picked one.
 bool host_fast_enabled() {
   const char *e = std::getenv("OW_HOST_FAST");
-  if (!e || !*e || std::string(e) == "0") return false;
-  if (std::string(e) == "1") return true;
-  throw std::runtime_error("OW_HOST_FAST is '" + std::string(e) + "': expected '0'/unset or '1'");
+  if (!e || !*e || std::string(e) == "1") return true;
+  if (std::string(e) == "0") return false;
+  throw std::runtime_error("OW_HOST_FAST is '" + std::string(e) + "': expected '1'/unset or '0'");
 }
 
 int omp_threads() {

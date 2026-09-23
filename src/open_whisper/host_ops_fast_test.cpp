@@ -371,11 +371,43 @@ void bench_gelu() {
 #endif
 }
 
+// OW_HOST_FAST's default flipped 2026-09-23 (task 0180 Part 15/17): unset
+// now means fast (it used to mean exact). Strict parsing is unchanged --
+// only "0" restores exact, and anything else still throws. Manipulates the
+// real process environment via _putenv_s and restores it to unset
+// afterwards (host_fast_enabled() has no internal caching, unlike
+// encoder.cpp's run_layer()'s function-local static, so this is safe to call
+// repeatedly within one process).
+void test_host_fast_default() {
+  std::printf("-- OW_HOST_FAST default --\n");
+  auto set_env = [](const char *v) { _putenv_s("OW_HOST_FAST", v ? v : ""); };
+
+  set_env(nullptr);
+  check(ow::host_fast_enabled() == true, "unset -> fast (the new default)");
+  set_env("1");
+  check(ow::host_fast_enabled() == true, "'1' -> fast");
+  set_env("0");
+  check(ow::host_fast_enabled() == false, "'0' -> exact (still restores it)");
+  set_env("2");
+  bool threw = false;
+  try {
+    (void)ow::host_fast_enabled();
+  } catch (const std::exception &e) {
+    threw = std::string(e.what()).find("OW_HOST_FAST") != std::string::npos;
+  }
+  check(threw, "'2' throws, naming OW_HOST_FAST, rather than reading as exact or fast");
+
+  set_env(nullptr);   // restore: empty is read as unset by host_fast_enabled() itself
+}
+
 }  // namespace
 
 int main() {
   std::printf("host_ops_fast_test: task 0180 OW_HOST_FAST characterisation "
              "(no NPU, no XRT, no model container)\n\n");
+
+  test_host_fast_default();
+  std::printf("\n");
 
   test_erf();
   std::printf("\n");

@@ -90,6 +90,13 @@ public:
   const KernelSet &kernel_set() const { return *kernels_; }
   const Weights &weights() const { return *weights_; }
 
+  // Pre-formatted "value (source)" strings for the startup summary
+  // (engine_adapter.cpp's config_summary()) -- built once in the
+  // constructor, next to the printf that shows the same thing.
+  const std::string &attn_summary() const { return attn_summary_; }
+  const std::string &host_fast_summary() const { return host_fast_summary_; }
+  bool host_fast() const { return host_fast_; }
+
   Timers timers;
 
 private:
@@ -108,6 +115,8 @@ private:
   // design that reloads per call has already lost. Null on the default path.
   std::unique_ptr<FaAttention> fa_attn_;
   bool use_fa_attn_ = false;
+  std::string attn_summary_, host_fast_summary_;
+  bool host_fast_ = false;
 
   // Staged B slots, filled once at construction.
   size_t conv1_slot_ = 0, conv2_slot_ = 0, xkv_slot_ = 0;

@@ -47,9 +47,17 @@ inline float hsum8(__m256 acc) {
 // Env parsing.
 // ---------------------------------------------------------------------
 
+// Defaults changed 2026-09-23 (task 0180 Parts 11-15): the WER gate on 1200
+// utterances (LibriSpeech + FLEURS, 9 languages) found bf16 xkv / int8
+// weights / int8x head statistically indistinguishable from the exact
+// fp32/bf16/bf16 path under the hf protocol (H2Q vs H0: sign test p = 1.0,
+// ΔWER -0.005pp [-0.04, +0.05]), while together saving ~158 MB/token
+// (~1.6x on the decoder's DRAM traffic). "fp32"/"bf16" still restore the
+// exact path exactly -- strict parsing is unchanged, only which value is
+// unset's default.
 XkvPrecision parse_xkv_precision() {
   const char *e = std::getenv("OW_DEC_XKV");
-  if (!e || !*e) return XkvPrecision::FP32;
+  if (!e || !*e) return XkvPrecision::BF16;
   const std::string v(e);
   if (v == "fp32") return XkvPrecision::FP32;
   if (v == "bf16") return XkvPrecision::BF16;
@@ -58,7 +66,7 @@ XkvPrecision parse_xkv_precision() {
 
 WeightPrecision parse_weight_precision() {
   const char *e = std::getenv("OW_DEC_W");
-  if (!e || !*e) return WeightPrecision::BF16;
+  if (!e || !*e) return WeightPrecision::INT8;
   const std::string v(e);
   if (v == "bf16") return WeightPrecision::BF16;
   if (v == "int8") return WeightPrecision::INT8;
@@ -67,7 +75,7 @@ WeightPrecision parse_weight_precision() {
 
 HeadPrecision parse_head_precision() {
   const char *e = std::getenv("OW_DEC_HEAD");
-  if (!e || !*e) return HeadPrecision::BF16;
+  if (!e || !*e) return HeadPrecision::INT8X;
   const std::string v(e);
   if (v == "bf16") return HeadPrecision::BF16;
   if (v == "int8") return HeadPrecision::INT8;

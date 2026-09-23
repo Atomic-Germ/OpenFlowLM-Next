@@ -186,15 +186,19 @@ private:
     int _sample_in_time_stamp(buffer<bf16>& logits);
 
     // -- OFLM_WHISPER_PROTOCOL dispatch --------------------------------------------
-    // "legacy" (default, unchanged) or "hf" (a faithful, scoped port of
+    // "legacy" or "hf" (a faithful, scoped port of
     // WhisperForConditionalGeneration.generate() greedy decoding -- see
-    // generation_hf.hpp). Read once, strictly: any other value throws. Cached so a
-    // typo shows up at model load, not mid-transcription.
-    // (_generate_legacy/_generate_hf are declared further down, in a second `private:`
-    // block after `whisper_task_type_t` is defined -- their signatures need that type,
-    // which is only visible in a class member declaration's signature, as opposed to a
-    // function body, once it has actually been declared earlier in the class.)
-    std::string _decode_protocol();
+    // generation_hf.hpp). Unset's default depends on which engine loaded (task 0180
+    // Parts 11-15: `hf` is only measured on the open engine) -- so, unlike the rest of
+    // this project's env parsing, this cannot be a function-local static: it needs
+    // `this->engine` to already exist. _init_decode_protocol() resolves and VALIDATES
+    // it ONCE, right after the engine is built in load_model() (not lazily on the
+    // first request -- a bad value is a load-time error, matching every other guard
+    // this engine has), and prints which value is in effect and why (default-for-open /
+    // default-for-closed / env). _decode_protocol() is then just a getter.
+    void _init_decode_protocol();
+    std::string _decode_protocol() const { return protocol_; }
+    std::string protocol_;
 
     /// \brief lazily loaded/cached generation_config.json + the model's REAL
     ///        (unpadded) vocab_size, both only needed by the `hf` protocol.

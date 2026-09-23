@@ -319,14 +319,21 @@ Decoder::Decoder(const std::string &model_dir) {
     L.ln_final_b = load_f32(f, p + "final_layer_norm.bias", {static_cast<size_t>(D)});
   }
 
-  // OPTIONAL precision variants (task 0180 Part 8): read once, strict --
-  // print the VALUE PARSED, not the intention, matching encoder.cpp's own
-  // OW_ATTN startup line.
+  // OPTIONAL precision variants (task 0180 Part 8, defaults changed Parts
+  // 11-15 -- see decoder_quant.cpp): read once, strict -- print the VALUE
+  // PARSED and its SOURCE (default vs. the env var), matching encoder.cpp's
+  // own OW_ATTN startup line.
   xkv_precision_ = parse_xkv_precision();
   weight_precision_ = parse_weight_precision();
   head_precision_ = parse_head_precision();
-  std::printf("  decoder    xkv=%s weights=%s head=%s\n", ow::to_string(xkv_precision_),
-             ow::to_string(weight_precision_), ow::to_string(head_precision_));
+  auto source = [](const char *var) {
+    const char *e = std::getenv(var);
+    return (e && *e) ? (std::string(var) + "=" + e) : std::string("default");
+  };
+  std::printf("  decoder    xkv=%s (%s) weights=%s (%s) head=%s (%s)\n",
+             ow::to_string(xkv_precision_), source("OW_DEC_XKV").c_str(),
+             ow::to_string(weight_precision_), source("OW_DEC_W").c_str(),
+             ow::to_string(head_precision_), source("OW_DEC_HEAD").c_str());
 
   if (weight_precision_ == WeightPrecision::INT8) {
     layers_int8_.resize(static_cast<size_t>(DG::n_layers));

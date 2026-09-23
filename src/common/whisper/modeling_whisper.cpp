@@ -48,6 +48,11 @@ void Whisper::load_model(std::string model_path, nlohmann::ordered_json model_in
     this->engine.reset();
     this->engine = make_whisper_engine(this->model_path, *this->lm_config, this->device, enable_preemption);
     header_print("OFLM", "Whisper engine: " << this->engine->describe());
+    const std::string extra_config = this->engine->config_summary();
+    if (!extra_config.empty()) {
+        header_print("OFLM", extra_config);
+    }
+    this->_init_decode_protocol();
     this->setup_tokenizer(model_path);
     
     this->sampler.reset();
@@ -116,23 +121,35 @@ bool Whisper::load_audio(std::vector<uint8_t>& audio_data) {
     return true;
 }
 
-std::string Whisper::_decode_protocol() {
-    // Read once per process via a function-local static -- std::getenv is cheap but a
-    // typo in the env var must be caught once, loudly, not read differently by two
-    // callers racing a mutable env var mid-run.
-    static const std::string protocol = [] {
-        const char* env = std::getenv("OFLM_WHISPER_PROTOCOL");
-        if (env == nullptr || std::string(env).empty()) {
-            return std::string("legacy");
+void Whisper::_init_decode_protocol() {
+    // Validated ONCE, here, right after this->engine exists -- not lazily on the first
+    // request (task 0180 Part 11 found the old lazy read meant a bad value surfaced mid-
+    // transcription, and named no source for the value it did pick). this->engine must
+    // already be constructed: the unset default depends on which one it is.
+    const char* env = std::getenv("OFLM_WHISPER_PROTOCOL");
+    std::string source;
+    if (env != nullptr && *env != '\0') {
+        const std::string v(env);
+        if (v != "legacy" && v != "hf") {
+            throw std::runtime_error("OFLM_WHISPER_PROTOCOL=" + v +
+                                      ": unknown value, expected 'legacy' or 'hf'");
         }
-        std::string v(env);
-        if (v == "legacy" || v == "hf") {
-            return v;
-        }
-        throw std::runtime_error("OFLM_WHISPER_PROTOCOL=" + v +
-                                  ": unknown value, expected 'legacy' or 'hf' (unset defaults to 'legacy')");
-    }();
-    return protocol;
+        this->protocol_ = v;
+        source = "OFLM_WHISPER_PROTOCOL=" + v;
+    } else if (this->engine->is_open()) {
+        // The `hf` protocol has been measured only on the open engine (task 0180 Parts
+        // 11-15: WER 16.11% -> 5.50% (open engine, legacy -> hf protocol) on 1200 LibriSpeech+FLEURS utterances, 9 languages,
+        // sign test p = 1.6e-44 against the legacy protocol's chaotic 16-token watchdog
+        // truncations). It has NEVER been measured on the closed engine, so the closed
+        // engine keeps 'legacy' as its own default below -- this default is for the open
+        // engine only. An explicit OFLM_WHISPER_PROTOCOL still overrides for either engine.
+        this->protocol_ = "hf";
+        source = "default for the open engine";
+    } else {
+        this->protocol_ = "legacy";
+        source = "default for the closed engine (hf protocol not measured on it)";
+    }
+    header_print("OFLM", "Whisper decode protocol: " << this->protocol_ << " (" << source << ")");
 }
 
 const whisper_hf::GenerationConfig& Whisper::_hf_gen_config() {

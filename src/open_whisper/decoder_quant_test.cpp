@@ -515,11 +515,41 @@ void report_real_model_stats() {
 int main() {
   std::printf("== open_whisper decoder_quant ==\n");
   std::printf("-- env parsing (strict) --\n");
+  // Defaults changed 2026-09-23 (task 0180 Parts 11-15): the WER gate (1200
+  // utterances) found bf16 xkv / int8 weights / int8x head statistically
+  // indistinguishable from the exact fp32/bf16/bf16 path under the hf
+  // protocol, so those are now what "unset" resolves to.
   check([] { try { (void)ow::to_string(ow::parse_xkv_precision()); return true; } catch (...) { return false; } }(),
-        "OW_DEC_XKV unset -> no throw, default fp32");
-  check(std::string(ow::to_string(ow::parse_xkv_precision())) == "fp32", "OW_DEC_XKV unset -> \"fp32\"");
-  check(std::string(ow::to_string(ow::parse_weight_precision())) == "bf16", "OW_DEC_W unset -> \"bf16\"");
-  check(std::string(ow::to_string(ow::parse_head_precision())) == "bf16", "OW_DEC_HEAD unset -> \"bf16\"");
+        "OW_DEC_XKV unset -> no throw, default bf16");
+  check(std::string(ow::to_string(ow::parse_xkv_precision())) == "bf16", "OW_DEC_XKV unset -> \"bf16\"");
+  check(std::string(ow::to_string(ow::parse_weight_precision())) == "int8", "OW_DEC_W unset -> \"int8\"");
+  check(std::string(ow::to_string(ow::parse_head_precision())) == "int8x", "OW_DEC_HEAD unset -> \"int8x\"");
+  // "fp32"/"bf16" still restore the exact path exactly -- only the unset
+  // default moved, strict parsing and the explicit values did not.
+#ifdef _WIN32
+  _putenv_s("OW_DEC_XKV", "fp32");
+  _putenv_s("OW_DEC_W", "bf16");
+  _putenv_s("OW_DEC_HEAD", "bf16");
+#else
+  setenv("OW_DEC_XKV", "fp32", 1);
+  setenv("OW_DEC_W", "bf16", 1);
+  setenv("OW_DEC_HEAD", "bf16", 1);
+#endif
+  check(std::string(ow::to_string(ow::parse_xkv_precision())) == "fp32",
+        "OW_DEC_XKV=fp32 still restores the exact path");
+  check(std::string(ow::to_string(ow::parse_weight_precision())) == "bf16",
+        "OW_DEC_W=bf16 still restores the exact path");
+  check(std::string(ow::to_string(ow::parse_head_precision())) == "bf16",
+        "OW_DEC_HEAD=bf16 still restores the exact path");
+#ifdef _WIN32
+  _putenv_s("OW_DEC_XKV", "");
+  _putenv_s("OW_DEC_W", "");
+  _putenv_s("OW_DEC_HEAD", "");
+#else
+  unsetenv("OW_DEC_XKV");
+  unsetenv("OW_DEC_W");
+  unsetenv("OW_DEC_HEAD");
+#endif
 #ifdef _WIN32
   _putenv_s("OW_DEC_XKV", "sideways");
 #else

@@ -96,11 +96,20 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--only", default=None, help="comma-separated stream names (debugging)")
     ap.add_argument("--force", action="store_true", help="rebuild streams already built")
-    ap.add_argument("--emulate-bfp16", action="store_true",
-                    help="compile the bf16 matmul onto the MMAC unit via bfp16 emulation. "
-                         "NOT the shipped datapath: measured 1.71x on the array and "
-                         "1.16x on the encoder, and it costs 2 of 6 golden token paths "
-                         "(enc.out cosine 0.99943 -> 0.99303). See specs/open-whisper.")
+    # Default changed 2026-09-23 (task 0180 Parts 9/11/15): the golden-token-path gate
+    # this help text used to cite (2 of 6 paths, enc.out cosine 0.99943 -> 0.99303) was
+    # measured under the legacy decode protocol, whose 16-token watchdog truncations
+    # dominate the noise floor (round 1, p = 0.044). Under the hf protocol, on the WER
+    # gate (1200 utterances, LibriSpeech + FLEURS, 9 languages) that actually gates this
+    # engine, bfp16 is statistically indistinguishable from bf16 (H4 vs H0: 8/16 texts
+    # differ favourably, sign test not significant) and worth 1.71x on the array /
+    # 5.67 RTFx end to end -- so it is now the default datapath. --no-emulate-bfp16
+    # builds the plain bf16 matmul on the fp32 vector unit instead (measured slower).
+    ap.add_argument("--emulate-bfp16", dest="emulate_bfp16", default=True,
+                    action=argparse.BooleanOptionalAction,
+                    help="compile the bf16 matmul onto the MMAC unit via bfp16 emulation "
+                         "(default: on). See tasks/0180 Parts 9/11/15 in NpuEmbeddings for "
+                         "the WER evidence; --no-emulate-bfp16 builds plain bf16 instead.")
     args = ap.parse_args()
 
     names = list(wg.STREAMS) if not args.only else args.only.split(",")

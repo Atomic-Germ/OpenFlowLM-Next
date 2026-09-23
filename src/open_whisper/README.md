@@ -353,3 +353,52 @@ T3 model field echoed):
 python -c "import sys; sys.path.insert(0,'.'); from oflm_test.tasks import TranscriptionTask; r=TranscriptionTask('http://127.0.0.1:8090/v1').run(); print(dict(r.verdicts), r.failures)"
 {'PASS': 3} []
 ```
+
+## Speed defaults (2026-09-23, NpuEmbeddings task 0180)
+
+Every variant below passed a 1200-utterance WER gate (LibriSpeech
+test-clean/test-other + FLEURS, 9 languages, `NpuEmbeddings/tools/wer/`) --
+statistically indistinguishable from, or better than, the exact path -- and
+became the DEFAULT. Each is still switchable off by its own env var, and every
+one is validated at model load (never lazily on the first request) and
+printed to the server log, naming the value in effect and its source
+(`default` or the env var). See `NpuEmbeddings/tasks/0180-whisper-fastest/
+TASK.md` Parts 9-17 for the WER numbers and paired-test statistics behind
+each of these.
+
+| var | values (default in **bold**) | what it does |
+|---|---|---|
+| `OFLM_WHISPER_PROTOCOL` | **`hf`** (open engine) / `legacy` (closed engine) / explicit `legacy`\|`hf` | HF-faithful greedy decoding (`generation_hf.hpp`) vs. the original per-16-token-watchdog loop. `hf` is only measured on the OPEN engine (WER 16.11% -> 5.50% (open engine, legacy -> hf protocol) on 1200 utterances, sign test p = 1.6e-44) -- unset, the CLOSED engine still defaults to `legacy`. An explicit value overrides for either engine. Validated once in `Whisper::load_model()`, right after the engine loads (`modeling_whisper.cpp`'s `_init_decode_protocol()`), not lazily. |
+| `OW_ATTN` | **`auto`** / `host` / `npu` | Bidirectional attention on the NPU (a fused FlashAttention kernel, `fa_attention.hpp`) vs. the host. `auto` uses the kernel when one is found at `<kernels_dir>/fa/` (or `OW_FA_DIR`, which still overrides the search directory) and its `fa.json` matches this engine's geometry (H=20, dk=dv=64, lq=lk=1536, valid_len=1500); `npu` REQUIRES it and refuses if absent or mismatched; `host` never uses it. Always printed which was chosen and why (`encoder.cpp`). `fa.json` records what the kernel build actually was (`heads`/`dk`/`dv`/`lq`/`lk`/`valid_len`/`fp32_state`/`emulate_bfp16`/`mlir_aie_version`/`peano_version`) -- read and checked, never assumed, and it does not matter which toolchain built it. |
+| `OW_DEC_XKV` | **`bf16`** / `fp32` | Decoder's gathered cross-attention K/V precision. `fp32` restores the exact path exactly. |
+| `OW_DEC_W` | **`int8`** / `bf16` | Decoder linear layers' weight precision (per-output-row symmetric int8). `bf16` restores the exact path exactly. |
+| `OW_DEC_HEAD` | **`int8x`** / `int8` / `bf16` | The tied `lm_head` projection's precision (`int8x` recomputes the top-64 logits exactly in bf16 after an int8 sweep). `bf16` restores the exact path exactly. |
+| `OW_HOST_FAST` | **`1`** / `0` | Fused, vectorised host ops (AVX2 erf-based GELU, fused LayerNorm+bf16-round, fused bias+residual, fused bias+gather for attention) vs. the original unfused ones. `0` restores exact. |
+
+All six are strict: any value other than the ones listed throws, naming the
+env var and the bad value -- never silently read as the default (the
+"fails open" class `CLAUDE.md` documents in the sibling `NpuEmbeddings`
+repository).
+
+**The GEMM kernel set's datapath (bf16 vs. bf16-via-bfp16-emulation) is a
+BUILD-time choice, not a runtime env var** -- it lives in the kernel set
+itself (`design.json`'s `emulate_bfp16`, `whisper_kernels.json`'s own copy),
+because it is compiled into the xclbin. `open_kernels/export_whisper_kernels.py
+--emulate-bfp16` now defaults to **on** (1.71x on the array; WER
+indistinguishable from plain bf16 under the `hf` protocol, H4 vs H0);
+`--no-emulate-bfp16` builds the plain bf16 datapath instead. The engine
+prints which one a loaded kernel set actually is (`kernels.cpp`'s `datapath`
+line) -- read from the set, never assumed.
+
+**The open container builder ships `generation_config.json`.**
+`utilities/q4nx-build --open-whisper` now REQUIRES it from the source HF
+snapshot (it was optional and silently skipped before, which is how a build
+without it reached a test machine) -- the `hf` protocol reads it at load
+time and refuses with a clear message if it is absent
+(`generation_hf.cpp`'s `GenerationConfig::load`).
+
+**The server log names the whole configuration.** `Whisper::load_model()`
+prints, in order: which engine loaded and why, that engine's own
+`config_summary()` (the open engine's: `attn=... xkv=... weights=... head=...
+host_ops=... gemm_datapath=...`, each with its source), then the decode
+protocol and its source.

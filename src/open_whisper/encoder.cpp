@@ -13,18 +13,13 @@
 namespace ow {
 namespace {
 
-// OW_ATTN: unset, empty or "host" keeps the existing host_ops.cpp
-// attention(); "npu" dispatches AMD's MLIR-AIR fused FlashAttention kernel
-// instead (fa_attention.hpp). Any other value is REFUSED rather than read as
-// "host": a misspelt "npu" would otherwise run the host path while the
-// operator believes they are measuring the array.
-bool fa_attn_requested() {
-  const char *e = std::getenv("OW_ATTN");
-  if (!e || !*e) return false;
-  const std::string v(e);
-  if (v == "host") return false;
-  if (v == "npu") return true;
-  throw std::runtime_error("OW_ATTN is '" + v + "': expected 'host' or 'npu'");
+// OW_FA_DIR overrides where the FlashAttention kernel is looked for; unset,
+// it is <kernels_dir>/fa -- next to the GEMM kernel set, the same way
+// whisper_kernels.json lives beside design.json.
+std::string fa_kernel_dir(const std::string &kernels_dir) {
+  const char *e = std::getenv("OW_FA_DIR");
+  if (e && *e) return std::string(e);
+  return kernels_dir + "/fa";
 }
 double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -67,17 +62,44 @@ Encoder::Encoder(const std::string &model_dir, const std::string &kernels_dir_hi
   std::printf("  staged     %zu weight buffers on the device\n",
              3 + layer_slots_.size() * 4);
 
-  use_fa_attn_ = fa_attn_requested();
+  // OW_ATTN: "auto" (default, unset) uses the NPU FlashAttention kernel when
+  // one is found next to this kernel set, else host; "npu" requires it,
+  // refusing rather than falling back if none is found; "host" never uses
+  // it. Never silent either way -- the chosen mode and the reason are always
+  // printed (CLAUDE.md rule 8's class: a choice nothing prints is as good as
+  // unmade).
+  const AttnMode attn_mode = parse_attn_mode(std::getenv("OW_ATTN"));
+  const std::string fa_dir = fa_kernel_dir(kdir);
+  const bool fa_present = fa_kernel_present(fa_dir);
+  use_fa_attn_ = resolve_use_npu_attn(attn_mode, fa_present, fa_dir);
+  const char *env = std::getenv("OW_ATTN");
+  const std::string source = (env && *env) ? (std::string("OW_ATTN=") + env) : "default (auto)";
   if (use_fa_attn_) {
-    const char *fa_dir = std::getenv("OW_FA_DIR");
-    if (!fa_dir || !*fa_dir)
-      throw std::runtime_error("OW_ATTN=npu requires OW_FA_DIR (a directory "
-                               "holding air.xclbin + air.insts.bin)");
-    std::printf("  attention  NPU (OW_ATTN=npu)\n");
+    attn_summary_ = "npu, " + fa_dir + " (" + source + ")";
+    std::printf("  attention  NPU FlashAttention, %s (%s)\n", fa_dir.c_str(), source.c_str());
     fa_attn_ = std::make_unique<FaAttention>(*device_, fa_dir);
   } else {
-    std::printf("  attention  host (default; set OW_ATTN=npu for the MLIR-AIR "
-               "FlashAttention kernel)\n");
+    // attn_mode == Npu without fa_present already threw inside
+    // resolve_use_npu_attn(), so reaching here means either "host" was
+    // requested, or "auto" found no kernel at fa_dir.
+    const std::string why = attn_mode == AttnMode::Auto
+                                ? "no FlashAttention kernel at " + fa_dir
+                                : source;
+    attn_summary_ = "host (" + why + ")";
+    std::printf("  attention  host (%s)\n", why.c_str());
+  }
+
+  // OW_HOST_FAST (host_ops.cpp): validated here too, at construction, so a
+  // bad value is caught before the first layer runs -- run_layer()'s own
+  // function-local static re-reads it (cheap, deterministic, side-effect-
+  // free besides the same throw) and is left untouched.
+  host_fast_ = host_fast_enabled();
+  {
+    const char *hf_env = std::getenv("OW_HOST_FAST");
+    const std::string hf_source =
+        (hf_env && *hf_env) ? (std::string("OW_HOST_FAST=") + hf_env) : "default";
+    host_fast_summary_ = std::string(host_fast_ ? "fast" : "exact") + " (" + hf_source + ")";
+    std::printf("  host ops   %s\n", host_fast_summary_.c_str());
   }
 }
 

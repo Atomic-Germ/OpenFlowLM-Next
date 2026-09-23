@@ -33,6 +33,22 @@ public:
 
     /// \brief One line naming the engine and what selected it, for the load log.
     virtual std::string describe() const = 0;
+
+    /// \brief True for the open engine, false for the closed one. Used by
+    ///        Whisper::_init_decode_protocol() (modeling_whisper.cpp) to pick
+    ///        OFLM_WHISPER_PROTOCOL's unset default: the `hf` protocol has been
+    ///        measured only on the open engine (task 0180 Parts 11-15: WER
+    ///        16.11% -> 5.50% (open engine, legacy -> hf protocol) on 1200 utterances), never on the closed one, so
+    ///        the closed engine keeps `legacy` as its default. An explicit
+    ///        OFLM_WHISPER_PROTOCOL still overrides for either engine.
+    virtual bool is_open() const = 0;
+
+    /// \brief Extra startup-summary lines this engine wants in the load log
+    ///        (e.g. the open engine's OW_ATTN/OW_DEC_*/OW_HOST_FAST/datapath
+    ///        configuration, each with the value in effect and its source --
+    ///        default or env). Empty string (the base default) prints nothing;
+    ///        only the open engine overrides this today.
+    virtual std::string config_summary() const { return {}; }
 };
 
 /// \brief Build the engine for a Whisper model directory.
