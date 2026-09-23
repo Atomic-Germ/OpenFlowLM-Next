@@ -14,6 +14,17 @@
 //   moeroute  <kernel> <rout-buf>           MoE expert fills -> the router's 8 experts
 //   moeroute2 <kernel> <buf> <idx-offset>   ditto, pool-layout placeholder fills
 //   attnpos <kernel> <pos>                  KV window / new-row / RoPE record for this token
+//   poolbase <dst> <off> <src>              write src's device address (+0x80000000) into dst
+//   ondvctrl <dst> <pool> <i0,..,i7>        fill dst with the on-device router's control
+//                                           words for `pool` and those top-8 indices (the
+//                                           same generator the router core runs)
+//   runlist <name>                          empty runlist; runlist_add <name> <kernel>
+//                                           <buf...> appends a run, runlist_exec <name>
+//                                           executes the whole list ONCE and prints ms
+//
+// The NPU is shared: a run failure of the form "qds_device::wait() unexpected command state"
+// is retried HARNESS_RETRY_CONTENTION times (default 0, 5 s apart) because that error also
+// reproduces on known-good kernels while another process holds accel0.
 //
 // Relative paths resolve against the .cfg's directory. `#` starts a comment.
 // Every `run` prints its ERT state and wall time (start -> wait), which is the
