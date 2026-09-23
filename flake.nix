@@ -81,7 +81,7 @@
             shellHook = ''
               export XILINX_XRT="${pkgs.xrt}/opt/xilinx/xrt"
               export PKG_CONFIG_PATH="${pkgs.xrt}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-              export OFLM_XCLBIN_PATH="${config.packages.openflowlm-open-kernels}/share/oflm"
+
             '';
           };
 
