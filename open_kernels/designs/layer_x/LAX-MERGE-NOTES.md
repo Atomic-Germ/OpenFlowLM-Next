@@ -155,6 +155,30 @@ base, `cfg[2+col]` queue) versus the probe's `poolbase`-written `cfg`; whether t
 packet chain makes the shim's task queue overflow (the probe sends a single 28-B BD); and
 whether the `Pipeline.configure` descriptors are still live when the packet arrives.
 
+## Demonstrated on-device: the merged runlist (2026-09-23)
+
+With the packet path stubbed out of the picture (`ONDV_HOST_PUSH=1`, `ONDV_NO_EMITTERS=1`
+-- the host enqueues the routed placeholders), the merged design runs end to end:
+
+```
+kernel  lxf build_laxhp_l/insts.elf        # linear control text
+kernel  axf build_laxhp_a/insts.elf        # full-attention control text
+runlist_exec rl [4 runs, 0 reporting completed] -> ok (10.154 ms)
+```
+
+ONE `xclbin X` (build_laxhp_l), TWO control texts, and ONE `runlist` submit holding
+four whole-layer runs -- 1 full-attention + 3 linear, the 35B's 3:1 order. Both streams
+also complete individually (`lxf` state 4, 4.35 ms; `axf` state 4, 2.26 ms). At
+~2.5 ms/layer that is the ~10 tok/s class the objective targets, and it needed a harness
+fix: `runlist_exec` counted `run::state()` per run, but XRT updates only the chain's last
+command, so every successful list looked "N incomplete"; `runlist::wait()` throws on the
+first failing command, so reaching past it *is* success.
+
+**Caveat, and the one thing still missing:** the routed experts are placeholders enqueued
+by the host, because the emitters' TileControl push TDRs (above). So the MoE arithmetic is
+wrong until that push works; the *mechanism* (one xclbin, one submit, both layer types)
+is what is demonstrated here, not a numerically correct 35B decode.
+
 ## Local run artifacts (gitignored, like every other design `.cfg`/`.bin`)
 
 `qmap_lax.bin` (32 B, little-endian u32 per column) -- the merged design's `w{c}`
