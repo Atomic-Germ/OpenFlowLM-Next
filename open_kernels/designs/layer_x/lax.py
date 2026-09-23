@@ -158,7 +158,10 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
     if ondv:
         f_oc = ExternalFunction("ondv_ctrl_col", source_file=str(X.RT / "ondv_ctrl_col.cc"),
                                 arg_types=[t["x"], t["x"], np.int32, tl["u8_ctrl"]],
-                                include_dirs=inc + [str(X.RT)])
+                                include_dirs=inc + [str(X.RT)],
+                                compile_flags=[f"-DONDV_BD_UP={X.ONDV_BD_UP}",
+                                               f"-DONDV_BD_GATE={X.ONDV_BD_GATE}",
+                                               f"-DONDV_BD_DOWN={X.ONDV_BD_DOWN}"])
 
     def af(sym, args):
         return ExternalFunction(sym, source_file=str(ATTN / f"{sym}.cc"), arg_types=args,

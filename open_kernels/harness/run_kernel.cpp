@@ -53,6 +53,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -135,7 +136,10 @@ struct Buf {
 struct RunList {
     std::string ctxname;
     std::unique_ptr<xrt::runlist> rl;
-    std::vector<xrt::run> runs;   // xrt::runlist::add does not take ownership
+    std::deque<xrt::run> runs;    // xrt::runlist::add does not take ownership, and a
+                                  // vector's push_back reallocation would invalidate the
+                                  // references the list holds (runlist_exec then reports
+                                  // ERT_CMD_STATE_NEW); deque keeps them stable
 };
 
 struct Host {
@@ -405,21 +409,21 @@ struct Host {
             RunList& r = found->second;
             auto t0 = std::chrono::steady_clock::now();
             r.rl->execute();
-            r.rl->wait();
+            r.rl->wait();   // throws on the first failing command in the list
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             ++runs;
-            int bad = 0;
+            // Reaching here means the whole list completed: xrt::runlist::wait() throws on
+            // any failing command. The individual run::state() is NOT updated by a runlist
+            // (only the last command of the chain is polled), so it is reported for
+            // information and is NOT the verdict -- counting it made every successful
+            // runlist look "incomplete".
+            int reporting = 0;
             for (auto& run : r.runs)
-                if (run.state() != ERT_CMD_STATE_COMPLETED) ++bad;
+                if (run.state() == ERT_CMD_STATE_COMPLETED) ++reporting;
             // ONE execute for the whole list: that is the `one xrt::runlist submit` the
             // objective asks for, and %.3f ms is the per-token number.
-            std::printf("runlist_exec %s [%zu runs] -> %d incomplete (%.3f ms)\n", name.c_str(),
-                        r.runs.size(), bad, ms);
-            if (bad) {
-                std::printf("runlist_exec %s FAILED (%d runs not completed)%s\n", name.c_str(), bad,
-                            keep_going ? "; continuing (HARNESS_KEEP_GOING)" : "");
-                return keep_going;
-            }
+            std::printf("runlist_exec %s [%zu runs, %d reporting completed] -> ok (%.3f ms)\n",
+                        name.c_str(), r.runs.size(), reporting, ms);
         } else if (cmd == "dump") {
             auto name = need(it, "dump buf");
             auto outp = resolve(need(it, "dump file"));

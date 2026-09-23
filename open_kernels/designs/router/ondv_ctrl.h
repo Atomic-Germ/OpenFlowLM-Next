@@ -55,16 +55,6 @@ static inline uint32_t ondv_bd_w1(unsigned bd) { return 0x1D000u + 0x20u * bd + 
 // MM2S task queues on a shim tile: ch0 @ 0x1D214, ch1 @ 0x1D21C.
 static inline uint32_t ondv_mm2s_queue(unsigned ch) { return ch == 0u ? 0x1D214u : 0x1D21Cu; }
 
-// ---- the descriptors xcommon pins -------------------------------------------
-static constexpr unsigned kOndvBdUp = ONDV_BD_UP;
-static constexpr unsigned kOndvBdGate = ONDV_BD_GATE;
-static constexpr unsigned kOndvBdDown = ONDV_BD_DOWN;
-
-// ---- the 35B recipe's MoE geometry (recipes/qwen36moe.py `Common`) ----------
-// STRIPE/PAIR/UP_BYTES/DOWN_PER_CORE*DOWN_BAND/POOL_DOWN and the stripe split.
-static constexpr unsigned kOndvCores = 8;
-static constexpr unsigned kOndvRouted = 8;          // NE, the routed slots
-static constexpr unsigned kOndvSpp = 4;             // STRIPES_PER_PROJ
 // The pinned routed descriptors' physical BD ids. Overridable so a design whose w
 // channel already occupies 8/9/10 can move them (the packet retargets whatever id it
 // is told, so the header and designs/layer_x/xcommon.py ONDV_BD_* must agree).
@@ -78,6 +68,16 @@ static constexpr unsigned kOndvSpp = 4;             // STRIPES_PER_PROJ
 #define ONDV_BD_DOWN 10
 #endif
 
+// ---- the descriptors xcommon pins -------------------------------------------
+static constexpr unsigned kOndvBdUp = ONDV_BD_UP;
+static constexpr unsigned kOndvBdGate = ONDV_BD_GATE;
+static constexpr unsigned kOndvBdDown = ONDV_BD_DOWN;
+
+// ---- the 35B recipe's MoE geometry (recipes/qwen36moe.py `Common`) ----------
+// STRIPE/PAIR/UP_BYTES/DOWN_PER_CORE*DOWN_BAND/POOL_DOWN and the stripe split.
+static constexpr unsigned kOndvCores = 8;
+static constexpr unsigned kOndvRouted = 8;          // NE, the routed slots
+static constexpr unsigned kOndvSpp = 4;             // STRIPES_PER_PROJ
 static constexpr unsigned kOndvCps = 2;             // CORES_PER_STRIPE
 static constexpr uint32_t kOndvStripe = 163840u;    // one 128-row up (or gate) stripe
 static constexpr uint32_t kOndvPair = 10240u;       // the two chunks of a half at one k-tile
