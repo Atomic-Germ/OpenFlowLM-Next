@@ -178,7 +178,7 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 2 with the single-row kernel retired; Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 4 with the single-row kernel retired (RB 2 from 2026-09-22 until Track E the same day); Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
 - **Retiring the single-row kernel** (`attn.h ATTN_BLOCK_ONLY`, set only by
@@ -290,11 +290,44 @@ the stream floor itself. `kernel_remarks --arch aie2p` says no loop in the block
 is software-pipelined; per (head, row) the score costs ~90 cycles of which the
 `reduce_add` is 66. RB 4 fits with 32 bytes to spare and reaches 3.05-3.2 ms at 4000,
 correct by the same gates, but is not adopted on that margin. An `aie::mmul` score phase
-(commit 57addcca) fits and is correct but is slower: building its A tile from four
+(built and measured on a branch, not merged) fits and is correct but is slower: building its A tile from four
 128-bit K loads is shuffle-bound (223 bundles per four k-steps against a ResMII of 116).
 The remaining levers are a K layout that makes that tile one load, pipelining the
 reduction, and the `ain` stream's own rate. Detail:
 `.claude/plans/decode-gap-2026-09-22/track-a.md`.
+
+**Measured (2026-09-22 evening, Track E: RB 4 and the block kernel's arithmetic):**
+Three changes, all confined to the block-only path (every other family's attention
+translation units preprocess token-identical, `utilities/attn_pp_identical_native.sh`,
+38/38). (1) The attention core's soft-float -- `__mulsf3` / `__divsf3` / `__muldi3`,
+2,112 bytes for norm_rope's RMS scale and 1/sqrt Newton steps and attn_fin's `1/l` --
+became integer routines (`open_kernels/include/scalar_fp.h`) that give the IEEE
+round-to-nearest-even result bit for bit on every operand those sites can see
+(`utilities/scalar_fp_test.cpp`); dumps are bit-identical to the same kernel with the
+soft-float (max |diff| 0.0 over 105 dumps). That is what makes RB 4 fit. (2) The score
+phase reduces all RB x NHL dot products as one tree whose levels pair lanes exactly as
+`aie::reduce_add` does, instead of one serial `reduce_add` per (row, head); the PV loop
+writes four head-dim slices per block, so the compiler no longer serialises every slice
+behind the last one's store; and the rescale factor's exponential rides in row 0's
+padding lanes of the block's one `vexpN<32>`. Bit-identical to (1) (max |diff| 0.0, and
+deterministic over three runs). (3) RB 2 -> 4 (`attnknobs`), which is not bit-exact against
+RB 2: the 64-token greedy continuation after the 1122-token prompt is 64/64 identical to
+RB 2's, and against the reference both flip at the same position-49 near-tie (gap 0.045)
+with corr min before it 0.988466 (RB 2: 0.988460). Tightest attention core 15,248 ->
+14,208 bytes (2,176 free). `ax0` in the real walk, minimum of 20 over 3 alternated
+rounds, measured on the one-context layer image (`sets/k35e2` vs `sets/k35int2`; that
+image lands separately, and its attention cores compile the same program as `ax.py`'s):
+
+| position | 1 | 1024 | 2048 | 4000 |
+|---|---|---|---|---|
+| RB 2 (`k35int2`) | 0.64 | 1.44 | 2.22 | 3.73 ms |
+| RB 4 + the above (`k35e2`) | 0.63 | 1.03 | 1.41 | 2.15 ms |
+
+The step's sum of minima at 4000 goes 100.1 -> 84.2 ms. An `ATTN_NULL` probe of the same
+image (no arithmetic, every transfer kept) is 1.24 ms at 4000, so the walk is now ~0.9
+ms of arithmetic on a ~1.24 ms stream, down from ~2.5. A deeper `ain` fifo (two whole
+blocks) was tried and rejected: no gain, and the 8-layer dumps became non-deterministic.
+Detail: `.claude/plans/decode-gap-2026-09-22/track-e.md`.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
