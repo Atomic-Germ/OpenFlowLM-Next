@@ -71,6 +71,8 @@ PKT = int(os.environ.get("LP_PKT", "15"))   # 15 is the placer's controller_id f
 CORE_CH = int(os.environ.get("LP_CORE_CH", "1"))
 CORE_ROW = int(os.environ.get("LP_ROW", "2"))   # the emitter core's row (2 = probe, 4/5 = fused design)
 CHAIN = int(os.environ.get("LP_CHAIN", "1"))   # number of chained packet BDs (1 = probe, 9 = fused)
+MAT = int(os.environ.get("LP_MAT", "1"))     # matrices (15-word blocks) per packet BD (fused: 2-3)
+SHARED = int(os.environ.get("LP_SHARED", "0"))   # 1 = also enqueue a managed fill on the SAME shim channel
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -79,10 +81,11 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     cfg_ty = np.ndarray[(2,), np.dtype[np.uint32]]
     go_ty = np.ndarray[(4,), np.dtype[np.uint32]]
     out_ty = np.ndarray[(2,), np.dtype[np.uint32]]
-    ctrl_ty = np.ndarray[(16,), np.dtype[np.uint32]]
+    ctrl_ty = np.ndarray[(16 * MAT,), np.dtype[np.uint32]]
     inc = include_dirs()
     f_words = ExternalFunction("ondv_live_words", source_file=str(HERE / "ondv_live_words.cc"),
-                               arg_types=[go_ty, ctrl_ty, np.int32, np.int32], include_dirs=inc)
+                               arg_types=[go_ty, ctrl_ty, np.int32, np.int32], include_dirs=inc,
+                               compile_flags=[f"-DLP_MAT={MAT}"])
     f_out = ExternalFunction("ondv_live_out", source_file=str(HERE / "ondv_live_out.cc"),
                              arg_types=[slab_ty, out_ty, np.int32], include_dirs=inc)
 
@@ -93,7 +96,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     pktlk = [Lock(core, init=0, name=f"pktlk{i}") for i in range(CHAIN)]
     pktdn = Lock(core, init=0, name="pktdn")   # the packet BD releases it when it has fired
 
-    of_slab = ObjectFifo(slab_ty, name="slabf", depth=CHAIN * NEL)
+    of_slab = ObjectFifo(slab_ty, name="slabf", depth=CHAIN * NEL * MAT + SHARED)
     of_in = ObjectFifo(go_ty, name="inf", depth=2)   # [addr_lo addr_hi ...] then the enable
     of_out = ObjectFifo(out_ty, name="outf", depth=1)
 
@@ -107,7 +110,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
         for lk in locks:
             lk.release(1)            # arm BD i, wait for it to fire
             pktdn.acquire(1)
-        for _ in range(CHAIN * NEL - 1):   # every element of every re-push must arrive
+        for _ in range(CHAIN * NEL * MAT + SHARED - 1):   # every element of every re-push must arrive
             s = slabin.acquire(1)
             slabin.release(1)
         s = slabin.acquire(1)        # the last delivery, for the out word
@@ -123,7 +126,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
 
     bds = []
     for i in range(CHAIN):
-        bds.append(Bd(buffer=ctrl, length=60,
+        bds.append(Bd(buffer=ctrl, length=60 * MAT,
                       acquires=[Acquire(pktlk[i])], releases=[Release(pktdn)],
                       next=(i + 1) if i + 1 < CHAIN else 0))
     dma = TileDma(tile=core, channels=[
@@ -133,6 +136,8 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     def sequence(a_zero, a_cfg, a_go, a_ones, c_out, slabp, inpf, outc):
         p = Pipeline(3)
         # the routed descriptor: CONFIGURED, never enqueued -- the core blocks on it
+        if SHARED:
+            p.fill(slabp, a_zero, TensorAccessPattern((1, WS), 0, [1, 1, 1, WS], [0, 0, 0, 1]))
         p.configure(slabp, a_zero, TensorAccessPattern((1, WS), 0, [1, 1, 1, WS], [0, 0, 0, 1]), bd_id=BD)
         # element 1: the retarget address (the harness's poolbase wrote it into cfg)
         p.fill(inpf, a_cfg, TensorAccessPattern((1, 4), 0, [1, 1, 1, 4], [0, 0, 0, 1]))
