@@ -69,6 +69,7 @@ QUEUE = int(os.environ.get("LP_QUEUE", "0x1D21C"), 16)   # the shim MM2S queue t
 PKT = int(os.environ.get("LP_PKT", "15"))   # 15 is the placer's controller_id for shims
 CORE_CH = int(os.environ.get("LP_CORE_CH", "1"))
 CORE_ROW = int(os.environ.get("LP_ROW", "2"))   # the emitter core's row (2 = probe, 4/5 = fused design)
+CHAIN = int(os.environ.get("LP_CHAIN", "1"))   # number of chained packet BDs (1 = probe, 9 = fused)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -77,7 +78,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     cfg_ty = np.ndarray[(2,), np.dtype[np.uint32]]
     go_ty = np.ndarray[(4,), np.dtype[np.uint32]]
     out_ty = np.ndarray[(2,), np.dtype[np.uint32]]
-    ctrl_ty = np.ndarray[(8,), np.dtype[np.uint32]]
+    ctrl_ty = np.ndarray[(12,), np.dtype[np.uint32]]
     inc = include_dirs()
     f_words = ExternalFunction("ondv_live_words", source_file=str(HERE / "ondv_live_words.cc"),
                                arg_types=[go_ty, ctrl_ty, np.int32, np.int32], include_dirs=inc)
@@ -88,23 +89,27 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     core = Tile(0, CORE_ROW)
     ctrl = Buffer(ctrl_ty, name="ctrlw", tile=core)
     slab = Buffer(slab_ty, name="slab", tile=core)
-    pktlk = Lock(core, init=0, name="pktlk")   # the core releases it to arm the packet
+    pktlk = [Lock(core, init=0, name=f"pktlk{i}") for i in range(CHAIN)]
     pktdn = Lock(core, init=0, name="pktdn")   # the packet BD releases it when it has fired
 
-    of_slab = ObjectFifo(slab_ty, name="slabf", depth=1)
+    of_slab = ObjectFifo(slab_ty, name="slabf", depth=CHAIN)
     of_in = ObjectFifo(go_ty, name="inf", depth=2)   # [addr_lo addr_hi ...] then the enable
     of_out = ObjectFifo(out_ty, name="outf", depth=1)
 
-    def core_body(goin, ctrl, slabin, outprod, pktlk, pktdn, fw, fo):
+    def core_body(goin, ctrl, slabin, outprod, pktdn, fw, fo, *locks):
         c = goin.acquire(1)          # element 1: the retarget address (written by poolbase)
         g = goin.acquire(1)          # element 2: the enable, which the control program only
                                      # fills AFTER the configure -- so the packet cannot
                                      # precede the descriptor it retargets
         fw(c, ctrl, BD, QUEUE)
-        pktlk.release(1)             # ... and this arms the packet BD
         goin.release(2)
-        pktdn.acquire(1)             # the packet has been sent
-        s = slabin.acquire(1)        # blocks until the descriptor actually delivers
+        for lk in locks:
+            lk.release(1)            # arm BD i, wait for it to fire
+            pktdn.acquire(1)
+        for _ in range(CHAIN - 1):   # each re-push must deliver one slab
+            s = slabin.acquire(1)
+            slabin.release(1)
+        s = slabin.acquire(1)        # the last delivery, for the out word
         o = outprod.acquire(1)
         fo(s, o, WS)
         outprod.release(1)
@@ -112,13 +117,16 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
 
     worker = Worker(core_body,
                     fn_args=[of_in.cons(), ctrl, of_slab.cons(), of_out.prod(),
-                             pktlk, pktdn, f_words, f_out],
+                             pktdn, f_words, f_out, *pktlk],
                     tile=core, stack_size=0x1800)
 
+    bds = []
+    for i in range(CHAIN):
+        bds.append(Bd(buffer=ctrl, length=40,
+                      acquires=[Acquire(pktlk[i])], releases=[Release(pktdn)],
+                      next=(i + 1) if i + 1 < CHAIN else 0))
     dma = TileDma(tile=core, channels=[
-        DmaChannel(direction=DMAChannelDir.MM2S, channel=CORE_CH, bds=[
-            Bd(buffer=ctrl, length=28, acquires=[Acquire(pktlk)], releases=[Release(pktdn)]),
-        ]),
+        DmaChannel(direction=DMAChannelDir.MM2S, channel=CORE_CH, bds=bds),
     ])
 
     def sequence(a_zero, a_cfg, a_go, a_ones, c_out, slabp, inpf, outc):
@@ -136,7 +144,8 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
                             of_slab.prod(tile=shim), of_in.prod(tile=shim),
                             of_out.cons(tile=Tile(1, 0))])
     rt.add_tile_dma(dma)
-    rt.add_lock(pktlk)
+    for lk in pktlk:
+        rt.add_lock(lk)
     rt.add_lock(pktdn)
     rt.add_flow(PacketFlow(pkt_id=PKT, src=core, src_port=WireBundle.DMA, src_channel=CORE_CH,
                            dst=shim, dst_port=WireBundle.TileControl, dst_channel=0,

@@ -41,7 +41,10 @@ void ondv_live_words(const uint32_t *__restrict cfg, int32_t *__restrict w,
   w[2] = (int32_t)(cfg[0] & 0xFFFFFFFCu);
   w[3] = (int32_t)(cfg[1] & 0xFFFFu);                        // addr_high[15:0]
   w[4] = lp_stream_hdr(pkt);                                 // stream header
-  w[5] = lp_ctrl_hdr((uint32_t)queue, 1);                    // ctrl: queue push, 1 beat
-  w[6] = (int32_t)((uint32_t)bd & 0xFu);
+  w[5] = lp_ctrl_hdr(0x1D000u + 0x20u * (uint32_t)bd + 28u, 1); // ctrl: write w7 (Valid_BD), 1 beat
+  w[6] = (int32_t)0x02000000u;                               // re-arm Valid_BD
+  w[7] = lp_stream_hdr(pkt);                                 // stream header
+  w[8] = lp_ctrl_hdr((uint32_t)queue, 1);                    // ctrl: queue push, 1 beat
+  w[9] = (int32_t)((uint32_t)bd & 0xFu);
 }
 }

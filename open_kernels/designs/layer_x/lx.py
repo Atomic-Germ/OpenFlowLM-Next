@@ -548,19 +548,20 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 rt.add_lock(lk)
             rt.add_lock(pktdone[c])
             # 9 packet BDs per emitter, chained in firing order and paced by the acquire
-            # locks the emitter releases: slot 0's up|gate (56 B), then per slot k>=1 an
-            # 84-B packet holding slot k-1's down (28 B) + slot k's up|gate (56 B), and
-            # finally slot NE-1's down (28 B). Each reads its column's ctrlw slice at a
-            # byte offset; the down_{k-1}|up|gate_k words are contiguous (offset 84k-28).
+            # locks the emitter releases: slot 0's up|gate (80 B), then per slot k>=1 an
+            # 120-B packet holding slot k-1's down (40 B) + slot k's up|gate (80 B), and
+            # finally slot NE-1's down (40 B). Each reads its column's ctrlw slice at a
+            # byte offset; the down_{k-1}|up|gate_k words are contiguous (offset 120k-40).
+            # One matrix is now 10 words (retarget + Valid_BD re-arm + queue push).
             # The BDs are NOT packet-stamped: the control stream carries its own stream
             # headers (ondv_ctrl.h) and the flow below keeps them.
-            bds = [Bd(buffer=ctrlw[c], offset=0, length=56,
+            bds = [Bd(buffer=ctrlw[c], offset=0, length=80,
                       acquires=[Acquire(pktlk[c][0])], releases=[Release(pktdone[c])], next=1)]
             for k in range(1, X.NE):
-                bds.append(Bd(buffer=ctrlw[c], offset=84 * k - 28, length=84,
+                bds.append(Bd(buffer=ctrlw[c], offset=120 * k - 40, length=120,
                               acquires=[Acquire(pktlk[c][k])], releases=[Release(pktdone[c])],
                               next=k + 1))
-            bds.append(Bd(buffer=ctrlw[c], offset=644, length=28,
+            bds.append(Bd(buffer=ctrlw[c], offset=920, length=40,
                           acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
             rt.add_tile_dma(TileDma(
                 tile=emitter_tile[c],

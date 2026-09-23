@@ -15,15 +15,14 @@
 //   hdr = stream_id<<24 | opcode<<22 | (beats-1)<<20 | address
 //   bit 31 = parity, 1 iff popcount(bits[30:0]) is EVEN          (opcode 0 = write)
 //
-// A retarget + enqueue of descriptor `bd` at 64-bit DDR byte address `addr` is:
+// A retarget + re-arm + enqueue of descriptor `bd` at 64-bit DDR byte address `addr` is:
 //
-//   hdr(w1_reg, 2 beats), addr_lo, addr_hi, hdr(queue_reg, 1 beat), bd
+//   hdr(w1_reg, 2 beats), addr_lo, addr_hi, hdr(w7_reg, 1 beat), Valid_BD, hdr(queue_reg, 1 beat), bd
 //
-// The last word is the MM2S task-queue INSERTION command: Start_BD_ID in bits [3:0]
-// (the register write itself is the start). Bit 31 is Enable_Token_Issue on AIE2 -- the
-// managed dma_start_task path sets it only when it wants a completion token, never for a
-// plain fill: issuing a token on every routed push back-pressures the shim channel
-// (DMA_Task_Token_Stall) once the token queue fills, which is the fused design's TDR.
+// The w7 write re-sets Valid_BD [25] -- the hardware clears it when the BD completes, so
+// a re-push without it is a silent no-op (only the first wave would ever deliver). The
+// last word is the MM2S task-queue INSERTION command: Start_BD_ID in bits [3:0] (the
+// register write itself is the start). Bit 31 is Enable_Token_Issue on AIE2 and stays 0.
 
 #include <stdint.h>
 
@@ -55,6 +54,10 @@ static inline int32_t ondv_stream_hdr() {
 
 // BD n registers live at 0x1D000 + 0x20*n: w0 len @+0, w1 addr_low @+4, w2 addr_high @+8.
 static inline uint32_t ondv_bd_w1(unsigned bd) { return 0x1D000u + 0x20u * bd + 4u; }
+// w7 (offset +28) holds Valid_BD [25] -- the hardware clears it when the BD completes,
+// so a re-push must re-set it or the descriptor is a no-op on the second wave.
+static inline uint32_t ondv_bd_w7(unsigned bd) { return 0x1D000u + 0x20u * bd + 28u; }
+static constexpr uint32_t kOndvValidBd = 0x02000000u;   // Valid_BD=1, no next, no locks
 
 // MM2S task queues on a shim tile: ch0 @ 0x1D214, ch1 @ 0x1D21C.
 static inline uint32_t ondv_mm2s_queue(unsigned ch) { return ch == 0u ? 0x1D214u : 0x1D21Cu; }
@@ -97,17 +100,20 @@ static constexpr uint32_t kOndvPoolDown = 335544320u;
 static constexpr uint32_t kOndvQueue[kOndvCores] = {
     0x1D21Cu, 0x1D214u, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D214u, 0x1D214u, 0x1D214u};
 
-// One routed slot's SEVEN words: stream hdr, retarget ctrl hdr + 2 address words, stream
-// hdr, queue-push ctrl hdr + the bd data word.
-static constexpr unsigned kOndvWords = 7;
+// One routed slot's TEN words: stream hdr, retarget ctrl hdr + 2 address words, stream
+// hdr, Valid_BD ctrl hdr + the valid word, stream hdr, queue-push ctrl hdr + the bd word.
+static constexpr unsigned kOndvWords = 10;
 static inline void ondv_words(int32_t *w, unsigned bd, uint32_t queue, uint64_t addr) {
   w[0] = ondv_stream_hdr();                              // stream header (routing)
   w[1] = ondv_hdr(ondv_bd_w1(bd), 2);                    // ctrl: write w1, 2 beats
   w[2] = (int32_t)(uint32_t)(addr & 0xFFFFFFFCu);        // w1: addr_low, bits 1:0 zero
   w[3] = (int32_t)(uint32_t)((addr >> 32) & 0xFFFFu);    // w2: addr_high[15:0]
   w[4] = ondv_stream_hdr();                              // stream header (routing)
-  w[5] = ondv_hdr(queue, 1);                             // ctrl: push queue, 1 beat
-  w[6] = (int32_t)bd;                                    // queue push: Start_BD_ID (no token)
+  w[5] = ondv_hdr(ondv_bd_w7(bd), 1);                    // ctrl: write w7 (Valid_BD), 1 beat
+  w[6] = (int32_t)kOndvValidBd;                          // re-arm the descriptor
+  w[7] = ondv_stream_hdr();                              // stream header (routing)
+  w[8] = ondv_hdr(queue, 1);                             // ctrl: push queue, 1 beat
+  w[9] = (int32_t)bd;                                    // queue push: Start_BD_ID (no token)
 }
 
 // The expert's byte offset of routed slot k's up stripe for column c (xcommon.moe_sequence's
