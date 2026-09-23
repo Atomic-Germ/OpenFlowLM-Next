@@ -108,13 +108,13 @@ def spec_list(names: str) -> list[Path]:
     return sorted(SPECS_DIR.glob("*.json"))
 
 
-def export_open_kernels(py: Path, specs: list[Path], force: bool) -> int:
+def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> int:
     """open_qwen36 + dense families (compile-only, no NPU). Returns 0 on success."""
     failed: list[str] = []
     for spec in specs:
         name = spec.stem
         print(f"-- export {name}", flush=True)
-        cmd = [str(py), str(EXPORT), "--spec", str(spec)]
+        cmd = [str(py), str(EXPORT), "--spec", str(spec), "--jobs", str(jobs)]
         if force:
             cmd.append("--force")
         if subprocess.run(cmd).returncode != 0:
@@ -155,8 +155,16 @@ def export_bert_sets(py: Path, force: bool) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--specs", default="", help="comma-separated open_kernels spec names (empty = all)")
+    ap.add_argument("--skip-specs", default="",
+                    help="comma-separated open_kernels spec names to skip (e.g. a recipe with a known gap)")
     ap.add_argument("--force", action="store_true", help="rebuild even when the build cache is current")
+    ap.add_argument("--skip-bert", action="store_true",
+                    help="skip open_npue BERT embedding sets (they need an NPU at build time)")
+    ap.add_argument("-j", "--jobs", type=int, default=max(1, os.cpu_count() // 2),
+                    help="parallel kernel-set builds within each spec (default: os.cpu_count()//2)")
     a = ap.parse_args()
+
+    skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
 
     py = ensure_venv()
 
@@ -191,19 +199,21 @@ def main() -> int:
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
     # ---- the two kernel families ---------------------------------------------
-    specs = spec_list(a.specs)
+    specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
     if not specs:
         print("FATAL: no kernel specs found", file=sys.stderr)
         return 1
 
-    n_failed = export_open_kernels(py, specs, a.force)
-    n_failed += export_bert_sets(py, a.force)
+    n_failed = export_open_kernels(py, specs, a.force, a.jobs)
+    if not a.skip_bert:
+        n_failed += export_bert_sets(py, a.force)
 
     print(flush=True)
     if n_failed:
         print(f"kernel export failed: {n_failed} item(s)", flush=True)
         return 1
-    print(f"kernel export ok: {len(specs)} open_kernels spec(s) + BERT design sets", flush=True)
+    suffix = " + BERT design sets" if not a.skip_bert else ""
+    print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 
 
