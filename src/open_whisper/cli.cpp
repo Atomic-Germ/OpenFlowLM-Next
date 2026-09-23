@@ -68,7 +68,7 @@ bool any_nan(const float *a, size_t n) {
 }
 
 struct Args {
-  std::string model, kernels, golden, dump, decode, baseline;
+  std::string model, kernels, golden, dump, decode, baseline, dump_logits;
   long long stress = 0;
   bool forced = false;
 };
@@ -88,6 +88,7 @@ bool parse_args(int argc, char **argv, Args &a) {
     else if (s == "--stress") a.stress = std::stoll(next());
     else if (s == "--decode") a.decode = next();
     else if (s == "--baseline") a.baseline = next();
+    else if (s == "--dump-logits") a.dump_logits = next();
     else { std::fprintf(stderr, "unknown argument: %s\n", s.c_str()); return false; }
   }
   if (a.decode != "" && a.decode != "hf" && a.decode != "host") {
@@ -134,9 +135,20 @@ std::vector<int32_t> read_tokens(const open_qwen36::Q4nxFile &golden, const std:
 // the gate passed. `model_dir` is reopened as its own Decoder rather than
 // sharing anything with `enc` -- the decoder never touches the NPU kernel set
 // at all.
+// `dump_f`, when non-null, gets every decode step's full fp32
+// [vocab_padded] logits appended raw (teacher-forced pass first, then the
+// free-run pass, in the exact order dec.step() is called) -- an instrument
+// for proving a host-side change to the decoder is byte-identical (see
+// NpuEmbeddings CLAUDE.md trap 29 and tasks/0179 Parts 15/17 there: this
+// project measured a one-ulp change flip a golden token path, so "close" is
+// not a category that exists on this host path -- only bit-identical is
+// trusted).
 bool run_decode_gate(ow::Encoder &enc, const std::string &model_dir, const open_qwen36::Q4nxFile &golden,
                      const std::string &proto, const std::vector<int32_t> &baseline,
-                     int64_t baseline_agree) {
+                     int64_t baseline_agree, std::FILE *dump_f = nullptr) {
+  auto dump_step = [&](const float *logits, int64_t n) {
+    if (dump_f) std::fwrite(logits, sizeof(float), static_cast<size_t>(n), dump_f);
+  };
   const std::string tok_name = proto + ".tokens", lg_name = proto + ".logits";
   if (!golden.has(tok_name) || !golden.has(lg_name)) {
     std::printf("-- decode %s SKIPPED: golden has no '%s'/'%s' --\n", proto.c_str(), tok_name.c_str(),
@@ -165,7 +177,10 @@ bool run_decode_gate(ow::Encoder &enc, const std::string &model_dir, const open_
   // whisper_goldens.py's own assertion (and whisper_decode_check.py) is what
   // establishes that it agrees with an uncached full-context pass.
   std::vector<std::vector<float>> logits(static_cast<size_t>(T), std::vector<float>(static_cast<size_t>(VP)));
-  for (int64_t i = 0; i < T; ++i) dec.step(tokens[static_cast<size_t>(i)], logits[static_cast<size_t>(i)].data());
+  for (int64_t i = 0; i < T; ++i) {
+    dec.step(tokens[static_cast<size_t>(i)], logits[static_cast<size_t>(i)].data());
+    dump_step(logits[static_cast<size_t>(i)].data(), VP);
+  }
 
   bool pad_ok = true;
   for (int64_t i = 0; i < T && pad_ok; ++i)
@@ -204,7 +219,10 @@ bool run_decode_gate(ow::Encoder &enc, const std::string &model_dir, const open_
   dec.clear_context();
   std::vector<int32_t> ids(tokens.begin(), tokens.begin() + first_free);
   std::vector<float> last(static_cast<size_t>(VP));
-  for (int64_t i = 0; i < first_free; ++i) dec.step(ids[static_cast<size_t>(i)], last.data());
+  for (int64_t i = 0; i < first_free; ++i) {
+    dec.step(ids[static_cast<size_t>(i)], last.data());
+    dump_step(last.data(), VP);
+  }
   while (static_cast<int64_t>(ids.size()) < 440) {
     int64_t am = 0;
     float best = last[0];
@@ -213,6 +231,7 @@ bool run_decode_gate(ow::Encoder &enc, const std::string &model_dir, const open_
     ids.push_back(static_cast<int32_t>(am));
     if (am == EOT) break;
     dec.step(static_cast<int32_t>(am), last.data());
+    dump_step(last.data(), VP);
   }
   bool same = ids.size() == tokens.size();
   int64_t first_div = -1;
@@ -248,6 +267,8 @@ bool run_decode_gate(ow::Encoder &enc, const std::string &model_dir, const open_
   const auto &t = dec.timers;
   std::printf("  decode timers, teacher-forced + free-run combined (host wall clock; no NPU dispatch "
              "in this class at all)\n");
+  std::printf("    xkv_gather   %8.1f ms  (set_encoder_output()'s head-contiguous K/V copy, once "
+             "per window -- not counted in TOTAL/steps below)\n", t.xkv_gather * 1e3);
   std::printf("    embed        %8.1f ms\n", t.embed * 1e3);
   std::printf("    layer_norm   %8.1f ms\n", t.layer_norm * 1e3);
   std::printf("    linear       %8.1f ms\n", t.linear * 1e3);
@@ -256,6 +277,22 @@ bool run_decode_gate(ow::Encoder &enc, const std::string &model_dir, const open_
   std::printf("    TOTAL        %8.1f ms over %lld steps (%.3f ms/token, %.2f tok/s)\n", t.total * 1e3,
              (long long)t.steps, t.steps ? t.total * 1e3 / static_cast<double>(t.steps) : 0.0,
              t.total > 0 ? static_cast<double>(t.steps) / t.total : 0.0);
+  std::printf("  -- finer split of linear/attention above (timing only; arithmetic unchanged) --\n");
+  std::printf("    linear.self_qkv    %8.1f ms\n", t.linear_self_qkv * 1e3);
+  std::printf("    linear.self_out    %8.1f ms\n", t.linear_self_out * 1e3);
+  std::printf("    linear.cross_q     %8.1f ms\n", t.linear_cross_q * 1e3);
+  std::printf("    linear.cross_out   %8.1f ms\n", t.linear_cross_out * 1e3);
+  std::printf("    linear.fc1         %8.1f ms\n", t.linear_fc1 * 1e3);
+  std::printf("    linear.fc2         %8.1f ms\n", t.linear_fc2 * 1e3);
+  std::printf("    linear.head        %8.1f ms\n", t.linear_head * 1e3);
+  std::printf("    linear.sum_check   %8.1f ms  (vs linear %.1f ms)\n",
+             (t.linear_self_qkv + t.linear_self_out + t.linear_cross_q + t.linear_cross_out +
+              t.linear_fc1 + t.linear_fc2 + t.linear_head) * 1e3,
+             t.linear * 1e3);
+  std::printf("    attention.self     %8.1f ms\n", t.attention_self * 1e3);
+  std::printf("    attention.cross    %8.1f ms\n", t.attention_cross * 1e3);
+  std::printf("    attention.sum_check %7.1f ms  (vs attention %.1f ms)\n",
+             (t.attention_self + t.attention_cross) * 1e3, t.attention * 1e3);
 
   return pad_ok && argmax_ok && (same || (!baseline.empty() && baseline == ids));
 }
@@ -383,7 +420,16 @@ int main(int argc, char **argv) {
                      stem.c_str(), args.decode.c_str());
         }
       }
-      decode_ok = run_decode_gate(enc, args.model, golden, args.decode, baseline, baseline_agree);
+      std::FILE *dump_f = nullptr;
+      if (!args.dump_logits.empty()) {
+        dump_f = std::fopen(args.dump_logits.c_str(), "wb");
+        if (!dump_f) throw std::runtime_error("cannot open " + args.dump_logits + " for --dump-logits");
+      }
+      decode_ok = run_decode_gate(enc, args.model, golden, args.decode, baseline, baseline_agree, dump_f);
+      if (dump_f) {
+        std::fclose(dump_f);
+        std::printf("  dump-logits  wrote %s\n", args.dump_logits.c_str());
+      }
     }
 
     std::printf("-- host stage timers (host wall clock; NOT an NPU performance claim) --\n");

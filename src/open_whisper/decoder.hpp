@@ -76,6 +76,27 @@ struct DecoderTimers {
   double embed = 0, layer_norm = 0, linear = 0, attention = 0, gelu = 0;
   double total = 0;
   int64_t steps = 0;
+
+  // Finer split of `linear` and `attention` above -- timing only, added for
+  // task b1's baseline (the two coarse fields are still accumulated exactly
+  // as before, so any comparison against a pre-existing number still works;
+  // each fine-grained field's sum equals its coarse parent to within fp
+  // accumulation order, which is asserted nowhere but true by construction:
+  // both are summed from the same now_s() intervals).
+  double linear_self_qkv = 0;   // self_q + self_k + self_v (three linear() calls, one bucket)
+  double linear_self_out = 0;
+  double linear_cross_q = 0;
+  double linear_cross_out = 0;
+  double linear_fc1 = 0;
+  double linear_fc2 = 0;
+  double linear_head = 0;       // the tied 51866 x 1280 sweep
+  double attention_self = 0;
+  double attention_cross = 0;
+
+  // set_encoder_output()'s head-contiguous K/V gather (task b2 step 1) --
+  // once per 30 s window, not per step, so it is its own bucket rather than
+  // folded into `attention`.
+  double xkv_gather = 0;
 };
 
 class Decoder {
@@ -116,6 +137,26 @@ private:
 
   const float *xkv_ = nullptr;                        // [1500, 10240], NOT owned
   int64_t pos_ = 0;
+
+  // Cross-attention K/V, gathered head-contiguous once per window by
+  // set_encoder_output() -- xkv_'s own fused-row layout puts a 64-float head
+  // slice 10240 floats (40 KB) apart from the next row's same head, so
+  // attend_one's cross-attention pass walked 20 strided passes over a 61 MB
+  // buffer. Gathered layout: [layer][k=0|v=1][head][t in 0..1500)][head_dim],
+  // contiguous per (layer, k/v, head) -- same VALUES (memcpy, no arithmetic),
+  // only the addresses attend_one reads change. Sized on first use because
+  // DecoderGeometry has no `1500` of its own (that is the encoder's frame
+  // count, not decoder geometry) -- see set_encoder_output().
+  std::vector<float> xkv_gathered_;
+
+  // attend_one's scores scratch, one row per HEAD ([n_heads][1500]) --
+  // preallocated once here so parallelising attend_one across heads needs no
+  // allocation on the hot path, and indexed by head rather than thread id so
+  // a larger OpenMP team than at construction cannot overflow it. 1500 covers
+  // both self-attention's cache (<= max_target_positions = 448) and
+  // cross-attention (1500 encoder frames).
+  std::vector<float> attn_scores_scratch_;
+  int64_t attn_scratch_stride_ = 1500;
 
   // Self-attention KV cache: one [max_target_positions, d_model] block per
   // layer, per side. clear_context() only resets pos_ -- rows at or beyond it
