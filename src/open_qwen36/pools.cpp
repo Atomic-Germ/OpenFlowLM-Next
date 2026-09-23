@@ -462,6 +462,25 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
             size_t fch = (4 * s + r % 4) * nk + r / 4;
             std::memcpy(dst + op.dst + k * CH8, src + fch * CH8, CH8);
         }
+    } else if (op.op == "transpose_banked") {
+        const std::string name = with_layer(op.tensor, layer);
+        const uint64_t rows = op.rows, cols = op.cols, elem = op.elem;
+        if (!rows || !cols || !elem) fail("transpose_banked " + name + " without rows / cols / elem");
+        // Check against the actual destination before multiplying dimensions.
+        // The bank width is a format constant: no wider GEMV vector is implied.
+        const uint64_t banks = rows / 32 + (rows % 32 != 0);
+        if (op.dst > dst_bytes || banks > (dst_bytes - op.dst) / 32 / elem / cols)
+            fail("transpose_banked " + name + ": destination too small");
+        size_t n = 0;
+        const uint8_t* src = raw(m, name, rows * cols * elem, &n);
+        if (n != rows * cols * elem)
+            fail("transpose_banked " + name + ": tensor size does not match rows / cols / elem");
+        uint8_t* out = dst + op.dst;
+        std::memset(out, 0, banks * cols * 32 * elem);
+        for (uint64_t r = 0; r < rows; ++r)
+            for (uint64_t c = 0; c < cols; ++c)
+                std::memcpy(out + (((r / 32) * cols + c) * 32 + r % 32) * elem,
+                            src + (r * cols + c) * elem, elem);
     } else if (op.op == "transpose") {
         const std::string name = with_layer(op.tensor, layer);
         const uint64_t rows = op.rows, cols = op.cols, elem = op.elem ? op.elem : 2;
