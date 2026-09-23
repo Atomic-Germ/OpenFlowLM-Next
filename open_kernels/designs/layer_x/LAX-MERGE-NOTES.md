@@ -78,6 +78,37 @@ builds (same-size xclbins differing only in metadata, byte-identical per-tile
 programs, main program == lx's 16272 B, <=2 DMA channels per shim and <=16 total, and
 identical `w` channels) and exits non-zero if any of it regresses.
 
+## Device status (2026-09-23): the fused path does not complete
+
+After the merged build I tried to device-verify. `lx0` (the shipped first half,
+classic flow) and `expert_fetch/build_live` (the one-emitter packet probe) both
+complete -- `state 4`, 3.4 ms and 1.1 ms -- but **every fused whole-layer build
+hangs**: `build_emitter`, a fresh rebuild of `lx.py` from the current sources, all
+`build_ondv*` variants, and `lax` itself, via both the ELF and the classic flow.
+This is not contention: it reproduces after `modprobe -r amdxdna` with no
+`accel0` holder, and on a machine where `lx0`/the probe complete immediately
+afterwards. `dmesg` shows the failure directly:
+
+```
+[21675] amdxdna 0000:c6:00.1: AIE2_TDR_WORK: Device isn't making progress... Count 6 timeout 15
+[21738] amdxdna 0000:c6:00.1: AMD-Vi: Event logged [IO_PAGE_FAULT domain=0x0002 address=0x7fb5f2700000 flags=0x0007]
+[21781] amdxdna 0000:c6:00.1: AIE2_DUMP_CTX: Firmware timeout state capture: ... JOB[0]: op: 0x14 msg: 0x1d000001
+```
+
+The FAULT addresses are BO bases, consistent with the fused design's routed
+descriptors being retargeted at addresses the IOMMU has not mapped, which would
+stall the shim transfer, block the main core on `w`, and fail the run as a TDR (the
+fault lines interleave with the peer's jobs on this shared box, so that attribution
+is the design's, not proven line by line). The probe's own header names exactly this
+outcome -- "a timeout means it was never pushed, which is the failure the fused
+design hits today" -- so this is the pre-existing ONDV blocker, not something `lax`
+introduced. The standalone
+`build_emitter` no longer reproduces the `state 4` the pause reason records (its
+control text is byte-identical to a fresh rebuild, and the two xclbins differ only
+in metadata), so either the array/driver no longer supports the packet push or the
+recorded run predates a regression. Device verification of `lax` (numerics, and the
+40-layer token) is blocked on that until it is resolved.
+
 ## Local run artifacts (gitignored, like every other design `.cfg`/`.bin`)
 
 `qmap_lax.bin` (32 B, little-endian u32 per column) -- the merged design's `w{c}`
