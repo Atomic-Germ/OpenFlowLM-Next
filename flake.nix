@@ -14,6 +14,13 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" ];
 
+      flake = {
+        nixosModules = {
+          default = ./nixos-module.nix;
+          openflowlm = ./nixos-module.nix;
+        };
+      };
+
       perSystem = { config, self', inputs', system, ... }: let
         pkgs = import inputs.nixpkgs {
           inherit system;
