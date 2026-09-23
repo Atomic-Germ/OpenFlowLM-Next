@@ -1,0 +1,57 @@
+{
+  "decoder_start_token_id": 258,
+  "eos_token_id": 257,
+  "no_timestamps_token_id": 283,
+  "max_length": 40,
+  "max_initial_timestamp_index": 5,
+  "lang_to_id": {
+    "<|lang0|>": 259,
+    "<|lang1|>": 260,
+    "<|lang2|>": 261,
+    "<|lang3|>": 262,
+    "<|lang4|>": 263,
+    "<|lang5|>": 264,
+    "<|lang6|>": 265,
+    "<|lang7|>": 266,
+    "<|lang8|>": 267,
+    "<|lang9|>": 268,
+    "<|lang10|>": 269,
+    "<|lang11|>": 270,
+    "<|lang12|>": 271,
+    "<|lang13|>": 272,
+    "<|lang14|>": 273,
+    "<|lang15|>": 274,
+    "<|lang16|>": 275,
+    "<|lang17|>": 276,
+    "<|lang18|>": 277,
+    "<|lang19|>": 278
+  },
+  "task_to_id": {
+    "transcribe": 280,
+    "translate": 279
+  },
+  "suppress_tokens": [
+    1,
+    2,
+    7,
+    8,
+    14,
+    25,
+    50,
+    90,
+    150,
+    200,
+    254,
+    255,
+    258,
+    279,
+    280,
+    281,
+    282,
+    283
+  ],
+  "begin_suppress_tokens": [
+    256,
+    257
+  ]
+}

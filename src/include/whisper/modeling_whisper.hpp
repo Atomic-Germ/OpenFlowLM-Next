@@ -12,6 +12,7 @@
 #include <iostream>
 #include "whisper/whisper_npu.hpp"
 #include "whisper/whisper_engine.hpp"
+#include "whisper/generation_hf.hpp"
 #include "nlohmann/json.hpp"
 #include "utils/profiler.hpp"
 #include "lm_config.hpp"
@@ -184,6 +185,29 @@ private:
 
     int _sample_in_time_stamp(buffer<bf16>& logits);
 
+    // -- OFLM_WHISPER_PROTOCOL dispatch --------------------------------------------
+    // "legacy" (default, unchanged) or "hf" (a faithful, scoped port of
+    // WhisperForConditionalGeneration.generate() greedy decoding -- see
+    // generation_hf.hpp). Read once, strictly: any other value throws. Cached so a
+    // typo shows up at model load, not mid-transcription.
+    // (_generate_legacy/_generate_hf are declared further down, in a second `private:`
+    // block after `whisper_task_type_t` is defined -- their signatures need that type,
+    // which is only visible in a class member declaration's signature, as opposed to a
+    // function body, once it has actually been declared earlier in the class.)
+    std::string _decode_protocol();
+
+    /// \brief lazily loaded/cached generation_config.json + the model's REAL
+    ///        (unpadded) vocab_size, both only needed by the `hf` protocol.
+    ///        Whisper_Config pads vocab_size to a multiple of 32 in place (see
+    ///        lm_config.hpp) and does not keep the unpadded value, so this rereads
+    ///        config.json directly rather than touching that shared class.
+    const whisper_hf::GenerationConfig& _hf_gen_config();
+    int _real_vocab_size();
+
+    bool hf_gen_config_loaded_ = false;
+    whisper_hf::GenerationConfig hf_gen_config_;
+    int real_vocab_size_ = 0;
+
     inline bool _is_valid_utf8(const std::string& input) {
         size_t i = 0;
         while (i < input.size()) {
@@ -241,6 +265,19 @@ public:
         e_transcribe = 1
     } whisper_task_type_t;
 
+private:
+    /// \brief the legacy decoding loop, verbatim (renamed from the old generate() body).
+    std::pair<std::string, std::string> _generate_legacy(whisper_task_type_t task, bool enable_time_stamp,
+                                                           bool return_time_stamp, std::ostream& os);
+
+    /// \brief the `hf` protocol: detect_language + feed it, SuppressTokens +
+    ///        SuppressTokensAtBegin (+ WhisperTimeStampLogitsProcessor when
+    ///        enable_time_stamp) every step, greedy argmax, and HF's segment/seek
+    ///        arithmetic between 30 s windows. See generation_hf.hpp/.cpp.
+    std::pair<std::string, std::string> _generate_hf(whisper_task_type_t task, bool enable_time_stamp,
+                                                       bool return_time_stamp, std::ostream& os);
+
+public:
     Whisper(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, nlohmann::ordered_json model_inf, bool enable_preemption = false);
