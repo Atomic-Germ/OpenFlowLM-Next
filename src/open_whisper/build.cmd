@@ -83,6 +83,24 @@ if errorlevel 1 goto :clfail
 out\generation_hf_test.exe testdata
 if errorlevel 1 goto :genhftestfail
 
+REM task 0180: OW_HOST_FAST=1's fused host ops (host_ops.cpp's
+REM gelu_bias_bf16_fast / layer_norm_bf16_fast / add_bias_residual_fast /
+REM attention_gather_bias_fast+attention_core / bf16_fill_parallel, and the
+REM AVX2 erf they're built on), characterised against exact/double references
+REM -- no device, no XRT. Links host_ops.cpp (the ops under test) and
+REM q4nx_file.cpp (a generic safetensors reader, used only if OW_TEST_GOLDEN
+REM points at a golden .safetensors file -- unset, it runs on PRNG data and
+REM says so).
+echo [open_whisper] host_ops_fast_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
+   /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
+   /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
+   host_ops_fast_test.cpp host_ops.cpp "..\open_qwen36\q4nx_file.cpp" ^
+   /Fe:out\host_ops_fast_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+out\host_ops_fast_test.exe
+if errorlevel 1 goto :fasttestfail
+
 echo [open_whisper] OK -^> out\open_whisper_cli.exe
 exit /b 0
 
@@ -96,6 +114,10 @@ exit /b 1
 
 :genhftestfail
 echo [open_whisper] generation_hf_test FAILED
+exit /b 1
+
+:fasttestfail
+echo [open_whisper] host_ops_fast_test FAILED
 exit /b 1
 
 :noxrt

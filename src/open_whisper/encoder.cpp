@@ -105,20 +105,35 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
   std::vector<uint16_t> &a_bf2 = s_a_bf2_;
   std::vector<float> &fc2_out = s_fc2_out_;
 
+  // task 0180: OW_HOST_FAST=1 fuses several of the passes below (strict
+  // parsing, see host_ops.cpp) -- the exact path above is left untouched.
+  // Parsed once (host_fast_enabled() throws on a malformed value, and doing
+  // that on every layer would just repeat the same throw 32 times).
+  static const bool fast = host_fast_enabled();
+
   double t0 = now_s();
-  layer_norm(x, W.ln1_w.data(), W.ln1_b.data(), m_padded, D, h.data());
+  if (fast) {
+    // LN1 fused with the bf16 round Qkv's A needs -- no fp32 `h` write.
+    layer_norm_bf16_fast(x, W.ln1_w.data(), W.ln1_b.data(), m_padded, D, a_bf.data());
+  } else {
+    layer_norm(x, W.ln1_w.data(), W.ln1_b.data(), m_padded, D, h.data());
+  }
   timers.layer_norm += now_s() - t0;
 
   // qkv = gemm(h, qkv.B) + qkv.bias
-  t0 = now_s();
-  bf16_fill(a_bf.data(), h.data(), a_bf.size());
-  timers.bf16 += now_s() - t0;
+  if (!fast) {
+    t0 = now_s();
+    bf16_fill(a_bf.data(), h.data(), a_bf.size());
+    timers.bf16 += now_s() - t0;
+  }
   const float *qkv_c = kernels_->run(Op::Qkv, a_bf.data(), S.qkv, &timers.npu_in,
                                      &timers.npu_disp_op[static_cast<size_t>(Op::Qkv)], &timers.npu_out);
-  std::memcpy(qkv.data(), qkv_c, qkv.size() * sizeof(float));
-  t0 = now_s();
-  add_bias(qkv.data(), W.qkv_bias.data(), m_padded, 3 * D);
-  timers.bias += now_s() - t0;
+  if (!fast) {
+    std::memcpy(qkv.data(), qkv_c, qkv.size() * sizeof(float));
+    t0 = now_s();
+    add_bias(qkv.data(), W.qkv_bias.data(), m_padded, 3 * D);
+    timers.bias += now_s() - t0;
+  }
 
   // attention, then x += gemm(attn, o.B) + o.bias
   t0 = now_s();
@@ -127,55 +142,117 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
     return e && *e && *e != '0';
   }();
   if (use_fa_attn_) {
-    fa_attn_->run(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
-                 &timers.fa_phases);
+    // NPU FA path. OW_HOST_FAST=1 now reaches this path too: run_fast() fuses
+    // the qkv bias add into FaAttention's own repack, reading the GEMM C
+    // buffer once instead of the standalone memcpy + add_bias() pass -- no
+    // fp32 `qkv` copy is made for this branch at all. The exact (!fast) path
+    // is unchanged: the top-of-function `!fast` block above already built the
+    // biased fp32 `qkv`, so run() here just uses it -- adding the bias again
+    // would double it.
+    if (fast) {
+      fa_attn_->run_fast(qkv_c, m_padded, real_rows, D, H, HD, W.qkv_bias.data(), attn.data(),
+                        &timers.fa_phases);
+    } else {
+      fa_attn_->run(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
+                   &timers.fa_phases);
+    }
+  } else if (fast) {
+    // Fused bias-add + head gather, straight off the device C buffer --
+    // skips the standalone `qkv` copy and add_bias() pass entirely.
+    zero_pad_rows(attn.data(), real_rows, m_padded, D);
+    attention_gather_bias_fast(qkv_c, m_padded, real_rows, D, H, HD, W.qkv_bias.data(),
+                              s_attn_scratch_.data());
+    attention_core(real_rows, D, H, HD, attn.data(), s_attn_scratch_.data(),
+                  phase_split ? &timers.attn_phases : nullptr);
   } else {
     attention(qkv.data(), m_padded, real_rows, D, H, HD, attn.data(),
              s_attn_scratch_.data(), phase_split ? &timers.attn_phases : nullptr);
   }
   timers.attention += now_s() - t0;
 
-  t0 = now_s();
-  bf16_fill(a_bf.data(), attn.data(), a_bf.size());
-  timers.bf16 += now_s() - t0;
+  if (fast) {
+    // bf16 round for O's A, fused into the attention output above would need
+    // a second per-head write; done here as bf16_fill_parallel instead
+    // (bit-identical to bf16_fill, just threaded).
+    t0 = now_s();
+    bf16_fill_parallel(a_bf.data(), attn.data(), a_bf.size());
+    timers.bf16 += now_s() - t0;
+  } else {
+    t0 = now_s();
+    bf16_fill(a_bf.data(), attn.data(), a_bf.size());
+    timers.bf16 += now_s() - t0;
+  }
   const float *o_c = kernels_->run(Op::O, a_bf.data(), S.o, &timers.npu_in,
                                    &timers.npu_disp_op[static_cast<size_t>(Op::O)], &timers.npu_out);
-  t0 = now_s();
-  std::memcpy(o_out.data(), o_c, o_out.size() * sizeof(float));
-  add_bias(o_out.data(), W.o_bias.data(), m_padded, D);
-  timers.bias += now_s() - t0;
-  t0 = now_s();
-  add_rows(x, o_out.data(), m_padded, D, x);
-  zero_pad_rows(x, real_rows, m_padded, D);
-  timers.residual += now_s() - t0;
+  if (fast) {
+    // Fused memcpy + bias + residual: reads the device C buffer ONCE
+    // (read-only, trap 27) and writes x once, in the same op order as the
+    // three-pass exact path (c+bias, then +x) -- bit-identical, just fewer
+    // memory round trips. zero_pad_rows unchanged: padded rows still get
+    // discarded after, exactly as the exact path leaves them.
+    t0 = now_s();
+    add_bias_residual_fast(o_c, W.o_bias.data(), m_padded, D, x);
+    zero_pad_rows(x, real_rows, m_padded, D);
+    timers.residual += now_s() - t0;
+  } else {
+    t0 = now_s();
+    std::memcpy(o_out.data(), o_c, o_out.size() * sizeof(float));
+    add_bias(o_out.data(), W.o_bias.data(), m_padded, D);
+    timers.bias += now_s() - t0;
+    t0 = now_s();
+    add_rows(x, o_out.data(), m_padded, D, x);
+    zero_pad_rows(x, real_rows, m_padded, D);
+    timers.residual += now_s() - t0;
+  }
 
   // h = LN2(x); fc1 -> GELU -> fc2; x += fc2_out + bias
   t0 = now_s();
-  layer_norm(x, W.ln2_w.data(), W.ln2_b.data(), m_padded, D, h.data());
+  if (fast) {
+    layer_norm_bf16_fast(x, W.ln2_w.data(), W.ln2_b.data(), m_padded, D, a_bf.data());
+  } else {
+    layer_norm(x, W.ln2_w.data(), W.ln2_b.data(), m_padded, D, h.data());
+  }
   timers.layer_norm += now_s() - t0;
-  t0 = now_s();
-  bf16_fill(a_bf.data(), h.data(), a_bf.size());
-  timers.bf16 += now_s() - t0;
+  if (!fast) {
+    t0 = now_s();
+    bf16_fill(a_bf.data(), h.data(), a_bf.size());
+    timers.bf16 += now_s() - t0;
+  }
   const float *fc1_c = kernels_->run(Op::Fc1, a_bf.data(), S.fc1, &timers.npu_in,
                                      &timers.npu_disp_op[static_cast<size_t>(Op::Fc1)], &timers.npu_out);
-  t0 = now_s();
-  // The C buffer is READ-ONLY here on purpose -- see gelu_bias() in host_ops.hpp.
-  gelu_bias(fc1_c, m_padded, FFN, W.fc1_bias.data(), fc1_h.data());
-  timers.gelu += now_s() - t0;
-
-  t0 = now_s();
-  bf16_fill(a_bf2.data(), fc1_h.data(), a_bf2.size());
-  timers.bf16 += now_s() - t0;
+  if (fast) {
+    // GELU + bias + bf16-round in ONE pass: the fp32 fc1_h intermediate
+    // (31.5 MB) is never written or re-read. The C buffer is READ-ONLY here
+    // on purpose -- see gelu_bias_bf16_fast() in host_ops.hpp.
+    t0 = now_s();
+    gelu_bias_bf16_fast(fc1_c, m_padded, FFN, W.fc1_bias.data(), a_bf2.data());
+    timers.gelu += now_s() - t0;
+  } else {
+    t0 = now_s();
+    // The C buffer is READ-ONLY here on purpose -- see gelu_bias() in host_ops.hpp.
+    gelu_bias(fc1_c, m_padded, FFN, W.fc1_bias.data(), fc1_h.data());
+    timers.gelu += now_s() - t0;
+    t0 = now_s();
+    bf16_fill(a_bf2.data(), fc1_h.data(), a_bf2.size());
+    timers.bf16 += now_s() - t0;
+  }
   const float *fc2_c = kernels_->run(Op::Fc2, a_bf2.data(), S.fc2, &timers.npu_in,
                                      &timers.npu_disp_op[static_cast<size_t>(Op::Fc2)], &timers.npu_out);
-  std::memcpy(fc2_out.data(), fc2_c, fc2_out.size() * sizeof(float));
-  t0 = now_s();
-  add_bias(fc2_out.data(), W.fc2_bias.data(), m_padded, D);
-  timers.bias += now_s() - t0;
-  t0 = now_s();
-  add_rows(x, fc2_out.data(), m_padded, D, x);
-  zero_pad_rows(x, real_rows, m_padded, D);
-  timers.residual += now_s() - t0;
+  if (fast) {
+    t0 = now_s();
+    add_bias_residual_fast(fc2_c, W.fc2_bias.data(), m_padded, D, x);
+    zero_pad_rows(x, real_rows, m_padded, D);
+    timers.residual += now_s() - t0;
+  } else {
+    std::memcpy(fc2_out.data(), fc2_c, fc2_out.size() * sizeof(float));
+    t0 = now_s();
+    add_bias(fc2_out.data(), W.fc2_bias.data(), m_padded, D);
+    timers.bias += now_s() - t0;
+    t0 = now_s();
+    add_rows(x, fc2_out.data(), m_padded, D, x);
+    zero_pad_rows(x, real_rows, m_padded, D);
+    timers.residual += now_s() - t0;
+  }
 }
 
 void Encoder::encode(const float *mel, const StageHook &hook) {

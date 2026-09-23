@@ -50,6 +50,15 @@ public:
   void run(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
           int64_t heads, int64_t head_dim, float *out, FaPhases *phases = nullptr);
 
+  // task 0180 Part A: OW_HOST_FAST=1's path. Same contract as run(), except
+  // `qkv_c` is the qkv GEMM's device C buffer BEFORE the bias add (read-only,
+  // trap 27) and `bias` is the qkv bias to fuse in -- the caller no longer
+  // needs its own biased fp32 `qkv` copy at all for this path. Expected and
+  // tested bit-identical to run() called on add_bias(qkv_c).
+  void run_fast(const float *qkv_c, int64_t m_padded, int64_t t, int64_t d,
+               int64_t heads, int64_t head_dim, const float *bias, float *out,
+               FaPhases *phases = nullptr);
+
   const std::string &xclbin_path() const { return xclbin_path_; }
   size_t xclbin_bytes() const { return xclbin_bytes_; }
   // FNV-1a 64-bit over the raw xclbin bytes, hex string. Not a cryptographic
@@ -58,6 +67,12 @@ public:
   const std::string &xclbin_fnv1a() const { return xclbin_hash_; }
 
 private:
+  // Shared tail of run()/run_fast(): upload q_bf_/k_bf_/v_bf_, dispatch, read
+  // o_bf_ back and scatter it into `out`. Both callers have already filled
+  // q_bf_/k_bf_/v_bf_ by the time this runs.
+  void dispatch_and_scatter(int64_t m_padded, int64_t t, int64_t d, int64_t heads,
+                            int64_t head_dim, float *out, FaPhases *phases);
+
   std::unique_ptr<npue::npu::Design> design_;
   std::string xclbin_path_;
   size_t xclbin_bytes_ = 0;
