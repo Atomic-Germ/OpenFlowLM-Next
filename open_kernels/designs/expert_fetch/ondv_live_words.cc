@@ -10,8 +10,9 @@
 //   embedded stream headers itself. (The earlier packet-stamped-BD shape was the spike's
 //   and is not what the compiler emits; it does not deliver here.)
 // BD n's registers live at 0x1D000 + 0x20*n (w0 len @+0, w1 addr_low @+4, w2 addr_high @+8);
-// a shim's MM2S task queues are ch0 @ 0x1D214, ch1 @ 0x1D21C. The last data word's leading
-// 1 is the task queue's hardware start flag.
+// a shim's MM2S task queues are ch0 @ 0x1D214, ch1 @ 0x1D21C. The last data word is the
+// queue-INSERTION command (Start_BD_ID in bits [3:0]); bit 31 is Enable_Token_Issue on
+// AIE2 and must stay 0 (a token per push back-pressures the channel).
 #include <stdint.h>
 
 static inline int32_t lp_parity(uint32_t w) {
@@ -41,6 +42,6 @@ void ondv_live_words(const uint32_t *__restrict cfg, int32_t *__restrict w,
   w[3] = (int32_t)(cfg[1] & 0xFFFFu);                        // addr_high[15:0]
   w[4] = lp_stream_hdr(pkt);                                 // stream header
   w[5] = lp_ctrl_hdr((uint32_t)queue, 1);                    // ctrl: queue push, 1 beat
-  w[6] = (int32_t)(0x80000000u | (uint32_t)bd);
+  w[6] = (int32_t)((uint32_t)bd & 0xFu);
 }
 }

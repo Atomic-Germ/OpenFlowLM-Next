@@ -68,6 +68,7 @@ BD = int(os.environ.get("LP_BD", "8"))      # the pinned descriptor the packet a
 QUEUE = int(os.environ.get("LP_QUEUE", "0x1D21C"), 16)   # the shim MM2S queue that owns it
 PKT = int(os.environ.get("LP_PKT", "15"))   # 15 is the placer's controller_id for shims
 CORE_CH = int(os.environ.get("LP_CORE_CH", "1"))
+CORE_ROW = int(os.environ.get("LP_ROW", "2"))   # the emitter core's row (2 = probe, 4/5 = fused design)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -84,7 +85,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
                              arg_types=[slab_ty, out_ty, np.int32], include_dirs=inc)
 
     shim = Tile(0, 0, tile_type=AIETileType.ShimNOCTile)
-    core = Tile(0, 2)
+    core = Tile(0, CORE_ROW)
     ctrl = Buffer(ctrl_ty, name="ctrlw", tile=core)
     slab = Buffer(slab_ty, name="slab", tile=core)
     pktlk = Lock(core, init=0, name="pktlk")   # the core releases it to arm the packet

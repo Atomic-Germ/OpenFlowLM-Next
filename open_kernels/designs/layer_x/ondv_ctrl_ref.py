@@ -13,10 +13,11 @@ Encoding (recovered from core_ddr_bounce_retarget.mlir / ddr_bounce_fetch.mlir):
 
 A retarget + enqueue of descriptor `bd` at DDR byte address `addr` is five words:
 
-    hdr(BD_w1, 2 beats), addr_lo, addr_hi, hdr(queue, 1 beat), 0x80000000 | bd
+    hdr(BD_w1, 2 beats), addr_lo, addr_hi, hdr(queue, 1 beat), bd
 
-The last word's leading 1 is the QUEUE's hardware start flag, not a parity bit -- the
-reason 0x80000002 pairs with a header whose own parity bit is 0.
+The last word is the MM2S task-queue INSERTION command (Start_BD_ID in bits [3:0]);
+bit 31 is Enable_Token_Issue on AIE2 and stays 0 for a plain push (the spikes' 0x80000000
+was AIE1's start flag, not valid on npu2).
 
 Shim register map (both spikes, reconfirmed on this box):
     BD n registers 0x1D000 + 0x20*n: w0 len @+0, w1 addr_low @+4, w2 addr_high @+8
@@ -56,7 +57,7 @@ def bd_w1_reg(bd: int) -> int:
 def retarget_enqueue(bd: int, addr: int, channel: int = 1) -> list[int]:
     """The five words that rewrite descriptor `bd`'s DDR address and push it."""
     low, high = (addr & 0xFFFFFFFF), ((addr >> 32) & 0xFFFF)
-    return [hdr(bd_w1_reg(bd), 2), low, high, hdr(MM2S_QUEUE[channel], 1), 0x80000000 | bd]
+    return [hdr(bd_w1_reg(bd), 2), low, high, hdr(MM2S_QUEUE[channel], 1), bd & 0xF]
 
 
 # ---- the 35B recipe's MoE geometry and the whole-stream generator -------------
@@ -81,7 +82,7 @@ def down_off(expert: int, c: int) -> int:
 
 
 def words(bd: int, queue: int, addr: int) -> list[int]:
-    return [hdr(bd_w1_reg(bd), 2), addr & 0xFFFFFFFC, (addr >> 32) & 0xFFFF, hdr(queue, 1), 0x80000000 | bd]
+    return [hdr(bd_w1_reg(bd), 2), addr & 0xFFFFFFFC, (addr >> 32) & 0xFFFF, hdr(queue, 1), bd & 0xF]
 
 
 def emit_stream(idx: list[int], base: int) -> list[int]:
@@ -109,7 +110,7 @@ def _selftest() -> None:
     assert hdr(0x1D21C, 1) == 0x8001D21C
     # the retarget sequence with the corrected header
     got = retarget_enqueue(bd=2, addr=0, channel=1)
-    want = [0x0011D044, 0x00000000, 0x00000000, 0x8001D21C, 0x80000002]
+    want = [0x0011D044, 0x00000000, 0x00000000, 0x8001D21C, 0x00000002]
     assert got == want, [hex(w) for w in got]
     # and with a real address (the spike's idx=3 slab: base + 3*16384)
     got3 = retarget_enqueue(bd=2, addr=3 * 16384, channel=1)
