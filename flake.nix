@@ -32,6 +32,29 @@
           type = "app";
           program = "${config.packages.oflm}/bin/oflm";
         };
+
+        devShells = {
+          default = config.devShells.oflm;
+
+          oflm = pkgs.mkShell {
+            name = "oflm-dev";
+            nativeBuildInputs = with pkgs; [
+              cmake
+              ninja
+              pkg-config
+              patchelf
+              cargo
+              rustc
+            ];
+            buildInputs = (pkgs.callPackage ./package.nix {}).buildInputs;
+            shellHook = ''
+              export XILINX_XRT="${pkgs.xrt}/opt/xilinx/xrt"
+              export PKG_CONFIG_PATH="${pkgs.xrt}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            '';
+          };
+
+          open-kernels = pkgs.callPackage ./open-kernels-shell.nix {};
+        };
       };
     };
 }
