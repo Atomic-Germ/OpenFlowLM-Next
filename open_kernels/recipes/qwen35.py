@@ -19,6 +19,9 @@ MoE's. So this module is a thin surface:
     programs                          ONE run per layer type -- nothing is routed, so there is
                                       no part split (the MoE needs two streams only because
                                       the router's output patches the second one)
+    gemm_route                        the MoE's block prefill route with ffn="dense": the same
+                                      linear / full halves, and the FFN as the shared expert's
+                                      two GEMMs without its gate (OPEN-PREFILL-BATCH)
 
 The container (probed on Qwen3.8-Distilled-9B-NPU2, 2026-09-06) names its
 tensors `model.layers.N.` and stores every projection as q4_1 / 5120 EXCEPT
@@ -217,6 +220,18 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+def gemm_route(spec: ModelSpec) -> dict | None:
+    """The block prefill route (OPEN-PREFILL-BATCH): `qwen36moe.gemm_route` over this family's
+    pack plan, with the dense FFN in place of the MoE block. None means the sequential set,
+    byte for byte what it was: a projection at q8, or a size whose projections the GEMM cannot
+    tile (not a multiple of 256) -- refused here rather than failing the whole export, since
+    the sequential path serves that size either way."""
+    try:
+        return M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+    except OpRangeError:
+        return None
+
+
 # ---- the step program: ONE run per layer type (nothing is routed, so no part split)
 def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     L = layout(spec)
@@ -252,6 +267,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                         "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": "ax", "args": args}],
         }
+    r = gemm_route(spec)
+    if r:
+        for k in ("contexts", "kernels", "globals"):
+            out[k].update(r[k])
+        for lt, gb in r["layer_types"].items():
+            out["layer_types"][lt]["gemm_block"] = gb
     return out
 
 
@@ -296,6 +317,9 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                        "build_dir": f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(n)}}
+    r = gemm_route(spec)
+    if r:
+        b.update(r["builds"])
     return b
 
 
@@ -307,6 +331,8 @@ KERNEL_SOURCES = [
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
+    "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
+    "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

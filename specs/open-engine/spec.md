@@ -32,7 +32,7 @@ the offending key named.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
 - `manifest_version: 2` → refused by the parser.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
-- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name.
+- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name. A `linear` / `full` route carries exactly one FFN tail: the MoE block (`moe_kernel`, `shared_program`, requiring `layout.moe`) or a dense `ffn_program` of two steps (up|gate, down) whose buffers `ffn_weights` defines, with its width `ff`; both, or neither, is refused by name. A route weight is normally a run of the layer type's pool or consts ops; `from: "pack"` instead carries its own `std_perm` ops, which the engine packs into that buffer alone, and any other op there is refused. A `std_perm` may carry `split: "hi" | "lo"` (anything else, or on another op, is refused): one half of a q8 source's exact q4_1 split. A `linear` route with `out_split` runs its out projection over both halves stacked, 2 x hidden rows, and adds them.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
@@ -1255,6 +1255,11 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
+
+**Batched prefill (2026-09-23, #109):** the family carries the 35B's block prefill route with a
+dense FFN in place of the MoE block, and runs its q8 out projection there as an exact split
+into two q4_1 halves rather than re-quantising it -- 13.5-17x faster prefill at every size
+tested with the greedy output unchanged. See `OPEN-PREFILL-BATCH`.
 
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
@@ -2863,7 +2868,7 @@ on the slow path. LFM2 joined the fast one later the same day and the sweep is
 flat -- OPEN-ATTN-CONTEXT carries the numbers.
 - Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.
 ### OPEN-PREFILL-BATCH: the block prefill route
-**Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense,qwen35}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
 **Test category:** manual (needs the NPU; `Qwen3.6-35B-A3B-NPU2` for the MoE kinds, a dense family's own kernel set for `dense`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `tests/test_gemma3.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
 
 A kernel set may carry a block prefill route: per layer type a `gemm_block`
@@ -2890,20 +2895,36 @@ the host wrote. The shared expert is not in that dispatch: it is the same
 weights for every token of the block, so the route runs it once as two more
 GEMMs (up|gate, contiguous and band-law in the pool, then down) with silu and
 the sigmoid gate on the host, folds it into the residual the dispatch is
-handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Hardware contexts are shared: ONE GEMM xclbin
+handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Qwen3.5
+(`qwen35.py`) is the same two kinds with a dense FFN in place of the MoE block,
+and its route is the 35B's with the tail swapped: an `ffn_program` of the same
+two GEMMs (up|gate, contiguous at the head of the pool, then down) with
+`silu(g) * u` on the host and no gate, added to the residual, and no `mx`, no
+router, no expert kernels. Its containers ship the DeltaNet out projection at
+q8, which the sequential kernel streams natively, and the GEMM reads q4_1 only.
+Re-quantising that projection costs what `OPEN-QUANT-Q8` measured -- the
+reason it is native -- so the route does not: every q8 code v = 16 hi + lo
+(hi = v >> 4, lo = v & 15) makes the weight the exact sum of two q4_1 readings,
+d = 16 scale, m = -128 scale, nibble hi + 8 and d = scale, m = 0, nibble lo,
+both scales exact in bf16. The two halves sit stacked in one buffer (a
+`from: "pack"` weight of two `std_perm` ops with `split` hi and lo), one GEMM
+of 2 x hidden rows runs them, and the host adds the halves (`out_split`). Hardware contexts are shared: ONE GEMM xclbin
 for the whole route -- the core program depends on neither N nor K, the band
 count K/256 reaching each core as a runtime parameter the instruction stream
 writes -- and one `mx` xclbin for both layer
-types. `OFLM_OPEN_GEMM_BLOCK=1` (read through `getenv_oflm`, so the pre-rename
-`FLM_` export still works) selects the route; off by default so every existing
-measurement is unaffected. With it on the engine takes the route whenever the
+types. The route is **on by default** (#109): the engine takes it whenever the
 set carries it and the prompt has at least the crossover length (64 tokens;
-`OFLM_OPEN_GEMM_BLOCK_MIN` overrides), never for a prompt that has had an image. Only the real tokens of a padded block touch the
+`OFLM_OPEN_GEMM_BLOCK_MIN` overrides), never for a prompt that has had an image.
+`OFLM_OPEN_GEMM_BLOCK=0` (read through `getenv_oflm`, so the pre-rename `FLM_`
+export still works) turns it off; any other value leaves it on. A set without
+the route, or a prompt the route does not take, prefills one token at a time --
+with the route on, never skipped. Only the real tokens of a padded block touch the
 state, write KV rows, run the MoE or advance the position, and the conv state,
 S and the KV rows leave the buffers as the sequential path would (bf16 where
 the kernels keep bf16). A projection streamed at q8 has no route -- the GEMM
 dequantises the q4_1 band law -- and such a manifest is the sequential one
-unchanged.
+unchanged; the one exception is the DeltaNet out projection (`linear_out`),
+which runs as its exact q4_1 split as above.
 
 On a MoE kernel set the blocks are run **layer-major**: every T-wide block of
 the prompt goes through layer l's projections and host stages before layer
@@ -2929,6 +2950,7 @@ block-major.
 - The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
 - The build key covers `designs/gemm_q4_prefill/*` (`test_prefill_batch.py`).
+- Qwen3.5's emission (`tests/test_qwen35.py`): at the 9B, `linear` runs `gemm_n12288_k4096` (qkv|z, pool ops 3-4) then `gemm_n4096_k4096` (out), `full` runs `gemm_n10240_k4096` (q, k, v, gate: pool ops 3-6) then `gemm_n4096_k4096` (o, op 7), and both carry `ffn_program` = `gemm_n24576_k4096` (up|gate, pool ops 0-1, contiguous, up first) then `gemm_n4096_k12288` (down, op 2) with `ff` 12288 and none of the MoE tail's keys; one `gemm` context, no `mx` / `mb` kernels or globals, and the attention products built at `AG_M` 1024 in their own directories. All four published sizes emit a route; `attn` or `linear` at q8, or a width the GEMM cannot tile, emits none and leaves the sequential manifest; `linear_out` at q8 emits `gout_w` as `from: "pack"` -- two `std_perm` ops of `ssm_out_proj`, 2048 chunks each at in_dim 4096, `split` hi at dst 0 and lo right after -- with `out_split` and the out step on `gemm_n8192_k4096`, while the sequential consts keep their `q8_perm`. The split reads back every q8 value exactly (the re-quantisation of the same chunks does not), and NumPy (`pack.split_q8_q4_1`) and C++ (`pools::split_q4_1_chunks`) produce the same bytes (`tests/test_qwen35.py`, `pools_test.cpp`). The 35B's manifest is byte-identical to its emission before the dense tail existed, apart from the build key. The parser takes the qwen35 fixture's route and a split out projection, and refuses both tails, neither tail, a third FFN step, an FFN step naming an undefined buffer, an FFN weight past the plan, a packed weight that is not `std_perm`, and a split that is not hi / lo (`manifest_test.cpp`).
 - The dense kind's recipe (`dense.py gemm_route`) emits one `gemm_block` per layer type present, sharing the five-step program, weight map and widths (`layout`/`geometry` don't vary by layer type) but each naming its own `attn_kernel` / `attn_args`: a family with one layer type gets the schema's defaults (`dxB` / `...,"ptab"`); Gemma 3's two get `dxB` / `ptab` for `dense` and a second kernel entry `dxB_local` / `ptab_local` -- the SAME `dx_attn/insts.bin` stream, patched with the family's sliding window -- for `dense_local`, plus `sandwich: true` and `act: "gelu_tanh"` on both (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`). A family combining sandwich norms with a non-gelu-tanh activation, or the reverse, gets no route (`tests/test_gemma3.py`) -- the host chain only implements the two pairings above. Nor does a family whose q/k/v carry a bias or whose position record is wider than one attention element (Qwen2, both): `dx_attn` has neither stream and refuses to build, so the manifest stays the sequential one (`tests/test_qwen2.py`). The parser refuses a dense route whose `attn_kernel` runs the same instruction stream as any sequential `program` step (`dx`, `dx_local`) -- `attnpos` alone does not make a kernel the attention-only dispatch, and the sequential stream would run the whole layer per token (`manifest_test.cpp`).
 - Layer-major is refused where it has no meaning: `layer_major_ok()` is false without a block
   route, with `OFLM_OPEN_LAYER_MAJOR=0`, and for any layer type whose kind is not `linear` or
@@ -2957,6 +2979,14 @@ block-major.
    the two must be **byte-identical** -- that is what says the schedule itself changed nothing.
    With the batched expert kernel they are not, and the gate is instead that both sit the same
    distance from the per-token run: equal max |diff| and equal argmax-flip count against it.
+7. Qwen3.5 (`Qwen3.8-Distilled-9B-NPU2`, and `Qwen3.5-0.8B-NPU2` for the smallest geometry):
+   `export_qwen36_kernels.py --model-dir <model>`, each new GEMM shape through the harness,
+   then steps 3 and 4 on a prompt of more than one block (`--layers 4 --prefill-logits`, then all
+   layers with `--max-tokens 8`: the same greedy continuation, since decode reads the DeltaNet
+   state and KV rows the route wrote), layer-major against `--block-major` byte-identical (no
+   experts, nothing may differ), and `oflm-test --llm` through `oflm serve` with no flag set.
+   With `OFLM_OPEN_GEMM_BLOCK=0`, and separately on a set with no route, a long prompt still
+   prefills (the sequential path) -- the fall-through that used to skip the prompt.
 
 **Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`OFLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `OFLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
 
@@ -3295,6 +3325,32 @@ the one that matters for a sliding-window family -- the block route writes the K
 Qwen3-4B's 1.66x is expected: past 1024 rows the sequential path's local layers already attend
 over a capped window, so the route has less to win there. Details:
 `.claude/plans/gemma3-block-prefill.md`.
+
+**Result 2026-09-23 (Qwen3.5, #109; the route on by default):** step 7 on
+`Qwen3.8-Distilled-9B-NPU2` (the published shape of the 9B, `linear_out` at q8) and
+`Qwen3.5-0.8B-NPU2`, natively on Windows. Every GEMM shape PASSes the harness at rel_fro
+1.65-1.72e-3 (gate 5e-3), `n24576_k4096` -- the widest N the GEMM has run -- included, 54 ms.
+The q8 out projection decided the design: packed as a re-quantised q4_1 copy, the 9B at full
+depth over 1000 positions scored mean logits corr 0.9957 against the sequential path and, at
+the twelve hardest positions (markdown table separators) against the fp64 replica, mean 0.890 /
+min 0.44 / top-5 2 of 12, where the sequential path scores 0.99998 / 0.99996 / 12 of 12 -- and
+a sequential run on an all-q4_1 set lands at 0.931 / 0.635, so the loss is the re-quantisation,
+not the route (with identical q4_1 weights the two agree to corr 1.00000 at one layer). With
+the exact split: one layer against the sequential path corr 1.00000, argmax 299/300; all 32
+layers, 1000 positions, mean corr 0.99997 / argmax 997 / top-5 976; against the fp64 replica
+at the twelve hard positions mean 0.99984, min 0.99885, argmax and top-5 12 of 12; the 16-token
+greedy continuation identical. Layer-major against `--block-major` is byte-identical at every
+position. Prefill, nothing else on the box: **9B 1000 tokens 141.9 s -> 10.5 s (13.5x), 2582
+tokens 375.9 s -> 26.6 s (14.1x); 0.8B 32.6 s -> 1.9 s and 92.7 s -> 5.6 s**; decode unchanged
+(171 -> 169 and 180 -> 179 ms/token at the 9B). Through `oflm serve` with no flag set:
+`oflm-test --llm` PASSes 5 of 5 on `qwen3.5:0.8b` (the suite lists `qwen3.5:9b` as non-chat
+and skips it; the 9B answered a 2002-token question coherently at 92 tok/s prefill), the 0.8B
+prefills that question at 588 tok/s against 26 without the route, and the 0.8B on a set with
+no route prefills it one token at a time and answers -- the fall-through. One serve run of the
+0.8B hit two `lx` ERT timeouts, the first on a 15-token prompt before that server had
+dispatched any route kernel, with NPU context errors (pci Event ID 3) in the System log at the
+same moments; four repeats of that request and a second full `oflm-test` on a fresh server did
+not reproduce it. Details: `specs/open-engine/plans/archive/qwen35-block-prefill.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)

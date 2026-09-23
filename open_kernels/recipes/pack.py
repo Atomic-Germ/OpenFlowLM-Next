@@ -92,6 +92,29 @@ def _bf16_rne(x) -> np.ndarray:
     return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
 
 
+def split_q8_q4_1(chunks, part: str) -> np.ndarray:
+    """[n, 8704] q8 chunk bytes -> [n, 5120] q4_1 chunk bytes holding one half of the exact
+    split v = 16 * hi + lo: "hi" is d = 16 * scale, m = -128 * scale, nibble hi + 8, and "lo"
+    is d = scale, m = 0, nibble lo, so the two readings sum to scale * v exactly. The
+    scales are the q8 scale times a power of two, exact in bf16. src/open_qwen36/pools.cpp
+    `split_q4_1_chunks` is the same."""
+    if part not in ("hi", "lo"):
+        raise ValueError(f"split {part!r}: hi or lo")
+    src = _u8(chunks).reshape(-1, Q8)
+    n = src.shape[0]
+    sc = _bf16_to_f32(np.ascontiguousarray(src[:, :512]).view(np.uint16))            # [n, 256]
+    code = np.ascontiguousarray(src[:, 512:]).view(np.int8).astype(np.int32)         # [n, 8192]
+    hi = part == "hi"
+    d = (sc * np.float32(16) if hi else sc).astype(np.float32)
+    m = (sc * np.float32(-128) if hi else np.zeros_like(sc)).astype(np.float32)
+    out = np.zeros((n, CH), np.uint8)
+    out[:, :512] = (d.view(np.uint32) >> 16).astype(np.uint16).view(np.uint8).reshape(n, 512)
+    out[:, 512:1024] = (m.view(np.uint32) >> 16).astype(np.uint16).view(np.uint8).reshape(n, 512)
+    q = ((code >> 4) + 8 if hi else code & 15).astype(np.uint8)                       # byte order = code order
+    out[:, 1024:] = q[:, 0::2] | (q[:, 1::2] << 4)
+    return out
+
+
 def requant_q4_1(chunks) -> np.ndarray:
     """[n, 8704] q8 chunk bytes -> [n, 5120] q4_1 chunk bytes, block for block.
 
@@ -535,7 +558,12 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         if not op.get("nch") or not op.get("in_dim"):
             raise ValueError(f"std_perm {name} without nch / in_dim")
         c0 = op.get("chunk0", 0)
-        sel = q4_chunks_of(m, name, _raw(m, name), c0, op["nch"])
+        if op.get("split"):
+            if _chunk_bytes_of(m, name) != Q8:
+                raise ValueError(f"std_perm {name} split {op['split']}: the source must be q8")
+            sel = split_q8_q4_1(_u8(_raw(m, name)).reshape(-1, Q8)[c0:c0 + op["nch"]], op["split"])
+        else:
+            sel = q4_chunks_of(m, name, _raw(m, name), c0, op["nch"])
         if sel.shape[0] != op["nch"]:
             raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
         n = op["nch"] * CH

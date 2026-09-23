@@ -931,7 +931,12 @@ GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 col
 # up (the plan's B(3)); the design and the driver are ready for it.
 MB_NT = 8
 ATTN_LMAX = 4096      # the widest attention GEMM stream (rows of window); a longer window is chunked on the host
-GEMM_ROLES = ("attn", "linear", "linear_out", "shared")   # the projections the route streams
+# The projections the route streams out of the layer's own packed bytes, which the GEMM can
+# read only at q4_1. `linear_out` is not among them: at q8 the route packs it as the exact
+# sum of two q4_1 halves (a `from: pack` weight), which is what lets a Qwen3.5 container --
+# whose ssm_out_proj ships q8 -- have a route at all.
+GEMM_ROLES = ("attn", "linear", "shared")
+DENSE_GEMM_ROLES = ("attn", "linear", "ffn")    # ... and with a dense FFN (Qwen3.5)
 
 
 def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
@@ -943,15 +948,21 @@ def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
     return hits[0]
 
 
-def gemm_route(spec: ModelSpec) -> dict | None:
+def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> dict | None:
     """Per layer type the `gemm_block` the driver reads, plus the contexts / kernels / globals /
     builds the route adds. None when a projection is streamed at q8: the GEMM dequantises the
-    q4_1 band law only, and the sequential path is then exactly what it was."""
-    if any(spec.quant_of(r) == "q8" for r in GEMM_ROLES):
+    q4_1 band law only, and the sequential path is then exactly what it was.
+
+    `ffn="dense"` is Qwen3.5 (recipes/qwen35.py): the same linear / full halves, and in place of
+    the router, the shared expert and the routed experts an `ffn_program` -- up|gate then down,
+    the shared expert's two GEMMs without its sigmoid gate. `plan` is that family's pack plan's
+    `layer_types`, since the op indices the weight buffers name are its own."""
+    dense = ffn == "dense"
+    if any(spec.quant_of(r) == "q8" for r in (DENSE_GEMM_ROLES if dense else GEMM_ROLES)):
         return None
-    L, T = layout(spec), GEMM_T
-    hid, ff = spec.hidden, spec.moe_intermediate
-    plan = pack_plan(spec)["layer_types"]
+    L, T = layout(spec, ffn=ffn), GEMM_T
+    hid, ff = spec.hidden, spec.intermediate if dense else spec.moe_intermediate
+    plan = plan if plan is not None else pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
     def ctx(N: int, K: int) -> str:
@@ -969,7 +980,8 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     # contiguous in the pool and both std_perm, so the band law the GEMM reads is already
     # what is packed) and folds it into the residual mx is handed. mx closes on xres + acc.
     moe_args = ["pool", "xres", "consts", "state", "act", "ptab"]     # mx.py's six, ax's order
-    check_buffer_args("mx", moe_args)
+    if not dense:
+        check_buffer_args("mx", moe_args)
     sff = spec.shared_expert_intermediate
     # The token-batched expert kernel (OPEN-MOE-BATCH, designs/moe_batch): one dispatch streams
     # every slot's expert once for up to MB_NT of its tokens. One xclbin, one instruction stream
@@ -982,7 +994,8 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     # which without a 64 rounds up to 256 + 128 and streams 78 experts nobody asked for.
     mb_slots = [s for s in (E >> i for i in range(30)) if s >= 8 and s % 8 == 0]
     mb_args = ["pool", "mb_x", "mb_h", "mb_y"]
-    check_buffer_args("moe_batch", mb_args)
+    if not dense:
+        check_buffer_args("moe_batch", mb_args)
     moe_batch = {"kernels": {str(s): f"mb_s{s}" for s in mb_slots}, "args": mb_args, "nt": MB_NT}
 
     # Block attention as two bf16 GEMMs per kv head (OPEN-PREFILL-ATTN, designs/attn_block): the
@@ -999,6 +1012,25 @@ def gemm_route(spec: ModelSpec) -> dict | None:
                       "kernels_s": {str(L): f"ag_s{L}" for L in ag_tiers},
                       "kernels_pv": {str(L): f"ag_pv{L}" for L in ag_tiers}}
 
+    def ffn_of(lt: str) -> dict:
+        # up and gate are the pool's first two ops, contiguous and both std_perm, so one GEMM
+        # gives [up | gate] -- the layout the shared expert's up|gate GEMM already has
+        pool = plan[lt]["pool"]
+        return {"ffn_program": [run(2 * ff, hid, "gffn_ug_w"), run(hid, ff, "gffn_down_w")],
+                "ffn_weights": {
+                    "gffn_ug_w": {"from": "pool", "ops": [_op_index(pool, "mlp.up_proj.weight"),
+                                                          _op_index(pool, "mlp.gate_proj.weight")]},
+                    "gffn_down_w": {"from": "pool", "ops": [_op_index(pool, "mlp.down_proj.weight")]}}}
+
+    def moe_of(lt: str, a_xm: int, a_rout: int, a_res: int) -> tuple[dict, dict, dict]:
+        """The MoE tail's keys, in the three places the 35B's manifest has always had them."""
+        if dense:
+            return {}, {}, {}
+        kind = "linear" if lt == LINEAR else "full"
+        return ({"moe_kernel": f"mx_{kind}", "moe_args": moe_args},
+                {"a_xm": a_xm, "a_rout": a_rout, "a_res": a_res},
+                {**shared_of(lt), "moe_batch": moe_batch})
+
     def shared_of(lt: str) -> dict:
         pool = plan[lt]["pool"]
         return {"shared_program": [run(2 * sff, hid, "gshare_w"), run(hid, sff, "gsdown_w")],
@@ -1012,36 +1044,48 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     if spec.has_linear:
         pool, consts = plan[LINEAR]["pool"], plan[LINEAR]["consts"]
         nch, vw = spec.lin_qkv_dim, spec.lin_value_width
+        out_i = _op_index(consts, "linear_attn.ssm_out_proj.weight")
+        split = spec.quant_of("linear_out") == "q8"
+        if split:
+            # The sequential kernel streams this projection at q8 and the GEMM reads q4_1 only.
+            # Re-quantising it costs what OPEN-QUANT-Q8 measured (the reason q8 is native), so
+            # the route packs the q8 weight as the exact sum of two q4_1 ones (hi and lo codes,
+            # pools split_q4_1_chunks) stacked in one buffer: one GEMM of 2 x hid rows, halves
+            # added on the host.
+            nq = q4_chunks(hid, vw)
+            op = {"op": "std_perm", "tensor": consts[out_i]["tensor"], "nch": nq, "in_dim": vw}
+            gout = {"from": "pack", "pack": [{**op, "dst": 0, "split": "hi"},
+                                             {**op, "dst": nq * CHUNK, "split": "lo"}]}
+        else:
+            gout = {"from": "consts", "ops": [out_i]}
+        m0, m1, m2 = moe_of(LINEAR, L.A_XM, L.A_ROUT, L.A_RES)
         types[LINEAR] = {
             "kind": "linear", "t": T, "eps": spec.norm_eps,
-            "program": [run(nch + vw, hid, "gqkvz_w"), run(hid, vw, "gout_w")],
-            "moe_kernel": "mx_linear", "moe_args": moe_args,
+            "program": [run(nch + vw, hid, "gqkvz_w"), run(2 * hid if split else hid, vw, "gout_w")], **m0,
             "weights": {"gqkvz_w": {"from": "pool", "ops": [_op_index(pool, "linear_attn.qkv_proj.weight"),
                                                            _op_index(pool, "self_attn.gate_proj.weight")]},
-                        "gout_w": {"from": "consts", "ops": [_op_index(consts, "linear_attn.ssm_out_proj.weight")]}},
+                        "gout_w": gout},
             "qkv_dim": nch, "vw": vw, "key_heads": spec.lin_key_heads, "value_heads": spec.lin_value_heads,
-            "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff,
-            "a_xm": L.A_XM, "a_rout": L.A_ROUT, "a_res": L.A_RES,
+            "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
+            **({"out_split": True} if split else {}),
             "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,
-            **shared_of(LINEAR), "moe_batch": moe_batch,
+            **m2, **(ffn_of(LINEAR) if dense else {}),
         }
     if spec.has_full:
         pool = plan[FULL]["pool"]
         qw, kvw = spec.attn_q_width, spec.attn_kv_width
         nq = q4_chunks(qw, hid)
+        m0, m1, m2 = moe_of(FULL, L.AA_XM, L.AA_ROUT, L.AA_RES)
         types[FULL] = {
             "kind": "full", "t": T, "eps": spec.norm_eps,
-            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w"), run(hid, qw, "go_w")],
-            "moe_kernel": "mx_full", "moe_args": moe_args,
+            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w"), run(hid, qw, "go_w")], **m0,
             "weights": {"gqkvg_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight", 0),
                                                            _op_index(pool, "self_attn.k_proj.weight"),
                                                            _op_index(pool, "self_attn.v_proj.weight"),
                                                            _op_index(pool, "self_attn.q_proj.weight", nq)]},
                         "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]}},
             "qw": qw, "kvw": kvw, "nh": spec.num_heads, "kvh": spec.num_kv_heads, "hd": spec.head_dim,
-            "rot": spec.rotary_dim, "ff": ff,
-            "a_xm": L.AA_XM, "a_rout": L.AA_ROUT, "a_res": L.AA_RES,
-            **shared_of(FULL), "moe_batch": moe_batch,
+            "rot": spec.rotary_dim, "ff": ff, **m1, **m2, **(ffn_of(FULL) if dense else {}),
         }
         if attn_block:
             types[FULL]["attn_block"] = attn_block
@@ -1054,7 +1098,7 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     # final.xclbin for the whole GEMM route and one insts.bin per shape.
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
-    kinds = [k for lt, k in ((LINEAR, "linear"), (FULL, "full")) if lt in types]
+    kinds = [k for lt, k in ((LINEAR, "linear"), (FULL, "full")) if lt in types and not dense]
     for kind in kinds:
         name = f"mx_{kind}"
         if "mx" not in out["contexts"]:
@@ -1063,25 +1107,28 @@ def gemm_route(spec: ModelSpec) -> dict | None:
         out["builds"][name] = {"design": "layer_x/mx.py", "build_dir": f"layer_x/build_mx_{kind}{sfx}", "env": {"MX_KIND": kind}}
     # the expert streams share one xclbin (the core program does not depend on the slot count);
     # the x / h / y globals are sized for the longest
-    out["contexts"]["mb"] = f"mb_s{mb_slots[0]}/final.xclbin"
-    for s in mb_slots:
+    for s in ([] if dense else mb_slots):
+        out["contexts"].setdefault("mb", f"mb_s{mb_slots[0]}/final.xclbin")
         name = f"mb_s{s}"
         out["kernels"][name] = {"context": "mb", "insts": f"{name}/insts.bin", "patch": "moebatch", "build": name}
         out["builds"][name] = {"design": "moe_batch/moe_batch.py", "build_dir": f"moe_batch/build_s{s}{sfx}",
                                "env": {"MB_SLOTS": str(s), "MB_NT": str(MB_NT), "MB_HID": str(hid), "MB_FF": str(ff),
                                        "MB_EXPERTS": str(E), "MB_POOL_DOWN": str(L.POOL_DOWN),
                                        "MB_POOL_BYTES": str(L.POOL_BYTES)}}
-    out["globals"]["mb_x"] = mb_slots[0] * hid * MB_NT * 2
-    out["globals"]["mb_h"] = mb_slots[0] * ff * MB_NT * 2
-    out["globals"]["mb_y"] = mb_slots[0] * hid * MB_NT * 4
+    if not dense:
+        out["globals"]["mb_x"] = mb_slots[0] * hid * MB_NT * 2
+        out["globals"]["mb_h"] = mb_slots[0] * ff * MB_NT * 2
+        out["globals"]["mb_y"] = mb_slots[0] * hid * MB_NT * 4
     if attn_block:
         hd = spec.head_dim
+        # AG_M is baked into the build; the 35B's directories keep the names they have always had
+        msfx = "" if ag_m == 2048 else f"_m{ag_m}"
         out["contexts"]["ag"] = f"ag_s{ag_tiers[0]}/final.xclbin"
         for Lw in ag_tiers:
             for tag, K, N in (("s", hd, Lw), ("pv", Lw, hd)):
                 name = f"ag_{tag}{Lw}"
                 out["kernels"][name] = {"context": "ag", "insts": f"{name}/insts.bin", "build": name}
-                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{sfx}",
+                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{sfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K), "AG_N": str(N)}}
         # a: Q or P rows [m, K] bf16; b: the tiled K^T or V [K, N] bf16; c: [m, N] f32 -- sized for the widest
         out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2
