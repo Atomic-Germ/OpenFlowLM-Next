@@ -4,6 +4,7 @@
   fetchurl,
   python312,
   python312Packages,
+  pkgs,
   xrt,
   git,
   makeWrapper,
@@ -11,6 +12,13 @@
   zlib,
   patchelf,
   skipBert ? true,
+  # Three dense specs currently fail with the upstream 1.4.3/20260923
+  # mlir-aie + Peano toolchain on Python 3.12:
+  #   - qwen25-3b: dx_attn.py lacks a bias stream for this spec's q/k/v bias.
+  #   - minicpm5-2b, phi4-mini-4b: aiecc fails with
+  #     "aie.objectfifo.pool op segment 0 has no filler" in dx_attn placement.
+  # These are recipe/toolchain issues, not Nix/Python-version regressions.
+  # Skip them until open_kernels/recipes/dense.py or dx_attn.py covers them.
   skipSpecs ? "qwen25-3b,minicpm5-2b,phi4-mini-4b",
 }:
 
