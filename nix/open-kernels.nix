@@ -95,7 +95,7 @@ stdenv.mkDerivation rec {
     #   - qwen25-3b: attention bias not supported by this design
     #   - minicpm5-2b, phi4-mini-4b: aiecc objectfifo.pool placement error
     # Skip them until the open_kernels recipe covers them.
-    python utilities/export-kernels.py --force --jobs "''${NIX_BUILD_CORES:-4}" \
+    python ../utilities/export-kernels.py --force --jobs "''${NIX_BUILD_CORES:-4}" \
       ${lib.optionalString skipBert "--skip-bert"} \
       ${lib.optionalString (skipSpecs != "") "--skip-specs ${skipSpecs}"}
   '';
