@@ -38,10 +38,11 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, PacketFlow, Program, Runtime, TaskGroup, Worker
+from aie.iron import (Acquire, Bd, Buffer, CompileTime, DmaChannel, In, InOut, Lock, ObjectFifo, Out,
+                     PacketFlow, Program, Release, Runtime, TaskGroup, TileDma, Worker)
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
-from aie.dialects._aie_enum_gen import AIETileType, WireBundle
+from aie.dialects._aie_enum_gen import AIETileType, DMAChannelDir, WireBundle
 from aie.iron.kernel import ExternalFunction
 
 HERE = Path(__file__).parent
@@ -138,6 +139,13 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     inc = include_dirs() + [str(GEMV), str(GLUE), str(POST), str(X.LN), str(X.RT), str(HERE.parent / "moe_experts")]
     K = X.kernels(inc, t)
     L = X.ln_kernels(inc, tl)
+    if ondv:
+        # the per-column control-word kernel (designs/router/ondv_ctrl_col.cc): its first two
+        # args are the x broadcast's elements (bf16[2048] = 4 KB) and its fourth is the 512-B
+        # control buffer (120 words + slack)
+        f_oc = ExternalFunction("ondv_ctrl_col", source_file=str(X.RT / "ondv_ctrl_col.cc"),
+                                arg_types=[t["x"], t["x"], np.int32, tl["u8_ctrl"]],
+                                include_dirs=inc + [str(X.RT)])
     f_ab = (ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
                              arg_types=[u8_4k, fxn, f32, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
             ExternalFunction("glue_ab", source_file=str(GLUE / "glue_ab.cc"), arg_types=[u8_4k, fxn, f32, np.int32], include_dirs=inc, **GLUE_FLAGS))
@@ -164,16 +172,23 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
     of_gout = ObjectFifo(u8_2k, name="gout", depth=3)
     of_pin = ObjectFifo(u8_4k, name="pin", depth=2)        # [nw][o g][z g]...
     of_pout = ObjectFifo(u8_2k, name="pout", depth=2)      # og per group
-    # on-device routing (lx_ondv): the router core's control stream, and the pool-base
-    # config it is generated against
-    of_octrl = ObjectFifo(u8_4k, name="octrl", depth=1) if ondv else None
-    # the control streams' source tiles (hoisted: the placer dedups a shim tile's channel
-    # requirements by logical-tile OP, so one Tile object per source column, reused by every
-    # PacketFlow from it) and which source each column's stream comes from
-    src_of_col = [0, 0, 0, 1, 1, 1, 2, 2]
-    octrl_src = [Tile(5, 0, tile_type=AIETileType.ShimNOCTile),
-                 Tile(6, 0, tile_type=AIETileType.ShimNOCTile),
-                 Tile(7, 0, tile_type=AIETileType.ShimNOCTile)] if ondv else None
+    # on-device routing (lx_ondv): eight per-column emitter cores at row 4, each running
+    # ondv_ctrl_col and sending ONE packet-stamped BD on its own MM2S to its own column's
+    # shim TileControl. ONE shared CoreTile object per column so the Worker, the Buffer, the
+    # Lock, the TileDma and the PacketFlow all land on the SAME logical tile (the placer
+    # dedups channel requirements by logical-tile op).
+    emitter_tile = [Tile(c, 4, tile_type=AIETileType.CoreTile) for c in range(N_CORES)] if ondv else None
+    # the shim tile each column's w fifo lives on. The packet flow's destination MUST be this
+    # SAME Tile object (not a fresh Tile(c, 0)): the routed descriptors (BD 8/9/10) are written
+    # on this shim's w channel, so the control packets must reach THIS shim's TileControl.
+    shim_w = [Tile(c, 0, tile_type=AIETileType.ShimNOCTile) for c in range(N_CORES)]
+    ctrlw = [Buffer(tl["u8_ctrl"], name=f"ctrlw{c}", tile=emitter_tile[c]) for c in range(N_CORES)] if ondv else None
+    # per-column acquire locks: index 0 fires slot 0's up|gate (right after rout+cfg); index
+    # k+1 fires slot k's down AND slot k+1's up|gate on the h_k trigger (value 2 for k<7),
+    # except index NE which fires only slot NE-1's down (value 1). One shared done lock per
+    # column satisfies the verifier's acquire+release pairing on every packet BD.
+    pktlk = [[Lock(emitter_tile[c], init=0, name=f"pktlk{c}_{i}") for i in range(X.NE + 1)] for c in range(N_CORES)] if ondv else None
+    pktdone = [Lock(emitter_tile[c], init=0, name=f"pktdone{c}") for c in range(N_CORES)] if ondv else None
 
     # ---- cores
     def main_body(win, xin, yout, *args):
@@ -259,8 +274,7 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
-                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]]
-                              + ([of_octrl.prod(), L["ondv_ctrl"]] if ondv else []),
+                               L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]],
                       tile=Tile(0, hrow), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
@@ -274,6 +288,34 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                                    Buffer(f32, name="beta"), Buffer(fqk, name="qk"), Buffer(fvt, name="vt"), Buffer(fxn, name="xnb"),
                                    f_ab, f_small, f_conv, f_emit, f_copy],
                           tile=Tile(2, hrow), stack_size=0x1800))
+    if ondv:
+        # x-broadcast elements before the two on-device-routing elements (the router's top-8
+        # and the 2-word pool base), which now arrive right after the MoE header: part 0's xn
+        # + og, then moe_sequence's xm. The per-wave h elements follow, after rout + cfg.
+        N_X_SKIP = XN_ELEMS + OG_ELEMS + 1
+
+        def _emitter_body(c):
+            def emitter_body(xin, ctrl, f_oc_col, *locks):
+                for _ in range_(N_X_SKIP):
+                    e = xin.acquire(1)
+                    xin.release(1)
+                r = xin.acquire(1)          # act[A_ROUT] (the router's top-8)
+                cfg = xin.acquire(1)        # the 2-word pool base
+                f_oc_col(r, cfg, c, ctrl)
+                xin.release(2)
+                locks[0].release(1)         # slot 0's up|gate (BD 8/9)
+                for e in range(X.NE):       # Python-unrolled: h_0 .. h_7
+                    h = xin.acquire(1)
+                    xin.release(1)
+                    # h_k fires slot k's down AND slot k+1's up|gate (one 15-word packet),
+                    # except h_{NE-1} fires only the last down (a 5-word packet)
+                    locks[e + 1].release(1)
+            return emitter_body
+
+        for c in range(N_CORES):
+            workers.append(Worker(_emitter_body(c),
+                                  fn_args=[of_x.cons(), ctrlw[c], f_oc, *pktlk[c]],
+                                  tile=emitter_tile[c], stack_size=0x1800))
 
     bt = X.bt
     BB_HID, BB_OUT = X.role_band_bytes("linear", HID), X.role_band_bytes("linear_out", OUT_K)
@@ -367,21 +409,21 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
 
     def sequence(*a):
         if ondv:
-            (a_pool, c_xres, a_consts, a_state, a_act, a_cfg, a_octrl) = a[:7]
-            (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[7:17]
-            octrl_c = a[17]
+            (a_pool, c_xres, a_consts, a_state, a_act, a_cfg) = a[:6]
+            (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[6:16]
         else:
             (a_pool, c_xres, a_consts, a_state, a_act) = a[:5]
             (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c) = a[5:15]
-            a_cfg = a_octrl = octrl_c = None
+            a_cfg = None
         if DENSE:
             dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
                            side_p, gact_p, gout_c, pin_p, pout_c)
         elif part == 0 or ondv:
             # With MOE_ONDEVICE_ROUTE this is the WHOLE layer in ONE instruction stream:
-            # the router core emits the control stream, so there is no host between it and
-            # the routed experts and no second dispatch. Without it, `part` still selects
-            # the half of the layer the driver dispatches and moeroute2 patches between.
+            # the per-column emitter cores retarget + push the routed-expert descriptors
+            # on-device, so there is no host between the router and the routed experts and
+            # no second dispatch. Without it, `part` still selects the half of the layer the
+            # driver dispatches and moeroute2 patches between.
             # 1. layer-entry norm: xn -> act[A_XN]
             tg_ln = TaskGroup()
             lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -447,68 +489,66 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
             tg_ln.finish()
             tg_r = TaskGroup()
             lni.fill(a_consts, tap=bt(C_BYTES, C_RW, X.W_ELEMS * ELEM), wait=True, group=tg_r)
-            if ondv:
-                # The router's LAST input element, and it must be issued BEFORE the rout
-                # drain: the core holds the rout element until it has emitted the control
-                # stream, and it cannot emit that until it has the pool base -- so a drain
-                # first and a config after it deadlocks (measured: ERT timeout, and the
-                # run completes once the fill moves here).
-                lni.fill(a_cfg, tap=bt(ELEM, 0, ELEM), wait=True, group=tg_r)
             lno.drain(a_act, tap=bt(A_BYTES, A_ROUT, ELEM), wait=True, group=tg_r)
             tg_r.finish()
-            if ondv:
-                # the pool base the router forms the retarget addresses against, and the
-                # control stream it emits -- two plain DDR round trips (the config is the
-                # router's LAST input element, so no extra shim channel)
-                if os.environ.get("ONDV_NO_OCTRL_DRAIN") != "1":
-                    pcf = Pipeline(1)
-                    pcf.drain(octrl_c, a_octrl, bt(ELEM, 0, ELEM))
-                    pcf.finish()
             pw.finish()
             px.finish()
             if ondv and os.environ.get("ONDV_SKIP_MOE") != "1":
                 # the rest of the layer, one stream: the routed fills are configured but
-                # never enqueued and the control stream retargets + pushes them on-device
+                # never enqueued and the per-column emitter cores retarget + push them
+                # on-device (their rout + pool-base input rides the x broadcast)
                 X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
                                A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW,
-                               ondv=(a_octrl, octrl_src, src_of_col))
+                               ondv=(a_cfg,))
         else:
             # 8. the MoE block (moeroute2 has pointed the routed slots' fills at the router's choice)
             X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                           A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW,
-                           ondv=(a_octrl, octrl_src, src_of_col) if ondv else None)
+                           A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW)
 
     rt_args = [pool_ty, xres_ty, consts_ty, state_ty, act_ty]
     if ondv:
-        # two extra DDR buffers: the pool-base config in (filled into the router's input
-        # stream) and the router's control stream out
-        rt_args += [np.ndarray[(ELEM,), np.dtype[np.uint8]], np.ndarray[(ELEM,), np.dtype[np.uint8]]]
+        # one extra DDR buffer: the pool-base config in (the 2 words the emitters retarget
+        # the routed-expert descriptors against; the router's top-8 rides `act` at A_ROUT)
+        rt_args += [np.ndarray[(ELEM,), np.dtype[np.uint8]]]
     rt_args += [of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
-                [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
+                [of_w[c].prod(tile=shim_w[c] if ondv else Tile(c, 0)) for c in range(N_CORES)],
                 of_x.prod(tile=Tile(1, 0)),
                 [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                 of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
                 of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0))]
-    if ondv:
-        # (4,0) S2MM ch1 is the one free S2MM on a column that has no second MM2S to
-        # give: the router's control stream comes back here
-        rt_args += [of_octrl.cons(tile=Tile(4, 0))]
     rt = Runtime(sequence, rt_args)
     flows = []
-    if ondv and os.environ.get("ONDV_NO_FLOWS") != "1":
-        # The router's control stream reaches a column's TileControl by a packet route.
-        # Columns 0-4 have no free MM2S channel (lni+w0, w1+x, side+w2, gact+w3, pin+w4),
-        # so the stream is emitted from the free ch1 of (5,0), (6,0), (7,0) -- a packet
-        # stream may cross tiles (designs/expert_fetch/ondv_flow_cross_probe.py) -- and
-        # fanned to all eight columns' TileControl, one pkt_id each.        # ONE Tile object per source column: the placer dedups channel requirements by
-        # (logical-tile op, channel), so a fresh Tile() per flow would ask for a channel
-        # each time instead of sharing one.
-        for c in range(int(os.environ.get("ONDV_FLOW_N", str(N_CORES)))):
-            flows.append(PacketFlow(pkt_id=c, src=octrl_src[src_of_col[c]],
-                                   dst=Tile(c, 0, tile_type=AIETileType.ShimNOCTile),
-                                   src_port=WireBundle.DMA, src_channel=1,
-                                   dst_port=WireBundle.TileControl, dst_channel=0,
-                                   shim_symbol=f"octrl{5 + src_of_col[c]}_shim_alloc" if c in (0, 3, 6) else None))
+    if ondv:
+        # one packet-stamped BD per emitter core on its OWN MM2S ch1, aimed at its own
+        # column's shim TileControl (pkt_id 15 = the placer's controller_id). A core's
+        # packet reaches its own column on South -- the legal in-column arrival -- so no
+        # cross-column routing, no control overlay and no shim MM2S channel are needed.
+        for c in range(N_CORES):
+            for lk in pktlk[c]:
+                rt.add_lock(lk)
+            rt.add_lock(pktdone[c])
+            # 9 packet BDs per emitter, chained in firing order and paced by the acquire
+            # locks the emitter releases: slot 0's up|gate (40 B), then per slot k>=1 a
+            # 60-B packet holding slot k-1's down (20 B) + slot k's up|gate (40 B), and
+            # finally slot NE-1's down (20 B). Each reads its column's ctrlw slice at a
+            # byte offset; the down_{k-1}|up|gate_k words are contiguous (offset 60k-20).
+            bds = [Bd(buffer=ctrlw[c], offset=0, length=40,
+                      acquires=[Acquire(pktlk[c][0])], releases=[Release(pktdone[c])],
+                      packet=(0, 15), next=1)]
+            for k in range(1, X.NE):
+                bds.append(Bd(buffer=ctrlw[c], offset=60 * k - 20, length=60,
+                              acquires=[Acquire(pktlk[c][k])], releases=[Release(pktdone[c])],
+                              packet=(0, 15), next=k + 1))
+            bds.append(Bd(buffer=ctrlw[c], offset=460, length=20,
+                          acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])],
+                          packet=(0, 15), next=0))
+            rt.add_tile_dma(TileDma(
+                tile=emitter_tile[c],
+                channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
+            flows.append(PacketFlow(pkt_id=15, src=emitter_tile[c],
+                                    src_port=WireBundle.DMA, src_channel=1,
+                                    dst=shim_w[c],
+                                    dst_port=WireBundle.TileControl, dst_channel=0))
     for f in flows:
         rt.add_flow(f)
     if pieces:
@@ -519,15 +559,16 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"] + (["--generate-ctrl-pkt-overlay"] if os.environ.get("ONDV_CTRL_OVERLAY") == "1" else []))
-def lx_ondv(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, cfg: In, octrl: Out, *,
+def lx_ondv(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, cfg: In, *,
             part: CompileTime[int] = 0, stop: CompileTime[int] = 99, srchash: CompileTime[int] = 0):
-    """The fused whole-layer path: the router helper core emits the routed-expert
-    retarget+enqueue control words on-device, so the layer is ONE instruction stream.
+    """The fused whole-layer path: eight per-column emitter cores write the routed-expert
+    retarget+enqueue control words and send them on-device, so the layer is ONE instruction
+    stream (no host between the router and the routed experts).
 
-    Two extra DDR buffers: `cfg` carries [base_lo, base_hi] = the MoE pool BO's DDR
-    address (bo.address() + 0x8000_0000; the driver writes it, one per layer), and
-    `octrl` receives the 8x8x15-word control stream the router emits."""
-    return _lx_build(pool, xres, consts, state, act, cfg, octrl, part=part, stop=stop, srchash=srchash, ondv=True, mrow=2, hrow=3)
+    One extra DDR buffer: `cfg` carries [base_lo, base_hi] = the MoE pool BO's DDR address
+    (bo.address() + 0x8000_0000; the driver writes it, one per layer). The router's top-8
+    rides `act` at A_ROUT and reaches the emitters over the x broadcast."""
+    return _lx_build(pool, xres, consts, state, act, cfg, None, part=part, stop=stop, srchash=srchash, ondv=True, mrow=2, hrow=3)
 
 
 DESIGN = lx_ondv if X.ONDV else lx

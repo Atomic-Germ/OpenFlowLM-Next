@@ -415,6 +415,12 @@ def moe_body(win, ain, yout, B, K, nx=NX):
         K["hdr"](we, xm, ms, mode)
         win.release(1)
     ain.release(1)
+    if ONDV and nx == NX:
+        # the two on-device-routing x elements (rout + cfg) arrive here, BEFORE the waves;
+        # the main cores skip them so the emitters (additional x-broadcast consumers) can
+        # read them and the fifo stays in step
+        e = ain.acquire(2)
+        ain.release(2)
     for e in range_(nx):                          # NE routed slots, then the shared expert
         for b in range_(2):                       # u then g, HID_PC rows each, UP_ELEMS elements per band
             for g in range_(C.UP_ELEMS):
@@ -496,77 +502,56 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
     placeholder pool offsets (expert j); moeroute2 rewrites them from the router output.
     nx must match the body's: NE drops the shared expert's fills with its slot.
 
-    With MOE_ONDEVICE_ROUTE (`ondv = (a_octrl, src_tiles, src_of_col)`) the routed fills are
-    configured but never enqueued, and the router's control stream retargets and pushes them
-    on-device; the descriptor bookkeeping is in the comments below."""
+    With MOE_ONDEVICE_ROUTE (`ondv = (a_cfg,)` = the pool-base buffer) the routed fills are
+    configured ONCE (BD 8/9/10, placeholder expert 0) and never enqueued; the per-column
+    emitter cores retarget + push those same three descriptors per wave. The emitters' input
+    (the router's top-8 and the pool base) rides the x broadcast right after the MoE header,
+    so the control words are sent before the main cores need the weights."""
     spp, cps = C.STRIPES_PER_PROJ, C.CORES_PER_STRIPE
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, ELEM))
     for c in range(N_CORES):
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_ROUT, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_consts, bt(C_BYTES, C_SGW, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_RES + c * ROWS_PC * 4, CALL_BYTES))
-    prev_down = []                                    # ONDV: the previous expert's down descriptors
+    if ONDV:
+        # Configure the three pinned routed descriptors ONCE (placeholder expert 0): their
+        # length/stride is the same for every expert, so only the address (w1/w2) changes per
+        # wave, and that is exactly what the emitters' control packets rewrite. The descriptors
+        # stay pinned for the whole block (never freed; the control packets own them).
+        for c in range(N_CORES):
+            up0 = (2 * spp * 0 + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
+            pipe_w.configure(w_prods[c], a_pool, half_tap(up0), bd_id=ONDV_BD_UP)
+            pipe_w.configure(w_prods[c], a_pool, half_tap(up0 + STRIPE), bd_id=ONDV_BD_GATE)
+            pipe_w.configure(w_prods[c], a_pool,
+                             bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
+                                DOWN_PER_CORE * DOWN_BAND), bd_id=ONDV_BD_DOWN)
+        # the two on-device-routing x elements (rout + cfg) arrive BEFORE the waves so the
+        # emitters can generate + send the control words in time; the main cores skip them
+        pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_ROUT, ELEM))
+        pipe_x.fill(x_prod, ondv[0], bt(ELEM, 0, ELEM))
     for e in range(nx):
-        upg = []                                      # ONDV: this expert's up | gate descriptors
         for c in range(N_CORES):
             if e < NE:
-                up = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
-                if ONDV:
-                    # configured, never enqueued: the router retargets these at the
-                    # chosen expert and pushes them (the fused-layer path), and the
-                    # pinned BD indices are what its control packets address
-                    upg.append(pipe_w.configure(w_prods[c], a_pool, half_tap(up), bd_id=ONDV_BD_UP))
-                    upg.append(pipe_w.configure(w_prods[c], a_pool, half_tap(up + STRIPE), bd_id=ONDV_BD_GATE))
-                else:
-                    pipe_w.fill(w_prods[c], a_pool, half_tap(up))
-                    pipe_w.fill(w_prods[c], a_pool, half_tap(up + STRIPE))
+                # routed slot: the descriptors were configured once above; the emitters'
+                # control packets retarget + push them per wave. Nothing to configure here.
+                pass
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_UP + c * HALF, HALF))
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_HP + c * HID_PC * 4, HID_PC * 4))
-        if ondv is not None and e < NE and os.environ.get("ONDV_NO_CTRL_BD") != "1":
-            # retarget + enqueue this wave's up | gate (the cores are blocked on them)
-            ondv_recycle(ondv_stream(ondv[0], ondv[1], ondv[2], e, 0), 4)
         pipe_y.finish(*y_conss)                           # the hidden parts are in DDR
-        if ondv is not None:
-            # the previous wave's down descriptor is long consumed (the core finished that
-            # expert before this wave's up | gate, whose y-finish is the line above), so Bd
-            # 10 is free again for this wave to pin
-            for t in prev_down:
-                pipe_w.free(t)
-            prev_down = []
         pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_HP, ELEM))
-        down_t = []                                   # ONDV: this expert's down descriptors
         for c in range(N_CORES):
             if e < NE:
-                dn = bt(POOL_BYTES, POOL_DOWN + e * UP_BYTES + c * DOWN_PER_CORE * DOWN_BAND,
-                        DOWN_PER_CORE * DOWN_BAND)
-                if ONDV:
-                    down_t.append(pipe_w.configure(w_prods[c], a_pool, dn, bd_id=ONDV_BD_DOWN))
-                else:
-                    pipe_w.fill(w_prods[c], a_pool, dn)
+                pass                                     # down descriptor configured once above
             else:
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                                    DOWN_PER_CORE * DOWN_BAND))
-        if ondv is not None:
-            if e < NE and os.environ.get("ONDV_NO_CTRL_BD") != "1":
-                # the down descriptor exists now, so its 3 words can be retargeted + pushed
-                ondv_recycle(ondv_stream(ondv[0], ondv[1], ondv[2], e, 1), 2)
-            # Freeing here, at the END of the wave, is what keeps the pinned ids ours: the
-            # core has consumed this wave's up | gate (the y-finish above) and is past the
-            # previous wave's down (that wave's y-finish came first), and no unpinned
-            # configure runs between a free and the next wave's re-pin.
-            for t in upg:
-                pipe_w.free(t)
-            prev_down = down_t
     for c in range(N_CORES):
         pipe_y.drain(y_conss[c], c_xres, bt(HID, c * ROWS_PC, ROWS_PC))   # the block output = the new residual
     pipe_w.finish()
     pipe_x.finish()
     pipe_y.finish()                                   # the block output is in DDR
-    if ONDV:
-        for t in prev_down:                           # the last expert's down is consumed now
-            pipe_w.free(t)
 
 
 # ---- DeltaNet on the main cores (dnx.h): S slices ride the w stream, S' rows leave through y
@@ -636,10 +621,9 @@ def ln_types():
     t = dict(u8_4k=np.ndarray[(ELEM,), np.dtype[np.uint8]], xb=np.ndarray[(HID,), np.dtype[bfloat16]],
              racc=np.ndarray[(SPEC.num_experts,), np.dtype[np.float32]])
     if ONDV:
-        # the router core's L1 is tight and every column's second MM2S channel is spoken
-        # for, so the pool-base config rides the router's existing input stream (a last
-        # 4 KB element) rather than a fifo of its own
-        t.pop("u8_cfg", None)
+        # the per-column emitter core's control buffer: 8 slots x 15 words = 480 B of words
+        # (the emitter's packet BD sends 480 of the 512 B); the kernel's 4th arg is this type
+        t["u8_ctrl"] = np.ndarray[(512,), np.dtype[np.uint8]]
     return t
 
 
@@ -661,12 +645,6 @@ def ln_kernels(inc, t):
     k["rcopy"] = ExternalFunction("router_copy_x", source_file=str(RT / "router_copy.cc"), arg_types=[u, t["xb"]], include_dirs=inc)
     k["racc"] = ExternalFunction("router_acc", source_file=str(RT / "router.cc"), arg_types=[u, t["xb"], t["racc"], np.int32], include_dirs=inc)
     k["rfin"] = ExternalFunction("router_fin", source_file=str(RT / "router_fin.cc"), arg_types=[t["racc"], u], include_dirs=inc)
-    if ONDV:
-        # on-device routing: the router's own top-8 -> the retarget+enqueue control words
-        # (designs/router/ondv_ctrl.{h,cc}); u8_4k for [rout | idx | w], the 2-word config
-        # and the 8x8x15-word control stream
-        k["ondv_ctrl"] = ExternalFunction("ondv_ctrl", source_file=str(RT / "ondv_ctrl.cc"),
-                                          arg_types=[u, u, u], include_dirs=inc + [str(RT)])
     return k
 
 
