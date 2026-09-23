@@ -15,9 +15,21 @@
       systems = [ "x86_64-linux" ];
 
       flake = {
+        overlays.default = final: prev: {
+          oflm = inputs.self.packages.${prev.system}.oflm;
+          openflowlm-open-kernels = inputs.self.packages.${prev.system}.openflowlm-open-kernels;
+          openflowlm-open-kernels-with-bert = inputs.self.packages.${prev.system}.openflowlm-open-kernels-with-bert;
+        };
+
         nixosModules = {
-          default = ./nixos-module.nix;
-          openflowlm = ./nixos-module.nix;
+          default = { config, lib, pkgs, ... }: {
+            nixpkgs.overlays = [ inputs.self.overlays.default ];
+            imports = [ ./nixos-module.nix ];
+          };
+          openflowlm = { config, lib, pkgs, ... }: {
+            nixpkgs.overlays = [ inputs.self.overlays.default ];
+            imports = [ ./nixos-module.nix ];
+          };
         };
       };
 
@@ -29,7 +41,10 @@
         };
       in {
         packages = {
-          oflm = pkgs.callPackage ./package.nix {};
+          oflm = pkgs.callPackage ./package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
+          oflm-with-bert = pkgs.callPackage ./package.nix {
+            openflowlm-open-kernels = config.packages.openflowlm-open-kernels-with-bert;
+          };
           openflowlm-open-kernels = pkgs.callPackage ./open-kernels.nix {};
           openflowlm-open-kernels-with-bert = pkgs.callPackage ./open-kernels.nix { skipBert = false; };
           default = config.packages.oflm;
@@ -43,7 +58,9 @@
         devShells = {
           default = config.devShells.oflm;
 
-          oflm = pkgs.mkShell {
+          oflm = let
+            oflmPkg = pkgs.callPackage ./package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
+          in pkgs.mkShell {
             name = "oflm-dev";
             nativeBuildInputs = with pkgs; [
               cmake
@@ -53,10 +70,11 @@
               cargo
               rustc
             ];
-            buildInputs = (pkgs.callPackage ./package.nix {}).buildInputs;
+            buildInputs = oflmPkg.buildInputs;
             shellHook = ''
               export XILINX_XRT="${pkgs.xrt}/opt/xilinx/xrt"
               export PKG_CONFIG_PATH="${pkgs.xrt}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+              export OFLM_XCLBIN_PATH="${config.packages.openflowlm-open-kernels}/share/oflm"
             '';
           };
 
