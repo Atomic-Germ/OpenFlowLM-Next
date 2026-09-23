@@ -83,6 +83,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "If load asr model")
             ("embed,e", po::value<bool>(&parsed_args.embed)->default_value(0),
             "If load embed model")
+            ("asrmodel", po::value<std::string>(&parsed_args.asr_model)->default_value(""),
+             "Which Whisper model to load with --asr 1 "
+             "(default: whisper-v3:turbo)")
             ("embeddingmodel", po::value<std::string>(&parsed_args.embedding_model)->default_value(""),
              "Which embedding model to serve with --embed 1 "
              "(default: embed-gemma:300m)")

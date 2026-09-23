@@ -4,6 +4,7 @@ import os
 import re
 import time
 import json
+import uuid
 import urllib.request
 import urllib.error
 from abc import ABC, abstractmethod
@@ -2020,4 +2021,133 @@ class ApiConformanceTask(BaseTestTask):
                                 lambda: self._probe_parity(model_id))
                 print(f"Finished API conformance for: {model_id}")
         print(f"\nAPI conformance tests complete. Saved to {self.csv_filename}")
+        return self.result
+
+
+class TranscriptionTask(BaseTestTask):
+    """
+    /v1/audio/transcriptions, which nothing tested until now.
+
+      T1 Transcribes    A clip of clear speech comes back as text that contains
+                        what is said in it.
+      T2 Refuses        A request with no file is refused with a non-2xx status
+                        and an error a client can read.
+      T3 Answers as     The response names a model, so a client can tell which
+         itself         one produced the text.
+
+    The audio suite next door posts `chat.completions` with `input_audio`, which
+    Whisper refuses as a non-chat model -- so it exercises the transcription
+    endpoint not at all. This one talks raw HTTP: `/v1/audio/transcriptions` is
+    multipart, and for T2 the status IS the assertion.
+
+    It does not filter on the server's model list, deliberately: Whisper is
+    hidden from `/v1/models` (`model_list.hpp` skips it in both listings), and
+    the handler ignores the `model` field anyway. The suite therefore asks
+    whether the SERVER transcribes, which is a property of `--asr 1`, not of a
+    tag.
+    """
+
+    SUITE_NAME = "transcription"
+
+    # Read from the audiobook clip, whose opening words are unambiguous speech.
+    CLIP = PACKAGE_DIR / "test_files" / "audio" / "dead-faith-audiobook-example.mp3"
+    CONTENT_PATTERN = re.compile(r"\b(opinion|democracy|uniforms|sanctioned)\b", re.IGNORECASE)
+    MODEL_TAG = "whisper-v3:turbo"
+
+    def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
+        super().__init__(base_url, backend_os, model_filter=model_filter)
+        self.csv_filename = self.get_csv_filename("transcription")
+
+    def _post_multipart(self, fields: dict, files: dict, timeout: int = 600):
+        """One raw multipart POST; returns (status, parsed_json_or_None, raw_text)."""
+        boundary = "----oflmtest" + uuid.uuid4().hex
+        body = bytearray()
+        for name, value in fields.items():
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                     f"{value}\r\n").encode("utf-8")
+        for name, (filename, content) in files.items():
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; "
+                     f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                     ).encode("utf-8")
+            body += content + b"\r\n"
+        body += f"--{boundary}--\r\n".encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/audio/transcriptions", data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status, text = response.status, response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            status, text = e.code, e.read().decode("utf-8", "replace")
+        try:
+            return status, json.loads(text), text
+        except json.JSONDecodeError:
+            return status, None, text
+
+    def _probe_transcribe(self):
+        content = self.CLIP.read_bytes()
+        status, body, text = self._post_multipart({"model": self.MODEL_TAG},
+                                                  {"file": (self.CLIP.name, content)})
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {text[:200]}"), status, text[:200]
+        said = (body or {}).get("text", "")
+        if not said.strip():
+            return ("FAIL", "answered 200 with no text"), status, text[:200]
+        if not self.CONTENT_PATTERN.search(said):
+            return (("FAIL", f"transcript matches none of the clip's words: {said[:160]}"),
+                    status, said[:200])
+        return ("PASS", f"{len(said)} characters"), status, said[:200]
+
+    def _probe_no_file(self):
+        status, body, text = self._post_multipart({"model": self.MODEL_TAG}, {})
+        if status < 400:
+            return ("FAIL", f"answered HTTP {status} to a request with no file: {text[:160]}"), status, text[:160]
+        code, _type, message = self._error_fields(body)
+        if message is None:
+            return (("SOFT-FAIL", f"refused with HTTP {status}, but with no error object a "
+                                  f"client can read: {text[:160]}"), status, text[:160])
+        # A missing required field is the client's error, not the server's: 5xx here means
+        # the request reached something that threw rather than being validated
+        # (SERVER-REQUEST-VALIDATION).
+        if status >= 500:
+            return (("FAIL", f"HTTP {status}, so a missing file is reported as a server "
+                             f"fault: {message[:120]}"), status, message[:160])
+        return ("PASS", f"HTTP {status}, {code or 'no code'}: {message[:120]}"), status, message[:160]
+
+    def _probe_names_model(self):
+        content = self.CLIP.read_bytes()
+        status, body, text = self._post_multipart({"model": self.MODEL_TAG},
+                                                  {"file": (self.CLIP.name, content)})
+        named = (body or {}).get("model")
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {text[:160]}"), status, text[:160]
+        if not named:
+            return ("FAIL", "the response names no model"), status, text[:160]
+        return ("PASS", f"model={named}"), status, str(named)
+
+    def run(self):
+        if not self.CLIP.is_file():
+            print(f"Transcription tests skipped: {self.CLIP} is missing")
+            self.record("SKIPPED", "transcription / clip missing")
+            return self.result
+        with open(self.csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["Model", "Check", "Probe", "Status", "Detail", "Verdict"])
+            print("\n=== Starting Transcription Tests ===")
+            for check, probe_name, fn in (
+                    ("T1 Transcribes", self.CLIP.name, self._probe_transcribe),
+                    ("T2 Refuses", "no file", self._probe_no_file),
+                    ("T3 Answers as itself", self.CLIP.name, self._probe_names_model)):
+                try:
+                    verdict, status, note = fn()
+                    self.record(verdict, f"{self.MODEL_TAG} / {check}")
+                    writer.writerow([self.MODEL_TAG, check, probe_name, status, note,
+                                     f"{verdict[0]}: {verdict[1]}"])
+                    print(f"  {check} [{probe_name}]: {verdict[0]} ({verdict[1]})")
+                except Exception as e:
+                    print(f"  {check} [{probe_name}]: ERROR ({e})")
+                    self.record(f"ERROR: {e}", f"{self.MODEL_TAG} / {check}")
+                    writer.writerow([self.MODEL_TAG, check, probe_name, "N/A", str(e), f"ERROR: {e}"])
+                time.sleep(1)
+        print(f"Transcription tests complete. Saved to {self.csv_filename}")
         return self.result

@@ -130,6 +130,13 @@ def _parse_args(argv):
              "per-tensor dtype and tied-embedding mapping in the manifest, and "
              "emits model_info_entry.json for src/model_info.json.",
     )
+    parser.add_argument(
+        "--open-whisper", dest="open_whisper", action="store_true",
+        help="Build the open Whisper engine's model repo (issue #72): encoder GEMM "
+             "operands as bf16 W^T with the fused Q|K|V and cross K|V the kernel set "
+             "expects, f32 biases/norms, the decoder in bf16, and a tokenizer_config.json "
+             "carrying the bos/eos ids the host reads.",
+    )
     return parser.parse_args(argv)
 
 
@@ -152,6 +159,20 @@ def main(argv=None) -> int:
 
     # Open (unquantized) builders: no GGUF, no quantization, no config
     # assembly from a repo card. One shot produces an uploadable HF repo dir.
+    if args.open_whisper:
+        from q4nx.open_whisper import MODEL_INFO_ARTIFACT, build_open_whisper_repo
+
+        output_folder = os.path.abspath(args.output_flag or ".")
+        result = build_open_whisper_repo(input_path, output_folder, npu_assets=args.npu_assets)
+        print(f"[INFO] Open Whisper repo built at {result['output_dir']}")
+        print(f"[INFO] Source: {result['source']}")
+        print(f"[INFO] Tensors: {result['tensor_count']}")
+        for name in result["files"]:
+            print(f"  - {name}")
+        print(f"[INFO] Registry metadata written to "
+              f"{os.path.join(result['output_dir'], MODEL_INFO_ARTIFACT)}")
+        return 0
+
     if args.open_embedding or args.open_causal_lm:
         # --make-reference combined with a build references the built dir.
         make_ref = args.make_reference

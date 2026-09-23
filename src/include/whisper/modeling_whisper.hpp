@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include "whisper/whisper_npu.hpp"
+#include "whisper/whisper_engine.hpp"
 #include "nlohmann/json.hpp"
 #include "utils/profiler.hpp"
 #include "lm_config.hpp"
@@ -131,8 +132,7 @@ private:
 
     std::string model_path;
     std::unique_ptr<FFT400> fft_400;
-    std::unique_ptr<whisper_npu> whisper_engine;
-    std::unique_ptr<npu_xclbin_manager> npu;
+    std::unique_ptr<whisper_engine> engine;
 	std::unique_ptr<Whisper_Config> lm_config = nullptr;
     oflm_rt::device* device;
 

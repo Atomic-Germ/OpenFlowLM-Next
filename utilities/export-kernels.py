@@ -26,9 +26,19 @@ Requirements (assumed present, or set up here):
 
 Why Python 3.11: the installed XRT build ships pyxrt (its Python binding) for
 3.11 only, and the open_npue export needs it. mlir-aie 1.4.2 and the llvm-aie
-(Peano) wheel support 3.11, so one venv serves both families. The export is
-Linux-only (it needs the XRT/Peano toolchain and, for open_npue, the NPU), so
-the CMake target that drives this script is guarded to non-Windows builds.
+(Peano) wheel support 3.11, so one venv serves both families.
+
+This SCRIPT is Linux-only -- its venv/path handling (`/opt/xilinx/xrt`,
+`bin/python`, `lib/python*/site-packages/...`) is POSIX-specific, so the CMake
+target that drives it is guarded to non-Windows builds. The underlying build
+it drives is not: `open_kernels/export_qwen36_kernels.py` and
+`build_design.py` have no OS-specific code, mlir-aie and Peano both ship
+win_amd64 wheels, and a native Windows toolchain (`iron_setup.py`, a
+downloaded XRT SDK zip -- see mlir-aie's `docs/buildHostWinNative.md`, no WSL
+and no source build required) has built and run open_kernels sets on
+hardware (`.opencode/skill/open-granite-kernels/SKILL.md`). `open_npue`'s
+export additionally needs pyxrt and an installed NPU, which the Windows XRT
+SDK also supplies (for its own pyxrt-compatible Python version).
 """
 from __future__ import annotations
 

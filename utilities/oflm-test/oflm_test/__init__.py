@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from .tasks import (LLMTask, EmbeddingTask, AudioTask, VisionTask, ToolCallingTask,
-                    ApiConformanceTask)
+                    ApiConformanceTask, TranscriptionTask)
 
 SUITE_NAMES = ("llm", "embedding", "audio", "vision", "tools", "api")
 # Suites that need a chat model loaded; embedding is the odd one out.
@@ -154,6 +154,12 @@ def run_suites(args, baseurl, suites, model_filter, results):
     if suites["audio"]:
         results.append(AudioTask(baseurl, args.backend_os, model_filter=model_filter)
                        .run(temperature=args.temp, reasoning=args.reasoning))
+
+        # The audio task above posts chat.completions, which Whisper refuses as a
+        # non-chat model; this one is the only thing that exercises
+        # /v1/audio/transcriptions.
+        results.append(TranscriptionTask(baseurl, args.backend_os,
+                                         model_filter=model_filter).run())
 
     if suites["vision"]:
         results.append(VisionTask(baseurl, args.backend_os, model_filter=model_filter)

@@ -354,7 +354,7 @@ static json convert_tool_responses_gemma4(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), embed(args.embed), embedding_model_tag(args.embedding_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
     this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
@@ -372,7 +372,7 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
     // Initialize chat bot with default model
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
     if (this->asr) {
-        std::string whisper_tag = "whisper-v3:turbo";
+        std::string whisper_tag = this->asr_model_tag;
         ensure_asr_model_loaded(whisper_tag);
     }
     if (this->embed) {
@@ -536,6 +536,12 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
 void RestHandler::ensure_asr_model_loaded(const std::string& model_tag) {
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
     std::string ensure_tag = model_tag;
+    // get_model_info() answers an unknown tag with llama3.2:1b, which would then be
+    // pulled and handed to the Whisper loader. Refuse before anything is downloaded.
+    if (this->supported_models.get_model_info(ensure_tag).first.rfind("whisper", 0) != 0) {
+        header_print("ERROR", "--asrmodel " + ensure_tag + " is not a Whisper model in the registry");
+        exit(EXIT_FAILURE);
+    }
     switch (downloader.is_model_downloaded(ensure_tag)) {
         case ModelDownloader::ModelStatus::Ready:
             break;
@@ -1755,6 +1761,13 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         }
         std::string model = request["model"].get<std::string>();
         std::string file_content = request["file"].get<std::string>();
+        if (file_content.empty()) {
+            send_response(json{{"error", {
+                {"message", "file is required and must contain the audio to transcribe."},
+                {"type", "invalid_request_error"}, {"param", "file"},
+                {"code", "invalid_value"}}}});
+            return;
+        }
         std::vector<uint8_t> audio_raw(file_content.begin(), file_content.end());
         bool stream = request.value("stream", false);
         json response;

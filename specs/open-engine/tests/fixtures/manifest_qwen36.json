@@ -1230,6 +1230,7 @@
    "build_dir": "moe_batch/build_s256",
    "env": {
     "MB_SLOTS": "256",
+    "MB_NT": "8",
     "MB_HID": "2048",
     "MB_FF": "512",
     "MB_EXPERTS": "256",
@@ -1242,6 +1243,7 @@
    "build_dir": "moe_batch/build_s128",
    "env": {
     "MB_SLOTS": "128",
+    "MB_NT": "8",
     "MB_HID": "2048",
     "MB_FF": "512",
     "MB_EXPERTS": "256",
@@ -1254,6 +1256,7 @@
    "build_dir": "moe_batch/build_s64",
    "env": {
     "MB_SLOTS": "64",
+    "MB_NT": "8",
     "MB_HID": "2048",
     "MB_FF": "512",
     "MB_EXPERTS": "256",
@@ -1266,6 +1269,7 @@
    "build_dir": "moe_batch/build_s32",
    "env": {
     "MB_SLOTS": "32",
+    "MB_NT": "8",
     "MB_HID": "2048",
     "MB_FF": "512",
     "MB_EXPERTS": "256",
@@ -1278,6 +1282,7 @@
    "build_dir": "moe_batch/build_s16",
    "env": {
     "MB_SLOTS": "16",
+    "MB_NT": "8",
     "MB_HID": "2048",
     "MB_FF": "512",
     "MB_EXPERTS": "256",
@@ -1290,6 +1295,7 @@
    "build_dir": "moe_batch/build_s8",
    "env": {
     "MB_SLOTS": "8",
+    "MB_NT": "8",
     "MB_HID": "2048",
     "MB_FF": "512",
     "MB_EXPERTS": "256",

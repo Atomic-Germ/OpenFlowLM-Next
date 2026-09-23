@@ -14,9 +14,9 @@ from ml_dtypes import bfloat16
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from layout import h_from_dev, y_from_dev  # noqa: E402
+from layout import NT, h_from_dev, y_from_dev  # noqa: E402
 
-HID, FF, NT = 2048, 512, 8
+HID, FF = 2048, 512
 REL_FRO_GATE = 5e-3
 
 
