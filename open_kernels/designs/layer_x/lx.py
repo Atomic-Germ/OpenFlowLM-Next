@@ -148,7 +148,8 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                                 include_dirs=inc + [str(X.RT)],
                                 compile_flags=[f"-DONDV_BD_UP={X.ONDV_BD_UP}",
                                                f"-DONDV_BD_GATE={X.ONDV_BD_GATE}",
-                                               f"-DONDV_BD_DOWN={X.ONDV_BD_DOWN}"])
+                                               f"-DONDV_BD_DOWN={X.ONDV_BD_DOWN}",
+                                               f"-DONDV_FIX_EXPERT={int(os.environ.get('ONDV_FIX_EXPERT', '0'))}"])
     f_ab = (ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
                              arg_types=[u8_4k, fxn, f32, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS) if DENSE else
             ExternalFunction("glue_ab", source_file=str(GLUE / "glue_ab.cc"), arg_types=[u8_4k, fxn, f32, np.int32], include_dirs=inc, **GLUE_FLAGS))

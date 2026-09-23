@@ -64,6 +64,7 @@ sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 
 WS = 4096                                   # slab words (16 KB)
+NEL = int(os.environ.get("LP_NEL", "1"))    # fifo elements per descriptor fill (1 = probe, 8 = fused 81920-B band)
 BD = int(os.environ.get("LP_BD", "8"))      # the pinned descriptor the packet addresses
 QUEUE = int(os.environ.get("LP_QUEUE", "0x1D21C"), 16)   # the shim MM2S queue that owns it
 PKT = int(os.environ.get("LP_PKT", "15"))   # 15 is the placer's controller_id for shims
@@ -74,7 +75,7 @@ CHAIN = int(os.environ.get("LP_CHAIN", "1"))   # number of chained packet BDs (1
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
 def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: CompileTime[int] = 0):
-    slab_ty = np.ndarray[(WS,), np.dtype[np.uint32]]
+    slab_ty = np.ndarray[(WS // NEL,), np.dtype[np.uint32]]
     cfg_ty = np.ndarray[(2,), np.dtype[np.uint32]]
     go_ty = np.ndarray[(4,), np.dtype[np.uint32]]
     out_ty = np.ndarray[(2,), np.dtype[np.uint32]]
@@ -92,7 +93,7 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
     pktlk = [Lock(core, init=0, name=f"pktlk{i}") for i in range(CHAIN)]
     pktdn = Lock(core, init=0, name="pktdn")   # the packet BD releases it when it has fired
 
-    of_slab = ObjectFifo(slab_ty, name="slabf", depth=CHAIN)
+    of_slab = ObjectFifo(slab_ty, name="slabf", depth=CHAIN * NEL)
     of_in = ObjectFifo(go_ty, name="inf", depth=2)   # [addr_lo addr_hi ...] then the enable
     of_out = ObjectFifo(out_ty, name="outf", depth=1)
 
@@ -106,12 +107,12 @@ def live_probe(zero: In, cfg: In, go: In, ones: In, out: Out, *, srchash: Compil
         for lk in locks:
             lk.release(1)            # arm BD i, wait for it to fire
             pktdn.acquire(1)
-        for _ in range(CHAIN - 1):   # each re-push must deliver one slab
+        for _ in range(CHAIN * NEL - 1):   # every element of every re-push must arrive
             s = slabin.acquire(1)
             slabin.release(1)
         s = slabin.acquire(1)        # the last delivery, for the out word
         o = outprod.acquire(1)
-        fo(s, o, WS)
+        fo(s, o, WS // NEL)
         outprod.release(1)
         slabin.release(1)
 

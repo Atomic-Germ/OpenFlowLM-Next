@@ -76,6 +76,12 @@ static inline uint32_t ondv_mm2s_queue(unsigned ch) { return ch == 0u ? 0x1D214u
 #ifndef ONDV_BD_DOWN
 #define ONDV_BD_DOWN 10
 #endif
+// Diagnostic: force every routed slot to expert 0 (the same placeholder the
+// host-enqueued ONDV_HOST_PUSH path uses) so a completion isolates the address
+// computation from the packet-push mechanism.
+#ifndef ONDV_FIX_EXPERT
+#define ONDV_FIX_EXPERT 0
+#endif
 
 // ---- the descriptors xcommon pins -------------------------------------------
 static constexpr unsigned kOndvBdUp = ONDV_BD_UP;
@@ -155,7 +161,7 @@ static inline void ondv_ctrl_col_impl(const int32_t *__restrict idx, uint32_t ba
                                       int32_t *__restrict out) {
   const uint64_t base = ((uint64_t)base_hi << 32) | (uint64_t)base_lo;
   for (unsigned k = 0; k < kOndvRouted; ++k) {
-    const unsigned e = (unsigned)idx[k];
+    const unsigned e = ONDV_FIX_EXPERT ? 0u : (unsigned)idx[k];
     const uint32_t up = ondv_up_off(e, col);
     int32_t *w = out + k * (3u * kOndvWords);
     ondv_words(w + 0 * kOndvWords, kOndvBdUp, queue, base + up, kOndvUpW3, kOndvUpW4, kOndvUpW5);
@@ -168,7 +174,7 @@ static inline void ondv_ctrl_impl(const int32_t *__restrict idx, uint32_t base_l
                                   int32_t *__restrict out) {
   const uint64_t base = ((uint64_t)base_hi << 32) | (uint64_t)base_lo;
   for (unsigned k = 0; k < kOndvRouted; ++k) {
-    const unsigned e = (unsigned)idx[k];
+    const unsigned e = ONDV_FIX_EXPERT ? 0u : (unsigned)idx[k];
     for (unsigned c = 0; c < kOndvCores; ++c) {
       // COLUMN-major: column c's 8 slots (8 x 15 words) are contiguous, so one packet BD
       // per column can carry them (the corrected, core-sourced control shape)
