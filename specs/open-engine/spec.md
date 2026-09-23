@@ -3462,3 +3462,79 @@ multiplies. A set without `attn_block`, or `OFLM_OPEN_ATTN_BLOCK=0`, runs
 **Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`.
 
 **Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.
+
+### OPEN-REQUEST-ISOLATION: the same request on a reused engine gives the same tokens
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `read_back`, `Core::reset`, `seek`, `route`, `arm_route_records`, `det_step`; `cli.cpp` `--repeat`, `--det-step`)
+**Test category:** manual (needs the NPU and a resident 35B)
+
+`oflm serve` keeps one resident `Core` across requests. Run twice on it, the same
+request must produce the same tokens and bit-identical logits: nothing a request
+leaves behind (recurrent state, KV rows, act scratch, patched instruction
+streams, position records) may reach the next one, and no host read may return
+a buffer's contents from before the dispatch that wrote it.
+
+The host reads one thing back in the middle of a decode step: the router's
+top-k (`idx`, 32 bytes of the record the layer's first dispatch writes into
+`act`), which it patches into the second dispatch's expert fills (`moeroute2`).
+A completed wait on that dispatch did not guarantee the host saw the record: in
+some periods about one read in 3000 returned the previous step's `idx`, while a
+re-sync microseconds later returned the new one. The stale list is a valid one,
+so nothing failed -- the step ran the wrong experts and the tokens diverged a
+few steps later.
+
+What a read is on this driver. `xrt::bo::sync(FROM_DEVICE)` on the Windows NPU
+driver (its user-mode shim, `xrt_core.dll`; the XRT headers do not say) is,
+for any range smaller than the L3 cache, a CLFLUSH loop over every 64-byte line
+the range touches -- the start rounded down, the partial last line included --
+with no fence after it; larger ranges go to the kernel driver. Two things
+follow. Rounding a sync out to whole cache lines changes nothing (the loop
+already covers them). And CLFLUSH is not ordered against later loads (AMD's
+manual requires an MFENCE after it for that), so a load that follows the sync
+may still be served from the stale cached line. Which of two mechanisms
+produced the stale reads -- that missing fence, or the dispatch's final write
+reaching memory after its completion is reported -- is not settled: the fault
+did not recur on demand (see the result). The engine therefore closes both:
+
+1. Every device-to-host read in `core.cpp` goes through `read_back()`: the
+   sync, then an MFENCE. `OFLM_OPEN_READ_FENCE=0` drops the fence, for the A/B
+   only.
+2. Each step arms every `idx` slot with a sentinel (`0xFFFFFFFF`, with no
+   dispatch outstanding), and `route()` re-syncs until the dispatch's record has
+   replaced it, throwing if it has not after 1 s. This is what turns any
+   remaining late read into a wait (or a hard error) instead of wrong experts.
+   `OFLM_OPEN_ROUTE_SENTINEL=0` restores the old single read, for the A/B only.
+
+**Verification (manual):**
+1. `open_qwen36_cli --kernels <set> --ids 248045 --at-position 1024 --max-tokens 24 --repeat 3`:
+   every request must print `REPRODUCED` (exit 0).
+2. The tighter probe: `--ids 248045,846,220,95772,2005,95815,828,95726,110004,95849,3709,96674,101697,97785,2005,95815,828,95999,2005,95933,828,95726,104062,248046 --at-position 1024 --det-step 100`
+   (one resident engine, the 24-step request forced 100 times, every step's
+   logits compared bit for bit with a reference pass): `0 of 100 reps
+   differed`. It prints `late router reads caught: N of M`; N > 0 means the
+   fault happened and the sentinel absorbed it.
+3. The failure is intermittent -- it came in periods (hours of zero, then about
+   a third of the probe's reps). A clean run of step 2 with
+   `OFLM_OPEN_ROUTE_SENTINEL=0 OFLM_OPEN_READ_FENCE=0` means the box is in a
+   quiet period, and says nothing about the fix until one without it fails.
+4. A dispatch in flight when Windows enters modern standby does not complete
+   (`ERT state 8`, a `pci` Event ID 3 at wake). Discard any run whose window
+   contains a Kernel-Power 506/507 pair; it is not this requirement's failure.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, `k35main`, 40 layers).** In a failing
+period, the old single read: 68 of 220 probe reps diverged, first at steps 1-23,
+never at step 0. Widening the read to the whole 1088-byte record, alternated
+with it in the same period: 0 of 100. `OFLM_ROUTE_CHECK=1` caught one read
+changing on a re-read (layer 29, position 1043: an old expert list, then the new
+one on an immediate re-sync).
+
+**Result 2026-09-23 (same model and set, upstream main + this change).** The
+fault did not recur. `--det-step 40` runs: the old read (sentinel and fence
+off) 0 of 200 reps diverged -- 40 on a quiet box, 80 under four memory-copy
+processes, 80 under a loop of four parallel WSL kernel builds; the fence alone
+0 of 120; the full fix 0 of 160, with 0 late reads caught in 161,280. So the
+2026-09-22 period is still the only evidence the fault exists, and the fix is
+justified by it and by the mechanism above, not by a live catch. Bit-exact
+against main (19 ids, 4 layers: max |diff| 0.0 at all 19 positions), `--repeat
+3` at position 1024 reproduced, decode unchanged (three alternated pairs at
+position 1024: main 125 / 121 / 120 ms/token, this change 123 / 121 / 122).
+Detail: `.claude/plans/decode-gap-2026-09-22/pr1-route-read.md`.
