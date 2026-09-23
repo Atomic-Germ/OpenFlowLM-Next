@@ -24,11 +24,11 @@
         nixosModules = {
           default = { config, lib, pkgs, ... }: {
             nixpkgs.overlays = [ inputs.self.overlays.default ];
-            imports = [ ./nixos-module.nix ];
+            imports = [ ./nix/nixos-module.nix ];
           };
           openflowlm = { config, lib, pkgs, ... }: {
             nixpkgs.overlays = [ inputs.self.overlays.default ];
-            imports = [ ./nixos-module.nix ];
+            imports = [ ./nix/nixos-module.nix ];
           };
         };
       };
@@ -41,12 +41,12 @@
         };
       in {
         packages = {
-          oflm = pkgs.callPackage ./package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
-          oflm-with-bert = pkgs.callPackage ./package.nix {
+          oflm = pkgs.callPackage ./nix/package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
+          oflm-with-bert = pkgs.callPackage ./nix/package.nix {
             openflowlm-open-kernels = config.packages.openflowlm-open-kernels-with-bert;
           };
-          openflowlm-open-kernels = pkgs.callPackage ./open-kernels.nix {};
-          openflowlm-open-kernels-with-bert = pkgs.callPackage ./open-kernels.nix { skipBert = false; };
+          openflowlm-open-kernels = pkgs.callPackage ./nix/open-kernels.nix {};
+          openflowlm-open-kernels-with-bert = pkgs.callPackage ./nix/open-kernels.nix { skipBert = false; };
           default = config.packages.oflm;
         };
 
@@ -59,7 +59,7 @@
           default = config.devShells.oflm;
 
           oflm = let
-            oflmPkg = pkgs.callPackage ./package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
+            oflmPkg = pkgs.callPackage ./nix/package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
           in pkgs.mkShell {
             name = "oflm-dev";
             nativeBuildInputs = with pkgs; [
@@ -78,7 +78,7 @@
             '';
           };
 
-          open-kernels = pkgs.callPackage ./open-kernels-shell.nix {};
+          open-kernels = pkgs.callPackage ./nix/open-kernels-shell.nix {};
         };
       };
     };
