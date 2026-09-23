@@ -21,11 +21,38 @@ offset fails that test before it reaches a build.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .attnknobs import knobs as attn_knobs, probe_env  # noqa: F401  (probe_env: cache.py reads it off the family module)
+from .attnknobs import knobs as attn_knobs, probe_env as _attn_probe_env
 from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
+
+
+def one_context() -> bool:
+    """The decode layer loop as ONE hardware context: the two whole-layer designs merged into
+    designs/layer_x/ux.py's four instruction streams over one image (OPEN-DECODE-ONE-CONTEXT).
+    On by default; OPEN_LAYER_ONE_CTX=0 at export rolls back to the two-context lx/ax sets.
+    A spec the merged image cannot carry stays on two contexts anyway (`merged_image`)."""
+    return os.environ.get("OPEN_LAYER_ONE_CTX", "1") != "0"
+
+
+def merged_image(spec: ModelSpec) -> bool:
+    """Whether this spec's layer kernels are the merged image. It needs both layer types, and
+    no q8 projection role: ux.py's main-core program has room for ONE GEMV entry (the main
+    cores sit at 16256 of 16384 bytes), so a q8 model of the family keeps lx/ax."""
+    return one_context() and spec.has_linear and spec.has_full and not spec.q8_roles
+
+
+def probe_env() -> dict[str, str]:
+    """The build key's probe variables (cache.py reads this off the family module). The
+    merged-image flavour joins them: it changes what `builds` compiles and what `programs`
+    emits, and nothing else in the key can see it, so without this a merged set and an
+    lx/ax set would share a key and the second would be skipped."""
+    e = dict(_attn_probe_env())
+    if one_context():
+        e["OPEN_LAYER_ONE_CTX"] = "1"
+    return e
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
@@ -1118,12 +1145,18 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     out["contexts"]["lm"] = "lm_head_q8/final.xclbin"
     out["kernels"]["ln"] = {"context": "ln", "insts": "ln/insts.bin", "build": "ln"}
     out["kernels"]["lm"] = {"context": "lm", "insts": "lm_head_q8/insts.bin", "build": "lm_head_q8"}
+    # The merged image (ux.py) carries both layer types, so both run in the context named
+    # here and the linear stream takes the attention layer's six buffer arguments -- one
+    # image, one kernel signature; its `ptab` is never touched (OPEN-DECODE-ONE-CONTEXT).
+    merged = merged_image(spec)
+    lin_ctx, full_ctx = ("layer", "layer") if merged else ("lx", "ax")
     if spec.has_linear:
-        args = ["pool", "xres", "consts", "state", "act"]
+        args = ["pool", "xres", "consts", "state", "act", "ptab"] if merged else \
+               ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx0/final.xclbin"
-        out["kernels"]["lx0"] = {"context": "lx", "insts": "lx0/insts.bin", "build": "lx0"}
-        out["kernels"]["lx1"] = {"context": "lx", "insts": "lx1/insts.bin", "patch": "moeroute2", "build": "lx1"}
+        out["contexts"][lin_ctx] = "lx0/final.xclbin"
+        out["kernels"]["lx0"] = {"context": lin_ctx, "insts": "lx0/insts.bin", "build": "lx0"}
+        out["kernels"]["lx1"] = {"context": lin_ctx, "insts": "lx1/insts.bin", "patch": "moeroute2", "build": "lx1"}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES, "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
             "program": [{"op": "run", "kernel": "lx0", "args": args},
@@ -1133,8 +1166,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax0/final.xclbin"
-        ax0 = {"context": "ax", "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
+        out["contexts"].setdefault(full_ctx, "ax0/final.xclbin")
+        ax0 = {"context": full_ctx, "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
         _A = attn(spec)
         if _A and _A.BLOCK:
             # The blocked walk consumes cached + new rows in whole blocks of RB, so the
@@ -1142,10 +1175,11 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             # the padding rows sit at or past `pos` and the kernel masks them. The count
             # has to come off the manifest: the row count is patched per token by the
             # host, and a kernel built one way against a driver patching the other way
-            # deadlocks on the fifo rather than answering wrongly.
+            # deadlocks on the fifo rather than answering wrongly. The merged image
+            # (OPEN_LAYER_ONE_CTX) carries the same attention cores, so the same rb.
             ax0["rb"] = _A.RB
         out["kernels"]["ax0"] = ax0
-        out["kernels"]["ax1"] = {"context": "ax", "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
+        out["kernels"]["ax1"] = {"context": full_ctx, "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": "ax0", "args": args},
@@ -1196,12 +1230,19 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     # no q8 role keeps the name every shipped build already uses (OPEN-QUANT-Q8).
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
-    if spec.has_linear:
-        b["lx0"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx0{sfx}", "env": {"LX_PART": "0"}}
-        b["lx1"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx1{sfx}", "env": {"LX_PART": "1"}}
-    if spec.has_full:
-        b["ax0"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax0{sfx}", "env": {"AX_PART": "0"}}
-        b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
+    if merged_image(spec):
+        # Same four set names, so the manifest, the driver's kernel names and an export's
+        # --only list do not move; one design, four parts, one image.
+        for name, part in (("lx0", 0), ("lx1", 1), ("ax0", 2), ("ax1", 3)):
+            b[name] = {"design": "layer_x/ux.py", "build_dir": f"layer_x/build_ux{part}{sfx}",
+                       "env": {"UX_PART": str(part)}}
+    else:
+        if spec.has_linear:
+            b["lx0"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx0{sfx}", "env": {"LX_PART": "0"}}
+            b["lx1"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx1{sfx}", "env": {"LX_PART": "1"}}
+        if spec.has_full:
+            b["ax0"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax0{sfx}", "env": {"AX_PART": "0"}}
+            b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
     b["ln"] = {"design": "ln/ln.py", "build_dir": "ln/build", "env": {}}
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),

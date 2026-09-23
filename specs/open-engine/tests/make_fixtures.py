@@ -1,7 +1,9 @@
 """Write the manifest fixtures with a fixed build key (the real one hashes the
 sources, which would churn the fixtures on every edit):
 
-    fixtures/manifest_qwen36.json     the 27B (Qwen3.6-35B-A3B, the qwen36moe recipe)
+    fixtures/manifest_qwen36.json     the 27B (Qwen3.6-35B-A3B, the qwen36moe recipe), in the
+                                      two-context lx/ax layout (OPEN_LAYER_ONE_CTX=0): the layout
+                                      manifest_test.cpp reads; the merged default is test_one_context.py's
     fixtures/manifest_qwen3_4b.json   Qwen3-4B (the qwen3 dense recipe)
     fixtures/manifest_gemma3_4b.json  Gemma3-4B (two layer types, a sliding window)
     fixtures/manifest_hy_mt2_7b.json  Hy-MT2-7B (post-RoPE q/k norm, a padded head)
@@ -21,6 +23,23 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2] / "open_kernels"))
 from recipes.load import default_spec, load_spec  # noqa: E402
 from recipes.manifest import manifest  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def two_contexts():
+    """OPEN_LAYER_ONE_CTX=0 for the duration: the qwen36moe recipe's rollback layout (lx/ax on
+    two contexts). The merged image is the default; this fixture pins the other layout, which
+    is still a shipped option and the one the C++ manifest reader's checks are written for."""
+    old = os.environ.get("OPEN_LAYER_ONE_CTX")
+    os.environ["OPEN_LAYER_ONE_CTX"] = "0"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("OPEN_LAYER_ONE_CTX", None)
+        else:
+            os.environ["OPEN_LAYER_ONE_CTX"] = old
 
 FIXTURE = HERE / "fixtures" / "manifest_qwen36.json"
 FIXTURE_Q3 = HERE / "fixtures" / "manifest_qwen3_4b.json"
@@ -36,7 +55,8 @@ SPEC_PH = HERE.parents[2] / "open_kernels" / "recipes" / "specs" / "phi4-mini-4b
 
 
 def fixture_manifest() -> dict:
-    return manifest(default_spec(), key="sha256:fixture")
+    with two_contexts():
+        return manifest(default_spec(), key="sha256:fixture")
 
 
 def fixture_manifest_q3() -> dict:

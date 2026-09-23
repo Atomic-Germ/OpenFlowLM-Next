@@ -88,7 +88,8 @@ two RTP words, the glue's tile, the merged buffer totals, the RTP writes at the
 head of parts 0 and 2, and the shim endpoints that move (`ain`, `aout`).
 
 Build: for p in 0 1 2 3: UX_PART=$p python build_design.py designs/layer_x/ux.py designs/layer_x/build_ux$p
-or, with the manifest, OPEN_LAYER_ONE_CTX=1 python export_qwen36_kernels.py --only lx0,lx1,ax0,ax1 --force
+or, with the manifest, python export_qwen36_kernels.py --only lx0,lx1,ax0,ax1 --force (the default for
+the qwen36moe family; OPEN_LAYER_ONE_CTX=0 builds lx.py / ax.py instead)
 """
 
 from __future__ import annotations
