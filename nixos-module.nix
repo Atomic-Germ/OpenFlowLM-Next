@@ -10,6 +10,7 @@
   config,
   lib,
   pkgs,
+  self,
   ...
 }:
 
