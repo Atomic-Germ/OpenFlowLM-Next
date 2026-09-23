@@ -73,6 +73,11 @@ selects the host sequence.
 What remains is device verification on `accel0` (numerics, and the ax stream's
 `attnpos` per token), which is outside the non-device build step.
 
+`check_lax_merge.py <build_lax_l> <build_lax_a>` re-derives all of the above from the
+builds (same-size xclbins differing only in metadata, byte-identical per-tile
+programs, main program == lx's 16272 B, <=2 DMA channels per shim and <=16 total, and
+identical `w` channels) and exits non-zero if any of it regresses.
+
 ## Local run artifacts (gitignored, like every other design `.cfg`/`.bin`)
 
 `qmap_lax.bin` (32 B, little-endian u32 per column) -- the merged design's `w{c}`
