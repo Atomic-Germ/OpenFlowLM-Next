@@ -52,6 +52,14 @@ class Pipeline:
     def drain(self, cons, tensor, tap):
         self._issue(cons, lambda tg: cons.drain(tensor, tap=tap, wait=True, group=tg))
 
+    def finish_oldest(self, *eps):
+        """Await only the OLDEST outstanding transfer of each endpoint given -- for a
+        consumer that needs the first region a channel drains but not the ones after it."""
+        for ep in eps:
+            q = self._q(ep)
+            if q:
+                q.popleft().finish()
+
     def finish(self, *eps):
         """Await everything issued (or, with endpoints given, only their queues)."""
         qs = [self._q(ep) for ep in eps] if eps else list(self.queues.values())
