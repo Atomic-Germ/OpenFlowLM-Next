@@ -1,4 +1,5 @@
 {
+  srcRoot,
   lib,
   stdenv,
   fetchurl,
@@ -39,22 +40,7 @@ stdenv.mkDerivation rec {
   pname = "openflowlm-open-kernels";
   version = "0.1.0";
 
-  src = lib.cleanSourceWith {
-    src = ../.;
-    filter = path: type:
-      let
-        base = baseNameOf path;
-        isBuildOutput = lib.hasSuffix ".o" base
-          || lib.hasSuffix ".a" base
-          || lib.hasSuffix ".so" base
-          || lib.hasSuffix ".dylib" base
-          || lib.hasSuffix ".dll" base
-          || base == "result" || base == "result-bin";
-        isEngineLib = lib.hasInfix "/src/lib/" path && (lib.hasSuffix ".so" base || lib.hasSuffix ".so.bak" base);
-      in
-        (type == "directory" || !isBuildOutput || isEngineLib)
-        && !(base == ".git");
-  };
+  src = srcRoot;
 
   nativeBuildInputs = env.nativeTools ++ [ env.ironvenv ];
   buildInputs = env.runtimeLibs;
@@ -62,18 +48,20 @@ stdenv.mkDerivation rec {
   buildPhase = ''
     export HOME=$TMPDIR
     export XILINX_XRT="${xrt}/opt/xilinx/xrt"
+    export OFLM_VENV_DIR="$TMPDIR/ironvenv"
+    export OFLM_SKIP_VENV_SETUP=1
 
-    # TODO: figure out a better way to handle this part since deleting the original feels hacky
-    # utilities/export-kernels.py expects a writable venv at ./ironvenv with
-    # its own bin/python. Copy the nix-provided venv and add a python symlink.
-    rm -rf ironvenv
-    cp -R ${env.ironvenv} ironvenv
-    chmod -R +w ironvenv
-    ln -sf ${python312}/bin/python ironvenv/bin/python
+    # utilities/export-kernels.py expects a writable venv.  Materialize it
+    # under $TMPDIR so the source tree is never modified (important both for
+    # sandbox builds and for local dev shells that run from a writable git
+    # checkout), and tell the script where to find it via OFLM_VENV_DIR.
+    cp -R ${env.ironvenv} "$OFLM_VENV_DIR"
+    chmod -R +w "$OFLM_VENV_DIR"
+    ln -sf ${python312}/bin/python "$OFLM_VENV_DIR/bin/python"
 
-    export PEANO_INSTALL_DIR="$PWD/ironvenv/${env.env.PEANO_INSTALL_DIR}"
-    export PATH="$PWD/ironvenv/${env.pySite}/llvm-aie/bin:$PWD/ironvenv/${env.pySite}/mlir_aie/bin:${env.xrtCombined}/bin:$PATH"
-    export PYTHONPATH="$PWD/ironvenv/${env.pySite}:${env.xrtCombined}/python''${PYTHONPATH:+:$PYTHONPATH}"
+    export PEANO_INSTALL_DIR="$OFLM_VENV_DIR/${env.env.PEANO_INSTALL_DIR}"
+    export PATH="$OFLM_VENV_DIR/${env.pySite}/llvm-aie/bin:$OFLM_VENV_DIR/${env.pySite}/mlir_aie/bin:${env.xrtCombined}/bin:$PATH"
+    export PYTHONPATH="$OFLM_VENV_DIR/${env.pySite}:${env.xrtCombined}/python''${PYTHONPATH:+:$PYTHONPATH}"
     export LD_LIBRARY_PATH="${env.env.LD_LIBRARY_PATH}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
     # The manylinux llvm-aie/mlir-aie wheels ship x86_64 executables that
@@ -81,7 +69,7 @@ stdenv.mkDerivation rec {
     # unavailable, so patch the interpreter to the stdenv linker and add the
     # C++ runtime + zlib to the RUNPATH without destroying the wheel's own
     # library search paths (e.g. mlir_aie.libs/libcrypto-...so.3).
-    for dir in "$PEANO_INSTALL_DIR/bin" "$PWD/ironvenv/${env.pySite}/mlir_aie/bin"; do
+    for dir in "$PEANO_INSTALL_DIR/bin" "$OFLM_VENV_DIR/${env.pySite}/mlir_aie/bin"; do
       if [ -d "$dir" ]; then
         for bin in "$dir/"*; do
           if [ -f "$bin" ] && [ -x "$bin" ]; then

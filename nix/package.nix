@@ -1,4 +1,5 @@
 {
+  source,
   lib,
   stdenv,
   fetchFromGitHub,
@@ -56,24 +57,7 @@ stdenv.mkDerivation rec {
   pname = "openflowlm";
   version = oflmVersion;
 
-  src = lib.sources.cleanSourceWith {
-    src = ../.;
-    filter = path: type:
-      let
-        base = baseNameOf path;
-        isBuildOutput = lib.hasSuffix ".o" base
-          || lib.hasSuffix ".a" base
-          || lib.hasSuffix ".so" base
-          || lib.hasSuffix ".dylib" base
-          || lib.hasSuffix ".dll" base
-          || base == "result" || base == "result-bin";
-        # Keep prebuilt engine shared libraries even though they look like
-        # build outputs; the project ships them in src/lib/<backend>/.
-        isEngineLib = lib.hasInfix "/src/lib/" path && (lib.hasSuffix ".so" base || lib.hasSuffix ".so.bak" base);
-      in
-        (type == "directory" || !isBuildOutput || isEngineLib)
-        && !(base == ".git");
-  };
+  src = source;
 
   # The Rust tokenizer crate inside tokenizers-cpp has no Cargo.lock upstream.
   # We vendor its dependencies and inject the lock file at build time.

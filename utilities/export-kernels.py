@@ -52,7 +52,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SPECS_DIR = REPO / "open_kernels" / "recipes" / "specs"
-VENV = REPO / "ironvenv"
+VENV = Path(os.environ.get("OFLM_VENV_DIR", str(REPO / "ironvenv")))
 REQS = REPO / "ironvenv-requirements.txt"
 EXPORT = REPO / "open_kernels" / "export_qwen36_kernels.py"
 
@@ -73,7 +73,7 @@ PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def venv_python() -> Path:
-    return VENV / "bin" / "python"
+    return VENV / "bin" / "python3"
 
 
 def llvm_aie_bin() -> Path | None:
@@ -83,6 +83,10 @@ def llvm_aie_bin() -> Path | None:
 
 def ensure_venv() -> Path:
     py = venv_python()
+    # Nix builds provide a pre-assembled IRON venv with the correct wheels.
+    # Skip the network/pip-based setup when requested.
+    if os.environ.get("OFLM_SKIP_VENV_SETUP") == "1" and py.is_file():
+        return py
     if py.is_file():
         # If the existing venv can import the IRON "aie" package, trust it
         # (e.g. the Nix dev shell materialized it). Otherwise fall through and
@@ -98,6 +102,10 @@ def ensure_venv() -> Path:
         subprocess.run(["uv", "pip", "install", "--python", str(py), "-r", str(REQS)], check=True)
     else:
         subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
+        # Ensure the venv has a python3 symlink; the nix-provided venv only
+        # guarantees bin/python3, and export scripts below call python3.
+        if not (VENV / "bin" / "python3").exists() and (VENV / "bin" / "python").exists():
+            os.symlink("python", VENV / "bin" / "python3")
         subprocess.run([str(py), "-m", "pip", "install", "-r", str(REQS)], check=True)
     return py
 

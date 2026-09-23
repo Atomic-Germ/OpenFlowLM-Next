@@ -41,12 +41,16 @@
         };
       in {
         packages = {
-          oflm = pkgs.callPackage ./nix/package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
+          oflm = pkgs.callPackage ./nix/package.nix {
+            source = inputs.self;
+            openflowlm-open-kernels = config.packages.openflowlm-open-kernels;
+          };
           oflm-with-bert = pkgs.callPackage ./nix/package.nix {
+            source = inputs.self;
             openflowlm-open-kernels = config.packages.openflowlm-open-kernels-with-bert;
           };
-          openflowlm-open-kernels = pkgs.callPackage ./nix/open-kernels.nix {};
-          openflowlm-open-kernels-with-bert = pkgs.callPackage ./nix/open-kernels.nix { skipBert = false; };
+          openflowlm-open-kernels = pkgs.callPackage ./nix/open-kernels.nix { srcRoot = inputs.self; };
+          openflowlm-open-kernels-with-bert = pkgs.callPackage ./nix/open-kernels.nix { srcRoot = inputs.self; skipBert = false; };
           default = config.packages.oflm;
         };
 
@@ -59,7 +63,10 @@
           default = config.devShells.oflm;
 
           oflm = let
-            oflmPkg = pkgs.callPackage ./nix/package.nix { openflowlm-open-kernels = config.packages.openflowlm-open-kernels; };
+            oflmPkg = pkgs.callPackage ./nix/package.nix {
+              source = inputs.self;
+              openflowlm-open-kernels = config.packages.openflowlm-open-kernels;
+            };
           in pkgs.mkShell {
             name = "oflm-dev";
             nativeBuildInputs = with pkgs; [
