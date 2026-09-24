@@ -640,7 +640,7 @@ void exp_g_minus_u(bfloat16 *u, bfloat16 *g) {
   }
 }
 
-// R3 phase-3 (Whisper, kernel_fusion_based_whisper variant MF/MF2 only).
+// Whisper modification (FP32_STATE builds only; see the file header).
 // FP32_STATE gates the online-softmax STATE precision fix scoped in R3
 // phase-2/3: the RUNNING MAX (`up`) needs no wider storage -- max() only
 // ever selects one of two already-bf16-quantized inputs, so it is lossless
@@ -1099,8 +1099,8 @@ void add_gp_g(bfloat16 *gp, bfloat16 *g) {
   }
 }
 
-// R3 phase-3 (Whisper, kernel_fusion_based_whisper variant M/MF/MF2 only --
-// NOT in the upstream mlir-air example this was copied from).
+// Whisper modification (the key-length mask; see the file header) --
+// NOT in the upstream mlir-air example this was derived from.
 //
 // Apply an ABSOLUTE key-length mask to QK scores in-place, independent of
 // causal masking: sets every column whose GLOBAL kv index >= valid_len to

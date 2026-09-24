@@ -454,16 +454,19 @@ void test_recompute_top_k_exact() {
 
 // ---------------------------------------------------------------------
 // Real weights, offline: per-tensor int8 quantization error statistics.
-// Skipped (not a failure) if the model directory is not found, so this
-// test still passes on a machine without the 1.6 GB container.
+// Runs only when OW_DEC_TEST_MODEL names a model directory holding
+// model.open.safetensors; skipped (not a failure) otherwise, so this test
+// passes on a machine without the 1.6 GB container.
 // ---------------------------------------------------------------------
 
 void report_real_model_stats() {
   std::printf("-- real decoder weights: int8 quantization error per tensor --\n");
   const char *env = std::getenv("OW_DEC_TEST_MODEL");
-  const std::string model_dir =
-      env && *env ? std::string(env)
-                  : "C:/Users/vegar/Documents/flm/models/Whisper-V3-Turbo-OpenNPU2";
+  if (!env || !*env) {
+    std::printf("  (skipped -- set OW_DEC_TEST_MODEL to a model dir with model.open.safetensors)\n");
+    return;
+  }
+  const std::string model_dir(env);
   const std::string safet = model_dir + "/model.open.safetensors";
 
   std::FILE *probe = std::fopen(safet.c_str(), "rb");

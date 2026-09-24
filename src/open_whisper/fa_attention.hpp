@@ -1,9 +1,10 @@
 //===- fa_attention.hpp --------------------------------------*- C++ -*-===//
 //
 // open_whisper -- OPTIONAL bidirectional attention on the NPU, via a fused
-// FlashAttention kernel built from AMD's MLIR-AIR example (externalrepos/
-// mlir-air, programming_examples/flash_attention/kernel_fusion_based_whisper)
-// or an equivalent, into an xclbin+insts.bin pair that carries no
+// FlashAttention kernel -- open_kernels/designs/whisper_fa (an IRON port of
+// AMD's MLIR-AIR flash_attention/kernel_fusion_based example, built by
+// open_kernels/export_whisper_kernels.py into <kernels_dir>/fa/) or an
+// equivalent -- as an xclbin+insts.bin pair that carries no
 // design.json of this project's own -- only fa.json (see fa_guards.hpp),
 // which records what the build actually was rather than this engine
 // assuming it, and is checked, not trusted.

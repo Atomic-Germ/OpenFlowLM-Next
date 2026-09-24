@@ -23,8 +23,10 @@ in the first place, since it never touches the array).
   geometry, and pre-tiles every `[K,N]` GEMM operand with `tile_b()` (ported
   with attribution from NpuEmbeddings' `npue_pack.cpp`, whose `tile_b` is not
   exported from that translation unit).
-- `kernels.hpp/.cpp` -- finds the kernel set (`OFLM_WHISPER_KERNELS_DIR`, else
-  `<model_dir>/open_kernels`), checks `whisper_kernels.json`'s format,
+- `kernels.hpp/.cpp` -- opens the kernel set (under `oflm`, the directory
+  `whisper_engine_select.cpp`'s `find_open_kernels` chose -- see "Kernel set
+  placement"; the standalone CLI takes `--kernels`, else
+  `OFLM_WHISPER_KERNELS_DIR`, else `<model_dir>/open_kernels`), checks `whisper_kernels.json`'s format,
   `complete` flag and `hf_config_check` against `config.json`, checks
   `design.json`'s `b_layout` tuple against what `weights.cpp` tiled with, then
   loads the seven instruction streams into one `npue::npu::Design` and drives
