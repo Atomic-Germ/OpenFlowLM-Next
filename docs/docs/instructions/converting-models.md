@@ -15,10 +15,11 @@ It is included in this flake as a package, app, and dev shell.
 
 ## 🚀 Quick start (Nix)
 
-### Enter the converter shell
+### Enter the converter shell (recommended)
 
 ```bash
 nix develop .#q4nx-build
+q4nx-build -i peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP --dry-run
 ```
 
 ### Run a conversion without entering the shell
@@ -26,6 +27,13 @@ nix develop .#q4nx-build
 ```bash
 nix run .#q4nx-build -- -i peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP --dry-run
 ```
+
+> ⚠️ **First run** creates a writable Python venv in `~/.cache/oflm/q4nx-build` and installs the converter's PyPI dependencies (torch, transformers, gguf, ...). This may take a few minutes and needs network access. Subsequent runs are instant.
+> 
+> You can override the venv location with `Q4NX_BUILD_HOME`:
+> ```bash
+> Q4NX_BUILD_HOME=/bigdisk/q4nx-build nix run .#q4nx-build -- --help
+> ```
 
 ---
 
@@ -54,7 +62,27 @@ This prints:
 - the skeleton source (e.g. `OpenFlowLM/Qwen3.6-35B-A3B-NPU2`),
 - the target family it resolves to.
 
-### 2. Force the family if auto-detection is wrong
+### 2. Pick a specific source GGUF (recommended)
+
+HF repos often contain several quant tiers (`Q4_K_M`, `Q4_K_XL`, `Q5_K_XL`, …) plus a vision projector. `q4nx-build` picks the first file that matches the family-preferred quant keywords, which is usually `Q4_K_M` for Qwen3.6-MoE. To use a different tier, pass the exact repo file:
+
+```bash
+nix run .#q4nx-build -- \
+  -i peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP/Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf \
+  -f qwen3.6-moe \
+  --dry-run
+```
+
+This also works with a local file:
+
+```bash
+nix run .#q4nx-build -- \
+  -i /path/to/Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf \
+  -f qwen3.6-moe \
+  -o ~/MyModel-OFLM
+```
+
+### 3. Force the family if auto-detection is wrong
 
 Finetunes and re-quantizations sometimes have metadata that does not identify the underlying architecture. Use `-f` / `--force` to pin the OpenFlowLM family:
 
@@ -75,22 +103,6 @@ Finetunes and re-quantizations sometimes have metadata that does not identify th
 | `nanbeige` | Nanbeige4.1 3B |
 | `phi4` | Phi-4-mini 4B |
 | `lfm2` | LiquidFM 2 1.2B / 2.6B |
-
-```bash
-nix run .#q4nx-build -- \
-  -i peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP \
-  -f qwen3.6-moe \
-  -o ~/Cyber-Tiel-35B-A3B-OFLM
-```
-
-### 3. Convert a local GGUF file
-
-```bash
-nix run .#q4nx-build -- \
-  -i /path/to/model-Q4_K_M.gguf \
-  -f qwen3.6-moe \
-  -o ~/MyModel-OFLM
-```
 
 ### 4. Install the converted model
 
@@ -119,9 +131,11 @@ The output directory contains the files `oflm` needs:
 ├── model.q4nx
 ├── tokenizer.json
 ├── tokenizer_config.json
-└── chat_template.jinja        # optional
+├── chat_template.jinja        # optional
 └── vision_weight.q4nx          # only for VL models
 ```
+
+For Qwen3.5 / Qwen3.6-MoE VL models, `q4nx-build` copies `vision_weight.q4nx` from the matching skeleton source automatically when you convert the language weights. You do **not** need a separate `-t vision` step or the raw `mmproj` GGUF.
 
 ---
 
@@ -185,9 +199,10 @@ nix run .#q4nx-build -- \
   -f qwen3.6-moe \
   --dry-run
 
-# 2. convert (use /home with at least 70 GB free, or /tmp on a large filesystem)
+# 2. convert the Q4_K_XL tier (recommended; ~22.7 GB download, ~70 GB workspace)
+#    Vision weights are copied from the Ornith skeleton automatically.
 nix run .#q4nx-build -- \
-  -i peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP \
+  -i peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP/Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf \
   -f qwen3.6-moe \
   -o ~/Cyber-Tiel-35B-A3B-OFLM
 
