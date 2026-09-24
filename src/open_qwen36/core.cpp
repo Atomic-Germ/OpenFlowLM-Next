@@ -236,13 +236,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     std::map<std::string, bool> wanted;
     for (int l = 0; l < nl_; ++l) {
         for (const auto& s : types_[l]->program) wanted[s.kernel] = true;
-        // 0167/#32: the GEMM-route block's 5 GEMM kernels, plus "dxB"
+        // 0167/#32: the GEMM-route block's 5 GEMM kernels, plus its attn_kernel
         // (the attention half, driven directly by Core rather than via a
-        // Step -- see manifest.hpp's GemmBlockProgram) which the manifest
-        // parser already required to exist whenever gemm_block is present.
+        // Step -- see manifest.hpp's GemmBlockProgram; a layer type with its
+        // own sliding window names its own, e.g. Gemma 3's dxB_local) which
+        // the manifest parser already required to exist whenever gemm_block
+        // is present.
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
-        if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted["dxB"] = true;
+        if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted[types_[l]->gemm_block.attn_kernel] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_s) wanted[k] = true;
@@ -362,10 +364,11 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     auto t0 = std::chrono::steady_clock::now();
     pools_.clear(); consts_.clear(); act_.clear(); state_.clear(); globals_.clear();
     gemm_w_.clear(); hc_.clear();
-    ln_w_bf16_.clear(); post_ln_w_bf16_.clear();
+    ln_w_bf16_.clear(); post_ln_w_bf16_.clear(); pre_ffn_w_.clear(); post_ffn_w_.clear();
     pools_.reserve(nl_); consts_.reserve(nl_); act_.reserve(nl_); state_.reserve(nl_);
     if (gemm_block_t_) {
         ln_w_bf16_.resize(nl_); post_ln_w_bf16_.resize(nl_);
+        pre_ffn_w_.resize(nl_); post_ffn_w_.resize(nl_);
         hc_.resize(nl_);
     }
     // the block route's per-layer weight buffers: each a contiguous run of pack ops of
@@ -415,6 +418,18 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 post_ln_w_bf16_[l].resize(man_.hidden);
                 std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
                 std::memcpy(post_ln_w_bf16_[l].data(), c_host + man_.hidden * 2, man_.hidden * 2);
+                if (lt.gemm_block.sandwich) {
+                    // Read straight from the file by tensor name suffix (the MoE kinds'
+                    // pattern, `const_tensor()`), not sliced from packed consts bytes: these
+                    // two are additional to the plain chain's two, and pack_plan only ever
+                    // packs them into consts.CD_PREFFN/CD_POSTFFN when sandwich_norms is set,
+                    // so their offsets are family-specific in a way the other two are not.
+                    pre_ffn_w_[l] = file_->bf16(const_tensor(lt, "pre_feedforward_layernorm.weight", l));
+                    post_ffn_w_[l] = file_->bf16(const_tensor(lt, "post_feedforward_layernorm.weight", l));
+                    if (pre_ffn_w_[l].size() != man_.hidden || post_ffn_w_[l].size() != man_.hidden)
+                        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) +
+                                                 ": sandwich norm weight is not [hidden]");
+                }
             } else {
                 // the MoE kinds' host stages read their small tensors straight from the
                 // file, by the names the consts plan carries (no consts layout knowledge here)
@@ -1322,6 +1337,23 @@ void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, cons
     }
 }
 
+void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, const std::vector<float>& w_f32,
+                        double eps, std::vector<float>& out) {
+    // Same reduction as the bf16 overload; the weight arrives already dequantised to f32
+    // (read straight from the file, not sliced from packed consts bytes -- see its caller).
+    out.assign(T * hid, 0.f);
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        const double* row = &x[static_cast<size_t>(t) * hid];
+        double ss = 0;
+        for (size_t k = 0; k < hid; ++k) ss += row[k] * row[k];
+        const double rms = std::sqrt(ss / static_cast<double>(hid) + eps);
+        float* orow = &out[static_cast<size_t>(t) * hid];
+        for (size_t k = 0; k < hid; ++k)
+            orow[k] = static_cast<float>((row[k] / rms) * static_cast<double>(w_f32[k]));
+    }
+}
+
 void Core::tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out) {
     out.assign(K * T, 0);
     host::tile_x(x_tk.data(), T, K, out.data());
@@ -1422,8 +1454,8 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     // laid out consecutively (ad_q -> ad_kvn -> ad_og), so the read side is one range.
     const size_t qkv_off = gb.ad_q, qkv_bytes = gb.ad_og - gb.ad_q, og_bytes = qw * 2;
     {
-        Kern& dxb = kerns_.at("dxB");
-        const std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
+        Kern& dxb = kerns_.at(gb.attn_kernel);
+        const std::vector<std::string>& attn_args = gb.attn_args;
         for (size_t tk = 0; tk < T; ++tk) {
             const uint64_t pos = static_cast<uint64_t>(pos_) + tk;
             auto tp = std::chrono::steady_clock::now();
@@ -1458,23 +1490,45 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     run_gemm(1, og, qw, hid, y_o);
 
     // ---- host: residual add, post-attention RMSNorm ------------------------
+    // Plain: res1 = xres + y_o; xm = post_attn_norm(res1). Sandwich (Gemma 3): the norm sits
+    // on the attention OUTPUT before it joins the residual, and a SEPARATE weight
+    // (pre_feedforward_layernorm) norms the resulting residual to produce xm --
+    // post_attention_layernorm and pre_feedforward_layernorm are different tensors here,
+    // where the plain chain has only the one.
     auto th = std::chrono::steady_clock::now();
     std::vector<double> res1(T * hid);
-#pragma omp parallel for
-    for (long long t = 0; t < static_cast<long long>(T); ++t)
-        for (size_t c = 0; c < hid; ++c)
-            res1[static_cast<size_t>(t) * hid + c] =
-                xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
-    timing_.tail_ms += ms_since(th);
     std::vector<float> xm;
-    rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm);
+    if (gb.sandwich) {
+        std::vector<double> y_o_row(T * hid);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                y_o_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+        std::vector<float> t_attn;
+        rmsnorm_host(y_o_row, T, hid, post_ln_w_bf16_[l], gb.eps, t_attn);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                res1[static_cast<size_t>(t) * hid + c] =
+                    xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(t_attn[static_cast<size_t>(t) * hid + c]);
+        rmsnorm_host(res1, T, hid, pre_ffn_w_[l], gb.eps, xm);
+    } else {
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                res1[static_cast<size_t>(t) * hid + c] =
+                    xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+        rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm);
+    }
+    timing_.tail_ms += ms_since(th);
 
     // ---- GEMM gate_proj + up_proj (SAME context, zero switch between them) -
     std::vector<float> y_gate, y_up;  // both [ff, T]
     run_gemm(2, xm, hid, ff, y_gate);
     run_gemm(3, xm, hid, ff, y_up);
 
-    // ---- host SwiGLU: silu(gate) * up ---------------------------------------
+    // ---- host gated FFN: silu(gate) * up, or Gemma 3's gelu_tanh(gate) * up ------------
+    const bool gelu_tanh = gb.act == "gelu_tanh";
     th = std::chrono::steady_clock::now();
     std::vector<float> h(T * ff);
 #pragma omp parallel for
@@ -1483,20 +1537,40 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         for (size_t c = 0; c < ff; ++c) {
             const double g = static_cast<double>(y_gate[c * T + tk]);
             const double u = static_cast<double>(y_up[c * T + tk]);
-            h[tk * ff + c] = static_cast<float>((g / (1.0 + std::exp(-g))) * u);
+            // tanh-approximate GELU (HF's "gelu_pytorch_tanh"): sqrt(2/pi) = 0.7978845608028654
+            const double act = gelu_tanh ? 0.5 * g * (1.0 + std::tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))
+                                         : (g / (1.0 + std::exp(-g)));
+            h[tk * ff + c] = static_cast<float>(act * u);
         }
     }
     timing_.tail_ms += ms_since(th);
 
     // ---- GEMM down_proj, then residual -> next layer's xres -----------------
+    // Plain: xres = res1 + y_down. Sandwich: y_down is normed (post_feedforward_layernorm)
+    // before it joins the residual, mirroring the attention side above.
     std::vector<float> y_down;  // [hid, T]
     run_gemm(4, h, ff, hid, y_down);
     th = std::chrono::steady_clock::now();
+    if (gb.sandwich) {
+        std::vector<double> y_down_row(T * hid);
 #pragma omp parallel for
-    for (long long t = 0; t < static_cast<long long>(T); ++t)
-        for (size_t c = 0; c < hid; ++c)
-            xres[static_cast<size_t>(t) * hid + c] =
-                res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                y_down_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+        std::vector<float> t_ffn;
+        rmsnorm_host(y_down_row, T, hid, post_ffn_w_[l], gb.eps, t_ffn);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                xres[static_cast<size_t>(t) * hid + c] =
+                    res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(t_ffn[static_cast<size_t>(t) * hid + c]);
+    } else {
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                xres[static_cast<size_t>(t) * hid + c] =
+                    res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+    }
     timing_.tail_ms += ms_since(th);
 }
 

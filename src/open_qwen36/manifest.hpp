@@ -108,8 +108,16 @@ struct GemmBlockProgram {
     std::vector<Step> program;
     std::map<std::string, GemmWeight> weights;
     double eps = 0;               ///< RMSNorm eps for the host norms
-    // dense: the q/k/v widths, the FFN width, the T=1 "act" byte offsets dxB reads
+    // dense: the q/k/v widths, the FFN width, the T=1 "act" byte offsets the attention
+    // dispatch reads, which kernel and buffer args run it (a layer type with its own sliding
+    // window names its own kernel and position table, e.g. Gemma 3's dxB_local / ptab_local;
+    // everyone else defaults to dxB / ptab), the residual/norm chain ("plain" or Gemma's
+    // sandwich, OPEN-PREFILL-BATCH) and the FFN activation ("silu" | "gelu_tanh")
     uint64_t qw = 0, kvw = 0, ff = 0, ad_q = 0, ad_kvn = 0, ad_og = 0;
+    std::string attn_kernel = "dxB";
+    std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
+    bool sandwich = false;
+    std::string act = "silu";
     // linear: the fused qkv width, the value width, the DeltaNet geometry, the state layout
     uint64_t qkv_dim = 0, vw = 0, key_heads = 0, value_heads = 0, head_dim = 0, conv_kernel = 0;
     uint64_t state_s_off = 0, s_head_bytes = 0, s_rows = 0;

@@ -88,6 +88,14 @@ for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL, same
     if _k != "ATTN_RB":
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+# og elements, as dx.py has them now: attn_fin writes kOGH = min(NHL, HPO) heads per element,
+# and each core -- core 0 included -- emits its own N_OG of them on its own fifo. The earlier
+# form this file was copied from put core 0's og on the KV-row fifo (so an og element had to
+# be KVW wide) and emitted NHL // HPO of them, which is ZERO for a geometry whose per-core
+# head count is below HPO (Gemma 3: NHL 2, HPO 4; Phi-4-mini: 4 and 8): core 0 then never
+# releases an og element, the drain waits forever, and the dispatch times out on hardware.
+OGH = min(NHL, G.HPO)
+N_OG = NHL // OGH
 
 
 def bt(total, off, n):
@@ -118,6 +126,7 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
+    og_ty = np.ndarray[(OGH * G.HD,), np.dtype[bfloat16]]   # attn_fin writes kOGH heads at a time
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
     fq = (np.ndarray[(2 * QW,), np.dtype[bfloat16]]
@@ -150,14 +159,13 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
     f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
                   ATTN_FLAGS) if RB > 1 else None)
-    f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, brow, i32], ATTN_FLAGS)
+    f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
 
-    # ---- fifos, verbatim from dx.py
+    # ---- fifos, as dx.py: ain, the KV-row fifo (core 0's two cache rows ONLY), and one og
+    # fifo per attention core
     of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2))
     of_aout = ObjectFifo(brow, name="aout", depth=2)
-    of_og = [ObjectFifo(brow, name=f"og{c}", depth=2) for c in range(1, ACORES)]
-
-    N_OG = NHL // G.HPO
+    of_og = [ObjectFifo(og_ty, name=f"og{c}", depth=2) for c in range(ACORES)]
 
     # ---- verbatim from dx.py: _attn / attn_body / make_attn_body
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
@@ -209,8 +217,8 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
             ogout.release(1)
 
     if RB > 1:
-        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
-            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+        def attn_body(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
+            _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0)
 
         def make_attn_body(c):
@@ -220,8 +228,8 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
                       f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0)
             return body
     else:
-        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
-            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+        def attn_body(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin):
+            _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, None, 0)
 
         def make_attn_body(c):
@@ -240,10 +248,10 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
 
-    workers = [Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
+    workers = [Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
                       tile=Tile(2, 3), stack_size=0x1800)]
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
+        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, 3), stack_size=0x1800))
 
     def sequence_attn(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, ain_p, aout_c, og_cs):
@@ -258,9 +266,8 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
         # of its four kinds; this dispatch's shape supplies exactly that).
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
-        pa_out.drain(aout_c, a_act, bt(L.AD_BYTES, L.AD_OG, NHL * G.HD * 2))
-        for c in range(1, ACORES):                                          # heads NHL*c ..
-            pa_out.drain(og_cs[c - 1], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
+        for c in range(ACORES):                                             # heads NHL*c ..
+            pa_out.drain(og_cs[c], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
         pa_in.fill(ain_p, a_consts, bt(L.CD_BYTES, L.CD_META, E_A))            # [qn | kn]
         pa_in.fill(ain_p, a_ptab, bt(L.PTAB_BYTES, L.PTAB_ROW, L.PTAB_ROW))    # the position record (attnpos)
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_Q, QW * 4))
@@ -273,7 +280,7 @@ def dx_attn(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, 
     rt = Runtime(sequence_attn,
                  [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
                   of_ain.prod(tile=Tile(2, 0)), of_aout.cons(tile=Tile(1, 0)),
-                  [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]])
+                  [of_og[c].cons(tile=Tile(2 + c, 0)) for c in range(ACORES)]])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
