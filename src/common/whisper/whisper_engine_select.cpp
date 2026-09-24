@@ -13,7 +13,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
+
+#include "nlohmann/json.hpp"
 
 /// \brief Defined in whisper_engine_closed.cpp -- the only caller of the closed engine's
 ///        constructor now that make_whisper_engine() lives here instead.
@@ -30,22 +33,48 @@ bool has_file(const std::string& dir, const char* name) {
 }
 
 #ifdef OFLM_USE_OPEN_WHISPER
+/// \brief The exporter's own format tag (open_kernels/export_whisper_kernels.py's `FORMAT`),
+///        checked below so auto-discovery never accepts a whisper_kernels.json some future,
+///        differently-shaped exporter wrote.
+constexpr const char* kOpenKernelsFormat = "oflm-open-whisper-kernels-v1";
+
 /// \brief Where the open engine's kernel set is, or "" -- the same search order the other
 ///        open engines use (open_qwen36/engine.cpp's find_kernels): OFLM_WHISPER_KERNELS_DIR,
 ///        then <model_dir>/open_kernels, then <root>/xclbins/<model_name>/open_kernels for
 ///        every xclbins root (the build tree's xclbins junction, the install tree, oflm-add's
 ///        user roots). The last is where export_whisper_kernels.py writes by default, so a
 ///        build of this tree finds its own kernels with no configuration. A candidate counts
-///        only if it holds whisper_kernels.json; *how names the rule that chose it, because
-///        every rule yields a working engine and a set chosen against intent looks right.
+///        only if whisper_kernels.json PARSES, names this exporter's own format, and reads
+///        `"complete": true` (PR #111 review): an `--only` export -- a subset of the seven GEMM
+///        streams, built for testing one stream in isolation -- writes a whisper_kernels.json
+///        that exists and is valid JSON but is deliberately incomplete, and auto-discovery
+///        picking it up would hand the engine a kernel set missing streams it needs. A
+///        candidate that fails this check is skipped, NOT refused -- the next candidate in the
+///        search order still gets a chance, since this is discovery, not validation of an
+///        operator-named location (that is OFLM_WHISPER_KERNELS_DIR below, which is always used
+///        as given and left for the engine's own construction to refuse).
+/// \note *how names the rule that chose it, because every rule yields a working engine and a
+///       set chosen against intent looks right.
 std::string find_open_kernels(const std::string& model_dir, const Whisper_Config& config, std::string* how) {
     namespace fs = std::filesystem;
-    std::error_code ec;
-    auto ok = [&](const fs::path& d) { return fs::is_regular_file(d / "whisper_kernels.json", ec); };
+    auto ok = [&](const fs::path& d) {
+        std::ifstream f(d / "whisper_kernels.json", std::ios::binary);
+        if (!f) return false;
+        try {
+            nlohmann::json j;
+            f >> j;
+            return j.value("complete", false) && j.value("format", std::string()) == kOpenKernelsFormat;
+        } catch (const nlohmann::json::exception&) {
+            return false;
+        }
+    };
     const std::string env = utils::getenv_oflm("OFLM_WHISPER_KERNELS_DIR");
     if (!env.empty()) {
         // An explicit location is used as given (the engine then validates it and refuses a
-        // wrong one), never silently replaced by a set found somewhere else.
+        // wrong one), never silently replaced by a set found somewhere else -- including when
+        // it is incomplete: an operator who names a directory explicitly gets ITS refusal
+        // (e.g. from the streams the container actually needs), not a silent skip to whatever
+        // the search order would otherwise have picked.
         *how = "OFLM_WHISPER_KERNELS_DIR";
         return env;
     }
