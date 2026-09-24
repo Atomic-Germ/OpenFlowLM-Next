@@ -217,10 +217,20 @@ std::pair<std::string, std::string> Whisper::_generate_legacy(whisper_task_type_
             break;
         }
 
-        std::vector<float> audio_chunk(l_this_round);
+        // Range-construct directly (PR #111 review, finding 11): the old
+        // `vector<float> audio_chunk(l_this_round)` followed by `insert(begin(), ...)`
+        // default-constructs l_this_round zeros and then INSERTS l_this_round more
+        // elements at the front, leaving a vector of 2*l_this_round -- real audio
+        // first, the original zeros pushed to the tail -- allocated and copied for
+        // no reason a single range constructor doesn't already give for free.
+        // Confirmed non-observable: _preprocess_audio's own pad/trim
+        // (`x.resize(N_SAMPLES)` or `x.resize(N_SAMPLES, 0.0f)`) always keeps
+        // exactly the first l_this_round elements and either truncates or
+        // zero-extends the rest, so the doubled buffer's extra zero tail was
+        // already being discarded or duplicated, never read as data.
+        std::vector<float> audio_chunk(this->audio_buffer.data() + current_idx,
+                                        this->audio_buffer.data() + current_idx + l_this_round);
 
-        audio_chunk.insert(audio_chunk.begin(), this->audio_buffer.data() + current_idx, this->audio_buffer.data() + current_idx + l_this_round);
-        
         _preprocess_audio(mel_feature, audio_chunk);
       
         // run whisper encoder
@@ -406,9 +416,13 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         const float time_offset = _S2T_(current_idx);
         const float window_seconds = _S2T_(l_this_round);
 
-        std::vector<float> audio_chunk(static_cast<size_t>(l_this_round));
-        audio_chunk.insert(audio_chunk.begin(), this->audio_buffer.data() + current_idx,
-                            this->audio_buffer.data() + current_idx + l_this_round);
+        // Range-construct directly, not size-then-insert (PR #111 review, finding
+        // 11 -- see _generate_legacy's identical fix above for why this is safe:
+        // _preprocess_audio's own pad/trim discards or duplicates whatever the
+        // extra zero tail would have held, so it was never observable, only wasted
+        // allocation and copy of up to N_SAMPLES=480000 floats per window).
+        std::vector<float> audio_chunk(this->audio_buffer.data() + current_idx,
+                                        this->audio_buffer.data() + current_idx + l_this_round);
         double t0 = now_s_whisper();
         _preprocess_audio(mel_feature, audio_chunk);
         t_preprocess += now_s_whisper() - t0;
