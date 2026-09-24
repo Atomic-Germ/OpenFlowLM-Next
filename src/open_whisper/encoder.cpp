@@ -135,9 +135,13 @@ void Encoder::run_layer(int64_t layer, float *x, int64_t real_rows, int64_t m_pa
 
   // task 0180: OW_HOST_FAST=1 fuses several of the passes below (strict
   // parsing, see host_ops.cpp) -- the exact path above is left untouched.
-  // Parsed once (host_fast_enabled() throws on a malformed value, and doing
-  // that on every layer would just repeat the same throw 32 times).
-  static const bool fast = host_fast_enabled();
+  // The MEMBER, set once at construction (host_fast_enabled() validated
+  // there -- see the constructor comment above), not a second
+  // function-local re-read: a function-local static would give run_layer()
+  // its own private copy of "was OW_HOST_FAST valid", a second source of
+  // truth that could only ever agree with the constructor's by accident
+  // (PR #111 review, finding G).
+  const bool fast = host_fast_;
 
   double t0 = now_s();
   if (fast) {
