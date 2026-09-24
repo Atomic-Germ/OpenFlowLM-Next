@@ -110,8 +110,7 @@ def build_stream(name: str, out: Path, force: bool, bfp16: bool) -> Path:
     bdir = out / "build" / name
     if not force and (bdir / "final.xclbin").is_file() and (bdir / "insts.bin").is_file():
         stamp = bdir / "shape.json"
-        if stamp.is_file() and json.loads(stamp.read_text()) == {
-                "M": M, "K": K, "N": N, "bfp16": bfp16}:
+        if _read_stamp(stamp) == {"M": M, "K": K, "N": N, "bfp16": bfp16}:
             print(f"  {name:6s} {M}x{K}x{N}  (kept)")
             return bdir
     # WG_BFP16 is SET here, never inherited: an exporter that let the environment
@@ -146,15 +145,35 @@ def _git_blob_hash(repo_root: Path, path: Path) -> str:
         return "unavailable"
 
 
+def _read_stamp(path: Path):
+    # A missing, truncated or otherwise unreadable stamp means "rebuild", never a crash --
+    # the stamp only decides whether a build may be kept.
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _fa_stamp() -> dict:
     # What a kept fa build must match: the shape AND the bytes of every source that went
     # into it. A shape-only stamp would keep a stale build after an edit to attn_npu2.cc
     # or attn_fa.py -- the "stale binary fails open" family (NpuEmbeddings CLAUDE.md traps
     # 7c/7d): the kernel set would carry the old kernel while fa.json's blob hashes named
     # the new sources.
+    # And the toolchain that compiles them: after an mlir-aie or Peano change a kept build
+    # would otherwise ship next to a fa.json naming the NEW versions.
+    import importlib.metadata as md
+
+    def _ver(pkg: str) -> str:
+        try:
+            return md.version(pkg)
+        except Exception:
+            return "unavailable"
+
     fa_dir = HERE / "designs" / "whisper_fa"
     return {"shape": FA_SHAPE,
-            "sources": {f: hashlib.sha256((fa_dir / f).read_bytes()).hexdigest() for f in FA_SOURCES}}
+            "sources": {f: hashlib.sha256((fa_dir / f).read_bytes()).hexdigest() for f in FA_SOURCES},
+            "toolchain": {"mlir_aie": _ver("mlir_aie"), "llvm-aie": _ver("llvm-aie")}}
 
 
 def _remove_stale_fa(out: Path) -> bool:
@@ -187,7 +206,7 @@ def build_fa(out: Path, force: bool) -> Path:
     bdir = out / "build" / "fa"
     if not force and (bdir / "final.xclbin").is_file() and (bdir / "insts.bin").is_file():
         stamp = bdir / "shape.json"
-        if stamp.is_file() and json.loads(stamp.read_text()) == _fa_stamp():
+        if _read_stamp(stamp) == _fa_stamp():
             print("  fa      (kept)")
         else:
             _run_fa_build(bdir)
