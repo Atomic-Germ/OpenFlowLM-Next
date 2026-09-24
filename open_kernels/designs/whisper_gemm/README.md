@@ -37,6 +37,10 @@ drain tiler's stride limit and fall back to one row block per barrier, and `conv
 K = 3840. All seven matched conv1 in 70-78 bytes across 11-14 short runs, i.e. UUID and
 metadata only.
 
+The same command also builds `<out>/fa/` -- the bidirectional FlashAttention kernel
+`src/open_whisper` dispatches to, a SEPARATE hardware context from these seven GEMM
+streams, from `../whisper_fa/attn_fa.py` (its own `README.md`). `--no-fa` skips it.
+
 ## Test it on hardware
 
 ```

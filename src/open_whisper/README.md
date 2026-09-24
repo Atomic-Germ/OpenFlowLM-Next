@@ -390,6 +390,19 @@ indistinguishable from plain bf16 under the `hf` protocol, H4 vs H0);
 prints which one a loaded kernel set actually is (`kernels.cpp`'s `datapath`
 line) -- read from the set, never assumed.
 
+**`fa/` is now produced by the normal kernel-set build, from our own IRON source.**
+`open_kernels/export_whisper_kernels.py` builds `<kernels_dir>/fa/` (the
+FlashAttention kernel `OW_ATTN` reads above) by default, alongside the seven
+GEMM streams, from `open_kernels/designs/whisper_fa/attn_fa.py` -- an IRON
+(mlir-aie) port of AMD's MLIR-AIR `attn_npu2.py`/`.cc`
+(`kernel_fusion_based_whisper`), built by the same pinned mlir-aie + Peano
+toolchain and verified byte-identical to AMD's own AIR-compiled kernel at
+production shape on real Whisper layers (NpuEmbeddings task 0181; see
+`open_kernels/designs/whisper_fa/README.md`). `--no-fa` skips it, in which case
+`OW_ATTN=auto` falls back to host attention and `OW_ATTN=npu` refuses at load.
+There is no longer a separate toolchain (e.g. MLIR-AIR) needed anywhere in the
+build of this engine's kernel set.
+
 **The open container builder ships `generation_config.json`.**
 `utilities/q4nx-build --open-whisper` now REQUIRES it from the source HF
 snapshot (it was optional and silently skipped before, which is how a build
