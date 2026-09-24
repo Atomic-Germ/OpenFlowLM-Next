@@ -157,6 +157,28 @@ def _fa_stamp() -> dict:
             "sources": {f: hashlib.sha256((fa_dir / f).read_bytes()).hexdigest() for f in FA_SOURCES}}
 
 
+def _remove_stale_fa(out: Path) -> bool:
+    """--no-fa must leave a GEMM-only/host-attention set: OW_ATTN=auto discovers a kernel
+    purely from <out>/fa/'s presence (fa_kernel_present() in encoder.cpp), so a `fa/` left
+    over from an earlier `--fa` build of the same --out would still be picked up and used,
+    silently defeating --no-fa (PR #111 review). <out>/build/fa (the build cache) is left
+    alone -- it is never discovered by the engine and keeping it avoids re-paying the ~45 s
+    IRON build if --fa is turned back on later.
+
+    Removed atomically: rename fa/ out of the way first, then delete the renamed copy, so
+    the canonical path either has a complete fa/ or none at all -- never a directory
+    mid-rmtree that still satisfies the engine's file-presence check.
+    """
+    final_dir = out / "fa"
+    if not final_dir.exists():
+        return False
+    stale = out / ".fa_stale"
+    shutil.rmtree(stale, ignore_errors=True)
+    final_dir.rename(stale)
+    shutil.rmtree(stale, ignore_errors=True)
+    return True
+
+
 def build_fa(out: Path, force: bool) -> Path:
     """Build designs/whisper_fa/attn_fa.py at the fixed production shape (FA_SHAPE) and
     stage it into <out>/fa/ (air.xclbin, air.insts.bin, fa.json) -- see the module
@@ -333,7 +355,8 @@ def main() -> int:
         build_fa(out, args.force)
         fa_built = True
     else:
-        print("  fa      skipped (--no-fa)")
+        removed = _remove_stale_fa(out)
+        print("  fa      skipped (--no-fa)" + (", removed stale fa/" if removed else ""))
 
     marker = {"format": FORMAT, "design": "design.json",
               "streams": [s["op"] for s in streams],
