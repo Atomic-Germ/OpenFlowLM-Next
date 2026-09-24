@@ -63,7 +63,11 @@ from npue import gemm_b_layout, layout_hash  # noqa: E402
 from toolchain_provenance import write_toolchain_json  # noqa: E402
 
 DESIGN = HERE / "designs" / "whisper_gemm" / "whisper_gemm.py"
-FA_DESIGN = HERE / "designs" / "whisper_fa" / "attn_fa.py"
+# OW_TEST_FA_DESIGN_OVERRIDE: test-only escape hatch (PR #111 review, finding D
+# verification) to point the fa/ build at a broken design source, so a failed/
+# interrupted fa/ build can be simulated and shown NOT to leave a stale-but-accepted
+# kernel set. Never set this in production; it is not documented in --help.
+FA_DESIGN = Path(os.environ.get("OW_TEST_FA_DESIGN_OVERRIDE") or str(HERE / "designs" / "whisper_fa" / "attn_fa.py"))
 FA_SOURCES = ["attn_fa.py", "attn_npu2.cc", "attn_cascade_wrap.cc", "zero.cc"]
 FORMAT = "oflm-open-whisper-kernels-v1"
 # The directory name src/model_list.json gives whisper-v3:turbo; the engine looks for
@@ -322,8 +326,26 @@ def main() -> int:
     out = (args.out if args.out is not None
            else HERE.parent / "src" / "xclbins" / args.model_name / "open_kernels").resolve()
     out.mkdir(parents=True, exist_ok=True)
-
     print(f"whisper kernel set -> {out}")
+
+    # PR #111 review, finding D: invalidate first, write the marker last. A PREVIOUS
+    # successful export may have left <out>/whisper_kernels.json (and, if it built one,
+    # fa/) from an earlier run. whisper_engine_select.cpp's find_open_kernels() accepts
+    # that marker purely on `"complete": true` + the right format -- it never checks
+    # that the stream files it names, or fa/, still match what is on disk NOW. Without
+    # this, a run that dies partway through the copies/builds BELOW (a `final.xclbin`/
+    # `insts_*.bin` already overwritten, but `build_fa` failing, or the process being
+    # killed, before the NEW marker at the bottom of this function is reached) leaves a
+    # directory that still parses as a complete, valid kernel set and is actually a MIX
+    # of the old and new build. Removing the marker (and any existing fa/, via the same
+    # atomic remove `--no-fa` already uses) here, before anything below touches a served
+    # file, means any interruption between here and the final marker write leaves this
+    # directory unrecognisable to auto-discovery -- never silently half-new.
+    marker_path = out / "whisper_kernels.json"
+    if marker_path.exists():
+        marker_path.unlink()
+    _remove_stale_fa(out)
+
     dirs = {n: build_stream(n, out, args.force, args.emulate_bfp16) for n in names}
 
     ref_name = names[0]
