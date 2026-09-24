@@ -53,6 +53,16 @@ void Whisper::load_model(std::string model_path, nlohmann::ordered_json model_in
         header_print("OFLM", extra_config);
     }
     this->_init_decode_protocol();
+    if (this->_decode_protocol() == "hf") {
+        // Load and validate generation_config.json NOW, not on the first request
+        // (PR #111 review): the README/PR usage claim is that the hf protocol's
+        // config is checked at load time, but until this call _hf_gen_config()
+        // only ran lazily inside _generate_hf() -- a missing/malformed file let
+        // the server finish "loading" and then fail the first transcription
+        // instead. The legacy protocol still never touches this file, lazy or
+        // otherwise.
+        this->_hf_gen_config();
+    }
     this->setup_tokenizer(model_path);
     
     this->sampler.reset();
@@ -409,9 +419,12 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         this->engine->clear_context();
 
         // [SOT] -> detect_language -> FEED the language token (the legacy protocol
-        // never did the feed; see the function comment above).
+        // never did the feed; see the function comment above). gc.decoder_start_token_id
+        // (from generation_config.json), not the compile-time start_of_transcript
+        // constant -- a container whose config names a different start token must
+        // detect language from the context IT actually declares (PR #111 review).
         t0 = now_s_whisper();
-        buffer<bf16> logits_buf = this->engine->decode_audio(start_of_transcript);
+        buffer<bf16> logits_buf = this->engine->decode_audio(gc.decoder_start_token_id);
         t_decode += now_s_whisper() - t0;
         ++n_decode_steps;
         t0 = now_s_whisper();
@@ -429,7 +442,12 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         int begin_index = 3;
         if (!enable_time_stamp) {
             t0 = now_s_whisper();
-            logits_buf = this->engine->decode_audio(no_time_stamp_token);  // + [notimestamps]
+            // gc.no_timestamps_token_id, not the compile-time no_time_stamp_token
+            // constant -- same reasoning as decoder_start_token_id above (PR #111
+            // review): this token must be the one the model's OWN generation_config.json
+            // names as <|notimestamps|>, which is also the id ts_proc (below) suppresses
+            // and computes timestamp_begin() from, so the two must agree by construction.
+            logits_buf = this->engine->decode_audio(gc.no_timestamps_token_id);  // + [notimestamps]
             t_decode += now_s_whisper() - t0; ++n_decode_steps;
             begin_index = 4;
         }
