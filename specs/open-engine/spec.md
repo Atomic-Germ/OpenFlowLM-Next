@@ -1154,9 +1154,21 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   bf16 inputs on 2026-09-24 (max-relative error <1e-4 and cosine >0.99999).
   The existing fixed-width `transpose_banked` opcode implements the new plan's
   conceptual `transpose_banked32`; both Python and C++ check every active tail
-  1..32 and both hidden widths. This establishes AB/decay/beta only, not 48-head
-  record emission or recurrent state. No catalogue promotion or model export.
+  1..32 and both hidden widths. No catalogue promotion or model export.
   See [bring-up report](plans/wide-deltanet-bringup.md).
+- **WideDeltaNet A7 synthetic chain.** The separate AB dispatch now feeds
+  `designs/wide_deltanet/glue.py` through a byte copy into its side buffer.
+  The glue reuses the existing convolution, normalization and emission kernels
+  at 48 heads with two input DMA channels. `deltanet/dn_step.py` accepts a
+  compile-time head count (default32, `DN_HEADS=48` for this chain); its scalar
+  and vector arithmetic is unchanged. NPU comparisons at both H5120/H2560
+  pass the inherited whole-tensor metrics for two 8-token sequences each,
+  cold and warm state; conv state is bit-exact. Every record is compared and
+  all output canaries remain intact. The stricter optional head-local metric
+  exposes up to1.03e-3 relative error for near-zero first-token outputs; this
+  diagnostic is retained separately, not claimed to pass. See
+  [A7 report](plans/wide-deltanet-a7.md) for thresholds, resources and evidence.
+  Whole-layer integration, segmented FFN and full-model validation are pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
