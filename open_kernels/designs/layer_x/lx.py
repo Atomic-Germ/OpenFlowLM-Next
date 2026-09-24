@@ -320,14 +320,16 @@ def _lx_build(pool, xres, consts, state, act, cfg, octrl, *, part=0, stop=99, sr
                 locks[0].release(1)         # slot 0's up|gate (BD 8/9)
                 if done is not None:
                     done.acquire(1)
-                for e in range(X.NE):       # Python-unrolled: h_0 .. h_7
+                for e in range(X.NX):       # NX = NE+1: consume the shared expert's h too
                     h = xin.acquire(1)
                     xin.release(1)
                     # h_k fires slot k's down AND slot k+1's up|gate (one 15-word packet),
-                    # except h_{NE-1} fires only the last down (a 5-word packet)
-                    locks[e + 1].release(1)
-                    if done is not None:
-                        done.acquire(1)
+                    # except h_{NE-1} fires only the last down (a 5-word packet); h_{NE}
+                    # (the shared expert) fires nothing -- consumed only for fifo balance.
+                    if e < X.NE:
+                        locks[e + 1].release(1)
+                        if done is not None:
+                            done.acquire(1)
             return emitter_body
 
         if os.environ.get("ONDV_NO_EMITTERS") != "1":

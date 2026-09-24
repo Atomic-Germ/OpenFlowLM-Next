@@ -377,10 +377,11 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                 f_oc_col(r, cfg, c, ctrl)
                 xin.release(2)
                 locks[0].release(1)
-                for e in range(X.NE):
+                for e in range(X.NX):       # NX = NE+1: consume the shared expert's h too
                     h = xin.acquire(1)
                     xin.release(1)
-                    locks[e + 1].release(1)
+                    if e < X.NE:            # only the routed slots fire a packet
+                        locks[e + 1].release(1)
             return emitter_body
 
         for c in range(N_CORES):
