@@ -99,6 +99,19 @@ static constexpr uint32_t kOndvPair = 10240u;       // the two chunks of a half 
 static constexpr uint32_t kOndvUpBytes = 655360u;   // one expert's up (= gate = down)
 static constexpr uint32_t kOndvDownCore = 81920u;   // DOWN_PER_CORE * DOWN_BAND
 static constexpr uint32_t kOndvPoolDown = 335544320u;
+// The shared expert's stripes (recipes/qwen36moe.py POOL_SHARE_*): one 81920 B slice per column.
+static constexpr uint32_t kOndvShareUp = 503316480u;
+static constexpr uint32_t kOndvShareGate = 503971840u;
+static constexpr uint32_t kOndvShareDown = 504627200u;
+
+// ONDV_EMIT_SHARED=1: the emitter also pushes the shared expert's three fills as a ninth slot.
+// The host sequence would otherwise enqueue them as soon as it has awaited the last routed
+// wave's hidden drain -- possibly BEFORE the emitter pushes that wave's down. All four are
+// 81920 B on the same MM2S queue, so nothing hangs: the core silently pairs the wrong weights.
+// With the emitter owning every w-queue push of the MoE block, the order is fixed.
+#ifndef ONDV_EMIT_SHARED
+#define ONDV_EMIT_SHARED 0
+#endif
 
 // The MM2S channel each column's w fifo landed on, i.e. its queue register. Taken from
 // the built design's `aie.shim_dma_allocation` table for @w0..@w7. NOTE: these are the
@@ -169,6 +182,14 @@ static inline void ondv_ctrl_col_impl(const int32_t *__restrict idx, uint32_t ba
     ondv_words(w + 0 * kOndvWords, kOndvBdUp, queue, base + up, kOndvUpW3, kOndvUpW4, kOndvUpW5);
     ondv_words(w + 1 * kOndvWords, kOndvBdGate, queue, base + up + kOndvStripe, kOndvUpW3, kOndvUpW4, kOndvUpW5);
     ondv_words(w + 2 * kOndvWords, kOndvBdDown, queue, base + ondv_down_off(e, col), kOndvDnW3, kOndvDnW4, kOndvDnW5);
+  }
+  if (ONDV_EMIT_SHARED) {
+    // slot kOndvRouted: the shared expert, plain linear fills (the down descriptor's shape)
+    int32_t *w = out + kOndvRouted * (3u * kOndvWords);
+    const uint32_t cs = col * kOndvDownCore;
+    ondv_words(w + 0 * kOndvWords, kOndvBdUp, queue, base + kOndvShareUp + cs, kOndvDnW3, kOndvDnW4, kOndvDnW5);
+    ondv_words(w + 1 * kOndvWords, kOndvBdGate, queue, base + kOndvShareGate + cs, kOndvDnW3, kOndvDnW4, kOndvDnW5);
+    ondv_words(w + 2 * kOndvWords, kOndvBdDown, queue, base + kOndvShareDown + cs, kOndvDnW3, kOndvDnW4, kOndvDnW5);
   }
 }
 

@@ -92,6 +92,9 @@ ONDV_BD_UP, ONDV_BD_GATE, ONDV_BD_DOWN = (int(_v) for _v in
 # Which columns run an emitter core. Columns that do not get their routed fills from the
 # host instead (a bisect knob: ONDV_EMITTER_COLS=0 tests one packet push in the full
 # design, where the one-emitter probe build_live succeeds but all eight TDR).
+# ONDV_EMIT_SHARED=1: the emitters push the shared expert's fills too (designs/router/ondv_ctrl.h),
+# so the host sequence must not enqueue them on the emitter columns.
+ONDV_EMIT_SHARED = ONDV and os.environ.get("ONDV_EMIT_SHARED") == "1"
 ONDV_EMITTER_COLS = tuple(sorted({int(_v) for _v in
                                   os.environ.get("ONDV_EMITTER_COLS",
                                                  ",".join(str(_c) for _c in range(C.N_CORES))).split(",")
@@ -558,7 +561,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
                     up0 = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR
                     pipe_w.fill(w_prods[c], a_pool, half_tap(up0))
                     pipe_w.fill(w_prods[c], a_pool, half_tap(up0 + STRIPE))
-            else:
+            elif not (ONDV_EMIT_SHARED and not _host_push(c)):
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_UP + c * HALF, HALF))
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_GATE + c * HALF, HALF))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_HP + c * HID_PC * 4, HID_PC * 4))
@@ -570,7 +573,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
                     pipe_w.fill(w_prods[c], a_pool,
                                 bt(POOL_BYTES, POOL_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                    DOWN_PER_CORE * DOWN_BAND))
-            else:
+            elif not (ONDV_EMIT_SHARED and not _host_push(c)):
                 pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_SHARE_DOWN + c * DOWN_PER_CORE * DOWN_BAND,
                                                    DOWN_PER_CORE * DOWN_BAND))
     for c in range(N_CORES):

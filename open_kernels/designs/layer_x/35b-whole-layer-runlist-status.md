@@ -94,3 +94,79 @@ only because its xclbin's command size left more slots. Two ways to one submit/t
    one command = one submit, no slot pressure. This is the robust route.
 2. Raise the context's command capacity (smaller `max_cu_size` / larger CQ — driver or
    xclbin level), so a 40-run runlist fits.
+
+## 2026-09-24 (lax decode): the whole 40-layer token, real weights, parity PASS, ONE submit
+
+The merged `lax` kernels now run the real Qwen3.6-35B-A3B decode: all 40 whole layers (30
+linear + 10 full attention, the model's 3:1 order) with the routed experts retargeted and
+enqueued ON-DEVICE, in ONE xclbin, as **ONE `xrt::runlist` submit on ONE hw_context**, and
+the token's logits match the fp64 reference (`model/compare_decode.py`):
+
+```
+runlist_exec r0 [40 runs] -> ok
+token 0 (position 0): logits corr 0.999998  argmax ours 846 ref 846
+  top5 ours [846, 8678, 1421, 2244, 1785] ref [846, 8678, 1421, 2244, 1785]      PASS
+```
+
+Three tokens (positions 0..2, KV cache + DeltaNet state carried, `attnpos` per token) all PASS
+(corr 0.999998 / 0.999993 / 0.999998, argmax 846 / 198 / 3710 = the reference), and the same
+run as five 8-layer submits (`--per 8`) gives identical results. Speed, steady state: 75.8 ms for
+the 40 layers in ONE submit, 86.4 ms with the final norm + lm_head = **11.6 tok/s** (16.5x the
+~0.7 tok/s starting point); five submits 85.7 / 96.3 ms = 10.4 tok/s. Evidence:
+`1bit-MONSTER-goal/benchmarks/RESULTS-lax-decode-35b-2026-09-24.md`.
+
+### Correction: nothing before this was a decode
+
+The earlier "(cont. 12) COMPLETE 40-layer MoE decode (5 submits, ~11.6 tok/s)" ran ONE
+`insts.bin` (N=8, one layer's text x8, no per-layer offsets) five times over UNFILLED buffers
+(`/tmp/t_5ctx.cfg` never loads pool/consts/act). It measured throughput of layer-shaped work;
+it computed nothing, and no `lax` layer had ever been checked against real data. Run on real
+layer-0 weights, every `lax` build returned NaN. Three bugs, all fixed on branch `lax-decode`:
+
+1. **The emitter read the router output as its pool base** (`lax.py` emitter body). It took
+   the rout and cfg x elements as `xin.acquire(1)` twice. Object-fifo acquire counts are
+   cumulative: the second `acquire(1)`, while one element is held, returns the SAME element,
+   so `cfg` aliased `rout` and the base was the first two router probabilities
+   (`0xa47b3abcc180`: exactly the IO_PAGE_FAULT addresses). Found with an echo of what the
+   emitter actually read (`ONDV_DBG=1`, `designs/router/ondv_echo.cc`, drained to the unused
+   kv argument). Fix: `rc = xin.acquire(2); r, cfg = rc[0], rc[1]`. This is also the whole
+   story behind "cfg[2..9] is not delivered to the core" and "act[A_ROUT+2048] is not what the
+   core reads" above: the core never looked at the cfg element.
+2. **The shared expert's fills raced the last routed down** (`ONDV_EMIT_SHARED=1`). The host
+   sequence enqueues the shared expert's up|gate as soon as it has awaited the last routed
+   wave's hidden drain, i.e. possibly BEFORE the emitter pushes that wave's down; all are
+   81920 B on the same MM2S queue, so nothing hangs and the core pairs the wrong weights. Now
+   the emitter pushes the shared expert too (a ninth slot in `ondv_ctrl.h`, two more chunk BDs)
+   and the host does not. Without it: corr 0.99889 (varies run to run, below the 0.9999 bar).
+3. **The "8 whole layers per hw_context" cap was a lock overflow, not a CERT/TXN budget**
+   (`ONDV_PKTDONE_ACQ=1`). Every chunk BD of the emitter's control stream releases `pktdone`
+   and nothing acquired it, so the lock only counted up (one per chunk per layer) and AIE2
+   locks are 6-bit. The emitter now takes the chunks' releases back once per layer. Measured on
+   real layers, one context: 7 runs ok / 8 TDR before; 8, 9, 16, 24 and **40 runs ok** after.
+   So cont. 14-17's "~16K per-context TXN op budget" reading is wrong: it matched the op count
+   because both scale with layers.
+
+Everything before the MoE block in `lax` was already right: on real layer 0, xn, qkv, z, the
+DeltaNet in/out, og, out, the post-attention residual, xm and the router output (and its
+top-8) all match the proven `lx` path at corr 1.000000, and the shared expert's hidden matched
+wherever its column's stream was not corrupted by the race.
+
+### Build and run (branch `lax-decode`)
+
+```bash
+source ~/ironenv142/bin/activate
+export PATH=/home/bcloud/Xilinx/2026.1/Vitis/aietools/bin:$VIRTUAL_ENV/bin:/usr/bin:$PATH
+unset PYTHONPATH
+cd open_kernels
+export OPEN_KERNELS_SPEC=recipes/specs/qwen36-35b-a3b.json MOE_ONDEVICE_ROUTE=1 \
+       ONDV_EMIT_SHARED=1 ONDV_PKTDONE_ACQ=1
+LAX_KIND=0 python build_design.py designs/layer_x/lax.py OUT/lax_l
+LAX_KIND=1 python build_design.py designs/layer_x/lax.py OUT/lax_a
+# weights + fp64 reference (all-q4_1, the lax builds' spec); pools are 40 x 512 MB
+python3 model/make_decode.py --requant --layers 40 --tokens N --out DEC --pool-dir POOLS
+python3 model/lax_decode_cfg.py --out DEC --lax-l OUT/lax_l --lax-a OUT/lax_a --per 40 --tokens N
+harness/build/run_kernel DEC/run_lax_p40.cfg
+python3 model/compare_decode.py --out DEC --tokens N
+```
+
+`insts.bin` md5: lax_l `31244de2088ccd8dac27df72afdd0c29`, lax_a `7025eebc7663feb97cdebf6cfef7b2fb`.

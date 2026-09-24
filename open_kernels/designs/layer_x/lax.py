@@ -175,9 +175,17 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
         f_oc = ExternalFunction("ondv_ctrl_col", source_file=str(X.RT / "ondv_ctrl_col.cc"),
                                 arg_types=[t["x"], t["x"], np.int32, tl["u8_ctrl"]],
                                 include_dirs=inc + [str(X.RT)],
-                                compile_flags=[f"-DONDV_BD_UP={X.ONDV_BD_UP}",
+                                compile_flags=[f"-DONDV_EMIT_SHARED={int(X.ONDV_EMIT_SHARED)}",
+                                               f"-DONDV_FIX_EXPERT={int(os.environ.get('ONDV_FIX_EXPERT', '0'))}",
+                                               f"-DONDV_BD_UP={X.ONDV_BD_UP}",
                                                f"-DONDV_BD_GATE={X.ONDV_BD_GATE}",
                                                f"-DONDV_BD_DOWN={X.ONDV_BD_DOWN}"])
+
+    DBG = ondv and os.environ.get("ONDV_DBG") == "1"
+    dbg_ty = np.ndarray[(64,), np.dtype[np.uint32]]
+    if DBG:
+        f_echo = ExternalFunction("ondv_echo", source_file=str(X.RT / "ondv_echo.cc"),
+                                  arg_types=[t["x"], t["x"], tl["u8_ctrl"], dbg_ty], include_dirs=inc)
 
     def af(sym, args):
         return ExternalFunction(sym, source_file=str(ATTN / f"{sym}.cc"), arg_types=args,
@@ -216,6 +224,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
             for c in range(N_CORES)]
     of_y = [ObjectFifo(t["y"], name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(t["x"], name="x", depth=2)
+    of_dbg = ObjectFifo(dbg_ty, name="dbg", depth=1) if DBG else None
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=3)
     of_side = ObjectFifo(u8_4k, name="side", depth=2)
@@ -231,7 +240,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                     for c in range(N_CORES)] if ondv else None
     shim_w = [Tile(c, 0, tile_type=AIETileType.ShimNOCTile) for c in range(N_CORES)]
     ctrlw = [Buffer(tl["u8_ctrl"], name=f"ctrlw{c}", tile=emitter_tile[c]) for c in range(N_CORES)] if ondv else None
-    pktlk = [[Lock(emitter_tile[c], init=0, name=f"pktlk{c}_{i}") for i in range(X.NE + 1)] for c in range(N_CORES)] if ondv else None
+    pktlk = [[Lock(emitter_tile[c], init=0, name=f"pktlk{c}_{i}") for i in range(X.NE + 1 + X.ONDV_EMIT_SHARED)] for c in range(N_CORES)] if ondv else None
     pktdone = [Lock(emitter_tile[c], init=0, name=f"pktdone{c}") for c in range(N_CORES)] if ondv else None
 
     def rep(fn):
@@ -393,26 +402,45 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
 
     if ondv:
         N_X_SKIP = XN_ELEMS + OG_ELEMS + 1
+        PKD_ACQ = os.environ.get("ONDV_PKTDONE_ACQ") == "1"
 
         def _emitter_body(c):
             def emitter_body(xin, ctrl, f_oc_col, *locks):
+                if PKD_ACQ:
+                    pkd, locks = locks[-1], locks[:-1]
+                if DBG and c == 0:
+                    f_echo_, dbg_out = locks[0], locks[1]
+                    locks = locks[2:]
                 for _ in range_(N_X_SKIP):
                     e = xin.acquire(1)
                     xin.release(1)
-                r = xin.acquire(1)
-                cfg = xin.acquire(1)
+                # acquire(2), NOT two acquire(1)s: object-fifo acquire counts are cumulative, so a
+                # second acquire(1) while holding one element returns that SAME element -- the
+                # emitter then read the router output as its pool base (the "cfg[2..9] not
+                # delivered" and page-fault symptoms)
+                rc = xin.acquire(2)
+                r, cfg = rc[0], rc[1]
                 f_oc_col(r, cfg, c, ctrl)
+                if DBG and c == 0:
+                    de = dbg_out.acquire(1)
+                    f_echo_(r, cfg, ctrl, de)
+                    dbg_out.release(1)
                 xin.release(2)
                 locks[0].release(1)
                 for e in range(X.NX):       # NX = NE+1: consume the shared expert's h too
                     h = xin.acquire(1)
                     xin.release(1)
-                    if e < X.NE:            # only the routed slots fire a packet
+                    if e < X.NE or X.ONDV_EMIT_SHARED:   # routed slots (and the shared one's down)
                         locks[e + 1].release(1)
+                if PKD_ACQ:
+                    # take back every chunk BD's pktdone release: otherwise the lock only counts up
+                    # (one per chunk per layer) and AIE2 locks are 6-bit
+                    pkd.acquire(X.NE + 1 + X.ONDV_EMIT_SHARED)
             return emitter_body
 
         for c in range(N_CORES):
-            workers.append(Worker(rep(_emitter_body(c)), fn_args=[of_x.cons(), ctrlw[c], f_oc, *pktlk[c]],
+            extra = [f_echo, of_dbg.prod()] if (DBG and c == 0) else []
+            workers.append(Worker(rep(_emitter_body(c)), fn_args=[of_x.cons(), ctrlw[c], f_oc, *extra, *pktlk[c]] + ([pktdone[c]] if PKD_ACQ else []),
                                   tile=emitter_tile[c], stack_size=0x1800))
 
     bt = X.bt
@@ -566,8 +594,9 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
         (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_state) = a[:7]
         a_cfg = a[7] if ondv else None
         rest = a[8:] if ondv else a[7:]
+        dbg_c = rest[13] if DBG else None
         (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c,
-         ain_p, aout_c, og_cs) = rest
+         ain_p, aout_c, og_cs) = rest[:13]
         kinds = _layer_kinds(NLAYERS, kind)
         for k, kk in enumerate(kinds):
             if kk == KIND_FULL:
@@ -578,6 +607,10 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                 lx_sequence(a_pool, c_xres, a_consts, a_state, a_act, a_cfg,
                             lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c,
                             configure_routed=(k == 0))
+        if DBG:
+            tg_d = TaskGroup()                    # the emitter echo -> the (unused) kv argument
+            dbg_c.drain(a_kv, tap=X.bt(KV_BYTES, 0, 256), wait=True, group=tg_d)
+            tg_d.finish()
 
     rt_args = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty, state_ty]
     if ondv:
@@ -590,6 +623,8 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                 of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0)),
                 of_ain.prod(tile=Tile(5, 0)), of_aout.cons(tile=Tile(6, 0)),
                 [of_og[c].cons(tile=Tile(3 + c, 0)) for c in range(ACORES - 1)]]
+    if DBG:
+        rt_args += [of_dbg.cons(tile=Tile(7, 0))]
     rt = Runtime(sequence, rt_args)
     flows = []
     if ondv:
@@ -602,8 +637,15 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
             for k in range(1, X.NE):
                 bds.append(Bd(buffer=ctrlw[c], offset=180 * k - 60, length=180,
                               acquires=[Acquire(pktlk[c][k])], releases=[Release(pktdone[c])], next=k + 1))
-            bds.append(Bd(buffer=ctrlw[c], offset=1380, length=60,
-                          acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
+            if X.ONDV_EMIT_SHARED:
+                # down7 + the shared up|gate, then the shared down on its own after the shared h
+                bds.append(Bd(buffer=ctrlw[c], offset=1380, length=180,
+                              acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=X.NE + 1))
+                bds.append(Bd(buffer=ctrlw[c], offset=1560, length=60,
+                              acquires=[Acquire(pktlk[c][X.NE + 1])], releases=[Release(pktdone[c])], next=0))
+            else:
+                bds.append(Bd(buffer=ctrlw[c], offset=1380, length=60,
+                              acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
             rt.add_tile_dma(TileDma(tile=emitter_tile[c],
                                     channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
             flows.append(PacketFlow(pkt_id=int(os.environ.get("ONDV_PKT_ID", "15")), src=emitter_tile[c], src_port=WireBundle.DMA, src_channel=1,
