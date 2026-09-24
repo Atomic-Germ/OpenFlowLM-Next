@@ -41,6 +41,11 @@ void Whisper::load_model(std::string model_path, nlohmann::ordered_json model_in
     header_print("OFLM", "Loading model: " << model_path);
     this->enable_preemption = enable_preemption;
     this->model_path = model_path;
+    // Per-model caches: a Whisper that loads a second model must not keep reading the
+    // first one's generation_config.json or vocab_size.
+    this->hf_gen_config_loaded_ = false;
+    this->hf_gen_config_ = whisper_hf::GenerationConfig{};
+    this->real_vocab_size_ = 0;
 
     this->lm_config = std::make_unique<Whisper_Config>();
     this->lm_config->from_pretrained(this->model_path);
