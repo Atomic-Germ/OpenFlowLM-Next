@@ -17,6 +17,7 @@
 //   feed <dst> <table> <id|last>            dst (f32 row) <- the table's bf16 row for a token id
 //   greedy <logits> <n>                     argmax over the first n f32 logits -> `last`, printed
 //   tick                                    wall ms since the previous tick
+//   stopat <id>                             end the program here if `greedy` last picked <id>
 //   poolbase <dst> <off> <src>              write src's device address (+0x80000000) into dst
 //   ondvctrl <dst> <pool> <i0,..,i7>        fill dst with the on-device router's control
 //                                           words for `pool` and those top-8 indices (the
@@ -59,6 +60,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -154,6 +156,7 @@ struct Host {
     std::map<std::string, RunList> runlists;
     int runs = 0;
     size_t last_token = 0;                              // `greedy`'s pick, `feed ... last`
+    bool stopped = false;                               // `stopat` hit: end the program
     std::chrono::steady_clock::time_point tick_t = std::chrono::steady_clock::now();
     bool keep_going = false;
     unsigned timeout_ms = 60000;
@@ -387,10 +390,17 @@ struct Host {
                 if (v[i] > v[best]) best = i;
             last_token = best;
             std::printf("greedy %zu\n", best);
+            std::fflush(stdout);                        // a wrapper streams these as they come
         } else if (cmd == "tick") {
             auto now = std::chrono::steady_clock::now();
             std::printf("tick %.3f ms\n", std::chrono::duration<double, std::milli>(now - tick_t).count());
             tick_t = now;
+            std::fflush(stdout);
+        } else if (cmd == "stopat") {
+            if (last_token == num(need(it, "stopat id"), "stopat id")) {
+                stopped = true;
+                std::printf("stop %zu\n", last_token);
+            }
         } else if (cmd == "ondvctrl") {
             // Fill a buffer with the on-device router's control words using the SAME
             // generator the router core runs, for a given pool BO and top-8 index list.
@@ -568,15 +578,22 @@ struct Host {
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::fprintf(stderr, "usage: run_kernel <program.cfg>\n");
+        std::fprintf(stderr, "usage: run_kernel <program.cfg | ->\n");
         return 2;
     }
-    fs::path cfg = fs::absolute(argv[1]);
-    std::ifstream f(cfg);
-    if (!f) {
-        std::fprintf(stderr, "cannot open %s\n", cfg.string().c_str());
-        return 2;
+    // `-`: read the program from stdin as it is written, so a driver (model/lax_chat.py) can
+    // keep the device state across prompts and decide each next line from the previous output
+    const bool from_stdin = std::strcmp(argv[1], "-") == 0;
+    fs::path cfg = from_stdin ? fs::current_path() / "stdin" : fs::absolute(argv[1]);
+    std::ifstream file;
+    if (!from_stdin) {
+        file.open(cfg);
+        if (!file) {
+            std::fprintf(stderr, "cannot open %s\n", cfg.string().c_str());
+            return 2;
+        }
     }
+    std::istream& f = from_stdin ? static_cast<std::istream&>(std::cin) : file;
     Host h;
     const char* rc_env = std::getenv("HARNESS_RETRY_CONTENTION");
     const int retry_contention = rc_env ? std::atoi(rc_env) : 0;
@@ -587,7 +604,7 @@ int main(int argc, char** argv) {
     std::string line;
     int lineno = 0;
     try {
-        while (std::getline(f, line)) {
+        while (!h.stopped && std::getline(f, line)) {
             ++lineno;
             // The NPU is shared. Contention surfaces as xrt's "qds_device::wait()
             // unexpected command state" -- measured on the KNOWN-GOOD shipped lx0 kernel

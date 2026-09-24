@@ -186,3 +186,23 @@ condition; what follows the end-of-turn token is the model continuing past it).
 Wall time per position, steady state: prompt 76.4 ms (no head), generated **89.9 ms median
 (89.2-90.2) = 11.1 tok/s end to end** (feed + one submit + norm + lm_head + argmax readback).
 The first position of a process is cold (8.8 s: first touch of the ~21 GB of BOs). 0 faults.
+
+### (lax decode, cont.) Chat on the NPU: `model/lax_chat.py`
+
+`lax_chat.py` drives one persistent harness session (`run_kernel -` reads its program from
+stdin), so the ~21 GB of weights load once (10 s) and the KV cache and DeltaNet state carry
+across turns; each turn feeds only its new tokens. Greedy, thinking off, a turn ends at
+`<|im_end|>`. A three-turn session:
+
+```
+Q: What is the capital of France? Answer in one sentence.
+A: The capital of France is Paris.                              7 tok, 11.1 tok/s
+Q: And what is its population, roughly?
+A: The population of Paris is approximately 2.1 million people within the city proper,
+   though the larger metropolitan area is home to around 12 million people.   32 tok, 11.1 tok/s
+Q: Write a haiku about a neural processing unit.
+A: Silicon mind wakes, / Parallel paths light the way, / Data flows like rain.   18 tok, 11.0 tok/s
+```
+
+Prompts run at ~12 tok/s (no head per prompt token). Harness additions: `feed`, `greedy`, `tick`,
+`stopat`, and the stdin program mode.

@@ -17,6 +17,7 @@ ondv_ctrl_col reads at run time.
 
 The lax builds must be ONDV builds with the three fixes (MOE_ONDEVICE_ROUTE=1 ONDV_EMIT_SHARED=1
 ONDV_PKTDONE_ACQ=1, see 35b-whole-layer-runlist-status.md "2026-09-24 (lax decode)").
+`setup()` / `position()` are also the building blocks of model/lax_chat.py.
 """
 from __future__ import annotations
 
@@ -29,29 +30,17 @@ GLOBALS = ("xres", "zero", "normw", "xresf", "hn", "logits", "lmpool", "ptab")
 # lax's w{c} fifos: MM2S ch1 (0x1D21C) or ch0 (0x1D214) per column
 QUEUES = (0x1D21C, 0x1D214, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D214, 0x1D214)
 POOL, CONSTS, ACT, CFG, STATE, KV = 536870912, 11882496, 190464, 4096, 2342912, 8388608
+HEAD = ["run ln xres zero normw xresf hn", "run lm lmpool hn logits"]    # final norm + lm_head
 
 
 def sfx(t):
     return "" if t == 0 else f"_t{t}"
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True, help="make_decode.py's --out")
-    ap.add_argument("--lax-l", required=True, help="lax build, LAX_KIND=0 (linear attention)")
-    ap.add_argument("--lax-a", required=True, help="lax build, LAX_KIND=1 (full attention)")
-    ap.add_argument("--per", type=int, default=40, help="layers per hw_context / runlist submit")
-    ap.add_argument("--tokens", type=int, default=1)
-    ap.add_argument("--dump-res", action="store_true", help="dump xres after every submit")
-    ap.add_argument("--prompt-ids", default=None,
-                    help="generation mode: comma-separated prompt token ids, fed one position at a time")
-    ap.add_argument("--gen", type=int, default=0, help="generation mode: greedy tokens after the prompt")
-    ap.add_argument("--embed", default=None, help="generation mode: the bf16 embedding table [vocab, hidden]")
-    ap.add_argument("--vocab", type=int, default=248070, help="generation mode: real vocab (argmax range)")
-    a = ap.parse_args()
-    out = Path(a.out).resolve()
+def setup(out: Path, lax_l: Path, lax_a: Path, per: int) -> tuple[list[str], int, str]:
+    """Kernels, buffers and the runlists of a lax decode over make_decode.py's `out`:
+    (lines, number of submits per position, the layer kinds as 'l'/'f')."""
     src = (out / "run_decode.cfg").read_text().splitlines()
-
     kinds = {}                                # layer -> 'l' | 'f', from the kernel that runs its pool
     pool_dir = None
     for line in src:
@@ -65,11 +54,10 @@ def main() -> int:
     tail += [line for line in src if line.split()[:1] == ["kernelx"] and line.split()[1] in ("ln", "lm")]
 
     c = ["device", "attngeom 2048 1024"]
-    ng = (nl + a.per - 1) // a.per
+    ng = (nl + per - 1) // per
     for g in range(ng):
-        c += [f"xclbin X{g} {Path(a.lax_l).resolve()}/final.xclbin",
-              f"kernelx lxf{g} X{g} {Path(a.lax_l).resolve()}/insts.bin",
-              f"kernelx axf{g} X{g} {Path(a.lax_a).resolve()}/insts.bin"]
+        c += [f"xclbin X{g} {lax_l}/final.xclbin", f"kernelx lxf{g} X{g} {lax_l}/insts.bin",
+              f"kernelx axf{g} X{g} {lax_a}/insts.bin"]
     c += tail
     c += [line for line in src if line.startswith("buf ") and line.split()[1] in GLOBALS]
     c += [f"buf dkv {KV}", f"buf dstate {STATE}"]            # the unused kv / state argument
@@ -89,21 +77,47 @@ def main() -> int:
 
     for g in range(ng):
         c.append(f"runlist r{g}")
-        for l in range(g * a.per, min(g * a.per + a.per, nl)):
+        for l in range(g * per, min(g * per + per, nl)):
             c.append(f"runlist_add r{g} {'lxf' if kinds[l] == 'l' else 'axf'}{g} {args(l)}")
+    c.append("attngeom 2048 1024 0")
+    return c, ng, "".join(kinds[l] for l in range(nl))
+
+
+def position(pos: int, ng: int, feed: str | None = None) -> list[str]:
+    """One position: optionally feed a token's embedding (`feed` = an id or 'last'; needs the
+    `embed` buffer), then the attention position and every submit."""
+    c = [f"feed xres embed {feed}"] if feed is not None else []
+    c += [f"attnpos axf{g} {pos}" for g in range(ng)]
+    c += [f"runlist_exec r{g}" for g in range(ng)]
+    return c
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True, help="make_decode.py's --out")
+    ap.add_argument("--lax-l", required=True, help="lax build, LAX_KIND=0 (linear attention)")
+    ap.add_argument("--lax-a", required=True, help="lax build, LAX_KIND=1 (full attention)")
+    ap.add_argument("--per", type=int, default=40, help="layers per hw_context / runlist submit")
+    ap.add_argument("--tokens", type=int, default=1)
+    ap.add_argument("--dump-res", action="store_true", help="dump xres after every submit")
+    ap.add_argument("--prompt-ids", default=None,
+                    help="generation mode: comma-separated prompt token ids, fed one position at a time")
+    ap.add_argument("--gen", type=int, default=0, help="generation mode: greedy tokens after the prompt")
+    ap.add_argument("--embed", default=None, help="generation mode: the bf16 embedding table [vocab, hidden]")
+    ap.add_argument("--vocab", type=int, default=248070, help="generation mode: real vocab (argmax range)")
+    a = ap.parse_args()
+    out = Path(a.out).resolve()
+    c, ng, kinds = setup(out, Path(a.lax_l).resolve(), Path(a.lax_a).resolve(), a.per)
     if a.prompt_ids:
         # greedy generation: every position is one feed + one submit; the norm + lm_head (and the
         # argmax, fed back as the next input) only where a next token is wanted
         ids = [int(v) for v in a.prompt_ids.split(",")]
         emb = Path(a.embed).resolve()
         c.append(f"buf embed {emb.stat().st_size} {emb}")
-        c.append("attngeom 2048 1024 0")
         for pos in range(len(ids) + a.gen):
-            c.append(f"feed xres embed {ids[pos] if pos < len(ids) else 'last'}")
-            c += [f"attnpos axf{g} {pos}" for g in range(ng)]
-            c += [f"runlist_exec r{g}" for g in range(ng)]
+            c += position(pos, ng, str(ids[pos]) if pos < len(ids) else "last")
             if pos >= len(ids) - 1:
-                c += ["run ln xres zero normw xresf hn", "run lm lmpool hn logits", f"greedy logits {a.vocab}"]
+                c += HEAD + [f"greedy logits {a.vocab}"]
             c.append("tick")
         path = out / f"run_lax_gen_p{a.per}.cfg"
         path.write_text("\n".join(c) + "\n", newline="\n")
@@ -113,17 +127,15 @@ def main() -> int:
         s = sfx(t)
         if t:
             c.append(f"load xres {out}/xres{t}.bin")
-        c.append("attngeom 2048 1024 0")
         c += [f"attnpos axf{g} {t}" for g in range(ng)]
         for g in range(ng):
             c.append(f"runlist_exec r{g}")
             if a.dump_res:
-                c.append(f"dump xres {out}/y_res{min(g * a.per + a.per, nl) - 1}{s}.bin 8192")
-        c += ["run ln xres zero normw xresf hn", "run lm lmpool hn logits", f"dump logits {out}/y_logits{s}.bin 993280"]
+                c.append(f"dump xres {out}/y_res{min(g * a.per + a.per, len(kinds)) - 1}{s}.bin 8192")
+        c += HEAD + [f"dump logits {out}/y_logits{s}.bin 993280"]
     path = out / f"run_lax_p{a.per}.cfg"
     path.write_text("\n".join(c) + "\n", newline="\n")
-    print(f"wrote {path}: {nl} layers ({''.join(kinds[l] for l in range(nl))}), {ng} submit(s)/token, "
-          f"{a.tokens} token(s)")
+    print(f"wrote {path}: {len(kinds)} layers ({kinds}), {ng} submit(s)/token, {a.tokens} token(s)")
     return 0
 
 
