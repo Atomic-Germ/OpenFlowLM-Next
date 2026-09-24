@@ -35,7 +35,7 @@ def worker(namespace):
     return namespace["glue_body"]
 
 
-@pytest.mark.parametrize("heads,hidden", [(48, 5120), (32, 4096), (32, 2560), (16, 2048), (16, 1024)])
+@pytest.mark.parametrize("heads,hidden", [(48, 5120), (48, 2560), (32, 4096), (32, 2560), (16, 2048), (16, 1024)])
 def test_actual_glue_declarations_preserve_legacy_and_budget_wide_buffers(heads, hidden):
     """Evaluate the real design's type/FIFO declarations with recording constructors.
 
@@ -128,7 +128,7 @@ class Output:
         self.count += count
 
 
-@pytest.mark.parametrize("hidden,heads,dense", [(5120, 48, True), (4096, 32, True), (2560, 32, True),
+@pytest.mark.parametrize("hidden,heads,dense", [(5120, 48, True), (2560, 48, True), (4096, 32, True), (2560, 32, True),
                                               (2048, 16, True), (1024, 16, True), (2048, 32, False)])
 def test_glue_stream_order_reuses_accumulators_and_continues_to_records(hidden, heads, dense):
     wide = heads > 32
@@ -204,7 +204,7 @@ def test_glue_stream_order_reuses_accumulators_and_continues_to_records(hidden, 
     assert records == list(range(heads))
     assert out.count == 3 * conv_tiles + heads
     assert not sin.values and not xin.values and not ain.values
-    assert xin.count == (12 if wide else 0)
+    assert xin.count == (4 * len(tiles) if wide else 0)
     assert not any(f.held for f in (sin, xin, ain, out))
 
 
@@ -214,12 +214,53 @@ def test_ab_bank_count_is_geometry_not_model_name():
         assert Q36.ab_banks(ModelSpec.from_dict(dict(s.to_dict(), lin_value_heads=heads))) == banks
 
 
-def test_wide_dispatch_stays_blocked_until_dma_bringup(monkeypatch):
+def test_impossible_fused_dma_requires_explicit_diagnostic_probe(monkeypatch):
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    monkeypatch.delenv("OPEN_KERNELS_WIDE_GLUE_PROBE", raising=False)
     # Keep the independent FFN L1 blocker out of this assertion.
     s = ModelSpec.from_dict(dict(spec27().to_dict(), intermediate=8192))
-    with pytest.raises(OpRangeError, match="not implemented.*wide.*DMA"):
+    with pytest.raises(OpRangeError, match="not implemented.*3 input DMA"):
         Q35.recipe(s)
+    monkeypatch.setenv("OPEN_KERNELS_WIDE_GLUE_PROBE", "1")
+    assert Q35.recipe(s).linear.NHEAD == 48
+    monkeypatch.delenv("OPEN_KERNELS_UNVALIDATED")
+    with pytest.raises(OpRangeError, match="outside the validated"):
+        Q35.recipe(s)
+
+
+@pytest.mark.parametrize("hidden", [2560, 5120])
+def test_wide_dma_replays_xn_with_contiguous_banked_weights(hidden):
+    s = ModelSpec.from_dict(dict(spec27().to_dict(), hidden=hidden, intermediate=8192))
+    layout = Q35.layout(s)
+    transfers = []
+    class Pipe:
+        def fill(self, endpoint, source, tap):
+            total, off, size = tap
+            assert 0 <= off < off + size <= total
+            transfers.append((endpoint, source, off, size))
+    chunks = Q35.xn_side_elems(s)
+    ns = dict(layout.constants(), AB_BANKS=2, AB_TILES=Q35.ab_tiles_per_half(s), ELEM=4096,
+              XN_ELEMS=chunks, bt=lambda total, off, size: (total, off, size))
+    tree = ast.parse(LX.read_text())
+    lx = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "lx")
+    fn = next(n for n in lx.body if isinstance(n, ast.FunctionDef) and n.name == "wide_side_sequence")
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(LX), "exec"), ns)
+    ns["wide_side_sequence"](Pipe(), "weights", "xn", "consts", "act")
+    weights = [t for t in transfers if t[0] == "weights"]
+    xn = [t for t in transfers if t[0] == "xn"]
+    assert len(weights) == 7 and len(xn) == 4 * chunks
+    bank_size = hidden * 32 * 2
+    offsets = [layout.SIDE_ALPHA, layout.SIDE_BETA, layout.SIDE_SMALL,
+               layout.SIDE_ALPHA + bank_size, layout.SIDE_BETA + bank_size,
+               layout.SIDE_SMALL, layout.SIDE_CONV]
+    assert weights == [("weights", "consts", layout.C_SIDE + off, size)
+                       for off, size in zip(offsets, [bank_size, bank_size, 4096,
+                                                       bank_size, bank_size, 4096, 81920])]
+    assert xn == [("xn", "act", layout.A_XN + chunk * 4096, 4096)
+                  for _ in range(4) for chunk in range(chunks)]
+    # Issue a weight bank before replaying its xn. A throttled FIFO must never
+    # wait for chunk four while the worker is still waiting for the first weights.
+    assert [t[0] for t in transfers] == ((["weights"] + ["xn"] * chunks) * 2 + ["weights"]) * 2 + ["weights"]
 
 
 def test_small_bank_pointer_arithmetic_in_compiled_cpp(tmp_path):

@@ -36,4 +36,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build, verify and ship the open XDNA2 kernel sets (dx ln lm_head_q4) that run IBM Granite 4.2 3B on the dense recipe. Use when rebuilding those xclbins, adding another Granite size, debugging "no open kernels found" for granite:3b, or when a Granite container's attention_multiplier is refused at load.</description>
     <location>.opencode/skill/open-granite-kernels/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-deltanet-ab</name>
+    <description>Build and validate the separate open banked alpha/beta dispatch at H5120/H2560, including xn streaming and the fused glue DMA constraint.</description>
+    <location>.opencode/skill/open-wide-deltanet-ab/SKILL.md</location>
+  </skill>
 </available_skills>
