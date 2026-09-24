@@ -88,9 +88,13 @@ public:
   const std::string &xclbin_fnv1a() const { return xclbin_hash_; }
 
 private:
-  // Shared tail of run()/run_fast(): upload q_bf_/k_bf_/v_bf_, dispatch, read
-  // o_bf_ back and scatter it into `out`. Both callers have already filled
-  // q_bf_/k_bf_/v_bf_ by the time this runs.
+  // Shared tail of run()/run_fast(): sync Q/K/V to the device, dispatch, read
+  // O back and scatter it into `out`. Both callers have already repacked
+  // straight into design_'s own host_ptr(0..2) by the time this runs (PR
+  // #111 review, finding J -- no intermediate host-side q_bf_/k_bf_/v_bf_
+  // scratch and no memcpy: repack_qkv()/repack_qkv_bias_fast() write directly
+  // into the device-mapped buffers, and scatter_output() reads host_ptr(3)
+  // directly after sync_from_device).
   void dispatch_and_scatter(int64_t m_padded, int64_t t, int64_t d, int64_t heads,
                             int64_t head_dim, float *out, FaPhases *phases);
 
@@ -99,10 +103,6 @@ private:
   size_t xclbin_bytes_ = 0;
   std::string xclbin_hash_;
   FaKernelInfo info_;
-
-  // Repack/scatter scratch, sized once at construction and reused across
-  // layers -- same reasoning as Encoder's own s_* scratch members.
-  std::vector<uint16_t> q_bf_, k_bf_, v_bf_, o_bf_;
 };
 
 }  // namespace ow

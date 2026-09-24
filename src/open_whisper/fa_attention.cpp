@@ -196,13 +196,6 @@ FaAttention::FaAttention(npue::npu::Device &dev, const std::string &fa_dir) {
   design_ = std::make_unique<npue::npu::Design>(dev, xclbin_path_, insts_path, buffers,
                                                 "MLIR_AIE");
 
-  const size_t n = static_cast<size_t>(kHeads) * static_cast<size_t>(kSeqPad) *
-                   static_cast<size_t>(kHeadDim);
-  q_bf_.resize(n);
-  k_bf_.resize(n);
-  v_bf_.resize(n);
-  o_bf_.resize(n);
-
   std::printf("  fa attn    %s (%zu B, fnv1a %s)\n", xclbin_path_.c_str(),
              xclbin_bytes_, xclbin_hash_.c_str());
   std::printf("  fa kernel  %s (%s, fp32_state=%s, mlir-aie %s, peano %s)\n",
@@ -234,19 +227,23 @@ void FaAttention::dispatch_and_scatter(int64_t m_padded, int64_t t, int64_t d, i
                                        int64_t head_dim, float *out, FaPhases *phases) {
   constexpr int64_t kSeqPad = 1536;
   double t0 = now_s();
-  std::memcpy(design_->host_ptr(0), q_bf_.data(), q_bf_.size() * sizeof(uint16_t));
+  // PR #111 review, finding J: no host-side q_bf_/k_bf_/v_bf_ scratch and no
+  // memcpy into host_ptr(0..2) -- run()/run_fast() repack straight into the
+  // device-mapped buffers below. These are device INPUTS (trap 27 -- "never
+  // write into a device-mapped buffer the device also writes" -- does not
+  // apply to a buffer the device only ever READS).
   design_->sync_to_device(0);
-  std::memcpy(design_->host_ptr(1), k_bf_.data(), k_bf_.size() * sizeof(uint16_t));
   design_->sync_to_device(1);
-  std::memcpy(design_->host_ptr(2), v_bf_.data(), v_bf_.size() * sizeof(uint16_t));
   design_->sync_to_device(2);
   design_->dispatch_only();
   if (phases) phases->dispatch += now_s() - t0;
 
   t0 = now_s();
   design_->sync_from_device(3);
-  std::memcpy(o_bf_.data(), design_->host_ptr(3), o_bf_.size() * sizeof(uint16_t));
-  scatter_output(o_bf_.data(), kSeqPad, t, d, heads, head_dim, out);
+  // host_ptr(3) is the OUTPUT buffer -- read directly (never written) only
+  // AFTER sync_from_device, matching trap 27's other half.
+  scatter_output(static_cast<const uint16_t *>(design_->host_ptr(3)), kSeqPad, t, d, heads, head_dim,
+                out);
   zero_pad_rows(out, t, m_padded, d);
   if (phases) phases->scatter += now_s() - t0;
 }
@@ -257,8 +254,10 @@ void FaAttention::run(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
   constexpr int64_t kSeqPad = 1536;
 
   double t0 = now_s();
-  repack_qkv(qkv, m_padded, kSeqPad, t, d, heads, head_dim, q_bf_.data(),
-            k_bf_.data(), v_bf_.data());
+  repack_qkv(qkv, m_padded, kSeqPad, t, d, heads, head_dim,
+            static_cast<uint16_t *>(design_->host_ptr(0)),
+            static_cast<uint16_t *>(design_->host_ptr(1)),
+            static_cast<uint16_t *>(design_->host_ptr(2)));
   if (phases) phases->repack += now_s() - t0;
 
   dispatch_and_scatter(m_padded, t, d, heads, head_dim, out, phases);
@@ -278,8 +277,10 @@ void FaAttention::run_fast(const float *qkv_c, int64_t m_padded, int64_t t, int6
   constexpr int64_t kSeqPad = 1536;
 
   double t0 = now_s();
-  repack_qkv_bias_fast(qkv_c, m_padded, kSeqPad, t, d, heads, head_dim, bias, q_bf_.data(),
-                       k_bf_.data(), v_bf_.data());
+  repack_qkv_bias_fast(qkv_c, m_padded, kSeqPad, t, d, heads, head_dim, bias,
+                       static_cast<uint16_t *>(design_->host_ptr(0)),
+                       static_cast<uint16_t *>(design_->host_ptr(1)),
+                       static_cast<uint16_t *>(design_->host_ptr(2)));
   if (phases) phases->repack += now_s() - t0;
 
   dispatch_and_scatter(m_padded, t, d, heads, head_dim, out, phases);
