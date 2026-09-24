@@ -2,9 +2,10 @@
 
 Authoritative work order: user's `LLM_Coding_Agent_Plan.md`, Track A before B
 (27B) before C (Flash-Next/qwen4exp). Branch: `implement-qwen38-27b-support`.
-This milestone implements and validates the separate AB dispatch. **A7 remains
-open:** conv/record emission and multi-token recurrent state are not yet tested
-as a complete 48-head NPU chain. Neither model is supported yet.
+This report records the separate AB milestone. The subsequent
+[A7 chain milestone](wide-deltanet-a7.md) now passes the inherited synthetic
+acceptance gates, with the stricter head-local diagnostic limitation recorded
+there. Neither model is supported yet.
 
 ## Actual compile/place findings
 
@@ -117,7 +118,7 @@ The expanded C++ `pools_test` also **PASS (0 failures)**, including both widths,
 all 32 tail sizes and refusal before writing on malformed geometry. Reproduce
 with the C++ build command in the earlier 27B report.
 
-## Next stage and remaining gates
+## Next stage after AB (completed in the A7 report)
 
 1. Compose the separate AB outputs with a two-input conv/record dispatch;
    compare all 48 records including value-to-key mapping against reference.
@@ -128,5 +129,5 @@ with the C++ build command in the earlier 27B report.
    converter/model packaging and LLM suite. Track C follows the stable 27B path.
 
 No catalogue entries, q4nx builder registration, manifests or shipped model
-assets were promoted. A1/A3/shared AB portions of A2/A4/A5 have implementation
-and test evidence; full A6 record mapping and A7 acceptance are still pending.
+assets were promoted. Follow the [A7 report](wide-deltanet-a7.md) for the current
+record/state acceptance evidence and Track B next steps.

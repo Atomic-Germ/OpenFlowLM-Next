@@ -89,8 +89,8 @@ def _check(spec: ModelSpec) -> None:
         if M.ab_banks(spec) > 1 and os.environ.get("OPEN_KERNELS_WIDE_GLUE_PROBE") != "1":
             raise OpRangeError(
                 "qwen35: not implemented: fused wide glue needs 3 input DMA channels; "
-                "the core has 2. Separate open AB dispatch exists but layer integration "
-                "and recurrent-state validation are pending. Use utilities/probe-qwen35-wide.py "
+                "the core has 2. The separate open WideDeltaNet chain is validated, "
+                "but whole-layer integration is pending. Use utilities/probe-qwen35-wide.py "
                 "only to reproduce the compile/place failure.")
         # The explicit diagnostic probe below may bypass this known topology failure,
         # but it does not bypass catalogue validation or establish model support.

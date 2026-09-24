@@ -41,4 +41,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the separate open banked alpha/beta dispatch at H5120/H2560, including xn streaming and the fused glue DMA constraint.</description>
     <location>.opencode/skill/open-wide-deltanet-ab/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-deltanet-chain</name>
+    <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
+    <location>.opencode/skill/open-wide-deltanet-chain/SKILL.md</location>
+  </skill>
 </available_skills>
