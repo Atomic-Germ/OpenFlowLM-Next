@@ -46,4 +46,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
     <location>.opencode/skill/open-wide-deltanet-chain/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-dense-activation-stream</name>
+    <description>Build and validate layer_x Q4 projection probes at K5120/K6144 using depth-two streamed xn/xm inputs and actual main-core scratch.</description>
+    <location>.opencode/skill/open-dense-activation-stream/SKILL.md</location>
+  </skill>
 </available_skills>

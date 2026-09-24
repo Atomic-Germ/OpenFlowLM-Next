@@ -1169,6 +1169,13 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   diagnostic is retained separately, not claimed to pass. See
   [A7 report](plans/wide-deltanet-a7.md) for thresholds, resources and evidence.
   Whole-layer integration, segmented FFN and full-model validation are pending.
+- **Dense wide activation input.** Main-core xn/xm preparation streams inputs
+  longer than two 4-KiB chunks through the existing depth-two FIFO. One/two-chunk
+  lifetimes and Q4 arithmetic/packing are unchanged. Isolated Q4 projections at
+  K5120 and K6144 pass nine NPU comparisons each with actual main-core scratch;
+  buffers plus stack occupy59392 B/core. FFN xm has unit/IR coverage only;
+  whole-layer placement still hits the fused glue DMA limit. See the
+  [wide input report](plans/dense-wide-input.md). No catalogue promotion.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;

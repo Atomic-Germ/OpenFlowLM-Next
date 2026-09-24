@@ -5,9 +5,11 @@ Status: in progress. No 27B hardware geometry promoted to the catalogue.
 2026-09-24: the user's `LLM_Coding_Agent_Plan.md` supersedes the original
 model-only ordering. Current work is shared WideDeltaNet (Track A), then
 Qwen3.8-27B (B), then Flash-Next/qwen4exp (C). Current results and next steps
-are in [wide-deltanet-bringup.md](wide-deltanet-bringup.md). The phase notes
-below are historical; in particular the toolchain is now installed and two
-standalone AB kernels have passed hardware comparisons.
+are in [wide-deltanet-bringup.md](wide-deltanet-bringup.md), the
+[A7 chain report](wide-deltanet-a7.md), and the
+[Track B dense input report](dense-wide-input.md). The phase notes below are
+historical; the toolchain is installed, the synthetic A7 chain passes inherited
+whole-tensor gates, and Q4 projections at K5120/K6144 pass hardware comparison.
 
 ## Baseline (2026-09-23)
 
