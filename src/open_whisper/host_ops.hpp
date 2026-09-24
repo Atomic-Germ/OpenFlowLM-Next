@@ -118,13 +118,14 @@ void attention(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
 // abs/rel error, in ulps where meaningful) and gated by the product-level WER
 // harness (tools/wer/), not by golden-token bit-identity (trap 29 says that
 // gate is a coin flip below ~1.3x cosine, which every one of these lands
-// inside). The exact ops above are UNCHANGED and stay the default; every
-// caller selects between the two behind host_fast_enabled().
+// inside). The exact ops above are UNCHANGED and stay available, selected
+// per caller by host_fast_enabled() -- but FAST is the current default (PR
+// #111 review, finding H: this comment previously said the opposite).
 //
-// host_fast_enabled(): OW_HOST_FAST, strict -- unset or "0" is false, "1" is
-// true, anything else throws (same discipline as encoder.cpp's OW_ATTN
-// parser: a misspelling must not silently fall back to "off" while a caller
-// believes it is running the fast path).
+// host_fast_enabled(): OW_HOST_FAST, strict -- unset or "1" is true (fast,
+// the default), "0" is false (exact), anything else throws (same discipline
+// as encoder.cpp's OW_ATTN parser: a misspelling must not silently fall back
+// to "off" while a caller believes it is running the fast path).
 bool host_fast_enabled();
 
 // omp_threads(): the team size every OpenMP region in this engine uses, via a
