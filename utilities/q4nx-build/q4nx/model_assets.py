@@ -241,6 +241,12 @@ GGUF_QUANT_PRIORITY: Tuple[str, ...] = ("q4_1", "q4_0", "q8_0")
 GGUF_QUANT_PRIORITY_BY_FAMILY: Dict[str, Tuple[str, ...]] = {
     "lfm2": ("q4_0", "q4_1", "q8_0"),
     "gpt-oss": ("q4_1", "q4_0", "q8_0", "mxfp4"),
+    # Qwen3.5 and Qwen3.6-MoE official OFLM models ship Q4_K (super-block
+    # layout). A repo like Cyber-Tiel has language GGUFs named Q4_K_* and a
+    # vision projector named mmproj-Q8_0; without q4_k in the priority the
+    # projector is selected instead of the language weights.
+    "qwen3.5": ("q4_k", "q4_1", "q4_0", "q8_0"),
+    "qwen3.6-moe": ("q4_k", "q4_1", "q4_0", "q8_0"),
 }
 
 

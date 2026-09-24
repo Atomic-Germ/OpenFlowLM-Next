@@ -49,14 +49,21 @@
             source = inputs.self;
             openflowlm-open-kernels = config.packages.openflowlm-open-kernels-with-bert;
           };
+          q4nx-build = pkgs.callPackage ./nix/q4nx-build.nix {};
           openflowlm-open-kernels = pkgs.callPackage ./nix/open-kernels.nix { srcRoot = inputs.self; };
           openflowlm-open-kernels-with-bert = pkgs.callPackage ./nix/open-kernels.nix { srcRoot = inputs.self; skipBert = false; };
           default = config.packages.oflm;
         };
 
-        apps.default = {
-          type = "app";
-          program = "${config.packages.oflm}/bin/oflm";
+        apps = {
+          default = {
+            type = "app";
+            program = "${config.packages.oflm}/bin/oflm";
+          };
+          q4nx-build = {
+            type = "app";
+            program = "${config.packages.q4nx-build}/bin/q4nx-build";
+          };
         };
 
         devShells = {
@@ -82,6 +89,14 @@
               export XILINX_XRT="${pkgs.xrt}/opt/xilinx/xrt"
               export PKG_CONFIG_PATH="${pkgs.xrt}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
+            '';
+          };
+
+          "q4nx-build" = pkgs.mkShell {
+            name = "q4nx-build";
+            packages = [ config.packages.q4nx-build ];
+            shellHook = ''
+              export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             '';
           };
 

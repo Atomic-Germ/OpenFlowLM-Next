@@ -19,6 +19,7 @@ This section will walk you through how to use OpenFlowLM with examples.
 ## 📚 Sections
 
 - [System Command and CLI Mode](cli/)
+- [Converting Custom Models](converting-models/)
 - [Server Mode](server/)
 - [Server Basics](server/basics/)
 - [API / Client Usage](server/openapi/)
