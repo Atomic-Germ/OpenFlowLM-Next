@@ -196,6 +196,21 @@ for session_id in range(NUM_SESSIONS):
         elif adversarial_mode == 4 and step == MAX_STEPS - 1:
             # push toward EOS near the end to exercise max_length-adjacent behaviour
             logits[0, EOS] += 6.0
+        elif with_timestamps and adversarial_mode == 7 and step in (4, 5, 14, 15, 24, 25):
+            # SEVERAL separated timestamp pairs spread across one window (PR #111
+            # review, finding 13: "a sequence with several timestamps" using the
+            # real prompt layout). Modes 1/2 above only ever force a timestamp in
+            # steps 0-1; this fires three independent consecutive-pairs at
+            # increasing timestamp ids (steps 4-5, 14-15, 24-25), so the "timestamps
+            # shouldn't decrease" / "avoid re-emitting <|0.00|> again" branches of
+            # WhisperTimeStampLogitsProcessor.apply() each fire more than once in
+            # the same session, and the run between pairs (steps 6-13, 16-23) still
+            # has ordinary random logits so ordinary text tokens interleave with
+            # the timestamps, matching a real multi-segment transcript's shape.
+            pair_base = {4: TIMESTAMP_BEGIN + 1, 5: TIMESTAMP_BEGIN + 1,
+                        14: TIMESTAMP_BEGIN + 5, 15: TIMESTAMP_BEGIN + 5,
+                        24: TIMESTAMP_BEGIN + 9, 25: TIMESTAMP_BEGIN + 9}[step]
+            logits[0, pair_base if step in (4, 14, 24) else pair_base + 1] += 15.0
 
         full_ids = torch.tensor([prefix], dtype=torch.long) if prefix else torch.zeros((1, 0), dtype=torch.long)
         decoder_input_ids = torch.cat([input_ids, full_ids], dim=-1)
