@@ -50,19 +50,52 @@ const char *to_string(AttnMode mode) {
   return "?";
 }
 
-bool resolve_use_npu_attn(AttnMode mode, bool fa_kernel_present, const std::string &fa_dir) {
+bool resolve_use_npu_attn(AttnMode mode, bool fa_kernel_usable, const std::string &fa_dir,
+                          const std::string &reason) {
   switch (mode) {
     case AttnMode::Host: return false;
-    case AttnMode::Auto: return fa_kernel_present;
+    case AttnMode::Auto: return fa_kernel_usable;
     case AttnMode::Npu:
-      if (!fa_kernel_present)
+      if (!fa_kernel_usable)
         throw std::runtime_error(
-            "OW_ATTN=npu: no FlashAttention kernel at " + fa_dir +
-            " (need air.xclbin, air.insts.bin and fa.json -- set OW_FA_DIR, or "
-            "build one into the kernel set's fa/ subdirectory)");
+            "OW_ATTN=npu: no usable FlashAttention kernel at " + fa_dir + " (" +
+            (reason.empty()
+                 ? "need air.xclbin, air.insts.bin and fa.json -- set OW_FA_DIR, or "
+                   "build one into the kernel set's fa/ subdirectory"
+                 : reason) +
+            ")");
       return true;
   }
   return false;
+}
+
+bool fa_kernel_usable(const std::string &fa_dir, std::string &reason) {
+  // File presence only (fa.json's own content is not read here): a directory
+  // missing any of the three files is simply "no kernel", the same message
+  // fa_kernel_present() (fa_attention.cpp) already gives for that case.
+  auto file_present = [](const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    return f.good();
+  };
+  if (!file_present(fa_dir + "/air.xclbin") || !file_present(fa_dir + "/air.insts.bin") ||
+      !file_present(fa_dir + "/fa.json")) {
+    reason = "no FlashAttention kernel at " + fa_dir;
+    return false;
+  }
+  // All three files exist -- now the part fa_kernel_present() skipped: does
+  // fa.json actually parse, and does it name this engine's own geometry? Both
+  // read_fa_kernel_info and check_fa_geometry throw with a specific, actionable
+  // message (the malformed/missing field, or the mismatched field and both
+  // values); caught here so a stale/wrong-shaped fa/ resolves to "not usable",
+  // not to an exception the Auto path has no chance to catch.
+  try {
+    const FaKernelInfo info = read_fa_kernel_info(fa_dir);
+    check_fa_geometry("FA kernel at " + fa_dir, info);
+  } catch (const std::exception &e) {
+    reason = e.what();
+    return false;
+  }
+  return true;
 }
 
 FaKernelInfo read_fa_kernel_info(const std::string &fa_dir) {

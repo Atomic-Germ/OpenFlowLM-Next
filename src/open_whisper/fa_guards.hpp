@@ -29,13 +29,17 @@ enum class AttnMode { Auto, Host, Npu };
 AttnMode parse_attn_mode(const char *env_value);
 const char *to_string(AttnMode mode);
 
-// mode=Auto: npu iff `fa_kernel_present`, silently -- "silently" only in the
+// mode=Auto: npu iff `fa_kernel_usable`, silently -- "silently" only in the
 // sense that it is not an error either way; the caller (encoder.cpp) always
 // prints which one was chosen and why, never leaving the choice unlogged.
-// mode=Npu: npu, REFUSING (throwing, naming `fa_dir`) if `fa_kernel_present`
-// is false -- npu without a kernel must never fall back to host.
-// mode=Host: never npu, regardless of `fa_kernel_present`.
-bool resolve_use_npu_attn(AttnMode mode, bool fa_kernel_present, const std::string &fa_dir);
+// mode=Npu: npu, REFUSING (throwing, naming `fa_dir` and, when given, `reason`)
+// if `fa_kernel_usable` is false -- npu without a USABLE kernel must never
+// fall back to host, and "usable" is `fa_kernel_usable`'s call: file presence
+// alone is not enough (PR #111 review -- a stale/mismatched fa/ made auto
+// throw during FaAttention construction instead of falling back).
+// mode=Host: never npu, regardless of `fa_kernel_usable`.
+bool resolve_use_npu_attn(AttnMode mode, bool fa_kernel_usable, const std::string &fa_dir,
+                          const std::string &reason = "");
 
 // The subset of fa.json this engine reads and checks against its own fixed
 // geometry (Whisper-large-v3-turbo's encoder attention: H=20, dk=dv=64,
@@ -65,5 +69,17 @@ FaKernelInfo read_fa_kernel_info(const std::string &fa_dir);
 // numerics, not its shape, and either combination dispatches at the same
 // buffer sizes.
 void check_fa_geometry(const std::string &where, const FaKernelInfo &info);
+
+// The full OW_ATTN=auto/npu probe: are air.xclbin, air.insts.bin and fa.json all
+// present, does fa.json parse, and does its geometry match this engine's fixed
+// shape? Unlike a bare file-existence check, this is everything `auto` needs to
+// decide WITHOUT constructing FaAttention (which touches the device) -- a
+// stale or mismatched `fa/` must make auto fall back to host, not throw during
+// construction (PR #111 review). Never throws; on false, `reason` explains why
+// (missing files, unparseable JSON, or the specific geometry mismatch --
+// whatever `read_fa_kernel_info`/`check_fa_geometry` would have said), so both
+// auto's fallback log line and npu's refusal can name something a reader can
+// act on.
+bool fa_kernel_usable(const std::string &fa_dir, std::string &reason);
 
 }  // namespace ow

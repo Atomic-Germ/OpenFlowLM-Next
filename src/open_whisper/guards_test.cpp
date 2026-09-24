@@ -283,6 +283,75 @@ void test_fa_kernel_info(const std::string &tmp_dir) {
   std::remove((tmp_dir + "/fa.json").c_str());
 }
 
+// fa_kernel_usable() and its effect through resolve_use_npu_attn(): OW_ATTN=auto
+// must not throw on a stale/mismatched fa/ -- it must resolve to host, naming why
+// -- and OW_ATTN=npu must still refuse it (PR #111 review: auto previously only
+// checked that the three files existed, so a malformed or wrong-geometry fa.json
+// made FaAttention's constructor throw instead of falling back).
+void test_fa_kernel_usable(const std::string &tmp_dir) {
+  std::printf("-- fa_kernel_usable (auto/npu probe) --\n");
+  const std::string xclbin = tmp_dir + "/air.xclbin", insts = tmp_dir + "/air.insts.bin";
+  auto touch = [](const std::string &p) { std::ofstream(p, std::ios::binary) << "x"; };
+  auto rm_all = [&] {
+    std::remove(xclbin.c_str());
+    std::remove(insts.c_str());
+    std::remove((tmp_dir + "/fa.json").c_str());
+  };
+  rm_all();
+
+  // No files at all: not usable, reason names "no FlashAttention kernel".
+  {
+    std::string reason;
+    check(!ow::fa_kernel_usable(tmp_dir, reason), "no files -> not usable");
+    check(reason.find("no FlashAttention kernel") != std::string::npos,
+          "  reason names 'no FlashAttention kernel' (got: " + reason + ")");
+  }
+
+  touch(xclbin);
+  touch(insts);
+
+  // Files present but fa.json malformed (not valid JSON): fa_kernel_present()
+  // alone would have said "present"; fa_kernel_usable() must not.
+  {
+    write_fa_json(tmp_dir, "{ this is not json");
+    std::string reason;
+    check(!ow::fa_kernel_usable(tmp_dir, reason), "malformed fa.json -> not usable");
+    check(reason.find("invalid JSON") != std::string::npos,
+          "  reason names 'invalid JSON' (got: " + reason + ")");
+    check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, false, tmp_dir, reason) == false,
+          "  auto + malformed fa.json -> host (no throw)");
+    expect_throw([&] { (void)ow::resolve_use_npu_attn(ow::AttnMode::Npu, false, tmp_dir, reason); },
+                 "invalid JSON", "  npu + malformed fa.json -> refuses, naming why");
+  }
+
+  // Files present, fa.json valid JSON, but the wrong geometry (16 heads, not
+  // 20): auto falls back to host; npu refuses, naming the mismatched field.
+  {
+    write_fa_json(tmp_dir, fa_json(/*heads=*/16));
+    std::string reason;
+    const bool usable = ow::fa_kernel_usable(tmp_dir, reason);
+    check(!usable, "wrong geometry (16 heads) -> not usable");
+    check(reason.find("heads") != std::string::npos,
+          "  reason names the mismatched field 'heads' (got: " + reason + ")");
+    check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, usable, tmp_dir, reason) == false,
+          "  auto + wrong geometry -> host (no throw)");
+    expect_throw([&] { (void)ow::resolve_use_npu_attn(ow::AttnMode::Npu, usable, tmp_dir, reason); },
+                 "heads", "  npu + wrong geometry -> refuses, naming 'heads'");
+  }
+
+  // A complete, correctly-shaped fa.json IS usable -- the positive control,
+  // proving the two negatives above are about the content, not the plumbing.
+  {
+    write_fa_json(tmp_dir, fa_json());
+    std::string reason;
+    check(ow::fa_kernel_usable(tmp_dir, reason), "correct fa.json -> usable");
+    check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, true, tmp_dir, reason) == true,
+          "  auto + usable kernel -> npu");
+  }
+
+  rm_all();
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -294,6 +363,7 @@ int main(int argc, char **argv) {
     test_weight_dtype(tmp_dir);
     test_attn_mode();
     test_fa_kernel_info(tmp_dir);
+    test_fa_kernel_usable(tmp_dir);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "guards_test: unexpected exception: %s\n", e.what());
     return 1;

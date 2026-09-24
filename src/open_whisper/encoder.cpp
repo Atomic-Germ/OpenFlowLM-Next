@@ -63,15 +63,22 @@ Encoder::Encoder(const std::string &model_dir, const std::string &kernels_dir_hi
              3 + layer_slots_.size() * 4);
 
   // OW_ATTN: "auto" (default, unset) uses the NPU FlashAttention kernel when
-  // one is found next to this kernel set, else host; "npu" requires it,
-  // refusing rather than falling back if none is found; "host" never uses
-  // it. Never silent either way -- the chosen mode and the reason are always
-  // printed (CLAUDE.md rule 8's class: a choice nothing prints is as good as
-  // unmade).
+  // one is found next to this kernel set AND fa.json parses and names this
+  // engine's own geometry; "npu" requires all of that too, refusing rather
+  // than falling back if it does not hold; "host" never uses it. Never silent
+  // either way -- the chosen mode and the reason are always printed
+  // (CLAUDE.md rule 8's class: a choice nothing prints is as good as unmade).
+  //
+  // fa_kernel_usable() (not the bare file-existence fa_kernel_present()) is
+  // what decides this: a stale or mismatched fa/ -- malformed fa.json, or one
+  // built for a different geometry -- must make auto fall back to host, not
+  // throw here when FaAttention's own constructor re-reads and re-checks the
+  // same file (PR #111 review).
   const AttnMode attn_mode = parse_attn_mode(std::getenv("OW_ATTN"));
   const std::string fa_dir = fa_kernel_dir(kdir);
-  const bool fa_present = fa_kernel_present(fa_dir);
-  use_fa_attn_ = resolve_use_npu_attn(attn_mode, fa_present, fa_dir);
+  std::string fa_reason;
+  const bool fa_ok = fa_kernel_usable(fa_dir, fa_reason);
+  use_fa_attn_ = resolve_use_npu_attn(attn_mode, fa_ok, fa_dir, fa_reason);
   const char *env = std::getenv("OW_ATTN");
   const std::string source = (env && *env) ? (std::string("OW_ATTN=") + env) : "default (auto)";
   if (use_fa_attn_) {
@@ -79,12 +86,11 @@ Encoder::Encoder(const std::string &model_dir, const std::string &kernels_dir_hi
     std::printf("  attention  NPU FlashAttention, %s (%s)\n", fa_dir.c_str(), source.c_str());
     fa_attn_ = std::make_unique<FaAttention>(*device_, fa_dir);
   } else {
-    // attn_mode == Npu without fa_present already threw inside
-    // resolve_use_npu_attn(), so reaching here means either "host" was
-    // requested, or "auto" found no kernel at fa_dir.
-    const std::string why = attn_mode == AttnMode::Auto
-                                ? "no FlashAttention kernel at " + fa_dir
-                                : source;
+    // attn_mode == Npu with !fa_ok already threw inside resolve_use_npu_attn(),
+    // so reaching here means either "host" was requested, or "auto" found no
+    // usable kernel at fa_dir -- fa_reason names why (missing files, bad JSON,
+    // or the specific geometry mismatch).
+    const std::string why = attn_mode == AttnMode::Auto ? fa_reason : source;
     attn_summary_ = "host (" + why + ")";
     std::printf("  attention  host (%s)\n", why.c_str());
   }
