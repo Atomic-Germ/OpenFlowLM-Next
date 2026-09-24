@@ -566,12 +566,12 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
             for lk in pktlk[c]:
                 rt.add_lock(lk)
             rt.add_lock(pktdone[c])
-            bds = [Bd(buffer=ctrlw[c], offset=0, length=56,
+            bds = [Bd(buffer=ctrlw[c], offset=0, length=120,
                       acquires=[Acquire(pktlk[c][0])], releases=[Release(pktdone[c])], next=1)]
             for k in range(1, X.NE):
-                bds.append(Bd(buffer=ctrlw[c], offset=84 * k - 28, length=84,
+                bds.append(Bd(buffer=ctrlw[c], offset=180 * k - 60, length=180,
                               acquires=[Acquire(pktlk[c][k])], releases=[Release(pktdone[c])], next=k + 1))
-            bds.append(Bd(buffer=ctrlw[c], offset=644, length=28,
+            bds.append(Bd(buffer=ctrlw[c], offset=1380, length=60,
                           acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
             rt.add_tile_dma(TileDma(tile=emitter_tile[c],
                                     channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
