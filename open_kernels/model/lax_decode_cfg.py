@@ -10,8 +10,10 @@ one run, and `--per` consecutive layers are ONE `xrt::runlist` submit on one hw_
 make_decode.py writes the per-layer pools / consts / zero state and the fp64 reference; this
 file only re-spells its run_decode.cfg for lax. `--per 40` is the whole token in ONE submit;
 `--per 8` is five. The layer kinds come from run_decode.cfg (which kernel runs each pool).
-Each layer's cfg holds its own pool base (`poolbase`): the emitters form the routed-expert
-addresses from it. The per-column MM2S queues are the compiled kOndvQueue (ondv_ctrl.h).
+Each layer's cfg holds its own pool base (`poolbase`, words 0..1): the emitters form the
+routed-expert addresses from it. Words 2..9 are the per-column w-channel MM2S queue registers
+(the merged lax design's shim allocation, designs/router/check_ondv_channels.py), which
+ondv_ctrl_col reads at run time.
 
 The lax builds must be ONDV builds with the three fixes (MOE_ONDEVICE_ROUTE=1 ONDV_EMIT_SHARED=1
 ONDV_PKTDONE_ACQ=1, see 35b-whole-layer-runlist-status.md "2026-09-24 (lax decode)").
@@ -24,6 +26,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GLOBALS = ("xres", "zero", "normw", "xresf", "hn", "logits", "lmpool", "ptab")
+# lax's w{c} fifos: MM2S ch1 (0x1D21C) or ch0 (0x1D214) per column
+QUEUES = (0x1D21C, 0x1D214, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D214, 0x1D214)
 POOL, CONSTS, ACT, CFG, STATE, KV = 536870912, 11882496, 190464, 4096, 2342912, 8388608
 
 
@@ -69,9 +73,13 @@ def main() -> int:
     c += tail
     c += [line for line in src if line.startswith("buf ") and line.split()[1] in GLOBALS]
     c += [f"buf dkv {KV}", f"buf dstate {STATE}"]            # the unused kv / state argument
+    qmap = out / "qmap_lax.bin"
+    qmap.write_bytes(b"".join(q.to_bytes(4, "little") for q in QUEUES))
+    c.append(f"buf qmap 32 {qmap}")
     for l in range(nl):
         c += [f"buf pool{l} {POOL} {pool_dir}/pool_L{l}.bin", f"buf consts{l} {CONSTS} {out}/consts_{l}.bin",
-              f"buf act{l} {ACT}", f"buf cfg{l} {CFG}", f"poolbase cfg{l} 0 pool{l}"]
+              f"buf act{l} {ACT}", f"buf cfg{l} {CFG}", f"poolbase cfg{l} 0 pool{l}",
+              f"copy cfg{l} 8 qmap 0 32"]
         c.append(f"buf state{l} {STATE} {out}/zstate_linear_attention.bin" if kinds[l] == "l" else f"buf kv{l} {KV}")
 
     def args(l):
