@@ -327,10 +327,26 @@ void attend_one_xkv_bf16(const float *q, const uint16_t *k_base, int64_t k_row_s
 // int8x top-K exact recompute.
 // ---------------------------------------------------------------------
 
-void recompute_top_k_exact(const float *x, int64_t out, int64_t in, int64_t k,
+void recompute_top_k_exact(const float *x, int64_t out, int64_t special_begin, int64_t in, int64_t k,
                            const uint16_t *w_bf16, const float *bias, float *logits) {
-  const int64_t kk = std::min<int64_t>(k, out);
-  std::vector<int64_t> idx(static_cast<size_t>(out));
+  auto exact_row = [&](int64_t o) {
+    return dot_bf16_kernel(x, w_bf16 + static_cast<size_t>(o) * static_cast<size_t>(in), in) +
+           (bias ? bias[o] : 0.f);
+  };
+
+  // PR #111 review, finding E: every special-token row is recomputed exactly,
+  // unconditionally -- regardless of where the int8 pass ranked it. See this
+  // function's header for why (the hf protocol's own logits processing lives
+  // almost entirely in this region, which is far too small a slice of the
+  // vocabulary to reliably self-select into an int8-ranked top-K).
+  const int64_t text_n = std::min<int64_t>(std::max<int64_t>(special_begin, 0), out);
+  for (int64_t o = text_n; o < out; ++o) logits[o] = exact_row(o);
+
+  // Among the TEXT rows only, the same top-K-by-approximation-then-cap
+  // scheme as before (PR #111 review, finding 9's fix, unchanged in kind --
+  // just narrowed to [0, text_n) rather than [0, out)).
+  const int64_t kk = std::min<int64_t>(k, text_n);
+  std::vector<int64_t> idx(static_cast<size_t>(text_n));
   std::iota(idx.begin(), idx.end(), int64_t{0});
   std::partial_sort(idx.begin(), idx.begin() + kk, idx.end(),
                     [&](int64_t a, int64_t b) { return logits[a] > logits[b]; });
@@ -342,20 +358,20 @@ void recompute_top_k_exact(const float *x, int64_t out, int64_t in, int64_t k,
   // corrected max. That happens precisely when the true-max row's own int8 approximation
   // overestimates ITS true value (pushing its pre-recompute rank threshold above the
   // true max), leaving room in between for an excluded row's inflated approximation to
-  // beat the exact winner post-recompute. Fixed by capping every NON-recomputed logit at
-  // min(the kk exact values): a capped row can never win the argmax against a correctly
-  // recomputed one, and since the kk rows are themselves only approximations of "which
+  // beat the exact winner post-recompute. Fixed by capping every NON-recomputed TEXT
+  // logit at min(the kk exact TEXT values): a capped row can never win the argmax
+  // against a correctly recomputed one (TEXT or special -- special rows are exact and
+  // never capped), and since the kk rows are themselves only approximations of "which
   // rows might be the max" anyway, lowering an excluded row's value costs nothing real --
   // it was never going to be trusted as exact either way.
   float min_exact = std::numeric_limits<float>::infinity();
   for (int64_t j = 0; j < kk; ++j) {
     const int64_t o = idx[static_cast<size_t>(j)];
-    const float exact = dot_bf16_kernel(x, w_bf16 + static_cast<size_t>(o) * static_cast<size_t>(in), in) +
-                        (bias ? bias[o] : 0.f);
+    const float exact = exact_row(o);
     logits[o] = exact;
     if (exact < min_exact) min_exact = exact;
   }
-  for (int64_t j = kk; j < out; ++j) {
+  for (int64_t j = kk; j < text_n; ++j) {
     const int64_t o = idx[static_cast<size_t>(j)];
     if (logits[o] > min_exact) logits[o] = min_exact;
   }

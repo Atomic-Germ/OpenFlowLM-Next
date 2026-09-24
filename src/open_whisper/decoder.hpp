@@ -69,6 +69,18 @@ struct DecoderGeometry {
   // tail set to -inf so the pad can never win an argmax or a sample.
   static constexpr int64_t vocab_padded = 51872;
   static constexpr int64_t max_target_positions = 448;
+  // First id of the "special" region: eos/<|endoftext|>, then every language,
+  // task, no-timestamps and timestamp token through vocab-1 (~1609 rows for
+  // this geometry). Checked against config.json's OWN "eos_token_id" in the
+  // constructor, the same way every other DG field is -- not a magic number,
+  // a value this decoder is verified to have been built for (PR #111 review,
+  // finding E). OW_DEC_HEAD=int8x recomputes every row in [eos_token_id,
+  // vocab) exactly, unconditionally, because the hf decode protocol's own
+  // logits processing (generation_hf.cpp: suppress_tokens, the timestamp
+  // log-sum-exp, detect_language) reads almost exclusively from this region,
+  // and it is far too small (~3%) of the vocabulary to reliably land inside
+  // an int8-ranked top-64 on its own.
+  static constexpr int64_t eos_token_id = 50257;
 };
 
 // Host wall-clock only (the same rule as encoder.hpp's Timers -- never an NPU

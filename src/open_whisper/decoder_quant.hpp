@@ -153,13 +153,28 @@ void attend_one_xkv_bf16(const float *q, const uint16_t *k_base, int64_t k_row_s
 // ---------------------------------------------------------------------
 
 // `logits[0, out)` already holds the int8-approximate value for every row.
-// Finds the K largest BY THAT APPROXIMATION, recomputes exactly those K rows
-// with dot_bf16_kernel against `w_bf16` (the container's own bf16 bits --
-// the same tensor linear()'s default bf16 path reads), overwrites
-// logits[idx] with the exact value + bias[idx] (bias may be null for an
-// explicit zero vector, matching the tied head's own no-bias convention),
-// and then CAPS every non-recomputed row at the minimum of the K exact
-// values just computed.
+//
+// Every row in [special_begin, out) -- eos/<|endoftext|>, then every
+// language, task, no-timestamps and timestamp token -- is recomputed
+// EXACTLY, unconditionally, REGARDLESS of its int8-approximate rank (PR #111
+// review, finding E). It is not optional: the hf decode protocol's own
+// logits processing (generation_hf.cpp's apply_suppress_tokens,
+// WhisperTimestampProcessor's log-sum-exp text-vs-timestamp decision, and
+// detect_language's language argmax) reads almost exclusively from this
+// region, which is only ~3% of the vocabulary (1609 of 51866 rows for this
+// geometry) -- far too small a slice to reliably land inside an int8-ranked
+// top-64 on its own, so leaving it to the top-K logic below would mean the
+// protocol's decisions run on int8 approximations (or on the cap, an even
+// coarser placeholder) almost every step.
+//
+// Among the remaining TEXT rows [0, special_begin), finds the K largest BY
+// THE (still int8-approximate) LOGIT, recomputes exactly those K rows with
+// dot_bf16_kernel against `w_bf16` (the container's own bf16 bits -- the
+// same tensor linear()'s default bf16 path reads), overwrites logits[idx]
+// with the exact value + bias[idx] (bias may be null for an explicit zero
+// vector, matching the tied head's own no-bias convention), and then CAPS
+// every non-recomputed TEXT row at the minimum of the K exact TEXT values
+// just computed. Special rows are never capped -- they are already exact.
 //
 // Why the cap is there (PR #111 review, finding 9): an earlier version of
 // this comment argued the argmax stayed exact "whether or not any of the
@@ -171,21 +186,24 @@ void attend_one_xkv_bf16(const float *q, const uint16_t *k_base, int64_t k_row_s
 // the approximation threshold that decided the top-K cutoff. A row excluded
 // from the top K can sit in that gap -- an int8 overestimate of its own --
 // and, left uncorrected, that stale value would outrank the exact winner.
-// The cap forecloses this: no un-recomputed row can ever exceed the exact
-// values, so the post-call argmax is always one of the K rows this function
-// actually computed exactly. Capping costs nothing real for a row that was
-// never going to be trusted uncorrected either way.
+// The cap forecloses this: no un-recomputed TEXT row can ever exceed the K
+// exact TEXT values, so the post-call argmax is always one of: a row in
+// [special_begin, out) (always exact), or one of the K rows this function
+// recomputed exactly within [0, special_begin). Capping costs nothing real
+// for a row that was never going to be trusted uncorrected either way.
 //
 // The remaining, DIFFERENT failure mode is unfixed and unfixable by this
-// function alone: the true maximum landing OUTSIDE the int8-ranked top-K in
-// the first place, which requires int8 quantization error to have pushed the
-// true winner below rank K-1 other rows, i.e. an error larger than the gap
-// between the true max and the K-th largest int8-approximate logit. K=64 is
-// chosen because that gap is, empirically (see decoder_quant_test's
-// real-weight measurement), far larger than the per-row int8 error this
-// quantization produces -- but it is not a proof, which is why this is
-// documented as the named risk rather than claimed away.
-void recompute_top_k_exact(const float *x, int64_t out, int64_t in, int64_t k,
+// function alone: the true TEXT maximum landing OUTSIDE the int8-ranked
+// top-K in the first place, which requires int8 quantization error to have
+// pushed the true winner below rank K-1 other TEXT rows, i.e. an error
+// larger than the gap between the true max and the K-th largest
+// int8-approximate TEXT logit. K=64 is chosen because that gap is,
+// empirically (see decoder_quant_test's real-weight measurement), far
+// larger than the per-row int8 error this quantization produces -- but it
+// is not a proof, which is why this is documented as the named risk rather
+// than claimed away. This residual risk does not apply to
+// [special_begin, out) at all, since every row there is always exact.
+void recompute_top_k_exact(const float *x, int64_t out, int64_t special_begin, int64_t in, int64_t k,
                            const uint16_t *w_bf16, const float *bias, float *logits);
 
 }  // namespace ow

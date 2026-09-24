@@ -275,6 +275,11 @@ Decoder::Decoder(const std::string &model_dir) {
   want_int("decoder_ffn_dim", DG::ffn);
   want_int("max_target_positions", DG::max_target_positions);
   want_int("vocab_size", DG::vocab);
+  // PR #111 review, finding E: OW_DEC_HEAD=int8x's special-token boundary
+  // (DG::eos_token_id) comes from config.json, checked here exactly like
+  // every other DG field -- not assumed independently of the tensors it
+  // indexes into.
+  want_int("eos_token_id", DG::eos_token_id);
   // scale_embedding is false on whisper-large-v3-turbo: step() adds the raw
   // embedding with no sqrt(d_model) scale. A checkpoint that sets it true
   // would silently need a different embed step, so this is refused rather
@@ -445,6 +450,16 @@ void Decoder::set_encoder_output(const float *xkv_1500x10240) {
 }
 
 void Decoder::step(int32_t token_id, float *logits_out) {
+  // PR #111 review (Copilot 4096191784, finding C): the hf protocol builds every
+  // token it feeds here from generation_config.json (now validated at load,
+  // GenerationConfig::validate) and from this same step's own logits (argmax over
+  // [0, vocab_size)), but this function is the last line of defense against ANY
+  // caller -- a bad id would otherwise index straight into embed_tokens_.w below
+  // with no check, reading (or with a large enough id, writing past the buffer via
+  // the pointer arithmetic that follows) out of bounds.
+  if (token_id < 0 || token_id >= DG::vocab)
+    throw std::runtime_error("Decoder::step: token_id " + std::to_string(token_id) +
+                             " is out of range [0, " + std::to_string(DG::vocab) + ")");
   if (pos_ >= DG::max_target_positions)
     throw std::runtime_error("Decoder::step: position " + std::to_string(pos_) +
                              " has reached max_target_positions (" +
@@ -627,7 +642,11 @@ void Decoder::step(int32_t token_id, float *logits_out) {
       // argmax exact unless the true maximum falls outside the int8 top-64.
       // embed_tokens_ has no bias tensor (load_linear_nobias), so `bias` is
       // null here, matching linear()'s own zero-bias vector for this Linear.
-      recompute_top_k_exact(h_.data(), DG::vocab, D, 64, embed_tokens_.w.data(), nullptr, logits_out);
+      // DG::eos_token_id (PR #111 review, finding E): every row from there to
+      // DG::vocab -- eos, language, task, no-timestamps, every timestamp
+      // token -- is recomputed exactly too, not just the int8-ranked top-64.
+      recompute_top_k_exact(h_.data(), DG::vocab, DG::eos_token_id, D, 64, embed_tokens_.w.data(), nullptr,
+                            logits_out);
     }
   }
   {

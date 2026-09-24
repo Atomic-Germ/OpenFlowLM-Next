@@ -413,7 +413,10 @@ void test_recompute_top_k_exact() {
              (true_argmax == int8_argmax) ? "coincide (rerun with a different seed to see a miss)"
                                           : "DIFFER -- int8x has something to fix");
 
-  ow::recompute_top_k_exact(x.data(), OUT, IN, K, w_bf16.data(), nullptr, logits.data());
+  // special_begin=OUT: no special-token carve-out here (that is finding E's own
+  // test, test_recompute_top_k_exact_special_region below) -- every row behaves as
+  // "text" for this regression test of the plain top-K/cap logic.
+  ow::recompute_top_k_exact(x.data(), OUT, OUT, IN, K, w_bf16.data(), nullptr, logits.data());
 
   // Every recomputed row (rank <= K by the int8 pass) must equal the true
   // bf16-exact logit to tight tolerance, not just "be close".
@@ -485,7 +488,8 @@ void test_recompute_top_k_exact_overestimate_gap() {
   w_bf16[4] = f32_to_bf16_rne(0.0f);
 
   std::vector<float> logits = {100.0f, 60.0f, 5.0f, 5.0f, 5.0f};  // the "approximate" pass
-  ow::recompute_top_k_exact(x.data(), OUT, IN, K, w_bf16.data(), nullptr, logits.data());
+  // special_begin=OUT: no special-token carve-out (see the comment on the test above).
+  ow::recompute_top_k_exact(x.data(), OUT, OUT, IN, K, w_bf16.data(), nullptr, logits.data());
 
   int64_t argmax = 0;
   float max_v = -std::numeric_limits<float>::infinity();
@@ -498,6 +502,47 @@ void test_recompute_top_k_exact_overestimate_gap() {
   check(logits[0] == 1.0f, "row 0 (the only recomputed row) holds its exact value 1.0");
   check_le(logits[1], 1.0f, "row 1 (excluded, was 60.0) no longer exceeds the exact max -- capped");
   check(argmax == 0, "argmax is the recomputed row, not the uncapped excluded row 1 (was wrongly 1 before the fix)");
+}
+
+// PR #111 review, finding E: every row in [special_begin, out) must come back EXACT,
+// unconditionally -- even when its int8-approximate rank would have put it nowhere
+// near the top-K, which is the whole point (the hf protocol's own processing lives
+// almost entirely in this region). Constructed so K=2 by approximation would NOT
+// naturally select any of the three "special" rows (2, 3, 4), each far below the
+// approximate top-2 (rows 0 and 1); the true (bf16-exact) values are exactly the
+// opposite ranking, so this is only satisfiable if the special region is recomputed
+// unconditionally, not merely captured by chance.
+void test_recompute_top_k_exact_special_region() {
+  std::printf("-- int8x: top-K exact recompute (special-token region) --\n");
+  const int64_t OUT = 5, IN = 1, K = 2, SPECIAL_BEGIN = 2;  // rows [2,5) are "special"
+  std::vector<float> x = {1.0f};
+  std::vector<uint16_t> w_bf16(static_cast<size_t>(OUT));
+  w_bf16[0] = f32_to_bf16_rne(0.1f);  // TEXT, true dot 0.1 -- approx-ranked top-2, recomputed either way
+  w_bf16[1] = f32_to_bf16_rne(0.1f);  // TEXT, true dot 0.1 -- approx-ranked top-2, recomputed either way
+  w_bf16[2] = f32_to_bf16_rne(9.0f);  // SPECIAL, true dot 9.0 -- the true global max
+  w_bf16[3] = f32_to_bf16_rne(3.0f);  // SPECIAL, true dot 3.0
+  w_bf16[4] = f32_to_bf16_rne(2.0f);  // SPECIAL, true dot 2.0
+
+  // The "approximate" pass ranks the special rows LOW -- far outside a K=2 top-K --
+  // and (deliberately) OVERESTIMATES both text rows, so a version of this function
+  // that ignored special_begin would neither recompute nor even cap rows 2-4 down
+  // from their approximate values correctly: row 2's approximate value (0.05) is
+  // already far below the text rows' inflated approximations (50.0), so row 2 would
+  // never win the argmax at all without the unconditional special-region recompute.
+  std::vector<float> logits = {50.0f, 49.0f, 0.05f, 0.02f, 0.01f};
+  ow::recompute_top_k_exact(x.data(), OUT, SPECIAL_BEGIN, IN, K, w_bf16.data(), nullptr, logits.data());
+
+  check(logits[2] == 9.0f, "special row 2 holds its exact value 9.0 (never int8-ranked into the top-K)");
+  check(logits[3] == 3.0f, "special row 3 holds its exact value 3.0");
+  check(logits[4] == 2.0f, "special row 4 holds its exact value 2.0");
+  int64_t argmax = 0;
+  float max_v = -std::numeric_limits<float>::infinity();
+  for (int64_t o = 0; o < OUT; ++o)
+    if (logits[static_cast<size_t>(o)] > max_v) {
+      max_v = logits[static_cast<size_t>(o)];
+      argmax = o;
+    }
+  check(argmax == 2, "argmax is the true global max (a special row the approximate pass ranked last)");
 }
 
 // ---------------------------------------------------------------------
@@ -631,6 +676,7 @@ int main() {
   test_attend_one_xkv_bf16();
   test_recompute_top_k_exact();
   test_recompute_top_k_exact_overestimate_gap();
+  test_recompute_top_k_exact_special_region();
   report_real_model_stats();
 
   std::printf("%s\n", failures ? "FAILED" : "all decoder_quant checks hold");
