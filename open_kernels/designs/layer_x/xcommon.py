@@ -309,32 +309,51 @@ def role_gemv_bands(win, yout, B, K, role, nbands, KK):
 
 
 # ---- the dense FFN tail on one main core (ffn="dense"; designs/dense/dx.py steps 6-7)
+def prep_stream(xin, tab, prep, kk, n_elems):
+    """Prepare a wide activation without retaining more than one input element.
+
+    The table owns the prepared blocks after each call; subsequent GEMVs do
+    not read xn/xm. Keep the depth-two broadcast FIFO at its legacy size.
+    """
+    for i in range_(n_elems):
+        xe = xin.acquire(1)
+        prep(xe, tab, kk, i)
+        xin.release(1)
+
+
 def prep_bands(win, xin, yout, B, K, kk, n_elems, nbands, role="attn"):
     """Prepare the KK-wide activation from `n_elems` 4 KB x elements (the kernel derives
     each element's block range from its index, so no arithmetic on the loop variable),
     then run `nbands` bands of it at `role`'s weight format. The dense counterpart of the
     MoE's fixed prep entries."""
     tab = B["tab"]
-    xe = xin.acquire(n_elems)
-    if n_elems == 1:
-        K["prep"](xe, tab, kk, 0)
+    if n_elems > 2:
+        prep_stream(xin, tab, K["prep"], kk, n_elems)
     else:
-        for i in range(n_elems):
-            K["prep"](xe[i], tab, kk, i)
+        xe = xin.acquire(n_elems)
+        if n_elems == 1:
+            K["prep"](xe, tab, kk, 0)
+        else:
+            for i in range(n_elems):
+                K["prep"](xe[i], tab, kk, i)
     role_gemv_bands(win, yout, B, K, role, nbands, kk)
-    xin.release(n_elems)
+    if n_elems <= 2:
+        xin.release(n_elems)
 
 
 def ffn_body(win, xin, yout, B, K):
     """up | gate per 64-row band into `ms`, act(gate) * up out through y, then the down
     GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements)."""
     tab, ms = B["tab"], B["ms"]
-    me = xin.acquire(FFN.XM_ELEMS)
-    if FFN.XM_ELEMS == 1:
-        K["prep"](me, tab, HID, 0)
+    if FFN.XM_ELEMS > 2:
+        prep_stream(xin, tab, K["prep"], HID, FFN.XM_ELEMS)
     else:
-        for i in range(FFN.XM_ELEMS):
-            K["prep"](me[i], tab, HID, i)
+        me = xin.acquire(FFN.XM_ELEMS)
+        if FFN.XM_ELEMS == 1:
+            K["prep"](me, tab, HID, 0)
+        else:
+            for i in range(FFN.XM_ELEMS):
+                K["prep"](me[i], tab, HID, i)
     if "ffn" in Q8:
         gms, pb_h, ng_h = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
     elif MIXED:
@@ -365,7 +384,8 @@ def ffn_body(win, xin, yout, B, K):
             ye = yout.acquire(1)
         K["act"](ms, ye)
         yout.release(1)
-    xin.release(FFN.XM_ELEMS)
+    if FFN.XM_ELEMS <= 2:
+        xin.release(FFN.XM_ELEMS)
     for i in range_(FFN.H_ELEMS):
         he = xin.acquire(1)
         K["prepf"](he, tab, FF, i)

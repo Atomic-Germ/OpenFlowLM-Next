@@ -66,12 +66,15 @@ rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, state_ty, act_ty,
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ffn", type=int, default=8192, help="synthetic FFN width (default 8192)")
-    p.add_argument("--scope", choices=("layer", "glue"), default="layer")
+    p.add_argument("--scope", choices=("layer", "glue", "projection"), default="layer")
+    p.add_argument("--projection-k", type=int, default=5120, help="isolated Q4 projection width")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
     out = args.out.resolve()
     if args.scope == "glue":
         out = out / "glue"
+    elif args.scope == "projection":
+        out = out / f"projection_k{args.projection_k}"
     out.mkdir(parents=True, exist_ok=True)
     fixture = ROOT / "specs/open-engine/tests/fixtures/config_qwen38_27b.json"
     spec = ModelSpec.from_hf_config(json.loads(fixture.read_text())).to_dict()
@@ -88,6 +91,9 @@ def main():
     layer_dir = ROOT / "open_kernels/designs/layer_x"
     env["PYTHONPATH"] = str(layer_dir) + os.pathsep + env.get("PYTHONPATH", "")
     design_path = layer_dir / "lx.py"
+    if args.scope == "projection":
+        design_path = layer_dir / "projection_probe.py"
+        env["PROBE_K"] = str(args.projection_k)
     if args.scope == "glue":
         source = design_path.read_text()
         # HERE must continue to name the production source directory, not the
@@ -97,6 +103,8 @@ def main():
         design_path.write_text(isolate_glue(source))
     metadata = {"python": sys.version, "ffn": args.ffn, "scope": args.scope, "hardware_validated": False,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}
+    if args.scope == "projection":
+        metadata.update(projection_k=args.projection_k, projection_n=1024, weight_format="q4_1")
     (out / "probe-toolchain.json").write_text(json.dumps(metadata, indent=2) + "\n")
     commands = [
         [sys.executable, str(ROOT / "open_kernels/designs/layer_x/gen_kernels.py")],
