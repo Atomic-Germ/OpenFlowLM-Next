@@ -593,7 +593,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
     rt = Runtime(sequence, rt_args)
     flows = []
     if ondv:
-        for c in range(N_CORES):
+        for c in X.ONDV_EMITTER_COLS:
             for lk in pktlk[c]:
                 rt.add_lock(lk)
             rt.add_lock(pktdone[c])
