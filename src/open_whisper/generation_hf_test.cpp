@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -209,6 +210,57 @@ int run_validate_cases(const std::string& dir, int& failures) {
     return fails;
 }
 
+// eos_token_id may be a bare int or a one-element list; a longer list is refused rather
+// than silently reduced to its first element. Loads copies of the synthetic config
+// with the field rewritten, from temporary directories.
+int run_eos_array_cases(const std::string& dir, int& failures) {
+    namespace fs = std::filesystem;
+    std::ifstream in(dir + "/generation_config.json", std::ios::binary);
+    nlohmann::json base = nlohmann::json::parse(in);
+    const int eos = base["eos_token_id"].is_array() ? base["eos_token_id"][0].get<int>()
+                                                    : base["eos_token_id"].get<int>();
+    int checks = 0, fails = 0;
+    auto load_with = [&](const nlohmann::json& eos_value, const char* tag) {
+        const fs::path d = fs::temp_directory_path() / (std::string("gen_hf_eos_") + tag);
+        fs::create_directories(d);
+        nlohmann::json j = base;
+        j["eos_token_id"] = eos_value;
+        std::ofstream(d / "generation_config.json", std::ios::binary) << j.dump();
+        return d.string();
+    };
+    {
+        ++checks;
+        const std::string d = load_with(nlohmann::json::array({eos}), "one");
+        try {
+            const auto cfg = whisper_hf::GenerationConfig::load(d);
+            if (cfg.eos_token_id != eos) {
+                ++fails;
+                std::cerr << "  [FAIL] one-element eos_token_id loaded as " << cfg.eos_token_id << "\n";
+            }
+        } catch (const std::exception& e) {
+            ++fails;
+            std::cerr << "  [FAIL] one-element eos_token_id refused: " << e.what() << "\n";
+        }
+    }
+    {
+        ++checks;
+        const std::string d = load_with(nlohmann::json::array({eos, eos + 1}), "two");
+        bool threw = false;
+        try {
+            (void)whisper_hf::GenerationConfig::load(d);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        if (!threw) {
+            ++fails;
+            std::cerr << "  [FAIL] two-element eos_token_id was accepted\n";
+        }
+    }
+    failures += fails;
+    std::cout << "  eos_token_id arrays: " << checks << " checked, " << fails << " mismatched\n";
+    return fails;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -255,6 +307,9 @@ int main(int argc, char** argv) {
 
         std::cout << "-- GenerationConfig::validate() (PR #111 review, finding C) --\n";
         run_validate_cases(dir, failures);
+
+        std::cout << "-- GenerationConfig::load() eos_token_id arrays --\n";
+        run_eos_array_cases(dir, failures);
     } catch (const std::exception& e) {
         std::cerr << "[generation_hf_test] EXCEPTION: " << e.what() << "\n";
         return 1;

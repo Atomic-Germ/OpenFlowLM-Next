@@ -55,7 +55,10 @@ GenerationConfig GenerationConfig::load(const std::string& model_dir) {
     if (!j.contains("eos_token_id") || j["eos_token_id"].is_null()) {
         fail(path, "missing required field 'eos_token_id'");
     } else if (j["eos_token_id"].is_array()) {
-        if (j["eos_token_id"].empty()) fail(path, "'eos_token_id' is an empty array");
+        if (j["eos_token_id"].size() != 1) {
+            fail(path, "'eos_token_id' is an array of " + std::to_string(j["eos_token_id"].size()) +
+                           " ids; this port supports exactly one end-of-text token");
+        }
         cfg.eos_token_id = j["eos_token_id"][0].get<int>();
     } else {
         cfg.eos_token_id = j["eos_token_id"].get<int>();
