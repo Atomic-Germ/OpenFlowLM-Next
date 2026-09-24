@@ -606,7 +606,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                           acquires=[Acquire(pktlk[c][X.NE])], releases=[Release(pktdone[c])], next=0))
             rt.add_tile_dma(TileDma(tile=emitter_tile[c],
                                     channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
-            flows.append(PacketFlow(pkt_id=15, src=emitter_tile[c], src_port=WireBundle.DMA, src_channel=1,
+            flows.append(PacketFlow(pkt_id=int(os.environ.get("ONDV_PKT_ID", "15")), src=emitter_tile[c], src_port=WireBundle.DMA, src_channel=1,
                                     dst=shim_w[c], dst_port=WireBundle.TileControl, dst_channel=0,
                                     keep_pkt_header=os.environ.get("ONDV_KEEP_HDR", "1") == "1")) if (os.environ.get("ONDV_NO_EMITTERS") != "1" or os.environ.get("ONDV_FORCE_FLOW") == "1") else None
     for f in flows:
