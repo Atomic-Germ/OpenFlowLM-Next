@@ -130,6 +130,14 @@ NEED_Q4_GMS = "ffn" not in Q8              # the dense tail's up | gate bands
 MIXED = KIND == "dense" and bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
 GEMV_OS = ["-Oz"] if MIXED else OS         # size over speed, harder, on the crowded core only
 
+# An all-q8 MoE spec (the 35B fine-tunes, and Atomic-Germ's own Qwen3.6-35B) carries the
+# larger gemv_q8_gy where the q4_1 spec has gemv_q4_gy, and since the DeltaNet slice update
+# (dnx.h pass 2) that left lx's main core 224 B over its 16 KB. The routed experts' up | gate
+# GEMV is the one TU where -Oz shrinks the linked core (by 304 B) at no measured cost: it
+# waits on the weight stream, not on its loop. -Oz on the other TUs grew the core, and the
+# older per-row pass 2 fits but costs 0.46 ms a layer. q4_1 specs keep -Os (the DNX_PAD lesson).
+GUP_OS = ["-Oz"] if KIND == "moe" and Q8 else OS
+
 
 def bt(total: int, off: int, n: int) -> TensorAccessPattern:
     return TensorAccessPattern((1, total), off, [1, 1, 1, n], [0, 0, 0, 1])
@@ -215,7 +223,7 @@ def kernels(inc, t):
     # GEMVs (runtime group / band law): projections into a y element; MoE up/gate and down into ms
     if NEED_Q4_GY:
         k["gy"] = ef("gemv_q4_gy", [e, tab, y, i32, i32, i32])      # (t, tab, ye, group, per_band, rs)
-    k["gup"] = ef("gemv_q4_gup", [e, tab, ms, i32, i32])            # (t, tab, ms, group, band)  u | g
+    k["gup"] = ef("gemv_q4_gup", [e, tab, ms, i32, i32], GUP_OS)    # (t, tab, ms, group, band)  u | g
     k["gdown"] = ef("gemv_q4_gdown", [e, tab, ms, i32, i32])        # (t, tab, ms, j, slot)      routed / shared law
     # activation tables: x (one element, K = HID) and the two-element og (K = KWIDE)
     k["prep2048"] = ExternalFunction(f"gemv_q4_prep_k{HID}", source_file=str(_gemv_prep_entry(HID)),

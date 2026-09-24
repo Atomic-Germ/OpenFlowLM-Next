@@ -508,6 +508,21 @@ reduces over `lin_value_width` -- 4096 on the 9B and 4B, 2048 on the 2B and 0.8B
 `hidden`, so both K were already validated by the 35B pass and all four sizes compose with
 no `OPEN_KERNELS_UNVALIDATED`.
 
+**Result 2026-09-24 (the all-q8 35B stopped building; fixed).** #78's DeltaNet slice update
+(dnx.h pass 2) grew the MoE main core, and the q4_1 35B still fit, so nothing rebuilt a q8
+one: every all-q8 35B -- Ornith, its siblings and Atomic-Germ's own mirror -- failed `lx0`
+with `Overflow of program memory`, reported by a user. The core measured 16 608 B against
+16 384. The fix compiles only `gemv_q4_gup` (the routed experts' up | gate) at `-Oz`, only on
+an all-q8 MoE spec: 16 304 B. Per-TU `-Oz` elsewhere grows the linked core (`gemv_q4_gdown`
+with it: 16 448, over), and the pre-#78 per-row pass 2 fits (16 080) but runs `lx0` at 2.48
+ms a call against 2.02. The rebuilt Ornith set scores 0.999996 / 0.999998 / 0.999989 against
+the replica on the 8-layer / 3-token slice, argmax and top-5 identical, bit-identical to
+the per-row variant, and decodes a 40-layer step in 140.5 ms against 152.9 (per-row) and
+159.3 (the 2026-09-07 set), three interleaved rounds. q4_1 specs compile exactly as before.
+The mixed Qwen3.5 cores were not affected (9B 14 304 B, 0.8B 14 416 B). The exporter now
+prints each set's fullest core against 16 384 B, and names this failure in plain words
+when aiecc hits it; the all-q8 35B has 80 B left.
+
 ### OPEN-QUANT-Q4K: the packers read Q4_K containers
 **Applies to:** openflowlm-next (`open_kernels/model/q4nx.py`,
 `open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`,
