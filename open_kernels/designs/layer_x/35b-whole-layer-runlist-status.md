@@ -64,3 +64,33 @@ packet BDs that are configured once and never drained — exactly the "shim task
 lead in `LAX-MERGE-NOTES.md`). Next step: bisect what is left behind after one whole-layer run
 (dump the shim TileControl/BD state, or add a per-layer drain/barrier) so layers can chain; then
 the 40-layer token is ONE submit.
+
+### 2026-09-24 (cont.): the 9-layer limit is ~8 ERT command slots PER hw_context
+
+Decisive experiments (all on an idle device, per-run buffers, `lax` ELF kernels):
+
+| test | result |
+| --- | --- |
+| 8 runs, one runlist | ok (17-20 ms) |
+| 9 runs, one runlist | TDR |
+| 8 runs (r0) then 1 run (r1), same process/context | r0 ok, **r1 TDR** |
+| 4 + 4 + 4 runs, same context | first two ok, **third TDR** |
+| 8 runs, then a **plain `run`** (not a runlist) | plain run TDR |
+| 8 runs on context **X**, then 2 runs on a **second context Y** (same xclbin) | both ok |
+
+So the device is not wedged and the design is not leaking shim state: each whole-layer
+execution consumes **one ERT command slot** from its `hw_context`, and the context has ~8.
+XRT's `get_ert_slots()` (`xdna-driver/xrt/.../common/device.cpp`) computes
+`slots = max(min_slots, num_cus*2+1)` then `size = max(cq_size/slots, max_cu_size)`,
+`slots = cq_size/size` — i.e. the **per-command size (`max_cu_size`, ~ the 74 KB control
+text) caps the slot count at ~8**; the `Runtime.ert_slotsize` xrt.ini override (read, since
+`verbosity` takes effect via `XRT_INI_PATH`) does not raise it for the xdna path.
+
+Consequence for the objective: a 40-layer token cannot be 40 runs in one `xrt::runlist`
+(the hw_context runs out of slots at 8). The runtime's per-ctx ELF route reached 40 runs
+only because its xclbin's command size left more slots. Two ways to one submit/token:
+
+1. **One whole-token control text** (all 40 layers, per-layer buffer offsets): one `run` =
+   one command = one submit, no slot pressure. This is the robust route.
+2. Raise the context's command capacity (smaller `max_cu_size` / larger CQ — driver or
+   xclbin level), so a 40-run runlist fits.
