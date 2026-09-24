@@ -213,12 +213,20 @@ FaAttention::FaAttention(npue::npu::Device &dev, const std::string &fa_dir) {
 }
 
 namespace {
-void check_shape(const char *who, int64_t heads, int64_t head_dim, int64_t m_padded) {
-  constexpr int64_t kHeads = 20, kHeadDim = 64, kSeqPad = 1536;
-  if (heads != kHeads || head_dim != kHeadDim || m_padded != kSeqPad)
-    throw std::runtime_error(std::string(who) + ": shape " + std::to_string(heads) + "/" +
-                             std::to_string(head_dim) + "/" + std::to_string(m_padded) +
-                             " does not match the kernel's fixed 20/64/1536");
+// Every dimension the repack, the dispatch and the scatter rely on: the kernel is
+// compiled for exactly this shape, and t and d also bound the pointer arithmetic
+// into the fixed-size scratch buffers (t > 1536 would write past them; t < 1500
+// would dispatch a kernel that attends over 1500 keys).
+void check_shape(const char *who, int64_t heads, int64_t head_dim, int64_t m_padded, int64_t t,
+                 int64_t d) {
+  constexpr int64_t kHeads = 20, kHeadDim = 64, kSeqPad = 1536, kValidLen = 1500;
+  if (heads != kHeads || head_dim != kHeadDim || m_padded != kSeqPad || t != kValidLen ||
+      d != kHeads * kHeadDim)
+    throw std::runtime_error(std::string(who) + ": shape heads=" + std::to_string(heads) +
+                             " head_dim=" + std::to_string(head_dim) + " m_padded=" +
+                             std::to_string(m_padded) + " t=" + std::to_string(t) + " d=" +
+                             std::to_string(d) +
+                             " does not match the kernel's fixed 20/64/1536/1500/1280");
 }
 }  // namespace
 
@@ -245,7 +253,7 @@ void FaAttention::dispatch_and_scatter(int64_t m_padded, int64_t t, int64_t d, i
 
 void FaAttention::run(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
                       int64_t heads, int64_t head_dim, float *out, FaPhases *phases) {
-  check_shape("FaAttention::run", heads, head_dim, m_padded);
+  check_shape("FaAttention::run", heads, head_dim, m_padded, t, d);
   constexpr int64_t kSeqPad = 1536;
 
   double t0 = now_s();
@@ -266,7 +274,7 @@ void FaAttention::run(const float *qkv, int64_t m_padded, int64_t t, int64_t d,
 void FaAttention::run_fast(const float *qkv_c, int64_t m_padded, int64_t t, int64_t d,
                            int64_t heads, int64_t head_dim, const float *bias, float *out,
                            FaPhases *phases) {
-  check_shape("FaAttention::run_fast", heads, head_dim, m_padded);
+  check_shape("FaAttention::run_fast", heads, head_dim, m_padded, t, d);
   constexpr int64_t kSeqPad = 1536;
 
   double t0 = now_s();
