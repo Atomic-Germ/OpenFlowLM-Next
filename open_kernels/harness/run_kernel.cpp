@@ -8,6 +8,10 @@
 //   kernel  <name> <xclbin> <insts.elf>     ELF flow: xrt::elf -> module -> ext::kernel
 //   buf     <name> <bytes> [init-file]      device buffer (zeroed, or from file)
 //   load    <buf> <file>                    overwrite a buffer from a file
+//   fdload  <buf> <fd> [bytes [offset]]     overwrite a buffer from an inherited fd (a pipe):
+//                                           read exactly `bytes` (default: the buffer's size)
+//                                           straight into the BO -- weights packed at load
+//                                           time by the driver, no file (model/lax_pack.py)
 //   run     <kernel> <buf> [<buf> ...]      opcode 3, buffers at args 3.. ; wait
 //   dump    <buf> <file> [bytes [offset]]   read back to a file
 //   copy    <dst> <dst_off> <src> <src_off> <bytes>
@@ -52,6 +56,7 @@
 // that buffer at +10). Every weight fill and every cache transfer is one 0x81,
 // so patching its offset word re-points the DMA without recompiling.
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -68,6 +73,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
@@ -304,6 +311,24 @@ struct Host {
             Buf& b = buf(name);
             size_t n = d.size() < b.size ? d.size() : b.size;
             std::memcpy(b.bo.map<uint8_t*>(), d.data(), n);
+            b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        } else if (cmd == "fdload") {
+            auto name = need(it, "fdload buf");
+            int fd = static_cast<int>(num(need(it, "fdload fd"), "fdload fd"));
+            Buf& b = buf(name);
+            std::string sb, so;
+            size_t n = (it >> sb) ? num(sb, "fdload bytes") : b.size;
+            size_t off = (it >> so) ? num(so, "fdload offset") : 0;
+            if (off + n > b.size) throw std::runtime_error("fdload " + name + ": range past the buffer");
+            auto* m = b.bo.map<uint8_t*>() + off;
+            for (size_t got = 0; got < n;) {
+                ssize_t r = ::read(fd, m + got, n - got);
+                if (r < 0 && errno == EINTR) continue;
+                if (r <= 0)
+                    throw std::runtime_error("fdload " + name + ": " + (r ? std::strerror(errno) : "EOF") +
+                                             " after " + std::to_string(got) + " of " + std::to_string(n) + " B");
+                got += static_cast<size_t>(r);
+            }
             b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         } else if (cmd == "run") {
             auto kn = need(it, "run kernel");

@@ -30,6 +30,7 @@ GLOBALS = ("xres", "zero", "normw", "xresf", "hn", "logits", "lmpool", "ptab")
 # lax's w{c} fifos: MM2S ch1 (0x1D21C) or ch0 (0x1D214) per column
 QUEUES = (0x1D21C, 0x1D214, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D21C, 0x1D214, 0x1D214)
 POOL, CONSTS, ACT, CFG, STATE, KV = 536870912, 11882496, 190464, 4096, 2342912, 8388608
+QMAP = b"".join(q.to_bytes(4, "little") for q in QUEUES)
 HEAD = ["run ln xres zero normw xresf hn", "run lm lmpool hn logits"]    # final norm + lm_head
 
 
@@ -37,38 +38,23 @@ def sfx(t):
     return "" if t == 0 else f"_t{t}"
 
 
-def setup(out: Path, lax_l: Path, lax_a: Path, per: int) -> tuple[list[str], int, str]:
-    """Kernels, buffers and the runlists of a lax decode over make_decode.py's `out`:
-    (lines, number of submits per position, the layer kinds as 'l'/'f')."""
-    src = (out / "run_decode.cfg").read_text().splitlines()
-    kinds = {}                                # layer -> 'l' | 'f', from the kernel that runs its pool
-    pool_dir = None
-    for line in src:
-        p = line.split()
-        if p[:1] == ["run"] and len(p) > 2 and p[2].startswith("pool") and p[2][4:].isdigit():
-            kinds.setdefault(int(p[2][4:]), "f" if p[1].startswith("ax") else "l")
-        if p[:2] == ["buf", "pool0"]:
-            pool_dir = Path(p[3]).parent
+def _program(kinds: str, head: list[str], gbufs: list[str], qbuf: list[str], lbufs, lax_l: Path,
+             lax_a: Path, per: int) -> tuple[list[str], int]:
+    """The lax program around its buffers: `head` = the ln / lm kernels, `gbufs` = the GLOBALS,
+    `qbuf` = the qmap buffer, `lbufs(l)` = layer l's (pool + consts, state) buffer lines."""
     nl = len(kinds)
-    tail = [line for line in src if line.split()[:1] == ["xclbin"] and line.split()[1] in ("ln", "lm")]
-    tail += [line for line in src if line.split()[:1] == ["kernelx"] and line.split()[1] in ("ln", "lm")]
-
     c = ["device", "attngeom 2048 1024"]
     ng = (nl + per - 1) // per
     for g in range(ng):
         c += [f"xclbin X{g} {lax_l}/final.xclbin", f"kernelx lxf{g} X{g} {lax_l}/insts.bin",
               f"kernelx axf{g} X{g} {lax_a}/insts.bin"]
-    c += tail
-    c += [line for line in src if line.startswith("buf ") and line.split()[1] in GLOBALS]
+    c += head + gbufs
     c += [f"buf dkv {KV}", f"buf dstate {STATE}"]            # the unused kv / state argument
-    qmap = out / "qmap_lax.bin"
-    qmap.write_bytes(b"".join(q.to_bytes(4, "little") for q in QUEUES))
-    c.append(f"buf qmap 32 {qmap}")
+    c += qbuf
     for l in range(nl):
-        c += [f"buf pool{l} {POOL} {pool_dir}/pool_L{l}.bin", f"buf consts{l} {CONSTS} {out}/consts_{l}.bin",
-              f"buf act{l} {ACT}", f"buf cfg{l} {CFG}", f"poolbase cfg{l} 0 pool{l}",
-              f"copy cfg{l} 8 qmap 0 32"]
-        c.append(f"buf state{l} {STATE} {out}/zstate_linear_attention.bin" if kinds[l] == "l" else f"buf kv{l} {KV}")
+        w, st = lbufs(l)
+        c += w + [f"buf act{l} {ACT}", f"buf cfg{l} {CFG}", f"poolbase cfg{l} 0 pool{l}", f"copy cfg{l} 8 qmap 0 32"]
+        c += st
 
     def args(l):
         if kinds[l] == "l":
@@ -80,7 +66,74 @@ def setup(out: Path, lax_l: Path, lax_a: Path, per: int) -> tuple[list[str], int
         for l in range(g * per, min(g * per + per, nl)):
             c.append(f"runlist_add r{g} {'lxf' if kinds[l] == 'l' else 'axf'}{g} {args(l)}")
     c.append("attngeom 2048 1024 0")
-    return c, ng, "".join(kinds[l] for l in range(nl))
+    return c, ng
+
+
+def setup(out: Path, lax_l: Path, lax_a: Path, per: int) -> tuple[list[str], int, str]:
+    """Kernels, buffers and the runlists of a lax decode over make_decode.py's `out` (its
+    pre-packed pool / consts files): (lines, number of submits per position, the layer kinds)."""
+    src = (out / "run_decode.cfg").read_text().splitlines()
+    kinds = {}                                # layer -> 'l' | 'f', from the kernel that runs its pool
+    pool_dir = None
+    for line in src:
+        p = line.split()
+        if p[:1] == ["run"] and len(p) > 2 and p[2].startswith("pool") and p[2][4:].isdigit():
+            kinds.setdefault(int(p[2][4:]), "f" if p[1].startswith("ax") else "l")
+        if p[:2] == ["buf", "pool0"]:
+            pool_dir = Path(p[3]).parent
+    kinds = "".join(kinds[l] for l in range(len(kinds)))
+    head = [line for line in src if line.split()[:1] == ["xclbin"] and line.split()[1] in ("ln", "lm")]
+    head += [line for line in src if line.split()[:1] == ["kernelx"] and line.split()[1] in ("ln", "lm")]
+    gbufs = [line for line in src if line.startswith("buf ") and line.split()[1] in GLOBALS]
+    qmap = out / "qmap_lax.bin"
+    qmap.write_bytes(QMAP)
+
+    def lbufs(l):
+        return ([f"buf pool{l} {POOL} {pool_dir}/pool_L{l}.bin", f"buf consts{l} {CONSTS} {out}/consts_{l}.bin"],
+                [f"buf state{l} {STATE} {out}/zstate_linear_attention.bin" if kinds[l] == "l" else f"buf kv{l} {KV}"])
+
+    c, ng = _program(kinds, head, gbufs, [f"buf qmap 32 {qmap}"], lbufs, lax_l, lax_a, per)
+    return c, ng, kinds
+
+
+def setup_packed(model, lax_l: Path, lax_a: Path, per: int, designs: Path, fd: int,
+                 xres: Path | None = None, embed: bool = True) -> tuple[list[str], int, str, list]:
+    """setup() with every weight packed at load time from the model (model/lax_pack.py): each
+    packed buffer is `buf` + `fdload <fd>`, and `items` lists (what to pack, bytes) in the order
+    the program reads them from the pipe. The zero / state / kv buffers start zeroed; `xres` (a
+    file) seeds the residual, as make_decode.py's xres0.bin does. `embed` adds the bf16 embedding
+    table (the `feed` source)."""
+    kinds = model.kinds()
+    items = []
+
+    def packed(name, size, key, nbytes=None):
+        items.append((key, nbytes or size))
+        return [f"buf {name} {size}", f"fdload {name} {fd}" + (f" {nbytes}" if nbytes else "")]
+
+    gbufs = []
+    for name in GLOBALS:
+        size = model.size(name)
+        if name == "normw":
+            gbufs += packed(name, size, ("normw",))
+        elif name == "ptab":
+            gbufs += packed(name, size, ("ptab",))
+        elif name == "lmpool":
+            gbufs += packed(name, size, ("lmpool",))
+        elif name == "xres" and xres is not None:
+            gbufs.append(f"buf xres {size} {xres}")
+        else:
+            gbufs.append(f"buf {name} {size}")
+    qbuf = packed("qmap", 32, ("bytes", QMAP))
+
+    def lbufs(l):
+        return (packed(f"pool{l}", POOL, ("pool", l)) + packed(f"consts{l}", CONSTS, ("consts", l), model.consts_bytes(l)),
+                [f"buf state{l} {STATE}" if kinds[l] == "l" else f"buf kv{l} {KV}"])
+
+    c, ng = _program(kinds, model.head_lines(designs), gbufs, qbuf, lbufs, lax_l, lax_a, per)
+    if embed:
+        a, b = model.embed_range()
+        c += packed("embed", b - a, ("embed",))
+    return c, ng, kinds, items
 
 
 def position(pos: int, ng: int, feed: str | None = None) -> list[str]:
@@ -92,9 +145,51 @@ def position(pos: int, ng: int, feed: str | None = None) -> list[str]:
     return c
 
 
+def with_fd(lines: list[str], fd: int) -> list[str]:
+    """setup_packed(..., fd=0)'s program with the pipe's real fd in its `fdload` lines (the
+    items have to exist before the Stream -- and so the fd -- does)."""
+    return [" ".join(p[:2] + [str(fd)] + p[3:]) if p[:1] == ["fdload"] else " ".join(p)
+            for p in (line.split() for line in lines)]
+
+
+def run_packed(a, out: Path) -> int:
+    """The --tokens parity program over weights packed at load time, run here and now."""
+    import time
+    from lax_pack import Model, Npu, Stream
+    t0 = time.time()
+    ref = Path(a.ref).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    model = Model(Path(a.model_dir))
+    c, ng, kinds, items = setup_packed(model, Path(a.lax_l).resolve(), Path(a.lax_a).resolve(), a.per,
+                                       Path(a.designs).resolve(), 0, xres=ref / "xres0.bin", embed=False)
+    stream = Stream(model, items, a.workers)
+    lines = with_fd(c, stream.rfd)
+    npu = Npu(lines, stream)
+    print(f"loaded {len(items)} packed buffers in {time.time() - t0:.1f} s ({kinds})", flush=True)
+    for t in range(a.tokens):
+        s = sfx(t)
+        prog = [f"load xres {ref}/xres{t}.bin"] if t else []
+        prog += [f"attnpos axf{g} {t}" for g in range(ng)] + [f"runlist_exec r{g}" for g in range(ng)]
+        prog += HEAD + [f"dump logits {out}/y_logits{s}.bin 993280", "tick"]
+        npu.send(prog)
+        npu.wait("tick")
+        print(f"token {t}: y_logits{s}.bin", flush=True)
+    rc = npu.close()
+    (out / f"run_lax_packed_p{a.per}.log").write_text("".join(npu.out))
+    return rc
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True, help="make_decode.py's --out")
+    ap.add_argument("--out", required=True, help="make_decode.py's --out; with --model-dir, where the "
+                    "dumps go (and --ref's xres{t}.bin feed the tokens)")
+    ap.add_argument("--model-dir", default=None,
+                    help="pack every weight at load time from this model's model.q4nx and RUN the program "
+                         "now (model/lax_pack.py) instead of writing a .cfg over pre-packed files")
+    ap.add_argument("--ref", default=None, help="with --model-dir: make_decode.py's --out (xres{t}.bin)")
+    ap.add_argument("--designs", default=str(HERE.parent / "designs"),
+                    help="with --model-dir: where the ln / lm_head builds live")
+    ap.add_argument("--workers", type=int, default=8, help="with --model-dir: packing processes")
     ap.add_argument("--lax-l", required=True, help="lax build, LAX_KIND=0 (linear attention)")
     ap.add_argument("--lax-a", required=True, help="lax build, LAX_KIND=1 (full attention)")
     ap.add_argument("--per", type=int, default=40, help="layers per hw_context / runlist submit")
@@ -107,6 +202,8 @@ def main() -> int:
     ap.add_argument("--vocab", type=int, default=248070, help="generation mode: real vocab (argmax range)")
     a = ap.parse_args()
     out = Path(a.out).resolve()
+    if a.model_dir:
+        return run_packed(a, out)
     c, ng, kinds = setup(out, Path(a.lax_l).resolve(), Path(a.lax_a).resolve(), a.per)
     if a.prompt_ids:
         # greedy generation: every position is one feed + one submit; the norm + lm_head (and the

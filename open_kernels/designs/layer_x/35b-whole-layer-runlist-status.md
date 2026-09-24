@@ -206,3 +206,50 @@ A: Silicon mind wakes, / Parallel paths light the way, / Data flows like rain.  
 
 Prompts run at ~12 tok/s (no head per prompt token). Harness additions: `feed`, `greedy`, `tick`,
 `stopat`, and the stdin program mode.
+
+### (lax decode, cont.) Weights packed at startup, no pre-packed files (`model/lax_pack.py`)
+
+The decode no longer reads make_decode.py's ~21 GB of pre-packed files (`/tmp/lax-pools/pool_L*.bin`,
+`pool_lmhead.bin`, `embed_bf16.bin`, `consts_*.bin`, `normw.bin`, `ptab.bin`, `zstate_*.bin`), so
+it survives a reboot. `lax_chat.py` (default path) and `lax_decode_cfg.py --model-dir` pack every
+buffer from `model.q4nx` at startup with the same `recipes/pack.py` code (make_decode.py
+--requant's plan, bit-identical to the files) and stream the bytes over a pipe:
+
+* harness: new `fdload <buf> <fd> [bytes [offset]]` reads exactly that many bytes from an
+  inherited fd straight into the BO's host mapping (no intermediate copy or file);
+* `lax_decode_cfg.setup_packed()` writes the same program as `setup()` (same buffers, same order)
+  with `buf X size` + `fdload X fd` for the packed ones; zero / state / kv buffers just start zeroed;
+* `lax_pack.Stream`: 8 forked workers (`--workers`), each packs one task (a layer's pool + consts,
+  the lm_head pool, the embedding table), waits for its turn and write()s into the pipe itself.
+  The container is read by one pread per tensor: through the mmap, 8 workers on a cold page cache
+  ran at ~0.3 GB/s; with pread, 13 s cold / 8 s warm for the 21.8 GB with no NPU in the loop.
+
+Nothing is written anywhere (no /dev/shm, no disk). `strace -f -e trace=openat` over a chat and a
+parity run shows no open of /tmp/lax-pools or of any pool / consts / embed / normw / ptab / zstate
+file; the only `.bin` files opened are the kernels' insts.bin (and, in the parity run, the
+reference's xres{t}.bin inputs and the dumped y_logits).
+
+Measured 2026-09-24 on the shared box (load average 8-30 from other agents, so startup varies):
+
+| | startup (process start -> ready) | host RAM |
+|---|---|---|
+| chat, q4nx in page cache | 18.5 s / 28.8 s (two runs) | MemAvailable drop 22.3-24.0 GiB peak (the BOs ~21.8 GiB + workers); process-tree RSS peak 5.5 GiB |
+| chat, q4nx evicted (fadvise DONTNEED, as after a reboot) | 36.4 s | 23.2 GiB |
+| old path (files in tmpfs) | ~10 s | |
+
+Decode speed unchanged: "What is the capital of France? Answer in one sentence." -> `The capital
+of France is Paris.` at 10.9-11.1 tok/s; the population follow-up 32 tok at 10.9 tok/s.
+
+3-token parity through the load-time packing (`lax_decode_cfg.py --model-dir ... --ref
+~/.cache/lax-decode/full3 --out ~/.cache/lax-decode/durable3 --tokens 3`, then
+`compare_decode.py --tokens 3`): logits corr 0.999998 / 0.999993 / 0.999998, argmax 846 / 198 /
+3710, **PASS** -- the same numbers as over the files.
+
+```
+python3 open_kernels/model/lax_chat.py --lax-l ~/.cache/lax-decode/builds/lax_l_head \
+    --lax-a ~/.cache/lax-decode/builds/lax_a_head --designs ~/OpenFlowLM-Next/open_kernels/designs \
+    "What is the capital of France? Answer in one sentence."
+```
+
+`--designs` points at the checkout holding the ln / lm_head_q8 builds (the worktree has none). The
+old file path stays (`--out DEC --embed EMB`).
