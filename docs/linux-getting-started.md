@@ -128,6 +128,19 @@ cmake --build --preset linux-default
 cmake --install --preset linux-default
 ```
 
+**Native package and portable tarball, in one command:**
+```sh
+cmake --workflow --preset linux-package   # configure + build + test + RPM/TGZ
+```
+
+`.deb` is built separately (`linux-package-deb`) on Debian/Ubuntu or in a
+Debian container, because the engine binary carries the build host's glibc,
+FFmpeg and Boost sonames.
+
+The install goes to `/opt/openflowlm`; the package adds `/usr/bin/oflm` and
+`/etc/profile.d/openflowlm.sh` so `oflm`, `oflm-test`, and `q4nx-build` are on
+`PATH` with no shell-rc editing.
+
 **Engine-only (fast iteration):**
 ```sh
 cmake --preset linux-debug
