@@ -155,18 +155,31 @@ void attend_one_xkv_bf16(const float *q, const uint16_t *k_base, int64_t k_row_s
 // `logits[0, out)` already holds the int8-approximate value for every row.
 // Finds the K largest BY THAT APPROXIMATION, recomputes exactly those K rows
 // with dot_bf16_kernel against `w_bf16` (the container's own bf16 bits --
-// the same tensor linear()'s default bf16 path reads), and overwrites
+// the same tensor linear()'s default bf16 path reads), overwrites
 // logits[idx] with the exact value + bias[idx] (bias may be null for an
-// explicit zero vector, matching the tied head's own no-bias convention).
+// explicit zero vector, matching the tied head's own no-bias convention),
+// and then CAPS every non-recomputed row at the minimum of the K exact
+// values just computed.
 //
-// Why this keeps greedy argmax exact: the true (bf16-exact) maximum logit is
-// somewhere in [0, out). If it is among the K rows the int8 pass ranked
-// highest, this function computes it exactly and overwrites it in place, so
-// the corrected array's max IS the true max -- the argmax is exact whether
-// or not any of the other out-K rows' int8 approximations are close. The
-// only failure mode is the true maximum landing OUTSIDE the int8-ranked
-// top-K: that requires int8 quantization error to have pushed the true
-// winner below rank K-1 other rows, i.e. an error larger than the gap
+// Why the cap is there (PR #111 review, finding 9): an earlier version of
+// this comment argued the argmax stayed exact "whether or not any of the
+// other out-K rows' int8 approximations are close" -- that was too strong.
+// Capturing the true max within the top K is necessary but not sufficient:
+// if the true-max row's OWN int8 approximation happens to OVERESTIMATE its
+// true value, its pre-recompute rank sits above where its exact value would
+// have placed it, leaving a gap between the (now-exact) corrected max and
+// the approximation threshold that decided the top-K cutoff. A row excluded
+// from the top K can sit in that gap -- an int8 overestimate of its own --
+// and, left uncorrected, that stale value would outrank the exact winner.
+// The cap forecloses this: no un-recomputed row can ever exceed the exact
+// values, so the post-call argmax is always one of the K rows this function
+// actually computed exactly. Capping costs nothing real for a row that was
+// never going to be trusted uncorrected either way.
+//
+// The remaining, DIFFERENT failure mode is unfixed and unfixable by this
+// function alone: the true maximum landing OUTSIDE the int8-ranked top-K in
+// the first place, which requires int8 quantization error to have pushed the
+// true winner below rank K-1 other rows, i.e. an error larger than the gap
 // between the true max and the K-th largest int8-approximate logit. K=64 is
 // chosen because that gap is, empirically (see decoder_quant_test's
 // real-weight measurement), far larger than the per-row int8 error this

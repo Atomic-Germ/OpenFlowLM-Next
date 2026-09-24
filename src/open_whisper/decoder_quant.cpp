@@ -334,11 +334,30 @@ void recompute_top_k_exact(const float *x, int64_t out, int64_t in, int64_t k,
   std::iota(idx.begin(), idx.end(), int64_t{0});
   std::partial_sort(idx.begin(), idx.begin() + kk, idx.end(),
                     [&](int64_t a, int64_t b) { return logits[a] > logits[b]; });
+  // The header's own reasoning ("the argmax is exact ... whether or not any of the
+  // other out-K rows' int8 approximations are close") was too strong (PR #111 review,
+  // finding 9): it only checked that the TRUE max, if ranked within the top K by its
+  // OWN (possibly noisy) approximation, gets recomputed -- it did not check that some
+  // OTHER, un-recomputed row's approximation could still OVERESTIMATE past the now-exact
+  // corrected max. That happens precisely when the true-max row's own int8 approximation
+  // overestimates ITS true value (pushing its pre-recompute rank threshold above the
+  // true max), leaving room in between for an excluded row's inflated approximation to
+  // beat the exact winner post-recompute. Fixed by capping every NON-recomputed logit at
+  // min(the kk exact values): a capped row can never win the argmax against a correctly
+  // recomputed one, and since the kk rows are themselves only approximations of "which
+  // rows might be the max" anyway, lowering an excluded row's value costs nothing real --
+  // it was never going to be trusted as exact either way.
+  float min_exact = std::numeric_limits<float>::infinity();
   for (int64_t j = 0; j < kk; ++j) {
     const int64_t o = idx[static_cast<size_t>(j)];
     const float exact = dot_bf16_kernel(x, w_bf16 + static_cast<size_t>(o) * static_cast<size_t>(in), in) +
                         (bias ? bias[o] : 0.f);
     logits[o] = exact;
+    if (exact < min_exact) min_exact = exact;
+  }
+  for (int64_t j = kk; j < out; ++j) {
+    const int64_t o = idx[static_cast<size_t>(j)];
+    if (logits[o] > min_exact) logits[o] = min_exact;
   }
 }
 

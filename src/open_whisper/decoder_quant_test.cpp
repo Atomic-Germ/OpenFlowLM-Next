@@ -452,6 +452,54 @@ void test_recompute_top_k_exact() {
   check(corrected_argmax == true_argmax, "corrected argmax equals the true (bf16-exact) argmax");
 }
 
+// A CONSTRUCTED adversarial case (PR #111 review, finding 9), not a random draw: the
+// header's original reasoning claimed the argmax stayed exact "whether or not any of
+// the other out-K rows' int8 approximations are close" -- false whenever the true-max
+// row's OWN approximation overestimates its true value, leaving a gap an excluded row's
+// stale approximation can sit in. `logits[]` here is set directly (not via
+// quantize_int8_rows_f32/linear_int8) so the gap is exact and reproducible rather than
+// dependent on a PRNG seed landing on it.
+//
+//   row 0: input (pre-call) approx = 100.0, true (bf16-exact) dot = 1.0*1.0 = 1.0 --
+//          massively OVERESTIMATED, but still ranks #1 by approx, so it IS the one row
+//          K=1 recomputes.
+//   row 1: input approx = 60.0 (excluded: 60 < 100, so NOT in the top-1) -- 60 sits
+//          exactly in the gap (1.0, 100.0], so an un-recomputed row 1 outranks row 0's
+//          corrected exact value of 1.0.
+//   rows 2..4: true dot = 0.0, well below row 0's true 1.0, so row 0 is genuinely the
+//          global argmax and this is not a vacuous "any answer is fine" setup.
+//
+// Before the fix (no cap on excluded rows): corrected argmax = row 1 (60.0 uncorrected
+// beats row 0's exact 1.0) -- WRONG. After the fix: row 1 is capped to
+// min(exact top-K) = 1.0, ties row 0's own 1.0, and the first-strict-`>` scan keeps row
+// 0 (encountered first) -- matching the true argmax.
+void test_recompute_top_k_exact_overestimate_gap() {
+  std::printf("-- int8x: top-K exact recompute (constructed overestimate-gap case) --\n");
+  const int64_t OUT = 5, IN = 1, K = 1;
+  std::vector<float> x = {1.0f};
+  std::vector<uint16_t> w_bf16(static_cast<size_t>(OUT));
+  w_bf16[0] = f32_to_bf16_rne(1.0f);  // row 0's true dot = 1.0
+  w_bf16[1] = f32_to_bf16_rne(0.0f);  // row 1's true dot is irrelevant (never recomputed)
+  w_bf16[2] = f32_to_bf16_rne(0.0f);
+  w_bf16[3] = f32_to_bf16_rne(0.0f);
+  w_bf16[4] = f32_to_bf16_rne(0.0f);
+
+  std::vector<float> logits = {100.0f, 60.0f, 5.0f, 5.0f, 5.0f};  // the "approximate" pass
+  ow::recompute_top_k_exact(x.data(), OUT, IN, K, w_bf16.data(), nullptr, logits.data());
+
+  int64_t argmax = 0;
+  float max_v = -std::numeric_limits<float>::infinity();
+  for (int64_t o = 0; o < OUT; ++o) {
+    if (logits[static_cast<size_t>(o)] > max_v) {
+      max_v = logits[static_cast<size_t>(o)];
+      argmax = o;
+    }
+  }
+  check(logits[0] == 1.0f, "row 0 (the only recomputed row) holds its exact value 1.0");
+  check_le(logits[1], 1.0f, "row 1 (excluded, was 60.0) no longer exceeds the exact max -- capped");
+  check(argmax == 0, "argmax is the recomputed row, not the uncapped excluded row 1 (was wrongly 1 before the fix)");
+}
+
 // ---------------------------------------------------------------------
 // Real weights, offline: per-tensor int8 quantization error statistics.
 // Runs only when OW_DEC_TEST_MODEL names a model directory holding
@@ -582,6 +630,7 @@ int main() {
   test_bf16_kernels();
   test_attend_one_xkv_bf16();
   test_recompute_top_k_exact();
+  test_recompute_top_k_exact_overestimate_gap();
   report_real_model_stats();
 
   std::printf("%s\n", failures ? "FAILED" : "all decoder_quant checks hold");
