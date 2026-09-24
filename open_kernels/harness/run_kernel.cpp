@@ -277,6 +277,8 @@ struct Host {
             std::string initf;
             it >> initf;
             Buf b{xrt::ext::bo(device(), padup(size)), size};
+            std::printf("buf %s @ 0x%llx (%zu B)\n", name.c_str(),
+                        static_cast<unsigned long long>(b.bo.address()), size);
             auto* m = b.bo.map<uint8_t*>();
             std::memset(m, 0, padup(size));
             if (!initf.empty()) {
