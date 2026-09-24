@@ -21,6 +21,7 @@
 ///   OW_BREAK_RULE=detect_language  -- use an unmasked argmax instead
 ///   OW_BREAK_RULE=segment_offset   -- always return the full window (the legacy bug)
 /// Any other value, or unset, runs the real port unmodified.
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -164,6 +165,29 @@ int run_segment_offset_cases(const std::string& dir, int& failures) {
 int main(int argc, char** argv) {
     std::string dir = argc > 1 ? argv[1] : "testdata";
     if (const char* env = std::getenv("OW_BREAK_RULE")) g_break_rule = env;
+
+    if (!g_break_rule.empty()) {
+        // broke() compares g_break_rule against exactly these five literals (see the
+        // call sites above); anything else silently disables nothing, and the run below
+        // still reports "deliberate-break run complete" -- a typo like
+        // OW_BREAK_RULE=timestampx would read as a successful fault-injection run with
+        // zero mismatches instead of the misconfiguration it actually is (PR #111 review).
+        static const char* const kKnownRules[] = {"suppress_tokens", "begin_suppress", "timestamp",
+                                                    "detect_language", "segment_offset"};
+        bool known = false;
+        for (const char* rule : kKnownRules) {
+            if (g_break_rule == rule) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            std::cerr << "[generation_hf_test] OW_BREAK_RULE=" << g_break_rule
+                      << ": unknown rule, expected one of suppress_tokens|begin_suppress|"
+                         "timestamp|detect_language|segment_offset\n";
+            return 1;
+        }
+    }
 
     std::cout << "[generation_hf_test] testdata dir: " << dir << "\n";
     if (!g_break_rule.empty()) {
