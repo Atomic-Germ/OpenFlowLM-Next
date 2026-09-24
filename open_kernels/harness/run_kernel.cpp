@@ -330,16 +330,26 @@ struct Host {
             auto dst = need(it, "poolbase dst");
             size_t off = num(need(it, "poolbase offset"), "poolbase offset");
             auto src = need(it, "poolbase src");
+            // Optional per-column shim-queue mask (bit c = column c on MM2S ch1). It rides
+            // the low 8 bits of the pool address's low word -- the part of the cfg element
+            // the emitter core provably receives -- because the pool BO is >= 1 MB aligned
+            // (bits 0..19 zero) and cfg[2..9] does not reach the core (see
+            // designs/router/ondv_ctrl_col.cc). Needed by the merged `lax` design, whose
+            // single emitter core must retarget different channels per layer type.
+            uint32_t qmask = 0;
+            if (std::string qs; it >> qs)
+                if (!qs.empty() && qs[0] != '#')
+                    qmask = static_cast<uint32_t>(std::stoull(qs, nullptr, 0)) & 0xFFu;
             uint64_t addr = buf(src).bo.address() + 0x80000000ull;
             Buf& b = buf(dst);
             if (off + 8 > b.size) throw std::runtime_error("poolbase: dst buffer too small");
-            uint32_t lo = static_cast<uint32_t>(addr), hi = static_cast<uint32_t>(addr >> 32);
+            uint32_t lo = static_cast<uint32_t>(addr) | qmask, hi = static_cast<uint32_t>(addr >> 32);
             auto* m = b.bo.map<uint8_t*>();
             std::memcpy(m + off, &lo, 4);
             std::memcpy(m + off + 4, &hi, 4);
             b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-            std::printf("poolbase %s+%zu <- %s @ 0x%llx\n", dst.c_str(), off, src.c_str(),
-                        static_cast<unsigned long long>(addr));
+            std::printf("poolbase %s+%zu <- %s @ 0x%llx (qmask 0x%02x)\n", dst.c_str(), off,
+                        src.c_str(), static_cast<unsigned long long>(addr), qmask);
         } else if (cmd == "ondvctrl") {
             // Fill a buffer with the on-device router's control words using the SAME
             // generator the router core runs, for a given pool BO and top-8 index list.

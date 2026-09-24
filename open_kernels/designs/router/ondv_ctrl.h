@@ -101,12 +101,14 @@ static constexpr uint32_t kOndvDownCore = 81920u;   // DOWN_PER_CORE * DOWN_BAND
 static constexpr uint32_t kOndvPoolDown = 335544320u;
 
 // The MM2S channel each column's w fifo landed on, i.e. its queue register. Taken from
-// the built design's `aie.shim_dma_allocation` table for @w0..@w7 (w0 ch1, w1 ch0, w2
-// ch1, w3 ch1, w4 ch1, w5 ch0, w6 ch0, w7 ch0). This is a property of the design's
-// shim budget, not of the model: re-derive it (tools/check_ondv_channels.py) if the
-// design's fifo set changes, or the packets push the wrong column's queue.
+// the built design's `aie.shim_dma_allocation` table for @w0..@w7. NOTE: these are the
+// MERGED `lax` design's channels (0:ch1 1:ch0 2:ch1 3:ch1 4:ch1 5:ch1 6:ch0 7:ch0), which
+// is the objective's target; the standalone `lx` design differs at c5 (ch0) and `ax` at
+// c3/c4 (ch0). This is a property of the design's shim budget, not of the model: re-derive
+// it (tools/check_ondv_channels.py) and set the matching values if the design changes, or
+// the packets push the wrong column's queue.
 static constexpr uint32_t kOndvQueue[kOndvCores] = {
-    0x1D21Cu, 0x1D214u, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D214u, 0x1D214u, 0x1D214u};
+    0x1D21Cu, 0x1D214u, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D21Cu, 0x1D214u, 0x1D214u};
 
 // One routed slot's FIFTEEN words: stream hdr, "write w0..w3" ctrl hdr + 4 data, stream
 // hdr, "write w4..w7" ctrl hdr + 4 data, stream hdr, queue-push ctrl hdr + the bd word.
