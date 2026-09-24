@@ -61,7 +61,15 @@ void Whisper::load_model(std::string model_path, nlohmann::ordered_json model_in
         // the server finish "loading" and then fail the first transcription
         // instead. The legacy protocol still never touches this file, lazy or
         // otherwise.
-        this->_hf_gen_config();
+        //
+        // PR #111 review (Copilot 4096191784, finding C): every id this config
+        // supplies (decoder_start_token_id, task ids, no_timestamps_token_id, lang
+        // ids, eos, the timestamp id range) is used unchecked as a logits-vector
+        // index or bound throughout _generate_hf. A checkpoint whose
+        // generation_config.json disagrees with its own config.json vocab_size must
+        // refuse HERE, at load, with a message naming the field and the id -- not
+        // read or write past the logits buffer on the first request.
+        this->_hf_gen_config().validate(this->_real_vocab_size());
     }
     this->setup_tokenizer(model_path);
     
@@ -401,6 +409,18 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
     std::string result;
     std::string language_detected;
 
+    // PR #111 review, finding B: HF detects the language ONCE, from the first
+    // window, before its seek loop even starts (_retrieve_init_tokens ->
+    // detect_language, generation_whisper.py ~L693, ~L1560 -- both run before the
+    // `while (seek < max_frames)` loop at ~L785), and reuses that single token for
+    // every window's decoder prompt. The per-window version this replaces
+    // re-detected on every 30s window's own audio, so a >30s clip whose language
+    // changed context mid-way (or whose second window is ambiguous on its own,
+    // e.g. a few seconds of music or silence) could feed a DIFFERENT language token
+    // per window and desync from what HF would have produced.
+    bool language_locked = false;
+    int lang_id = -1;
+
     // task 0180 Part B: per-request stage timers (host wall clock; NOT an NPU
     // performance claim -- rule 1). Accumulated across every window this
     // request opens (almost always one, for the <=30s clips this was profiled
@@ -414,7 +434,6 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
             break;
         }
         const float time_offset = _S2T_(current_idx);
-        const float window_seconds = _S2T_(l_this_round);
 
         // Range-construct directly, not size-then-insert (PR #111 review, finding
         // 11 -- see _generate_legacy's identical fix above for why this is safe:
@@ -432,20 +451,24 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         t_encode += now_s_whisper() - t0;
         this->engine->clear_context();
 
-        // [SOT] -> detect_language -> FEED the language token (the legacy protocol
-        // never did the feed; see the function comment above). gc.decoder_start_token_id
-        // (from generation_config.json), not the compile-time start_of_transcript
+        // [SOT] -> detect_language (window 1 only, finding B above) -> FEED the
+        // language token every window (the legacy protocol never did the feed; see
+        // the function comment above). gc.decoder_start_token_id (from
+        // generation_config.json), not the compile-time start_of_transcript
         // constant -- a container whose config names a different start token must
         // detect language from the context IT actually declares (PR #111 review).
         t0 = now_s_whisper();
         buffer<bf16> logits_buf = this->engine->decode_audio(gc.decoder_start_token_id);
         t_decode += now_s_whisper() - t0;
         ++n_decode_steps;
-        t0 = now_s_whisper();
-        std::vector<float> sot_logits = to_float_vec(logits_buf);
-        t_logits_copy += now_s_whisper() - t0;
-        const int lang_id = whisper_hf::detect_language(sot_logits, lang_ids, vocab_size);
-        language_detected = this->tokenizer->run_time_decoder(lang_id);
+        if (!language_locked) {
+            t0 = now_s_whisper();
+            std::vector<float> sot_logits = to_float_vec(logits_buf);
+            t_logits_copy += now_s_whisper() - t0;
+            lang_id = whisper_hf::detect_language(sot_logits, lang_ids, vocab_size);
+            language_detected = this->tokenizer->run_time_decoder(lang_id);
+            language_locked = true;
+        }
 
         t0 = now_s_whisper();
         logits_buf = this->engine->decode_audio(lang_id);  // context: [SOT, lang]
@@ -521,22 +544,30 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
             break;
         }
 
-        float advance_seconds = window_seconds;
+        // PR #111 review findings A and F: compute_segment_offset_samples strips a
+        // trailing EOS internally (generated may end with gc.eos_token_id -- pushed
+        // just above, at the `break` -- and HF strips exactly that before its own
+        // equivalent of this call) and returns an exact SAMPLE count, so no
+        // seconds<->samples float round-trip (_T2S_/_S2T_) happens on this path at
+        // all. `l_this_round` (samples, exact) is both the fallback and the function's
+        // `window_samples` argument -- no seconds intermediate is computed on this path.
+        int advance_samples = l_this_round;
         if (enable_time_stamp) {
-            advance_seconds = whisper_hf::compute_segment_offset_seconds(generated, timestamp_begin, window_seconds);
-            if (advance_seconds <= 0.0f) {
-                // Documented deviation from HF (generation_hf.hpp): a zero-second
-                // offset is reachable (an unclosed trailing segment that opened at
-                // exactly <|0.00|>) and would stall this engine's single sequential
-                // window forever, where HF's batched seek loop just lets other batch
-                // items carry the shared `seek` state forward regardless.
+            advance_samples =
+                whisper_hf::compute_segment_offset_samples(generated, timestamp_begin, gc.eos_token_id, l_this_round);
+            if (advance_samples <= 0) {
+                // Documented deviation from HF (generation_hf.hpp): a zero offset is
+                // reachable (an unclosed trailing segment that opened at exactly
+                // <|0.00|>) and would stall this engine's single sequential window
+                // forever, where HF's batched seek loop just lets other batch items
+                // carry the shared `seek` state forward regardless.
                 header_print("Warning", "hf protocol: zero-length segment offset at t=" << time_offset
                                                                                           << "s, forcing full-window advance");
-                advance_seconds = window_seconds;
+                advance_samples = l_this_round;
             }
         }
 
-        current_idx += _T2S_(advance_seconds);
+        current_idx += advance_samples;
         l_this_round = std::min(WINDOW_SAMPLES, length - current_idx);
         l_this_round = std::max(l_this_round, 0);
     }
