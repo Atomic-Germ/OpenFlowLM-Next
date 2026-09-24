@@ -118,8 +118,16 @@ cmake --preset linux-default
 cmake --build --preset linux-default
 cmake --test --preset linux-default
 cmake --install --preset linux-default
-cpack --preset linux-package-tgz
 ```
+
+Or do all of it, in the host-native and portable package formats, with one command:
+
+```bash
+cmake --workflow --preset linux-package   # configures, builds, tests, packages RPM+TGZ (+ kernels)
+```
+
+The install lands in `/opt/openflowlm` and adds `/usr/bin/oflm` plus
+`/etc/profile.d/openflowlm.sh`, so `oflm` is on `PATH` with no shell-rc edits.
 
 For detailed instructions, see [docs/BUILD.md](docs/BUILD.md).
 

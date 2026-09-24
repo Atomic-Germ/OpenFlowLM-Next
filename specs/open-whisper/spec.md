@@ -42,15 +42,24 @@ subtitle hallucination. Matching it would mean matching a lossy reference.
 - The bf16-operand replica is the **ceiling** any engine built on the bf16 GEMM can reach.
   Gates are calibrated from it, never set in advance.
 
-**Measured 2026-09-19** (float64 cosine over the 1500 real rows, six clips):
-`enc.out` **0.99571-0.99930**, cross K/V min 0.99454-0.99906, per-layer chained
-0.99966-0.99999, teacher-forced >= 0.9999980. That reproduces whisper-xdna's independent
-finding that 0.999 on `enc.out` is not reachable at 32-layer depth in bf16.
-The final LayerNorm amplifies the relative error about 3x (1.5-2.6e-2 before, 3.8-9.3e-2
-after).
+**Measured 2026-09-22**, on the corrected audio (float64 cosine over the 1500 real rows,
+six clips): `enc.out` **0.99600-0.99943**, cross K/V min 0.99485-0.99922, conv stem
+0.9999979-0.9999999. That reproduces whisper-xdna's independent finding that 0.999 on
+`enc.out` is not reachable at 32-layer depth in bf16. The final LayerNorm amplifies the
+relative error about 3x.
 
-**And it costs no tokens:** with the exact decoder on the bf16 replica's encoder output,
-all six transcripts are token-identical to float64 and 296/296 teacher-forced steps agree.
+**It costs a few tokens, and the number depends on the implementation.** With the exact
+decoder on the numpy replica's encoder output, 8 of 12 (clip, protocol) pairs are
+token-identical to float64 and 4 diverge. The earlier claim here -- "it costs no tokens",
+1 of 12 -- was measured against goldens built from **louder audio** (trap 28) and is
+withdrawn.
+
+**And the two bf16 implementations do not diverge on the same pairs.** The NPU engine
+matches float64 on 11 of 12, including three pairs where the numpy replica does not; the
+replica's fourth is the one the engine also takes. Both are bf16-operand paths, and they
+differ in accumulation order and in how attention is computed, so on a clip where a token
+is marginal they land on opposite sides of it. A bf16 "ceiling" is therefore a property of
+a datapath, not a single number two implementations must agree on.
 
 ### OPEN-WHISPER-SEAM: one engine interface, and no silent fallback between engines
 **Applies to:** `src/include/whisper/whisper_engine.hpp`, `src/common/whisper/whisper_engine_closed.cpp`
@@ -134,17 +143,17 @@ natively on Windows): all seven xclbins identical up to 70-78 bytes in 11-14 sho
   top of a later dispatch's result.
 - Two runs of the same clip give the same numbers.
 
-**Measured 2026-09-20** (idle machine, `open_whisper_cli --golden ... [--forced]`), both
-clips at the replica's bf16 ceiling and identical across runs to eight digits:
+**Measured 2026-09-22** on the corrected audio (`open_whisper_cli --golden ... --forced`),
+both clips at the replica's bf16 ceiling:
 
 | | Demos_sample-data_journal (replica) | nvidia (replica) |
 |---|---|---|
-| conv1 / conv2 | 0.99999785 / 0.99999992 (same) | 0.99999890 / 0.99999995 (same) |
-| chained `enc.hidden.1` | 0.99999810 (0.99999810) | 0.99999814 (0.99999814) |
-| chained `enc.hidden.32` | 0.99987223 (0.99988110) | 0.99991683 (0.99984733) |
-| `enc.out` | **0.99828836** (0.99822134) | **0.99906620** (0.99905335) |
-| cross K/V worst | 0.99788008 | 0.99901179 |
-| teacher-forced, all 32 layers | >= 0.99999827 | >= 0.99999825 |
+| conv1 / conv2 | 0.99999823 / 0.99999993 (same) | 0.99999860 / 0.99999993 (same) |
+| chained `enc.hidden.1` | 0.99999813 | 0.99999812 |
+| chained `enc.hidden.32` | 0.99988115 | 0.99992415 |
+| `enc.out` | **0.99810825** (0.99799226) | **0.99943178** (0.99922097) |
+| cross K/V worst | 0.99759194 | 0.99937406 |
+| teacher-forced, all 32 layers | >= 0.99999829 | >= 0.99999827 |
 
 Host wall clock, labelled as such and not an NPU figure: 4.4-4.8 s per 30 s window,
 attention ~4.3 s of it, NPU submit+wait ~1.6 s.
@@ -176,16 +185,14 @@ The cross K/V computed by the last `encode_audio()` stay, because the host calls
 - Free-running greedy under the host's own protocol reproduces the float64 transcript on
   the golden clips. Differences from the **closed** engine are reported, not treated as
   failures.
-**Measured 2026-09-20** (the decoder; end to end is phase 3b and still open):
-`open_whisper_cli --decode hf|host --baseline <file>` over six clips x two protocols,
-**12/12 pass**. Eleven reproduce transformers' float64 token path exactly, with
-teacher-forced argmax agreement 5/5 to 114/114 and logits cosine mean 0.99995-0.99999
-(min 0.99897). The twelfth, `output_voice_clone` under the host protocol, diverges at
-token 17 (`316` where float64 says `497`) -- and **the numpy replica diverges at the same
-index to the same token**, so that is the bf16 datapath, not this engine. That path is
-recorded by `whisper_decode_check.py --write-baseline` and the gate accepts it while still
-printing the float64 difference: a gate that cannot pass is one its reader learns to skip
-(T64).
+**Measured 2026-09-22** on the corrected audio: `open_whisper_cli --decode hf|host
+--baseline <file>` over six clips x two protocols, **12/12 pass**. Eleven reproduce
+transformers' float64 token path exactly, with teacher-forced argmax agreement 5/5 to
+114/114. The twelfth, `Demos_sample-data_journal` under the transformers protocol,
+diverges at token 5 and **matches the recorded bf16 path exactly** -- so that is the
+datapath, not this engine. `whisper_decode_check.py --write-baseline` records that path
+and the gate accepts it while still printing the float64 difference: a gate that cannot
+pass is one its reader learns to skip (T64).
 
 Decode cost, host wall clock and not an NPU figure: 12.5-14.6 ms/token, 69-80 tok/s.
 
@@ -232,14 +239,73 @@ counts. Harness and engine wall clock is a host-side observation and is labelled
 never quoted as array time. End-to-end wall clock is quoted only against a paired run of
 the other engine, on a quiet machine.
 
+### OPEN-WHISPER-ATTN-NPU: encoder attention stays on the host, and why
+
+**Applies to:** the encoder's 32 x 20 attention heads at seq 1500 (1536 padded)
+**Acceptance criteria:** the two attention GEMMs move to the array only if a measurement
+says the move pays. Whatever is built must keep the single xclbin -- an attention shape
+that needs its own design costs a context switch per layer and is refused on that ground
+alone.
+
+**Measured 2026-09-22 -- NOT BUILT, and the measurement is the reason.**
+
+The host's three attention phases, instrumented behind `OW_ATTN_PHASES=1` (CPU seconds
+summed across threads, so the shares are what matter, not the totals):
+
+| phase | share of attention |
+|---|---:|
+| Q.K^T | 49.9% |
+| row softmax | 12.4% |
+| P.V | 37.7% |
+
+The softmax stays on the host in any split design, so the ceiling for moving both GEMMs
+-- crediting them as *free* -- is **1.66x** on the encoder as a whole.
+
+Both shapes were built and run. `Q.K^T` tiles per head as 1536 x 64 x 1536; `P.V` has
+N = 64 and does not tile, so four heads are grouped block-diagonally into
+1536 x 6144 x 256, which costs 4x the arithmetic. Both produce a `final.xclbin` in the
+**same equivalence class as the seven production streams** -- same size, differences
+confined to the same UUID and name runs -- so they would be two more instruction streams
+in the existing context, not a switch. Both are numerically exact against an fp64
+reference (rel_fro 5.6e-08 and 8.0e-07).
+
+| shape | GFLOP | per dispatch |
+|---|---:|---:|
+| `s_h1` 1536 x 64 x 1536 (Q.K^T, one head) | 0.302 | 0.437 ms |
+| `pv_g4` 1536 x 6144 x 256 (P.V, four heads) | 4.83 | 1.914 ms |
+
+That is 20 + 5 dispatches per layer, **586 ms of array time per 30 s window** -- against
+824 ms for the entire encoder as it ships today.
+
+**The transport is what decides it.** A split design materialises the scores matrix in
+host memory: 6.04 GB read back as fp32 C, 3.02 GB written back as bf16 A for the value
+GEMM, plus 0.88 GB of operands and output, **9.94 GB per window**. At 20-60 GB/s of host
+memory that is 166-497 ms, and it buys nothing -- it is pure overhead that the host path
+does not pay, because the host never leaves L1 with a row of scores.
+
+Against a measured 5052 ms encode with 2296 ms of attention:
+
+| | attention | total | speedup |
+|---|---:|---:|---:|
+| today | 2296 ms | 5052 ms | 1.00x |
+| ceiling (GEMMs free) | 285 ms | 3042 ms | **1.66x** |
+| built, transport at 60 GB/s | 1036 ms | 3793 ms | 1.33x |
+| built, transport at 40 GB/s | 1119 ms | 3876 ms | 1.30x |
+| built, transport at 20 GB/s | 1368 ms | 4125 ms | 1.22x |
+
+**Decision: not built.** A split design collects at most 1.33x of a 1.66x ceiling, and
+half of what it gives back is a cost that exists only because the design splits. The form
+that avoids it is the chained one -- Q.K^T, softmax and P.V on the array with the scores
+never leaving it -- which needs a row-softmax kernel, the one genuinely new kernel in this
+whole effort. whisper-xdna (MIT) measured 1.73x for exactly that shape at ctx 1500 on
+XDNA1. That is the version worth building, and it is not a variant of this one.
+
 ## Not settled
 
 - **The open container is not published**, so there is no registry entry for it yet: an
   entry pointing at a repository that does not exist is the failure this file exists to
   avoid. It is built locally with `q4nx-build --open-whisper` and selected with
   `--asrmodel` from a user registry.
-- **Encoder attention on the array** is a later phase, gated on measuring the host's share.
-  Its PV product has N = 64, which does not tile at 32 x 8 columns.
 - **The decoder** runs on the host first. Moving it to the NPU needs an `attn.h` variant
   with no RoPE and no cache append, plus a decoder layer design with LayerNorm, biases and
   a non-gated GELU.

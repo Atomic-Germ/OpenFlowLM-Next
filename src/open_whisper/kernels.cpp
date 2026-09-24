@@ -150,9 +150,19 @@ KernelSet::KernelSet(npue::npu::Device &dev, const std::string &kernels_dir_hint
       throw std::runtime_error(dir_ + "/design.json: stream '" +
                                op_name(static_cast<Op>(i)) + "' never appeared in streams[]");
 
+  // WHICH DATAPATH, read from the set rather than assumed. bfp16 emulation runs
+  // the bf16 matmul on the MMAC unit instead of the fp32 vector unit: 1.71x on
+  // the array, and it costs 2 of 6 golden token paths, so it is not shipped.
+  // A set built before the field existed reads UNRECORDED -- never a guess,
+  // because two sets that differ only in this are otherwise indistinguishable.
+  const char *datapath =
+      marker.contains("emulate_bfp16")
+          ? (marker["emulate_bfp16"].get<bool>() ? "bf16 via bfp16 emulation" : "bf16")
+          : "UNRECORDED";
   std::printf("  kernels    %s (mlir-aie %s, peano %s)\n", dir_.c_str(),
              design_->info().mlir_aie_version.c_str(),
              design_->info().peano_version.c_str());
+  std::printf("  datapath   %s\n", datapath);
 }
 
 size_t KernelSet::stage_b(const uint16_t *tiled, size_t elems) {

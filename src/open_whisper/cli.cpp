@@ -325,6 +325,10 @@ int main(int argc, char **argv) {
 
     std::printf("-- chained (this encoder's own state feeds the next layer) --\n");
     enc.encode(mel.data(), hook);
+    // The summary below describes THIS encode. run_layer_from() below goes
+    // through run_layer() and would add the --forced passes to the stage and
+    // NPU buckets but not to `total`, so take the timers before it runs.
+    ow::Timers t = enc.timers;
 
     if (args.forced) {
       std::printf("-- teacher-forced (golden enc.hidden.<i> feeds layer i alone) --\n");
@@ -383,7 +387,8 @@ int main(int argc, char **argv) {
     }
 
     std::printf("-- host stage timers (host wall clock; NOT an NPU performance claim) --\n");
-    const auto &t = enc.timers;
+    for (size_t o = 0; o < static_cast<size_t>(ow::Op::Count); ++o)
+      t.npu_dispatch += t.npu_disp_op[o];
     std::printf("  im2col       %8.1f ms\n", t.im2col * 1e3);
     std::printf("  bf16 round   %8.1f ms\n", t.bf16 * 1e3);
     std::printf("  layer_norm   %8.1f ms\n", t.layer_norm * 1e3);
@@ -391,14 +396,69 @@ int main(int argc, char **argv) {
     std::printf("  bias add     %8.1f ms\n", t.bias * 1e3);
     std::printf("  residual add %8.1f ms\n", t.residual * 1e3);
     std::printf("  attention    %8.1f ms\n", t.attention * 1e3);
+    // OW_ATTN_PHASES=1 splits that into the two GEMMs a kernel set could take and
+    // the softmax that stays on the host whichever way they go. Summed across
+    // threads, so these are CPU-seconds and total more than the wall time above.
+    {
+      const auto &ph = t.attn_phases;
+      const double tot = ph.scores + ph.softmax + ph.values;
+      if (tot > 0) {
+        std::printf("    Q.K^T      %8.1f ms  (%.1f%% of attention CPU time)\n",
+                   ph.scores * 1e3, 100.0 * ph.scores / tot);
+        std::printf("    softmax    %8.1f ms  (%.1f%%)  -- stays on the host\n",
+                   ph.softmax * 1e3, 100.0 * ph.softmax / tot);
+        std::printf("    P.V        %8.1f ms  (%.1f%%)\n",
+                   ph.values * 1e3, 100.0 * ph.values / tot);
+      }
+    }
     std::printf("  npu in-sync  %8.1f ms  (host wall clock: memcpy + sync_to_device)\n",
                t.npu_in * 1e3);
-    std::printf("  npu dispatch %8.1f ms  (host wall clock: submit+wait, dominated by "
-               "hardware -- see docs on trace-based NPU numbers)\n",
+    std::printf("  npu dispatch %8.1f ms  (host wall clock: submit+wait, dominated by hardware)\n",
                t.npu_dispatch * 1e3);
+    // Per stream, against the DRAM traffic the design actually moves.
+    // gemm_pretiled.py's fill loop streams A once and C once, but B ONCE PER
+    // ROW BLOCK -- b_reuse is off because it does not build at 8 columns
+    // (T48 / tasks-0046: the mem tile has A(1) + B(1) + C(4 rows) = 6 of 6
+    // channels, and the C join is what spends them). With
+    // n_row_blocks = M / (m * n_aie_rows) = M / 256:
+    //     bytes = M*K*2  +  n_row_blocks * K*N*2  +  M*N*4
+    // The array's measured shim roof is ~45.5 GB/s (NpuEmbeddings T45), so
+    // the GB/s column says how close each shape runs to the memory system.
+    double tot_bytes = 0;
+    for (size_t o = 0; o < static_cast<size_t>(ow::Op::Count); ++o) {
+      const ow::Op op = static_cast<ow::Op>(o);
+      const ow::StreamShape sh = ow::expected_shape(op);
+      const bool per_layer = !(op == ow::Op::Conv1 || op == ow::Op::Conv2 ||
+                               op == ow::Op::Xkv);
+      const double calls = per_layer ? 32.0 : 1.0;
+      const double nrb = static_cast<double>(sh.M) / 256.0;
+      const double bytes = calls * (static_cast<double>(sh.M) * sh.K * 2.0 +
+                                    nrb * static_cast<double>(sh.K) * sh.N * 2.0 +
+                                    static_cast<double>(sh.M) * sh.N * 4.0);
+      tot_bytes += bytes;
+      const double ms = t.npu_disp_op[o] * 1e3;
+      std::printf("    %-6s %8.1f ms  %4.0f calls  %7.2f GB  %6.1f GB/s\n",
+                 ow::op_name(op), ms, calls, bytes / 1e9,
+                 ms > 0 ? bytes / 1e9 / (ms / 1e3) : 0.0);
+    }
+    std::printf("    %-6s %8.1f ms              %7.2f GB  %6.1f GB/s  (shim roof ~45.5)\n",
+               "TOTAL", t.npu_dispatch * 1e3, tot_bytes / 1e9,
+               t.npu_dispatch > 0 ? tot_bytes / 1e9 / t.npu_dispatch : 0.0);
     std::printf("  npu out-sync %8.1f ms  (host wall clock: sync_from_device)\n",
                t.npu_out * 1e3);
-    std::printf("  TOTAL        %8.1f ms  (host wall clock, end to end)\n", t.total * 1e3);
+    std::printf("  golden cmp   %8.1f ms  (GATE ONLY: float64 comparison of %zu stage "
+               "tensors; not part of an encode)\n",
+               t.hook * 1e3, rows.size());
+    const double enc_only = t.total - t.hook;
+    std::printf("  ENCODE       %8.1f ms  (host wall clock, total minus the gate)\n",
+               enc_only * 1e3);
+    const double named = t.im2col + t.bf16 + t.layer_norm + t.gelu + t.bias + t.residual +
+                        t.attention + t.npu_in + t.npu_dispatch + t.npu_out;
+    std::printf("  unattributed %8.1f ms  (%.1f%% of ENCODE -- named buckets sum to %.1f ms)\n",
+               (enc_only - named) * 1e3,
+               enc_only > 0 ? 100.0 * (enc_only - named) / enc_only : 0.0, named * 1e3);
+    std::printf("  TOTAL        %8.1f ms  (host wall clock, end to end, gate included)\n",
+               t.total * 1e3);
 
   } catch (const std::exception &e) {
     std::fprintf(stderr, "open_whisper_cli: FAILED: %s\n", e.what());
