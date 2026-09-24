@@ -170,3 +170,19 @@ python3 model/compare_decode.py --out DEC --tokens N
 ```
 
 `insts.bin` md5: lax_l `31244de2088ccd8dac27df72afdd0c29`, lax_a `7025eebc7663feb97cdebf6cfef7b2fb`.
+
+### (lax decode, cont.) Greedy generation on the NPU: "The capital of France is Paris."
+
+`model/lax_decode_cfg.py --prompt-ids ... --gen N --embed EMB` writes a generation program: each
+position feeds its token's embedding (`feed`, harness), runs the 40 layers as ONE submit, and
+where a next token is wanted runs norm + lm_head and takes the argmax (`greedy`), which the next
+position feeds back (`feed xres embed last`). `EMB` is the q4nx's bf16 `model.embed_tokens.weight`
+as a raw file.
+
+Prompt (chat template, thinking off, 24 tokens): `What is the capital of France? Answer in one
+sentence.` Output: `The capital of France is Paris.<|im_end|>` (the harness has no stop
+condition; what follows the end-of-turn token is the model continuing past it).
+
+Wall time per position, steady state: prompt 76.4 ms (no head), generated **89.9 ms median
+(89.2-90.2) = 11.1 tok/s end to end** (feed + one submit + norm + lm_head + argmax readback).
+The first position of a process is cold (8.8 s: first touch of the ~21 GB of BOs). 0 faults.

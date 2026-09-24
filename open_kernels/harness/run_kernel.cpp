@@ -14,6 +14,9 @@
 //   moeroute  <kernel> <rout-buf>           MoE expert fills -> the router's 8 experts
 //   moeroute2 <kernel> <buf> <idx-offset>   ditto, pool-layout placeholder fills
 //   attnpos <kernel> <pos>                  KV window / new-row / RoPE record for this token
+//   feed <dst> <table> <id|last>            dst (f32 row) <- the table's bf16 row for a token id
+//   greedy <logits> <n>                     argmax over the first n f32 logits -> `last`, printed
+//   tick                                    wall ms since the previous tick
 //   poolbase <dst> <off> <src>              write src's device address (+0x80000000) into dst
 //   ondvctrl <dst> <pool> <i0,..,i7>        fill dst with the on-device router's control
 //                                           words for `pool` and those top-8 indices (the
@@ -150,6 +153,8 @@ struct Host {
     std::map<std::string, Buf> bufs;
     std::map<std::string, RunList> runlists;
     int runs = 0;
+    size_t last_token = 0;                              // `greedy`'s pick, `feed ... last`
+    std::chrono::steady_clock::time_point tick_t = std::chrono::steady_clock::now();
     bool keep_going = false;
     unsigned timeout_ms = 60000;
 
@@ -352,6 +357,40 @@ struct Host {
             b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
             std::printf("poolbase %s+%zu <- %s @ 0x%llx (qmask 0x%02x)\n", dst.c_str(), off,
                         src.c_str(), static_cast<unsigned long long>(addr), qmask);
+        } else if (cmd == "feed") {
+            // feed <dst> <table> <id|last>: a token's embedding. The table buffer holds bf16 rows
+            // of dst's width (dst is the f32 residual stream, `xres`).
+            auto dst = need(it, "feed dst");
+            auto tab = need(it, "feed table");
+            auto ids = need(it, "feed id");
+            size_t id = ids == "last" ? last_token : num(ids, "feed id");
+            Buf& d = buf(dst);
+            Buf& t = buf(tab);
+            size_t w = d.size / 4;
+            if ((id + 1) * w * 2 > t.size) throw std::runtime_error("feed: token id past the table");
+            const uint16_t* row = t.bo.map<const uint16_t*>() + id * w;
+            auto* o = d.bo.map<float*>();
+            for (size_t i = 0; i < w; ++i) {
+                uint32_t b = static_cast<uint32_t>(row[i]) << 16;
+                std::memcpy(o + i, &b, 4);
+            }
+            d.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        } else if (cmd == "greedy") {
+            auto lb = need(it, "greedy logits");
+            size_t n = num(need(it, "greedy n"), "greedy n");
+            Buf& b = buf(lb);
+            if (n * 4 > b.size) throw std::runtime_error("greedy: n past the logits buffer");
+            b.bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            const float* v = b.bo.map<const float*>();
+            size_t best = 0;
+            for (size_t i = 1; i < n; ++i)
+                if (v[i] > v[best]) best = i;
+            last_token = best;
+            std::printf("greedy %zu\n", best);
+        } else if (cmd == "tick") {
+            auto now = std::chrono::steady_clock::now();
+            std::printf("tick %.3f ms\n", std::chrono::duration<double, std::milli>(now - tick_t).count());
+            tick_t = now;
         } else if (cmd == "ondvctrl") {
             // Fill a buffer with the on-device router's control words using the SAME
             // generator the router core runs, for a given pool BO and top-8 index list.

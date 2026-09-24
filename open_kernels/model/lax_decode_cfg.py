@@ -39,6 +39,11 @@ def main() -> int:
     ap.add_argument("--per", type=int, default=40, help="layers per hw_context / runlist submit")
     ap.add_argument("--tokens", type=int, default=1)
     ap.add_argument("--dump-res", action="store_true", help="dump xres after every submit")
+    ap.add_argument("--prompt-ids", default=None,
+                    help="generation mode: comma-separated prompt token ids, fed one position at a time")
+    ap.add_argument("--gen", type=int, default=0, help="generation mode: greedy tokens after the prompt")
+    ap.add_argument("--embed", default=None, help="generation mode: the bf16 embedding table [vocab, hidden]")
+    ap.add_argument("--vocab", type=int, default=248070, help="generation mode: real vocab (argmax range)")
     a = ap.parse_args()
     out = Path(a.out).resolve()
     src = (out / "run_decode.cfg").read_text().splitlines()
@@ -78,6 +83,24 @@ def main() -> int:
         c.append(f"runlist r{g}")
         for l in range(g * a.per, min(g * a.per + a.per, nl)):
             c.append(f"runlist_add r{g} {'lxf' if kinds[l] == 'l' else 'axf'}{g} {args(l)}")
+    if a.prompt_ids:
+        # greedy generation: every position is one feed + one submit; the norm + lm_head (and the
+        # argmax, fed back as the next input) only where a next token is wanted
+        ids = [int(v) for v in a.prompt_ids.split(",")]
+        emb = Path(a.embed).resolve()
+        c.append(f"buf embed {emb.stat().st_size} {emb}")
+        c.append("attngeom 2048 1024 0")
+        for pos in range(len(ids) + a.gen):
+            c.append(f"feed xres embed {ids[pos] if pos < len(ids) else 'last'}")
+            c += [f"attnpos axf{g} {pos}" for g in range(ng)]
+            c += [f"runlist_exec r{g}" for g in range(ng)]
+            if pos >= len(ids) - 1:
+                c += ["run ln xres zero normw xresf hn", "run lm lmpool hn logits", f"greedy logits {a.vocab}"]
+            c.append("tick")
+        path = out / f"run_lax_gen_p{a.per}.cfg"
+        path.write_text("\n".join(c) + "\n", newline="\n")
+        print(f"wrote {path}: {len(ids)} prompt + {a.gen} generated positions, {ng} submit(s)/position")
+        return 0
     for t in range(a.tokens):
         s = sfx(t)
         if t:

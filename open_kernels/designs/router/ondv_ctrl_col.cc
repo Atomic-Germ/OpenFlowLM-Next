@@ -18,6 +18,6 @@ void ondv_ctrl_col(const uint8_t *__restrict rout, const uint32_t *__restrict cf
   // runtime value rather than the old hardcoded kOndvQueue.
   // EXPERIMENT: hardcoded queue table (the revision that completes) instead of cfg[2+col].
   ondv_ctrl_col_impl((const int32_t *)(rout + 1024), cfg[0], cfg[1], (unsigned)col,
-                     cfg[2 + (unsigned)col], out);   // RUNTIME queue source (aliasing fixed)
+                     kOndvQueue[(unsigned)col], out);
 }
 }
