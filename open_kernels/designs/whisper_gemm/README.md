@@ -28,8 +28,13 @@ About 2.0 TFLOP per 30 s window.
 ```
 . C:\dev\mlir-aie\iron_env.ps1          # or: source ~/ironenv142/bin/activate
 $env:PATH = "C:\Xilinx\XRT;" + $env:PATH
-python open_kernels\export_whisper_kernels.py --out <dir>
+python open_kernels\export_whisper_kernels.py
 ```
+
+With no `--out` the set goes to `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/`, where
+the engine finds it with no configuration (the same place the other open engines' sets
+live; the build tree's `xclbins` junction and the install step cover it). `--out DIR`
+writes elsewhere.
 
 The exporter builds every stream and **refuses the set** unless all seven `final.xclbin`
 are the same static configuration. That is not a formality: `fc1` and `xkv` exceed the

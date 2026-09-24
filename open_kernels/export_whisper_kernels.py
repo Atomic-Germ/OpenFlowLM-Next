@@ -3,7 +3,12 @@ instruction stream per encoder GEMM shape, plus fa/ (the bidirectional FlashAtte
 kernel, NpuEmbeddings task 0181), plus the files the engine reads beside them.
 
     . C:\dev\mlir-aie\iron_env.ps1          # or: source ~/ironenv142/bin/activate
-    python open_kernels/export_whisper_kernels.py --out DIR [--only qkv,o] [--force] [--no-fa]
+    python open_kernels/export_whisper_kernels.py [--out DIR] [--only qkv,o] [--force] [--no-fa]
+
+By default the set is written to src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/ -- the
+same place the other open engines' exporters write theirs, which the build tree's
+xclbins junction and the install step already cover, so the engine finds it with no
+configuration (src/common/whisper/whisper_engine_select.cpp, find_open_kernels).
 
 Each GEMM stream is designs/whisper_gemm/whisper_gemm.py specialised to one (M, K, N) and
 built by build_design.py in its own directory. The set is only valid if every stream's
@@ -61,6 +66,9 @@ DESIGN = HERE / "designs" / "whisper_gemm" / "whisper_gemm.py"
 FA_DESIGN = HERE / "designs" / "whisper_fa" / "attn_fa.py"
 FA_SOURCES = ["attn_fa.py", "attn_npu2.cc", "attn_cascade_wrap.cc", "zero.cc"]
 FORMAT = "oflm-open-whisper-kernels-v1"
+# The directory name src/model_list.json gives whisper-v3:turbo; the engine looks for
+# <xclbins root>/xclbins/<this>/open_kernels (Whisper_Config::model_name).
+MODEL_NAME = "Whisper-V3-Turbo-NPU2"
 
 # whisper_gemm.py is the single source of the shapes and knobs; read them from it rather
 # than restating them (a second copy is a chance to drift).
@@ -234,7 +242,11 @@ def _run_fa_build(bdir: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="destination (default src/xclbins/<--model-name>/open_kernels)")
+    ap.add_argument("--model-name", default=MODEL_NAME,
+                    help="the model directory name the server resolves the tag to "
+                         "(default %(default)s, whisper-v3:turbo in src/model_list.json)")
     ap.add_argument("--only", default=None, help="comma-separated stream names (debugging)")
     ap.add_argument("--force", action="store_true", help="rebuild streams already built")
     # Default changed 2026-09-23 (task 0180 Parts 9/11/15): the golden-token-path gate
@@ -266,7 +278,8 @@ def main() -> int:
     unknown = [n for n in names if n not in wg.STREAMS]
     if unknown:
         raise SystemExit(f"unknown stream(s) {unknown}; known: {list(wg.STREAMS)}")
-    out = args.out.resolve()
+    out = (args.out if args.out is not None
+           else HERE.parent / "src" / "xclbins" / args.model_name / "open_kernels").resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     print(f"whisper kernel set -> {out}")

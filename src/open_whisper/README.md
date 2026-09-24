@@ -232,7 +232,7 @@ and the closed `whisper_npu` in `src/common/whisper/
 whisper_engine_select.cpp`, the sole factory `make_whisper_engine()` declared
 in `whisper/whisper_engine.hpp`. Auto picks open when the model directory has
 BOTH `model.open.safetensors` and a kernel set (`OFLM_WHISPER_KERNELS_DIR`,
-else `<model_dir>/open_kernels`); else closed when `model.q4nx` is there;
+else `<model_dir>/open_kernels`, else `<xclbins root>/xclbins/<model name>/open_kernels`); else closed when `model.q4nx` is there;
 else it refuses, naming both missing paths. Every branch logs which rule
 fired (`modeling_whisper.cpp` also logs `describe()` right after, so a load
 prints two lines: which rule chose an engine, then which engine and kernel
@@ -250,9 +250,13 @@ the target's global include path (the same "same basename, different file"
 hazard `OPEN_NPUE_SOURCES`'s own CMake comment warns about), and `/arch:AVX2
 /openmp` (MSVC) / `-mavx2 -mfma -fopenmp` (else), matching `OPEN_NPUE_SOURCES`.
 
-**Kernel set placement.** The engine finds its kernel set exactly as
-`kernels.hpp` already documents: `OFLM_WHISPER_KERNELS_DIR`, else
-`<model_dir>/open_kernels`. Verified against the local `whisper_gemm` export
+**Kernel set placement.** `whisper_engine_select.cpp`'s `find_open_kernels` searches, in
+order, `OFLM_WHISPER_KERNELS_DIR`, `<model_dir>/open_kernels`, then
+`<root>/xclbins/<model name>/open_kernels` for every xclbins root -- the same order
+as the other open engines (`open_qwen36/engine.cpp`). The last is where
+`export_whisper_kernels.py` writes by default, so building this tree is enough; the
+server log names the directory and the rule that chose it. Earlier setups placed a
+set beside the model instead: Verified against the local `whisper_gemm` export
 by making `<model_dir>/open_kernels` an NTFS junction to
 `NpuEmbeddings_scratch/whisper-kernels` (`New-Item -ItemType Junction`; no
 admin needed, unlike a symlink) -- nothing is copied into the model directory
@@ -395,7 +399,7 @@ line) -- read from the set, never assumed.
 FlashAttention kernel `OW_ATTN` reads above) by default, alongside the seven
 GEMM streams, from `open_kernels/designs/whisper_fa/attn_fa.py` -- an IRON
 (mlir-aie) port of AMD's MLIR-AIR `attn_npu2.py`/`.cc`
-(`kernel_fusion_based_whisper`), built by the same pinned mlir-aie + Peano
+(`kernel_fusion_based`, modified for Whisper), built by the same pinned mlir-aie + Peano
 toolchain and verified byte-identical to AMD's own AIR-compiled kernel at
 production shape on real Whisper layers (NpuEmbeddings task 0181; see
 `open_kernels/designs/whisper_fa/README.md`). `--no-fa` skips it, in which case
