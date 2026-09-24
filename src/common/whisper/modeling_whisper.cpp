@@ -385,7 +385,7 @@ std::pair<std::string, std::string> Whisper::_generate_hf(whisper_task_type_t ta
         }
         task_token = it->second;
     } else {
-        header_print("Error", "Non-recongnized task!");
+        header_print("Error", "Non-recognized task!");
         return std::make_pair("", "");
     }
 
