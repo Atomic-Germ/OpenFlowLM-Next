@@ -250,14 +250,38 @@ print(f"wrote {len(sessions)} sessions, {sum(len(s['steps']) for s in sessions)}
 # _retrieve_segment ground truth. mel hop = 0.01s (100 Hz), input_stride = 2
 # (50 Hz encoder / 100 Hz mel), time_precision = 0.02s/token-step -- the real
 # Whisper feature-extractor constants, independent of the synthetic vocab above.
+# FS = 16000 (Whisper's audio sample rate -- modeling_whisper.hpp's own FS) is
+# needed here too, PR #111 review findings A and F: the C++ port
+# (compute_segment_offset_samples) now returns an exact SAMPLE count, not
+# seconds, and strips a trailing EOS before running _retrieve_segment's own
+# logic -- both to be verified here against the REAL transformers function,
+# not assumed.
 MEL_HOP = 0.01
 TIME_PRECISION = 0.02
 INPUT_STRIDE = 2
+FS = 16000
+MEL_HOP_SAMPLES = FS // 100  # 160: samples per 10ms mel frame
+SAMPLES_PER_TIMESTAMP_STEP = round(TIME_PRECISION * FS)  # 320 -- must match
+# generation_hf.hpp's compute_segment_offset_samples() default argument exactly.
+assert SAMPLES_PER_TIMESTAMP_STEP == 320
 
 
-def retrieve_segment_seconds(generated: list[int], timestamp_begin: int, window_seconds: float):
+def retrieve_segment_samples(generated: list[int], timestamp_begin: int, eos_token_id: int, window_samples: int):
+    # Finding A: HF's generate() strips a trailing EOS (generation_whisper.py
+    # ~L1083-1086) BEFORE ever calling _retrieve_segment -- _retrieve_segment
+    # itself has no idea what EOS is. Do the same here, so a case built with a
+    # trailing EOS (as the real per-window `generated` this project's
+    # modeling_whisper.cpp passes always can be) is checked against what HF
+    # actually produces for that window, not against _retrieve_segment's
+    # answer on the UNSTRIPPED sequence (which is precisely the bug finding A
+    # fixed: an unstripped EOS reads as an unclosed trailing segment).
+    stripped = list(generated)
+    if stripped and stripped[-1] == eos_token_id:
+        stripped = stripped[:-1]
+
+    window_seconds = window_samples / FS
     seek_num_frames = round(window_seconds / MEL_HOP)
-    seek_sequence = torch.tensor(generated, dtype=torch.long)
+    seek_sequence = torch.tensor(stripped, dtype=torch.long)
     seek_outputs = [{}]
     decoder_input_ids = torch.zeros((1, 3), dtype=torch.long)
     segments, segment_offset_frames = WhisperGenerationMixin._retrieve_segment(
@@ -274,17 +298,29 @@ def retrieve_segment_seconds(generated: list[int], timestamp_begin: int, window_
         return_token_timestamps=False,
         decoder_input_ids=decoder_input_ids,
     )
-    return float(segment_offset_frames) * MEL_HOP
+    # segment_offset_frames is in MEL FRAMES (10ms units, input_stride already
+    # applied by _retrieve_segment itself) -- the single-segment/no-pair
+    # branches return seek_num_frames directly, which is exactly
+    # window_samples's own mel-frame count, so this conversion is exact there
+    # too, not just on the timestamp-pair branch.
+    return int(segment_offset_frames) * MEL_HOP_SAMPLES
 
 
 TB = TIMESTAMP_BEGIN  # reuse the synthetic layout so ids line up with generation_config_test.json
 seg_cases = []
 
 
-def add_case(name, generated, window_seconds):
-    seconds = retrieve_segment_seconds(generated, TB, window_seconds)
+def add_case(name, generated, window_seconds, eos_token_id=EOS):
+    window_samples = round(window_seconds * FS)
+    assert abs(window_samples - window_seconds * FS) < 1e-6, f"{name}: window_seconds does not land on a sample"
+    samples = retrieve_segment_samples(generated, TB, eos_token_id, window_samples)
     seg_cases.append(
-        {"name": name, "generated": generated, "window_seconds": window_seconds, "expected_seconds": seconds}
+        {
+            "name": name,
+            "generated": generated,
+            "window_samples": window_samples,
+            "expected_samples": samples,
+        }
     )
 
 
@@ -299,7 +335,56 @@ add_case("single_token_no_timestamp", [3], 30.0)
 add_case("immediate_double_timestamp", [TB, TB + 1], 30.0)
 add_case("short_final_window", [TB, 1, 2, TB + 2], 4.0)
 
+# PR #111 review, finding A: the SAME cases as above, but every `generated` now ends
+# with EOS -- exactly the shape modeling_whisper.cpp's `generated` is in when a window
+# ends via EOS rather than max_length (Whisper::_generate_hf pushes the EOS token
+# before breaking). Each one is checked against what HF's own generate() would have
+# produced for that window (EOS stripped first, see retrieve_segment_samples above),
+# which is the regression this project shipped without: before the fix, the C++ port
+# read the trailing EOS as an unclosed final segment.
+add_case("with_eos_single_timestamp_ending", [TB, 5, 6, TB + 3, EOS], 30.0)
+add_case("with_eos_no_timestamps_at_all", [1, 2, 3, 4, 5, EOS], 30.0)
+add_case("with_eos_one_unpaired_timestamp", [TB, 5, 6, 7, EOS], 12.5)
+add_case("with_eos_consecutive_pair_then_more_unclosed", [TB, 5, 6, TB + 1, TB + 2, 8, 9, EOS], 30.0)
+add_case("with_eos_two_full_segments_then_open_third",
+        [TB, 1, 2, TB + 4, TB + 4, 3, 4, TB + 9, 5, 6, EOS], 30.0)
+add_case("with_eos_zero_at_open_of_trailing_segment", [TB, 1, TB, 2, 3, EOS], 30.0)
+add_case("with_eos_only", [EOS], 7.5)
+add_case("with_eos_single_token_no_timestamp", [3, EOS], 30.0)
+add_case("with_eos_immediate_double_timestamp", [TB, TB + 1, EOS], 30.0)
+add_case("with_eos_short_final_window", [TB, 1, 2, TB + 2, EOS], 4.0)
+
+# THE case that demonstrates the actual bug numerically (not just "takes a
+# different branch that happens to land on the same answer"), i.e. what "show it
+# fails before the fix" means: an EARLIER consecutive timestamp PAIR (so
+# pair_end_indices is non-empty -- the function does NOT fall through to "return
+# the whole window" regardless) followed by a lone trailing timestamp, then EOS.
+#
+# Stripped (correct): [TB, 1, 2, TB+4, TB+4, 3, 4, TB+9] -- last two tokens
+# [4, TB+9] -> single_timestamp_ending = TRUE -> "no speech after the last
+# timestamp" -> returns the FULL window (480000 samples at 30.0s).
+#
+# Unstripped (the bug): [..., TB+9, EOS] -- last two tokens [TB+9, EOS], and EOS
+# is not a timestamp id, so single_timestamp_ending reads FALSE. With
+# pair_end_indices=[4] (from the TB+4,TB+4 pair) non-empty, the function takes the
+# "ignore the unfinished segment, seek to where it started" branch instead:
+# last_timestamp_pos = generated[3] - TB = 4, returning 4*320 = 1280 samples --
+# 0.08s into a 30s window. This is EXACTLY the seek-backward-and-re-transcribe
+# failure mode finding A describes: on real audio >30s, the NEXT window would
+# start 1280 samples in rather than 480000, re-decoding almost the entire
+# just-finished window.
+add_case("with_eos_pair_then_trailing_single_timestamp", [TB, 1, 2, TB + 4, TB + 4, 3, 4, TB + 9, EOS], 30.0)
+
 with open(os.path.join(HERE, "segment_offset_cases.json"), "w") as f:
-    json.dump({"timestamp_begin": TB, "time_precision": TIME_PRECISION, "cases": seg_cases}, f, indent=2)
+    json.dump(
+        {
+            "timestamp_begin": TB,
+            "eos_token_id": EOS,
+            "samples_per_timestamp_step": SAMPLES_PER_TIMESTAMP_STEP,
+            "cases": seg_cases,
+        },
+        f,
+        indent=2,
+    )
 
 print(f"wrote {len(seg_cases)} segment-offset cases")

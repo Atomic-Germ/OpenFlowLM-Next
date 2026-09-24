@@ -130,24 +130,26 @@ int run_greedy_cases(const std::string& dir, int& failures) {
 int run_segment_offset_cases(const std::string& dir, int& failures) {
     const auto data = load_json(dir + "/segment_offset_cases.json");
     const int timestamp_begin = data["timestamp_begin"].get<int>();
-    const float time_precision = data["time_precision"].get<float>();
+    const int eos_token_id = data["eos_token_id"].get<int>();
+    const int samples_per_timestamp_step = data["samples_per_timestamp_step"].get<int>();
 
     int checks = 0, fails = 0;
     for (const auto& c : data["cases"]) {
         std::vector<int> generated = c["generated"].get<std::vector<int>>();
-        const float window_seconds = c["window_seconds"].get<float>();
-        const float want = c["expected_seconds"].get<float>();
+        const int window_samples = c["window_samples"].get<int>();
+        const int want = c["expected_samples"].get<int>();
 
-        float got;
+        int got;
         if (broke("segment_offset")) {
-            got = window_seconds;  // the legacy protocol's actual behaviour: always full window
+            got = window_samples;  // the legacy protocol's actual behaviour: always full window
         } else {
-            got = whisper_hf::compute_segment_offset_seconds(generated, timestamp_begin, window_seconds,
-                                                               time_precision);
+            got = whisper_hf::compute_segment_offset_samples(generated, timestamp_begin, eos_token_id,
+                                                              window_samples, samples_per_timestamp_step);
         }
         ++checks;
-        const float tol = 1e-4f;
-        if (std::fabs(got - want) > tol) {
+        // Exact: compute_segment_offset_samples is integer arithmetic throughout
+        // (PR #111 review, finding F), so there is no tolerance to allow here.
+        if (got != want) {
             ++fails;
             std::cerr << "  [FAIL] case '" << c["name"].get<std::string>() << "' got=" << got << " want=" << want
                       << "\n";
@@ -157,6 +159,53 @@ int run_segment_offset_cases(const std::string& dir, int& failures) {
     std::cout << "  segment_offset: " << checks << " checked, " << fails << " mismatched"
               << (g_break_rule.empty() ? "" : "  (OW_BREAK_RULE=" + g_break_rule + " -- mismatches expected)")
               << "\n";
+    return fails;
+}
+
+// PR #111 review, finding C (Copilot 4096191784): GenerationConfig::validate()
+// unit test. The synthetic generation_config.json (gen_hf_testvectors.py) has
+// vocab_size=300 baked into every id it writes, so validate(300) must accept it
+// and validate() at a SMALLER width -- where at least one of those ids (e.g.
+// eos_token_id=257) is now out of range -- must refuse.
+int run_validate_cases(const std::string& dir, int& failures) {
+    const auto cfg = whisper_hf::GenerationConfig::load(dir);
+    int checks = 0, fails = 0;
+
+    auto expect_ok = [&](int vocab_size, const char* what) {
+        ++checks;
+        try {
+            cfg.validate(vocab_size);
+        } catch (const std::exception& e) {
+            ++fails;
+            std::cerr << "  [FAIL] validate(" << vocab_size << ") should have accepted (" << what
+                      << ") but threw: " << e.what() << "\n";
+        }
+    };
+    auto expect_throw = [&](int vocab_size, const char* what) {
+        ++checks;
+        bool threw = false;
+        try {
+            cfg.validate(vocab_size);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        if (!threw) {
+            ++fails;
+            std::cerr << "  [FAIL] validate(" << vocab_size << ") should have thrown (" << what
+                      << ") but did not\n";
+        }
+    };
+
+    expect_ok(300, "the real width every id in this synthetic config was built against");
+    expect_ok(301, "a real width one larger than every id still validates");
+    // eos_token_id=257 in the synthetic config (gen_hf_testvectors.py's EOS): any
+    // width at or below it must refuse.
+    expect_throw(257, "eos_token_id itself is out of [0, vocab_size)");
+    expect_throw(100, "every one of decoder_start_token_id/eos/lang/task/timestamp ids is >= 100");
+    expect_throw(0, "vocab_size itself is invalid");
+
+    failures += fails;
+    std::cout << "  validate: " << checks << " checked, " << fails << " mismatched\n";
     return fails;
 }
 
@@ -203,6 +252,9 @@ int main(int argc, char** argv) {
 
         std::cout << "-- segment/seek replay (_retrieve_segment) --\n";
         run_segment_offset_cases(dir, failures);
+
+        std::cout << "-- GenerationConfig::validate() (PR #111 review, finding C) --\n";
+        run_validate_cases(dir, failures);
     } catch (const std::exception& e) {
         std::cerr << "[generation_hf_test] EXCEPTION: " << e.what() << "\n";
         return 1;

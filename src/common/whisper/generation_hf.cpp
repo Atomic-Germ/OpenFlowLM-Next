@@ -92,6 +92,40 @@ GenerationConfig GenerationConfig::load(const std::string& model_dir) {
     return cfg;
 }
 
+void GenerationConfig::validate(int vocab_size) const {
+    if (vocab_size <= 0) {
+        throw std::runtime_error("GenerationConfig::validate: vocab_size must be positive, got " +
+                                  std::to_string(vocab_size));
+    }
+    auto check = [&](const char* field, int id) {
+        if (id < 0 || id >= vocab_size) {
+            throw std::runtime_error("generation_config.json: '" + std::string(field) + "' = " +
+                                      std::to_string(id) + " is out of range [0, " + std::to_string(vocab_size) +
+                                      ") -- the model's real vocab_size (config.json)");
+        }
+    };
+    check("decoder_start_token_id", decoder_start_token_id);
+    check("eos_token_id", eos_token_id);
+    check("no_timestamps_token_id", no_timestamps_token_id);
+    // timestamp_begin() itself is the first valid timestamp id; every id from there
+    // to vocab_size-1 is a timestamp token, so checking the boundary covers the
+    // whole range (there is nothing above it to check against but vocab_size, which
+    // the id-index invariant above already enforces).
+    check("no_timestamps_token_id + 1 (timestamp_begin)", timestamp_begin());
+    for (const auto& kv : lang_to_id) {
+        check(("lang_to_id['" + kv.first + "']").c_str(), kv.second);
+    }
+    for (const auto& kv : task_to_id) {
+        check(("task_to_id['" + kv.first + "']").c_str(), kv.second);
+    }
+    for (int id : suppress_tokens) {
+        check("suppress_tokens[]", id);
+    }
+    for (int id : begin_suppress_tokens) {
+        check("begin_suppress_tokens[]", id);
+    }
+}
+
 std::vector<int> GenerationConfig::lang_ids() const {
     std::vector<int> ids;
     ids.reserve(lang_to_id.size());
@@ -203,8 +237,15 @@ void WhisperTimestampProcessor::apply(std::vector<float>& logits, const std::vec
 
     // if sum of probability over timestamps exceeds the best single non-timestamp token,
     // force a timestamp. Computed in double for the log-sum-exp stability HF gets from
-    // float32 softmax over a much smaller (post-suppression) support; double here only
-    // reduces our own rounding, it does not change which branch wins on ties (strict '>').
+    // float32 softmax over a much smaller (post-suppression) support -- but `logits`
+    // here has already been rounded to bf16 by whisper_engine::decode_audio (the
+    // interface shared with the closed engine, unchanged by this port) before this
+    // function ever sees it. Computing the sum in double only avoids adding a SECOND
+    // rounding on top of that; it does not, and cannot, undo the first one. So this
+    // decision CAN legitimately differ from HF's own (float32 logits, float32 sum)
+    // near a probability-mass boundary -- that is a datapath-precision fact (bf16 vs
+    // float32 logits), not a bug in this reduction, and not something running it in
+    // double either causes or fixes (PR #111 review, finding I; Copilot 4096191944).
     double max_logit = -std::numeric_limits<double>::infinity();
     for (int i = 0; i < vocab_size; ++i) {
         if (logits[i] > static_cast<float>(max_logit)) max_logit = logits[i];
@@ -235,14 +276,29 @@ void WhisperTimestampProcessor::apply(std::vector<float>& logits, const std::vec
     }
 }
 
-float compute_segment_offset_seconds(const std::vector<int>& generated, int timestamp_begin, float window_seconds,
-                                      float time_precision) {
+int compute_segment_offset_samples(const std::vector<int>& generated, int timestamp_begin, int eos_token_id,
+                                    int window_samples, int samples_per_timestamp_step) {
+    // Strip a trailing EOS first (generation_whisper.py ~L1083-1086: `if
+    // seek_sequence[-1] == generation_config.eos_token_id: seek_sequence =
+    // seek_sequence[:-1]`), which HF's generate() always does before calling
+    // _retrieve_segment -- see this function's header (PR #111 review, finding A).
+    // A local copy, not an index bound: an EOS in the MIDDLE of `generated` (cannot
+    // happen -- the caller breaks its decode loop the step it sees one -- but this
+    // keeps the port's scope identical to HF's, which also only ever strips the
+    // last element) is left untouched.
+    const std::vector<int>* seq = &generated;
+    std::vector<int> stripped;
+    if (!generated.empty() && generated.back() == eos_token_id) {
+        stripped.assign(generated.begin(), generated.end() - 1);
+        seq = &stripped;
+    }
+
     // Port of WhisperGenerationMixin._retrieve_segment (generation_whisper.py
     // ~L1993-2074), batch size 1, specialised to the seek offset only (see the header
     // for why the segment list itself is not needed here).
-    const int n = static_cast<int>(generated.size());
+    const int n = static_cast<int>(seq->size());
     std::vector<char> is_ts(n);
-    for (int i = 0; i < n; ++i) is_ts[i] = generated[i] >= timestamp_begin ? 1 : 0;
+    for (int i = 0; i < n; ++i) is_ts[i] = (*seq)[i] >= timestamp_begin ? 1 : 0;
 
     const bool single_timestamp_ending = n >= 2 && !is_ts[n - 2] && is_ts[n - 1];
 
@@ -264,7 +320,7 @@ float compute_segment_offset_seconds(const std::vector<int>& generated, int time
         if (single_timestamp_ending) {
             // "single timestamp at the end means no speech after the last timestamp":
             // consume the whole window.
-            return window_seconds;
+            return window_samples;
         }
         // "otherwise, ignore the unfinished segment and seek to [where it started]".
         const int idx = last_slice - 2;
@@ -272,17 +328,18 @@ float compute_segment_offset_seconds(const std::vector<int>& generated, int time
             // Cannot happen given pair_end_indices is non-empty and the arithmetic above
             // (idx is always the first token of the last matched pair) -- guarded rather
             // than asserted so a future edit that breaks this invariant fails safe.
-            return window_seconds;
+            return window_samples;
         }
-        const int last_timestamp_pos = generated[idx] - timestamp_begin;
-        // Bit-faithful: this CAN be 0.0 (see the header). No floor here on purpose.
-        return static_cast<float>(last_timestamp_pos) * time_precision;
+        const int last_timestamp_pos = (*seq)[idx] - timestamp_begin;
+        // Bit-faithful: this CAN be 0 (see the header). No floor here on purpose, and
+        // no floating point either -- an exact integer sample count.
+        return last_timestamp_pos * samples_per_timestamp_step;
     }
 
     // No consecutive timestamp pair anywhere: HF always consumes the whole window here
     // too (segment_offset = seek_num_frames[prev_idx], generation_whisper.py ~L2072),
     // regardless of whether a single unpaired timestamp token exists.
-    return window_seconds;
+    return window_samples;
 }
 
 }  // namespace whisper_hf

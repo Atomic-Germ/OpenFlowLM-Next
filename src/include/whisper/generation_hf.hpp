@@ -56,6 +56,24 @@ struct GenerationConfig {
     ///         optional (HF: `generation_config.suppress_tokens is not None` / `getattr`).
     static GenerationConfig load(const std::string& model_dir);
 
+    /// \brief Refuse (throw) if any id this port will ever hand to the model's real
+    ///        vocabulary is out of `[0, vocab_size)` -- PR #111 review (Copilot
+    ///        4096191784). Every one of these ids comes from `generation_config.json`
+    ///        and is used, unchecked, as a vector index or an argmax bound elsewhere
+    ///        in this port (`to_float_vec`, `detect_language`,
+    ///        `WhisperTimestampProcessor`, `compute_segment_offset_samples`); a
+    ///        checkpoint whose config disagrees with its own `config.json` vocab_size
+    ///        (or a corrupted/hand-edited file) would otherwise read or write past
+    ///        the logits buffer instead of failing at load. Checks:
+    ///        decoder_start_token_id, eos_token_id, no_timestamps_token_id, every
+    ///        lang_to_id and task_to_id value, every suppress_tokens /
+    ///        begin_suppress_tokens entry, and the timestamp id RANGE
+    ///        (`timestamp_begin()` itself, since every id from there to vocab_size-1
+    ///        is a valid timestamp token -- there is no separate upper bound to check
+    ///        beyond vocab_size, which the caller already knows).
+    /// \throws std::runtime_error naming the field and the offending id.
+    void validate(int vocab_size) const;
+
     /// \brief The language-token ids from lang_to_id, in ASCENDING id order.
     /// \note HF builds a boolean mask over the whole vocab from `.values()` (dict
     ///       insertion order is irrelevant to a mask); ascending order here is only so
@@ -117,22 +135,59 @@ private:
 
 /// \brief Port of `WhisperGenerationMixin._retrieve_segment`'s seek arithmetic,
 ///        specialised to batch size 1 and to a caller that already knows the window's
-///        duration in seconds and does not need per-segment start/end times (the host
+///        duration in SAMPLES and does not need per-segment start/end times (the host
 ///        streams decoded text token by token as it generates -- see
 ///        Whisper::_generate_hf in modeling_whisper.cpp -- so only the amount to
 ///        advance the seek pointer by is needed here, not the segment list itself).
+///
+/// \note Two fixes over the seconds-returning form this replaced (PR #111 review,
+///       findings A and F):
+///       - **Trailing EOS is stripped internally**, mirroring
+///         `if seek_sequence[-1] == generation_config.eos_token_id: seek_sequence =
+///         seek_sequence[:-1]` (generation_whisper.py ~L1083-1086), which HF's
+///         `generate()` always runs immediately before calling `_retrieve_segment`.
+///         `_retrieve_segment` itself never sees the EOS token HF appends when a
+///         window ends via EOS rather than max_length, so a caller that hands this
+///         function the raw EOS-terminated `generated` (as `Whisper::_generate_hf`
+///         does) still gets HF's answer, not a `[..., <ts>, <ts>, EOS]` sequence
+///         misread as an unterminated final segment -- the bug that made the NEXT
+///         30s window seek backward and re-transcribe the last segment on audio
+///         >30s.
+///       - **The result is an exact integer sample count, not seconds.** HF's own
+///         seek pointer is in mel frames (10ms each): `segment_offset =
+///         last_timestamp_pos * input_stride` (`input_stride` = 2, so 20ms per
+///         timestamp-token step -> 2 mel frames), then `seek += segment_offset`
+///         (generation_whisper.py ~L2048, ~L898). Converting that to audio samples
+///         needs one more factor, the mel hop in samples (`FS / 100` = 160 samples
+///         per 10ms mel frame at the standard FS=16000), which the caller folds into
+///         `samples_per_timestamp_step` so this function does the whole conversion
+///         in integers: `last_timestamp_pos * samples_per_timestamp_step`. The old
+///         float form (`last_timestamp_pos * time_precision(0.02f)`, seconds,
+///         converted back to samples via `int(seconds * FS)` at the call site) could
+///         truncate a value that should land on an exact sample boundary, losing up
+///         to one sample per window.
 /// \param generated the full token sequence produced for this window (same
 ///        "since begin_index" sequence WhisperTimestampProcessor saw), AFTER
-///        generation for the window has finished (EOS or max_length).
+///        generation for the window has finished (EOS or max_length). May end with
+///        `eos_token_id`; that trailing token is stripped before the port's own logic
+///        runs, exactly as HF strips it before calling `_retrieve_segment`.
 /// \param timestamp_begin GenerationConfig::timestamp_begin().
-/// \param window_seconds the audio duration actually fed to the encoder for this
-///        window (<=30; the last window of a clip may be shorter).
-/// \param time_precision seconds per timestamp-token step; 0.02 for every released
-///        Whisper checkpoint (the <|0.00|>, <|0.02|>, ... token ladder).
-/// \return seconds to advance the seek pointer by. This is a BIT-FAITHFUL port of
-///         `_retrieve_segment`'s arithmetic (no floor, no clamp): it CAN return exactly
-///         0.0 when the last unmatched timestamp pair opens at <|0.00|> (verified
-///         against transformers 5.15.0 directly -- see
+/// \param eos_token_id GenerationConfig::eos_token_id -- identifies the trailing
+///        token to strip, matching HF's own comparison.
+/// \param window_samples the audio duration actually fed to the encoder for this
+///        window, in SAMPLES (<=WINDOW_SAMPLES; the last window of a clip may be
+///        shorter). Exact by construction -- this is the same sample count the
+///        caller sliced out of the audio buffer, no float round-trip involved.
+/// \param samples_per_timestamp_step exact number of audio samples one
+///        timestamp-token step (`time_precision` seconds) represents. 320 for every
+///        released Whisper checkpoint at the standard FS=16000 (`time_precision`
+///        0.02s * FS 16000 = 320, or equivalently `input_stride`(2) *
+///        mel_hop_samples(160)) -- derived once by the caller, not recomputed here,
+///        so this function performs no floating-point FS conversion of its own.
+/// \return SAMPLES to advance the seek pointer by. This is a bit-faithful port of
+///         `_retrieve_segment`'s arithmetic (no floor, no clamp): it CAN return
+///         exactly 0 when the last unmatched timestamp pair opens at <|0.00|>
+///         (verified against transformers 5.15.0 directly -- see
 ///         testdata/segment_offset_cases.json's "immediate_double_timestamp" case,
 ///         where real HF's own `_retrieve_segment` also returns a zero-frame offset).
 ///         HF's batched seek loop tolerates a zero offset because OTHER items in the
@@ -141,7 +196,7 @@ private:
 ///         (Whisper::_generate_hf in modeling_whisper.cpp) applies its OWN documented
 ///         floor after calling this -- deliberately kept out of this function so the
 ///         function itself stays a faithful, independently-testable port.
-float compute_segment_offset_seconds(const std::vector<int>& generated, int timestamp_begin, float window_seconds,
-                                      float time_precision = 0.02f);
+int compute_segment_offset_samples(const std::vector<int>& generated, int timestamp_begin, int eos_token_id,
+                                    int window_samples, int samples_per_timestamp_step = 320);
 
 }  // namespace whisper_hf
