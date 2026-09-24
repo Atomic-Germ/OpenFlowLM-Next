@@ -608,7 +608,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                                     channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
             flows.append(PacketFlow(pkt_id=15, src=emitter_tile[c], src_port=WireBundle.DMA, src_channel=1,
                                     dst=shim_w[c], dst_port=WireBundle.TileControl, dst_channel=0,
-                                    keep_pkt_header=os.environ.get("ONDV_KEEP_HDR", "1") == "1")) if os.environ.get("ONDV_NO_EMITTERS") != "1" else None
+                                    keep_pkt_header=os.environ.get("ONDV_KEEP_HDR", "1") == "1")) if (os.environ.get("ONDV_NO_EMITTERS") != "1" or os.environ.get("ONDV_FORCE_FLOW") == "1") else None
     for f in flows:
         rt.add_flow(f)
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
