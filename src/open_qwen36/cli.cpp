@@ -91,9 +91,11 @@ struct Args {
     int gap_ms = 0;
     int at_position = 0;
     bool gemm_block = false;        // 0167/#32: prefill via step_gemm_block()
+    bool block_major = false;       // --block-major: force the old block-at-a-time schedule
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
     std::string dump_act;           // bring-up: "<layer>:<off>:<bytes>:<path>"
-    int bench = 0;                  // --bench N: time the route's dispatches instead of running a prompt
+    int bench = 0;                  // --bench N[:LAYER]: time the route's dispatches instead of running a prompt
+    int bench_layer = 0;            // which layer's route -- the 35B's two types run different GEMM shapes
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
@@ -165,8 +167,14 @@ Args parse(int argc, char** argv) {
         else if (k == "--dump-act") a.dump_act = val();            // "<layer>:<off>:<n>:<path>"
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
+        else if (k == "--block-major") a.block_major = true;
         else if (k == "--prefill-logits") a.prefill_logits = true;
-        else if (k == "--bench") a.bench = std::atoi(val().c_str());
+        else if (k == "--bench") {
+            const std::string v = val();
+            const size_t c = v.find(':');
+            a.bench = std::atoi(v.substr(0, c).c_str());
+            if (c != std::string::npos) a.bench_layer = std::atoi(v.substr(c + 1).c_str());
+        }
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else if (k == "--bench-kernel") a.bench_kernel = val();
         else if (k == "--pmode") a.pmode = val();
@@ -181,7 +189,7 @@ Args parse(int argc, char** argv) {
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
-                             "[--gemm-block] [--prefill-logits] [--bench N] [--bench-decode N] "
+                             "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
                              "[--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE]\n");
         std::exit(2);
     }
@@ -207,8 +215,39 @@ std::vector<int> request(Core& core, const Args& a) {
     // every position reached, dumped by ABSOLUTE position (dump_pos), so a
     // --gemm-block run and a plain run can be diffed position for position
     // over the SAME --ids.
+    // Stage lines shared by both schedules: which stage to work on, when the line above
+    // says the route is too slow.
+    auto stages = [&](const char* what, size_t n0, size_t n1, size_t t_real) {
+        const auto& tm = core.last_timing();
+        std::fprintf(stderr, "  %s [%zu,%zu) t_real=%zu: %.1f ms (GEMM %.1f, host %.1f, per-token %.1f, lm_head %.1f)\n",
+                     what, n0, n1, t_real, tm.total_ms, tm.part0_ms, tm.part1_ms, tm.route_ms, tm.lmhead_ms);
+        std::fprintf(stderr,
+                     "      mid %.1f (dn conv %.1f, dn rule %.1f, attn %.1f), prenorm %.1f, gemm tile %.1f,"
+                     " gemm tr %.1f, tail %.1f, shared %.1f, state %.1f, sync %.1f, setup %.1f"
+                     " | moe prep %.1f, patch %.1f, run %.1f, read %.1f | residue %.1f\n",
+                     tm.mid_ms, tm.dn_conv_ms, tm.dn_rule_ms, tm.attn_ms, tm.prenorm_ms, tm.gemm_tile_ms,
+                     tm.gemm_tr_ms, tm.tail_ms, tm.shared_ms, tm.state_ms, tm.sync_ms, tm.setup_ms,
+                     tm.moe_prep_ms, tm.moe_patch_ms, tm.moe_run_ms, tm.moe_read_ms,
+                     tm.total_ms - tm.part0_ms - tm.part1_ms - tm.route_ms - tm.lmhead_ms);
+        for (const auto& [kn, d] : core.take_dispatch_stats())
+            std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
+                         d.calls, d.ms, d.ms / d.calls, d.min_ms);
+    };
     size_t i = 0;
-    if (a.gemm_block) {
+    // B(2): the whole prompt through each layer before the next, so a layer's MoE streams
+    // each expert once for every token of the prompt that wants it instead of once per
+    // block. Bit-exact against the block-at-a-time loop below, which --block-major forces.
+    if (a.gemm_block && core.layer_major_ok() && !a.block_major) {
+        core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty());
+        core.step_gemm_prompt(a.ids, true);
+        stages("gemm-prompt", 0, a.ids.size(), a.ids.size());
+        for (size_t t = 0; t < core.block_logits().size(); ++t)
+            dump_pos(a.dump_prefix, static_cast<int>(t), core.block_logits()[t]);
+        if (!a.dump_prefix.empty() && core.block_logits().empty())
+            dump_pos(a.dump_prefix, static_cast<int>(a.ids.size() - 1), core.logits());
+        if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
+        i = a.ids.size();
+    } else if (a.gemm_block) {
         size_t GT = core.gemm_block_t();
         if (GT == 0) { std::fprintf(stderr, "ERROR: --gemm-block given but this kernel set has no gemm_block program\n"); std::exit(2); }
         core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty());
@@ -218,22 +257,7 @@ std::vector<int> request(Core& core, const Args& a) {
             blk.resize(GT, blk.empty() ? 0 : blk.back());
             bool want = a.prefill_logits || (i + t_real == a.ids.size());
             core.step_gemm_block(blk, t_real, want);
-            {
-                const auto& tm = core.last_timing();
-                std::fprintf(stderr, "  gemm-block [%zu,%zu) t_real=%zu: %.1f ms (GEMM %.1f, host %.1f, per-token %.1f, lm_head %.1f)\n",
-                             i, i + GT, t_real, tm.total_ms, tm.part0_ms, tm.part1_ms, tm.route_ms, tm.lmhead_ms);
-                // which stage to work on, when the line above says the route is too slow
-                std::fprintf(stderr,
-                             "      mid %.1f (dn conv %.1f, dn rule %.1f, attn %.1f), gemm tile %.1f, gemm tr %.1f,"
-                             " tail %.1f, shared %.1f, state %.1f"
-                             " | moe prep %.1f, patch %.1f, run %.1f, read %.1f\n",
-                             tm.mid_ms, tm.dn_conv_ms, tm.dn_rule_ms, tm.attn_ms, tm.gemm_tile_ms, tm.gemm_tr_ms,
-                             tm.tail_ms, tm.shared_ms, tm.state_ms,
-                             tm.moe_prep_ms, tm.moe_patch_ms, tm.moe_run_ms, tm.moe_read_ms);
-            }
-            for (const auto& [kn, d] : core.take_dispatch_stats())
-                std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
-                             d.calls, d.ms, d.ms / d.calls, d.min_ms);
+            stages("gemm-block", i, i + GT, t_real);
             // every real position of the block, like the sequential path's --prefill-logits
             for (size_t t = 0; t < core.block_logits().size(); ++t)
                 dump_pos(a.dump_prefix, static_cast<int>(i + t), core.block_logits()[t]);
@@ -300,7 +324,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {
-            core.bench_dispatch(0, a.bench);
+            core.bench_dispatch(a.bench_layer, a.bench);
             std::printf("DONE\n");
             return 0;
         }
@@ -316,6 +340,16 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (a.bench_decode) {
+            // --at-position applies here too, and it is the whole point of the probe: ax0 is the
+            // only decode dispatch whose transfers grow with the window, so a bench taken at
+            // position 1 (which is all this path could measure before) says nothing about what a
+            // step costs at a real context length. seek() moves the position; the rows in between
+            // are the zeroed buffer, which is the right window SIZE and meaningless values -- the
+            // bench times dispatches and never reads a logit.
+            if (a.at_position > 0) {
+                std::fprintf(stderr, "seeking to position %d\n", a.at_position);
+                core.seek(a.at_position);
+            }
             core.step(a.ids[0], true);       // one real step first: the attnpos and route patches
             core.bench_decode(a.bench_decode);
             std::printf("DONE\n");

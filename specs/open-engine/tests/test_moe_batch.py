@@ -97,6 +97,8 @@ def test_the_route_names_the_token_batched_expert_streams():
         mb = m["layer_types"][lt]["gemm_block"]["moe_batch"]
         # one stream per dispatch length, the shortest that holds the experts still owed tokens is
         # run, so the ladder is binary down from the expert count and the padding stays small
+        # nt is the token slots one streaming of an expert serves -- the driver reads it here,
+        # the build passes the same number to the design, and nothing else may decide it
         assert mb == {"kernels": {"256": "mb_s256", "128": "mb_s128", "64": "mb_s64", "32": "mb_s32",
                                   "16": "mb_s16", "8": "mb_s8"},
                       "args": ["pool", "mb_x", "mb_h", "mb_y"], "nt": 8}
@@ -108,10 +110,14 @@ def test_the_route_names_the_token_batched_expert_streams():
         b = m["builds"][f"mb_s{s}"]
         assert b["design"] == "moe_batch/moe_batch.py" and b["build_dir"] == f"moe_batch/build_s{s}"
         assert b["env"]["MB_SLOTS"] == str(s) and b["env"]["MB_EXPERTS"] == "256"
+        assert b["env"]["MB_NT"] == str(mb["nt"])
         assert int(b["env"]["MB_POOL_DOWN"]) == m["layout"]["moe"]["pool_down"]
         assert int(b["env"]["MB_POOL_BYTES"]) == m["layout"]["pool_bytes"]
-    # x / h / y sized for the longest stream: [256 slots, K, 8 tokens] bf16 in, [256, 512, 8] bf16 h, [256, 2048, 8] f32 out
-    assert (m["globals"]["mb_x"], m["globals"]["mb_h"], m["globals"]["mb_y"]) == (256 * 2048 * 16, 256 * 512 * 16, 256 * 2048 * 32)
+    # x / h / y sized for the longest stream: [256 slots, K, nt tokens] bf16 in, [256, 512, nt] bf16 h,
+    # [256, 2048, nt] f32 out
+    nt = m["layer_types"][LINEAR]["gemm_block"]["moe_batch"]["nt"]
+    assert (m["globals"]["mb_x"], m["globals"]["mb_h"], m["globals"]["mb_y"]) == (256 * 2048 * nt * 2, 256 * 512 * nt * 2,
+                                                                                 256 * 2048 * nt * 4)
 
 
 # ---- the kernel itself: manual, on the NPU (the harness measurement is the artifact)

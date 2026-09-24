@@ -24,9 +24,9 @@ sys.path.insert(0, str(HERE.parent.parent))                       # open_kernels
 from q4_1_pack import CH, dequant_q4_1, pack_q4_1_pool, random_q4_1_blocks  # noqa: E402
 from recipes.pack import down_perm, stripe_transpose  # noqa: E402
 sys.path.insert(0, str(HERE))
-from layout import x_to_dev  # noqa: E402
+from layout import NT, x_to_dev  # noqa: E402
 
-HID, FF, NT = 2048, 512, 8
+HID, FF = 2048, 512
 STRIPE = 128 * HID * 5 // 8
 EXP_UG = 2 * (FF // 128) * STRIPE
 DOWN_BYTES = HID * FF * 5 // 8

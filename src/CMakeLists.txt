@@ -385,6 +385,69 @@ if(NOT OFLM_USE_HRX)
     endif()
 endif()
 
+# ———————————————————————————————————————————————
+# open_whisper: the open Whisper-large-v3-turbo engine (phase 2b/3, issue #72)
+# ———————————————————————————————————————————————
+#
+# NPU GEMM (open_whisper/kernels.cpp, over open_npue/npu_device.hpp/.cpp,
+# already added above) for every matrix product, host fp32 for everything
+# else. XRT only, exactly like open_qwen36 and open_npue above: it drives the
+# kernel set through xrt::hw_context directly.
+#
+# cli.cpp is EXCLUDED -- it is open_whisper/build.cmd's own standalone gate
+# binary (open_whisper_cli.exe) and carries its own main(); it must never join
+# the oflm target's link, or the build fails with a duplicate main() (or, if
+# it somehow didn't, oflm.exe would silently gain a second CLI's argv parsing).
+if(NOT OFLM_USE_HRX)
+    set(OPEN_WHISPER_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/weights.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/kernels.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/guards.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/host_ops.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/encoder.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/decoder.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/engine_adapter.cpp"
+    )
+    list(APPEND SOURCES ${OPEN_WHISPER_SOURCES})
+
+    # Same reasoning as OPEN_NPUE_SOURCES above: open_whisper/kernels.hpp
+    # includes "npu_device.hpp" (open_npue/npu_device.hpp) as a bare filename,
+    # relying on the include path rather than a relative "../open_npue/" spelling
+    # (open_whisper/build.cmd's standalone build passes the same -I). Scoping
+    # this to these files, rather than adding open_npue to the target's
+    # global include path, keeps the "same basename, different file" hazard
+    # OPEN_NPUE_SOURCES's own comment describes from reappearing here.
+    set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/open_npue")
+
+    # /arch:AVX2 is load-bearing here for the same reason as open_npue's copy
+    # of this comment: host_ops.cpp's bf16 rounding and attention inner loops
+    # are behind #if defined(__AVX2__) with a correct (slower) scalar #else,
+    # and MSVC x64 defines no __AVX2__ without the flag. /openmp is what makes
+    # host_ops.cpp's and decoder.cpp's `#pragma omp parallel for` row-parallel
+    # loops actually parallel rather than silently sequential.
+    if(MSVC)
+        set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "/arch:AVX2;/openmp")
+    else()
+        # -fopenmp ONLY when CMake can also link OpenMP. The link dependency
+        # (OpenMP::OpenMP_CXX) is added further down, gated on this same
+        # find_package -- so compiling with the flag when it fails would define
+        # _OPENMP, emit calls into libgomp and fail at link, on a build where the
+        # scalar fallback these sources already carry would have worked. Cached,
+        # so calling it here and again below costs nothing.
+        find_package(OpenMP QUIET)
+        set(OPEN_WHISPER_FLAGS "-mavx2;-mfma")
+        if(OpenMP_CXX_FOUND)
+            list(APPEND OPEN_WHISPER_FLAGS "-fopenmp")
+        else()
+            message(STATUS "open_whisper: no OpenMP -- host loops build sequential")
+        endif()
+        set_source_files_properties(${OPEN_WHISPER_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "${OPEN_WHISPER_FLAGS}")
+    endif()
+endif()
+
 # Exclude files that depend on missing libraries for Linux
 if(NOT WIN32)
     # list(FILTER SOURCES EXCLUDE REGEX ".*modeling_gemma3\\.cpp$")
@@ -512,12 +575,25 @@ if(NOT OFLM_USE_HRX)
     # Qwen3.6-MoE on the open kernels (open_qwen36/); the closed engine stays
     # reachable with OFLM_QWEN36_ENGINE=closed.
     target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_QWEN36=1)
+    # The open Whisper engine (open_whisper/); gates whisper_engine_select.cpp's
+    # #ifdef so an OFLM_USE_HRX build (which never adds OPEN_WHISPER_SOURCES
+    # above) still compiles with only the closed adapter reachable.
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_WHISPER=1)
     target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
     # The vision tower runs on the host (open_qwen36/vision/vit.cpp): threads over OpenMP
     # where the compiler has it, a single thread otherwise (the pragmas are then ignored).
     find_package(OpenMP QUIET)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(oflm PUBLIC OpenMP::OpenMP_CXX)
+        # vcomp reads OMP_WAIT_POLICY when it LOADS, and an implicitly linked DLL loads
+        # before any static initialiser in this binary runs -- so core.cpp's PASSIVE
+        # initialiser set a variable the runtime had already read past. Delay-loading
+        # vcomp moves its load to the first call into it, which is after that. Worth
+        # 20.5 -> 17.1 s on a 2582-token prefill; see the note above OmpWaitPolicy.
+        if(MSVC)
+            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL")
+            target_link_libraries(oflm PRIVATE delayimp)
+        endif()
     endif()
     # The block prefill's host stages (open_qwen36/block_host.cpp) are written for the
     # vectoriser; the same per-source flag the open embedding sources carry.
@@ -867,7 +943,12 @@ else()
         set(OFLM_ENGINE_INSTALL_RPATH "$ORIGIN")
     endif()
 
-    file(GLOB so_libs "${OFLM_ENGINE_LIB_DIR}/*.so*")
+    # Match real shared objects only: `*.so` and versioned `*.so.<n>`. A bare
+    # `*.so*` also picks up editor/runtime backups such as
+    # libq4_npu_eXpress.so.bak-20260826, which must never be installed, shipped,
+    # or patched. (A `.bak` infix in a version suffix is never a real SONAME.)
+    file(GLOB so_libs "${OFLM_ENGINE_LIB_DIR}/*.so" "${OFLM_ENGINE_LIB_DIR}/*.so.*")
+    list(FILTER so_libs EXCLUDE REGEX "\\.bak")
     install(FILES ${so_libs} DESTINATION "${OFLM_ENGINE_LIB_DESTINATION}")
     set_target_properties(oflm PROPERTIES INSTALL_RPATH "${OFLM_OFLM_INSTALL_RPATH}")
 
@@ -935,6 +1016,57 @@ install(DIRECTORY
     "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/recipes"
     DESTINATION "${OFLM_SHARE_DESTINATION}/open_kernels"
     FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
+
+# ————————————————————————————————————————————————————————————
+# Bundled utilities: the Python tools that accompany a distribution --
+#   * oflm-test  -- end-to-end LLM/vision/embed/tools test suite
+#   * q4nx-build -- GGUF/HF-safetensors -> Q4NX model converter
+# Shipped so an installed binary never needs a source checkout. Launchers are
+# installed into the install bin dir, so the same PATH plumbing that exposes
+# `oflm` exposes these. They keep their own Python deps (documented in their
+# READMEs); the package only owns the code and the launcher.
+# ————————————————————————————————————————————————————————————
+option(OFLM_BUILD_UTILITIES "Install the bundled Python utilities (oflm-test, q4nx-build)" ON)
+if(OFLM_BUILD_UTILITIES AND NOT WIN32)
+    set(_oflm_utilities_src "${CMAKE_CURRENT_SOURCE_DIR}/../utilities")
+    # oflm-test ships fixtures (images/audio/json) used by the suite; keep them.
+    install(DIRECTORY "${_oflm_utilities_src}/oflm-test/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/utilities/oflm-test"
+        PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE
+        PATTERN "*.egg-info" EXCLUDE PATTERN "tests" EXCLUDE)
+    install(DIRECTORY "${_oflm_utilities_src}/q4nx-build/q4nx/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/utilities/q4nx-build/q4nx"
+        FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
+    # q4nx resolves its per-family configs relative to the package (../configs).
+    install(DIRECTORY "${_oflm_utilities_src}/q4nx-build/configs/"
+        DESTINATION "${OFLM_SHARE_DESTINATION}/utilities/q4nx-build/configs"
+        PATTERN "__pycache__" EXCLUDE)
+
+    # One launcher shape for every bundled tool: put the tool's source dir on
+    # PYTHONPATH and call its entry point. `main()` is argv-free in both tools
+    # (q4nx.cli:main defaults argv=None), so "$@" flows through sys.argv.
+    function(_oflm_install_utility name subdir module)
+        set(_oflm_util_dir "${CMAKE_INSTALL_PREFIX}/${OFLM_SHARE_DESTINATION}/utilities")
+        set(_oflm_util_tmpl "${CMAKE_BINARY_DIR}/_oflm-utility-launcher.in")
+        if(NOT EXISTS "${_oflm_util_tmpl}")
+            file(WRITE "${_oflm_util_tmpl}" [==[#!/bin/sh
+# Bundled launcher: runs the @_OFLM_UTIL_NAME@ package installed beside this tool.
+_OFLM_UTIL_DIR="@_OFLM_UTIL_DIR@"
+export PYTHONPATH="${_OFLM_UTIL_DIR}/@_OFLM_UTIL_SUBDIR@${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -c 'import sys; from @_OFLM_UTIL_MODULE@ import main; sys.exit(main())' "$@"
+]==])
+        endif()
+        set(_OFLM_UTIL_NAME "${name}")
+        set(_OFLM_UTIL_DIR "${_oflm_util_dir}")
+        set(_OFLM_UTIL_SUBDIR "${subdir}")
+        set(_OFLM_UTIL_MODULE "${module}")
+        configure_file("${_oflm_util_tmpl}" "${CMAKE_BINARY_DIR}/${name}" @ONLY)
+        install(PROGRAMS "${CMAKE_BINARY_DIR}/${name}" DESTINATION "${OFLM_BIN_DESTINATION}")
+    endfunction()
+
+    _oflm_install_utility("oflm-test" "oflm-test" "oflm_test")
+    _oflm_install_utility("q4nx-build" "q4nx-build" "q4nx.cli")
+endif()
 
 # Directory holding the selected NPU runtime shared library, used by the Windows
 # dependency set, the portable XRT bundling, and the HRX dependency closure. HRX
@@ -1290,6 +1422,44 @@ endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# ————————————————————————————————————————————————————————————
+# PATH plumbing for the /opt/openflowlm prefix. The prefix keeps the runtime
+# self-contained, but /opt/openflowlm/bin is not on a default PATH, and an
+# end-user install must not require editing a shell rc. Write two things
+# OUTSIDE the prefix (deb/rpm own them because CPack packs everything staged
+# under $ENV{DESTDIR}):
+#   * /etc/profile.d/openflowlm.sh -- prepends the bin dir for login shells;
+#   * /usr/bin/oflm               -- a symlink so non-login shells find it too.
+# oflm-add already probes /opt/openflowlm/share/oflm, so the data tree needs no
+# change. Skipped for the relocatable portable tarball and for engine-only dev
+# installs (set OFLM_INSTALL_PATH_PLUMBING=OFF).
+# ————————————————————————————————————————————————————————————
+option(OFLM_INSTALL_PATH_PLUMBING "Install /usr/bin/oflm and /etc/profile.d so the /opt prefix needs no PATH editing" ON)
+if(NOT WIN32 AND NOT OFLM_PORTABLE_BUILD AND OFLM_INSTALL_PATH_PLUMBING)
+    set(_oflm_profile_tmpl "${CMAKE_BINARY_DIR}/_oflm-profile.in")
+    file(WRITE "${_oflm_profile_tmpl}" [==[# Added by the OpenFlowLM package: makes `oflm` and its bundled
+# utilities available in login shells whose PATH lacks the install prefix.
+case ":${PATH}:" in
+    *"@_OFLM_BIN_DIR@:"*) ;;
+    *) PATH="@_OFLM_BIN_DIR@:${PATH}"; export PATH ;;
+esac
+]==])
+    set(_OFLM_BIN_DIR "${CMAKE_INSTALL_PREFIX}/${OFLM_BIN_DESTINATION}")
+    configure_file("${_oflm_profile_tmpl}" "${CMAKE_BINARY_DIR}/openflowlm-profile.sh" @ONLY)
+    install(CODE "
+        # These live OUTSIDE \${CMAKE_INSTALL_PREFIX}, so: file(MAKE_DIRECTORY)
+        # and create_symlink use \$ENV{DESTDIR} directly, while file(INSTALL)
+        # prepends it itself (DESTINATION must not).
+        file(MAKE_DIRECTORY \"\$ENV{DESTDIR}/etc/profile.d\")
+        file(INSTALL \"${CMAKE_BINARY_DIR}/openflowlm-profile.sh\"
+             DESTINATION \"/etc/profile.d\" RENAME openflowlm.sh)
+        file(MAKE_DIRECTORY \"\$ENV{DESTDIR}/usr/bin\")
+        execute_process(COMMAND \"\${CMAKE_COMMAND}\" -E create_symlink
+            \"${CMAKE_INSTALL_PREFIX}/${OFLM_BIN_DESTINATION}/oflm\"
+            \"\$ENV{DESTDIR}/usr/bin/oflm\")
+    ")
+endif()
+
 # ———————————————————————————————————————————————
 # Packaging (CPack): produce an installable, full-distribution package.
 #   cmake --build --preset linux-package-rpm   # or -deb / -tgz
@@ -1301,7 +1471,55 @@ set(CPACK_PACKAGE_VENDOR "Atomic-Germ")
 set(CPACK_PACKAGE_CONTACT "openflowlm@atomic-germ")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "OpenFlowLM — NPU-offloaded LLM inference engine")
 set(CPACK_PACKAGE_DESCRIPTION "OpenFlowLM runs LLMs with dense GEMM offloaded to the AMD NPU2 via open XDNA2 kernels, with a CPU reference path.")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Atomic-Germ/OpenFlowLM-Next")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE_OPEN_RUNTIME.md")
 set(CPACK_GENERATOR "TGZ")
 set(CPACK_SET_DESTDIR ON)
 set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+# The /opt prefix plus the absolute /usr/bin symlink make the packages
+# non-relocatable; CPACK_PACKAGE_RELOCATABLE defaults to true and would make
+# CPackRPM warn (and quietly disable it), so state it explicitly.
+set(CPACK_PACKAGE_RELOCATABLE OFF)
+# Keep generated packages out of the build root.
+set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
+
+# Distro metadata. XRT is an external runtime dependency (see the install
+# backend above): RPM's automatic Requires: derives it from the engine .so
+# NEEDED entries, so the explicit DEB dependency names the Ubuntu package that
+# carries libxrt_coreutil.so.2. shlibdeps only runs where a Debian package
+# database exists; on an RPM-only build host it cannot map Fedora sonames and
+# would fail the package, so the explicit list is the fallback there.
+set(CPACK_DEBIAN_PACKAGE_NAME "openflowlm")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Atomic-Germ <openflowlm@atomic-germ>")
+set(CPACK_DEBIAN_PACKAGE_SECTION "science")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3, libxrt-npu2")
+# shlibdeps can only derive libc6/libstdc++6/... on a host with a *populated*
+# Debian package database. An absent or empty dpkg status (typical on Fedora,
+# and the CI image) would silently contribute nothing, leaving the package
+# under-specified, so gate on content and say so.
+if(EXISTS "/var/lib/dpkg/status")
+    file(SIZE "/var/lib/dpkg/status" _oflm_dpkg_status_size)
+    if(_oflm_dpkg_status_size GREATER 0)
+        set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    else()
+        message(STATUS "DEB: dpkg status is empty; shlibdeps disabled (build the "
+                       "DEB on Debian/Ubuntu for complete Depends)")
+    endif()
+else()
+    message(STATUS "DEB: no Debian package database; shlibdeps disabled (build "
+                   "the DEB on Debian/Ubuntu for complete Depends)")
+endif()
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+
+set(CPACK_RPM_PACKAGE_NAME "openflowlm")
+set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+set(CPACK_RPM_PACKAGE_GROUP "Applications/Science")
+set(CPACK_RPM_PACKAGE_AUTOREQ ON)
+# The /opt prefix plus the absolute /usr/bin symlink make this package
+# non-relocatable; state it so CPack does not warn about the conflict.
+set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
+set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
+# /etc/profile.d and /usr/bin belong to the base filesystem packages; do not
+# make openflowlm claim ownership of them.
+set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/profile.d" "/usr/bin")
 include(CPack)

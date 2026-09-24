@@ -24,22 +24,15 @@ Whisper::Whisper(oflm_rt::device* npu_device_inst){
 
 void Whisper::load_model(std::string model_path, nlohmann::ordered_json model_info, bool enable_preemption) {
     header_print("OFLM", "Loading model: " << model_path);
-    this->npu = std::make_unique<npu_xclbin_manager>(npu_device::device_npu2, this->device, enable_preemption);
     this->enable_preemption = enable_preemption;
     this->model_path = model_path;
-    this->enable_preemption = enable_preemption;
 
     this->lm_config = std::make_unique<Whisper_Config>();
     this->lm_config->from_pretrained(this->model_path);
-    
-    this->whisper_engine = std::make_unique<whisper_npu>(*this->lm_config, this->npu.get(), 448);
-    std::unique_ptr<Q4NX> q4nx = std::make_unique<Q4NX>(this->model_path);
 
-    this->whisper_engine->load_weights(*q4nx);
-
-    // //free the q4nx
-    q4nx.reset();
-    this->whisper_engine->clear_context();
+    this->engine.reset();
+    this->engine = make_whisper_engine(this->model_path, *this->lm_config, this->device, enable_preemption);
+    header_print("OFLM", "Whisper engine: " << this->engine->describe());
     this->setup_tokenizer(model_path);
     
     this->sampler.reset();
@@ -138,14 +131,14 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
         _preprocess_audio(mel_feature, audio_chunk);
       
         // run whisper encoder
-        this->whisper_engine->encode_audio(mel_feature); // encoded and pass kv-cache to decoder
+        this->engine->encode_audio(mel_feature); // encoded and pass kv-cache to decoder
 
         // decoder loop
-        this->whisper_engine->clear_context();
+        this->engine->clear_context();
         this->sampler->reset_penalties();
 
         last_idx = start_of_transcript; // the first token is fixed
-        buffer<bf16> logits = this->whisper_engine->decode_audio(last_idx);
+        buffer<bf16> logits = this->engine->decode_audio(last_idx);
         last_idx = this->_sample_in_language(logits);
       
         // std::cout << "Language detected: " << this->tokenizer->run_time_decoder(last_idx) << "(" << langmap::to_language_name(this->tokenizer->run_time_decoder(last_idx)) << ")" << std::endl;
@@ -154,12 +147,12 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
         if (task == e_translate) {
             //header_print("info", "translate is not supported! Do transcribe instead!");
             //task = e_transcribe;
-            //buffer<bf16> logits = this->whisper_engine->decode_audio(50259); // en
-            //logits = this->whisper_engine->decode_audio(translate_token);
+            //buffer<bf16> logits = this->engine->decode_audio(50259); // en
+            //logits = this->engine->decode_audio(translate_token);
             //last_idx = this->_sample_in_time_stamp(logits);
         }
         else if (task == e_transcribe) {
-            buffer<bf16> logits = this->whisper_engine->decode_audio(transcribe_token);
+            buffer<bf16> logits = this->engine->decode_audio(transcribe_token);
             last_idx = this->_sample_in_time_stamp(logits);
         }
         else {
@@ -175,7 +168,7 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
             }
         }
         else{
-            buffer<bf16> logits = this->whisper_engine->decode_audio(no_time_stamp_token);
+            buffer<bf16> logits = this->engine->decode_audio(no_time_stamp_token);
             last_idx = this->sampler->sample(logits);
             std::string token_str = this->tokenizer->run_time_decoder(last_idx);
             result += token_str;
@@ -184,7 +177,7 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
         
         int watching_dog = 16;
         for (int i = 0; i < 448 - 3; i++){
-            buffer<bf16> logits = this->whisper_engine->decode_audio(last_idx);
+            buffer<bf16> logits = this->engine->decode_audio(last_idx);
             if (watching_dog == 0 && allow_force_time_stamp){
                 last_idx = this->_sample_in_time_stamp(logits);
                 watching_dog = 16;

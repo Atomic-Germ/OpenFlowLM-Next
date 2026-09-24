@@ -4,15 +4,25 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <stdexcept>
+
+#include <omp.h>
+
+#include <omp.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
@@ -52,13 +62,94 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
+// Busy CPU cores throttle the NPU. Measured on this box (Ryzen AI, .claude/plans/
+// prefill-parity.md workstream A): after every `#pragma omp parallel for` in the host
+// stages the OpenMP workers spin-wait for the runtime's blocktime, and the NEXT
+// dispatch runs while they spin. The CPU, NPU and iGPU share a package power budget,
+// so a spinning core pulls the array's clock down -- twelve external spin processes,
+// touching no memory at all, slow the q8 lm head from 11.5 to 35.4 ms. Inside the
+// prefill block every dispatch ran at 1.6-2.1x its alone-time; threads ASLEEP and
+// threads ABSENT gave the same dispatch times, so it is the spinning and not the host
+// work, and even four spinning workers throttle it fully (no thread-count sweet spot).
+// PASSIVE costs the host stages one wake-up per parallel region (+7 %) and gives back
+// 19 % of the block: 2582-token prefill 38.55 -> 29.93 s. Bit-exact either way.
+//
+// It has to be an environment variable: MSVC's VCOMP140.DLL reads OMP_WAIT_POLICY when it
+// initialises, and there is no API for it. A policy already in the environment wins, and
+// OFLM_OPEN_OMP_PASSIVE=0 turns this off.
+//
+// **The link line is part of this.** vcomp initialises when it LOADS, not at the first
+// parallel region, and an implicitly linked DLL loads before any of the exe's static
+// initialisers run -- so setting the variable here reached a runtime that had already
+// read it, and for a year the binary carried a PASSIVE it never applied. What proved it:
+// the same trick for OMP_NUM_THREADS set the variable to 10 and `omp_get_max_threads()`
+// still said 24. Delay-loading vcomp (`/DELAYLOAD:VCOMP140.DLL delayimp.lib`, see
+// build.cmd and CMakeLists.txt) moves its load to the first call into it, which is after
+// this initialiser. Measured at 2582 tokens: 20.5 s with the variable unset against
+// 17.1 s with it set from outside, the same binary. Any build of this file that drops
+// the delay-load silently loses that.
+bool g_omp_policy_too_late = false;   ///< vcomp was already loaded when we set the variable
+
+struct OmpWaitPolicy {
+    OmpWaitPolicy() {
+        if (std::getenv("OMP_WAIT_POLICY")) return;
+        const char* off = std::getenv("OFLM_OPEN_OMP_PASSIVE");
+        if (off && std::string(off) == "0") return;
+#ifdef _WIN32
+        // The check that makes the delay-load's absence loud. If vcomp is already in the
+        // process at this point it has read its configuration and the _putenv below is a
+        // no-op -- which is exactly the state this binary shipped in and nobody noticed.
+        g_omp_policy_too_late = GetModuleHandleW(L"VCOMP140.DLL") != nullptr;
+        _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
+#else
+        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+#endif
+    }
+};
+const OmpWaitPolicy g_omp_wait_policy;
+
+/// Host threads for the block route's stages, or 0 to leave the runtime alone.
+///
+/// How MANY threads is a separate question from whether they spin, and once the policy
+/// above is really in force it is a settled one. While the workers still spun through
+/// every dispatch, fewer of them was faster: at the runtime's own count every dispatch ran
+/// at 1.4x its `--bench` rate (`mb_s256` 17.5 ms against 12.4, and the same dispatch
+/// repeated with no host work in front of it still 17.5), at ten threads every one was at
+/// its own rate, and 2582 tokens went 20.4 -> 18.9 s. With PASSIVE applied the ordering
+/// reverses -- 17.6 s at the full count against 19.5 at ten -- because sleeping workers
+/// cost the package nothing and the host stages want every core. So the default is the
+/// runtime's own count; OFLM_OPEN_OMP_THREADS stays as a knob for a box where it isn't.
+///
+/// This one cannot go through the environment even with the delay-load: vcomp latches its
+/// thread count the first time anything asks, which is inside the Core already.
+unsigned omp_thread_budget() {
+    if (std::getenv("OMP_NUM_THREADS")) return 0;      // the environment has already decided
+    if (const char* e = std::getenv("OFLM_OPEN_OMP_THREADS"))
+        return static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    return 0;
+}
+
 }  // namespace
+
+void Core::apply_thread_budget() const {
+    if (omp_threads_ > 0 && omp_get_max_threads() != omp_threads_) omp_set_num_threads(omp_threads_);
+}
 
 void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
 }
 
 Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
+    omp_threads_ = static_cast<int>(omp_thread_budget());
+    apply_thread_budget();
+    if (g_omp_policy_too_late)
+        std::fprintf(stderr, "open_qwen36: WARNING: VCOMP140.DLL was already loaded before "
+                             "OMP_WAIT_POLICY could be set, so the host workers will SPIN through "
+                             "every dispatch and the prefill will be ~20%% slower. Link with "
+                             "/DELAYLOAD:VCOMP140.DLL, or set OMP_WAIT_POLICY=PASSIVE in the "
+                             "environment before starting.\n");
+    log("host threads: " + std::to_string(omp_get_max_threads()) + " (OMP_WAIT_POLICY=" +
+        std::string(std::getenv("OMP_WAIT_POLICY") ? std::getenv("OMP_WAIT_POLICY") : "unset") + ")");
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
     fs::path md(cfg_.model_dir);
@@ -145,13 +236,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     std::map<std::string, bool> wanted;
     for (int l = 0; l < nl_; ++l) {
         for (const auto& s : types_[l]->program) wanted[s.kernel] = true;
-        // 0167/#32: the GEMM-route block's 5 GEMM kernels, plus "dxB"
+        // 0167/#32: the GEMM-route block's 5 GEMM kernels, plus its attn_kernel
         // (the attention half, driven directly by Core rather than via a
-        // Step -- see manifest.hpp's GemmBlockProgram) which the manifest
-        // parser already required to exist whenever gemm_block is present.
+        // Step -- see manifest.hpp's GemmBlockProgram; a layer type with its
+        // own sliding window names its own, e.g. Gemma 3's dxB_local) which
+        // the manifest parser already required to exist whenever gemm_block
+        // is present.
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
-        if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted["dxB"] = true;
+        if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted[types_[l]->gemm_block.attn_kernel] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_s) wanted[k] = true;
@@ -181,7 +274,9 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
+    moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
@@ -198,6 +293,20 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
             (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
+    if (gemm_block_t_)
+        log(std::string("prefill schedule: ") +
+            (layer_major_ok() ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
+                              : layer_major_on_ ? "block-major (a MoE kind's layer types only)"
+                                                : "block-major (OFLM_OPEN_LAYER_MAJOR=0)"));
+}
+
+bool Core::layer_major_ok() const {
+    if (!layer_major_on_ || !gemm_block_t_) return false;
+    for (int l = 0; l < nl_; ++l) {
+        const std::string& kind = types_[l]->gemm_block.kind;
+        if (kind != "linear" && kind != "full") return false;
+    }
+    return nl_ > 0;
 }
 
 Core::~Core() = default;
@@ -255,10 +364,11 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     auto t0 = std::chrono::steady_clock::now();
     pools_.clear(); consts_.clear(); act_.clear(); state_.clear(); globals_.clear();
     gemm_w_.clear(); hc_.clear();
-    ln_w_bf16_.clear(); post_ln_w_bf16_.clear();
+    ln_w_bf16_.clear(); post_ln_w_bf16_.clear(); pre_ffn_w_.clear(); post_ffn_w_.clear();
     pools_.reserve(nl_); consts_.reserve(nl_); act_.reserve(nl_); state_.reserve(nl_);
     if (gemm_block_t_) {
         ln_w_bf16_.resize(nl_); post_ln_w_bf16_.resize(nl_);
+        pre_ffn_w_.resize(nl_); post_ffn_w_.resize(nl_);
         hc_.resize(nl_);
     }
     // the block route's per-layer weight buffers: each a contiguous run of pack ops of
@@ -308,6 +418,18 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 post_ln_w_bf16_[l].resize(man_.hidden);
                 std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
                 std::memcpy(post_ln_w_bf16_[l].data(), c_host + man_.hidden * 2, man_.hidden * 2);
+                if (lt.gemm_block.sandwich) {
+                    // Read straight from the file by tensor name suffix (the MoE kinds'
+                    // pattern, `const_tensor()`), not sliced from packed consts bytes: these
+                    // two are additional to the plain chain's two, and pack_plan only ever
+                    // packs them into consts.CD_PREFFN/CD_POSTFFN when sandwich_norms is set,
+                    // so their offsets are family-specific in a way the other two are not.
+                    pre_ffn_w_[l] = file_->bf16(const_tensor(lt, "pre_feedforward_layernorm.weight", l));
+                    post_ffn_w_[l] = file_->bf16(const_tensor(lt, "post_feedforward_layernorm.weight", l));
+                    if (pre_ffn_w_[l].size() != man_.hidden || post_ffn_w_[l].size() != man_.hidden)
+                        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) +
+                                                 ": sandwich norm weight is not [hidden]");
+                }
             } else {
                 // the MoE kinds' host stages read their small tensors straight from the
                 // file, by the names the consts plan carries (no consts layout knowledge here)
@@ -533,6 +655,18 @@ struct BenchStat {
         return v.size() % 2 ? v[v.size() / 2] : 0.5 * (v[v.size() / 2 - 1] + v[v.size() / 2]);
     }
 };
+
+/// MB a dispatch streams from DDR, and the rate that implies at `ms`.
+///
+/// Both engines run the same weights through the same array, so at decode this
+/// ratio is most of the story: a kernel at the array's rate has nothing left in
+/// it and a kernel far below it is where the time is. Read off the PATCHED
+/// stream, so a kernel whose transfer sizes depend on the position (ax0's KV
+/// window) reports what this position streams.
+double stream_mb(const uint32_t* iw, size_t words) {
+    return stream_patch::ddr_bytes_total(iw, words) / 1048576.0;
+}
+double gbps(double mb, double ms) { return ms > 0 ? mb / 1024.0 / (ms / 1000.0) : 0; }
 }  // namespace
 
 void Core::bench_dispatch(int layer, int reps) {
@@ -558,7 +692,8 @@ void Core::bench_dispatch(int layer, int reps) {
     }
 
     std::fprintf(stderr, "\nopen_qwen36: dispatch bench, layer %d, %d reps each\n", layer, reps);
-    std::fprintf(stderr, "  %-22s %8s %8s %8s %8s\n", "kernel", "min ms", "mean ms", "submit", "context");
+    std::fprintf(stderr, "  %-22s %8s %8s %8s %9s %7s %8s\n", "kernel", "min ms", "mean ms", "submit", "MB", "GB/s",
+                 "context");
     std::map<std::string, BenchStat> alone;
     for (const auto& [name, args] : jobs) {
         Kern& k = kerns_.at(name);
@@ -569,9 +704,44 @@ void Core::bench_dispatch(int layer, int reps) {
             st.add(submit, wait);
         }
         alone[name] = st;
-        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f %8s\n", name.c_str(), st.min, st.mean(), st.mean_submit(),
-                     man_.kernels.at(name).context.c_str());
+        const double mb = stream_mb(k.iw(), k.words.size());
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f %9.1f %7.1f %8s\n", name.c_str(), st.min, st.mean(),
+                     st.mean_submit(), mb, gbps(mb, st.min), man_.kernels.at(name).context.c_str());
     }
+
+    // Every probe below compares a kernel against its own baseline taken IN THE SAME LOOP, one
+    // baseline rep per probe rep. Subtracting the pass above instead -- which is what these did
+    // until now -- puts whatever the box did in between straight into the delta: the k35v5 and
+    // k35v6 runs of 2026-09-13 disagreed by 5.6 ms on mb_s256 that way, and one of them read a
+    // context switch as free. The context-switch probe at the end was fixed first (3b86aac4);
+    // this is the same fix for the other five. Deltas are quoted on the minima for the same
+    // reason: one dispatch that loses the box drags a mean by several ms.
+    //
+    // `one_rep` does whatever the probe is measuring and returns (submit, wait); the baseline rep
+    // beside it is the same kernel with nothing done to it. `note` is printed after the delta.
+    using Rep = std::pair<double, double>;
+    auto probe = [&](const char* title,
+                     const std::vector<std::pair<std::string, std::vector<std::string>>>& what,
+                     const std::function<bool(const std::string&)>& skip,
+                     const std::function<Rep(const std::string&, const std::vector<std::string>&, int)>& one_rep,
+                     const std::function<std::string(const std::string&)>& note) {
+        std::fprintf(stderr, "  %s\n", title);
+        for (const auto& [name, args] : what) {
+            if (skip(name)) continue;
+            Kern& k = kerns_.at(name);
+            BenchStat base, st;
+            run_split(k, args, layer);                   // warm, outside the timing
+            for (int i = 0; i < reps; ++i) {
+                { const auto [s, w] = run_split(k, args, layer); base.add(s, w); }
+                const auto [s, w] = one_rep(name, args, i);
+                st.add(s, w);
+            }
+            std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs its own baseline (%.3f)%s\n", name.c_str(),
+                         st.min, st.mean(), st.mean_submit(), st.min - base.min, base.min, note(name).c_str());
+        }
+    };
+    auto never = [](const std::string&) { return false; };
+    auto no_note = [](const std::string&) { return std::string(); };
 
     // The same kernels cycling through every layer's own weights. The pass above re-reads
     // layer 0's, which a real block never does: it walks 40 layers once. Whatever this costs
@@ -580,121 +750,95 @@ void Core::bench_dispatch(int layer, int reps) {
     std::vector<int> same;
     for (int l = 0; l < nl_; ++l)
         if (types_[l]->name == types_[layer]->name) same.push_back(l);
-    std::fprintf(stderr, "  cycling the %zu %s layers' weights (the cold-memory probe)\n", same.size(),
-                 types_[layer]->name.c_str());
-    for (const auto& [name, args] : jobs) {
-        Kern& k = kerns_.at(name);
-        BenchStat st;
-        for (int i = 0; i < reps; ++i) {
-            const auto [submit, wait] = run_split(k, args, same[i % same.size()]);
-            st.add(submit, wait);
-        }
-        const double solo = alone[name].mean();
-        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs layer 0 only\n", name.c_str(), st.min, st.mean(),
-                     st.mean_submit(), st.mean() - solo);
-    }
+    probe(("cycling the " + std::to_string(same.size()) + " " + types_[layer]->name +
+           " layers' weights (the cold-memory probe)").c_str(),
+          jobs, never,
+          [&](const std::string& n, const std::vector<std::string>& args, int i) {
+              return run_split(kerns_.at(n), args, same[i % same.size()]);
+          },
+          no_note);
 
     // The same kernels with the CPU busy for ~30 ms first, the gap a real layer has between
     // its dispatches. Same context throughout, so anything here is the cost of an idle NPU.
-    std::fprintf(stderr, "  after a 30 ms host gap (the idle probe)\n");
-    for (const auto& [name, args] : jobs) {
-        Kern& k = kerns_.at(name);
-        BenchStat st;
-        for (int i = 0; i < reps; ++i) {
-            volatile double spin = 0;                       // busy, not asleep: the CPU is working in a real block
-            auto g0 = std::chrono::steady_clock::now();
-            while (ms_since(g0) < 30.0) spin += 1.0;
-            const auto [submit, wait] = run_split(k, args, layer);
-            st.add(submit, wait);
-        }
-        const double solo = alone[name].mean();
-        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
-                     st.mean_submit(), st.mean() - solo);
-    }
+    probe("after a 30 ms BUSY host gap (the idle probe)", jobs, never,
+          [&](const std::string& n, const std::vector<std::string>& args, int) {
+              volatile double spin = 0;                   // busy, not asleep: the CPU works in a real block
+              auto g0 = std::chrono::steady_clock::now();
+              while (ms_since(g0) < 30.0) spin += 1.0;
+              return run_split(kerns_.at(n), args, layer);
+          },
+          no_note);
+
+    // The same gap with the CPU ASLEEP, which is the pair that says what the busy one measured.
+    // A sleeping gap leaves the NPU idle exactly as long and takes no package power, so a cost
+    // here is the NPU's own clock coming back up and a cost only in the busy probe is the CPU
+    // stealing the power budget (which is what A.1's PASSIVE finding turned on). Both matter:
+    // a real block's host stages are tens of ms of work between dispatches.
+    probe("after a 30 ms SLEEPING host gap (the idle probe's pair)", jobs, never,
+          [&](const std::string& n, const std::vector<std::string>& args, int) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(30));
+              return run_split(kerns_.at(n), args, layer);
+          },
+          no_note);
 
     // The patched kernels with their instruction stream re-synced first, as the real path does
     // it. The patch itself is a few hundred words; the sync is the whole stream.
-    std::fprintf(stderr, "  with the expert patch + instruction sync (the patch probe)\n");
     std::vector<uint32_t> ex(man_.moe.experts);
     for (size_t i = 0; i < ex.size(); ++i) ex[i] = static_cast<uint32_t>(i);
-    for (const auto& [name, args] : jobs) {
-        Kern& k = kerns_.at(name);
-        if (k.moe2.empty()) continue;
-        BenchStat st, sync_only;
-        for (int i = 0; i < reps; ++i) {
-            auto p0 = std::chrono::steady_clock::now();
-            stream_patch::moe2_apply(k.iw(), k.moe2, ex.data(), man_.moe);
-            k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-            sync_only.add(ms_since(p0), 0);
-            const auto [submit, wait] = run_split(k, args, layer);
-            st.add(submit, wait);
-        }
-        const double solo = alone[name].mean();
-        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone (patch+sync itself %.3f, %zu KB)\n",
-                     name.c_str(), st.min, st.mean(), st.mean_submit(), st.mean() - solo, sync_only.mean(),
-                     k.words.size() * 4 / 1024);
-    }
+    std::map<std::string, BenchStat> sync_only;
+    probe("with the expert patch + instruction sync (the patch probe)", jobs,
+          [&](const std::string& n) { return kerns_.at(n).moe2.empty(); },
+          [&](const std::string& n, const std::vector<std::string>& args, int) {
+              Kern& k = kerns_.at(n);
+              auto p0 = std::chrono::steady_clock::now();
+              stream_patch::moe2_apply(k.iw(), k.moe2, ex.data(), man_.moe);
+              k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+              sync_only[n].add(ms_since(p0), 0);
+              return run_split(k, args, layer);
+          },
+          [&](const std::string& n) {
+              char buf[80];
+              std::snprintf(buf, sizeof buf, " (patch+sync itself %.3f, %zu KB)", sync_only[n].mean(),
+                            kerns_.at(n).words.size() * 4 / 1024);
+              return std::string(buf);
+          });
 
     // The same kernels with the host moving their buffers around each call, as the route does.
-    std::fprintf(stderr, "  with the host reading the output (the buffer-traffic probe)\n");
-    for (const auto& [name, args] : jobs) {
-        Kern& k = kerns_.at(name);
-        if (args.size() < 3) continue;
-        xrt::bo& xb = buffer(args[args.size() - 2], layer);   // the input the host fills
-        xrt::bo& yb = buffer(args.back(), layer);             // the output the host reads
-        BenchStat st, traffic;
-        volatile double sink = 0;
-        for (int i = 0; i < reps; ++i) {
-            auto h0 = std::chrono::steady_clock::now();
-            xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xb.size(), 0);
-            const double up = ms_since(h0);
-            const auto [submit, wait] = run_split(k, args, layer);
-            st.add(submit, wait);
-            auto h1 = std::chrono::steady_clock::now();
-            yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, yb.size(), 0);
-            const float* y = yb.map<float*>();
-            for (size_t j = 0; j < yb.size() / 4; j += 1024) sink += y[j];
-            traffic.add(up, ms_since(h1));
-        }
-        const double solo = alone[name].mean();
-        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone (host traffic %.2f ms, out %zu MB)\n",
-                     name.c_str(), st.min, st.mean(), st.mean_submit(), st.mean() - solo, traffic.mean(),
-                     yb.size() >> 20);
-    }
+    std::map<std::string, BenchStat> traffic;
+    volatile double sink = 0;
+    probe("with the host reading the output (the buffer-traffic probe)", jobs,
+          [&](const std::string& n) {
+              for (const auto& [name, args] : jobs)
+                  if (name == n) return args.size() < 3;
+              return true;
+          },
+          [&](const std::string& n, const std::vector<std::string>& args, int) {
+              xrt::bo& xb = buffer(args[args.size() - 2], layer);   // the input the host fills
+              xrt::bo& yb = buffer(args.back(), layer);             // the output the host reads
+              auto h0 = std::chrono::steady_clock::now();
+              xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xb.size(), 0);
+              const double up = ms_since(h0);
+              const auto r = run_split(kerns_.at(n), args, layer);
+              auto h1 = std::chrono::steady_clock::now();
+              yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, yb.size(), 0);
+              const float* y = yb.map<float*>();
+              for (size_t j = 0; j < yb.size() / 4; j += 1024) sink += y[j];
+              traffic[n].add(up, ms_since(h1));
+              return r;
+          },
+          [&](const std::string& n) {
+              char buf[64];
+              std::snprintf(buf, sizeof buf, " (host traffic %.2f ms)", traffic[n].mean());
+              return std::string(buf);
+          });
 
-    // The layer's cycle again, with the host writing and reading ~25 MB between dispatches --
-    // the size of the tiling, gather and transpose the route does around each one.
-    {
-        std::vector<std::pair<std::string, std::vector<std::string>>> cycle;
-        for (const Step& st : gb.program) cycle.push_back({st.kernel, st.args});
-        for (const Step& st : gb.shared_program) cycle.push_back({st.kernel, st.args});
-        if (!gb.moe_batch.kernels.empty()) {
-            auto big = gb.moe_batch.kernels.rbegin();
-            cycle.push_back({big->second, gb.moe_batch.args});
-            if (gb.moe_batch.kernels.size() > 1)
-                cycle.push_back({std::next(big)->second, gb.moe_batch.args});
-        }
-        std::vector<float> churn(6u << 20), churn2(6u << 20);        // 24 MB written, 24 MB read
-        volatile double sink = 0;
-        std::fprintf(stderr, "  the same cycle with ~48 MB of host memory churn between dispatches\n");
-        std::map<std::string, BenchStat> in_cycle;
-        for (int i = 0; i < reps; ++i)
-            for (const auto& [name, args] : cycle) {
-#pragma omp parallel for
-                for (long long j = 0; j < static_cast<long long>(churn.size()); ++j)
-                    churn[j] = static_cast<float>(j + i);
-                for (size_t j = 0; j < churn2.size(); j += 16) sink += churn2[j] + churn[j];
-                const auto [submit, wait] = run_split(kerns_.at(name), args, layer);
-                in_cycle[name].add(submit, wait);
-            }
-        for (const auto& [name, args] : cycle) {
-            const BenchStat& st = in_cycle[name];
-            std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
-                         st.mean_submit(), st.mean() - alone[name].mean());
-        }
-    }
-
-    // The layer's real dispatch cycle, in order, over and over.
+    // The layer's real dispatch cycle, and the same cycle with the host writing and reading
+    // ~48 MB between dispatches (the size of the tiling, gather and transpose the route does
+    // around each one). All three passes -- solo, cycle, cycle+churn -- run inside ONE rep loop,
+    // so the two deltas below are differences between things measured seconds apart rather than
+    // minutes, and each says one thing: rotation is what the cycle costs over the same kernel
+    // repeated, churn is what the host traffic costs over the SAME cycle without it. Reading
+    // churn against the solo baseline, as this did before, charged it for the rotation as well.
     {
         std::vector<std::pair<std::string, std::vector<std::string>>> cycle;
         for (const Step& st : gb.program) cycle.push_back({st.kernel, st.args});
@@ -705,18 +849,38 @@ void Core::bench_dispatch(int layer, int reps) {
             if (gb.moe_batch.kernels.size() > 1)
                 cycle.push_back({std::next(big)->second, gb.moe_batch.args});
         }
-        std::fprintf(stderr, "  the layer's own cycle of %zu dispatches, repeated (the rotation probe)\n", cycle.size());
-        std::map<std::string, BenchStat> in_cycle;
-        for (int i = 0; i < reps; ++i)
+        std::vector<float> churn(6u << 20), churn2(6u << 20);        // 24 MB written, 24 MB read
+        volatile double csink = 0;
+        std::map<std::string, BenchStat> solo, rot, chn;
+        for (const auto& [name, args] : cycle) run_split(kerns_.at(name), args, layer);   // warm
+        for (int i = 0; i < reps; ++i) {
             for (const auto& [name, args] : cycle) {
-                const auto [submit, wait] = run_split(kerns_.at(name), args, layer);
-                in_cycle[name].add(submit, wait);
+                run_split(kerns_.at(name), args, layer);              // the rep before pays any switch
+                const auto [s, w] = run_split(kerns_.at(name), args, layer);
+                solo[name].add(s, w);
             }
-        for (const auto& [name, args] : cycle) {
-            const BenchStat& st = in_cycle[name];
-            std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
-                         st.mean_submit(), st.mean() - alone[name].mean());
+            for (const auto& [name, args] : cycle) {
+                const auto [s, w] = run_split(kerns_.at(name), args, layer);
+                rot[name].add(s, w);
+            }
+            for (const auto& [name, args] : cycle) {
+#pragma omp parallel for
+                for (long long j = 0; j < static_cast<long long>(churn.size()); ++j)
+                    churn[j] = static_cast<float>(j + i);
+                for (size_t j = 0; j < churn2.size(); j += 16) csink += churn2[j] + churn[j];
+                const auto [s, w] = run_split(kerns_.at(name), args, layer);
+                chn[name].add(s, w);
+            }
         }
+        std::fprintf(stderr, "  the layer's own cycle of %zu dispatches (the rotation probe) and the same "
+                             "cycle with ~48 MB of host churn, both against an interleaved solo baseline\n",
+                     cycle.size());
+        std::fprintf(stderr, "  %-22s %8s %8s %8s %9s %9s\n", "kernel", "solo min", "cycle", "+churn",
+                     "rotation", "churn");
+        for (const auto& [name, args] : cycle)
+            std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f %9.3f %9.3f\n", name.c_str(), solo[name].min,
+                         rot[name].min, chn[name].min, rot[name].min - solo[name].min,
+                         chn[name].min - rot[name].min);
     }
 
     // The same kernels alternating with one from another context: if a dispatch costs more
@@ -778,13 +942,48 @@ void Core::bench_kernel(const std::string& name, int reps, int layer, int warm_t
     if (!args)
         for (const Step& s : man_.tail)
             if (s.kernel == name) args = &s.args;
+    // the block route's kernels too: the prefill's own dispatches are the ones worth holding
+    // at full rate for a whole prefill's worth of seconds (see the window report below)
+    const GemmBlockProgram& gb = types_[layer]->gemm_block;
+    if (!args)
+        for (const auto* prog : {&gb.program, &gb.shared_program})
+            for (const Step& s : *prog)
+                if (s.kernel == name) args = &s.args;
+    if (!args)
+        for (const auto& [slots, kn] : gb.moe_batch.kernels)
+            if (kn == name) args = &gb.moe_batch.args;
+    if (!args)
+        for (int l = 0; l < nl_ && !args; ++l) {
+            const AttnBlock& ab = types_[l]->gemm_block.attn_block;
+            if (!ab.present()) continue;
+            for (const auto* m : {&ab.kernels_s, &ab.kernels_pv})
+                for (const auto& [len, kn] : *m)
+                    if (kn == name) args = &ab.args;
+        }
     if (!args) throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " does not run " + name);
 
     run_split(k, *args, layer);                             // the first call of a context pays for it
+    // Windowed, because the question this answers is whether the rate HOLDS. A prefill is tens
+    // of seconds of back-to-back dispatches, and every in-block figure is ~1.4x the same
+    // kernel's `--bench` minimum even under `--pmode turbo`. If that is the package heating up
+    // rather than anything the engine does between dispatches, it shows here as the window
+    // minimum drifting up under a load with no host work in it at all.
     BenchStat st;
+    BenchStat win;
+    const int W = reps >= 200 ? reps / 20 : 0;
+    const auto tb0 = std::chrono::steady_clock::now();
+    if (W)
+        std::fprintf(stderr, "\nopen_qwen36: %s on layer %d, %d reps in windows of %d\n  %8s %9s %9s\n",
+                     name.c_str(), layer, reps, W, "at s", "win min", "win mean");
     for (int i = 0; i < reps; ++i) {
         const auto [submit, wait] = run_split(k, *args, layer);
         st.add(submit, wait);
+        if (!W) continue;
+        win.add(submit, wait);
+        if ((i + 1) % W == 0) {
+            std::fprintf(stderr, "  %8.1f %9.3f %9.3f\n", ms_since(tb0) / 1000.0, win.min, win.mean());
+            win = BenchStat{};
+        }
     }
     std::fprintf(stderr, "\nopen_qwen36: %s on layer %d, %d reps: %.3f min, %.3f mean, %.3f submit (context %s)\n\n",
                  name.c_str(), layer, reps, st.min, st.mean(), st.mean_submit(), man_.kernels.at(name).context.c_str());
@@ -810,8 +1009,9 @@ void Core::bench_decode(int reps) {
         return ms;
     };
 
-    std::fprintf(stderr, "\nopen_qwen36: decode bench, %d reps each\n", reps);
-    std::fprintf(stderr, "  %-16s %-12s %8s %8s %8s %8s\n", "probe", "kernel", "min ms", "mean ms", "submit", "context");
+    std::fprintf(stderr, "\nopen_qwen36: decode bench at position %d, %d reps each\n", pos_, reps);
+    std::fprintf(stderr, "  %-16s %-12s %8s %8s %8s %9s %7s %8s\n", "probe", "kernel", "min ms", "mean ms",
+                 "submit", "MB", "GB/s", "context");
 
     // One layer, over and over: its weights stay in whatever cache holds them and the context
     // never changes, so this is the kernel's own cost with nothing charged on top.
@@ -826,10 +1026,33 @@ void Core::bench_decode(int reps) {
         for (const Step& s : types_[ls[0]]->program) {
             if (s.op != "run") continue;
             const BenchStat& st = alone[s.kernel];
-            std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f %8s\n", ("one " + tname).c_str(), s.kernel.c_str(),
-                         st.min, st.mean(), st.mean_submit(), man_.kernels.at(s.kernel).context.c_str());
+            Kern& k = kerns_.at(s.kernel);
+            const double mb = stream_mb(k.iw(), k.words.size());
+            std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f %9.1f %7.1f %8s\n", ("one " + tname).c_str(),
+                         s.kernel.c_str(), st.min, st.mean(), st.mean_submit(), mb, gbps(mb, st.min),
+                         man_.kernels.at(s.kernel).context.c_str());
         }
     }
+
+    // What each dispatch streams, per buffer argument. This is the split the rate table needs:
+    // ax0's projection weights and its cached-KV walk are two very different numbers behind one
+    // dispatch time, and which of them is off the array's rate decides what to fix.
+    std::fprintf(stderr, "\n  what each dispatch streams (patched at position %d)\n", pos_);
+    for (const auto& [tname, ls] : layers_of)
+        for (const Step& s : types_[ls[0]]->program) {
+            if (s.op != "run") continue;
+            Kern& k = kerns_.at(s.kernel);
+            std::string line;
+            for (const auto& [arg, bytes] : stream_patch::ddr_bytes(k.iw(), k.words.size())) {
+                const char* nm = arg < s.args.size() ? s.args[arg].c_str() : "?";
+                char buf[96];
+                std::snprintf(buf, sizeof buf, "  %s[%u] %.2f", nm, arg, bytes / 1048576.0);
+                line += buf;
+            }
+            std::fprintf(stderr, "  %-12s %9.2f MB total = %s MB\n", s.kernel.c_str(),
+                         stream_mb(k.iw(), k.words.size()), line.c_str());
+        }
+    std::fprintf(stderr, "\n");
 
     // The same, cycling every layer of that type: a real step touches each layer's weights once
     // and never comes back, so anything here over the pass above is the price of cold weights.
@@ -860,14 +1083,24 @@ void Core::bench_decode(int reps) {
             step_ms += submit + wait;
         }
     }
+    double step_mb = 0;
     for (const auto& [name, st] : walk) {
         const auto it = alone.find(name);
         char delta[48] = "";
         if (it != alone.end()) std::snprintf(delta, sizeof delta, "  %+.3f vs one layer", st.mean() - it->second.mean());
-        std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f  %4d calls/step%s\n", "the real walk", name.c_str(),
-                     st.min, st.mean(), st.mean_submit(), st.n / reps, delta);
+        Kern& k = kerns_.at(name);
+        const int calls = st.n / reps;
+        const double mb = stream_mb(k.iw(), k.words.size());
+        step_mb += mb * calls;
+        std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f %9.1f %7.1f  %4d calls/step%s\n", "the real walk",
+                     name.c_str(), st.min, st.mean(), st.mean_submit(), mb, gbps(mb, st.min), calls, delta);
     }
-    std::fprintf(stderr, "  a step's dispatches: %.1f ms\n\n", step_ms / reps);
+    // The one number the closed engine can be held against: both stream the same weights through
+    // the same array, so a step is bytes / rate and nothing else. A kernel at the array's rate has
+    // nothing left in it; the gap lives in whichever ones are not.
+    const double step = step_ms / reps;
+    std::fprintf(stderr, "  a step's dispatches: %.1f ms, %.0f MB, %.1f GB/s aggregate\n\n", step, step_mb,
+                 gbps(step_mb, step));
 }
 
 void Core::route(Kern& k, int layer, uint64_t act_off) {
@@ -1010,23 +1243,29 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
     throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
 }
 
-const float* Core::gemm_run(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer) {
+const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
     xrt::bo& xb = buffer(s.args[1], 0);
     xrt::bo& yb = buffer(s.args[2], 0);
     if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
         throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals are smaller than [" +
                                  std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(N) + "]");
     auto t0 = std::chrono::steady_clock::now();
-    host::tile_x(x.data(), T, K, xb.map<uint16_t*>());   // straight into the mapped buffer
+    host::tile_x(x, T, K, xb.map<uint16_t*>());          // straight into the mapped buffer
     timing_.part1_ms += ms_since(t0);
     timing_.gemm_tile_ms += ms_since(t0);
+    auto ts = std::chrono::steady_clock::now();
     xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
+    timing_.sync_ms += ms_since(ts);
+    timing_.part1_ms += ms_since(ts);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
+    ts = std::chrono::steady_clock::now();
     yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
+    timing_.sync_ms += ms_since(ts);
+    timing_.part1_ms += ms_since(ts);
     return yb.map<float*>();
 }
 
-void Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer,
+void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
                 std::vector<float>& out) {
     const float* y = gemm_run(s, x, T, K, N, layer);
     auto t1 = std::chrono::steady_clock::now();
@@ -1095,6 +1334,23 @@ void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, cons
             const double w = static_cast<double>(bf16_to_f32(w_bf16[k]));
             orow[k] = static_cast<float>((row[k] / rms) * w);
         }
+    }
+}
+
+void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, const std::vector<float>& w_f32,
+                        double eps, std::vector<float>& out) {
+    // Same reduction as the bf16 overload; the weight arrives already dequantised to f32
+    // (read straight from the file, not sliced from packed consts bytes -- see its caller).
+    out.assign(T * hid, 0.f);
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        const double* row = &x[static_cast<size_t>(t) * hid];
+        double ss = 0;
+        for (size_t k = 0; k < hid; ++k) ss += row[k] * row[k];
+        const double rms = std::sqrt(ss / static_cast<double>(hid) + eps);
+        float* orow = &out[static_cast<size_t>(t) * hid];
+        for (size_t k = 0; k < hid; ++k)
+            orow[k] = static_cast<float>((row[k] / rms) * static_cast<double>(w_f32[k]));
     }
 }
 
@@ -1198,8 +1454,8 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     // laid out consecutively (ad_q -> ad_kvn -> ad_og), so the read side is one range.
     const size_t qkv_off = gb.ad_q, qkv_bytes = gb.ad_og - gb.ad_q, og_bytes = qw * 2;
     {
-        Kern& dxb = kerns_.at("dxB");
-        const std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
+        Kern& dxb = kerns_.at(gb.attn_kernel);
+        const std::vector<std::string>& attn_args = gb.attn_args;
         for (size_t tk = 0; tk < T; ++tk) {
             const uint64_t pos = static_cast<uint64_t>(pos_) + tk;
             auto tp = std::chrono::steady_clock::now();
@@ -1234,23 +1490,45 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     run_gemm(1, og, qw, hid, y_o);
 
     // ---- host: residual add, post-attention RMSNorm ------------------------
+    // Plain: res1 = xres + y_o; xm = post_attn_norm(res1). Sandwich (Gemma 3): the norm sits
+    // on the attention OUTPUT before it joins the residual, and a SEPARATE weight
+    // (pre_feedforward_layernorm) norms the resulting residual to produce xm --
+    // post_attention_layernorm and pre_feedforward_layernorm are different tensors here,
+    // where the plain chain has only the one.
     auto th = std::chrono::steady_clock::now();
     std::vector<double> res1(T * hid);
-#pragma omp parallel for
-    for (long long t = 0; t < static_cast<long long>(T); ++t)
-        for (size_t c = 0; c < hid; ++c)
-            res1[static_cast<size_t>(t) * hid + c] =
-                xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
-    timing_.tail_ms += ms_since(th);
     std::vector<float> xm;
-    rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm);
+    if (gb.sandwich) {
+        std::vector<double> y_o_row(T * hid);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                y_o_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+        std::vector<float> t_attn;
+        rmsnorm_host(y_o_row, T, hid, post_ln_w_bf16_[l], gb.eps, t_attn);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                res1[static_cast<size_t>(t) * hid + c] =
+                    xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(t_attn[static_cast<size_t>(t) * hid + c]);
+        rmsnorm_host(res1, T, hid, pre_ffn_w_[l], gb.eps, xm);
+    } else {
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                res1[static_cast<size_t>(t) * hid + c] =
+                    xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
+        rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm);
+    }
+    timing_.tail_ms += ms_since(th);
 
     // ---- GEMM gate_proj + up_proj (SAME context, zero switch between them) -
     std::vector<float> y_gate, y_up;  // both [ff, T]
     run_gemm(2, xm, hid, ff, y_gate);
     run_gemm(3, xm, hid, ff, y_up);
 
-    // ---- host SwiGLU: silu(gate) * up ---------------------------------------
+    // ---- host gated FFN: silu(gate) * up, or Gemma 3's gelu_tanh(gate) * up ------------
+    const bool gelu_tanh = gb.act == "gelu_tanh";
     th = std::chrono::steady_clock::now();
     std::vector<float> h(T * ff);
 #pragma omp parallel for
@@ -1259,24 +1537,45 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         for (size_t c = 0; c < ff; ++c) {
             const double g = static_cast<double>(y_gate[c * T + tk]);
             const double u = static_cast<double>(y_up[c * T + tk]);
-            h[tk * ff + c] = static_cast<float>((g / (1.0 + std::exp(-g))) * u);
+            // tanh-approximate GELU (HF's "gelu_pytorch_tanh"): sqrt(2/pi) = 0.7978845608028654
+            const double act = gelu_tanh ? 0.5 * g * (1.0 + std::tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))
+                                         : (g / (1.0 + std::exp(-g)));
+            h[tk * ff + c] = static_cast<float>(act * u);
         }
     }
     timing_.tail_ms += ms_since(th);
 
     // ---- GEMM down_proj, then residual -> next layer's xres -----------------
+    // Plain: xres = res1 + y_down. Sandwich: y_down is normed (post_feedforward_layernorm)
+    // before it joins the residual, mirroring the attention side above.
     std::vector<float> y_down;  // [hid, T]
     run_gemm(4, h, ff, hid, y_down);
     th = std::chrono::steady_clock::now();
+    if (gb.sandwich) {
+        std::vector<double> y_down_row(T * hid);
 #pragma omp parallel for
-    for (long long t = 0; t < static_cast<long long>(T); ++t)
-        for (size_t c = 0; c < hid; ++c)
-            xres[static_cast<size_t>(t) * hid + c] =
-                res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                y_down_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+        std::vector<float> t_ffn;
+        rmsnorm_host(y_down_row, T, hid, post_ffn_w_[l], gb.eps, t_ffn);
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                xres[static_cast<size_t>(t) * hid + c] =
+                    res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(t_ffn[static_cast<size_t>(t) * hid + c]);
+    } else {
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(T); ++t)
+            for (size_t c = 0; c < hid; ++c)
+                xres[static_cast<size_t>(t) * hid + c] =
+                    res1[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
+    }
     timing_.tail_ms += ms_since(th);
 }
 
 void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits) {
+    apply_thread_budget();
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_gemm_block before load_weights");
     const size_t T = ids.size();
     if (T == 0) return;
@@ -1346,17 +1645,45 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
 // ---- the MoE families' block: kinds linear and full. Timing: part0 = the GEMM
 // dispatches, part1 = the host stages, route = the per-token MoE (routing + kernel).
 
+void Core::moe_stage_resize(size_t rows) {
+    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    if (moe_.res.size() >= rows * hid) return;
+    moe_.res.resize(rows * hid);
+    moe_.xm.resize(rows * hid);
+    moe_.probs.resize(rows * E);
+    moe_.idx.resize(rows * topk);
+    moe_.w.resize(rows * topk);
+}
+
+void Core::block_layer_moe(int l, size_t rows, size_t t_real, float* xres) {
+    const GemmBlockProgram& gb = types_[l]->gemm_block;
+    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    if (moe_batch_on_ && gb.moe_batch.present()) {
+        moe_block(l, moe_.xm.data(), moe_.res.data(), moe_.idx.data(), moe_.w.data(), rows, t_real, xres);
+        return;
+    }
+    for (size_t t = 0; t < rows; ++t) {
+        if (t < t_real)
+            moe_token(l, moe_.xm.data() + t * hid, moe_.res.data() + t * hid, moe_.probs.data() + t * E,
+                      moe_.idx.data() + t * topk, moe_.w.data() + t * topk, xres + t * hid);
+        else
+            std::memcpy(xres + t * hid, moe_.res.data() + t * hid, hid * 4);   // padding: carried, never read
+    }
+}
+
 void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits) {
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
     const size_t T = ids.size(), hid = man_.hidden;
     std::vector<float> xres(T * hid);
     for (size_t t = 0; t < T; ++t) file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[t]), hid, xres.data() + t * hid);
+    moe_stage_resize(T);
     for (int l = 0; l < nl_; ++l) {
         const std::string& kind = types_[l]->gemm_block.kind;
-        if (kind == "linear") block_layer_linear(l, xres, T, t_real);
-        else if (kind == "full") block_layer_full(l, xres, T, t_real);
+        if (kind == "linear") block_layer_linear(l, xres.data(), T, t_real, 0, true, true);
+        else if (kind == "full") block_layer_full(l, xres.data(), T, t_real, static_cast<size_t>(pos_), 0, true);
         else throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no block route");
+        block_layer_moe(l, T, t_real, xres.data());
     }
     pos_ += static_cast<int>(t_real);
     block_logits_.clear();
@@ -1366,6 +1693,64 @@ void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_
             block_logits_.push_back(logits_host_);
         }
     if (want_logits) tail_logits(xres.data() + (t_real - 1) * hid);
+    timing_.total_ms = ms_since(t0);
+}
+
+// ---- B(2) of .claude/plans/prefill-parity.md: the same layers in the other order.
+//
+// The block-major loop above runs one block of T tokens through all 40 layers, so a
+// layer's MoE sees only that block's ~8 tokens per expert and streams each expert's
+// 1.97 MB for them alone -- 25.9 GB a block, which at the array's ceiling is most of
+// what a block costs. Closed prefills the whole prompt in ONE weight pass; forced to
+// our batch size it runs at 59 tok/s against our 86, so the per-pass kernel work was
+// never the gap. This is the schedule that closes it: all blocks through layer l, then
+// layer l's MoE once over every token of the prompt, then layer l + 1.
+//
+// Nothing about a layer's arithmetic changes. Each layer's device state -- the KV rows,
+// the DeltaNet S and conv rows -- is still written block by block in position order,
+// and layer l still reads the residual layer l - 1 produced for the same block, because
+// layer l - 1 finished every block before layer l started. The MoE's own accumulation
+// order per token is ascending expert index either way (the visit list is sorted by
+// expert), and a token's expert output does not depend on which other tokens share its
+// slot, so the result is bit-for-bit the block-major one.
+void Core::step_gemm_prompt(const std::vector<int>& ids, bool want_logits) {
+    apply_thread_budget();
+    if (!layer_major_ok()) throw std::runtime_error("open_qwen36: step_gemm_prompt on a kernel set without a MoE block route");
+    if (ids.empty()) throw std::runtime_error("open_qwen36: step_gemm_prompt with no tokens");
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+    const size_t T = gemm_block_t_, hid = man_.hidden;
+    const size_t N = ids.size(), B = (N + T - 1) / T, TOT = B * T;
+    if (static_cast<size_t>(pos_) + N > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: prompt of " + std::to_string(N) + " at position " + std::to_string(pos_) +
+                                 " is past the context capacity of " + std::to_string(cfg_.max_ctx));
+    const size_t pos0 = static_cast<size_t>(pos_);
+    // The padded rows carry the last real id, exactly as the block-major caller padded
+    // the tail block; they never touch the state and never reach the position.
+    auto tsetup = std::chrono::steady_clock::now();
+    std::vector<float> xres(TOT * hid);
+    for (size_t t = 0; t < TOT; ++t)
+        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[std::min(t, N - 1)]), hid, xres.data() + t * hid);
+    moe_stage_resize(TOT);
+    timing_.setup_ms += ms_since(tsetup);
+    timing_.part1_ms += ms_since(tsetup);
+    for (int l = 0; l < nl_; ++l) {
+        const std::string& kind = types_[l]->gemm_block.kind;
+        for (size_t b = 0; b < B; ++b) {
+            const size_t row0 = b * T, t_real = std::min(T, N - row0);
+            if (kind == "linear") block_layer_linear(l, xres.data() + row0 * hid, T, t_real, row0, b == 0, b + 1 == B);
+            else block_layer_full(l, xres.data() + row0 * hid, T, t_real, pos0 + row0, row0, b == 0);
+        }
+        block_layer_moe(l, TOT, N, xres.data());
+    }
+    pos_ += static_cast<int>(N);
+    block_logits_.clear();
+    if (block_logits_all_)
+        for (size_t t = 0; t < N; ++t) {
+            tail_logits(xres.data() + t * hid);
+            block_logits_.push_back(logits_host_);
+        }
+    if (want_logits) tail_logits(xres.data() + (N - 1) * hid);
     timing_.total_ms = ms_since(t0);
 }
 
@@ -1415,15 +1800,6 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
     timing_.route_ms += ms_since(tp);
 }
 
-namespace {
-// residual + post-attention norm, the router, then the MoE per real token: the tail both
-// MoE kinds share once their attention half has produced `out` [T, hid]
-struct MoeTail {
-    std::vector<float> res, xm, probs, w;
-    std::vector<int32_t> idx;
-};
-}  // namespace
-
 // The shared expert, once over the block instead of once per token: up|gate (one GEMM --
 // the two are contiguous in the pool and both band-law) then down, with silu, the sigmoid
 // gate and the add on the host. The kernels' own formula, from moe_silu32 / moe_hdr2 /
@@ -1433,15 +1809,15 @@ void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, siz
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const size_t hid = man_.hidden, ff = gb.shared_ff;
-    std::vector<float> xv(xm, xm + T * hid);
-    gemm(gb.shared_program[0], xv, T, hid, 2 * ff, l, sg_ug_);
+    gemm(gb.shared_program[0], xm, T, hid, 2 * ff, l, sg_ug_);
     const std::vector<float>& ug = sg_ug_;
     auto t0 = std::chrono::steady_clock::now();
-    std::vector<float> h(T * ff);
-    for (size_t t = 0; t < T; ++t) {
-        const float* u = ug.data() + t * 2 * ff;
+    float* h = BlockScratch::fit(bs_.sh, T * ff);
+#pragma omp parallel for
+    for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
+        const float* u = ug.data() + static_cast<size_t>(tt) * 2 * ff;
         const float* g = u + ff;
-        float* ho = h.data() + t * ff;
+        float* ho = h + static_cast<size_t>(tt) * ff;
         for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
     }
     timing_.shared_ms += ms_since(t0);
@@ -1449,7 +1825,9 @@ void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, siz
     const std::vector<float>& y = sg_y_;
     auto t1 = std::chrono::steady_clock::now();
     const std::vector<float>& sgw = hc_[l].sgw;
-    for (size_t t = 0; t < t_real; ++t) {
+#pragma omp parallel for
+    for (long long tt = 0; tt < static_cast<long long>(t_real); ++tt) {
+        const size_t t = static_cast<size_t>(tt);
         const float* x = xm + t * hid;
         double d = 0;
         for (size_t i = 0; i < hid; ++i) d += static_cast<double>(bf16_to_f32(f32_to_bf16(x[i]))) * sgw[i];
@@ -1461,71 +1839,67 @@ void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, siz
     timing_.shared_ms += ms_since(t1);
 }
 
-void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real) {
+void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_t row0, bool first, bool last) {
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const HostConsts& hc = hc_[l];
     const size_t hid = man_.hidden, nch = gb.qkv_dim, vw = gb.vw, E = man_.moe.experts, topk = man_.moe.topk;
+    float* res = moe_.res.data() + row0 * hid;
+    float* xm = moe_.xm.data() + row0 * hid;
 
-    std::vector<float> xn(T * hid);
-    host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
+    auto tn = std::chrono::steady_clock::now();
+    float* xn = BlockScratch::fit(bs_.xn, T * hid);
+    host::rmsnorm_rows(xres, T, hid, hc.ln.data(), gb.eps, xn);
+    timing_.part1_ms += ms_since(tn);
+    timing_.prenorm_ms += ms_since(tn);
     const float* yq = gemm_run(gb.program[0], xn, T, hid, nch + vw, l);
-    std::vector<float> qkv(T * nch), z(T * vw);
+    float* qkv = BlockScratch::fit(bs_.part[0], T * nch);
+    float* z = BlockScratch::fit(bs_.part[1], T * vw);
     {
         auto tt = std::chrono::steady_clock::now();
-        const host::TransposePart parts[2] = {{qkv.data(), 0, nch}, {z.data(), nch, vw}};
+        const host::TransposePart parts[2] = {{qkv, 0, nch}, {z, nch, vw}};
         host::transpose_parts(yq, T, parts, 2);
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }
     // the conv rows and S live in the state BO; the recurrence runs on the host in place
+    // The recurrence runs in the host map. On the layer-major route nothing between one
+    // block and the next touches this layer's state BO, so it is pulled off the device
+    // once at the layer's first block and pushed back once at its last.
     xrt::bo& st = state_[l];
     auto ts = std::chrono::steady_clock::now();
-    st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, lt.state_bytes, 0);
+    if (first) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
     uint8_t* sp = st.map<uint8_t*>();
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
-    std::vector<float> og(T * vw);
+    float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
     double phase[2] = {0, 0};
-    host::deltanet_block(g, qkv.data(), z.data(), xn.data(), hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
+    host::deltanet_block(g, qkv, z, xn, hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
                          hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
-                         reinterpret_cast<float*>(sp + gb.state_s_off), og.data(), phase);
+                         reinterpret_cast<float*>(sp + gb.state_s_off), og, phase);
     timing_.dn_conv_ms += phase[0];
     timing_.dn_rule_ms += phase[1];
     timing_.part1_ms += ms_since(t0);
     timing_.mid_ms += ms_since(t0);
     ts = std::chrono::steady_clock::now();
-    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+    if (last) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
     gemm(gb.program[1], og, T, vw, hid, l, gout_);
     const std::vector<float>& out = gout_;
 
     auto t1 = std::chrono::steady_clock::now();
-    MoeTail m;
-    m.res.resize(T * hid);
-    for (size_t i = 0; i < T * hid; ++i) m.res[i] = xres[i] + out[i];
-    m.xm.resize(T * hid);
-    host::rmsnorm_rows(m.res.data(), T, hid, hc.postln.data(), gb.eps, m.xm.data());
-    m.probs.resize(T * E); m.idx.resize(T * topk); m.w.resize(T * topk);
-    host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
+    host::rmsnorm_rows(res, T, hid, hc.postln.data(), gb.eps, xm);
+    host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,
+                       moe_.idx.data() + row0 * topk, moe_.w.data() + row0 * topk);
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
-    shared_expert_block(l, m.xm.data(), m.res.data(), T, t_real);
-    if (moe_batch_on_ && gb.moe_batch.present()) {
-        moe_block(l, m.xm.data(), m.res.data(), m.idx.data(), m.w.data(), T, t_real, xres.data());
-        return;
-    }
-    for (size_t t = 0; t < T; ++t) {
-        if (t < t_real)
-            moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
-                      m.w.data() + t * topk, xres.data() + t * hid);
-        else
-            std::memcpy(xres.data() + t * hid, m.res.data() + t * hid, hid * 4);   // padding: carried, never read
-    }
+    shared_expert_block(l, xm, res, T, t_real);
 }
 
 void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
@@ -1542,48 +1916,59 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
     if (ba.size() < M * ab.l_max * 2 || bb.size() < ab.l_max * hd * 2 || bc.size() < M * ab.l_max * 4)
         throw std::runtime_error("open_qwen36: the attn_block globals are smaller than the widest window");
     // row r of a product is query head r / T of the group at token r % T
-    std::vector<size_t> pos(M);
+    size_t* pos = BlockScratch::fit(bs_.pos, M);
     for (size_t r = 0; r < M; ++r) pos[r] = g.pos0 + r % T;
-    std::vector<uint16_t> qb(M * hd);
-    std::vector<float> m(M), lsum(M), acc(M * hd);
+    uint16_t* qb = BlockScratch::fit(bs_.qb, M * hd);
+    float* m = BlockScratch::fit(bs_.m, M);
+    float* lsum = BlockScratch::fit(bs_.lsum, M);
+    float* acc = BlockScratch::fit(bs_.acc, M * hd);
     std::fill(og, og + T * qw, 0.f);
     for (size_t gh = 0; gh < g.kvh; ++gh) {
         auto th = std::chrono::steady_clock::now();
         for (size_t hl = 0; hl < grp; ++hl)
             for (size_t t = 0; t < T; ++t) {
                 const float* src = Q + t * qw + (gh * grp + hl) * hd;
-                uint16_t* dst = qb.data() + (hl * T + t) * hd;
+                uint16_t* dst = qb + (hl * T + t) * hd;
                 for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
             }
-        std::fill(m.begin(), m.end(), -std::numeric_limits<float>::infinity());
-        std::fill(lsum.begin(), lsum.end(), 0.f);
-        std::fill(acc.begin(), acc.end(), 0.f);
+        std::fill(m, m + M, -std::numeric_limits<float>::infinity());
+        std::fill(lsum, lsum + M, 0.f);
+        std::fill(acc, acc + M * hd, 0.f);
         timing_.mid_ms += ms_since(th);
+        timing_.part1_ms += ms_since(th);
         // the window in chunks of the widest stream, the softmax merged across them
         for (size_t c0 = 0; c0 < rows; c0 += ab.l_max) {
             const size_t lreal = std::min(ab.l_max, rows - c0);
             const size_t L = (lreal + 255) / 256 * 256;
             th = std::chrono::steady_clock::now();
-            std::memcpy(ba.map<uint16_t*>(), qb.data(), M * hd * 2);
+            std::memcpy(ba.map<uint16_t*>(), qb, M * hd * 2);
             host::tile_rows_as_bt(kv + c0 * kv_row_elems + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
             ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hd * L * 2, 0);
             timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
             timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
-            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * L * 4, 0);
             th = std::chrono::steady_clock::now();
-            host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos.data(), m.data(), lsum.data(), acc.data(),
-                                ba.map<uint16_t*>());
+            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * L * 4, 0);   // the whole M x L score matrix
+            timing_.sync_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
+            th = std::chrono::steady_clock::now();
+            host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos, m, lsum, acc, ba.map<uint16_t*>());
             host::tile_rows_as_b(kv + c0 * kv_row_elems + kvw + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
             ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
             timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
             timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
+            th = std::chrono::steady_clock::now();
             bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * hd * 4, 0);
+            timing_.sync_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
             th = std::chrono::steady_clock::now();
             const float* c = bc.map<float*>();
             for (size_t i = 0; i < M * hd; ++i) acc[i] += c[i];
             timing_.mid_ms += ms_since(th);
+            timing_.part1_ms += ms_since(th);
         }
         th = std::chrono::steady_clock::now();
         for (size_t hl = 0; hl < grp; ++hl)
@@ -1595,84 +1980,83 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
                 for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv / (1.0f + std::exp(-gt[j]));
             }
         timing_.mid_ms += ms_since(th);
+        timing_.part1_ms += ms_since(th);
     }
 }
 
-void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real) {
+void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t pos0, size_t row0, bool first) {
     const double mid0 = timing_.mid_ms;   // whatever this layer adds to mid is the attention half
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const HostConsts& hc = hc_[l];
     const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, nf = 2 * qw + 2 * kvw;
     const size_t E = man_.moe.experts, topk = man_.moe.topk;
+    float* res = moe_.res.data() + row0 * hid;
+    float* xm = moe_.xm.data() + row0 * hid;
 
-    std::vector<float> xn(T * hid);
-    host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
+    auto tn = std::chrono::steady_clock::now();
+    float* xn = BlockScratch::fit(bs_.xn, T * hid);
+    host::rmsnorm_rows(xres, T, hid, hc.ln.data(), gb.eps, xn);
+    timing_.part1_ms += ms_since(tn);
+    timing_.prenorm_ms += ms_since(tn);
     const float* yf = gemm_run(gb.program[0], xn, T, hid, nf, l);
-    std::vector<float> q(T * qw), k(T * kvw), v(T * kvw), gate(T * qw);
+    float* q = BlockScratch::fit(bs_.part[0], T * qw);
+    float* k = BlockScratch::fit(bs_.part[1], T * kvw);
+    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
+    float* gate = BlockScratch::fit(bs_.part[3], T * qw);
     {
         auto tt = std::chrono::steady_clock::now();
-        const host::TransposePart parts[4] = {{q.data(), 0, qw},
-                                              {k.data(), qw, kvw},
-                                              {v.data(), qw + kvw, kvw},
-                                              {gate.data(), qw + 2 * kvw, qw}};
+        const host::TransposePart parts[4] = {{q, 0, qw},
+                                              {k, qw, kvw},
+                                              {v, qw + kvw, kvw},
+                                              {gate, qw + 2 * kvw, qw}};
         host::transpose_parts(yf, T, parts, 4);
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }
-    // the KV rows: [0, pos_) read, [pos_, pos_ + t_real) written by the host attention
+    // the KV rows: [0, pos0) read, [pos0, pos0 + t_real) written by the host attention.
+    // The read is only needed for the layer's FIRST block -- the blocks after it want the
+    // rows the blocks before them just wrote into this same host map, and pulling the
+    // whole window back per block is a cost that grows with the square of the prompt.
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row;
     auto ts = std::chrono::steady_clock::now();
-    if (pos_ > 0) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, static_cast<size_t>(pos_) * row, 0);
+    if (first && pos0 > 0) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, pos0 * row, 0);
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = static_cast<size_t>(pos_); g.eps = gb.eps;
-    std::vector<float> og(T * qw);
+    g.pos0 = pos0; g.eps = gb.eps;
+    float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
     if (attn_block_on_ && gb.attn_block.present()) {
-        std::vector<float> Q(T * qw);
-        host::attention_prep(g, q.data(), k.data(), v.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
-                             st.map<uint16_t*>(), row / 2, Q.data());
+        float* Q = BlockScratch::fit(bs_.qrope, T * qw);
+        host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                             st.map<uint16_t*>(), row / 2, Q);
         timing_.part1_ms += ms_since(t0);
         timing_.mid_ms += ms_since(t0);
-        attention_npu(l, g, Q.data(), gate.data(), st.map<uint16_t*>(), row / 2, og.data());
+        attention_npu(l, g, Q, gate, st.map<uint16_t*>(), row / 2, og);
     } else {
-        host::attention_block(g, q.data(), k.data(), v.data(), gate.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
-                              st.map<uint16_t*>(), row / 2, og.data());
+        host::attention_block(g, q, k, v, gate, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                              st.map<uint16_t*>(), row / 2, og);
         timing_.part1_ms += ms_since(t0);
         timing_.mid_ms += ms_since(t0);
     }
     ts = std::chrono::steady_clock::now();
-    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, static_cast<size_t>(pos_) * row);
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, pos0 * row);
     timing_.state_ms += ms_since(ts);
     timing_.attn_ms += timing_.mid_ms - mid0;
     gemm(gb.program[1], og, T, qw, hid, l, gout_);
     const std::vector<float>& out = gout_;
 
     auto t1 = std::chrono::steady_clock::now();
-    MoeTail m;
-    m.res.resize(T * hid);
-    for (size_t i = 0; i < T * hid; ++i) m.res[i] = xres[i] + out[i];
-    m.xm.resize(T * hid);
-    host::rmsnorm_rows(m.res.data(), T, hid, hc.postln.data(), gb.eps, m.xm.data());
-    m.probs.resize(T * E); m.idx.resize(T * topk); m.w.resize(T * topk);
-    host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
+    host::rmsnorm_rows(res, T, hid, hc.postln.data(), gb.eps, xm);
+    host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,
+                       moe_.idx.data() + row0 * topk, moe_.w.data() + row0 * topk);
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
-    shared_expert_block(l, m.xm.data(), m.res.data(), T, t_real);
-    if (moe_batch_on_ && gb.moe_batch.present()) {
-        moe_block(l, m.xm.data(), m.res.data(), m.idx.data(), m.w.data(), T, t_real, xres.data());
-        return;
-    }
-    for (size_t t = 0; t < T; ++t) {
-        if (t < t_real)
-            moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
-                      m.w.data() + t * topk, xres.data() + t * hid);
-        else
-            std::memcpy(xres.data() + t * hid, m.res.data() + t * hid, hid * 4);
-    }
+    shared_expert_block(l, xm, res, T, t_real);
 }
 
 // The routed experts over the block on the token-batched kernel. Every expert's tokens are
@@ -1721,11 +2105,17 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
             for (size_t j = 0; j < std::min(NT, owed[e].size() - off); ++j)
                 per_token[owed[e][off + j].first].push_back({i * NT + j, owed[e][off + j].second});
         }
-        // x[slot] as the kernel's A tiles: [hid / 8][8 tokens][8 k] bf16 (designs/moe_batch/layout.py)
+        // x[slot] as the kernel's A tiles: [hid / 8][NT tokens][8 k] bf16, which is already the
+        // kernel's [k-block][NG sub-tiles][8 tokens][8 k] -- the sub-tile axis is the high bits
+        // of the token index (designs/moe_batch/layout.py)
 #pragma omp parallel for
         for (long long i = 0; i < static_cast<long long>(n); ++i) {
             const auto& [e, off] = visits[done + i];
             uint16_t* xs = xh + i * hid * NT;
+            // A visit with fewer than NT tokens owed leaves the rest of its columns holding
+            // the previous pass's activations. They are deliberately not cleared: the mmul's
+            // token lanes are independent, and zeroing them was measured (2026-09-20, 600
+            // tokens x 1 layer) to change not one bit of the output.
             for (size_t j = 0; j < std::min(NT, owed[e].size() - off); ++j) {
                 const float* row = xm + owed[e][off + j].first * hid;
                 for (size_t kb = 0; kb < hid / 8; ++kb)
@@ -1741,25 +2131,36 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         timing_.moe_patch_ms += ms_since(t1);
         const double run_ms = run(mk, mb.args, l);
         timing_.moe_run_ms += run_ms;
+        // Why the same dispatch costs 17.4 ms here and 12.4 ms under `--bench`: run it a
+        // SECOND time, same stream, same buffers, no host work in between. If the repeat is
+        // the bench's figure then what the first one pays for is the host work before it; if
+        // both are 17.4 the hardware really is in a different state during a prefill.
+        if (moe_redispatch_) {
+            const double again = run(mk, mb.args, l);
+            std::fprintf(stderr, "open_qwen36: layer %d moe redispatch: %.3f then %.3f ms\n", l, run_ms, again);
+        }
+
         if (log_passes)
             std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, n, visits.size(),
                          kname->c_str(), run_ms);
         auto t2 = std::chrono::steady_clock::now();
         yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n * hid * NT * 4, 0);
         const float* yh = yb.map<float*>();
-        // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][8 tokens][8];
-        // row 64 band + 16 g + 2 jj + p. A column belongs to exactly one token, so the
-        // un-interleave is the scatter -- read the tiles straight into the token's row rather
-        // than staging 20 MB a layer and reading it back.
+        // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][NG mmul
+        // sub-tiles][8 tokens][8]; row 64 band + 16 g + 2 jj + p, token 8 sub + tt. A column
+        // belongs to exactly one token, so the un-interleave is the scatter -- read the tiles
+        // straight into the token's row rather than staging 20 MB a layer and reading it back.
+        const size_t NG = NT / 8;                      // mmul sub-tiles a slot holds
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(t_real); ++t) {
             float* o = out + t * hid;
             for (const auto& [col, wt] : per_token[t]) {
-                const float* base = yh + (col / NT) * hid * NT + (col % NT) * 8;
+                const size_t tt = col % NT;
+                const float* base = yh + (col / NT) * hid * NT + (tt / 8) * 64 + (tt % 8) * 8;
                 for (size_t band = 0; band < hid / 64; ++band)
                     for (size_t g = 0; g < 4; ++g) {
-                        const float* even = base + ((band * 4 + g) * 2) * 64;
-                        const float* odd = even + 64;
+                        const float* even = base + ((band * 4 + g) * 2 * NG) * 64;
+                        const float* odd = even + NG * 64;
                         float* d = o + band * 64 + g * 16;
                         for (size_t jj = 0; jj < 8; ++jj) {
                             d[2 * jj] += wt * even[jj];

@@ -39,7 +39,7 @@ std::map<std::string, runner_cmd_t> cmd_map = {
 /// \param downloader - the downloader for the models
 /// \param tag - the tag of the model to load
 Runner::Runner(model_list& supported_models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption) {
+    : supported_models(supported_models), downloader(downloader), tag(args.model_tag), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption) {
 
     this->npu_device_inst = oflm_rt::device(0);
 
@@ -112,7 +112,12 @@ Runner::Runner(model_list& supported_models, ModelDownloader& downloader, progra
         if (!asr_supported) 
         {
             header_print("OFLM", "The loaded model does not support ASR. Loading default Whisper model for ASR...");
-            std::string whisper_tag = "whisper-v3:turbo";
+            std::string whisper_tag = this->asr_model_tag;
+            // get_model_info() answers an unknown tag with llama3.2:1b; refuse instead.
+            if (this->supported_models.get_model_info(whisper_tag).first.rfind("whisper", 0) != 0) {
+                header_print("ERROR", "--asrmodel " + whisper_tag + " is not a Whisper model in the registry");
+                exit(EXIT_FAILURE);
+            }
             switch (this->downloader.is_model_downloaded(whisper_tag)) {
                 case ModelDownloader::ModelStatus::Ready:
                     break;

@@ -58,7 +58,8 @@ REM and cl fails with C1083 before ever reaching this file's own code.
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
    q4nx_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
-   /Fe:out\open_qwen36_cli.exe /Fo:out\
+   /Fe:out\open_qwen36_cli.exe /Fo:out\ ^
+   /link /DELAYLOAD:VCOMP140.DLL delayimp.lib
 if errorlevel 1 goto :clfail
 echo [open_qwen36] OK -^> out\open_qwen36_cli.exe
 exit /b 0

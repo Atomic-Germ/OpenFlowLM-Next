@@ -56,6 +56,16 @@ function(add_npu_test TARGET_NAME OUTPUT_SUBDIR)
         CXX_STANDARD_REQUIRED ON
     )
 
+    # A version string for utils/vm_args.hpp, and which prebuilt engine libs to link
+    # against: these targets are built outside the main project, which is where
+    # OFLM_VERSION and OFLM_RUNTIME_NAME come from.
+    if(NOT DEFINED OFLM_TEST_VERSION)
+        set(OFLM_TEST_VERSION "0.0.0-test")
+    endif()
+    if(NOT DEFINED OFLM_TEST_RUNTIME_NAME)
+        set(OFLM_TEST_RUNTIME_NAME "xrt")
+    endif()
+
     # Apply the same AVX2 settings to the test executable
     target_compile_definitions(${TARGET_NAME} PUBLIC
         DISABLE_ABI_CHECK=1
@@ -63,6 +73,11 @@ function(add_npu_test TARGET_NAME OUTPUT_SUBDIR)
         _ENABLE_EXTENDED_ALIGNED_STORAGE
         __WINDOWS__
         DEV_BUILD
+        # utils/vm_args.hpp prints it for `--version`. Only src/CMakeLists.txt defined
+        # it, so a test target including that header failed to COMPILE, before ever
+        # reaching a link error -- pre-existing, and unrelated to which target hits it.
+        # common.mk (the Makefile path) has carried its own copy all along.
+        __OFLM_VERSION__="${OFLM_TEST_VERSION}"
         CMAKE_INSTALL_PREFIX="${CMAKE_SOURCE_DIR}/../../build/${OUTPUT_SUBDIR}"
         CMAKE_XCLBIN_PREFIX="${CMAKE_SOURCE_DIR}/../../xclbins"
     )
@@ -95,6 +110,11 @@ function(add_npu_test TARGET_NAME OUTPUT_SUBDIR)
 
     # Basic link settings for test
     target_link_directories(${TARGET_NAME} PUBLIC
+        # The prebuilt engine libs moved into lib/xrt and lib/hrx (src/CMakeLists.txt's
+        # OFLM_ENGINE_LIB_DIR); these targets still pointed at lib/ itself and could not
+        # find q4_npu_eXpress.lib. Pre-existing, and independent of what a target lists
+        # as sources. XRT is the default here, as it is there.
+        ${CMAKE_SOURCE_DIR}/../../lib/${OFLM_TEST_RUNTIME_NAME}
         ${CMAKE_SOURCE_DIR}/../../lib
         ${XRT_LIB_DIR}
         ${CMAKE_SOURCE_DIR}/../../build/tokenizer/lib

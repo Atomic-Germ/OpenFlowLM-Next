@@ -46,8 +46,9 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 
 | Preset | Purpose | Description |
 |---|---|---|
-| `linux-default` | Full distribution | Builds executable + open NPU kernels (default) |
+| `linux-default` | Full distribution | Builds executable + open NPU kernels + bundled utilities (default) |
 | `linux-debug` | Debug development | Engine only, kernels OFF (fast iteration) |
+| `fedora-default` | Fedora release | Like `linux-default`, with XRT discovered through pkg-config |
 | `linux-portable` | Portable bundle | Bundles XRT/XDNA libraries |
 | `windows-default` | Windows build | Visual Studio build (engine only; kernels Linux-only) |
 
@@ -70,8 +71,9 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 
 | Preset | Output |
 |---|---|
+| `linux-package` | Host-native `.rpm` + portable `.tar.gz` (one command) |
 | `linux-package-tgz` | `.tar.gz` distribution |
-| `linux-package-deb` | `.deb` package |
+| `linux-package-deb` | `.deb` package (build on Debian/Ubuntu or in a Debian container) |
 | `linux-package-rpm` | `.rpm` package |
 
 ### Workflow Presets
@@ -79,6 +81,7 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 | Preset | Steps |
 |---|---|
 | `linux-default` | Configure + Build + Test (one command) |
+| `linux-package` | Configure + Build + Test + Package RPM/TGZ (one command) |
 
 ---
 
@@ -99,11 +102,31 @@ cmake --install build
 - Engine shared libraries
 - Open kernel xclbins (all families)
 - Model registry files
+- Bundled utilities (`oflm-test`, `q4nx-build`) and their launchers
 
 **Output:**
 - Binary in `build/bin/oflm`
 - Kernels in `src/xclbins/`
 - Installed to `/opt/openflowlm`
+- `/usr/bin/oflm` symlink + `/etc/profile.d/openflowlm.sh`, so `oflm` is on
+  `PATH` immediately after install with no shell-rc editing. (Set
+  `-DOFLM_INSTALL_PATH_PLUMBING=OFF` to skip these for an engine-only dev
+  install.)
+
+**One command for engine, kernels, tests, and packages:**
+
+```bash
+cmake --workflow --preset linux-package
+```
+
+This configures, builds, tests, and emits the host-native `.rpm` and portable
+`.tar.gz` into `build/packages/`. Packages depend on the system XRT (`xrt-base`
+on Fedora, `libxrt-npu2` on Ubuntu), matching the runtime-prerequisite flow.
+
+`.deb` is intentionally **not** part of this preset: a DEB is only valid when
+built on Debian/Ubuntu, since the engine binary carries the build host's glibc,
+FFmpeg and Boost sonames. Produce it with `linux-package-deb` on an Ubuntu host
+or inside a Debian container.
 
 ### 2. Engine-Only Build
 
@@ -275,7 +298,14 @@ cmake -B build --preset windows-default
 cmake --build build
 ```
 
-**Note:** Windows builds are engine-only; NPU kernel export is Linux-only.
+**Note:** the commands above build the engine only. The NPU kernels themselves
+(both the embedding and the language-model sets) build natively on Windows
+too -- see "2. The NPU kernels" below, and mlir-aie's own
+[`docs/buildHostWinNative.md`](https://github.com/Xilinx/mlir-aie/blob/main/docs/buildHostWinNative.md)
+for the toolchain setup (a downloaded XRT SDK zip and `iron_setup.py`; no WSL,
+no source build), pinned to mlir-aie **v1.4.2**, which this tree's designs are
+written against. `utilities/export-kernels.py`'s own orchestration is
+Linux-only (its path handling is POSIX-specific), not the build it drives.
 
 ---
 
@@ -310,6 +340,21 @@ cd C:\dev\mlir-aie; . .\iron_env.ps1        # the leading dot is required
 On Linux, activate the equivalent `mlir-aie` virtualenv (`ironenv`), with
 `xclbinutil` and `aiebu-asm` on `PATH` — both come from XRT, not from the
 mlir-aie wheel.
+
+Setting that checkout up on Windows, if you don't have one, is mlir-aie's own
+[`docs/buildHostWinNative.md`](https://github.com/Xilinx/mlir-aie/blob/main/docs/buildHostWinNative.md):
+extract the XRT SDK zip to `C:\Xilinx\XRT`, clone mlir-aie, run
+`python utils\iron_setup.py`, which writes the `iron_env.ps1` above. Two things
+that guide does not tell you, both of which bite:
+
+- **Check the clone out at tag `v1.4.2` first.** This tree's IRON designs use
+  1.4.2's API — `ironvenv-requirements.txt` pins `mlir_aie==1.4.2` — and
+  `iron_setup.py` reads the checkout: a tag installs its matching release wheel,
+  while a checkout left on `main` installs the rolling one, whose API `dx.py`
+  fails to import against (`cannot import name 'TaskGroup'`).
+- The published Windows `llvm-aie` wheel ships no `llvm-objcopy.exe`, which
+  `iron_setup.py` needs to repair that wheel; it falls back to one on `PATH`.
+  `winget install LLVM.LLVM` and putting its `bin` on `PATH` satisfies it.
 
 ### Embedding models (`open_npue`)
 
