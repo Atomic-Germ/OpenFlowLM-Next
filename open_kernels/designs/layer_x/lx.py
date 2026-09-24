@@ -290,14 +290,27 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     YB = X.BAND_ROWS * 4                                   # one band's y bytes
 
     # ---- host sequences (one per instruction stream)
+    def wide_side_sequence(ps, side_p, xn_p, a_consts, a_act):
+        """Bank-major weights and a separate xn replay stream, jointly paced.
+
+        Diagnostic only: this fused topology needs three core input DMA channels.
+        The recipe guard allows it only for the explicit compile/place probe.
+        Issue weights before xn for each projection: throttling xn must not
+        wait on a worker whose weights have not yet been submitted.
+        """
+        bank_bytes = sum(AB_TILES) * ELEM
+        for bank in range(AB_BANKS):
+            for reg in (SIDE_ALPHA, SIDE_BETA):
+                ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + reg + bank * bank_bytes, bank_bytes))
+                for h in range(XN_ELEMS):
+                    ps.fill(xn_p, a_act, bt(A_BYTES, A_XN + h * ELEM, ELEM))
+            ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_SMALL, ELEM))
+        ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_CONV, GLUE_SIDE_BYTES - SIDE_CONV))
+
     def dense_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
                        side_p, gact_p, gout_c, pin_p, pout_c, *wide_producers):
         """ONE instruction stream: the MoE stream's steps 1-6 with the router dropped, then
         designs/dense/dx.py's steps 5-7 (residual + norm, the FFN, the output residual)."""
-        if WIDE_GLUE:
-            # Phase 5 must establish physical DMA/shim feasibility. Never feed the
-            # banked worker with the legacy interleaved xn/weights sequence.
-            raise NotImplementedError("wide DeltaNet glue DMA scheduling is not implemented")
         # 1. layer-entry norm: xn -> act[A_XN]
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -318,14 +331,17 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         # and one TaskGroup of 10 would silently drop the rest (ironutil.Pipeline). The count
         # is `qwen35.glue_side_fills`, checked against the shim budget by the recipe.
         ps = Pipeline(3)
-        for reg in (SIDE_ALPHA, SIDE_BETA):
-            off = 0
-            for h, ntiles in enumerate(AB_TILES):
-                ps.fill(side_p, a_act, bt(A_BYTES, A_XN + h * ELEM, ELEM))
-                ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + reg + off, ntiles * ELEM))
-                off += ntiles * ELEM
-        ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_SMALL, ELEM))
-        ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_CONV, GLUE_SIDE_BYTES - SIDE_CONV))
+        if WIDE_GLUE:
+            wide_side_sequence(ps, side_p, wide_producers[0], a_consts, a_act)
+        else:
+            for reg in (SIDE_ALPHA, SIDE_BETA):
+                off = 0
+                for h, ntiles in enumerate(AB_TILES):
+                    ps.fill(side_p, a_act, bt(A_BYTES, A_XN + h * ELEM, ELEM))
+                    ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + reg + off, ntiles * ELEM))
+                    off += ntiles * ELEM
+            ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_SMALL, ELEM))
+            ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_CONV, GLUE_SIDE_BYTES - SIDE_CONV))
         py.finish()                                      # qkv, z are in DDR
         # 3. glue: conv state updated in place, DeltaNet records -> act[A_VEC]
         pipe = Pipeline(3)

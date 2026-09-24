@@ -2,6 +2,13 @@
 
 Status: in progress. No 27B hardware geometry promoted to the catalogue.
 
+2026-09-24: the user's `LLM_Coding_Agent_Plan.md` supersedes the original
+model-only ordering. Current work is shared WideDeltaNet (Track A), then
+Qwen3.8-27B (B), then Flash-Next/qwen4exp (C). Current results and next steps
+are in [wide-deltanet-bringup.md](wide-deltanet-bringup.md). The phase notes
+below are historical; in particular the toolchain is now installed and two
+standalone AB kernels have passed hardware comparisons.
+
 ## Baseline (2026-09-23)
 
 - Repository: `c23b1a57f23b6342457b8099ef1f14e3d73f4d47`.
@@ -184,7 +191,7 @@ No xclbins/libraries were built. Source-based cache keys change intentionally;
 legacy layout fixtures and interpreted worker behavior still pass, but binary
 identity has not been established by a rebuild.
 
-## Next work and outstanding gates
+## Outstanding gates after phase 4 (historical; superseded by Track A report)
 
 Phase 5: implement and compile/place the wide host schedule (7 logical weight
 fills and 12 xn fills). The temporary wide-dispatch guards above must be

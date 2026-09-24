@@ -35,6 +35,8 @@ path, so a request carrying one routes to the closed engine.
 """
 from __future__ import annotations
 
+import os
+
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
@@ -80,14 +82,19 @@ def _check(spec: ModelSpec) -> None:
                 key_heads=spec.lin_key_heads, conv_kernel=spec.conv_kernel)
         if spec.lin_key_dim != spec.lin_value_dim:
             raise OpRangeError("qwen35: DeltaNet key and value head dims must match")
-        if M.ab_banks(spec) > 1:
-            raise OpRangeError("qwen35: not implemented: wide DeltaNet glue DMA scheduling; "
-                               "the banked worker needs compile/place validation before dispatch")
         require_gemv(spec, "linear", spec.hidden, spec.lin_qkv_dim // n, pc)
         require_gemv(spec, "linear", spec.hidden, spec.lin_value_width // n, pc)
         require_gemv(spec, "linear_out", spec.lin_value_width, spec.hidden // n, pc)
         fills = glue_side_fills(spec)
-        if fills > LIMITS["shim_fills"]:
+        if M.ab_banks(spec) > 1 and os.environ.get("OPEN_KERNELS_WIDE_GLUE_PROBE") != "1":
+            raise OpRangeError(
+                "qwen35: not implemented: fused wide glue needs 3 input DMA channels; "
+                "the core has 2. Separate open AB dispatch exists but layer integration "
+                "and recurrent-state validation are pending. Use utilities/probe-qwen35-wide.py "
+                "only to reproduce the compile/place failure.")
+        # The explicit diagnostic probe below may bypass this known topology failure,
+        # but it does not bypass catalogue validation or establish model support.
+        if M.ab_banks(spec) == 1 and fills > LIMITS["shim_fills"]:
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
                 f"(xn half + its weight tiles, per accumulator, then small and conv), over the "

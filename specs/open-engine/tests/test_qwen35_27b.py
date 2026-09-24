@@ -88,7 +88,7 @@ class BytesModel:
         return self.data
 
 
-@pytest.mark.parametrize("hidden", [64, 5120])
+@pytest.mark.parametrize("hidden", [7, 64, 2560, 5120])
 def test_banked_ab_transpose_preserves_every_element_and_zeroes_tail(hidden):
     src = ((np.arange(48 * hidden, dtype=np.uint32) * 37 + 11) % 65536).astype("<u2").reshape(48, hidden)
     size = 2 * hidden * 32 * 2
@@ -102,6 +102,19 @@ def test_banked_ab_transpose_preserves_every_element_and_zeroes_tail(hidden):
     assert np.all(dst[:8] == 0xAB) and np.all(dst[-8:] == 0xAB)
     for head in (31, 32, 47):
         np.testing.assert_array_equal(got[head // 32, :, head % 32], src[head])
+
+
+@pytest.mark.parametrize("tail", range(1, 33))
+def test_banked_transpose_all_active_tails(tail):
+    heads, hidden = 32 + tail, 13
+    src = np.arange(heads * hidden, dtype="<u2").reshape(heads, hidden)
+    dst = np.full(2 * hidden * 32 * 2, 0xAB, dtype=np.uint8)
+    pack.apply_op(dict(op="transpose_banked", tensor="w", rows=heads, cols=hidden,
+                       elem=2, dst=0), BytesModel(src.tobytes()), 0, dst)
+    got = dst.view("<u2").reshape(2, hidden, 32)
+    for head in range(heads):
+        np.testing.assert_array_equal(got[head // 32, :, head % 32], src[head])
+    assert not got[1, :, tail:].any()
 
 
 @pytest.mark.parametrize("change,match", [

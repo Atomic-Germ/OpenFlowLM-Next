@@ -833,9 +833,11 @@ int main() {
     check(pok, "transpose: [16, 64] bf16 -> [64, 32] with columns 16..31 zero");
 
     // Bank-major AB packing through the runtime interpreter, including the 48-head tail.
-    for (size_t hidden : {size_t(64), size_t(5120)}) {
-        std::vector<uint8_t> src(48 * hidden * 2);
-        for (size_t i = 0; i < 48 * hidden; ++i) {
+    std::vector<std::pair<size_t, size_t>> ab_shapes = {{48, 7}, {48, 64}, {48, 2560}, {48, 5120}};
+    for (size_t tail = 1; tail <= 32; ++tail) ab_shapes.emplace_back(32 + tail, 13);
+    for (auto [heads, hidden] : ab_shapes) {
+        std::vector<uint8_t> src(heads * hidden * 2);
+        for (size_t i = 0; i < heads * hidden; ++i) {
             uint16_t value = static_cast<uint16_t>(i * 37 + 11);
             src[2 * i] = value & 0xff;
             src[2 * i + 1] = value >> 8;
@@ -845,7 +847,7 @@ int main() {
         open_qwen36::PackOp op;
         op.op = "transpose_banked";
         op.tensor = "ab";
-        op.rows = 48; op.cols = hidden; op.elem = 2; op.dst = 8;
+        op.rows = heads; op.cols = hidden; op.elem = 2; op.dst = 8;
         std::vector<uint8_t> dst(2 * hidden * 32 * 2 + 16, 0xAB);
         try {
             open_qwen36::pools::apply(op, file, 0, dst.data(), dst.size(), 5120);
@@ -855,18 +857,19 @@ int main() {
                     for (size_t lane = 0; lane < 32; ++lane) {
                         size_t h = bank * 32 + lane;
                         size_t off = 8 + ((bank * hidden + c) * 32 + lane) * 2;
-                        equal &= h < 48 ? std::memcmp(dst.data() + off, src.data() + (h * hidden + c) * 2, 2) == 0
+                        equal &= h < heads ? std::memcmp(dst.data() + off, src.data() + (h * hidden + c) * 2, 2) == 0
                                         : dst[off] == 0 && dst[off + 1] == 0;
                     }
             for (size_t i = 0; i < 8; ++i)
                 equal &= dst[i] == 0xAB && dst[dst.size() - 1 - i] == 0xAB;
-            check(equal, "transpose_banked: exact bank/lane bytes and zero tail K=" + std::to_string(hidden));
+            check(equal, "transpose_banked: exact bank/lane bytes and zero tail K=" + std::to_string(hidden)
+                         + " heads=" + std::to_string(heads));
             for (int invalid = 0; invalid < 5; ++invalid) {
                 auto bad = op;
                 if (invalid == 0) bad.rows = 0;
                 if (invalid == 1) bad.cols = 0;
                 if (invalid == 2) bad.elem = 0;
-                if (invalid == 3) bad.rows = 49;
+                if (invalid == 3) bad.rows = heads + 1;
                 if (invalid == 4) bad.dst = dst.size();
                 auto before = dst;
                 bool refused = false;
