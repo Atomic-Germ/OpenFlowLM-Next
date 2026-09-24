@@ -91,6 +91,22 @@ AX_BANDS = 2 * Q_PC + 2 * KV_PC                             # what a full-attent
 PAD_BANDS = PRE_BANDS - AX_BANDS                            # the dummy bands the ax sequence adds
 KIND_LINEAR, KIND_FULL = 0, 1
 KIND = int(os.environ.get("LAX_KIND", KIND_LINEAR))
+# NLAYERS > 1 builds ONE control text that runs N whole layers back to back (the buffers are
+# re-used, so layer k's output feeds layer k+1). This is the workaround for the measured
+# per-hw_context limit of 8 whole-layer RUNS (the leak is per RUN, not per layer): with
+# NLAYERS=5, 8 runs cover the 35B's 40 layers in ONE xrt::runlist submit.
+NLAYERS = int(os.environ.get("LAX_NLAYERS", "1"))
+# Per-layer kind pattern for a multi-layer text: 'l' = linear-attention, 'f' = full-attention.
+# The 35B is a 3:1 hybrid, so NLAYERS=8 with pattern "lllf" gives [L,L,L,F,L,L,L,F] and 5 runs
+# cover all 40 layers in the model's order. Empty -> all layers of the build's `kind`.
+_PAT = os.environ.get("LAX_PATTERN", "")
+
+def _layer_kinds(n, kind):
+    if _PAT:
+        m = {"l": KIND_LINEAR, "f": KIND_FULL}
+        p = [m[ch] for ch in _PAT]
+        return [p[i % len(p)] for i in range(n)]
+    return [kind] * n
 
 # dn_glue's head count, passed only when it differs from the header default (see lx.py)
 GLUE_NHEAD_DEFAULT = 32
@@ -218,6 +234,17 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
     pktlk = [[Lock(emitter_tile[c], init=0, name=f"pktlk{c}_{i}") for i in range(X.NE + 1)] for c in range(N_CORES)] if ondv else None
     pktdone = [Lock(emitter_tile[c], init=0, name=f"pktdone{c}") for c in range(N_CORES)] if ondv else None
 
+    def rep(fn):
+        """Runtime-loop a per-layer core body NLAYERS times (NOT unrolled: the main core is
+        near its 16 KB program limit, so a Python loop would overflow it)."""
+        if NLAYERS == 1:
+            return fn
+
+        def g(*a):
+            for _ in range_(NLAYERS):
+                fn(*a)
+        return g
+
     # ---- the unified main core: lx.py's body verbatim (role is inert on an all-q4_1 spec)
     def main_body(win, xin, yout, *args):
         B, K = X.unpack_args(args)
@@ -330,18 +357,18 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
             _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fqk, fkk, fv, fi, fs, fsn, ff, c)
         return body
 
-    workers = [Worker(X.ln_router_body,
+    workers = [Worker(rep(X.ln_router_body),
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"),
                                Buffer(tl["racc"], name="racc"), L["ln_nr"], L["ln"], L["rcopy"], L["racc"],
                                L["rfin"]], tile=Tile(0, hrow), stack_size=0x1800)]
     for c in range(N_CORES):
-        workers.append(Worker(main_body,
+        workers.append(Worker(rep(main_body),
                               fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
                                        *X.worker_args(X.core_buffers(t, c), K)],
                               tile=Tile(c, mrow), stack_size=0x1800))
-    workers.append(Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), Buffer(nw_ty, name="nwb"),
+    workers.append(Worker(rep(post_body), fn_args=[of_pin.cons(), of_pout.prod(), Buffer(nw_ty, name="nwb"),
                                               post_fn, post_copy], tile=Tile(1, hrow), stack_size=0x1800))
-    workers.append(Worker(glue_body,
+    workers.append(Worker(rep(glue_body),
                           fn_args=[of_side.cons(), of_gact.cons(), of_gout.prod(),
                                    Buffer(f32, name="acc_a"), Buffer(f32, name="acc_b"),
                                    Buffer(f32, name="decay"), Buffer(f32, name="beta"),
@@ -358,10 +385,10 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
 
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin]
     # the attention cores live at row hrow AFTER the glue core (Tile(2)): (3, hrow) .. (2+ACORES, hrow)
-    workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
+    workers.append(Worker(rep(attn_body), fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
                           tile=Tile(3, hrow), stack_size=0x1800))
     for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
+        workers.append(Worker(rep(make_attn_body(c)), fn_args=[of_ain.cons(), of_og[c - 1].prod()] + abufs(c) + afns,
                               tile=Tile(3 + c, hrow), stack_size=0x1800))
 
     if ondv:
@@ -385,7 +412,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
             return emitter_body
 
         for c in range(N_CORES):
-            workers.append(Worker(_emitter_body(c), fn_args=[of_x.cons(), ctrlw[c], f_oc, *pktlk[c]],
+            workers.append(Worker(rep(_emitter_body(c)), fn_args=[of_x.cons(), ctrlw[c], f_oc, *pktlk[c]],
                                   tile=emitter_tile[c], stack_size=0x1800))
 
     bt = X.bt
@@ -399,7 +426,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
 
     # ---- host sequences (one per instruction stream)
     def lx_sequence(a_pool, c_xres, a_consts, a_state, a_act, a_cfg, lni, lno, w_prods, x_prod, y_conss,
-                    side_p, gact_p, gout_c, pin_p, pout_c):
+                    side_p, gact_p, gout_c, pin_p, pout_c, configure_routed=True):
         """The linear-attention stream (lx.py's, verbatim)."""
         tg_ln = TaskGroup()
         lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
@@ -458,7 +485,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
         px.finish()
         X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods,
                        x_prod, y_conss, A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW,
-                       ondv=(a_cfg,))
+                       ondv=(a_cfg,), configure_routed=configure_routed)
 
     def w_regions(c):
         return [(POOL_Q + c * Q_PC * BB_AH, Q_PC * BB_AH), (POOL_GATE + c * Q_PC * BB_AH, Q_PC * BB_AH),
@@ -472,7 +499,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                 (AA_OUT + c * O_PC * YB, O_PC * YB)]
 
     def ax_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_state, a_cfg,
-                    lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs):
+                    lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs, configure_routed=True):
         """The full-attention stream (ax.py's) against the UNIFIED main body: it fills
         `PRE_BANDS` pre-MoE bands (18 real + PAD_BANDS dummy) and, because the body always
         runs the DeltaNet step, feeds and sinks that step inside `state` (unused here)."""
@@ -533,7 +560,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
         tg_x.finish()
         X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods,
                        x_prod, y_conss, AA_BYTES, CA_BYTES, AA_XM, AA_ROUT, AA_RES, AA_HP, CA_SGW,
-                       ondv=(a_cfg,))
+                       ondv=(a_cfg,), configure_routed=configure_routed)
 
     def sequence(*a):
         (a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_state) = a[:7]
@@ -541,12 +568,16 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
         rest = a[8:] if ondv else a[7:]
         (lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c,
          ain_p, aout_c, og_cs) = rest
-        if kind == KIND_FULL:
-            ax_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_state, a_cfg,
-                        lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs)
-        else:
-            lx_sequence(a_pool, c_xres, a_consts, a_state, a_act, a_cfg,
-                        lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c)
+        kinds = _layer_kinds(NLAYERS, kind)
+        for k, kk in enumerate(kinds):
+            if kk == KIND_FULL:
+                ax_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_state, a_cfg,
+                            lni, lno, w_prods, x_prod, y_conss, ain_p, aout_c, og_cs,
+                            configure_routed=(k == 0))
+            else:
+                lx_sequence(a_pool, c_xres, a_consts, a_state, a_act, a_cfg,
+                            lni, lno, w_prods, x_prod, y_conss, side_p, gact_p, gout_c, pin_p, pout_c,
+                            configure_routed=(k == 0))
 
     rt_args = [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty, state_ty]
     if ondv:
@@ -577,7 +608,7 @@ def _lax_build(pool, xres, consts, kv, act, ptab, state, cfg, *, kind=KIND_LINEA
                                     channels=[DmaChannel(direction=DMAChannelDir.MM2S, channel=1, bds=bds)]))
             flows.append(PacketFlow(pkt_id=15, src=emitter_tile[c], src_port=WireBundle.DMA, src_channel=1,
                                     dst=shim_w[c], dst_port=WireBundle.TileControl, dst_channel=0,
-                                    keep_pkt_header=True))
+                                    keep_pkt_header=os.environ.get("ONDV_KEEP_HDR", "1") == "1")) if os.environ.get("ONDV_NO_EMITTERS") != "1" else None
     for f in flows:
         rt.add_flow(f)
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()

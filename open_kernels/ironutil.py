@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+import os
 
 from aie.iron import TaskGroup
 from aie.utils import config
@@ -97,7 +98,7 @@ class Pipeline:
     """Throttled DMA issue. Keyed by the fifo endpoint (one shim channel each)."""
 
     def __init__(self, inflight: int = 3):
-        self.inflight = inflight
+        self.inflight = int(os.environ.get("ONDV_PIPE_INFLIGHT", inflight))
         self.queues: dict[int, deque] = {}
 
     def _q(self, ep) -> deque:

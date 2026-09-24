@@ -505,7 +505,8 @@ def ondv_recycle(tasks, per_col):
 
 
 def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                 A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW, nx=NX, ondv=None):
+                 A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW, nx=NX, ondv=None,
+                 configure_routed=True):
     """Host sequence of the MoE block (one instruction-stream part). Routed slot j's fills carry
     placeholder pool offsets (expert j); moeroute2 rewrites them from the router output.
     nx must match the body's: NE drops the shared expert's fills with its slot.
@@ -531,7 +532,7 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
         pipe_w.fill(w_prods[c], a_consts, bt(C_BYTES, C_SGW, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_RES + c * ROWS_PC * 4, CALL_BYTES))
     if ONDV:
-        if not host_push:
+        if not host_push and configure_routed:
             # Configure the three pinned routed descriptors ONCE (placeholder expert 0): their
             # length/stride is the same for every expert, so only the address (w1/w2) changes per
             # wave, and that is exactly what the emitters' control packets rewrite. The descriptors
