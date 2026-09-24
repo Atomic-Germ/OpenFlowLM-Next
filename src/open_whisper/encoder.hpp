@@ -110,9 +110,11 @@ private:
   std::unique_ptr<Weights> weights_;
   std::unique_ptr<KernelSet> kernels_;
 
-  // OW_ATTN=npu (default: unset/host -- see attn() in encoder.cpp). Resident
-  // for the Encoder's lifetime, same as kernels_'s Design: F1/trap 7b say a
-  // design that reloads per call has already lost. Null on the default path.
+  // NPU FlashAttention. OW_ATTN unset means auto: used whenever a usable
+  // kernel is found at <kernels_dir>/fa (fa.json parsed and its geometry
+  // checked), otherwise host; OW_ATTN=npu requires it, OW_ATTN=host never
+  // uses it. Resident for the Encoder's lifetime, like kernels_'s Design;
+  // null when attention runs on the host.
   std::unique_ptr<FaAttention> fa_attn_;
   bool use_fa_attn_ = false;
   std::string attn_summary_, host_fast_summary_;

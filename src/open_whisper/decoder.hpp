@@ -146,11 +146,11 @@ private:
   const float *xkv_ = nullptr;                        // [1500, 10240], NOT owned
   int64_t pos_ = 0;
 
-  // OPTIONAL, env-selected precision variants (task 0180 Part 8, see
-  // decoder_quant.hpp) -- read ONCE in the constructor. All three default to
-  // the value that makes step() take EXACTLY the pre-existing code path with
-  // EXACTLY the pre-existing arithmetic; only a non-default value activates
-  // any of the code decoder_quant.{hpp,cpp} adds.
+  // Env-selected precision variants (see decoder_quant.hpp), read ONCE in
+  // the constructor. Unset, they are bf16 / int8 / int8x (the speed defaults,
+  // WER-neutral over 1200 utterances); OW_DEC_XKV=fp32, OW_DEC_W=bf16 and
+  // OW_DEC_HEAD=bf16 restore the exact path. The initialisers below are only
+  // placeholders -- the constructor always assigns all three.
   XkvPrecision xkv_precision_ = XkvPrecision::FP32;
   WeightPrecision weight_precision_ = WeightPrecision::BF16;
   HeadPrecision head_precision_ = HeadPrecision::BF16;

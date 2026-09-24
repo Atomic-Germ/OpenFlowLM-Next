@@ -12,9 +12,11 @@
 /// \note Ported from transformers 5.15.0
 ///       (models/whisper/generation_whisper.py,
 ///       generation/logits_process.py) -- see generation_hf.cpp for the exact
-///       lines each function mirrors. The legacy protocol
-///       (Whisper::_generate_legacy in modeling_whisper.cpp) is unchanged and
-///       stays the default; this is the OFLM_WHISPER_PROTOCOL=hf path.
+///       lines each function mirrors. This is the OFLM_WHISPER_PROTOCOL=hf
+///       path: the default for the open engine. The closed engine defaults to
+///       the unchanged legacy loop (Whisper::_generate_legacy in
+///       modeling_whisper.cpp); an explicit OFLM_WHISPER_PROTOCOL overrides
+///       either (Whisper::_init_decode_protocol).
 #pragma once
 
 #include <cstdint>
