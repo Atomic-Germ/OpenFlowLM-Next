@@ -294,6 +294,9 @@ private:
     std::map<std::string, std::vector<xrt::bo>> gemm_w_;
     // dense: the two norm weights (bf16) the host RMSNorm reads, captured from consts
     std::vector<std::vector<uint16_t>> ln_w_bf16_, post_ln_w_bf16_;
+    // dense, sandwich only (gemm_block.sandwich): the two extra norms Gemma 3's chain reads,
+    // f32 (dequantised from the file by tensor name, not sliced from packed consts bytes)
+    std::vector<std::vector<float>> pre_ffn_w_, post_ffn_w_;
     // linear / full: the small per-layer tensors the host stages read, straight from the file
     struct HostConsts {
         std::vector<float> ln, postln, router;          ///< [hid], [hid], [hid, E]
@@ -388,6 +391,10 @@ private:
     /// the final multiply both in fp64. w is bf16 (hidden elements).
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
                              const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out);
+    /// The same norm, for a weight already dequantised to f32 (the sandwich route's two extra
+    /// norms, read straight from the file by tensor name rather than from packed consts bytes).
+    static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
+                             const std::vector<float>& w_f32, double eps, std::vector<float>& out);
     /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64, MAC 8x8, tile_n 32)
     /// -- the layout gemm_q4_prefill.py streams its activation in.
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);

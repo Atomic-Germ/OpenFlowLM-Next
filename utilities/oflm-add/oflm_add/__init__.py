@@ -30,10 +30,10 @@ writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
 symlink into ~/.config/oflm/xclbins/ for the new model directory. Custom OFLM
 models never ship xclbins (they are closed source), so the kernel symlink is
 always taken from the matching official model, keyed by family (engine) and
-size -- e.g. Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2. The only thing
-you need in your shell rc afterwards is:
-
-    OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json" OFLM_XCLBIN_PATH="$HOME/.config/oflm"
+size -- e.g. Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2. OpenFlowLM discovers
+both automatically -- it reads the user registry in preference to the shipped
+one and resolves each model's kernels under whichever xclbin root carries that
+model's directory -- so no environment variables are required.
 """
 
 import argparse
@@ -1051,6 +1051,5 @@ def main():
     print(f"Done: {dir_name} installed to {target}")
     print(f"Run:  oflm run {tag}   (or: oflm serve {tag})")
     print()
-    print("Make sure your shell has these exports (add to ~/.bashrc):")
-    print('    export OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json"')
-    print('    export OFLM_XCLBIN_PATH="$HOME/.config/oflm"')
+    print("OpenFlowLM discovers this model's registry entry and kernels")
+    print("automatically; no OFLM_CONFIG_PATH/OFLM_XCLBIN_PATH exports needed.")

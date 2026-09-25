@@ -384,6 +384,14 @@ std::vector<std::string> xclbin_roots();
 ///@return path to the xclbin directory
 std::string find_xclbin_path();
 
+///@brief the single xclbin root that carries a given model's directory
+///@param model_name the model directory name (e.g. "Qwen3.6-35B-A3B-NPU2")
+///@return the most specific root whose <root>/xclbins/<model_name> exists; falls
+///        back to find_xclbin_path() when no root carries that model. Lets a
+///        shipped model (kernels in the install tree) and a user-added model
+///        (kernels symlinked under the user config dir) resolve side by side.
+std::string find_xclbin_root_for(const std::string& model_name);
+
 ///@brief get_server_port gets the server port from environment variable OFLM_SERVE_PORT
 ///@return the server port, default is 52625 if environment variable is not set
 int get_server_port(int user_port);
