@@ -51,4 +51,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate layer_x Q4 projection probes at K5120/K6144 using depth-two streamed xn/xm inputs and actual main-core scratch.</description>
     <location>.opencode/skill/open-dense-activation-stream/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-ln</name>
+    <description>Build and validate streamed residual RMSNorm at width 5120, including actual L1 placement and legacy 2048/4096 hardware regression.</description>
+    <location>.opencode/skill/open-wide-ln/SKILL.md</location>
+  </skill>
 </available_skills>
