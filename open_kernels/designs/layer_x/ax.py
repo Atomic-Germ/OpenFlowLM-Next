@@ -415,8 +415,13 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 pa_out.drain(og_cs[c - 1], a_act, bt(AA_BYTES, AA_OG + c * NHL * HD * 2, NHL * HD * 2))
             pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.E_A))          # [qn | kn], one element
             pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, PTAB_ROW, PTAB_ROW))   # the position record (attnpos)
-            py.finish(*y_conss)                                       # q, gate, k, v are in DDR
+            # q is in DDR already: issuing each core's 4th drain (v) made the throttle await
+            # its oldest, the q drain. The attention core takes q first (Q_AIN_ELEMS elements)
+            # and k, v, the window and the gate after, so q goes now -- the attention's q stage
+            # runs while the main cores are still on gate | k | v -- and the rest after them.
+            assert all(len(py._q(e)) == 3 for e in y_conss), "q's drain must be the one retired"
             pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_QG, QW * 4))
+            py.finish(*y_conss)                                       # gate, k, v are in DDR
             pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_KVN, KVW * 4))
             pa_in.fill(ain_p, a_act, bt(AA_BYTES, AA_KVN + KVW * 4, KVW * 4))
             pa_in.fill(ain_p, a_kv, bt(KV_BYTES, 0, KV_ROW))                 # the window: rows [0, nf) (attnpos)

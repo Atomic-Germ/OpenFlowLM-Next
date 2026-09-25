@@ -336,11 +336,19 @@ int main(int argc, char** argv) {
             // every projection shape is an instruction stream over ONE hardware context
             check(d.kernels.at("gemm_n6144_k2560").context == "gemm" && d.kernels.at("gemm_n2560_k9728").context == "gemm",
                   "qwen3: one GEMM context for every shape");
+            // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
+            // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
+            check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
+                  "qwen3: the route's attention kernel, table, chain and activation are the plain defaults");
             json ok = matching_config(d);
             d.check_model(ok, "qwen3");
             check(true, "qwen3: a matching config.json is accepted");
             json bad = ok; bad["intermediate_size"] = 12288;
             refused(d, bad, "intermediate_size", "qwen3: an 8B config is refused by name");
+            // attnpos alone does not make a kernel the attention-only dispatch: the sequential
+            // dx is attnpos-patched too, and would run the whole layer per token of the block
+            refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
+                             [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
         }
@@ -358,6 +366,25 @@ int main(int argc, char** argv) {
             check(g.layer_types.at("dense_local").program[0].args.back() == "ptab_local" &&
                   g.layer_types.at("dense").program[0].args.back() == "ptab", "gemma3: each layer type binds its table");
             check(g.layer_types.at("dense").consts.size() == 6 && g.hidden == 2560 && g.vocab == 262208 && g.real_vocab == 262145, "gemma3: consts and vocab");
+            // ---- the dense block prefill route, two layer types (OPEN-PREFILL-BATCH)
+            const auto& dgb = g.layer_types.at("dense").gemm_block;
+            const auto& lgb = g.layer_types.at("dense_local").gemm_block;
+            check(dgb.t == 256 && dgb.kind == "dense" && lgb.t == 256 && lgb.kind == "dense",
+                  "gemma3: both layer types carry a 256-token dense route");
+            check(dgb.attn_kernel == "dxB" && dgb.attn_args.back() == "ptab",
+                  "gemma3: dense binds the global attention kernel and table");
+            check(lgb.attn_kernel == "dxB_local" && lgb.attn_args.back() == "ptab_local",
+                  "gemma3: dense_local binds its OWN attention kernel and table");
+            check(dgb.sandwich && lgb.sandwich && dgb.act == "gelu_tanh" && lgb.act == "gelu_tanh",
+                  "gemma3: both layer types carry the sandwich chain and gelu-tanh");
+            check(g.kernels.at("dxB").patch == "attnpos" && g.kernels.at("dxB").window == 0 &&
+                  g.kernels.at("dxB_local").patch == "attnpos" && g.kernels.at("dxB_local").window == 1024 &&
+                  g.kernels.at("dxB").insts == g.kernels.at("dxB_local").insts &&
+                  g.kernels.at("dxB").context == g.kernels.at("dxB_local").context,
+                  "gemma3: dxB / dxB_local share a stream and context, own windows");
+            check(g.contexts.size() == 5, "gemma3: kernels (dx/ln/lm plus the route's dxa and gemm)");
+            refused_manifest(argv[3], "not the attention-only", "gemma3: an attn_kernel sharing dx's stream (dx_local) is refused",
+                             [](json& j) { j["layer_types"]["dense_local"]["gemm_block"]["attn_kernel"] = "dx_local"; });
             uint64_t s0, n0, s1, n1;
             stream_patch::attn_window(1500, 1024, &s0, &n0);
             stream_patch::attn_window(0, 1024, &s1, &n1);

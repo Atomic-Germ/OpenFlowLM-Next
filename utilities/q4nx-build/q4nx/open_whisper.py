@@ -49,8 +49,17 @@ MANIFEST_FORMAT = "oflm-open-whisper-v1"
 MODEL_INFO_ARTIFACT = "model_info_entry.json"
 
 COPIED_FILES = ("config.json", "tokenizer.json")
-OPTIONAL_FILES = ("generation_config.json", "preprocessor_config.json",
-                  "special_tokens_map.json", "added_tokens.json")
+# generation_config.json is REQUIRED, not optional (task 0180 Part 12): the `hf` decode
+# protocol reads decoder_start_token_id/eos_token_id/no_timestamps_token_id/max_length
+# from it (src/common/whisper/generation_hf.cpp's GenerationConfig::load) and that
+# protocol is now the open engine's own default (see whisper_engine.hpp's is_open()).
+# It used to be optional and silently skipped when the cached HF snapshot a build read
+# from happened not to have one -- which is exactly how a build without it reached a
+# test machine, and the gap was invisible until the hf protocol was exercised for the
+# first time. A build that cannot ship it should fail loudly here, not produce a
+# container the engine can only fail against later.
+REQUIRED_FILES = ("generation_config.json",)
+OPTIONAL_FILES = ("preprocessor_config.json", "special_tokens_map.json", "added_tokens.json")
 
 # The only geometry the engine and its kernel set are built for. Anything else is refused
 # here rather than producing a container no kernel set can serve.
@@ -179,6 +188,15 @@ def build_open_whisper_repo(source: str, output_dir: str, npu_assets: Optional[s
 
     produced: List[str] = []
     for name in COPIED_FILES:
+        shutil.copyfile(src / name, out / name)
+        produced.append(name)
+    for name in REQUIRED_FILES:
+        if not (src / name).is_file():
+            raise FileNotFoundError(
+                f"{src / name} not found: the open Whisper engine's hf decode protocol "
+                f"(the default protocol -- see whisper_engine.hpp) requires "
+                f"generation_config.json; the source model directory or HF snapshot must "
+                f"have it")
         shutil.copyfile(src / name, out / name)
         produced.append(name)
     for name in OPTIONAL_FILES:

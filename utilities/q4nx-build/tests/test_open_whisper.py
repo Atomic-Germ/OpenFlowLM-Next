@@ -5,6 +5,7 @@ so this runs anywhere. Weights are drawn from values bf16 represents exactly, wh
 every layout check an equality rather than a tolerance.
 """
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -74,6 +75,9 @@ def _checkpoint(root: Path, seed: int = 0) -> dict:
     (root / "config.json").write_text(json.dumps(cfg))
     (root / "tokenizer.json").write_text("{}")
     (root / "tokenizer_config.json").write_text(json.dumps({"bos_token": "<|endoftext|>"}))
+    (root / "generation_config.json").write_text(json.dumps({
+        "decoder_start_token_id": 50258, "eos_token_id": 50257,
+        "no_timestamps_token_id": 50363, "max_length": 448}))
     return {k: v.astype(np.float32) for k, v in t.items()}
 
 
@@ -170,6 +174,22 @@ class OpenWhisperContainerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t2, self.assertRaises(ValueError):
             build_open_whisper_repo(str(Path(self.tmp.name) / "src"), t2)   # the real GEOMETRY
         self.assertEqual(GEOMETRY["d_model"], 1280)
+
+    def test_ships_generation_config_json(self):
+        # Required, not optional (task 0180 Part 12): the hf decode protocol, now this
+        # engine's own default, reads it at load time and refuses without it.
+        self.assertTrue((self.out / "generation_config.json").is_file())
+        cfg = json.loads((self.out / "generation_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["decoder_start_token_id"], 50258)
+
+    def test_refuses_a_source_with_no_generation_config_json(self):
+        with tempfile.TemporaryDirectory() as root:
+            src = Path(root) / "src"
+            shutil.copytree(Path(self.tmp.name) / "src", src)
+            (src / "generation_config.json").unlink()
+            with self.assertRaises(FileNotFoundError) as ctx:
+                build_open_whisper_repo(str(src), str(Path(root) / "out"), geometry=TINY)
+            self.assertIn("generation_config.json", str(ctx.exception))
 
     def test_bf16_rounds_to_nearest_even(self):
         x = np.array([1.0, 1.0 + 2 ** -8, 1.0 + 3 * 2 ** -8, -2.5], np.float32)

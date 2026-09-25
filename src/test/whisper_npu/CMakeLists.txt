@@ -17,6 +17,11 @@ add_npu_test(
         # unless OFLM_USE_OPEN_WHISPER is defined, which this target does not define.
         "${CMAKE_SOURCE_DIR}/../../common/whisper/whisper_engine_select.cpp"
         "${CMAKE_SOURCE_DIR}/../../common/whisper/whisper_engine_closed.cpp"
+        # modeling_whisper.cpp's hf protocol calls whisper_hf::GenerationConfig /
+        # detect_language / WhisperTimestampProcessor / etc. -- all defined in
+        # generation_hf.cpp. Without it this target fails at link with unresolved
+        # externals (PR #111 review).
+        "${CMAKE_SOURCE_DIR}/../../common/whisper/generation_hf.cpp"
 )
 
 # Configure runtime linking to support both static Boost and dynamic tokenizers_cpp

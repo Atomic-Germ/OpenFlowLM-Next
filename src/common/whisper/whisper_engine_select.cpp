@@ -11,8 +11,12 @@
 #include "open_whisper/engine_adapter.hpp"
 #endif
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
+
+#include "nlohmann/json.hpp"
 
 /// \brief Defined in whisper_engine_closed.cpp -- the only caller of the closed engine's
 ///        constructor now that make_whisper_engine() lives here instead.
@@ -29,26 +33,72 @@ bool has_file(const std::string& dir, const char* name) {
 }
 
 #ifdef OFLM_USE_OPEN_WHISPER
-/// \brief Mirrors ow::KernelSet::resolve_dir's own search order (OFLM_WHISPER_KERNELS_DIR,
-///        else <model_dir>/open_kernels) WITHOUT opening a device or the kernel set's own
-///        JSON, so auto-selection can ask "would an open engine even find one?" before
-///        committing to either engine. engine_adapter.cpp calls the real resolve_dir right
-///        afterwards, which is what actually validates it -- this is only a existence probe.
-bool open_kernels_resolve(const std::string& model_dir) {
-    const std::string hint = utils::getenv_oflm("OFLM_WHISPER_KERNELS_DIR");
-    std::error_code ec;
-    if (!hint.empty()) return std::filesystem::is_directory(hint, ec);
-    return std::filesystem::is_directory(std::filesystem::path(model_dir) / "open_kernels", ec);
+/// \brief The exporter's own format tag (open_kernels/export_whisper_kernels.py's `FORMAT`),
+///        checked below so auto-discovery never accepts a whisper_kernels.json some future,
+///        differently-shaped exporter wrote.
+constexpr const char* kOpenKernelsFormat = "oflm-open-whisper-kernels-v1";
+
+/// \brief Where the open engine's kernel set is, or "" -- the same search order the other
+///        open engines use (open_qwen36/engine.cpp's find_kernels): OFLM_WHISPER_KERNELS_DIR,
+///        then <model_dir>/open_kernels, then <root>/xclbins/<model_name>/open_kernels for
+///        every xclbins root (the build tree's xclbins junction, the install tree, oflm-add's
+///        user roots). The last is where export_whisper_kernels.py writes by default, so a
+///        build of this tree finds its own kernels with no configuration. A candidate counts
+///        only if whisper_kernels.json PARSES, names this exporter's own format, and reads
+///        `"complete": true` (PR #111 review): an `--only` export -- a subset of the seven GEMM
+///        streams, built for testing one stream in isolation -- writes a whisper_kernels.json
+///        that exists and is valid JSON but is deliberately incomplete, and auto-discovery
+///        picking it up would hand the engine a kernel set missing streams it needs. A
+///        candidate that fails this check is skipped, NOT refused -- the next candidate in the
+///        search order still gets a chance, since this is discovery, not validation of an
+///        operator-named location (that is OFLM_WHISPER_KERNELS_DIR below, which is always used
+///        as given and left for the engine's own construction to refuse).
+/// \note *how names the rule that chose it, because every rule yields a working engine and a
+///       set chosen against intent looks right.
+std::string find_open_kernels(const std::string& model_dir, const Whisper_Config& config, std::string* how) {
+    namespace fs = std::filesystem;
+    auto ok = [&](const fs::path& d) {
+        std::ifstream f(d / "whisper_kernels.json", std::ios::binary);
+        if (!f) return false;
+        try {
+            nlohmann::json j;
+            f >> j;
+            return j.value("complete", false) && j.value("format", std::string()) == kOpenKernelsFormat;
+        } catch (const nlohmann::json::exception&) {
+            return false;
+        }
+    };
+    const std::string env = utils::getenv_oflm("OFLM_WHISPER_KERNELS_DIR");
+    if (!env.empty()) {
+        // An explicit location is used as given (the engine then validates it and refuses a
+        // wrong one), never silently replaced by a set found somewhere else -- including when
+        // it is incomplete: an operator who names a directory explicitly gets ITS refusal
+        // (e.g. from the streams the container actually needs), not a silent skip to whatever
+        // the search order would otherwise have picked.
+        *how = "OFLM_WHISPER_KERNELS_DIR";
+        return env;
+    }
+    const fs::path local = fs::path(model_dir) / "open_kernels";
+    if (ok(local)) { *how = "beside the model"; return local.string(); }
+    std::vector<std::string> roots = utils::xclbin_roots();
+    if (!config.exec_path.empty() && std::find(roots.begin(), roots.end(), config.exec_path) == roots.end())
+        roots.push_back(config.exec_path);
+    for (const std::string& r : roots) {
+        const fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
+        if (ok(cand)) { *how = "an xclbins root"; return cand.string(); }
+    }
+    return {};
 }
 
-std::unique_ptr<whisper_engine> make_open_engine(const std::string& model_path, Whisper_Config& config) {
+std::unique_ptr<whisper_engine> make_open_engine(const std::string& model_path, const std::string& kernels_dir,
+                                                 Whisper_Config& config) {
     // Whisper_Config::from_pretrained already rounded vocab_size up to a multiple of 32
     // (see lm_config.hpp) by the time this runs -- Whisper::load_model calls
     // from_pretrained() before make_whisper_engine(). Read it rather than hardcoding it:
     // OpenWhisperEngine's constructor checks it against the decoder's own compile-time
     // constant instead of assuming the two agree.
     const int64_t vocab_padded = static_cast<int64_t>(config.get<u32>("vocab_size"));
-    return std::make_unique<open_whisper::OpenWhisperEngine>(model_path, "", vocab_padded);
+    return std::make_unique<open_whisper::OpenWhisperEngine>(model_path, kernels_dir, vocab_padded);
 }
 #endif
 
@@ -75,13 +125,17 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
             throw std::runtime_error("OFLM_WHISPER_ENGINE=open: " + model_path +
                                      "/model.open.safetensors not found");
         }
-        if (!open_kernels_resolve(model_path)) {
+        std::string how;
+        const std::string kdir = find_open_kernels(model_path, config, &how);
+        if (kdir.empty()) {
             throw std::runtime_error(
-                "OFLM_WHISPER_ENGINE=open: no whisper_gemm kernel set found (set "
-                "OFLM_WHISPER_KERNELS_DIR, or place one at " + model_path + "/open_kernels)");
+                "OFLM_WHISPER_ENGINE=open: no Whisper kernel set found (build one with "
+                "open_kernels/export_whisper_kernels.py, which writes xclbins/" + config.model_name +
+                "/open_kernels; or set OFLM_WHISPER_KERNELS_DIR; or place one at " + model_path +
+                "/open_kernels)");
         }
-        header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open)");
-        return make_open_engine(model_path, config);
+        header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open), kernels " << kdir << " (" << how << ")");
+        return make_open_engine(model_path, kdir, config);
     }
     if (!want.empty()) {
         throw std::runtime_error("OFLM_WHISPER_ENGINE=" + want +
@@ -92,13 +146,15 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
     // back to closed when its weights are there; otherwise refuse, naming both missing
     // paths, rather than silently choosing whichever engine happens to construct without
     // throwing (the "fails open" class this project keeps finding -- see CLAUDE.md rule 8).
-    const bool open_ready = has_file(model_path, "model.open.safetensors") &&
-                            open_kernels_resolve(model_path);
+    std::string how;
+    const std::string kdir = has_file(model_path, "model.open.safetensors")
+                                 ? find_open_kernels(model_path, config, &how) : std::string();
+    const bool open_ready = !kdir.empty();
     const bool closed_ready = has_file(model_path, "model.q4nx");
     if (open_ready) {
         header_print("OFLM", "Whisper engine: open (model.open.safetensors + a kernel set "
-                             "found, OFLM_WHISPER_ENGINE unset)");
-        return make_open_engine(model_path, config);
+                             "found, OFLM_WHISPER_ENGINE unset), kernels " << kdir << " (" << how << ")");
+        return make_open_engine(model_path, kdir, config);
     }
     if (closed_ready) {
         header_print("OFLM", "Whisper engine: closed (model.q4nx found, OFLM_WHISPER_ENGINE "
@@ -107,7 +163,8 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
     }
     throw std::runtime_error(
         "no usable Whisper weights in " + model_path + ": neither model.open.safetensors "
-        "(with a kernel set -- OFLM_WHISPER_KERNELS_DIR or <model>/open_kernels) nor "
+        "(with a kernel set -- xclbins/<model>/open_kernels, <model>/open_kernels or "
+        "OFLM_WHISPER_KERNELS_DIR) nor "
         "model.q4nx was found");
 #else
     // HRX builds (and any build without open_whisper's sources) compile only this branch --

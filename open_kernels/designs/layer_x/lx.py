@@ -368,7 +368,10 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
             tg_s = TaskGroup()
             side_p.fill(a_act, tap=bt(A_BYTES, A_XN, ELEM), wait=True, group=tg_s)
             side_p.fill(a_consts, tap=bt(C_BYTES, C_SIDE, GLUE_SIDE_BYTES), wait=True, group=tg_s)
-            py.finish()                                      # qkv, z are in DDR
+            # qkv is in DDR. Only qkv: the glue reads A_QKV and nothing else, and every core
+            # computes its 16 qkv bands before its 8 z bands, so the glue now runs while the
+            # cores are still on z. z is first read by post, behind the py.finish() below.
+            py.finish_oldest(*y_conss)
             # 3. glue: conv state updated in place, DeltaNet records -> act[A_VEC]
             pipe = Pipeline(3)
             for tt in range(NT):
@@ -391,6 +394,14 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
                 pw.finish()
                 px.finish()
                 return
+            # 6a. out projection's weights and result drains, issued BEFORE post: they read
+            # consts and depend on nothing post writes. Every DeltaNet fill and drain has
+            # completed by now (o is the last thing each core emits), so the throttle's waits
+            # here are already satisfied; each core's w fifo fills with its first out elements
+            # while post runs, instead of after.
+            for c in range(N_CORES):
+                pw.fill(w_prods[c], a_consts, bt(C_BYTES, C_WOUT + c * OUT_PC * BB_OUT, OUT_PC * BB_OUT))
+                py.drain(y_conss[c], a_act, bt(A_BYTES, A_OUT + c * OUT_PC * YB, OUT_PC * YB))
             # 5. post: og -> act[A_OG] (z from act, o from DeltaNet)
             pipe = Pipeline(3)
             pipe.fill(pin_p, a_consts, bt(C_BYTES, C_NW, ELEM))
@@ -399,10 +410,7 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
                 pipe.fill(pin_p, a_act, bt(A_BYTES, A_O + g * G * 4, G * 4))
                 pipe.fill(pin_p, a_act, bt(A_BYTES, A_Z + g * G * 4, G * 4))
             pipe.finish()                                    # og is in DDR
-            # 6. out projection (weights in consts) against og
-            for c in range(N_CORES):
-                pw.fill(w_prods[c], a_consts, bt(C_BYTES, C_WOUT + c * OUT_PC * BB_OUT, OUT_PC * BB_OUT))
-                py.drain(y_conss[c], a_act, bt(A_BYTES, A_OUT + c * OUT_PC * YB, OUT_PC * YB))
+            # 6b. out projection against og
             px.fill(x_prod, a_act, bt(A_BYTES, A_OG, VW * 2))
             py.finish()                                      # out is in DDR
             # 7. residual + post-attention norm, then the router

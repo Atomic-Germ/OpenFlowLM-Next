@@ -207,6 +207,21 @@ public:
   // `dir` holds final.xclbin, insts.bin and design.json from
   // tools/export_xclbin.py.
   Design(Device &dev, const std::string &dir);
+
+  // Load an xclbin/insts pair that was NOT built by this project's own export
+  // pipeline and so carries no design.json -- e.g. the MLIR-AIR FlashAttention
+  // example (open_whisper's OW_FA_DIR). `buffer_bytes` gives every data
+  // buffer's size in kernel-argument order (last is the output; `run()`'s
+  // `inputs` must then have `buffer_bytes.size() - 1` entries, same contract
+  // as the design.json constructor). `kernel_name_prefix` is matched against
+  // the xclbin's kernel names the same way the design.json path already does
+  // ("MLIR_AIE" is both this project's own convention and the AIR example's).
+  // Gets its own hw_context, same as the design.json path -- two `Design`s
+  // sharing one `Device` is how a second xclbin becomes resident beside the
+  // first (research/notes/0004).
+  Design(Device &dev, const std::string &xclbin_path, const std::string &insts_path,
+        const std::vector<size_t> &buffer_bytes,
+        const std::string &kernel_name_prefix = "MLIR_AIE");
   ~Design();
   Design(const Design &) = delete;
   Design &operator=(const Design &) = delete;

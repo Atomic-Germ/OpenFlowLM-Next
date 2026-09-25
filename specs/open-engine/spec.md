@@ -32,7 +32,7 @@ the offending key named.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
 - `manifest_version: 2` → refused by the parser.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
-- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH).
+- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
@@ -2934,13 +2934,24 @@ on the slow path. LFM2 joined the fast one later the same day and the sweep is
 flat -- OPEN-ATTN-CONTEXT carries the numbers.
 - Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.
 ### OPEN-PREFILL-BATCH: the block prefill route
-**Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`, `designs/gemm_q4_prefill/`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
-**Test category:** manual (needs the NPU and `Qwen3.6-35B-A3B-NPU2`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
+**Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
+**Test category:** manual (needs the NPU; `Qwen3.6-35B-A3B-NPU2` for the MoE kinds, a dense family's own kernel set for `dense`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `tests/test_gemma3.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
 
 A kernel set may carry a block prefill route: per layer type a `gemm_block`
 naming, by kind, the GEMM dispatches that replace the layer's projections for
 T = 256 tokens at once -- `dense` (0167/#32): the five-step chain with T
-single-token attention dispatches; `linear`: qkv|z then out, with the DeltaNet
+single-token attention dispatches, run through the kernel and buffer args its
+own `attn_kernel` / `attn_args` name (default `dxB`, so every dense layer
+type shares one attention kernel and position table unless it says
+otherwise); a layer type with its own sliding window (Gemma 3's
+`dense_local`) names its own kernel entry -- the same instruction stream,
+patched with its own window, per `stream_patch`'s existing `attnpos`
+mechanism -- and its own table, exactly as the sequential path's `dx` /
+`dx_local` already do. The `dense` kind also carries `sandwich` and `act`, so
+a family whose residual chain norms the attention and FFN outputs before they
+join the residual (Gemma 3's sandwich norms) and whose FFN gates a
+GeGLU-tanh rather than a SiLU is served by the same route and the same
+five-step program; `linear`: qkv|z then out, with the DeltaNet
 recurrence on the host between them; `full`: q|k|v|gate then o, with attention
 over the KV rows on the host -- the weight buffers those dispatches read as
 contiguous runs of the layer type's pack ops, and, for the MoE kinds, the
@@ -2989,6 +3000,7 @@ block-major.
 - The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
 - The build key covers `designs/gemm_q4_prefill/*` (`test_prefill_batch.py`).
+- The dense kind's recipe (`dense.py gemm_route`) emits one `gemm_block` per layer type present, sharing the five-step program, weight map and widths (`layout`/`geometry` don't vary by layer type) but each naming its own `attn_kernel` / `attn_args`: a family with one layer type gets the schema's defaults (`dxB` / `...,"ptab"`); Gemma 3's two get `dxB` / `ptab` for `dense` and a second kernel entry `dxB_local` / `ptab_local` -- the SAME `dx_attn/insts.bin` stream, patched with the family's sliding window -- for `dense_local`, plus `sandwich: true` and `act: "gelu_tanh"` on both (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`). A family combining sandwich norms with a non-gelu-tanh activation, or the reverse, gets no route (`tests/test_gemma3.py`) -- the host chain only implements the two pairings above. Nor does a family whose q/k/v carry a bias or whose position record is wider than one attention element (Qwen2, both): `dx_attn` has neither stream and refuses to build, so the manifest stays the sequential one (`tests/test_qwen2.py`). The parser refuses a dense route whose `attn_kernel` runs the same instruction stream as any sequential `program` step (`dx`, `dx_local`) -- `attnpos` alone does not make a kernel the attention-only dispatch, and the sequential stream would run the whole layer per token (`manifest_test.cpp`).
 - Layer-major is refused where it has no meaning: `layer_major_ok()` is false without a block
   route, with `OFLM_OPEN_LAYER_MAJOR=0`, and for any layer type whose kind is not `linear` or
   `full`; `step_gemm_prompt()` throws rather than silently running the wrong schedule, and
@@ -3315,6 +3327,46 @@ rather than return wrong numbers, and re-checking it is worth a moment on a
 toolchain bump. Details: `.claude/plans/gemm-context-collapse.md`, raw data in
 `.claude/plans/decode-run/logs/`.
 
+**Result 2026-09-18 (the dense kind, seven of eight families; Gemma 3 completes the set in code):**
+`recipes/dense.py` now emits the `dense` kind's route for every dense-shaped family in the
+catalogue (Qwen3, Llama 3, Granite, Phi-3, Qwen2, HunYuan, and Gemma 3's two layer types) --
+the C++ side (`step_gemm_block_layer`) already implemented it end to end; the recipe was the
+only missing piece for the first six. Paired against the closed engine on one box, one sitting,
+a 981-token Qwen3-4B prompt: TTFT **1.98 s closed / 64.55 s open sequential (32.8x) -> 38.82 s
+with the route (19.6x)**, argmax and top-5 agreeing 19/19 against the sequential path at
+correlation >= 0.9999559, decode unaffected. The route's own instrumentation says why the gain
+is 1.66x and not more: the five projection GEMMs are 17 % of prefill and flat per block, exactly
+as designed; 74 % is the T single-token attention dispatches, unbatched here (`OPEN-PREFILL-ATTN`
+is the fix, and it is now the largest term in dense prefill as well as in decode). Gemma 3 needed
+two additions the other six did not: a per-layer-type `attn_kernel` / `attn_args` (its sliding
+window layers get their own `dxB_local` sharing `dxB`'s stream, per the acceptance criterion
+above) and the `sandwich` / `act` fields for its sandwich norms and GeGLU-tanh, both unit-tested
+(`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`, all 602 spec
+tests and the manifest/block_host/vit C++ tests passing). Details: `.claude/plans/closing-the-kernel-gap.md` §9.
+
+**Result 2026-09-18 (Gemma 3 on hardware, and the dx_attn hang it found):** the first
+`dxB` dispatch on Gemma3-4B timed out (ERT state 8), reproducibly, with or without the
+sliding-window kernel -- so not the per-layer-type plumbing. `designs/dense/dx_attn.py` had
+been copied from `dx.py` before dx.py's og handling changed: it still put core 0's og on the
+KV-row fifo and emitted `NHL // HPO` og elements per core, which is **zero** when a core owns
+fewer heads than an og element carries. Gemma 3 (NHL 2, HPO 4) and Phi-4-mini (4, 8) are
+both such geometries; the six families the route had run on all have NHL >= HPO. dx_attn.py
+now matches dx.py (kOGH = min(NHL, HPO) heads per element, one og fifo per core), and every
+dense family's dx_attn build key moves. Gates, same box, same sitting, a 1290-token random-id
+prompt so the sliding window is past its 1024 rows, block route against the sequential path:
+Gemma3-4B all 34 layers **8/8 greedy tokens identical after the prefill, 66.8 s vs 86.6 s
+(1.30x)**; 6 layers over all 1290 positions argmax 1274/1290, top-5 1230/1290, min corr
+0.99927, 32/32 greedy. The control on the same prompt, Qwen3-4B (hd 128) on its re-exported
+set: argmax 1276/1290, top-5 1205/1290, min corr 0.99989, 32/32 greedy, 10.8 s vs 19.9 s at 6
+layers -- the same flip profile (top-2 margins of hundredths of a logit, the route's bf16
+GEMM), so no regression on the hd-128 path and Gemma's deviation is in family. Phi4-mini, whose
+route had never run, now does: 16/16 greedy at 4 layers, 6.0 s vs 12.1 s. The decode gate is
+the one that matters for a sliding-window family -- the block route writes the KV rows
+`dx_local` decodes against afterward -- and it passes at full depth. The 1.30x against
+Qwen3-4B's 1.66x is expected: past 1024 rows the sequential path's local layers already attend
+over a capped window, so the route has less to win there. Details:
+`.claude/plans/gemma3-block-prefill.md`.
+
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`
@@ -3533,3 +3585,155 @@ multiplies. A set without `attn_block`, or `OFLM_OPEN_ATTN_BLOCK=0`, runs
 **Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`.
 
 **Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.
+
+### OPEN-REQUEST-ISOLATION: the same request on a reused engine gives the same tokens
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `read_back`, `Core::reset`, `seek`, `route`, `arm_route_records`, `det_step`; `cli.cpp` `--repeat`, `--det-step`)
+**Test category:** manual (needs the NPU and a resident 35B)
+
+`oflm serve` keeps one resident `Core` across requests. Run twice on it, the same
+request must produce the same tokens and bit-identical logits: nothing a request
+leaves behind (recurrent state, KV rows, act scratch, patched instruction
+streams, position records) may reach the next one, and no host read may return
+a buffer's contents from before the dispatch that wrote it.
+
+The host reads one thing back in the middle of a decode step: the router's
+top-k (`idx`, 32 bytes of the record the layer's first dispatch writes into
+`act`), which it patches into the second dispatch's expert fills (`moeroute2`).
+A completed wait on that dispatch did not guarantee the host saw the record: in
+some periods about one read in 3000 returned the previous step's `idx`, while a
+re-sync microseconds later returned the new one. The stale list is a valid one,
+so nothing failed -- the step ran the wrong experts and the tokens diverged a
+few steps later.
+
+What a read is on this driver. `xrt::bo::sync(FROM_DEVICE)` on the Windows NPU
+driver (its user-mode shim, `xrt_core.dll`; the XRT headers do not say) is,
+for any range smaller than the L3 cache, a CLFLUSH loop over every 64-byte line
+the range touches -- the start rounded down, the partial last line included --
+with no fence after it; larger ranges go to the kernel driver. Two things
+follow. Rounding a sync out to whole cache lines changes nothing (the loop
+already covers them). And CLFLUSH is not ordered against later loads (AMD's
+manual requires an MFENCE after it for that), so a load that follows the sync
+may still be served from the stale cached line. Which of two mechanisms
+produced the stale reads -- that missing fence, or the dispatch's final write
+reaching memory after its completion is reported -- is not settled: the fault
+did not recur on demand (see the result). The engine therefore closes both:
+
+1. Every device-to-host read in `core.cpp` goes through `read_back()`: the
+   sync, then an MFENCE. `OFLM_OPEN_READ_FENCE=0` drops the fence, for the A/B
+   only.
+2. Each step arms every `idx` slot with a sentinel (`0xFFFFFFFF`, with no
+   dispatch outstanding), and `route()` re-syncs until the dispatch's record has
+   replaced it, throwing if it has not after 1 s. This is what turns any
+   remaining late read into a wait (or a hard error) instead of wrong experts.
+   `OFLM_OPEN_ROUTE_SENTINEL=0` restores the old single read, for the A/B only.
+
+**Verification (manual):**
+1. `open_qwen36_cli --kernels <set> --ids 248045 --at-position 1024 --max-tokens 24 --repeat 3`:
+   every request must print `REPRODUCED` (exit 0).
+2. The tighter probe: `--ids 248045,846,220,95772,2005,95815,828,95726,110004,95849,3709,96674,101697,97785,2005,95815,828,95999,2005,95933,828,95726,104062,248046 --at-position 1024 --det-step 100`
+   (one resident engine, the 24-step request forced 100 times, every step's
+   logits compared bit for bit with a reference pass): `0 of 100 reps
+   differed`. It prints `late router reads caught: N of M`; N > 0 means the
+   fault happened and the sentinel absorbed it.
+3. The failure is intermittent -- it came in periods (hours of zero, then about
+   a third of the probe's reps). A clean run of step 2 with
+   `OFLM_OPEN_ROUTE_SENTINEL=0 OFLM_OPEN_READ_FENCE=0` means the box is in a
+   quiet period, and says nothing about the fix until one without it fails.
+4. A dispatch in flight when Windows enters modern standby does not complete
+   (`ERT state 8`, a `pci` Event ID 3 at wake). Discard any run whose window
+   contains a Kernel-Power 506/507 pair; it is not this requirement's failure.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, `k35main`, 40 layers).** In a failing
+period, the old single read: 68 of 220 probe reps diverged, first at steps 1-23,
+never at step 0. Widening the read to the whole 1088-byte record, alternated
+with it in the same period: 0 of 100. `OFLM_ROUTE_CHECK=1` caught one read
+changing on a re-read (layer 29, position 1043: an old expert list, then the new
+one on an immediate re-sync).
+
+**Result 2026-09-23 (same model and set, upstream main + this change).** The
+fault did not recur. `--det-step 40` runs: the old read (sentinel and fence
+off) 0 of 200 reps diverged -- 40 on a quiet box, 80 under four memory-copy
+processes, 80 under a loop of four parallel WSL kernel builds; the fence alone
+0 of 120; the full fix 0 of 160, with 0 late reads caught in 161,280. So the
+2026-09-22 period is still the only evidence the fault exists, and the fix is
+justified by it and by the mechanism above, not by a live catch. Bit-exact
+against main (19 ids, 4 layers: max |diff| 0.0 at all 19 positions), `--repeat
+3` at position 1024 reproduced, decode unchanged (three alternated pairs at
+position 1024: main 125 / 121 / 120 ms/token, this change 123 / 121 / 122).
+Detail: `.claude/plans/decode-gap-2026-09-22/pr1-route-read.md`.
+
+### OPEN-DECODE-PIPELINE: the decode route keeps a dispatch in flight across the layer boundary
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `Core::step_impl`, `start_run`, `wait_run`, `bench_step`)
+**Test category:** manual (needs the NPU and a resident 35B; the two bit-exact dumps and the paired step timings are the artifact)
+
+A decode step issues one hardware command per half-layer, and serially the array
+is idle for a host turnaround at each of them. The route instead starts layer
+l + 1's FIRST dispatch before waiting on layer l's LAST one, so the device takes
+it up the instant the previous command retires. The rule it must not break:
+**a kernel's instruction stream is patched only when no run on that kernel is
+outstanding.** Instruction BOs are per kernel NAME and shared by every layer, so
+
+- the router's top-k patch (`moeroute2`, on `lx1` / `ax1`) happens only after the
+  previous layer's second dispatch -- the same kernel object whenever the two
+  layers share a type -- has been waited on, and after this layer's first
+  dispatch has been waited on, because the patch reads the router record that
+  dispatch wrote into `act`;
+- the per-token `attnpos` patch (on `ax0`) happens once at the top of the step,
+  with nothing outstanding at all.
+
+`xres` is the one buffer every layer writes and the next layer's first dispatch
+reads, and nothing on the host orders those two commands. `xrt::run::start()` is
+documented as asynchronous, XRT's own `xrt::fence` exists precisely "to
+synchronize operations between run objects", and no ordering of two outstanding
+runs is promised anywhere in `xrt_kernel.h`; the ordering is therefore an
+EMPIRICAL property of one hardware context's command queue, and the gate below
+is its proof -- a reorder would read a stale `xres` and every logit after it
+would move.
+
+`OFLM_OPEN_SUBMIT_AHEAD` selects the schedule: `1` (the default) queues ahead
+only when the two dispatches run in the SAME hardware context, `0` restores the
+serial `start(); wait();` route, and `2` -- which crosses contexts -- **hangs the
+array** and exists only as the probe that established that. A layer whose program
+is a single dispatch (the dense families) queues that dispatch itself behind the
+previous layer's; the deepstack path (Qwen3-VL reads `xres` back between layers)
+runs serially.
+
+**Verification (manual):**
+1. **Bit-exact, 19 ids, 4 layers, sequential.** `open_qwen36_cli --model <35B>
+   --kernels <set> --pmode performance --layers 4 --ids
+   248045,846,198,760,28758,8427,4821,303,411,20012,369,264,2526,1287,314,4471,34523,440,836
+   --max-tokens 1 --prefill-logits --dump-logits <prefix> --quiet`, once with
+   `OFLM_OPEN_SUBMIT_AHEAD=0` and once with the level under test, compared with
+   `decode-run/cmp_exact.py`: **max |diff| 0.0 at every position.**
+2. **Bit-exact, a 64-token greedy continuation.** The same binary on
+   `gap-table/ids_1122.txt` with `--gemm-block --max-tokens 64 --dump-logits`,
+   the `_t<i>.bin` dumps compared position by position: the same 64 token ids and
+   **max |diff| 0.0** at every one.
+3. **Timing.** `--bench-decode N` prints the serial per-kernel table and the sum
+   of dispatch minima; `--bench-step N` then sweeps the schedules INTERLEAVED
+   (rep i takes each level in turn) over the real step and prints min / median /
+   mean of its wall time. The step's wall time and the sum of its dispatches'
+   own times are reported separately: once dispatches overlap, a queued-ahead
+   command's start-to-done includes the time it waited behind the one in front,
+   so the two stop being the same number. Real decodes are run ALTERNATED
+   (off, on, off, on, ...), never one run each.
+4. The engine logs `host threads: N (OMP_WAIT_POLICY=PASSIVE)` at construction;
+   a WARNING on that line invalidates every timing above.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, 40 layers, `sets/k35main`).** Both
+gates PASS: the 19-id 4-layer dump and the 64-token continuation are **max |diff|
+0.0 against the baseline's reference dumps**, with and without the pipeline, and
+the 64 token ids are identical. On a quiet box, `--bench-step 20` over two
+alternated rounds puts the pipeline **~3 ms of median step time** ahead of the
+serial route (at positions 1 and 1024; about 105 against 108 ms at position 1).
+Level 1 ran a soak (three requests on one resident engine, ~1,400 pipelined
+layer boundaries), every gate run and the integration benches with no `ERT state`
+line anywhere.
+
+**What it cannot reach.** The host gap between a dispatch returning and the next
+starting is 0.02-0.07 ms, so the host time a step spends outside its dispatches
+is a few ms in total: that is the ceiling for any submit-ahead scheme. The larger
+term is the lx <-> ax hardware context change, 22 per step. Queueing ahead across
+that change (level 2) hung the array three times in three runs
+(`ERT_CMD_STATE_TIMEOUT`), so no host schedule hides it; one xclbin carrying both
+layer types does.

@@ -15,9 +15,11 @@
 #include <stdexcept>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "fa_guards.hpp"
 #include "kernels.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 
@@ -173,6 +175,183 @@ void test_b_layout(const std::string &tmp_dir) {
   std::remove((tmp_dir + "/design.json").c_str());
 }
 
+// OW_ATTN parsing (task 0180 defaults: auto/npu/host) and its resolution
+// against whether a FlashAttention kernel is actually present -- entirely
+// without touching the filesystem or a device, per parse_attn_mode() and
+// resolve_use_npu_attn()'s own contract (fa_guards.hpp).
+void test_attn_mode() {
+  std::printf("-- OW_ATTN mode --\n");
+  check(ow::parse_attn_mode(nullptr) == ow::AttnMode::Auto, "unset -> auto");
+  check(ow::parse_attn_mode("") == ow::AttnMode::Auto, "empty -> auto");
+  check(ow::parse_attn_mode("auto") == ow::AttnMode::Auto, "'auto' -> auto");
+  check(ow::parse_attn_mode("host") == ow::AttnMode::Host, "'host' -> host");
+  check(ow::parse_attn_mode("npu") == ow::AttnMode::Npu, "'npu' -> npu");
+  expect_throw([&] { (void)ow::parse_attn_mode("npuu"); }, "OW_ATTN",
+               "refuses a misspelt 'npuu' rather than reading it as host");
+  expect_throw([&] { (void)ow::parse_attn_mode("Auto"); }, "OW_ATTN",
+               "refuses 'Auto' (case-sensitive, not read as auto)");
+
+  // auto: npu iff a kernel is present, silently either way (no throw).
+  check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, true, "dir") == true,
+        "auto + kernel present -> npu");
+  check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, false, "dir") == false,
+        "auto + no kernel -> host");
+  // host: never npu, regardless of what is on disk.
+  check(ow::resolve_use_npu_attn(ow::AttnMode::Host, true, "dir") == false,
+        "host + kernel present -> still host");
+  // npu: requires the kernel; THIS is the guard the task asked for by name --
+  // "npu without a kernel set refuses".
+  check(ow::resolve_use_npu_attn(ow::AttnMode::Npu, true, "dir") == true,
+        "npu + kernel present -> npu");
+  expect_throw([&] { (void)ow::resolve_use_npu_attn(ow::AttnMode::Npu, false, "/some/fa/dir"); },
+               "/some/fa/dir", "npu + no kernel present -> refuses, naming the directory");
+}
+
+// fa.json's required fields and the geometry guard -- read_fa_kernel_info()
+// refuses an incomplete file (every field is required, the same discipline
+// as design.json's read_b_layout), and check_fa_geometry() refuses a
+// complete-but-wrong-shaped one.
+void write_fa_json(const std::string &dir, const std::string &body) {
+  std::ofstream f(dir + "/fa.json", std::ios::binary);
+  f << body;
+}
+
+// Builds the JSON object field by field so a field can be OMITTED (rather
+// than string-surgered out of a fixed template, which is fragile exactly at
+// the last field -- no trailing comma to remove). `omit`, when non-null,
+// names the one field to leave out entirely.
+std::string fa_json(int64_t heads = 20, int64_t dk = 64, int64_t dv = 64, int64_t lq = 1536,
+                    int64_t lk = 1536, int64_t valid_len = 1500, const char *omit = nullptr) {
+  std::vector<std::pair<std::string, std::string>> fields = {
+      {"heads", std::to_string(heads)},      {"dk", std::to_string(dk)},
+      {"dv", std::to_string(dv)},            {"lq", std::to_string(lq)},
+      {"lk", std::to_string(lk)},            {"valid_len", std::to_string(valid_len)},
+      {"fp32_state", "true"},                {"emulate_bfp16", "false"},
+      {"mlir_aie_version", "\"1.4.3.dev55\""},
+      {"peano_version", "\"22.0.0.2026092301\""},
+  };
+  std::ostringstream ss;
+  ss << "{";
+  bool first = true;
+  for (const auto &kv : fields) {
+    if (omit && kv.first == omit) continue;
+    if (!first) ss << ",";
+    first = false;
+    ss << "\"" << kv.first << "\":" << kv.second;
+  }
+  ss << "}";
+  return ss.str();
+}
+
+void test_fa_kernel_info(const std::string &tmp_dir) {
+  std::printf("-- fa.json --\n");
+  expect_throw([&] { (void)ow::read_fa_kernel_info(tmp_dir + "/no-such-fa-dir"); },
+               "cannot open", "refuses a directory with no fa.json at all");
+
+  write_fa_json(tmp_dir, fa_json());
+  expect_ok([&] {
+    const ow::FaKernelInfo info = ow::read_fa_kernel_info(tmp_dir);
+    if (info.heads != 20 || info.dk != 64 || info.dv != 64 || info.lq != 1536 ||
+        info.lk != 1536 || info.valid_len != 1500 || !info.fp32_state || info.emulate_bfp16 ||
+        info.mlir_aie_version != "1.4.3.dev55")
+      throw std::runtime_error("read back the wrong record");
+  }, "reads a complete, correctly-shaped fa.json");
+  expect_ok([&] { ow::check_fa_geometry("fa.json", ow::read_fa_kernel_info(tmp_dir)); },
+            "check_fa_geometry accepts the engine's own shape (20/64/64/1536/1536/1500)");
+
+  for (const char *key : {"heads", "dk", "dv", "lq", "lk", "valid_len", "fp32_state",
+                          "emulate_bfp16", "mlir_aie_version", "peano_version"}) {
+    write_fa_json(tmp_dir, fa_json(20, 64, 64, 1536, 1536, 1500, key));
+    expect_throw([&] { (void)ow::read_fa_kernel_info(tmp_dir); }, key,
+                 std::string("refuses fa.json with no '") + key + "'");
+  }
+
+  // A kernel built for a different shape (this repo's own T44/T60-style
+  // family, or a stale build predating a geometry change) must be refused,
+  // not dispatched against -- the same class of guard as check_stream_shape.
+  write_fa_json(tmp_dir, fa_json(/*heads=*/16));
+  expect_throw([&] { ow::check_fa_geometry("fa.json", ow::read_fa_kernel_info(tmp_dir)); },
+               "heads", "refuses a kernel built for 16 heads instead of 20");
+  write_fa_json(tmp_dir, fa_json(20, 64, 64, 1536, 1536, /*valid_len=*/448));
+  expect_throw([&] { ow::check_fa_geometry("fa.json", ow::read_fa_kernel_info(tmp_dir)); },
+               "valid_len", "refuses a kernel built for valid_len 448 (the decoder's, not "
+                            "the encoder's 1500)");
+
+  write_fa_json(tmp_dir, "{}");
+  expect_throw([&] { (void)ow::read_fa_kernel_info(tmp_dir); }, "heads",
+               "refuses an empty fa.json");
+  std::remove((tmp_dir + "/fa.json").c_str());
+}
+
+// fa_kernel_usable() and its effect through resolve_use_npu_attn(): OW_ATTN=auto
+// must not throw on a stale/mismatched fa/ -- it must resolve to host, naming why
+// -- and OW_ATTN=npu must still refuse it (PR #111 review: auto previously only
+// checked that the three files existed, so a malformed or wrong-geometry fa.json
+// made FaAttention's constructor throw instead of falling back).
+void test_fa_kernel_usable(const std::string &tmp_dir) {
+  std::printf("-- fa_kernel_usable (auto/npu probe) --\n");
+  const std::string xclbin = tmp_dir + "/air.xclbin", insts = tmp_dir + "/air.insts.bin";
+  auto touch = [](const std::string &p) { std::ofstream(p, std::ios::binary) << "x"; };
+  auto rm_all = [&] {
+    std::remove(xclbin.c_str());
+    std::remove(insts.c_str());
+    std::remove((tmp_dir + "/fa.json").c_str());
+  };
+  rm_all();
+
+  // No files at all: not usable, reason names "no FlashAttention kernel".
+  {
+    std::string reason;
+    check(!ow::fa_kernel_usable(tmp_dir, reason), "no files -> not usable");
+    check(reason.find("no FlashAttention kernel") != std::string::npos,
+          "  reason names 'no FlashAttention kernel' (got: " + reason + ")");
+  }
+
+  touch(xclbin);
+  touch(insts);
+
+  // Files present but fa.json malformed (not valid JSON): fa_kernel_present()
+  // alone would have said "present"; fa_kernel_usable() must not.
+  {
+    write_fa_json(tmp_dir, "{ this is not json");
+    std::string reason;
+    check(!ow::fa_kernel_usable(tmp_dir, reason), "malformed fa.json -> not usable");
+    check(reason.find("invalid JSON") != std::string::npos,
+          "  reason names 'invalid JSON' (got: " + reason + ")");
+    check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, false, tmp_dir, reason) == false,
+          "  auto + malformed fa.json -> host (no throw)");
+    expect_throw([&] { (void)ow::resolve_use_npu_attn(ow::AttnMode::Npu, false, tmp_dir, reason); },
+                 "invalid JSON", "  npu + malformed fa.json -> refuses, naming why");
+  }
+
+  // Files present, fa.json valid JSON, but the wrong geometry (16 heads, not
+  // 20): auto falls back to host; npu refuses, naming the mismatched field.
+  {
+    write_fa_json(tmp_dir, fa_json(/*heads=*/16));
+    std::string reason;
+    const bool usable = ow::fa_kernel_usable(tmp_dir, reason);
+    check(!usable, "wrong geometry (16 heads) -> not usable");
+    check(reason.find("heads") != std::string::npos,
+          "  reason names the mismatched field 'heads' (got: " + reason + ")");
+    check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, usable, tmp_dir, reason) == false,
+          "  auto + wrong geometry -> host (no throw)");
+    expect_throw([&] { (void)ow::resolve_use_npu_attn(ow::AttnMode::Npu, usable, tmp_dir, reason); },
+                 "heads", "  npu + wrong geometry -> refuses, naming 'heads'");
+  }
+
+  // A complete, correctly-shaped fa.json IS usable -- the positive control,
+  // proving the two negatives above are about the content, not the plumbing.
+  {
+    write_fa_json(tmp_dir, fa_json());
+    std::string reason;
+    check(ow::fa_kernel_usable(tmp_dir, reason), "correct fa.json -> usable");
+    check(ow::resolve_use_npu_attn(ow::AttnMode::Auto, true, tmp_dir, reason) == true,
+          "  auto + usable kernel -> npu");
+  }
+
+  rm_all();
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -182,6 +361,9 @@ int main(int argc, char **argv) {
     test_stream_shapes();
     test_b_layout(tmp_dir);
     test_weight_dtype(tmp_dir);
+    test_attn_mode();
+    test_fa_kernel_info(tmp_dir);
+    test_fa_kernel_usable(tmp_dir);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "guards_test: unexpected exception: %s\n", e.what());
     return 1;
