@@ -23,6 +23,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#include <immintrin.h>
 
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
@@ -58,8 +59,32 @@ std::vector<uint8_t> read_file(const fs::path& p) {
     return v;
 }
 
+// OPEN-REQUEST-ISOLATION. Every device-to-host read in this file goes through read_back().
+// What xrt::bo::sync(FROM_DEVICE) is on the Windows driver (the shim, xrt_core.dll,
+// disassembled 2026-09-23 -- the XRT headers say nothing about it): below the size of the
+// L3 cache it is a user-mode CLFLUSH loop over every 64-byte line the range touches (the
+// start rounded down, the partial last line included), and above it a call into the kernel
+// driver. The loop has no fence after it. CLFLUSH is not ordered against later loads -- AMD's
+// manual: "the only way to avoid this situation is to use the MFENCE instruction after the
+// CLFLUSH instruction" -- so the caller's first load of a line it just flushed may still be
+// served from the stale cached copy. The fence closes that. It does NOT make a record the
+// device has not finished writing visible; route() keeps its sentinel for that.
+// OFLM_OPEN_READ_FENCE=0 drops the fence, for the A/B only.
+bool g_read_fence = true;
+
+void read_back(xrt::bo& bo, size_t bytes, size_t off) {
+    bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE, bytes, off);
+    if (g_read_fence) _mm_mfence();
+}
+
 double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+std::string fmt_idx(const uint32_t* idx) {
+    std::string s;
+    for (int i = 0; i < 8; ++i) s += (i ? "," : "") + std::to_string(idx[i]);
+    return s;
 }
 
 // Busy CPU cores throttle the NPU. Measured on this box (Ryzen AI, .claude/plans/
@@ -277,6 +302,9 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
+    route_check_ = std::getenv("OFLM_ROUTE_CHECK") != nullptr;
+    if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
+    if (const char* env = std::getenv("OFLM_OPEN_READ_FENCE")) g_read_fence = std::atoi(env) != 0;
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
@@ -820,7 +848,7 @@ void Core::bench_dispatch(int layer, int reps) {
               const double up = ms_since(h0);
               const auto r = run_split(kerns_.at(n), args, layer);
               auto h1 = std::chrono::steady_clock::now();
-              yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, yb.size(), 0);
+              read_back(yb, yb.size(), 0);
               const float* y = yb.map<float*>();
               for (size_t j = 0; j < yb.size() / 4; j += 1024) sink += y[j];
               traffic[n].add(up, ms_since(h1));
@@ -1103,19 +1131,220 @@ void Core::bench_decode(int reps) {
                  gbps(step_mb, step));
 }
 
+int Core::det_step(int reps, const std::vector<int>& ids, bool full) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: det_step before load_weights");
+    if (ids.empty()) throw std::runtime_error("open_qwen36: det_step wants at least one id");
+    const int p0 = pos_;
+    // One step's observable output. `full`: every buffer a step writes -- each layer's act,
+    // the KV row it wrote or a hash of its recurrent state, xres / xresf / hn -- plus the
+    // logits; otherwise the logits alone, which is all a decode loop reads, and reads nothing
+    // else back that could change the timing being probed.
+    struct Buf { std::string name; int layer; std::vector<uint8_t> bytes; };
+    auto grab = [&](int pos) {
+        std::vector<Buf> out;
+        for (auto& [l, rec] : route_log_) out.push_back({"route", l, std::move(rec)});
+        route_log_.clear();
+        auto take = [&](const std::string& name, int layer, xrt::bo& bo, size_t off, size_t n, bool hash) {
+            read_back(bo, n, off);
+            const uint8_t* m = bo.map<uint8_t*>() + off;
+            if (!hash) {
+                out.push_back({name, layer, std::vector<uint8_t>(m, m + n)});
+                return;
+            }
+            uint64_t h = 1469598103934665603ull;       // FNV-1a over 8-byte words
+            for (size_t o = 0; o + 8 <= n; o += 8) {
+                uint64_t w;
+                std::memcpy(&w, m + o, 8);
+                h = (h ^ w) * 1099511628211ull;
+            }
+            std::vector<uint8_t> hb(8);
+            std::memcpy(hb.data(), &h, 8);
+            out.push_back({name + "(hash)", layer, std::move(hb)});
+        };
+        if (full)
+            for (int l = 0; l < nl_; ++l) {
+                const LayerType& lt = *types_[l];
+                take("act", l, act_[l], 0, lt.act_bytes, false);
+                if (lt.state_kind == "kv")
+                    take("kv@" + std::to_string(pos), l, state_[l], static_cast<size_t>(pos) * lt.state_row,
+                         lt.state_row, false);
+                else
+                    take("state", l, state_[l], 0, lt.state_bytes, true);
+            }
+        if (full)
+            for (const char* g : {"xres", "xresf", "hn"})
+                if (globals_.count(g))
+                    take(g, -1, globals_.at(g), 0, man_.hidden * (std::string(g) == "hn" ? 2 : 4), false);
+        std::vector<uint8_t> lg(man_.vocab * 4);
+        std::memcpy(lg.data(), logits_host_.data(), lg.size());
+        out.push_back({"logits", -1, std::move(lg)});
+        return out;
+    };
+    using Run = std::vector<std::vector<Buf>>;
+    auto once = [&]() {
+        Run run;
+        reset();
+        seek(p0);
+        for (size_t i = 0; i < ids.size(); ++i) {
+            step(ids[i], true);
+            run.push_back(grab(p0 + static_cast<int>(i)));
+        }
+        return run;
+    };
+    // OFLM_DET_ROUTE=1 also compares every router record -- but syncing the whole record
+    // instead of the 32-byte idx changes route()'s timing enough to hide the late-read bug
+    // (repeat-bug.md), so it is off by default.
+    route_log_on_ = std::getenv("OFLM_DET_ROUTE") && std::string(std::getenv("OFLM_DET_ROUTE")) == "1";
+    route_log_.clear();
+    once();                                   // warm: the contexts, and the first step's patches
+    const Run ref = once();
+    std::map<std::string, int> first_at;      // "step s L<l> <buf>" -> reps that first moved there
+    int bad = 0;
+    std::fprintf(stderr, "open_qwen36: det_step: %d reps of %zu steps from position %d (%s)\n", reps, ids.size(), p0,
+                 full ? "every buffer" : "logits only");
+    for (int r = 0; r < reps; ++r) {
+        const Run got = once();
+        bool rep_bad = false;
+        for (size_t s = 0; s < ids.size() && !rep_bad; ++s) {
+            std::string where, all;
+            int nbufs = 0;
+            for (size_t i = 0; i < ref[s].size(); ++i) {
+                const auto& a = ref[s][i].bytes;
+                const auto& b = got[s][i].bytes;
+                size_t nw = 0, first = SIZE_MAX, last = 0;
+                for (size_t o = 0; o + 4 <= a.size(); o += 4)
+                    if (std::memcmp(&a[o], &b[o], 4)) {
+                        ++nw;
+                        if (first == SIZE_MAX) first = o;
+                        last = o;
+                    }
+                if (!nw) continue;
+                ++nbufs;
+                char line[256];
+                std::snprintf(line, sizeof line, "L%d %s: %zu words differ in [%zu, %zu]", ref[s][i].layer,
+                              ref[s][i].name.c_str(), nw, first, last + 4);
+                if (where.empty()) {
+                    where = line;
+                    first_at["step " + std::to_string(s) + " L" + std::to_string(ref[s][i].layer) + " " +
+                             ref[s][i].name]++;
+                    int shown = 0;
+                    for (size_t o = first; o + 4 <= a.size() && shown < 8; o += 4) {
+                        if (!std::memcmp(&a[o], &b[o], 4)) continue;
+                        float fa, fb;
+                        uint32_t ua, ub;
+                        std::memcpy(&fa, &a[o], 4);
+                        std::memcpy(&fb, &b[o], 4);
+                        std::memcpy(&ua, &a[o], 4);
+                        std::memcpy(&ub, &b[o], 4);
+                        char e[160];
+                        std::snprintf(e, sizeof e, "\n        @%zu %08x -> %08x (f32 %g -> %g)", o, ua, ub, fa, fb);
+                        where += e;
+                        ++shown;
+                    }
+                }
+                if (nbufs <= 16) all += std::string("\n      ") + line;
+            }
+            if (!nbufs) continue;
+            rep_bad = true;
+            ++bad;
+            std::fprintf(stderr, "  rep %d DIFFERS at step %zu (position %d, id %d): %d buffers; first in walk order: %s%s%s\n",
+                         r, s, p0 + static_cast<int>(s), ids[s], nbufs, where.c_str(), all.c_str(),
+                         nbufs > 16 ? "\n      ..." : "");
+            std::fflush(stderr);
+        }
+    }
+    std::fprintf(stderr, "open_qwen36: det_step: %d of %d reps differed from the reference\n", bad, reps);
+    std::fprintf(stderr, "open_qwen36: late router reads caught (OFLM_OPEN_ROUTE_SENTINEL=%d): %llu of %llu\n",
+                 route_sentinel_ ? 1 : 0, static_cast<unsigned long long>(route_late_),
+                 static_cast<unsigned long long>(route_reads_));
+    if (route_check_)
+        std::fprintf(stderr, "open_qwen36: route check: %llu of %llu router reads changed on a re-read\n",
+                     static_cast<unsigned long long>(route_stale_), static_cast<unsigned long long>(route_checks_));
+    for (const auto& [k, n] : first_at) std::fprintf(stderr, "    first moved at %s: %d\n", k.c_str(), n);
+    route_log_on_ = false;
+    route_log_.clear();
+    reset();
+    return bad;
+}
+
 void Core::route(Kern& k, int layer, uint64_t act_off) {
     auto t0 = std::chrono::steady_clock::now();
     if (k.moe2.empty()) throw std::runtime_error("open_qwen36: moeroute2 on " + k.name + ", which has no routed-expert table");
     xrt::bo& act = act_[layer];
     const size_t off = act_off + man_.rout_idx_off;
-    act.sync(XCL_BO_SYNC_BO_FROM_DEVICE, 32, off);
+    if (route_log_on_) {
+        // the whole record: the router's probabilities, then idx and the weights
+        const size_t n = man_.rout_idx_off + 64;
+        read_back(act, n, act_off);
+        const uint8_t* m = act.map<uint8_t*>() + act_off;
+        route_log_.push_back({layer, std::vector<uint8_t>(m, m + n)});
+    } else {
+        read_back(act, 32, off);
+    }
     uint32_t idx[8];
     std::memcpy(idx, act.map<uint8_t*>() + off, 32);
+    // OPEN-REQUEST-ISOLATION. The wait on this layer's first dispatch returning is NOT
+    // enough for the host to see the router record it wrote: roughly one read in 3000 (in
+    // the periods where it happens at all) still returns the PREVIOUS step's idx, and a
+    // re-sync microseconds later returns the new one (repeat-bug.md). The previous step's
+    // idx is a valid expert list, so nothing downstream notices -- the step just runs the
+    // wrong experts. arm_route_records() overwrote the slot with a sentinel before this
+    // step's dispatches, so a read that still shows it has not landed yet: sync again.
+    if (route_sentinel_) {
+        auto armed = [&] {
+            for (unsigned s = 0; s < man_.moe.topk; ++s)
+                if (idx[s] == kRouteSentinel) return true;
+            return false;
+        };
+        ++route_reads_;
+        if (armed()) {
+            ++route_late_;
+            const auto tw = std::chrono::steady_clock::now();
+            do {
+                if (ms_since(tw) > 1000.0)
+                    throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " at position " +
+                                             std::to_string(pos_) + ": the router record never landed (1 s after its "
+                                             "dispatch completed)");
+                read_back(act, 32, off);
+                std::memcpy(idx, act.map<uint8_t*>() + off, 32);
+            } while (armed());
+        }
+    }
+    if (route_check_) {
+        // read it again twice: at once, and a millisecond later, both through a fresh sync
+        uint32_t again[8], later[8];
+        read_back(act, 32, off);
+        std::memcpy(again, act.map<uint8_t*>() + off, 32);
+        const auto tw = std::chrono::steady_clock::now();
+        while (ms_since(tw) < 1.0) {}
+        read_back(act, 32, off);
+        std::memcpy(later, act.map<uint8_t*>() + off, 32);
+        ++route_checks_;
+        if (std::memcmp(idx, later, 32) || std::memcmp(again, later, 32)) {
+            ++route_stale_;
+            std::fprintf(stderr, "open_qwen36: route layer %d pos %d: idx read %s / again %s / 1 ms later %s\n", layer,
+                         pos_, fmt_idx(idx).c_str(), fmt_idx(again).c_str(), fmt_idx(later).c_str());
+        }
+    }
     for (unsigned s = 0; s < man_.moe.topk; ++s)
         if (idx[s] >= man_.moe.experts) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
     stream_patch::moe2_apply(k.iw(), k.moe2, idx, man_.moe);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     timing_.route_ms += ms_since(t0);
+}
+
+void Core::arm_route_records() {
+    // Every router record's idx slot -> the sentinel, so route() can tell a record this step's
+    // dispatch wrote from one it has not landed yet. Called with nothing outstanding; the
+    // first dispatch of each layer overwrites the whole record before anything reads it.
+    for (int l = 0; l < nl_; ++l)
+        for (const Step& s : types_[l]->program) {
+            if (s.op == "run") continue;
+            const size_t off = s.act_off + man_.rout_idx_off;
+            uint32_t* p = reinterpret_cast<uint32_t*>(act_[l].map<uint8_t*>() + off);
+            for (int i = 0; i < 8; ++i) p[i] = kRouteSentinel;
+            act_[l].sync(XCL_BO_SYNC_BO_TO_DEVICE, 32, off);
+        }
 }
 
 void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
@@ -1174,6 +1403,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         stream_patch::attn_apply(k.iw(), k.attn, static_cast<uint64_t>(pos_), k.geom);
         k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     }
+    if (route_sentinel_) arm_route_records();
     for (int l = 0; l < nl_; ++l) {
         int nrun = 0;
         for (const Step& s : types_[l]->program) {
@@ -1190,7 +1420,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         // - about 10 KB each way per injected layer per image row, against a vision tower
         // that costs seconds.
         if (deepstack && l < n_deepstack) {
-            xres.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.hidden * 4, 0);
+            read_back(xres, man_.hidden * 4, 0);
             float* r = xres.map<float*>();
             const float* f = deepstack + static_cast<size_t>(l) * man_.hidden;
             for (size_t i = 0; i < man_.hidden; ++i) r[i] += f[i];
@@ -1201,7 +1431,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         auto t1 = std::chrono::steady_clock::now();
         for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
         xrt::bo& lg = buffer("logits", 0);
-        lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.vocab * 4, 0);
+        read_back(lg, man_.vocab * 4, 0);
         std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
         timing_.lmhead_ms = ms_since(t1);
     }
@@ -1259,7 +1489,7 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     timing_.part1_ms += ms_since(ts);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
     ts = std::chrono::steady_clock::now();
-    yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
+    read_back(yb, N * T * 4, 0);
     timing_.sync_ms += ms_since(ts);
     timing_.part1_ms += ms_since(ts);
     return yb.map<float*>();
@@ -1282,7 +1512,7 @@ void Core::tail_logits(const float* row) {
     xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
     for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
     xrt::bo& lg = buffer("logits", 0);
-    lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.vocab * 4, 0);
+    read_back(lg, man_.vocab * 4, 0);
     std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
     timing_.lmhead_ms = ms_since(t1);
 }
@@ -1304,11 +1534,11 @@ void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t ac
     const size_t r = region_bytes ? region_off : 0;
     const size_t off = token * act_bytes + r;
     if (wide_to_scratch) {
-        wide.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, off);
+        read_back(wide, n, off);
         std::memcpy(scratch1.map<uint8_t*>() + r, wide.map<uint8_t*>() + off, n);
         scratch1.sync(XCL_BO_SYNC_BO_TO_DEVICE, n, r);
     } else {
-        scratch1.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, r);
+        read_back(scratch1, n, r);
         std::memcpy(wide.map<uint8_t*>() + off, scratch1.map<uint8_t*>() + r, n);
         wide.sync(XCL_BO_SYNC_BO_TO_DEVICE, n, off);
     }
@@ -1410,7 +1640,7 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         timing_.part0_ms += run(k, s.args, l);
         tt = std::chrono::steady_clock::now();
         xrt::bo& yb = buffer(s.args[2], 0);
-        yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
+        read_back(yb, N * T * 4, 0);
         y_out.assign(N * T, 0.f);
         std::memcpy(y_out.data(), yb.map<uint8_t*>(), N * T * 4);
         timing_.gemm_tr_ms += ms_since(tt);
@@ -1794,7 +2024,7 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
     timing_.moe_run_ms += run(mk, gb.moe_args, l);
     auto t1 = std::chrono::steady_clock::now();
     xrt::bo& xr = buffer("xres", 0);
-    xr.sync(XCL_BO_SYNC_BO_FROM_DEVICE, hid * 4, 0);
+    read_back(xr, hid * 4, 0);
     std::memcpy(out, xr.map<uint8_t*>(), hid * 4);
     timing_.moe_read_ms += ms_since(t1);
     timing_.route_ms += ms_since(tp);
@@ -1868,7 +2098,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     // once at the layer's first block and pushed back once at its last.
     xrt::bo& st = state_[l];
     auto ts = std::chrono::steady_clock::now();
-    if (first) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, lt.state_bytes, 0);
+    if (first) read_back(st, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
     uint8_t* sp = st.map<uint8_t*>();
     host::DeltaGeom g;
@@ -1949,7 +2179,7 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             timing_.part1_ms += ms_since(th);
             timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
             th = std::chrono::steady_clock::now();
-            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * L * 4, 0);   // the whole M x L score matrix
+            read_back(bc, M * L * 4, 0);   // the whole M x L score matrix
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
             th = std::chrono::steady_clock::now();
@@ -1961,7 +2191,7 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             timing_.part1_ms += ms_since(th);
             timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
             th = std::chrono::steady_clock::now();
-            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * hd * 4, 0);
+            read_back(bc, M * hd * 4, 0);
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
             th = std::chrono::steady_clock::now();
@@ -2021,7 +2251,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row;
     auto ts = std::chrono::steady_clock::now();
-    if (first && pos0 > 0) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, pos0 * row, 0);
+    if (first && pos0 > 0) read_back(st, pos0 * row, 0);
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
@@ -2144,7 +2374,7 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
             std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, n, visits.size(),
                          kname->c_str(), run_ms);
         auto t2 = std::chrono::steady_clock::now();
-        yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n * hid * NT * 4, 0);
+        read_back(yb, n * hid * NT * 4, 0);
         const float* yh = yb.map<float*>();
         // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][NG mmul
         // sub-tiles][8 tokens][8]; row 64 band + 16 g + 2 jj + p, token 8 sub + tt. A column
@@ -2192,13 +2422,13 @@ Snapshot Core::checkpoint() const {
             size_t n = static_cast<size_t>(pos_) * lt.state_row;
             std::vector<uint8_t> rows(n);
             if (n) {
-                bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, 0);
+                read_back(bo, n, 0);
                 std::memcpy(rows.data(), bo.map<uint8_t*>(), n);
             }
             s.kv.push_back(std::move(rows));
         } else {
             std::vector<uint8_t> st(lt.state_bytes);
-            bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE, lt.state_bytes, 0);
+            read_back(bo, lt.state_bytes, 0);
             std::memcpy(st.data(), bo.map<uint8_t*>(), lt.state_bytes);
             s.states.push_back(std::move(st));
         }
@@ -2233,7 +2463,7 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
     if (row < 0 || static_cast<size_t>(row) >= cfg_.max_ctx) throw std::runtime_error("open_qwen36: KV row out of range");
     const size_t kv_row = types_[layer]->state_row;
     size_t off = static_cast<size_t>(row) * kv_row + (value ? kv_row / 2 : 0);
-    state_[layer].sync(XCL_BO_SYNC_BO_FROM_DEVICE, kv_row / 2, off);
+    read_back(state_[layer], kv_row / 2, off);
     std::memcpy(out, state_[layer].map<uint8_t*>() + off, kv_row / 2);
 }
 
@@ -2243,7 +2473,7 @@ void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {
     if (off + n > bytes)
         throw std::runtime_error("open_qwen36: read_act: [" + std::to_string(off) + ", " + std::to_string(off + n) +
                                  ") is outside the layer's " + std::to_string(bytes) + "-byte act buffer");
-    act_[layer].sync(XCL_BO_SYNC_BO_FROM_DEVICE, n, off);
+    read_back(act_[layer], n, off);
     std::memcpy(dst, act_[layer].map<uint8_t*>() + off, n);
 }
 
