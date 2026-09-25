@@ -113,7 +113,8 @@ ln-results.json 36d5dcaed5697de4bc17d22a7f158127cc9c6c9487f0e82d26e8fc57fefe9c14
 ## Remaining gates
 
 Follow-up: [LM head K5120](wide-lm-head.md) passes full-vocabulary hardware
-comparison. The next B5 primitive is attention Q24/KV4/head_dim256/rotary64.
+comparison, and [attention Q24/KV4/head_dim256/rotary64](wide-attention.md)
+passes synthetic comparisons through position2048.
 Then integrate separate AB/conv/recurrence with projections, post norm and
 segmented FFN, measuring full-layer data and program memory. The existing
 fused `lx` path still exceeds physical shim input DMA resources; its embedded

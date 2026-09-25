@@ -61,4 +61,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the standalone Q8 LM head at K5120 with full vocabulary, production packing, independent FP64 references and K4096 regression.</description>
     <location>.opencode/skill/open-wide-lm-head/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-attention</name>
+    <description>Build and validate Q24/KV4/HD256/ROT64 attention using the production ax worker, per-head gates, device-carried KV state and Q16/KV4 regression.</description>
+    <location>.opencode/skill/open-wide-attention/SKILL.md</location>
+  </skill>
 </available_skills>

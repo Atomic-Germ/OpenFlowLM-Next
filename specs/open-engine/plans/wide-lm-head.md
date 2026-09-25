@@ -114,8 +114,9 @@ lm-results.json 0a9be7359325502d843b8c40cd9f379f419301d8b98731c73065ee548417fe0b
 
 ## Next gate
 
-Attention Q24/KV4/head_dim256/rotary64 remains to be validated at the exact
-tuple. Full-layer integration still requires replacing the fused wide glue
+Follow-up: [attention Q24/KV4/head_dim256/rotary64](wide-attention.md) now
+passes exact-tuple synthetic hardware checks through position2048, including
+head-local comparisons and device-carried cache. Full-layer integration still requires replacing the fused wide glue
 DMA schedule, using a fitting norm schedule inside or outside the layer,
 and reconciling128-row standalone versus140-row padded recurrent state.
 No 8-layer/64-layer model, converter packaging, chat test or full-model
