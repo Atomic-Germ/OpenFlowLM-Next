@@ -35,6 +35,8 @@ path, so a request carrying one routes to the closed engine.
 """
 from __future__ import annotations
 
+import os
+
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
@@ -84,7 +86,15 @@ def _check(spec: ModelSpec) -> None:
         require_gemv(spec, "linear", spec.hidden, spec.lin_value_width // n, pc)
         require_gemv(spec, "linear_out", spec.lin_value_width, spec.hidden // n, pc)
         fills = glue_side_fills(spec)
-        if fills > LIMITS["shim_fills"]:
+        if M.ab_banks(spec) > 1 and os.environ.get("OPEN_KERNELS_WIDE_GLUE_PROBE") != "1":
+            raise OpRangeError(
+                "qwen35: not implemented: fused wide glue needs 3 input DMA channels; "
+                "the core has 2. The separate open WideDeltaNet chain is validated, "
+                "but whole-layer integration is pending. Use utilities/probe-qwen35-wide.py "
+                "only to reproduce the compile/place failure.")
+        # The explicit diagnostic probe below may bypass this known topology failure,
+        # but it does not bypass catalogue validation or establish model support.
+        if M.ab_banks(spec) == 1 and fills > LIMITS["shim_fills"]:
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
                 f"(xn half + its weight tiles, per accumulator, then small and conv), over the "
@@ -162,7 +172,9 @@ def pack_plan(spec: ModelSpec) -> dict:
         # when it differs from `rows`: an extra key would move every existing family's plan,
         # its manifest and its build key for a value they already have.
         lanes = ab_lanes(spec)
-        pad = {"dst_rows": lanes} if lanes != heads else {}
+        banked = heads > M.AB_LANES
+        transpose = "transpose_banked" if banked else "transpose"
+        pad = {"dst_rows": lanes} if lanes != heads and not banked else {}
         plan["layer_types"][LINEAR] = {
             "pool": ffn_pool + [
                 proj_op(spec, "linear", pre + "linear_attn.qkv_proj.weight", L.POOL_QKV, nch, hid, hid),
@@ -171,10 +183,10 @@ def pack_plan(spec: ModelSpec) -> dict:
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.C_LNW, "cap": L.ELN},
                 # the container's q8 alpha / beta come with a bf16 [heads, hidden] copy; the glue
-                # reads [hidden, heads], which is what the 35B's container already stores (R4)
-                {"op": "transpose", "tensor": pre + "linear_attn.ssm_alpha_proj.bf16.weight",
+                # reads 32-lane rows: bank-major above 32 heads, legacy transpose otherwise.
+                {"op": transpose, "tensor": pre + "linear_attn.ssm_alpha_proj.bf16.weight",
                  "dst": side + L.SIDE_ALPHA, "rows": heads, "cols": hid, "elem": 2, **pad},
-                {"op": "transpose", "tensor": pre + "linear_attn.ssm_beta_proj.bf16.weight",
+                {"op": transpose, "tensor": pre + "linear_attn.ssm_beta_proj.bf16.weight",
                  "dst": side + L.SIDE_BETA, "rows": heads, "cols": hid, "elem": 2, **pad},
                 {"op": "put", "tensor": pre + "linear_attn.ssm_a", "dst": side + L.SIDE_SMALL,
                  "cap": heads * 4},

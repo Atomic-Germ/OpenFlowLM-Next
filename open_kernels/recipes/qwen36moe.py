@@ -188,6 +188,11 @@ def ab_lanes(spec: ModelSpec) -> int:
     return roundup(spec.lin_value_heads, AB_LANES)
 
 
+def ab_banks(spec: ModelSpec) -> int:
+    """Number of sequential 32-lane AB projections, not a wider vector primitive."""
+    return ab_lanes(spec) // AB_LANES
+
+
 class _Alloc:
     """Sequential byte allocator for a buffer layout: name -> offset, in order."""
 

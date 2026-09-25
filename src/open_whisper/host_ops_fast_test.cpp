@@ -374,13 +374,20 @@ void bench_gelu() {
 // OW_HOST_FAST's default flipped 2026-09-23 (task 0180 Part 15/17): unset
 // now means fast (it used to mean exact). Strict parsing is unchanged --
 // only "0" restores exact, and anything else still throws. Manipulates the
-// real process environment via _putenv_s and restores it to unset
+// real process environment and restores it to unset
 // afterwards (host_fast_enabled() has no internal caching, unlike
 // encoder.cpp's run_layer()'s function-local static, so this is safe to call
 // repeatedly within one process).
 void test_host_fast_default() {
   std::printf("-- OW_HOST_FAST default --\n");
-  auto set_env = [](const char *v) { _putenv_s("OW_HOST_FAST", v ? v : ""); };
+  auto set_env = [](const char *v) {
+#ifdef _WIN32
+    _putenv_s("OW_HOST_FAST", v ? v : "");
+#else
+    if (v) setenv("OW_HOST_FAST", v, 1);
+    else unsetenv("OW_HOST_FAST");
+#endif
+  };
 
   set_env(nullptr);
   check(ow::host_fast_enabled() == true, "unset -> fast (the new default)");
