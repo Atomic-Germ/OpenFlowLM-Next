@@ -62,7 +62,9 @@ ironvenv/bin/python utilities/probe-qwen35-wide.py --scope layer \
 ```
 
 The A7 separate AB/conv/recurrence chain is the validated alternative; it still
-needs layer-program integration. FFN17408 still requires segmented K8192/8192/1024.
+needs layer-program integration. The subsequent segmented K8192/8192/1024 work
+is in `.opencode/skill/open-segmented-dense/SKILL.md`, including its remaining
+full-FFN accuracy gate.
 These Q4-only projection probes do not validate that FFN, mixed Q8, normalization,
 attention or a model, and do not themselves promote catalogue entries.
 See `specs/open-engine/plans/dense-wide-input.md` for measured resource/test data.

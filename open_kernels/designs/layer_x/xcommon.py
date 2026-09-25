@@ -32,6 +32,7 @@ from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern
 
 from layout import R, SPEC, POOL_BYTES, POOL_DOWN, POOL_SHARE_DOWN, POOL_SHARE_GATE, POOL_SHARE_UP
+from recipes.segmented_dense import weight_slice
 
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
@@ -213,6 +214,9 @@ def kernels(inc, t):
         k["act"] = ef("dense_act", [ms, y])
         k["prep"] = ef("dense_prep", [x, tab, i32, i32])
         k["prepf"] = ef("dense_prep_f32", [x, tab, i32, i32])
+        if FFN.DOWN_SEGMENTS:
+            k["down_acc"] = ef("dense_down_acc", [ms, ds, i32, i32])
+            k["down_out"] = ef("dense_down_out", [ds, y, i32])
         k["vcopy"] = dnf("dnx_vcopy", [e, ds])
         k["p1"] = dnf("dnx_pass1", [e, ds, i32])
         k["delta"] = dnf("dnx_delta", [ds])
@@ -258,7 +262,8 @@ def _knames() -> tuple:
     ns = [n for n in base if (n != "gy" or NEED_Q4_GY) and (n != "gms" or NEED_Q4_GMS)]
     if MIXED:
         ns = ["gyms"] + [n for n in ns if n not in ("gy", "gms")]
-    return tuple(ns) + KNAMES_Q8
+    segmented = ("down_acc", "down_out") if KIND == "dense" and FFN.DOWN_SEGMENTS else ()
+    return tuple(ns) + KNAMES_Q8 + segmented
 
 
 KNAMES = _knames()
@@ -386,11 +391,61 @@ def ffn_body(win, xin, yout, B, K):
         yout.release(1)
     if FFN.XM_ELEMS <= 2:
         xin.release(FFN.XM_ELEMS)
+    if FFN.DOWN_SEGMENTS:
+        segmented_down_body(win, xin, yout, B, K)
+        return
     for i in range_(FFN.H_ELEMS):
         he = xin.acquire(1)
         K["prepf"](he, tab, FF, i)
         xin.release(1)
     role_gemv_bands(win, yout, B, K, "ffn", FFN.DOWN_PC, FF)
+
+
+def segmented_down_body(win, xin, yout, B, K, diagnostic=False):
+    """One prepared segment across ALL bands; ds retains partial sums locally.
+
+    The diagnostic variant emits snapshots after each segment. Production emits
+    only the final sums. Neither path feeds snapshots back into the core.
+    """
+    tab, ms, ds = B["tab"], B["ms"], B["ds"]
+    for start, width in FFN.DOWN_SEGMENTS:
+        for i in range_((width * 4 + ELEM - 1) // ELEM):
+            he = xin.acquire(1)
+            K["prepf"](he, tab, width, i)
+            xin.release(1)
+        for band in range_(FFN.DOWN_PC):
+            for g in range_(n_groups(width)):
+                we = win.acquire(1)
+                K["gms"](we, tab, ms, g, per_band(width), 0)
+                win.release(1)
+            K["down_acc"](ms, ds, band, int(start == 0))
+        if diagnostic or start + width == FFN.FF:
+            for band in range_(FFN.DOWN_PC):
+                ye = yout.acquire(1)
+                K["down_out"](ds, ye, band)
+                yout.release(1)
+
+
+def segmented_down_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss,
+                            A_BYTES, A_H, A_OUT2, POOL_DOWN_FFN, diagnostic=False):
+    yb = BAND_ROWS * 4
+    if not diagnostic:
+        for c in range(N_CORES):
+            pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_OUT2 + c * FFN.DOWN_PC * yb, FFN.DOWN_PC * yb))
+    for index, (start, width) in enumerate(FFN.DOWN_SEGMENTS):
+        if diagnostic:
+            for c in range(N_CORES):
+                off = A_OUT2 + (index * N_CORES + c) * FFN.DOWN_PC * yb
+                pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, off, FFN.DOWN_PC * yb))
+        pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H + start * 4, (width * 4 + ELEM - 1) // ELEM * ELEM))
+        for band in range(FFN.DOWN_PC):
+            for c in range(N_CORES):
+                off, size = weight_slice(FF, c * FFN.DOWN_PC + band, start, width)
+                pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_DOWN_FFN + off, size))
+        pipe_w.finish()
+        pipe_x.finish()
+        if diagnostic:
+            pipe_y.finish()
 
 
 def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss,
@@ -406,6 +461,10 @@ def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss
             pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_UP + (c * FFN.UP_PC + j) * bb_h, bb_h))
             pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_GATE + (c * FFN.UP_PC + j) * bb_h, bb_h))
     pipe_y.finish(*y_conss)                                   # h is in DDR
+    if FFN.DOWN_SEGMENTS:
+        segmented_down_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss,
+                                A_BYTES, A_H, A_OUT2, POOL_DOWN_FFN)
+        return
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H, FFN.H_ELEMS * ELEM))
     for c in range(N_CORES):
         pipe_w.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_DOWN_FFN + c * FFN.DOWN_PC * bb_f, FFN.DOWN_PC * bb_f))

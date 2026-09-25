@@ -72,11 +72,16 @@ def _check(spec: ModelSpec) -> None:
             raise OpRangeError(f"qwen35: {what} {v} is not a multiple of {BAND_ROWS * n} "
                                f"(64-row bands over {n} cores)")
     pc = per_call(spec, FFN)
+    parts = M.dense_segments(spec)
+    if parts and os.environ.get("OPEN_KERNELS_UNVALIDATED") != "1":
+        raise OpRangeError("qwen35: segmented FFN whole-layer integration is not yet validated; "
+                           "use OPEN_KERNELS_UNVALIDATED=1 for diagnostic builds only")
     require("ln", width=spec.hidden)
     require("lm_head_q8", K=spec.hidden, vocab=spec.vocab)
     # the FFN tail (recipes/dense.py's GEMV points, at this family's widths)
     require_gemv(spec, "ffn", spec.hidden, spec.intermediate // n, pc)
-    require_gemv(spec, "ffn", spec.intermediate, spec.hidden // n, pc)
+    for _, width in parts or ((0, spec.intermediate),):
+        require_gemv(spec, "ffn", width, spec.hidden // n, pc)
     if spec.has_linear:
         require("deltanet", heads=spec.lin_value_heads, dim=spec.lin_value_dim,
                 key_heads=spec.lin_key_heads, conv_kernel=spec.conv_kernel)

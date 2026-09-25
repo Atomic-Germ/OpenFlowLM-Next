@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Compile-only resource probe of wide Qwen3.5; never exports a model manifest.
 
-Run with ironvenv/bin/python. The FFN is deliberately synthetic until segmented
-FFN exists. Logs/spec/toolchain metadata remain in the selected build directory.
+Run with ironvenv/bin/python. Inputs are synthetic; down/ffn scopes can use the
+real FFN width. Logs/spec/toolchain metadata remain in the selected build directory.
 """
 import argparse
 import ast
@@ -66,15 +66,23 @@ rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, state_ty, act_ty,
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ffn", type=int, default=8192, help="synthetic FFN width (default 8192)")
-    p.add_argument("--scope", choices=("layer", "glue", "projection"), default="layer")
+    p.add_argument("--scope", choices=("layer", "glue", "projection", "down", "ffn"), default="layer")
+    p.add_argument("--trace", action="store_true", help="FFN up/gate diagnostic output")
+    p.add_argument("--final-only", action="store_true", help="down probe emits only final sums")
     p.add_argument("--projection-k", type=int, default=5120, help="isolated Q4 projection width")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
+    if args.trace and args.scope != "ffn":
+        p.error("--trace requires --scope ffn")
+    if args.final_only and args.scope != "down":
+        p.error("--final-only requires --scope down")
     out = args.out.resolve()
     if args.scope == "glue":
         out = out / "glue"
     elif args.scope == "projection":
         out = out / f"projection_k{args.projection_k}"
+    elif args.scope in ("down", "ffn"):
+        out = out / (args.scope + ("_final" if args.final_only else "") + ("_trace" if args.trace else ""))
     out.mkdir(parents=True, exist_ok=True)
     fixture = ROOT / "specs/open-engine/tests/fixtures/config_qwen38_27b.json"
     spec = ModelSpec.from_hf_config(json.loads(fixture.read_text())).to_dict()
@@ -94,6 +102,11 @@ def main():
     if args.scope == "projection":
         design_path = layer_dir / "projection_probe.py"
         env["PROBE_K"] = str(args.projection_k)
+    if args.scope in ("down", "ffn"):
+        design_path = layer_dir / "segmented_probe.py"
+        env["PROBE_FFN_TRACE"] = str(int(args.trace))
+        env["PROBE_FULL_FFN"] = str(int(args.scope == "ffn"))
+        env["PROBE_PARTIALS"] = str(int(not args.final_only))
     if args.scope == "glue":
         source = design_path.read_text()
         # HERE must continue to name the production source directory, not the
@@ -105,6 +118,8 @@ def main():
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}
     if args.scope == "projection":
         metadata.update(projection_k=args.projection_k, projection_n=1024, weight_format="q4_1")
+    if args.scope in ("down", "ffn"):
+        metadata.update(final_only=args.final_only, trace=args.trace, buffer_args=3, weight_format="q4_1")
     (out / "probe-toolchain.json").write_text(json.dumps(metadata, indent=2) + "\n")
     commands = [
         [sys.executable, str(ROOT / "open_kernels/designs/layer_x/gen_kernels.py")],
