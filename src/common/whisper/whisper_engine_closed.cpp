@@ -35,6 +35,7 @@ public:
     void clear_context() override { engine->clear_context(); }
     int get_current_context_length() override { return engine->get_current_context_length(); }
     std::string describe() const override { return "closed (whisper_npu)"; }
+    bool is_open() const override { return false; }
 
 private:
     // Declaration order is destruction order reversed: the engine goes before the manager

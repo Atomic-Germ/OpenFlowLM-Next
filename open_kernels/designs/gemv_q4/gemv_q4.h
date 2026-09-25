@@ -231,17 +231,29 @@ static inline void gemv_q4_pool_group(const uint8_t *__restrict chunks,
 
 // The same with the band law (chunks per band, row split) as RUNTIME arguments:
 // one entry point serves every shape of a design (16 KB program memory).
+//
+// The row split is a POWER OF TWO -- 2 for std_perm's 64-row bands, 4 for the expert
+// stripes and the down bands -- so the band walk is shifts and a mask. Written as `/ rs`
+// and `% rs` it was three SOFTWARE divides per call: `rs` arrives as a runtime argument,
+// so the compiler cannot fold them, and an AIE core has no integer divider (the 32-step
+// `__udivsi3` loop, not pipelined and not a hardware loop). `gemv_q4_gy` is the only entry
+// that passes `rs` at runtime -- `gup` and `gdown` pass literals and were always folded --
+// which is exactly the pair of dispatches (`lx0`, `ax0`, whose every band goes through
+// `gy`) that read slower per chunk than `lx1` / `ax1`.
 static inline void gemv_q4_pool_group_rt(const uint8_t *__restrict chunks,
                                          const uint8_t *__restrict tab,
                                          unsigned group, float *__restrict y,
                                          unsigned per_band, unsigned rs) {
-  const unsigned K = kTileK * per_band / rs;
-  const unsigned kt_last = per_band / rs - 1;
+  const unsigned sh = (rs == 4) ? 2u : 1u;                    // rs = 1 << sh, and rs is 2 or 4
+                                                              // (`__builtin_clz` is a 32-step
+                                                              // loop on this core, not an insn)
+  const unsigned K = (kTileK * per_band) >> sh;
+  const unsigned kt_last = (per_band >> sh) - 1;
 #pragma clang loop unroll(disable)
   for (unsigned i = 0; i < kPerCall; ++i) {
     const unsigned c = group * kPerCall + i;
-    const unsigned part = c % rs;
-    const unsigned kt = c / rs;
+    const unsigned part = c & (rs - 1);
+    const unsigned kt = c >> sh;
     gemv_q4_tile(chunks + i * kTileBytes, tab, K, kt, kt == 0, kt == kt_last, y + part * kRows);
   }
 }

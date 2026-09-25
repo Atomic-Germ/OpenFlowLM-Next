@@ -22,6 +22,8 @@ SOURCES += ../../common/modules/sampler.cpp
 SOURCES += ../../common/tokenizer/tokenizer.cpp
 SOURCES += ../../common/whisper/modeling_whisper_audio.cpp
 SOURCES += ../../common/whisper/modeling_whisper.cpp
+# modeling_whisper.cpp's hf decoding protocol calls into this translation unit.
+SOURCES += ../../common/whisper/generation_hf.cpp
 # Whisper::load_model() calls make_whisper_engine(); without these two this target
 # no longer links. whisper_engine_select.cpp compiles closed-only unless
 # OFLM_USE_OPEN_WHISPER is defined, which this target does not define.

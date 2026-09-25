@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "fa_attention.hpp"
 #include "host_ops.hpp"
 #include "kernels.hpp"
 #include "npu_device.hpp"
@@ -32,6 +33,9 @@ struct Timers {
   // that stays on the host whatever happens to them. Only filled when
   // OW_ATTN_PHASES=1, because the split costs about 2% of the call.
   AttnPhases attn_phases;
+  // OW_ATTN=npu only: the NPU attention path's own three stages (repack,
+  // dispatch, readback+scatter). Zero on the default host path.
+  FaPhases fa_phases;
   double npu_in = 0, npu_dispatch = 0, npu_out = 0;
   // Dispatch time split by stream, so the array's cost can be compared against
   // each shape's own DRAM traffic rather than against one aggregate.
@@ -86,6 +90,13 @@ public:
   const KernelSet &kernel_set() const { return *kernels_; }
   const Weights &weights() const { return *weights_; }
 
+  // Pre-formatted "value (source)" strings for the startup summary
+  // (engine_adapter.cpp's config_summary()) -- built once in the
+  // constructor, next to the printf that shows the same thing.
+  const std::string &attn_summary() const { return attn_summary_; }
+  const std::string &host_fast_summary() const { return host_fast_summary_; }
+  bool host_fast() const { return host_fast_; }
+
   Timers timers;
 
 private:
@@ -98,6 +109,16 @@ private:
   std::unique_ptr<npue::npu::Device> device_;
   std::unique_ptr<Weights> weights_;
   std::unique_ptr<KernelSet> kernels_;
+
+  // NPU FlashAttention. OW_ATTN unset means auto: used whenever a usable
+  // kernel is found at <kernels_dir>/fa (fa.json parsed and its geometry
+  // checked), otherwise host; OW_ATTN=npu requires it, OW_ATTN=host never
+  // uses it. Resident for the Encoder's lifetime, like kernels_'s Design;
+  // null when attention runs on the host.
+  std::unique_ptr<FaAttention> fa_attn_;
+  bool use_fa_attn_ = false;
+  std::string attn_summary_, host_fast_summary_;
+  bool host_fast_ = false;
 
   // Staged B slots, filled once at construction.
   size_t conv1_slot_ = 0, conv2_slot_ = 0, xkv_slot_ = 0;
