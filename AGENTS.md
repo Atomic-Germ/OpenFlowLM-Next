@@ -56,4 +56,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate streamed residual RMSNorm at width 5120, including actual L1 placement and legacy 2048/4096 hardware regression.</description>
     <location>.opencode/skill/open-wide-ln/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-lm-head</name>
+    <description>Build and validate the standalone Q8 LM head at K5120 with full vocabulary, production packing, independent FP64 references and K4096 regression.</description>
+    <location>.opencode/skill/open-wide-lm-head/SKILL.md</location>
+  </skill>
 </available_skills>

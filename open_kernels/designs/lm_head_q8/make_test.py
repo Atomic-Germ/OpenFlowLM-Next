@@ -7,6 +7,8 @@ against our builder in pools.rs).
 Writes w_<tag>.bin (first B bands of pool-order q8 chunks), x_<tag>.bin,
 ref_<tag>.bin (f32, fp64 reference from the same bytes), run_<tag>.cfg (paths
 relative to this directory).
+Set LMHEAD_K to the captured pool's width (default 2048). The reference API
+derives K from each input and can compare a batch without decoding weights again.
 """
 from __future__ import annotations
 
@@ -22,8 +24,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 import fixture_paths as FX  # noqa: E402
 CH = 8704
-K = 2048
-PER_BAND = 32
+K = int(os.environ.get("LMHEAD_K", "2048"))
+PER_BAND = 4 * (K // 256)
 BAND_ROWS = 128
 N_ALL = 248320
 
@@ -39,22 +41,37 @@ def dequant_chunks(b: np.ndarray) -> np.ndarray:
 
 
 def reference(w_bytes: np.ndarray, x: np.ndarray, n: int, batch: int = 2048) -> np.ndarray:
+    return references(w_bytes, x[None, :], n, batch)[0]
+
+
+def references(w_bytes: np.ndarray, xs: np.ndarray, n: int, batch: int = 256) -> np.ndarray:
+    """Independent fp64 decode for one or more inputs; derive K from the inputs.
+
+    Bound temporary dequantized storage, including when w_bytes is a memmap.
+    The column/row mapping describes pool bytes, independent of pack.apply_op.
+    """
+    if xs.ndim != 2 or xs.shape[1] <= 0 or xs.shape[1] % 256:
+        raise ValueError('LM-head inputs must have shape [cases, K], K divisible by 256')
+    k = xs.shape[1]
+    if n <= 0 or n % BAND_ROWS or batch <= 0 or w_bytes.size != n * k // (32 * 256) * CH:
+        raise ValueError('LM-head pool size, row count or batch size is invalid')
+    per_band = 4 * (k // 256)
     nch = len(w_bytes) // CH
-    chunks = w_bytes[: nch * CH].reshape(nch, CH)
-    y = np.zeros(n, np.float64)
-    xf = x.astype(np.float64)
+    chunks = w_bytes.reshape(nch, CH)
+    y = np.zeros((n, len(xs)), np.float64)
+    xf = xs.astype(np.float64)
     c = np.arange(nch)
-    band, ci = np.divmod(c, PER_BAND)
+    band, ci = np.divmod(c, per_band)
     rows0 = BAND_ROWS * band + 32 * (ci % 4)
     cols0 = 256 * (ci // 4)
     for lo in range(0, nch, batch):
         hi = min(lo + batch, nch)
         w = dequant_chunks(chunks[lo:hi]).astype(np.float64)                        # (b, 32, 256)
-        xs = xf[cols0[lo:hi, None] + np.arange(256)[None, :]]                       # (b, 256)
-        part = np.einsum("brk,bk->br", w, xs)                                       # (b, 32)
+        xblock = xf[:, cols0[lo:hi, None] + np.arange(256)[None, :]]                # (cases, b, 256)
+        part = np.einsum("brk,tbk->brt", w, xblock)                                # (b, 32, cases)
         rows = rows0[lo:hi, None] + np.arange(32)[None, :]
         np.add.at(y, rows, part)
-    return y.astype(np.float32)
+    return y.T.astype(np.float32)
 
 
 def main() -> int:
