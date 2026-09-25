@@ -47,8 +47,17 @@ def metric(got, ref, cosine_threshold):
     got, ref = got.astype(np.float64).ravel(), ref.astype(np.float64).ravel()
     if not np.isfinite(got).all() or not np.isfinite(ref).all():
         return dict(passed=False, error="non-finite data")
-    rel = float(np.max(np.abs(got - ref)) / (np.max(np.abs(ref)) + 1e-30))
+    ref_scale, got_scale = np.max(np.abs(ref)), np.max(np.abs(got))
+    error = np.max(np.abs(got - ref))
+    rel = float(error / ref_scale) if ref_scale else (0.0 if error == 0 else float("inf"))
     # Exact zero is useful for state/reset tests; cosine is undefined there.
-    cosine = 1.0 if np.array_equal(got, ref) else float(
-        got @ ref / (np.linalg.norm(got) * np.linalg.norm(ref) + 1e-30))
+    if np.array_equal(got, ref):
+        cosine = 1.0
+    elif ref_scale == 0 or got_scale == 0:
+        cosine = 0.0
+    else:
+        # Cosine is scale invariant. Normalize first instead of adding an
+        # absolute epsilon that dominates small-but-nonzero tensors.
+        a, b = got / got_scale, ref / ref_scale
+        cosine = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
     return dict(passed=rel < 1e-4 and cosine > cosine_threshold, maxrel=rel, cosine=cosine)
