@@ -395,6 +395,14 @@ refused at load rather than falling back to 2048.
 - The `lmhead_q8` order at K = 2048 / 2560 / 4096 is the law above, and at K = 2048 it is byte for byte the shipped 27B one (`tests/test_pack_plan.py`); an `lmhead_q8` op without `in_dim` is refused by both the NumPy packer and the manifest parser, naming the field.
 - A `std_perm` without `nch` / `in_dim`, or a `transpose` without `rows` / `cols` / `elem`, is refused by the manifest parser naming the field.
 - `transpose` takes an optional `dst_rows`: the destination row is widened to that many values and the tail zeroed (`[16, hid] -> [hid, 32]` with columns 16..31 zero, the 16-head DeltaNet's alpha / beta). It appears in a plan ONLY when it differs from `rows`, so a 32-head family's plan, manifest and build key do not move; `dst_rows` narrower than `rows` is refused by both packers. Both produce the same bytes (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
+- `transpose_banked` is the dedicated wide-head AB operation: `[heads, hidden]`
+  becomes `[ceil(heads/32), hidden, 32]`, with unused tail lanes zeroed. It
+  requires `tensor`, `rows`, `cols`, `elem`, and uses `dst` as a byte offset.
+  At 48 heads and hidden 5120, each bank is 327680 bytes (80 side tiles).
+  Python and C++ test every element, heads 31/32/47, padding and destination
+  bounds. Qwen3.5 plans select it only above 32 heads; existing plans retain
+  `transpose`. This packing capability does not validate a wide-head NPU
+  kernel. See `tests/test_qwen35_27b.py` and `plans/qwen35-27b-bringup.md`.
 - `model/q4nx.py` reads each q8 tensor the way the POOL holds it: as the container's own q8 when `native_q8(name)` (the projections the plan streams with `q8_perm`), else as the packer's q4_1. So a slice comparison measures the kernels whichever path a projection is on. `make_decode.py --requant` swings the whole run -- spec, plan, pools and reference -- onto the fallback for the A/B.
 - A `q8_perm` half-tile round-trips exactly: dequantizing the two half-tiles of a chunk gives the same values as dequantizing the chunk, value for value. The band law matches a brute-force placement against the dequantized source matrix, and a q8 projection occupies exactly twice the q4_1 bytes.
 - The NumPy and C++ packers produce the same `q8_perm` pool bytes (the same FNV-1a in `tests/test_quant_q8.py` and `src/open_qwen36/pools_test.cpp`), and a `q8_perm` without `nch` / `in_dim` is refused by the manifest parser naming the field.
@@ -1122,6 +1130,63 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
 - **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. The value head's key head is `h / (lin_value_heads / lin_key_heads)` -- 2 value heads per key head at 32, one at 16.
 - **The alpha / beta projection is padded to the accumulator's 32 lanes**, not narrowed: a W element stays 64 rows x 32 bf16 = 4 KB, `AB_ELEMS` is `hidden / 64` whatever the head count, and a 16-head model's `transpose` op carries `dst_rows` so columns 16..31 are zero. `dt_bias` sits at `lin_value_heads` floats inside `small`, not at a fixed 32.
 - **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048) / 64` weight tiles, which is 32 and 8 at HID 2560. The side channel's fills are `2 + 4 * ceil(hidden*2 / 4096)` and the recipe refuses a hidden width whose count exceeds `LIMITS["shim_fills"]`, naming the number.
+- **Wide glue worker (diagnostic only; fused topology cannot place).** Above 32
+  value heads the dense path has `ceil(heads/32)` sequential AB banks and a
+  dedicated depth-1 `xn_side` FIFO. Each bank consumes alpha then beta, each
+  replaying all xn chunks, then one small-parameter element. Two 32-float
+  accumulators are reused; decay/beta span the actual head count. A banked
+  helper uses local accumulator indices but global A/dt_bias/output indices
+  and processes only the active tail lanes. Existing <=32-head and MoE worker
+  paths retain their original streams. The 48-head worker consumes 12 xn
+  chunks and continues to six value tiles / 48 records. These contracts are
+  tested by executing the actual Python worker with checked FIFO substitutes
+  and compiling the actual small-helper indexing loop with host math in
+  `tests/test_qwen35_wide_glue.py`. They do not establish IRON placement or
+  NPU numerical correctness. The implemented host schedule fails actual IRON
+  placement: weights + xn + gact require three input DMA channels, but the core
+  has two. Wide recipe dispatch remains explicitly refused; only
+  `utilities/probe-qwen35-wide.py` enables the diagnostic topology.
+- **Shared WideDeltaNet AB primitive.** `recipes/wide_deltanet.py` describes
+  geometry, 32-lane banks/tails, xn chunks and value-to-key grouping without a
+  model-name branch. `designs/wide_deltanet/ab.py` uses a separate open dispatch
+  with two input DMA channels and reused 32-float accumulators. Both H=5120 and
+  H=2560, 48 heads, passed seven NPU dispatches against float64 math over the same
+  bf16 inputs on 2026-09-24 (max-relative error <1e-4 and cosine >0.99999).
+  The existing fixed-width `transpose_banked` opcode implements the new plan's
+  conceptual `transpose_banked32`; both Python and C++ check every active tail
+  1..32 and both hidden widths. No catalogue promotion or model export.
+  See [bring-up report](plans/wide-deltanet-bringup.md).
+- **WideDeltaNet A7 synthetic chain.** The separate AB dispatch now feeds
+  `designs/wide_deltanet/glue.py` through a byte copy into its side buffer.
+  The glue reuses the existing convolution, normalization and emission kernels
+  at 48 heads with two input DMA channels. `deltanet/dn_step.py` accepts a
+  compile-time head count (default32, `DN_HEADS=48` for this chain); its scalar
+  and vector arithmetic is unchanged. NPU comparisons at both H5120/H2560
+  pass the inherited whole-tensor metrics for two 8-token sequences each,
+  cold and warm state; conv state is bit-exact. Every record is compared and
+  all output canaries remain intact. The stricter optional head-local metric
+  exposes up to1.03e-3 relative error for near-zero first-token outputs; this
+  diagnostic is retained separately, not claimed to pass. See
+  [A7 report](plans/wide-deltanet-a7.md) for thresholds, resources and evidence.
+  Whole-layer integration, segmented FFN and full-model validation are pending.
+- **Dense wide activation input.** Main-core xn/xm preparation streams inputs
+  longer than two 4-KiB chunks through the existing depth-two FIFO. One/two-chunk
+  lifetimes and Q4 arithmetic/packing are unchanged. Isolated Q4 projections at
+  K5120 and K6144 pass nine NPU comparisons each with actual main-core scratch;
+  buffers plus stack occupy59392 B/core. FFN xm has unit/IR coverage only;
+  whole-layer placement still hits the fused glue DMA limit. See the
+  [wide input report](plans/dense-wide-input.md). No catalogue promotion.
+- **Segmented dense down.** When a full FFN table cannot fit L1 even with
+  one-chunk weight elements, the dense composition uses8192-wide segments.
+  H5120/FF17408 uses8192+8192+1024, segment-major across all output bands,
+  slicing the original Q4 pool and retaining partials in reusable ds scratch.
+  Partial/final down comparisons pass44 hardware gates. The subsequent precise
+  SiLU/product path resolves an h-to-bf16 rounding amplification: full FFN now
+  passes13 synthetic inputs, with and without up/gate tracing. Its optional
+  vector helper retains three bf16 components and six products; legacy TUs
+  remain unchanged. See [precision report](plans/dense-ffn-precision.md).
+  Whole-layer integration remains behind `OPEN_KERNELS_UNVALIDATED`; mixed Q8 is unimplemented.
+  See [segmented FFN report](plans/segmented-dense-ffn.md). No model/catalogue promotion.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;

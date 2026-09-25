@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from .attnknobs import knobs as attn_knobs, probe_env  # noqa: F401  (probe_env: cache.py reads it off the family module)
 from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
+from .segmented_dense import segments
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
@@ -188,6 +189,11 @@ def ab_lanes(spec: ModelSpec) -> int:
     return roundup(spec.lin_value_heads, AB_LANES)
 
 
+def ab_banks(spec: ModelSpec) -> int:
+    """Number of sequential 32-lane AB projections, not a wider vector primitive."""
+    return ab_lanes(spec) // AB_LANES
+
+
 class _Alloc:
     """Sequential byte allocator for a buffer layout: name -> offset, in order."""
 
@@ -295,6 +301,7 @@ class Ffn:
     FF: int; UP_PC: int; DOWN_PC: int
     MS_U: int; MS_G: int; MS_FLOATS: int
     XN_ELEMS: int; XM_ELEMS: int; H_ELEMS: int
+    DOWN_SEGMENTS: tuple = ()            # empty preserves the legacy full-table path
 
 
 @dataclass(frozen=True)
@@ -382,12 +389,31 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
     if ffn != "dense":
         return PER_CALL
     wide = kwide(spec, ffn)
-    ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
+    ds = dense_ds_floats(spec)
     for pc in (2, 1):
         if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc) <= L1_BUDGET:
             return pc
     raise OpRangeError(f"qwen35: a {wide}-wide activation table does not leave room for the streams "
                        f"in a core's L1 ({tab_bytes(wide)} B of table, {L1_BUDGET} B budget)")
+
+
+def dense_segments(spec: ModelSpec) -> tuple:
+    """Only segment when even the legacy one-chunk full table cannot fit L1."""
+    wide = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
+               spec.attn_q_width if spec.has_full else 0, spec.intermediate)
+    ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
+    if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, 1) <= L1_BUDGET:
+        return ()
+    if spec.q8_roles:
+        raise OpRangeError("qwen35: not implemented: segmented dense FFN requires all-Q4 projections")
+    return segments(spec.intermediate)
+
+
+def dense_ds_floats(spec: ModelSpec) -> int:
+    # DeltaNet state work has finished before FFN. Reuse ds for per-core down
+    # partial sums; attention-only recipes reserve the required output rows.
+    return max(DN_SCRATCH_FLOATS if spec.has_linear else 0,
+               spec.hidden // LIMITS["n_cols"] if dense_segments(spec) else 0)
 
 
 def kwide(spec: ModelSpec, ffn: str = "moe") -> int:
@@ -396,7 +422,10 @@ def kwide(spec: ModelSpec, ffn: str = "moe") -> int:
     h's table replaces xm's and FF joins the max instead (designs/dense/dx.py)."""
     wide = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
                spec.attn_q_width if spec.has_full else 0)
-    return max(wide, spec.intermediate) if ffn == "dense" else wide
+    if ffn == "dense":
+        parts = dense_segments(spec)
+        return max(wide, max(w for _, w in parts) if parts else spec.intermediate)
+    return wide
 
 
 def common(spec: ModelSpec, ffn: str = "moe") -> Common:
@@ -490,7 +519,7 @@ def _common_dense(spec: ModelSpec) -> Common:
         TILE=CHUNK, PER_CALL=pc, CALL_BYTES=call_bytes,
         STRIPE=0, HALF=0, PAIR=2 * CHUNK, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
         BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=0,
-        MS_FLOATS=FFN_MS_FLOATS, DS_FLOATS=DN_SCRATCH_FLOATS if dn_dim else 0,
+        MS_FLOATS=FFN_MS_FLOATS, DS_FLOATS=dense_ds_floats(spec),
         TAB_BYTES=tab_bytes(wide), H_TAB_OFF=0, KWIDE=wide,
         MS_RW=0, MS_XR=0, MS_ACC=0, MS_U=0, MS_G=BAND_ROWS, MS_YD=0,
         ROWS_PC=hid // n, HID_PC=ff // n,
@@ -508,6 +537,7 @@ def ffn_geometry(spec: ModelSpec) -> Ffn:
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=FFN_MS_FLOATS,
         XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * 2, ELEM) // ELEM,
         H_ELEMS=roundup(ff * 4, ELEM) // ELEM,
+        DOWN_SEGMENTS=dense_segments(spec),
     )
 
 
@@ -1207,7 +1237,8 @@ KERNEL_SOURCES = [
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/router/*.cc", "designs/router/*.h",
-    "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
+    "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/ln/ln_stream.py",
+    "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",

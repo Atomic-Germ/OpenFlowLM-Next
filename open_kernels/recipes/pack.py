@@ -22,6 +22,7 @@ tensor's bytes as stored, in the file's raster order). It may also offer
   conv_transpose  conv1d [taps, NCH] bf16 -> [groups][taps][width]
   lmhead_q8       the q8 lm_head's 128-row supertile order
   transpose       a small [rows, cols] tensor -> [cols, rows] (qwen35's alpha / beta)
+  transpose_banked [heads, hidden] -> [ceil(heads/32), hidden, 32], zero-padded AB banks
 
 **q8 projections** (OPEN-QUANT-Q8). Where the recipe's per-role quant map says q8, the
 plan carries `q8_perm` instead of `std_perm` and the pool holds the container's q8 values
@@ -627,6 +628,27 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
         if op["dst"] + n > len(dst):
             raise ValueError("lm_head larger than its pool")
         dst[op["dst"]:op["dst"] + n] = raw[perm].reshape(-1)
+    elif kind == "transpose_banked":
+        # AB projections retain 32-lane rows: [heads, hidden] -> [banks, hidden, 32].
+        # A padded ordinary transpose would interleave banks at every hidden row.
+        name = _name(op, "tensor", layer)
+        rows, cols, elem = (op.get(k, 0) for k in ("rows", "cols", "elem"))
+        if rows <= 0 or cols <= 0 or elem <= 0:
+            raise ValueError(f"transpose_banked {name}: rows / cols / elem must be positive")
+        b = _u8(_raw(m, name))
+        if len(b) != rows * cols * elem:
+            raise ValueError(f"{name}: {len(b)} B is not a [{rows}, {cols}] tensor of {elem}-byte values")
+        banks = (rows + 31) // 32
+        size = banks * cols * 32 * elem
+        off = op["dst"]
+        if off < 0 or off + size > len(dst):
+            raise ValueError(f"transpose_banked {name}: destination does not fit {size} B")
+        src = b.reshape(rows, cols, elem)
+        w = np.zeros((banks, cols, 32, elem), np.uint8)
+        for bank in range(banks):
+            active = min(32, rows - bank * 32)
+            w[bank, :, :active] = src[bank * 32:bank * 32 + active].transpose(1, 0, 2)
+        dst[off:off + size] = w.reshape(-1)
     elif kind == "transpose":
         # a small [rows, cols] tensor of `elem`-byte values -> [cols, rows]. `dst_rows`, when
         # given, widens the destination row to that many values and zeroes the tail -- the
