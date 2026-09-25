@@ -241,6 +241,12 @@ GGUF_QUANT_PRIORITY: Tuple[str, ...] = ("q4_1", "q4_0", "q8_0")
 GGUF_QUANT_PRIORITY_BY_FAMILY: Dict[str, Tuple[str, ...]] = {
     "lfm2": ("q4_0", "q4_1", "q8_0"),
     "gpt-oss": ("q4_1", "q4_0", "q8_0", "mxfp4"),
+    # Qwen3.5 and Qwen3.6-MoE official OFLM models ship Q4_K (super-block
+    # layout). A repo like Cyber-Tiel has language GGUFs named Q4_K_* and a
+    # vision projector named mmproj-Q8_0; without q4_k in the priority the
+    # projector is selected instead of the language weights.
+    "qwen3.5": ("q4_k", "q4_1", "q4_0", "q8_0"),
+    "qwen3.6-moe": ("q4_k", "q4_1", "q4_0", "q8_0"),
 }
 
 
@@ -944,9 +950,6 @@ def inject_oflm_keys(config: dict, q4nx_config: dict, output_dir: Path, oflm_ver
         # Darwin-style text-only MoE: model_type becomes qwen3_5_moe_text.
         if text_config.get("model_type"):
             config["model_type"] = text_config["model_type"]
-    # Strip keys the OFLM runtime doesn't consume (HF VL wrapper leftovers).
-    for key in ("video_token_id",):
-        config.pop(key, None)
     # Drop HF vision blob when no vision weights were converted (text-only finetunes).
     if not (output_dir / "vision_weight.q4nx").exists():
         config.pop("vision_model_weight", None)
@@ -984,6 +987,14 @@ def inject_oflm_keys(config: dict, q4nx_config: dict, output_dir: Path, oflm_ver
     # Darwin/Ornith engines need caching enabled at runtime.
     if config.get("model_type") in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6_moe", "qwen3_6_moe_text"):
         config["use_cache"] = True
+    # Qwen3.5/3.6-MoE VL skeletons sometimes omit video_token_id, but the engine
+    # dereferences it during VLM init. Ensure the canonical id is present when
+    # vision weights were shipped.
+    if (
+        config.get("model_type") in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6_moe", "qwen3_6_moe_text")
+        and (output_dir / "vision_weight.q4nx").exists()
+    ):
+        config.setdefault("video_token_id", 248057)
     if oflm_version:
         config["oflm_version"] = oflm_version
     vision_config = q4nx_config.get("vision_config", {})
