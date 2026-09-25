@@ -3351,6 +3351,13 @@ no route prefills it one token at a time and answers -- the fall-through. One se
 dispatched any route kernel, with NPU context errors (pci Event ID 3) in the System log at the
 same moments; four repeats of that request and a second full `oflm-test` on a fresh server did
 not reproduce it. Details: `specs/open-engine/plans/archive/qwen35-block-prefill.md`.
+Re-run 2026-09-25 after rebasing onto main at #114 (layer_x's head-by-head DeltaNet
+transfers and the decode submit-ahead), with both kernel sets rebuilt from that tree: the
+9B's 1000 positions score the same argmax 997 / top-5 976 / mean corr 0.99997 against the
+sequential path, the 16-token continuation is identical, prefill 127.7 s -> 9.75 s, decode
+154 ms/token both ways; the 0.8B prefills 1000 tokens in 28.7 s -> 1.94 s with an identical
+continuation, and `oflm-test --llm` on `qwen3.5:0.8b` through `oflm serve` with no flag set
+PASSes 5 of 5.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
