@@ -11,7 +11,8 @@ are in [wide-deltanet-bringup.md](wide-deltanet-bringup.md), the
 [segmented FFN report](segmented-dense-ffn.md), followed by the
 [precision fix](dense-ffn-precision.md), and the
 [standalone LN5120 validation](wide-ln.md) and
-[full-vocabulary LM head K5120](wide-lm-head.md) (2026-09-25). Segmented down and the synthetic full
+[full-vocabulary LM head K5120](wide-lm-head.md), and
+[attention Q24/KV4/256/64](wide-attention.md) (2026-09-25). Segmented down and the synthetic full
 FFN pass strict hardware comparison; whole-layer validation is pending. The phase notes below are
 historical; the toolchain is installed, the synthetic A7 chain passes inherited
 whole-tensor gates, and Q4 projections at K5120/K6144 pass hardware comparison.
