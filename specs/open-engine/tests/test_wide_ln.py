@@ -111,3 +111,12 @@ def test_acceptance_handles_zero_and_rejects_nonfinite_or_wrong_results():
     assert not probe.metrics(wrong, ref)['passed']
     wrong = np.full(5120, 1.0078125, bfloat16)
     assert not probe.metrics(wrong, ref)['passed']
+
+
+@pytest.mark.parametrize('family', ['qwen35', 'qwen36moe', 'dense'])
+def test_recipe_cache_covers_precise_wide_norm(family):
+    recipe = __import__('recipes.' + family, fromlist=['KERNEL_SOURCES'])
+    files = {p.relative_to(ROOT / 'open_kernels').as_posix()
+             for pattern in recipe.KERNEL_SOURCES
+             for p in (ROOT / 'open_kernels').glob(pattern)}
+    assert 'include/vecmath_precise.h' in files

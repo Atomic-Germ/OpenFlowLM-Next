@@ -76,4 +76,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate Q24/KV4/HD256/ROT64 attention using the production ax worker, per-head gates, device-carried KV state and Q16/KV4 regression.</description>
     <location>.opencode/skill/open-wide-attention/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-deltanet-layer</name>
+    <description>Build and debug the complete synthetic H5120/FF17408 DeltaNet layer, padded state adapters and remaining full-layer precision failure.</description>
+    <location>.opencode/skill/open-wide-deltanet-layer/SKILL.md</location>
+  </skill>
 </available_skills>

@@ -1188,6 +1188,16 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   Whole-layer integration remains behind `OPEN_KERNELS_UNVALIDATED`; mixed Q8 is unimplemented.
   See [segmented FFN report](plans/segmented-dense-ffn.md). No model/catalogue promotion.
 
+- **Complete wide DeltaNet layer bring-up (not accepted).** A byte-only composition
+  of standalone LN, QKV/Z, AB, glue, recurrence, post, output projection and
+  segmented FFN executes cold/warm four-token sequences plus reset repeat.
+  Production128-active/140-padded state rows and separate AB bank regions are
+  adapted explicitly. Precise wide LN and opt-in standalone post improve local
+  BF16 accuracy, but one final output has maxrel0.00908 versus the unchanged
+  0.005 bound. All strict conditional GEMV/FFN checks pass; they do not replace
+  this failed independent layer check. No catalogue/model promotion. See the
+  [complete-layer report](plans/wide-deltanet-layer.md) and retained diagnostics.
+
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
 then the engine CLI, then `chat.py` (the Qwen template). The same procedure runs each

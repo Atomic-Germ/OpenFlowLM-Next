@@ -70,6 +70,7 @@ def main():
     p.add_argument("--trace", action="store_true", help="FFN up/gate diagnostic output")
     p.add_argument("--final-only", action="store_true", help="down probe emits only final sums")
     p.add_argument("--projection-k", type=int, default=5120, help="isolated Q4 projection width")
+    p.add_argument("--projection-n", type=int, default=1024, help="isolated Q4 projection output rows")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
     if args.trace and args.scope != "ffn":
@@ -102,6 +103,7 @@ def main():
     if args.scope == "projection":
         design_path = layer_dir / "projection_probe.py"
         env["PROBE_K"] = str(args.projection_k)
+        env["PROBE_N"] = str(args.projection_n)
     if args.scope in ("down", "ffn"):
         design_path = layer_dir / "segmented_probe.py"
         env["PROBE_FFN_TRACE"] = str(int(args.trace))
@@ -117,7 +119,7 @@ def main():
     metadata = {"python": sys.version, "ffn": args.ffn, "scope": args.scope, "hardware_validated": False,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}
     if args.scope == "projection":
-        metadata.update(projection_k=args.projection_k, projection_n=1024, weight_format="q4_1")
+        metadata.update(projection_k=args.projection_k, projection_n=args.projection_n, weight_format="q4_1")
     if args.scope in ("down", "ffn"):
         metadata.update(final_only=args.final_only, trace=args.trace, buffer_args=3, weight_format="q4_1")
     (out / "probe-toolchain.json").write_text(json.dumps(metadata, indent=2) + "\n")

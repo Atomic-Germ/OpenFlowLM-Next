@@ -21,10 +21,11 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from ironutil import include_dirs
 import xcommon as X
+from recipes.wide_deltanet_layer import projection_bands
 
 K = int(os.environ.get("PROBE_K", str(X.HID)))
-BANDS_PER_CORE = 2
-N = X.N_CORES * BANDS_PER_CORE * X.BAND_ROWS
+N = int(os.environ.get("PROBE_N", str(X.N_CORES * 2 * X.BAND_ROWS)))
+BANDS_PER_CORE = projection_bands(N, X.N_CORES)
 XN_ELEMS = (K * 2 + X.ELEM - 1) // X.ELEM
 W_BYTES = N * K // 8192 * X.TILE
 if X.KIND != "dense" or X.Q8 or K % 256 or not 0 < K <= X.KWIDE:
