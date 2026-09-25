@@ -177,3 +177,24 @@ def test_chain_program_carries_device_state_and_never_loads_reference(tmp_path, 
     assert sum(line.startswith("load cs ") for line in commands) == 2
     with pytest.raises(ValueError, match="multiple tokens"):
         module.prepare(out, 2560, 1)
+
+
+@pytest.mark.parametrize('scale', [1.0, 1e-25, 1e-150, 1e150])
+def test_metric_is_scale_invariant_for_nonzero_vectors(scale):
+    module = reference_module()
+    want = np.array([1., -2., 3.])
+    got = want + np.array([1e-5, -2e-5, 1e-5])
+    baseline = module.metric(got, want, .9999999)
+    scaled = module.metric(got * scale, want * scale, .9999999)
+    assert scaled['passed']
+    assert scaled['cosine'] == pytest.approx(baseline['cosine'], abs=1e-14)
+    assert scaled['maxrel'] == pytest.approx(baseline['maxrel'], rel=1e-10)
+
+
+def test_metric_does_not_mask_tiny_relative_errors_or_nonzero_against_zero():
+    module = reference_module()
+    want = np.array([1e-100, 2e-100])
+    assert not module.metric(want * 1.01, want, .9999999)['passed']
+    assert module.metric(np.zeros(2), np.zeros(2), .9999999)['passed']
+    assert not module.metric(np.zeros(2), want, .9999999)['passed']
+    assert not module.metric(want, np.zeros(2), .9999999)['passed']
