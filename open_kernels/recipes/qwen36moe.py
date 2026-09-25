@@ -188,6 +188,11 @@ def ab_lanes(spec: ModelSpec) -> int:
     return roundup(spec.lin_value_heads, AB_LANES)
 
 
+def ab_banks(spec: ModelSpec) -> int:
+    """Number of sequential 32-lane AB projections, not a wider vector primitive."""
+    return ab_lanes(spec) // AB_LANES
+
+
 class _Alloc:
     """Sequential byte allocator for a buffer layout: name -> offset, in order."""
 
@@ -1207,7 +1212,8 @@ KERNEL_SOURCES = [
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/router/*.cc", "designs/router/*.h",
-    "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
+    "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/ln/ln_stream.py",
+    "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
