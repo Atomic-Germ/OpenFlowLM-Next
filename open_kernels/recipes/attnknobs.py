@@ -17,13 +17,16 @@ from dataclasses import dataclass
 from .catalogue import OpRangeError
 from .spec import ModelSpec
 
-# ATTN_NULL, ATTN_ABL, ATTN_RB and ATTN_FAST change the COMPILED kernel, and cache.build_key
+# ATTN_NULL, ATTN_ABL, ATTN_RB, ATTN_FAST and the two layer_x ablations change the COMPILED kernel, and cache.build_key
 # hashes sources + spec + quant, which cannot see an environment variable. Two exports
 # that differ only in a probe would therefore share a key, and export_qwen36_kernels.py
 # skips a build whose key the destination already has -- so a probe build could be
 # shipped as a real one, silently. `probe_env()` is what cache.py folds in to stop that;
 # it returns {} when nothing is set, so an ordinary build's key is unchanged.
-PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST")
+# LX_NULL_DN / LX_NULL_GEMV (designs/layer_x/xcommon.py) are the same kind of knob on the
+# main cores: LX_NULL_DN compiles the DeltaNet arithmetic away, LX_NULL_GEMV the q4/q8 GEMV
+# tile body, both leaving every stream, fifo and DMA -- and so insts.bin -- byte-identical.
+PROBE_VARS = ("ATTN_NULL", "ATTN_ABL", "ATTN_RB", "ATTN_FAST", "LX_NULL_DN", "LX_NULL_GEMV")
 
 RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the unblocked path
 
