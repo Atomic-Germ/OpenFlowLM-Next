@@ -48,6 +48,8 @@ public:
   void clear_context() override;
   int get_current_context_length() override;
   std::string describe() const override;
+  bool is_open() const override { return true; }
+  std::string config_summary() const override;
 
 private:
   std::string kernels_dir_;

@@ -1,0 +1,1408 @@
+//===- attn_npu2.cc ------------------------------------------*- C++ -*-===//
+//
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2025, Advanced Micro Devices, Inc.
+//
+//===----------------------------------------------------------------------===//
+//
+// Derived from Xilinx/mlir-air (https://github.com/Xilinx/mlir-air) at commit
+// e91630a, programming_examples/flash_attention/kernel_fusion_based/attn_npu2.cc,
+// MIT. See open_kernels/PROVENANCE.md.
+//
+// MODIFIED for Whisper's encoder (NpuEmbeddings tasks/0180 Parts 5 and 7):
+//   - apply_length_mask(): a key-length mask (compile-time valid_len, 1500 of
+//     1536 rows), run unconditionally on the non-causal path. Upstream masks
+//     only causally, so zero-padded keys took softmax mass.
+//   - FP32_STATE: the online-softmax running sum kept in fp32 (sp and its
+//     cascade-merge copies; zero_fill_sp_f32, widen_bf16_to_f32,
+//     vector_copy_32elems_f32, accum_sp_r_s_f32, div_gp_sp_f32), and the
+//     rescale exponential computed by a software exp2 polynomial -- copied
+//     from mlir-aie's aie_kernels/aie2p/exp2f_vec.cc (Apache-2.0 WITH
+//     LLVM-exception, attributed where it is used below) -- because
+//     aie::exp2<float> does not exist on aie2p.
+//   - a shared noinline matmul body for the native-bf16 path (gated off when
+//     AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 is defined, which is how this
+//     kernel is built, so it does not change the shipped code).
+//
+// The IRON (mlir-aie) design in ./attn_fa.py drives these kernels; AIR's own
+// compiler drives them from one herd body that branches on tile role.
+// Three bugs were found and fixed getting the IRON port to agree with AIR, all on
+// the CALLER side (attn_fa.py / attn_cascade_wrap.cc), not in this file:
+//
+//   1. Two DMA access-pattern layout bugs (_block_dims / _out_block_dims in
+//      attn_fa.py) -- bijections over the right addresses, so they never
+//      tripped a bounds check, only delivered elements in the wrong order.
+//   2. IRON's default core stack (1024 B) is half of what AIR emits for
+//      this design (`stack_size = 2048` on every core, read straight off
+//      AIR's own lowered MLIR). `exp_g_minus_u` below is the one function
+//      in this file that spills onto the stack under vexp2 (~1.5 KB); on
+//      IRON's default it silently overflowed upward into this core's own
+//      buffers (gp/g/etc., allocated just above the stack) -- deterministic
+//      corruption, not a crash, in ~1/8 of rows. Confirmed by direct
+//      ablation (clean at 2048, bit-exact reproduction of the bug at an
+//      explicit 1024) before being adopted as a `Worker(stack_size=2048)`
+//      argument in attn_fa.py.
+//
+// A third bug (a per-iteration drain issued once instead of once per
+// runtime TaskGroup, in attn_fa.py's own control flow) produced a hang or a
+// silently-discarded partial result at `num_lq_iters >= 2`; also not in
+// this file. Full derivation, every bisection step, and the byte-identical
+// hardware comparison against AIR's own build: NpuEmbeddings (sibling repo)
+// tasks/0181-fa-iron-port/TASK.md.
+//
+//===----------------------------------------------------------------------===//
+
+#define NOCPP
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <type_traits>
+
+#define REL_WRITE 0
+#define REL_READ 1
+
+#include <aie_api/aie.hpp>
+
+#include "zero.cc"
+
+// Default values if not provided by Makefile
+#ifndef lqp
+#define lqp 32
+#endif
+
+#ifndef lkp
+#define lkp 96
+#endif
+
+#ifndef dk
+#define dk 64
+#endif
+
+#ifndef dv
+#define dv 64
+#endif
+
+#ifndef dv_full
+#define dv_full dv
+#endif
+
+// Column-major B matmul with compile-time transpose control.
+// transpose_b: true  = apply aie::transpose before mac (K DMA: inner [n_in,
+// k_in])
+//              false = load B as-is, hardware mul_8x8_8x8T transposes (V DMA:
+//              inner [k_in, n_in])
+// A and C are always column-major tiled.
+template <typename T_in, typename T_out, unsigned rowA, unsigned colA,
+          unsigned colB, unsigned r, unsigned s, unsigned t,
+          bool transpose_b = true>
+static inline void matmul_vectorized_2x2_mmul(const T_in *__restrict pA,
+                                              const T_in *__restrict pB,
+                                              T_out *__restrict pC) {
+
+  using MMUL = aie::mmul<r, s, t, T_in, T_in, accauto>;
+
+  event0();
+
+  for (unsigned z = 0; z < rowA; z += 2)
+    chess_prepare_for_pipelining chess_loop_range(2, ) {
+      T_out *__restrict pC1 = pC + (z)*MMUL::size_C;
+      T_out *__restrict pC2 = pC + ((z + 1)) * MMUL::size_C;
+
+      for (unsigned j = 0; j < colB; j += 2)
+#ifdef OPT_PERF_ENABLED
+        chess_flatten_loop
+#endif
+        {
+          const T_in *__restrict pA1 = pA + (z)*MMUL::size_A;
+          const T_in *__restrict pA2 = pA + ((z + 1)) * MMUL::size_A;
+          const T_in *__restrict pB1 = pB + (j)*colA * MMUL::size_B;
+          const T_in *__restrict pB2 = pB + (j + 1) * colA * MMUL::size_B;
+
+          aie::vector<T_out, MMUL::size_C> acc_C00 =
+              aie::load_v<MMUL::size_C>(pC1);
+          aie::vector<T_out, MMUL::size_C> acc_C01 =
+              aie::load_v<MMUL::size_C>(pC1 + MMUL::size_C * rowA);
+          aie::vector<T_out, MMUL::size_C> acc_C10 =
+              aie::load_v<MMUL::size_C>(pC2);
+          aie::vector<T_out, MMUL::size_C> acc_C11 =
+              aie::load_v<MMUL::size_C>(pC2 + MMUL::size_C * rowA);
+
+          MMUL C00(acc_C00);
+          MMUL C01(acc_C01);
+          MMUL C10(acc_C10);
+          MMUL C11(acc_C11);
+
+          for (unsigned i = 0; i < colA; ++i)
+#ifdef OPT_PERF_ENABLED
+            chess_flatten_loop
+#endif
+            {
+              aie::vector<T_in, MMUL::size_A> A0 =
+                  aie::load_v<MMUL::size_A>(pA1);
+              pA1 += rowA * MMUL::size_A;
+              aie::vector<T_in, MMUL::size_A> A1 =
+                  aie::load_v<MMUL::size_A>(pA2);
+              pA2 += rowA * MMUL::size_A;
+
+              aie::vector<T_in, MMUL::size_B> B0, B1;
+              if constexpr (transpose_b) {
+                // K DMA k-major block layout: block (n=j, k=i) at i*colB+j.
+                // Sub-tile elements are [n_in, k_in], transpose to [k_in,
+                // n_in].
+                const T_in *__restrict pBk0 =
+                    pB + (i * colB + j) * MMUL::size_B;
+                const T_in *__restrict pBk1 =
+                    pB + (i * colB + (j + 1)) * MMUL::size_B;
+                B0 = aie::transpose(aie::load_v<MMUL::size_B>(pBk0), t, s);
+                B1 = aie::transpose(aie::load_v<MMUL::size_B>(pBk1), t, s);
+              } else {
+                // V DMA inner layout is [k_in, n_in] -- already correct for
+                // hardware mul_8x8_8x8T, no software transpose needed.
+                B0 = aie::load_v<MMUL::size_B>(pB1);
+                B1 = aie::load_v<MMUL::size_B>(pB2);
+              }
+              pB1 += MMUL::size_B;
+              pB2 += MMUL::size_B;
+
+              C00.mac(A0, B0);
+              C01.mac(A0, B1);
+              C10.mac(A1, B0);
+              C11.mac(A1, B1);
+            }
+
+          aie::store_v(pC1, C00.template to_vector<T_out>());
+          pC1 += MMUL::size_C * rowA;
+          aie::store_v(pC1, C01.template to_vector<T_out>());
+          pC1 += MMUL::size_C * rowA;
+          aie::store_v(pC2, C10.template to_vector<T_out>());
+          pC2 += MMUL::size_C * rowA;
+          aie::store_v(pC2, C11.template to_vector<T_out>());
+          pC2 += MMUL::size_C * rowA;
+        }
+    }
+
+  event1();
+}
+
+#ifndef AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16
+// 0180 mfn.diff: native-bf16-MMAC-only twin of matmul_vectorized_2x2_mmul
+// (trap 9's class: "compile the object and read the sizes, don't theorise").
+//
+// With AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 undefined, aie::mmul lowers
+// bf16 to genuine MAC sequences instead of the compact bfp16-quantised
+// hardware path, and the loop below more than triples in size: measured with
+// llvm-nm/llvm-size on attn_npu2.o, matmul_a_b_bf16 (transpose_b=true) goes
+// 608 B -> 1920 B and matmul_g_b_bf16 (transpose_b=false) 800 B -> 1632 B.
+// Both are the SAME <m,k,n>=<64,64,64> instantiation of
+// matmul_vectorized_8x8x8_bf16_bf16 (Whisper: lqp=dk=lkp=dv=64), differing
+// ONLY in that one bool -- so under the upstream `if constexpr (transpose_b)`
+// form (kept unchanged above, for the emulated path) the compiler emits the
+// entire MAC loop, dominated by the native bf16 MAC sequence rather than by
+// the B-load/transpose difference, TWICE: once per call site. Every core in
+// the cascade design calls both matmul_a_b_bf16 and matmul_g_b_bf16 (each
+// stage computes its own local QK^T and its own local softmax@V), so this
+// duplication is paid on every core, not just one -- it is what turns a
+// ~768 B whole-object growth (attn_npu2.o text) into a 1008-1248 B per-core
+// overflow on the cores that also carry the cascade merge/drain code
+// (confirmed: row 5, the cascade's north/first stage with no merge(), has
+// ~3.1 KB of spare .text in the MF build and is the only row group that
+// still linked when MFN's build stopped; rows 2-4 have 0.9-1.1 KB of spare,
+// consistent with (1920-608)+(1632-800)=2144 B of growth against that
+// spare).
+//
+// This variant makes transpose_b a RUNTIME argument instead of a template
+// parameter, so matmul_a_b_bf16 and matmul_g_b_bf16 share ONE compiled copy
+// of the MAC loop (the transpose/non-transpose B-load becomes a runtime
+// `if`, touching only the B operand's load path, not the accumulation --
+// the arithmetic executed for a given call is bit-for-bit what the upstream
+// templated form would have executed for the same transpose_b value; only
+// the CODE that computes it is now shared instead of duplicated).
+// `static __attribute__((noinline))` (trap 9's "runtime arg instead of
+// per-call-site copy" instance) is what makes the sharing real: without it
+// -O2 is free to re-inline the body at each of the two call sites anyway,
+// recreating the duplication this exists to remove.
+//
+// Scoped to !AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16: the bfp16-emulated
+// path (variants M and MF, both already inside the 16 KB program-memory
+// budget) never instantiates this function, so its matmul_a_b_bf16/
+// matmul_g_b_bf16 keep going through the unmodified templated form above
+// and compile to EXACTLY the same instructions as before this diff --
+// verified separately by disassembling an MF_slim build against MF.
+template <typename T_in, typename T_out, unsigned rowA, unsigned colA,
+          unsigned colB, unsigned r, unsigned s, unsigned t>
+static __attribute__((noinline)) void
+matmul_vectorized_2x2_mmul_rt(const T_in *__restrict pA,
+                              const T_in *__restrict pB, T_out *__restrict pC,
+                              bool transpose_b) {
+
+  using MMUL = aie::mmul<r, s, t, T_in, T_in, accauto>;
+
+  event0();
+
+  for (unsigned z = 0; z < rowA; z += 2)
+    chess_prepare_for_pipelining chess_loop_range(2, ) {
+      T_out *__restrict pC1 = pC + (z)*MMUL::size_C;
+      T_out *__restrict pC2 = pC + ((z + 1)) * MMUL::size_C;
+
+      for (unsigned j = 0; j < colB; j += 2) {
+        const T_in *__restrict pA1 = pA + (z)*MMUL::size_A;
+        const T_in *__restrict pA2 = pA + ((z + 1)) * MMUL::size_A;
+        const T_in *__restrict pB1 = pB + (j)*colA * MMUL::size_B;
+        const T_in *__restrict pB2 = pB + (j + 1) * colA * MMUL::size_B;
+
+        aie::vector<T_out, MMUL::size_C> acc_C00 =
+            aie::load_v<MMUL::size_C>(pC1);
+        aie::vector<T_out, MMUL::size_C> acc_C01 =
+            aie::load_v<MMUL::size_C>(pC1 + MMUL::size_C * rowA);
+        aie::vector<T_out, MMUL::size_C> acc_C10 =
+            aie::load_v<MMUL::size_C>(pC2);
+        aie::vector<T_out, MMUL::size_C> acc_C11 =
+            aie::load_v<MMUL::size_C>(pC2 + MMUL::size_C * rowA);
+
+        MMUL C00(acc_C00);
+        MMUL C01(acc_C01);
+        MMUL C10(acc_C10);
+        MMUL C11(acc_C11);
+
+        for (unsigned i = 0; i < colA; ++i) {
+          aie::vector<T_in, MMUL::size_A> A0 = aie::load_v<MMUL::size_A>(pA1);
+          pA1 += rowA * MMUL::size_A;
+          aie::vector<T_in, MMUL::size_A> A1 = aie::load_v<MMUL::size_A>(pA2);
+          pA2 += rowA * MMUL::size_A;
+
+          aie::vector<T_in, MMUL::size_B> B0, B1;
+          if (transpose_b) {
+            // K DMA k-major block layout: block (n=j, k=i) at i*colB+j.
+            // Sub-tile elements are [n_in, k_in], transpose to [k_in, n_in].
+            const T_in *__restrict pBk0 =
+                pB + (i * colB + j) * MMUL::size_B;
+            const T_in *__restrict pBk1 =
+                pB + (i * colB + (j + 1)) * MMUL::size_B;
+            B0 = aie::transpose(aie::load_v<MMUL::size_B>(pBk0), t, s);
+            B1 = aie::transpose(aie::load_v<MMUL::size_B>(pBk1), t, s);
+          } else {
+            // V DMA inner layout is [k_in, n_in] — already correct for
+            // hardware mul_8x8_8x8T, no software transpose needed.
+            B0 = aie::load_v<MMUL::size_B>(pB1);
+            B1 = aie::load_v<MMUL::size_B>(pB2);
+          }
+          pB1 += MMUL::size_B;
+          pB2 += MMUL::size_B;
+
+          C00.mac(A0, B0);
+          C01.mac(A0, B1);
+          C10.mac(A1, B0);
+          C11.mac(A1, B1);
+        }
+
+        aie::store_v(pC1, C00.template to_vector<T_out>());
+        pC1 += MMUL::size_C * rowA;
+        aie::store_v(pC1, C01.template to_vector<T_out>());
+        pC1 += MMUL::size_C * rowA;
+        aie::store_v(pC2, C10.template to_vector<T_out>());
+        pC2 += MMUL::size_C * rowA;
+        aie::store_v(pC2, C11.template to_vector<T_out>());
+        pC2 += MMUL::size_C * rowA;
+      }
+    }
+
+  event1();
+}
+#endif // !AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16
+
+// bf16 MatMul kernel with bf16 outputs.
+// transpose_b: controls whether B blocks are software-transposed before mac.
+template <unsigned m, unsigned k, unsigned n, bool transpose_b = true>
+static inline void
+matmul_vectorized_8x8x8_bf16_bf16(const bfloat16 *__restrict pA,
+                                  const bfloat16 *__restrict pB,
+                                  bfloat16 *__restrict pC) {
+  constexpr int r = 8;
+  constexpr int s = 8;
+  constexpr int t = 8;
+  static_assert(m % (2 * r) == 0); // 'm' dimension
+  static_assert(k % s == 0);       // 'k' dimension
+  static_assert(n % (2 * t) == 0); // 'n' dimension
+
+#ifdef AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16
+  return matmul_vectorized_2x2_mmul<bfloat16, bfloat16, (m / r), (k / s),
+                                    (n / t), r, s, t, transpose_b>(pA, pB, pC);
+#else
+  return matmul_vectorized_2x2_mmul_rt<bfloat16, bfloat16, (m / r), (k / s),
+                                       (n / t), r, s, t>(pA, pB, pC,
+                                                          transpose_b);
+#endif
+}
+
+// Combined scale: log2e / sqrt(dk_full). Applies 1/sqrt(dk) inside softmax
+// with accfloat precision, avoiding bf16 truncation of Q.
+// dk is the tile dimension (= lkp), dk_full is the full key dimension.
+// When dk_full == dk (default), sqrt(64) = 8.0 — no change.
+#include <cmath>
+
+#ifndef dk_full
+#define dk_full dk
+#endif
+
+constexpr double constexpr_sqrt_dk = (dk_full == 64)    ? 8.0
+                                     : (dk_full == 128) ? 11.313708498984761
+                                     : (dk_full == 256) ? 16.0
+                                     : (dk_full == 512) ? 22.627416997969522
+                                                        : 8.0;
+static_assert(dk_full == 64 || dk_full == 128 || dk_full == 256 ||
+                  dk_full == 512,
+              "Unsupported dk_full value: update constexpr_sqrt_dk");
+
+#define log2e (1.44269504089 / constexpr_sqrt_dk)
+
+__attribute__((always_inline)) v8bfloat16 getExpBf16(v8bfloat16 x) {
+
+  constexpr int VecLen = 8;
+
+  // Calculate the e^(x) function as 2^(log2e * x)
+  aie::vector<bfloat16, VecLen> input_bf16 = x;
+  aie::accum<accfloat, VecLen> exp_in;
+  aie::vector<bfloat16, VecLen> exp_val;
+  aie::vector<bfloat16, VecLen> log2e_vec =
+      aie::broadcast<bfloat16, VecLen>(log2e);
+
+  exp_in = aie::mul(input_bf16, log2e_vec);
+  exp_val = aie::exp2<bfloat16>(exp_in.to_vector<float>());
+  return exp_val;
+}
+
+// Largest divisor of n that is at most 8: the number of column blocks the
+// exp pass keeps live at once.
+constexpr int exp_col_chunk(int n) {
+  for (int d = 8; d > 1; d--)
+    if (n % d == 0)
+      return d;
+  return 1;
+}
+
+// G = exp(G - u) for n column blocks of one row group, as n independent
+// unrolled chains so the sub -> clamp -> mul -> exp2 latency overlaps across
+// vectors (a rolled loop pays ~27 cycles per vector, mostly waiting).
+template <int n>
+static inline __attribute__((always_inline)) void
+exp_g_minus_u_cols(bfloat16 *__restrict p, aie::vector<bfloat16, 32> uvec,
+                   aie::vector<bfloat16, 32> lowest_vec,
+                   aie::vector<bfloat16, 16> log2e_vec16) {
+  constexpr int block_stride = lqp * 8;
+  using V = aie::vector<bfloat16, 32>;
+  V v[n];
+#pragma clang loop unroll(full)
+  for (int cb = 0; cb < n; cb++)
+    v[cb] = aie::load_v<32>(p + cb * block_stride);
+#pragma clang loop unroll(full)
+  for (int cb = 0; cb < n; cb++) {
+    V d = aie::max(aie::sub(v[cb], uvec), lowest_vec);
+    aie::vector<bfloat16, 16> lo = d.extract<16>(0);
+    aie::vector<bfloat16, 16> hi = d.extract<16>(1);
+    lo = aie::exp2<bfloat16>(aie::mul(lo, log2e_vec16).to_vector<float>());
+    hi = aie::exp2<bfloat16>(aie::mul(hi, log2e_vec16).to_vector<float>());
+    d.insert(0, lo);
+    d.insert(1, hi);
+    v[cb] = d;
+  }
+#pragma clang loop unroll(full)
+  for (int cb = 0; cb < n; cb++)
+    aie::store_v(p + cb * block_stride, v[cb]);
+}
+
+extern "C" {
+
+// Set rounding mode at the start of every extern C function.
+// Setting conv_even rounding in every softmax function; without this,
+// softmax intermediates use the system default rounding mode,
+// causing ~44% errors at val_range=4 due to rounding noise
+// amplified by softmax's peaked distribution.
+#ifdef ROUND_CONV_EVEN
+#define SET_ROUNDING() ::aie::set_rounding(::aie::rounding_mode::conv_even)
+#else
+#define SET_ROUNDING() /* no-op */
+#endif
+
+// Copy tile_size_q×dk elements from src to dst (single-pass vector copy)
+void copy_tile(bfloat16 *src, bfloat16 *dst) {
+  SET_ROUNDING();
+  constexpr int VecLen = 32;
+  constexpr int num_elems = lqp * dk;
+  bfloat16 *__restrict ps = src;
+  bfloat16 *__restrict pd = dst;
+  for (unsigned j = 0; j < num_elems / VecLen; j++)
+    chess_prepare_for_pipelining chess_loop_range(8, ) {
+      aie::vector<bfloat16, VecLen> v = aie::load_v<VecLen>(ps);
+      aie::store_v(pd, v);
+      ps += VecLen;
+      pd += VecLen;
+    }
+}
+
+// Copy the lc-th tile_size_q×dk tile out of a 2-tile src buffer into dst.
+// Mirrors the per-column q offset (q + col*lq*dh): a 2-way Q broadcast
+// delivers a column-pair's 2 q-tiles to both columns; each column extracts its
+// half (lc = column-in-pair) for its own independent q-rows.
+// The 2-way broadcast delivers the pair in the M-tiled (transposed) layout the
+// matmul expects: dims [dk/M, 2*(lqp/M), M, M] — the two tiles are INTERLEAVED
+// along dim1, so tile lc occupies dim1 [lc*(lqp/M) : (lc+1)*(lqp/M)]. Extract
+// it per-d0 block (src stride 2*CHUNK, dst stride CHUNK) rather than a flat
+// offset.
+void copy_half_tile(bfloat16 *src, bfloat16 *dst, int lc) {
+  SET_ROUNDING();
+  constexpr int VecLen = 32;
+  constexpr int M = 8;
+  constexpr int D0 = dk / M;     // dk/M outer blocks
+  constexpr int CHUNK = lqp * M; // per-d0 per-tile elems = (lqp/M)*M*M
+  for (int d0 = 0; d0 < D0; d0++) {
+    bfloat16 *__restrict ps = src + d0 * (2 * CHUNK) + lc * CHUNK;
+    bfloat16 *__restrict pd = dst + d0 * CHUNK;
+    for (int j = 0; j < CHUNK / VecLen; j++)
+      chess_prepare_for_pipelining chess_loop_range(8, ) {
+        aie::vector<bfloat16, VecLen> v = aie::load_v<VecLen>(ps);
+        aie::store_v(pd, v);
+        ps += VecLen;
+        pd += VecLen;
+      }
+  }
+}
+
+void matmul_a_b_bf16(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *out) {
+  SET_ROUNDING();
+  // Buffer shapes:
+  // A: [lqp, dk] = [32, 64]
+  // B: [lkp, dk] = [96, 64]  (K row-major, aie::transpose per block)
+  // Out: [lqp, lkp] = [32, 96]
+  matmul_vectorized_8x8x8_bf16_bf16<lqp, dk, lkp>(a_in, b_in, out);
+}
+
+void matmul_g_b_bf16(bfloat16 *g_in, bfloat16 *b_in, bfloat16 *out) {
+  SET_ROUNDING();
+  // Buffer shapes:
+  // G: [lqp, lkp] = [32, 96]
+  // B: [lkp, dv] = [96, 64]
+  // Out: [lqp, dv] = [32, 64]
+  // G@V: V DMA inner layout is [k_in, n_in], so NO software transpose needed.
+  // The hardware mul_8x8_8x8T already transposes B internally.
+  //
+  // ATTEMPT 28 (fa_iron6, round 3) forced transpose_b=true here (reusing
+  // matmul_a_b_bf16's proven-clean branch) as a test of "V's raw block
+  // content actually needs the same software transpose K gets" -- REFUTED:
+  // garbage persisted (spread to ALL columns, 7-12% each, with even the
+  // "clean" columns showing 0.5-4446 mean abs error, i.e. the branch swap
+  // made it worse, not better). Reverted to false (original) here; attempt
+  // 29 tests the sharper hypothesis that matmul_g_b_bf16 fails specifically
+  // because it runs SECOND on a core that already ran matmul_a_b_bf16 (a
+  // cross-call hardware/accumulator state hazard), independent of which
+  // transpose_b branch it uses.
+  matmul_vectorized_8x8x8_bf16_bf16<lqp, lkp, dv, /*transpose_b=*/false>(
+      g_in, b_in, out);
+}
+
+void zero_fill_gp_bf16(bfloat16 *c_out) {
+  SET_ROUNDING();
+  // Buffer shape: [lqp, dv] = [32, 64]
+  zero_vectorized<bfloat16, lqp, dv, 32>(c_out);
+}
+
+void zero_fill_sp_bf16(bfloat16 *c_out) {
+  SET_ROUNDING();
+  // Buffer shape: [lqp, 1] = [32, 1]
+  zero_vectorized<bfloat16, lqp, 1, 32>(c_out);
+}
+
+void zero_fill_g_bf16(bfloat16 *c_out) {
+  SET_ROUNDING();
+  // Buffer shape: [lqp, lkp] = [32, 96]
+  zero_vectorized<bfloat16, lqp, lkp, 32>(c_out);
+}
+
+void neg_inf_fill_up_bf16(bfloat16 *c_out) {
+  SET_ROUNDING();
+  // Buffer shape: [lqp, 1] = [32, 1]
+  neg_inf_vectorized<bfloat16, lqp, 1, 32>(c_out);
+}
+
+void max_g_bf16(bfloat16 *in, bfloat16 *out) {
+  SET_ROUNDING();
+  // u = np.max(G, axis=-1, keepdims=True)
+  // G is column-major 8x8 tiled: block (cb, rb) is 64 contiguous elements
+  // (8 rows x 8 cols, row-major inside the block). Per row-block: (1) a rolled
+  // v64 max over the column blocks leaves one 8x8 tile of per-row partials;
+  // (2) one 8x8 transpose puts each row's 8 partials in 8 different slices;
+  // (3) three vector max stages leave the 8 row maxima in one v8, stored with a
+  // single vector store instead of 4x reduce_max + 4 scalar stores per half.
+  constexpr int col_blocks = lkp / 8;
+  constexpr int row_blocks = lqp / 8;
+  constexpr int block_stride = lqp * 8;
+
+  // Use bf16 lowest (0xff7f) instead of -inf (0xff80) as initial max value.
+  // For fully-masked rows (all -inf), max returns bf16_lowest > -inf,
+  // avoiding NaN in exp(G - u) where G=-inf and u would be -inf.
+  uint16_t lowest_u16 = (uint16_t)0xff7f;
+  bfloat16 lowest_val = *(bfloat16 *)&lowest_u16;
+  aie::vector<bfloat16, 64> lowest_vec =
+      aie::broadcast<bfloat16, 64>(lowest_val);
+
+  for (int rb = 0; rb < row_blocks; rb++) {
+    const bfloat16 *__restrict p = in + rb * 64;
+    aie::vector<bfloat16, 64> m = lowest_vec;
+    for (int cb = 0; cb < col_blocks; cb++)
+      chess_prepare_for_pipelining chess_loop_range(8, ) {
+        m = aie::max(m, aie::load_v<64>(p + cb * block_stride));
+      }
+    aie::vector<bfloat16, 64> t = aie::transpose(m, 8, 8);
+    aie::vector<bfloat16, 32> a = aie::max(t.extract<32>(0), t.extract<32>(1));
+    aie::vector<bfloat16, 16> b = aie::max(a.extract<16>(0), a.extract<16>(1));
+    aie::vector<bfloat16, 8> c = aie::max(b.extract<8>(0), b.extract<8>(1));
+    aie::store_v(out + rb * 8, c);
+  }
+}
+
+void maximum_up_u_bf16(bfloat16 *up, bfloat16 *u) {
+  SET_ROUNDING();
+  // u = np.maximum(u, up)
+  // Buffer shape:
+  // up: [lqp, 1] = [32, 1]
+  // u: [lqp, 1] = [32, 1]
+  constexpr int VecLen = 32;
+  constexpr int num_elems = lqp;
+  bfloat16 *__restrict pu = u;
+  for (int i = 0; i < num_elems; i += VecLen) {
+    aie::vector<bfloat16, VecLen> up_temp = aie::load_v<VecLen>(up + i);
+    aie::vector<bfloat16, VecLen> u_temp = aie::load_v<VecLen>(pu);
+    u_temp = aie::max(up_temp, u_temp);
+    aie::store_v(pu, u_temp);
+    pu += VecLen;
+  }
+}
+
+void exp_g_minus_u(bfloat16 *u, bfloat16 *g) {
+  SET_ROUNDING();
+  // G = exp(G - u) in-place. G is column-major 8x8 tiled.
+  // VecLen=32 processes 4 rows at once (half a block).
+  // exp2 native width is 16, so split 32 into 2x16 for exp.
+  // With bf16 lowest (not -inf), lowest - lowest = 0 (not NaN).
+  // u_vec (4 rows x 8 lanes per 8x8 half-block) is built once per call with
+  // interleave_zip into a static table, instead of 4 scalar loads + broadcasts
+  // + inserts per group. The column blocks of a group are processed in chunks
+  // of at most 8: at lkp = 64 that is one chunk, fully unrolled; a wider lkp
+  // keeps the live vectors (and the stack) bounded instead of spilling. The
+  // group loop stays rolled: unrolling it too overflows the 16 KB program
+  // memory.
+  static_assert(lqp % 32 == 0, "exp_g_minus_u loads u 32 rows at a time");
+  constexpr int col_blocks = lkp / 8;
+  constexpr int col_chunk = exp_col_chunk(col_blocks);
+  constexpr int col_chunks = col_blocks / col_chunk;
+  constexpr int row_halves = lqp / 32;
+  constexpr int row_groups = lqp / 4;
+  constexpr int block_stride = lqp * 8;
+  using V = aie::vector<bfloat16, 32>;
+  alignas(64) static bfloat16 u_rep[lqp * 8];
+  uint16_t lowest_u16 = (uint16_t)0xff7f;
+  bfloat16 lowest_val = *(bfloat16 *)&lowest_u16;
+  aie::vector<bfloat16, 16> log2e_vec16 =
+      aie::broadcast<bfloat16, 16>((bfloat16)log2e);
+  V lowest_vec = aie::broadcast<bfloat16, 32>(lowest_val);
+  for (int rh = 0; rh < row_halves; rh++) {
+    V uv = aie::load_v<32>(u + rh * 32);
+    auto z1 = aie::interleave_zip(uv, uv, 1);
+    auto z2a = aie::interleave_zip(z1.first, z1.first, 2);
+    auto z2b = aie::interleave_zip(z1.second, z1.second, 2);
+    auto z3a = aie::interleave_zip(z2a.first, z2a.first, 4);
+    auto z3b = aie::interleave_zip(z2a.second, z2a.second, 4);
+    auto z3c = aie::interleave_zip(z2b.first, z2b.first, 4);
+    auto z3d = aie::interleave_zip(z2b.second, z2b.second, 4);
+    bfloat16 *t = u_rep + rh * 256;
+    aie::store_v(t + 0, z3a.first);
+    aie::store_v(t + 32, z3a.second);
+    aie::store_v(t + 64, z3b.first);
+    aie::store_v(t + 96, z3b.second);
+    aie::store_v(t + 128, z3c.first);
+    aie::store_v(t + 160, z3c.second);
+    aie::store_v(t + 192, z3d.first);
+    aie::store_v(t + 224, z3d.second);
+  }
+  for (int gi = 0; gi < row_groups; gi++) {
+    V uvec = aie::load_v<32>(u_rep + gi * 32);
+    bfloat16 *__restrict p = g + gi * 32;
+    if constexpr (col_chunks == 1) {
+      exp_g_minus_u_cols<col_chunk>(p, uvec, lowest_vec, log2e_vec16);
+    } else {
+      // Rolled, so the compiler cannot hoist one chunk's loads over the
+      // previous chunk's stores and keep two chunks' vectors live at once.
+#pragma clang loop unroll(disable)
+      for (int c = 0; c < col_chunks; c++)
+        exp_g_minus_u_cols<col_chunk>(p + c * col_chunk * block_stride, uvec,
+                                      lowest_vec, log2e_vec16);
+    }
+  }
+}
+
+// Whisper modification (FP32_STATE builds only; see the file header).
+// FP32_STATE gates the online-softmax STATE precision fix scoped in R3
+// phase-2/3: the RUNNING MAX (`up`) needs no wider storage -- max() only
+// ever selects one of two already-bf16-quantized inputs, so it is lossless
+// in bf16 regardless (confirmed by reading every call site: `up` is never
+// summed, only maxed, until it is READ to compute a rescale factor). The
+// two things that DO lose precision under bf16 are (1) the exp2 intrinsic
+// computing the rescale factor `r = exp(up-u)` (`aie::exp2<bfloat16>` has
+// ~5.5e-2 relative error per the project's own established measurement,
+// independent of the operands' storage width) and (2) the RUNNING SUM `sp`,
+// which is a genuine accumulator (FMA'd via `s := sp*r + s` once per chunk,
+// 24 chunks, plus NS-1=3 more times across the cascade merge) and so DOES
+// compound bf16 rounding error chunk over chunk, unlike the max. FP32_STATE
+// therefore changes exactly two things: exp_up_minus_u's exp2 call, and
+// `sp`'s storage dtype (plus the small kernels that read/write it) -- NOT
+// `up`, NOT the G score tile (which must stay bf16 for the MMAC PV matmul
+// regardless), NOT the per-chunk `s_tmp` scratch fused_softmax itself
+// produces (fused_softmax is UNCHANGED by this variant; its own signature
+// stays all-bfloat16*, so the widen from its bf16 output into the fp32
+// running sum happens explicitly, once, via widen_bf16_to_f32 below).
+#ifndef FP32_STATE
+#define FP32_STATE 0
+#endif
+
+#if FP32_STATE
+// aie2p's HARDWARE exp2 intrinsic does not support a float result at all --
+// confirmed by trying `aie::exp2<float>` here and reading the constraint it
+// fails: aie.hpp gates float output on `arch::is(arch::AIE_MLv2)`, and this
+// chip is XDNA2/aie2p, where only `TR=bfloat16` is permitted. So "fp32
+// exp2" cannot be a one-line intrinsic swap on this hardware; it has to be
+// a software polynomial. Copied (not included, to keep this file self-
+// contained and avoid pulling in exp2f_vec.cc's own extern "C" exports)
+// from this SAME toolchain's shipped reference kernel,
+// mlir_aie/include/aie_kernels/aie2p/exp2f_vec.cc (Copyright (C) 2026 AMD,
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception -- compatible
+// with this file's MIT license). That file's own measurement against a
+// float64 reference: max relative error 8.9e-5 over softmax's actual input
+// range, against aie::exp2<bfloat16>'s LUT running 6.1% (on [-1,0]) to
+// 49.1% (on [-100,0]) -- the domain this rescale factor's argument
+// (up-u, always <= 0) actually lives in. VecLen=16 matches
+// exp_up_minus_u's own native width, unchanged.
+static __attribute__((noinline)) aie::vector<float, 16>
+exp2f_poly16(aie::vector<float, 16> x) {
+  constexpr int N = 16;
+  x = aie::max(x, aie::broadcast<float, N>(-111.0f));
+  aie::mask<N> overflow = aie::ge(x, aie::broadcast<float, N>(128.0f));
+  x = aie::min(x, aie::broadcast<float, N>(127.999f));
+  aie::vector<int32_t, N> ki = aie::to_fixed<int32_t>(x);
+  aie::vector<float, N> kf = aie::to_float<float>(ki);
+  aie::vector<int32_t, N> one = aie::broadcast<int32_t, N>(1);
+  aie::vector<int32_t, N> zero = aie::broadcast<int32_t, N>(0);
+  ki = aie::sub(ki, aie::select(zero, one, aie::lt(x, kf)));
+  aie::vector<float, N> f = aie::sub(x, aie::to_float<float>(ki));
+  aie::vector<float, N> p = aie::broadcast<float, N>(0.0013333558f);
+  p = aie::add(aie::mul(p, f).to_vector<float>(),
+               aie::broadcast<float, N>(0.0096181291f));
+  p = aie::add(aie::mul(p, f).to_vector<float>(),
+               aie::broadcast<float, N>(0.0555041087f));
+  p = aie::add(aie::mul(p, f).to_vector<float>(),
+               aie::broadcast<float, N>(0.2402265069f));
+  p = aie::add(aie::mul(p, f).to_vector<float>(),
+               aie::broadcast<float, N>(0.6931471805f));
+  p = aie::add(aie::mul(p, f).to_vector<float>(), aie::broadcast<float, N>(1.0f));
+  aie::vector<int32_t, N> ebits =
+      aie::upshift(aie::add(ki, aie::broadcast<int32_t, N>(127)), 23);
+  aie::vector<float, N> p2k = ebits.template cast_to<float>();
+  aie::vector<float, N> result = aie::mul(p, p2k).to_vector<float>();
+  aie::vector<int32_t, N> pos_inf_bits =
+      aie::broadcast<int32_t, N>(0x7f800000);
+  aie::vector<float, N> pos_inf = pos_inf_bits.template cast_to<float>();
+  return aie::select(result, pos_inf, overflow);
+}
+#endif // FP32_STATE
+
+void exp_up_minus_u(bfloat16 *up, bfloat16 *u, bfloat16 *r) {
+  SET_ROUNDING();
+  // r = exp(up - u) — VecLen=16 to match exp2 native width
+  // With bf16 lowest (not -inf), lowest - lowest = 0 (not NaN).
+  constexpr int VecLen = 16;
+  constexpr int num_elems = lqp;
+  uint16_t lowest_u16 = (uint16_t)0xff7f;
+  bfloat16 lowest_val = *(bfloat16 *)&lowest_u16;
+  aie::vector<bfloat16, VecLen> lowest_vec =
+      aie::broadcast<bfloat16, VecLen>(lowest_val);
+  bfloat16 *__restrict pr = r;
+  bfloat16 *__restrict pu = u;
+  bfloat16 *__restrict pup = up;
+  aie::vector<bfloat16, VecLen> log2e_vec =
+      aie::broadcast<bfloat16, VecLen>((bfloat16)log2e);
+  for (int i = 0; i < num_elems; i += VecLen) {
+    aie::vector<bfloat16, VecLen> uTemp = aie::load_v<VecLen>(pu);
+    aie::vector<bfloat16, VecLen> upTemp = aie::load_v<VecLen>(pup);
+    aie::vector<bfloat16, VecLen> diff = aie::sub(upTemp, uTemp);
+    // Clamp extreme negative values
+    diff = aie::max(diff, lowest_vec);
+#if FP32_STATE
+    // Same inputs (up/u are lossless in bf16, see comment above), same
+    // log2e-scaled argument (aie::mul of two bf16 vectors already widens
+    // through its accfloat accumulator -- to_vector<float>() on THAT accum
+    // is what the bf16 branch below already does too), but the exp2
+    // EVALUATION ITSELF now runs the software poly (exp2f_poly16, see its
+    // own comment for why aie::exp2<float> is not available on this
+    // hardware), narrowed to bf16 only at the final store.
+    aie::vector<float, VecLen> arg_f =
+        aie::mul(diff, log2e_vec).to_vector<float>();
+    aie::vector<float, VecLen> exp_val_f = exp2f_poly16(arg_f);
+    // aie::vector<float,N> has no to_vector<bfloat16>() directly -- narrow
+    // through an accfloat accumulator instead, same pattern as this
+    // toolchain's own aie_kernels/aie2p/cast_f32_bf16.cc.
+    aie::accum<accfloat, VecLen> exp_val_acc;
+    exp_val_acc.from_vector(exp_val_f);
+    aie::vector<bfloat16, VecLen> exp_val = exp_val_acc.template to_vector<bfloat16>();
+#else
+    aie::vector<bfloat16, VecLen> exp_val =
+        aie::exp2<bfloat16>(aie::mul(diff, log2e_vec).to_vector<float>());
+#endif
+    aie::store_v(pr, exp_val);
+    pr += VecLen;
+    pu += VecLen;
+    pup += VecLen;
+  }
+}
+
+#if FP32_STATE
+// Below: the small set of fp32-state kernels MF/MF2 need, none of which
+// touch the G score tile or the PV output accumulator (both stay bf16 --
+// the MMAC hardware has no native fp32 path, see matmul_a_b_bf16 /
+// matmul_g_b_bf16). Only the RUNNING SUM `sp` (persistent, and its cascade-
+// merge counterparts sp_c / st) widens to float; the rescale factor `r`
+// stays bfloat16* at every interface (mul_r_gp, which multiplies it into
+// bf16 gp, is UNCHANGED) -- only the FMA that accumulates it into `sp` now
+// happens in float.
+
+void zero_fill_sp_f32(float *c_out) {
+  SET_ROUNDING();
+  constexpr int VecLen = 8; // 256-bit vector / 4 bytes per float
+  constexpr int num_elems = lqp;
+  aie::vector<float, VecLen> zero_vec = aie::zeros<float, VecLen>();
+  float *__restrict p = c_out;
+  for (int i = 0; i < num_elems; i += VecLen) {
+    aie::store_v(p, zero_vec);
+    p += VecLen;
+  }
+}
+
+// Widens fused_softmax's own bf16 per-chunk rowsum output (s_tmp) into a
+// float scratch, once, so accum_sp_r_s_f32 below can FMA it into the fp32
+// running sum without ever rounding the RUNNING TOTAL itself to bf16.
+void widen_bf16_to_f32(bfloat16 *src, float *dst) {
+  SET_ROUNDING();
+  constexpr int VecLen = 16;
+  constexpr int num_elems = lqp;
+  bfloat16 *__restrict ps = src;
+  float *__restrict pd = dst;
+  for (int i = 0; i < num_elems; i += VecLen) {
+    aie::vector<bfloat16, VecLen> v = aie::load_v<VecLen>(ps);
+    // Widen through an accfloat accumulator -- aie::vector<bfloat16,N> has
+    // no to_vector<float>() directly, same as the narrowing direction (see
+    // exp_up_minus_u's comment).
+    aie::accum<accfloat, VecLen> a;
+    a.from_vector(v);
+    aie::store_v(pd, a.template to_vector<float>());
+    ps += VecLen;
+    pd += VecLen;
+  }
+}
+
+void vector_copy_32elems_f32(const int offset, const float *__restrict inputs,
+                              float *__restrict outputs) {
+  constexpr int VecLen = 8;
+  constexpr int num_elems = lqp;
+  const float *__restrict pIn = inputs;
+  float *__restrict pOut = outputs + offset;
+  for (unsigned j = 0; j < num_elems / VecLen; j++) {
+    aie::vector<float, VecLen> vec = aie::load_v<VecLen>(pIn);
+    pIn += VecLen;
+    aie::store_v(pOut, vec);
+    pOut += VecLen;
+  }
+}
+
+// s += sp * r, all in float except the bf16 rescale factor r -- same
+// semantics as accum_sp_r_s (s is the read/write accumulator, sp and r are
+// read-only), used identically by the per-chunk update (sp=persistent
+// running sum, s=widened chunk scratch) and by the cascade merge (sp=sp_c
+// or the persistent sp, s=st, the merge's running accumulator).
+void accum_sp_r_s_f32(float *sp, bfloat16 *r, float *s) {
+  SET_ROUNDING();
+  constexpr int VecLen = 8;
+  constexpr int num_elems = lqp;
+  bfloat16 *__restrict pr = r;
+  float *__restrict ps = s;
+  float *__restrict psp = sp;
+  for (int i = 0; i < num_elems; i += VecLen) {
+    // r is bf16 (mul_r_gp's own interface is unchanged, see file comment) --
+    // widen it here so the multiply-add happens in float throughout.
+    aie::vector<bfloat16, VecLen> rTemp16 = aie::load_v<VecLen>(pr);
+    aie::accum<accfloat, VecLen> rAcc;
+    rAcc.from_vector(rTemp16);
+    aie::vector<float, VecLen> rTemp = rAcc.template to_vector<float>();
+    aie::vector<float, VecLen> spTemp = aie::load_v<VecLen>(psp);
+    aie::accum<accfloat, VecLen> accTemp = aie::mul(rTemp, spTemp);
+    accTemp = aie::add(accTemp, aie::load_v<VecLen>(ps));
+    aie::store_v(ps, accTemp.to_vector<float>());
+    pr += VecLen;
+    ps += VecLen;
+    psp += VecLen;
+  }
+}
+
+// Gp = Gp / sp (final normalization), sp read as float, Gp stays bf16 --
+// same as div_gp_sp but reading the higher-precision running sum.
+void div_gp_sp_f32(float *sp, bfloat16 *gp) {
+  SET_ROUNDING();
+  constexpr int VecLen = 32;
+  constexpr int BlockSize = 64;
+  constexpr int ColsPerBlock = 8;
+  constexpr int RowsPerBlock = 8;
+  constexpr int col_blocks = dv / ColsPerBlock;
+  constexpr int row_blocks = lqp / RowsPerBlock;
+  constexpr int block_stride = lqp * ColsPerBlock;
+
+  for (int rb = 0; rb < row_blocks; rb++) {
+    for (int half = 0; half < 2; half++) {
+      int row_start = rb * RowsPerBlock + half * 4;
+      // Build the 32-wide 1/sp vector directly from the float sp values,
+      // narrowing to bf16 only here -- gp itself is bf16 either way, so a
+      // wider intermediate for the divide buys nothing past this point.
+      aie::vector<bfloat16, 8> sp0 =
+          aie::broadcast<bfloat16, 8>((bfloat16)sp[row_start]);
+      aie::vector<bfloat16, 8> sp1 =
+          aie::broadcast<bfloat16, 8>((bfloat16)sp[row_start + 1]);
+      aie::vector<bfloat16, 8> sp2 =
+          aie::broadcast<bfloat16, 8>((bfloat16)sp[row_start + 2]);
+      aie::vector<bfloat16, 8> sp3 =
+          aie::broadcast<bfloat16, 8>((bfloat16)sp[row_start + 3]);
+      aie::vector<bfloat16, VecLen> sp_vec;
+      sp_vec.insert(0, sp0);
+      sp_vec.insert(1, sp1);
+      sp_vec.insert(2, sp2);
+      sp_vec.insert(3, sp3);
+      aie::vector<bfloat16, VecLen> sp_inv = aie::inv(sp_vec);
+
+      int base = rb * BlockSize + half * VecLen;
+      for (int cb = 0; cb < col_blocks; cb++) {
+        int off = base + cb * block_stride;
+        aie::vector<bfloat16, VecLen> v = aie::load_v<VecLen>(gp + off);
+        aie::accum<accfloat, VecLen> acc = aie::mul(v, sp_inv);
+        aie::store_v(gp + off, acc.to_vector<bfloat16>());
+      }
+    }
+  }
+}
+#endif // FP32_STATE
+
+void mul_r_gp(bfloat16 *r, bfloat16 *gp) {
+  SET_ROUNDING();
+  // Gp = Gp * r (per-row scaling)
+  // Buffer shape: Gp: [lqp, dv], r: [lqp, 1]
+  // Layout: column-major 8x8 block tiled (same as matmul output).
+  // block(col_blk, row_blk) at offset col_blk * (lqp * 8) + row_blk * 64,
+  // element within block at row_in * 8 + col_in.
+  // VecLen=32 reads 4 rows x 8 cols (half a block).
+  // (1) r_vec (4 rows x 8 lanes) comes from three interleave_zip stages on a
+  // vector load of r, instead of 4 scalar loads + 4 broadcasts + 4 inserts per
+  // group; (2) each group's column-block vectors are loaded, multiplied and
+  // stored as separate unrolled batches so the vmul.f latency overlaps across
+  // vectors instead of being paid per vector.
+  static_assert(lqp % 32 == 0, "mul_r_gp loads r 32 rows at a time");
+  constexpr int VecLen = 32;
+  constexpr int col_blocks = dv / 8;
+  constexpr int row_halves = lqp / 32;
+  constexpr int block_stride = lqp * 8;
+  using V = aie::vector<bfloat16, VecLen>;
+  for (int rh = 0; rh < row_halves; rh++) {
+    V rv = aie::load_v<VecLen>(r + rh * VecLen);
+    auto z1 = aie::interleave_zip(rv, rv, 1);
+    auto z2a = aie::interleave_zip(z1.first, z1.first, 2);
+    auto z2b = aie::interleave_zip(z1.second, z1.second, 2);
+    auto z3a = aie::interleave_zip(z2a.first, z2a.first, 4);
+    auto z3b = aie::interleave_zip(z2a.second, z2a.second, 4);
+    auto z3c = aie::interleave_zip(z2b.first, z2b.first, 4);
+    auto z3d = aie::interleave_zip(z2b.second, z2b.second, 4);
+    V rvec[8] = {z3a.first, z3a.second, z3b.first, z3b.second,
+                 z3c.first, z3c.second, z3d.first, z3d.second};
+#pragma clang loop unroll(full)
+    for (int gi = 0; gi < 8; gi++) {
+      bfloat16 *__restrict p = gp + (rh * 8 + gi) * VecLen;
+      V v[col_blocks];
+#pragma clang loop unroll(full)
+      for (int cb = 0; cb < col_blocks; cb++)
+        v[cb] = aie::load_v<VecLen>(p + cb * block_stride);
+#pragma clang loop unroll(full)
+      for (int cb = 0; cb < col_blocks; cb++)
+        v[cb] = aie::mul(v[cb], rvec[gi]).template to_vector<bfloat16>();
+#pragma clang loop unroll(full)
+      for (int cb = 0; cb < col_blocks; cb++)
+        aie::store_v(p + cb * block_stride, v[cb]);
+    }
+  }
+}
+
+void sum_g(bfloat16 *g, bfloat16 *s) {
+  SET_ROUNDING();
+  // s = sum(G, axis=-1, keepdims=True)
+  // G is column-major 8×8 tiled. VecLen=32 loads 4 rows at once.
+  constexpr int VecLen = 32;
+  constexpr int BlockSize = 64;
+  constexpr int ColsPerBlock = 8;
+  constexpr int RowsPerBlock = 8;
+  constexpr int col_blocks = lkp / ColsPerBlock;
+  constexpr int row_blocks = lqp / RowsPerBlock;
+  constexpr int block_stride = lqp * ColsPerBlock;
+
+  bfloat16 *__restrict ps = s;
+  for (int rb = 0; rb < row_blocks; rb++) {
+    for (int half = 0; half < 2; half++) {
+      // Accumulate sum across column blocks for 4 rows
+      aie::accum<accfloat, VecLen> sum_acc = aie::zeros<accfloat, VecLen>();
+      int base = rb * BlockSize + half * VecLen;
+      for (int cb = 0; cb < col_blocks; cb++)
+        chess_prepare_for_pipelining chess_loop_range(8, ) {
+          aie::vector<bfloat16, VecLen> v =
+              aie::load_v<VecLen>(g + base + cb * block_stride);
+          sum_acc = aie::add(sum_acc, v);
+        }
+      // Reduce each 8-element row slice to get per-row sum.
+      // Use f32 for reduce_add to preserve precision.
+      aie::vector<float, VecLen> sum_v = sum_acc.to_vector<float>();
+      aie::vector<float, 8> r0 = sum_v.extract<8>(0);
+      aie::vector<float, 8> r1 = sum_v.extract<8>(1);
+      aie::vector<float, 8> r2 = sum_v.extract<8>(2);
+      aie::vector<float, 8> r3 = sum_v.extract<8>(3);
+      ps[half * 4 + 0] = (bfloat16)aie::reduce_add(r0);
+      ps[half * 4 + 1] = (bfloat16)aie::reduce_add(r1);
+      ps[half * 4 + 2] = (bfloat16)aie::reduce_add(r2);
+      ps[half * 4 + 3] = (bfloat16)aie::reduce_add(r3);
+    }
+    ps += RowsPerBlock;
+  }
+}
+
+void accum_sp_r_s(bfloat16 *sp, bfloat16 *r, bfloat16 *s) {
+  SET_ROUNDING();
+  // s += sp * r
+  // Buffer shape:
+  // sp: [lqp, 1] = [32, 1]
+  // r: [lqp, 1] = [32, 1]
+  // s: [lqp, 1] = [32, 1]
+  constexpr int VecLen = 32;
+  constexpr int num_elems = lqp;
+  bfloat16 *__restrict pr = r;
+  bfloat16 *__restrict ps = s;
+  bfloat16 *__restrict psp = sp;
+  for (int i = 0; i < num_elems; i += VecLen) {
+    aie::vector<bfloat16, VecLen> rTemp = aie::load_v<VecLen>(pr);
+    aie::vector<bfloat16, VecLen> spTemp = aie::load_v<VecLen>(psp);
+    aie::accum<accfloat, VecLen> accTemp = aie::mul(rTemp, spTemp);
+    accTemp = aie::add(accTemp, aie::load_v<VecLen>(ps));
+    aie::vector<bfloat16, VecLen> sTemp = to_v32bfloat16(accTemp);
+    aie::store_v(ps, sTemp);
+    pr += VecLen;
+    ps += VecLen;
+    psp += VecLen;
+  }
+}
+
+void vector_copy_32elems(const int offset, const bfloat16 *__restrict inputs,
+                         bfloat16 *__restrict outputs) {
+  constexpr int VecLen = 32;
+  constexpr int num_elems = lqp;
+  const bfloat16 *__restrict pIn = inputs;
+  bfloat16 *__restrict pOut = outputs + offset;
+  for (unsigned j = 0; j < num_elems / VecLen; j++) {
+    aie::vector<bfloat16, VecLen> vec = aie::load_v<VecLen>(pIn);
+    pIn += VecLen;
+    aie::store_v(pOut, vec);
+    pOut += VecLen;
+  }
+}
+
+void div_gp_sp(bfloat16 *sp, bfloat16 *gp) {
+  SET_ROUNDING();
+  // Gp = Gp / sp (per-row normalization)
+  // Buffer shape: Gp: [lqp, dv], sp: [lqp, 1]
+  // Layout: column-major 8×8 block tiled (same as matmul output).
+  // block(col_blk, row_blk) at offset col_blk * (lqp * 8) + row_blk * 64,
+  // element within block at row_in * 8 + col_in.
+  // VecLen=32 reads 4 rows × 8 cols (half a block).
+  constexpr int VecLen = 32;
+  constexpr int BlockSize = 64; // 8×8 block
+  constexpr int ColsPerBlock = 8;
+  constexpr int RowsPerBlock = 8;
+  constexpr int col_blocks = dv / ColsPerBlock;
+  constexpr int row_blocks = lqp / RowsPerBlock;
+  constexpr int block_stride =
+      lqp * ColsPerBlock; // stride between column blocks
+
+  for (int rb = 0; rb < row_blocks; rb++) {
+    for (int half = 0; half < 2; half++) {
+      // Build 32-wide 1/sp vector: 4 rows × 8 cols, each row's inv(sp)
+      // broadcast
+      int row_start = rb * RowsPerBlock + half * 4;
+      aie::vector<bfloat16, 8> sp0 = aie::broadcast<bfloat16, 8>(sp[row_start]);
+      aie::vector<bfloat16, 8> sp1 =
+          aie::broadcast<bfloat16, 8>(sp[row_start + 1]);
+      aie::vector<bfloat16, 8> sp2 =
+          aie::broadcast<bfloat16, 8>(sp[row_start + 2]);
+      aie::vector<bfloat16, 8> sp3 =
+          aie::broadcast<bfloat16, 8>(sp[row_start + 3]);
+      aie::vector<bfloat16, VecLen> sp_vec;
+      sp_vec.insert(0, sp0);
+      sp_vec.insert(1, sp1);
+      sp_vec.insert(2, sp2);
+      sp_vec.insert(3, sp3);
+      aie::vector<bfloat16, VecLen> sp_inv = aie::inv(sp_vec);
+
+      int base = rb * BlockSize + half * VecLen;
+      for (int cb = 0; cb < col_blocks; cb++)
+        chess_prepare_for_pipelining chess_loop_range(8, ) {
+          int off = base + cb * block_stride;
+          aie::vector<bfloat16, VecLen> v = aie::load_v<VecLen>(gp + off);
+          aie::accum<accfloat, VecLen> acc = aie::mul(v, sp_inv);
+          aie::store_v(gp + off, acc.to_vector<bfloat16>());
+        }
+    }
+  }
+}
+
+// Fused softmax: delegates to existing optimized VecLen=32 kernels.
+// On return: up=new_max, sp=sum(exp(G)), r=rescale_factor, G=exp(G-max).
+void fused_softmax(bfloat16 *g, bfloat16 *up, bfloat16 *sp, bfloat16 *r) {
+  SET_ROUNDING();
+  max_g_bf16(g, r);
+  maximum_up_u_bf16(up, r);
+  exp_g_minus_u(r, g);
+  exp_up_minus_u(up, r, sp);
+  vector_copy_32elems(0, r, up);
+  vector_copy_32elems(0, sp, r);
+  sum_g(g, sp);
+}
+
+void add_gp_g(bfloat16 *gp, bfloat16 *g) {
+  SET_ROUNDING();
+  constexpr int VecLen = 32;
+  constexpr int num_elems = lqp * dv;
+  bfloat16 *__restrict gp_ptr = gp;
+  bfloat16 *__restrict g_ptr = g;
+  for (unsigned j = 0; j < num_elems / VecLen; j++) {
+    aie::vector<bfloat16, VecLen> gp_vec = aie::load_v<VecLen>(gp_ptr);
+    aie::vector<bfloat16, VecLen> g_vec = aie::load_v<VecLen>(g_ptr);
+    aie::accum<accfloat, VecLen> acc(gp_vec);
+    acc = aie::add(acc, g_vec);
+    aie::store_v(g_ptr, acc.to_vector<bfloat16>());
+    gp_ptr += VecLen;
+    g_ptr += VecLen;
+  }
+}
+
+// Whisper modification (the key-length mask; see the file header) --
+// NOT in the upstream mlir-air example this was derived from.
+//
+// Apply an ABSOLUTE key-length mask to QK scores in-place, independent of
+// causal masking: sets every column whose GLOBAL kv index >= valid_len to
+// -inf, for every row. valid_len is a COMPILE-TIME constant (Whisper: 1500
+// real keys, kernel tiled at lk=1536 because lk=1500 does not tile -- see
+// prep notes; the trailing 36 K rows are host-side zero padding).
+//
+// Why this exists: the non-causal path has NO mask mechanism at all
+// (apply_mask is only wired up under causal=True in attn_npu2.py). Zero-
+// padded K rows produce QK score 0, not -inf, so softmax puts real nonzero
+// weight on them -- R3 phase-2 measured this in isolated float64 arithmetic
+// (no bf16, no kernel) at rel_fro 0.7-1.8%, max_abs up to 8.5e-2, while
+// cosine stays exactly 1.0 (direction unchanged, magnitude diluted -- a
+// cosine-only gate would never catch it). This mask removes that error at
+// its source, on-chip, instead of leaving it to whatever discards padded
+// rows downstream.
+//
+// Simpler than apply_causal_mask: the valid/invalid column boundary does
+// NOT depend on the query row, so (unlike the causal mask, which documents
+// "read-modify-write EVERY position" as its own invariant) a fully-valid
+// column block is left untouched -- correct either way since a value never
+// read again by the caller needs no defined content, but callers of THIS
+// function should not assume every byte of `g` was touched, only that every
+// column >= valid_len within [row 0, lqp) reads -inf afterward.
+//
+// Called UNCONDITIONALLY in the non-causal path (attn_npu2.py wires it in
+// regardless of `causal`) -- there is nothing else that would mask a padded
+// key. With valid_len >= lk (the unset/no-truncation default below) every
+// block is "fully valid" and the function is a no-op, so it is safe to
+// leave wired in for non-Whisper shapes too.
+#ifndef valid_len
+#define valid_len 2147483647 // INT32_MAX: effectively unmasked if unset
+#endif
+void apply_length_mask(bfloat16 *g, int32_t kv_block_idx) {
+  SET_ROUNDING();
+  uint16_t neg_inf_u16 = (uint16_t)0xff80;
+  bfloat16 neg_inf_val = *(bfloat16 *)&neg_inf_u16;
+  constexpr int BlkDim = 8;
+
+  const int32_t block_start = kv_block_idx * lkp;
+
+  // 1. Whole block past the valid length: all -inf.
+  if (block_start >= valid_len) {
+    constexpr int VecLen = 32;
+    aie::vector<bfloat16, VecLen> neg_inf_vec =
+        aie::broadcast<bfloat16, VecLen>(neg_inf_val);
+    bfloat16 *p = g;
+    for (int i = 0; i < lqp * lkp; i += VecLen) {
+      aie::store_v(p, neg_inf_vec);
+      p += VecLen;
+    }
+    return;
+  }
+
+  // 2. Whole block fully inside the valid length: nothing to mask.
+  if (block_start + lkp <= valid_len) {
+    return;
+  }
+
+  // 3. Ragged edge -- the SAME column boundary for every row (unlike
+  // causal), so the per-column-block mask decision is identical across the
+  // whole row loop. Not hoisted out of the loop here for simplicity; a
+  // follow-up could precompute sel_bits per col_blk once, outside the row
+  // loop, since it never varies with `row` -- left as a documented
+  // opportunity rather than taken, to keep this change small and reviewable.
+  const int32_t local_bound = valid_len - block_start; // 0 < local_bound < lkp
+  aie::vector<bfloat16, BlkDim> mask_vec =
+      aie::broadcast<bfloat16, BlkDim>(neg_inf_val);
+
+  for (int row = 0; row < lqp; row++) {
+    int row_blk = row / BlkDim;
+    int row_in = row % BlkDim;
+
+    for (int col_blk = 0; col_blk < lkp / BlkDim; col_blk++) {
+      int col_start = col_blk * BlkDim;
+      int off = col_blk * (lqp * BlkDim) + row_blk * (BlkDim * BlkDim) +
+                row_in * BlkDim;
+
+      if (col_start >= local_bound) {
+        aie::store_v(g + off, mask_vec);
+      } else if (col_start + BlkDim <= local_bound) {
+        continue; // fully valid, untouched (see function comment)
+      } else {
+        uint32_t sel_bits = 0;
+        for (int c = 0; c < BlkDim; c++) {
+          if (col_start + c >= local_bound)
+            sel_bits |= (1u << c);
+        }
+        aie::mask<BlkDim> sel(sel_bits);
+        aie::vector<bfloat16, BlkDim> orig = aie::load_v<BlkDim>(g + off);
+        aie::store_v(g + off, aie::select(orig, mask_vec, sel));
+      }
+    }
+  }
+}
+
+// Apply causal mask to QK scores in-place. Sets elements where
+// global_kv_col > global_q_row to -inf in the tiled G buffer.
+// G is in column-major 8×8 tiled layout: block(col_blk, row_blk) at
+// offset col_blk * (lqp * 8) + row_blk * 64, element within block at
+// row_in_blk * 8 + col_in_blk.
+void apply_causal_mask(bfloat16 *g, int32_t q_block_idx, int32_t kv_block_idx) {
+  SET_ROUNDING();
+  uint16_t neg_inf_u16 = (uint16_t)0xff80;
+  bfloat16 neg_inf_val = *(bfloat16 *)&neg_inf_u16;
+
+  // 1. Block above diagonal: all masked -> fill with -inf
+  if (kv_block_idx > q_block_idx) {
+    constexpr int VecLen = 32;
+    aie::vector<bfloat16, VecLen> neg_inf_vec =
+        aie::broadcast<bfloat16, VecLen>(neg_inf_val);
+    bfloat16 *p = g;
+    for (int i = 0; i < lqp * lkp; i += VecLen) {
+      aie::store_v(p, neg_inf_vec);
+      p += VecLen;
+    }
+    return;
+  }
+
+  // 2. Block below diagonal: no masking needed
+  if (kv_block_idx < q_block_idx) {
+    return;
+  }
+
+  // 3. Diagonal block (kv_block_idx == q_block_idx):
+  // Read-modify-write ALL 8-element row slices for EVERY row.
+  // For unmasked blocks: read and write back unchanged.
+  // For masked blocks: write mask value.
+  // For partial blocks: read, select, write back.
+  // This ensures EVERY position goes through a vector load+store cycle.
+  constexpr int BlkDim = 8;
+  aie::vector<bfloat16, BlkDim> mask_vec =
+      aie::broadcast<bfloat16, BlkDim>(neg_inf_val);
+
+  for (int row = 0; row < lqp; row++) {
+    int mask_start = row + 1;
+    int row_blk = row / BlkDim;
+    int row_in = row % BlkDim;
+
+    for (int col_blk = 0; col_blk < lkp / BlkDim; col_blk++) {
+      int col_start = col_blk * BlkDim;
+      int off = col_blk * (lqp * BlkDim) + row_blk * (BlkDim * BlkDim) +
+                row_in * BlkDim;
+
+      aie::vector<bfloat16, BlkDim> orig = aie::load_v<BlkDim>(g + off);
+
+      if (mask_start >= lkp) {
+        // Last row or beyond: no masking, write back unchanged
+        aie::store_v(g + off, orig);
+      } else if (col_start >= mask_start) {
+        // Entire block masked
+        aie::store_v(g + off, mask_vec);
+      } else if (col_start + BlkDim > mask_start) {
+        // Partial block
+        uint32_t sel_bits = 0;
+        for (int c = 0; c < BlkDim; c++) {
+          if (col_start + c >= mask_start) {
+            sel_bits |= (1u << c);
+          }
+        }
+        aie::mask<BlkDim> sel(sel_bits);
+        aie::store_v(g + off, aie::select(orig, mask_vec, sel));
+      } else {
+        // Unmasked block: write back unchanged
+        aie::store_v(g + off, orig);
+      }
+    }
+  }
+}
+
+// Apply a sliding-window causal mask to QK scores in-place: keep only
+// global_q_row - window < global_kv_col <= global_q_row. `window_blocks` is the
+// window measured in lqp-sized blocks (window = window_blocks * lqp), which is
+// exact because the window sizes we tile for are multiples of lqp. Same
+// column-major 8x8 tiled G layout as apply_causal_mask.
+//
+// With lqp == lkp there are exactly two ragged blocks per row-block: the
+// diagonal (masks col > row, as in the causal case) and the oldest in-window
+// block (masks col <= row, its exact complement).
+void apply_window_mask(bfloat16 *g, int32_t q_block_idx, int32_t kv_block_idx,
+                       int32_t window_blocks) {
+  SET_ROUNDING();
+  uint16_t neg_inf_u16 = (uint16_t)0xff80;
+  bfloat16 neg_inf_val = *(bfloat16 *)&neg_inf_u16;
+
+  const int32_t old_block_idx = q_block_idx - window_blocks;
+
+  // 1. Wholly outside the window (in the future, or older than the window).
+  if (kv_block_idx > q_block_idx || kv_block_idx < old_block_idx) {
+    constexpr int VecLen = 32;
+    aie::vector<bfloat16, VecLen> neg_inf_vec =
+        aie::broadcast<bfloat16, VecLen>(neg_inf_val);
+    bfloat16 *p = g;
+    for (int i = 0; i < lqp * lkp; i += VecLen) {
+      aie::store_v(p, neg_inf_vec);
+      p += VecLen;
+    }
+    return;
+  }
+
+  // 2. Strictly interior to the window: nothing to mask.
+  if (kv_block_idx < q_block_idx && kv_block_idx > old_block_idx) {
+    return;
+  }
+
+  // 3. Ragged edge. Read-modify-write EVERY 8-element row slice (the same
+  // invariant apply_causal_mask relies on), selecting per element.
+  const bool diag = (kv_block_idx == q_block_idx);
+  constexpr int BlkDim = 8;
+  aie::vector<bfloat16, BlkDim> mask_vec =
+      aie::broadcast<bfloat16, BlkDim>(neg_inf_val);
+
+  for (int row = 0; row < lqp; row++) {
+    int bound = row + 1;
+    int row_blk = row / BlkDim;
+    int row_in = row % BlkDim;
+
+    for (int col_blk = 0; col_blk < lkp / BlkDim; col_blk++) {
+      int col_start = col_blk * BlkDim;
+      int off = col_blk * (lqp * BlkDim) + row_blk * (BlkDim * BlkDim) +
+                row_in * BlkDim;
+
+      aie::vector<bfloat16, BlkDim> orig = aie::load_v<BlkDim>(g + off);
+
+      uint32_t sel_bits = 0;
+      for (int c = 0; c < BlkDim; c++) {
+        int col = col_start + c;
+        bool masked = diag ? (col >= bound) : (col < bound);
+        if (masked) {
+          sel_bits |= (1u << c);
+        }
+      }
+
+      if (sel_bits == 0) {
+        aie::store_v(g + off, orig);
+      } else if (sel_bits == ((1u << BlkDim) - 1)) {
+        aie::store_v(g + off, mask_vec);
+      } else {
+        aie::mask<BlkDim> sel(sel_bits);
+        aie::store_v(g + off, aie::select(orig, mask_vec, sel));
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dv-chunked output accumulators (head_dim > lkp).
+//
+// At dv_chunks > 1 a tile keeps one [lqp, dv] accumulator PER dv chunk, stacked
+// in a single [lqp, dv_full] slab. The mmul layout is column-block-major, so
+// chunk c is the flat range starting at c*lqp*dv and the whole slab drains as
+// ONE row-major [lqp, dv_full] transfer. AIE lowers memrefs to bare pointers,
+// so a static subview offset would be dropped -- pass the chunk index instead,
+// exactly like copy_half_tile does for the Q pair.
+// ---------------------------------------------------------------------------
+static constexpr int GP_TILE_ELEMS = lqp * dv;
+
+// Full-d DMA (head_dim > lkp): K/V/Q cross the channels as ONE transfer of the
+// whole d, exactly like the reference's memref<256x128> memtile buffer, so each
+// channel keeps a single put per loop iteration and air-to-aie can fold the
+// chunk loop into a cyclic BD chain. The dk/dv chunking then happens here, on
+// pointers, instead of at the channel level.
+void matmul_a_b_bf16_chunk(bfloat16 *a_base, bfloat16 *b_base, bfloat16 *out,
+                           int c) {
+  matmul_a_b_bf16(a_base + c * (lqp * dk), b_base + c * (lkp * dk), out);
+}
+
+// The Q pair broadcast carries one dk chunk at a time; land it in chunk c of
+// the full-d Q buffer.
+void copy_half_tile_at(bfloat16 *src, bfloat16 *dst, int lc, int c) {
+  copy_half_tile(src, dst + c * (lqp * dk), lc);
+}
+
+// dv chunk c of the V tile accumulates into dv chunk c of the output slab.
+void matmul_g_b_bf16_chunk(bfloat16 *g_in, bfloat16 *v_base, bfloat16 *out_base,
+                           int c) {
+  matmul_g_b_bf16(g_in, v_base + c * (lkp * dv), out_base + c * GP_TILE_ELEMS);
+}
+
+void zero_fill_gp_bf16_at(bfloat16 *base, int c) {
+  zero_fill_gp_bf16(base + c * GP_TILE_ELEMS);
+}
+
+void mul_r_gp_at(bfloat16 *r, bfloat16 *base, int c) {
+  mul_r_gp(r, base + c * GP_TILE_ELEMS);
+}
+
+void div_gp_sp_at(bfloat16 *sp, bfloat16 *base, int c) {
+  div_gp_sp(sp, base + c * GP_TILE_ELEMS);
+}
+
+// Whole-slab variants: the dv chunks are contiguous, so one call with the loop
+// on THIS side replaces dv_chunks call sites in the core -- the unrolled core
+// is tight against AIE2P program memory at dv_chunks 4.
+void zero_fill_gp_bf16_all(bfloat16 *base) {
+  for (int c = 0; c < dv_full / dv; c++)
+    zero_fill_gp_bf16(base + c * GP_TILE_ELEMS);
+}
+
+void div_gp_sp_all(bfloat16 *sp, bfloat16 *base) {
+  for (int c = 0; c < dv_full / dv; c++)
+    div_gp_sp(sp, base + c * GP_TILE_ELEMS);
+}
+
+} // extern "C"

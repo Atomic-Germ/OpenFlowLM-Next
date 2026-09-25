@@ -73,6 +73,12 @@ public:
   }
   const std::string &dir() const { return dir_; }
 
+  // "bf16", "bf16 via bfp16 emulation", or "UNRECORDED" -- the same string
+  // the constructor already prints as "datapath", read from whisper_kernels.json's
+  // emulate_bfp16 field rather than assumed (CLAUDE.md rule 8/8b). For the
+  // startup summary (engine_adapter.cpp's config_summary()).
+  const std::string &datapath() const { return datapath_; }
+
   // Stage a tiled bf16 [K,N] operand once; returns the slot for run()'s
   // `b_slot`. `elems` is K*N (element count, not bytes).
   size_t stage_b(const uint16_t *tiled, size_t elems);
@@ -90,6 +96,7 @@ private:
   std::string dir_;
   std::unique_ptr<npue::npu::Design> design_;
   std::array<StreamShape, static_cast<size_t>(Op::Count)> shapes_{};
+  std::string datapath_;
 };
 
 }  // namespace ow
