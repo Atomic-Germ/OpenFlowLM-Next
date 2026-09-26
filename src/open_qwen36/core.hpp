@@ -79,6 +79,14 @@ struct DispatchStat {
 
 struct StepTiming {
     double part0_ms = 0, part1_ms = 0, route_ms = 0, lmhead_ms = 0, total_ms = 0;
+    // The decode step's own host stages, so "the step costs more than its dispatches" can be
+    // answered without guessing. part0_ms / part1_ms are what the host BLOCKED for, not the
+    // dispatches' device durations: once the route submits ahead (OFLM_OPEN_SUBMIT_AHEAD) a
+    // dispatch runs while the host is elsewhere, so the two stop being the same number and
+    // only the blocked half still adds up to total_ms.
+    double embed_ms = 0;      ///< the token's embedding row into xres and its sync
+    double patch_ms = 0;      ///< the per-step attnpos patch + instruction sync, over every patched kernel
+    double dispatch_ms = 0;   ///< sum of the dispatches' own start-to-done times (> total_ms when pipelined)
     // The block route's stages, split finely enough to say which one to work on.
     // part1_ms is mid + tail; route_ms is the four moe_* below.
     double mid_ms = 0;        ///< the DeltaNet recurrence, or the attention itself
@@ -178,6 +186,18 @@ public:
     int det_step(int reps, const std::vector<int>& ids, bool full);
     /// How many router reads found the record not landed yet and waited for it (since load).
     uint64_t late_route_reads() const { return route_late_; }
+    /// The REAL step, min of `reps`, at the position the engine is already at: what the
+    /// dispatches bench_decode() sums actually cost when the route issues them, host stages
+    /// and submit-ahead included. bench_decode() measures the dispatches serially by design
+    /// (every other track compares against that); this is the number a token costs. It
+    /// re-seeks to the entry position before each rep so every rep reads the same window,
+    /// and leaves the state and the KV rows meaningless, like bench_decode().
+    void bench_step(int reps, int token);
+    /// OFLM_OPEN_STEP_TRACE=1: per kernel, over every dispatch recorded since the last call --
+    /// min / mean / p90 of the dispatch itself, the mean host gap in front of it, and the same
+    /// means split by whether the dispatch before it was on another hardware context. Printed
+    /// to stderr and cleared. Silent when the trace is off.
+    void dump_step_trace(const char* what);
     /// One kernel, on one layer, over and over, with the arguments its own program gives it.
     /// For a half-program kernel (lx0, ax0) this HANGS unless the build is self-contained --
     /// the second half is what drains its fifos -- so it is for timing a truncated build
@@ -246,6 +266,7 @@ private:
     struct Kern {
         std::string name;
         std::string patch;
+        std::string ctx;                             ///< the hardware context it runs in (manifest `contexts`)
         std::unique_ptr<xrt::kernel> k;
         std::unique_ptr<xrt::bo> instr;
         std::vector<uint32_t> words;
@@ -276,6 +297,32 @@ private:
     /// "kernel dx at position N" alone does not separate a hung command from a late one.
     uint64_t dispatches_ = 0;
     std::chrono::steady_clock::time_point last_done_{};
+    const Kern* last_dispatched_ = nullptr;    ///< whose context the next dispatch is measured against
+
+    // ---- the decode route's pipeline (OPEN-DECODE-PIPELINE) and the trace that justified it
+    /// 0 = serial `start(); wait();` per dispatch, as it always was.
+    /// 1 = queue the next layer's first dispatch behind this layer's last one when both run in
+    ///     the SAME hardware context (one command queue, so submission order is execution order).
+    /// 2 = do it across contexts too, and start the tail's norm behind the last layer. This
+    ///     HANGS the array -- a command queued from a second hardware context while the first
+    ///     still has one in flight took `ax1` into ERT state 8 twice in two runs -- and is kept
+    ///     only as the probe that established that. Never a default.
+    /// OFLM_OPEN_SUBMIT_AHEAD sets it.
+    int submit_ahead_ = 0;
+    int step_trace_ = 0;                       ///< OFLM_OPEN_STEP_TRACE (2 also prints one step dispatch by dispatch)
+    /// OFLM_OPEN_SPIN_US: poll a command's state for this long before blocking on it. A PROBE,
+    /// off by default -- it trades a scheduler wake-up for a busy core, and a busy core pulls
+    /// this box's NPU clock down through the shared package budget.
+    int spin_us_ = 0;
+    struct TraceRec {
+        const Kern* k = nullptr;
+        int layer = 0;
+        double submit_ms = 0, elapsed_ms = 0, blocked_ms = 0, gap_ms = 0;
+        bool ctx_change = false;
+    };
+    std::vector<TraceRec> trace_;
+    int trace_steps_ = 0;
+    double trace_wall_ms_ = 0, trace_route_ms_ = 0, trace_patch_ms_ = 0, trace_embed_ms_ = 0, trace_lm_ms_ = 0;
     std::vector<int> mrope_section_;          ///< empty: no M-RoPE (every model but the VLMs)
     bool mrope_interleaved_ = false;
     int image_token_id_ = -1;
@@ -382,6 +429,26 @@ private:
     /// run()'s two halves for the bench: building the xrt::run and setting its arguments,
     /// then start() to wait(). The sum is what run() returns.
     std::pair<double, double> run_split(Kern& k, const std::vector<std::string>& args, int layer);
+    /// One dispatch the host has started and not yet waited on. The decode route keeps at
+    /// most two of these alive at a time (OFLM_OPEN_SUBMIT_AHEAD): the layer's second
+    /// dispatch and the next layer's first, queued behind it.
+    struct Inflight {
+        Kern* k = nullptr;
+        int layer = -1;
+        double submit_ms = 0;    ///< set_arg + start
+        double gap_ms = -1;      ///< host gap since the previous dispatch RETURNED (the timeout diagnostic's)
+        bool ctx_change = false; ///< the dispatch before it ran in another hardware context
+        std::chrono::steady_clock::time_point t0, t1;   ///< entry, and the moment start() returned
+        xrt::run r;
+        bool active() const { return k != nullptr; }
+    };
+    /// Build the command, set its arguments and start() it. Nothing waits.
+    Inflight start_run(Kern& k, const std::vector<std::string>& args, int layer);
+    /// Wait for `f`, with run_split's timeout / "late or hung" handling, and record it in the
+    /// trace. Returns {elapsed, blocked}: elapsed is start() to done (the dispatch's own cost),
+    /// blocked is how long THIS call sat in wait() -- the same number serially, and the only
+    /// honest one to add up once a dispatch has been running while the host did something else.
+    std::pair<double, double> wait_run(Inflight& f);
     void route(Kern& k, int layer, uint64_t act_off);
     void log(const std::string& s) const;
 

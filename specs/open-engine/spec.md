@@ -3605,3 +3605,79 @@ against main (19 ids, 4 layers: max |diff| 0.0 at all 19 positions), `--repeat
 3` at position 1024 reproduced, decode unchanged (three alternated pairs at
 position 1024: main 125 / 121 / 120 ms/token, this change 123 / 121 / 122).
 Detail: `.claude/plans/decode-gap-2026-09-22/pr1-route-read.md`.
+
+### OPEN-DECODE-PIPELINE: the decode route keeps a dispatch in flight across the layer boundary
+**Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `Core::step_impl`, `start_run`, `wait_run`, `bench_step`)
+**Test category:** manual (needs the NPU and a resident 35B; the two bit-exact dumps and the paired step timings are the artifact)
+
+A decode step issues one hardware command per half-layer, and serially the array
+is idle for a host turnaround at each of them. The route instead starts layer
+l + 1's FIRST dispatch before waiting on layer l's LAST one, so the device takes
+it up the instant the previous command retires. The rule it must not break:
+**a kernel's instruction stream is patched only when no run on that kernel is
+outstanding.** Instruction BOs are per kernel NAME and shared by every layer, so
+
+- the router's top-k patch (`moeroute2`, on `lx1` / `ax1`) happens only after the
+  previous layer's second dispatch -- the same kernel object whenever the two
+  layers share a type -- has been waited on, and after this layer's first
+  dispatch has been waited on, because the patch reads the router record that
+  dispatch wrote into `act`;
+- the per-token `attnpos` patch (on `ax0`) happens once at the top of the step,
+  with nothing outstanding at all.
+
+`xres` is the one buffer every layer writes and the next layer's first dispatch
+reads, and nothing on the host orders those two commands. `xrt::run::start()` is
+documented as asynchronous, XRT's own `xrt::fence` exists precisely "to
+synchronize operations between run objects", and no ordering of two outstanding
+runs is promised anywhere in `xrt_kernel.h`; the ordering is therefore an
+EMPIRICAL property of one hardware context's command queue, and the gate below
+is its proof -- a reorder would read a stale `xres` and every logit after it
+would move.
+
+`OFLM_OPEN_SUBMIT_AHEAD` selects the schedule: `1` (the default) queues ahead
+only when the two dispatches run in the SAME hardware context, `0` restores the
+serial `start(); wait();` route, and `2` -- which crosses contexts -- **hangs the
+array** and exists only as the probe that established that. A layer whose program
+is a single dispatch (the dense families) queues that dispatch itself behind the
+previous layer's; the deepstack path (Qwen3-VL reads `xres` back between layers)
+runs serially.
+
+**Verification (manual):**
+1. **Bit-exact, 19 ids, 4 layers, sequential.** `open_qwen36_cli --model <35B>
+   --kernels <set> --pmode performance --layers 4 --ids
+   248045,846,198,760,28758,8427,4821,303,411,20012,369,264,2526,1287,314,4471,34523,440,836
+   --max-tokens 1 --prefill-logits --dump-logits <prefix> --quiet`, once with
+   `OFLM_OPEN_SUBMIT_AHEAD=0` and once with the level under test, compared with
+   `decode-run/cmp_exact.py`: **max |diff| 0.0 at every position.**
+2. **Bit-exact, a 64-token greedy continuation.** The same binary on
+   `gap-table/ids_1122.txt` with `--gemm-block --max-tokens 64 --dump-logits`,
+   the `_t<i>.bin` dumps compared position by position: the same 64 token ids and
+   **max |diff| 0.0** at every one.
+3. **Timing.** `--bench-decode N` prints the serial per-kernel table and the sum
+   of dispatch minima; `--bench-step N` then sweeps the schedules INTERLEAVED
+   (rep i takes each level in turn) over the real step and prints min / median /
+   mean of its wall time. The step's wall time and the sum of its dispatches'
+   own times are reported separately: once dispatches overlap, a queued-ahead
+   command's start-to-done includes the time it waited behind the one in front,
+   so the two stop being the same number. Real decodes are run ALTERNATED
+   (off, on, off, on, ...), never one run each.
+4. The engine logs `host threads: N (OMP_WAIT_POLICY=PASSIVE)` at construction;
+   a WARNING on that line invalidates every timing above.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, 40 layers, `sets/k35main`).** Both
+gates PASS: the 19-id 4-layer dump and the 64-token continuation are **max |diff|
+0.0 against the baseline's reference dumps**, with and without the pipeline, and
+the 64 token ids are identical. On a quiet box, `--bench-step 20` over two
+alternated rounds puts the pipeline **~3 ms of median step time** ahead of the
+serial route (at positions 1 and 1024; about 105 against 108 ms at position 1).
+Level 1 ran a soak (three requests on one resident engine, ~1,400 pipelined
+layer boundaries), every gate run and the integration benches with no `ERT state`
+line anywhere.
+
+**What it cannot reach.** The host gap between a dispatch returning and the next
+starting is 0.02-0.07 ms, so the host time a step spends outside its dispatches
+is a few ms in total: that is the ceiling for any submit-ahead scheme. The larger
+term is the lx <-> ax hardware context change, 22 per step. Queueing ahead across
+that change (level 2) hung the array three times in three runs
+(`ERT_CMD_STATE_TIMEOUT`), so no host schedule hides it; one xclbin carrying both
+layer types does.
