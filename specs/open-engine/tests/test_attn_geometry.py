@@ -104,20 +104,54 @@ from recipes import qwen35 as Q35  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-# spec -> (ACORES, NHL, RB): 16 / 2 / 256 (the 35B and the 27B) is 8 og elements -> 4 cores
-# of 4 heads; Qwen3.5-9B's 16 / 4 / 256 is 4 og elements -> 4 cores of 4; the 0.8B's 8 / 2 /
-# 256 is 4 og elements -> 4 cores of 2, padded to 8 lanes; hd 256 with the gate: RB 1.
-MOE_FAST = {"qwen36-35b-a3b.json": (4, 4, 1), "qwen35-9b.json": (4, 4, 1)}   # hd 256 + gate: no row block
+# spec -> (ACORES, NHL, RB, BLOCK): 16 / 2 / 256 (the 35B and the 27B) is 8 og elements ->
+# 4 cores of 4 heads; Qwen3.5-9B's 16 / 4 / 256 is 4 og elements -> 4 cores of 4; the 0.8B's
+# 8 / 2 / 256 is 4 og elements -> 4 cores of 2, padded to 8 lanes.
+#
+# Head dim 256 WITH the output gate had no row block at all until 2026-09-22: the gate's
+# exponential and reciprocal live on the attention core and the block kernel would not fit
+# beside them AND the single-row kernel. The 35B now runs RB 2 with the single-row kernel
+# RETIRED (BLOCK = attn.h ATTN_BLOCK_ONLY) -- every row, including the new position's, goes
+# through attn_stepb and the block masks the padding rows. Qwen3.5 is the same head dim and
+# gate but has not been compared on it, so it keeps RB 1: this list is measurement, not
+# declaration, exactly like FAST_ATTENTION.
+MOE_FAST = {"qwen36-35b-a3b.json": (4, 4, 4, 1), "qwen35-9b.json": (4, 4, 1, 0)}
 
 
 @pytest.mark.parametrize("name", sorted(MOE_FAST))
 def test_moe_attn_geometry_on_the_fast_path(name, unvalidated, monkeypatch):
     monkeypatch.setenv("ATTN_FAST", "1")
     A = Q36.attn(load_spec(SPECS / name))
-    acores, nhl, rb = MOE_FAST[name]
-    assert (A.VEXP, A.ACORES, A.NHL, A.RB) == (1, acores, nhl, rb), name
+    acores, nhl, rb, block = MOE_FAST[name]
+    assert (A.VEXP, A.ACORES, A.NHL, A.RB, A.BLOCK) == (1, acores, nhl, rb, block), name
     assert A.NHL * A.ACORES == A.NH and A.NHL % A.HPO == 0 and (A.RB == 1 or A.RB * max(A.NHL, 8) in (8, 16, 32))
     assert A.MLS % 32 == 0 and A.MLS >= A.NHL
+    # The retirement is only ever the block kernel's own cost model: there is no such
+    # thing as a block-only build with nothing to block.
+    assert not (A.BLOCK and A.RB == 1), name
+
+
+def test_block_only_is_measured_not_declared(unvalidated, monkeypatch):
+    """Retiring the single-row kernel changes the softmax's rounding (one block rescale
+    instead of one per row), so a family joins by a greedy-continuation compare. The 35B
+    passed on 2026-09-22; Qwen3.5 shares the head dim and the gate and has not been run."""
+    from recipes import attnknobs
+    monkeypatch.delenv("ATTN_FAST", raising=False)
+    assert attnknobs.BLOCK_ONLY_MEASURED == ("qwen36moe",)
+    monkeypatch.setattr(attnknobs, "BLOCK_ONLY_MEASURED", ())
+    A = Q36.attn(load_spec(SPECS / "qwen36-35b-a3b.json"))
+    assert (A.RB, A.BLOCK) == (1, 0)
+
+
+def test_block_only_needs_the_manifest_to_carry_rb(unvalidated, monkeypatch):
+    """The driver pads the streamed row count to whole blocks and the kernel derives its
+    block count from the same position; a kernel built one way against a driver patching
+    the other way deadlocks on the fifo rather than answering wrongly, so `rb` travels in
+    the manifest beside the kernel and is absent when nothing blocks."""
+    monkeypatch.delenv("ATTN_FAST", raising=False)
+    p = Q36.programs(load_spec(SPECS / "qwen36-35b-a3b.json"))
+    assert p["kernels"]["ax0"]["rb"] == 4
+    assert "rb" not in p["kernels"]["ax1"] and "rb" not in p["kernels"]["lx0"]
 
 
 @pytest.mark.parametrize("name", sorted(MOE_FAST))

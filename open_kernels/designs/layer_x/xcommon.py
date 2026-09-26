@@ -1,7 +1,8 @@
 r"""Shared pieces of the whole-layer designs lx / ax: the main cores' GEMV entry
 points, the MoE block and the DeltaNet step on those cores (kernels, the core
 program fragments, the host-sequence fragments), the norm + router helper core,
-and the DMA tap helpers. See lx.py for the design as a whole. The geometry
+and the DMA tap helpers. See lx.py for the design as a whole, and xlayer.py for the
+per-layer-type pieces (helper cores, part-0 host sequences) lx / ax / ux share. The geometry
 (cores, widths, element counts, scratch offsets) is the recipe's `Common`
 (open_kernels/recipes/qwen36moe.py), computed from the ModelSpec.
 
@@ -471,12 +472,13 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
 DN_ROWS, DN_SLICES, DN_HEADS_PC = C.DN_ROWS, C.DN_SLICES, C.DN_HEADS_PC
 
 
-def dn_body(win, yout, B, K):
+def dn_body(win, yout, B, K, nheads=DN_HEADS_PC):
     """This core's heads: the record (copied out of its element: release() frees the OLDEST held
     element), DN_SLICES slices (pass 1), delta, DN_SLICES slices x 2*DN_ROWS half rows (pass 2, into
-    y elements), o."""
+    y elements), o. `nheads` is the recipe's count, or -- in the merged image (ux.py) -- a value
+    read from the stream at run time, 0 in a full-attention layer (the loop runs zero times)."""
     ds = B["ds"]
-    for _ in range_(DN_HEADS_PC):
+    for _ in range_(nheads):
         re_ = win.acquire(1)
         K["vcopy"](re_, ds)
         win.release(1)

@@ -178,9 +178,28 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 4 with the single-row kernel retired (RB 2 from 2026-09-22 until Track E the same day); Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+- **Retiring the single-row kernel** (`attn.h ATTN_BLOCK_ONLY`, set only by
+  `designs/layer_x/ax.py`) is what lets head dim 256 WITH the output gate block at
+  all: the gate's exponential and reciprocal are on the attention core, and a plain
+  `ATTN_RB=2` overflows its 16 KB of program memory beside the single-row path. On
+  that path every row goes through `attn_stepb`, including the new position's: the
+  driver streams `RB*ceil((valid+1)/RB) - 1` cached rows, the kernel runs `pb[4] =
+  pb[0] / RB` full blocks off the fifo and peels the last one (`attn_stepb_new`,
+  whose final slot is the new row from core scratch), and the padding rows between
+  `pos` and the end of that block are masked with `-1e30` -- the same mechanism the
+  kernel already uses for padding LANES. A family joins by the same rule
+  `FAST_ATTENTION` uses, measurement not declaration: `BLOCK_ONLY_MEASURED` holds
+  `qwen36moe` only, and Qwen3.5 keeps RB 1 at the same head dim and gate until
+  someone runs the compare. `BLOCK` follows `RB`: an `ATTN_RB=1` probe on a measured
+  family gets the single-row kernel back.
+- The rows-per-call travels in the manifest beside the kernel (`kernels.ax0.rb`) and
+  `stream_patch::attn_apply` pads the streamed row count from it. It has to: the
+  kernel derives its own block count from the same position record, and a kernel
+  built one way against a driver patching the other way deadlocks on the `ain` fifo
+  rather than answering wrongly. Absent means 1.
 
 **Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
 directory; one decode step at positions 0 / 256 / 1024 / 2048 through
@@ -235,6 +254,58 @@ end, since it is the round that starts with the first one's answer in context.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Measured (2026-09-22, the 35B at RB 4):**
+`ax0` was the only decode dispatch that grew with the prompt, and the 35B was the one
+fast family with no row block: at head dim 256 with the output gate, the block kernel
+did not fit beside the single-row one in the attention core's 16 KB of program memory.
+Three changes make it fit at RB 4, all confined to the block-only path
+(`ATTN_BLOCK_ONLY`); every other family's attention translation units preprocess
+token-identical to the base (`utilities/attn_pp_identical.sh`: 38/38 at Gemma3-4B,
+Qwen3-4B, Qwen3.5-9B and the 35B's previous RB 1 flags).
+
+1. **The single-row kernel is retired on this path.** The new token's row joins the
+   last block and padding rows are masked; the manifest carries the block size as `rb`.
+2. **No soft-float.** The attention core's `__mulsf3` / `__divsf3` / `__muldi3` -- 2,112
+   bytes for norm_rope's RMS scale and 1/sqrt Newton steps and attn_fin's `1/l` --
+   became integer routines (`open_kernels/include/scalar_fp.h`) that give the IEEE
+   round-to-nearest-even result bit for bit on every operand those sites can see
+   (`utilities/scalar_fp_test.cpp`). Dumps are bit-identical to the same kernel with
+   the soft-float (max |diff| 0.0 over 105 dumps).
+3. **A cheaper block kernel (`ATTN_TREE`).** The score phase reduces all RB x NHL dot
+   products as one tree whose levels pair lanes exactly as `aie::reduce_add` does; the
+   PV loop writes four head-dim slices per block, so the compiler no longer serialises
+   every slice behind the last one's store; and the rescale factor's exponential rides
+   in row 0's padding lanes of the block's one `vexpN<32>`. Bit-identical to (2) and
+   deterministic over three runs.
+
+The tightest attention core is 14,208 bytes (2,176 free). `ax0` in the real walk,
+minimum of 20 over 3 alternated rounds, clean box, measured on the one-context layer
+image (PR #116, whose attention cores compile the same program as `ax.py`'s). The RB 1
+row is from an earlier session on `ax.py`'s own image, for scale:
+
+| position | 1 | 1024 | 2048 | 4000 |
+|---|---|---|---|---|
+| RB 1 (before) | 0.71 | 1.63 | 2.57 | 4.32 ms |
+| RB 2, block-only | 0.64 | 1.44 | 2.22 | 3.73 ms |
+| RB 4 + (2) and (3) | 0.63 | 1.03 | 1.41 | 2.15 ms |
+
+The step's sum of minima at 4000 goes 100.1 -> 84.2 ms against RB 2. An `ATTN_NULL`
+build (every fifo transfer kept, no arithmetic) puts `ax0` at 1.24 ms at 4000, so the
+walk is now ~0.9 ms of arithmetic on a ~1.24 ms stream, down from ~2.5; the stream is
+the floor. A deeper `ain` fifo (two whole blocks) was tried and rejected: no gain, and
+the 8-layer dumps became non-deterministic. An `aie::mmul` score phase fits and is
+correct but is slower: building its A tile from four 128-bit K loads is shuffle-bound.
+
+**Not bit-exact against RB 1.** Blocking reorders the sums. Greedy continuation after
+the 1122-token prompt (block prefill, so the prefill KV is identical) is identical for
+48 tokens, then flips at a 0.045-logit near-tie that every blocked variant hits at the same
+position with the same token; RB 4's 64-token
+continuation is 64/64 identical to RB 2's. Teacher-forced over 64 positions at RB 2:
+64/64 argmax, and positions with a masked padding row match unmasked ones in median corr
+(0.99929 / 0.99920), so the mask adds nothing. The corr spread elsewhere (min 0.984) is
+the routed experts flipping on near-ties, as recorded for this family's first
+fast-attention pass.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
@@ -3666,3 +3737,80 @@ term is the lx <-> ax hardware context change, 22 per step. Queueing ahead acros
 that change (level 2) hung the array three times in three runs
 (`ERT_CMD_STATE_TIMEOUT`), so no host schedule hides it; one xclbin carrying both
 layer types does.
+
+### OPEN-DECODE-ONE-CONTEXT: the decode layer loop runs in one hardware context
+**Applies to:** openflowlm-next (`open_kernels/designs/layer_x/ux.py` + `xlayer.py`, `open_kernels/recipes/qwen36moe.py` `one_context()` / `merged_image()`)
+**Test category:** test (the recipe emission, `tests/test_one_context.py`) + manual (the hardware claim below)
+
+For the qwen36moe family (the 35B and the 27B), the export's four layer kernels
+`lx0`, `lx1`, `ax0` and `ax1` are, **by default**, four instruction streams over
+ONE image (`ux.py`), and the manifest points all four at one context, `layer`.
+The layer walk then changes hardware context zero times instead of 20; only `ln`
+and `lm` at the tail keep their own. The main cores run lx's program with the two
+numbers that differ between the layer types (GEMV band count, DeltaNet head
+count) read from RTP words, so a full-attention layer runs the DeltaNet loop zero
+times. Every kernel's arithmetic and every DDR byte are unchanged, so the gate is
+bit-exact. The engine needs nothing new: it opens the contexts the manifest names.
+
+- **Rollback:** `OPEN_LAYER_ONE_CTX=0` at export builds the two-context `lx` / `ax`
+  layout (`lx.py`, `ax.py`) under the same set names. The variable is export-only;
+  nothing reads it at run time (the engine follows the manifest). It is in the
+  build key, so the two layouts never share one.
+- **A spec with a q8 projection role keeps two contexts** (`merged_image()`): the
+  merged main cores have room for one GEMV entry only. (Aside, 2026-09-23: that q8
+  shape's two-context `lx0` already overflows its main cores by 224 B on main at
+  c23b1a57 -- Ornith-1.5, and Aquila-mini by the same spec -- so it has no
+  buildable layer set; this requirement does not change that.)
+- **Known constraint:** the merged main cores are at 16256 of 16384 B of program
+  memory (128 B free). Any main-core growth -- a new stage, a wider prep, another
+  kernel entry -- has to be paid for elsewhere first, or it breaks the default build.
+- **One copy of every shared fragment:** the glue / post / attention helper cores,
+  the norm helper, the fifos and both part-0 host sequences live in
+  `layer_x/xlayer.py` and are called by `lx.py`, `ax.py` and `ux.py` alike, so an
+  edit to either layer type reaches both layouts. Moving them there changed no
+  compiled byte (2026-09-23 result below).
+
+**Verification (manual):**
+1. Export (default, or `OPEN_LAYER_ONE_CTX=1`) into a copy of a reference set; every
+   core's `.text` must fit 16384 B (aiecc fails the build otherwise; the main
+   cores are the tight ones).
+2. Bit-exact against the two-context set (`OPEN_LAYER_ONE_CTX=0`) under the same
+   CLI: `open_qwen36_cli --model <35B> --kernels <set> --pmode performance --layers 4
+   --ids 248045,846,198,760,28758,8427,4821,303,411,20012,369,264,2526,1287,314,4471,34523,440,836
+   --max-tokens 1 --prefill-logits --dump-logits <prefix> --quiet`, and the same at
+   `--layers 8` (a linear layer after a full one on the same image), compared
+   position by position: **max |diff| 0.0**. Then `gap-table/ids_1122.txt` with
+   `--gemm-block --max-tokens 64 --dump-logits`: the same 64 token ids and
+   **max |diff| 0.0** at every one.
+3. `--bench-decode 20` at positions 1 and 1024, alternated against the
+   two-context set: the walk's `ax0` penalty against its one-layer figure goes to
+   noise.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, 40 layers, quiet box, `sets/k35int` =
+this image + the layer_x issue order + the divide->shift GEMV fix, against
+`sets/k35b3` = the same without this image, 2 alternated rounds, `--pmode
+performance`).** Main cores 16256 of 16384 B (128 free). Both gates max |diff| 0.0,
+64/64 tokens identical. Min / mean ms:
+
+| | `k35b3` pos 1 | `k35int` pos 1 | `k35b3` pos 1024 | `k35int` pos 1024 |
+|---|---|---|---|---|
+| step, sum of 82 dispatches | 74.3 / 96.5 | 65.7 / 70.7 | 83.4 / 97.3 | 74.9 / 80.8 |
+| real step, serial (min / median) | 85.2 / 94.5 | 69.1 / 70.3 | 94.1 / 96.5 | 78.7 / 83.0 |
+
+Detail: `.claude/plans/decode-gap-2026-09-22/integration.md` and `track-d.md`.
+
+**Result 2026-09-23: default on, after the xlayer refactor.** (1) The refactor moved no
+compiled byte: `export_qwen36_kernels.py --check` of every layer_x set built before and
+after it -- the 35B and the 27B each in both layouts plus `mx_linear` / `mx_full`, and the
+Qwen3.5 dense `lx` / `ax` for the 0.8B and the 9B spec -- reports every `insts.bin`
+byte-identical and every xclbin identical apart from build stamps (48 files), and the MLIR
+of every stream is identical too. (2) The 27B (`Qwen3.6-27B-A2.8B-open`, 30 layers, full
+attention at 2, 5, 8, ...) on its one-context set against its two-context set, same CLI:
+19 ids at `--layers 4` and `--layers 8`, and 1122 tokens + a 64-token `--gemm-block`
+continuation, **max |diff| 0.0** on every dumped position, 64/64 tokens identical.
+`oflm serve` on the one-context set, `oflm-test --llm`: **PASS 5/5**. `--bench-decode 20`,
+2 alternated rounds, real step wall min / median ms on the serial route: position 1
+two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; position
+1024 79.3-80.3 / 80.5-83.0 against 62.9-63.6 / 64.4 (the walk's `ax0` penalty, +0.95 ms
+a call on two contexts, goes to noise). Detail:
+`.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.

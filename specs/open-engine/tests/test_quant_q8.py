@@ -257,8 +257,10 @@ def test_the_shipped_27b_manifest_is_byte_identical():
     """The whole point of the normalisation: a model with no q8 role must produce exactly
     the manifest it produced before this requirement existed."""
     from pathlib import Path
+    from make_fixtures import two_contexts
     fx = Path(__file__).resolve().parent / "fixtures" / "manifest_qwen36.json"
-    got = json.dumps(manifest(default_spec(), key="sha256:fixture"), indent=1) + "\n"
+    with two_contexts():                                  # the fixture's layout (make_fixtures.py)
+        got = json.dumps(manifest(default_spec(), key="sha256:fixture"), indent=1) + "\n"
     assert got == fx.read_text(encoding="utf-8")
 
 
@@ -299,7 +301,8 @@ def test_a_quant_the_gemv_cannot_read_is_still_refused():
         Q.recipe(dataclasses.replace(default_spec(), quant={"attn": "q4_k"}))
 
 
-def test_the_build_dir_names_only_gain_a_hash_when_a_role_is_q8():
+def test_the_build_dir_names_only_gain_a_hash_when_a_role_is_q8(monkeypatch):
+    monkeypatch.setenv("OPEN_LAYER_ONE_CTX", "0")         # lx/ax on both sides (a q8 spec never merges)
     ref = default_spec()
     assert Q.builds(ref)["lx0"]["build_dir"] == "layer_x/build_lx0"
     q8 = dataclasses.replace(ref, quant={"attn": "q8"})

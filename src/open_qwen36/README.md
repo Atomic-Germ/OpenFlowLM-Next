@@ -62,12 +62,20 @@ without a manifest needs one before the engine will take it:
 
 | set | design | knobs | what it is |
 |---|---|---|---|
-| `lx0` | `layer_x/lx.py` | `LX_PART=0` | linear-attention layer, dispatch 0 (norm → qkv/z → glue → DeltaNet → post → out → norm → router) |
-| `lx1` | `layer_x/lx.py` | `LX_PART=1` | its MoE block (same xclbin as `lx0`, second instruction stream) |
-| `ax0` | `layer_x/ax.py` | `AX_PART=0` | full-attention layer, dispatch 0 |
-| `ax1` | `layer_x/ax.py` | `AX_PART=1` | its MoE block |
+| `lx0` | `layer_x/ux.py` | `UX_PART=0` | linear-attention layer, dispatch 0 (norm → qkv/z → glue → DeltaNet → post → out → norm → router) |
+| `lx1` | `layer_x/ux.py` | `UX_PART=1` | its MoE block |
+| `ax0` | `layer_x/ux.py` | `UX_PART=2` | full-attention layer, dispatch 0 |
+| `ax1` | `layer_x/ux.py` | `UX_PART=3` | its MoE block |
 | `ln` | `ln/ln.py` | — | final RMSNorm |
 | `lm_head_q8` | `lm_head_q8/lm_head_q8.py` | `LMHEAD_N=248320 LMHEAD_CORES=8` | q8 lm_head, full vocab |
+
+The four layer sets are four instruction streams over ONE image, so the whole layer
+walk runs in one hardware context (OPEN-DECODE-ONE-CONTEXT). `OPEN_LAYER_ONE_CTX=0` at
+export builds the older two-context layout instead -- `lx0`/`lx1` from `layer_x/lx.py`
+(`LX_PART=0/1`), `ax0`/`ax1` from `layer_x/ax.py` (`AX_PART=0/1`), under the same set
+names -- and a spec with a q8 projection role always gets that layout (the merged main
+cores have no room for a second GEMV entry). Both layouts share every helper core and
+host sequence (`layer_x/xlayer.py`), so they compute the same bits.
 
 About 6 minutes for all six on a Ryzen AI 9 HX 370 (WSL; ~90 s per layer_x set). `--only lx0,lx1`
 rebuilds a subset, `--out DIR` redirects (a model directory's `open_kernels/`

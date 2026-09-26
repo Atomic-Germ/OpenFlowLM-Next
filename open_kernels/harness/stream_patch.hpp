@@ -52,6 +52,10 @@ struct AttnGeometry {
     uint64_t kv_row = 2048;
     uint64_t ptab_row = 1024;
     uint64_t window = 0;             ///< rows of a sliding window (0 = every cached row); Gemma's local layers
+    /// Cached rows the kernel takes per call (attn.h ATTN_RB) when it walks them in whole
+    /// blocks AND takes the new position's row as the last block's final slot (attn.h
+    /// ATTN_BLOCK_ONLY). 1 = every other kernel: the row count is the window's own.
+    uint64_t rb = 1;
 };
 
 /// The cached rows position `pos` attends to: [start, pos), streamed as nf rows (>= 1: position 0
@@ -264,6 +268,20 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
                        const AttnGeometry& g = AttnGeometry{}) {
     uint64_t start, nf;
     attn_window(pos, g.window, &start, &nf);
+    if (g.rb > 1) {
+        // The blocked walk (attn.h ATTN_BLOCK_ONLY) covers the `valid` cached rows AND the
+        // new position's row in ceil((valid + 1) / rb) blocks, the last of which takes the
+        // new row from core scratch as its final slot. So the stream carries one row less
+        // than those blocks hold: rb * (valid / rb + 1) - 1. The extra rows over `valid`
+        // sit at or past `pos` and the kernel masks them.
+        //
+        // The highest row this reads is pos + rb - 2 - (valid % rb), so at rb 2 it is
+        // exactly `pos` -- inside the cache, and the row this very dispatch writes. At
+        // rb > 2 it can be pos + rb - 2, which needs rb - 2 rows of slack above the
+        // context capacity in the KV buffer.
+        const uint64_t valid = pos - start;
+        nf = g.rb * (valid / g.rb + 1) - 1;
+    }
     for (const auto& p : table) {
         uint64_t v = p.kind == 0   ? nf * g.kv_row / 4  // a BD length is in words
                      : p.kind == 1 ? pos * g.kv_row

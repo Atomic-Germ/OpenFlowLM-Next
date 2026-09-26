@@ -293,5 +293,5 @@ def attn_l(w: In, xres: In, consts: In, kv: In, act: InOut, hdr: Out, *,
 DESIGN = attn_l
 _src = b"".join(sorted(f.read_bytes() for f in ATTN.glob("*.cc")) + sorted(f.read_bytes() for f in ATTN.glob("*.h"))
                 + [(LN / "ln.cc").read_bytes(), (LINL / "ln_nr.cc").read_bytes(), (GEMV / "gemv_q4.h").read_bytes(),
-                   (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+                   (HERE.parent.parent / "include" / "vecmath.h").read_bytes(), (HERE.parent.parent / "include" / "scalar_fp.h").read_bytes()])
 SPECIALIZE = {"pos": POS, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
