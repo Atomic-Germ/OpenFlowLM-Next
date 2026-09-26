@@ -208,7 +208,9 @@
   "ln": "ln/final.xclbin",
   "lm": "lm_head_q8/final.xclbin",
   "lx": "lx/final.xclbin",
-  "ax": "ax/final.xclbin"
+  "ax": "ax/final.xclbin",
+  "ag": "ag_s256/final.xclbin",
+  "gemm": "gemm_n4096_k4096/final.xclbin"
  },
  "kernels": {
   "ln": {
@@ -231,6 +233,191 @@
    "insts": "ax/insts.bin",
    "patch": "attnpos",
    "build": "ax"
+  },
+  "ag_s256": {
+   "context": "ag",
+   "insts": "ag_s256/insts.bin",
+   "build": "ag_s256"
+  },
+  "ag_pv256": {
+   "context": "ag",
+   "insts": "ag_pv256/insts.bin",
+   "build": "ag_pv256"
+  },
+  "ag_s512": {
+   "context": "ag",
+   "insts": "ag_s512/insts.bin",
+   "build": "ag_s512"
+  },
+  "ag_pv512": {
+   "context": "ag",
+   "insts": "ag_pv512/insts.bin",
+   "build": "ag_pv512"
+  },
+  "ag_s768": {
+   "context": "ag",
+   "insts": "ag_s768/insts.bin",
+   "build": "ag_s768"
+  },
+  "ag_pv768": {
+   "context": "ag",
+   "insts": "ag_pv768/insts.bin",
+   "build": "ag_pv768"
+  },
+  "ag_s1024": {
+   "context": "ag",
+   "insts": "ag_s1024/insts.bin",
+   "build": "ag_s1024"
+  },
+  "ag_pv1024": {
+   "context": "ag",
+   "insts": "ag_pv1024/insts.bin",
+   "build": "ag_pv1024"
+  },
+  "ag_s1280": {
+   "context": "ag",
+   "insts": "ag_s1280/insts.bin",
+   "build": "ag_s1280"
+  },
+  "ag_pv1280": {
+   "context": "ag",
+   "insts": "ag_pv1280/insts.bin",
+   "build": "ag_pv1280"
+  },
+  "ag_s1536": {
+   "context": "ag",
+   "insts": "ag_s1536/insts.bin",
+   "build": "ag_s1536"
+  },
+  "ag_pv1536": {
+   "context": "ag",
+   "insts": "ag_pv1536/insts.bin",
+   "build": "ag_pv1536"
+  },
+  "ag_s1792": {
+   "context": "ag",
+   "insts": "ag_s1792/insts.bin",
+   "build": "ag_s1792"
+  },
+  "ag_pv1792": {
+   "context": "ag",
+   "insts": "ag_pv1792/insts.bin",
+   "build": "ag_pv1792"
+  },
+  "ag_s2048": {
+   "context": "ag",
+   "insts": "ag_s2048/insts.bin",
+   "build": "ag_s2048"
+  },
+  "ag_pv2048": {
+   "context": "ag",
+   "insts": "ag_pv2048/insts.bin",
+   "build": "ag_pv2048"
+  },
+  "ag_s2304": {
+   "context": "ag",
+   "insts": "ag_s2304/insts.bin",
+   "build": "ag_s2304"
+  },
+  "ag_pv2304": {
+   "context": "ag",
+   "insts": "ag_pv2304/insts.bin",
+   "build": "ag_pv2304"
+  },
+  "ag_s2560": {
+   "context": "ag",
+   "insts": "ag_s2560/insts.bin",
+   "build": "ag_s2560"
+  },
+  "ag_pv2560": {
+   "context": "ag",
+   "insts": "ag_pv2560/insts.bin",
+   "build": "ag_pv2560"
+  },
+  "ag_s2816": {
+   "context": "ag",
+   "insts": "ag_s2816/insts.bin",
+   "build": "ag_s2816"
+  },
+  "ag_pv2816": {
+   "context": "ag",
+   "insts": "ag_pv2816/insts.bin",
+   "build": "ag_pv2816"
+  },
+  "ag_s3072": {
+   "context": "ag",
+   "insts": "ag_s3072/insts.bin",
+   "build": "ag_s3072"
+  },
+  "ag_pv3072": {
+   "context": "ag",
+   "insts": "ag_pv3072/insts.bin",
+   "build": "ag_pv3072"
+  },
+  "ag_s3328": {
+   "context": "ag",
+   "insts": "ag_s3328/insts.bin",
+   "build": "ag_s3328"
+  },
+  "ag_pv3328": {
+   "context": "ag",
+   "insts": "ag_pv3328/insts.bin",
+   "build": "ag_pv3328"
+  },
+  "ag_s3584": {
+   "context": "ag",
+   "insts": "ag_s3584/insts.bin",
+   "build": "ag_s3584"
+  },
+  "ag_pv3584": {
+   "context": "ag",
+   "insts": "ag_pv3584/insts.bin",
+   "build": "ag_pv3584"
+  },
+  "ag_s3840": {
+   "context": "ag",
+   "insts": "ag_s3840/insts.bin",
+   "build": "ag_s3840"
+  },
+  "ag_pv3840": {
+   "context": "ag",
+   "insts": "ag_pv3840/insts.bin",
+   "build": "ag_pv3840"
+  },
+  "ag_s4096": {
+   "context": "ag",
+   "insts": "ag_s4096/insts.bin",
+   "build": "ag_s4096"
+  },
+  "ag_pv4096": {
+   "context": "ag",
+   "insts": "ag_pv4096/insts.bin",
+   "build": "ag_pv4096"
+  },
+  "gemm_n4096_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n4096_k4096/insts.bin",
+   "build": "gemm_n4096_k4096"
+  },
+  "gemm_n4096_k12288": {
+   "context": "gemm",
+   "insts": "gemm_n4096_k12288/insts.bin",
+   "build": "gemm_n4096_k12288"
+  },
+  "gemm_n10240_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n10240_k4096/insts.bin",
+   "build": "gemm_n10240_k4096"
+  },
+  "gemm_n12288_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n12288_k4096/insts.bin",
+   "build": "gemm_n12288_k4096"
+  },
+  "gemm_n24576_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n24576_k4096/insts.bin",
+   "build": "gemm_n24576_k4096"
   }
  },
  "layer_types": {
@@ -256,6 +443,91 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "linear",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n12288_k4096",
+      "args": [
+       "gqkvz_w",
+       "gemm_x_k4096",
+       "gemm_y_n12288"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k4096",
+      "args": [
+       "gout_w",
+       "gemm_x_k4096",
+       "gemm_y_n4096"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkvz_w": {
+      "from": "pool",
+      "ops": [
+       3,
+       4
+      ]
+     },
+     "gout_w": {
+      "from": "consts",
+      "ops": [
+       8
+      ]
+     }
+    },
+    "qkv_dim": 8192,
+    "vw": 4096,
+    "key_heads": 16,
+    "value_heads": 32,
+    "head_dim": 128,
+    "conv_kernel": 4,
+    "ff": 12288,
+    "state_s_off": 49152,
+    "s_head_bytes": 66560,
+    "s_rows": 130,
+    "ffn_program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n24576_k4096",
+      "args": [
+       "gffn_ug_w",
+       "gemm_x_k4096",
+       "gemm_y_n24576"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k12288",
+      "args": [
+       "gffn_down_w",
+       "gemm_x_k12288",
+       "gemm_y_n4096"
+      ]
+     }
+    ],
+    "ffn_weights": {
+     "gffn_ug_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1
+      ]
+     },
+     "gffn_down_w": {
+      "from": "pool",
+      "ops": [
+       2
+      ]
+     }
+    }
+   },
    "pack": {
     "pool": [
      {
@@ -382,6 +654,136 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "full",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k4096",
+      "args": [
+       "gqkvg_w",
+       "gemm_x_k4096",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k4096",
+      "args": [
+       "go_w",
+       "gemm_x_k4096",
+       "gemm_y_n4096"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkvg_w": {
+      "from": "pool",
+      "ops": [
+       3,
+       4,
+       5,
+       6
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       7
+      ]
+     }
+    },
+    "qw": 4096,
+    "kvw": 1024,
+    "nh": 16,
+    "kvh": 4,
+    "hd": 256,
+    "rot": 64,
+    "ff": 12288,
+    "ffn_program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n24576_k4096",
+      "args": [
+       "gffn_ug_w",
+       "gemm_x_k4096",
+       "gemm_y_n24576"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n4096_k12288",
+      "args": [
+       "gffn_down_w",
+       "gemm_x_k12288",
+       "gemm_y_n4096"
+      ]
+     }
+    ],
+    "ffn_weights": {
+     "gffn_ug_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1
+      ]
+     },
+     "gffn_down_w": {
+      "from": "pool",
+      "ops": [
+       2
+      ]
+     }
+    },
+    "attn_block": {
+     "m": 1024,
+     "hd": 256,
+     "l_max": 4096,
+     "args": [
+      "ag_a",
+      "ag_b",
+      "ag_c"
+     ],
+     "kernels_s": {
+      "256": "ag_s256",
+      "512": "ag_s512",
+      "768": "ag_s768",
+      "1024": "ag_s1024",
+      "1280": "ag_s1280",
+      "1536": "ag_s1536",
+      "1792": "ag_s1792",
+      "2048": "ag_s2048",
+      "2304": "ag_s2304",
+      "2560": "ag_s2560",
+      "2816": "ag_s2816",
+      "3072": "ag_s3072",
+      "3328": "ag_s3328",
+      "3584": "ag_s3584",
+      "3840": "ag_s3840",
+      "4096": "ag_s4096"
+     },
+     "kernels_pv": {
+      "256": "ag_pv256",
+      "512": "ag_pv512",
+      "768": "ag_pv768",
+      "1024": "ag_pv1024",
+      "1280": "ag_pv1280",
+      "1536": "ag_pv1536",
+      "1792": "ag_pv1792",
+      "2048": "ag_pv2048",
+      "2304": "ag_pv2304",
+      "2560": "ag_pv2560",
+      "2816": "ag_pv2816",
+      "3072": "ag_pv3072",
+      "3328": "ag_pv3328",
+      "3584": "ag_pv3584",
+      "3840": "ag_pv3840",
+      "4096": "ag_pv4096"
+     }
+    }
+   },
    "pack": {
     "pool": [
      {
@@ -538,7 +940,16 @@
     2.7384196342643614e-07,
     1.6548170999431814e-07
    ]
-  }
+  },
+  "ag_a": 8388608,
+  "ag_b": 2097152,
+  "ag_c": 16777216,
+  "gemm_x_k4096": 2097152,
+  "gemm_y_n4096": 4194304,
+  "gemm_x_k12288": 6291456,
+  "gemm_y_n10240": 10485760,
+  "gemm_y_n12288": 12582912,
+  "gemm_y_n24576": 25165824
  },
  "builds": {
   "lx": {
@@ -570,6 +981,339 @@
     "LMHEAD_N": "248320",
     "LMHEAD_K": "4096",
     "LMHEAD_CORES": "8"
+   }
+  },
+  "ag_s256": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s256_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "256"
+   }
+  },
+  "ag_pv256": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv256_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "256"
+   }
+  },
+  "ag_s512": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s512_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "512"
+   }
+  },
+  "ag_pv512": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv512_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "512",
+    "AG_N": "256"
+   }
+  },
+  "ag_s768": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s768_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "768"
+   }
+  },
+  "ag_pv768": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv768_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "768",
+    "AG_N": "256"
+   }
+  },
+  "ag_s1024": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1024_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "1024"
+   }
+  },
+  "ag_pv1024": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1024_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1024",
+    "AG_N": "256"
+   }
+  },
+  "ag_s1280": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1280_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "1280"
+   }
+  },
+  "ag_pv1280": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1280_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1280",
+    "AG_N": "256"
+   }
+  },
+  "ag_s1536": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1536_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "1536"
+   }
+  },
+  "ag_pv1536": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1536_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1536",
+    "AG_N": "256"
+   }
+  },
+  "ag_s1792": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1792_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "1792"
+   }
+  },
+  "ag_pv1792": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1792_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1792",
+    "AG_N": "256"
+   }
+  },
+  "ag_s2048": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2048_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "2048"
+   }
+  },
+  "ag_pv2048": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2048_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2048",
+    "AG_N": "256"
+   }
+  },
+  "ag_s2304": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2304_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "2304"
+   }
+  },
+  "ag_pv2304": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2304_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2304",
+    "AG_N": "256"
+   }
+  },
+  "ag_s2560": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2560_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "2560"
+   }
+  },
+  "ag_pv2560": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2560_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2560",
+    "AG_N": "256"
+   }
+  },
+  "ag_s2816": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2816_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "2816"
+   }
+  },
+  "ag_pv2816": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2816_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2816",
+    "AG_N": "256"
+   }
+  },
+  "ag_s3072": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3072_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "3072"
+   }
+  },
+  "ag_pv3072": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3072_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3072",
+    "AG_N": "256"
+   }
+  },
+  "ag_s3328": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3328_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "3328"
+   }
+  },
+  "ag_pv3328": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3328_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3328",
+    "AG_N": "256"
+   }
+  },
+  "ag_s3584": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3584_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "3584"
+   }
+  },
+  "ag_pv3584": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3584_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3584",
+    "AG_N": "256"
+   }
+  },
+  "ag_s3840": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3840_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "3840"
+   }
+  },
+  "ag_pv3840": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3840_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3840",
+    "AG_N": "256"
+   }
+  },
+  "ag_s4096": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s4096_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "4096"
+   }
+  },
+  "ag_pv4096": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv4096_m1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "4096",
+    "AG_N": "256"
+   }
+  },
+  "gemm_n4096_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n4096_k4096_t256",
+   "env": {
+    "GQP_N": "4096",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n4096_k12288": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n4096_k12288_t256",
+   "env": {
+    "GQP_N": "4096",
+    "GQP_K": "12288",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n10240_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n10240_k4096_t256",
+   "env": {
+    "GQP_N": "10240",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n12288_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n12288_k4096_t256",
+   "env": {
+    "GQP_N": "12288",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n24576_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n24576_k4096_t256",
+   "env": {
+    "GQP_N": "24576",
+    "GQP_K": "4096",
+    "GQP_T": "256"
    }
   }
  },

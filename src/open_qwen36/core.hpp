@@ -498,7 +498,11 @@ private:
     void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
     /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the
     /// sigmoid gate on the host, added into res [T, hid] in place.
-    void shared_expert_block(int l, const float* xm, float* res, size_t T, size_t t_real);
+    /// The FFN over a block as two GEMMs -- up|gate, then down -- with silu(g) * u on the host
+    /// between them, added into `res`. With `gate_w` it is the 35B's shared expert (each real
+    /// token's output scaled by sigmoid(xm . gate_w)); without, Qwen3.5's dense FFN.
+    void ffn_block(int l, const std::vector<Step>& prog, size_t ff, const float* xm, float* res, size_t T,
+                   size_t t_real, const std::vector<float>* gate_w);
     /// A linear-attention layer of the block route, everything up to the MoE: GEMM qkv|z
     /// -> host DeltaNet (state in place through t_real tokens) -> GEMM out -> residual,
     /// norm, router -> the shared expert. `xres` is THIS block's T rows; the router's

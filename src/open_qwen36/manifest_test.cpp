@@ -398,8 +398,8 @@ int main(int argc, char** argv) {
                       full.program[0].args[5] == "ptab" && full.state_kind == "kv" && full.state_row == 4096,
                   "qwen35: one run per attention layer, the KV cache");
             check(q.kernels.at("ax").patch == "attnpos" && q.kernels.at("lx").patch.empty() &&
-                      q.contexts.size() == 4,
-                  "qwen35: attnpos on the attention stream only, four contexts");
+                      q.contexts.size() == 6 && q.contexts.count("gemm") && q.contexts.count("ag"),
+                  "qwen35: attnpos on the attention stream only, six contexts (the route's gemm and ag)");
             // the out projection and the two transposes, with the sizes pools::apply needs.
             // ssm_out_proj is q8 in this container and q4_1 in the 35B's; the plan is the SAME
             // std_perm either way, because pools.cpp re-quantises a q8 source transparently.
@@ -420,6 +420,24 @@ int main(int argc, char** argv) {
             for (const auto& s : lin.program) routed |= s.op == "moeroute2";
             for (const auto& s : full.program) routed |= s.op == "moeroute2";
             check(!routed, "qwen35: nothing is routed");
+            // the block prefill route: the 35B's linear / full halves, a dense FFN for the MoE block
+            const auto& lg = lin.gemm_block;
+            const auto& fg = full.gemm_block;
+            check(lg.t == 256 && lg.kind == "linear" && fg.t == 256 && fg.kind == "full",
+                  "qwen35: both layer types carry a 256-token linear / full route");
+            check(lg.has_dense_ffn() && fg.has_dense_ffn() && lg.moe_kernel.empty() && fg.moe_kernel.empty() &&
+                      lg.shared_program.empty() && !lg.moe_batch.present(),
+                  "qwen35: the route's FFN is dense, with no MoE tail");
+            check(lg.ff == 12288 && lg.ffn_program.size() == 2 && lg.ffn_program[0].kernel == "gemm_n24576_k4096" &&
+                      lg.ffn_program[1].kernel == "gemm_n4096_k12288" &&
+                      lg.ffn_weights.at("gffn_ug_w").ops == std::vector<size_t>{0, 1} &&
+                      lg.ffn_weights.at("gffn_down_w").ops == std::vector<size_t>{2},
+                  "qwen35: up|gate (pool ops 0-1) then down (op 2)");
+            check(lg.program[0].kernel == "gemm_n12288_k4096" && fg.program[0].kernel == "gemm_n10240_k4096" &&
+                      lg.weights.at("gout_w").from == "consts",
+                  "qwen35: qkv|z and q|k|v|gate, the out projection from consts");
+            check(fg.attn_block.present() && fg.attn_block.m == 1024 && fg.attn_block.hd == 256,
+                  "qwen35: the attention products at 4 query heads per kv head");
             check(q.lmhead_ops.size() == 1 && q.lmhead_ops[0].op == "lmhead_q8", "qwen35: the q8 head");
             json ok = matching_config(q);
             check(ok["model_type"] == "qwen3_5" && ok["intermediate_size"] == 12288,
@@ -441,6 +459,69 @@ int main(int argc, char** argv) {
             for (auto& o : j["layer_types"]["linear_attention"]["pack"]["consts"])
                 if (o["op"] == "transpose") o.erase("rows");
         });
+        // a layer has one FFN: the dense ffn_program and the MoE tail, both or neither, are refused
+        refused_manifest(argv[5], "carries both", "qwen35: a route with ffn_program AND moe_kernel is refused", [](json& j) {
+            j["layer_types"]["linear_attention"]["gemm_block"]["moe_kernel"] = "lx";
+        });
+        refused_manifest(argv[5], "ffn_program or layout.moe", "qwen35: a route with no FFN at all is refused", [](json& j) {
+            j["layer_types"]["full_attention"]["gemm_block"].erase("ffn_program");
+        });
+        refused_manifest(argv[5], "exactly 2 steps (up|gate, down)", "qwen35: an ffn_program with a third step is refused",
+                         [](json& j) {
+                             auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["ffn_program"];
+                             p.push_back(p[1]);
+                         });
+        refused_manifest(argv[5], "which ffn_weights does not define", "qwen35: an ffn step naming no ffn weight is refused",
+                         [](json& j) {
+                             auto& w = j["layer_types"]["linear_attention"]["gemm_block"]["ffn_weights"];
+                             w["renamed"] = w["gffn_down_w"];
+                             w.erase("gffn_down_w");
+                         });
+        refused_manifest(argv[5], "op 99", "qwen35: an ffn weight past the pack plan is refused at load", [](json& j) {
+            j["layer_types"]["linear_attention"]["gemm_block"]["ffn_weights"]["gffn_down_w"]["ops"] = {99};
+        });
+        // a q8 out projection: the route packs it as the hi and lo halves of its exact q4_1 split
+        // (a `from: pack` weight) and the out GEMM returns 2 x hidden rows for the host to add
+        auto split_out = [](json& j) {
+            json& gb = j["layer_types"]["linear_attention"]["gemm_block"];
+            const json op = {{"op", "std_perm"}, {"tensor", "model.layers.{l}.linear_attn.ssm_out_proj.weight"},
+                             {"nch", 2048}, {"in_dim", 4096}};
+            json hi = op, lo = op;
+            hi["dst"] = 0;
+            hi["split"] = "hi";
+            lo["dst"] = 2048 * 5120;
+            lo["split"] = "lo";
+            gb["weights"]["gout_w"] = {{"from", "pack"}, {"pack", {hi, lo}}};
+            gb["out_split"] = true;
+        };
+        {
+            std::ifstream f(argv[5]);
+            json j = json::parse(f);
+            split_out(j);
+            try {
+                Manifest q = Manifest::parse(j, "edited");
+                const auto& g = q.layer_types.at("linear_attention").gemm_block;
+                const auto& gw = g.weights.at("gout_w");
+                check(g.out_split && gw.from == "pack" && gw.ops.empty() && gw.pack.size() == 2 &&
+                          gw.pack[0].split == "hi" && gw.pack[1].split == "lo" && gw.pack[1].dst == 2048 * 5120 &&
+                          gw.pack[0].nch == 2048 && gw.pack[0].in_dim == 4096,
+                      "qwen35: a split out projection (hi and lo std_perm halves, out_split) parses");
+            } catch (const std::exception& e) {
+                check(false, std::string("qwen35: a split out projection parses: ") + e.what());
+            }
+        }
+        refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight that is not std_perm is refused",
+                         [&](json& j) {
+                             split_out(j);
+                             json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];
+                             o["op"] = "q8_perm";
+                             o.erase("split");
+                         });
+        refused_manifest(argv[5], "split must be hi or lo", "qwen35: a split that is not hi / lo is refused",
+                         [&](json& j) {
+                             split_out(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][0]["split"] = "mid";
+                         });
     }
     // ---- Phi-3: a 96-dim rotation, longrope's two tables, and hf_config_defaults -- the
     // compatibility check is two-way for keys a config may omit (OPEN-FAMILY-PHI3)

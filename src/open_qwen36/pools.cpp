@@ -214,6 +214,38 @@ const uint8_t* q4_source(const Q4nxFile& m, const std::string& name, size_t chun
 
 }  // namespace
 
+void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst) {
+    for (size_t c = 0; c < nch; ++c) {
+        const uint8_t* s = src + c * Q8_CHUNK;
+        uint8_t* o = dst + c * Q4_CHUNK;
+        std::memset(o, 0, Q4_CHUNK);
+        const int8_t* code = reinterpret_cast<const int8_t*>(s + 512);
+        uint8_t* nib = o + 1024;
+        for (unsigned meta = 0; meta < 256; ++meta) {
+            uint16_t sh;
+            std::memcpy(&sh, s + 2 * meta, 2);
+            const float scale = bf16_to_f32(sh);
+            // x16 and x-128 move only the exponent, so the truncation is exact
+            const float d = hi ? scale * 16.0f : scale;
+            const float mn = hi ? scale * -128.0f : 0.0f;
+            uint32_t du, mu;
+            std::memcpy(&du, &d, 4);
+            std::memcpy(&mu, &mn, 4);
+            const uint16_t d16 = static_cast<uint16_t>(du >> 16), m16 = static_cast<uint16_t>(mu >> 16);
+            std::memcpy(o + 2 * meta, &d16, 2);
+            std::memcpy(o + 512 + 2 * meta, &m16, 2);
+        }
+        for (unsigned r = 0; r < 32; ++r)
+            for (unsigned b = 0; b < 8; ++b)
+                for (unsigned i = 0; i < 32; ++i) {
+                    const unsigned p = code_index(r, b, i);
+                    const int v = code[p];
+                    const int q = hi ? (v >> 4) + 8 : (v & 15);     // >> of a negative int floors
+                    nib[p >> 1] |= static_cast<uint8_t>((p & 1) ? (q << 4) : q);
+                }
+    }
+}
+
 void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
     for (size_t c = 0; c < nch; ++c) {
         const uint8_t* s = src + c * Q8_CHUNK;
@@ -326,7 +358,18 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
         if (op.nch == 0 || op.in_dim == 0) fail("std_perm " + name + " without nch / in_dim");
         bounds(op, op.nch * ch, dst_bytes);
         std::vector<uint8_t> tmp;
-        const uint8_t* src = q4_source(m, name, op.chunk0, op.nch, ch, tmp);
+        const uint8_t* src = nullptr;
+        if (!op.split.empty()) {
+            // one half of a q8 projection's exact q4_1 split (split_q4_1_chunks)
+            if (m.chunk_bytes(name) != Q8_CHUNK || ch != Q4_CHUNK)
+                fail("std_perm " + name + " split " + op.split + ": the source must be q8 and the pool q4_1");
+            const uint8_t* q8 = raw(m, name, (op.chunk0 + op.nch) * Q8_CHUNK) + op.chunk0 * Q8_CHUNK;
+            tmp.resize(op.nch * Q4_CHUNK);
+            split_q4_1_chunks(q8, op.nch, op.split == "hi", tmp.data());
+            src = tmp.data();
+        } else {
+            src = q4_source(m, name, op.chunk0, op.nch, ch, tmp);
+        }
         auto perm = std_perm(op.nch, op.in_dim);
         for (size_t c = 0; c < op.nch; ++c) std::memcpy(dst + op.dst + c * ch, src + perm[c] * ch, ch);
     } else if (op.op == "std_fuse") {

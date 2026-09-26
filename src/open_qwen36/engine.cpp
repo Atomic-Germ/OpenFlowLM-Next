@@ -148,22 +148,20 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // Decode-as-prefill: exact for this architecture, one step per token, the
         // lm_head only for the last one (whose logits pick the first sampled token).
         //
-        // 0167/#32: OFLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
-        // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
-        // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
-        // (q4_1 dequantised on-core) plus T single-token attention dispatches,
-        // instead of T sequential step() calls. Off by default so every existing
-        // measurement is unaffected. The whole prompt runs in GT-wide blocks, the
-        // tail padded with a repeated in-range id (hardware-proven exact: the
-        // real columns' output does not depend on the padding), never falling
-        // back to step(). A kernel set with no gemm_block program (GT == 0) runs
-        // exactly the sequential path this engine always has.
+        // 0167/#32: when the kernel set carries a GEMM-route prefill block
+        // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) the prompt
+        // runs on it -- T tokens through every layer as whole-array bf16 GEMM
+        // dispatches (q4_1 dequantised on-core) instead of T sequential step()
+        // calls. On by default (#109); OFLM_OPEN_GEMM_BLOCK=0 turns it off. The
+        // whole prompt runs in GT-wide blocks, the tail padded with a repeated
+        // in-range id (hardware-proven exact: the real columns' output does not
+        // depend on the padding), never falling back to step(). A kernel set with
+        // no gemm_block program (GT == 0) runs exactly the sequential path this
+        // engine always has.
         return guarded([&] {
-            // Test the VALUE, not just presence: the docs say =1, and
-            // OFLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
-            // that gets diagnosed as a different bug entirely (review on #39).
+            // Only =0 turns it off: unset, =1 or anything else leaves it on.
             // getenv_oflm, not getenv, so a pre-rename FLM_* export still works (#41).
-            const std::string gemm_block_env = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK");
+            const bool gemm_block_on = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK") != "0";
             // A block costs its full-width GEMMs however few real tokens it holds, so a
             // short prompt is cheaper one token at a time; the crossover is measured, not
             // derived (Qwen3.6-35B: ~64 tokens), OFLM_OPEN_GEMM_BLOCK_MIN overrides it.
@@ -172,7 +170,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             // A prompt that has had an image is on the (t, h, w) counter, and the
             // gemm-block route writes no position records - it would place these
             // tokens at the wrong positions, so stay sequential.
-            if (gemm_block_env == "1" && ids.size() >= min_prompt && !core_->mrope_active()) {
+            if (gemm_block_on && ids.size() >= min_prompt && !core_->mrope_active()) {
                 // B(2) of .claude/plans/prefill-parity.md: on a MoE kernel set, run the
                 // whole prompt through each layer before the next, so the layer's expert
                 // pass sees every token that wants an expert instead of one block's worth.
@@ -193,7 +191,8 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
                     }
                     return logits_view();
                 }
-                return logits_view();
+                // no route in this kernel set: fall through to the sequential path below
+                // (this used to return here, leaving the prompt unprocessed -- #109)
             }
             for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
             return logits_view();

@@ -56,6 +56,9 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.cols = j.value("cols", 0ull);
     p.elem = j.value("elem", 0ull);
     p.dst_rows = j.value("dst_rows", 0ull);
+    p.split = j.value("split", "");
+    if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
+        fail(where, p.op + " " + p.tensor + ": split must be hi or lo, on a std_perm");
     // The same fields pools::apply needs, checked here so a bad manifest is named
     // at load rather than surfacing as a "pools:" error part-way through packing.
     auto need_all = [&](std::initializer_list<std::pair<const char*, uint64_t>> fs) {
@@ -216,7 +219,17 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 for (const auto& [name, wj] : gj[key].items()) {
                     GemmWeight w;
                     w.from = get<std::string>(wj, "from", gw + "." + key + "." + name);
-                    if (w.from != "pool" && w.from != "consts") fail(gw, "weight " + name + ": from must be pool or consts");
+                    if (w.from == "pack") {
+                        for (const auto& oj : need(wj, "pack", gw + "." + key + "." + name))
+                            w.pack.push_back(parse_op(oj, gw + "." + key + "." + name));
+                        if (w.pack.empty()) fail(gw, "weight " + name + " packs nothing");
+                        for (const auto& o : w.pack)
+                            if (o.op != "std_perm")
+                                fail(gw, "weight " + name + ": a packed weight is std_perm ops only (the band law the GEMM reads)");
+                        into[name] = w;
+                        continue;
+                    }
+                    if (w.from != "pool" && w.from != "consts") fail(gw, "weight " + name + ": from must be pool, consts or pack");
                     w.ops = get<std::vector<size_t>>(wj, "ops", gw + "." + key + "." + name);
                     if (w.ops.empty()) fail(gw, "weight " + name + " names no pack ops");
                     into[name] = w;
@@ -248,51 +261,71 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.weights = {{"gqkv3_w", {"pool", {0, 1, 2}}}, {"go_w", {"pool", {3}}}, {"gup_w", {"pool", {4}}},
                                  {"ggate_w", {"pool", {5}}}, {"gdown_w", {"pool", {6}}}};
             } else if (g.kind == "linear" || g.kind == "full") {
-                if (!m.has_moe) fail(gw, "a " + g.kind + " route needs layout.moe (the per-token MoE tail)");
                 if (g.program.size() != 2)
                     fail(gw, "a " + g.kind + " route has exactly 2 steps (the fused input projection, the output projection), has " +
                                  std::to_string(g.program.size()));
-                g.a_xm = get<uint64_t>(gj, "a_xm", gw);
-                g.a_rout = get<uint64_t>(gj, "a_rout", gw);
-                g.a_res = get<uint64_t>(gj, "a_res", gw);
-                g.moe_kernel = get<std::string>(gj, "moe_kernel", gw);
-                g.moe_args = get<std::vector<std::string>>(gj, "moe_args", gw);
-                auto mk = m.kernels.find(g.moe_kernel);
-                if (mk == m.kernels.end()) fail(gw, "moe_kernel names unknown kernel " + g.moe_kernel);
-                if (mk->second.patch != "moeroute2") fail(gw, "moe_kernel " + g.moe_kernel + " is not built with the moeroute2 patch table");
-                if (g.moe_args.empty()) fail(gw, "moe_args is empty");
-                // the shared expert over the whole block: up|gate then down. mx is built
-                // routed-only, so a MoE route without these two steps has no shared expert
-                // at all -- required, not optional.
-                g.shared_ff = get<uint64_t>(gj, "shared_ff", gw);
-                g.shared_program = parse_program(need(gj, "shared_program", gw), gw + ".shared_program");
-                if (g.shared_program.size() != 2)
-                    fail(gw, "shared_program has exactly 2 steps (up|gate, down), has " + std::to_string(g.shared_program.size()));
-                for (const auto& s : g.shared_program) {
-                    check_step(m, s, gw, "gemm_block.shared_program");
-                    if (s.op != "run" || s.args.size() != 3)
-                        fail(gw, "gemm_block.shared_program step " + s.kernel + " must be a run with exactly 3 args, has " +
-                                     std::to_string(s.args.size()));
-                }
-                parse_weights("shared_weights", g.shared_weights);
-                // the token-batched expert kernel: optional (an older set runs mx per token)
-                if (gj.contains("moe_batch")) {
-                    const json& bj = gj["moe_batch"];
-                    const std::string bw = gw + ".moe_batch";
-                    MoeBatch& b = g.moe_batch;
-                    b.nt = get<uint64_t>(bj, "nt", bw);
-                    b.args = get<std::vector<std::string>>(bj, "args", bw);
-                    if (b.nt == 0 || b.args.size() != 4 || b.args[0] != "pool")
-                        fail(bw, "wants nt > 0 and four args (pool, x, h, y)");
-                    for (const auto& [slots_s, kname] : need(bj, "kernels", bw).items()) {
-                        const size_t slots = static_cast<size_t>(std::stoull(slots_s));
-                        if (slots == 0 || slots % 8) fail(bw, "slot count " + slots_s + " is not a positive multiple of 8");
-                        auto it = m.kernels.find(kname.get<std::string>());
-                        if (it == m.kernels.end()) fail(bw, "names unknown kernel " + kname.get<std::string>());
-                        if (it->second.patch != "moebatch") fail(bw, "kernel " + it->first + " is not built with the moebatch patch table");
-                        b.kernels[slots] = it->first;
+                // What follows the post-attention norm: the MoE block (the 35B -- per-token routed
+                // experts, the shared expert as two GEMMs) or a dense FFN (Qwen3.5 -- the same two
+                // GEMMs, ungated). A layer has one FFN, so exactly one of the two is present.
+                if (gj.contains("ffn_program")) {
+                    if (gj.contains("moe_kernel") || gj.contains("shared_program"))
+                        fail(gw, "carries both a dense ffn_program and the MoE tail (moe_kernel / shared_program)");
+                    g.ff = get<uint64_t>(gj, "ff", gw);
+                    g.ffn_program = parse_program(gj["ffn_program"], gw + ".ffn_program");
+                    if (g.ffn_program.size() != 2)
+                        fail(gw, "ffn_program has exactly 2 steps (up|gate, down), has " + std::to_string(g.ffn_program.size()));
+                    for (const auto& s : g.ffn_program) {
+                        check_step(m, s, gw, "gemm_block.ffn_program");
+                        if (s.op != "run" || s.args.size() != 3)
+                            fail(gw, "gemm_block.ffn_program step " + s.kernel + " must be a run with exactly 3 args, has " +
+                                         std::to_string(s.args.size()));
                     }
-                    if (b.kernels.empty()) fail(bw, "names no streams");
+                    parse_weights("ffn_weights", g.ffn_weights);
+                } else {
+                    if (!m.has_moe)
+                        fail(gw, "a " + g.kind + " route needs an ffn_program or layout.moe (the per-token MoE tail)");
+                    g.a_xm = get<uint64_t>(gj, "a_xm", gw);
+                    g.a_rout = get<uint64_t>(gj, "a_rout", gw);
+                    g.a_res = get<uint64_t>(gj, "a_res", gw);
+                    g.moe_kernel = get<std::string>(gj, "moe_kernel", gw);
+                    g.moe_args = get<std::vector<std::string>>(gj, "moe_args", gw);
+                    auto mk = m.kernels.find(g.moe_kernel);
+                    if (mk == m.kernels.end()) fail(gw, "moe_kernel names unknown kernel " + g.moe_kernel);
+                    if (mk->second.patch != "moeroute2") fail(gw, "moe_kernel " + g.moe_kernel + " is not built with the moeroute2 patch table");
+                    if (g.moe_args.empty()) fail(gw, "moe_args is empty");
+                    // the shared expert over the whole block: up|gate then down. mx is built
+                    // routed-only, so a MoE route without these two steps has no shared expert
+                    // at all -- required, not optional.
+                    g.shared_ff = get<uint64_t>(gj, "shared_ff", gw);
+                    g.shared_program = parse_program(need(gj, "shared_program", gw), gw + ".shared_program");
+                    if (g.shared_program.size() != 2)
+                        fail(gw, "shared_program has exactly 2 steps (up|gate, down), has " + std::to_string(g.shared_program.size()));
+                    for (const auto& s : g.shared_program) {
+                        check_step(m, s, gw, "gemm_block.shared_program");
+                        if (s.op != "run" || s.args.size() != 3)
+                            fail(gw, "gemm_block.shared_program step " + s.kernel + " must be a run with exactly 3 args, has " +
+                                         std::to_string(s.args.size()));
+                    }
+                    parse_weights("shared_weights", g.shared_weights);
+                    // the token-batched expert kernel: optional (an older set runs mx per token)
+                    if (gj.contains("moe_batch")) {
+                        const json& bj = gj["moe_batch"];
+                        const std::string bw = gw + ".moe_batch";
+                        MoeBatch& b = g.moe_batch;
+                        b.nt = get<uint64_t>(bj, "nt", bw);
+                        b.args = get<std::vector<std::string>>(bj, "args", bw);
+                        if (b.nt == 0 || b.args.size() != 4 || b.args[0] != "pool")
+                            fail(bw, "wants nt > 0 and four args (pool, x, h, y)");
+                        for (const auto& [slots_s, kname] : need(bj, "kernels", bw).items()) {
+                            const size_t slots = static_cast<size_t>(std::stoull(slots_s));
+                            if (slots == 0 || slots % 8) fail(bw, "slot count " + slots_s + " is not a positive multiple of 8");
+                            auto it = m.kernels.find(kname.get<std::string>());
+                            if (it == m.kernels.end()) fail(bw, "names unknown kernel " + kname.get<std::string>());
+                            if (it->second.patch != "moebatch") fail(bw, "kernel " + it->first + " is not built with the moebatch patch table");
+                            b.kernels[slots] = it->first;
+                        }
+                        if (b.kernels.empty()) fail(bw, "names no streams");
+                    }
                 }
                 // the attention products on the NPU: optional, full attention only
                 if (g.kind == "full" && gj.contains("attn_block")) {
@@ -334,6 +367,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
+                    g.out_split = gj.value("out_split", false);
                     if (t.state_kind != "linear") fail(gw, "a linear route on a layer type whose state is not linear");
                     if (g.qkv_dim != 2 * g.key_heads * g.head_dim + g.value_heads * g.head_dim || g.vw != g.value_heads * g.head_dim)
                         fail(gw, "qkv_dim / vw disagree with the head counts");
@@ -357,12 +391,16 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             for (const auto& s : g.shared_program)
                 if (!g.shared_weights.count(s.args[0]))
                     fail(gw, "shared step " + s.kernel + " reads weight buffer " + s.args[0] + ", which shared_weights does not define");
+            for (const auto& s : g.ffn_program)
+                if (!g.ffn_weights.count(s.args[0]))
+                    fail(gw, "ffn step " + s.kernel + " reads weight buffer " + s.args[0] + ", which ffn_weights does not define");
         }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));
         for (const auto& o : need(pk, "consts", tw)) t.consts.push_back(parse_op(o, tw + " pack.consts"));
-        for (const auto* ws : {&t.gemm_block.weights, &t.gemm_block.shared_weights})
+        for (const auto* ws : {&t.gemm_block.weights, &t.gemm_block.shared_weights, &t.gemm_block.ffn_weights})
             for (const auto& [name, w] : *ws) {
+                if (w.from == "pack") continue;
                 const size_t n = w.from == "pool" ? t.pool.size() : t.consts.size();
                 for (size_t idx : w.ops)
                     if (idx >= n) fail(tw, "gemm_block weight " + name + " names " + w.from + " op " + std::to_string(idx) + " of " + std::to_string(n));
