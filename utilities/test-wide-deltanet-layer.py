@@ -61,7 +61,7 @@ def sizes(l):
                 discard=H*2, act=max(l.A_BYTES, l.A_OUT2+H*4*3), trace=4)
 
 
-def prepare(out, tokens):
+def prepare(out, tokens, qkv_build=None, glue_build=None, step_build=None):
     if tokens < 2: raise ValueError('requires multiple persistent tokens')
     out.mkdir(parents=True, exist_ok=True)
     s, l = geometry()
@@ -102,6 +102,12 @@ def prepare(out, tokens):
                    ab=DESIGN/'wide_deltanet/build_ab_h5120', glue=DESIGN/'wide_deltanet/build_glue',
                    step=DESIGN/'wide_deltanet/build_step', post=DESIGN/'wide_deltanet/build_layer/post',
                    out=DESIGN/'wide_deltanet/build_layer/projection_k6144', ffn=DESIGN/'layer_x/build_segmented_precise/ffn')
+    if qkv_build is not None:
+        kernels["qz"] = qkv_build.resolve()
+    if glue_build is not None:
+        kernels["glue"] = glue_build.resolve()
+    if step_build is not None:
+        kernels["step"] = step_build.resolve()
     artifacts = {}
     for name, directory in kernels.items():
         for file in ('final.xclbin', 'insts.bin'): artifacts[str(directory/file)] = sha(directory/file)
@@ -326,8 +332,11 @@ if __name__=='__main__':
     p.add_argument('stage',choices=('prepare','compare','post-prepare','post-compare'))
     p.add_argument('--out',type=Path,default=DESIGN/'wide_deltanet/build_layer/acceptance')
     p.add_argument('--tokens',type=int,default=4)
+    p.add_argument('--qkv-build',type=Path,help='alternate diagnostic QKV/Z build directory')
+    p.add_argument('--glue-build',type=Path,help='alternate diagnostic conv/record build directory')
+    p.add_argument('--step-build',type=Path,help='alternate diagnostic recurrence build directory')
     a=p.parse_args()
     out=a.out.resolve()
-    if a.stage=='prepare': result=prepare(out,a.tokens)
+    if a.stage=='prepare': result=prepare(out,a.tokens,a.qkv_build,a.glue_build,a.step_build)
     else: result={'compare':compare,'post-prepare':post_prepare,'post-compare':post_compare}[a.stage](out)
     sys.exit(result)

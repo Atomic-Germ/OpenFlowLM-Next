@@ -1,5 +1,9 @@
 // DeltaNet pass 2 entry point (one TU per entry point).
+#if DN_STEP_PRECISE
+#include "dn_step_precise.h"
+#else
 #include "dn_step.h"
+#endif
 
 extern "C" {
 void dn_pass2(const float *__restrict S, float *__restrict Sout, const float *__restrict vec,

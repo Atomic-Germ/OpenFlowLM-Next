@@ -20,6 +20,12 @@
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
+// Opt-in projection diagnostic: retain the quantization residual as a second
+// int16 table at 2^15 finer scale, and a third BF16 block-sum component.
+#ifndef GEMV_Q4_CORRECTION
+#define GEMV_Q4_CORRECTION 0
+#endif
+
 // Sum of 32 bf16 values -> fp32, returned as 32-lane bf16 hi/lo broadcast
 // vectors (hi + lo == sum to ~2^-16). Vector-only: accumulator adds fold
 // 32 -> 16 -> 8 lanes, rotate-adds finish 8 -> 1 (zero padding makes the
@@ -52,13 +58,23 @@ static inline void block_sum_split(const bfloat16 *__restrict xb,
   lo = aie::sub(bc, hi).template to_vector<bfloat16>();
 }
 
-static constexpr unsigned gemv_q4_tab_bytes(unsigned K) { return 2 * K + K / 8 + K / 8; }
+static constexpr unsigned gemv_q4_tab_bytes(unsigned K) {
+  return 2 * K + K / 8 + K / 8
+#if GEMV_Q4_CORRECTION
+      + 2 * K + K / 16 + 4 * 32 * sizeof(float)
+#endif
+      ;
+}
 
 // One 32-wide block of x (already bf16) -> xi, s, xs_hi/lo of block kb.
 __attribute__((noinline)) inline void gemv_q4_prep_block(const aie::vector<bfloat16, 32> &xv, int16_t *__restrict xi,
                                       int32_t *__restrict sh, bfloat16 *__restrict xsh,
                                       bfloat16 *__restrict xsl, unsigned kb,
-                                      const aie::vector<uint8_t, 64> &absmask) {
+                                      const aie::vector<uint8_t, 64> &absmask
+#if GEMV_Q4_CORRECTION
+                                      , int16_t *__restrict residual, bfloat16 *__restrict xst
+#endif
+                                      ) {
   const aie::vector<int16_t, 32> ab =
       aie::bit_and(xv.template cast_to<uint8_t>(), absmask).template cast_to<int16_t>();
   const int mx = aie::reduce_max(ab);            // positive floats order as their bits
@@ -68,7 +84,16 @@ __attribute__((noinline)) inline void gemv_q4_prep_block(const aie::vector<bfloa
   const aie::vector<bfloat16, 32> sc =
       aie::broadcast<int16_t, 32>((int16_t)((127 + s) << 7)).template cast_to<bfloat16>();
   const aie::accum<accfloat, 32> a = aie::mul(xv, sc);
+#if GEMV_Q4_CORRECTION
+  const auto quantized = aie::to_fixed<int16_t>(a, 0);
+  aie::store_v(xi + kb * 32, quantized);
+  const auto remainder = aie::sub(a, aie::to_float<float>(quantized, 0));
+  const auto fine = aie::mul(remainder.template to_vector<bfloat16>(),
+                            aie::broadcast<bfloat16, 32>((bfloat16)32768.0f));
+  aie::store_v(residual + kb * 32, aie::to_fixed<int16_t>(fine, 0));
+#else
   aie::store_v(xi + kb * 32, aie::to_fixed<int16_t>(a, 0));
+#endif
   // block sum of the exact bf16 x (fp32 tree) as bf16 hi/lo
   aie::accum<accfloat, 32> xa;
   xa.from_vector(xv);
@@ -95,6 +120,10 @@ __attribute__((noinline)) inline void gemv_q4_prep_block(const aie::vector<bfloa
   const aie::vector<bfloat16, 32> lo = aie::sub(bc, hi).template to_vector<bfloat16>();
   xsh[kb] = hi[0];
   xsl[kb] = lo[0];
+#if GEMV_Q4_CORRECTION
+  const auto tail = aie::sub(aie::sub(bc, hi), lo).template to_vector<bfloat16>();
+  xst[kb] = tail[0];
+#endif
 }
 
 static inline aie::vector<uint8_t, 64> gemv_q4_absmask() {
@@ -118,7 +147,11 @@ __attribute__((noinline)) inline void gemv_q4_prep_blocks(const bfloat16 *__rest
   const aie::vector<uint8_t, 64> absmask = gemv_q4_absmask();
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < nb; ++j) {
-    gemv_q4_prep_block(aie::load_v<32>(x + j * 32), xi, sh, xsh, xsl, b0 + j, absmask);
+    gemv_q4_prep_block(aie::load_v<32>(x + j * 32), xi, sh, xsh, xsl, b0 + j, absmask
+#if GEMV_Q4_CORRECTION
+                       , (int16_t *)(tab + 2 * K + K / 4), (bfloat16 *)(tab + 4 * K + K / 4)
+#endif
+                       );
   }
 }
 
@@ -141,7 +174,11 @@ __attribute__((noinline)) inline void gemv_q4_prep_f32(const float *__restrict x
   for (unsigned kb = 0; kb < NB; ++kb) {
     aie::accum<accfloat, 32> a;
     a.from_vector(aie::load_v<32>(xf + kb * 32));
-    gemv_q4_prep_block(a.template to_vector<bfloat16>(), xi, sh, xsh, xsl, kb, absmask);
+    gemv_q4_prep_block(a.template to_vector<bfloat16>(), xi, sh, xsh, xsl, kb, absmask
+#if GEMV_Q4_CORRECTION
+                       , (int16_t *)(tab + 2 * K + K / 4), (bfloat16 *)(tab + 4 * K + K / 4)
+#endif
+                       );
   }
 }
 
@@ -159,7 +196,11 @@ __attribute__((noinline)) inline void gemv_q4_prep_f32_blocks(const float *__res
   for (unsigned j = 0; j < nb; ++j) {
     aie::accum<accfloat, 32> a;
     a.from_vector(aie::load_v<32>(xf + j * 32));
-    gemv_q4_prep_block(a.template to_vector<bfloat16>(), xi, sh, xsh, xsl, b0 + j, absmask);
+    gemv_q4_prep_block(a.template to_vector<bfloat16>(), xi, sh, xsh, xsl, b0 + j, absmask
+#if GEMV_Q4_CORRECTION
+                       , (int16_t *)(tab + 2 * K + K / 4), (bfloat16 *)(tab + 4 * K + K / 4)
+#endif
+                       );
   }
 }
 

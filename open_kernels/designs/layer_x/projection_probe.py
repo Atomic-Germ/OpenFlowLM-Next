@@ -21,10 +21,16 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from ironutil import include_dirs
 import xcommon as X
-from recipes.wide_deltanet_layer import projection_bands
+from recipes.wide_deltanet_layer import projection_bands, projection_table_bytes
 
 K = int(os.environ.get("PROBE_K", str(X.HID)))
 N = int(os.environ.get("PROBE_N", str(X.N_CORES * 2 * X.BAND_ROWS)))
+CORRECTION = os.environ.get("PROBE_Q4_CORRECTION") == "1"
+if CORRECTION:
+    if K != 5120 or X.HID != 5120 or X.KIND != "dense" or X.Q8:
+        raise ValueError("corrected projection is only a dense H5120 all-Q4 probe")
+    X.TAB_BYTES = projection_table_bytes(K, X.TAB_BYTES, True)
+    X.OS.append("-DGEMV_Q4_CORRECTION=1")
 BANDS_PER_CORE = projection_bands(N, X.N_CORES)
 XN_ELEMS = (K * 2 + X.ELEM - 1) // X.ELEM
 W_BYTES = N * K // 8192 * X.TILE
@@ -78,4 +84,4 @@ _sources = [Path(__file__), HERE / "xcommon.py", HERE / "gen_kernels.py", ROOT /
             *sorted(HERE.glob("*.cc")), *sorted(HERE.glob("*.h")),
             *sorted((HERE.parent / "gemv_q4").glob("*.h"))]
 SPECIALIZE = {"source_hash": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources)
-                                             + repr((K, N, X.C, X.FFN)).encode()).hexdigest()[:8], 16)}
+                                             + repr((K, N, CORRECTION, X.C, X.FFN)).encode()).hexdigest()[:8], 16)}

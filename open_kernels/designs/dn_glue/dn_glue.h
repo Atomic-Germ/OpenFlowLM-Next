@@ -48,6 +48,9 @@ static constexpr unsigned kGrp = kNHead / kKeyHeads;
 static constexpr unsigned kV = 32;
 
 #include "vecmath.h"   // fp32 vector math on bf16 MACs (split32, fmul32, vexp32, vsigmoid32, srsqrt)
+#if DNGLUE_PRECISE
+#include "vecmath_precise.h"
+#endif
 
 // ---- alpha/beta projection tile: W element = kAbRows rows x 32 bf16 (4 KB); acc[32] += x[rows] @ W
 static constexpr unsigned kAbRows = 64;
@@ -105,10 +108,23 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
     accf32 a = aie::mul(aie::load_v<kV>(w + j), s0v);
     a = aie::mac(a, aie::load_v<kV>(w + kTile + j), s1v);
     a = aie::mac(a, aie::load_v<kV>(w2 + j), s2v);
+#if DNGLUE_PRECISE
+    v32b xh3, xl3, xt3;
+    precise_splitN<32>(x, xh3, xl3, xt3);
+    const auto w3 = aie::load_v<kV>(w2 + kTile + j);
+    a = aie::mac(a, xh3, w3);
+    a = aie::mac(a, xl3, w3);
+    a = aie::mac(a, xt3, w3);
+#else
     a = mac_vv(a, x, aie::load_v<kV>(w2 + kTile + j));
+#endif
     // silu(a) = a * sigmoid(a), fp32 throughout (see vsigmoid32)
     const v32f af = a.template to_vector<float>();
+#if DNGLUE_PRECISE
+    aie::store_v(dst + j, precise_siluN<32>(af));
+#else
     aie::store_v(dst + j, fmul32(af, vsigmoid32(af)));
+#endif
     // state shift
     aie::store_v(ns0 + j, s1v);
     aie::store_v(ns1 + j, s2v);
@@ -124,11 +140,16 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
       accf32 ss = aie::zeros<accfloat, kV>();
 #pragma clang loop unroll(disable)
       for (unsigned j = 0; j < kHD; j += kV) {
+#if DNGLUE_PRECISE
+        const auto c = aie::load_v<kV>(hp + j);
+        ss = aie::add(ss, precise_mulN<32>(c, c));
+#else
         v32b ch, cl;
         split32(aie::load_v<kV>(hp + j), ch, cl);
         ss = aie::mac(ss, ch, ch);
         ss = aie::mac(ss, ch, cl);
         ss = aie::mac(ss, ch, cl);
+#endif
       }
       // aie::invsqrt is a coarse hardware approximation (~2% observed);
       // two Newton steps bring it to fp32.
@@ -137,9 +158,13 @@ static inline void glue_conv_tile(const float *__restrict q0, const float *__res
       const bfloat16 il = (bfloat16)(inv - (float)ih);
 #pragma clang loop unroll(disable)
       for (unsigned j = 0; j < kHD; j += kV) {
+#if DNGLUE_PRECISE
+        aie::store_v(hp + j, precise_mulN<32>(aie::load_v<kV>(hp + j), aie::broadcast<float, kV>(inv)));
+#else
         accf32 o = aie::zeros<accfloat, kV>();
         o = mac_vs(o, aie::load_v<kV>(hp + j), ih, il);
         aie::store_v(hp + j, o.template to_vector<float>());
+#endif
       }
     }
   }

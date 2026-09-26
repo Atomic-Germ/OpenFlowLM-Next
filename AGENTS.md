@@ -78,7 +78,12 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
   </skill>
   <skill>
     <name>open-wide-deltanet-layer</name>
-    <description>Build and debug the complete synthetic H5120/FF17408 DeltaNet layer, padded state adapters and remaining full-layer precision failure.</description>
+    <description>Build the baseline synthetic H5120/FF17408 DeltaNet layer, prerequisite kernels and padded state adapters.</description>
     <location>.opencode/skill/open-wide-deltanet-layer/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-deltanet-precision</name>
+    <description>Build and validate the corrected Q4, precise conv and compensated recurrence composition that closes the synthetic H5120 DeltaNet layer gate.</description>
+    <location>.opencode/skill/open-wide-deltanet-precision/SKILL.md</location>
   </skill>
 </available_skills>

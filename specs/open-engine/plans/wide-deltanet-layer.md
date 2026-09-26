@@ -1,10 +1,11 @@
 # Wide DeltaNet complete-layer bring-up — 2026-09-25
 
-**B7 one-DeltaNet-layer acceptance is not complete.** A synthetic all-Q4
+**Historical report; the gate is closed by the [2026-09-26 precision follow-up](wide-deltanet-precision.md).**
+The results below describe the original failure. A synthetic all-Q4
 H5120/FF17408 layer now executes entirely on the open NPU path, but one of
 eight outputs exceeds the inherited full-layer error bound. This follows
 [wide attention](wide-attention.md). No catalogue, converter or model support
-is promoted. The next task is to close this numerical gate.
+is promoted. The follow-up records the fix and current next step.
 
 ## Composition and TDD
 

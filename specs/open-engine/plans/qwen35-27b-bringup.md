@@ -14,8 +14,9 @@ are in [wide-deltanet-bringup.md](wide-deltanet-bringup.md), the
 [full-vocabulary LM head K5120](wide-lm-head.md), and
 [attention Q24/KV4/256/64](wide-attention.md) (2026-09-25). Segmented down and the synthetic full
 FFN pass strict hardware comparison. The [complete synthetic DeltaNet layer](wide-deltanet-layer.md)
-now runs90 open NPU dispatches, but its full-layer gate remains failing at warm-1
-(maxrel0.00908 versus0.005); acceptance and model integration are pending. The phase notes below are
+now passes874 checks over90 open NPU dispatches after the
+[2026-09-26 precision fix](wide-deltanet-precision.md): worst final maxrel0.00017123
+versus0.005. The full attention layer is next; model integration remains pending. The phase notes below are
 historical; the toolchain is installed, the synthetic A7 chain passes inherited
 whole-tensor gates, and Q4 projections at K5120/K6144 pass hardware comparison.
 

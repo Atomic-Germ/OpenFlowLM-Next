@@ -72,3 +72,14 @@ def token_commands(s,l):
              'run ln fo res1 ones y discard', f'copy state 0 conv 0 {l.STATE_S_OFF}']
     cmds += [f'copy state {dst} so {src} {size}' for dst,src,size in state_copies(l,48,128,restore=True)]
     return cmds
+
+
+def projection_table_bytes(k, base, correction=False):
+    """Corrected standalone QKV table, within the measured main-core budget."""
+    if k<=0 or k%32:
+        raise ValueError('projection table requires whole 32-element blocks')
+    result=max(base,4*k+k//4+k//16+512) if correction else base
+    # Actual H5120/FF17408 probe uses40960 bytes beside its table.
+    if 40960+result>65536:
+        raise ValueError('corrected projection table exceeds main-core L1 budget')
+    return result

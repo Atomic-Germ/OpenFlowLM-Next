@@ -93,3 +93,12 @@ def test_layer_program_rejects_geometry_different_from_built_kernels(monkeypatch
     s,l=layout(monkeypatch)
     with pytest.raises(ValueError,match='not implemented'):
         token_commands(replace(s,**changes),l)
+
+
+def test_corrected_projection_table_preserves_default_and_fits_wide_core():
+    from recipes.wide_deltanet_layer import projection_table_bytes
+    assert projection_table_bytes(5120,18432,False)==18432
+    assert projection_table_bytes(5120,18432,True)==22592
+    assert 59392-18432+projection_table_bytes(5120,18432,True)<=65536
+    with pytest.raises(ValueError,match='budget'):
+        projection_table_bytes(8192,18432,True)

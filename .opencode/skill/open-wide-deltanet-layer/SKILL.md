@@ -1,14 +1,15 @@
 ---
 name: open-wide-deltanet-layer
-description: Build and debug the synthetic complete H5120/FF17408 DeltaNet layer using byte-only composition of open NPU primitives. Use for the B7 one-layer accuracy gate, padded state adapters, or propagated BF16 rounding. The full-layer numerical gate is currently failing.
+description: Build the baseline synthetic H5120/FF17408 DeltaNet layer and its prerequisite kernels using byte-only composition. Use for padded state adapters, baseline reproduction and the original precision investigation.
 ---
 
 # Wide DeltaNet layer acceptance
 
-Read `specs/open-engine/plans/wide-deltanet-layer.md` first. **The layer runs,
-but acceptance does not pass**: seed38427, warm token1 has maxrel0.00908004
-against the unchanged0.005 gate. Do not promote the catalogue or skip to an
-8-layer/model claim. Keep that fixture and the A7 head-local caveat.
+Read `specs/open-engine/plans/wide-deltanet-layer.md` for the baseline failure.
+The passing composition and current commands are in
+`.opencode/skill/open-wide-deltanet-precision/SKILL.md`. The commands below
+reproduce the baseline (warm-1 maxrel0.00908004), not the precision fix.
+Keep that fixture; one-layer acceptance does not imply model support.
 
 ## Build
 
