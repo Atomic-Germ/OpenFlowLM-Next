@@ -91,4 +91,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the corrected Q4, precise conv and compensated recurrence composition that closes the synthetic H5120 DeltaNet layer gate.</description>
     <location>.opencode/skill/open-wide-deltanet-precision/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-attention-layer</name>
+    <description>Build and validate the complete synthetic H5120/FF17408 attention layer with production packing, segmented FFN and persistent device KV cache.</description>
+    <location>.opencode/skill/open-wide-attention-layer/SKILL.md</location>
+  </skill>
 </available_skills>

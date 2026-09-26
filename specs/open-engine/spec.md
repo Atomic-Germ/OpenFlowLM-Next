@@ -1188,15 +1188,21 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   Whole-layer integration remains behind `OPEN_KERNELS_UNVALIDATED`; mixed Q8 is unimplemented.
   See [segmented FFN report](plans/segmented-dense-ffn.md). No model/catalogue promotion.
 
-- **Complete wide DeltaNet layer bring-up (not accepted).** A byte-only composition
+- **Complete synthetic wide DeltaNet layer.** A byte-only composition
   of standalone LN, QKV/Z, AB, glue, recurrence, post, output projection and
   segmented FFN executes cold/warm four-token sequences plus reset repeat.
   Production128-active/140-padded state rows and separate AB bank regions are
-  adapted explicitly. Precise wide LN and opt-in standalone post improve local
-  BF16 accuracy, but one final output has maxrel0.00908 versus the unchanged
-  0.005 bound. All strict conditional GEMV/FFN checks pass; they do not replace
-  this failed independent layer check. No catalogue/model promotion. See the
-  [complete-layer report](plans/wide-deltanet-layer.md) and retained diagnostics.
+  adapted explicitly. Corrected Q4, precise conv and compensated recurrence
+  close the original precision failure:874 checks pass, worst final
+  maxrel0.00017123 versus0.005. See the [precision follow-up](plans/wide-deltanet-precision.md).
+- **Complete synthetic wide attention layer.** Production Q4 packing and
+  Q/K/V/gate projection, Q24/KV4/HD256/ROT64 attention, residual RMSNorm and
+  segmented FFN pass458 checks over63 NPU dispatches. The device carries its
+  KV cache across cold/warm sequences at positions0–3 and253–256. Worst final
+  maxrel1.66353e-5 versus0.005; per-head and strict conditional gates also pass.
+  See the [attention-layer report](plans/wide-attention-layer.md). Both layer
+  gates use sequential standalone contexts, not fused placement. The8-layer
+  slice, runtime/model integration and catalogue promotion remain pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
