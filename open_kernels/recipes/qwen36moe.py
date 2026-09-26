@@ -1266,7 +1266,7 @@ KERNEL_SOURCES = [
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
-    "include/vecmath.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

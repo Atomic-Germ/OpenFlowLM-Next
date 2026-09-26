@@ -14,9 +14,9 @@
 // the softmax denominator l >= 1). What they drop from compiler-rt is exactly the
 // denormal / infinity / NaN handling, so swapping them in changes no result.
 //
-// No aie_api here: the header is plain C++ so the host test
-// (utilities/scalar_fp_test.cpp, specs/open-engine/tests/test_scalar_fp.py) compiles
-// the same code and checks it against the host FPU.
+// No aie_api here: the header is plain C++ so the host check
+// (utilities/scalar_fp_test.cpp) compiles the same code and compares it against the
+// host FPU.
 
 #include <stdint.h>
 

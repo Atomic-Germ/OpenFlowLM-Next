@@ -256,6 +256,12 @@ int main(int argc, char** argv) {
     refused_manifest(argv[1], "not a declared global", "an attn_block naming an undeclared buffer is refused", [](json& j) {
         j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["args"][2] = "ag_z";
     });
+    refused_manifest(argv[1], "is not 1, 2 or 4", "a row block the attention kernel is not built for is refused", [](json& j) {
+        j["kernels"]["ax0"]["rb"] = 8;
+    });
+    refused_manifest(argv[1], "needs the attnpos", "a row block on a stream the host does not pad is refused", [](json& j) {
+        j["kernels"]["lx1"]["rb"] = 2;
+    });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];
         p.push_back(p[1]);

@@ -2,74 +2,66 @@
 # Every family that does NOT set ATTN_BLOCK_ONLY must compile attn.h byte for byte
 # (OPEN-ATTN-CONTEXT: a family joins the path by measurement, and everything else
 # compiles what it compiled). Prove it at the source level: preprocess each attention
-# translation unit at a family's own flags with the pre-change header set and with the
-# current one, and diff. A byte-identical preprocessed TU is a byte-identical object,
-# which is the same evidence a --check re-export gives for one tenth of the time.
+# translation unit at a family's own flags with a reference ref's sources and with the
+# working tree's, and compare token streams. Identical tokens = identical objects, the
+# same evidence a --check re-export gives for one tenth of the time.
 #
-# Run from WSL, from the repo root, with the reference sources extracted first:
+# Run from Git Bash on Windows or from WSL/Linux, with the mlir-aie environment active
+# (its python resolves Peano and the AIE headers):
 #
-#   mkdir -p ppcheck_old
-#   for f in attn.h attn_stepb.cc; do   # every file the change touched
-#     git show <ref>:open_kernels/designs/attn/$f > ppcheck_old/$f
-#   done
-#   wsl -d Ubuntu-24.04 -- bash -lc 'source ~/ironenv142/bin/activate &&
-#     bash <repo>/utilities/attn_pp_identical.sh'
+#   bash utilities/attn_pp_identical.sh [git ref]      # default: main
 #
-# On a Windows checkout with core.autocrlf the working copy of this file has CRLF line
-# endings and bash under WSL dies on line 1; strip the CRs (or check it out with LF).
+# PEANO / HDR in the environment override the python lookup.
 #
 # Add a family by adding its ATTN_* flags below -- they are recipes/attnknobs.py's
-# geometry for that spec, which `python -c "from recipes import dense; ..."` prints.
+# geometry for that spec.
 set -e
-W=/mnt/c/code/openflowlm-next/.claude/worktrees/agent-a7a473d4917f6cad9
-A=$W/open_kernels/designs/attn
-OUT=/tmp/ppcheck
-rm -rf $OUT; mkdir -p $OUT/old $OUT/new
-cp $A/*.cc $A/*.h $OUT/new/
-cp $A/*.cc $A/*.h $OUT/old/
-cp $W/ppcheck_old/* $OUT/old/   # the reference set: every file the change touched
-rm -f $OUT/old/attn_stepb_new.cc
-
-eval "$(python - <<'PY'
+REF=${1:-main}
+W=$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })
+git -C "$W" rev-parse --verify -q "$REF^{commit}" > /dev/null || { echo "no such ref: $REF"; exit 2; }
+if [ -z "$PEANO" ] || [ -z "$HDR" ]; then
+  eval "$(${PYTHON:-python} - <<'PY'
 from aie.utils import config
-print(f'PEANO={config.peano_install_dir()}')
-print(f'HDR={config.cxx_header_path()}')
+print(f'PEANO="{config.peano_install_dir()}"')
+print(f'HDR="{config.cxx_header_path()}"')
 PY
 )"
-ARCH=aie2p
+fi
+PEANO=${PEANO//\\//}; HDR=${HDR//\\//}
+OUT=$W/.claude/tmp/ppcheck
+rm -rf "$OUT"; mkdir -p "$OUT/old/attn" "$OUT/old/include"
+for f in $(git -C "$W" ls-tree --name-only "$REF" open_kernels/designs/attn/); do
+  git -C "$W" show "$REF:$f" > "$OUT/old/attn/$(basename "$f")"
+done
+for f in $(git -C "$W" ls-tree --name-only "$REF" open_kernels/include/); do
+  git -C "$W" show "$REF:$f" > "$OUT/old/include/$(basename "$f")"
+done
 CLANG="$PEANO/bin/clang++"
-BASE="-I$HDR -I$HDR/aie_kernels -I$HDR/aie_kernels/$ARCH -I$W/open_kernels/include -D__AIE_API_AIE_ADF_HPP__ --target=$ARCH-none-unknown-elf -std=c++20 -O2 -DNDEBUG -Wno-macro-redefined"
+base() { echo "-I$HDR -I$HDR/aie_kernels -I$HDR/aie_kernels/aie2p -I$1 -D__AIE_API_AIE_ADF_HPP__ --target=aie2p-none-unknown-elf -std=c++20 -O2 -DNDEBUG -Wno-macro-redefined"; }
 
-# Gemma3-4B: head dim 256, NO gate, 4 cores x 2 heads, RB 2 -- the family that keeps the
-# single-row kernel AT a blocked RB, so it exercises every branch this change touched.
+# Gemma3-4B: head dim 256, no gate, RB 2 -- keeps the single-row kernel at a blocked RB.
 G3="-DATTN_NH=8 -DATTN_KVH=4 -DATTN_HD=256 -DATTN_ROT=128 -DATTN_GATE=0 -DATTN_VEXP=1 -DATTN_NHL=2 -DATTN_RB=2 -DATTN_QKNORM=1"
-# Qwen3-4B: head dim 128, 4 cores x 8 heads, RB 4 -- a family NOT at hd 256.
+# Qwen3-4B: head dim 128, RB 4 -- a family not at head dim 256.
 Q3="-DATTN_NH=32 -DATTN_KVH=8 -DATTN_HD=128 -DATTN_ROT=128 -DATTN_GATE=0 -DATTN_VEXP=1 -DATTN_NHL=8 -DATTN_RB=4 -DATTN_QKNORM=1"
-# The 35B as it shipped: hd 256 WITH the gate, RB 1, the single-row path.
-Q36="-DATTN_NH=16 -DATTN_KVH=2 -DATTN_HD=256 -DATTN_ROT=64 -DATTN_GATE=1 -DATTN_VEXP=1 -DATTN_NHL=4"
+# Qwen3.5-9B: the 35B's design, still on the single-row kernel.
+Q35="-DATTN_NH=16 -DATTN_KVH=4 -DATTN_HD=256 -DATTN_ROT=64 -DATTN_GATE=1 -DATTN_VEXP=1 -DATTN_NHL=4"
+# The 35B's previous flags: RB 1, the single-row path.
+Q36RB1="-DATTN_NH=16 -DATTN_KVH=2 -DATTN_HD=256 -DATTN_ROT=64 -DATTN_GATE=1 -DATTN_VEXP=1 -DATTN_NHL=4"
 
-fail=0
-for name in "gemma3-4b|$G3" "qwen3-4b|$Q3" "qwen36-35b-rb1|$Q36"; do
+fail=0; n=0
+for name in "gemma3-4b|$G3" "qwen3-4b|$Q3" "qwen35-9b|$Q35" "qwen36-rb1|$Q36RB1"; do
   tag=${name%%|*}; flags=${name#*|}
-  for tu in attn_meta.cc attn_q.cc attn_k.cc attn_v.cc attn_init.cc attn_fin.cc attn_fin_ng.cc attn_step.cc attn_step_new.cc attn_stepb.cc; do
-    [ -f "$OUT/old/$tu" ] || continue
-    if [ "$tu" = attn_stepb.cc ]; then case "$flags" in *ATTN_RB=*) ;; *) continue;; esac; fi
-    ok=1
-    for v in old new; do
-      "$CLANG" -E -P $BASE -I$OUT/$v $flags "$OUT/$v/$tu" -o "$OUT/$tag.$tu.$v.i" || ok=0
-      # An empty macro expansion leaves a stray space (`int e )`): compare TOKENS, not
-      # bytes -- whitespace collapsed and dropped beside punctuation. Anything that would
-      # change the compiled code changes a token.
-      [ $ok = 1 ] && sed -i "s|$OUT/$v|DIR|g" "$OUT/$tag.$tu.$v.i" &&         tr -s '[:space:]' ' ' < "$OUT/$tag.$tu.$v.i" | sed 's/ *\([][(){},;:<>=*&+-]\) *//g' > "$OUT/$tag.$tu.$v.t"
-    done
-    [ $ok = 1 ] || { echo "PP FAILED $tag $tu"; fail=1; continue; }
-    if cmp -s "$OUT/$tag.$tu.old.t" "$OUT/$tag.$tu.new.t"; then
-      echo "same  $tag  $tu"
+  for tu in attn_meta attn_q attn_k attn_v attn_init attn_fin attn_fin_ng attn_step attn_step_new attn_stepb; do
+    if [ $tu = attn_stepb ]; then case "$flags" in *ATTN_RB=*) ;; *) continue;; esac; fi
+    "$CLANG" -E -P $(base "$OUT/old/include") -I"$OUT/old/attn" $flags "$OUT/old/attn/$tu.cc" -o "$OUT/$tag.$tu.old.i"
+    "$CLANG" -E -P $(base "$W/open_kernels/include") -I"$W/open_kernels/designs/attn" $flags "$W/open_kernels/designs/attn/$tu.cc" -o "$OUT/$tag.$tu.new.i"
+    n=$((n + 1))
+    if cmp -s <(tr -s ' \t\r\n' '\n' < "$OUT/$tag.$tu.old.i") <(tr -s ' \t\r\n' '\n' < "$OUT/$tag.$tu.new.i"); then
+      echo "identical  $tag  $tu"
     else
-      echo "DIFF  $tag  $tu"; diff <(tr ";" "
-" < "$OUT/$tag.$tu.old.t") <(tr ";" "
-" < "$OUT/$tag.$tu.new.t") | head -20; fail=1
+      echo "DIFFERENT  $tag  $tu"; fail=1
     fi
   done
 done
-echo "PPCHECK_FAIL=$fail"
+echo "$n TUs compared against $REF"
+exit $fail

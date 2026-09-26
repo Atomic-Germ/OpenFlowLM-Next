@@ -255,79 +255,57 @@ end, since it is the round that starts with the first one's answer in context.
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
 
-**Measured (2026-09-22, the 35B at RB 2 with the single-row kernel retired):**
+**Measured (2026-09-22, the 35B at RB 4):**
 `ax0` was the only decode dispatch that grew with the prompt, and the 35B was the one
 fast family with no row block: at head dim 256 with the output gate, the block kernel
-did not fit beside the single-row one in the attention core's 16 KB. Retiring the
-single-row kernel pays for it -- the tightest of the four attention cores went 14,256 ->
-15,248 bytes -- and every other family's attention translation units are token-identical
-to what they were (`utilities/attn_pp_identical.sh`: 29/29 at Gemma3-4B, Qwen3-4B and the
-35B's previous flags). `ax0` alone, minimum of 20, clean box, the reference set and the
-candidate alternated per position:
+did not fit beside the single-row one in the attention core's 16 KB of program memory.
+Three changes make it fit at RB 4, all confined to the block-only path
+(`ATTN_BLOCK_ONLY`); every other family's attention translation units preprocess
+token-identical to the base (`utilities/attn_pp_identical.sh`: 38/38 at Gemma3-4B,
+Qwen3-4B, Qwen3.5-9B and the 35B's previous RB 1 flags).
 
-| position | 1 | 256 | 1024 | 2048 | 4000 |
-|---|---|---|---|---|---|
-| RB 1 (reference set) | 0.94* | 0.95 | 1.63 | 2.57 | 4.32 ms |
-| RB 2, block-only | 0.67 | 0.86 | 1.50 | 2.25 | 3.75 ms |
+1. **The single-row kernel is retired on this path.** The new token's row joins the
+   last block and padding rows are masked; the manifest carries the block size as `rb`.
+2. **No soft-float.** The attention core's `__mulsf3` / `__divsf3` / `__muldi3` -- 2,112
+   bytes for norm_rope's RMS scale and 1/sqrt Newton steps and attn_fin's `1/l` --
+   became integer routines (`open_kernels/include/scalar_fp.h`) that give the IEEE
+   round-to-nearest-even result bit for bit on every operand those sites can see
+   (`utilities/scalar_fp_test.cpp`). Dumps are bit-identical to the same kernel with
+   the soft-float (max |diff| 0.0 over 105 dumps).
+3. **A cheaper block kernel (`ATTN_TREE`).** The score phase reduces all RB x NHL dot
+   products as one tree whose levels pair lanes exactly as `aie::reduce_add` does; the
+   PV loop writes four head-dim slices per block, so the compiler no longer serialises
+   every slice behind the last one's store; and the rescale factor's exponential rides
+   in row 0's padding lanes of the block's one `vexpN<32>`. Bit-identical to (2) and
+   deterministic over three runs.
 
-\* the first dispatch of the hold; RB 1 reads 0.71 at position 1 elsewhere, and the
-blocked kernels 0.63-0.67, so position 1 is roughly unchanged.
-
-Greedy continuation after the 1122-token prompt (block prefill, so the prefill KV is
-identical): 48 identical tokens, then a flip at a 0.045-logit near-tie that every blocked
-variant hits at the same position. Teacher-forced over 64 positions: 64/64 argmax, and
-positions 0 and 2 -- each with a masked padding row -- bit-identical to RB 1; the even
-(masked) and odd positions have the same median corr (0.99929 / 0.99920), so the mask
-adds nothing. The corr spread elsewhere (min 0.984) is the routed experts flipping on
-near-ties, as recorded for this family's first fast-attention pass.
-
-What it did NOT do is make the walk flat, and the reason is now measured rather than
-guessed. The block amortises q reloads, the accumulator rescale and the exponential;
-those were only ~15 % of a row (0.90 -> 0.77 us/row). An `ATTN_NULL` build (every fifo
-transfer kept, no arithmetic) puts `ax0` at 1.28 ms at 4000, so the walk is ~80 %
-arithmetic and ~0.16 us/row of stream, and the 2026-09-22 target of 1.2 ms at 4000 is
-the stream floor itself. `kernel_remarks --arch aie2p` says no loop in the block kernel
-is software-pipelined; per (head, row) the score costs ~90 cycles of which the
-`reduce_add` is 66. RB 4 fits with 32 bytes to spare and reaches 3.05-3.2 ms at 4000,
-correct by the same gates, but is not adopted on that margin. An `aie::mmul` score phase
-(built and measured on a branch, not merged) fits and is correct but is slower: building its A tile from four
-128-bit K loads is shuffle-bound (223 bundles per four k-steps against a ResMII of 116).
-The remaining levers are a K layout that makes that tile one load, pipelining the
-reduction, and the `ain` stream's own rate. Detail:
-`.claude/plans/decode-gap-2026-09-22/track-a.md`.
-
-**Measured (2026-09-22 evening, Track E: RB 4 and the block kernel's arithmetic):**
-Three changes, all confined to the block-only path (every other family's attention
-translation units preprocess token-identical, `utilities/attn_pp_identical_native.sh`,
-38/38). (1) The attention core's soft-float -- `__mulsf3` / `__divsf3` / `__muldi3`,
-2,112 bytes for norm_rope's RMS scale and 1/sqrt Newton steps and attn_fin's `1/l` --
-became integer routines (`open_kernels/include/scalar_fp.h`) that give the IEEE
-round-to-nearest-even result bit for bit on every operand those sites can see
-(`utilities/scalar_fp_test.cpp`); dumps are bit-identical to the same kernel with the
-soft-float (max |diff| 0.0 over 105 dumps). That is what makes RB 4 fit. (2) The score
-phase reduces all RB x NHL dot products as one tree whose levels pair lanes exactly as
-`aie::reduce_add` does, instead of one serial `reduce_add` per (row, head); the PV loop
-writes four head-dim slices per block, so the compiler no longer serialises every slice
-behind the last one's store; and the rescale factor's exponential rides in row 0's
-padding lanes of the block's one `vexpN<32>`. Bit-identical to (1) (max |diff| 0.0, and
-deterministic over three runs). (3) RB 2 -> 4 (`attnknobs`), which is not bit-exact against
-RB 2: the 64-token greedy continuation after the 1122-token prompt is 64/64 identical to
-RB 2's, and against the reference both flip at the same position-49 near-tie (gap 0.045)
-with corr min before it 0.988466 (RB 2: 0.988460). Tightest attention core 15,248 ->
-14,208 bytes (2,176 free). `ax0` in the real walk, minimum of 20 over 3 alternated
-rounds, measured on the one-context layer image (OPEN-DECODE-ONE-CONTEXT; `sets/k35e2`
-vs `sets/k35int2`), whose attention cores compile the same program as `ax.py`'s:
+The tightest attention core is 14,208 bytes (2,176 free). `ax0` in the real walk,
+minimum of 20 over 3 alternated rounds, clean box, measured on the one-context layer
+image (PR #116, whose attention cores compile the same program as `ax.py`'s). The RB 1
+row is from an earlier session on `ax.py`'s own image, for scale:
 
 | position | 1 | 1024 | 2048 | 4000 |
 |---|---|---|---|---|
-| RB 2 (`k35int2`) | 0.64 | 1.44 | 2.22 | 3.73 ms |
-| RB 4 + the above (`k35e2`) | 0.63 | 1.03 | 1.41 | 2.15 ms |
+| RB 1 (before) | 0.71 | 1.63 | 2.57 | 4.32 ms |
+| RB 2, block-only | 0.64 | 1.44 | 2.22 | 3.73 ms |
+| RB 4 + (2) and (3) | 0.63 | 1.03 | 1.41 | 2.15 ms |
 
-The step's sum of minima at 4000 goes 100.1 -> 84.2 ms. An `ATTN_NULL` probe of the same
-image (no arithmetic, every transfer kept) is 1.24 ms at 4000, so the walk is now ~0.9
-ms of arithmetic on a ~1.24 ms stream, down from ~2.5. A deeper `ain` fifo (two whole
-blocks) was tried and rejected: no gain, and the 8-layer dumps became non-deterministic.
-Detail: `.claude/plans/decode-gap-2026-09-22/track-e.md`.
+The step's sum of minima at 4000 goes 100.1 -> 84.2 ms against RB 2. An `ATTN_NULL`
+build (every fifo transfer kept, no arithmetic) puts `ax0` at 1.24 ms at 4000, so the
+walk is now ~0.9 ms of arithmetic on a ~1.24 ms stream, down from ~2.5; the stream is
+the floor. A deeper `ain` fifo (two whole blocks) was tried and rejected: no gain, and
+the 8-layer dumps became non-deterministic. An `aie::mmul` score phase fits and is
+correct but is slower: building its A tile from four 128-bit K loads is shuffle-bound.
+
+**Not bit-exact against RB 1.** Blocking reorders the sums. Greedy continuation after
+the 1122-token prompt (block prefill, so the prefill KV is identical) is identical for
+48 tokens, then flips at a 0.045-logit near-tie that every blocked variant hits at the same
+position with the same token; RB 4's 64-token
+continuation is 64/64 identical to RB 2's. Teacher-forced over 64 positions at RB 2:
+64/64 argmax, and positions with a masked padding row match unmasked ones in median corr
+(0.99929 / 0.99920), so the mask adds nothing. The corr spread elsewhere (min 0.984) is
+the routed experts flipping on near-ties, as recorded for this family's first
+fast-attention pass.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
