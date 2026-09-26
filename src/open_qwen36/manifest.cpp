@@ -174,8 +174,12 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         d.rb = v.value("rb", 1ull);
-        if (d.rb == 0 || (d.rb & (d.rb - 1)) != 0)
-            fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " is not a power of two");
+        // attn_stepb*.cc build RB 2 and 4 only; any other count would pad the stream for
+        // rows the kernel never takes, and the core waits on its fifo forever
+        if (d.rb != 1 && d.rb != 2 && d.rb != 4)
+            fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " is not 1, 2 or 4");
+        if (d.rb > 1 && d.patch != "attnpos")
+            fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
