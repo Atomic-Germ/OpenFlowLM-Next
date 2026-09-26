@@ -7,6 +7,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "open_qwen36/manifest.hpp"
 
@@ -80,6 +81,39 @@ int main(int argc, char** argv) {
           "MoE pool geometry");
     check(m.contexts.count("lx") && m.contexts.count("ax") && m.contexts.count("ln") && m.contexts.count("lm"), "four contexts");
     check(m.kernels.at("ax0").patch == "attnpos" && m.kernels.at("lx1").patch == "moeroute2" && m.kernels.at("ln").patch.empty(), "kernel patch kinds");
+    // attnpos pads the streamed row count to whole blocks of `rb` (attn.h ATTN_BLOCK_ONLY);
+    // every other kernel is unblocked and the field is absent from its manifest entry.
+    check(m.kernels.at("ax0").rb == 4 && m.kernels.at("lx1").rb == 1, "attn rows per call");
+    {
+        // The blocked walk covers the cached rows AND the new position's row in whole
+        // blocks of `rb`, taking the new row as the last block's final slot -- so the
+        // stream carries one row less than those blocks hold, and the extra rows over
+        // the real count sit at or past `pos`, where the kernel masks them. At rb 2 the
+        // highest row read is exactly `pos`: inside the cache, and written by this very
+        // dispatch. A count that does not match what attn_meta_impl derives from the
+        // same position deadlocks the fifo, so this is the arithmetic both sides run.
+        std::vector<uint32_t> iw(1, 0);
+        const std::vector<stream_patch::AttnPatch> tab{{0, 0, 0}};
+        stream_patch::AttnGeometry g;                     // kv_row 2048, no window
+        auto rows = [&](uint64_t pos, uint64_t rb) {
+            g.rb = rb;
+            stream_patch::attn_apply(iw.data(), tab, pos, g);
+            return static_cast<uint64_t>(iw[0]) * 4 / g.kv_row;
+        };
+        check(rows(0, 2) == 1 && rows(1, 2) == 1 && rows(2, 2) == 3 && rows(3, 2) == 3 &&
+              rows(4, 2) == 5 && rows(1000, 2) == 1001, "attn_apply: rows padded to whole blocks of 2");
+        check(rows(0, 1) == 1 && rows(2, 1) == 2 && rows(1000, 1) == 1000, "attn_apply: rb 1 is the window's own count");
+        bool top = true, fits = true;
+        for (uint64_t pos = 0; pos < 64; ++pos) {
+            top = top && rows(pos, 2) - 1 <= pos;
+            // What attn_meta_impl will do with the same position: pb[4] = pb[0] / kRB full
+            // blocks off the fifo, then one peeled block of kRB - 1 more. If that is not
+            // exactly what the fill delivers, the core blocks forever on an acquire.
+            for (uint64_t rb = 2; rb <= 4; rb *= 2) fits = fits && rb * (pos / rb) + rb - 1 == rows(pos, rb);
+        }
+        check(top, "attn_apply: the padded window never reads past the position's own row");
+        check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
+    }
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
     check(lin.consts_bytes == 11882496 && lin.act_bytes == 190464 && lin.state_kind == "linear" && lin.state_bytes == 2342912, "linear layer buffers");
@@ -221,6 +255,12 @@ int main(int argc, char** argv) {
     });
     refused_manifest(argv[1], "not a declared global", "an attn_block naming an undeclared buffer is refused", [](json& j) {
         j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["args"][2] = "ag_z";
+    });
+    refused_manifest(argv[1], "is not 1, 2 or 4", "a row block the attention kernel is not built for is refused", [](json& j) {
+        j["kernels"]["ax0"]["rb"] = 8;
+    });
+    refused_manifest(argv[1], "needs the attnpos", "a row block on a stream the host does not pad is refused", [](json& j) {
+        j["kernels"]["lx1"]["rb"] = 2;
     });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];

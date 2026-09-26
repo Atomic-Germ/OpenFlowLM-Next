@@ -285,6 +285,9 @@ class Attn:
     # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
     # kernel every family compiled before it existed
     VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
+    BLOCK: int = 0                       # 1: attn.h ATTN_BLOCK_ONLY -- no single-row kernel is built,
+                                         # and the driver pads the streamed row count to a whole
+                                         # number of blocks (stream_patch::attn_apply, manifest `rb`)
 
 
 @dataclass(frozen=True)
@@ -826,7 +829,7 @@ def attn(spec: ModelSpec) -> Attn | None:
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
         OG_ELEMS=roundup(qw * 2, ELEM) // ELEM,
-        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB,
+        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
     )
 
 
@@ -1131,7 +1134,17 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
         out["contexts"]["ax"] = "ax0/final.xclbin"
-        out["kernels"]["ax0"] = {"context": "ax", "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
+        ax0 = {"context": "ax", "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
+        _A = attn(spec)
+        if _A and _A.BLOCK:
+            # The blocked walk consumes cached + new rows in whole blocks of RB, so the
+            # driver streams RB*ceil((valid+1)/RB) - 1 cached rows rather than `valid` --
+            # the padding rows sit at or past `pos` and the kernel masks them. The count
+            # has to come off the manifest: the row count is patched per token by the
+            # host, and a kernel built one way against a driver patching the other way
+            # deadlocks on the fifo rather than answering wrongly.
+            ax0["rb"] = _A.RB
+        out["kernels"]["ax0"] = ax0
         out["kernels"]["ax1"] = {"context": "ax", "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
@@ -1212,7 +1225,7 @@ KERNEL_SOURCES = [
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
-    "include/vecmath.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

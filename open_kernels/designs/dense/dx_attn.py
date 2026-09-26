@@ -288,5 +288,5 @@ DESIGN = dx_attn
 _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("dx_attn.py"))
                 + sorted(f.read_bytes() for f in ATTN.glob("*.cc")) + sorted(f.read_bytes() for f in ATTN.glob("*.h"))
                 + sorted(f.read_bytes() for f in (HERE.parent.parent / "recipes").glob("*.py"))
-                + [(HERE.parent.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode()])
+                + [(HERE.parent.parent / "include" / "vecmath.h").read_bytes(), (HERE.parent.parent / "include" / "scalar_fp.h").read_bytes(), SPEC.spec_hash().encode()])
 SPECIALIZE = {"srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

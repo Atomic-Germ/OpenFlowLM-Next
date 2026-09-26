@@ -135,5 +135,5 @@ def attn(meta: In, qg: In, kvn: In, kv: In, kvnew: Out, og: Out, *,
 
 
 DESIGN = attn
-_src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.read_bytes() for f in HERE.glob("*.h")) + [(HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+_src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.read_bytes() for f in HERE.glob("*.h")) + [(HERE.parent.parent / "include" / "vecmath.h").read_bytes(), (HERE.parent.parent / "include" / "scalar_fp.h").read_bytes()])
 SPECIALIZE = {"pos": POS, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
