@@ -23,8 +23,10 @@ in the first place, since it never touches the array).
   geometry, and pre-tiles every `[K,N]` GEMM operand with `tile_b()` (ported
   with attribution from NpuEmbeddings' `npue_pack.cpp`, whose `tile_b` is not
   exported from that translation unit).
-- `kernels.hpp/.cpp` -- finds the kernel set (`OFLM_WHISPER_KERNELS_DIR`, else
-  `<model_dir>/open_kernels`), checks `whisper_kernels.json`'s format,
+- `kernels.hpp/.cpp` -- opens the kernel set (under `oflm`, the directory
+  `whisper_engine_select.cpp`'s `find_open_kernels` chose -- see "Kernel set
+  placement"; the standalone CLI takes `--kernels`, else
+  `OFLM_WHISPER_KERNELS_DIR`, else `<model_dir>/open_kernels`), checks `whisper_kernels.json`'s format,
   `complete` flag and `hf_config_check` against `config.json`, checks
   `design.json`'s `b_layout` tuple against what `weights.cpp` tiled with, then
   loads the seven instruction streams into one `npue::npu::Design` and drives
@@ -232,7 +234,7 @@ and the closed `whisper_npu` in `src/common/whisper/
 whisper_engine_select.cpp`, the sole factory `make_whisper_engine()` declared
 in `whisper/whisper_engine.hpp`. Auto picks open when the model directory has
 BOTH `model.open.safetensors` and a kernel set (`OFLM_WHISPER_KERNELS_DIR`,
-else `<model_dir>/open_kernels`); else closed when `model.q4nx` is there;
+else `<model_dir>/open_kernels`, else `<xclbins root>/xclbins/<model name>/open_kernels`); else closed when `model.q4nx` is there;
 else it refuses, naming both missing paths. Every branch logs which rule
 fired (`modeling_whisper.cpp` also logs `describe()` right after, so a load
 prints two lines: which rule chose an engine, then which engine and kernel
@@ -250,9 +252,13 @@ the target's global include path (the same "same basename, different file"
 hazard `OPEN_NPUE_SOURCES`'s own CMake comment warns about), and `/arch:AVX2
 /openmp` (MSVC) / `-mavx2 -mfma -fopenmp` (else), matching `OPEN_NPUE_SOURCES`.
 
-**Kernel set placement.** The engine finds its kernel set exactly as
-`kernels.hpp` already documents: `OFLM_WHISPER_KERNELS_DIR`, else
-`<model_dir>/open_kernels`. Verified against the local `whisper_gemm` export
+**Kernel set placement.** `whisper_engine_select.cpp`'s `find_open_kernels` searches, in
+order, `OFLM_WHISPER_KERNELS_DIR`, `<model_dir>/open_kernels`, then
+`<root>/xclbins/<model name>/open_kernels` for every xclbins root -- the same order
+as the other open engines (`open_qwen36/engine.cpp`). The last is where
+`export_whisper_kernels.py` writes by default, so building this tree is enough; the
+server log names the directory and the rule that chose it. Earlier setups placed a
+set beside the model instead: Verified against the local `whisper_gemm` export
 by making `<model_dir>/open_kernels` an NTFS junction to
 `NpuEmbeddings_scratch/whisper-kernels` (`New-Item -ItemType Junction`; no
 admin needed, unlike a symlink) -- nothing is copied into the model directory
@@ -353,3 +359,65 @@ T3 model field echoed):
 python -c "import sys; sys.path.insert(0,'.'); from oflm_test.tasks import TranscriptionTask; r=TranscriptionTask('http://127.0.0.1:8090/v1').run(); print(dict(r.verdicts), r.failures)"
 {'PASS': 3} []
 ```
+
+## Speed defaults (2026-09-23, NpuEmbeddings task 0180)
+
+Every variant below passed a 1200-utterance WER gate (LibriSpeech
+test-clean/test-other + FLEURS, 9 languages, `NpuEmbeddings/tools/wer/`) --
+statistically indistinguishable from, or better than, the exact path -- and
+became the DEFAULT. Each is still switchable off by its own env var, and every
+one is validated at model load (never lazily on the first request) and
+printed to the server log, naming the value in effect and its source
+(`default` or the env var). See `NpuEmbeddings/tasks/0180-whisper-fastest/
+TASK.md` Parts 9-17 for the WER numbers and paired-test statistics behind
+each of these.
+
+| var | values (default in **bold**) | what it does |
+|---|---|---|
+| `OFLM_WHISPER_PROTOCOL` | **`hf`** (open engine) / `legacy` (closed engine) / explicit `legacy`\|`hf` | HF-faithful greedy decoding (`generation_hf.hpp`) vs. the original per-16-token-watchdog loop. `hf` is only measured on the OPEN engine (WER 16.11% -> 5.50% (open engine, legacy -> hf protocol) on 1200 utterances, sign test p = 1.6e-44) -- unset, the CLOSED engine still defaults to `legacy`. An explicit value overrides for either engine. Validated once in `Whisper::load_model()`, right after the engine loads (`modeling_whisper.cpp`'s `_init_decode_protocol()`), not lazily. |
+| `OW_ATTN` | **`auto`** / `host` / `npu` | Bidirectional attention on the NPU (a fused FlashAttention kernel, `fa_attention.hpp`) vs. the host. `auto` uses the kernel when one is found at `<kernels_dir>/fa/` (or `OW_FA_DIR`, which still overrides the search directory) and its `fa.json` matches this engine's geometry (H=20, dk=dv=64, lq=lk=1536, valid_len=1500); `npu` REQUIRES it and refuses if absent or mismatched; `host` never uses it. Always printed which was chosen and why (`encoder.cpp`). `fa.json` records what the kernel build actually was (`heads`/`dk`/`dv`/`lq`/`lk`/`valid_len`/`fp32_state`/`emulate_bfp16`/`mlir_aie_version`/`peano_version`) -- read and checked, never assumed, and it does not matter which toolchain built it. |
+| `OW_DEC_XKV` | **`bf16`** / `fp32` | Decoder's gathered cross-attention K/V precision. `fp32` restores the exact path exactly. |
+| `OW_DEC_W` | **`int8`** / `bf16` | Decoder linear layers' weight precision (per-output-row symmetric int8). `bf16` restores the exact path exactly. |
+| `OW_DEC_HEAD` | **`int8x`** / `int8` / `bf16` | The tied `lm_head` projection's precision (`int8x` recomputes the top-64 logits exactly in bf16 after an int8 sweep). `bf16` restores the exact path exactly. |
+| `OW_HOST_FAST` | **`1`** / `0` | Fused, vectorised host ops (AVX2 erf-based GELU, fused LayerNorm+bf16-round, fused bias+residual, fused bias+gather for attention) vs. the original unfused ones. `0` restores exact. |
+
+All six are strict: any value other than the ones listed throws, naming the
+env var and the bad value -- never silently read as the default (the
+"fails open" class `CLAUDE.md` documents in the sibling `NpuEmbeddings`
+repository).
+
+**The GEMM kernel set's datapath (bf16 vs. bf16-via-bfp16-emulation) is a
+BUILD-time choice, not a runtime env var** -- it lives in the kernel set
+itself (`design.json`'s `emulate_bfp16`, `whisper_kernels.json`'s own copy),
+because it is compiled into the xclbin. `open_kernels/export_whisper_kernels.py
+--emulate-bfp16` now defaults to **on** (1.71x on the array; WER
+indistinguishable from plain bf16 under the `hf` protocol, H4 vs H0);
+`--no-emulate-bfp16` builds the plain bf16 datapath instead. The engine
+prints which one a loaded kernel set actually is (`kernels.cpp`'s `datapath`
+line) -- read from the set, never assumed.
+
+**`fa/` is now produced by the normal kernel-set build, from our own IRON source.**
+`open_kernels/export_whisper_kernels.py` builds `<kernels_dir>/fa/` (the
+FlashAttention kernel `OW_ATTN` reads above) by default, alongside the seven
+GEMM streams, from `open_kernels/designs/whisper_fa/attn_fa.py` -- an IRON
+(mlir-aie) port of AMD's MLIR-AIR `attn_npu2.py`/`.cc`
+(`kernel_fusion_based`, modified for Whisper), built by the same pinned mlir-aie + Peano
+toolchain and verified byte-identical to AMD's own AIR-compiled kernel at
+production shape on real Whisper layers (NpuEmbeddings task 0181; see
+`open_kernels/designs/whisper_fa/README.md`). `--no-fa` skips it, in which case
+`OW_ATTN=auto` falls back to host attention and `OW_ATTN=npu` refuses at load.
+There is no longer a separate toolchain (e.g. MLIR-AIR) needed anywhere in the
+build of this engine's kernel set.
+
+**The open container builder ships `generation_config.json`.**
+`utilities/q4nx-build --open-whisper` now REQUIRES it from the source HF
+snapshot (it was optional and silently skipped before, which is how a build
+without it reached a test machine) -- the `hf` protocol reads it at load
+time and refuses with a clear message if it is absent
+(`generation_hf.cpp`'s `GenerationConfig::load`).
+
+**The server log names the whole configuration.** `Whisper::load_model()`
+prints, in order: which engine loaded and why, that engine's own
+`config_summary()` (the open engine's: `attn=... xkv=... weights=... head=...
+host_ops=... gemm_datapath=...`, each with its source), then the decode
+protocol and its source.

@@ -320,6 +320,51 @@ Design::Design(Device &dev, const std::string &dir)
   dev_ = &dev;
 }
 
+// The raw xclbin/insts constructor -- see npu_device.hpp. No design.json, so
+// none of the provenance/datapath fields above get filled in; `info_` stays
+// at its struct defaults (c_elem_bytes=4, a_elem_bytes=2, etc.) except `name`
+// and `buffer_bytes`, which are the only two anything here reads.
+Design::Design(Device &dev, const std::string &xclbin_path,
+               const std::string &insts_path,
+               const std::vector<size_t> &buffer_bytes,
+               const std::string &kernel_name_prefix)
+    : impl_(std::make_unique<Impl>()) {
+  info_.name = xclbin_path;
+  info_.kind = "raw";
+  info_.buffer_bytes = buffer_bytes;
+  if (info_.buffer_bytes.size() < 2)
+    throw std::runtime_error(xclbin_path + ": fewer than two buffers");
+  output_index_ = info_.buffer_bytes.size() - 1;
+
+  auto &d = *dev.impl();
+  auto xclbin = xrt::xclbin(xclbin_path);
+  auto uuid = d.device.register_xclbin(xclbin);
+  impl_->ctx = xrt::hw_context(d.device, uuid);
+
+  std::string kname;
+  for (const auto &k : xclbin.get_kernels())
+    if (k.get_name().rfind(kernel_name_prefix, 0) == 0) { kname = k.get_name(); break; }
+  if (kname.empty())
+    throw std::runtime_error(xclbin_path + ": no '" + kernel_name_prefix +
+                             "' kernel in the xclbin");
+  impl_->kernel = xrt::kernel(impl_->ctx, kname);
+
+  auto instr = read_file(insts_path);
+  impl_->n_instr_words = instr.size() / sizeof(uint32_t);
+  impl_->bo_instr = xrt::bo(d.device, instr.size(), XCL_BO_FLAGS_CACHEABLE,
+                            impl_->kernel.group_id(1));
+  std::memcpy(impl_->bo_instr.map<void *>(), instr.data(), instr.size());
+  impl_->bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+  for (size_t i = 0; i < info_.buffer_bytes.size(); ++i)
+    impl_->bos.push_back(make_data_bo(
+        d.device, impl_->kernel, info_.buffer_bytes[i],
+        impl_->kernel.group_id(static_cast<int>(3 + i))));
+  impl_->alt.resize(info_.buffer_bytes.size());
+  impl_->active.assign(info_.buffer_bytes.size(), 0);
+  dev_ = &dev;
+}
+
 Design::~Design() = default;
 
 size_t Design::load_instr(const std::string &path) {

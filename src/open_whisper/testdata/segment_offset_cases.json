@@ -1,0 +1,256 @@
+{
+  "timestamp_begin": 284,
+  "eos_token_id": 257,
+  "samples_per_timestamp_step": 320,
+  "cases": [
+    {
+      "name": "single_timestamp_ending",
+      "generated": [
+        284,
+        5,
+        6,
+        287
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "no_timestamps_at_all",
+      "generated": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "one_unpaired_timestamp",
+      "generated": [
+        284,
+        5,
+        6,
+        7
+      ],
+      "window_samples": 200000,
+      "expected_samples": 200000
+    },
+    {
+      "name": "consecutive_pair_then_more_unclosed",
+      "generated": [
+        284,
+        5,
+        6,
+        285,
+        286,
+        8,
+        9
+      ],
+      "window_samples": 480000,
+      "expected_samples": 320
+    },
+    {
+      "name": "two_full_segments_then_open_third",
+      "generated": [
+        284,
+        1,
+        2,
+        288,
+        288,
+        3,
+        4,
+        293,
+        5,
+        6
+      ],
+      "window_samples": 480000,
+      "expected_samples": 1280
+    },
+    {
+      "name": "zero_at_open_of_trailing_segment",
+      "generated": [
+        284,
+        1,
+        284,
+        2,
+        3
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "empty_sequence",
+      "generated": [],
+      "window_samples": 120000,
+      "expected_samples": 120000
+    },
+    {
+      "name": "single_token_no_timestamp",
+      "generated": [
+        3
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "immediate_double_timestamp",
+      "generated": [
+        284,
+        285
+      ],
+      "window_samples": 480000,
+      "expected_samples": 0
+    },
+    {
+      "name": "short_final_window",
+      "generated": [
+        284,
+        1,
+        2,
+        286
+      ],
+      "window_samples": 64000,
+      "expected_samples": 64000
+    },
+    {
+      "name": "with_eos_single_timestamp_ending",
+      "generated": [
+        284,
+        5,
+        6,
+        287,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "with_eos_no_timestamps_at_all",
+      "generated": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "with_eos_one_unpaired_timestamp",
+      "generated": [
+        284,
+        5,
+        6,
+        7,
+        257
+      ],
+      "window_samples": 200000,
+      "expected_samples": 200000
+    },
+    {
+      "name": "with_eos_consecutive_pair_then_more_unclosed",
+      "generated": [
+        284,
+        5,
+        6,
+        285,
+        286,
+        8,
+        9,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 320
+    },
+    {
+      "name": "with_eos_two_full_segments_then_open_third",
+      "generated": [
+        284,
+        1,
+        2,
+        288,
+        288,
+        3,
+        4,
+        293,
+        5,
+        6,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 1280
+    },
+    {
+      "name": "with_eos_zero_at_open_of_trailing_segment",
+      "generated": [
+        284,
+        1,
+        284,
+        2,
+        3,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "with_eos_only",
+      "generated": [
+        257
+      ],
+      "window_samples": 120000,
+      "expected_samples": 120000
+    },
+    {
+      "name": "with_eos_single_token_no_timestamp",
+      "generated": [
+        3,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    },
+    {
+      "name": "with_eos_immediate_double_timestamp",
+      "generated": [
+        284,
+        285,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 0
+    },
+    {
+      "name": "with_eos_short_final_window",
+      "generated": [
+        284,
+        1,
+        2,
+        286,
+        257
+      ],
+      "window_samples": 64000,
+      "expected_samples": 64000
+    },
+    {
+      "name": "with_eos_pair_then_trailing_single_timestamp",
+      "generated": [
+        284,
+        1,
+        2,
+        288,
+        288,
+        3,
+        4,
+        293,
+        257
+      ],
+      "window_samples": 480000,
+      "expected_samples": 480000
+    }
+  ]
+}

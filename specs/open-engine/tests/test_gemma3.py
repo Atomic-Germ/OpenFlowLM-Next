@@ -3,6 +3,8 @@
 position tables, the sliding window's row counts, the sandwich layout."""
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -91,3 +93,27 @@ def test_4b_layout_and_manifest(unvalidated):
     assert consts == ["input_layernorm", "post_attention_layernorm", "q_norm", "k_norm",
                       "pre_feedforward_layernorm", "post_feedforward_layernorm"]
     assert m["hf_config_check"]["sliding_window"] == 1024 and m["layout"]["lmhead_pool_bytes"] > 0
+    # the dense block prefill route (OPEN-PREFILL-BATCH): both layer types carry it, each
+    # naming its OWN attention kernel and table -- dxB / ptab for dense, dxB_local / ptab_local
+    # for the sliding-window layers -- sharing one instruction stream and one GEMM context.
+    dg, lg = m["layer_types"][DENSE]["gemm_block"], m["layer_types"][DENSE_LOCAL]["gemm_block"]
+    assert dg["t"] == 256 and dg["kind"] == "dense" and lg["t"] == 256 and lg["kind"] == "dense"
+    assert dg["attn_kernel"] == "dxB" and dg["attn_args"][-1] == "ptab"
+    assert lg["attn_kernel"] == "dxB_local" and lg["attn_args"][-1] == "ptab_local"
+    assert dg["sandwich"] and lg["sandwich"] and dg["act"] == "gelu_tanh" and lg["act"] == "gelu_tanh"
+    assert m["kernels"]["dxB"]["window"] == 0 and m["kernels"]["dxB_local"]["window"] == 1024
+    assert m["kernels"]["dxB"]["insts"] == m["kernels"]["dxB_local"]["insts"]
+    assert m["kernels"]["dxB"]["context"] == m["kernels"]["dxB_local"]["context"] == "dxa"
+    assert sorted(m["contexts"]) == ["dx", "dxa", "gemm", "lm", "ln"]
+
+
+def test_a_mismatched_sandwich_and_activation_combo_gets_no_route(unvalidated):
+    """The block route's host chain (core.cpp step_gemm_block_layer) only implements two
+    pairings: plain residuals with SiLU, and Gemma 3's sandwich norms with GeGLU-tanh. A spec
+    combining sandwich norms with a different activation, or the reverse, must get no route --
+    the sequential path stays correct where a wrongly-served route would silently compute the
+    residual chain or the gate wrong."""
+    spec = ModelSpec.from_hf_config(HF_GEMMA3_4B, real_vocab=262145)
+    assert DR.gemm_route(dataclasses.replace(spec, activation="silu")) is None
+    assert DR.gemm_route(dataclasses.replace(spec, sandwich_norms=False)) is None
+    assert DR.gemm_route(spec) is not None, "the real combination still gets a route"

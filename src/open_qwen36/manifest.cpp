@@ -235,7 +235,17 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 g.ad_q = get<uint64_t>(gj, "ad_q", gw);
                 g.ad_kvn = get<uint64_t>(gj, "ad_kvn", gw);
                 g.ad_og = get<uint64_t>(gj, "ad_og", gw);
-                if (!m.kernels.count("dxB")) fail(gw, "gemm_block present but this manifest declares no dxB kernel");
+                // A layer type with its own sliding window (Gemma 3's dense_local) names its
+                // own attention kernel and table; everyone else defaults to today's dxB / ptab.
+                g.attn_kernel = gj.value("attn_kernel", std::string("dxB"));
+                g.attn_args = gj.value("attn_args", std::vector<std::string>{"pool", "xres", "consts", "state", "act", "ptab"});
+                g.sandwich = gj.value("sandwich", false);
+                g.act = gj.value("act", std::string("silu"));
+                if (g.attn_args.size() != 6) fail(gw, "attn_args wants exactly 6 buffer names, has " + std::to_string(g.attn_args.size()));
+                auto ak = m.kernels.find(g.attn_kernel);
+                if (ak == m.kernels.end()) fail(gw, "gemm_block present but this manifest declares no " + g.attn_kernel + " kernel");
+                if (ak->second.patch != "attnpos") fail(gw, "attn_kernel " + g.attn_kernel + " is not built with the attnpos patch table");
+                if (g.act != "silu" && g.act != "gelu_tanh") fail(gw, "act must be silu or gelu_tanh, is " + g.act);
                 // #39's hand-built sets carry no weights map: the dense recipe's pack order is q k v o up gate down
                 if (g.weights.empty())
                     g.weights = {{"gqkv3_w", {"pool", {0, 1, 2}}}, {"go_w", {"pool", {3}}}, {"gup_w", {"pool", {4}}},
@@ -364,6 +374,21 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     }
     for (const auto& l : m.layers)
         if (!m.layer_types.count(l)) fail(where, "layers names unknown layer type " + l);
+    // A dense route's attn_kernel must be the attention-only dx_attn stream. attnpos alone
+    // does not say so -- the sequential dx is attnpos-patched too and takes the same six
+    // arguments -- so refuse any attn_kernel whose instruction stream a sequential program
+    // runs: it would execute the whole layer once per token of the block.
+    for (const auto& [name, t] : m.layer_types) {
+        const GemmBlockProgram& g = t.gemm_block;
+        if (!g.t || g.kind != "dense") continue;
+        const std::string& ai = m.kernels.at(g.attn_kernel).insts;
+        for (const auto& [on, ot] : m.layer_types)
+            for (const auto& s : ot.program)
+                if (m.kernels.at(s.kernel).insts == ai)
+                    fail(where + " layer type " + name + " gemm_block",
+                         "attn_kernel " + g.attn_kernel + " runs " + ai + ", the sequential layer stream of " + on +
+                             "'s " + s.kernel + ", not the attention-only dx_attn one");
+    }
     m.tail = parse_program(need(j, "tail", where), where + " tail");
     for (const auto& s : m.tail) check_step(m, s, where, "tail");
     for (const auto& [k, v] : need(j, "globals", where).items()) {

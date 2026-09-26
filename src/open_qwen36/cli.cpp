@@ -17,6 +17,10 @@
 /// request a second time on the same resident engine (state reset check).
 /// --at-position P first seeks to position P with no cache rows in between
 /// (a capacity check: the attention window then spans P rows).
+/// --det-step N [--det-full] steps the --ids (forced, from --at-position) N times on one
+/// resident engine and compares every step's logits (--det-full: every buffer) bit for
+/// bit against a reference pass (OPEN-REQUEST-ISOLATION); exit 1 if any rep moved.
+/// OFLM_ROUTE_CHECK=1 re-reads each router record and counts reads that changed.
 ///
 /// 0167/#32: --gemm-block prefills via Core::step_gemm_block() (T tokens per
 /// layer as 5 whole-array GEMM dispatches plus T attention dispatches, the
@@ -97,6 +101,9 @@ struct Args {
     int bench = 0;                  // --bench N[:LAYER]: time the route's dispatches instead of running a prompt
     int bench_layer = 0;            // which layer's route -- the 35B's two types run different GEMM shapes
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
+    int det_step = 0;               // --det-step N: the --ids steps from --at-position, N times, compared
+    bool det_full = false;          // --det-full: compare every buffer a step writes, not only the logits
+    int bench_step = 0;             // --bench-step N: the REAL step, min of N, at --at-position
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
 };
@@ -176,6 +183,9 @@ Args parse(int argc, char** argv) {
             if (c != std::string::npos) a.bench_layer = std::atoi(v.substr(c + 1).c_str());
         }
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
+        else if (k == "--det-step") a.det_step = std::atoi(val().c_str());
+        else if (k == "--det-full") a.det_full = true;
+        else if (k == "--bench-step") a.bench_step = std::atoi(val().c_str());
         else if (k == "--bench-kernel") a.bench_kernel = val();
         else if (k == "--pmode") a.pmode = val();
         // The server has a host gap right here that the CLI does not: between the last
@@ -190,7 +200,7 @@ Args parse(int argc, char** argv) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE]\n");
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE]\n");
         std::exit(2);
     }
     return a;
@@ -293,14 +303,21 @@ std::vector<int> request(Core& core, const Args& a) {
         core.step(tok, true);
         if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
         const auto& tm = core.last_timing();
-        std::fprintf(stderr, "  step @%d: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f)\n", core.position() - 1,
-                     tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms);
+        std::fprintf(stderr,
+                     "  step @%d: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f; embed %.2f, patch %.2f,"
+                     " dispatches %.1f)\n",
+                     core.position() - 1, tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms,
+                     tm.embed_ms, tm.patch_ms, tm.dispatch_ms);
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
                          d.calls, d.ms, d.ms / d.calls, d.min_ms);
         tok = argmax(core.logits(), core.real_vocab());
     }
     double dec_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+    if (core.late_route_reads())
+        std::fprintf(stderr, "late router reads caught so far: %llu\n",
+                     static_cast<unsigned long long>(core.late_route_reads()));
+    core.dump_step_trace("the decode loop");        // OFLM_OPEN_STEP_TRACE=1; silent otherwise
     if (out.size() > 1)
         std::fprintf(stderr, "decode %zu tokens: %.0f ms/token (%.2f tok/s)\n", out.size() - 1, dec_ms / (out.size() - 1),
                      1000.0 * (out.size() - 1) / dec_ms);
@@ -352,8 +369,31 @@ int main(int argc, char** argv) {
             }
             core.step(a.ids[0], true);       // one real step first: the attnpos and route patches
             core.bench_decode(a.bench_decode);
+            core.dump_step_trace("bench_decode's serial replays");   // and clears, so the next table is clean
+            // and the number bench_decode's serial sum is the floor for: what a real step of
+            // those same dispatches costs when the route issues them (OPEN-DECODE-PIPELINE).
+            core.bench_step(a.bench_step ? a.bench_step : 10, a.ids[0]);
+            core.dump_step_trace("--bench-step");
             std::printf("DONE\n");
             return 0;
+        }
+        if (a.bench_step) {
+            if (a.at_position > 0) {
+                std::fprintf(stderr, "seeking to position %d\n", a.at_position);
+                core.seek(a.at_position);
+            }
+            core.step(a.ids[0], true);       // one real step first: the attnpos and route patches
+            core.dump_step_trace("the warm-up step");
+            core.bench_step(a.bench_step, a.ids[0]);
+            core.dump_step_trace("--bench-step");
+            std::printf("DONE\n");
+            return 0;
+        }
+        if (a.det_step) {
+            if (a.at_position > 0) core.seek(a.at_position);
+            const int bad = core.det_step(a.det_step, a.ids, a.det_full);
+            std::printf(bad ? "NONDETERMINISTIC\n" : "DONE\n");
+            return bad ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);

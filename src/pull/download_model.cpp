@@ -168,7 +168,10 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     }
 
     CURLcode res = curl_easy_perform(curl);
-    
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
     fclose(fp);
     curl_easy_cleanup(curl);
 
@@ -178,6 +181,16 @@ bool download_file(const std::string& url, const std::string& local_path, bool i
     if (res != CURLE_OK) {
         std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
         std::filesystem::remove(local_path); // Remove partial download
+        return false;
+    }
+
+    // A non-2xx response body must not be left on disk as if it were the
+    // model file: HF answers a missing/private repo with a small 401/404
+    // body, FOLLOWLOCATION writes it out, and the pull "succeeds" with a
+    // model directory full of 29-byte error pages.
+    if (http_code < 200 || http_code >= 300) {
+        std::cerr << "HTTP " << http_code << " for " << url << std::endl;
+        std::filesystem::remove(local_path);
         return false;
     }
 
@@ -248,8 +261,15 @@ std::string download_string(const std::string& url) {
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) {
-        std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (res != CURLE_OK || http_code < 200 || http_code >= 300) {
+        if (res == CURLE_OK) {
+            std::cerr << "HTTP " << http_code << " for " << url << std::endl;
+        }
+        else {
+            std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
+        }
         return "";
     }
 

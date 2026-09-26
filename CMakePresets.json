@@ -19,39 +19,39 @@
       }
     },
     {
+      "name": "common-xrt",
+      "hidden": true,
+      "description": "Make pkg-config see an XRT installed under /opt/xilinx/xrt (the default on Fedora; absent paths are ignored)",
+      "environment": {
+        "XILINX_XRT": "/opt/xilinx/xrt",
+        "PKG_CONFIG_PATH": "/opt/xilinx/xrt/lib64/pkgconfig:/opt/xilinx/xrt/lib/pkgconfig:$penv{PKG_CONFIG_PATH}",
+        "CMAKE_PREFIX_PATH": "/opt/xilinx/xrt:$penv{CMAKE_PREFIX_PATH}"
+      }
+    },
+    {
       "name": "linux-default",
       "displayName": "Linux Default",
-      "description": "Release build: oflm engine + open NPU kernel xclbins (full distribution)",
-      "inherits": ["common-default", "common-install"],
+      "description": "Release build: oflm engine + open NPU kernel xclbins + bundled utilities (full distribution)",
+      "inherits": ["common-default", "common-install", "common-xrt"],
       "generator": "Ninja",
       "binaryDir": "build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "OFLM_BUILD_KERNELS": "ON"
+        "OFLM_BUILD_KERNELS": "ON",
+        "OFLM_BUILD_UTILITIES": "ON"
       }
     },
     {
       "name": "fedora-default",
       "displayName": "Fedora Default",
-      "description": "Fedora release build with XRT discovered through pkg-config",
-      "inherits": ["common-default", "common-install"],
-      "generator": "Ninja",
-      "binaryDir": "build",
-      "environment": {
-        "XILINX_XRT": "/opt/xilinx/xrt",
-        "PKG_CONFIG_PATH": "/opt/xilinx/xrt/lib/pkgconfig:$penv{PKG_CONFIG_PATH}",
-        "CMAKE_PREFIX_PATH": "/opt/xilinx/xrt:$penv{CMAKE_PREFIX_PATH}"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "OFLM_BUILD_KERNELS": "ON"
-      }
+      "description": "Alias of linux-default; XRT discovery is common to all Linux presets now",
+      "inherits": "linux-default"
     },
     {
       "name": "linux-debug",
       "displayName": "Linux Debug",
       "description": "Debug build for development (engine only by default)",
-      "inherits": ["common-default", "common-install"],
+      "inherits": ["common-default", "common-install", "common-xrt"],
       "generator": "Ninja",
       "binaryDir": "build-debug",
       "cacheVariables": {
@@ -62,19 +62,8 @@
     {
       "name": "fedora-debug",
       "displayName": "Fedora Debug",
-      "description": "Fedora build for development (engine only by default)",
-      "inherits": ["common-default", "common-install"],
-      "generator": "Ninja",
-      "binaryDir": "build-debug",
-      "environment": {
-        "XILINX_XRT": "/opt/xilinx/xrt",
-        "PKG_CONFIG_PATH": "/opt/xilinx/xrt/lib/pkgconfig:$penv{PKG_CONFIG_PATH}",
-        "CMAKE_PREFIX_PATH": "/opt/xilinx/xrt:$penv{CMAKE_PREFIX_PATH}"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "OFLM_BUILD_KERNELS": "OFF"
-      }
+      "description": "Alias of linux-debug; XRT discovery is common to all Linux presets now",
+      "inherits": "linux-debug"
     },
     {
       "name": "linux-portable",
@@ -110,6 +99,13 @@
   ],
   "packagePresets": [
     {
+      "name": "linux-package",
+      "displayName": "Package (RPM + TGZ)",
+      "description": "Everything linux-default installs, in the host-native RPM and portable TGZ formats",
+      "configurePreset": "linux-default",
+      "generators": ["RPM", "TGZ"]
+    },
+    {
       "name": "linux-package-tgz",
       "displayName": "Package (TGZ)",
       "configurePreset": "linux-default",
@@ -118,6 +114,7 @@
     {
       "name": "linux-package-deb",
       "displayName": "Package (DEB)",
+      "description": "Build on Debian/Ubuntu or in a Debian container; a DEB built on Fedora carries Fedora ABI/glibc/soname requirements and shlibdeps cannot resolve Depends there",
       "configurePreset": "linux-default",
       "generators": ["DEB"]
     },
@@ -136,6 +133,16 @@
         { "type": "configure", "name": "linux-default" },
         { "type": "build", "name": "linux-default" },
         { "type": "test", "name": "linux-default" }
+      ]
+    },
+    {
+      "name": "linux-package",
+      "displayName": "Configure + Build + Test + Package (RPM + TGZ)",
+      "steps": [
+        { "type": "configure", "name": "linux-default" },
+        { "type": "build", "name": "linux-default" },
+        { "type": "test", "name": "linux-default" },
+        { "type": "package", "name": "linux-package" }
       ]
     }
   ]

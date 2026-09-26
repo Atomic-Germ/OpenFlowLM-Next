@@ -94,4 +94,18 @@ std::string OpenWhisperEngine::describe() const {
   return "open (" + kernels_dir_ + ")";
 }
 
+std::string OpenWhisperEngine::config_summary() const {
+  // Every one of the open engine's speed levers (0180 Parts 11-15), value +
+  // source (default/env), in one line -- the individual constructors already
+  // printed each of these as they were resolved; this recaps them together
+  // so a server log names the whole configuration in one place, not just
+  // scattered across the load sequence.
+  return "  config     attn=" + encoder_->attn_summary() +
+        " xkv=" + std::string(ow::to_string(decoder_->xkv_precision())) +
+        " weights=" + std::string(ow::to_string(decoder_->weight_precision())) +
+        " head=" + std::string(ow::to_string(decoder_->head_precision())) +
+        " host_ops=" + encoder_->host_fast_summary() +
+        " gemm_datapath=" + encoder_->kernel_set().datapath();
+}
+
 }  // namespace open_whisper

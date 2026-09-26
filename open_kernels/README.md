@@ -8,6 +8,22 @@
 > Every model dimension the whole-layer designs (`designs/layer_x`) and the engine
 > use comes from `recipes/` (a `ModelSpec` and the family recipe that turns it into
 > layouts, kernel TUs and the engine's `manifest.json`; `recipes/__init__.py`).
+>
+> **The Whisper kernel set is NOT part of the phlegm snapshot below** -- it was added
+> to this tree directly (issue #72). One command, `export_whisper_kernels.py`, builds
+> the whole thing: the encoder's seven GEMM streams
+> (`designs/whisper_gemm/whisper_gemm.py`, its own `README.md`) AND the bidirectional
+> FlashAttention kernel `src/open_whisper` dispatches to at `<kernels_dir>/fa/`
+> (`designs/whisper_fa/attn_fa.py`, its own `README.md`) -- both from our own IRON
+> source, built by the same pinned mlir-aie + Peano toolchain, in one hardware
+> context each. `--no-fa` skips the FlashAttention kernel (the engine then falls back
+> to host attention, `OW_ATTN=auto`). Provenance for the third-party pieces
+> (`whisper_fa`'s `attn_npu2.cc`/`zero.cc`, from AMD's MLIR-AIR) is in
+> `PROVENANCE.md`; measured properties and the porting history are in
+> `designs/whisper_fa/README.md` and, in full, `NpuEmbeddings`'s
+> `tasks/0180-whisper-fastest/TASK.md` (why this kernel exists: it is what makes
+> the open engine 2.8x the closed one) and `tasks/0181-fa-iron-port/TASK.md`
+> (the IRON port built here, verified byte-identical to that kernel).
 
 # open-kernels — our own NPU kernels (IRON / mlir-aie), driven by phlegm
 

@@ -669,7 +669,18 @@
     "ff": 8192,
     "ad_q": 8192,
     "ad_kvn": 20480,
-    "ad_og": 28672
+    "ad_og": 28672,
+    "attn_kernel": "dxB",
+    "attn_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "sandwich": false,
+    "act": "silu"
    },
    "pack": {
     "pool": [
