@@ -653,3 +653,13 @@ class Qwen35_08B(Qwen35, model_arch=ModelArch.QWEN35_08B):
 
 class Qwen35_9B(Qwen35, model_arch=ModelArch.QWEN35_9B):
     pass
+
+
+class Qwen35_27B(Qwen35, model_arch=ModelArch.QWEN35_27B):
+    def convert(self, q4nx_path: str, weights_type: str = 'language'):
+        if weights_type != 'language':
+            raise NotImplementedError('not implemented: Qwen35/38-27B vision conversion')
+        if self.gguf_reader is None:
+            raise NotImplementedError('not implemented: bounded-memory 27B conversion from HF tensors; use GGUF')
+        from .qwen35_wide import convert
+        return convert(self, q4nx_path)

@@ -22,8 +22,11 @@ also passes458 checks (2026-09-27), worst final maxrel1.66353e-5. The
 dispatches, worst final maxrel4.11248e-5. The [synthetic autoregressive decode](wide-autoregressive-decode.md)
 also passes5149 checks over684 dispatches: three cold/three warm tokens and a
 complete reset replay, full-vocabulary logits correlation>=0.9999999228 with
-identical argmax. The64-layer full model is next; runtime integration remains
-pending. The phase notes below are
+identical argmax. The [real64-layer model](qwen38-full-model.md) now executes
+three tokens and a byte-identical reset replay across3564 dispatches. Logits
+and tokens agree, but three inherited numerical bounds fail (2026-09-28).
+Full-depth precision is the next gate; runtime integration remains pending.
+The phase notes below are
 historical; the toolchain is installed, the synthetic A7 chain passes inherited
 whole-tensor gates, and Q4 projections at K5120/K6144 pass hardware comparison.
 

@@ -7,7 +7,7 @@ from .qwen3vl import Qwen3VL
 from .llama import Llama
 from .lfm2 import LFM2
 from .qwen3 import Qwen3
-from .qwen35 import Qwen35, Qwen35_9B, Qwen35_2B, Qwen35_08B
+from .qwen35 import Qwen35, Qwen35_27B, Qwen35_9B, Qwen35_2B, Qwen35_08B
 from .qwen35moe import Qwen35Moe
 from .qwen2 import Qwen2
 from .qwen2vl import Qwen2VL
@@ -19,4 +19,4 @@ from .nanbeige import Nanbeige
 from .hunyuan import HunyuanDense
 from .granite import Granite
 
-__all__ = ['Qwen3VL', 'Llama', 'LFM2', 'Qwen3', 'Qwen2', 'Qwen2VL', 'Gemma3', 'Gemma4', 'Phi4', 'GPTOSS', 'Nanbeige', 'Qwen35', 'Qwen35_2B', 'Qwen35_9B', 'Qwen35_08B', 'Qwen35Moe', 'HunyuanDense', 'Granite']
+__all__ = ['Qwen3VL', 'Llama', 'LFM2', 'Qwen3', 'Qwen2', 'Qwen2VL', 'Gemma3', 'Gemma4', 'Phi4', 'GPTOSS', 'Nanbeige', 'Qwen35', 'Qwen35_2B', 'Qwen35_9B', 'Qwen35_27B', 'Qwen35_08B', 'Qwen35Moe', 'HunyuanDense', 'Granite']

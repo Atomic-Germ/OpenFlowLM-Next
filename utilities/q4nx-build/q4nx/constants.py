@@ -11,6 +11,7 @@ class ModelArch(IntEnum):
     QWEN35_2B = auto()
     QWEN35_4B = auto()
     QWEN35_9B = auto()
+    QWEN35_27B = auto()
     QWEN35MOE = auto()
     QWEN2   = auto()
     QWEN2VL = auto()
@@ -34,6 +35,7 @@ QWEN35_VARIANT_DIMS: dict[ModelArch, int] = {
     ModelArch.QWEN35_2B: 2048,
     ModelArch.QWEN35_4B: 2560,
     ModelArch.QWEN35_9B: 4096,
+    ModelArch.QWEN35_27B: 5120,
 }
 
 
@@ -55,6 +57,7 @@ ModelArchNames: dict[ModelArch, list[str]] = {
     ModelArch.QWEN35_08B: ["qwen35-0.8B","qwen3.5-0.8B"],
     ModelArch.QWEN35_4B:  ["qwen35-4B","qwen3.5-4B"],
     ModelArch.QWEN35_9B:  ["qwen35-9B","qwen3.5-9B"],
+    ModelArch.QWEN35_27B: ["qwen35-27B","qwen3.5-27B","qwen3.8-27B"],
     ModelArch.QWEN35_2B:  ["qwen35-2B","qwen3.5-2B"],
     ModelArch.QWEN35MOE:  ["qwen35moe","qwen3.5moe","qwen3.5-moe","qwen3.6moe","qwen3.6-moe","qwen3.6-moe-text"],
     ModelArch.QWEN3VL: ["qwen3vl", "qwen3-vl"],
@@ -79,6 +82,7 @@ ModelArchConfigs: dict[ModelArch, str] = {
     ModelArch.QWEN3:   "qwen3.json",
     ModelArch.QWEN35_4B: "qwen3.5_4b.json",
     ModelArch.QWEN35_9B: "qwen3.5_9b.json",
+    ModelArch.QWEN35_27B: "qwen3.5_27b.json",
     ModelArch.QWEN35_2B: "qwen3.5_2b.json",
     ModelArch.QWEN35_08B: "qwen3.5_0.8b.json",
     ModelArch.QWEN35MOE: "qwen35moe.json",

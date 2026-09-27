@@ -183,7 +183,8 @@ def compare(out):
         exact(tag,'independent_reference_input',token==c['input_token'])
         exact(tag,'embedding_row',token<V and read(tag+'-layer0-input-x.bin',H*4)==embeddings[token].astype(np.float32).tobytes())
         previous[sequence] = nxt
-        exact(tag,'final_residual_copy',read(tag+'-finalres.bin',H*4)==read(tag+'-layer7-got-y.bin',H*4))
+        last=len(meta['layer_types'])-1
+        exact(tag,'final_residual_copy',read(tag+'-finalres.bin',H*4)==read(f'{tag}-layer{last}-got-y.bin',H*4))
         ref = np.load(out/f'{tag}-head-ref.npz')
         checks.append(dict(tag=tag,field='final_norm',**metric(xn,ref['xn'],8e-3)))
         got = np.frombuffer(read(tag+'-logits.bin',V*4),np.float32)

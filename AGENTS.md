@@ -106,4 +106,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Validate synthetic eight-layer autoregressive decode with final RMSNorm, full-vocabulary Q8 logits, token feedback and persistent layer state.</description>
     <location>.opencode/skill/open-wide-decode/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-model</name>
+    <description>Download and stream-convert real Qwen38-27B weights, restore 48-head GGUF order, and prepare or validate the standalone 64-layer model.</description>
+    <location>.opencode/skill/open-qwen38-model/SKILL.md</location>
+  </skill>
 </available_skills>

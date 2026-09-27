@@ -127,5 +127,25 @@ class GetModelArchFromGgufTest(unittest.TestCase):
         self.assertEqual(get_model_arch_from_gguf(reader), ModelArch.QWEN35_9B)
 
 
+class Qwen38WideVariantTest(unittest.TestCase):
+    def test_5120_selects_27b_without_padding_to_9b(self):
+        reader = FakeReader(architecture='qwen35',embedding_length=5120)
+        self.assertEqual(get_model_arch_from_gguf(reader),ModelArch.QWEN35_27B)
+        self.assertEqual(nearest_qwen35_variant(5120),(ModelArch.QWEN35_27B,0))
+        self.assertEqual(get_model_arch_from_gguf(reader,'qwen3.8-27b'),ModelArch.QWEN35_27B)
+        self.assertIn(ModelArch.QWEN35_27B,resolve_override_candidates('qwen3.5'))
+
+    def test_27b_uses_text_config_and_registered_converter(self):
+        import json
+        from q4nx.constants import ModelArchConfigs
+        from q4nx.models.qwen35 import Qwen35_27B
+        config = Path(__file__).parents[1]/'configs'/ModelArchConfigs[ModelArch.QWEN35_27B]
+        data=json.loads(config.read_text())
+        self.assertEqual(data['default_tensor_type'],'Q4_1')
+        self.assertNotIn('vision_config',data)
+        from q4nx.model_converter import get_registered_models
+        self.assertIs(get_registered_models()[ModelArch.QWEN35_27B],Qwen35_27B)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -110,7 +110,7 @@ def append_layer(cfg,s,l,kinds,sizes,tag,i,pos):
     state_name,state_size = (f'state{i}',l.STATE_BYTES) if prefix=='d' else (f'cache{i}',l.KV_BYTES)
     cfg.extend([f'dump x {tag}-input-x.bin {H*4+64}',f'dump {state_name} {tag}-input-state.bin {state_size+64}'])
     cfg.extend(f'load {buffer_name(name,prefix,i)} poison-{prefix}-{name}.bin' for name in sizes[prefix])
-    cfg.extend(layer_commands(s,l,i,pos,257))
+    cfg.extend(layer_commands(s,l,i,pos,257,layers=len(kinds)))
     cfg.extend(f'dump {buffer_name(name,prefix,i)} {tag}-got-{name}.bin {size+64}' for name,size in sizes[prefix].items())
     cfg.append(f'dump {state_name} {tag}-got-state.bin {state_size+64}')
     cfg.append(f'copy x 0 y 0 {H*4}')

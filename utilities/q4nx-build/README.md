@@ -14,6 +14,7 @@ Based on the configuration, the converter supports several model architectures, 
 - Qwen 3
 - Qwen 3 VL
 - Qwen 3.5
+- Qwen 3.5 / 3.8 27B (text, GGUF source; hidden 5120)
 - Qwen 3.5 MoE
 - Qwen 3.6 MoE
 
@@ -57,6 +58,28 @@ When `-i` names an HF repo, `q4nx-build` fills in the rest from the repo's own m
 ```bash
 q4nx-build -i numind/NuExtract3-GGUF
 ```
+
+### Qwen3.8-27B text conversion
+
+The 5120-wide variant is detected from GGUF metadata. Its converter restores
+16-key/48-value-head order and streams a standard Q4NX container to disk instead
+of retaining the full model in RAM. Layer projections use Q4_1, the head Q8,
+and alpha/beta companions BF16. The destination container must not already exist.
+Direct HF-tensor and vision conversion for this variant are not implemented.
+
+From the repository root:
+
+```bash
+python utilities/download-qwen38-27b.py
+python utilities/q4nx-build/convert.py \
+  -i Models/qwen38-27b/source/Qwen3.8-27B-Q8_0.gguf \
+  -o Models/qwen38-27b/converted -t language \
+  -s Models/qwen38-27b/source
+```
+
+`Models/` is ignored by Git. The downloader pins revisions, verifies source
+hashes and preserves a provenance manifest. Full-model hardware/runtime status
+is tracked in [the bring-up report](../../specs/open-engine/plans/qwen38-full-model.md).
 
 ### Open (unquantized) embedding repos
 

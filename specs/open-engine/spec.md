@@ -1215,7 +1215,17 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   every token. All repeat captures are byte-identical. Host control performs
   selection/row lookup; neural operators stay on the NPU. Strict state-head
   diagnostics pass10/36 tensors and remain separate from inherited layer gates.
-  See the [decode report](plans/wide-autoregressive-decode.md). The64-layer model,
+  See the [decode report](plans/wide-autoregressive-decode.md).
+- **Real64-layer standalone model (numerical gate FAIL).** A streamed GGUF
+  converter restores16-key/48-value head order and produces851 Q4NX tensors.
+  All64 layers execute three autoregressive tokens and reset replay across3564
+  open NPU calls. Tokens match the independent reference, full-logit correlation
+  is at least0.9999865019, and every repeat capture is byte-identical. However,
+  head11 at layer39, the last residual at layer63 and the final norm exceed
+  inherited bounds on token1: maxrel0.02287582/0.02633356/0.01282051 versus
+  0.02/0.005/0.008. The comparator exits nonzero. Conditional replay localizes
+  accumulated input/state error; it does not replace independent acceptance.
+  See the [full-model report](plans/qwen38-full-model.md). Full-depth precision,
   runtime integration and catalogue promotion remain pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,

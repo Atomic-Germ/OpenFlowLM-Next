@@ -1,4 +1,4 @@
-"""Compose eight validated standalone layers; weights stream, state stays per layer."""
+"""Compose standalone wide layers; weights stream, state stays per layer."""
 from .spec import LINEAR, FULL
 from . import wide_deltanet_layer as D, wide_attention_layer as A
 
@@ -6,10 +6,14 @@ SHARED = frozenset(('x','y','pool','const','ones','zero'))
 SHARED_KERNELS = frozenset(('ln','out','ffn'))
 
 
-def layer_types(s):
-    kinds = tuple(s.layer_types[:8])
-    if len(kinds)!=8 or kinds.count(LINEAR)!=6 or kinds.count(FULL)!=2:
-        raise ValueError('eight-layer probe requires six linear and two full layers in the explicit prefix')
+def layer_types(s, layers=8):
+    if layers not in (8,64):
+        raise ValueError('wide composition supports an eight-layer prefix or the full 64 layers')
+    if layers==64 and (s.num_layers!=64 or len(s.layer_types)!=64):
+        raise ValueError('full-model composition requires exactly 64 explicit layer types')
+    kinds = tuple(s.layer_types[:layers])
+    if len(kinds)!=layers or kinds.count(LINEAR)!=layers*3//4 or kinds.count(FULL)!=layers//4:
+        raise ValueError('eight-layer/full-model composition requires three linear layers per full layer')
     return kinds
 
 
@@ -32,9 +36,9 @@ def scope(command, prefix, index):
     return ' '.join(words)
 
 
-def layer_commands(s, l, index, pos, rows):
-    kinds = layer_types(s)
-    if not 0<=index<8: raise ValueError('layer index outside the eight-layer slice')
+def layer_commands(s, l, index, pos, rows, layers=8):
+    kinds = layer_types(s,layers)
+    if not 0<=index<layers: raise ValueError('layer index outside the requested wide composition')
     if not 0<=pos<rows<=l.MAX_CTX: raise ValueError('cache position outside streamed rows')
     module,prefix = (D,'d') if kinds[index]==LINEAR else (A,'a')
     commands = [f'load pool layer{index}/pool.bin',f'load const layer{index}/const.bin']

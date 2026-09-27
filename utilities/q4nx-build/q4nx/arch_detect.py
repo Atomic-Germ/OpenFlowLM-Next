@@ -218,7 +218,7 @@ _QWEN35_DIM_TO_ARCH: Dict[int, ModelArch] = {
 def _is_dense_qwen35_arch(arch: ModelArch) -> bool:
     return arch in (
         ModelArch.QWEN35_08B, ModelArch.QWEN35_2B,
-        ModelArch.QWEN35_4B, ModelArch.QWEN35_9B,
+        ModelArch.QWEN35_4B, ModelArch.QWEN35_9B, ModelArch.QWEN35_27B,
     )
 
 
@@ -531,6 +531,7 @@ ARCH_TO_FAMILY: Dict[ModelArch, str] = {
     ModelArch.QWEN35_2B: "qwen3.5",
     ModelArch.QWEN35_4B: "qwen3.5",
     ModelArch.QWEN35_9B: "qwen3.5",
+    ModelArch.QWEN35_27B: "qwen3.5",
     ModelArch.QWEN35MOE: "qwen3.6-moe",
     ModelArch.QWEN3: "qwen3",
     ModelArch.QWEN3VL: "qwen3vl",
