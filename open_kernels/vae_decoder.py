@@ -203,12 +203,19 @@ def plan(R: int) -> Plan:
     B["OUT"] = Buf(R, R, 128, R + 2)
     B["RGBA"] = Buf(R * R // 1024, 1, EL, 1, border=0)
     B["DUMMY"] = Buf(1, 1, BLOCK * EL, 1, border=0)      # >= any unused argument's declared size
+    # A zero-bordered buffer holds ONE channel count: producers write the interior only, so
+    # a narrower layout's interior lands on a wider layout's border bytes (and the other
+    # way round) -- the conv then reads the previous layout's data as its zero padding.
+    # So the stage whose first resnet narrows (512 -> 256, 256 -> 128) normalizes its
+    # input into GI<i>, and G/T/S hold the stage's output channels only.
     for i, r in enumerate(res):
-        cmax = rev[max(i - 1, 0)]                       # the stage's input channels
+        cin = rev[max(i - 1, 0)]                        # the stage's input channels
         src = L if i == 0 else res[i - 1]               # the producer's source grid
-        B[f"X{i}"] = Buf(r, r, cmax, _parts(src) * (r + 2), extra_rows=1)
+        B[f"X{i}"] = Buf(r, r, cin, _parts(src) * (r + 2), extra_rows=1)
         for n in ("G", "T", "S"):
-            B[f"{n}{i}"] = Buf(r, r, cmax, _parts(r) * (r + 2), extra_rows=1)
+            B[f"{n}{i}"] = Buf(r, r, rev[i], _parts(r) * (r + 2), extra_rows=1)
+        if cin != rev[i]:
+            B[f"GI{i}"] = Buf(r, r, cin, _parts(r) * (r + 2), extra_rows=1)
 
     def conv(taps, src, dst, H, W, cin, cout, wkey, up=False, what=""):
         spec = {"H": H, "W": W, "Cin": cin, "Cout": cout, "up": up,
@@ -243,11 +250,12 @@ def plan(R: int) -> Plan:
     def resnet(key, i, ci, co, next_gn):
         r, x = res[i], state["x"]
         G, T, S = f"G{i}", f"T{i}", f"S{i}"
+        GI = G if ci == co else f"GI{i}"                # one channel count per buffer
         if state["fresh"] != key + ".norm1":
             vew("gn_stats", ci, r, r, a=(x, {}), gn=key + ".norm1", what=key + ".norm1 stats")
-        vew("gn_apply", ci, r, r, a=(x, {}), y=(G, {}), gn=key + ".norm1", silu=True,
+        vew("gn_apply", ci, r, r, a=(x, {}), y=(GI, {}), gn=key + ".norm1", silu=True,
             what=key + ".norm1")
-        conv(9, G, T, r, r, ci, co, key + ".conv1")
+        conv(9, GI, T, r, r, ci, co, key + ".conv1")
         vew("gn_stats", co, r, r, a=(T, {}), gn=key + ".norm2", what=key + ".norm2 stats")
         vew("gn_apply", co, r, r, a=(T, {}), y=(G, {}), gn=key + ".norm2", silu=True,
             what=key + ".norm2")
