@@ -136,15 +136,18 @@ NEED_Q4_GMS = "ffn" not in Q8              # the dense tail's up | gate bands
 # GEMV TUs are compiled -Oz. An all-q4_1 or an all-q8 spec sees exactly the entries, the
 # flags and the call sequence it saw before: the DNX_PAD lesson -- what is not identical moves.
 MIXED = KIND == "dense" and bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
-GEMV_OS = ["-Oz"] if MIXED else OS         # size over speed, harder, on the crowded core only
+OZ = ["-Oz"] + OS[1:]                      # OS at -Oz, keeping -DGEMV_NULL (the ODR note above)
+GEMV_OS = OZ if MIXED else OS              # size over speed, harder, on the crowded core only
 
 # An all-q8 MoE spec (the 35B fine-tunes, and Atomic-Germ's own Qwen3.6-35B) carries the
 # larger gemv_q8_gy where the q4_1 spec has gemv_q4_gy, and since the DeltaNet slice update
 # (dnx.h pass 2) that left lx's main core 224 B over its 16 KB. The routed experts' up | gate
 # GEMV is the one TU where -Oz shrinks the linked core (by 304 B) at no measured cost: it
 # waits on the weight stream, not on its loop. -Oz on the other TUs grew the core, and the
-# older per-row pass 2 fits but costs 0.46 ms a layer. q4_1 specs keep -Os (the DNX_PAD lesson).
-GUP_OS = ["-Oz"] if KIND == "moe" and Q8 else OS
+# older per-row pass 2 fits but costs 0.46 ms a layer. Every other spec, a partly-q8 MoE one
+# included, keeps -Os: only the all-q8 core was measured (the DNX_PAD lesson).
+ALL_Q8_MOE = KIND == "moe" and not NEED_Q4_GY    # attn, linear and linear_out all at q8
+GUP_OS = OZ if ALL_Q8_MOE else OS
 
 
 def bt(total: int, off: int, n: int) -> TensorAccessPattern:
