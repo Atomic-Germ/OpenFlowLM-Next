@@ -1,0 +1,669 @@
+name: Release
+
+# A release is a tag. Everything below is the tag's job:
+#
+#   verify     the tag is a version this tree can actually produce, and that it
+#              matches the version the presets declare
+#   prebuilts  fetch the NPU-built kernels from the npu-prebuilts orphan branch
+#              and check them against this tag (utilities/release/fetch-prebuilts.sh)
+#   linux      DEB + RPM + TGZ from one ubuntu-24.04 build
+#   windows    oflm-setup.msi from a windows-latest build
+#   nix        the flake that packages the release TGZ, built to prove it works
+#   publish    one GitHub release, checksummed
+#
+# The kernels are the reason this is not a single job: they need an NPU, and
+# GitHub does not have one. They are built by utilities/release/stage-prebuilts.sh
+# on a machine that does, and live on a branch until a release claims them. See
+# RELEASE.md.
+
+on:
+  push:
+    # Plain X.Y.Z only. An RPM or DEB version field cannot carry a -rc suffix,
+    # so a pre-release tag is not something this can package; it gets a branch
+    # and a prerelease build by hand until that is a decision worth automating.
+    # A glob, not a regex: GitHub tag filters are minimatch patterns, so '+'
+    # would be a literal plus and this would match nothing at all. The strict
+    # X.Y.Z check is the verify job's first step, where the error message can
+    # explain itself.
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to cut a release from (e.g. v0.1.0). Defaults to the current ref.'
+        required: false
+        type: string
+      skip_prebuilts:
+        description: 'Build without the NPU kernel sets (a package that will load no open model).'
+        required: false
+        default: false
+        type: boolean
+      skip_windows:
+        description: 'Skip the MSI job (no XRT deps captured, or Windows is broken).'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Build every artifact but publish nothing.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # The one version every job agrees on. `verify` is what establishes that it
+  # is a real version for this tree; everything downstream just uses it.
+  OFLM_VERSION: ${{ inputs.tag || github.ref_name }}
+  PREBUILTS_BRANCH: npu-prebuilts
+  SKIP_PREBUILTS: ${{ inputs.skip_prebuilts || false }}
+  SKIP_WINDOWS: ${{ inputs.skip_windows || false }}
+  DRY_RUN: ${{ inputs.dry_run || false }}
+  # A vcpkg release tag (dots, e.g. 2026.07.29), not a branch: the MSI of a given
+  # oflm version must be reproducible from the source, and master is not. Bump
+  # it together with the installed\ cache key below, or a re-run will link the
+  # new oflm.exe against a stale installed tree.
+  VCPKG_REF: '2026.07.29'
+
+jobs:
+  # ----------------------------------------------------------------- verify
+  verify:
+    name: verify ${{ inputs.tag || github.ref_name }}
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      version_tag: ${{ steps.v.outputs.version_tag }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: The tag is a version this tree can package
+        id: v
+        run: |
+          set -euo pipefail
+          tag="${OFLM_VERSION}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) version="${tag#v}" ;;
+            *) echo "::error::'$tag' is not a vX.Y.Z tag. This workflow cannot build" \
+                    "an RPM or DEB from a tag with a pre-release suffix in it."; exit 1 ;;
+          esac
+          # Three fields, each 1-3 digits, no leading zeros. A CPack version that
+          # does not fit an RPM %VERSION or a DEB Version field fails at package
+          # time, twenty minutes into a job, with a much worse message.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+            echo "::error::version '$version' is not MAJOR.MINOR.PATCH with fields of at most three digits"
+            exit 1
+          fi
+          # The documented single source of truth is OFLM_VERSION in the presets
+          # (docs/semantic-versioning.md): a release is the commit that bumps
+          # it, then the tag. A tag that disagrees with the tree is a release
+          # whose --version output lies.
+          for preset in CMakePresets.json src/CMakePresets.json; do
+            declared="$(python3 -c "
+          import json,sys
+          presets=json.load(open('$preset'))['configurePresets']
+          print(next(p for p in presets if p['name']=='common-default')['cacheVariables']['OFLM_VERSION'])")"
+            if [ "$declared" != "$version" ]; then
+              echo "::error::$preset declares OFLM_VERSION=$declared but the tag says $version." \
+                   "Bump the preset in the release commit, or retag it."
+              exit 1
+            fi
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version_tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "OK: $tag, OFLM_VERSION matches both presets"
+
+      - name: This release does not already exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$OFLM_VERSION" >/dev/null 2>&1; then
+            echo "::error::a release for $OFLM_VERSION already exists. Bump OFLM_VERSION" \
+                 "(both presets) and tag the new version, or delete the release first."
+            exit 1
+          fi
+
+      - name: Record the NPU-version floor the build must keep
+        run: |
+          set -euo pipefail
+          # NPU_VERSION is not the release version: it is the minimum NPU driver
+          # build oflm accepts, and main.cpp compares only its FOURTH field, so it
+          # is a four-field string and nothing else. Changing it is a
+          # compatibility decision, not a release chore -- it is read from the
+          # presets and printed, never overridden here.
+          python3 -c "
+          import json
+          for rel in ('CMakePresets.json', 'src/CMakePresets.json'):
+              presets = json.load(open(rel))['configurePresets']
+              common = next(p for p in presets if p['name'] == 'common-default')
+              print(f'{rel}: OFLM_VERSION={common[\"cacheVariables\"][\"OFLM_VERSION\"]} '
+                    f'NPU_VERSION={common[\"cacheVariables\"][\"NPU_VERSION\"]}')"
+
+  # -------------------------------------------------------------- prebuilts
+  prebuilts:
+    name: prebuilts (NPU-built kernels)
+    needs: verify
+    runs-on: ubuntu-24.04
+    outputs:
+      ref: ${{ steps.p.outputs.ref }}
+      windows_deps: ${{ steps.p.outputs.windows_deps }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.version_tag }}
+          submodules: recursive
+
+      - name: Fetch, verify and unpack the prebuilts
+        id: p
+        env:
+          ALLOW_MISSING: ${{ env.SKIP_PREBUILTS }}
+        run: |
+          set -euo pipefail
+          args=(--version "${{ needs.verify.outputs.version }}" --branch "$PREBUILTS_BRANCH")
+          if [ "$ALLOW_MISSING" = "true" ]; then args+=(--allow-missing); fi
+          utilities/release/fetch-prebuilts.sh "${args[@]}"
+          echo "ref=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -d prebuilts/win/xrt-include ]; then
+            echo "windows_deps=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "windows_deps=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Say plainly which kernel sets went in
+        run: |
+          set -euo pipefail
+          echo "Prebuilt kernel families in this package:"
+          ls -1 src/xclbins | while read -r family; do
+            n=$(find "src/xclbins/$family" -name '*.xclbin' | wc -l)
+            printf '  %-40s %3d xclbin(s)\n' "$family" "$n"
+          done
+
+      # One artifact, downloaded by the three build jobs. The alternative -- each
+      # job fetching the branch itself -- is three copies of the fetch and three
+      # chances to verify a different payload than the one that was reviewed.
+      #
+      # The path list is computed, not `src/xclbins/*/`: the closed xclbins in
+      # that directory are tracked, so every build job already has them from its
+      # own checkout, and uploading them would add ~76 MB to each of the three
+      # downloads. What is left is exactly what fetch-prebuilts.sh unpacked, and
+      # an artifact whose name means that.
+      - name: List what the prebuilts job added
+        id: payload
+        run: |
+          set -euo pipefail
+          {
+            # The Windows inputs, if the bundle had any. Listed as a directory
+            # glob so a bundle without them still uploads the xclbins.
+            if [ -d prebuilts/win ]; then echo "prebuilts/win/**"; fi
+            # git is the oracle here, and it is the same query
+            # stage-prebuilts.sh collects with: ignored, untracked, under
+            # src/xclbins.
+            git ls-files --others --ignored --exclude-standard -- src/xclbins
+          } > "$RUNNER_TEMP/payload.txt"
+          echo "lines: $(wc -l < "$RUNNER_TEMP/payload.txt")"
+          head -5 "$RUNNER_TEMP/payload.txt"
+          { echo 'paths<<EOF'
+            cat "$RUNNER_TEMP/payload.txt"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Hand the payload to the build jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilts
+          path: ${{ steps.payload.outputs.paths }}
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ linux
+  linux:
+    name: deb + rpm + tgz
+    needs: [ verify, prebuilts ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.version_tag }}
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            software-properties-common \
+            libboost-all-dev uuid-dev libdrm-dev cmake ninja-build g++ \
+            libreadline-dev libcurl4-openssl-dev libfftw3-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+            python3 rpm
+          # XRT: the NPU runtime the engine links against. It is a system
+          # dependency of every package built here, and a build dependency of
+          # the engine, and the packages declare it rather than bundle it.
+          if ! sudo add-apt-repository -y ppa:amd-team/xrt; then
+            echo "::error::could not add ppa:amd-team/xrt; without XRT there is no engine build"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y libxrt-dev libxrt2 libxrt-npu2
+          xclbinutil --version
+
+      - name: Unpack the prebuilt kernels
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilts
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          # OFLM_BUILD_KERNELS=OFF is the point of the prebuilts: the export
+          # needs ironvenv and an NPU, both of which this runner has not got.
+          # The kernels are already in src/xclbins, and the install rule ships
+          # whatever is in that directory.
+          cmake -B build -G Ninja --preset linux-default \
+            -DOFLM_BUILD_KERNELS=OFF \
+            -DOFLM_BUILD_UTILITIES=ON \
+            -DOFLM_VERSION="${{ needs.verify.outputs.version }}" \
+            -DCMAKE_CXX_FLAGS="-I/usr/include/xrt"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          # Once per format, on purpose: `cpack -G DEB -G RPM -G TGZ` is
+          # last-wins, not a list. It produces a TGZ, exits 0, and the release
+          # looks fine until verify-package.sh --require notices there is no DEB
+          # and no RPM. (A generator *list* in CPACK_GENERATOR does work; that is
+          # what the linux-package preset does.)
+          #
+          # The RPM is the one that is not native to this runner: it binds this
+          # host's ABI (glibc 2.39, the sonames of the apt-built FFmpeg), so it
+          # needs Fedora 41+ / RHEL 10+. That floor is in the release notes.
+          for gen in DEB RPM TGZ; do
+            cpack --config build/CPackConfig.cmake -G "$gen"
+          done
+          ls -l build/packages/
+
+      - name: Check the packages are complete
+        run: |
+          set -euo pipefail
+          utilities/release/verify-package.sh build/packages \
+            --version "${{ needs.verify.outputs.version }}" \
+            --require deb,rpm,tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: build/packages/*
+          retention-days: 30
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- windows
+  windows:
+    name: msi
+    needs: [ verify, prebuilts ]
+    if: ${{ inputs.skip_windows != true }}
+    runs-on: windows-2022
+    env:
+      # get_files.bat stages %VCPKG_ROOT%\installed\x64-windows\bin\*.dll into
+      # the MSI, and CMake's vcpkg.cmake toolchain needs the same variable. Set
+      # here, at the job, so the staging step cannot forget it: an MSI without
+      # them installs fine and then fails to start oflm.exe with a missing DLL.
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.version_tag }}
+          submodules: recursive
+
+      - name: The NPU driver version floor, from the presets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # main.cpp refuses to start on a driver older than this. It is read,
+          # never hardcoded here, so the MSI and the Linux packages always
+          # enforce the same floor from the same file.
+          $common = (Get-Content CMakePresets.json -Raw | ConvertFrom-Json).configurePresets |
+            Where-Object { $_.name -eq 'common-default' }
+          "NPU_VERSION=$($common.cacheVariables.NPU_VERSION)" >> $env:GITHUB_ENV
+
+      - name: Unpack the prebuilt kernels and the XRT deps
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilts
+
+      - name: The Windows NPU runtime must be here
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'prebuilts/win/xrt-include/xrt/xrt.h')) {
+            # The explanation is a file: a multi-line PowerShell here-string
+            # cannot live in a YAML block scalar (its unindented lines end the
+            # block), and a file is reviewable and translatable besides.
+            throw (Get-Content 'utilities/release/no-xrt-deps.md' -Raw)
+          }
+
+      - name: Cache the vcpkg installed tree
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          # The baseline is in the key as well as the port list: the cached tree
+          # is the ports' build output, and bumping VCPKG_REF without a new key
+          # would link a new oflm.exe against yesterday's libraries.
+          key: vcpkg-win-${{ runner.os }}-${{ env.VCPKG_REF }}-${{ hashFiles('utilities/release/vcpkg-ports.txt') }}
+
+      - name: Bootstrap vcpkg and install the native dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'C:\vcpkg\vcpkg.exe')) {
+            # Pinned, because "master at the time" is not a property of a tag:
+            # a re-run of the same release must not pick up different library
+            # versions and produce a different MSI from the same source. The
+            # cache key below does not include the baseline, so bumping this
+            # value is what invalidates a stale installed\ tree -- change both
+            # together (or delete the cache).
+            git clone --depth 1 -b $env:VCPKG_REF https://github.com/microsoft/vcpkg C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          }
+          # Printed either way, so a release can be traced to the ports tree it
+          # was built from.
+          git -C C:\vcpkg log -1 --format='vcpkg baseline: %H %cs'
+          & C:\vcpkg\vcpkg.exe version
+          # The port list is a file, not a line in the YAML: it is the one input
+          # whose contents are the dev's answer and not mine, and a dependency
+          # change should be a one-line diff rather than a workflow edit.
+          $ports = (Get-Content 'utilities/release/vcpkg-ports.txt' |
+                    Where-Object { $_ -and -not $_.StartsWith('#') }) -join ' '
+          Write-Host "vcpkg install $ports --triplet x64-windows"
+          & C:\vcpkg\vcpkg.exe install --triplet x64-windows $ports
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
+
+      - name: The tokenizers-cpp submodule is here
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # .gitmodules lists it and the index has the gitlink, so checkout
+          # --recurse-submodules fetches the exact commit the tag records. This
+          # step only turns "it silently was not there" into an error: the engine
+          # needs tokenizers-cpp at configure time, and a missing submodule
+          # otherwise shows up three steps later as a find_package failure.
+          if (-not (Test-Path 'third_party/tokenizers-cpp/CMakeLists.txt')) {
+            throw 'third_party/tokenizers-cpp is missing. Do NOT clone it here: the ' +
+                  'tag pins a commit, and cloning would build a different one.'
+          }
+          # tokenizers-cpp is a Rust crate (it builds sentencepiece's model code
+          # through cargo). The image has Rust, but not necessarily the host
+          # toolchain, and a missing cargo is a five-minute build failure.
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            throw "cargo is not on PATH; install the MSVC Rust toolchain: rustup default stable-msvc"
+          }
+          cargo --version
+
+      - name: Configure
+        shell: pwsh
+        env:
+          OFLM_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Exactly the command line src/build-windows-vcpkg.cmd uses, including
+          # the Visual Studio generator: that is the configuration known to
+          # build, and CI should not be the first place a different one is
+          # tried. (Ninja is not an option here -- it needs cl.exe on PATH, which
+          # a plain pwsh session on the runner does not have.)
+          cmake -S src -B src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            "-DXRT_INCLUDE_DIR=$($PWD.Path)/prebuilts/win/xrt-include" `
+            "-DXRT_LIB_DIR=$($PWD.Path)/prebuilts/win/xrt-lib" `
+            "-DOFLM_VERSION=$env:OFLM_VERSION" `
+            "-DNPU_VERSION=$env:NPU_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          # sentencepiece creates a symlink that needs elevation; the junction is
+          # the unprivileged equivalent, and it can only be made after the first
+          # configure has fetched abseil, so a first attempt needs a second pass
+          # (the same retry build-windows-vcpkg.cmd does).
+          $absl = 'third_party/tokenizers-cpp/sentencepiece/third_party'
+          if ((Test-Path "$absl/abseil-cpp/absl") -and -not (Test-Path "$absl/absl")) {
+            New-Item -ItemType Junction -Path "$absl/absl" -Target "$absl/abseil-cpp/absl" | Out-Null
+            cmake -S src -B src/build
+            if ($LASTEXITCODE -ne 0) { throw "configure failed on the second pass" }
+          }
+
+      - name: Build oflm.exe
+        # The oflm target only, like src/build-windows-vcpkg.cmd: the rest of the
+        # solution is test and tool binaries, and nothing outside src\build\oflm.exe
+        # reaches the MSI.
+        run: cmake --build src/build --config Release --target oflm --parallel
+
+      - name: Stage the MSI payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'src/build/oflm.exe')) { throw 'no oflm.exe was produced' }
+          cmd /c 'src\wix\get_files.bat'
+          if ($LASTEXITCODE -ne 0) { throw "get_files.bat failed ($LASTEXITCODE)" }
+          # A file staged but not in the .wxs is a file that does not get
+          # installed, and the MSI has no post-install check that would notice.
+          # Fail here instead, where the fix is one line in oflm.wxs.
+          .\utilities\release\check-wix-payload.ps1
+
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global wix --version 5.0.2
+          $env:PATH += ';';$env:PATH += "$env:USERPROFILE\.dotnet\tools"
+          # ProductVersion comes from the tag, and oflm.wxs refuses to invent
+          # one: an MSI version of 0.0.0 installs over nothing and upgrades
+          # nothing, silently, forever.
+          wix build src/wix/oflm.wxs -arch x64 -ext WixToolset.UI.wixext `
+            -d "ProductVersion=${{ needs.verify.outputs.version }}" `
+            -out "src/wix/output/oflm-setup.msi"
+          if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages
+          path: src/wix/output/*.msi
+          retention-days: 30
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------- nix
+  nix:
+    name: nix flake
+    needs: [ verify, linux ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.version_tag }}
+
+      - name: The TGZ this flake will package
+        uses: actions/download-artifact@v4
+        with:
+          # Into build/packages, because that is where the pin step looks: the
+          # flake packages the artifact this release just built, not one it
+          # downloads again from a URL that could differ.
+          name: linux-packages
+          path: build/packages
+
+      - name: Install Nix
+        run: |
+          set -euo pipefail
+          # The official installer, daemon mode: the runner has systemd, and the
+          # daemon install is the one that adds the unprivileged runner user to
+          # the nix-users group, so `nix build` works as that user rather than
+          # only as root. Sandbox off in the build step below: GitHub's Ubuntu
+          # image has no bwrap, and this derivation only untars a file and runs
+          # the binary in it.
+          curl -fsSL https://nixos.org/nix/install -o install-nix.sh
+          sudo ./install-nix.sh --daemon --yes
+          # The installer puts the profile where it puts it; ask, do not assume.
+          profile="$(sudo -H sh -c 'echo "$HOME/.nix-profile/bin"')"
+          echo "$profile" >> "$GITHUB_PATH"
+          echo "$profile" >> "$GITHUB_STEP_SUMMARY"
+          sudo systemctl start nix-daemon 2>/dev/null || true
+          # Fail here rather than three steps later with a store-lock error.
+          nix --version
+          nix store info >/dev/null
+
+      - name: Pin the flake to the tarball this release just built
+        id: pin
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          tgz="build/packages/openflowlm-${VERSION}-Linux.tar.gz"
+          sha="$(nix hash file --type sha256 --to sri "$tgz")"
+          # --to sri, so the value is the one flake syntax wants ("sha256-...")
+          # and there is no hex-to-base64 conversion to get wrong in review.
+          VERSION="$VERSION" SHA="$sha" python3 -c '
+          import json, os
+          json.dump({"version": os.environ["VERSION"], "sha256": os.environ["SHA"]},
+                    open("nix/pin.json", "w"), indent=2)
+          open("nix/pin.json", "a").write("\n")'
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          cat nix/pin.json
+
+      - name: Build it
+        run: |
+          set -euo pipefail
+          # The derivation's own checkPhase runs `oflm --version` and
+          # `oflm list` out of the store, so this is the flake being proven, not
+          # just parsed.
+          nix build --option sandbox false --no-link .#openflowlm
+          nix path-info .#openflowlm
+
+      - name: Pack the flake for this version
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The repository's nix/pin.json cannot be updated from here -- that
+          # would be a commit after the tag -- so the release carries the flake
+          # pinned to it. A release asset that is a tarball with flake.nix at its
+          # root is a valid flake ref, so this works with no flake registry:
+          #
+          #   nix build "https://github.com/Atomic-Germ/OpenFlowLM-Next/releases/
+          #              download/v${VERSION}/openflowlm-${VERSION}-nix.tar.gz#openflowlm"
+          #
+          # and the repository's own nix/pin.json tracks the newest release for
+          # anyone who takes `nix build github:Atomic-Germ/OpenFlowLM-Next#openflowlm`.
+          v="$VERSION"
+          rm -rf "openflowlm-$v-nix"
+          cp -r nix "openflowlm-$v-nix"
+          tar -czf "build/packages/openflowlm-$v-nix.tar.gz" "openflowlm-$v-nix"
+          tar -tzf "build/packages/openflowlm-$v-nix.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nix-packages
+          path: build/packages/*-nix.tar.gz
+          retention-days: 30
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- publish
+  publish:
+    name: publish ${{ needs.verify.outputs.version }}
+    needs: [ verify, prebuilts, linux, windows, nix ]
+    # windows is a need, not a blocker: needs.windows.result has to exist for the
+    # MSI download below to be conditional at all, and a skipped job skips its
+    # dependents -- hence !cancelled() plus the explicit result checks.
+    #
+    # A *skipped* windows publishes everything else. A *failed* one does not:
+    # publishing a version whose MSI broke halfway is how you end up shipping
+    # 1.2.3 and then 1.2.4 with a different oflm.exe for the same source.
+    if: >-
+      ${{ !cancelled()
+          && inputs.dry_run != true
+          && needs.verify.result == 'success'
+          && needs.linux.result == 'success'
+          && needs.nix.result == 'success'
+          && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.version_tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.windows.result == 'success' }}
+        with:
+          name: windows-packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: nix-packages
+          path: dist
+
+      - name: Checksums
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          # Every asset, in one file: the download page lists them, this is what
+          # you check a download against.
+          sha256sum ./* | sed 's|\./||' | tee SHA256SUMS
+          # The one line per asset that installs it, so the body of the release
+          # is copy-pasteable into a build script. The Nix asset is not a tarball
+          # to unpack, so it gets the one line that actually works for it; a
+          # "tar xf" of it would unpack a flake and look like it worked.
+          {
+            echo "# OpenFlowLM $VERSION -- $REPO, $TAG"
+            echo
+            echo "# Fedora / RHEL (glibc 2.39+: Fedora 41+, RHEL 10+)"
+            for f in *.rpm; do echo "sudo dnf install ./$f"; done
+            echo
+            echo "# Debian / Ubuntu"
+            for f in *.deb; do echo "sudo apt install ./$f"; done
+            echo
+            echo "# Any Linux: unpack, then the profile and the PATH entry are"
+            echo "# already in the tree, so only PATH is up to you."
+            for f in *-Linux.tar.gz; do
+              echo "tar xf $f"
+              echo "sudo cp -r openflowlm-$VERSION-Linux/opt/openflowlm /opt/"
+              echo "export PATH=/opt/openflowlm/bin:\$PATH"
+            done
+            echo
+            echo "# Windows (PowerShell)"
+            for f in *.msi; do echo "msiexec /i $f"; done
+            echo
+            echo "# Nix"
+            for f in *-nix.tar.gz; do
+              echo "nix build \"https://github.com/$REPO/releases/download/$TAG/$f#openflowlm\""
+            done
+          } > INSTALL.txt
+          cat INSTALL.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="utilities/release/release-notes.md"
+          gh release create "${{ needs.verify.outputs.version_tag }}" dist/* \
+            --title "OpenFlowLM ${{ needs.verify.outputs.version }}" \
+            --notes-file "$notes" \
+            --verify-tag

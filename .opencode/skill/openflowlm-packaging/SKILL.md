@@ -1,6 +1,6 @@
 ---
 name: openflowlm-packaging
-description: Build and ship the OpenFlowLM Linux distribution (engine + open xclbins + bundled utilities) as RPM/TGZ (and DEB on Debian/Ubuntu). Use when producing a release, changing the install prefix or PATH handling, editing src/CMakeLists.txt install/CPack rules or CMakePresets package/workflow presets, or debugging "no manual steps" install problems (oflm not on PATH, user model added with oflm-add not visible, missing xclbins).
+description: Build and ship the OpenFlowLM Linux distribution (engine + open xclbins + bundled utilities) as RPM/TGZ (and DEB on Debian/Ubuntu). Use when producing a release, changing the install prefix or PATH handling, editing src/CMakeLists.txt install/CPack rules or CMakePresets package/workflow presets, or debugging "no manual steps" install problems (oflm not on PATH, user model added with oflm-add not visible, missing xclbins). For cutting a tag-driven release (MSI, prebuilt kernels, Nix), see the openflowlm-release skill.
 ---
 
 # OpenFlowLM packaging
@@ -95,6 +95,14 @@ utilities, and **no** `.bak`; `rpm -qpR` for `libxrt_coreutil.so.2`. The full
 `cmake --workflow --preset linux-package` additionally rebuilds the kernels
 (cached) and runs the tests in one shot; `git status` should show `src/xclbins`
 manifests only if a recipe actually changed.
+
+For a *release* build, note the two differences: the release workflow configures
+with `OFLM_BUILD_KERNELS=OFF` and fetches the kernels from the `npu-prebuilts`
+branch instead, and it checks the result with
+`utilities/release/verify-package.sh build/packages --version <v>`, which asserts
+the open-kernel and BERT xclbins are actually present. A local
+`OFLM_BUILD_KERNELS=OFF` build legitimately fails that check — see the
+`openflowlm-release` skill and [RELEASE.md](../../../../RELEASE.md).
 
 ## Known blockers on this host
 
