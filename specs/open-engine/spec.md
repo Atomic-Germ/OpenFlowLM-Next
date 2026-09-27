@@ -1201,8 +1201,14 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   KV cache across cold/warm sequences at positions0–3 and253–256. Worst final
   maxrel1.66353e-5 versus0.005; per-head and strict conditional gates also pass.
   See the [attention-layer report](plans/wide-attention-layer.md). Both layer
-  gates use sequential standalone contexts, not fused placement. The8-layer
-  slice, runtime/model integration and catalogue promotion remain pending.
+  gates use sequential standalone contexts, not fused placement.
+- **Synthetic eight-layer slice.** Six linear and two full layers selected from
+  the explicit configuration prefix execute with distinct packed weights and
+  independent state. Two cold/two warm tokens plus reset repeat pass3098 checks
+  over370 NPU calls; worst final maxrel4.11248e-5. Strict head-local state
+  diagnostics pass8/24 layer-token tensors and remain reported separately.
+  See the [slice report](plans/wide-eight-layer-slice.md). Token selection,
+  runtime/model integration and catalogue promotion remain pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;

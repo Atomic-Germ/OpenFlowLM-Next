@@ -17,8 +17,10 @@ FFN pass strict hardware comparison. The [complete synthetic DeltaNet layer](wid
 now passes874 checks over90 open NPU dispatches after the
 [2026-09-26 precision fix](wide-deltanet-precision.md): worst final maxrel0.00017123
 versus0.005. The [complete synthetic attention layer](wide-attention-layer.md)
-also passes458 checks (2026-09-27), worst final maxrel1.66353e-5. The8-layer
-slice is next; model integration remains pending. The phase notes below are
+also passes458 checks (2026-09-27), worst final maxrel1.66353e-5. The
+[synthetic8-layer slice](wide-eight-layer-slice.md) passes3098 checks across370
+dispatches, worst final maxrel4.11248e-5. Multi-token decode with token selection
+is next; model integration remains pending. The phase notes below are
 historical; the toolchain is installed, the synthetic A7 chain passes inherited
 whole-tensor gates, and Q4 projections at K5120/K6144 pass hardware comparison.
 

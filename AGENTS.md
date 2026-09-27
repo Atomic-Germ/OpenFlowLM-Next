@@ -96,4 +96,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the complete synthetic H5120/FF17408 attention layer with production packing, segmented FFN and persistent device KV cache.</description>
     <location>.opencode/skill/open-wide-attention-layer/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-slice</name>
+    <description>Validate the synthetic eight-layer H5120 Qwen38 slice with distinct packed weights, device activation chaining and isolated recurrent/KV state.</description>
+    <location>.opencode/skill/open-wide-slice/SKILL.md</location>
+  </skill>
 </available_skills>
