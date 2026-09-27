@@ -7,11 +7,11 @@
 ///       tower on the host CPU (vision/vit.hpp) and enter the model as embedding
 ///       vectors at their M-RoPE positions. Text prompts decode one token at a
 ///       time by default, which is exact but ~0.12 s per prompt token on the full
-///       model; batched prefill (0167/#32) runs instead when the loaded kernel set
-///       carries a GEMM-route block program (Core::gemm_block_t() > 0, currently
-///       Granite only) AND OFLM_OPEN_GEMM_BLOCK=1 is set: T tokens per layer as 5
-///       whole-array GEMM dispatches plus T attention dispatches, instead of T
-///       sequential steps.
+///       model; batched prefill (0167/#32) runs instead whenever the loaded kernel
+///       set carries a GEMM-route block program (Core::gemm_block_t() > 0) and the
+///       prompt is at least OFLM_OPEN_GEMM_BLOCK_MIN (64) tokens: T tokens per layer
+///       as whole-array GEMM dispatches instead of T sequential steps.
+///       OFLM_OPEN_GEMM_BLOCK=0 turns it off.
 #pragma once
 
 #include <memory>

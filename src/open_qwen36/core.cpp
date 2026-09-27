@@ -270,6 +270,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         // is present.
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
         for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
+        for (const auto& s : types_[l]->gemm_block.ffn_program) wanted[s.kernel] = true;
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted[types_[l]->gemm_block.attn_kernel] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
@@ -332,7 +333,9 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
                 throw std::runtime_error("open_qwen36: " + k + " carries " + std::to_string(kerns_.at(k).slots) +
                                          " expert slots, the manifest says " + std::to_string(slots));
         }
-    if (gemm_block_t_)
+    bool any_moe = false;
+    for (const auto& t : types_) any_moe = any_moe || !t->gemm_block.moe_kernel.empty();
+    if (gemm_block_t_ && any_moe)
         log(std::string("token-batched expert kernel: ") +
             (any_batch ? (moe_batch_on_ ? "on" : "off (OFLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
     bool any_attn = false;
@@ -342,7 +345,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
             (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
         log(std::string("prefill schedule: ") +
-            (layer_major_ok() ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
+            (layer_major_ok() ? (any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
+                                         : "layer-major (the whole prompt through each layer)")
                               : layer_major_on_ ? "block-major (a MoE kind's layer types only)"
                                                 : "block-major (OFLM_OPEN_LAYER_MAJOR=0)"));
 }
@@ -425,8 +429,21 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         if (!(gemm_block_t_ && lt.gemm_block.t)) return;
         std::map<std::string, GemmWeight> all = lt.gemm_block.weights;
         all.insert(lt.gemm_block.shared_weights.begin(), lt.gemm_block.shared_weights.end());
+        all.insert(lt.gemm_block.ffn_weights.begin(), lt.gemm_block.ffn_weights.end());
         for (const auto& [name, gw] : all) {
             if (gw.from != from) continue;
+            auto& v = gemm_w_[name];
+            if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
+            if (from == "pack") {
+                size_t bytes = 0;
+                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + o.nch * man_.chunk_bytes);
+                xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
+                std::memset(w.map<uint8_t*>(), 0, padup(bytes));
+                for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, man_.chunk_bytes);
+                w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+                v[l] = std::move(w);
+                continue;
+            }
             size_t off0 = 0, total = 0;
             for (size_t i = 0; i < gw.ops.size(); ++i) {
                 auto [off, bytes] = op_region(lt, from, gw.ops[i]);
@@ -439,8 +456,6 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             xrt::bo w = xrt::ext::bo(*dev_, padup(total));
             std::memcpy(w.map<uint8_t*>(), host + off0, total);
             w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-            auto& v = gemm_w_[name];
-            if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
             v[l] = std::move(w);
         }
     };
@@ -457,6 +472,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(man_, lt, *file_, l, c_host);
         build_weights(lt, l, "consts", c_host);
+        build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
             if (lt.gemm_block.kind == "dense") {
                 // the dense route's host RMSNorm reads the two norm weights as bf16;
@@ -491,20 +507,42 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 };
                 h.ln = bf("input_layernorm.weight");
                 h.postln = bf("post_attention_layernorm.weight");
-                h.router = bf("moe_router.weight");
-                h.sgw = bf("shared_expert_gate.weight");
                 want(h.ln, man_.hidden, "input_layernorm");
                 want(h.postln, man_.hidden, "post_attention_layernorm");
-                want(h.router, man_.hidden * man_.moe.experts, "moe_router");
-                want(h.sgw, man_.hidden, "shared_expert_gate");
+                if (!gb.has_dense_ffn()) {
+                    h.router = bf("moe_router.weight");
+                    h.sgw = bf("shared_expert_gate.weight");
+                    want(h.router, man_.hidden * man_.moe.experts, "moe_router");
+                    want(h.sgw, man_.hidden, "shared_expert_gate");
+                }
                 if (gb.kind == "linear") {
-                    const std::string wa = const_tensor(lt, "ssm_alpha_proj.weight", l);
-                    const auto& shape = file_->meta(wa).shape;
-                    if (shape.size() != 2 || shape[0] != man_.hidden)
-                        throw std::runtime_error("open_qwen36: " + wa + " is not [hidden, lanes]");
-                    h.lanes = shape[1];
-                    h.Wa = file_->bf16(wa);
-                    h.Wb = bf("ssm_beta_proj.weight");
+                    // The host reads alpha / beta as [hidden, lanes]. The 35B's container stores
+                    // exactly that; Qwen3.5's stores a bf16 [heads, hidden] copy beside the q8
+                    // projection, which its consts plan transposes -- so transpose it here too.
+                    auto ab = [&](const std::string& stem, std::vector<float>& out) -> size_t {
+                        const std::string copy = stem + ".bf16.weight";
+                        const bool t = std::any_of(lt.consts.begin(), lt.consts.end(), [&](const PackOp& op) {
+                            return op.op == "transpose" && op.tensor.size() >= copy.size() &&
+                                   op.tensor.compare(op.tensor.size() - copy.size(), copy.size(), copy) == 0;
+                        });
+                        const std::string name = const_tensor(lt, t ? copy : stem + ".weight", l);
+                        const auto& shape = file_->meta(name).shape;
+                        const size_t hid_dim = t ? 1 : 0;
+                        if (shape.size() != 2 || shape[hid_dim] != man_.hidden)
+                            throw std::runtime_error("open_qwen36: " + name + (t ? " is not [heads, hidden]" : " is not [hidden, lanes]"));
+                        const size_t lanes = shape[1 - hid_dim];
+                        std::vector<float> w = file_->bf16(name);
+                        if (t) {
+                            out.assign(man_.hidden * lanes, 0.f);
+                            host::transpose(w.data(), lanes, man_.hidden, out.data());   // [lanes, hid] -> [hid, lanes]
+                        } else {
+                            out = std::move(w);
+                        }
+                        return lanes;
+                    };
+                    h.lanes = ab("ssm_alpha_proj", h.Wa);
+                    if (ab("ssm_beta_proj", h.Wb) != h.lanes)
+                        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": alpha and beta disagree on lanes");
                     h.A = file_->f32(const_tensor(lt, "ssm_a", l));
                     h.dtb = file_->f32(const_tensor(lt, "ssm_dt.bias", l));
                     h.convw = bf("ssm_conv1d.weight");
@@ -768,7 +806,7 @@ void Core::bench_dispatch(int layer, int reps) {
 
     // every kernel the route names, with the buffer arguments the manifest gives it
     std::vector<std::pair<std::string, std::vector<std::string>>> jobs;
-    for (const auto* prog : {&gb.program, &gb.shared_program})
+    for (const auto* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
         for (const Step& st : *prog) jobs.push_back({st.kernel, st.args});
     for (const auto& [slots, name] : gb.moe_batch.kernels) jobs.push_back({name, gb.moe_batch.args});
     if (!gb.moe_kernel.empty()) jobs.push_back({gb.moe_kernel, gb.moe_args});
@@ -934,6 +972,7 @@ void Core::bench_dispatch(int layer, int reps) {
         std::vector<std::pair<std::string, std::vector<std::string>>> cycle;
         for (const Step& st : gb.program) cycle.push_back({st.kernel, st.args});
         for (const Step& st : gb.shared_program) cycle.push_back({st.kernel, st.args});
+        for (const Step& st : gb.ffn_program) cycle.push_back({st.kernel, st.args});
         if (!gb.moe_batch.kernels.empty()) {
             auto big = gb.moe_batch.kernels.rbegin();                 // the widest stream, then the second pass
             cycle.push_back({big->second, gb.moe_batch.args});
@@ -1037,7 +1076,7 @@ void Core::bench_kernel(const std::string& name, int reps, int layer, int warm_t
     // at full rate for a whole prefill's worth of seconds (see the window report below)
     const GemmBlockProgram& gb = types_[layer]->gemm_block;
     if (!args)
-        for (const auto* prog : {&gb.program, &gb.shared_program})
+        for (const auto* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
             for (const Step& s : *prog)
                 if (s.kernel == name) args = &s.args;
     if (!args)
@@ -2224,6 +2263,7 @@ void Core::moe_stage_resize(size_t rows) {
 
 void Core::block_layer_moe(int l, size_t rows, size_t t_real, float* xres) {
     const GemmBlockProgram& gb = types_[l]->gemm_block;
+    if (gb.has_dense_ffn()) return;                 // the layer's own FFN already wrote xres
     const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
     if (moe_batch_on_ && gb.moe_batch.present()) {
         moe_block(l, moe_.xm.data(), moe_.res.data(), moe_.idx.data(), moe_.w.data(), rows, t_real, xres);
@@ -2372,11 +2412,10 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
 // gate and the add on the host. The kernels' own formula, from moe_silu32 / moe_hdr2 /
 // moe_accfin: h = silu(g) * u, out += sigmoid(xm . sgw) * down(h). xm is rounded to bf16
 // first because that is what the dispatch would have seen.
-void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, size_t t_real) {
-    const LayerType& lt = *types_[l];
-    const GemmBlockProgram& gb = lt.gemm_block;
-    const size_t hid = man_.hidden, ff = gb.shared_ff;
-    gemm(gb.shared_program[0], xm, T, hid, 2 * ff, l, sg_ug_);
+void Core::ffn_block(int l, const std::vector<Step>& prog, size_t ff, const float* xm, float* res, size_t T,
+                     size_t t_real, const std::vector<float>* gate_w) {
+    const size_t hid = man_.hidden;
+    gemm(prog[0], xm, T, hid, 2 * ff, l, sg_ug_);
     const std::vector<float>& ug = sg_ug_;
     auto t0 = std::chrono::steady_clock::now();
     float* h = BlockScratch::fit(bs_.sh, T * ff);
@@ -2388,10 +2427,17 @@ void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, siz
         for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
     }
     timing_.shared_ms += ms_since(t0);
-    gemm(gb.shared_program[1], h, T, ff, hid, l, sg_y_);
+    gemm(prog[1], h, T, ff, hid, l, sg_y_);
     const std::vector<float>& y = sg_y_;
     auto t1 = std::chrono::steady_clock::now();
-    const std::vector<float>& sgw = hc_[l].sgw;
+    if (!gate_w) {
+        // a dense FFN: every row, padding included, so the block's residual stays defined
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] += y[static_cast<size_t>(i)];
+        timing_.shared_ms += ms_since(t1);
+        return;
+    }
+    const std::vector<float>& sgw = *gate_w;
 #pragma omp parallel for
     for (long long tt = 0; tt < static_cast<long long>(t_real); ++tt) {
         const size_t t = static_cast<size_t>(tt);
@@ -2455,18 +2501,39 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     ts = std::chrono::steady_clock::now();
     if (last) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
-    gemm(gb.program[1], og, T, vw, hid, l, gout_);
-    const std::vector<float>& out = gout_;
-
     auto t1 = std::chrono::steady_clock::now();
+    if (gb.out_split) {
+        // a q8 out projection as its exact q4_1 split: rows [0, hid) are the hi half's
+        // output and [hid, 2 hid) the lo half's, and the projection is their sum
+        gemm(gb.program[1], og, T, vw, 2 * hid, l, gout_);
+        t1 = std::chrono::steady_clock::now();
+        const std::vector<float>& y = gout_;
 #pragma omp parallel for
-    for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
+        for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
+            const size_t t = static_cast<size_t>(tt);
+            const float* a = y.data() + t * 2 * hid;
+            for (size_t c = 0; c < hid; ++c) res[t * hid + c] = xres[t * hid + c] + (a[c] + a[hid + c]);
+        }
+    } else {
+        gemm(gb.program[1], og, T, vw, hid, l, gout_);
+        t1 = std::chrono::steady_clock::now();
+        const std::vector<float>& out = gout_;
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
+    }
     host::rmsnorm_rows(res, T, hid, hc.postln.data(), gb.eps, xm);
+    if (gb.has_dense_ffn()) {
+        timing_.part1_ms += ms_since(t1);
+        timing_.tail_ms += ms_since(t1);
+        ffn_block(l, gb.ffn_program, gb.ff, xm, res, T, t_real, nullptr);
+        std::memcpy(xres, res, T * hid * 4);         // the layer's output; block_layer_moe has nothing to add
+        return;
+    }
     host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,
                        moe_.idx.data() + row0 * topk, moe_.w.data() + row0 * topk);
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
-    shared_expert_block(l, xm, res, T, t_real);
+    ffn_block(l, gb.shared_program, gb.shared_ff, xm, res, T, t_real, &hc.sgw);
 }
 
 void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
@@ -2619,11 +2686,18 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
 #pragma omp parallel for
     for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
     host::rmsnorm_rows(res, T, hid, hc.postln.data(), gb.eps, xm);
+    if (gb.has_dense_ffn()) {
+        timing_.part1_ms += ms_since(t1);
+        timing_.tail_ms += ms_since(t1);
+        ffn_block(l, gb.ffn_program, gb.ff, xm, res, T, t_real, nullptr);
+        std::memcpy(xres, res, T * hid * 4);         // the layer's output; block_layer_moe has nothing to add
+        return;
+    }
     host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,
                        moe_.idx.data() + row0 * topk, moe_.w.data() + row0 * topk);
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
-    shared_expert_block(l, xm, res, T, t_real);
+    ffn_block(l, gb.shared_program, gb.shared_ff, xm, res, T, t_real, &hc.sgw);
 }
 
 // The routed experts over the block on the token-batched kernel. Every expert's tokens are

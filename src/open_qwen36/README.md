@@ -537,14 +537,13 @@ on a memory-starved box, not the kernels.
 
 ## What is still not closed
 
-- **Batched prefill -- open on Granite, not yet on the other families.**
-  `OFLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
-  dispatches plus T attention dispatches instead of T decode steps (1.95x TTFT
-  on a 1005-token prompt). It is read through `utils::getenv_oflm`, so the
-  pre-rename `FLM_OPEN_GEMM_BLOCK` still works and prints a one-line notice
-  naming the current variable. It needs a kernel set carrying a `gemm_block`
-  program, which today is Granite only; every other family still goes through
-  the decode step one token at a time. The route writes no M-RoPE position
+- **Batched prefill -- on by default wherever the kernel set carries it.**
+  A prompt of 64 tokens or more runs T tokens per layer as whole-array GEMM
+  dispatches instead of T decode steps, on every family whose recipe emits a
+  `gemm_block` program: the dense families, Qwen3.5 and the 35B.
+  `OFLM_OPEN_GEMM_BLOCK=0` turns it off (read through `utils::getenv_oflm`, so
+  the pre-rename `FLM_OPEN_GEMM_BLOCK` still works). A kernel set without the
+  program prefills one token at a time. The route writes no M-RoPE position
   records, so a prompt that has had an image stays on the sequential path.
 - **Long-context attention cost -- closed on the dense families and Qwen3.5,
   the 35B in progress** (2026-09-08, spec OPEN-ATTN-CONTEXT). The attention

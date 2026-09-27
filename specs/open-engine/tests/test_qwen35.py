@@ -496,3 +496,154 @@ def test_the_manifest_carries_what_the_engine_needs(spec9, monkeypatch):
         assert d["pack"]["pool"] and d["pack"]["consts"]
     assert m["layer_types"][FULL]["buffers"]["state"] == {"kind": "kv", "row": 4096}
     assert m["layer_types"][LINEAR]["buffers"]["state"]["kind"] == "linear"
+
+
+# ------------------------------------------------ the block prefill route (OPEN-PREFILL-BATCH)
+T = 256
+
+
+def _run(kernel, w, x, y):
+    return {"op": "run", "kernel": kernel, "args": [w, x, y]}
+
+
+def test_the_9b_carries_the_35b_route_with_a_dense_ffn(spec9, monkeypatch):
+    """The linear / full halves are the 35B's; the MoE block is replaced by up|gate then
+    down over the block -- the shared expert's two GEMMs without its sigmoid gate."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    m = manifest(spec9)
+    lin = m["layer_types"][LINEAR]
+    full = m["layer_types"][FULL]
+    lg, fg = lin["gemm_block"], full["gemm_block"]
+    assert (lg["kind"], lg["t"], fg["kind"], fg["t"]) == ("linear", T, "full", T)
+    assert lg["program"] == [_run("gemm_n12288_k4096", "gqkvz_w", "gemm_x_k4096", "gemm_y_n12288"),
+                             _run("gemm_n4096_k4096", "gout_w", "gemm_x_k4096", "gemm_y_n4096")]
+    assert fg["program"] == [_run("gemm_n10240_k4096", "gqkvg_w", "gemm_x_k4096", "gemm_y_n10240"),
+                             _run("gemm_n4096_k4096", "go_w", "gemm_x_k4096", "gemm_y_n4096")]
+    ffn = [_run("gemm_n24576_k4096", "gffn_ug_w", "gemm_x_k4096", "gemm_y_n24576"),
+           _run("gemm_n4096_k12288", "gffn_down_w", "gemm_x_k12288", "gemm_y_n4096")]
+    for gb, d in ((lg, lin), (fg, full)):
+        assert gb["ffn_program"] == ffn and gb["ff"] == 12288
+        w = gb["ffn_weights"]
+        assert w == {"gffn_ug_w": {"from": "pool", "ops": [0, 1]}, "gffn_down_w": {"from": "pool", "ops": [2]}}
+        pool = d["pack"]["pool"]
+        assert [pool[i]["tensor"].split(".")[-2] for i in (0, 1, 2)] == ["up_proj", "gate_proj", "down_proj"]
+        assert all(pool[i]["op"] == "std_perm" for i in (0, 1, 2))
+        # contiguous, up first: the one GEMM's output is [up | gate], as the shared expert's
+        assert pool[1]["dst"] == pool[0]["dst"] + pool[0]["nch"] * m["layout"]["chunk_bytes"]
+        # none of the MoE tail
+        assert not {"moe_kernel", "moe_args", "shared_program", "shared_weights", "moe_batch", "a_rout"} & set(gb)
+    # the q8 out projection is re-quantised into a std_perm the GEMM can read
+    consts = lin["pack"]["consts"]
+    assert lg["weights"]["gout_w"] == {"from": "consts", "ops": [8]}
+    assert consts[8]["op"] == "std_perm" and consts[8]["tensor"].endswith("ssm_out_proj.weight")
+    assert lg["weights"]["gqkvz_w"] == {"from": "pool", "ops": [3, 4]}
+    assert fg["weights"] == {"gqkvg_w": {"from": "pool", "ops": [3, 4, 5, 6]}, "go_w": {"from": "pool", "ops": [7]}}
+
+
+def test_the_9b_route_is_one_gemm_context_and_no_expert_kernels(spec9, monkeypatch):
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    m = manifest(spec9)
+    assert sorted(m["contexts"]) == ["ag", "ax", "gemm", "lm", "ln", "lx"]
+    gemms = sorted(k for k in m["kernels"] if k.startswith("gemm_"))
+    assert gemms == ["gemm_n10240_k4096", "gemm_n12288_k4096", "gemm_n24576_k4096", "gemm_n4096_k12288",
+                     "gemm_n4096_k4096"]
+    assert all(m["kernels"][k]["context"] == "gemm" for k in gemms)
+    assert not [k for k in m["kernels"] if k.startswith(("mx_", "mb_"))]
+    assert not [k for k in m["globals"] if k.startswith("mb_")]
+    assert m["globals"]["gemm_y_n24576"] == 24576 * T * 4 and m["globals"]["gemm_x_k12288"] == 12288 * T * 2
+    # 16 query heads over 4 kv heads: the attention GEMM is built for 4 x 256 rows, in its own
+    # directory (the 35B's 8 x 256 builds keep theirs)
+    ab = m["layer_types"][FULL]["gemm_block"]["attn_block"]
+    assert ab["m"] == 1024 and ab["hd"] == 256
+    b = Q35.builds(spec9)
+    assert b["ag_s256"]["env"]["AG_M"] == "1024" and b["ag_s256"]["build_dir"] == "attn_block/build_s256_m1024"
+    assert b["gemm_n24576_k4096"]["env"] == {"GQP_N": "24576", "GQP_K": "4096", "GQP_T": str(T)}
+
+
+def test_every_published_size_gets_a_route():
+    for name in ("9b", "4b", "2b", "0p8b"):
+        s = ModelSpec.from_hf_config(cfg(name))
+        r = Q35.gemm_route(s)
+        assert r is not None, name
+        assert set(r["layer_types"]) == {LINEAR, FULL}, name
+        ff = s.intermediate
+        assert r["layer_types"][LINEAR]["ffn_program"][0]["kernel"] == f"gemm_n{2 * ff}_k{s.hidden}", name
+
+
+def test_a_q8_projection_or_an_untileable_width_leaves_the_sequential_set(spec9, monkeypatch):
+    """The GEMM reads the q4_1 band law and tiles 256 x 256: a spec outside either keeps
+    exactly the manifest it had, rather than failing the export. (The out projection is the
+    exception: see the next test.)"""
+    import dataclasses
+
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    # ffn at q8 alone is a spec the recipe refuses outright (a mixed-format main core), so the
+    # ffn case is every role at q8
+    every = {r: "q8" for r in ("attn", "linear", "linear_out", "ffn")}
+    for quant in ({"attn": "q8"}, {"linear": "q8"}, every):
+        s = dataclasses.replace(spec9, quant=quant)
+        assert Q35.gemm_route(s) is None, quant
+        m = manifest(s)
+        assert all("gemm_block" not in d for d in m["layer_types"].values()), quant
+        assert not [k for k in m["kernels"] if k.startswith(("gemm_", "ag_"))], quant
+    assert Q35.gemm_route(dataclasses.replace(spec9, intermediate=12160)) is None
+
+
+def test_the_build_key_covers_the_route_sources(spec9):
+    from recipes.cache import source_files
+
+    files = [f.as_posix() for f in source_files(spec9)]
+    for must in ("designs/gemm_q4_prefill/gemm_q4_prefill.py", "designs/attn_block/attn_gemm.py"):
+        assert any(f.endswith(must) for f in files), must
+
+
+def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, monkeypatch):
+    """The published 9B containers store ssm_out_proj at q8 and the sequential kernel streams
+    it at q8 (the spec derived from such a model says linear_out=q8), because re-quantising it
+    costs real quality (OPEN-QUANT-Q8). The GEMM reads q4_1 only, so the route packs the q8
+    weight as two q4_1 halves whose readings sum to it exactly, stacked in one buffer: one
+    GEMM of 2 x hid rows, the halves added on the host."""
+    import dataclasses
+
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = dataclasses.replace(spec9, quant={"linear_out": "q8"})
+    m = manifest(s)
+    lin = m["layer_types"][LINEAR]
+    gb = lin["gemm_block"]
+    op = {"op": "std_perm", "tensor": "model.layers.{l}.linear_attn.ssm_out_proj.weight", "nch": 2048, "in_dim": 4096}
+    assert gb["weights"]["gout_w"] == {"from": "pack", "pack": [{**op, "dst": 0, "split": "hi"},
+                                                                {**op, "dst": 2048 * 5120, "split": "lo"}]}
+    assert gb["out_split"] is True
+    assert gb["program"][1] == _run("gemm_n8192_k4096", "gout_w", "gemm_x_k4096", "gemm_y_n8192")
+    assert "gemm_n8192_k4096" in m["kernels"]
+    # the sequential kernel still reads its q8 pack of the same tensor
+    seq = [o for o in lin["pack"]["consts"] if o.get("tensor", "").endswith("ssm_out_proj.weight")]
+    assert len(seq) == 1 and seq[0]["op"] == "q8_perm"
+    # every other weight, and the q4_1 spec's route, are unchanged
+    q4 = manifest(spec9)["layer_types"][LINEAR]["gemm_block"]
+    assert {k: v for k, v in gb["weights"].items() if k != "gout_w"} ==         {k: v for k, v in q4["weights"].items() if k != "gout_w"}
+    assert "out_split" not in q4 and q4["program"][1]["kernel"] == "gemm_n4096_k4096"
+
+
+def test_the_q8_split_is_exact_and_matches_the_cpp_packer():
+    """hi + lo read back every q8 value exactly (the q4_1 re-quantisation of the same chunks
+    is off by up to d/2), and both halves are byte-identical to pools.cpp split_q4_1_chunks
+    on the shared vector (pools_test.cpp asserts the same two FNV-1a values)."""
+    from q4nx import dq_chunks_q4_1, dq_chunks_q8
+
+    src = _shared_q8_vector(12)
+    hi, lo = pack.split_q8_q4_1(src, "hi"), pack.split_q8_q4_1(src, "lo")
+    want = np.asarray(dq_chunks_q8(np.asarray(src)), np.float64)
+    got = np.asarray(dq_chunks_q4_1(hi), np.float64) + np.asarray(dq_chunks_q4_1(lo), np.float64)
+    np.testing.assert_array_equal(got, want)
+    rq = np.asarray(dq_chunks_q4_1(pack.requant_q4_1(src)), np.float64)
+    assert np.abs(rq - want).max() > 0.01, "the re-quantisation this replaces really is lossy"
+    assert _fnv1a(hi.tobytes()) == 0x011857DF63D905CE, "split hi changed; update pools_test.cpp too"
+    assert _fnv1a(lo.tobytes()) == 0x1A95B8AE739769D2, "split lo changed; update pools_test.cpp too"
+
+
+def test_a_split_needs_a_q8_source():
+    dst = np.zeros(5120, np.uint8)
+    m = _Bytes({"w": b"\0" * 5120})
+    with pytest.raises(ValueError, match="must be q8"):
+        pack.apply_op({"op": "std_perm", "tensor": "w", "dst": 0, "nch": 1, "in_dim": 256, "split": "hi"}, m, 0, dst)
