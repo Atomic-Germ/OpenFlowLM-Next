@@ -131,8 +131,24 @@ A time quoted for this pipeline must meet all of these:
 
 A number measured under load says so.
 
-**Measured 2026-09-27**, pyxrt runner, turbo. **Another 12-core CPU job was running**, so
-these are pessimistic:
+**Measured 2026-09-27, native engine** (`src/open_diffusion`), turbo, 2 prompts × 3 warm
+runs each. **Another ~11-core CPU job (another session's) was running**, so these are
+pessimistic:
+
+| | 512² | 1024² |
+|---|---:|---:|
+| image, warm | 5.2-6.0 s (mean 5.6) | 13.5-15.9 s (mean 15.1) |
+| text encoder | 0.65-0.80 s | 0.64-0.75 s |
+| conditioning | 0.04-0.06 s | 0.04-0.06 s |
+| one denoising step | 1.0-1.25 s | 2.9-3.5 s |
+| VAE | 0.46-0.54 s | 1.27-1.46 s |
+| first image after load | 5.7-6.3 s | 15.0-15.8 s |
+| load (kernels + 7.5 GB weights, cached) | 8-9 s | 6-7 s |
+| host CPU per image | 0.03-0.19 s | 0.03-0.11 s |
+
+**Earlier the same day, pyxrt runner** (`generate.py`), with a different 12-core job
+running. These are slower: Python dispatch, and more contention. They were pessimistic
+too:
 - the standalone attention benchmark ran 42.7 ms against its quiet 30.5 ms;
 - `sgl_in` ran 68.7 ms against 59.4 ms.
 
