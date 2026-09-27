@@ -5,6 +5,7 @@ r"""npu_host: run_kernel's model from Python (pyxrt), for multi-kernel chain tes
     st = fa.stream("r512_attn_dbl")                  # insts_<name>.bin -> instruction BO
     x = npu.buf("X", nbytes); x.write(arr, row=0)    # host-only BO; bf16/uint16 numpy in/out
     st.run(x.view(offset, nbytes), ...)              # opcode 3, blocking wait (it sleeps)
+    h = st.start(...); ...; h.wait()                 # queued: same-context runs go in order
 
 Buffers are XRT host-only BOs; `view` makes a sub-buffer of the ROOT allocation (XRT
 does not compose sub-buffers of sub-buffers: the host pointer and the device address
@@ -51,6 +52,14 @@ class Buf:
         self.host[:] = 0
         self.bo.sync(TO_DEV, self.nbytes, 0)
 
+    def load(self, path, offset: int = 0) -> None:
+        """Read a file straight into the mapped BO (no intermediate copy)."""
+        n = Path(path).stat().st_size
+        assert offset + n <= self.nbytes, (self.name, path, n, self.nbytes)
+        with open(path, "rb") as f:
+            f.readinto(memoryview(self.host)[offset:offset + n])
+        self.bo.sync(TO_DEV, n, offset)
+
     def read(self, dtype=np.uint16, offset: int = 0, count: int | None = None) -> np.ndarray:
         itemsize = np.dtype(dtype).itemsize
         count = (self.nbytes - offset) // itemsize if count is None else count
@@ -61,17 +70,30 @@ class Buf:
 class Stream:
     def __init__(self, kset: "KernelSet", name: str, path: Path):
         self.kset, self.name = kset, name
-        words = np.fromfile(path, dtype=np.uint32)
-        self.nwords = int(words.size)
-        self.instr = pyxrt.bo(kset.npu.dev, words.nbytes, pyxrt.bo.cacheable,
+        self.words = np.fromfile(path, dtype=np.uint32)
+        self.nwords = int(self.words.size)
+        self.instr = pyxrt.bo(kset.npu.dev, self.words.nbytes, pyxrt.bo.cacheable,
                               kset.kernel.group_id(1))
-        self.instr.write(words.tobytes(), 0)
-        self.instr.sync(TO_DEV, words.nbytes, 0)
+        self._upload()
+
+    def _upload(self) -> None:
+        self.instr.write(self.words.tobytes(), 0)
+        self.instr.sync(TO_DEV, self.words.nbytes, 0)
+
+    def patch(self, words: list[int], value: int) -> None:
+        """Set instruction words (e.g. an RTP value) -- only while no run of it is queued."""
+        self.words[words] = value
+        self._upload()
+
+    def start(self, *bos):
+        """Queue a run without waiting (runs queued on one hardware context execute in
+        order; wait on the last before using another context -- queued across contexts,
+        they hang the array)."""
+        return self.kset.kernel(3, self.instr, self.nwords, *bos)
 
     def run(self, *bos) -> float:
         t0 = time.perf_counter()
-        h = self.kset.kernel(3, self.instr, self.nwords, *bos)
-        st = h.wait()
+        st = self.start(*bos).wait()
         ms = (time.perf_counter() - t0) * 1e3
         if st != COMPLETED:
             raise RuntimeError(f"{self.kset.name}/{self.name}: {st} after {ms:.1f} ms")

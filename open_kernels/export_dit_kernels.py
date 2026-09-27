@@ -81,7 +81,13 @@ Attention streams (dit_fa, head dim 128):
     r<R>_attn_sgl single block: Q/K/V read in place from FU, O -> FU's slot, 64-of-128
     te_attn       the Qwen3-4B text encoder: 512 tokens, 32/8 heads (GQA), causal, keys
                   past the prompt masked -- valid_len is written into the stream as 512
-                  and is the prompt length at run time (the engine patches it)
+                  and is the prompt length at run time: dit_fa.json's patch.te_attn.valid_len
+                  lists the instruction words a runner sets to it (found by diffing a
+                  probe build with another value)
+
+klein_pipeline.py (the whole-image schedule) adds: the modulation GEMM for all steps
+(`mod`), ctx_emb reading CTX with row stride 8192, and in ew/ `t_silu`, `r<R>_euler`
+and the text-encoder taps `te_tap9/18/27`.
 """
 
 from __future__ import annotations
@@ -103,6 +109,8 @@ CONV_DESIGN = HERE / "designs" / "dit_conv" / "dit_conv.py"
 VEW_DESIGN = HERE / "designs" / "vae_ew" / "vae_ew.py"
 sys.path.insert(0, str(HERE.parent / "npu_offload" / "gemm_rtp"))
 sys.path.insert(0, str(HERE / "designs" / "dit_gemm"))
+sys.path.insert(0, str(HERE))
+import klein_pipeline  # noqa: E402  (the whole-image schedule; no IRON import)
 
 FAMILIES = {
     "FLUX.2-klein-4B-NPU2": dict(hidden=3072, mlp=9216, text_tokens=512, patch_px=16),
@@ -154,10 +162,10 @@ def klein_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: in
         streams[f"r{R}_x_emb"] = dict(M=T, K=512, N=h, layout={"lda": 128, "a_size": T * 128 + 512},
                                       role="x_embedder (K 128 -> 512)")
         streams[f"r{R}_proj_out"] = dict(M=T, K=h, N=1024, role="proj_out (N 128 -> 1024)")
-    streams["ctx_emb"] = dict(M=L, K=7680, N=h, role="context_embedder")
     streams["t_emb1"] = dict(M=512, K=512, N=h, layout={"lda": 256, "a_size": 512 * 256 + 512},
                              role="timestep_embedder.linear_1 (K 256 -> 512; M = steps, padded)")
     streams["t_emb2"] = dict(M=512, K=h, N=h, role="timestep_embedder.linear_2")
+    streams.update(klein_pipeline.gemm_streams())         # ctx_emb, the modulation GEMM
     streams.update(qwen3_te_streams(L))
     return streams
 
@@ -255,7 +263,26 @@ def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens:
         "y": view(Lt, qkv), "z": view(Lt, qkv, EW_EL), "p_off": EW_EL, "n_par": 3,
         "heads": 24, "b_q_heads": TE["heads"] - 24, "b_k_heads": TE["kv_heads"],
         "sizes": {k: Lt * qkv for k in ("X", "B", "Y", "Z")} | {"P": 5 * EW_EL}}
+    streams.update(klein_pipeline.ew_streams(resolutions))   # silu, euler, text-encoder taps
     return streams
+
+
+VL_PROBE, VL_PROBE_STREAM = 77, "te_attn_vlprobe"
+
+
+def valid_len_words(base: Path, probe: Path, base_value: int, probe_value: int) -> list[int]:
+    """The uint32 word indices of an instruction stream that hold its valid_len: the words
+    where a build with probe_value differs from the base build -- all of them, and only
+    them, holding the two values (refused otherwise)."""
+    import numpy as np
+    a, b = np.fromfile(base, np.uint32), np.fromfile(probe, np.uint32)
+    if a.size != b.size:
+        raise SystemExit(f"valid_len probe: streams differ in length ({a.size} vs {b.size})")
+    idx = np.nonzero(a != b)[0]
+    if idx.size == 0 or (a[idx] != base_value).any() or (b[idx] != probe_value).any():
+        raise SystemExit(f"valid_len probe: {idx.size} differing words are not all "
+                         f"{base_value} -> {probe_value}; the stream cannot be patched")
+    return [int(i) for i in idx]
 
 
 def _read_json(p: Path):
@@ -391,18 +418,32 @@ def main() -> int:
         fix = int(args.fa_exp_fix)
         print(f"dit_fa set for {args.family}: {len(fa_streams)} streams -> {fa_out}")
         keys = ("L", "heads", "kv_heads", "causal", "valid_len", "layout")
-        dirs = build_many({n: ({**{k: s[k] for k in keys}, "exp_fix": fix},
-                               {"DF_L": s["L"], "DF_HEADS": s["heads"],
-                                "DF_KV_HEADS": s["kv_heads"], "DF_CAUSAL": s["causal"],
-                                "DF_VALID_LEN": s["valid_len"], "DF_EXP_FIX": fix,
-                                "DF_QKV_LD": s["layout"].get("qkv_ld", 0),
-                                "DF_K_COL": s["layout"].get("k_col", 0),
-                                "DF_V_COL": s["layout"].get("v_col", 0),
-                                "DF_O_LD": s["layout"].get("o_ld", 0),
-                                "DF_O_COL": s["layout"].get("o_col", 0),
-                                "DF_O_INTERLEAVE": s["layout"].get("o_interleave", 0)},
-                               FA_DESIGN, fa_out) for n, s in fa_streams.items()},
-                          args.force, args.jobs)
+
+        def fa_job(s):
+            return ({**{k: s[k] for k in keys}, "exp_fix": fix},
+                    {"DF_L": s["L"], "DF_HEADS": s["heads"],
+                     "DF_KV_HEADS": s["kv_heads"], "DF_CAUSAL": s["causal"],
+                     "DF_VALID_LEN": s["valid_len"], "DF_EXP_FIX": fix,
+                     "DF_QKV_LD": s["layout"].get("qkv_ld", 0),
+                     "DF_K_COL": s["layout"].get("k_col", 0),
+                     "DF_V_COL": s["layout"].get("v_col", 0),
+                     "DF_O_LD": s["layout"].get("o_ld", 0),
+                     "DF_O_COL": s["layout"].get("o_col", 0),
+                     "DF_O_INTERLEAVE": s["layout"].get("o_interleave", 0)},
+                    FA_DESIGN, fa_out)
+
+        jobs = {n: fa_job(s) for n, s in fa_streams.items()}
+        # te_attn's valid_len is the prompt's length: an RTP write in the instruction stream.
+        # A probe build with another value finds the words a runner patches per prompt.
+        patch = {}
+        if "te_attn" in fa_streams:
+            jobs[VL_PROBE_STREAM] = fa_job(fa_streams["te_attn"] | {"valid_len": VL_PROBE})
+        dirs = build_many(jobs, args.force, args.jobs)
+        if VL_PROBE_STREAM in dirs:
+            probe = dirs.pop(VL_PROBE_STREAM)
+            patch["te_attn"] = {"valid_len": valid_len_words(
+                dirs["te_attn"] / "insts.bin", probe / "insts.bin",
+                fa_streams["te_attn"]["valid_len"], VL_PROBE)}
         assemble(fa_out, dirs, marker, {
             "family": args.family,
             "kernel": "dit_fa",
@@ -411,6 +452,7 @@ def main() -> int:
             "exp_fix": fix,
             "resolutions": resolutions,
             "streams": fa_streams,
+            "patch": patch,
         })
         print(f"OK: {len(fa_streams)} dit_fa streams over one xclbin -> {fa_out}")
 
