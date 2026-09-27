@@ -11,6 +11,8 @@
 //   run     <kernel> <buf> [<buf> ...]      opcode 3, buffers at args 3.. ; wait
 //   dump    <buf> <file> [bytes [offset]]   read back to a file
 //   copy    <dst> <dst_off> <src> <src_off> <bytes>
+//   greedy  <logits-buf> <vocab> <token-buf>   finite FP32 argmax -> uint32
+//   embed   <dst> <bf16-file> <token-buf> <vocab> <hidden>   selected row -> FP32
 //   moeroute  <kernel> <rout-buf>           MoE expert fills -> the router's 8 experts
 //   moeroute2 <kernel> <buf> <idx-offset>   ditto, pool-layout placeholder fills
 //   attnpos <kernel> <pos>                  KV window / new-row / RoPE record for this token
@@ -62,6 +64,7 @@
 #include "xrt/experimental/xrt_xclbin.h"
 
 #include "stream_patch.hpp"
+#include "decode_control.hpp"
 
 namespace fs = std::filesystem;
 
@@ -317,6 +320,37 @@ struct Host {
                 throw std::runtime_error("copy: out of range");
             s.bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
             std::memcpy(d.bo.map<uint8_t*>() + doff, s.bo.map<uint8_t*>() + soff, n);
+            d.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        } else if (cmd == "greedy") {
+            auto source = need(it, "greedy logits");
+            size_t count = num(need(it, "greedy vocabulary"), "greedy vocabulary");
+            auto target = need(it, "greedy token");
+            Buf& s = buf(source);
+            Buf& d = buf(target);
+            if (count > s.size/sizeof(float) || d.size < sizeof(uint32_t))
+                throw std::runtime_error("greedy: buffer too small");
+            s.bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            uint32_t token = decode_control::greedy(s.bo.map<float*>(),count);
+            std::memcpy(d.bo.map<void*>(),&token,sizeof(token));
+            d.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            std::printf("greedy %s -> %u\n",source.c_str(),token);
+        } else if (cmd == "embed") {
+            auto target = need(it, "embed destination");
+            auto file = resolve(need(it, "embed file"));
+            auto source = need(it, "embed token");
+            size_t rows = num(need(it, "embed vocabulary"), "embed vocabulary");
+            size_t width = num(need(it, "embed hidden"), "embed hidden");
+            Buf& s = buf(source);
+            Buf& d = buf(target);
+            if (s.size < sizeof(uint32_t) || width > d.size/sizeof(float))
+                throw std::runtime_error("embed: buffer too small");
+            s.bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            uint32_t token;
+            std::memcpy(&token,s.bo.map<void*>(),sizeof(token));
+            auto row = decode_control::embedding(file,token,rows,width);
+            // Preserve bytes outside the destination row (notably canaries).
+            d.bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            std::memcpy(d.bo.map<void*>(),row.data(),width*sizeof(float));
             d.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         } else if (cmd == "moeroute" || cmd == "moeroute2") {
             bool v2 = cmd == "moeroute2";

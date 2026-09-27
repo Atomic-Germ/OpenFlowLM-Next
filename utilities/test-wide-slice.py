@@ -74,6 +74,48 @@ def initial_state(l,kind,rng,warm,start):
     return cache,cache.tobytes()
 
 
+def harness_setup(out,s,l,kinds,kernels):
+    files = []
+    cfg,hashes = ['device'],{}
+    for name,directory in kernels.items():
+        cfg += [f'xclbin {name} {directory}/final.xclbin',f'kernelx {name} {name} {directory}/insts.bin']
+        for file in ('final.xclbin','insts.bin'): hashes[str(directory/file)] = sha(directory/file)
+    np.ones(H,bfloat16).tofile(out/'ones.bin');np.zeros(H,np.float32).tofile(out/'zero.bin')
+    files += [out/'ones.bin',out/'zero.bin']
+    cfg += [f'buf pool {l.POOL_BYTES}',f'buf const {max(l.C_BYTES,l.CA_BYTES)}',
+            f'buf x {H*4+64}',f'buf y {H*4+64}',f'buf position {l.E_A}',
+            f'buf ones {H*2} ones.bin',f'buf zero {H*4} zero.bin']
+    sizes = dict(d=D.sizes(l),a=A.outputs(l))
+    extras = dict(d=dict(cs=l.STATE_S_OFF,si=48*128*128*4,qzw=(NCH+VW)*H//8192*5120,
+                         ow=H*VW//8192*5120,lnw=H*2,postw=H*2,nw=4096,
+                         side=4096+4*NCH*2,abs=4*H*32*2+8192),
+                  a=dict(meta=l.E_A*2,qkvgw=14336*H//8192*5120,ow=H*QW//8192*5120,lnw=H*2,postw=H*2))
+    for prefix in ('d','a'):
+        for name,size in extras[prefix].items(): cfg.append(f'buf {prefix}_{name} {size}')
+        bf16 = ('xn','conv','og','xm','discard') if prefix=='d' else A.BF16_OUTPUTS
+        for name,size in sizes[prefix].items():
+            if name!='y': cfg.append(f'buf {prefix}_{name} {size+64}')
+            dtype = bfloat16 if name in bf16 else np.float32
+            path = out/f'poison-{prefix}-{name}.bin'
+            path.write_bytes(np.full(size//np.dtype(dtype).itemsize,np.nan,dtype).tobytes()+GUARD)
+            files.append(path)
+    for i,kind in enumerate(kinds):
+        name,size = (f'state{i}',l.STATE_BYTES) if kind==LINEAR else (f'cache{i}',l.KV_BYTES)
+        cfg.append(f'buf {name} {size+64}')
+    return cfg,hashes,files,sizes
+
+
+def append_layer(cfg,s,l,kinds,sizes,tag,i,pos):
+    prefix = 'd' if kinds[i]==LINEAR else 'a'
+    state_name,state_size = (f'state{i}',l.STATE_BYTES) if prefix=='d' else (f'cache{i}',l.KV_BYTES)
+    cfg.extend([f'dump x {tag}-input-x.bin {H*4+64}',f'dump {state_name} {tag}-input-state.bin {state_size+64}'])
+    cfg.extend(f'load {buffer_name(name,prefix,i)} poison-{prefix}-{name}.bin' for name in sizes[prefix])
+    cfg.extend(layer_commands(s,l,i,pos,257))
+    cfg.extend(f'dump {buffer_name(name,prefix,i)} {tag}-got-{name}.bin {size+64}' for name,size in sizes[prefix].items())
+    cfg.append(f'dump {state_name} {tag}-got-state.bin {state_size+64}')
+    cfg.append(f'copy x 0 y 0 {H*4}')
+
+
 def prepare(out,tokens):
     if not 2<=tokens<=8: raise ValueError('the slice gate requires 2..8 tokens per sequence')
     kernels = artifacts()
@@ -103,42 +145,9 @@ def prepare(out,tokens):
         params.append(p);pools.append(pool);consts.append(const)
         files += [directory/n for n in ('pool.bin','const.bin','params.npz')]
         print('Packed layer',i,kind,flush=True)
-    cfg,hashes = ['device'],{}
-    for name,directory in kernels.items():
-        cfg += [f'xclbin {name} {directory}/final.xclbin',f'kernelx {name} {name} {directory}/insts.bin']
-        for file in ('final.xclbin','insts.bin'): hashes[str(directory/file)] = sha(directory/file)
-    np.ones(H,bfloat16).tofile(out/'ones.bin');np.zeros(H,np.float32).tofile(out/'zero.bin')
-    files += [out/'ones.bin',out/'zero.bin']
-    cfg += [f'buf pool {l.POOL_BYTES}',f'buf const {max(l.C_BYTES,l.CA_BYTES)}',
-            f'buf x {H*4+64}',f'buf y {H*4+64}',f'buf position {l.E_A}',
-            f'buf ones {H*2} ones.bin',f'buf zero {H*4} zero.bin']
-    sizes = dict(d=D.sizes(l),a=A.outputs(l))
-    extras = dict(d=dict(cs=l.STATE_S_OFF,si=48*128*128*4,qzw=(NCH+VW)*H//8192*5120,
-                         ow=H*VW//8192*5120,lnw=H*2,postw=H*2,nw=4096,
-                         side=4096+4*NCH*2,abs=4*H*32*2+8192),
-                  a=dict(meta=l.E_A*2,qkvgw=14336*H//8192*5120,ow=H*QW//8192*5120,lnw=H*2,postw=H*2))
-    for prefix in ('d','a'):
-        for name,size in extras[prefix].items(): cfg.append(f'buf {prefix}_{name} {size}')
-        bf16 = ('xn','conv','og','xm','discard') if prefix=='d' else A.BF16_OUTPUTS
-        for name,size in sizes[prefix].items():
-            if name!='y': cfg.append(f'buf {prefix}_{name} {size+64}')
-            dtype = bfloat16 if name in bf16 else np.float32
-            path = out/f'poison-{prefix}-{name}.bin'
-            path.write_bytes(np.full(size//np.dtype(dtype).itemsize,np.nan,dtype).tobytes()+GUARD)
-            files.append(path)
-    for i,kind in enumerate(kinds):
-        name,size = (f'state{i}',l.STATE_BYTES) if kind==LINEAR else (f'cache{i}',l.KV_BYTES)
-        cfg.append(f'buf {name} {size+64}')
+    cfg,hashes,setup_files,sizes = harness_setup(out,s,l,kinds,kernels)
+    files += setup_files
     cases = []
-    def append_layer(tag,i,pos):
-        prefix = 'd' if kinds[i]==LINEAR else 'a'
-        state_name,state_size = (f'state{i}',l.STATE_BYTES) if prefix=='d' else (f'cache{i}',l.KV_BYTES)
-        cfg.extend([f'dump x {tag}-input-x.bin {H*4+64}',f'dump {state_name} {tag}-input-state.bin {state_size+64}'])
-        cfg.extend(f'load {buffer_name(name,prefix,i)} poison-{prefix}-{name}.bin' for name in sizes[prefix])
-        cfg.extend(layer_commands(s,l,i,pos,257))
-        cfg.extend(f'dump {buffer_name(name,prefix,i)} {tag}-got-{name}.bin {size+64}' for name,size in sizes[prefix].items())
-        cfg.append(f'dump {state_name} {tag}-got-state.bin {state_size+64}')
-        cfg.append(f'copy x 0 y 0 {H*4}')
     rng = np.random.default_rng(38429)
     for sequence,start in (('cold',0),('warm',257-tokens)):
         states = []
@@ -165,11 +174,11 @@ def prepare(out,tokens):
                 path = out/f'{tag}-ref.npz'
                 np.savez(path,**{k:v.astype(np.float32) for k,v in refs.items()});files.append(path)
                 cases.append(dict(tag=tag,token=token,sequence=sequence,layer=i,kind=kind,pos=pos))
-                append_layer(tag,i,pos)
+                append_layer(cfg,s,l,kinds,sizes,tag,i,pos)
                 print('Reference:',tag,flush=True)
     for i,kind in enumerate(kinds): cfg.append(f"load {'state' if kind==LINEAR else 'cache'}{i} cold-layer{i}-init.bin")
     cfg += ['load x cold-0-x.bin','load position cold-0-position.bin']
-    for i in range(8): append_layer(f'repeat-layer{i}',i,0)
+    for i in range(8): append_layer(cfg,s,l,kinds,sizes,f'repeat-layer{i}',i,0)
     (out/'slice.cfg').write_text('\n'.join(cfg)+'\n');files.append(out/'slice.cfg')
     metadata = dict(seed=38429,rows=257,tokens=tokens,layer_types=kinds,cases=cases,outputs=sizes,kernels=hashes,
                     fixtures={p.relative_to(out).as_posix():sha(p) for p in files})

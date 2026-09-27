@@ -101,4 +101,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Validate the synthetic eight-layer H5120 Qwen38 slice with distinct packed weights, device activation chaining and isolated recurrent/KV state.</description>
     <location>.opencode/skill/open-wide-slice/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-decode</name>
+    <description>Validate synthetic eight-layer autoregressive decode with final RMSNorm, full-vocabulary Q8 logits, token feedback and persistent layer state.</description>
+    <location>.opencode/skill/open-wide-decode/SKILL.md</location>
+  </skill>
 </available_skills>

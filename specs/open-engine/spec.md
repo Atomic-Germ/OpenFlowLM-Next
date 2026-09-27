@@ -1207,8 +1207,16 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   independent state. Two cold/two warm tokens plus reset repeat pass3098 checks
   over370 NPU calls; worst final maxrel4.11248e-5. Strict head-local state
   diagnostics pass8/24 layer-token tensors and remain reported separately.
-  See the [slice report](plans/wide-eight-layer-slice.md). Token selection,
-  runtime/model integration and catalogue promotion remain pending.
+  See the [slice report](plans/wide-eight-layer-slice.md).
+- **Synthetic eight-layer autoregressive decode.** Final RMSNorm and the full
+  248320-row Q8 head feed greedy token selection and BF16 embedding lookup.
+  Three cold/three warm tokens plus a complete reset replay pass5149 checks
+  across684 NPU calls; logits correlation>=0.9999999228 and argmax agrees for
+  every token. All repeat captures are byte-identical. Host control performs
+  selection/row lookup; neural operators stay on the NPU. Strict state-head
+  diagnostics pass10/36 tensors and remain separate from inherited layer gates.
+  See the [decode report](plans/wide-autoregressive-decode.md). The64-layer model,
+  runtime integration and catalogue promotion remain pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
