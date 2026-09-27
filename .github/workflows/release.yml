@@ -4,17 +4,25 @@ name: Release
 #
 #   verify     the tag is a version this tree can actually produce, and that it
 #              matches the version the presets declare
-#   prebuilts  fetch the NPU-built kernels from the npu-prebuilts orphan branch
-#              and check them against this tag (utilities/release/fetch-prebuilts.sh)
 #   linux      DEB + RPM + TGZ from one ubuntu-24.04 build
-#   windows    oflm-setup.msi from a windows-latest build
+#   windows    oflm-setup.msi from a windows-2022 build
 #   nix        the flake that packages the release TGZ, built to prove it works
 #   publish    one GitHub release, checksummed
 #
-# The kernels are the reason this is not a single job: they need an NPU, and
-# GitHub does not have one. They are built by utilities/release/stage-prebuilts.sh
-# on a machine that does, and live on a branch until a release claims them. See
-# RELEASE.md.
+# The kernels and the Windows XRT inputs are the reason this cannot be one job:
+# they need an NPU, and GitHub does not have one. They are therefore part of the
+# source. Each is built on a machine that has the hardware, by a script that
+# commits it to the staging branch, and a release is tagged from that branch, so
+# by the time this workflow runs the checkout already has them:
+#
+#   src/xclbins/<family>/open_kernels/**    stage-prebuilts.sh        (Linux + NPU)
+#   src/xclbins/BERT-h*/**                  stage-prebuilts.sh        (Linux + NPU)
+#   prebuilts/win/**                        stage-prebuilts-win.ps1  (Windows + NPU)
+#   prebuilts/manifest.json                 both, one section each
+#
+# There is no fetching and no cross-job artifact: `verify` checks the manifest
+# against this tag, which is the same check the retired orphan branch needed and
+# one hop closer. See RELEASE.md.
 
 on:
   push:
@@ -33,12 +41,12 @@ on:
         required: false
         type: string
       skip_prebuilts:
-        description: 'Build without the NPU kernel sets (a package that will load no open model).'
+        description: 'Build without the staged open kernel sets (a package that will load no open model).'
         required: false
         default: false
         type: boolean
       skip_windows:
-        description: 'Skip the MSI job (no XRT deps captured, or Windows is broken).'
+        description: 'Skip the MSI job (no XRT deps staged, or Windows is broken).'
         required: false
         default: false
         type: boolean
@@ -59,7 +67,9 @@ env:
   # The one version every job agrees on. `verify` is what establishes that it
   # is a real version for this tree; everything downstream just uses it.
   OFLM_VERSION: ${{ inputs.tag || github.ref_name }}
-  PREBUILTS_BRANCH: npu-prebuilts
+  # Set only for an emergency package while an NPU machine is unavailable: the
+  # staged kernel sets are removed before the build, so the result loads no open
+  # model. The closed xclbins that ship in the repository are still packaged.
   SKIP_PREBUILTS: ${{ inputs.skip_prebuilts || false }}
   SKIP_WINDOWS: ${{ inputs.skip_windows || false }}
   DRY_RUN: ${{ inputs.dry_run || false }}
@@ -77,6 +87,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       version_tag: ${{ steps.v.outputs.version_tag }}
+      windows_deps: ${{ steps.p.outputs.windows_deps }}
     steps:
       - name: Checkout the tag
         uses: actions/checkout@v4
@@ -148,87 +159,29 @@ jobs:
               print(f'{rel}: OFLM_VERSION={common[\"cacheVariables\"][\"OFLM_VERSION\"]} '
                     f'NPU_VERSION={common[\"cacheVariables\"][\"NPU_VERSION\"]}')"
 
-  # -------------------------------------------------------------- prebuilts
-  prebuilts:
-    name: prebuilts (NPU-built kernels)
-    needs: verify
-    runs-on: ubuntu-24.04
-    outputs:
-      ref: ${{ steps.p.outputs.ref }}
-      windows_deps: ${{ steps.p.outputs.windows_deps }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.verify.outputs.version_tag }}
-          submodules: recursive
-
-      - name: Fetch, verify and unpack the prebuilts
+      - name: The prebuilts in this tag are the ones it was built for
         id: p
-        env:
-          ALLOW_MISSING: ${{ env.SKIP_PREBUILTS }}
         run: |
           set -euo pipefail
-          args=(--version "${{ needs.verify.outputs.version }}" --branch "$PREBUILTS_BRANCH")
-          if [ "$ALLOW_MISSING" = "true" ]; then args+=(--allow-missing); fi
-          utilities/release/fetch-prebuilts.sh "${args[@]}"
-          echo "ref=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
-          if [ -d prebuilts/win/xrt-include ]; then
+          # The kernels are already in the checkout: they were committed to
+          # staging, and this tag was cut from staging. What is left to prove is
+          # that they were built from this source, for this version.
+          args=(--version "${{ steps.v.outputs.version }}")
+          if [ "$SKIP_PREBUILTS" = "true" ]; then
+            echo "::warning::skip_prebuilts is set: the open kernel sets will not be packaged"
+            args+=(--allow-missing)
+          fi
+          utilities/release/verify-prebuilts.py "${args[@]}"
+          if [ -f prebuilts/win/xrt-include/xrt/xrt.h ]; then
             echo "windows_deps=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows_deps=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Say plainly which kernel sets went in
-        run: |
-          set -euo pipefail
-          echo "Prebuilt kernel families in this package:"
-          ls -1 src/xclbins | while read -r family; do
-            n=$(find "src/xclbins/$family" -name '*.xclbin' | wc -l)
-            printf '  %-40s %3d xclbin(s)\n' "$family" "$n"
-          done
-
-      # One artifact, downloaded by the three build jobs. The alternative -- each
-      # job fetching the branch itself -- is three copies of the fetch and three
-      # chances to verify a different payload than the one that was reviewed.
-      #
-      # The path list is computed, not `src/xclbins/*/`: the closed xclbins in
-      # that directory are tracked, so every build job already has them from its
-      # own checkout, and uploading them would add ~76 MB to each of the three
-      # downloads. What is left is exactly what fetch-prebuilts.sh unpacked, and
-      # an artifact whose name means that.
-      - name: List what the prebuilts job added
-        id: payload
-        run: |
-          set -euo pipefail
-          {
-            # The Windows inputs, if the bundle had any. Listed as a directory
-            # glob so a bundle without them still uploads the xclbins.
-            if [ -d prebuilts/win ]; then echo "prebuilts/win/**"; fi
-            # git is the oracle here, and it is the same query
-            # stage-prebuilts.sh collects with: ignored, untracked, under
-            # src/xclbins.
-            git ls-files --others --ignored --exclude-standard -- src/xclbins
-          } > "$RUNNER_TEMP/payload.txt"
-          echo "lines: $(wc -l < "$RUNNER_TEMP/payload.txt")"
-          head -5 "$RUNNER_TEMP/payload.txt"
-          { echo 'paths<<EOF'
-            cat "$RUNNER_TEMP/payload.txt"
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Hand the payload to the build jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: prebuilts
-          path: ${{ steps.payload.outputs.paths }}
-          include-hidden-files: true
-          retention-days: 3
-          if-no-files-found: error
-
   # ------------------------------------------------------------------ linux
   linux:
     name: deb + rpm + tgz
-    needs: [ verify, prebuilts ]
+    needs: verify
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -257,10 +210,15 @@ jobs:
           sudo apt-get install -y libxrt-dev libxrt2 libxrt-npu2
           xclbinutil --version
 
-      - name: Unpack the prebuilt kernels
-        uses: actions/download-artifact@v4
-        with:
-          name: prebuilts
+      - name: Drop the staged kernels when skip_prebuilts is set
+        if: env.SKIP_PREBUILTS == 'true'
+        run: |
+          set -euo pipefail
+          # The closed xclbins stay. The staged ones are the directories the
+          # staging script force-adds, and leaving them in would package kernels
+          # the dispatch input said not to.
+          rm -rf src/xclbins/*/open_kernels* src/xclbins/BERT-h*
+          echo "staged kernel directories removed"
 
       - name: Configure
         run: |
@@ -301,9 +259,11 @@ jobs:
       - name: Check the packages are complete
         run: |
           set -euo pipefail
-          utilities/release/verify-package.sh build/packages \
-            --version "${{ needs.verify.outputs.version }}" \
-            --require deb,rpm,tgz
+          args=(build/packages
+            --version "${{ needs.verify.outputs.version }}"
+            --require deb,rpm,tgz)
+          if [ "$SKIP_PREBUILTS" = "true" ]; then args+=(--allow-missing-kernels); fi
+          utilities/release/verify-package.sh "${args[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -315,8 +275,12 @@ jobs:
   # ---------------------------------------------------------------- windows
   windows:
     name: msi
-    needs: [ verify, prebuilts ]
-    if: ${{ inputs.skip_windows != true }}
+    needs: verify
+    # Skipped, not failed, when nothing was staged: verify already said so, and
+    # a release without an MSI is a decision (skip_windows) or a machine that
+    # has not run stage-prebuilts-win.ps1 yet. A half-staged Windows side fails
+    # verify instead of arriving here.
+    if: ${{ inputs.skip_windows != true && needs.verify.outputs.windows_deps == 'true' }}
     runs-on: windows-2022
     env:
       # get_files.bat stages %VCPKG_ROOT%\installed\x64-windows\bin\*.dll into
@@ -340,11 +304,6 @@ jobs:
           $common = (Get-Content CMakePresets.json -Raw | ConvertFrom-Json).configurePresets |
             Where-Object { $_.name -eq 'common-default' }
           "NPU_VERSION=$($common.cacheVariables.NPU_VERSION)" >> $env:GITHUB_ENV
-
-      - name: Unpack the prebuilt kernels and the XRT deps
-        uses: actions/download-artifact@v4
-        with:
-          name: prebuilts
 
       - name: The Windows NPU runtime must be here
         shell: pwsh
@@ -580,7 +539,7 @@ jobs:
   # ---------------------------------------------------------------- publish
   publish:
     name: publish ${{ needs.verify.outputs.version }}
-    needs: [ verify, prebuilts, linux, windows, nix ]
+    needs: [ verify, linux, windows, nix ]
     # windows is a need, not a blocker: needs.windows.result has to exist for the
     # MSI download below to be conditional at all, and a skipped job skips its
     # dependents -- hence !cancelled() plus the explicit result checks.

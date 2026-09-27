@@ -3,6 +3,7 @@
 #
 #   utilities/release/verify-package.sh build/packages [--version X.Y.Z]
 #                                                    [--require deb,rpm,tgz]
+#                                                    [--allow-missing-kernels]
 #                                                    [--expect-kernels glob]
 #
 # WHY A SCRIPT AND NOT A LOOK. A package that builds is not a package that
@@ -46,15 +47,17 @@ EXPECT_BERT='xclbins/BERT-h[^/]*/.*\.xclbin$'
 # which is what a local single-format build wants -- and also what a cpack that
 # silently produced one format instead of three would look like.
 REQUIRE=""
+ALLOW_MISSING_KERNELS=0
 FAILURES=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)        VERSION="${2:?}"; shift 2 ;;
         --require)        REQUIRE="${2:?}"; shift 2 ;;
+        --allow-missing-kernels) ALLOW_MISSING_KERNELS=1; shift ;;
         --expect-kernels) EXPECT_KERNELS="${2:?}"; shift 2 ;;
         --expect-bert)    EXPECT_BERT="${2:?}"; shift 2 ;;
-        -h|--help)        sed -n '3,24p' "$0"; exit 0 ;;
+        -h|--help)        sed -n '3,25p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -125,6 +128,8 @@ has_kernels() {
     bert="$(grep -cE "$EXPECT_BERT" <<<"$2" || true)"
     if [ "$open" -gt 0 ]; then
         pass "ships $open open-kernel xclbin file(s) ($EXPECT_KERNELS)"
+    elif [ "$ALLOW_MISSING_KERNELS" = 1 ]; then
+        pass "ships no open kernel xclbins (--allow-missing-kernels; no open model will load)"
     else
         fail "ships NO open kernel xclbins. Nothing git ignores was in src/xclbins," \
              "so only the closed sets are in here and no open model will load." \
@@ -132,6 +137,8 @@ has_kernels() {
     fi
     if [ "$bert" -gt 0 ]; then
         pass "ships $bert BERT design-set xclbin(s) ($EXPECT_BERT)"
+    elif [ "$ALLOW_MISSING_KERNELS" = 1 ]; then
+        pass "ships no BERT design sets (--allow-missing-kernels)"
     else
         fail "ships no BERT design sets. Those are the open_npue embedding kernels," \
              "and utilities/export-kernels.py builds them in the same run as the" \

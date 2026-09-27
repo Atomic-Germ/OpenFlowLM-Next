@@ -97,12 +97,12 @@ utilities, and **no** `.bak`; `rpm -qpR` for `libxrt_coreutil.so.2`. The full
 manifests only if a recipe actually changed.
 
 For a *release* build, note the two differences: the release workflow configures
-with `OFLM_BUILD_KERNELS=OFF` and fetches the kernels from the `npu-prebuilts`
-branch instead, and it checks the result with
-`utilities/release/verify-package.sh build/packages --version <v>`, which asserts
-the open-kernel and BERT xclbins are actually present. A local
-`OFLM_BUILD_KERNELS=OFF` build legitimately fails that check — see the
-`openflowlm-release` skill and [RELEASE.md](../../../../RELEASE.md).
+with `OFLM_BUILD_KERNELS=OFF` and the kernels are already in the tag (committed
+to `staging` by `stage-prebuilts.sh`, not fetched), and it checks the result
+with `utilities/release/verify-package.sh build/packages --version <v>`, which
+asserts the open-kernel and BERT xclbins are actually present. A local
+`OFLM_BUILD_KERNELS=OFF` build of `main` legitimately fails that check — see
+the `openflowlm-release` skill and [RELEASE.md](../../../../RELEASE.md).
 
 ## Known blockers on this host
 
