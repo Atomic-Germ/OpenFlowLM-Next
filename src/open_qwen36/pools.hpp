@@ -69,6 +69,14 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
 /// its reading. `recipes/pack.py requant_q4_1` is the same arithmetic in NumPy; pools_test
 /// and tests/test_qwen35.py check the two on the same vectors.
 void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
+/// `nch` q8 chunks -> `nch` q4_1 chunks holding one HALF of an exact split: with each code
+/// v = 16 * hi + lo (hi = v >> 4 in [-8, 7], lo = v & 15), the "hi" chunk reads
+/// d = 16 * scale, m = -128 * scale, nibble hi + 8 and the "lo" chunk d = scale, m = 0,
+/// nibble lo, so hi + lo = scale * v exactly -- a q8 projection as two q4_1 ones, for a
+/// kernel that reads q4_1 only (the block prefill GEMM, OPEN-PREFILL-BATCH). Both scales
+/// are the q8 scale times a power of two, so bf16 holds them exactly. `recipes/pack.py
+/// split_q8_q4_1` is the same in NumPy.
+void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst);
 /// `nch` Q4_K chunks (4736 B each) -> `nch` q4_1 chunks (5120 B each), in the SAME chunk
 /// order. Both formats hold a 32-row x 256-column tile with one (scale, min) pair per
 /// (row, 32-column group) at the SAME meta index `g*32 + r`, so nothing is re-quantized:
