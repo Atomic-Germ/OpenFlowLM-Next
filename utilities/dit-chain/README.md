@@ -16,6 +16,13 @@ offsets, padding) by running whole blocks from captured inputs.
 - `chain_test_vae.py`: the VAE decoder. It runs the DiT's packed latents to RGBA8 in
   five kernel sets (conv, conv1, vew, gemm, fa), following
   `open_kernels/vae_decoder.py`'s schedule (102 dispatches).
+- `generate.py`: a whole image, prompt to PNG, every op on the NPU:
+  - it follows `open_kernels/klein_pipeline.py`'s schedule (1050 dispatches);
+  - `--study` injects the quality study's prompts and noise;
+  - `--profile` times every op;
+  - `--pack-only` packs the weights (~8 GB, once).
+- `export_bundle.py`: the same schedule as files for the native engine
+  (`src/open_diffusion`). `klein_tokens.py` writes a prompt's token ids for it.
 
 ## Run
 
@@ -133,3 +140,44 @@ the images score PSNR 44.3 dB and **LPIPS 0.0029 mean, 0.0032 max**, and a decod
 The largest ops are the upsample convs of up1 and up2 (101 and 86 ms) and the attention
 (62 ms). The first decode after the sets are loaded takes 6.2 s (1.4 s at 512²): context
 and instruction first-use. An engine warms up at load.
+
+**Fixed 2026-09-27: the image's edge pixels.** Up blocks 2 and 3 narrow their channels
+(512 → 256, 256 → 128) in their first resnet, and that resnet's GroupNorm output shared
+a buffer with the narrower layout.
+- Producers write the interior only, so each layout's interior landed on the other's
+  zero border. The convs then read it as padding.
+- The left, right and bottom edge pixels were off by 7-9 levels; the interior was ~1.
+- Every decode depended on what the previous one left.
+
+Now a zero-bordered buffer holds one channel count (`GI<i>`, `vae_decoder.plan`). Repeat
+decodes are identical. At 512² the test gives PSNR **46.7 dB** and LPIPS **0.0011** (was
+45.1 dB / 0.0014), and the late stages improved: up2 3.1e-2, up3 1.7e-2, conv_out
+1.5e-2.
+
+## The whole image (Phase 6, 2026-09-27)
+
+```
+C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\capture_pipeline_inputs.py --size 512
+python utilities\dit-chain\generate.py --kernels C:\dev\klein-kernels --size 512 --study C:\dev\ditref-out\goldens_pipe_512 --out C:\dev\gen\full512
+C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\score_images.py C:\dev\gen\full512 --test "{:02d}.png" --ref "{:02d}.png" --ref-dir C:\dev\ditref-out\klein_512_s4\bf16
+```
+
+The run takes 8 study prompts with the study's fixed noise (512²). LPIPS against the bf16
+CPU run:
+
+| | LPIPS mean / max |
+|---|---|
+| everything on the NPU | 0.107 / 0.191 |
+| DiT + VAE on the NPU, bf16 text embeddings (`--ctx-ref`) | 0.044 / 0.092 |
+| (CPU emulation of the DiT's linears + attention) | (0.029 / 0.081) |
+| (CPU emulation of the text encoder alone) | (0.092 / 0.241) |
+
+- The images are coherent, and the text prompts render legibly. The drift is what the
+  studies predict.
+- The extra DiT drift is the conditioning GEMMs: timestep MLP, modulation and embedders.
+  They share dit_gemm's bf16-accumulator arithmetic, which the study left in bf16, and
+  the modulation vectors come out 2-3% from diffusers'.
+  - Injecting diffusers' exact vectors takes the 7 non-chaotic prompts from 0.038 to
+    0.028.
+- `generate.py` and `src/open_diffusion` give pixel-identical images for the same inputs.
+- The DiT's final latents are deterministic run to run.

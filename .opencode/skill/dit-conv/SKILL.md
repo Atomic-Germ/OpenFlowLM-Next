@@ -66,6 +66,16 @@ Design note: `.claude/plans/image-diffusion-phase5-vae.md`.
     - q′ carries ½, because dit_fa scales by 1/√128.
     - W_o and the V/O biases fold into v″, and GEMM biases come through a constant-1
       column in QIN.
+11. **A zero-bordered buffer holds ONE channel count.** Producers write the interior
+    only. Write a buffer at C = 512 and later at C = 256, and each layout's interior lands
+    on the other's border bytes; the conv reads them as zero padding.
+    - It cost the image's left, right and bottom edge pixels 7-9 levels, fixed
+      2026-09-27 (`GI<i>` in `vae_decoder.plan`).
+    - It also made each decode depend on the previous one's leftovers.
+    - The chain test's whole-image PSNR hid it (45 dB). To catch it:
+      - measure the error per edge column and row;
+      - decode twice and compare;
+      - zero every buffer but one, and see whose stale content changes the image.
 
 ## Verify
 
