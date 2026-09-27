@@ -27,7 +27,14 @@ from ironutil import Pipeline, include_dirs  # noqa: E402
 
 N = int(os.environ.get("LN_N", 2048))     # the width; elements are N*2 bytes (ln.cc LN_N)
 EPS = float(os.environ.get("LN_EPS", "1e-6"))
+GROUPS = int(os.environ.get("LN_GROUPS", "1"))  # K2's GroupRMSNorm(2): one RMS per contiguous half
 ELEM = N * 2
+if GROUPS not in (1, 2):
+    raise SystemExit(f"LN_GROUPS={GROUPS}: only 1 (plain RMSNorm) or 2 (K2 halves) supported")
+if GROUPS == 2 and N <= 2048:
+    # the fused ln_fn below has no grouped reduction; a grouped model must take the
+    # split path (K2 hidden 2560 does) -- refuse loudly instead of silently wrong math
+    raise SystemExit(f"LN_GROUPS=2 with N={N}: the fused (N<=2048) kernel is single-group")
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -37,6 +44,8 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
     f_ty = np.ndarray[(N,), np.dtype[np.float32]]
     b_ty = np.ndarray[(N,), np.dtype[bfloat16]]
     flags = [f"-DLN_N={N}", f"-DLN_EPS={EPS:g}f"]
+    if GROUPS != 1:
+        flags.append(f"-DLN_GROUPS={GROUPS}")  # default 1: identical flags to the unpatched build
     if N <= 2048:
         # the fused kernel: five inputs and three outputs held at once (32 KB of 4 KB elements)
         fn = ExternalFunction("ln_fn", source_file=str(HERE / "ln.cc"),
