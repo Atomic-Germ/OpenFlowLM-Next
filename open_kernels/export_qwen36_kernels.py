@@ -41,6 +41,7 @@ xclbin and nowhere else (see src/open_qwen36/README.md).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -140,19 +141,34 @@ def git_head(root: Path) -> str:
         return "unavailable"
 
 
-def build(name: str, sets: dict, spec_file: Path) -> Path:
+def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
+    """Worker for parallel set builds. Returns (name, bdir) or raises."""
     src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
     env["OPEN_KERNELS_SPEC"] = str(spec_file)
     t0 = time.time()
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
-    print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
-          f"{out.relative_to(HERE).as_posix()}", flush=True)
-    r = subprocess.run([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env, cwd=str(HERE))
+    r = subprocess.run(
+        [sys.executable, str(HERE / "build_design.py"), str(src), str(out)],
+        env=env, cwd=str(HERE),
+        capture_output=True, text=True,
+    )
+    output = f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} {out.relative_to(HERE).as_posix()}\n"
+    output += r.stdout
+    output += r.stderr
     if r.returncode != 0:
-        sys.exit(f"[{name}] build FAILED ({r.returncode})")
-    print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
+        output += f"[{name}] build FAILED ({r.returncode})\n"
+        print(output, flush=True)
+        raise RuntimeError(f"[{name}] build FAILED ({r.returncode})")
+    output += f"[{name}] built in {time.time() - t0:.0f}s\n"
+    print(output, flush=True)
+    return name, out
+
+
+def build(name: str, sets: dict, spec_file: Path) -> Path:
+    """Sequential build of a single set (kept for callers that want it)."""
+    _, out = _build_one(name, sets, spec_file)
     return out
 
 
@@ -170,6 +186,8 @@ def main() -> int:
     ap.add_argument("--check", metavar="DIR",
                     help="a previous export (or a shipped xclbins/<model>/open_kernels dir) to compare "
                          "against; non-zero exit on any difference beyond the per-build UUID/timestamp stamps")
+    ap.add_argument("-j", "--jobs", type=int, default=max(1, os.cpu_count() // 2),
+                    help="parallel kernel-set builds within this spec (default: os.cpu_count()//2)")
     a = ap.parse_args()
 
     # ---- the spec, its recipe, and the kernel sets that recipe names
@@ -214,9 +232,22 @@ def main() -> int:
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
         gen.generate(F.recipe(spec))
+    # Build the requested sets in parallel, then copy outputs in deterministic order.
+    bdirs: dict[str, Path] = {}
+    if a.no_build:
+        for n in names:
+            bdirs[n] = DESIGNS / sets[n]["build_dir"]
+    else:
+        workers = max(1, min(a.jobs, len(names)))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_build_one, n, sets, spec_file) for n in names]
+            for future in concurrent.futures.as_completed(futures):
+                n, bdir = future.result()
+                bdirs[n] = bdir
+
     hashes: dict[str, str] = {}
     for n in names:
-        bdir = DESIGNS / sets[n]["build_dir"] if a.no_build else build(n, sets, spec_file)
+        bdir = bdirs[n]
         dst = out_root / n
         dst.mkdir(parents=True, exist_ok=True)
         for f in FILES:

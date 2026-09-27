@@ -85,3 +85,7 @@ src/xclbins/*/open_kernels*/
 
 # repro-open-timeout.sh output (server logs, per-attempt client logs)
 .repro-open-timeout/
+
+# Nix build result symlinks
+result
+result-*

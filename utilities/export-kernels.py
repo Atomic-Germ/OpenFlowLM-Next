@@ -52,7 +52,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SPECS_DIR = REPO / "open_kernels" / "recipes" / "specs"
-VENV = REPO / "ironvenv"
+VENV = Path(os.environ.get("OFLM_VENV_DIR", str(REPO / "ironvenv")))
 REQS = REPO / "ironvenv-requirements.txt"
 EXPORT = REPO / "open_kernels" / "export_qwen36_kernels.py"
 
@@ -66,12 +66,14 @@ XRT_ROOT = Path("/opt/xilinx/xrt")
 XRT_BIN = XRT_ROOT / "bin"
 XRT_PY = XRT_ROOT / "python"
 
-# pyxrt is built for 3.11 by the installed XRT; pin the venv to match.
-PYTHON = "3.11"
+# Use the Python major.minor of the interpreter running this script.
+# The nix-amd-ai XRT currently ships pyxrt for 3.12, so the dev shell
+# and package build both use Python 3.12.
+PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def venv_python() -> Path:
-    return VENV / "bin" / "python"
+    return VENV / "bin" / "python3"
 
 
 def llvm_aie_bin() -> Path | None:
@@ -81,14 +83,29 @@ def llvm_aie_bin() -> Path | None:
 
 def ensure_venv() -> Path:
     py = venv_python()
-    if py.is_file():
+    # Nix builds provide a pre-assembled IRON venv with the correct wheels.
+    # Skip the network/pip-based setup when requested.
+    if os.environ.get("OFLM_SKIP_VENV_SETUP") == "1" and py.is_file():
         return py
+    if py.is_file():
+        # If the existing venv can import the IRON "aie" package, trust it
+        # (e.g. the Nix dev shell materialized it). Otherwise fall through and
+        # recreate it.
+        try:
+            subprocess.run([str(py), "-c", "import aie"], check=True, capture_output=True)
+            return py
+        except subprocess.CalledProcessError:
+            pass
     print("-- creating ironvenv (mlir-aie + Peano toolchain)", flush=True)
     if shutil.which("uv"):
         subprocess.run(["uv", "venv", "--python", PYTHON, str(VENV)], check=True)
         subprocess.run(["uv", "pip", "install", "--python", str(py), "-r", str(REQS)], check=True)
     else:
         subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
+        # Ensure the venv has a python3 symlink; the nix-provided venv only
+        # guarantees bin/python3, and export scripts below call python3.
+        if not (VENV / "bin" / "python3").exists() and (VENV / "bin" / "python").exists():
+            os.symlink("python", VENV / "bin" / "python3")
         subprocess.run([str(py), "-m", "pip", "install", "-r", str(REQS)], check=True)
     return py
 
@@ -108,13 +125,13 @@ def spec_list(names: str) -> list[Path]:
     return sorted(SPECS_DIR.glob("*.json"))
 
 
-def export_open_kernels(py: Path, specs: list[Path], force: bool) -> int:
+def export_open_kernels(py: Path, specs: list[Path], force: bool, jobs: int) -> int:
     """open_qwen36 + dense families (compile-only, no NPU). Returns 0 on success."""
     failed: list[str] = []
     for spec in specs:
         name = spec.stem
         print(f"-- export {name}", flush=True)
-        cmd = [str(py), str(EXPORT), "--spec", str(spec)]
+        cmd = [str(py), str(EXPORT), "--spec", str(spec), "--jobs", str(jobs)]
         if force:
             cmd.append("--force")
         if subprocess.run(cmd).returncode != 0:
@@ -155,8 +172,22 @@ def export_bert_sets(py: Path, force: bool) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--specs", default="", help="comma-separated open_kernels spec names (empty = all)")
+    ap.add_argument("--skip-specs", default="",
+                    help="comma-separated open_kernels spec names to skip (e.g. a recipe with a known gap)")
     ap.add_argument("--force", action="store_true", help="rebuild even when the build cache is current")
+    ap.add_argument("--skip-bert", action="store_true",
+                    help="skip open_npue BERT embedding sets (they need an NPU at build time)")
+    ap.add_argument("--bert-only", action="store_true",
+                    help="only build open_npue BERT embedding sets, skip open_kernels dense specs")
+    ap.add_argument("-j", "--jobs", type=int, default=max(1, os.cpu_count() // 2),
+                   help="parallel kernel-set builds within each spec (default: os.cpu_count()//2)")
     a = ap.parse_args()
+
+    if a.skip_bert and a.bert_only:
+        print("FATAL: --skip-bert and --bert-only are mutually exclusive", file=sys.stderr)
+        return 1
+
+    skip_set = {n.strip() for n in a.skip_specs.split(",") if n.strip()}
 
     py = ensure_venv()
 
@@ -191,19 +222,26 @@ def main() -> int:
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
     # ---- the two kernel families ---------------------------------------------
-    specs = spec_list(a.specs)
-    if not specs:
-        print("FATAL: no kernel specs found", file=sys.stderr)
-        return 1
+    n_failed = 0
+    if not a.bert_only:
+        specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
+        if not specs:
+            print("FATAL: no kernel specs found", file=sys.stderr)
+            return 1
+        n_failed += export_open_kernels(py, specs, a.force, a.jobs)
 
-    n_failed = export_open_kernels(py, specs, a.force)
-    n_failed += export_bert_sets(py, a.force)
+    if not a.skip_bert:
+        n_failed += export_bert_sets(py, a.force)
 
     print(flush=True)
     if n_failed:
         print(f"kernel export failed: {n_failed} item(s)", flush=True)
         return 1
-    print(f"kernel export ok: {len(specs)} open_kernels spec(s) + BERT design sets", flush=True)
+    if a.bert_only:
+        print("kernel export ok: BERT design sets", flush=True)
+    else:
+        suffix = " + BERT design sets" if not a.skip_bert else ""
+        print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 
 

@@ -16,7 +16,12 @@ from q4nx.model_assets import (
 
 
 def _is_hf_repo_id(path: str) -> bool:
-    """True if path looks like an 'org/name' HF repo id (not a local path, not a .gguf)."""
+    """True if path looks like an 'org/name' HF repo id.
+
+    Explicit '.gguf' URLs/paths are files, not repo ids, even when they contain
+    a slash. The converter supports repo ids and local files; resolving a repo
+    file like org/name/file.gguf as a repo id fails the file-existence check.
+    """
     if not path or path.endswith(".gguf") or os.path.exists(path):
         return False
     if path.startswith(("http://", "https://", "file:")):
@@ -35,6 +40,19 @@ def _is_hf_source(path: str) -> bool:
     return False
 
 
+def _parse_repo_file(path: str) -> tuple[str, str] | None:
+    """Parse 'org/name/filename.gguf' as (repo_id, filename) if it looks right."""
+    if not path or os.path.exists(path) or path.startswith(("http://", "https://", "file:")):
+        return None
+    if not path.lower().endswith(".gguf"):
+        return None
+    parts = path.split("/")
+    # org/name/file.gguf -> exactly 3 parts
+    if len(parts) == 3 and all(parts) and "\\" not in path:
+        return ("/".join(parts[:2]), parts[2])
+    return None
+
+
 def _parse_args(argv):
     import argparse
 
@@ -42,8 +60,9 @@ def _parse_args(argv):
         prog="q4nx-build",
         description=(
             "Convert GGUF or HF-safetensors model files to Q4NX format (output always named "
-            "model.q4nx). -i also accepts an HF repo id: a quantized GGUF is auto-selected in "
-            "family-preferred order."
+            "model.q4nx). -i accepts a local GGUF file, an HF repo id, or a repo file path "
+            "(org/name/file.gguf). For repo ids a quantized GGUF is auto-selected in "
+            "family-preferred order; use the org/name/file.gguf form to pick an exact tier."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -210,8 +229,18 @@ def main(argv=None) -> int:
             print(f"[INFO] Prompts: {ref['prompt_count']}, tokens: {ref['token_counts']}")
         return 0
 
+    # Allow "org/name/file.gguf" to select a specific repo file.
+    repo_file = _parse_repo_file(input_path)
+    if repo_file is not None:
+        input_path = repo_file[0]
+        selected_gguf = repo_file[1]
+        source_file = repo_file[1]
+    else:
+        selected_gguf = None
+        source_file = None
+
     # Local paths must exist; HF repo ids are resolved later by the converter.
-    if not _is_hf_repo_id(input_path) and not os.path.exists(input_path):
+    if repo_file is None and not _is_hf_repo_id(input_path) and not os.path.exists(input_path):
         sys.exit(f"Error: Input file does not exist: {input_path}")
 
     oflm_version = args.oflm_version or get_default_oflm_version()
@@ -257,20 +286,30 @@ def main(argv=None) -> int:
     # hint. The chosen GGUF is downloaded via the HF cache; if the repo has
     # none, we fall back to the HF-safetensors source path below.
     hf_input = None
-    source_file = None
-    selected_gguf = None
     if _is_hf_repo_id(input_path):
+        if selected_gguf is not None:
+            print(f"[INFO] Selected GGUF: {selected_gguf}")
         if args.dry_run:
-            selected_gguf = select_repo_gguf(input_path, args.force_model_type, family_hint)
+            if selected_gguf is None:
+                selected_gguf = select_repo_gguf(input_path, args.force_model_type, family_hint)
             if selected_gguf is None:
                 hf_input = input_path
         else:
-            found = find_repo_gguf(input_path, args.force_model_type, family_hint=family_hint)
-            if found is not None:
-                input_path, source_file = found
-                source_model = source_model or input_path
+            if selected_gguf is not None:
+                from q4nx.model_assets import _hf_download_file
+                local_path = _hf_download_file(input_path, selected_gguf)
+                if local_path is None:
+                    hf_input = input_path
+                else:
+                    input_path = local_path
+                    source_model = source_model or input_path
             else:
-                hf_input = input_path
+                found = find_repo_gguf(input_path, args.force_model_type, family_hint=family_hint)
+                if found is not None:
+                    input_path, source_file = found
+                    source_model = source_model or input_path
+                else:
+                    hf_input = input_path
     elif _is_hf_source(input_path):
         hf_input = input_path
 
