@@ -153,7 +153,11 @@ families (Qwen3.6-MoE, Qwen3.5/3 dense, Llama 3, Gemma 3, HunYuan, Granite) and 
   that part of the export runs on the device (the `open_kernels` families are
   compile-only).
 
-On Windows the engine builds, but the NPU kernel export is Linux-only (it requires the XRT/Peano toolchain and the NPU).
+On Windows the engine builds, and so do the NPU kernels, natively -- see
+[docs/BUILD.md](docs/BUILD.md#2-the-npu-kernels). Only the one-shot
+`utilities/export-kernels.py` driver (and the CMake target that calls it) is
+Linux-only. The language-model kernels are compile-only; the BERT embedding sets need
+an NPU on the build host.
 
 ### Build Instructions
 
