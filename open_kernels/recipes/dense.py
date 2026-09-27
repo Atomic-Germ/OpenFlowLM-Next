@@ -104,7 +104,7 @@ QKNORM_POST_ROPE = ("hunyuan",)
 # that - attention_bias covers its o_proj, and all three expert projections carry one - so
 # adding it here is not enough on its own; it needs a fourth consts slot (gptoss-bringup.md).
 QKV_BIAS_FAMILIES = ("qwen2",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2")
 
 
 def qkv_bias(spec: ModelSpec) -> bool:
@@ -192,7 +192,7 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError("qwen3: hidden and intermediate must be multiples of 256 (one q4 k-tile)")
     if spec.num_kv_heads % 2:
         raise OpRangeError("qwen3: an odd kv-head count does not split into ain elements")
-    require("ln", width=spec.hidden)
+    require("ln", width=spec.hidden, groups=spec.norm_groups)
     require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
             rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
             qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE, qkv_bias=qkv_bias(spec))
@@ -544,9 +544,17 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     n = cores_for(spec)
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
+    # ln's build dir carries the groups: a width/eps pair is shared by models of DIFFERENT
+    # group counts (Qwen3-4B and K2 are both 2560/1e-06), and the two kernel sets are not
+    # interchangeable -- without the suffix the second export would overwrite the first's
+    # xclbin. A grouped model also needs the env the design reads (ln.py's LN_GROUPS),
+    # for the same reason dx gets its groups from the spec through LN_FLAGS below.
+    gsfx = f"_g{spec.norm_groups}" if spec.norm_groups != 1 else ""
+    genv = {"LN_GROUPS": str(spec.norm_groups)} if spec.norm_groups != 1 else {}
     b = {
         "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}", "env": {}},
-        "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
+        "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}{gsfx}",
+               "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}", **genv}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
     }
@@ -601,6 +609,18 @@ def hf_config_check(spec: ModelSpec) -> dict:
          "intermediate_size": spec.intermediate}
     if spec.family in ("qwen3", "gemma3", "hunyuan", "granite", "phi3"):
         d["head_dim"] = spec.head_dim          # Llama configs may omit it (hidden / heads)
+    if spec.family == "k2":
+        # The three fields the kernels bake in that the shape fields above cannot express:
+        # head_dim (K2 configs carry it; a same-shaped container built for 128 must not
+        # load against an inferred 80), the RoPE base (the position table's frequencies
+        # are export-time data, exactly Phi-3's argument above) and the norm's group
+        # count (ln_xn / ln_nr compile different reductions per group). rope_theta is
+        # emitted as the NESTED rope_parameters K2 configs actually carry: check_model
+        # compares the whole sub-object, so a config that moves the base or the type
+        # refuses at load rather than running with the wrong table.
+        d["head_dim"] = spec.head_dim
+        d["rope_parameters"] = {"rope_theta": spec.rope_theta, "rope_type": "default"}
+        d["layernorm_num_groups"] = spec.norm_groups
     if spec.family == "phi3":
         # The rotation width is compiled into the attention core (ATTN_ROT), and the
         # position table's frequencies (rope_theta, longrope's factor lists, the attention

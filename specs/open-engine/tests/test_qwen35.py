@@ -372,7 +372,7 @@ def test_every_published_size_composes_and_a_neighbour_nobody_built_does_not(spe
     Q35.recipe(spec9)
     for name in ("9b", "4b", "2b", "0p8b"):
         Q35.recipe(ModelSpec.from_hf_config(cfg(name)))
-    with pytest.raises(OpRangeError, match=r"ln: width=5120 is outside"):
+    with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(5120, 1\) is outside"):
         Q35.recipe(dataclasses.replace(spec9, hidden=5120))
 
 

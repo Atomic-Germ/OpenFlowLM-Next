@@ -40,10 +40,13 @@ def test_a_never_run_combination_of_validated_values_is_refused():
 
 def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take_it():
     """3072 stopped being an example on 2026-09-06, when Llama 3.2 3B put it in the
-    `ln` and `gemv_q4` sets; 5120 is the nearest width nobody has built."""
+    `ln` and `gemv_q4` sets; 5120 is the nearest width nobody has built. The ln set
+    became (width, groups) combinations on 2026-09-27, when K2's GroupRMSNorm(2)
+    entered it at (2560, 2) -- E3, the physical NPU parity pass."""
     spec = dataclasses.replace(default_spec(), hidden=5120)
-    with pytest.raises(OpRangeError, match=r"ln: width=5120 is outside the validated set "
-                                          r"\{1024, 2048, 2560, 3072, 3840, 4096\}"):
+    with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(5120, 1\) is outside "
+                                          r"the validated combinations \{\(1024, 1\), \(2048, 1\), \(2560, 1\), "
+                                          r"\(2560, 2\), \(3072, 1\), \(3840, 1\), \(4096, 1\)\}"):
         Q.recipe(spec)
 
 

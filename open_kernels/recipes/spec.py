@@ -81,6 +81,12 @@ class ModelSpec:
     moe_intermediate: int = 0
     shared_expert_intermediate: int = 0   # 0 = no shared expert
     norm_eps: float = 1e-6
+    # K2's GroupRMSNorm: one RMS per contiguous hidden/`norm_groups` span (K2: 2 halves of
+    # 1280). 1 is every other family's single RMS over the whole width. NOT a family property:
+    # it is the norm's own arithmetic, so it lives on the spec like norm_eps -- but it serialises
+    # and hashes exactly as the pre-field specs did while it is 1 (to_dict below), the same way
+    # canonical_quant keeps a no-q8 model hashing as the bare string.
+    norm_groups: int = 1
     # the weight format: the string every role is at ("q4_1"), or a role -> format map
     # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
     quant: str | dict = DEFAULT_QUANT
@@ -221,6 +227,8 @@ class ModelSpec:
         d = asdict(self)
         d["layer_types"] = list(self.layer_types)
         d["quant"] = self.canonical_quant()
+        if d["norm_groups"] == 1:
+            del d["norm_groups"]   # what every shipped spec serialised before the field existed
         return d
 
     def to_json(self) -> str:
@@ -247,6 +255,8 @@ class ModelSpec:
                 raise SpecError(f"layer_types: unknown layer type {t!r}")
         if len(kw["layer_types"]) != kw["num_layers"]:
             raise SpecError(f"layer_types has {len(kw['layer_types'])} entries, num_layers is {kw['num_layers']}")
+        if kw.get("norm_groups", 1) not in (1, 2):
+            raise SpecError(f"norm_groups {kw['norm_groups']!r}: only 1 (a single RMS) or 2 (K2's halves) exist")
         return cls(**kw)
 
     @classmethod
@@ -924,6 +934,69 @@ def _llama3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     )
 
 
+def _k2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
+    """K2-Horizon (IFM/K2-Horizon-3.7B, model_type `k2_horizon`): a generic dense family
+    of its own, NOT a qwen2/qwen3 -- K2's RMSNorm normalises two contiguous 1280-wide
+    halves separately (`layernorm_num_groups: 2`, the field this builder is the only one
+    to set), its attention has no q/k norm, no gate and no bias, and the RoPE base rides
+    under `rope_parameters.rope_theta` rather than at the top level.
+
+    head_dim is read EXPLICITLY (config.json always carries it for K2): the fallback
+    hidden/heads would give 80 for the 3.7B and silently mis-shape every attention
+    element. `rope_head_dim`, when the config spells it, must agree with head_dim -- a
+    partial rotation would be a different kernel. Every field that would change the
+    kernels is refused, not defaulted, when the config disagrees: the family's
+    contract is exactly this shape and a config that says otherwise is not a K2
+    this kernel set serves.
+    """
+    n = _need(cfg, "num_hidden_layers")
+    heads = _need(cfg, "num_attention_heads")
+    hd = _need(cfg, "head_dim")
+    if cfg.get("rope_head_dim", hd) != hd:
+        raise SpecError(f"k2: rope_head_dim {cfg.get('rope_head_dim')} != head_dim {hd}: "
+                        "a partial rotation is a different kernel")
+    groups = _need(cfg, "layernorm_num_groups")
+    if groups not in (1, 2):
+        raise SpecError(f"k2: layernorm_num_groups {groups!r} is not 1 or 2")
+    rp = cfg.get("rope_parameters")
+    if not isinstance(rp, Mapping) or "rope_theta" not in rp:
+        raise SpecError("k2: rope_parameters.rope_theta is missing (K2 keeps the base there, "
+                        "not at the top level)")
+    if rp.get("rope_type", "default") != "default":
+        raise SpecError(f"k2: rope_type {rp.get('rope_type')!r} is not 'default' (no scaling)")
+    if cfg.get("query_key_norm"):
+        raise SpecError("k2: query_key_norm=true is a qwen3 property; K2's attention has no q/k norm")
+    if cfg.get("attention_gate_func") is not None:
+        raise SpecError(f"k2: attention_gate_func {cfg.get('attention_gate_func')!r} is not null")
+    if cfg.get("attention_bias"):
+        raise SpecError("k2: attention_bias=true is a qwen2 property; K2's projections carry none")
+    if cfg.get("use_sliding_window") or cfg.get("sliding_window"):
+        raise SpecError("k2: a sliding window is a gemma3 property; K2 attends to everything")
+    if cfg.get("hidden_act", "silu") != "silu":
+        raise SpecError(f"k2: hidden_act {cfg.get('hidden_act')!r} is not 'silu'")
+    vocab = _need(cfg, "vocab_size")
+    return ModelSpec(
+        family="k2",
+        hidden=_need(cfg, "hidden_size"),
+        num_layers=n,
+        layer_types=tuple([DENSE] * n),
+        vocab=vocab,
+        real_vocab=real_vocab if real_vocab is not None else vocab,
+        num_heads=heads,
+        num_kv_heads=_need(cfg, "num_key_value_heads"),
+        head_dim=hd,
+        rotary_dim=hd,
+        rope_theta=float(rp["rope_theta"]),
+        qk_norm=False,
+        attn_gate=False,
+        intermediate=_need(cfg, "intermediate_size"),
+        norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+        norm_groups=groups,
+        quant=DEFAULT_QUANT,
+        extra={"model_type": cfg["model_type"], "source": "hf_config"},
+    )
+
+
 def _ntk_alpha_base(base: float, alpha: float, head_dim: int) -> float:
     """HunYuan's NTK-aware alpha scaling, applied once at load: the RoPE base is stretched
     to `base * alpha^(d/(d-2))` and the frequencies are otherwise the plain ones. Same
@@ -1386,7 +1459,7 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
                "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
-               "gpt_oss": _gptoss_hf}
+               "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,
                  "gemma3": _gemma3_gguf, "hunyuan-dense": _hunyuan_gguf, "granite": _granite_gguf}
 _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_hf: "qwen35",
@@ -1396,7 +1469,7 @@ _FAMILY_OF = {_qwen36moe_hf: "qwen36moe", _qwen36moe_gguf: "qwen36moe", _qwen35_
               _llama3_hf: "llama3", _llama3_gguf: "llama3", _gemma3_hf: "gemma3", _gemma3_gguf: "gemma3",
               _hunyuan_hf: "hunyuan", _hunyuan_gguf: "hunyuan",
               _granite_hf: "granite", _granite_gguf: "granite", _phi3_hf: "phi3",
-              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss"}
+              _lfm2_hf: "lfm2", _gptoss_hf: "gptoss", _k2_hf: "k2"}
 
 
 def hf_model_types(family: str) -> list[str]:
@@ -1433,7 +1506,7 @@ ROLE_TENSORS: dict[str, dict[str, str]] = {
 ROLE_TENSORS["lfm2"] = {**_ATTN_HF, **_FFN_HF,
                         "shortconv.in_proj.weight": "linear",
                         "shortconv.out_proj.weight": "linear_out"}
-for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2"):
+for _f in ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2"):
     ROLE_TENSORS[_f] = {**_ATTN_HF, **_FFN_HF}
 # GPT-OSS's routed experts, under the names q4nx-build writes them
 # (utilities/q4nx-build/configs/gpt-oss.json). No shared expert and no dense FFN.
