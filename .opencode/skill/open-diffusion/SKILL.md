@@ -16,6 +16,10 @@ Sources:
   pixel-identical to generate.py). `q4nx-build --open-diffusion` runs it.
 - `src/open_diffusion/`: the engine; `prompt.cpp` (main build) templates and tokenizes;
   `src/src/image_command.hpp` is `oflm image`; `cli.cpp` is the standalone gate.
+- Serving: `/v1/images/generations` and `/v1/images/edits` (501) in
+  `src/server/rest_handler.cpp`; the request rules are `openai_compat::images_request()`.
+  Spec: `specs/server-api/spec.md` SERVER-IMAGES-*; tests
+  `specs/server-api/tests/test_images_api.py` (needs `oflm serve <chat model>`).
 - The kernels have their own skills: `dit-gemm`, `dit-fa`, `dit-ew`, `dit-conv`.
 - Spec: `specs/open-diffusion/spec.md`. Design: `.claude/plans/image-diffusion-phase6-engine.md`.
 
@@ -108,6 +112,23 @@ images.
    A 12-core job made attention 42.7 ms against its quiet 30.5 ms.
    - Check `Get-Process` before quoting a number.
    - Keep `xrt-smi` in turbo.
+
+## Serving (what was learned)
+
+- **Swap by default, `--image 1` to keep both.** An image request resets `auto_chat_engine`
+  but keeps `current_model_tag`, so an omitted or same-named chat model reloads through
+  `ensure_model_loaded`'s NeedsLoad path. `release_image_engine_for_chat()` is the other
+  direction. llama3.2:1b plus the image engine fit the NPU together; with `--asr`/`--embed`
+  too is not measured.
+- **The engine takes the server's `xrt::device`** (`Engine(model, kernels, &npu_device_inst)`).
+- **`XT` is overwritten by the text encoder** (the residual stream), so `set_tokens` runs
+  before every image, not once per request.
+- **Step counts:** the engine derives each arg's per-step stride from step 0 vs step 1 of
+  the schedule (only `MOD` and `DT` move) and grows `DT` to fit 50 steps. For the bundle's
+  count it writes the bundle's own `tf_/dt_` bytes: `schedule.hpp`'s features are within
+  2^-8, not equal, because numpy's float32 `exp` is not correctly rounded.
+- `open_diffusion_schedule` CTest holds `schedule.hpp` to the bundle; `openai_compat` holds
+  `images_request()`.
 
 ## Adding a resolution
 

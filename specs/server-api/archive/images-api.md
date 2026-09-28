@@ -1,10 +1,20 @@
 # Plan: the OpenAI Images API over the NPU diffusion engine
 
-Status: **decisions taken 2026-09-27; not implemented.** This is the second of two PRs.
-It starts after the first lands: the engine in the main build, packaged as a model and
-runnable as `oflm image` (`specs/open-diffusion/plans/cli.md`). The native engine makes
-FLUX.2 [klein] 4B images fully on the NPU in 5.1 s at 512² and 13.4 s at 1024² (warm, quiet
-machine; OPEN-DIFFUSION-PERF).
+Status: **implemented 2026-09-28; merged into `specs/server-api/spec.md` as SERVER-IMAGES-*.**
+It is the second of two PRs, on top of the CLI PR (`specs/open-diffusion/archive/cli.md`).
+
+What landed differs from the text below in these ways:
+- **The step count** needed a new engine requirement, OPEN-DIFFUSION-STEPS (the step template
+  moved on by its derived strides; sigmas from `src/open_diffusion/schedule.hpp`). For the
+  bundle's own count the engine uses the bundle's TF/DT bytes, so the default image is
+  byte-identical to the CLI PR's.
+- **`/v1/models` lists the image model.** OPEN-DIFFUSION-CLI said it did not; that clause moved
+  here.
+- **Additions:** each `data` item carries its `seed`; `seed: -1` is random (A1111);
+  `output_compression` sets the JPEG quality; `response_format: "url"` is refused; an omitted
+  `model` is `--imagemodel`'s; `--image 1` allocates both resolutions at startup.
+- **Measured (the "to measure first" item):** `--image 1` with llama3.2:1b fits the NPU; with
+  `--asr` and `--embed` as well it is not measured.
 
 ## The API (the user's decision, 2026-09-27)
 

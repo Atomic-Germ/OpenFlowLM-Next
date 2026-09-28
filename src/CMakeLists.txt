@@ -1476,6 +1476,17 @@ if(NOT OFLM_USE_HRX)
     add_test(NAME open_diffusion_tokens
              COMMAND open_diffusion_tokens_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
+
+    # OPEN-DIFFUSION-STEPS: schedule.hpp's sigmas / timestep features / dts against the
+    # installed model's own tf_<R>.bin and dt_<R>.bin. Header-only; no device, no XRT.
+    add_executable(open_diffusion_schedule_test open_diffusion/schedule_test.cpp)
+    target_include_directories(open_diffusion_schedule_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion")
+    if(MSVC)
+        target_compile_options(open_diffusion_schedule_test PRIVATE /EHsc /Zc:__cplusplus)
+        target_compile_definitions(open_diffusion_schedule_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME open_diffusion_schedule COMMAND open_diffusion_schedule_test)
 endif()
 
 # ————————————————————————————————————————————————————————————

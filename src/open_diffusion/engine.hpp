@@ -2,10 +2,16 @@
 //
 // The engine replays a bundle (utilities/dit-chain/export_bundle.py): the schedule
 // open_kernels/klein_pipeline.py plans -- text encoder, conditioning, 4 denoising steps,
-// VAE; 1050 dispatches over six kernel sets -- as XRT runs built once at load. Per image
-// the host only writes the prompt's 512 embedding rows and the noise, patches te_attn's
-// valid_len, and reads the RGBA back. Runs on one hardware context are queued back to
-// back; before the next kernel set the host blocks on the last one (XRT's wait sleeps).
+// VAE; 1050 dispatches over six kernel sets -- as XRT runs built once. Per image the host
+// only writes the prompt's 512 embedding rows and the noise, patches te_attn's valid_len,
+// and reads the RGBA back. Runs on one hardware context are queued back to back; before
+// the next kernel set the host blocks on the last one (XRT's wait sleeps).
+//
+// One engine serves every resolution the bundle has. The weights and the kernel sets are
+// loaded once; a resolution's activations (1.4 GiB at 512, 4.6 GiB at 1024) are allocated
+// the first time it is selected and kept. The step count is free up to kMaxSteps: a step
+// is the bundle's step template with its modulation and dt views moved on, and a count
+// other than the bundle's gets its sigmas from schedule.hpp.
 //
 // Two directories: the model (q4nx-build --open-diffusion: bundle.json, the schedules,
 // weights.bin, the embedding table) and a kernel set (export_dit_kernels.py --install:
@@ -23,6 +29,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+namespace xrt { class device; }
 
 namespace open_diffusion {
 
@@ -46,20 +54,34 @@ std::string find_kernels(const std::string& model_dir, const std::string& env_di
 
 class Engine {
 public:
+    static constexpr int kMaxSteps = 50;
+
     // model_dir: q4nx-build --open-diffusion's output; kernels_dir: an installed kernel
-    // set (find_kernels); size: a resolution the model has.
+    // set (find_kernels). dev: the device to open the kernel sets on (the server's, so its
+    // engines share one handle); null opens device 0. Nothing is selected yet.
+    Engine(const std::string& model_dir, const std::string& kernels_dir, const xrt::device* dev = nullptr);
+    // The same, then select(size).
     Engine(const std::string& model_dir, const std::string& kernels_dir, int size);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
-    int size() const;
+    std::vector<int> sizes() const;          // the bundle's resolutions, ascending
+    int default_steps() const;               // the bundle's step count (4)
+    // Make size x size at `steps` denoising steps (0: default_steps()) the current image.
+    // The first selection of a size allocates its activations; an unknown size or a step
+    // count outside 1..kMaxSteps throws, naming what is supported.
+    void select(int size, int steps = 0);
+
+    int size() const;               // the current selection's; 0 before select()
+    int steps() const;
     int image_tokens() const;       // (size / 16)^2
     int latent_channels() const;    // 128
     int max_tokens() const;         // 512
     int pad_id() const;
     const std::string& prompt_template() const;   // "{prompt}" marks the user text
 
+    // For the current selection:
     // ids: the chat-templated prompt's tokens, unpadded, 1..max_tokens(); padded here.
     void set_tokens(const std::vector<int64_t>& ids);
     // The initial latents, packed [image_tokens, 128] bf16 bits.

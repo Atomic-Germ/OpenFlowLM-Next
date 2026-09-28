@@ -54,6 +54,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --cors 0" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --asr 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --image 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
     std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
@@ -92,6 +93,12 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("embeddingmodel", po::value<std::string>(&parsed_args.embedding_model)->default_value(""),
              "Which embedding model to serve with --embed 1 "
              "(default: embed-gemma:300m)")
+            ("image", po::value<bool>(&parsed_args.image_resident)->default_value(0),
+             "Load the image engine at startup and keep it beside the chat model "
+             "(for serve command; default: an image request swaps them)")
+            ("imagemodel", po::value<std::string>(&parsed_args.image_model)->default_value(""),
+             "The image model a request naming none gets, and --image 1 loads "
+             "(for serve command; default: flux2-klein:4b)")
             ("host", po::value<std::string>(&parsed_args.host)->default_value("127.0.0.1"), 
              "Set the server address (for serve command)")
             ("port,p", po::value<int>(&parsed_args.port)->default_value(-1), 
@@ -265,6 +272,12 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             {
                 std::cerr << "Error: The cors option is only supported with the serve command! " << std::endl;
                 return false;
+            }
+            for (const char* opt : {"image", "imagemodel"}) {
+                if (!vm[opt].defaulted()) {
+                    std::cerr << "Error: --" << opt << " is only supported with the serve command!" << std::endl;
+                    return false;
+                }
             }
             // `host` belongs with them: it is documented "(for serve command)"
             // and read in exactly one place, create_lm_server(). It was accepted

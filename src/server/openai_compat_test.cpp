@@ -551,6 +551,122 @@ static void test_require_field() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// images_request (SERVER-IMAGES-PARAMS, SERVER-IMAGES-SIZE): one field under two
+// names must never mean two things, and a refused control must say which it was.
+// ---------------------------------------------------------------------------
+static void test_images_request() {
+    std::printf("\n-- images_request --\n");
+    using openai_compat::ImagesRequest;
+    using openai_compat::json;
+    const std::vector<int> sizes = {512, 1024};
+    ImagesRequest r;
+    auto run = [&](const json& req) { return openai_compat::images_request(req, sizes, 1024, r); };
+    auto param_of = [](const json& e) { return e["error"]["param"].get<std::string>(); };
+    auto refused = [&](const json& req, const std::string& param, const std::string& what) {
+        const json e = run(req);
+        ok(!e.is_null() && openai_compat::status_for(e) == 400 && param_of(e) == param,
+           what + " -> 400 naming " + param + (e.is_null() ? "  (accepted)" : "  (got " + e.dump() + ")"));
+        return e;
+    };
+    const json base = {{"prompt", "a fox"}};
+    auto with = [&](json extra) { json j = base; for (auto& [k, v] : extra.items()) j[k] = v; return j; };
+
+    // defaults
+    ok(run(base).is_null(), "a prompt alone is accepted");
+    eq(r.prompt, "a fox", "the prompt is carried");
+    eqi(r.n, 1, "n defaults to 1");
+    eqi(r.size, 1024, "an omitted size is the auto size");
+    eq(r.output_format, "png", "output_format defaults to png");
+    ok(!r.seeded, "no seed: the handler picks one");
+    eqi(r.steps, 0, "no steps: the model's own count");
+    ok(r.ignored.empty(), "nothing ignored");
+
+    refused(json::object(), "prompt", "no prompt");
+    refused(json{{"prompt", 5}}, "prompt", "a numeric prompt");
+
+    // n
+    ok(run(with({{"n", 3}})).is_null() && r.n == 3, "n 3 is accepted");
+    refused(with({{"n", 0}}), "n", "n 0");
+    refused(with({{"n", 11}}), "n", "n 11");
+    refused(with({{"n", 2.0}}), "n", "n 2.0 (a float)");
+    refused(with({{"n", "2"}}), "n", "n \"2\" (a string)");
+
+    // size
+    ok(run(with({{"size", "512x512"}})).is_null() && r.size == 512, "512x512 is accepted");
+    ok(run(with({{"size", "auto"}})).is_null() && r.size == 1024, "auto is 1024x1024");
+    ok(run(with({{"size", nullptr}})).is_null() && r.size == 1024, "size null is omitted");
+    const json odd = refused(with({{"size", "1024x512"}}), "size", "a non-square size");
+    ok(odd["error"]["message"].get<std::string>().find("512x512, 1024x1024") != std::string::npos,
+       "the size refusal names the supported sizes");
+    refused(with({{"size", "768x768"}}), "size", "a square size the model lacks");
+    refused(with({{"size", "big"}}), "size", "a size that is not WxH");
+    refused(with({{"size", "1024"}}), "size", "a size with no x");
+    refused(with({{"size", 1024}}), "size", "a numeric size");
+
+    // output
+    ok(run(with({{"output_format", "jpeg"}, {"output_compression", 70}})).is_null() &&
+           r.output_format == "jpeg" && r.jpeg_quality == 70, "jpeg with output_compression 70");
+    const json webp = refused(with({{"output_format", "webp"}}), "output_format", "webp");
+    eq(webp["error"]["code"].get<std::string>(), "not_implemented", "webp is named as not implemented");
+    refused(with({{"output_format", "gif"}}), "output_format", "gif");
+    refused(with({{"output_compression", 101}}), "output_compression", "output_compression 101");
+    ok(run(with({{"response_format", "b64_json"}})).is_null(), "response_format b64_json is accepted");
+    refused(with({{"response_format", "url"}}), "response_format", "response_format url");
+    ok(run(with({{"stream", false}, {"partial_images", 0}})).is_null(), "stream false, partial_images 0");
+    refused(with({{"stream", true}}), "stream", "stream true");
+    refused(with({{"partial_images", 2}}), "partial_images", "partial_images 2");
+
+    // seed
+    ok(run(with({{"seed", 7}})).is_null() && r.seeded && r.seed == 7, "seed 7");
+    ok(run(with({{"seed", 18446744073709551615ull}})).is_null() && r.seeded &&
+           r.seed == 18446744073709551615ull, "seed 2^64-1");
+    ok(run(with({{"seed", -1}})).is_null() && !r.seeded, "seed -1 is A1111's random");
+    refused(with({{"seed", -2}}), "seed", "seed -2");
+    refused(with({{"seed", 1.5}}), "seed", "seed 1.5");
+
+    // the alias pairs are one field
+    ok(run(with({{"steps", 8}})).is_null() && r.steps == 8, "steps 8");
+    ok(run(with({{"num_inference_steps", 8}})).is_null() && r.steps == 8, "num_inference_steps 8");
+    ok(run(with({{"steps", 8}, {"num_inference_steps", 8}})).is_null() && r.steps == 8,
+       "both step spellings, agreeing");
+    refused(with({{"steps", 8}, {"num_inference_steps", 4}}), "num_inference_steps",
+            "both step spellings, disagreeing");
+    refused(with({{"steps", 0}}), "steps", "steps 0");
+    refused(with({{"num_inference_steps", 51}}), "num_inference_steps", "num_inference_steps 51");
+
+    ok(run(with({{"cfg_scale", 7}, {"negative_prompt", ""}})).is_null(),
+       "A1111's cfg_scale 7 and negative_prompt \"\" are accepted");
+    ok(r.ignored == std::vector<std::string>{"cfg_scale", "negative_prompt"}, "...and listed as ignored");
+    ok(run(with({{"guidance_scale", 3.5}})).is_null() && r.ignored.size() == 1, "guidance_scale 3.5 is ignored");
+    ok(run(with({{"cfg_scale", 4}, {"guidance_scale", 4.0}})).is_null(), "cfg_scale 4 and guidance_scale 4.0 agree");
+    refused(with({{"cfg_scale", 7}, {"guidance_scale", 1}}), "guidance_scale", "cfg_scale and guidance_scale disagreeing");
+    refused(with({{"cfg_scale", "7"}}), "cfg_scale", "a string cfg_scale");
+    refused(with({{"negative_prompt", 0}}), "negative_prompt", "a numeric negative_prompt");
+
+    for (const char* s : {"euler", "Euler", "Euler a", "flowmatch_euler"})
+        ok(run(with({{"sampler", s}})).is_null(), std::string("sampler ") + s + " is flow-match Euler");
+    ok(run(with({{"sampler_name", "Euler a"}})).is_null(), "sampler_name Euler a");
+    const json dpm = refused(with({{"sampler_name", "DPM++ 2M Karras"}}), "sampler_name", "a DPM sampler");
+    ok(dpm["error"]["message"].get<std::string>().find("Euler a") != std::string::npos,
+       "the sampler refusal lists the accepted names");
+    refused(with({{"sampler", "euler"}, {"sampler_name", "Euler"}}), "sampler_name",
+            "sampler and sampler_name disagreeing");
+
+    ok(run(with({{"quality", "high"}, {"style", "vivid"}, {"user", "x"}})).is_null() && r.ignored.empty(),
+       "unknown extras are ignored silently");
+
+    // the multipart form's strings
+    const json form = openai_compat::images_form_json(
+        {{"prompt", "a fox"}, {"n", "2"}, {"seed", "-1"}, {"cfg_scale", "7.5"}, {"stream", "false"},
+         {"steps", "2.5"}, {"size", "512x512"}});
+    ok(form["n"] == json(2) && form["seed"] == json(-1) && form["cfg_scale"] == json(7.5) &&
+           form["stream"] == json(false) && form["size"] == json("512x512"),
+       "form fields convert to the types images_request reads");
+    ok(form["steps"].is_string(), "a non-integer form steps stays a string (refused as the wrong type)");
+    refused(form, "steps", "the form's steps 2.5");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -567,6 +683,7 @@ int main(int argc, char** argv) {
     test_task_policy();
     test_stream_errors();
     test_require_field();
+    test_images_request();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);
