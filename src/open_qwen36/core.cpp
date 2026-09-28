@@ -328,15 +328,23 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // Stage 2.7 Gate A: the runtime decode route selector. The env above only
     // picks the INITIAL route (compat/debug); set_decode_route() overrides it
     // at any moment, which is what the one-process mid-stream switch needs.
-    // Auto's threshold is a MEASURED constant from the 2.6 crossover brackets
-    // (mid-bracket, not a fit): 896 for default threading, 640 at <= 4 OMP
-    // threads; OFLM_DECODE_AUTO_THRESHOLD overrides it for experimentation.
+    // Stage 2.10 P6: with k2 promoted into FAST_ATTENTION (the stage 2.9
+    // measurement: decode slope 1.488 -> 0.0251 ms/position-token, 59.2x), the
+    // fast NPU route wins at every measured window -- 65 ms at position 512
+    // against the ~1073 ms host floor, 463.7 ms at 16382 against the host
+    // curve's ~3.2 s and the slow path's ~24.5 s -- so Auto is NPU-first
+    // throughout the validated 0-16383 window and the 2.6 crossover thresholds
+    // (896 default / 640 at <= 4 OMP threads) are dead. Host stays the explicit
+    // oracle/fallback route; windows beyond 16K need a re-derived crossover
+    // after 32K/64K measurements. OFLM_DECODE_AUTO_THRESHOLD still forces the
+    // old position split for experiments.
     decode_route_ = host_attn_decode_on_ ? DecodeRoute::Host : DecodeRoute::Npu;
-    decode_auto_threshold_ = omp_get_max_threads() <= 4 ? 640 : 896;
+    decode_auto_threshold_ = std::numeric_limits<size_t>::max();
     if (const char* env = std::getenv("OFLM_DECODE_AUTO_THRESHOLD"))
         decode_auto_threshold_ = static_cast<size_t>(std::strtoull(env, nullptr, 10));
-    log("decode route selector: runtime (npu|host|auto; initial " + decode_route_at(0) + ", auto threshold " +
-        std::to_string(decode_auto_threshold_) + " tokens [measured 2.6 mid-bracket])");
+    log("decode route selector: runtime (npu|host|auto; initial " + decode_route_at(0) +
+        ", auto npu-first [fast attention promoted, stage 2.10;"
+        " OFLM_DECODE_AUTO_THRESHOLD forces a position split])");
     moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     route_check_ = std::getenv("OFLM_ROUTE_CHECK") != nullptr;
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
@@ -1877,10 +1885,10 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
 // Stage 2.7 Gate A: the runtime decode route selector. The 2.6 env remains as
 // the constructor-time default; set_decode_route() overrides it at any moment
 // -- including between steps of one process, which is the mid-stream switch
-// this stage exists to test. Auto resolves per position against a MEASURED
-// threshold (the 2.6 crossover brackets' midpoint, never a fit), so the
-// policy's every choice is traceable to a bracket that was measured on both
-// sides.
+// this stage exists to test. Since the stage 2.10 promotion Auto is NPU-first
+// (the fast attention path wins at every measured window; see the constructor
+// comment), and OFLM_DECODE_AUTO_THRESHOLD is the experimental escape hatch
+// that forces the old position split.
 // ============================================================================
 
 void Core::set_decode_route(const std::string& route) {
@@ -1897,7 +1905,7 @@ std::string Core::decode_route_at(size_t pos) const {
     switch (decode_route_) {
         case DecodeRoute::Host: return "host";
         case DecodeRoute::Npu: return "npu";
-        case DecodeRoute::Auto: return pos >= decode_auto_threshold_ ? "host" : "npu";
+        case DecodeRoute::Auto: return pos < decode_auto_threshold_ ? "npu" : "host";
     }
     return "npu";
 }

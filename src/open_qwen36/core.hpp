@@ -131,8 +131,9 @@ public:
     /// Stage 2.7 Gate A: the runtime decode route selector -- "npu" / "host" /
     /// "auto" (throws on anything else). Overrides the constructor env default
     /// at any moment, including between steps of one process (the mid-stream
-    /// switch). decode_route_at(pos) resolves Auto against the measured 2.6
-    /// threshold and is what the step lines log.
+    /// switch). Since the stage 2.10 promotion Auto is NPU-first (the fast
+    /// attention path wins at every measured window; OFLM_DECODE_AUTO_THRESHOLD
+    /// forces the old position split) and is what the step lines log.
     void set_decode_route(const std::string& route);
     std::string decode_route_at(size_t pos) const;
     /// One step whose input is a hidden vector instead of a token -- an image token's

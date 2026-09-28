@@ -376,7 +376,12 @@ int main(int argc, char** argv) {
         Core core(a.cfg);
         core.load_weights();
         // Stage 2.7: the runtime decode route (env only set the initial one).
+        // Stage 2.10 P6: auto is the default when nothing named a route --
+        // NPU-first since the fast attention promotion -- but the 2.6 env's
+        // initial host route still wins for the compat/debug path, so nothing
+        // switches silently under an env user.
         if (!a.decode_route.empty()) core.set_decode_route(a.decode_route);
+        else if (!std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) core.set_decode_route("auto");
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {
