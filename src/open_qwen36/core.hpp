@@ -128,6 +128,13 @@ public:
     /// One decode step for `token` at the current position. Logits (f32,
     /// vocab) are computed only when asked for; read them with logits().
     void step(int token, bool want_logits);
+    /// Stage 2.7 Gate A: the runtime decode route selector -- "npu" / "host" /
+    /// "auto" (throws on anything else). Overrides the constructor env default
+    /// at any moment, including between steps of one process (the mid-stream
+    /// switch). decode_route_at(pos) resolves Auto against the measured 2.6
+    /// threshold and is what the step lines log.
+    void set_decode_route(const std::string& route);
+    std::string decode_route_at(size_t pos) const;
     /// One step whose input is a hidden vector instead of a token -- an image token's
     /// embedding from the vision tower -- at the M-RoPE position `mpos` = (t, h, w). The
     /// (t, h, w) counter is not advanced; the caller does that per image (mrope_advance).
@@ -430,6 +437,18 @@ private:
     /// its own selector (host_attn_on_ / OFLM_OPEN_HOST_ATTN), so the two
     /// routings stay independently switchable in one binary.
     bool host_attn_decode_on_ = false;
+    /// Stage 2.7 Gate A: the RUNTIME decode route selector. The 2.6 env stays
+    /// as the constructor-time default (compat/debug: env on -> initial route
+    /// Host); set_decode_route() overrides it any time -- including between
+    /// steps of one process, which is the mid-stream switch Stage 2.7 tests.
+    /// Auto resolves per step against the measured 2.6 crossover brackets:
+    /// threshold 896 (mid-bracket of the measured (768,1024) host-win bracket
+    /// at default threading; 640 for <=4 OMP threads, mid-bracket of the
+    /// measured (512,768)). A measured constant, not a fit; overridable via
+    /// OFLM_DECODE_AUTO_THRESHOLD for experimentation.
+    enum class DecodeRoute { Npu, Host, Auto };
+    DecodeRoute decode_route_ = DecodeRoute::Npu;
+    size_t decode_auto_threshold_ = 0;
     /// Set only while step_host_decode drives its per-layer chain, so
     /// step_gemm_block_layer takes the host-attention branch for the decode
     /// route without the prefill env having to be on.
@@ -537,6 +556,8 @@ private:
     /// steps exactly as the NPU route's does, and the KV rows are the same
     /// bf16 cache rows, so the routes can switch mid-stream either direction.
     void step_host_decode(int token, const float* x, bool want_logits);
+    /// The route a step at the current position takes (internal convenience).
+    inline bool decode_step_is_host() const { return decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_)) == "host"; }
     /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
     void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
     /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the

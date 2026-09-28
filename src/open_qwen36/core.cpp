@@ -325,6 +325,18 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (host_attn_decode_on_)
         log("decode route: HOST (OFLM_OPEN_HOST_ATTN_DECODE=1; the 2.5 gemm-block chain at T=1 "
             "with host attention; the NPU GEMMs run padded at the kernel set's compiled T)");
+    // Stage 2.7 Gate A: the runtime decode route selector. The env above only
+    // picks the INITIAL route (compat/debug); set_decode_route() overrides it
+    // at any moment, which is what the one-process mid-stream switch needs.
+    // Auto's threshold is a MEASURED constant from the 2.6 crossover brackets
+    // (mid-bracket, not a fit): 896 for default threading, 640 at <= 4 OMP
+    // threads; OFLM_DECODE_AUTO_THRESHOLD overrides it for experimentation.
+    decode_route_ = host_attn_decode_on_ ? DecodeRoute::Host : DecodeRoute::Npu;
+    decode_auto_threshold_ = omp_get_max_threads() <= 4 ? 640 : 896;
+    if (const char* env = std::getenv("OFLM_DECODE_AUTO_THRESHOLD"))
+        decode_auto_threshold_ = static_cast<size_t>(std::strtoull(env, nullptr, 10));
+    log("decode route selector: runtime (npu|host|auto; initial " + decode_route_at(0) + ", auto threshold " +
+        std::to_string(decode_auto_threshold_) + " tokens [measured 2.6 mid-bracket])");
     moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     route_check_ = std::getenv("OFLM_ROUTE_CHECK") != nullptr;
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
@@ -1417,7 +1429,7 @@ void Core::bench_step(int reps, int token) {
     // Stage 2.6: the host decode route has no dispatch pipeline to schedule -- the
     // submit-ahead levels are the NPU route's own knob -- so its bench is serial-only
     // rather than paying two meaningless rows per rep.
-    const int nlev = host_attn_decode_on_ ? 1 : (configured >= 2 ? 3 : 2);
+    const int nlev = (decode_route_at(static_cast<size_t>(p0 < 0 ? 0 : p0)) == "host") ? 1 : (configured >= 2 ? 3 : 2);
     const int levels[3] = {0, 1, 2};
     std::vector<double> wall[3], disp[3];
     double embed[3] = {0, 0, 0}, patch[3] = {0, 0, 0}, route[3] = {0, 0, 0}, lm[3] = {0, 0, 0};
@@ -1655,14 +1667,15 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
                                  std::to_string(cfg_.max_ctx));
     if (!x && (token < 0 || static_cast<size_t>(token) >= man_.vocab)) throw std::runtime_error("open_qwen36: token id out of range");
-    // ---- Stage 2.6 Gate B: the host decode route (OFLM_OPEN_HOST_ATTN_DECODE=1).
-    // The whole step runs as the 2.5 gemm-block chain at T=1 with host attention;
-    // the fused per-layer dx dispatches (the walk below) are never issued. The
-    // NPU route itself is untouched -- with the env off this branch is dead code,
-    // which is what makes the A/B one binary with one flag.
-    if (host_attn_decode_on_) {
+    // ---- Stage 2.6 Gate B / Stage 2.7 Gate A: the decode route. Runtime-
+    // selectable (npu / host / auto against the measured threshold); the
+    // whole step runs as the 2.5 gemm-block chain at T=1 with host attention,
+    // or as the fused per-layer dx dispatch walk below. The NPU route itself
+    // is untouched -- route npu with the env off is the byte-anchored 2.2/2.3
+    // path, which is what makes every A/B one binary with one switch.
+    if (decode_step_is_host()) {
         if (deepstack || mpos || mrope_on_)
-            throw std::runtime_error("open_qwen36: host decode route (OFLM_OPEN_HOST_ATTN_DECODE=1) does not "
+            throw std::runtime_error("open_qwen36: host decode route does not "
                                      "implement this step's deepstack/mrope inputs (refusing rather than "
                                      "silently falling back to the NPU route)");
         step_host_decode(token, x, want_logits);
@@ -1858,6 +1871,35 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         trace_embed_ms_ += timing_.embed_ms;
         trace_lm_ms_ += timing_.lmhead_ms;
     }
+}
+
+// ============================================================================
+// Stage 2.7 Gate A: the runtime decode route selector. The 2.6 env remains as
+// the constructor-time default; set_decode_route() overrides it at any moment
+// -- including between steps of one process, which is the mid-stream switch
+// this stage exists to test. Auto resolves per position against a MEASURED
+// threshold (the 2.6 crossover brackets' midpoint, never a fit), so the
+// policy's every choice is traceable to a bracket that was measured on both
+// sides.
+// ============================================================================
+
+void Core::set_decode_route(const std::string& route) {
+    const std::string prev = decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_));
+    if (route == "npu") decode_route_ = DecodeRoute::Npu;
+    else if (route == "host") decode_route_ = DecodeRoute::Host;
+    else if (route == "auto") decode_route_ = DecodeRoute::Auto;
+    else throw std::runtime_error("open_qwen36: set_decode_route: unknown route '" + route + "' (npu | host | auto)");
+    const std::string now = decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_));
+    if (now != prev) log("decode route: " + now + " (runtime switch at position " + std::to_string(pos_) + ")");
+}
+
+std::string Core::decode_route_at(size_t pos) const {
+    switch (decode_route_) {
+        case DecodeRoute::Host: return "host";
+        case DecodeRoute::Npu: return "npu";
+        case DecodeRoute::Auto: return pos >= decode_auto_threshold_ ? "host" : "npu";
+    }
+    return "npu";
 }
 
 // ============================================================================

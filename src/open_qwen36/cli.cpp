@@ -106,6 +106,8 @@ struct Args {
     int bench_step = 0;             // --bench-step N: the REAL step, min of N, at --at-position
     std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
+    std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
+    std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -194,6 +196,8 @@ Args parse(int argc, char** argv) {
         // dispatch, so this makes the gap reproducible without the server.
         else if (k == "--gap-ms") a.gap_ms = std::atoi(val().c_str());
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
+        else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
+        else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -296,18 +300,50 @@ std::vector<int> request(Core& core, const Args& a) {
     auto t1 = clock::now();
     core.take_dispatch_stats();   // prefill's dispatches are not this loop's
     int tok = argmax(core.logits(), core.real_vocab());
+    // Stage 2.7 Gate B: the per-step decode schedule ("6n,6h,6n"), the tool for
+    // the one-process mid-stream switch test. Entries are (count, route) pairs
+    // applied to the decode loop's steps in order; beyond the schedule the last
+    // entry's route stays. Letters: n=npu, h=host, a=auto.
+    std::vector<std::pair<int, std::string>> sched;
+    if (!a.decode_schedule.empty()) {
+        size_t at = 0;
+        while (at <= a.decode_schedule.size()) {
+            const size_t comma = a.decode_schedule.find(',', at);
+            const std::string seg = a.decode_schedule.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+            const size_t x = seg.find_first_of("nha");
+            if (x == std::string::npos || x == 0 || seg.find_first_of("nha", x + 1) != std::string::npos)
+                { std::fprintf(stderr, "--decode-schedule wants <N><n|h|a> segments, got '%s'\n", seg.c_str()); std::exit(2); }
+            sched.push_back({std::atoi(seg.substr(0, x).c_str()), seg.substr(x)});
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+    }
+    auto sched_route = [&sched](int n) -> const char* {
+        auto full = [](const std::string& s) -> const char* {
+            if (s == "n") return "npu";
+            if (s == "h") return "host";
+            if (s == "a") return "auto";
+            return s.c_str();
+        };
+        int acc = 0;
+        for (const auto& [cnt, r] : sched)
+            if (n < (acc += cnt)) return full(r);
+        return sched.empty() ? nullptr : full(sched.back().second);
+    };
     for (int n = 0; n < a.max_tokens; ++n) {
         out.push_back(tok);
         std::printf("token %d\n", tok);
         std::fflush(stdout);
         if (n + 1 == a.max_tokens) break;
+        if (const char* r = sched_route(n)) core.set_decode_route(r);
+        const std::string rt = core.decode_route_at(core.position());
         core.step(tok, true);
         if (!a.dump_prefix.empty()) dump(a.dump_prefix, dumped++, core.logits());
         const auto& tm = core.last_timing();
         std::fprintf(stderr,
-                     "  step @%d: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f; embed %.2f, patch %.2f,"
+                     "  step @%d [%s]: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f; embed %.2f, patch %.2f,"
                      " dispatches %.1f)\n",
-                     core.position() - 1, tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms,
+                     core.position() - 1, rt.c_str(), tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms,
                      tm.embed_ms, tm.patch_ms, tm.dispatch_ms);
         for (const auto& [kn, d] : core.take_dispatch_stats())
             std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
@@ -339,6 +375,8 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::steady_clock::now();
         Core core(a.cfg);
         core.load_weights();
+        // Stage 2.7: the runtime decode route (env only set the initial one).
+        if (!a.decode_route.empty()) core.set_decode_route(a.decode_route);
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {
