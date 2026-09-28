@@ -413,6 +413,15 @@ private:
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;
+    /// Stage 2.5 Gate B (OFLM_OPEN_HOST_ATTN=1): the dense route's attention
+    /// computed on the host instead of T per-token dxB dispatches. Same
+    /// semantics as the dxB kernel (attn.h:22) for the K2 dense shape only:
+    /// no qk-norm, no gate, half-split RoPE over the full head, GQA
+    /// h -> kv head h/(nh/kvh), scale 1/sqrt(hd) on the scores, causal window
+    /// [0, pos] inclusive, fp32 dots + fp64 softmax denominator, cache rows
+    /// bf16 [K|V]. Checks its geometry against the manifest's own
+    /// hf_config_check and refuses anything else (fail-closed).
+    bool host_attn_on_ = false;
     bool route_check_ = false;                 ///< OFLM_ROUTE_CHECK: re-read every router record, count changes
     uint64_t route_checks_ = 0, route_stale_ = 0;
     std::vector<std::pair<int, std::vector<uint8_t>>> route_log_;
@@ -484,6 +493,10 @@ private:
     /// `region_bytes` limits it to [region_off, +region_bytes) of the slice; 0 moves all of it.
     void shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
                      size_t region_off = 0, size_t region_bytes = 0);
+    /// Stage 2.5 Gate B: the dense route's attention on the host (see
+    /// host_attn_on_). y_qkv3 is the fused projection's [n_qkv3, T] output;
+    /// fills og [T, qw] and the layer's KV cache rows [pos_, pos_+T).
+    void host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, std::vector<float>& og);
     /// out[t,:] = x[t,:] / sqrt(mean(x[t,:]^2) + eps) * w[:], reduction and
     /// the final multiply both in fp64. w is bf16 (hidden elements).
     /// groups > 1 splits each row into equal groups and RMSes each separately
