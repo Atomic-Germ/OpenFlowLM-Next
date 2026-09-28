@@ -71,6 +71,7 @@ def main():
     p.add_argument("--final-only", action="store_true", help="down probe emits only final sums")
     p.add_argument("--projection-k", type=int, default=5120, help="isolated Q4 projection width")
     p.add_argument("--projection-correction", action="store_true", help="diagnostic Q4 activation residual correction")
+    p.add_argument("--ffn-correction", action="store_true", help="corrected full FFN with K4096 down segments")
     p.add_argument("--projection-n", type=int, default=1024, help="isolated Q4 projection output rows")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
@@ -78,6 +79,8 @@ def main():
         p.error("--trace requires --scope ffn")
     if args.final_only and args.scope != "down":
         p.error("--final-only requires --scope down")
+    if args.ffn_correction and args.scope != 'ffn':
+        p.error('--ffn-correction requires --scope ffn')
     out = args.out.resolve()
     if args.scope == "glue":
         out = out / "glue"
@@ -111,6 +114,7 @@ def main():
         env["PROBE_FFN_TRACE"] = str(int(args.trace))
         env["PROBE_FULL_FFN"] = str(int(args.scope == "ffn"))
         env["PROBE_PARTIALS"] = str(int(not args.final_only))
+        env["PROBE_FFN_CORRECTION"] = str(int(args.ffn_correction))
     if args.scope == "glue":
         source = design_path.read_text()
         # HERE must continue to name the production source directory, not the
@@ -124,6 +128,7 @@ def main():
         metadata.update(projection_k=args.projection_k, projection_n=args.projection_n, correction=args.projection_correction, weight_format="q4_1")
     if args.scope in ("down", "ffn"):
         metadata.update(final_only=args.final_only, trace=args.trace, buffer_args=3, weight_format="q4_1")
+        metadata.update(correction=args.ffn_correction, segment_k=4096 if args.ffn_correction else 8192)
     (out / "probe-toolchain.json").write_text(json.dumps(metadata, indent=2) + "\n")
     commands = [
         [sys.executable, str(ROOT / "open_kernels/designs/layer_x/gen_kernels.py")],

@@ -5,6 +5,11 @@ three autoregressive tokens and reset replay, but the numerical gate is **FAIL**
 three inherited bounds are exceeded. This is PR4/B7; full-model acceptance,
 runtime support and catalogue promotion remain pending.
 
+Follow-up: [full-depth precision experiments](qwen38-model-precision.md) add
+compensated projection/FFN and opt-in attention/LN modes. Output correction alone
+reduces the failures to two; the gate remains open. A reproducible first BF16
+divergence is localized to layer1/channel2931, propagated from layer0 GEMV error.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

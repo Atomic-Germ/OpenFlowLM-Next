@@ -3,6 +3,8 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import struct
+import hashlib
+import importlib.util
 
 import pytest
 from recipes.spec import ModelSpec, LINEAR, FULL
@@ -108,3 +110,91 @@ def test_preflight_accepts_native_block_grid_and_rejects_transposed_grid(geometr
     assert validate_header(s,header,size)['ready_for_packing']
     header['model.layers.0.mlp.up_proj.weight']['shape']=[20,544,5120]
     with pytest.raises(ValueError): validate_header(s,header,size)
+
+
+@pytest.fixture
+def replay_fixture(tmp_path):
+    path = Path(__file__).resolve().parents[3]/'utilities/replay-wide-model.py'
+    spec = importlib.util.spec_from_file_location('replay_wide_model',path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source, kernel = tmp_path/'source', tmp_path/'kernel'
+    source.mkdir(); kernel.mkdir()
+    for name in ('final.xclbin','insts.bin'):
+        (source/name).write_bytes(b'old')
+        (kernel/name).write_bytes(b'new')
+    (source/'decode.cfg').write_text(f'xclbin out {source}/final.xclbin\nkernelx out out {source}/insts.bin\nrun out w x y\n')
+    (source/'weights.bin').write_bytes(b'weights')
+    (source/'cold-0-logits.bin').write_bytes(b'old capture')
+    meta = dict(source='real-q4nx', kernels={str(source/n):module.sha(source/n) for n in ('final.xclbin','insts.bin')},
+                fixtures={n:module.sha(source/n) for n in ('weights.bin','decode.cfg')})
+    (source/'slice-fixture.json').write_text(json.dumps(meta))
+    (kernel/'projection-fixture.json').write_text(json.dumps(dict(k=6144,n=5120,sha256={n:module.sha(kernel/n) for n in ('final.xclbin','insts.bin')})))
+    (kernel/'projection-results.json').write_text(json.dumps(dict(passed=True)))
+    return module,source,kernel,tmp_path/'trial'
+
+
+def test_model_replay_keeps_inputs_and_reference_separate_from_new_captures(replay_fixture):
+    module,source,kernel,out = replay_fixture
+    before = (source/'decode.cfg').read_bytes()
+    module.replay(source,out,kernel)
+    assert (source/'decode.cfg').read_bytes() == before
+    assert (out/'weights.bin').read_bytes() == b'weights'
+    assert not (out/'cold-0-logits.bin').exists()
+    assert str(kernel/'final.xclbin') in (out/'decode.cfg').read_text()
+    meta = json.loads((out/'slice-fixture.json').read_text())
+    assert meta['fixtures']['weights.bin'] == hashlib.sha256(b'weights').hexdigest()
+    assert meta['fixtures']['decode.cfg'] == module.sha(out/'decode.cfg')
+    assert str(source/'final.xclbin') not in meta['kernels']
+    assert meta['kernels'][str(kernel/'final.xclbin')] == module.sha(kernel/'final.xclbin')
+
+
+def test_model_replay_rejects_stale_or_wrong_geometry_kernel(replay_fixture):
+    module,source,kernel,out = replay_fixture
+    fixture = json.loads((kernel/'projection-fixture.json').read_text())
+    fixture['n'] = 1024
+    (kernel/'projection-fixture.json').write_text(json.dumps(fixture))
+    with pytest.raises(ValueError,match='geometry'): module.replay(source,out,kernel)
+    fixture['n'] = 5120
+    (kernel/'projection-fixture.json').write_text(json.dumps(fixture))
+    (kernel/'insts.bin').write_bytes(b'stale')
+    with pytest.raises(ValueError,match='changed'): module.replay(source,out,kernel)
+    assert not out.exists()
+
+
+def test_model_replay_can_replace_validated_ffn_without_replacing_reference(replay_fixture):
+    module,source,kernel,out = replay_fixture
+    ffn = kernel.parent/'ffn'; ffn.mkdir()
+    for name in ('final.xclbin','insts.bin'):
+        (ffn/name).write_bytes(b'ffn')
+    (ffn/'segmented-fixture.json').write_text(json.dumps(dict(k=17408,n=5120,full=True,trace=False,
+        sha256={n:module.sha(ffn/n) for n in ('final.xclbin','insts.bin')})))
+    (ffn/'segmented-results.json').write_text(json.dumps(dict(passed=True)))
+    cfg = source/'decode.cfg'
+    cfg.write_text(cfg.read_text()+f'xclbin ffn {ffn}/final.xclbin\nkernelx ffn ffn {ffn}/insts.bin\n')
+    meta = json.loads((source/'slice-fixture.json').read_text())
+    meta['kernels'].update({str(ffn/n):module.sha(ffn/n) for n in ('final.xclbin','insts.bin')})
+    meta['fixtures']['decode.cfg'] = module.sha(cfg)
+    (source/'slice-fixture.json').write_text(json.dumps(meta))
+    module.replay(source,out,kernel,ffn=ffn)
+    copied = json.loads((out/'slice-fixture.json').read_text())
+    assert copied['kernel_overrides']['ffn'] == str(ffn)
+    assert copied['fixtures']['weights.bin'] == meta['fixtures']['weights.bin']
+
+
+def test_model_replay_rejects_attention_with_different_static_dma_rows(replay_fixture):
+    module,source,kernel,out = replay_fixture
+    attn = kernel.parent/'attn'; attn.mkdir()
+    (attn/'attention-fixture.json').write_text(json.dumps(dict(nh=24,kvh=4,hd=256,rot=64,rows=8)))
+    with pytest.raises(ValueError,match='attention geometry'):
+        module.replay(source,out,kernel,attention=attn)
+    assert not out.exists()
+
+
+def test_model_replay_rejects_ln_with_different_epsilon(replay_fixture):
+    module,source,kernel,out = replay_fixture
+    ln = kernel.parent/'ln'; ln.mkdir()
+    (ln/'ln-fixture.json').write_text(json.dumps(dict(n=5120,eps=1e-5)))
+    with pytest.raises(ValueError,match='LN geometry'):
+        module.replay(source,out,kernel,ln=ln)
+    assert not out.exists()

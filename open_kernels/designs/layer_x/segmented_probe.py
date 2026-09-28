@@ -4,6 +4,7 @@ Full FFN mode runs the production up/gate/act/down body and schedule. Both modes
 keep actual main-core scratch and pool/activation offsets, without other layers.
 """
 import hashlib
+from dataclasses import replace
 import os
 from pathlib import Path
 import sys
@@ -20,10 +21,21 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from ironutil import Pipeline, include_dirs
 import xcommon as X
+from recipes.segmented_dense import segments
+from recipes.wide_deltanet_layer import projection_table_bytes
 
 FULL = os.environ.get('PROBE_FULL_FFN') == '1'
 TRACE = FULL and os.environ.get('PROBE_FFN_TRACE') == '1'
 DIAGNOSTIC = not FULL and os.environ.get('PROBE_PARTIALS', '1') == '1'
+CORRECTION = os.environ.get('PROBE_FFN_CORRECTION') == '1'
+if CORRECTION:
+    if not FULL or X.HID != 5120 or X.FF != 17408 or X.Q8:
+        raise ValueError('corrected FFN probe requires H5120/FF17408 all-Q4 full FFN')
+    # A corrected K8192 table would exceed L1. Reuse the exact pool and worker
+    # with K4096 segments; up/gate K5120 now sets the maximum table size.
+    X.FFN = replace(X.FFN, DOWN_SEGMENTS=segments(X.FF,4096))
+    X.TAB_BYTES = projection_table_bytes(X.HID,X.TAB_BYTES,True)
+    X.OS.append('-DGEMV_Q4_CORRECTION=1')
 L = X.R.layout
 OUT = L.A_OUT2
 ACT_BYTES = max(L.A_BYTES, OUT + X.HID * 4 * len(X.FFN.DOWN_SEGMENTS))
@@ -106,4 +118,4 @@ _sources = [Path(__file__), HERE / 'xcommon.py', HERE / 'gen_kernels.py', ROOT /
             *sorted((ROOT / 'include').glob('*.h'))]
 SPECIALIZE = {'source_hash': int(hashlib.sha256(b''.join(p.read_bytes() for p in _sources)
                          + b''.join(X.source_hash_inputs())
-                         + repr((FULL, TRACE, DIAGNOSTIC, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
+                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}

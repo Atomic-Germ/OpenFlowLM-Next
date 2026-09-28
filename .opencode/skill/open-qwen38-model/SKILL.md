@@ -82,3 +82,7 @@ error against the independent path. Trace accumulation earlier in the chain
 before choosing a precision change. Do not redo the expensive download,
 conversion or reference preparation when continuing from intact artifacts.
 Matching three tokens alone does not establish model support or close B7/B8.
+
+For the subsequent compensated kernels and unchanged-fixture replays, use
+`open-wide-model-precision` and its report. None of its measured variants closes
+the full-depth gate; the first propagated BF16 change is layer1/channel2931.

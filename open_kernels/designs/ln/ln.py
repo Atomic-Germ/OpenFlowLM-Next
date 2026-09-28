@@ -30,8 +30,11 @@ from designs.ln import ln_stream  # noqa: E402
 N = int(os.environ.get("LN_N", 2048))     # the width; elements are N*2 bytes (ln.cc LN_N)
 EPS = float(os.environ.get("LN_EPS", "1e-6"))
 ELEM = N * 2
+COMPENSATED = os.environ.get('LN_STREAM_COMPENSATED') == '1'
+if COMPENSATED and N <= 4096:
+    raise ValueError('compensated statistics require streamed wide LN')
 if N > 4096:
-    ln_stream.check_width(N)
+    ln_stream.check_width(N,COMPENSATED)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -41,6 +44,8 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
     f_ty = np.ndarray[(N,), np.dtype[np.float32]]
     b_ty = np.ndarray[(N,), np.dtype[bfloat16]]
     flags = [f"-DLN_N={N}", f"-DLN_EPS={EPS:g}f"]
+    if COMPENSATED:
+        flags.append('-DLN_STREAM_COMPENSATED=1')
     if N <= 2048:
         # the fused kernel: five inputs and three outputs held at once (32 KB of 4 KB elements)
         fn = ExternalFunction("ln_fn", source_file=str(HERE / "ln.cc"),
@@ -57,7 +62,7 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
 
         worker = Worker(core_body, fn_args=[of_in.cons(), of_out.prod(), fn], tile=Tile(0, 2), stack_size=0x1800)
     elif N > 4096:
-        stats_ty = np.ndarray[(32,), np.dtype[np.float32]]
+        stats_ty = np.ndarray[(64 if COMPENSATED else 32,), np.dtype[np.float32]]
         def kernel(name, types):
             return ExternalFunction(name, source_file=str(HERE / f"{name}.cc"),
                                     arg_types=types, include_dirs=include_dirs(), compile_flags=flags)
@@ -116,4 +121,4 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) +
                 [(HERE / "ln.h").read_bytes(), (HERE / "ln_stream.py").read_bytes(),
                  (HERE.parent.parent / "include" / "vecmath.h").read_bytes(),
                  (HERE.parent.parent / "include" / "vecmath_precise.h").read_bytes()])
-SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
+SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr(COMPENSATED).encode()).hexdigest()[:8], 16)}

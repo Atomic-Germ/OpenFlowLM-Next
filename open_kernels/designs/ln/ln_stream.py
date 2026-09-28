@@ -1,15 +1,15 @@
 """Bounded-memory wide residual RMSNorm worker and matching DMA schedule."""
 
 
-def l1_bytes(n):
+def l1_bytes(n, compensated=False):
     # Two input elements, one output, saved fp32 residual, 32 statistics, stack.
-    return 10 * n + 32 * 4 + 0x1800
+    return 10 * n + (64 if compensated else 32) * 4 + 0x1800
 
 
-def check_width(n):
+def check_width(n, compensated=False):
     if n <= 0 or n % 64:
         raise ValueError('streamed LN width must be positive and divisible by 64')
-    if l1_bytes(n) > 60 * 1024:
+    if l1_bytes(n,compensated) > 60 * 1024:
         raise ValueError(f'streamed LN width {n} exceeds the 60 KiB L1 budget')
 
 

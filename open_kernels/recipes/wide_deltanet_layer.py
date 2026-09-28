@@ -74,12 +74,12 @@ def token_commands(s,l):
     return cmds
 
 
-def projection_table_bytes(k, base, correction=False):
+def projection_table_bytes(k, base, correction=False, *, other_bytes=40960):
     """Corrected standalone QKV table, within the measured main-core budget."""
     if k<=0 or k%32:
         raise ValueError('projection table requires whole 32-element blocks')
     result=max(base,4*k+k//4+k//16+512) if correction else base
     # Actual H5120/FF17408 probe uses40960 bytes beside its table.
-    if 40960+result>65536:
+    if other_bytes<0 or other_bytes+result>65536:
         raise ValueError('corrected projection table exceeds main-core L1 budget')
     return result

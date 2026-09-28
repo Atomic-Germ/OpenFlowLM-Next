@@ -32,11 +32,16 @@ FIXTURE = os.environ.get('ATTN_PROBE_FIXTURE', 'config_qwen38_27b.json')
 SPEC = ModelSpec.from_hf_config(json.loads((ROOT.parent / 'specs/open-engine/tests/fixtures' / FIXTURE).read_text()))
 D = geometry(SPEC)
 ROWS = int(os.environ.get('ATTN_PROBE_ROWS', '257'))
+PRECISE = os.environ.get('ATTN_PROBE_PRECISE') == '1'
+if PRECISE and (D.NH,D.KVH,D.HD,D.ROT) != (24,4,256,64):
+    raise ValueError('precise attention probe requires Q24/KV4/HD256/ROT64')
 if ROWS < 1 or D.RB != 1 or not D.VEXP or D.NHL != D.HPO:
     raise ValueError('attention probe requires rows>=1, VEXP, RB1 and one whole output element per core')
 BODY = P.worker(D, range_)
 FLAGS = [f'-DATTN_{k}={v}' for k,v in dict(NH=D.NH, KVH=D.KVH, HD=D.HD, ROT=D.ROT,
                                           GATE=1, VEXP=D.VEXP, NHL=D.NHL).items()]
+if PRECISE:
+    FLAGS.append('-DATTN_PRECISE=1')
 
 
 @iron.jit(aiecc_flags=['--alloc-scheme=basic-sequential'])
@@ -81,6 +86,6 @@ def probe(meta: In, qg: In, kvn: In, cache: In, new: Out, og: Out, *, key: Compi
 
 DESIGN = probe
 sources = [*HERE.glob('*.cc'), HERE/'attn.h', HERE/'probe_support.py', HERE/'wide_probe.py',
-           P.AX, ROOT/'include/vecmath.h']
-raw = b''.join(p.read_bytes() for p in sorted(sources)) + repr((D,ROWS)).encode()
+           P.AX, ROOT/'include/vecmath.h', ROOT/'include/vecmath_precise.h']
+raw = b''.join(p.read_bytes() for p in sorted(sources)) + repr((D,ROWS,PRECISE)).encode()
 SPECIALIZE = {'key': int(hashlib.sha256(raw).hexdigest()[:8],16)}

@@ -102,3 +102,17 @@ def test_corrected_projection_table_preserves_default_and_fits_wide_core():
     assert 59392-18432+projection_table_bytes(5120,18432,True)<=65536
     with pytest.raises(ValueError,match='budget'):
         projection_table_bytes(8192,18432,True)
+
+
+def test_corrected_output_projection_requires_releasing_unused_state_scratch():
+    from recipes.wide_deltanet_layer import projection_table_bytes
+    # The standalone output GEMV never calls the recurrent worker. Retain a
+    # 128-byte dummy ds instead of its 5120-byte state scratch, with all FIFO,
+    # stack and ms reservations unchanged. The full layer cannot use this budget.
+    with pytest.raises(ValueError, match='L1 budget'):
+        projection_table_bytes(6144,18432,True)
+    table = projection_table_bytes(6144,18432,True,other_bytes=40960-5120+128)
+    assert table == 27008
+    assert table+40960-5120+128 == 62976
+    with pytest.raises(ValueError, match='L1 budget'):
+        projection_table_bytes(8192,18432,True,other_bytes=40960-5120+128)

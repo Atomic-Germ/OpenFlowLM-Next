@@ -111,4 +111,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Download and stream-convert real Qwen38-27B weights, restore 48-head GGUF order, and prepare or validate the standalone 64-layer model.</description>
     <location>.opencode/skill/open-qwen38-model/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-model-precision</name>
+    <description>Build compensated projection/FFN, precise attention and RMSNorm probes, and replay the real 64-layer model against unchanged reference fixtures.</description>
+    <location>.opencode/skill/open-wide-model-precision/SKILL.md</location>
+  </skill>
 </available_skills>

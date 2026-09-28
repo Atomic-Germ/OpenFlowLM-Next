@@ -1,5 +1,6 @@
 """Segment-major dense down GEMV: geometry, unchanged pool slices and worker order."""
 import ast
+from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,12 +43,13 @@ def test_segmented_q8_is_explicitly_not_implemented():
         Q.common(s, 'dense')
 
 
-def test_dma_slices_cover_original_pool_once_in_segment_major_order():
+@pytest.mark.parametrize('limit', [8192,4096])
+def test_dma_slices_cover_original_pool_once_in_segment_major_order(limit):
     from recipes.segmented_dense import segments, weight_slice
     n, k = 5120, 17408
     _, _, rows, cols = chunk_geometry(n, k, 2)
     visited = []
-    for start, width in segments(k):
+    for start, width in segments(k,limit):
         for band in range(n // 64):
             off, size = weight_slice(k, band, start, width)
             indices = np.arange(off // 5120, (off + size) // 5120)
@@ -82,9 +84,11 @@ def worker_functions(ns):
     exec(compile(ast.Module(body=body, type_ignores=[]), str(path), 'exec'), ns)
 
 
-def test_worker_retains_all_bands_until_last_segment_and_resets_next_token():
+@pytest.mark.parametrize('limit', [8192,4096])
+def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit):
     from test_dense_activation_stream import Fifo
-    f = Q.ffn_geometry(spec())
+    from recipes.segmented_dense import segments
+    f = replace(Q.ffn_geometry(spec()),DOWN_SEGMENTS=segments(17408,limit))
     nbands = f.DOWN_PC
     ds = np.full(nbands * 64, np.nan)
     ms = np.zeros(128)
@@ -121,7 +125,7 @@ def test_worker_retains_all_bands_until_last_segment_and_resets_next_token():
         ns['segmented_down_body'](Fifo(total_groups), Fifo(17), Output(),
                                   dict(tab=tab, ms=ms, ds=ds),
                                   dict(prepf=prep, gms=gms, down_acc=acc, down_out=emit))
-    assert events[:30] == [(start // 1024, b, int(start == 0))
+    assert events[:nbands*len(f.DOWN_SEGMENTS)] == [(start // 1024, b, int(start == 0))
                            for start, _ in f.DOWN_SEGMENTS for b in range(nbands)]
     expected = np.zeros((nbands, 64))
     cursor = 0
@@ -134,9 +138,10 @@ def test_worker_retains_all_bands_until_last_segment_and_resets_next_token():
     np.testing.assert_array_equal(outputs[nbands:], expected)
 
 
-def test_host_schedule_drains_before_weights_and_reads_each_h_segment_once():
-    from recipes.segmented_dense import weight_slice
-    f = Q.ffn_geometry(spec())
+@pytest.mark.parametrize('limit', [8192,4096])
+def test_host_schedule_drains_before_weights_and_reads_each_h_segment_once(limit):
+    from recipes.segmented_dense import weight_slice,segments
+    f = replace(Q.ffn_geometry(spec()),DOWN_SEGMENTS=segments(17408,limit))
     events = []
     class Pipe:
         def fill(self, ep, tensor, tap):
@@ -153,10 +158,10 @@ def test_host_schedule_drains_before_weights_and_reads_each_h_segment_once():
                                   list(range(8)), 'x', list(range(8)),
                                   1000000, 4096, 80000, 123456)
     fills = [e for e in events if e[0] == 'fill']
-    assert [e[3] for e in fills if e[1] == 'x'] == [(4096, 32768), (36864, 32768), (69632, 4096)]
+    assert [e[3] for e in fills if e[1] == 'x'] == [(4096+start*4,width*4) for start,width in f.DOWN_SEGMENTS]
     assert all(e[0] == 'drain' for e in events[:8])
     weights = [e for e in fills if e[2] == 'pool']
-    assert len(weights) == 3 * 8 * 10
+    assert len(weights) == len(f.DOWN_SEGMENTS) * 8 * 10
     expected = []
     for start, width in f.DOWN_SEGMENTS:
         for band in range(10):
@@ -164,6 +169,12 @@ def test_host_schedule_drains_before_weights_and_reads_each_h_segment_once():
                 off, size = weight_slice(17408, c * 10 + band, start, width)
                 expected.append(('fill', c, 'pool', (123456 + off, size)))
     assert weights == expected
+
+
+@pytest.mark.parametrize('limit', [0,-1024,768,4097])
+def test_segment_limit_must_align_streamed_f32_dma_elements(limit):
+    from recipes.segmented_dense import segments
+    with pytest.raises(ValueError): segments(17408,limit)
 
 
 def test_recipe_validates_segment_widths_and_keeps_whole_layer_guard(monkeypatch):

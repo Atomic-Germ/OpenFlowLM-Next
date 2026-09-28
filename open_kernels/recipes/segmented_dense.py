@@ -3,10 +3,12 @@
 SEGMENT_K = 8192
 
 
-def segments(k: int) -> tuple[tuple[int, int], ...]:
+def segments(k: int, max_k: int = SEGMENT_K) -> tuple[tuple[int, int], ...]:
     if k <= 0 or k % 256:
         raise ValueError("segmented K must be positive and 256-aligned")
-    return tuple((off, min(SEGMENT_K, k - off)) for off in range(0, k, SEGMENT_K))
+    if max_k <= 0 or max_k % 1024:
+        raise ValueError('segment limit must align whole 4096-byte f32 DMA elements')
+    return tuple((off, min(max_k, k - off)) for off in range(0, k, max_k))
 
 
 def weight_slice(k: int, band: int, start: int, width: int) -> tuple[int, int]:

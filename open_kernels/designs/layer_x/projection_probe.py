@@ -27,9 +27,15 @@ K = int(os.environ.get("PROBE_K", str(X.HID)))
 N = int(os.environ.get("PROBE_N", str(X.N_CORES * 2 * X.BAND_ROWS)))
 CORRECTION = os.environ.get("PROBE_Q4_CORRECTION") == "1"
 if CORRECTION:
-    if K != 5120 or X.HID != 5120 or X.KIND != "dense" or X.Q8:
+    if K not in (5120,6144) or X.HID != 5120 or X.KIND != "dense" or X.Q8:
         raise ValueError("corrected projection is only a dense H5120 all-Q4 probe")
-    X.TAB_BYTES = projection_table_bytes(K, X.TAB_BYTES, True)
+    other_bytes = 40960
+    if K == 6144:
+        # This standalone GEMV does not execute any DeltaNet or FFN worker.
+        # Reclaim only its unused ds allocation; retain ms, FIFOs and stack.
+        other_bytes -= (X.DS_FLOATS-32)*4
+        X.DS_FLOATS = 32
+    X.TAB_BYTES = projection_table_bytes(K, X.TAB_BYTES, True, other_bytes=other_bytes)
     X.OS.append("-DGEMV_Q4_CORRECTION=1")
 BANDS_PER_CORE = projection_bands(N, X.N_CORES)
 XN_ELEMS = (K * 2 + X.ELEM - 1) // X.ELEM

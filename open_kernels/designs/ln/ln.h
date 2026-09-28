@@ -18,6 +18,9 @@
 #ifndef LN_EPS
 #define LN_EPS 1e-6f
 #endif
+#ifndef LN_STREAM_COMPENSATED
+#define LN_STREAM_COMPENSATED 0
+#endif
 static constexpr unsigned kN = LN_N;
 static constexpr unsigned kHalf = LN_N / 2;
 static constexpr unsigned kV = 32;

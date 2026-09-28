@@ -41,6 +41,12 @@
 // design streams one dummy row at position 0: a zero-length DMA is not an option).
 
 #include "vecmath.h"
+#ifndef ATTN_PRECISE
+#define ATTN_PRECISE 0
+#endif
+#if ATTN_PRECISE
+#include "vecmath_precise.h"
+#endif
 
 #ifndef ATTN_NH
 #define ATTN_NH 16
@@ -275,24 +281,38 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
 #else
   accf32 ss = aie::zeros<accfloat, kV>();
   for (unsigned j = 0; j < kHD; j += kV) {
+#if ATTN_PRECISE
+    const v32f xj = aie::load_v<kV>(x + j);
+    ss = aie::add(ss, precise_mulN<kV>(xj, xj));
+#else
     v32b h, l;
     split32(aie::load_v<kV>(x + j), h, l);
     ss = aie::mac(ss, h, h);
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
+#endif
   }
   const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + ATTN_EPS);
   const bfloat16 ih = (bfloat16)inv;
   const bfloat16 il = (bfloat16)(inv - (float)ih);
   for (unsigned j = 0; j < kHD; j += kV) {
+#if ATTN_PRECISE
+    accf32 t(precise_mulN<kV>(aie::load_v<kV>(x+j), aie::broadcast<float,kV>(inv)));
+#else
     accf32 t = aie::zeros<accfloat, kV>();
     t = mac_vs(t, aie::load_v<kV>(x + j), ih, il);
+#endif
 #if ATTN_QKNORM_POST
     aie::store_v(dst + j, t.template to_vector<float>());
+#else
+#if ATTN_PRECISE
+    const accf32 weight(aie::load_v<kV>(w+j));
+    aie::store_v(dst+j, precise_mulN<kV>(t.template to_vector<float>(),weight.template to_vector<float>()));
 #else
     accf32 u = aie::zeros<accfloat, kV>();
     u = mac_vv(u, t.template to_vector<float>(), aie::load_v<kV>(w + j));
     aie::store_v(dst + j, u.template to_vector<float>());
+#endif
 #endif
   }
 #endif
@@ -305,8 +325,13 @@ __attribute__((noinline)) inline void norm_rope(const float *__restrict x, const
     const v32f s = aie::load_v<kV>(cs + kHalf + j);
     const v32f a = aie::load_v<kV>(dst + j);
     const v32f b = aie::load_v<kV>(dst + kHalf + j);
+#if ATTN_PRECISE
+    aie::store_v(dst+j, fsub32(precise_mulN<kV>(a,c),precise_mulN<kV>(b,s)));
+    aie::store_v(dst+kHalf+j, fadd32(precise_mulN<kV>(b,c),precise_mulN<kV>(a,s)));
+#else
     aie::store_v(dst + j, fsub32(fmul32(a, c), fmul32(b, s)));
     aie::store_v(dst + kHalf + j, fadd32(fmul32(b, c), fmul32(a, s)));
+#endif
   }
 #if (ATTN_ROT / 2) % 32
   {
@@ -775,9 +800,19 @@ __attribute__((noinline)) inline void attn_fin_impl(const float *__restrict oacc
     const float *g = (i < kHPE) ? (g0 + i * kHD) : (g1 + (i - kHPE) * kHD);
 #endif
     for (unsigned j = 0; j < kHD; j += kV) {
+#if ATTN_PRECISE
+      const v32f on = precise_mulN<kV>(aie::load_v<kV>(o+j),aie::broadcast<float,kV>(inv));
+#else
       const v32f on = fscaleN<32>(aie::load_v<kV>(o + j), inv);
+#endif
 #if ATTN_GATE
+#if ATTN_PRECISE
+      const v32f e = precise_expN<kV>(fsub32(aie::zeros<float,kV>(),aie::load_v<kV>(g+j)));
+      const v32f sig = precise_recipN<kV>(fadd32(e,aie::broadcast<float,kV>(1.0f)));
+      const v32f r = precise_mulN<kV>(on,sig);
+#else
       const v32f r = fmul32(on, vsigmoidN<32>(aie::load_v<kV>(g + j)));
+#endif
 #else
       const v32f r = on;
 #endif

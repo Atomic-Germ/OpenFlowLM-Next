@@ -5,6 +5,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+
+def test_compensated_stream_statistics_fit_without_changing_legacy_budget():
+    from designs.ln.ln_stream import l1_bytes,check_width
+    assert l1_bytes(5120,compensated=True) == l1_bytes(5120)+128
+    check_width(5120,compensated=True)
+    with pytest.raises(ValueError): check_width(6144,compensated=True)
+
 ROOT = Path(__file__).resolve().parents[3]
 
 

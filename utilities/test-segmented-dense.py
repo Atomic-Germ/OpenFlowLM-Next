@@ -2,6 +2,7 @@
 """Synthetic acceptance of segmented Q4 down and full dense FFN on actual geometry."""
 import argparse
 import hashlib
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'open_kernels'))
 from recipes.spec import ModelSpec
 from recipes import qwen35 as Q
+from recipes.segmented_dense import segments
 from q4_1_pack import pack_q4_1_pool, random_q4_1_blocks, chunk_geometry, dequant_chunk
 from wide_deltanet_reference import metric
 
@@ -35,6 +37,7 @@ def prepare(out):
     spec = ModelSpec.from_dict(json.loads((out / 'probe-spec.json').read_text()))
     tool = json.loads((out / 'probe-toolchain.json').read_text())
     l, f = Q.layout(spec), Q.ffn_geometry(spec)
+    f = replace(f, DOWN_SEGMENTS=segments(spec.intermediate,tool.get('segment_k',8192)))
     full = tool['scope'] == 'ffn'
     trace = full and tool.get('trace', False)
     extra_buffer = tool.get('buffer_args', 3 if trace else 2) == 3
