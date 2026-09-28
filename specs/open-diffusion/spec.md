@@ -20,13 +20,13 @@ The schedule is one list, `open_kernels/klein_pipeline.py`:
 The exporter builds its streams (`open_kernels/export_dit_kernels.py`). Two runners replay
 the same list:
 - `utilities/dit-chain/generate.py` (pyxrt);
-- `src/open_diffusion/` (native), from the bundle `utilities/dit-chain/export_bundle.py`
-  writes.
+- `src/open_diffusion/` (native), from the model directory `utilities/dit-chain/export_bundle.py`
+  writes (`q4nx-build --open-diffusion`). `oflm image` runs it.
 
 ## Requirements
 
 ### OPEN-DIFFUSION-NPU-ONLY: no host compute that grows with the data
-**Applies to:** `open_kernels/klein_pipeline.py`, `utilities/dit-chain/generate.py`, `src/open_diffusion`
+**Applies to:** `open_kernels/klein_pipeline.py`, `utilities/dit-chain/generate.py`, `src/open_diffusion`, `oflm image`
 **Verification:** manual
 
 During a generation the host may do only these things:
@@ -34,7 +34,7 @@ During a generation the host may do only these things:
 - gather the prompt's 512 embedding rows;
 - write the seeded noise;
 - patch `te_attn`'s `valid_len`;
-- read the RGBA and encode the PNG.
+- read the RGBA and encode the PNG or JPEG.
 
 Everything else is an NPU dispatch. The host queues runs within one kernel set and blocks,
 without polling, on the last run before switching sets.
@@ -119,6 +119,103 @@ NPU as an fp32 in its parameter run.
 - `dt_params` stores sigma[s+1] - sigma[s] as the fp32 at the parameter run's first
   vector.
 
+### OPEN-DIFFUSION-CLI: `oflm image` writes one image
+**Applies to:** `oflm` (`src/src/image_command.hpp`, `src/include/utils/vm_args.hpp`, `src/include/AutoModel/model_families.hpp`)
+**Verification:** manual
+
+`oflm image <tag> "<prompt>" [-o FILE] [--size 512|1024] [--seed N]` writes one image and
+prints its path, the seed and the time on the NPU (text, steps, VAE).
+- The format comes from the extension: `.png`, `.jpg` or `.jpeg`, any case. Any other is
+  refused before loading. The default file is `oflm-<seed>.png` in the current directory.
+- `--size` defaults to 1024. A size the registry entry's `image_sizes` does not list is
+  refused before any download, naming the supported ones.
+- `--seed` defaults to a random 64-bit value.
+- A tag whose registry entry lacks `"image": true` is refused before any download.
+- `-o`, `--size`, `--seed` and a third positional are refused by every other command.
+- `oflm run` and `oflm serve` refuse the image tag as not a chat model, before unloading
+  anything. `/api/tags` and `/v1/models` do not list it.
+- An HRX build answers that `oflm image` is not implemented in this build.
+
+**Verification (manual):**
+1. `oflm image flux2-klein:4b "a red fox in fresh snow" --size 512 --seed 1 -o fox.png`:
+   a coherent fox; the path, `Seed 1` and a timing line are printed.
+2. The same with `-o fox.jpg`: a JPEG of the same image.
+3. Each of these fails with the named reason and loads nothing:
+   `-o fox.webp`; `--size 768` (supported: 512, 1024); `oflm image llama3.2:1b "x"`
+   (not an image model); `oflm run llama3.2:1b --seed 1`; `oflm pull llama3.2:1b "x"`.
+4. `oflm run flux2-klein:4b` is refused as not a chat model.
+
+### OPEN-DIFFUSION-TOKENS: oflm's prompt ids equal the pipeline's
+**Applies to:** `src/open_diffusion/prompt.cpp`, `src/open_diffusion/engine.cpp`
+**Verification:** test
+
+The ids `oflm image` feeds the engine for a prompt equal `klein_pipeline.token_ids`: Qwen3's
+chat template with the empty think block kept, tokenized without special tokens,
+truncated to 512 after templating. The engine pads them with 151643 and masks keys past
+their length. A prompt may itself contain the pad token; the length is the ids' count,
+never the first pad.
+
+**Acceptance criteria** (`specs/open-diffusion/tests/token_goldens.json`, written by
+`utilities/dit-chain/klein_tokens.py --goldens`):
+- The 8 study prompts give the goldens' ids exactly.
+- A prompt with accents, CJK and an emoji gives the goldens' 32 ids.
+- `"a prompt that names <|endoftext|> inside it"` gives 20 ids with 151643 inside them.
+- The empty prompt gives the template's 12 ids.
+- A prompt of 400 words gives exactly 512 ids, the goldens' first 512.
+
+Run by the `open_diffusion_tokens` CTest (`src/open_diffusion/tokens_test.cpp`) against
+the installed model's `tokenizer.json`; it fails, naming the path, without it.
+
+### OPEN-DIFFUSION-DETERMINISM: same inputs, same bytes
+**Applies to:** `src/open_diffusion`, `oflm image`
+**Verification:** test
+
+The same prompt, size and seed give the same file bytes, run to run, and the same pixels
+as the pyxrt runner.
+
+**Acceptance criteria:**
+- Two `oflm image flux2-klein:4b "a red fox in fresh snow" --size 512 --seed 1` runs
+  write identical PNG files (`specs/open-diffusion/tests/test_cli_determinism.py`; needs
+  the NPU, `oflm.exe` and the installed model, and says which is missing when skipped).
+
+### OPEN-DIFFUSION-PACKAGE: the model and its kernels are built and found with no manual step
+**Applies to:** `utilities/q4nx-build` (`--open-diffusion`), `open_kernels/export_dit_kernels.py` (`--install`), `src/open_diffusion`, `src/model_list.json`, `src/model_info.json`
+**Verification:** manual
+
+- `q4nx-build --open-diffusion -i black-forest-labs/FLUX.2-klein-4B -o <dir>` builds the
+  whole model directory from the checkpoint (flat: 17 files, ~9 GB) and
+  `model_info_entry.json`. It refuses a checkpoint whose pipeline class, transformer or
+  text-encoder geometry is not klein 4B's, naming the fields.
+- `export_dit_kernels.py --install <dir>` copies a built kernel directory's runtime files
+  only and writes `diffusion_kernels.json` last. It refuses a directory built from other
+  stream specs than the tree's.
+- The model directory and the kernel set carry the same layout hash (every stream spec
+  and the weight packing). The engine refuses a kernel set whose manifest is missing,
+  incomplete, of another format or of another layout, naming which.
+- The engine finds its kernels in this order: `OFLM_DIFFUSION_KERNELS_DIR` (used as
+  given), `<model dir>/open_kernels`, then `<root>/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
+  for each xclbins root. The installer ships the last.
+- `oflm pull flux2-klein:4b` installs the model from `Cyronius/FLUX.2-klein-4B-NPU2`,
+  verifying every file's hash.
+
+**Verification (manual):**
+1. Build the model directory into an empty models root with `q4nx-build --open-diffusion`;
+   `oflm list` shows `flux2-klein:4b` installed.
+2. `oflm image` finds the installed kernel set with no variable set (it prints "an xclbins
+   root").
+3. Point `OFLM_DIFFUSION_KERNELS_DIR` at a copy of the set whose manifest layout is
+   edited: refused, naming both hashes.
+4. On a machine without the model: `oflm pull flux2-klein:4b` downloads 17 files and
+   reports them verified.
+
+**Verified 2026-09-28:** built from `black-forest-labs/FLUX.2-klein-4B` (layout
+`e0450140c44f78e0`) and uploaded to `Cyronius/FLUX.2-klein-4B-NPU2`. The live tree
+listing matched the builder's predicted registry entry for all 17 files. `oflm pull`
+into an empty models root verified all 17 hashes, and the pulled model's 512² seed-1 fox
+has the same bytes as the locally built one. `oflm image` found the shipped kernel set
+with nothing set ("an xclbins root"). A manifest with an edited layout was refused,
+naming both hashes.
+
 ### OPEN-DIFFUSION-PERF: what may be called a performance number
 **Applies to:** the whole pipeline
 **Verification:** manual
@@ -131,9 +228,55 @@ A time quoted for this pipeline must meet all of these:
 
 A number measured under load says so.
 
-**Measured 2026-09-27, native engine** (`src/open_diffusion`), turbo, 2 prompts × 3 warm
-runs each. **Another ~11-core CPU job (another session's) was running**, so these are
-pessimistic:
+**Measured 2026-09-27, native engine, quiet machine** (CPU load 3-5% before each run),
+turbo, the study's prompts 0-1 and noise (`goldens_pipe_<R>\ids_i.npy`, `noise_i.npy`),
+4 runs each:
+
+| | 512² | 1024² |
+|---|---:|---:|
+| image, warm | 5.09-5.15 s | 13.36-13.42 s |
+| text encoder | 0.64-0.65 s | 0.64-0.65 s |
+| conditioning | 0.04 s | 0.04 s |
+| one denoising step | 0.98-1.00 s | 2.85-2.88 s |
+| VAE | 0.46 s | 1.22-1.28 s |
+| first image after load | 5.12-5.14 s | 13.42 s |
+| load (cached) | 5.3-5.4 s | 5.2-5.4 s |
+| host CPU per image | 0.00-0.11 s | 0.00-0.06 s |
+
+LPIPS against the bf16 CPU run: 0.19 / 0.10 (512²) and 0.33 / 0.15 (1024²), the images
+recorded under OPEN-DIFFUSION-QUALITY.
+
+**The same machine's iGPU, for comparison** (Radeon 890M, gfx1150; measured 2026-09-27
+on the quiet machine, right before the NPU run above). This is the diffusers bf16
+pipeline through PyTorch-ROCm (`torch 2.12.0+rocm7.14.1`), timed by
+`utilities/dit-ref/igpu_bench.py`:
+
+| | 512² | 1024² |
+|---|---:|---:|
+| image, warm | 20.05-20.45 s (6 runs) | 134.2 s (1 run) |
+| text encoder | 1.30-1.36 s | 1.31 s |
+| one denoising step | 4.46-4.53 s | 31.9 s |
+| VAE | 0.66-0.71 s | 4.75 s |
+| first image after load | 52 s | 193 s |
+| host CPU per image | 21.7-22.7 s | 136 s |
+
+- The NPU is 3.9× faster at 512² and 10× faster at 1024².
+- The iGPU's LPIPS against the bf16 CPU run is 0.069 / 0.015 (512²). It is plain bf16,
+  so it drifts less than the NPU.
+- The iGPU has no fused attention on this build:
+  - by default, flash and memory-efficient SDPA have no gfx1150 kernel;
+  - with `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`, they fail to launch (`invalid
+    argument`).
+  - Attention therefore runs on the math path at ~0.5 TFLOPS. That is 1.35 s of each
+    512² step and 14-17 s of each 1024² step.
+- A bf16 4096³ GEMM on the iGPU runs 8.5 TFLOPS. At that rate for every FLOP, a step would
+  take ~1.5 s at 512², still slower than the NPU's 1.0 s.
+- The iGPU's host CPU time about equals its wall time. The ROCm runtime keeps a core
+  busy for the whole image.
+
+**Measured 2026-09-27, native engine, under load** (`src/open_diffusion`), turbo, 2
+prompts × 3 warm runs each. **Another ~11-core CPU job (another session's) was
+running**, so these are pessimistic:
 
 | | 512² | 1024² |
 |---|---:|---:|

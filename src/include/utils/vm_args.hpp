@@ -29,6 +29,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
     std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
     std::cout << "  bench-embed <tag>   - Benchmark an embedding model over batch sizes" << std::endl;
+    std::cout << "  image <tag> \"text\"  - Generate an image from a prompt" << std::endl;
     std::cout << "  list                - List all available models" << std::endl;
     std::cout << "  version             - Show version information" << std::endl;
     std::cout << "  help                - Show this help message" << std::endl;
@@ -58,6 +59,8 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
     std::cout << "\toflm bench-embed bge-base:en-v1.5" << std::endl;
     std::cout << "\toflm bench-embed nomic-embed-text:v1.5 --max-batch 32 --prompt-name document" << std::endl;
+    std::cout << "\toflm image flux2-klein:4b \"a red fox in fresh snow\" -o fox.png" << std::endl;
+    std::cout << "\toflm image flux2-klein:4b \"a lighthouse at dusk\" --size 512 --seed 7" << std::endl;
     std::cout << "\toflm list" << std::endl;
     std::cout << "\toflm list --quiet" << std::endl;
     std::cout << "\toflm list --filter installed" << std::endl;
@@ -127,18 +130,26 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("prompt-name", po::value<std::string>(&parsed_args.prompt_name)->default_value(""),
              "Task prompt for bench-embed, by its REST name (query, document, "
              "clustering, ...). Empty means query, which is what /v1/embeddings "
-             "resolves an unspecified request to");
+             "resolves an unspecified request to")
+            ("out,o", po::value<std::string>(&parsed_args.image_out)->default_value(""),
+             "Image file to write, .png or .jpg (for image command; default oflm-<seed>.png)")
+            ("size", po::value<int>(&parsed_args.image_size)->default_value(1024),
+             "Image width and height in pixels (for image command)")
+            ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
+             "Noise seed, for a reproducible image (for image command; default random)");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
         pos_desc.add("command", 1);
         pos_desc.add("model_tag", 1);
+        pos_desc.add("image_prompt", 1);
 
         // Define hidden options for positional arguments
         po::options_description hidden("Hidden options");
         hidden.add_options()
             ("command", po::value<std::string>(&parsed_args.command), "Command to execute")
-            ("model_tag", po::value<std::string>(&parsed_args.model_tag), "Model tag");
+            ("model_tag", po::value<std::string>(&parsed_args.model_tag), "Model tag")
+            ("image_prompt", po::value<std::string>(&parsed_args.image_prompt), "Image prompt");
 
         // Combine all options
         po::options_description all_options;
@@ -190,6 +201,22 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                                      " the bench-embed command!" << std::endl;
                         return false;
                     }
+                }
+            }
+            // The same for image: its options, and the prompt positional, which any
+            // other command would otherwise take and drop.
+            if (parsed_args.command != "image") {
+                for (const char* opt : {"out", "size", "seed"}) {
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: --" << opt << " is only supported with"
+                                     " the image command!" << std::endl;
+                        return false;
+                    }
+                }
+                if (vm.count("image_prompt")) {
+                    std::cerr << "Error: unexpected argument '" << parsed_args.image_prompt
+                              << "'; only the image command takes a prompt" << std::endl;
+                    return false;
                 }
             }
 
@@ -279,6 +306,14 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             std::cerr << "Error: bench-embed needs an embedding model tag, e.g. "
                          "`oflm bench-embed bge-base:en-v1.5`. `oflm list` shows "
                          "which are installed." << std::endl;
+            return false;
+        }
+
+        if (parsed_args.command == "image" &&
+            (parsed_args.model_tag.empty() || parsed_args.model_tag == "model-faker" ||
+             parsed_args.image_prompt.empty())) {
+            std::cerr << "Error: image needs a model tag and a prompt, e.g. "
+                         "`oflm image flux2-klein:4b \"a red fox in fresh snow\"`" << std::endl;
             return false;
         }
 

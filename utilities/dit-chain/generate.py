@@ -51,11 +51,11 @@ def model_dir() -> Path:
                               "--FLUX.2-klein-4B/snapshots/*"))[0])
 
 
-def _pack_one(sub: str, name: str, cache: str) -> tuple[str, float]:
+def _pack_one(sub: str, name: str, cache: str, ckpt: str) -> tuple[str, float]:
     t0 = time.time()
     specs = kp.dit_weight_specs() if sub == "transformer" else kp.te_weight_specs()
     K, N, build = specs[name]
-    st = SafeTensors(model_dir() / sub)
+    st = SafeTensors(Path(ckpt) / sub)
     b = build(st.get)
     assert b.shape == (K, N), (name, b.shape, (K, N))
     out = Path(cache) / f"{name}.bin"
@@ -65,8 +65,10 @@ def _pack_one(sub: str, name: str, cache: str) -> tuple[str, float]:
     return name, time.time() - t0
 
 
-def ensure_packed(cache: Path, jobs: int) -> dict[str, tuple[Path, int]]:
-    """{name: (file, bytes)} for every DiT and text-encoder GEMM weight, packing the missing."""
+def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None) -> dict[str, tuple[Path, int]]:
+    """{name: (file, bytes)} for every DiT and text-encoder GEMM weight, packing the missing.
+    ckpt: the checkpoint directory (default: the HF cache's snapshot)."""
+    ckpt = ckpt or model_dir()
     cache.mkdir(parents=True, exist_ok=True)
     want = {n: ("transformer", K * N * 9 // 8) for n, (K, N, _) in kp.dit_weight_specs().items()}
     want |= {n: ("text_encoder", K * N * 9 // 8) for n, (K, N, _) in kp.te_weight_specs().items()}
@@ -77,7 +79,7 @@ def ensure_packed(cache: Path, jobs: int) -> dict[str, tuple[Path, int]]:
         t0 = time.time()
         with ProcessPoolExecutor(jobs) as ex:
             for i, (n, s) in enumerate(ex.map(_pack_one, [want[n][0] for n in todo], todo,
-                                              [str(cache)] * len(todo))):
+                                              [str(cache)] * len(todo), [str(ckpt)] * len(todo))):
                 if i % 20 == 0 or i == len(todo) - 1:
                     print(f"  [{i + 1}/{len(todo)}] {n} {s:.1f} s", flush=True)
         print(f"packed in {time.time() - t0:.0f} s", flush=True)

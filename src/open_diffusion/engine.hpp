@@ -7,8 +7,14 @@
 // valid_len, and reads the RGBA back. Runs on one hardware context are queued back to
 // back; before the next kernel set the host blocks on the last one (XRT's wait sleeps).
 //
-// Tokenizing is the caller's: the engine takes token ids (the server has the HF
-// tokenizer; utilities/dit-chain/klein_tokens.py writes them for the CLI).
+// Two directories: the model (q4nx-build --open-diffusion: bundle.json, the schedules,
+// weights.bin, the embedding table) and a kernel set (export_dit_kernels.py --install:
+// diffusion_kernels.json and the six sets). They must carry the same layout hash: the
+// packed weights and the schedule are only valid against the streams they were made for.
+//
+// Tokenizing is the caller's: the engine takes token ids (prompt.hpp templates and
+// tokenizes in the main build; utilities/dit-chain/klein_tokens.py writes them for the
+// standalone CLI).
 #pragma once
 
 #include <cstdint>
@@ -26,10 +32,23 @@ struct Timing {
     std::vector<double> op_ms;                           // per op, with profile only
 };
 
+// The installed kernel set's manifest format (export_dit_kernels.py's MANIFEST_FORMAT).
+constexpr const char* kKernelsFormat = "oflm-open-diffusion-kernels-v1";
+
+// Whether dir holds a complete kernel set of this format and layout; *why says why not.
+bool kernels_usable(const std::string& dir, const std::string& layout, std::string* why);
+
+// The model's kernel set, or "": env_dir if given (used as named -- the engine then
+// refuses it if wrong), else <model_dir>/open_kernels, else <root>/xclbins/<family>/
+// open_kernels for each root, the first usable one. *how names the rule that chose it.
+std::string find_kernels(const std::string& model_dir, const std::string& env_dir,
+                         const std::vector<std::string>& roots, std::string* how);
+
 class Engine {
 public:
-    // bundle_dir: export_bundle.py's output; size: a resolution the bundle has.
-    Engine(const std::string& bundle_dir, int size);
+    // model_dir: q4nx-build --open-diffusion's output; kernels_dir: an installed kernel
+    // set (find_kernels); size: a resolution the model has.
+    Engine(const std::string& model_dir, const std::string& kernels_dir, int size);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -41,7 +60,7 @@ public:
     int pad_id() const;
     const std::string& prompt_template() const;   // "{prompt}" marks the user text
 
-    // ids: the chat-templated prompt's tokens, at most max_tokens(); padded here.
+    // ids: the chat-templated prompt's tokens, unpadded, 1..max_tokens(); padded here.
     void set_tokens(const std::vector<int64_t>& ids);
     // The initial latents, packed [image_tokens, 128] bf16 bits.
     void set_noise(const std::vector<uint16_t>& bf16_bits);
@@ -52,6 +71,8 @@ public:
     Timing run(bool profile = false);
     // The image, [size, size, 3] RGB8.
     std::vector<uint8_t> rgb();
+    // The image as "png" or "jpeg" file bytes (jpeg_quality 1..100).
+    std::vector<uint8_t> encode(const std::string& format, int jpeg_quality = 90);
     // Per-op description for a profile: (kernel set, stream, phase).
     std::vector<std::tuple<std::string, std::string, std::string>> ops() const;
 
@@ -60,7 +81,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// An 8-bit RGB PNG with stored (uncompressed) deflate blocks: no zlib.
-void write_png_rgb(const std::string& path, const uint8_t* rgb, int width, int height);
+// "png" or "jpeg" for a path's extension (.png, .jpg, .jpeg; any case), else "".
+std::string format_for_path(const std::string& path);
 
 }  // namespace open_diffusion

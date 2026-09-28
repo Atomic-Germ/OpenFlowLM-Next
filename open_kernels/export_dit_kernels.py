@@ -47,6 +47,14 @@ the Whisper and embedding sets use).
 The default destination, src/xclbins/<family>/open_kernels/, is gitignored: kernel sets
 are built, not checked in.
 
+    python open_kernels\export_dit_kernels.py --out <built dir> --install src\xclbins\<family>\open_kernels
+
+copies a built directory's runtime files only (no build/: the installer ships xclbins\
+recursively) and writes diffusion_kernels.json last: format, family, resolutions, the
+set directories, and layout_hash -- the stream specs plus WEIGHT_FORMAT, which a model
+directory (utilities/dit-chain/export_bundle.py) must match. src/open_diffusion finds the
+set by that manifest.
+
 Output:
     final.xclbin, insts_<stream>.bin
     dit_kernels.json   family, streams {name: {M, K, N, role}}, the packing it expects
@@ -267,6 +275,76 @@ def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens:
     return streams
 
 
+def set_streams(family: str, resolutions: list[int], vae: bool = True) -> dict[str, dict]:
+    """{set: {stream: spec}}: what main() builds, and each set's marker lists as `streams`."""
+    sets = {"gemm": klein_streams(resolutions, **FAMILIES[family])}
+    if family in FA_FAMILIES:
+        sets["fa"] = klein_fa_streams(resolutions, **FA_FAMILIES[family])
+    sets["ew"] = klein_ew_streams(resolutions, **FAMILIES[family])
+    if vae:
+        import vae_decoder  # noqa: E402
+        v = vae_decoder.stream_specs(resolutions)
+        for n, sp in v.get("gemm", {}).items():
+            sets["gemm"][n] = sp | {"role": "vae.attention.qkv"}
+        for n, sp in v.get("fa", {}).items():
+            sets.setdefault("fa", {})[n] = sp | {"role": "vae.attention"}
+        for k in ("conv", "conv1", "vew"):
+            if v.get(k):
+                sets[k] = v[k]
+    return sets
+
+
+# Where each set lives in a kernel directory, and its marker (the last file assemble writes)
+SET_DIRS = {"gemm": ".", "fa": "fa", "ew": "ew", "conv": "conv", "conv1": "conv1", "vew": "vew"}
+SET_MARKERS = {"gemm": "dit_kernels.json", "fa": "dit_fa.json", "ew": "dit_ew.json",
+               "conv": "dit_conv.json", "conv1": "dit_conv.json", "vew": "vae_ew.json"}
+# The installed set's manifest (src/open_diffusion finds kernels by it)
+MANIFEST, MANIFEST_FORMAT = "diffusion_kernels.json", "oflm-open-diffusion-kernels-v1"
+# dit_gemm's weight packing: bump when pack.pack_b's tile order changes (the packed
+# weights in a model directory are only valid against it)
+WEIGHT_FORMAT = "bfp16ebs8 pack_b v1"
+
+
+def layout_hash(sets: dict[str, dict]) -> str:
+    """What ties a model directory's schedule and packed weights to a kernel set: every
+    stream's spec and the weight packing. q4nx-build writes it into the model's config.json
+    and bundle.json, --install into the manifest; the engine refuses a mismatch."""
+    import hashlib
+    norm = json.loads(json.dumps(sets))                    # tuples -> lists, as a marker reads
+    blob = json.dumps({"weights": WEIGHT_FORMAT, "sets": norm}, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def install(src: Path, dst: Path, family: str) -> None:
+    """Copy a built kernel directory's runtime files (each set's final.xclbin, instruction
+    streams and marker -- not build/) to dst, then write the manifest last."""
+    markers = {}
+    for s, sub in SET_DIRS.items():
+        m = _read_json(src / sub / SET_MARKERS[s])
+        if m is None or not m.get("complete"):
+            raise SystemExit(f"{src / sub / SET_MARKERS[s]}: missing or incomplete; build the set first")
+        markers[s] = m
+    resolutions = markers["gemm"]["resolutions"]
+    sets = {s: m["streams"] for s, m in markers.items()}
+    want = set_streams(family, resolutions)
+    if json.loads(json.dumps(want)) != sets:
+        raise SystemExit(f"{src} was built from other stream specs than this tree's; rebuild it")
+    (dst / MANIFEST).unlink(missing_ok=True)
+    n = 0
+    for s, sub in SET_DIRS.items():
+        d = dst / sub
+        d.mkdir(parents=True, exist_ok=True)
+        for f in ["final.xclbin", SET_MARKERS[s], "toolchain.json"] + \
+                 [f"insts_{st}.bin" for st in sets[s]]:
+            shutil.copyfile(src / sub / f, d / f)
+            n += 1
+    (dst / MANIFEST).write_text(json.dumps({
+        "format": MANIFEST_FORMAT, "family": family, "resolutions": resolutions,
+        "layout": layout_hash(sets), "sets": SET_DIRS, "complete": True}, indent=2) + "\n",
+        encoding="utf-8")
+    print(f"installed {n} files -> {dst} (layout {layout_hash(sets)})")
+
+
 VL_PROBE, VL_PROBE_STREAM = 77, "te_attn_vlprobe"
 
 
@@ -356,19 +434,24 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=4, help="parallel stream builds")
     ap.add_argument("--fa-exp-fix", action="store_true",
                     help="build dit_fa with FA_EXP_FIX (see designs/dit_fa/README.md)")
+    ap.add_argument("--install", metavar="DIR", default=None,
+                    help="copy --out's runtime files (no build/) to DIR with its manifest, "
+                         "diffusion_kernels.json, and build nothing; e.g. "
+                         "src/xclbins/<family>/open_kernels, which the installer ships")
     args = ap.parse_args()
+
+    resolutions = [int(r) for r in args.resolutions.split(",")]
+    if args.install:
+        if not args.out:
+            raise SystemExit("--install needs --out: the built kernel directory")
+        install(Path(args.out).resolve(), Path(args.install).resolve(), args.family)
+        return 0
 
     from dit_gemm import check_shape  # noqa: E402  (imports IRON)
 
-    fam = FAMILIES[args.family]
-    resolutions = [int(r) for r in args.resolutions.split(",")]
-    streams = klein_streams(resolutions, **fam)
-    vae = {}
-    if not args.no_vae:
-        import vae_decoder  # noqa: E402
-        vae = vae_decoder.stream_specs(resolutions)
-        for n, sp in vae.get("gemm", {}).items():
-            streams[n] = sp | {"role": "vae.attention.qkv"}
+    sets = set_streams(args.family, resolutions, vae=not args.no_vae)
+    streams = sets["gemm"]
+    vae = {k: sets[k] for k in ("conv", "conv1", "vew") if k in sets}
     bad = {n: why for n, s in streams.items() if (why := check_shape(s["M"], s["K"], s["N"]))}
     if bad:
         for n, why in bad.items():
@@ -404,10 +487,8 @@ def main() -> int:
         sys.path.insert(0, str(HERE / "designs" / "dit_fa"))
         from dit_fa import check_shape as fa_check  # noqa: E402
 
-        fa_streams = klein_fa_streams(resolutions, **FA_FAMILIES[args.family])
-        for n, sp in vae.get("fa", {}).items():
-            fa_streams[n] = sp | {"role": "vae.attention"}
-        bad = {n: why for n, s in fa_streams.items()
+        fa_streams = sets["fa"]
+        bad ={n: why for n, s in fa_streams.items()
                if (why := fa_check(s["L"], s["heads"], s["kv_heads"]))}
         if bad:
             raise SystemExit(f"unsupported attention shape(s): {bad}")
@@ -460,7 +541,7 @@ def main() -> int:
         sys.path.insert(0, str(HERE / "designs" / "dit_ew"))
         from dit_ew import check_spec  # noqa: E402
 
-        ew_streams = klein_ew_streams(resolutions, **fam)
+        ew_streams = sets["ew"]
         bad = {n: why for n, s in ew_streams.items() if (why := check_spec(s))}
         if bad:
             raise SystemExit(f"unsupported dit_ew stream(s): {bad}")

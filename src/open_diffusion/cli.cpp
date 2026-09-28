@@ -1,8 +1,11 @@
 // open_diffusion_cli: one FLUX.2 [klein] image from a bundle, every op on the NPU.
 //
-//   open_diffusion_cli --bundle C:\dev\klein-bundle --size 512 --ids ids.npy --out img.png
+//   open_diffusion_cli --model DIR [--kernels DIR] --size 512 --ids ids.npy --out img.png|.jpg
 //       [--noise noise.npy | --seed N] [--runs N] [--profile]
 //
+// --model: q4nx-build --open-diffusion's output. --kernels: an installed kernel set
+//   (export_dit_kernels.py --install); default OFLM_DIFFUSION_KERNELS_DIR, else
+//   <model>/open_kernels.
 // --ids: the chat-templated prompt's token ids (.npy int64/int32, or a comma list);
 //   utilities/dit-chain/klein_tokens.py writes them. --noise: packed initial latents
 //   [(size/16)^2, 128] as bf16 bits (.npy uint16), e.g. capture_pipeline_inputs.py's.
@@ -10,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -91,7 +95,8 @@ double process_cpu_s() {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: open_diffusion_cli --bundle DIR --size 512|1024 --ids FILE.npy|a,b,c --out IMG.png\n"
+                 "usage: open_diffusion_cli --model DIR [--kernels DIR] --size 512|1024\n"
+                 "                          --ids FILE.npy|a,b,c --out IMG.png|.jpg\n"
                  "                          [--noise FILE.npy | --seed N] [--runs N] [--profile]\n");
     return 2;
 }
@@ -107,12 +112,20 @@ int main(int argc, char** argv) {
         if (k.rfind("--", 0) != 0 || i + 1 >= argc) return usage();
         a[k.substr(2)] = argv[++i];
     }
-    if (!a.count("bundle") || !a.count("ids") || !a.count("out")) return usage();
+    if (!a.count("model") || !a.count("ids") || !a.count("out")) return usage();
     try {
         int size = a.count("size") ? std::stoi(a["size"]) : 512;
         int runs = a.count("runs") ? std::stoi(a["runs"]) : 1;
+        std::string format = open_diffusion::format_for_path(a["out"]);
+        if (format.empty()) throw std::runtime_error("--out must end in .png, .jpg or .jpeg");
+        std::string how, kernels = a.count("kernels") ? a["kernels"] : "";
+        if (kernels.empty()) {
+            const char* env = std::getenv("OFLM_DIFFUSION_KERNELS_DIR");
+            kernels = open_diffusion::find_kernels(a["model"], env ? env : "", {}, &how);
+            if (kernels.empty()) throw std::runtime_error("no kernel set found: pass --kernels");
+        }
         auto t0 = GetTickCount64();
-        open_diffusion::Engine eng(a["bundle"], size);
+        open_diffusion::Engine eng(a["model"], kernels, size);
         std::printf("loaded %dx%d in %.1f s\n", size, size, (GetTickCount64() - t0) / 1e3);
 
         std::vector<uint16_t> noise;
@@ -131,8 +144,10 @@ int main(int argc, char** argv) {
             eng.set_noise(noise);
             auto t = eng.run(profile);
             double cpu = process_cpu_s() - c0;
-            auto img = eng.rgb();
-            open_diffusion::write_png_rgb(a["out"], img.data(), size, size);
+            auto img = eng.encode(format);
+            std::ofstream f(a["out"], std::ios::binary);
+            if (!f.write(reinterpret_cast<const char*>(img.data()), static_cast<std::streamsize>(img.size())))
+                throw std::runtime_error("cannot write " + a["out"]);
             std::printf("[run %d] %.2f s on the NPU (", r, t.total_s);
             for (size_t i = 0; i < t.phases.size(); ++i)
                 std::printf("%s%s %.2f", i ? ", " : "", t.phases[i].first.c_str(), t.phases[i].second);

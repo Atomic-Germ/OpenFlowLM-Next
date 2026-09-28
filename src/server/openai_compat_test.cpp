@@ -194,7 +194,7 @@ static void test_is_chat_model(const std::string& list_path) {
     ok(is_chat_model("llama3.2:1b", ml), "llama3.2:1b IS a chat model");
 
     // The two that passed is_model_supported() and were served by a renamed Llama3.
-    for (const char* tag : {"embed-gemma:300m", "whisper-v3:turbo"}) {
+    for (const char* tag : {"embed-gemma:300m", "whisper-v3:turbo", "flux2-klein:4b"}) {
         if (!ml.is_model_supported(tag)) {
             std::printf("skip  %s is not in this model_list.json\n", tag);
             continue;

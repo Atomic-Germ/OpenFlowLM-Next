@@ -1,6 +1,8 @@
 // open_diffusion engine: replays export_bundle.py's schedule. See engine.hpp.
 #include "engine.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -13,6 +15,9 @@
 #include <tuple>
 
 #include "nlohmann/json.hpp"
+#define STB_IMAGE_WRITE_STATIC
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_hw_context.h"
@@ -56,7 +61,47 @@ uint16_t to_bf16(float x) {
     return static_cast<uint16_t>(u >> 16);
 }
 
+// The manifest if dir holds a complete set of this format and layout; *why otherwise.
+bool read_manifest(const fs::path& dir, const std::string& layout, json* out, std::string* why) {
+    std::ifstream f(dir / "diffusion_kernels.json", std::ios::binary);
+    if (!f) { *why = "no diffusion_kernels.json"; return false; }
+    json j;
+    try { f >> j; } catch (const json::exception&) { *why = "diffusion_kernels.json does not parse"; return false; }
+    if (j.value("format", std::string()) != kKernelsFormat) {
+        *why = "diffusion_kernels.json is not format " + std::string(kKernelsFormat);
+        return false;
+    }
+    if (!j.value("complete", false)) { *why = "the kernel set is incomplete"; return false; }
+    if (j.value("layout", std::string()) != layout) {
+        *why = "the kernel set's layout " + j.value("layout", std::string("(none)")) +
+               " is not the model's " + layout + " (built from other kernel code; rebuild one of them)";
+        return false;
+    }
+    if (out) *out = std::move(j);
+    return true;
+}
+
 }  // namespace
+
+bool kernels_usable(const std::string& dir, const std::string& layout, std::string* why) {
+    return read_manifest(dir, layout, nullptr, why);
+}
+
+std::string find_kernels(const std::string& model_dir, const std::string& env_dir,
+                         const std::vector<std::string>& roots, std::string* how) {
+    if (!env_dir.empty()) { *how = "OFLM_DIFFUSION_KERNELS_DIR"; return env_dir; }
+    json bundle = read_json(fs::path(model_dir) / "bundle.json");
+    std::string layout = bundle.at("layout").get<std::string>(), why;
+    fs::path local = fs::path(model_dir) / "open_kernels";
+    if (kernels_usable(local.string(), layout, &why)) { *how = "beside the model"; return local.string(); }
+    // keyed on the family, not the model: a fine-tune of the same shape reuses the set
+    std::string family = bundle.at("family").get<std::string>();
+    for (const auto& r : roots) {
+        fs::path cand = fs::path(r) / "xclbins" / family / "open_kernels";
+        if (kernels_usable(cand.string(), layout, &why)) { *how = "an xclbins root"; return cand.string(); }
+    }
+    return {};
+}
 
 struct Engine::Impl {
     struct Stream {
@@ -137,14 +182,24 @@ struct Engine::Impl {
     }
 };
 
-Engine::Engine(const std::string& bundle_dir, int size) : impl_(std::make_unique<Impl>()) {
+Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, int size)
+    : impl_(std::make_unique<Impl>()) {
     Impl& m = *impl_;
-    m.dir = bundle_dir;
+    m.dir = model_dir;
     m.bundle = read_json(m.dir / "bundle.json");
+    json manifest;
+    std::string why;
+    if (!read_manifest(kernels_dir, m.bundle.at("layout").get<std::string>(), &manifest, &why))
+        throw std::runtime_error("kernel set " + kernels_dir + ": " + why);
     auto res = m.bundle.at("resolutions");
-    if (!res.contains(std::to_string(size)))
-        throw std::runtime_error("the bundle has no schedule for " + std::to_string(size) + "x" +
-                                 std::to_string(size) + " (it has " + res.dump() + ")");
+    if (!res.contains(std::to_string(size))) {
+        std::vector<int> sizes;
+        for (auto& [r, _] : res.items()) sizes.push_back(std::stoi(r));
+        std::sort(sizes.begin(), sizes.end());
+        std::string have;
+        for (int r : sizes) have += (have.empty() ? "" : ", ") + std::to_string(r);
+        throw std::runtime_error("unsupported size " + std::to_string(size) + " (supported: " + have + ")");
+    }
     m.sched = read_json(m.dir / res.at(std::to_string(size)).get<std::string>());
     m.R = m.sched.at("R").get<int>();
     m.T = m.sched.at("image_tokens").get<int>();
@@ -155,8 +210,8 @@ Engine::Engine(const std::string& bundle_dir, int size) : impl_(std::make_unique
     m.embed_dim = m.bundle.at("embed").at("dim").get<int>();
     m.token_row = m.sched.at("inputs").at("token_row_elems").get<int>();
 
-    fs::path kdir = m.bundle.at("kernels").get<std::string>();
-    for (auto& [name, sub] : m.bundle.at("kernel_sets").items()) {
+    fs::path kdir = kernels_dir;
+    for (auto& [name, sub] : manifest.at("sets").items()) {
         auto s = std::make_unique<Impl::Set>();
         s->dir = kdir / sub.get<std::string>();
         xrt::xclbin xcl((s->dir / "final.xclbin").string());
@@ -176,11 +231,18 @@ Engine::Engine(const std::string& bundle_dir, int size) : impl_(std::make_unique
         read_into(m.dir / file.get<std::string>(), b.bo.map<void*>(), b.bytes);
     }
     for (auto& [name, b] : m.bufs) b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    fs::path wpath = m.dir / m.bundle.at("weights_file").get<std::string>();
+    std::ifstream wf(wpath, std::ios::binary | std::ios::ate);
+    if (!wf) throw std::runtime_error("cannot open " + wpath.string());
+    auto wsize = static_cast<size_t>(wf.tellg());
     for (auto& [name, w] : m.bundle.at("weights").items()) {
-        size_t bytes = w.at("bytes").get<size_t>();
+        size_t off = w.at("offset").get<size_t>(), bytes = w.at("bytes").get<size_t>();
+        if (off + bytes > wsize) throw std::runtime_error(wpath.string() + " is shorter than " + name + " needs");
         m.alloc(name, bytes, group);
         Impl::Buf& b = m.buf(name);
-        read_into(w.at("file").get<std::string>(), b.bo.map<void*>(), bytes);
+        wf.seekg(static_cast<std::streamoff>(off));
+        wf.read(b.bo.map<char*>(), static_cast<std::streamsize>(bytes));
+        if (!wf) throw std::runtime_error("cannot read " + name + " from " + wpath.string());
         b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     }
 
@@ -203,7 +265,9 @@ Engine::Engine(const std::string& bundle_dir, int size) : impl_(std::make_unique
 
     int fa = set_index.at("fa");
     m.vl_stream = &m.stream(fa, "te_attn");
-    for (const auto& w : m.bundle.at("patch").at("te_attn").at("valid_len"))
+    // the words are the kernel set's (a probe build found them), not the model's
+    json fa_meta = read_json(kdir / manifest.at("sets").at("fa").get<std::string>() / "dit_fa.json");
+    for (const auto& w : fa_meta.at("patch").at("te_attn").at("valid_len"))
         m.vl_words.push_back(w.get<size_t>());
     m.embed.open(m.dir / m.bundle.at("embed").at("file").get<std::string>(), std::ios::binary);
     if (!m.embed) throw std::runtime_error("cannot open the embedding table");
@@ -220,8 +284,8 @@ const std::string& Engine::prompt_template() const { return impl_->templ; }
 
 void Engine::set_tokens(const std::vector<int64_t>& ids) {
     Impl& m = *impl_;
-    int n_real = 0;
-    while (n_real < static_cast<int>(ids.size()) && ids[n_real] != m.pad_id) ++n_real;
+    // the length as given, not up to the first pad id: a prompt may itself hold that token
+    int n_real = static_cast<int>(ids.size());
     if (n_real == 0 || n_real > m.max_tokens)
         throw std::runtime_error("the prompt must have 1.." + std::to_string(m.max_tokens) + " tokens");
     Impl::Buf& xt = m.buf(m.sched.at("inputs").at("tokens").get<std::string>());
@@ -335,70 +399,33 @@ std::vector<std::tuple<std::string, std::string, std::string>> Engine::ops() con
     return out;
 }
 
-// ---------------------------------------------------------------------------- PNG
+// ------------------------------------------------------------------------ encoding
 
-namespace {
-uint32_t crc32(const uint8_t* d, size_t n, uint32_t c = 0xFFFFFFFFu) {
-    static uint32_t table[256];
-    static bool init = false;
-    if (!init) {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t v = i;
-            for (int k = 0; k < 8; ++k) v = (v & 1) ? 0xEDB88320u ^ (v >> 1) : v >> 1;
-            table[i] = v;
-        }
-        init = true;
-    }
-    for (size_t i = 0; i < n; ++i) c = table[(c ^ d[i]) & 0xFF] ^ (c >> 8);
-    return c;
+std::vector<uint8_t> Engine::encode(const std::string& format, int jpeg_quality) {
+    auto px = rgb();
+    int R = impl_->R;
+    std::vector<uint8_t> out;
+    auto sink = [](void* ctx, void* data, int n) {
+        auto* v = static_cast<std::vector<uint8_t>*>(ctx);
+        v->insert(v->end(), static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + n);
+    };
+    int ok = 0;
+    if (format == "png")
+        ok = stbi_write_png_to_func(sink, &out, R, R, 3, px.data(), 3 * R);
+    else if (format == "jpeg")
+        ok = stbi_write_jpg_to_func(sink, &out, R, R, 3, px.data(), std::clamp(jpeg_quality, 1, 100));
+    else
+        throw std::runtime_error("unsupported image format " + format + " (png or jpeg)");
+    if (!ok) throw std::runtime_error("encoding the " + format + " failed");
+    return out;
 }
 
-void put32(std::vector<uint8_t>& v, uint32_t x) {
-    for (int s = 24; s >= 0; s -= 8) v.push_back(static_cast<uint8_t>(x >> s));
-}
-
-void chunk(std::ofstream& f, const char* type, const std::vector<uint8_t>& data) {
-    std::vector<uint8_t> v;
-    put32(v, static_cast<uint32_t>(data.size()));
-    v.insert(v.end(), type, type + 4);
-    v.insert(v.end(), data.begin(), data.end());
-    put32(v, crc32(v.data() + 4, v.size() - 4) ^ 0xFFFFFFFFu);
-    f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size()));
-}
-}  // namespace
-
-void write_png_rgb(const std::string& path, const uint8_t* rgb, int w, int h) {
-    std::vector<uint8_t> raw;
-    raw.reserve(static_cast<size_t>(h) * (3 * w + 1));
-    for (int y = 0; y < h; ++y) {
-        raw.push_back(0);                                // filter: none
-        raw.insert(raw.end(), rgb + static_cast<size_t>(y) * 3 * w, rgb + static_cast<size_t>(y + 1) * 3 * w);
-    }
-    std::vector<uint8_t> z = {0x78, 0x01};               // zlib, stored blocks
-    uint32_t a = 1, b = 0;
-    for (uint8_t c : raw) { a = (a + c) % 65521; b = (b + a) % 65521; }
-    for (size_t off = 0; off < raw.size() || off == 0;) {
-        size_t n = std::min<size_t>(65535, raw.size() - off);
-        bool last = off + n == raw.size();
-        z.push_back(last ? 1 : 0);
-        z.push_back(static_cast<uint8_t>(n)); z.push_back(static_cast<uint8_t>(n >> 8));
-        z.push_back(static_cast<uint8_t>(~n)); z.push_back(static_cast<uint8_t>(~n >> 8));
-        z.insert(z.end(), raw.begin() + off, raw.begin() + off + n);
-        off += n;
-        if (last) break;
-    }
-    put32(z, (b << 16) | a);
-    std::vector<uint8_t> ihdr;
-    put32(ihdr, static_cast<uint32_t>(w));
-    put32(ihdr, static_cast<uint32_t>(h));
-    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0});            // 8-bit RGB
-    std::ofstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error("cannot write " + path);
-    const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    f.write(reinterpret_cast<const char*>(sig), 8);
-    chunk(f, "IHDR", ihdr);
-    chunk(f, "IDAT", z);
-    chunk(f, "IEND", {});
+std::string format_for_path(const std::string& path) {
+    std::string ext = fs::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == ".png") return "png";
+    if (ext == ".jpg" || ext == ".jpeg") return "jpeg";
+    return {};
 }
 
 }  // namespace open_diffusion

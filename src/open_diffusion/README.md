@@ -10,7 +10,8 @@ has 1050 dispatches over six kernel sets:
 Every op runs on the NPU. Per image, the host does only these things:
 - writes the prompt's 512 embedding rows and the noise;
 - patches `te_attn`'s `valid_len`;
-- reads the RGBA and writes the PNG.
+- reads the RGBA and encodes the PNG or JPEG (`stb_image_write`, vendored in
+  `third_party/stb`).
 
 Runs on one hardware context are queued back to back. Before the next kernel set, the
 host blocks on every queued run; XRT's wait sleeps.
@@ -20,16 +21,31 @@ for the same token ids and noise.
 
 Spec: `specs/open-diffusion/spec.md`. Design: `.claude/plans/image-diffusion-phase6-engine.md`.
 
+It loads two directories, which must carry the same layout hash:
+- the model: `q4nx-build --open-diffusion` (`utilities/dit-chain/export_bundle.py`),
+  installed as `flux2-klein:4b`;
+- a kernel set: `export_dit_kernels.py --install`, found by `find_kernels`
+  (`OFLM_DIFFUSION_KERNELS_DIR`, `<model>/open_kernels`, then the xclbins roots).
+
+`oflm image` (`src/src/image_command.hpp`) is the user-facing command; `prompt.cpp`
+templates and tokenizes there. `cli.cpp` is the standalone gate, outside the main build.
+
 ## Build and run
+
+```
+oflm image flux2-klein:4b "a red fox in fresh snow" --seed 1 -o fox.png
+```
+
+The standalone gate, for kernel and schedule work:
 
 ```
 . C:\dev\mlir-aie\iron_env.ps1
 python open_kernels\export_dit_kernels.py --resolutions 512,1024 --out C:\dev\klein-kernels
-python utilities\dit-chain\generate.py --kernels C:\dev\klein-kernels --pack-only       # ~8 GB, once
-python utilities\dit-chain\export_bundle.py --kernels C:\dev\klein-kernels --out C:\dev\klein-bundle
+python open_kernels\export_dit_kernels.py --out C:\dev\klein-kernels --install src\xclbins\FLUX.2-klein-4B-NPU2\open_kernels
+python utilities\dit-chain\export_bundle.py --out C:\dev\klein-model --pack-cache C:\dev\klein-kernels\packed
 src\open_diffusion\build.cmd
-python utilities\dit-chain\klein_tokens.py "a red fox in fresh snow" C:\dev\fox.npy
-src\open_diffusion\out\open_diffusion_cli.exe --bundle C:\dev\klein-bundle --size 1024 --ids C:\dev\fox.npy --seed 1 --out fox.png
+python utilities\dit-chain\klein_tokens.py "a red fox in fresh snow" C:\dev\fox.npy --bundle C:\dev\klein-model
+src\open_diffusion\out\open_diffusion_cli.exe --model C:\dev\klein-model --kernels src\xclbins\FLUX.2-klein-4B-NPU2\open_kernels --size 1024 --ids C:\dev\fox.npy --seed 1 --out fox.png
 ```
 
 `--noise <npy>` injects packed initial latents (bf16 bits). `capture_pipeline_inputs.py`
@@ -37,9 +53,6 @@ writes the study's. `--runs N` repeats the image; `--profile` times each op.
 
 ## Not implemented yet
 
-- **Tokenizing.** The engine takes token ids. `src/common/tokenizer` (tokenizers-cpp) does
-  it in the main `flm` build, and the standalone build has no Qwen tokenizer. For now
-  `utilities/dit-chain/klein_tokens.py` writes the ids.
-- **Serving.** `oflm serve`'s `/v1/images/generations` is a separate plan.
-- **Packaging.** `q4nx-build --open-diffusion` and `oflm add` are separate work. The bundle
-  is a directory whose weights are referenced from `<kernels>\packed`.
+- **Serving.** `oflm serve`'s `/v1/images/generations` is a separate plan
+  (`specs/server-api/plans/images-api.md`).
+- **`oflm add` for klein derivatives.** `oflm-add` requires `model.q4nx`.

@@ -11,8 +11,11 @@ Sources:
   - weight packing specs, the parameter table and the host setup.
 - `open_kernels/export_dit_kernels.py`: builds every stream the schedule names.
 - `utilities/dit-chain/generate.py`: the pyxrt runner.
-- `utilities/dit-chain/export_bundle.py`: the schedule as files, for
-  `src/open_diffusion` (native, pixel-identical to generate.py).
+- `utilities/dit-chain/export_bundle.py`: the model directory (schedules, packed weights in
+  one `weights.bin`, the embedding table), for `src/open_diffusion` (native,
+  pixel-identical to generate.py). `q4nx-build --open-diffusion` runs it.
+- `src/open_diffusion/`: the engine; `prompt.cpp` (main build) templates and tokenizes;
+  `src/src/image_command.hpp` is `oflm image`; `cli.cpp` is the standalone gate.
 - The kernels have their own skills: `dit-gemm`, `dit-fa`, `dit-ew`, `dit-conv`.
 - Spec: `specs/open-diffusion/spec.md`. Design: `.claude/plans/image-diffusion-phase6-engine.md`.
 
@@ -21,11 +24,37 @@ Sources:
 ```
 . C:\dev\mlir-aie\iron_env.ps1
 python open_kernels\export_dit_kernels.py --resolutions 512,1024 --out C:\dev\klein-kernels --jobs 6
+python open_kernels\export_dit_kernels.py --out C:\dev\klein-kernels --install src\xclbins\FLUX.2-klein-4B-NPU2\open_kernels
 python utilities\dit-chain\generate.py --kernels C:\dev\klein-kernels --pack-only          # ~8 GB, 5 min, once
 python utilities\dit-chain\generate.py --kernels C:\dev\klein-kernels --size 512 --prompt "a red fox in snow" --out C:\dev\gen
-python utilities\dit-chain\export_bundle.py --kernels C:\dev\klein-kernels --out C:\dev\klein-bundle
-src\open_diffusion\build.cmd
 ```
+
+The shipped path (what a user gets from `oflm image`):
+
+```
+cd utilities\q4nx-build
+python -c "from q4nx.cli import main; main(['--open-diffusion','-i','black-forest-labs/FLUX.2-klein-4B','-o','%OFLM_MODEL_PATH%\models\FLUX.2-klein-4B-NPU2','--pack-cache','C:\dev\klein-kernels\packed'])"
+src\build-windows-vcpkg.cmd
+src\out\oflm.exe image flux2-klein:4b "a red fox in fresh snow" -o fox.png
+src\open_diffusion\build.cmd     # the standalone gate: --model <dir> --kernels <installed set> --ids ids.npy
+```
+
+- **Two directories, one layout hash.** The model directory (`bundle.json`, `config.json`)
+  and the installed kernel set (`diffusion_kernels.json`) each carry
+  `export_dit_kernels.layout_hash`: every stream spec plus `WEIGHT_FORMAT`. The engine
+  refuses a mismatch by name. Change a stream spec or `pack_b` and both must be rebuilt;
+  bump `WEIGHT_FORMAT` when only the packing changes.
+- **Kernel search:** `OFLM_DIFFUSION_KERNELS_DIR`, then `<model>/open_kernels`, then
+  `<root>/xclbins/FLUX.2-klein-4B-NPU2/open_kernels` per xclbins root (`find_kernels`).
+- **`--install` copies only runtime files** (157, 15 MB). Never ship `--out` itself: the
+  installer copies `xclbins\` recursively, `build\` included.
+- **The registry entry:** `model_info_entry.json` predicts the HF tree API's listing
+  (`*.bin` and >= 10 MB files are LFS). After the upload to `Cyronius/FLUX.2-klein-4B-NPU2`,
+  pull on a clean models directory: every file's hash is checked.
+- **Tokens:** `specs/open-diffusion/tests/token_goldens.json` (from `klein_tokens.py
+  --goldens`) pins oflm's prompt path to `klein_pipeline.token_ids`; the
+  `open_diffusion_tokens` CTest runs it. A prompt may contain `<|endoftext|>` (the pad id):
+  the engine takes the ids' length as given, never scans for the pad.
 
 Run PowerShell scripts that take `--out` through a wrapper with no `param()` block. With
 `[Parameter(ValueFromRemainingArguments)]`, `--out` binds to `-OutVariable`.
@@ -83,6 +112,7 @@ images.
 ## Adding a resolution
 
 - `check_resolution`: (R/16)² must be a multiple of 512.
-- Export with `--resolutions`, then re-export the bundle.
+- Export with `--resolutions`, `--install` it, then rebuild the model directory (the
+  layout hash changes) and add the size to `image_sizes` in `src/model_list.json`.
 - New streams appear per R: DiT gemm/ew/fa, euler, x_emb/proj_out, and the VAE's.
 - Capture study inputs with `capture_pipeline_inputs.py --size R`.
