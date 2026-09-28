@@ -26,6 +26,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdio>
 
 #include <cstddef>
 #include <cstdint>
@@ -105,6 +106,7 @@ struct StepTiming {
     double moe_run_ms = 0;    ///< the mx dispatch itself
     double moe_read_ms = 0;   ///< xres back
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
+    double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
 };
 
 class Core {
@@ -403,6 +405,11 @@ private:
 
     std::vector<float> logits_host_;
     StepTiming timing_;
+    /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
+    /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the
+    /// window-dependence of each phase regresses from a single run. Null = off,
+    /// zero cost. Measurement only -- never touches a computed value.
+    FILE* dxb_log_ = nullptr;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;

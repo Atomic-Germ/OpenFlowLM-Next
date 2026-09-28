@@ -303,6 +303,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
+    // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
+    // Measurement only; off (and free) unless the env names a file.
+    if (const char* env = std::getenv("OFLM_OPEN_DXB_LOG")) {
+        dxb_log_ = std::fopen(env, "w");
+        if (dxb_log_) {
+            std::fprintf(dxb_log_, "kind,layer,pos,patch_ms,prep_ms,submit_ms,wait_ms,read_ms\n");
+            log("dxB phase log: " + std::string(env));
+        }
+    }
     moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     route_check_ = std::getenv("OFLM_ROUTE_CHECK") != nullptr;
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
@@ -360,7 +369,13 @@ bool Core::layer_major_ok() const {
     return nl_ > 0;
 }
 
-Core::~Core() = default;
+Core::~Core() {
+    if (dxb_log_) {                      // Stage 2.5 Gate A phase log
+        std::fflush(dxb_log_);
+        std::fclose(dxb_log_);
+        dxb_log_ = nullptr;
+    }
+}
 
 xrt::hw_context& Core::context(const std::string& name) {
     auto it = ctxs_.find(name);
@@ -2038,7 +2053,13 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
 
     // ---- entry RMSNorm, GEMM A' (qkv3, real q|k|v pool weight, ONE dispatch) ----
     std::vector<float> xnorm;
-    rmsnorm_host(xres, T, hid, ln_w_bf16_[l], gb.eps, xnorm, gb.norm_groups);
+    {
+        // Stage 2.5 Gate A: the entry norm was the one stage without its own clock
+        // (it lived in the residue). Measurement only, code untouched.
+        auto tn = std::chrono::steady_clock::now();
+        rmsnorm_host(xres, T, hid, ln_w_bf16_[l], gb.eps, xnorm, gb.norm_groups);
+        timing_.prenorm_ms += ms_since(tn);
+    }
     std::vector<float> y_qkv3;  // [n_qkv3, T] row-major f32
     run_gemm(0, xnorm, hid, n_qkv3, y_qkv3);
 
@@ -2067,7 +2088,7 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
             for (size_t c = 0; c < kvw; ++c) vd[c] = y_qkv3[(qw + kvw + c) * T + tk];
         }
         gact.sync(XCL_BO_SYNC_BO_TO_DEVICE, T * AD, 0);
-        timing_.gemm_tr_ms += ms_since(tq);
+        timing_.qkv_scatter_ms += ms_since(tq);   // Stage 2.5: split out of gemm_tr_ms
     }
     // The attention dispatch reads q / k / v and writes og, so only those two ranges of a
     // token's slice move between the wide scratch and the layer's own act. q, k and v are
@@ -2078,17 +2099,31 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         const std::vector<std::string>& attn_args = gb.attn_args;
         for (size_t tk = 0; tk < T; ++tk) {
             const uint64_t pos = static_cast<uint64_t>(pos_) + tk;
+            // Stage 2.5 Gate A: the four phases of one dxB dispatch, each with its
+            // own clock, so the per-window regression comes out of a single run.
+            double p_ms, prep_ms, sub_ms = 0, wait_ms = 0, r_ms;
             auto tp = std::chrono::steady_clock::now();
             stream_patch::attn_apply(dxb.iw(), dxb.attn, pos, dxb.geom);
             dxb.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-            timing_.moe_patch_ms += ms_since(tp);
+            p_ms = ms_since(tp);
+            timing_.moe_patch_ms += p_ms;
             auto ts = std::chrono::steady_clock::now();
             shuttle_buf(gact, act1, tk, AD, /*wide_to_scratch=*/true, qkv_off, qkv_bytes);
-            timing_.moe_prep_ms += ms_since(ts);
-            timing_.route_ms += run(dxb, attn_args, l);
+            prep_ms = ms_since(ts);
+            timing_.moe_prep_ms += prep_ms;
+            // run_split instead of run -- the SAME code path (run() is run_split's
+            // halves summed), but submit and device-wait land in the phase log
+            // separately. timing_.route_ms semantics unchanged (submit + wait).
+            std::tie(sub_ms, wait_ms) = run_split(dxb, attn_args, l);
+            timing_.route_ms += sub_ms + wait_ms;
+            if (dispatch_log_) dispatch_stats_[dxb.name].add(sub_ms + wait_ms);  // run() did this; run_split does not
             ts = std::chrono::steady_clock::now();
             shuttle_buf(gact, act1, tk, AD, /*wide_to_scratch=*/false, gb.ad_og, og_bytes);
-            timing_.moe_read_ms += ms_since(ts);
+            r_ms = ms_since(ts);
+            timing_.moe_read_ms += r_ms;
+            if (dxb_log_)
+                std::fprintf(dxb_log_, "dxb,%d,%llu,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                             l, static_cast<unsigned long long>(pos), p_ms, prep_ms, sub_ms, wait_ms, r_ms);
         }
     }
     // ---- read back AD_OG (bf16, qw elements/token) as [T,qw] f32 -----------
