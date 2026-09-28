@@ -93,3 +93,13 @@ LPIPS against the fp32-math decode of the same latents (512², 8 prompts):
 | the NPU itself at 1024² (2 prompts) | 0.0029 / 0.0032 | 44.3 dB |
 
 The DiT's noise floor is 0.013, so the VAE's choices are judged on speed.
+
+## The iGPU, for comparison (2026-09-27)
+
+`igpu_bench.py` runs the same diffusers bf16 pipeline on the Radeon 890M (gfx1150)
+through PyTorch-ROCm. It times the stages the native engine reports and writes PNGs that
+`score_images.py` scores against the bf16 CPU run. It needs its own venv
+(`C:\dev\igpu-venv`); the install commands are in its docstring. Results, next to the
+NPU's on a quiet machine, are in `specs/open-diffusion/spec.md` (OPEN-DIFFUSION-PERF):
+- 20.2 s against 5.1 s at 512²;
+- 134 s against 13.4 s at 1024².
