@@ -422,6 +422,18 @@ private:
     /// bf16 [K|V]. Checks its geometry against the manifest's own
     /// hf_config_check and refuses anything else (fail-closed).
     bool host_attn_on_ = false;
+    /// Stage 2.6 Gate B (OFLM_OPEN_HOST_ATTN_DECODE=1): the decode step through
+    /// the Stage 2.5 gemm-block chain at T=1 -- host attention (the same
+    /// host_attn_layer, forced via in_host_decode_) plus the NPU gemm-block
+    /// GEMMs padded to the kernel set's compiled T -- instead of the fused
+    /// per-layer dx dispatch. Decode-only: the gemm-block prefill route keeps
+    /// its own selector (host_attn_on_ / OFLM_OPEN_HOST_ATTN), so the two
+    /// routings stay independently switchable in one binary.
+    bool host_attn_decode_on_ = false;
+    /// Set only while step_host_decode drives its per-layer chain, so
+    /// step_gemm_block_layer takes the host-attention branch for the decode
+    /// route without the prefill env having to be on.
+    bool in_host_decode_ = false;
     bool route_check_ = false;                 ///< OFLM_ROUTE_CHECK: re-read every router record, count changes
     uint64_t route_checks_ = 0, route_stale_ = 0;
     std::vector<std::pair<int, std::vector<uint8_t>>> route_log_;
@@ -519,6 +531,12 @@ private:
     /// dispatches -> GEMM o -> residual + post-attn RMSNorm -> GEMM gate, up -> host
     /// SwiGLU -> GEMM down -> residual. `xres` is T*hidden fp64, updated in place.
     void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
+    /// Stage 2.6 Gate B: one decode step on the host route (see
+    /// host_attn_decode_on_). The layer = step_gemm_block_layer at T=1 with
+    /// host attention forced; the residual rides the xres global between
+    /// steps exactly as the NPU route's does, and the KV rows are the same
+    /// bf16 cache rows, so the routes can switch mid-stream either direction.
+    void step_host_decode(int token, const float* x, bool want_logits);
     /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
     void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
     /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the

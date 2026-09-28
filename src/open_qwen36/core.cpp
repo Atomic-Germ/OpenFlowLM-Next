@@ -317,6 +317,14 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (host_attn_on_)
         log("gemm-block attention: HOST (OFLM_OPEN_HOST_ATTN=1; K2 dense shape only, "
             "no qk-norm/gate, geometry checked against the manifest)");
+    // Stage 2.6 Gate B: opt-in host DECODE route -- the whole decode step through
+    // the 2.5 gemm-block chain at T=1 (host attention forced for those calls
+    // only) instead of the fused per-layer dx dispatch. Decode-only: the
+    // gemm-block prefill route's own selector stays OFLM_OPEN_HOST_ATTN.
+    if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
+    if (host_attn_decode_on_)
+        log("decode route: HOST (OFLM_OPEN_HOST_ATTN_DECODE=1; the 2.5 gemm-block chain at T=1 "
+            "with host attention; the NPU GEMMs run padded at the kernel set's compiled T)");
     moe_redispatch_ = std::getenv("OFLM_OPEN_MOE_REDISPATCH") != nullptr;
     route_check_ = std::getenv("OFLM_ROUTE_CHECK") != nullptr;
     if (const char* env = std::getenv("OFLM_OPEN_ROUTE_SENTINEL")) route_sentinel_ = std::atoi(env) != 0;
@@ -1406,7 +1414,10 @@ void Core::bench_step(int reps, int token) {
     // queued from a second context while the first still has one in flight took `ax1` into
     // ERT state 8 twice in two runs, at position 1024 and at 4000, both on the first
     // cross-context queue-ahead of the step (c_benchstep_p1024.log, c_benchstep_p4000.log).
-    const int nlev = configured >= 2 ? 3 : 2;
+    // Stage 2.6: the host decode route has no dispatch pipeline to schedule -- the
+    // submit-ahead levels are the NPU route's own knob -- so its bench is serial-only
+    // rather than paying two meaningless rows per rep.
+    const int nlev = host_attn_decode_on_ ? 1 : (configured >= 2 ? 3 : 2);
     const int levels[3] = {0, 1, 2};
     std::vector<double> wall[3], disp[3];
     double embed[3] = {0, 0, 0}, patch[3] = {0, 0, 0}, route[3] = {0, 0, 0}, lm[3] = {0, 0, 0};
@@ -1644,6 +1655,19 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
                                  std::to_string(cfg_.max_ctx));
     if (!x && (token < 0 || static_cast<size_t>(token) >= man_.vocab)) throw std::runtime_error("open_qwen36: token id out of range");
+    // ---- Stage 2.6 Gate B: the host decode route (OFLM_OPEN_HOST_ATTN_DECODE=1).
+    // The whole step runs as the 2.5 gemm-block chain at T=1 with host attention;
+    // the fused per-layer dx dispatches (the walk below) are never issued. The
+    // NPU route itself is untouched -- with the env off this branch is dead code,
+    // which is what makes the A/B one binary with one flag.
+    if (host_attn_decode_on_) {
+        if (deepstack || mpos || mrope_on_)
+            throw std::runtime_error("open_qwen36: host decode route (OFLM_OPEN_HOST_ATTN_DECODE=1) does not "
+                                     "implement this step's deepstack/mrope inputs (refusing rather than "
+                                     "silently falling back to the NPU route)");
+        step_host_decode(token, x, want_logits);
+        return;
+    }
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
 
@@ -1834,6 +1858,80 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         trace_embed_ms_ += timing_.embed_ms;
         trace_lm_ms_ += timing_.lmhead_ms;
     }
+}
+
+// ============================================================================
+// Stage 2.6 Gate B (OFLM_OPEN_HOST_ATTN_DECODE=1): the decode step through the
+// 2.5 gemm-block chain at T=1 with host attention, instead of the fused
+// per-layer dx dispatch. One binary, one env: the NPU decode route (step_impl's
+// layer walk) is untouched, and this route never runs unless the env names it,
+// so the A/B is the same binary with the flag flipped. The projections and the
+// FFN ride the same five NPU gemm_q4_prefill dispatches the prefill route uses
+// (padded to the kernel set's compiled T, real token in column 0), the
+// attention is host_attn_layer (2.5's implementation, unchanged), and the tail
+// is the same NPU ln+lm pair -- so the route's cost splits cleanly into
+// part0_ms (NPU GEMM), route_ms (host attention) and lmhead_ms for Gate B.
+// ============================================================================
+
+void Core::step_host_decode(int token, const float* x, bool want_logits) {
+    apply_thread_budget();
+    // Fail-closed: this route IS the dense gemm-block chain, so every layer must
+    // carry one, all at the kernel set's compiled block T. host_attn_layer()
+    // then does its own geometry check against the manifest's hf_config_check
+    // and refuses anything that is not the full-rotary no-qknorm no-gate dense
+    // shape, exactly as in 2.5.
+    if (!gemm_block_t_)
+        throw std::runtime_error("open_qwen36: host decode route: this kernel set has no gemm_block program");
+    for (int l = 0; l < nl_; ++l) {
+        const GemmBlockProgram& gb = types_[l]->gemm_block;
+        if (gb.t != gemm_block_t_ || gb.kind != "dense" || gb.program.size() != 5)
+            throw std::runtime_error("open_qwen36: host decode route: layer " + std::to_string(l) + " (" +
+                                     types_[l]->name + ") is not a dense gemm-block type (refusing rather than "
+                                     "computing it wrong)");
+    }
+    const size_t hid = man_.hidden;
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+
+    // The residual row, host fp64 like the gemm-block route's own stream. The
+    // previous step left it in the xres global -- the NPU route's own running
+    // stream: tail_logits writes it there after a prefill, every host step
+    // below puts it back -- so a mid-stream switch of routes reads the same
+    // state in either direction.
+    std::vector<double> xres(hid);
+    {
+        auto te = std::chrono::steady_clock::now();
+        if (x) {
+            for (size_t c = 0; c < hid; ++c) xres[c] = static_cast<double>(x[c]);
+        } else {
+            std::vector<float> row(hid);
+            file_->bf16_row(man_.embed_tensor, static_cast<size_t>(token), hid, row.data());
+            for (size_t c = 0; c < hid; ++c) xres[c] = static_cast<double>(row[c]);
+        }
+        timing_.embed_ms += ms_since(te);
+    }
+    // The attention must come from the host on this route: in_host_decode_
+    // forces the 2.5 branch in step_gemm_block_layer for these calls only,
+    // leaving the gemm-block PREFILL route (OFLM_OPEN_HOST_ATTN) untouched.
+    in_host_decode_ = true;
+    for (int l = 0; l < nl_; ++l) step_gemm_block_layer(l, xres, 1);
+    in_host_decode_ = false;
+
+    // Publish the residual where every route keeps it, then the NPU tail
+    // (ln g2 + lm) exactly as the dx route's own last dispatches do.
+    std::vector<float> row(hid);
+    for (size_t c = 0; c < hid; ++c) row[c] = static_cast<float>(xres[c]);
+    if (want_logits) {
+        tail_logits(row.data());
+    } else {
+        auto te = std::chrono::steady_clock::now();
+        xrt::bo& xb = buffer("xres", 0);
+        std::memcpy(xb.map<uint8_t*>(), row.data(), hid * 4);
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hid * 4, 0);
+        timing_.state_ms += ms_since(te);
+    }
+    ++pos_;
+    timing_.total_ms = ms_since(t0);
 }
 
 // ============================================================================
@@ -2161,7 +2259,26 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         const Step& s = gb.program[idx];
         auto tt = std::chrono::steady_clock::now();
         std::vector<uint16_t> xt;
-        tile_gemm_x(x, T, K, xt);
+        // Stage 2.6 Gate B: the GEMM's instruction stream is compiled for gb.t
+        // tokens (256 in every set this repo emits -- gemm_q4_prefill.py: "T is
+        // still compiled in"), so a T < gb.t call (the host decode route's T=1)
+        // runs the SAME dispatch with the real tokens in columns [0, T) and
+        // zeros in the padding columns -- the padding invariance the block
+        // route already relies on for short tails (hardware-proven: 2.1/2.2's
+        // C gates ran 22 real columns against 234 padding ones and matched the
+        // sequential route). The output side reads back the kernel's whole
+        // [N, gb.t] and keeps the T real columns.
+        if (T == gb.t) {
+            tile_gemm_x(x, T, K, xt);
+        } else {
+            if (T > gb.t)
+                throw std::runtime_error("open_qwen36: gemm route: T=" + std::to_string(T) +
+                                         " exceeds the kernel set's compiled " + std::to_string(gb.t));
+            std::vector<float> xp(gb.t * K, 0.f);
+            for (size_t r = 0; r < T; ++r)
+                for (size_t c = 0; c < K; ++c) xp[r * K + c] = x[r * K + c];
+            tile_gemm_x(xp, gb.t, K, xt);
+        }
         xrt::bo& xb = buffer(s.args[1], 0);
         std::memcpy(xb.map<uint8_t*>(), xt.data(), xt.size() * 2);
         xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xt.size() * 2, 0);
@@ -2170,9 +2287,17 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
         timing_.part0_ms += run(k, s.args, l);
         tt = std::chrono::steady_clock::now();
         xrt::bo& yb = buffer(s.args[2], 0);
-        read_back(yb, N * T * 4, 0);
-        y_out.assign(N * T, 0.f);
-        std::memcpy(y_out.data(), yb.map<uint8_t*>(), N * T * 4);
+        if (T == gb.t) {
+            read_back(yb, N * T * 4, 0);
+            y_out.assign(N * T, 0.f);
+            std::memcpy(y_out.data(), yb.map<uint8_t*>(), N * T * 4);
+        } else {
+            read_back(yb, N * gb.t * 4, 0);
+            y_out.assign(N * T, 0.f);
+            const float* y = yb.map<float*>();
+            for (size_t n = 0; n < N; ++n)
+                for (size_t t = 0; t < T; ++t) y_out[n * T + t] = y[n * gb.t + t];
+        }
         timing_.gemm_tr_ms += ms_since(tt);
     };
 
@@ -2188,10 +2313,11 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
     std::vector<float> y_qkv3;  // [n_qkv3, T] row-major f32
     run_gemm(0, xnorm, hid, n_qkv3, y_qkv3);
 
-    // ---- Stage 2.5 Gate B: the attention half either on the host (opt-in) or
+    // ---- Stage 2.5 Gate B: the attention half either on the host (opt-in; the
+    // Stage 2.6 decode route forces the same branch via in_host_decode_) or
     // as the T single-token dxB dispatches. The NPU path below is untouched.
     std::vector<float> og(T * qw, 0.f);
-    if (host_attn_on_) {
+    if (host_attn_on_ || in_host_decode_) {
         host_attn_layer(l, y_qkv3, T, og);
     } else {
     // ---- T single-token dxB dispatches, position-patched, through a GLOBAL
