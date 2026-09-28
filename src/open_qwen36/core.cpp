@@ -1921,10 +1921,15 @@ void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t ac
 }
 
 void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, const std::vector<uint16_t>& w_bf16,
-                        double eps, std::vector<float>& out) {
+                        double eps, std::vector<float>& out, size_t groups) {
     // Reduction AND the final multiply both in fp64 (trap 11: a fp32
     // reduction over 2560+ terms is not a safe correctness metric at this
     // width). out[t,k] = x[t,k]/sqrt(mean_k(x^2)+eps)*w[k].
+    // groups > 1 (K2's GroupRMSNorm, Stage 2.2): each row splits into `groups`
+    // equal groups, the mean runs over the group alone, eps stays inside the
+    // sqrt -- the LN_GROUPS semantics the `ln` design bakes into the NPU
+    // kernel (E3's variant C). groups = 1 runs the identical single-group
+    // loop the plain form had, so pre-2.2 behaviour is bit-exact.
     out.assign(T * hid, 0.f);
     // Over tokens, which are independent: each row's reduction and its own rms stay
     // exactly where they were, so this is bit-exact against the serial form (the same
@@ -1932,31 +1937,40 @@ void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, cons
 #pragma omp parallel for
     for (long long t = 0; t < static_cast<long long>(T); ++t) {
         const double* row = &x[static_cast<size_t>(t) * hid];
-        double ss = 0;
-        for (size_t k = 0; k < hid; ++k) ss += row[k] * row[k];
-        const double rms = std::sqrt(ss / static_cast<double>(hid) + eps);
         float* orow = &out[static_cast<size_t>(t) * hid];
-        for (size_t k = 0; k < hid; ++k) {
-            const double w = static_cast<double>(bf16_to_f32(w_bf16[k]));
-            orow[k] = static_cast<float>((row[k] / rms) * w);
+        const size_t gw = hid / groups;   // the manifest gate guarantees groups divides hid
+        for (size_t gi = 0; gi < groups; ++gi) {
+            const double* grp = row + gi * gw;
+            double ss = 0;
+            for (size_t k = 0; k < gw; ++k) ss += grp[k] * grp[k];
+            const double rms = std::sqrt(ss / static_cast<double>(gw) + eps);
+            for (size_t k = 0; k < gw; ++k) {
+                const double w = static_cast<double>(bf16_to_f32(w_bf16[gi * gw + k]));
+                orow[gi * gw + k] = static_cast<float>((grp[k] / rms) * w);
+            }
         }
     }
 }
 
 void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, const std::vector<float>& w_f32,
-                        double eps, std::vector<float>& out) {
+                        double eps, std::vector<float>& out, size_t groups) {
     // Same reduction as the bf16 overload; the weight arrives already dequantised to f32
     // (read straight from the file, not sliced from packed consts bytes -- see its caller).
+    // groups carries the same GroupRMSNorm split as the bf16 overload.
     out.assign(T * hid, 0.f);
 #pragma omp parallel for
     for (long long t = 0; t < static_cast<long long>(T); ++t) {
         const double* row = &x[static_cast<size_t>(t) * hid];
-        double ss = 0;
-        for (size_t k = 0; k < hid; ++k) ss += row[k] * row[k];
-        const double rms = std::sqrt(ss / static_cast<double>(hid) + eps);
         float* orow = &out[static_cast<size_t>(t) * hid];
-        for (size_t k = 0; k < hid; ++k)
-            orow[k] = static_cast<float>((row[k] / rms) * static_cast<double>(w_f32[k]));
+        const size_t gw = hid / groups;
+        for (size_t gi = 0; gi < groups; ++gi) {
+            const double* grp = row + gi * gw;
+            double ss = 0;
+            for (size_t k = 0; k < gw; ++k) ss += grp[k] * grp[k];
+            const double rms = std::sqrt(ss / static_cast<double>(gw) + eps);
+            for (size_t k = 0; k < gw; ++k)
+                orow[gi * gw + k] = static_cast<float>((grp[k] / rms) * static_cast<double>(w_f32[gi * gw + k]));
+        }
     }
 }
 
@@ -2024,7 +2038,7 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
 
     // ---- entry RMSNorm, GEMM A' (qkv3, real q|k|v pool weight, ONE dispatch) ----
     std::vector<float> xnorm;
-    rmsnorm_host(xres, T, hid, ln_w_bf16_[l], gb.eps, xnorm);
+    rmsnorm_host(xres, T, hid, ln_w_bf16_[l], gb.eps, xnorm, gb.norm_groups);
     std::vector<float> y_qkv3;  // [n_qkv3, T] row-major f32
     run_gemm(0, xnorm, hid, n_qkv3, y_qkv3);
 
@@ -2111,20 +2125,20 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
             for (size_t c = 0; c < hid; ++c)
                 y_o_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
         std::vector<float> t_attn;
-        rmsnorm_host(y_o_row, T, hid, post_ln_w_bf16_[l], gb.eps, t_attn);
+        rmsnorm_host(y_o_row, T, hid, post_ln_w_bf16_[l], gb.eps, t_attn, gb.norm_groups);
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)
                 res1[static_cast<size_t>(t) * hid + c] =
                     xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(t_attn[static_cast<size_t>(t) * hid + c]);
-        rmsnorm_host(res1, T, hid, pre_ffn_w_[l], gb.eps, xm);
+        rmsnorm_host(res1, T, hid, pre_ffn_w_[l], gb.eps, xm, gb.norm_groups);
     } else {
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)
                 res1[static_cast<size_t>(t) * hid + c] =
                     xres[static_cast<size_t>(t) * hid + c] + static_cast<double>(y_o[c * T + static_cast<size_t>(t)]);
-        rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm);
+        rmsnorm_host(res1, T, hid, post_ln_w_bf16_[l], gb.eps, xm, gb.norm_groups);
     }
     timing_.tail_ms += ms_since(th);
 
@@ -2164,7 +2178,7 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T) {
             for (size_t c = 0; c < hid; ++c)
                 y_down_row[static_cast<size_t>(t) * hid + c] = static_cast<double>(y_down[c * T + static_cast<size_t>(t)]);
         std::vector<float> t_ffn;
-        rmsnorm_host(y_down_row, T, hid, post_ffn_w_[l], gb.eps, t_ffn);
+        rmsnorm_host(y_down_row, T, hid, post_ffn_w_[l], gb.eps, t_ffn, gb.norm_groups);
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(T); ++t)
             for (size_t c = 0; c < hid; ++c)

@@ -479,12 +479,17 @@ private:
                      size_t region_off = 0, size_t region_bytes = 0);
     /// out[t,:] = x[t,:] / sqrt(mean(x[t,:]^2) + eps) * w[:], reduction and
     /// the final multiply both in fp64. w is bf16 (hidden elements).
+    /// groups > 1 splits each row into equal groups and RMSes each separately
+    /// (K2's GroupRMSNorm, the LN_GROUPS=2 `ln` kernel's semantics); groups = 1
+    /// is bit-identical to the classic whole-row form.
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
-                             const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out);
+                             const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out,
+                             size_t groups = 1);
     /// The same norm, for a weight already dequantised to f32 (the sandwich route's two extra
     /// norms, read straight from the file by tensor name rather than from packed consts bytes).
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
-                             const std::vector<float>& w_f32, double eps, std::vector<float>& out);
+                             const std::vector<float>& w_f32, double eps, std::vector<float>& out,
+                             size_t groups = 1);
     /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64, MAC 8x8, tile_n 32)
     /// -- the layout gemm_q4_prefill.py streams its activation in.
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
