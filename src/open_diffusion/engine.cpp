@@ -77,6 +77,11 @@ bool read_manifest(const fs::path& dir, const std::string& layout, json* out, st
 
 }  // namespace
 
+bool available(std::string* why) {
+    if (why) why->clear();
+    return true;
+}
+
 bool kernels_usable(const std::string& dir, const std::string& layout, std::string* why) {
     return read_manifest(dir, layout, nullptr, why);
 }
@@ -391,7 +396,7 @@ void Engine::Impl::set_steps(Res& r, int steps) {
     r.steps = steps;
 }
 
-Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, const xrt::device* dev)
+Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev)
     : impl_(std::make_unique<Impl>()) {
     Impl& m = *impl_;
     m.dir = model_dir;
@@ -449,7 +454,7 @@ Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, con
 }
 
 Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, int size)
-    : Engine(model_dir, kernels_dir, static_cast<const xrt::device*>(nullptr)) {
+    : Engine(model_dir, kernels_dir, static_cast<const oflm_rt::device*>(nullptr)) {
     select(size);
 }
 

@@ -21,6 +21,10 @@
 // Tokenizing is the caller's: the engine takes token ids (prompt.hpp templates and
 // tokenizes in the main build; utilities/dit-chain/klein_tokens.py writes them for the
 // standalone CLI).
+//
+// Every build has this interface; callers never ask which NPU runtime was built. engine.cpp
+// implements it on XRT. An HRX build compiles engine_unavailable.cpp instead, whose
+// available() is false and names why, and whose every other entry point throws that.
 #pragma once
 
 #include <cstdint>
@@ -30,9 +34,13 @@
 #include <utility>
 #include <vector>
 
-namespace xrt { class device; }
+#include "device_runtime.hpp"
 
 namespace open_diffusion {
+
+// Whether this build can run the engine; *why says why not ("" when it can). Ask before
+// anything else: on false every other entry point throws the same reason.
+bool available(std::string* why = nullptr);
 
 struct Timing {
     double total_s = 0;                                  // first start to last completion
@@ -59,7 +67,7 @@ public:
     // model_dir: q4nx-build --open-diffusion's output; kernels_dir: an installed kernel
     // set (find_kernels). dev: the device to open the kernel sets on (the server's, so its
     // engines share one handle); null opens device 0. Nothing is selected yet.
-    Engine(const std::string& model_dir, const std::string& kernels_dir, const xrt::device* dev = nullptr);
+    Engine(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev = nullptr);
     // The same, then select(size).
     Engine(const std::string& model_dir, const std::string& kernels_dir, int size);
     ~Engine();

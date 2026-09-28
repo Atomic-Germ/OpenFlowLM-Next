@@ -23,11 +23,9 @@
 #include <filesystem>
 #include "server.hpp"
 #include "base64.hpp"
-#ifdef OFLM_USE_OPEN_DIFFUSION
 #include "open_diffusion/engine.hpp"
 #include "open_diffusion/prompt.hpp"
 #include "tokenizer/tokenizer.hpp"
-#endif
 
 ///@brief Report a handler's error on the transport the client is actually reading (#64)
 ///@param stream what the handler's stream callback has already sent
@@ -2061,7 +2059,6 @@ json RestHandler::resolve_image_model(const json& request, std::string* tag) {
 
 ///@brief Take the image engine off the NPU before a chat model loads (swap mode)
 void RestHandler::release_image_engine_for_chat() {
-#ifdef OFLM_USE_OPEN_DIFFUSION
     if (this->image_engine && !this->image_resident) {
         header_print("OFLM", "swapping the image engine ('" + this->image_engine_tag + "') off the NPU "
                              "for the chat model (--image 1 keeps both)");
@@ -2069,19 +2066,14 @@ void RestHandler::release_image_engine_for_chat() {
         this->image_tokenizer.reset();
         this->image_engine_tag.clear();
     }
-#endif
 }
 
 ///@brief Load the image engine for a tag unless it is loaded
 ///@param tag a resolved image model tag
 ///@return empty on success, else why it failed
 std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
-#ifndef OFLM_USE_OPEN_DIFFUSION
-    (void)tag;
-    return "image generation is not implemented in this build (it needs the XRT build's open "
-           "diffusion engine)";
-#else
     namespace fs = std::filesystem;
+    if (std::string why; !open_diffusion::available(&why)) return why;
     if (this->image_engine && this->image_engine_tag == tag) return {};
     if (this->image_engine) {
         header_print("OFLM", "request asked for image model '" + tag + "' while '" + this->image_engine_tag +
@@ -2141,7 +2133,6 @@ std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
                   std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     header_print("OFLM", std::string(line));
     return {};
-#endif
 }
 
 ///@brief Handle the openai images generations request
@@ -2173,11 +2164,11 @@ void RestHandler::handle_openai_images_generations(const json& request,
             send_response(err);
             return;
         }
-#ifndef OFLM_USE_OPEN_DIFFUSION
-        (void)cancellation_token;
-        send_response(json{{"error", {{"message", ensure_image_engine_loaded(tag)},
-                                      {"type", "not_implemented_error"}, {"param", nullptr}, {"code", 501}}}});
-#else
+        if (std::string why; !open_diffusion::available(&why)) {
+            send_response(json{{"error", {{"message", why}, {"type", "not_implemented_error"},
+                                          {"param", nullptr}, {"code", 501}}}});
+            return;
+        }
         if (std::string why = ensure_image_engine_loaded(tag); !why.empty()) {
             header_print("ERROR", why);
             send_response(json{{"error", {{"message", why}, {"type", "server_error"}, {"param", "model"},
@@ -2224,7 +2215,6 @@ void RestHandler::handle_openai_images_generations(const json& request,
                            {"model", tag},
                            {"output_format", ir.output_format},
                            {"size", size}});
-#endif
     }
     catch (const std::exception& e) {
         json error_response = {

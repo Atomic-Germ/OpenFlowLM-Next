@@ -19,25 +19,20 @@
 
 #include "model_downloader.hpp"
 #include "model_list.hpp"
-#include "program_args.hpp"
-#include "utils/utils.hpp"
-
-#ifdef OFLM_USE_OPEN_DIFFUSION
 #include "open_diffusion/engine.hpp"
 #include "open_diffusion/prompt.hpp"
+#include "program_args.hpp"
 #include "tokenizer/tokenizer.hpp"
-#endif
+#include "utils/utils.hpp"
 
 namespace image_command {
 
 inline int run(const program_args_t& a, model_list& models, ModelDownloader& downloader) {
-#ifndef OFLM_USE_OPEN_DIFFUSION
-    (void)a; (void)models; (void)downloader;
-    header_print("ERROR", "oflm image is not implemented in this build (it needs the XRT build's "
-                          "open diffusion engine)");
-    return 1;
-#else
     namespace fs = std::filesystem;
+    if (std::string why; !open_diffusion::available(&why)) {
+        header_print("ERROR", "oflm image: " + why);
+        return 1;
+    }
     // get_model_info falls back to llama3.2:1b for an unknown size; main.cpp has already
     // refused a tag that is not in the list, so this is the tag's own entry
     auto [tag, info] = models.get_model_info(a.model_tag);
@@ -125,7 +120,6 @@ inline int run(const program_args_t& a, model_list& models, ModelDownloader& dow
     header_print("OFLM", "Seed " + std::to_string(seed));
     header_print("OFLM", std::string(line));
     return 0;
-#endif
 }
 
 }  // namespace image_command

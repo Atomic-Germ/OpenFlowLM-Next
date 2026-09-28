@@ -38,6 +38,11 @@ It loads two directories, which must carry the same layout hash:
 user-facing paths; `prompt.cpp` templates and tokenizes there. `cli.cpp` is the standalone
 gate, outside the main build.
 
+Every build has the interface: `oflm image` and the server ask `open_diffusion::available()`,
+never which runtime was built. The engine drives XRT directly (six hardware contexts,
+sub-buffer views); an HRX build compiles `engine_unavailable.cpp` instead, which answers
+"not implemented in this build".
+
 ## Build and run
 
 ```

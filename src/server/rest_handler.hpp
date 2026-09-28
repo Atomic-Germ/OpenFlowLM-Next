@@ -151,11 +151,9 @@ private:
 
 
     std::unique_ptr<AutoModel> auto_chat_engine;
-#ifdef OFLM_USE_OPEN_DIFFUSION
     // The open diffusion engine and its prompt tokenizer.
     std::unique_ptr<open_diffusion::Engine> image_engine;
     std::unique_ptr<Tokenizer> image_tokenizer;
-#endif
     std::string image_engine_tag;       // what image_engine was loaded for
     bool image_resident;                // --image 1: loaded at startup, never swapped out
     std::string image_model_tag;        // --imagemodel: the model a request naming none gets
