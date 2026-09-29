@@ -158,6 +158,30 @@ def fullest_core(bdir: Path) -> int | None:
         return None
 
 
+def _discard_set(spec_file: Path) -> None:
+    """Remove the half-written set a failed build left behind.
+
+    Only ever touches a directory that holds no manifest.json -- a completed set
+    always has one, and one that does is a build in progress or a previous
+    success, neither of which this may delete. Removing the family directory
+    too (rather than just the spec) is the point: the empty shell is what
+    `install(DIRECTORY xclbins ...)` would otherwise package.
+    """
+    kdir = spec_file.parent
+    if (kdir / "manifest.json").is_file():
+        return
+    parent = kdir.parent
+    try:
+        for p in kdir.iterdir():
+            p.unlink()
+        kdir.rmdir()
+        # The family directory, only if this build is what created it.
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass        # another export may be writing here; leave it to that one
+
+
 def build(name: str, sets: dict, spec_file: Path) -> Path:
     src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
@@ -178,11 +202,19 @@ def build(name: str, sets: dict, spec_file: Path) -> Path:
         tail = (tail + chunk)[-4096:]
         overflow = overflow or b"Overflow of program memory" in tail
     if p.wait() != 0:
+        # A failed build leaves no set at all: the half-written spec and the empty
+        # family directory both go, so the install rule cannot ship a family whose
+        # kernels were never built.
+        _discard_set(spec_file)
         if overflow:
             sys.exit(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
                      "program memory. This is a bug in the kernels for this model, not in your setup; "
                      "please report it with this log.")
         sys.exit(f"[{name}] build FAILED ({p.returncode})")
+    # The set is real from here: the spec takes its final name.
+    final_spec = spec_file.with_name("spec.json")
+    if spec_file.is_file() and spec_file != final_spec:
+        spec_file.replace(final_spec)
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
@@ -194,7 +226,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--model-dir", help="derive the spec from this model's config.json (+ tokenizer.json)")
-    g.add_argument("--spec", help="a ModelSpec JSON (default: recipes/specs/qwen36-35b-a3b.json)")
+    g.add_argument("--spec", help="a ModelSpec JSON (default: a derived spec; see open_kernels/gen_catalogue_specs.py)")
     ap.add_argument("--out", default=None,
                     help="destination (default src/xclbins/<model name>/open_kernels)")
     ap.add_argument("--only", default=None, help="comma-separated subset of the recipe's kernel sets")
@@ -223,7 +255,14 @@ def main() -> int:
     key = build_key(spec)
     out_root = Path(a.out).resolve() if a.out else (XCLBINS / spec.extra.get("model", DEFAULT_MODEL) / "open_kernels")
     out_root.mkdir(parents=True, exist_ok=True)
-    spec_file = out_root / "spec.json"
+    # The spec is written under a `.partial` name and renamed when the build
+    # finishes. A design that fails (a core over its program memory, a tile the
+    # recipe refuses) must not leave a directory that `install(DIRECTORY
+    # xclbins ...)` will ship: a family directory holding a spec and no kernels
+    # is a package entry that looks installed and that find_kernels rejects for
+    # want of a manifest, so the failure surfaces to a user as a missing model
+    # rather than as a build that did not work. The directory is removed too.
+    spec_file = out_root / "spec.json.partial"
     spec_file.write_text(spec.to_json(), encoding="utf-8", newline="\n")
     print(f"spec {spec.spec_hash()[:19]} ({spec.extra.get('model', spec.family)}), build key {key[:19]}")
 

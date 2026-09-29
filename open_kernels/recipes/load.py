@@ -24,10 +24,10 @@ import struct
 import sys
 from pathlib import Path
 
-from .spec import ModelSpec, quant_map_from_chunk_sizes
+from .spec import ModelSpec, SpecError, quant_map_from_chunk_sizes
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_SPEC = HERE / "specs" / "qwen36-35b-a3b.json"
+SPECS = HERE / "specs"
 
 
 def load_spec(path: Path) -> ModelSpec:
@@ -35,7 +35,34 @@ def load_spec(path: Path) -> ModelSpec:
 
 
 def default_spec() -> ModelSpec:
-    return load_spec(DEFAULT_SPEC)
+    """A spec to work from when nothing names one.
+
+    The specs are DERIVED -- `open_kernels/gen_catalogue_specs.py` writes one per
+    (family, size) from the model catalogue, and the build regenerates them when
+    the catalogue changes. So there is no single checked-in "the" spec any more,
+    and naming one here is how a caller ends up quietly building the wrong
+    model's kernels.
+
+    OPEN_KERNELS_SPEC still wins, then the derived set for this machine's MoE
+    line, then whatever exists. Refusing beats guessing: every one of these
+    returns a real spec, but only the first two are ones anybody meant.
+    """
+    env = os.environ.get("OPEN_KERNELS_SPEC")
+    if env:
+        return load_spec(Path(env))
+    candidates = sorted(SPECS.glob("*.json")) if SPECS.is_dir() else []
+    if not candidates:
+        raise SpecError(
+            f"no derived specs in {SPECS}. They are generated from the model "
+            "catalogue: run open_kernels/gen_catalogue_specs.py, or build with "
+            "OFLM_BUILD_KERNELS=ON, which does it. There is no hand-written "
+            "default any more -- a hardcoded one is how this ended up building a "
+            "model nobody asked for.")
+    for pat in ("qwen36moe-*.json", "qwen35-*.json", "qwen3-*.json"):
+        for c in candidates:
+            if c.name.startswith(pat[:-len("*.json")]):
+                return load_spec(c)
+    return load_spec(candidates[0])
 
 
 def current_spec() -> ModelSpec:
@@ -124,6 +151,35 @@ def spec_from_model_dir(model_dir: Path) -> ModelSpec:
     spec = dataclasses.replace(spec, quant=quant_for(spec, Path(model_dir)))
     spec.extra["model"] = Path(model_dir).name
     return spec
+
+
+def spec_from_hf_config(cfg: dict, real_vocab: int | None = None,
+                        cat_family: str | None = None,
+                        size: str | None = None) -> ModelSpec:
+    """A spec from a model's `config.json` alone -- no container, no model dir.
+
+    This is the kernel BUILD's reader, and it is why `quant` is read from the
+    q4nx-build config rather than from a `model.q4nx` header: the build derives a
+    spec long before a container exists, and the header is an output of
+    q4nx-build while `utilities/q4nx-build/configs/` is its input. Reading the
+    input is what lets the two readers agree (see q4nx_quant's module docstring;
+    the two were checked against each other over the installed models and agree,
+    Qwen3.5's q8 `linear_out` included).
+
+    `cat_family` and `size` are the catalogue's own strings, which is how a
+    per-size family (`qwen3.5_0.8b` / `_2b` / `_4b` / `_9b`) picks its file.
+    """
+    spec = ModelSpec.from_hf_config(cfg, real_vocab=real_vocab)
+    if os.environ.get("OPEN_KERNELS_FORCE_Q4_1"):
+        return dataclasses.replace(spec, quant="q4_1")
+    from .q4nx_quant import require_quant_map
+    m = require_quant_map(spec.family, cat_family, size)
+    if not m:
+        return dataclasses.replace(spec, quant="q4_1")
+    from .families import for_spec
+    can = getattr(for_spec(spec), "Q8_ROLES", frozenset())
+    m = {r: f for r, f in m.items() if r in can}
+    return dataclasses.replace(spec, quant=narrow_to_buildable(spec, m, can) or "q4_1")
 
 
 def current_recipe(max_ctx: int = 4096):

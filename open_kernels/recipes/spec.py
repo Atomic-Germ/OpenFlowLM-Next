@@ -1384,7 +1384,13 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
-               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
+               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf,
+               # Gemma's own text-only towers (Gemma3-1B and every 1B-class derivative
+               # OFLM ships) publish this model_type, not `gemma3_text`. Same builder,
+               # same recipe -- its absence is why `oflm add` on Gemma3-1B derived no
+               # spec and found no kernels while every other Gemma3 size worked.
+               "gemma3_text_only": _gemma3_hf,
+               "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,

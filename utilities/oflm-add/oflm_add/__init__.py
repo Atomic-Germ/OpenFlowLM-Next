@@ -313,11 +313,165 @@ def resolve_official(system_registry, dir_name, family, size):
     return None, None
 
 
-def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
+# A tag that names the family outright, longest first so a specific tag is
+# preferred over a general one. These are the tags Atomic-Germ's own conversions
+# carry, and they are what let a finetune resolve: a directory named
+# `Ornith-1.5-9B-NPU2` says nothing about its architecture, but the repo's README
+# frontmatter is tagged `qwen3.5`, and every Qwen3.5-9B finetune wants the same
+# kernel set.
+_FRONT_FAMILY_TAGS = [
+    ("qwen3.6-moe", "qwen3.6-moe"), ("qwen3.6", "qwen3.6-moe"),
+    ("qwen3_5_moe", "qwen3.6-moe"), ("qwen3.5-moe", "qwen3.6-moe"),
+    ("qwen35moe", "qwen3.6-moe"),
+    ("qwen3.8", "qwen3.5"),          # the Qwen3.5 engine, per FAMILY_ALIASES
+    ("qwen3.5", "qwen3.5"), ("qwen3_5", "qwen3.5"), ("qwen35", "qwen3.5"),
+    ("qwen3.5-omni", "qwen3.5-omni"),
+    ("qwen3vl", "qwen3vl"), ("qwen3_vl", "qwen3vl"),
+    ("qwen3", "qwen3"), ("qwen2.5vl", "qwen2.5vl"), ("qwen2.5", "qwen2"),
+    ("qwen2vl", "qwen2vl"), ("qwen2", "qwen2"),
+    ("gemma4e", "gemma4e"), ("gemma4", "gemma4"), ("gemma-4", "gemma4"),
+    ("gemma3", "gemma3"), ("gemma-3", "gemma3"),
+    ("gpt-oss", "gpt-oss"), ("gpt_oss", "gpt-oss"),
+    ("granite", "granite"), ("llama3", "llama3"), ("llama-3", "llama3"),
+    ("llama", "llama3"), ("lfm2", "lfm2"), ("lfm2.5", "lfm2"),
+    ("hunyuan", "hunyuan"), ("phi4", "phi4"), ("phi-4", "phi4"), ("phi3", "phi3"),
+    ("nanbeige", "nanbeige"), ("crow", "qwen3.5"),
+]
+
+# Tags that mark a repo as one OFLM can serve at all. Absent on a repo that is
+# not an NPU conversion, which is worth saying rather than failing later.
+_FRONT_IS_OF = ("npu2", "q4nx", "fastflowlm", "flm", "fastflow")
+
+# The quant format a conversion wrote, when the tag says so. A q4nx-build config
+# remains the authority; this only CROSS-CHECKS it, and a disagreement is
+# reported rather than silently preferring one.
+_FRONT_QUANT_TAGS = {"mxfp4": "mxfp4", "q8": "q8", "q8_0": "q8",
+                     "q4_1": "q4_1", "q4_0": "q4_1", "q4_k": "q4_k"}
+
+
+def _read_frontmatter(repo, timeout=20.0):
+    """The YAML frontmatter of a HuggingFace repo's README, as a dict.
+
+    This is the most overlooked metadata a conversion carries. `config.json`
+    gives the geometry, but it does not say "this is a Q4NX container for an
+    AMD NPU" or which family a finetune belongs to -- and the finetune's NAME is
+    arbitrary (`Ornith-1.5-9B-NPU2`), so the tags are the only thing that ties
+    it to a kernel set. A one-line failure here is not fatal: family resolution
+    falls through to the name, exactly as before.
+    """
+    for url in (f"https://huggingface.co/{repo}/resolve/main/README.md",
+                f"https://huggingface.co/{repo}/raw/main/README.md"):
+        try:
+            req = urllib.request.Request(url, headers=_hf_headers())
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                text = r.read(200_000).decode("utf-8", "replace")
+        except Exception:
+            continue
+        if not text.startswith("---"):
+            return {}
+        end = text.find("\n---", 3)
+        if end < 0:
+            return {}
+        block = text[3:end]
+        out, key = {}, None
+        for line in block.splitlines():
+            if not line.strip():
+                continue
+            if line[0] not in " \t-":                 # a new key
+                if ":" not in line:
+                    continue
+                key, _, val = line.partition(":")
+                key, val = key.strip(), val.strip()
+                out[key] = val if val and val not in ("|", ">") else []
+            elif key is not None and line.lstrip().startswith("- "):
+                item = line.lstrip()[2:].strip().strip("'\"")
+                if isinstance(out.get(key), list):
+                    out[key].append(item)
+        return out
+    return {}
+
+
+# `config.json`'s `model_type` -> the family string, the same mapping the recipes
+# use (recipes/spec.py HF_FAMILIES / _FAMILY_OF). Duplicated rather than imported
+# because oflm-add has to work with no source checkout: the recipes are only
+# present if this is the repo or an install that ships them, and the family has
+# to be knowable before anything else is set up.
+_FAMILY_OF_MODEL_TYPE = {
+    "qwen3_5_moe": "qwen3.6-moe", "qwen3_5_moe_text": "qwen3.6-moe",
+    "qwen3_next": "qwen3.6-moe", "qwen3_5": "qwen3.5", "qwen3_5_text": "qwen3.5",
+    "qwen3": "qwen3", "qwen3_vl": "qwen3vl", "qwen3_vl_text": "qwen3vl",
+    "qwen2": "qwen2", "qwen2_5_vl": "qwen2.5vl", "qwen2_5_vl_text": "qwen2.5vl",
+    # HF publishes Llama 3 as `llama`, not `llama3` -- read off the repos this
+    # tree ships, and the reason a Llama finetune that was tagged correctly
+    # still resolved to nothing when the tags were the only source.
+    "llama": "llama3", "llama2": "llama3",
+    "gemma3": "gemma3", "gemma3_text": "gemma3", "gemma3_text_only": "gemma3",
+    "gemma4_text": "gemma4", "gemma4": "gemma4",
+    "hunyuan_v1_dense": "hunyuan", "granite": "granite", "phi3": "phi3",
+    "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss",
+}
+
+
+def frontmatter_family(front, model_type=None):
+    """A best-effort family from a README's tags, or None.
+
+    NOT the authority. `config.json`'s `model_type` is -- the ModelSpec is derived
+    from it, and it is always present on a model OFLM can serve. These tags only
+    name which q4nx-build config to read, so the cost of being wrong is a
+    fallback, not a wrong kernel set: `model_spec_hash` re-derives from
+    config.json and falls back to the container header if this is off.
+
+    So this is deliberately forgiving, in the direction of ANSWERING:
+
+      * a finetune carries its whole ancestry in its tags -- `Ornith-1.5-9B` is
+        tagged `qwen`, `qwen3` AND `qwen3.5`, where the last is the narrowest
+        and is what it actually IS. Ancestry is not a conflict, so the most
+        specific tag wins rather than the most common one;
+      * a tag naming a variant (`qwen3.5-omni`, `qwen3vl`, `gemma4e`) beats the
+        line it belongs to (`qwen3.5`, `qwen3`, `gemma4`), because that is the
+        narrower statement about which engine;
+      * `model_type`, when the caller has it, settles everything. A tag that
+        disagrees with the config is a stale tag, and the config is right.
+
+    Only returns None when there is genuinely nothing to go on, which leaves the
+    caller on the name-based path it always had.
+    """
+    tags = front.get("tags")
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    tags = [str(t).lower() for t in tags] if isinstance(tags, list) else []
+
+    # The config speaks first, when the caller has already read it.
+    if model_type:
+        want = _FAMILY_OF_MODEL_TYPE.get(str(model_type).lower())
+        if want:
+            return want
+
+    best: tuple[int, str] | None = None
+    for tag in tags:
+        for needle, family in _FRONT_FAMILY_TAGS:
+            if not (tag == needle or tag.startswith(needle + "-") or tag.startswith(needle + ".")):
+                continue
+            # A variant tag (a separator inside the needle) is the narrower claim
+            # and outranks the bare line; otherwise the longer name is narrower.
+            rank = (1 if any(c in needle for c in ".-") else 0, len(needle))
+            if best is None or rank > best[0]:
+                best = (rank, family)
+    return best[1] if best else None
+
+
+def derive_family(system_registry, dir_name, explicit=None, base_entry=None, front=None):
     if explicit:
         return explicit
     if base_entry:
         fam = base_entry.get("details", {}).get("family")
+        if fam:
+            return fam
+    # The frontmatter before the name: a finetune's directory name is arbitrary,
+    # and the tags on its repo are what say which engine it needs. `Ornith-1.5-9B`
+    # has no prefix FAMILY_ALIASES recognises; its repo is tagged `qwen3.5`.
+    if front:
+        fam = frontmatter_family(front)
         if fam:
             return fam
     lower = dir_name.lower()
@@ -685,7 +839,13 @@ def open_kernels_checkout():
     """An `open_kernels/` directory holding recipes/spec.py, or None.
 
     Looked for at $OPEN_KERNELS_DIR, then next to this checkout (oflm-add lives
-    in <repo>/utilities/oflm-add), then under the working directory.
+    in <repo>/utilities/oflm-add), then under the working directory, then -- for
+    an INSTALLED oflm, which is the case that matters to a user -- beside the
+    recipes in the install tree. The package ships `recipes/` (it has to: the
+    ModelSpec derivation is what links the kernels), so a user who installed the
+    RPM finds one at <prefix>/share/oflm/open_kernels with no source checkout and
+    no environment variable set. That is what makes `oflm add` link a kernel set
+    on a machine that has only the package.
     """
     candidates = []
     env = os.environ.get("OPEN_KERNELS_DIR")
@@ -694,30 +854,58 @@ def open_kernels_checkout():
     for parent in Path(__file__).resolve().parents:
         candidates.append(parent / "open_kernels")
     candidates.append(Path.cwd() / "open_kernels")
+    # Installed layout: <prefix>/share/oflm/utilities/oflm-add/oflm_add/ here, so
+    # <prefix>/share/oflm is two levels up from the package's grandparent.
+    here = Path(__file__).resolve()
+    share = here.parents[2]                      # <prefix>/share/oflm
+    if share.name:
+        candidates.append(share / "open_kernels")
     for c in candidates:
         if (c / "recipes" / "spec.py").is_file():
             return c
     return None
 
 
-def model_spec_hash(model_dir):
+def model_spec_hash(model_dir, cat_family=None, size=None):
     """(spec_hash, note) for an installed model directory; (None, why) on failure.
 
-    Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
-    config.json, the tokenizer's real vocab, and the per-role weight format off
-    the model.q4nx safetensors header (no weight byte is read).
+    The quant map -- the part of the hash that says which projections are q8 --
+    comes from the q4nx-build config for this family and size, which is the same
+    authority the kernel build reads, so the two hashes agree by construction.
+    Reading it out of the container instead needed a table of chunk widths
+    (`CHUNK_FORMAT`) that only listed the models someone had happened to try, so
+    a model at a new width was refused with a message about quant chunk bytes --
+    Gemma3-1B among them. The container is no longer consulted when the family
+    and size are known; it remains the fallback for a model the catalogue does
+    not name, where refusing beats guessing.
     """
     root = open_kernels_checkout()
     if root is None:
-        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
+        return None, "no open_kernels/recipes found (set OPEN_KERNELS_DIR)"
     added = str(root)
     inserted = added not in sys.path
     if inserted:
         sys.path.insert(0, added)
     try:
-        from recipes.load import spec_from_model_dir
-        spec = spec_from_model_dir(Path(model_dir))
-        return spec.spec_hash(), f"spec from {root}"
+        from recipes.load import spec_from_hf_config, spec_from_model_dir, tokenizer_vocab
+        from recipes.spec import SpecError
+        md = Path(model_dir)
+        # Preferred: the q4nx-build config, so this hash equals the kernel build's
+        # by construction rather than by coincidence. Needs only config.json and
+        # the tokenizer -- both of which an installed model has.
+        if cat_family:
+            try:
+                cfg = json.loads((md / "config.json").read_text(encoding="utf-8"))
+                spec = spec_from_hf_config(cfg, tokenizer_vocab(md / "tokenizer.json"),
+                                           cat_family, size)
+                return spec.spec_hash(), f"spec from {root} + q4nx config {cat_family}/{size}"
+            except SpecError:
+                pass            # no config for this family: fall through to the container
+        # Fallback: a model the catalogue does not name, where the container header
+        # is the only statement of its format. It can refuse, and refusing is right
+        # -- a guessed format is a wrong hash, which links mismatched kernels.
+        spec = spec_from_model_dir(md)
+        return spec.spec_hash(), f"spec from {root} (container header)"
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
     finally:
@@ -811,7 +999,8 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
     return False
 
 
-def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False):
+def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False,
+                       cat_family=None, size=None):
     """Find and link the open kernel set for this model; say which and why."""
     if override:
         kernel_dir = Path(override)
@@ -820,7 +1009,7 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
 
-    spec_hash, note = model_spec_hash(model_dir)
+    spec_hash, note = model_spec_hash(model_dir, cat_family, size)
     if not spec_hash:
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
@@ -953,7 +1142,16 @@ def main():
     bucket, size_token = tag.split(":", 1)
     official = match_official_entry(system_registry, dir_name)
     base_entry = official[3] if official else None
-    family = derive_family(system_registry, dir_name, args.family, base_entry)
+    # The README's tags, when this is a remote repo. Read BEFORE the name, because
+    # a finetune's directory name carries no family: `Ornith-1.5-9B-NPU2` is a
+    # Qwen3.5 model, and only its frontmatter says so. Not fatal if it fails --
+    # family resolution falls back to the name, as it always did.
+    front = _read_frontmatter(repo) if repo and not args.no_xclbin else {}
+    if not args.quiet and front:
+        _f = frontmatter_family(front)
+        if _f and not args.family and not (base_entry or {}).get("details", {}).get("family"):
+            log(f"[INFO] family {_f} from the repo's README tags (name does not say)")
+    family = derive_family(system_registry, dir_name, args.family, base_entry, front)
     size_value = (base_entry or {}).get("size") or size_from_tag(tag)
     official, official_note = resolve_official(system_registry, dir_name, family, size_value)
     base_entry = official[3] if official else None
@@ -976,7 +1174,7 @@ def main():
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
-            sh, note = model_spec_hash(local_dir)
+            sh, note = model_spec_hash(local_dir, family, size_token)
             roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
             found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
             print(f"spec hash      : {sh or '(' + note + ')'}")
@@ -1039,6 +1237,14 @@ def main():
             override=args.open_kernels,
             force=args.force,
             quiet=args.quiet,
+            # The quant map is read from the q4nx config for THIS family and size,
+            # which is what makes this hash equal the kernel build's. `family` is
+            # already resolved above (registry entry, --family, or a name prefix);
+            # `size` is the 'NNb' marker, and a finetune whose name carries one
+            # gets the same kernel set as any other model of that family and size
+            # -- which is the point: nothing here is keyed on an official model name.
+            cat_family=family,
+            size=size_token,
         )
 
     write_vision_sidecar(target, dir_name, quiet=args.quiet)

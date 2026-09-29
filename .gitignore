@@ -36,6 +36,13 @@ src/xclbins/BERT-h*/
 .claude/
 CLAUDE.md
 
+# The DERIVED kernel specs. gen_catalogue_specs.py writes one per (family, size)
+# from the model catalogue, and the build regenerates them when the catalogue
+# changes -- so they are build products, and a committed copy is a stale copy
+# that reads as authoritative. The catalogue is the source; these are what it
+# currently says.
+open_kernels/recipes/specs/
+
 # open_kernels build outputs and generated fixtures. A build directory is what it
 # holds, not what it is called: an ablation or a kept reference copy is still one,
 # and `build*/` alone let 1552 files into a `git add -A` (2026-09-13). Ignore the

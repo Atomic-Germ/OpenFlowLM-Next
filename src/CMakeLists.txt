@@ -292,6 +292,11 @@ list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
+# open_gemma3: the open CPU Gemma3 text engine (phase 1 of the Gemma3
+# OpenNPU2 implementation). Compiled into oflm like every other open engine
+# so a default Linux build contains the full open stack; the standalone
+# validation harness lives in src/test/gemma3_text_open/.
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_gemma3/engine.cpp")
 if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
     # The open Qwen3.6-MoE engine (open_qwen36/, open XDNA2 kernels under
@@ -1287,14 +1292,38 @@ install(FILES model_info.json DESTINATION "${OFLM_SHARE_DESTINATION}")
 # Only present when the kernel export ran (OFLM_BUILD_KERNELS=ON, or a manual
 # export); skip silently for engine-only builds.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/xclbins")
-    install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}")
+    # The exporters keep each stream's own build tree under
+    # <family>/open_kernels/build/<stream>/ -- the .prj, the per-core ELFs and
+    # object files -- as the evidence a rebuild is compared against. That is
+    # source-tree provenance, not something the engine loads, and it cannot be
+    # packaged: RPM's %install runs brp-strip over every packaged file, and
+    # strip rejects an AIE core ELF ("Unable to recognise the architecture"),
+    # which fails the whole package. So the runtime files go in and the build
+    # trees stay behind, where the exporters read them.
+    install(DIRECTORY xclbins DESTINATION "${OFLM_SHARE_DESTINATION}"
+        PATTERN "build" EXCLUDE)
 endif()
 
 # Open-kernel harness (open_kernels/harness/run_kernel): an N-buffer opcode-3
 # runner for IRON designs, driven by the same .cfg language phlegm's driver
-# speaks. A developer tool, not part of oflm; off by default.
-option(OFLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" OFF)
+# speaks. A developer tool, not part of oflm. ON by default on Linux, where
+# the XRT it links is the same one the engine build discovered above; off on
+# Windows, where /opt/xilinx/xrt does not exist and the harness has no XRT.
+if(WIN32)
+    option(OFLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" OFF)
+else()
+    option(OFLM_BUILD_OPEN_KERNELS_HARNESS "Build open_kernels/harness/run_kernel" ON)
+endif()
 if(OFLM_BUILD_OPEN_KERNELS_HARNESS)
+    # The harness locates XRT through the XRT_INCLUDE_DIR / XRT_LIB_DIR cache
+    # variables, $XILINX_XRT, or /opt/xilinx/xrt -- but this build discovered
+    # XRT above (pkg-config on Linux, the vcpkg/manual paths on Windows), so
+    # seed the cache with what was actually found instead of letting the
+    # harness fall through to a different root.
+    if(NOT WIN32 AND XRT_FOUND)
+        set(XRT_INCLUDE_DIR "${XRT_INCLUDE_DIRS}" CACHE PATH "Where XRT headers live" FORCE)
+        set(XRT_LIB_DIR "${XRT_LIBRARY_DIRS}" CACHE PATH "Where XRT libs live" FORCE)
+    endif()
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness"
                      "${CMAKE_BINARY_DIR}/open_kernels_harness")
 endif()
