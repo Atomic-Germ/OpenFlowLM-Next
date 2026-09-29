@@ -188,7 +188,13 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
                path == "/api/chat" || 
                path == "/v1/chat/completions" ||
                path == "/v1/audio/transcriptions" ||
-               path == "/v1/embeddings";
+               path == "/v1/embeddings" ||
+               // Both drive the same engines as the routes above: /v1/completions
+               // loads, inserts and decodes on the chat engine, and /api/embeddings
+               // shares handle_embeddings with /v1/embeddings. Left off this list they
+               // ran beside a queued request on the shared engine (#135).
+               path == "/v1/completions" ||
+               path == "/api/embeddings";
     }
     return false;
 }
@@ -792,7 +798,9 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
                 openai_compat::status_for(response_data, static_cast<int>(status)));
 
             response_ref.result(status);
-            response_ref.body() = response_data.dump();
+            // A body can echo request text (e.g. a model tag), which is not
+            // guaranteed valid UTF-8.
+            response_ref.body() = safe_dump(response_data);
             response_ref.set(http::field::content_type, "application/json");
             response_ref.prepare_payload();
             cancellation_token->complete();
@@ -831,8 +839,13 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             cancellation_token->complete();
             unregister_active_request(request_id);
 
-            res_ref.result(http::status::internal_server_error);
-            res_ref.body() = safe_dump(json{ {"error", std::string("Handler exception: ") + e.what()} });
+            // e.what() goes to the log, not the client: nlohmann quotes the
+            // request's own bytes into it (#135). A body that does not parse is
+            // the client's fault (400); anything else is ours (500).
+            header_print("ERROR", "Handler exception: " + std::string(e.what()));
+            const json body = openai_compat::exception_body(e);
+            res_ref.result(static_cast<http::status>(openai_compat::status_for(body)));
+            res_ref.body() = safe_dump(body);
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
 

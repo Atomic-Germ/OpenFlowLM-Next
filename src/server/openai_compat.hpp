@@ -378,4 +378,21 @@ inline json require_field(const json& request, const char* field, FieldType type
     return json();
 }
 
+/// The body for an exception a handler caught (#135). e.what() never goes to the
+/// client: nlohmann quotes the request's own bytes into a parse error ("last read:
+/// ...") and names its type-system internals, and an engine's text can name paths.
+/// The caller logs e.what(); the client gets one of two fixed bodies.
+///
+/// `request_fault` marks a catch around prompt processing (insert()), where a chat
+/// template rejecting the conversation throws a plain std::runtime_error. Anywhere
+/// else a json::exception almost always means a request field had a shape the
+/// handler did not expect; any other exception is the server's fault. The two map
+/// to 400 and 500 through status_for().
+inline json exception_body(const std::exception& e, bool request_fault = false) {
+    if (request_fault || dynamic_cast<const nlohmann::json::exception*>(&e) != nullptr)
+        return json{{"error", {{"message", "Invalid request"}, {"type", "invalid_request_error"},
+                               {"code", "invalid_value"}}}};
+    return json{{"error", {{"message", "Internal error"}, {"type", "server_error"}}}};
+}
+
 }  // namespace openai_compat

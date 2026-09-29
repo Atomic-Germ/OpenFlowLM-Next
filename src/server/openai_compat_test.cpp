@@ -551,6 +551,41 @@ static void test_require_field() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// exception_body (#135): e.what() is logged, never sent. nlohmann quotes the
+// request's own bytes into a parse error, so the body must not carry it.
+// ---------------------------------------------------------------------------
+static void test_exception_body() {
+    using openai_compat::exception_body;
+    using openai_compat::status_for;
+    using json = openai_compat::json;
+    std::printf("\n-- exception_body --\n");
+
+    std::string parse_what;
+    try {
+        // An unterminated string: nlohmann quotes the token it was reading.
+        (void)nlohmann::json::parse(std::string("{\"a\": \"secret-request-bytes"));
+    } catch (const nlohmann::json::exception& e) {
+        parse_what = e.what();
+        const json body = exception_body(e);
+        ok(body.dump().find("secret-request-bytes") == std::string::npos,
+           "a parse error's quoted request bytes stay out of the body");
+        eqi(status_for(body), 400, "a json::exception is the client's fault: 400");
+    }
+    ok(parse_what.find("secret-request-bytes") != std::string::npos,
+       "...and nlohmann really does quote them in what(), which is why");
+
+    const std::runtime_error engine_fault("/opt/models/weights.bin: read failed");
+    const json server = exception_body(engine_fault);
+    ok(server.dump().find("/opt/models") == std::string::npos, "an engine's text stays out too");
+    eqi(status_for(server), 500, "any other exception is a server fault: 500");
+    eq(server["error"]["message"].get<std::string>(), "Internal error", "with a fixed message");
+
+    const json templ = exception_body(std::runtime_error("template rejected the roles"), true);
+    eqi(status_for(templ), 400, "request_fault: a template rejecting the conversation is a 400");
+    ok(templ.dump().find("roles") == std::string::npos, "...still without the exception text");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -561,6 +596,7 @@ int main(int argc, char** argv) {
 
     test_finish_reason();
     test_status_for();
+    test_exception_body();
     test_model_error();
     test_preflight();
     test_resolve_task();
