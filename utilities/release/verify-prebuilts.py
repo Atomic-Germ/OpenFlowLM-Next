@@ -36,7 +36,7 @@ import subprocess
 import sys
 
 MANIFEST = "prebuilts/manifest.json"
-WINDOWS_INCLUDE = os.path.join("prebuilts", "win", "xrt-include", "xrt", "xrt.h")
+WINDOWS_INCLUDE = os.path.join("prebuilts", "win", "xrt-include", "xrt", "xrt_device.h")
 WINDOWS_LIB = os.path.join("prebuilts", "win", "xrt-lib", "xrt_coreutil.lib")
 
 

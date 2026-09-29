@@ -27,7 +27,7 @@
 
   <!-- get_files.bat (run by build.ps1 and by the release workflow) stages the
        payload into this directory, and empties it first. It used to be
-       $(SourceDir), which is src/inno -- a directory get_files.bat does not
+       $(SourceDir), which is src/inno, a directory get_files.bat does not
        write to, so the build read whichever oflm.exe an older inno/get_files.bat
        run had left there. It is "package" and not "." on purpose: "." would glob
        this .wxs, build.ps1, get_files.bat and the output\*.msi into Program

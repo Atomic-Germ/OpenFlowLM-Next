@@ -42,6 +42,24 @@ if defined VCPKG_ROOT (
     echo          MSI will fail to start with a missing DLL.
 )
 
+REM vcomp140.dll (OpenMP) is part of the VC++ redistributable, not of Windows:
+REM oflm.exe and the engine DLLs import it, and a machine without Visual Studio
+REM or the redistributable does not have it. Taken from the redist tree of the
+REM toolset that built oflm.exe; the last match is the newest version.
+echo Copying the OpenMP runtime...
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VSDIR="
+for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
+set "VCOMP="
+if defined VSDIR (
+    for /f "delims=" %%f in ('dir /s /b "%VSDIR%\VC\Redist\MSVC\vcomp140.dll" 2^>nul ^| findstr /i "\\x64\\Microsoft.VC143.OpenMP\\" ^| findstr /v /i "\\onecore\\"') do set "VCOMP=%%f"
+)
+if not defined VCOMP (
+    echo ERROR: vcomp140.dll not found under the Visual Studio redist tree.
+    exit /b 1
+)
+copy /y "%VCOMP%" "package\vcomp140.dll" >nul || exit /b 1
+
 echo Copying the model registry and the icon...
 copy /y "..\model_list.json" "package\model_list.json" >nul || exit /b 1
 copy /y "..\model_info.json" "package\model_info.json" >nul || exit /b 1

@@ -103,8 +103,12 @@ On the Windows machine with the Ryzen AI driver:
 ```powershell
 git checkout staging
 git pull
-utilities\release\stage-prebuilts-win.ps1
+powershell -ExecutionPolicy Bypass -File utilities\release\stage-prebuilts-win.ps1
 ```
+
+`-ExecutionPolicy Bypass` because Windows' default policy refuses to run an
+unsigned script. Windows PowerShell 5.1 (what a stock install has) and pwsh 7
+both work.
 
 The recipe (and why `xrt/detail/version-slim.h` has to be generated) is in
 [src/WinSetup.md](src/WinSetup.md).

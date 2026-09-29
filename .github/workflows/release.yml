@@ -172,7 +172,7 @@ jobs:
             args+=(--allow-missing)
           fi
           utilities/release/verify-prebuilts.py "${args[@]}"
-          if [ -f prebuilts/win/xrt-include/xrt/xrt.h ]; then
+          if [ -f prebuilts/win/xrt-include/xrt/xrt_device.h ]; then
             echo "windows_deps=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows_deps=false" >> "$GITHUB_OUTPUT"
@@ -309,7 +309,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path 'prebuilts/win/xrt-include/xrt/xrt.h')) {
+          if (-not (Test-Path 'prebuilts/win/xrt-include/xrt/xrt_device.h')) {
             # The explanation is a file: a multi-line PowerShell here-string
             # cannot live in a YAML block scalar (its unindented lines end the
             # block), and a file is reviewable and translatable besides.
@@ -427,13 +427,22 @@ jobs:
           $ErrorActionPreference = 'Stop'
           dotnet tool install --global wix --version 5.0.2
           $env:PATH += ';';$env:PATH += "$env:USERPROFILE\.dotnet\tools"
+          # -ext names an extension in wix's cache; it is not fetched on demand
+          # (WIX0144 otherwise). Same version as the tool.
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw "wix extension add failed ($LASTEXITCODE)" }
+          # From src/wix, as build.ps1 does: wix resolves the relative paths in
+          # oflm.wxs (package\, ..\inno, ..\xclbins) against the working
+          # directory, not against the .wxs.
+          Push-Location src/wix
           # ProductVersion comes from the tag, and oflm.wxs refuses to invent
           # one: an MSI version of 0.0.0 installs over nothing and upgrades
           # nothing, silently, forever.
-          wix build src/wix/oflm.wxs -arch x64 -ext WixToolset.UI.wixext `
+          wix build oflm.wxs -arch x64 -ext WixToolset.UI.wixext `
             -d "ProductVersion=${{ needs.verify.outputs.version }}" `
-            -out "src/wix/output/oflm-setup.msi"
+            -out "output/oflm-setup.msi"
           if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+          Pop-Location
 
       - uses: actions/upload-artifact@v4
         with:

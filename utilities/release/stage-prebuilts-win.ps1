@@ -135,10 +135,10 @@ New-Item -ItemType Directory -Force -Path $Include, $LibDir | Out-Null
 # The import library is made FROM the driver's DLL: that is the only place
 # xrt_coreutil.dll exists, and the ABI has to be the driver's.
 if (-not $DriverDll) {
-    $candidates = @(
+    $candidates = @(@(
         "$env:SystemRoot\System32\xrt_coreutil.dll",
         "$env:SystemRoot\System32\AMD\xrt_coreutil.dll"
-    ) | Where-Object { Test-Path $_ }
+    ) | Where-Object { Test-Path $_ })
     if ($candidates.Count -eq 0) {
         throw @"
 xrt_coreutil.dll not found. This is the NPU runtime that ships with the Ryzen AI
@@ -191,7 +191,7 @@ if ($LASTEXITCODE -ne 0) { throw "dumpbin /exports failed ($LASTEXITCODE)" }
 # ("N exports") are not names. A name is an identifier at the end of a line.
 $names = $exports |
     ForEach-Object {
-        if ($_ -match '^\s+[0-9]+\s+[0-9A-Fa-f]+\s+([A-Za-z_][A-Za-z0-9_@]*)\s*$') { $Matches[1] }
+        if ($_ -match '^\s+[0-9]+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+(\S+)\s*$') { $Matches[1] }
         elseif ($_ -match '^\s+[0-9]+\s+(\S+)\s*$') { $null }   # ordinal-only row: data, skip
     } | Where-Object { $_ } | Sort-Object -Unique
 if ($names.Count -lt 100) {
@@ -255,7 +255,7 @@ is in the $XrtTag checkout. The tag moved; see the recipe in src/WinSetup.md.
             throw "version-slim.h still has unsubstituted placeholders: $($left -join ', '). XRT's template changed; the recipe is in src/WinSetup.md."
         }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $slim) | Out-Null
-        Set-Content -Encoding ascii -NoNewline $slim $body
+        Set-Content -Encoding ascii -NoNewline -Path $slim -Value $body
         Write-Host "  generated xrt/detail/version-slim.h from the template ($version)"
     } else {
         Write-Host "  xrt/detail/version-slim.h came from the checkout"
@@ -281,7 +281,7 @@ whole xrt/ tree; a handful of files means the XRT layout moved at $XrtTag.
 See the recipe in src/WinSetup.md.
 "@
 }
-foreach ($required in 'xrt\xrt.h', 'xrt\detail\abi.h', 'xrt\detail\version-slim.h') {
+foreach ($required in 'xrt\xrt_device.h','xrt\detail\abi.h', 'xrt\detail\version-slim.h') {
     $p = Join-Path $Include $required
     if (-not (Test-Path $p)) { throw "xrt-include is missing $required" }
     if ($required -like '*version-slim.h') {

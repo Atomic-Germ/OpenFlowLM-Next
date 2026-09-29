@@ -39,12 +39,17 @@ $SystemDlls = @(
     'imm32.dll', 'version.dll', 'rpcrt4.dll', 'sechost.dll', 'sspicli.dll',
     'cfgmgr32.dll', 'powrprof.dll', 'pdh.dll', 'mscoree.dll', 'ucrtbase.dll',
     'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'concrt140.dll',
-    'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_codecvt_ids.dll'
+    'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_codecvt_ids.dll',
+    'msvcrt.dll', 'wsock32.dll', 'winhttp.dll', 'ncrypt.dll',
+    'bcryptprimitives.dll', 'avicap32.dll'
 )
+# Installed by the Ryzen AI NPU driver into System32, never shipped: the MSI
+# runs on the user's driver, and a bundled copy would shadow it.
+$DriverDlls = @('xrt_coreutil.dll')
 function Test-SystemDll([string]$name) {
     $n = $name.ToLowerInvariant()
-    return ($SystemDlls -contains $n) -or $n.StartsWith('api-ms-win-') `
-        -or $n.StartsWith('ext-ms-')
+    return ($SystemDlls -contains $n) -or ($DriverDlls -contains $n) `
+        -or $n.StartsWith('api-ms-win-') -or $n.StartsWith('ext-ms-')
 }
 
 function Find-MsvcTool([string]$Tool) {
@@ -114,11 +119,13 @@ building the installer.
 Write-Host "xclbins: $familyCount families"
 
 if ($missing.Count -gt 0) {
+    # Write-Host, not Write-Error: under ErrorActionPreference=Stop the first
+    # Write-Error throws, and the list would stop at one name.
     foreach ($dep in ($missing.Keys | Sort-Object)) {
-        Write-Error ("{0} is imported by {1} and is in neither the payload nor Windows" -f
+        Write-Host -ForegroundColor Red ("{0} is imported by {1} and is in neither the payload nor Windows" -f
                      $dep, (($missing[$dep] | Sort-Object -Unique) -join ', '))
     }
-    Write-Error @"
+    Write-Host -ForegroundColor Red @"
 $($missing.Count) DLL(s) the payload does not contain. get_files.bat copies
 src\lib\*.dll, src\lib\xrt\*.dll and %VCPKG_ROOT%\installed\x64-windows\bin\*.dll;
 one of those is the set this build actually linked against, and a DLL missing from
