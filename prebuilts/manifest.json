@@ -1,0 +1,13 @@
+{
+    "schema":  2,
+    "platforms":  {
+                      "windows":  {
+                                      "staged_utc":  "2026-09-29T14:05:34Z",
+                                      "for_version":  "0.1.0",
+                                      "xrt_version":  "2.21.75",
+                                      "npu_driver":  "32.00.20102.3931",
+                                      "import_lib_bytes":  276898,
+                                      "header_files":  52
+                                  }
+                  }
+}
