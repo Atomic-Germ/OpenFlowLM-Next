@@ -11,6 +11,7 @@ one-context alternative.
 | `compose_probe.py` | real sets composed into one full ELF: switch cost per mode, and configure-on-change |
 | `fullelf_generate.py` | a whole klein image through one full-ELF context (compiled as one module, the slow way), compared byte for byte with `generate.py` |
 | `preempt_probe.py` | real ops of an installed v2 ELF in engine-style stretches, queued or as runlists, outputs checked every iteration |
+| `cold_probe.py` | real ops of an installed v2 ELF right after their set's configure vs run again: is an op slower cold? (`--scale` fills activations with N(0, σ)) |
 | `contention_trial.ps1` | one engine trial while `switch_probe.py` hammers the NPU from another process: image correct? contender alive? |
 
 All of them need the IRON environment and turbo:
@@ -57,6 +58,15 @@ xrt-smi configure --pmode turbo
 `preempt_probe.py` passes under contention at normal priority: it idles between
 iterations, which gives the scheduler harmless places to switch. The engine keeps its
 queue full, so it doesn't get those.
+
+## After a configure (2026-09-30, quiet, `cold_probe.py`, 1024²)
+
+An op runs no slower right after its set's configure: `attn_sgl` took 31.9 ms first and
+31.6 ms again, `sgl_out` 21.6 / 21.6, `qk_sgl` 3.16 / 3.16, `res_all` 2.05 / 2.06. The
+configures cost 0.8 (fa), 0.4 (gemm) and 0.6 ms (ew). With `--scale`, attention slows on
+wide synthetic spreads (32.4 ms at σ = 1, 38.5 at σ = 4, 41.6 at σ = 16): dit_fa's lazy
+rescale. klein's real scores rarely trigger it (`../dit-chain/attn_rescales.py`), so this
+doesn't explain the engine's slower attention; see `specs/open-diffusion/archive/phase7-speed.md`.
 
 ## Kernel creation
 

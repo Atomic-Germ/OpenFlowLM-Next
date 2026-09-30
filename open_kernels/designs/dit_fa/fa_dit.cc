@@ -321,9 +321,16 @@ alignas(64) static bfloat16 s_newmax[TQ];
 alignas(64) static bfloat16 s_resc[TQ];
 
 // Lazy rescale: the reference max m moves only when a row's chunk max exceeds it
-// by more than TAU (log2 units), so P = exp2((s - m)c) <= 2^TAU (bf16 has the
-// range) and the O / l rescale runs on a handful of chunks per pass, not all.
-constexpr float TAU = 8.0f;
+// by more than TAU (log2 units), so P = exp2((s - m)c) <= 2^TAU (bf16 O and fp32 l
+// have the range; bfp16's shared exponent is relative) and the O / l rescale runs on
+// a handful of chunks per pass, not all. The rescale's frequency depends on the data:
+// on wide score spreads (make_test.py --qk-scale 2-3) TAU 8 ran ~20% slower and TAU 32
+// doesn't. klein's real scores rarely rescale at either (<1% of tile-chunk pairs at
+// TAU 8, utilities/dit-chain/attn_rescales.py), so for klein the change is small.
+#ifndef FA_TAU
+#define FA_TAU 32
+#endif
+constexpr float TAU = float(FA_TAU);
 
 // l += rowsum(P) on the MAC array: P [TQ, LKP] @ ones [LKP, 8], fp32 out, into the
 // replicated l. The mmul sees P in bfp16 exactly as pv's does, so l normalises the

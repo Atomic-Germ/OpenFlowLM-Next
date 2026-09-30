@@ -299,6 +299,12 @@ and 11% at 1024². What it removes is ~822 kernel-set switches of ~2.1 ms each, 
 configurations of 0.3-0.7 ms. The pixels are the same bytes
 (OPEN-DIFFUSION-DETERMINISM).
 
+**Re-measured 2026-09-30, quiet** (CPU 1-16% before each run, nothing computing), same
+binaries and inputs, 2 processes × 4 runs: 512² 3.75-3.96 s (3.75-3.78 s warm), text
+encoder 0.32-0.35 s, step 0.76-0.84 s, VAE 0.32-0.35 s; 1024² 12.16-12.40 s, step
+2.65-2.74 s, VAE 1.12-1.20 s; load 5.1-5.8 s. That is no faster than the light-load
+figures above, which stand as the range. Logs: `C:\dev\switch-work\quiet-0930`.
+
 **Contention:** another process using the NPU during an image
 (`utilities/reconfig-probe/contention_trial.ps1`, a six-xclbin-context contender).
 - At the engine's high QoS priority: 6 of 6 trials (24 images, 3 of them 1024²) were
