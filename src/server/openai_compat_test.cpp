@@ -570,10 +570,17 @@ static void test_exception_body() {
         const json body = exception_body(e);
         ok(body.dump().find("secret-request-bytes") == std::string::npos,
            "a parse error's quoted request bytes stay out of the body");
-        eqi(status_for(body), 400, "a json::exception is the client's fault: 400");
     }
     ok(parse_what.find("secret-request-bytes") != std::string::npos,
        "...and nlohmann really does quote them in what(), which is why");
+
+    // The model list is json too: a bad max_prefill_len throws the same type a bad
+    // request field would. The type says nothing about whose fault it is.
+    try {
+        (void)nlohmann::json{{"max_prefill_len", "4096"}}["max_prefill_len"].get<int>();
+    } catch (const nlohmann::json::exception& e) {
+        eqi(status_for(exception_body(e)), 500, "a json::exception is not assumed to be the client's: 500");
+    }
 
     const std::runtime_error engine_fault("/opt/models/weights.bin: read failed");
     const json server = exception_body(engine_fault);
@@ -581,8 +588,8 @@ static void test_exception_body() {
     eqi(status_for(server), 500, "any other exception is a server fault: 500");
     eq(server["error"]["message"].get<std::string>(), "Internal error", "with a fixed message");
 
-    const json templ = exception_body(std::runtime_error("template rejected the roles"), true);
-    eqi(status_for(templ), 400, "request_fault: a template rejecting the conversation is a 400");
+    const json templ = exception_body(request_error("chat template rejected the request: roles must alternate"));
+    eqi(status_for(templ), 400, "a request_error -- thrown where the fault is known -- is a 400");
     ok(templ.dump().find("roles") == std::string::npos, "...still without the exception text");
 }
 

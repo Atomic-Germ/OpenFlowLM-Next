@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "AutoEmbeddingModel/auto_embedding_model.hpp"   // embedding_task_type_t
+#include "AutoModel/request_error.hpp"
 #include "AutoModel/stop_reason.hpp"
 #include "nlohmann/json.hpp"
 
@@ -383,13 +384,13 @@ inline json require_field(const json& request, const char* field, FieldType type
 /// ...") and names its type-system internals, and an engine's text can name paths.
 /// The caller logs e.what(); the client gets one of two fixed bodies.
 ///
-/// `request_fault` marks a catch around prompt processing (insert()), where a chat
-/// template rejecting the conversation throws a plain std::runtime_error. Anywhere
-/// else a json::exception almost always means a request field had a shape the
-/// handler did not expect; any other exception is the server's fault. The two map
-/// to 400 and 500 through status_for().
-inline json exception_body(const std::exception& e, bool request_fault = false) {
-    if (request_fault || dynamic_cast<const nlohmann::json::exception*>(&e) != nullptr)
+/// Only a request_error is the client's fault (400): it is thrown where the fault
+/// is known, such as a chat template refusing the conversation. Neither the type
+/// nor the catch site can say more -- a json::exception comes as readily from the
+/// model list as from a request field, and an insert() can fail on the NPU -- so
+/// everything else is the server's (500).
+inline json exception_body(const std::exception& e) {
+    if (dynamic_cast<const request_error*>(&e) != nullptr)
         return json{{"error", {{"message", "Invalid request"}, {"type", "invalid_request_error"},
                                {"code", "invalid_value"}}}};
     return json{{"error", {{"message", "Internal error"}, {"type", "server_error"}}}};

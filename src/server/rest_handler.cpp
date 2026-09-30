@@ -56,10 +56,9 @@ static void send_error(const openai_compat::StreamState& stream,
 ///@brief Log a caught exception and return the fixed body the client gets (#135)
 ///@param where the handler, for the log line
 ///@param e the exception; its text goes to the server log only
-///@param request_fault true around prompt processing -- see openai_compat::exception_body()
-static json exception_error(const char* where, const std::exception& e, bool request_fault = false) {
+static json exception_error(const char* where, const std::exception& e) {
     header_print("ERROR", std::string(where) + ": " + e.what());
-    return openai_compat::exception_body(e, request_fault);
+    return openai_compat::exception_body(e);
 }
 
 ///@brief Normalize messages by merging consecutive user messages (like Ollama does)
@@ -487,12 +486,12 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
                                  "previous model leaves the NPU and must be reloaded");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Clear the tag before the engine goes: GET /api/ps reads it from another
+        // thread, and between the two it would report a model that is not loaded.
+        set_current_model_tag("model-faker");
         if (auto_chat_engine != nullptr) {
             auto_chat_engine.reset();
         }
-        // The engine is gone, so the tag must not name it: GET /api/ps reads the
-        // tag from another thread and would report a model that is not loaded.
-        set_current_model_tag("model-faker");
         std::pair<std::string, std::unique_ptr<AutoModel>> auto_model = get_auto_model(ensure_tag, this->supported_models, &this->npu_device_inst);
         auto_chat_engine = std::move(auto_model.second);
         ensure_tag = auto_model.first;
@@ -849,7 +848,7 @@ void RestHandler::handle_generate(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_generate", e, true));
+                send_response(exception_error("handle_generate", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -899,7 +898,7 @@ void RestHandler::handle_generate(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_generate", e, true));
+                send_response(exception_error("handle_generate", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -952,6 +951,11 @@ void RestHandler::handle_chat(const json& request,
     // A client disconnect or POST /api/cancel sets the token; prefill and decode
     // both poll it, so a cancelled request stops using the NPU (#135).
     auto is_cancelled = [&cancellation_token] { return cancellation_token && cancellation_token->cancelled(); };
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    auto ndjson_stream_callback = [&send_streaming_response, &stream_state](const json& data, bool is_final) {
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data, is_final); });
+        };
     try {
         // Checked before reading, like the other handlers (#70).
         if (json err = openai_compat::require_field(request, "messages", openai_compat::FieldType::Array);
@@ -984,7 +988,7 @@ void RestHandler::handle_chat(const json& request,
         if (stream) {
             // Streaming response using streaming_ostream
             auto total_start_time = time_utils::now();
-            streaming_ostream ostream(model, send_streaming_response, true);  // true for chat format
+            streaming_ostream ostream(model, ndjson_stream_callback, true);  // true for chat format
             uniformed_input.messages = messages;
             try {
                 bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
@@ -1005,35 +1009,27 @@ void RestHandler::handle_chat(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_chat", e, true));
+                send_response(exception_error("handle_chat", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
-            // A prefill that was cancelled has nothing more to run.
-            if (meta_info.stop_reason != CANCEL_DETECTED) {
-                try {
-                    bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
-                    if (!success && (meta_info.stop_reason == CANCEL_DETECTED || is_cancelled())) {
-                        // Nothing to decode. The response below still goes out: it is
-                        // what releases the NPU queue.
-                        meta_info.stop_reason = CANCEL_DETECTED;
-                        header_print("❌ ", "Prefill Cancelled!");
-                    } else if (!success) {
-                        json error_response = {{"error", {
-                            {"message", "the prompt does not fit this model's context window"},
-                            {"type", "invalid_request_error"},
-                            {"param", "messages"},
-                            {"code", "context_length_exceeded"}
-                        }}};
-                        send_response(error_response);
-                        this->auto_chat_engine->clear_context();
-                        return;
-                    }
-                } catch (const std::exception& e) {
-                    send_response(exception_error("handle_chat", e, true));
-                    this->auto_chat_engine->clear_context();
-                    return;
+            // This used to be a second insert() and no generate() (#134): the second
+            // insert matched the whole prompt against the history the first had just
+            // written, erased every token and sampled an empty logits buffer.
+            try {
+                if (meta_info.stop_reason != CANCEL_DETECTED) {
+                    auto_chat_engine->generate(meta_info, length_limit, ostream, is_cancelled);
                 }
+            } catch (const std::exception& e) {
+                const json error_response = exception_error("handle_chat", e);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Ndjson, error_response["error"]["message"].get<std::string>(),
+                           error_response, send_response, ndjson_stream_callback);
+                this->auto_chat_engine->clear_context();
+                return;
+            }
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Generation Cancelled!");
             }
             auto total_end_time = time_utils::now();
             meta_info.total_duration = (uint64_t)time_utils::duration_ns(total_start_time, total_end_time).first;
@@ -1050,11 +1046,16 @@ void RestHandler::handle_chat(const json& request,
             //std::string response_text = auto_chat_engine->generate_with_prompt(meta_info, uniformed_input, length_limit, std::cout);
             std::string response_text;
             try {
-                response_text = auto_chat_engine->generate_with_prompt(meta_info, uniformed_input, length_limit, nstream);
+                // generate_with_prompt, not insert() + generate(): some models write
+                // their own framing around the decode (GPT-OSS, the thinking models).
+                response_text = auto_chat_engine->generate_with_prompt(meta_info, uniformed_input, length_limit, nstream, is_cancelled);
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_chat", e, true));
+                send_response(exception_error("handle_chat", e));
                 this->auto_chat_engine->clear_context();
                 return;
+            }
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Request cancelled");
             }
             //std::string response_text = chat_engine->generate_with_prompt(meta_info, prompts, length_limit, std::cout, payload);
             auto total_end_time = time_utils::now();
@@ -1083,7 +1084,9 @@ void RestHandler::handle_chat(const json& request,
             this->auto_chat_engine->clear_context();
         }
     } catch (const std::exception& e) {
-        send_response(exception_error("handle_chat", e));
+        const json error_response = exception_error("handle_chat", e);
+        send_error(stream_state, openai_compat::StreamWire::Ndjson, error_response["error"]["message"].get<std::string>(),
+                   error_response, send_response, ndjson_stream_callback);
     }
 }
 
@@ -1703,7 +1706,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_openai_chat_completion", e, true));
+                send_response(exception_error("handle_openai_chat_completion", e));
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1756,7 +1759,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_openai_chat_completion", e, true));
+                send_response(exception_error("handle_openai_chat_completion", e));
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1977,7 +1980,7 @@ void RestHandler::handle_openai_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_openai_completion", e, true));
+                send_response(exception_error("handle_openai_completion", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -2024,7 +2027,7 @@ void RestHandler::handle_openai_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                send_response(exception_error("handle_openai_completion", e, true));
+                send_response(exception_error("handle_openai_completion", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }

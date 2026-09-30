@@ -59,7 +59,7 @@ std::string LFM2::apply_chat_template(nlohmann::ordered_json& messages, nlohmann
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
     // inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs, opt);
+    return this->_shared_apply_template(inputs, opt);
 }
 
 bool LFM2::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -94,11 +94,11 @@ std::string LFM2::generate(chat_meta_info_t& meta_info, int length_limit, std::o
     return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
-std::string LFM2::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string LFM2::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->generate(meta_info, length_limit, os);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 StreamResult LFM2::parse_stream_content(const std::string content) {
@@ -316,7 +316,7 @@ std::string LFM2_5_TK::apply_chat_template(nlohmann::ordered_json& messages, nlo
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
     // inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs, opt);
+    return this->_shared_apply_template(inputs, opt);
 }
 
 bool LFM2_5_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -462,11 +462,11 @@ std::string LFM2_5_TK::generate(chat_meta_info_t& meta_info, int length_limit, s
     return result;
 }
 
-std::string LFM2_5_TK::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string LFM2_5_TK::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->generate(meta_info, length_limit, os);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 NonStreamResult LFM2_5_TK::parse_nstream_content(const std::string response_text) {

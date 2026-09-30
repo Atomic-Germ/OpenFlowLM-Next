@@ -677,13 +677,14 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         if (!req.body().empty()) {
             std::string content_type = std::string(req[http::field::content_type]);
 
-            if (content_type.find("application/json") != std::string::npos) {
+            // Every body but a multipart upload is JSON -- the routes parse it
+            // whatever the header says -- and that is settled before parsing it:
+            // set only after a successful parse, a body that did not parse skipped
+            // process_task's 400 and reached a route's own json::parse (#135).
+            is_json = content_type.find("multipart/form-data") == std::string::npos;
+            if (is_json) {
                 json request_json_log = json::parse(req.body());
                 brief_print_message_request(request_json_log);
-                is_json = true;
-            }
-            else if (content_type.find("multipart/form-data") != std::string::npos) {
-                // print some request info 
             }
         }
     }
@@ -728,7 +729,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         }
         catch (const std::exception& e) {
             res_ref.result(http::status::bad_request);
-            res_ref.body() = safe_dump(json{ {"error", "Invalid JSON"} });
+            res_ref.body() = safe_dump(json{ {"error", {
+                {"message", "Invalid JSON"},
+                {"type", "invalid_request_error"},
+                {"code", "invalid_value"}}} });
             res_ref.set(http::field::content_type, "application/json");
             res_ref.prepare_payload();
 
@@ -767,7 +771,10 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
         session->set_cancellation_token(cancellation_token);
 
         std::string request_id;
-        if (request_json.contains("request_id")) {
+        // POST /api/cancel's request_id names the request to cancel, not itself.
+        // Registered under it, the cancel replaced its target's token and then
+        // cancelled its own, so /api/cancel never stopped anything (#135).
+        if (request_json.contains("request_id") && key != "POST /api/cancel") {
             request_id = request_json["request_id"];
         }
         else {
@@ -840,8 +847,8 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             unregister_active_request(request_id);
 
             // e.what() goes to the log, not the client: nlohmann quotes the
-            // request's own bytes into it (#135). A body that does not parse is
-            // the client's fault (400); anything else is ours (500).
+            // request's own bytes into it (#135). A request_error is the
+            // client's fault (400); anything else is ours (500).
             header_print("ERROR", "Handler exception: " + std::string(e.what()));
             const json body = openai_compat::exception_body(e);
             res_ref.result(static_cast<http::status>(openai_compat::status_for(body)));
