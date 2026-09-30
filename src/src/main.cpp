@@ -10,6 +10,7 @@
 #include "model_list.hpp"
 #include "model_downloader.hpp"
 #include "add_command.hpp"
+#include "pack_command.hpp"
 #include "update.hpp"
 #include "utils/utils.hpp"
 #include "program_args.hpp"
@@ -477,6 +478,15 @@ int main(int argc, char* argv[]) {
     // truth for registry and kernel-link behavior.
     if (argc > 1 && std::string(argv[1]) == "add") {
         return add_command::run(argc - 2, argv + 2);
+    }
+
+    // `pack` is the same handoff, to the bundled Q4NX builder. It has a richer
+    // option set than the runtime commands -- a quantiser takes a hundred
+    // arguments and grows more -- so its arguments pass through untouched, and
+    // the builder beside oflm stays the single source of truth for what they
+    // mean. See pack_command.hpp for why this is a handoff and not a port.
+    if (argc > 1 && std::string(argv[1]) == "pack") {
+        return pack_command::run(argc - 2, argv + 2);
     }
     
     // Parse command line arguments using Boost Program Options
