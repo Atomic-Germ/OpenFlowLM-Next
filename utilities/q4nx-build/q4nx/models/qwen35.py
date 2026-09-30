@@ -341,10 +341,16 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
         if target == GGMLQuantizationType.Q4_K:
             # No Q4_K encoder in ggml; the packer fits the super-block itself
             # from a Q4_1-grid triple, whose min sign is SUBTRACTED not added.
-            data = quantize(w.to(torch.float32).numpy(), GGMLQuantizationType.Q4_1).copy()
+            data = quantize(w.to(torch.bfloat16).contiguous().view(-1).view(torch.float32).numpy(),
+                            GGMLQuantizationType.Q4_1).copy()
             d, m, qw = gguf_tensor.unpack_q4_1(data, rows)
             return (d, -m, qw)
-        data = quantize(w.to(torch.float32).numpy(), target).copy()
+        # bfloat16 BEFORE quantize, exactly as gguf_tensor._requantize_to does it.
+        # It is not a cosmetic cast: _pack_q8nx asserts the scales arrive as
+        # float16, and a float32 requantize hands them float32 and trips it. The
+        # round trip also matches the precision the Q8_0 path assumes.
+        data = quantize(w.to(torch.bfloat16).contiguous().view(torch.float32).numpy(),
+                        target).copy()
         if target == GGMLQuantizationType.Q4_1:
             d, m, qw = gguf_tensor.unpack_q4_1(data, rows)
         elif target == GGMLQuantizationType.Q4_0:
