@@ -184,6 +184,32 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     auto j = nlohmann::json::parse(cf, nullptr, false);
     if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
     man_.check_model(j, md.filename().string());
+    // The model's OWN id count, which is not the set's. A set is shared by every
+    // model of one architecture, and two of those can have different tokenizers
+    // -- `Qwable-9B-Claude-Fable-5` has 248077 ids to `Ornith-1.5-9B`'s 248070.
+    // Taking the manifest's number would cap this model at 248070 and silently
+    // drop the seven ids the finetune added, so the model's own wins. Clamped to
+    // the padded head, because an id past the head is not representable however
+    // many the tokenizer has.
+    {
+        std::ifstream tf(md / "tokenizer.json");
+        if (tf) {
+            auto t = nlohmann::json::parse(tf, nullptr, false);
+            if (t.is_object()) {
+                long long top = -1;
+                if (t.contains("added_tokens") && t["added_tokens"].is_array())
+                    for (const auto& a : t["added_tokens"])
+                        if (a.is_object()) top = std::max<long long>(top, a.value("id", -1));
+                const auto& v = t.contains("model") ? t["model"] : t;
+                if (v.is_object() && v.contains("vocab") && v["vocab"].is_object())
+                    for (const auto& kv : v["vocab"].items())
+                        if (kv.value().is_number_integer())
+                            top = std::max<long long>(top, kv.value().get<long long>());
+                if (top >= 0)
+                    real_vocab_ = std::min<size_t>(static_cast<size_t>(top + 1), man_.vocab);
+            }
+        }
+    }
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);

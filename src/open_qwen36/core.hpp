@@ -252,7 +252,16 @@ public:
     const StepTiming& last_timing() const { return timing_; }
     const Manifest& manifest() const { return man_; }
     size_t vocab() const { return man_.vocab; }
-    size_t real_vocab() const { return man_.real_vocab; }
+    /// The highest token id this MODEL defines, which is not the same as the
+    /// set's: a kernel set is now shared by every model of one architecture, and
+    /// two such models can have different tokenizers. `Qwable-9B-Claude-Fable-5`
+    /// has 248077 ids where the set it shares was built against 248070, so
+    /// taking the manifest's number would silently drop the seven ids the
+    /// finetune added -- a wrong answer, not a refusal. The model's own count
+    /// wins, clamped to the padded head, and the manifest's is only the fallback
+    /// when the model cannot be asked.
+    size_t real_vocab() const { return real_vocab_ ? real_vocab_ : man_.real_vocab; }
+    size_t real_vocab_ = 0;          ///< 0 = ask the manifest; see real_vocab()
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);

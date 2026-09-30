@@ -228,21 +228,22 @@ def family_of(spec) -> str:
 
 
 def set_name(spec) -> str:
-    """The directory name for a set: family, size, and whatever else differs.
+    """The directory name for a set: family, size, and the geometry that differs.
 
-    Family and size, because that is what a person recognises. Then the fields
-    that actually separate two sets of the same family and size -- hidden,
-    layers, and the real vocabulary -- because a name that collides silently
-    overwrites one set with the other, which is the exact failure
-    `gemma3-12b.json` had when two specs both said `Gemma3-4B-NPU2`.
+    Family and hidden size, because that is what a person recognises. Then the
+    layer count, because two members of one family at one nominal size can still
+    be different depths, and a name that collides silently overwrites one set
+    with the other -- the exact failure `gemma3-12b.json` had when two specs both
+    said `Gemma3-4B-NPU2`.
 
-    `real_vocab` is in the name for a real reason: LFM2-1.2B and
-    LFM2.5-1.2B are the same hidden width and the same layer count and differ
-    ONLY in the tokenizer's id count, so family+size+hidden+layers would give
-    them one name and two different kernel sets, one of them lost. Anything left
-    out of a name that varies is a set that cannot be built.
+    The tokenizer's id count is deliberately NOT in the name. It is not a kernel
+    input (the head is sized from the padded vocab) and it is not in spec_hash
+    either, so putting it here would split one set per finetune: LFM2-1.2B and
+    LFM2.5-1.2B differ by two ids and want the same kernels. Where it did matter
+    to tell sets apart it is now carried by a suffix derived from the hash, which
+    is the only thing that can separate two genuinely different specs.
     """
-    return f"{spec.family}-h{spec.hidden}-L{spec.num_layers}-v{spec.real_vocab}"
+    return f"{spec.family}-h{spec.hidden}-L{spec.num_layers}"
 
 
 def main() -> int:
@@ -299,6 +300,17 @@ def main() -> int:
 
     out: Path = a.out
     out.mkdir(parents=True, exist_ok=True)
+    # The specs directory is DERIVED and wholly owned by this script, so it is
+    # cleared rather than merged into. A spec left over from an earlier naming
+    # scheme otherwise stays a valid-looking file that the exporter globs, and
+    # the same kernels get built twice under two names -- which is what happened
+    # when `real_vocab` left the name and the two naming schemes briefly coexisted.
+    # The bookkeeping stamp is rewritten below, so it goes too.
+    for stale in sorted(out.glob("*.json")):
+        stale.unlink()
+    stamp = out / ".stamp.json"
+    if stamp.exists():
+        stamp.unlink()
     written = 0
     # Two different specs must never land on one file: the exporter reads
     # extra["model"] to decide its output directory, so a collision is one set

@@ -52,6 +52,10 @@ def build_key(spec: ModelSpec, root: Path = ROOT) -> str:
         h.update(b"\0")
     d = spec.to_dict()
     d.pop("extra", None)
+    # real_vocab for the same reason spec_hash drops it: no kernel is built from
+    # it. Leaving it in here would rebuild every design for a tokenizer that
+    # differs by a few ids, which is the whole cost spec_hash was fixed to avoid.
+    d.pop("real_vocab", None)
     h.update(json.dumps(d, sort_keys=True).encode())
     # the canonical form: the bare string when every role is at the default (byte for byte
     # what this line hashed before roles existed), else the sorted map of the roles at q8

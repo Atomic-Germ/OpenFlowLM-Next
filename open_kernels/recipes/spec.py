@@ -254,9 +254,30 @@ class ModelSpec:
         return cls.from_dict(json.loads(s))
 
     def spec_hash(self) -> str:
-        """Stable hash of the hyperparameters (not of `extra`)."""
+        """Stable hash of the KERNEL hyperparameters -- the geometry a set is built from.
+
+        `extra` is excluded because it names the model rather than the kernels.
+        So is `real_vocab`, and that one is worth being explicit about: it is the
+        tokenizer's id count, it feeds no layout constant, no chunk count, no
+        build env and no packing plan (the lm_head is sized from the PADDED
+        `vocab`), and it is read back at run time only to bound which logits are
+        valid. Two models of identical architecture whose tokenizers differ by a
+        handful of ids are the same kernels, byte for byte.
+
+        Hashing it anyway meant every finetune with a slightly different
+        tokenizer needed its own kernel set -- measured on real repos:
+        `Ornith-1.5-9B` has 248070 tokenizer ids and `Qwable-9B-Claude-Fable-5`
+        has 248077, same hidden, same layers, same padded vocab, same quant, and
+        the second was refused for want of a set. For a distribution that cannot
+        pre-build every tune, that is the wrong trade.
+
+        The engine takes its real vocab from the MODEL now, clamped to the padded
+        vocab, rather than from this value -- so sharing a set cannot truncate a
+        model's own tokens. See the note in the manifest layout.
+        """
         d = self.to_dict()
         d.pop("extra", None)
+        d.pop("real_vocab", None)
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
     # ---- sources
