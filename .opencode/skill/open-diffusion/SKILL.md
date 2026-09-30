@@ -115,7 +115,7 @@ images.
 
 ## Serving (what was learned)
 
-- **Swap by default, `--image 1` to keep both.** An image request resets `auto_chat_engine`
+- **Swap by default, `--imagegen 1` to keep both.** An image request resets `auto_chat_engine`
   but keeps `current_model_tag`, so an omitted or same-named chat model reloads through
   `ensure_model_loaded`'s NeedsLoad path. `release_image_engine_for_chat()` is the other
   direction. llama3.2:1b plus the image engine fit the NPU together; with `--asr`/`--embed`

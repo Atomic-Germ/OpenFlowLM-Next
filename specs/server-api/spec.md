@@ -385,7 +385,7 @@ A client that disconnects during an `n` > 1 request stops it after the current i
   request is answered 200.
 - Chat, image, chat, image on one server are each answered 200.
 
-### SERVER-IMAGES-RESIDENCY: swap by default, both resident with --image 1
+### SERVER-IMAGES-RESIDENCY: swap by default, both resident with --imagegen 1
 **Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/include/utils/vm_args.hpp`)
 **Verification:** manual
 
@@ -395,7 +395,7 @@ engine (5.2 s warm, the weights in the OS file cache), and a chat request swaps 
 so each time. The chat model's tag is kept, so a chat request that names it, or names nothing, is
 served by it again.
 
-`oflm serve <tag> --image 1 [--imagemodel <tag>]` loads the image engine at startup beside the
+`oflm serve <tag> --imagegen 1 [--imagemodel <tag>]` loads the image engine at startup beside the
 chat model, allocates every resolution, and never swaps. It still shares the NPU lock: resident
 saves the load, not the queue. A startup that cannot load it exits naming why. `--imagemodel`
 alone sets the model a request naming none gets; a tag that is not an image model stops the
@@ -409,9 +409,9 @@ embedding and Whisper engines do.
    All four succeed, and the log shows `swapping the chat model ... off the NPU`, then
    `swapping the image engine ... off the NPU` and `reloading 'llama3.2:1b'`, at each switch.
    (2026-09-28: 3 swaps each way over the whole test file; image engine load 5.2 s.)
-2. `oflm serve llama3.2:1b --image 1`: the log shows one `Loading image model` line at startup
+2. `oflm serve llama3.2:1b --imagegen 1`: the log shows one `Loading image model` line at startup
    and none after the same four requests. (2026-09-28: loaded in 8.7 s with both resolutions
    allocated; llama3.2:1b and the image engine fit the NPU together.)
-3. `oflm serve llama3.2:1b --image 1 --imagemodel llama3.2:3b` exits with `--imagemodel: model
-   'llama3.2:3b' is not an image model`; `oflm run llama3.2:1b --image 1` is refused.
+3. `oflm serve llama3.2:1b --imagegen 1 --imagemodel llama3.2:3b` exits with `--imagemodel: model
+   'llama3.2:3b' is not an image model`; `oflm run llama3.2:1b --imagegen 1` is refused.
 4. Not measured: resident beside `--asr 1` and `--embed 1` as well.

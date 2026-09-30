@@ -272,7 +272,7 @@ def test_the_server_keeps_serving_after_image_errors():
 
 
 def test_chat_and_images_alternate():
-    # without --image 1 each switch swaps the engines; with it, neither reloads (the log shows it)
+    # without --imagegen 1 each switch swaps the engines; with it, neither reloads (the log shows it)
     chat = {"model": MODEL, "messages": [{"role": "user", "content": "Say ok."}], "max_tokens": 8}
     for step in ("chat", "image", "chat", "image"):
         status, body = _post("/v1/chat/completions", chat) if step == "chat" else _generate()

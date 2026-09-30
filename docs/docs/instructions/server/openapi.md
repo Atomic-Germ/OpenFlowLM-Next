@@ -424,10 +424,10 @@ gc.collect()
 `flux2-klein:4b` makes images with every op on the NPU: about 5.5 s at 512x512 and 14 s at
 1024x1024. It is pulled on the first request. By default an image request swaps the chat model
 off the NPU and a chat request swaps it back (about 5 s each way); start the server with
-`--image 1` to keep both loaded.
+`--imagegen 1` to keep both loaded.
 
 ```
-oflm serve llama3.2:1b --image 1
+oflm serve llama3.2:1b --imagegen 1
 ```
 
 ```python

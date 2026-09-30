@@ -428,10 +428,10 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
             this->image_model_tag = resolved;
         }
     }
-    // --image 1 (SERVER-IMAGES-RESIDENCY): loaded now, beside the chat model, and kept.
+    // --imagegen 1 (SERVER-IMAGES-RESIDENCY): loaded now, beside the chat model, and kept.
     if (this->image_resident) {
         if (std::string why = ensure_image_engine_loaded(this->image_model_tag); !why.empty()) {
-            header_print("ERROR", "--image 1: " + why);
+            header_print("ERROR", "--imagegen 1: " + why);
             exit(EXIT_FAILURE);
         }
     }
@@ -2061,7 +2061,7 @@ json RestHandler::resolve_image_model(const json& request, std::string* tag) {
 void RestHandler::release_image_engine_for_chat() {
     if (this->image_engine && !this->image_resident) {
         header_print("OFLM", "swapping the image engine ('" + this->image_engine_tag + "') off the NPU "
-                             "for the chat model (--image 1 keeps both)");
+                             "for the chat model (--imagegen 1 keeps both)");
         this->image_engine.reset();
         this->image_tokenizer.reset();
         this->image_engine_tag.clear();
@@ -2085,7 +2085,7 @@ std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
     if (!this->image_resident && this->auto_chat_engine) {
         // current_model_tag stays: a chat request naming it (or naming nothing) reloads it
         header_print("OFLM", "swapping the chat model ('" + this->current_model_tag + "') off the NPU "
-                             "for the image engine (--image 1 keeps both)");
+                             "for the image engine (--imagegen 1 keeps both)");
         this->auto_chat_engine.reset();
     }
     switch (this->downloader.is_model_downloaded(tag)) {

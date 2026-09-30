@@ -12,8 +12,8 @@ What landed differs from the text below in these ways:
   here.
 - **Additions:** each `data` item carries its `seed`; `seed: -1` is random (A1111);
   `output_compression` sets the JPEG quality; `response_format: "url"` is refused; an omitted
-  `model` is `--imagemodel`'s; `--image 1` allocates both resolutions at startup.
-- **Measured (the "to measure first" item):** `--image 1` with llama3.2:1b fits the NPU; with
+  `model` is `--imagemodel`'s; `--imagegen 1` allocates both resolutions at startup.
+- **Measured (the "to measure first" item):** `--imagegen 1` with llama3.2:1b fits the NPU; with
   `--asr` and `--embed` as well it is not measured.
 
 ## The API (the user's decision, 2026-09-27)
@@ -50,7 +50,7 @@ implemented:
 | SERVER-IMAGES-SIZE | `size` is `WxH` or `auto`; only the engine's resolutions run (512x512, 1024x1024; `auto` = 1024x1024); any other size is a 400 that names the supported ones | test (unit + integration) |
 | SERVER-IMAGES-EDITS | `/v1/images/edits` validates its multipart fields, then answers 501 naming what is missing (the NPU VAE encoder), until Phase 8 | test (integration) |
 | SERVER-IMAGES-NPU | image requests take the NPU lock like chat; the lock is released on every path; the server keeps serving after an image error | test (integration) |
-| SERVER-IMAGES-RESIDENCY | by default an image request swaps the NPU from the chat model to the image engine, and a chat request swaps back; `oflm serve <tag> --image 1 [--imagemodel <tag>]` loads the image engine at startup and keeps it resident beside the chat model; if it cannot be, the server exits at startup naming why | manual |
+| SERVER-IMAGES-RESIDENCY | by default an image request swaps the NPU from the chat model to the image engine, and a chat request swaps back; `oflm serve <tag> --imagegen 1 [--imagemodel <tag>]` loads the image engine at startup and keeps it resident beside the chat model; if it cannot be, the server exits at startup naming why | manual |
 
 OPEN-DIFFUSION-DETERMINISM (same prompt, size, steps and seed give the same bytes) is an
 engine property. It moves to the CLI plan, whose home spec is `specs/open-diffusion`.
@@ -130,7 +130,7 @@ This PR adds:
      engine, the way `ensure_model_loaded` switches chat models. A chat request swaps
      back. Load measured 5.2-5.4 s per resolution with the weights in the OS file cache;
      a cold load is not measured.
-   - **`--image 1` / `--imagemodel <tag>`** in `vm_args.hpp`, beside `--asr` / `--asrmodel`
+   - **`--imagegen 1` / `--imagemodel <tag>`** in `vm_args.hpp`, beside `--asr` / `--asrmodel`
      and `--embed` / `--embeddingmodel`. The image engine loads at startup, the way
      `ensure_embed_model_loaded` does, and stays resident. A load failure exits with the
      reason, as `--asr`'s does.
@@ -150,9 +150,9 @@ This PR adds:
      aliases on the wire, edits 501, and the server still serving after an error.
 
 **SERVER-IMAGES-RESIDENCY verification (manual):**
-- Without `--image`, send a chat request, then an image request, then a chat request.
+- Without `--imagegen`, send a chat request, then an image request, then a chat request.
   All three succeed.
-- With `--image 1`, send the same three. Neither the image engine nor the chat model
+- With `--imagegen 1`, send the same three. Neither the image engine nor the chat model
   reloads (the server log shows no load line).
 
 ## Decisions (the user's, 2026-09-27)
@@ -164,7 +164,7 @@ This PR adds:
 3. **Output formats:** PNG and JPEG. WebP needs `libwebp` through vcpkg; until a client
    needs it, `webp` is a 400 naming it as not implemented.
 4. **Residency:** swap the image engine and the chat model on demand by default.
-   `--image 1` keeps both resident.
+   `--imagegen 1` keeps both resident.
 
 ## Order
 

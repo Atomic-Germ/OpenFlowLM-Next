@@ -139,7 +139,7 @@ private:
     /// The tag an image request names (or --imagemodel's, when it names none), resolved
     /// and checked BEFORE anything is unloaded. Empty json and *tag set, or the 400.
     json resolve_image_model(const json& request, std::string* tag);
-    /// Load the image engine for `tag` unless it is loaded. Without --image 1 this swaps
+    /// Load the image engine for `tag` unless it is loaded. Without --imagegen 1 this swaps
     /// the chat model off the NPU first (SERVER-IMAGES-RESIDENCY). Empty on success,
     /// else why it failed.
     std::string ensure_image_engine_loaded(const std::string& tag);
@@ -155,7 +155,7 @@ private:
     std::unique_ptr<open_diffusion::Engine> image_engine;
     std::unique_ptr<Tokenizer> image_tokenizer;
     std::string image_engine_tag;       // what image_engine was loaded for
-    bool image_resident;                // --image 1: loaded at startup, never swapped out
+    bool image_resident;                // --imagegen 1: loaded at startup, never swapped out
     std::string image_model_tag;        // --imagemodel: the model a request naming none gets
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
     std::unique_ptr<Whisper> whisper_engine;
