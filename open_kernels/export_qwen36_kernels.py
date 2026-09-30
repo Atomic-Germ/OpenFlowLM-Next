@@ -211,10 +211,6 @@ def build(name: str, sets: dict, spec_file: Path) -> Path:
                      "program memory. This is a bug in the kernels for this model, not in your setup; "
                      "please report it with this log.")
         sys.exit(f"[{name}] build FAILED ({p.returncode})")
-    # The set is real from here: the spec takes its final name.
-    final_spec = spec_file.with_name("spec.json")
-    if spec_file.is_file() and spec_file != final_spec:
-        spec_file.replace(final_spec)
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
@@ -303,6 +299,14 @@ def main() -> int:
             print(f"  {hashes[k]}  {k}  ({(dst / f).stat().st_size} B)")
 
     # ---- the manifest and the toolchain record
+    # Every kernel built, so the set is real: the spec takes its final name now,
+    # and not after the FIRST one. Renaming it inside build() left the second
+    # kernel of the same export pointing OPEN_KERNELS_SPEC at a file that no
+    # longer existed -- which is invisible while every set is cached and appears
+    # the first time anything actually rebuilds.
+    final_spec = out_root / "spec.json"
+    if spec_file.is_file() and spec_file != final_spec:
+        spec_file.replace(final_spec)
     m = manifest(spec, a.max_ctx, key)
     mj.write_text(dumps(m), encoding="utf-8", newline="\n")
     info = {
