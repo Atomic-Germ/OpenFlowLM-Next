@@ -313,42 +313,6 @@ def resolve_official(system_registry, dir_name, family, size):
     return None, None
 
 
-# A tag that names the family outright, longest first so a specific tag is
-# preferred over a general one. These are the tags Atomic-Germ's own conversions
-# carry, and they are what let a finetune resolve: a directory named
-# `Ornith-1.5-9B-NPU2` says nothing about its architecture, but the repo's README
-# frontmatter is tagged `qwen3.5`, and every Qwen3.5-9B finetune wants the same
-# kernel set.
-_FRONT_FAMILY_TAGS = [
-    ("qwen3.6-moe", "qwen3.6-moe"), ("qwen3.6", "qwen3.6-moe"),
-    ("qwen3_5_moe", "qwen3.6-moe"), ("qwen3.5-moe", "qwen3.6-moe"),
-    ("qwen35moe", "qwen3.6-moe"),
-    ("qwen3.8", "qwen3.5"),          # the Qwen3.5 engine, per FAMILY_ALIASES
-    ("qwen3.5", "qwen3.5"), ("qwen3_5", "qwen3.5"), ("qwen35", "qwen3.5"),
-    ("qwen3.5-omni", "qwen3.5-omni"),
-    ("qwen3vl", "qwen3vl"), ("qwen3_vl", "qwen3vl"),
-    ("qwen3", "qwen3"), ("qwen2.5vl", "qwen2.5vl"), ("qwen2.5", "qwen2"),
-    ("qwen2vl", "qwen2vl"), ("qwen2", "qwen2"),
-    ("gemma4e", "gemma4e"), ("gemma4", "gemma4"), ("gemma-4", "gemma4"),
-    ("gemma3", "gemma3"), ("gemma-3", "gemma3"),
-    ("gpt-oss", "gpt-oss"), ("gpt_oss", "gpt-oss"),
-    ("granite", "granite"), ("llama3", "llama3"), ("llama-3", "llama3"),
-    ("llama", "llama3"), ("lfm2", "lfm2"), ("lfm2.5", "lfm2"),
-    ("hunyuan", "hunyuan"), ("phi4", "phi4"), ("phi-4", "phi4"), ("phi3", "phi3"),
-    ("nanbeige", "nanbeige"), ("crow", "qwen3.5"),
-]
-
-# Tags that mark a repo as one OFLM can serve at all. Absent on a repo that is
-# not an NPU conversion, which is worth saying rather than failing later.
-_FRONT_IS_OF = ("npu2", "q4nx", "fastflowlm", "flm", "fastflow")
-
-# The quant format a conversion wrote, when the tag says so. A q4nx-build config
-# remains the authority; this only CROSS-CHECKS it, and a disagreement is
-# reported rather than silently preferring one.
-_FRONT_QUANT_TAGS = {"mxfp4": "mxfp4", "q8": "q8", "q8_0": "q8",
-                     "q4_1": "q4_1", "q4_0": "q4_1", "q4_k": "q4_k"}
-
-
 def _read_frontmatter(repo, timeout=20.0):
     """The YAML frontmatter of a HuggingFace repo's README, as a dict.
 
@@ -444,21 +408,47 @@ def declared_kernels(front):
 
 
 def declared_family(front):
-    """The `oflm-family` value a repo publishes, or None.
+    """The `oflm-family` value a repo publishes, normalized, or None.
 
-    The same idea as `oflm-kernels`, for the family: an explicit
-    `oflm-family: qwen3.5` outranks anything inferred from a tag or a name,
-    because it was written by whoever made the conversion and they know. It is
-    honoured for models we did not create too -- a finetune author can add the
-    one tag and have `oflm add` do the right thing without a release from us.
+    The conversion declares what it is. An EXACT match -- the whole string, no
+    prefixes and no ranking against other tags -- because the value is one
+    unambiguous field written by whoever published the repo, not a convention to
+    be inferred.
+
+    Both spellings are accepted, because both are in use: the family names this
+    tree uses (`qwen3.5`, `qwen3.6-moe`) and the HF `model_type` values
+    (`qwen3_5`, `qwen3_5_moe`). A real repo carries `oflm-family: qwen3_5`,
+    which is exactly the HF name, and passing that through verbatim would
+    neither name a family nor a model_type to the code that consumes it. So it
+    is normalized through the same table the config reader uses -- one exact
+    lookup each way, no heuristics. An unrecognised value is returned as
+    written, so a family this build does not know yet still gets a chance.
     """
+    raw = None
     for tag in _tags_of(front):
         if tag.startswith("oflm-family:"):
-            v = tag.split(":", 1)[1].strip()
-            if v:
-                return v
-    v = front.get("oflm-family")
-    return str(v).strip() if v else None
+            raw = tag.split(":", 1)[1].strip()
+            break
+    if not raw:
+        v = front.get("oflm-family")
+        raw = str(v).strip() if v else None
+    if not raw:
+        return None
+    return _canonical_family(raw)
+
+
+def _canonical_family(value):
+    """`qwen3_5` and `qwen3.5` both -> `qwen3.5`. Exact lookups only."""
+    v = str(value).strip()
+    if v in FAMILY_VOCABULARY:
+        return v
+    low = v.lower()
+    if low in _FAMILY_OF_MODEL_TYPE:
+        return _FAMILY_OF_MODEL_TYPE[low]
+    upper = {f.upper(): f for f in FAMILY_VOCABULARY}
+    if v in upper:
+        return upper[v]
+    return v
 
 
 def issue_search_url(model_name):
@@ -476,52 +466,41 @@ def issue_search_url(model_name):
 
 
 def frontmatter_family(front, model_type=None):
-    """A best-effort family from a README's tags, or None.
+    """The family for a repo, or None to fall back to the name.
 
-    NOT the authority. `config.json`'s `model_type` is -- the ModelSpec is derived
-    from it, and it is always present on a model OFLM can serve. These tags only
-    name which q4nx-build config to read, so the cost of being wrong is a
-    fallback, not a wrong kernel set: `model_spec_hash` re-derives from
-    config.json and falls back to the container header if this is off.
+    An EXACT lookup, in a fixed order, with no ranking between candidates:
 
-    So this is deliberately forgiving, in the direction of ANSWERING:
+      1. `oflm-family: <value>` -- the conversion declares what it is. A full
+         string match, used verbatim. Whoever published the conversion knows,
+         and the format is stipulated to carry it, so there is nothing to
+         infer and nothing to weigh.
+      2. `config.json`'s `model_type` -- the architecture, read off the model
+         itself. Always present on a model OFLM can serve.
+      3. None, and the caller falls back to the directory name, which is what
+         every repo did before any of this.
 
-      * a finetune carries its whole ancestry in its tags -- `Ornith-1.5-9B` is
-        tagged `qwen`, `qwen3` AND `qwen3.5`, where the last is the narrowest
-        and is what it actually IS. Ancestry is not a conflict, so the most
-        specific tag wins rather than the most common one;
-      * a tag naming a variant (`qwen3.5-omni`, `qwen3vl`, `gemma4e`) beats the
-        line it belongs to (`qwen3.5`, `qwen3`, `gemma4`), because that is the
-        narrower statement about which engine;
-      * `model_type`, when the caller has it, settles everything. A tag that
-        disagrees with the config is a stale tag, and the config is right.
-
-    Only returns None when there is genuinely nothing to go on, which leaves the
-    caller on the name-based path it always had.
+    A tag like `qwen3.5` among a finetune's ancestry tags is NOT consulted, and
+    that is deliberate rather than an omission. `Ornith-1.5-9B` is tagged `qwen`,
+    `qwen3` and `qwen3.5` at once, because all three are true of it and which of
+    them should win is a question about tag-writing convention, not about the
+    model. Ranking them by specificity, by length, or by count each picked a
+    different answer and each was wrong for some real repo. `oflm-family` is one
+    unambiguous string, or it is absent; `config.json` settles it otherwise.
+    A repo with neither still gets the name-based path, which is the best effort
+    that was always there.
     """
-    tags = front.get("tags")
-    if isinstance(tags, str):
-        tags = [t.strip() for t in tags.split(",") if t.strip()]
-    tags = [str(t).lower() for t in tags] if isinstance(tags, list) else []
-
-    # The config speaks first, when the caller has already read it.
+    declared = declared_family(front)
+    if declared:
+        return declared
     if model_type:
-        want = _FAMILY_OF_MODEL_TYPE.get(str(model_type).lower())
-        if want:
-            return want
+        return _FAMILY_OF_MODEL_TYPE.get(str(model_type).lower())
+    return None
 
-    best: tuple[int, str] | None = None
-    for tag in tags:
-        for needle, family in _FRONT_FAMILY_TAGS:
-            if not (tag == needle or tag.startswith(needle + "-") or tag.startswith(needle + ".")):
-                continue
-            # A variant tag (a separator inside the needle) is the narrower claim
-            # and outranks the bare line; otherwise the longer name is narrower.
-            rank = (1 if any(c in needle for c in ".-") else 0, len(needle))
-            if best is None or rank > best[0]:
-                best = (rank, family)
-    return best[1] if best else None
 
+# Every family name this tree knows, as the value `oflm-family` is expected to
+# carry. Built from the alias table rather than maintained separately, so adding
+# a family to FAMILY_ALIASES cannot leave the declaration vocabulary behind it.
+FAMILY_VOCABULARY = tuple(sorted({fam for _, fam in FAMILY_ALIASES}))
 
 def derive_family(system_registry, dir_name, explicit=None, base_entry=None, front=None):
     if explicit:

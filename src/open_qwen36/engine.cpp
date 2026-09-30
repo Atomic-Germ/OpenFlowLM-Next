@@ -67,6 +67,65 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
         fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
         if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
     }
+    // GEOMETRY. The three lookups above all ask "is there a directory NAMED after
+    // this model?", which is a question about names. The sets are named for the
+    // family and size they were built for -- `qwen35-h4096-L32-v248070` -- so a
+    // finetune called `Ornith-1.5-9B-NPU2` has no directory of its own and finds
+    // nothing, even though a set built for exactly its geometry is installed.
+    //
+    // So match on what the set was BUILT FOR instead: every installed set's
+    // `hf_config_check` against this model's own config.json. That check is
+    // already the gate core.cpp applies when a set loads, so a set this accepts
+    // is one that would have been accepted anyway -- discovery cannot select a
+    // set that startup would then reject, and cannot reject one it needs.
+    //
+    // `oflm add` links the right set, and that is the normal path. This is the
+    // fallback for a model nobody linked: a lost symlink, a directory moved, a
+    // model dropped in by hand. Finding a set by geometry is what lets that work
+    // without asking the user to run anything.
+    if (!config.model_path.empty()) {
+        std::error_code ec;
+        fs::path cfg_path = fs::path(config.model_path) / "config.json";
+        if (fs::is_regular_file(cfg_path, ec)) {
+            nlohmann::json cfg;
+            try {
+                std::ifstream f(cfg_path);
+                f >> cfg;
+            } catch (const std::exception&) {
+                return {};                    // unreadable config: nothing to match on
+            }
+            // Sorted, so a set is chosen the same way on every run. Ties go to
+            // the set whose directory name is closest to the model, which for a
+            // catalogue model is the same set; for anything else it is a stable,
+            // explainable rule rather than a directory-order accident.
+            std::vector<fs::path> sets;
+            for (const std::string& r : roots) {
+                std::error_code ec2;
+                fs::path x = fs::path(r) / "xclbins";
+                if (!fs::is_directory(x, ec2)) continue;
+                for (const auto& e : fs::directory_iterator(x, ec2)) {
+                    fs::path k = e.path() / "open_kernels";
+                    if (fs::is_directory(k, ec2)) sets.push_back(k);
+                }
+            }
+            std::sort(sets.begin(), sets.end());
+            std::string first_why;
+            for (const auto& k : sets) {
+                if (!complete(k, &why)) continue;
+                try {
+                    Manifest::load((k / "manifest.json").string()).check_model(cfg, k.string());
+                } catch (const std::exception& e) {
+                    if (first_why.empty()) first_why = e.what();
+                    continue;                   // built for a different model
+                }
+                chose(("matching geometry (" + k.parent_path().filename().string() + ")").c_str());
+                return k.string();
+            }
+            if (!first_why.empty())
+                std::fprintf(stderr, "open_qwen36: %zu kernel set(s) installed, none fits %s: %s\n",
+                             sets.size(), config.model_name.c_str(), first_why.c_str());
+        }
+    }
     return {};
 }
 
