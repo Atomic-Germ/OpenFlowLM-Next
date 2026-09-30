@@ -198,7 +198,7 @@ def retention_report(imx: Imatrix, keep: int, layers: list[int]) -> list[tuple[i
     return out
 
 
-def pruned_note(keep: int, ffn: int, retained: float | None) -> str:
+def pruned_note(keep: int, ffn: int, retained: float | None, mtp: int = 0) -> str:
     """The README sentence that makes this artifact honestly labelled."""
     kept = f"{retained * 100:.1f}%" if retained is not None else "an unmeasured share"
     return (
@@ -209,6 +209,10 @@ def pruned_note(keep: int, ffn: int, retained: float | None) -> str:
         f"NOT equivalent in quality to the unpruned model at any bit width. It is "
         f"however not the same as truncating the FFN, which retains only "
         f"{keep / ffn * 100:.1f}% of the mass by construction."
+        + (f" The model's {mtp} multi-token-prediction (speculative decoding) "
+           f"block{'s are' if mtp != 1 else ' is'} also omitted: unused without "
+           f"speculative decoding, and not counted in num_hidden_layers."
+           if mtp else "")
     )
 
 

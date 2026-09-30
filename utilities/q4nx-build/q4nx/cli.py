@@ -74,6 +74,7 @@ def _prune_meta(model):
         "kept": getattr(model, "prune_ffn_kept", None),
         "frm": getattr(model, "prune_ffn_from", None),
         "retained": getattr(model, "prune_ffn_retained", None),
+        "mtp_dropped": getattr(model, "mtp_dropped", 0),
     }
 
 
