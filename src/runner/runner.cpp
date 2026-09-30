@@ -233,7 +233,7 @@ void Runner::run() {
                 for (const auto& model : models["models"]) {
                     std::string name = model["name"].get<std::string>();
                     std::cout << "  - " << name;
-                    switch (downloader.is_model_downloaded(name)) {
+                    switch (downloader.is_model_downloaded(name, false, true)) {
                         case ModelDownloader::ModelStatus::Ready:        std::cout << " ✅"; break;
                         case ModelDownloader::ModelStatus::Missing:      std::cout << " ⏬"; break;
                         case ModelDownloader::ModelStatus::Outdated:     std::cout << " ⚠️"; break;

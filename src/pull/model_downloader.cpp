@@ -10,6 +10,9 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <chrono>
+#include <mutex>
+#include <map>
 
 /// \brief Constructor
 /// \param models the model list
@@ -22,7 +25,7 @@ ModelDownloader::ModelDownloader(model_list& models)
 /// \param model_tag the model tag
 /// \return true if the model is downloaded, false otherwise
 ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::string& model_tag, bool sub_process_mode, bool fast_check) {
-    auto missing_files = get_missing_files(model_tag);
+    auto missing_files = get_missing_files(model_tag, fast_check);
     bool is_config_file_missing = std::find(missing_files.begin(), missing_files.end(), "config.json") != missing_files.end();
     ModelStatus modelstatus = ModelStatus::Missing;
 
@@ -254,10 +257,102 @@ static bool is_size_checked(const std::string& filename) {
     return filename != "chat_template.jinja";
 }
 
+/// How long a fetched repo listing is trusted before asking again.
+static constexpr long kListingCacheSeconds = 6 * 60 * 60;
+
+/// The repo's CURRENT file listing, from `file_url` -- cached.
+///
+/// Why this is cached: `oflm list` walks every model, and one HTTPS round trip
+/// per model made listing take about a second EACH, which for a registry of
+/// forty-odd models is a minute of staring at a list. The check is worth doing;
+/// paying for it on every keystroke-free invocation is not.
+///
+/// So the listing is kept beside the model store and reused for a few hours.
+/// A repo does not change its file list mid-afternoon, and the thing this
+/// exists to catch -- a model re-converted, a chat template updated -- happens
+/// between days, not between invocations. `OFLM_REPO_CACHE_TTL=0` forces a
+/// fresh fetch; a negative value disables the cache.
+///
+/// In-process memoisation comes first, because one run can reach the same repo
+/// more than once (a tag and its alias, say) and a second round trip for a URL
+/// already asked about in this process is never right.
+static nlohmann::json live_repo_listing(const std::string& file_url) {
+    static std::map<std::string, nlohmann::json> memo;
+    static std::mutex memo_lock;
+    {
+        std::lock_guard<std::mutex> lock(memo_lock);
+        auto it = memo.find(file_url);
+        if (it != memo.end()) return it->second;
+    }
+
+    nlohmann::json out;
+    // The string must be held, not `.c_str()`-ed off the returned temporary --
+    // that pointer dies at the end of the statement and the read below is then
+    // whatever happened to be on the stack, which is how the cache silently
+    // never engages.
+    const std::string ttl_env = utils::getenv_oflm("OFLM_REPO_CACHE_TTL");
+    const long ttl = ttl_env.empty() ? kListingCacheSeconds
+                                     : std::strtol(ttl_env.c_str(), nullptr, 10);
+
+    // The cache file is named for the URL's own hash: file_url is a path with
+    // slashes and a query string, and a filename has to survive both.
+    std::error_code ec;
+    std::filesystem::path dir =
+        std::filesystem::path(utils::get_models_directory()) / "repo-cache";
+    auto file = dir / (std::to_string(std::hash<std::string>{}(file_url)) + ".json");
+
+    if (ttl != 0) {
+        try {
+            if (std::filesystem::exists(file, ec)) {
+                const auto age = std::filesystem::file_time_type::clock::now() -
+                                  std::filesystem::last_write_time(file, ec);
+                const long secs = std::chrono::duration_cast<std::chrono::seconds>(age).count();
+                if (!ec && secs < ttl) {
+                    std::ifstream in(file);
+                    auto j = nlohmann::json::parse(in, nullptr, false);
+                    if (j.is_array() && !j.empty()) {
+                        std::lock_guard<std::mutex> lock(memo_lock);
+                        memo.emplace(file_url, j);
+                        return j;
+                    }
+                }
+            }
+        } catch (const std::exception&) {
+            // A cache is an optimisation. Anything wrong with it is a fetch.
+        }
+    }
+
+    try {
+        const std::string body = download_utils::download_string(file_url, true);
+        auto j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_array() && !j.empty()) {
+            out = j;
+            if (ttl > 0) {
+                try {
+                    std::filesystem::create_directories(dir, ec);
+                    const std::string tmp = file.string() + ".tmp";
+                    { std::ofstream o(tmp); o << body; }
+                    // Rename, so a crash mid-write cannot leave a truncated
+                    // cache that would then be trusted for hours.
+                    std::filesystem::rename(tmp, file, ec);
+                } catch (const std::exception&) {}
+            }
+        }
+    } catch (const std::exception&) {
+        // Offline, rate-limited, or the endpoint moved. The frozen snapshot is
+        // what there is, and an absent one just skips the size check. Neither
+        // is worth an error at status time.
+    }
+
+    std::lock_guard<std::mutex> lock(memo_lock);
+    memo.emplace(file_url, out);
+    return out;
+}
+
 /// \brief Get missing files
 /// \param model_tag The model tag
 /// \return The missing files
-std::vector<std::string> ModelDownloader::get_missing_files(const std::string& model_tag) {
+std::vector<std::string> ModelDownloader::get_missing_files(const std::string& model_tag, bool fast) {
     std::vector<std::string> missing_files;
 
     try {
@@ -276,19 +371,18 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
         // install, permanently, and no re-pull could fix it. The snapshot is
         // kept for the offline case, where there is nothing to ask, and the
         // snapshot is a strict improvement over no sizes at all.
+        //
+        // `fast` is `oflm list`, and it means PRESENCE ONLY. The header says so
+        // -- "no HuggingFace metadata is fetched" -- but the size check needs
+        // remote metadata, so it ran anyway and asking the repo for it cost an
+        // HTTPS round trip per model: about a second each, a minute of
+        // waiting to print a list nobody was timing. Presence is the honest
+        // answer to "is this installed", and it is answerable from the disk.
         nlohmann::json manifest;
         bool live = false;
-        if (model_info.contains("file_url") && model_info["file_url"].is_string()) {
-            try {
-                const std::string body = download_utils::download_string(
-                    model_info["file_url"].get<std::string>(), true);
-                auto j = nlohmann::json::parse(body, nullptr, false);
-                if (j.is_array() && !j.empty()) { manifest = j; live = true; }
-            } catch (const std::exception&) {
-                // Offline, rate-limited, or the endpoint moved. The snapshot
-                // below is what there is, and an absent one just skips the
-                // check. Neither is worth an error at status time.
-            }
+        if (!fast && model_info.contains("file_url") && model_info["file_url"].is_string()) {
+            manifest = live_repo_listing(model_info["file_url"].get<std::string>());
+            live = manifest.is_array() && !manifest.empty();
         }
         if (!live) {
             try {
@@ -338,7 +432,7 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
             // this file from the LIVE repo listing, so its source is known
             // without asking the snapshot. A mismatch here is a stale manifest,
             // not a broken install, and re-pulling cannot fix a stale manifest.
-            if (manifest.is_array() && is_size_checked(filename)) {
+            if (!fast && manifest.is_array() && is_size_checked(filename)) {
                 for (const auto& f : manifest) {
                     if (!f.contains("path") || f["path"] != filename) continue;
                     if (!f.contains("size")) break;
@@ -473,7 +567,28 @@ std::pair<nlohmann::json, float> ModelDownloader::build_download_list(const std:
             const auto& file = *it;
             std::string local_path = get_model_file_path(model_path, filename);
 
-            if (!file_exists(local_path)) {
+            // "Exists" is not "is the file we asked for". An interrupted
+            // download leaves a truncated weight that exists, and skipping it
+            // because it is there is how a pull reports "no files to download"
+            // for a model get_missing_files() has just called damaged -- the
+            // check above says broken, this one says fine, and the repair never
+            // happens. So the skip is size-aware and uses the same predicate:
+            // a mismatch on a size-checked file schedules the download.
+            bool need = !file_exists(local_path);
+            if (!need && is_size_checked(filename)) {
+                std::error_code sec;
+                if (file.contains("size")) {
+                    const auto on_disk = std::filesystem::file_size(local_path, sec);
+                    const auto expect = static_cast<std::uintmax_t>(file["size"].get<double>());
+                    if (!sec && on_disk != expect) {
+                        header_print("OFLM", filename + " is " + std::to_string(on_disk) +
+                                                 " bytes but should be " + std::to_string(expect) +
+                                                 " -- re-downloading it");
+                        need = true;
+                    }
+                }
+            }
+            if (need) {
                 std::string url;
                 if (std::string(base_url).find("resolve") != std::string::npos) { // resolve provided , may from a specific branch
                     url = base_url + "/" + filename + "?download=true";
