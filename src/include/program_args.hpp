@@ -50,6 +50,10 @@ struct program_args_t {
     int image_size = 1024;
     std::string image_seed = "";      // empty: a random 64-bit seed, printed
 
+    // for serve command's image endpoints (/v1/images/*)
+    bool image_resident = false;      // --imagegen 1: load the image engine at startup and keep it
+    std::string image_model = "";     // --imagemodel; empty means flux2-klein:4b
+
     // for list command
     std::string list_filter = "all";
 

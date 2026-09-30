@@ -7,6 +7,12 @@ has 1050 dispatches over six kernel sets:
 - 4 denoising steps;
 - the VAE.
 
+One `Engine` holds every resolution the bundle has: the weights and kernel sets load once,
+and `select(size, steps)` allocates a resolution's activations the first time. Any step
+count from 1 to 50 runs: step k is the bundle's step 0 with its modulation and dt views
+moved on by their strides, and a count other than the bundle's gets its sigmas from
+`schedule.hpp` (OPEN-DIFFUSION-STEPS).
+
 Every op runs on the NPU. Per image, the host does only these things:
 - writes the prompt's 512 embedding rows and the noise;
 - patches `te_attn`'s `valid_len`;
@@ -27,8 +33,15 @@ It loads two directories, which must carry the same layout hash:
 - a kernel set: `export_dit_kernels.py --install`, found by `find_kernels`
   (`OFLM_DIFFUSION_KERNELS_DIR`, `<model>/open_kernels`, then the xclbins roots).
 
-`oflm image` (`src/src/image_command.hpp`) is the user-facing command; `prompt.cpp`
-templates and tokenizes there. `cli.cpp` is the standalone gate, outside the main build.
+`oflm image` (`src/src/image_command.hpp`) and `oflm serve`'s `/v1/images/generations`
+(`src/server/rest_handler.cpp`, `specs/server-api/spec.md` SERVER-IMAGES-*) are the
+user-facing paths; `prompt.cpp` templates and tokenizes there. `cli.cpp` is the standalone
+gate, outside the main build.
+
+Every build has the interface: `oflm image` and the server ask `open_diffusion::available()`,
+never which runtime was built. The engine drives XRT directly (six hardware contexts,
+sub-buffer views); an HRX build compiles `engine_unavailable.cpp` instead, which answers
+"not implemented in this build".
 
 ## Build and run
 
@@ -49,10 +62,11 @@ src\open_diffusion\out\open_diffusion_cli.exe --model C:\dev\klein-model --kerne
 ```
 
 `--noise <npy>` injects packed initial latents (bf16 bits). `capture_pipeline_inputs.py`
-writes the study's. `--runs N` repeats the image; `--profile` times each op.
+writes the study's. `--steps N` changes the step count; `--runs N` repeats the image;
+`--profile` times each op.
 
 ## Not implemented yet
 
-- **Serving.** `oflm serve`'s `/v1/images/generations` is a separate plan
-  (`specs/server-api/plans/images-api.md`).
+- **Image edits.** `/v1/images/edits` answers 501: klein's reference-image path needs a
+  VAE encoder on the NPU.
 - **`oflm add` for klein derivatives.** `oflm-add` requires `model.q4nx`.

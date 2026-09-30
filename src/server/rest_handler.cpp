@@ -19,7 +19,13 @@
 #include <locale>
 #include <random>
 #include <cstdio>
+#include <ctime>
+#include <filesystem>
 #include "server.hpp"
+#include "base64.hpp"
+#include "open_diffusion/engine.hpp"
+#include "open_diffusion/prompt.hpp"
+#include "tokenizer/tokenizer.hpp"
 
 ///@brief Report a handler's error on the transport the client is actually reading (#64)
 ///@param stream what the handler's stream callback has already sent
@@ -355,7 +361,7 @@ static json convert_tool_responses_gemma4(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
     this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
@@ -408,6 +414,26 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
     }
     else {
         this->current_model_tag = "model-faker";
+    }
+
+    // --imagemodel is checked at startup whether or not it loads now: a typo should stop
+    // the server, not surface as a 400 on the first image request.
+    {
+        std::string resolved;
+        json err = resolve_image_model(json{{"model", this->image_model_tag}}, &resolved);
+        if (!err.is_null()) {
+            header_print("ERROR", "--imagemodel: " + err["error"]["message"].get<std::string>());
+            if (this->image_resident || !args.image_model.empty()) exit(EXIT_FAILURE);
+        } else {
+            this->image_model_tag = resolved;
+        }
+    }
+    // --imagegen 1 (SERVER-IMAGES-RESIDENCY): loaded now, beside the chat model, and kept.
+    if (this->image_resident) {
+        if (std::string why = ensure_image_engine_loaded(this->image_model_tag); !why.empty()) {
+            header_print("ERROR", "--imagegen 1: " + why);
+            exit(EXIT_FAILURE);
+        }
     }
     this->prompt_cache = PromptCache();
 }
@@ -472,11 +498,15 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
         // That is the intended behaviour, but it used to happen with no output at all --
         // a typo in a client's model field took the served model off the NPU and cost a
         // full reload, and the operator's only evidence was the latency.
-        if (!current_model_tag.empty() && current_model_tag != "model-faker") {
+        if (auto_chat_engine != nullptr && !current_model_tag.empty() && current_model_tag != "model-faker") {
             header_print("OFLM", "request asked for '" + ensure_tag + "' while '" +
                                  current_model_tag + "' is loaded -- switching; the "
                                  "previous model leaves the NPU and must be reloaded");
+        } else if (auto_chat_engine == nullptr && ensure_tag == current_model_tag) {
+            header_print("OFLM", "reloading '" + ensure_tag + "' (an image request had the NPU)");
         }
+        // swap mode: the image engine leaves the NPU for the chat model (SERVER-IMAGES-RESIDENCY)
+        release_image_engine_for_chat();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (auto_chat_engine != nullptr) {
             auto_chat_engine.reset();
@@ -1996,5 +2026,250 @@ void RestHandler::handle_openai_completion(const json& request,
         };
         send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
                    error_response, send_response, openai_stream_callback);
+    }
+}
+
+// ------------------------------------------------------------------ the Images API
+// specs/server-api/spec.md: SERVER-IMAGES-*. The engine is src/open_diffusion.
+
+///@brief Resolve an image request's model before anything is unloaded
+///@param request the request
+///@param tag the resolved tag, on success
+///@return an empty json, or the 400 to send
+json RestHandler::resolve_image_model(const json& request, std::string* tag) {
+    std::string want = this->image_model_tag;
+    if (request.is_object() && request.contains("model") && !request["model"].is_null()) {
+        if (!request["model"].is_string())
+            return openai_compat::invalid_param("model", "model must be a string.");
+        want = request["model"].get<std::string>();
+        // an explicit "" is not a request for the default (SERVER-MODEL-IDENTITY)
+        if (want.empty() || want == "model-faker")
+            return openai_compat::model_error(ModelLoad::Unknown, want);
+    }
+    std::string resolved = this->supported_models.cut_tag(want);
+    if (!this->supported_models.is_model_supported(resolved))
+        return openai_compat::model_error(ModelLoad::Unknown, want);
+    resolved = this->supported_models.rectify_model_tag(resolved);
+    // get_model_info's llama3.2:1b fallback cannot apply: the tag is in the list
+    auto [info_tag, info] = this->supported_models.get_model_info(resolved);
+    if (!info.value("image", false)) return openai_compat::not_image_model_error(want);
+    *tag = info_tag;
+    return json();
+}
+
+///@brief Take the image engine off the NPU before a chat model loads (swap mode)
+void RestHandler::release_image_engine_for_chat() {
+    if (this->image_engine && !this->image_resident) {
+        header_print("OFLM", "swapping the image engine ('" + this->image_engine_tag + "') off the NPU "
+                             "for the chat model (--imagegen 1 keeps both)");
+        this->image_engine.reset();
+        this->image_tokenizer.reset();
+        this->image_engine_tag.clear();
+    }
+}
+
+///@brief Load the image engine for a tag unless it is loaded
+///@param tag a resolved image model tag
+///@return empty on success, else why it failed
+std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
+    namespace fs = std::filesystem;
+    if (std::string why; !open_diffusion::available(&why)) return why;
+    if (this->image_engine && this->image_engine_tag == tag) return {};
+    if (this->image_engine) {
+        header_print("OFLM", "request asked for image model '" + tag + "' while '" + this->image_engine_tag +
+                             "' is loaded -- switching");
+        this->image_engine.reset();
+        this->image_tokenizer.reset();
+        this->image_engine_tag.clear();
+    }
+    if (!this->image_resident && this->auto_chat_engine) {
+        // current_model_tag stays: a chat request naming it (or naming nothing) reloads it
+        header_print("OFLM", "swapping the chat model ('" + this->current_model_tag + "') off the NPU "
+                             "for the image engine (--imagegen 1 keeps both)");
+        this->auto_chat_engine.reset();
+    }
+    switch (this->downloader.is_model_downloaded(tag)) {
+        case ModelDownloader::ModelStatus::Ready:
+            break;
+        case ModelDownloader::ModelStatus::Missing:
+        case ModelDownloader::ModelStatus::Outdated:
+            header_print("OFLM", "Model not present or outdated -- pulling '" + tag + "'");
+            if (!this->downloader.pull_model(tag, this->modelscope))
+                return "failed to pull '" + tag + "'; run `oflm pull " + tag + "`";
+            break;
+        case ModelDownloader::ModelStatus::Incompatible:
+            return "'" + tag + "' is not compatible with this version of OpenFlowLM";
+    }
+    const std::string model_dir = this->supported_models.get_model_path(tag);
+    std::string how;
+    std::string kernels = open_diffusion::find_kernels(
+        model_dir, utils::getenv_oflm("OFLM_DIFFUSION_KERNELS_DIR"), utils::xclbin_roots(), &how);
+    if (kernels.empty())
+        return "no kernel set for " + tag + ": looked for open_kernels beside the model and under every "
+               "xclbins root; set OFLM_DIFFUSION_KERNELS_DIR";
+    // Tokenizer's constructor exits the process on a missing file: check first
+    if (!fs::is_regular_file(fs::path(model_dir) / "tokenizer.json"))
+        return (fs::path(model_dir) / "tokenizer.json").string() + " is missing; run `oflm pull " + tag +
+               " --force`";
+    header_print("OFLM", "Loading image model '" + tag + "' (kernels " + how + ": " + kernels + ")");
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        this->image_tokenizer = std::make_unique<Tokenizer>(model_dir);
+        this->image_engine = std::make_unique<open_diffusion::Engine>(model_dir, kernels, &this->npu_device_inst);
+        if (this->image_resident) {
+            // resident means every resolution's activations are held from the start, so a
+            // server that cannot hold them says so now rather than on some later request
+            for (int s : this->image_engine->sizes()) this->image_engine->select(s);
+        }
+    }
+    catch (const std::exception& e) {
+        this->image_engine.reset();
+        this->image_tokenizer.reset();
+        return std::string("failed to load '") + tag + "': " + e.what();
+    }
+    this->image_engine_tag = tag;
+    char line[96];
+    std::snprintf(line, sizeof line, "Image model loaded in %.1f s",
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    header_print("OFLM", std::string(line));
+    return {};
+}
+
+///@brief Handle the openai images generations request
+///@param request the request
+///@param send_response the send response
+///@param send_streaming_response the send streaming response
+void RestHandler::handle_openai_images_generations(const json& request,
+                                                   std::function<void(const json&)> send_response,
+                                                   StreamResponseCallback send_streaming_response,
+                                                   std::shared_ptr<CancellationToken> cancellation_token) {
+    try {
+        // Everything is checked before the NPU is touched: a refused request unloads nothing.
+        std::string tag;
+        if (json err = resolve_image_model(request, &tag); !err.is_null()) {
+            send_response(err);
+            return;
+        }
+        auto [info_tag, info] = this->supported_models.get_model_info(tag);
+        std::vector<int> sizes = info.value("image_sizes", std::vector<int>{});
+        std::sort(sizes.begin(), sizes.end());
+        if (sizes.empty()) {
+            send_response(json{{"error", {{"message", "'" + tag + "' lists no image sizes in the model list"},
+                                          {"type", "server_error"}, {"param", "model"}, {"code", 500}}}});
+            return;
+        }
+        // "auto" is the largest size the model has (1024x1024 for klein)
+        openai_compat::ImagesRequest ir;
+        if (json err = openai_compat::images_request(request, sizes, sizes.back(), ir); !err.is_null()) {
+            send_response(err);
+            return;
+        }
+        if (std::string why; !open_diffusion::available(&why)) {
+            send_response(json{{"error", {{"message", why}, {"type", "not_implemented_error"},
+                                          {"param", nullptr}, {"code", 501}}}});
+            return;
+        }
+        if (std::string why = ensure_image_engine_loaded(tag); !why.empty()) {
+            header_print("ERROR", why);
+            send_response(json{{"error", {{"message", why}, {"type", "server_error"}, {"param", "model"},
+                                          {"code", "model_load_failed"}}}});
+            return;
+        }
+        if (!ir.ignored.empty()) {
+            std::string names;
+            for (const auto& f : ir.ignored) names += (names.empty() ? "" : ", ") + f;
+            header_print("OFLM", "ignoring " + names + ": '" + tag + "' is guidance-distilled (no CFG)");
+        }
+        uint64_t seed = ir.seed;
+        if (!ir.seeded) {
+            std::random_device rd;
+            seed = (static_cast<uint64_t>(rd()) << 32) | rd();
+        }
+        open_diffusion::Engine& eng = *this->image_engine;
+        eng.select(ir.size, ir.steps);
+        const std::vector<int64_t> ids =
+            open_diffusion::prompt_ids(*this->image_tokenizer, eng.prompt_template(), ir.prompt, eng.max_tokens());
+        json data = json::array();
+        for (int k = 0; k < ir.n; ++k) {
+            if (cancellation_token && cancellation_token->cancelled()) {
+                header_print("OFLM", "client gone -- stopping after " + std::to_string(k) + " of " +
+                                     std::to_string(ir.n) + " images");
+                break;
+            }
+            const uint64_t seed_k = seed + static_cast<uint64_t>(k);
+            eng.set_tokens(ids);
+            eng.set_noise(eng.seeded_noise(seed_k));
+            open_diffusion::Timing t = eng.run();
+            std::vector<uint8_t> bytes = eng.encode(ir.output_format, ir.jpeg_quality);
+            char line[160];
+            std::snprintf(line, sizeof line, "Image %d/%d: %dx%d, %d steps, seed %llu, %.1f s on the NPU",
+                          k + 1, ir.n, ir.size, ir.size, eng.steps(),
+                          static_cast<unsigned long long>(seed_k), t.total_s);
+            header_print("OFLM", std::string(line));
+            data.push_back(json{{"b64_json", base64::encode_into<std::string>(bytes.begin(), bytes.end())},
+                                {"seed", seed_k}});
+        }
+        const std::string size = std::to_string(ir.size) + "x" + std::to_string(ir.size);
+        send_response(json{{"created", static_cast<long long>(std::time(nullptr))},
+                           {"data", data},
+                           {"model", tag},
+                           {"output_format", ir.output_format},
+                           {"size", size}});
+    }
+    catch (const std::exception& e) {
+        json error_response = {
+            {"error", {
+                {"message", e.what()},
+                {"type", "server_error"},
+                {"code", 500}
+            }}
+        };
+        send_response(error_response);
+    }
+}
+
+///@brief Handle the openai images edits request: validated, then 501 until the NPU has a VAE encoder
+///@param fields the form's text fields
+///@param uploads the form's file parts
+///@param send_response the send response
+///@param send_streaming_response the send streaming response
+void RestHandler::handle_openai_images_edits(const json& fields, const std::vector<ImageUpload>& uploads,
+                                             std::function<void(const json&)> send_response,
+                                             StreamResponseCallback send_streaming_response) {
+    try {
+        size_t images = 0, masks = 0;
+        for (const auto& u : uploads) {
+            const bool is_mask = u.field == "mask";
+            if (u.bytes == 0)
+                return send_response(openai_compat::invalid_param(u.field, u.field + " is an empty file."));
+            if (is_mask && ++masks > 1)
+                return send_response(openai_compat::invalid_param("mask", "at most one mask may be sent."));
+            if (!is_mask) ++images;
+        }
+        if (images == 0)
+            return send_response(json{{"error", {
+                {"message", "image is required: one or more image files (image or image[])."},
+                {"type", "invalid_request_error"}, {"param", "image"}, {"code", "missing_required_parameter"}}}});
+        if (images > 16)
+            return send_response(openai_compat::invalid_param("image", "at most 16 images may be sent."));
+
+        std::string tag;
+        if (json err = resolve_image_model(fields, &tag); !err.is_null()) return send_response(err);
+        auto [info_tag, info] = this->supported_models.get_model_info(tag);
+        std::vector<int> sizes = info.value("image_sizes", std::vector<int>{});
+        std::sort(sizes.begin(), sizes.end());
+        openai_compat::ImagesRequest ir;
+        if (json err = openai_compat::images_request(fields, sizes, sizes.empty() ? 0 : sizes.back(), ir);
+            !err.is_null())
+            return send_response(err);
+
+        send_response(json{{"error", {
+            {"message", "image edits are not implemented yet: FLUX.2 [klein] edits by encoding the input "
+                        "image into latents, which needs a VAE encoder on the NPU. "
+                        "/v1/images/generations works."},
+            {"type", "not_implemented_error"}, {"param", nullptr}, {"code", 501}}}});
+    }
+    catch (const std::exception& e) {
+        send_response(json{{"error", {{"message", e.what()}, {"type", "server_error"}, {"code", 500}}}});
     }
 }

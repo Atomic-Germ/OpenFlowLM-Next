@@ -458,16 +458,19 @@ endif()
 # prompt's embedding rows and the noise and encodes the image, so unlike open_whisper it
 # needs no AVX or OpenMP flags. cli.cpp is EXCLUDED: it is open_diffusion/build.cmd's
 # standalone gate with its own main(), as open_whisper's cli.cpp is.
+#
+# Every build has the interface (engine.hpp), so `oflm image` and `oflm serve` need no
+# flag of their own. The engine drives XRT directly; an HRX build compiles
+# engine_unavailable.cpp in its place, whose open_diffusion::available() is false.
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp")
 if(NOT OFLM_USE_HRX)
-    set(OPEN_DIFFUSION_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp"
-    )
-    list(APPEND SOURCES ${OPEN_DIFFUSION_SOURCES})
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp")
     # stb_image_write (vendored, public domain) encodes the PNG/JPEG; only engine.cpp
     # includes it
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp" PROPERTIES
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb")
+else()
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine_unavailable.cpp")
 endif()
 
 # Exclude files that depend on missing libraries for Linux
@@ -601,8 +604,6 @@ if(NOT OFLM_USE_HRX)
     # #ifdef so an OFLM_USE_HRX build (which never adds OPEN_WHISPER_SOURCES
     # above) still compiles with only the closed adapter reachable.
     target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_WHISPER=1)
-    # `oflm image` (open_diffusion/); an HRX build answers "not implemented in this build"
-    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_DIFFUSION=1)
     target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
     # The vision tower runs on the host (open_qwen36/vision/vit.cpp): threads over OpenMP
     # where the compiler has it, a single thread otherwise (the pragmas are then ignored).
@@ -1476,6 +1477,17 @@ if(NOT OFLM_USE_HRX)
     add_test(NAME open_diffusion_tokens
              COMMAND open_diffusion_tokens_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
+
+    # OPEN-DIFFUSION-STEPS: schedule.hpp's sigmas / timestep features / dts against the
+    # installed model's own tf_<R>.bin and dt_<R>.bin. Header-only; no device, no XRT.
+    add_executable(open_diffusion_schedule_test open_diffusion/schedule_test.cpp)
+    target_include_directories(open_diffusion_schedule_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion")
+    if(MSVC)
+        target_compile_options(open_diffusion_schedule_test PRIVATE /EHsc /Zc:__cplusplus)
+        target_compile_definitions(open_diffusion_schedule_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME open_diffusion_schedule COMMAND open_diffusion_schedule_test)
 endif()
 
 # ————————————————————————————————————————————————————————————

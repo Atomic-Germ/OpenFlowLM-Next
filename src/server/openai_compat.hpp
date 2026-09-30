@@ -1,5 +1,6 @@
 /// \file openai_compat.hpp
-/// \brief The OpenAI wire vocabulary: finish_reason, error bodies, HTTP status.
+/// \brief The OpenAI wire vocabulary: finish_reason, error bodies, HTTP status, and the
+///        Images API's request rules.
 ///
 /// These three are here rather than inside a handler for one reason: EVERY defect
 /// #52 fixes is a case where one code path answered correctly and another, saying
@@ -11,7 +12,11 @@
 /// to it without a server, a device or a model.
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -376,6 +381,241 @@ inline json require_field(const json& request, const char* field, FieldType type
             {"message", std::string(field) + " must be " + want + "."},
             {"type", "invalid_request_error"}, {"param", field}, {"code", "invalid_value"}}}};
     return json();
+}
+
+// ---------------------------------------------------------------------------------
+// The Images API (/v1/images/generations, /v1/images/edits). specs/server-api:
+// SERVER-IMAGES-PARAMS, SERVER-IMAGES-SIZE.
+// ---------------------------------------------------------------------------------
+
+/// A 400 naming the field it is about.
+inline json invalid_param(const std::string& param, const std::string& message,
+                          const char* code = "invalid_value") {
+    return json{{"error", {
+        {"message", message}, {"type", "invalid_request_error"}, {"param", param}, {"code", code}}}};
+}
+
+/// The error for a tag that is in the model list but makes no images.
+inline json not_image_model_error(const std::string& model) {
+    return invalid_param("model", "model '" + model + "' is not an image model; this endpoint "
+                                  "serves image generation only", "model_not_found");
+}
+
+/// A request's image controls, validated. Everything but the model: the handler
+/// resolves that first, because the sizes it may ask for are the model's.
+struct ImagesRequest {
+    std::string prompt;
+    int n = 1;
+    int size = 0;                       ///< the square's side in pixels
+    std::string output_format = "png";  ///< "png" | "jpeg"
+    int jpeg_quality = 90;              ///< output_compression, for jpeg
+    bool seeded = false;                ///< false: the handler picks a random seed
+    uint64_t seed = 0;
+    int steps = 0;                      ///< 0: the model's own count
+    std::vector<std::string> ignored;   ///< controls accepted and ignored, for the log line
+};
+
+constexpr int kImagesMaxN = 10;
+constexpr int kImagesMaxSteps = 50;
+
+/// The sampler names that mean flow-match Euler, the only sampler klein has.
+inline const std::vector<std::string>& euler_sampler_names() {
+    static const std::vector<std::string> kNames = {
+        "euler", "Euler", "Euler a", "flowmatch_euler", "FlowMatchEulerDiscreteScheduler"};
+    return kNames;
+}
+
+/// "512x512, 1024x1024" for a list of square sides.
+inline std::string image_sizes_csv(const std::vector<int>& sizes) {
+    std::string s;
+    for (int r : sizes) s += (s.empty() ? "" : ", ") + std::to_string(r) + "x" + std::to_string(r);
+    return s;
+}
+
+/// Parse and check a request's image controls into `out`. Returns an empty json when
+/// the request is acceptable, else the 400 body to send.
+///
+/// \param sizes      the model's resolutions (square sides)
+/// \param auto_size  what `"auto"` and an omitted `size` mean
+///
+/// The rules (SERVER-IMAGES-PARAMS):
+///   - `null` is the same as leaving a field out: clients send it for "unset";
+///   - each alias pair is ONE field. Both spellings in one request must agree, or it is
+///     a 400 naming the second -- neither silently wins;
+///   - `cfg_scale`/`guidance_scale` and `negative_prompt` are type-checked and then
+///     ignored (klein is guidance-distilled; A1111 clients always send them);
+///   - `sampler`/`sampler_name` accepts the Euler family and refuses anything else;
+///   - `seed: -1` is A1111's "random";
+///   - fields this server does not know are ignored.
+inline json images_request(const json& req, const std::vector<int>& sizes, int auto_size,
+                           ImagesRequest& out) {
+    out = ImagesRequest{};
+    if (json err = require_field(req, "prompt", FieldType::String); !err.is_null()) return err;
+    out.prompt = req.at("prompt").get<std::string>();
+
+    auto has = [&](const char* f) { return req.contains(f) && !req.at(f).is_null(); };
+    // One field under two names: the first present spelling, and a 400 if both are
+    // present and differ. *field is the name the value came from.
+    auto alias = [&](const char* a, const char* b, const json** v, std::string* field) -> json {
+        *v = nullptr;
+        if (has(a)) { *v = &req.at(a); *field = a; }
+        if (has(b)) {
+            if (*v && **v != req.at(b))
+                return invalid_param(b, std::string(a) + " and " + b + " are the same field and "
+                                        "the request gives them different values");
+            if (!*v) { *v = &req.at(b); *field = b; }
+        }
+        return json();
+    };
+    // An integer in [lo, hi]; a float, even an integral one, is refused.
+    auto int_in = [&](const json& v, const std::string& f, long long lo, long long hi, long long* got) -> json {
+        if (!v.is_number_integer())
+            return invalid_param(f, f + " must be an integer.");
+        long long x = v.is_number_unsigned() && v.get<uint64_t>() > static_cast<uint64_t>(hi)
+                          ? hi + 1 : v.get<long long>();
+        if (x < lo || x > hi)
+            return invalid_param(f, f + " must be between " + std::to_string(lo) + " and " +
+                                    std::to_string(hi) + ".");
+        *got = x;
+        return json();
+    };
+
+    long long x = 0;
+    if (has("n")) {
+        if (json e = int_in(req.at("n"), "n", 1, kImagesMaxN, &x); !e.is_null()) return e;
+        out.n = static_cast<int>(x);
+    }
+
+    out.size = auto_size;
+    if (has("size")) {
+        const json& v = req.at("size");
+        if (!v.is_string()) return invalid_param("size", "size must be a string: \"WxH\" or \"auto\".");
+        const std::string s = v.get<std::string>();
+        if (s != "auto") {
+            size_t xpos = s.find('x');
+            auto digits = [](const std::string& t) {
+                return !t.empty() && t.size() <= 5 &&
+                       std::all_of(t.begin(), t.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+            };
+            if (xpos == std::string::npos || !digits(s.substr(0, xpos)) || !digits(s.substr(xpos + 1)))
+                return invalid_param("size", "size must be \"WxH\" (e.g. \"1024x1024\") or \"auto\", not \"" +
+                                             s + "\".");
+            int w = std::stoi(s.substr(0, xpos)), h = std::stoi(s.substr(xpos + 1));
+            if (w != h || std::find(sizes.begin(), sizes.end(), w) == sizes.end())
+                return invalid_param("size", "size " + s + " is not supported by this model; supported: " +
+                                             image_sizes_csv(sizes) + " (or \"auto\").");
+            out.size = w;
+        }
+    }
+
+    if (has("output_format")) {
+        const json& v = req.at("output_format");
+        const std::string f = v.is_string() ? v.get<std::string>() : std::string();
+        if (f == "webp")
+            return invalid_param("output_format", "output_format webp is not implemented in this "
+                                                  "server; use png or jpeg.", "not_implemented");
+        if (f != "png" && f != "jpeg")
+            return invalid_param("output_format", "output_format must be png or jpeg.");
+        out.output_format = f;
+    }
+    if (has("output_compression")) {
+        if (json e = int_in(req.at("output_compression"), "output_compression", 0, 100, &x); !e.is_null()) return e;
+        out.jpeg_quality = std::max(1, static_cast<int>(x));
+    }
+    if (has("response_format")) {
+        const json& v = req.at("response_format");
+        const std::string f = v.is_string() ? v.get<std::string>() : std::string();
+        if (f == "url")
+            return invalid_param("response_format", "response_format url is not offered: this server "
+                                                    "returns b64_json only.", "not_implemented");
+        if (f != "b64_json") return invalid_param("response_format", "response_format must be b64_json.");
+    }
+    if (has("stream")) {
+        const json& v = req.at("stream");
+        if (!v.is_boolean()) return invalid_param("stream", "stream must be a boolean.");
+        if (v.get<bool>())
+            return invalid_param("stream", "streaming (partial images) is not offered: each preview "
+                                           "costs a full VAE decode on the NPU.", "not_implemented");
+    }
+    if (has("partial_images")) {
+        if (json e = int_in(req.at("partial_images"), "partial_images", 0, 3, &x); !e.is_null()) return e;
+        if (x > 0)
+            return invalid_param("partial_images", "partial_images is not offered: each preview costs "
+                                                   "a full VAE decode on the NPU.", "not_implemented");
+    }
+
+    if (has("seed")) {
+        const json& v = req.at("seed");
+        if (!v.is_number_integer()) return invalid_param("seed", "seed must be an integer.");
+        if (v.is_number_unsigned()) {
+            out.seeded = true;
+            out.seed = v.get<uint64_t>();
+        } else if (v.get<long long>() == -1) {
+            out.seeded = false;                      // A1111's "random"
+        } else if (v.get<long long>() < 0) {
+            return invalid_param("seed", "seed must be a non-negative integer, or -1 for a random one.");
+        } else {
+            out.seeded = true;
+            out.seed = static_cast<uint64_t>(v.get<long long>());
+        }
+    }
+
+    const json* v = nullptr;
+    std::string field;
+    if (json e = alias("steps", "num_inference_steps", &v, &field); !e.is_null()) return e;
+    if (v) {
+        if (json e = int_in(*v, field, 1, kImagesMaxSteps, &x); !e.is_null()) return e;
+        out.steps = static_cast<int>(x);
+    }
+
+    if (json e = alias("cfg_scale", "guidance_scale", &v, &field); !e.is_null()) return e;
+    if (v) {
+        if (!v->is_number()) return invalid_param(field, field + " must be a number.");
+        out.ignored.push_back(field);
+    }
+    if (has("negative_prompt")) {
+        if (!req.at("negative_prompt").is_string())
+            return invalid_param("negative_prompt", "negative_prompt must be a string.");
+        out.ignored.push_back("negative_prompt");
+    }
+
+    if (json e = alias("sampler", "sampler_name", &v, &field); !e.is_null()) return e;
+    if (v) {
+        if (!v->is_string()) return invalid_param(field, field + " must be a string.");
+        const auto& names = euler_sampler_names();
+        if (std::find(names.begin(), names.end(), v->get<std::string>()) == names.end()) {
+            std::string list;
+            for (const auto& s : names) list += (list.empty() ? "" : ", ") + s;
+            return invalid_param(field, field + " '" + v->get<std::string>() + "' is not available: this "
+                                        "model's only sampler is flow-match Euler (" + list + ").");
+        }
+    }
+    return json();
+}
+
+/// A multipart form's text fields as the JSON images_request() reads. Form values are
+/// all strings; the numeric and boolean controls are converted when they parse as
+/// such, and left as strings otherwise, so a bad one is refused as the wrong type.
+inline json images_form_json(const std::vector<std::pair<std::string, std::string>>& fields) {
+    static const char* kInts[] = {"n", "seed", "steps", "num_inference_steps", "output_compression",
+                                  "partial_images"};
+    static const char* kNumbers[] = {"cfg_scale", "guidance_scale"};
+    json out = json::object();
+    for (const auto& [k, s] : fields) {
+        json v = s;
+        auto is = [&](const char* const* names, size_t count) {
+            return std::find_if(names, names + count, [&](const char* n) { return k == n; }) != names + count;
+        };
+        if (is(kInts, std::size(kInts)) || is(kNumbers, std::size(kNumbers))) {
+            json p = json::parse(s, nullptr, false);
+            if (!p.is_discarded() && p.is_number() && (!is(kInts, std::size(kInts)) || p.is_number_integer()))
+                v = p;
+        } else if (k == "stream" && (s == "true" || s == "false")) {
+            v = s == "true";
+        }
+        out[k] = v;
+    }
+    return out;
 }
 
 }  // namespace openai_compat

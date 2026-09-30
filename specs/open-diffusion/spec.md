@@ -119,6 +119,34 @@ NPU as an fp32 in its parameter run.
 - `dt_params` stores sigma[s+1] - sigma[s] as the fp32 at the parameter run's first
   vector.
 
+### OPEN-DIFFUSION-STEPS: any step count from 1 to 50, the default unchanged
+**Applies to:** `src/open_diffusion/engine.cpp`, `src/open_diffusion/schedule.hpp`
+**Verification:** test
+
+klein is distilled for 4 steps and the bundle is exported with 4, but the streams allow any count
+up to 512 (the modulation GEMM's M). `Engine::select(size, steps)` runs `steps` denoising steps:
+step k is the bundle's step 0 with each argument moved on by its stride from step 0 to step 1
+(the engine derives the strides and refuses a schedule whose steps do not lie on one line). Only
+the modulation views (368,640 bytes per step) and the Euler dt views (24,576) move. A count other
+than the bundle's gets its timestep features and dts from `schedule.hpp`, klein_pipeline's
+`sigmas` / `timestep_features` / `dt_params` in C++. For the bundle's own count the engine writes
+the bundle's `tf_<R>.bin` / `dt_<R>.bin`, so the default image does not change.
+
+One `Engine` serves every resolution the bundle has: the weights and kernel sets load once, and
+a resolution's activations are allocated the first time it is selected.
+
+**Acceptance criteria** (the `open_diffusion_schedule` CTest, `src/open_diffusion/schedule_test.cpp`,
+against the installed model; it fails naming the path without it):
+- At 512 and 1024, 4 steps: `dt_params` equals `dt_<R>.bin` word for word, and
+  `timestep_features` is within 2^-8 of `tf_<R>.bin` in every word. (5 of 131,584 words differ
+  by one rounding: numpy's float32 `exp` is not correctly rounded, and schedule.hpp uses double.)
+- `sigmas(4096, 8)` has 9 values from 1 down to 0, strictly decreasing.
+
+**Verification (manual)**, once, 2026-09-28: after the change, `oflm image flux2-klein:4b "a red
+fox in fresh snow" --size 512 --seed 1` and `"a lighthouse at dusk" --size 1024 --seed 7 -o
+x.jpg` wrote files byte-identical to the previous engine's. Through the server at 512², seed 1,
+the same fox: `steps: 2` softer (3.6 s), `steps: 8` sharper (10.4 s), both coherent.
+
 ### OPEN-DIFFUSION-CLI: `oflm image` writes one image
 **Applies to:** `oflm` (`src/src/image_command.hpp`, `src/include/utils/vm_args.hpp`, `src/include/AutoModel/model_families.hpp`)
 **Verification:** manual
@@ -133,7 +161,8 @@ prints its path, the seed and the time on the NPU (text, steps, VAE).
 - A tag whose registry entry lacks `"image": true` is refused before any download.
 - `-o`, `--size`, `--seed` and a third positional are refused by every other command.
 - `oflm run` and `oflm serve` refuse the image tag as not a chat model, before unloading
-  anything. `/api/tags` and `/v1/models` do not list it.
+  anything. `/api/tags` does not list it; `/v1/models` does, for the Images API
+  (SERVER-IMAGES-GENERATIONS in `specs/server-api/spec.md`).
 - An HRX build answers that `oflm image` is not implemented in this build.
 
 **Verification (manual):**

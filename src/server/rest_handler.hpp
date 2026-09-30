@@ -28,6 +28,16 @@ using json = nlohmann::ordered_json;
 
 // Forward declaration
 struct CancellationToken;
+class Tokenizer;
+namespace open_diffusion { class Engine; }
+
+///@brief One file part of a /v1/images/edits form (`image`, `image[]` or `mask`)
+struct ImageUpload {
+    std::string field;
+    std::string filename;
+    std::string content_type;
+    size_t bytes = 0;
+};
 
 ///@brief Stream callback type for sending streaming responses
 using StreamResponseCallback = std::function<void(const json&, bool)>; // data, is_final
@@ -107,6 +117,16 @@ public:
         std::function<void(const json&)> send_response,
         StreamResponseCallback send_streaming_response,
         std::shared_ptr<CancellationToken> cancellation_token = nullptr);
+    // specs/server-api: SERVER-IMAGES-*
+    void handle_openai_images_generations(const json& request,
+        std::function<void(const json&)> send_response,
+        StreamResponseCallback send_streaming_response,
+        std::shared_ptr<CancellationToken> cancellation_token = nullptr);
+    /// \param fields the form's text fields (openai_compat::images_form_json)
+    /// \param uploads its file parts
+    void handle_openai_images_edits(const json& fields, const std::vector<ImageUpload>& uploads,
+        std::function<void(const json&)> send_response,
+        StreamResponseCallback send_streaming_response);
 
 private:
     using ModelLoad = openai_compat::ModelLoad;
@@ -116,12 +136,27 @@ private:
     ModelLoad ensure_model_loaded(const std::string& model_tag, bool model_field_present = false);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
+    /// The tag an image request names (or --imagemodel's, when it names none), resolved
+    /// and checked BEFORE anything is unloaded. Empty json and *tag set, or the 400.
+    json resolve_image_model(const json& request, std::string* tag);
+    /// Load the image engine for `tag` unless it is loaded. Without --imagegen 1 this swaps
+    /// the chat model off the NPU first (SERVER-IMAGES-RESIDENCY). Empty on success,
+    /// else why it failed.
+    std::string ensure_image_engine_loaded(const std::string& tag);
+    /// Take the image engine off the NPU before a chat model loads, unless it is resident.
+    void release_image_engine_for_chat();
     void configure_chat_engine_parameters(const json& options, const json& request);
     json build_nstream_response(std::string response_text,
                                 stop_reason_t stop_reason = EOT_DETECTED);
 
 
     std::unique_ptr<AutoModel> auto_chat_engine;
+    // The open diffusion engine and its prompt tokenizer.
+    std::unique_ptr<open_diffusion::Engine> image_engine;
+    std::unique_ptr<Tokenizer> image_tokenizer;
+    std::string image_engine_tag;       // what image_engine was loaded for
+    bool image_resident;                // --imagegen 1: loaded at startup, never swapped out
+    std::string image_model_tag;        // --imagemodel: the model a request naming none gets
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
     std::unique_ptr<Whisper> whisper_engine;
     std::unique_ptr<AutoEmbeddingModel> auto_embedding_engine;
