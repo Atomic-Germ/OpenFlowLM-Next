@@ -19,6 +19,9 @@ Models
 # tracked and unaffected, and a NEW one is silently not added.
 !utilities/q4nx-build/q4nx/models/
 !utilities/q4nx-build/q4nx/models/**
+# ...but the negation above re-admits the models dir's __pycache__ too, since
+# `**` matches inside it. Re-ignore it, or a pack run commits .pyc files.
+utilities/q4nx-build/q4nx/models/__pycache__/
 tmp
 
 # open_npue AIE design sets -- BUILT, not checked in.
