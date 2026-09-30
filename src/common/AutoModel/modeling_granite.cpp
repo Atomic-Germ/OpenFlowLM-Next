@@ -1,6 +1,7 @@
 /// \file modeling_granite.cpp
 /// \brief IBM Granite (dense) family. See modeling_granite.hpp.
 
+#include <cctype>
 #include "AutoModel/modeling_granite.hpp"
 
 /************              Granite family            **************/
@@ -23,11 +24,23 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
     if (sel && std::string(sel) == "closed")
         throw std::runtime_error("OFLM_GRANITE_ENGINE=closed: not implemented -- Granite has no closed engine "
                                  "(llama_npu refuses hidden_size 2560); build the open kernels instead");
-    if (kernels.empty())
-        throw std::runtime_error("no open kernels were found for " + this->lm_config->model_name +
-                                 ". Granite runs on the open kernels only: build them with "
-                                 "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
-                                 "OFLM_OPEN_KERNELS_DIR at a built set.");
+    if (kernels.empty()) {
+        // Granite has no closed engine to fall back to (llama_npu refuses
+        // hidden_size 2560), so this is fatal either way -- but the instruction
+        // was to run a script from a source checkout, which someone who
+        // installed a package cannot do. The kernels ship with the
+        // distribution; a model without one is a gap, and the ask is an issue
+        // with the model already named.
+        std::string url = "https://github.com/Atomic-Germ/OpenFlowLM-Next/issues"
+                          "?q=is%3Aissue+is%3Aopen+no+open+kernels+";
+        for (char c : this->lm_config->model_name)
+            url += (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
+                    c == '.') ? c : '_';
+        throw std::runtime_error("no open kernel set is installed for " + this->lm_config->model_name +
+                                 ". Granite runs on the open kernels only, so this model will not start "
+                                 "until one is built and shipped. Please open an issue -- this link "
+                                 "names the model already:\n  " + url);
+    }
     header_print("OFLM", "Granite on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();

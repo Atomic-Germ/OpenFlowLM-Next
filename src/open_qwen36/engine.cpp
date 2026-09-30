@@ -11,6 +11,7 @@
 #include "models/qwen2vl/qwen2vl_npu.hpp"           // qwen2vl_image_payload_t
 #include "nlohmann/json.hpp"
 
+#include <cctype>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -73,9 +74,22 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(
     cfg_.model_dir = config.model_path;
     std::string how;
     cfg_.kernel_dir = find_kernels(config, &how);
-    if (cfg_.kernel_dir.empty())
-        throw std::runtime_error("open_qwen36: no open kernels found for " + config.model_name +
-                                 " (set OFLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
+    if (cfg_.kernel_dir.empty()) {
+        // The old text told the user to set OFLM_OPEN_KERNELS_DIR or install a
+        // set by hand, which is a thing you can only do from a source checkout
+        // and is not what a person who installed a package should be asked for.
+        // Kernels ship with the distribution; a model without one is a gap we
+        // want reported, so the ask is an issue with the model already named.
+        std::string url = "https://github.com/Atomic-Germ/OpenFlowLM-Next/issues"
+                          "?q=is%3Aissue+is%3Aopen+no+open+kernels+";
+        for (char c : config.model_name)
+            url += (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
+                    c == '.') ? c : '_';
+        throw std::runtime_error(
+            "open_qwen36: no open kernel set is installed for " + config.model_name +
+            ". The closed kernels are shipped and will serve it, but for open "
+            "kernels please open an issue -- this link names the model already:\n  " + url);
+    }
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;

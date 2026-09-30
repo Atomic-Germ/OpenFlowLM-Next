@@ -412,6 +412,69 @@ _FAMILY_OF_MODEL_TYPE = {
 }
 
 
+def _tags_of(front):
+    """The tag list of a README's frontmatter, lowercased."""
+    tags = front.get("tags")
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    return [str(t).lower() for t in tags] if isinstance(tags, list) else []
+
+
+def declared_kernels(front):
+    """The `oflm-kernels` value a repo publishes, or None.
+
+    A conversion can declare the exact set it was built and tested against:
+    `oflm-kernels: sha256:602fa183...` in the README frontmatter. That is the
+    strongest possible statement -- "this container, with this layout, wants
+    exactly these kernels" -- and it makes linking a lookup rather than a
+    derivation, which matters for a model whose geometry derives fine but whose
+    weights were laid out differently.
+
+    OPTIONAL. Most repos in the wild will not carry it, and must not be required
+    to: the tags and `config.json` are enough for the overwhelming majority, and
+    the point of this is to be better on the models we publish, not to make an
+    undeclared tag a hard error for someone else's.
+    """
+    for tag in _tags_of(front):
+        if tag.startswith("oflm-kernels:"):
+            v = tag.split(":", 1)[1].strip()
+            return v or None
+    v = front.get("oflm-kernels")
+    return str(v).strip() if v else None
+
+
+def declared_family(front):
+    """The `oflm-family` value a repo publishes, or None.
+
+    The same idea as `oflm-kernels`, for the family: an explicit
+    `oflm-family: qwen3.5` outranks anything inferred from a tag or a name,
+    because it was written by whoever made the conversion and they know. It is
+    honoured for models we did not create too -- a finetune author can add the
+    one tag and have `oflm add` do the right thing without a release from us.
+    """
+    for tag in _tags_of(front):
+        if tag.startswith("oflm-family:"):
+            v = tag.split(":", 1)[1].strip()
+            if v:
+                return v
+    v = front.get("oflm-family")
+    return str(v).strip() if v else None
+
+
+def issue_search_url(model_name):
+    """A GitHub issue search pre-filled with the model name.
+
+    The old answer to "no kernels for this model" was a sentence telling the
+    user to run a Python script from a source checkout several directories
+    deep, which is a thing they cannot do from an installed package and do not
+    want to anyway. A link that opens an issue already naming their model is
+    the request we actually want, and it costs them one click.
+    """
+    from urllib.parse import quote
+    return ("https://github.com/Atomic-Germ/OpenFlowLM-Next/issues"
+            f"?q=is%3Aissue+is%3Aopen+no+open+kernels+{quote(model_name)}")
+
+
 def frontmatter_family(front, model_type=None):
     """A best-effort family from a README's tags, or None.
 
@@ -1000,7 +1063,7 @@ def link_open_kernels(model_dir, kernel_dir, force=False, quiet=False):
 
 
 def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, quiet=False,
-                       cat_family=None, size=None):
+                       cat_family=None, size=None, declared_hash=None):
     """Find and link the open kernel set for this model; say which and why."""
     if override:
         kernel_dir = Path(override)
@@ -1009,7 +1072,19 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
 
+    # A repo that published `oflm-kernels` states the set it was built against,
+    # so that is what to look for -- a declared hash beats a derived one, and a
+    # mismatch between them is worth saying out loud, because it means the
+    # container is not the one the kernel set was made for.
     spec_hash, note = model_spec_hash(model_dir, cat_family, size)
+    if declared_hash and spec_hash and declared_hash != spec_hash:
+        log(f"[INFO] This repo declares oflm-kernels {declared_hash[:19]} but its "
+            f"config.json derives {spec_hash[:19]}. The two disagree, so the "
+            f"container is not the one that set was built for; using the derived "
+            f"one, and it may not match. This is worth an issue: "
+            f"{issue_search_url(dir_name)}")
+    elif declared_hash and not spec_hash:
+        spec_hash, note = declared_hash, "declared by the repo's oflm-kernels tag"
     if not spec_hash:
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
@@ -1019,11 +1094,16 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
             f"this model's ({spec_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
-    checkout = open_kernels_checkout()
-    script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
-    log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
-        "the closed kernels stay in charge. Build one with:")
-    log(f'           python "{script}" --model-dir "{model_dir}"')
+    # No set is installed for this model. Say so in one line and offer the one
+    # thing the user can actually do -- open an issue naming their model. The
+    # previous message told them to run a Python script from a source checkout
+    # several directories deep, which they cannot do from an installed package
+    # and would not want to: kernels are built by the distribution, not by the
+    # person installing it.
+    log(f"[INFO] No installed open kernel set matches this model "
+        f"({spec_hash[:19]}); it will run on the closed kernels, which are shipped. "
+        f"To get open kernels for it, open an issue -- this link has the model "
+        f"named already:\n           {issue_search_url(dir_name)}")
     return False
 
 
@@ -1147,11 +1227,24 @@ def main():
     # Qwen3.5 model, and only its frontmatter says so. Not fatal if it fails --
     # family resolution falls back to the name, as it always did.
     front = _read_frontmatter(repo) if repo and not args.no_xclbin else {}
-    if not args.quiet and front:
-        _f = frontmatter_family(front)
-        if _f and not args.family and not (base_entry or {}).get("details", {}).get("family"):
-            log(f"[INFO] family {_f} from the repo's README tags (name does not say)")
-    family = derive_family(system_registry, dir_name, args.family, base_entry, front)
+    # `oflm-family` is a declaration by whoever made the conversion, so it
+    # outranks --family inference and the registry alike. It is optional: a repo
+    # without it resolves from the tags, the registry, or the name, exactly as
+    # before, which is what keeps a model we never saw working on a best effort.
+    _declared = declared_family(front)
+    if _declared and not args.family and not (base_entry or {}).get("details", {}).get("family"):
+        if not args.quiet:
+            log(f"[INFO] family {_declared} (declared by the repo's oflm-family tag)")
+        family = _declared
+    else:
+        if not args.quiet and front:
+            _f = frontmatter_family(front)
+            if _f and not args.family and not (base_entry or {}).get("details", {}).get("family"):
+                log(f"[INFO] family {_f} from the repo's README tags (name does not say)")
+        family = derive_family(system_registry, dir_name, args.family, base_entry, front)
+    # A repo that publishes the exact set it was tested against, so linking is a
+    # lookup rather than a derivation. Also optional.
+    declared_kernels_hash = declared_kernels(front)
     size_value = (base_entry or {}).get("size") or size_from_tag(tag)
     official, official_note = resolve_official(system_registry, dir_name, family, size_value)
     base_entry = official[3] if official else None
@@ -1245,6 +1338,7 @@ def main():
             # -- which is the point: nothing here is keyed on an official model name.
             cat_family=family,
             size=size_token,
+            declared_hash=declared_kernels_hash,
         )
 
     write_vision_sidecar(target, dir_name, quiet=args.quiet)
