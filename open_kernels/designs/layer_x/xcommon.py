@@ -128,16 +128,25 @@ PROJ_ROLES = ("attn", "linear", "linear_out", "ffn") if KIND == "dense" else ("a
 NEED_Q4_GY = any(r not in Q8 for r in PROJ_ROLES)
 NEED_Q4_GMS = "ffn" not in Q8              # the dense tail's up | gate bands
 
-# A container that MIXES formats (every Qwen3.5 dense model: linear_out at q8, everything
-# else q4_1) needs BOTH GEMV bodies on the main core, and 16 KB of program memory does not
-# hold three entries -- the 4B's `lx` overflowed (.claude/plans/q8-hw-results.md section 2).
-# So on a mixed spec ONLY, the q4_1 pair folds into one `gemv_q4_gyms` whose destination is
-# a runtime argument (dst < 0 -> the band's y element, dst >= 0 -> ms + dst), and the two
-# GEMV TUs are compiled -Oz. An all-q4_1 or an all-q8 spec sees exactly the entries, the
-# flags and the call sequence it saw before: the DNX_PAD lesson -- what is not identical moves.
-MIXED = KIND == "dense" and bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
+# `gemv_q4_pool_group_rt` is `static inline`, so `gemv_q4_gy` and `gemv_q4_gms` each carry
+# their own copy of the band walk: two entries are two bodies, and 16 KB of program memory
+# does not hold them beside a q8 body. The mixed-format cores (every Qwen3.5 dense model:
+# linear_out at q8, everything else q4_1) overflowed `lx` for exactly that reason -- the 4B
+# first, then HID 2560, which measured 2 720 B for the un-folded pair against 1 008 B for
+# the folded one (utilities/kernel-size.py, per-TU `.text`).
+#
+# So the q4_1 pair folds into one `gemv_q4_gyms` whenever BOTH entries would otherwise be
+# resident. The fold's destination is a runtime argument (dst < 0 -> the band's y element,
+# dst >= 0 -> ms + dst) and the row split is the literal 2 `gemv_q4_gms` already hard-codes,
+# so it is correct with or without a q8 body beside it -- which is why the condition is
+# NEED_Q4_GY and NEED_Q4_GMS alone, and NOT `bool(Q8)`. An all-q4_1 dense spec is exactly
+# the case the fold was missing, and the one that overflowed at 2560 and 5120.
+#
+# An all-q8 spec has no q4_1 entry to fold and is untouched: it sees the same entries, flags
+# and call sequence it always saw (the DNX_PAD lesson -- what is not identical moves).
+FOLD = KIND == "dense" and NEED_Q4_GY and NEED_Q4_GMS
 OZ = ["-Oz"] + OS[1:]                      # OS at -Oz, keeping -DGEMV_NULL (the ODR note above)
-GEMV_OS = OZ if MIXED else OS              # size over speed, harder, on the crowded core only
+GEMV_OS = OZ if FOLD else OS               # size over speed, harder, on the folded core
 
 # An all-q8 MoE spec (the 35B fine-tunes, and Atomic-Germ's own Qwen3.6-35B) carries the
 # larger gemv_q8_gy where the q4_1 spec has gemv_q4_gy, and since the DeltaNet slice update
@@ -210,16 +219,16 @@ def kernels(inc, t):
 
     if KIND == "dense":
         k = {}
-        if MIXED:
+        if FOLD:
             # one entry for both q4_1 destinations (gen_kernels.q4_gyms)
             k["gyms"] = ef("gemv_q4_gyms", [e, tab, y, ms, i32, i32, i32], GEMV_OS)
         # A projection band into its y element (the same entry as the MoE path).
-        if NEED_Q4_GY and not MIXED:
+        if NEED_Q4_GY and not FOLD:
             k["gy"] = ef("gemv_q4_gy", [e, tab, y, i32, i32, i32])
         # The dense FFN tail (designs/dense/dx.py's kernels, generated into this design):
         # an up | gate band into the silu scratch, act(gate) * up, and the two element-indexed
         # activation preps (the core loops over 4 KB elements; the kernel derives the blocks).
-        if NEED_Q4_GMS and not MIXED:
+        if NEED_Q4_GMS and not FOLD:
             k["gms"] = ef("gemv_q4_gms", [e, tab, ms, i32, i32, i32])
         k["act"] = ef("dense_act", [ms, y])
         k["prep"] = ef("dense_prep", [x, tab, i32, i32])
@@ -267,7 +276,7 @@ def _knames() -> tuple:
     spec the folded entry stands where the pair stood; every other spec keeps its order."""
     base = KNAMES_MOE if KIND == "moe" else KNAMES_DENSE
     ns = [n for n in base if (n != "gy" or NEED_Q4_GY) and (n != "gms" or NEED_Q4_GMS)]
-    if MIXED:
+    if FOLD:
         ns = ["gyms"] + [n for n in ns if n not in ("gy", "gms")]
     return tuple(ns) + KNAMES_Q8
 
@@ -313,7 +322,7 @@ def role_gemv_bands(win, yout, B, K, role, nbands, KK):
     tab = B["tab"]
     if role in Q8:
         gemv_bands(win, yout, tab, K["gy8"], nbands, role_groups(role, KK), role_per_band(role, KK), 4)
-    elif MIXED:
+    elif FOLD:
         gemv_bands(win, yout, tab, K["gyms"], nbands, n_groups(KK), per_band(KK), 2, B["ms"])
     else:
         gemv_bands(win, yout, tab, K["gy"], nbands, n_groups(KK), per_band(KK), 2)
@@ -348,7 +357,7 @@ def ffn_body(win, xin, yout, B, K):
             K["prep"](me[i], tab, HID, i)
     if "ffn" in Q8:
         gms, pb_h, ng_h = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
-    elif MIXED:
+    elif FOLD:
         gms, pb_h, ng_h = K["gyms"], per_band(HID), n_groups(HID)
     else:
         gms, pb_h, ng_h = K["gms"], per_band(HID), n_groups(HID)
@@ -357,13 +366,13 @@ def ffn_body(win, xin, yout, B, K):
         """One up | gate band into ms + dst. The folded entry takes the y pointer too, so
         on a mixed core the band's y element is acquired first -- the shape `gemv_bands`
         already runs (acquire y, stream the w elements, release)."""
-        if MIXED:
+        if FOLD:
             gms(we, tab, ye, ms, g, pb_h, dst)
         else:
             gms(we, tab, ms, g, pb_h, dst)
 
     for _ in range_(FFN.UP_PC):
-        ye = yout.acquire(1) if MIXED else None
+        ye = yout.acquire(1) if FOLD else None
         for g in range_(ng_h):
             we = win.acquire(1)
             band(we, ye, g, C.MS_U)
@@ -372,7 +381,7 @@ def ffn_body(win, xin, yout, B, K):
             we = win.acquire(1)
             band(we, ye, g, C.MS_G)
             win.release(1)
-        if not MIXED:
+        if not FOLD:
             ye = yout.acquire(1)
         K["act"](ms, ye)
         yout.release(1)

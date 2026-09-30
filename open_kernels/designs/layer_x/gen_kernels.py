@@ -82,10 +82,16 @@ PROJ_ROLES = ("attn", "linear", "linear_out", "ffn")
 
 
 def mixed(R) -> bool:
-    """The spec's roles mix formats on one main core: something is q8, something is still
-    q4_1, and the q4_1 side is the `gy` + `gms` pair the fold replaces."""
-    q8 = R.q8
-    return bool(q8) and "ffn" not in q8 and any(r not in q8 for r in PROJ_ROLES)
+    """Whether this spec folds the q4_1 GEMV pair into one `gemv_q4_gyms`.
+
+    Whenever BOTH q4_1 entries would be resident: `gemv_q4_pool_group_rt` is
+    `static inline`, so each entry carries its own copy of the band walk and two entries
+    are two bodies on a 16 KB core. The folded entry picks its destination from a runtime
+    argument and hard-codes the row split the pair already used, so it is correct with or
+    without a q8 body on the same core -- the fold is NOT conditional on a q8 mix. An
+    all-q8 spec has no q4_1 entry and folds nothing. See xcommon.FOLD.
+    """
+    return "ffn" not in R.q8 and any(r not in R.q8 for r in PROJ_ROLES)
 
 
 # Generated only for a spec that needs them; removed again when it does not, so a family's

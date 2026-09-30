@@ -103,20 +103,22 @@ def role_rs(role):
 NEED_Q4_GY = any(r not in Q8 for r in ("attn", "ffn"))
 NEED_Q4_GMS = "ffn" not in Q8
 
-# A container that MIXES formats needs BOTH GEMV bodies on the main core, and 16 KB of
-# program memory does not hold three entries (.claude/plans/q8-hw-results.md section 2).
-# On a mixed spec ONLY, the q4_1 pair folds into one `gemv_q4_gyms` with a runtime
-# destination (dst < 0 -> the band's y element, dst >= 0 -> ms + dst) and the GEMV TUs are
-# compiled -Oz. An all-q4_1 or an all-q8 spec keeps today's entries, flags and call order.
-MIXED = bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
-GEMV_OS = ["-Oz"] if MIXED else OS
+# 16 KB of program memory does not hold the un-folded q4_1 pair beside anything: the pair
+# is two bodies because `gemv_q4_pool_group_rt` is `static inline` (.claude/plans/
+# q8-hw-results.md section 2). The pair folds into one `gemv_q4_gyms` with a runtime
+# destination (dst < 0 -> the band's y element, dst >= 0 -> ms + dst) whenever BOTH entries
+# would otherwise be resident. The fold does not read a q8 body -- it is correct without
+# one -- so the condition is NEED_Q4_GY and NEED_Q4_GMS alone, NOT `bool(Q8)`. An all-q8
+# spec has no q4_1 entry to fold and is untouched.
+FOLD = NEED_Q4_GY and NEED_Q4_GMS
+GEMV_OS = ["-Oz"] if FOLD else OS
 
 
 # The kernels a main core holds, in a fixed order. A q4_1 entry goes in only while some
 # projection still needs it (dead code costs 16 KB program memory); the order for a model
 # with no q8 role is the one the design always had.
 def _knames():
-    ns = ["gyms"] if MIXED else [n for n in ("gy", "gms")
+    ns = ["gyms"] if FOLD else [n for n in ("gy", "gms")
                                  if (n == "gy" and NEED_Q4_GY) or (n == "gms" and NEED_Q4_GMS)]
     ns += ["act", "prep", "prepf"]
     if Q8:
@@ -263,7 +265,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         """`nbands` bands of a KK-wide projection of `role`, at that role's weight format."""
         if role in Q8:
             gemv_bands(win, yout, tab, K["gy8"], nbands, role_groups(role, KK), role_per_band(role, KK), 4)
-        elif MIXED:
+        elif FOLD:
             gemv_bands(win, yout, tab, K["gyms"], nbands, n_groups(KK), per_band(KK), 2, ms)
         else:
             gemv_bands(win, yout, tab, K["gy"], nbands, n_groups(KK), per_band(KK), 2)
@@ -278,13 +280,13 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         if "ffn" in Q8:
             gms, pb_u, ng_u = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
         else:
-            gms, pb_u, ng_u = (K["gyms"] if MIXED else K["gms"]), PB_H, NG_H
+            gms, pb_u, ng_u = (K["gyms"] if FOLD else K["gms"]), PB_H, NG_H
 
         def band(we, ye, g, dst):
             """One up | gate band into ms + dst. The folded entry takes the y pointer too,
             so on a mixed core the band's y element is acquired first -- the shape
             `gemv_bands` already runs (acquire y, stream the w elements, release)."""
-            if MIXED:
+            if FOLD:
                 gms(we, tab, ye, ms, g, pb_u, dst)
             else:
                 gms(we, tab, ms, g, pb_u, dst)
@@ -309,7 +311,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         for i in range(G.XM_ELEMS):
             f_prep(me[i], tab, HID, i)
         for _ in range_(G.UP_PC):
-            ye = yout.acquire(1) if MIXED else None
+            ye = yout.acquire(1) if FOLD else None
             for g in range_(ng_u):
                 we = win.acquire(1)
                 band(we, ye, g, G.MS_U)
@@ -318,7 +320,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 we = win.acquire(1)
                 band(we, ye, g, G.MS_G)
                 win.release(1)
-            if not MIXED:
+            if not FOLD:
                 ye = yout.acquire(1)
             f_silu(ms, ye)
             yout.release(1)

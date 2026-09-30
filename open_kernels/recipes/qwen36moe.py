@@ -789,45 +789,6 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
     return Layout(**kv)
 
 
-def check_xn_element_split(spec: ModelSpec, out_pc: int) -> None:
-    """Refuse a width whose per-core band group crosses an xn element boundary.
-
-    The xn side arrives in 4 KB elements, each holding ELEM//2 bf16 rows, and each
-    main core takes `out_pc` consecutive output bands. Those two divisions are
-    INDEPENDENT, and when they do not divide into each other a core's bands span
-    two elements.
-
-    HID 2560 is the case that matters, and it is the only one in the catalogue:
-    2560 rows is `[2048, 512]`, so the element boundary falls at band 32, while
-    `2560 // 64 // 8` gives 5 bands per core and core 6 therefore owns bands
-    30..34 -- across the boundary. Every other width either fits in one element
-    or splits on a core edge: 4096 is `[2048, 2048]` with 8 bands a core, so the
-    boundary at band 32 is exactly core 4's first band.
-
-    Left unchecked this surfaces as `aiecc: Overflow of program memory` on
-    cdo_{0} after a full IRON compile, which reads as a size limit and is not
-    one -- HID 4096 builds the same core with 1 536 B to spare. Refusing here
-    names the width, the boundary and the core, which is the whole diagnosis.
-    """
-    n = LIMITS["n_cols"]
-    boundary_bands = (ELEM // 2) // BAND_ROWS          # where element 1 begins
-    for core in range(n):
-        lo, hi = core * out_pc, (core + 1) * out_pc
-        if lo < boundary_bands < hi:
-            raise OpRangeError(
-                f"{spec.family} hidden {spec.hidden}: core {core} of {n} takes output "
-                f"bands {lo}..{hi - 1} ({out_pc} per core, {spec.hidden} // "
-                f"{BAND_ROWS} // {n}) but the xn splits into 4 KB elements at band "
-                f"{boundary_bands} (HID {spec.hidden} = {ELEM // 2} + "
-                f"{spec.hidden - ELEM // 2}). A core whose bands cross that boundary "
-                f"needs a second element-specialised path, and the main core "
-                f"overflows its 16 KB of program memory. The width is not too large "
-                f"-- HID 4096 builds the same core with room to spare; the element "
-                f"split and the band split simply do not divide into each other. "
-                f"Rounding the width up so both splits align, or teaching the design "
-                f"to read a straddling core out of two elements, is the fix.")
-
-
 def linear(spec: ModelSpec) -> Linear | None:
     if not spec.has_linear:
         return None
@@ -836,7 +797,6 @@ def linear(spec: ModelSpec) -> Linear | None:
     tile = 1024                                     # dn_glue's channel tile
     key_width = spec.lin_key_heads * spec.lin_key_dim
     out_pc = spec.hidden // BAND_ROWS // n
-    check_xn_element_split(spec, out_pc)
     return Linear(
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=out_pc,
         QKV_DIM=nch, VW=vw,
