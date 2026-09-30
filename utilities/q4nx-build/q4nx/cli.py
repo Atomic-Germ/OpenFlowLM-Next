@@ -2,6 +2,7 @@
 """Console-script entry point for q4nx-build."""
 import os
 import sys
+from pathlib import Path
 
 from q4nx import create_converter, create_hf_converter
 from q4nx.arch_detect import family_from_text
@@ -33,6 +34,55 @@ def _is_hf_source(path: str) -> bool:
             or os.path.exists(os.path.join(path, "model.safetensors.index.json"))
         )
     return False
+
+
+def _resolve_imatrix_hint(args, input_path):
+    """Where the importance matrix lives, for --prune-ffn.
+
+    An explicit --imatrix wins; then OFLM_IMATRIX, so a pack driven through
+    `oflm pack` (which shells out to this tool) can name it in the environment
+    rather than requiring the flag to be threaded through; then a sidecar next
+    to the model file. Returns None when there is nothing, which the converter
+    turns into an explanation instead of a silent full-width pack.
+    """
+    from q4nx.imatrix_prune import imatrix_path, env_imatrix
+    explicit = args.imatrix or env_imatrix()
+    try:
+        p = imatrix_path(explicit, _model_dir(input_path))
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}")
+        raise SystemExit(2)
+    if explicit and p is None:
+        print(f"[ERROR] --imatrix {explicit} is not an importance matrix "
+              f"(no *.in_sum2 tensors)")
+        raise SystemExit(2)
+    if args.prune_ffn and p is None:
+        print(f"[ERROR] --prune-ffn {args.prune_ffn} needs an imatrix and none was "
+              f"found. Pass --imatrix PATH or put the imatrix GGUF beside the model.")
+        raise SystemExit(2)
+    return p
+
+
+def _prune_meta(model):
+    """What the converter recorded about an imatrix prune, for the card + config.
+
+    Empty when no prune ran, so every unpruned pack is byte-identical to before.
+    """
+    if not getattr(model, "imatrix", None):
+        return {}
+    return {
+        "kept": getattr(model, "prune_ffn_kept", None),
+        "frm": getattr(model, "prune_ffn_from", None),
+        "retained": getattr(model, "prune_ffn_retained", None),
+    }
+
+
+def _model_dir(input_path):
+    from pathlib import Path
+    if _is_hf_repo_id(input_path) or _is_hf_source(input_path):
+        return None
+    p = Path(input_path)
+    return p if p.is_dir() else p.parent
 
 
 def _parse_args(argv):
@@ -83,6 +133,21 @@ def _parse_args(argv):
         help="When the model's hidden size is smaller than the selected engine "
              "variant's official dim, zero-pad the hidden axis so the weights "
              "fit the compiled variant (padded channels are inert).",
+    )
+    parser.add_argument(
+        "--prune-ffn", dest="prune_ffn", type=int, default=None, metavar="K",
+        help="Narrow the dense FFN to K intermediate neurons, chosen PER LAYER by "
+             "imatrix importance. For a model whose FFN is too wide for a core's L1 "
+             "(Qwen3.8-27B at 17408 will not build; 12288-13312 will). Needs an "
+             "imatrix: --imatrix PATH, or a sidecar GGUF beside the model. Refuses "
+             "without one rather than chopping the first K, which retains only "
+             "K/width of the activation mass by construction.",
+    )
+    parser.add_argument(
+        "--imatrix", dest="imatrix", default=None, metavar="PATH",
+        help="Importance-matrix GGUF (*.in_sum2 tensors) used by --prune-ffn. "
+             "Defaults to a sidecar next to the model file. OFLM_IMATRIX is "
+             "honoured too, so `oflm pack` can name it without re-typing the flag.",
     )
     parser.add_argument(
         "--oflm-version", dest="oflm_version", default=None, help="oflm_version to write into config.json"
@@ -246,6 +311,20 @@ def main(argv=None) -> int:
 
     weights_type = weights_type or "language"
     output_folder = output_folder or os.path.dirname(input_path) or "."
+    # A pruned FFN is a different artifact from the one the card names, so the
+    # DIRECTORY says so too -- not just the README. Someone with both on disk
+    # should be able to tell them apart from `ls`, and a stale name that resolves
+    # to the wrong widths later is the failure this prevents. Only applied when
+    # the name came from the card (an explicit -o is the caller's to choose).
+    if args.prune_ffn and plan is not None and plan.output_name \
+            and output_folder == plan.output_name:
+        base = Path(plan.output_name)
+        tagged = f"{base.stem}-imx{args.prune_ffn}{base.suffix}"
+        if tagged != os.path.basename(output_folder):
+            output_folder = str(base.parent / tagged) if str(base.parent) != "." else tagged
+            print(f"[INFO] Output folder: {output_folder} (FFN pruned to "
+                  f"{args.prune_ffn}; tagged so it is not mistaken for the "
+                  f"unpruned model)")
 
     # Resolve the weight source before touching absolute paths: an HF repo id
     # must stay in 'org/name' form or _is_hf_repo_id/create_hf_converter won't
@@ -297,6 +376,8 @@ def main(argv=None) -> int:
     if hf_input is not None:
         model = create_hf_converter(hf_input, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
+        model.prune_ffn = args.prune_ffn
+        model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path)
         if args.quant:
             model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
@@ -312,10 +393,13 @@ def main(argv=None) -> int:
             oflm_version=oflm_version,
             source_file=source_file,
             model_arch=model.model_arch,
+            prune_meta=_prune_meta(model),
         )
     else:
         model = create_converter(input_path, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
+        model.prune_ffn = args.prune_ffn
+        model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path)
         if args.quant:
             model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
@@ -331,6 +415,7 @@ def main(argv=None) -> int:
             oflm_version=oflm_version,
             source_file=source_file,
             model_arch=model.model_arch,
+            prune_meta=_prune_meta(model),
         )
 
     if args.deploy_tag:
