@@ -1,8 +1,36 @@
 # Plan: the whole pipeline in one hardware context
 
-Status: **for review (2026-09-29).** Nothing below is implemented in the engine yet. The
-measurements come from probes in `utilities/dit-chain/switch_probe.py` and
-`utilities/reconfig-probe/`.
+Status: **done (2026-09-29)**, on branch `feat/one-context`. The spec changes are merged
+into `spec.md`.
+
+| | before | after |
+|---|---:|---:|
+| 512² image | 5.14-5.31 s | **3.66-3.69 s** |
+| 1024² image | 13.42-13.48 s | **11.98-12.02 s** |
+| load | 5.7-5.9 s | 5.5-5.9 s |
+
+Measured under light load (CPU 11-23%), interleaved A/B. The pixels are byte-identical to
+`generate.py` (`tests/test_engine_matches_pyxrt.py`).
+
+**What changed on the way** (the steps below are the plan as reviewed):
+- **One ELF per resolution, not one for all.** XRT's kernel creation walks all of an
+  ELF's control code (~2 ms per MB per kernel). The 1024² streams alone are ~9 MB.
+- **valid_len: neither scratchpad parameters nor the fallback.** compose_elf splits
+  te_attn's TXN into 512 tiny per-length heads (its 32 valid_len writes) plus one shared
+  tail. That is exact, needs no design change, and adds 0.4 MB. Whole per-length copies
+  (21 MB) made every kernel creation 3× slower.
+- **Contention was the real risk, and it shaped the replay.** At normal priority, another
+  process on the NPU hung ours (and itself), 8 of 8 trials: queued, runlists, and
+  firmware `load_pdi` alike. What passes (6 of 6):
+  - each set's configure and ops as one `xrt::runlist`;
+  - two cfg variants alternated, so every configure really resets;
+  - QoS priority 0x180.
+  A high/realtime-priority contender (Studio Effects?) is untested.
+- **Kernel creation moved to a thread** that overlaps the weight load. Without that, the
+  load was 1.5-3 s slower, and a one-shot 1024² `oflm image` lost.
+- **The study ids are padded to 512.** Passed whole, the engine runs unmasked. That
+  looked like a pre-existing engine-vs-pyxrt mismatch until the test passed the prompt's
+  own tokens.
 
 ## Why
 

@@ -1,6 +1,6 @@
 # reconfig-probe: what a kernel-set change costs on XDNA2, and how to make it cheap
 
-Probes behind `specs/open-diffusion/plans/one-context.md`. klein's pipeline changes
+Probes behind `specs/open-diffusion/archive/one-context.md`. klein's pipeline changes
 kernel set 822 times per image. These tools measure where that time goes and test the
 one-context alternative.
 
@@ -9,7 +9,9 @@ one-context alternative.
 | `../dit-chain/switch_probe.py` | real ops on their six xclbin contexts: queued, waited (host round trip) and alternating between sets |
 | `loadpdi_probe.py` | the three in-stream reconfiguration modes on mlir-aie's one-core `reconfigure_loadpdi` pair |
 | `compose_probe.py` | real sets composed into one full ELF: switch cost per mode, and configure-on-change |
-| `fullelf_generate.py` | a whole klein image through one full-ELF context, compared byte for byte with `generate.py` |
+| `fullelf_generate.py` | a whole klein image through one full-ELF context (compiled as one module, the slow way), compared byte for byte with `generate.py` |
+| `preempt_probe.py` | real ops of an installed v2 ELF in engine-style stretches, queued or as runlists, outputs checked every iteration |
+| `contention_trial.ps1` | one engine trial while `switch_probe.py` hammers the NPU from another process: image correct? contender alive? |
 
 All of them need the IRON environment and turbo:
 
@@ -39,6 +41,37 @@ xrt-smi configure --pmode turbo
   configurations. 3.51-3.54 s against `generate.py`'s 4.53 s on the same inputs; latents
   and PNG byte-identical, 3 runs.
 
+## Another process on the NPU
+
+`contention_trial.ps1`, klein at 512² and 1024², with a six-xclbin-context contender:
+
+| engine | trials | outcome |
+|---|---:|---|
+| queued runs, normal priority | 2 | hung (`ERT_CMD_STATE_TIMEOUT`), usually taking the contender down too |
+| runlists, normal priority | 1 | hung |
+| runlists + alternating resets, normal priority | 4 | hung |
+| `load_pdi` configures (firmware-known PDIs), normal priority | 1 | hung |
+| runlists + alternating resets, priority 0x100 (3) or 0x180 (3) | 6 (24 images, 3 at 1024²) | byte-identical, contender alive, images 10-25% slower while it ran |
+| the xclbin path (`generate.py`) | 1 | byte-identical |
+
+`preempt_probe.py` passes under contention at normal priority: it idles between
+iterations, which gives the scheduler harmless places to switch. The engine keeps its
+queue full, so it doesn't get those.
+
+## Kernel creation
+
+`xrt::ext::kernel(ctx, name)` walks all of the ELF's control code:
+
+| ELF | control code | per kernel |
+|---|---:|---:|
+| 144 instances of 7 KB | ~1 MB | 2.2 ms |
+| 13 instances, full size | ~1 MB | 1.3 ms |
+| 144 instances, full size | 15 MB | 17 ms |
+| + 512 whole te_attn copies | 36 MB | 56 ms |
+
+Creating kernels on 8 threads is no faster. On a thread next to file reading, it
+overlaps completely.
+
 ## Why one composed module builds slowly
 
 The 67-stream module took 671 s and ~10 GB in aiecc, 9.5 min of it before any core
@@ -54,6 +87,11 @@ Hence the exporter assembles the ELF from per-set and per-stream builds instead
 
 - aiecc merges adjacent `aiex.configure` of one device, so their BDs accumulate. A
   sequence that does not free its tasks runs out of shim BDs (16) once inlined many times.
+- A cfg's first op loads an empty device's PDI, and the firmware skips it if that PDI is
+  the one loaded. Alternate two variants naming different empties, or configures don't
+  reset.
+- Configuring a set on top of itself (ew, cfg_ew, ew) corrupted `qk` outputs in ~5% of
+  iterations. Configure only on a set change.
 - The runtime-sequence probes need unique SSA names per inlined `aiex.run`.
 - pyxrt 2.21 has `elf`, `ext.kernel`, `ext.bo` and `run.wait2`, but no
   `run.get_ctrl_scratchpad_bo`. The C++ API has it.

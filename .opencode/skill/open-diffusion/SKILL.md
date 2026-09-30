@@ -9,11 +9,16 @@ Sources:
 - `open_kernels/klein_pipeline.py`: the ONE schedule, which everything else follows:
   - buffers, and the ops in dispatch order (1050);
   - weight packing specs, the parameter table and the host setup.
-- `open_kernels/export_dit_kernels.py`: builds every stream the schedule names.
-- `utilities/dit-chain/generate.py`: the pyxrt runner.
+- `open_kernels/export_dit_kernels.py`: builds every stream the schedule names, then
+  `open_kernels/compose_elf.py` assembles the six sets into one full ELF per resolution:
+  the native engine's one hardware context. The `full-elf-context` skill has how, and the
+  traps.
+- `utilities/dit-chain/generate.py`: the pyxrt runner, on the six sets' xclbin contexts
+  in the build directory. It is the reference the engine is held to.
 - `utilities/dit-chain/export_bundle.py`: the model directory (schedules, packed weights in
   one `weights.bin`, the embedding table), for `src/open_diffusion` (native,
-  pixel-identical to generate.py). `q4nx-build --open-diffusion` runs it.
+  pixel-identical to generate.py: `specs/open-diffusion/tests/test_engine_matches_pyxrt.py`).
+  `q4nx-build --open-diffusion` runs it.
 - `src/open_diffusion/`: the engine; `prompt.cpp` (main build) templates and tokenizes;
   `src/src/image_command.hpp` is `oflm image`; `cli.cpp` is the standalone gate.
 - Serving: `/v1/images/generations` and `/v1/images/edits` (501) in
@@ -27,7 +32,7 @@ Sources:
 
 ```
 . C:\dev\mlir-aie\iron_env.ps1
-python open_kernels\export_dit_kernels.py --resolutions 512,1024 --out C:\dev\klein-kernels --jobs 6
+python open_kernels\export_dit_kernels.py --resolutions 512,1024 --out C:\dev\klein-kernels --jobs 6   # sets, then ELFs (~7 min cold)
 python open_kernels\export_dit_kernels.py --out C:\dev\klein-kernels --install src\xclbins\FLUX.2-klein-4B-NPU2\open_kernels
 python utilities\dit-chain\generate.py --kernels C:\dev\klein-kernels --pack-only          # ~8 GB, 5 min, once
 python utilities\dit-chain\generate.py --kernels C:\dev\klein-kernels --size 512 --prompt "a red fox in snow" --out C:\dev\gen
@@ -50,8 +55,12 @@ src\open_diffusion\build.cmd     # the standalone gate: --model <dir> --kernels 
   bump `WEIGHT_FORMAT` when only the packing changes.
 - **Kernel search:** `OFLM_DIFFUSION_KERNELS_DIR`, then `<model>/open_kernels`, then
   `<root>/xclbins/FLUX.2-klein-4B-NPU2/open_kernels` per xclbins root (`find_kernels`).
-- **`--install` copies only runtime files** (157, 15 MB). Never ship `--out` itself: the
-  installer copies `xclbins\` recursively, `build\` included.
+- **`--install` copies only runtime files**: the two ELFs and their description (39 MB),
+  after removing an earlier install's kernel-set files. Never ship `--out` itself: the
+  installer copies `xclbins\` recursively, `build\` and `elf_build\` included.
+- **`src\out\xclbins` is an `xcopy`** (`build-windows-vcpkg.cmd`) and never deletes. After a
+  kernel-set format change, `--install` into it too, or `src\out\oflm.exe` finds a stale set.
+  `src\build\xclbins` is a junction to `src\xclbins`.
 - **The registry entry:** `model_info_entry.json` predicts the HF tree API's listing
   (`*.bin` and >= 10 MB files are LFS). After the upload to `Cyronius/FLUX.2-klein-4B-NPU2`,
   pull on a clean models directory: every file's hash is checked.
@@ -87,8 +96,14 @@ images.
    - The last double block's res modulates for the single blocks.
    - The last single block's res applies norm_out, whose chunk order is (scale, shift).
 2. **te_attn's valid_len is an RTP write.** The exporter diffs a probe build (`valid_len
-   77`) and records the 32 words, one per core, in `fa/dit_fa.json` `patch`. Runners
-   rewrite them per prompt.
+   77`) and records the 32 words, one per core, in `fa/dit_fa.json` `patch`.
+   - The pyxrt runner rewrites them per prompt.
+   - The native engine can't: its control code is inside the ELF. compose_elf splits
+     te_attn into 512 tiny heads (`fa:te_attn_vl<n>`, those 32 writes) plus one tail
+     (`fa:te_attn`), and the engine runs the prompt length's head first.
+   - **The study's `ids_<i>.npy` are padded to 512.** Hand them to the engine whole and it
+     runs with valid_len 512: no mask, a different image. Pass the first n (generate.py's
+     report says `tokens`).
 3. **The text-encoder taps (hidden states 9/18/27) are a second res+RMSNorm pass**
    (`te_tap<k>`). Its residual output goes to CTX [512, 8192] at column 2560 k.
    - The 512 zero columns spill into the next slot, or past 7680.
@@ -99,15 +114,18 @@ images.
    O(1).
 5. **Every queued xrt::run must be waited on**, not just the last. A run never waited on
    keeps a stale state, and restarting it fails with "bad command state". Queued runs
-   across two hardware contexts hang the array, so drain before every switch.
+   across two hardware contexts hang the array, so the pyxrt runner drains before every
+   switch. The engine has one context, so it only drains at phase boundaries.
 6. **Determinism is a check.** The same inputs must give the same pixels, run after run and
    Python vs native.
    - Nondeterminism means state carried in a buffer. Zero-bordered VAE buffers were one
      case (`dit-conv` skill, lesson 11).
    - Diff the final latents first to localize it.
-7. **Six hardware contexts in one process work** (gemm, fa, ew, conv, conv1, vew). About
-   960 set switches per image at ~2 ms each are ~2 s at either size, the biggest
-   fixed cost at 512².
+7. **Kernel-set switches were the biggest fixed cost** (822 per image × ~2.1 ms, ~34% of
+   512²). The native engine now runs one full-ELF context per resolution, with register
+   reconfiguration at 0.3-0.7 ms: 5.2 → 3.7 s at 512², 13.5 → 12.0 s at 1024². Its price
+   is that it needs high QoS priority to survive another process on the NPU (the
+   `full-elf-context` skill). The pyxrt runner keeps six contexts.
 8. **Timing is invalid while any CPU job runs.** The CPU shares the package power budget.
    A 12-core job made attention 42.7 ms against its quiet 30.5 ms.
    - Check `Get-Process` before quoting a number.
@@ -136,4 +154,6 @@ images.
 - Export with `--resolutions`, `--install` it, then rebuild the model directory (the
   layout hash changes) and add the size to `image_sizes` in `src/model_list.json`.
 - New streams appear per R: DiT gemm/ew/fa, euler, x_emb/proj_out, and the VAE's.
+- compose_elf makes the new size its own ELF from `klein_pipeline.plan(R)`'s streams. Keep
+  each ELF to what its schedule runs: kernel creation walks all of an ELF's control code.
 - Capture study inputs with `capture_pipeline_inputs.py --size R`.

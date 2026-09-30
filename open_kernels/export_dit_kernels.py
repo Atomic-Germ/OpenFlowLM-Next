@@ -49,11 +49,13 @@ are built, not checked in.
 
     python open_kernels\export_dit_kernels.py --out <built dir> --install src\xclbins\<family>\open_kernels
 
-copies a built directory's runtime files only (no build/: the installer ships xclbins\
-recursively) and writes diffusion_kernels.json last: format, family, resolutions, the
-set directories, and layout_hash -- the stream specs plus WEIGHT_FORMAT, which a model
-directory (utilities/dit-chain/export_bundle.py) must match. src/open_diffusion finds the
-set by that manifest.
+copies a built directory's runtime files only -- diffusion_r<R>.elf, the six sets as one
+full ELF per resolution (compose_elf.py; the installer ships xclbins\ recursively) -- and
+writes diffusion_kernels.json last: format, family, resolutions, the ELFs, their sets and
+cfg kernels, the te_attn valid_len heads, and layout_hash -- the stream specs plus
+WEIGHT_FORMAT, which a model directory (utilities/dit-chain/export_bundle.py) must match.
+src/open_diffusion finds the set by that manifest. The sets' xclbins are not installed:
+only the pyxrt runners (utilities/dit-chain/) use them, from the build directory.
 
 Output:
     final.xclbin, insts_<stream>.bin
@@ -71,6 +73,9 @@ Output:
                        attention GEMM and attention are streams of the gemm and fa sets.
                        vae_decoder.py is the schedule these streams come from; --no-vae
                        skips all of it
+    diffusion_r<R>.elf every set as one full ELF per resolution, built last once all six
+                       sets are (compose_elf.py; --no-elf skips it); diffusion_elf.json
+                       names their kernels; elf_build/ keeps the per-set and per-stream builds
 
 Streams for FLUX.2 [klein] 4B (hidden 3072, SwiGLU 9216, 5 double- + 20 single-stream
 blocks, 512 text tokens), per resolution R with T = (R/16)^2 image tokens:
@@ -103,6 +108,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -299,7 +305,7 @@ SET_DIRS = {"gemm": ".", "fa": "fa", "ew": "ew", "conv": "conv", "conv1": "conv1
 SET_MARKERS = {"gemm": "dit_kernels.json", "fa": "dit_fa.json", "ew": "dit_ew.json",
                "conv": "dit_conv.json", "conv1": "dit_conv.json", "vew": "vae_ew.json"}
 # The installed set's manifest (src/open_diffusion finds kernels by it)
-MANIFEST, MANIFEST_FORMAT = "diffusion_kernels.json", "oflm-open-diffusion-kernels-v1"
+MANIFEST, MANIFEST_FORMAT = "diffusion_kernels.json", "oflm-open-diffusion-kernels-v2"
 # dit_gemm's weight packing: bump when pack.pack_b's tile order changes (the packed
 # weights in a model directory are only valid against it)
 WEIGHT_FORMAT = "bfp16ebs8 pack_b v1"
@@ -316,8 +322,12 @@ def layout_hash(sets: dict[str, dict]) -> str:
 
 
 def install(src: Path, dst: Path, family: str) -> None:
-    """Copy a built kernel directory's runtime files (each set's final.xclbin, instruction
-    streams and marker -- not build/) to dst, then write the manifest last."""
+    """Copy a built kernel directory's runtime files -- the full ELFs compose_elf.py
+    assembled from the six sets (one per resolution), their description and the toolchain
+    record -- to dst, then write the manifest last. The sets' xclbins stay in the build
+    directory, for the pyxrt runners (utilities/dit-chain/)."""
+    import compose_elf  # noqa: E402
+
     markers = {}
     for s, sub in SET_DIRS.items():
         m = _read_json(src / sub / SET_MARKERS[s])
@@ -329,20 +339,34 @@ def install(src: Path, dst: Path, family: str) -> None:
     want = set_streams(family, resolutions)
     if json.loads(json.dumps(want)) != sets:
         raise SystemExit(f"{src} was built from other stream specs than this tree's; rebuild it")
+    elf_meta = _read_json(src / compose_elf.ELF_META)
+    newest_set = max((src / sub / SET_MARKERS[s]).stat().st_mtime for s, sub in SET_DIRS.items())
+    elfs = [src / n for n in (elf_meta or {}).get("elf", {}).values()]
+    if elf_meta is None or sorted(elf_meta["elf"]) != sorted(str(r) for r in resolutions) or \
+            any(not e.is_file() or e.stat().st_mtime < newest_set for e in elfs):
+        raise SystemExit(f"{src}: the resolutions' ELFs are missing or older than the sets; "
+                         f"run compose_elf.py (or the export) again")
     (dst / MANIFEST).unlink(missing_ok=True)
-    n = 0
-    for s, sub in SET_DIRS.items():
-        d = dst / sub
-        d.mkdir(parents=True, exist_ok=True)
-        for f in ["final.xclbin", SET_MARKERS[s], "toolchain.json"] + \
-                 [f"insts_{st}.bin" for st in sets[s]]:
-            shutil.copyfile(src / sub / f, d / f)
-            n += 1
+    dst.mkdir(parents=True, exist_ok=True)
+    # what an earlier install left (the installer ships dst recursively): v1's six set
+    # directories and xclbins, and ELFs of another layout
+    stale = [dst / sub for s, sub in SET_DIRS.items() if sub != "." and (dst / sub / SET_MARKERS[s]).is_file()]
+    keep = {e.name for e in elfs}
+    stale += [p for p in dst.iterdir() if p.is_file() and p.name not in keep and (
+        p.name in ("final.xclbin", SET_MARKERS["gemm"]) or re.fullmatch(r"insts_.*\.bin|diffusion.*\.elf", p.name))]
+    for p in stale:
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+    if stale:
+        print(f"removed {len(stale)} stale kernel-set entries from {dst}")
+    for f in [e.name for e in elfs] + [compose_elf.ELF_META, "toolchain.json"]:
+        shutil.copyfile(src / f, dst / f)
     (dst / MANIFEST).write_text(json.dumps({
         "format": MANIFEST_FORMAT, "family": family, "resolutions": resolutions,
-        "layout": layout_hash(sets), "sets": SET_DIRS, "complete": True}, indent=2) + "\n",
-        encoding="utf-8")
-    print(f"installed {n} files -> {dst} (layout {layout_hash(sets)})")
+        "layout": layout_hash(sets), "elf": elf_meta["elf"], "sets": elf_meta["sets"],
+        "cfg": elf_meta["cfg"], "valid_len": elf_meta["valid_len"], "complete": True},
+        indent=2) + "\n", encoding="utf-8")
+    mib = sum(e.stat().st_size for e in elfs) / 2**20
+    print(f"installed {len(elfs)} ELFs ({mib:.1f} MiB) -> {dst} (layout {layout_hash(sets)})")
 
 
 VL_PROBE, VL_PROBE_STREAM = 77, "te_attn_vlprobe"
@@ -431,6 +455,8 @@ def main() -> int:
     ap.add_argument("--no-gemm", action="store_true", help="skip the dit_gemm set")
     ap.add_argument("--no-ew", action="store_true", help="skip the dit_ew set")
     ap.add_argument("--no-vae", action="store_true", help="skip the VAE decoder's streams and sets")
+    ap.add_argument("--no-elf", action="store_true",
+                    help="skip assembling the sets into full ELFs (compose_elf.py)")
     ap.add_argument("--jobs", type=int, default=4, help="parallel stream builds")
     ap.add_argument("--fa-exp-fix", action="store_true",
                     help="build dit_fa with FA_EXP_FIX (see designs/dit_fa/README.md)")
@@ -578,6 +604,17 @@ def main() -> int:
         assemble(kout, dirs, marker, {"family": args.family, "kernel": kernel, **extra,
                                       "resolutions": resolutions, "streams": specs})
         print(f"OK: {len(specs)} {kernel} streams over one xclbin -> {kout}")
+
+    # the six sets as one full ELF per resolution (one hardware context): what --install ships
+    if args.no_elf:
+        return 0
+    missing = [s for s, sub in SET_DIRS.items()
+               if not (_read_json(out / sub / SET_MARKERS[s]) or {}).get("complete")]
+    if missing:
+        print(f"not building the ELF: set(s) {', '.join(missing)} not built in {out}")
+        return 0
+    import compose_elf  # noqa: E402
+    compose_elf.build_elf(out, args.jobs)
     return 0
 
 
