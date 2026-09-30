@@ -708,7 +708,7 @@ def assemble_readme(
         from q4nx.imatrix_prune import pruned_note
         meta["prune_note"] = pruned_note(
             meta["prune_ffn_kept"], meta.get("prune_ffn_from") or 0,
-            meta.get("prune_ffn_retained"))
+meta.get("prune_ffn_retained"), meta.get("mtp_dropped") or 0)
     (output_dir / "README.md").write_text(generate_readme(readme_text, meta), encoding="utf-8")
 
 
@@ -1183,6 +1183,18 @@ def assemble_model_assets(
     if prune_meta and prune_meta.get("kept"):
         was = config.get("intermediate_size")
         config["intermediate_size"] = int(prune_meta["kept"])
+        # ...and the DEPTH, when the MTP block was dropped. `block_count` counts the
+        # speculative block, so a generated config says 65 for a container that holds
+        # 64 layers. The kernel recipe builds a per-layer set and the engine walks
+        # num_hidden_layers, so an inflated depth is a link-time mismatch -- and the
+        # 65th layer is not in the container to be found.
+        if prune_meta.get("mtp_dropped"):
+            declared = config.get("num_hidden_layers")
+            config["num_hidden_layers"] = int(declared) - int(prune_meta["mtp_dropped"])
+            print(f"[INFO] config.json num_hidden_layers {declared} -> "
+                  f"{config['num_hidden_layers']} (the MTP speculative block is not "
+                  f"in this container)")
+        config["oflm_mtp_dropped"] = int(prune_meta.get("mtp_dropped") or 0)
         config["oflm_pruned_ffn"] = {
             "from": int(prune_meta.get("frm") or was or 0),
             "to": int(prune_meta["kept"]),
@@ -1224,6 +1236,7 @@ def assemble_model_assets(
         _meta["prune_ffn_kept"] = _pf.get("to")
         _meta["prune_ffn_from"] = _pf.get("from")
         _meta["prune_ffn_retained"] = _pf.get("activation_mass_retained")
+        _meta["mtp_dropped"] = config.get("oflm_mtp_dropped") or 0
     assemble_readme(output_dir, candidates, _meta, source_file)
 
     print(f"[INFO] Model directory ready: {output_dir}")
