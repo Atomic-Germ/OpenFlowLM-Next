@@ -6,6 +6,10 @@ separately from full-model acceptance. No runtime/catalogue promotion.
 **Full-model acceptance remains FAIL.** The best measured variant in this
 stage is corrected output projection only: two failures remain instead of three.
 
+Follow-up: [Q4 block product precision](qwen38-q4-product-precision.md) reproduces
+and fixes a cancellation regression in an opt-in mode. Its primitive and
+full-model results are recorded separately; it does not promote runtime support.
+
 ## Changes and resource bounds
 
 All new arithmetic is opt-in. Existing model weights, pool formats, reference

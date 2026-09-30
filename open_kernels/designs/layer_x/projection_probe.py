@@ -26,6 +26,11 @@ from recipes.wide_deltanet_layer import projection_bands, projection_table_bytes
 K = int(os.environ.get("PROBE_K", str(X.HID)))
 N = int(os.environ.get("PROBE_N", str(X.N_CORES * 2 * X.BAND_ROWS)))
 CORRECTION = os.environ.get("PROBE_Q4_CORRECTION") == "1"
+PRODUCT_CORRECTION = os.environ.get('PROBE_PRODUCT_CORRECTION') == '1'
+if PRODUCT_CORRECTION and not CORRECTION:
+    raise ValueError('product correction requires corrected activation tables')
+if PRODUCT_CORRECTION:
+    X.OS.append('-DGEMV_Q4_PRODUCT_CORRECTION=1')
 if CORRECTION:
     if K not in (5120,6144) or X.HID != 5120 or X.KIND != "dense" or X.Q8:
         raise ValueError("corrected projection is only a dense H5120 all-Q4 probe")
@@ -90,4 +95,4 @@ _sources = [Path(__file__), HERE / "xcommon.py", HERE / "gen_kernels.py", ROOT /
             *sorted(HERE.glob("*.cc")), *sorted(HERE.glob("*.h")),
             *sorted((HERE.parent / "gemv_q4").glob("*.h"))]
 SPECIALIZE = {"source_hash": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources)
-                                             + repr((K, N, CORRECTION, X.C, X.FFN)).encode()).hexdigest()[:8], 16)}
+                                             + repr((K, N, CORRECTION, PRODUCT_CORRECTION, X.C, X.FFN)).encode()).hexdigest()[:8], 16)}

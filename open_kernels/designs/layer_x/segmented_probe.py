@@ -28,6 +28,11 @@ FULL = os.environ.get('PROBE_FULL_FFN') == '1'
 TRACE = FULL and os.environ.get('PROBE_FFN_TRACE') == '1'
 DIAGNOSTIC = not FULL and os.environ.get('PROBE_PARTIALS', '1') == '1'
 CORRECTION = os.environ.get('PROBE_FFN_CORRECTION') == '1'
+PRODUCT_CORRECTION = os.environ.get('PROBE_PRODUCT_CORRECTION') == '1'
+if PRODUCT_CORRECTION and not CORRECTION:
+    raise ValueError('product correction requires corrected activation tables')
+if PRODUCT_CORRECTION:
+    X.OS.append('-DGEMV_Q4_PRODUCT_CORRECTION=1')
 if CORRECTION:
     if not FULL or X.HID != 5120 or X.FF != 17408 or X.Q8:
         raise ValueError('corrected FFN probe requires H5120/FF17408 all-Q4 full FFN')
@@ -118,4 +123,4 @@ _sources = [Path(__file__), HERE / 'xcommon.py', HERE / 'gen_kernels.py', ROOT /
             *sorted((ROOT / 'include').glob('*.h'))]
 SPECIALIZE = {'source_hash': int(hashlib.sha256(b''.join(p.read_bytes() for p in _sources)
                          + b''.join(X.source_hash_inputs())
-                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
+                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}

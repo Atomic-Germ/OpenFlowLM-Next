@@ -72,6 +72,7 @@ def main():
     p.add_argument("--projection-k", type=int, default=5120, help="isolated Q4 projection width")
     p.add_argument("--projection-correction", action="store_true", help="diagnostic Q4 activation residual correction")
     p.add_argument("--ffn-correction", action="store_true", help="corrected full FFN with K4096 down segments")
+    p.add_argument("--product-correction", action="store_true", help="compensate Q4 block products and sums (requires projection/FFN correction)")
     p.add_argument("--projection-n", type=int, default=1024, help="isolated Q4 projection output rows")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
@@ -81,6 +82,9 @@ def main():
         p.error("--final-only requires --scope down")
     if args.ffn_correction and args.scope != 'ffn':
         p.error('--ffn-correction requires --scope ffn')
+    if args.product_correction and not ((args.scope == 'projection' and args.projection_correction)
+                                        or (args.scope == 'ffn' and args.ffn_correction)):
+        p.error('--product-correction requires a corrected projection or FFN probe')
     out = args.out.resolve()
     if args.scope == "glue":
         out = out / "glue"
@@ -96,6 +100,7 @@ def main():
     spec_path = out / "probe-spec.json"
     spec_path.write_text(json.dumps(spec, indent=2) + "\n")
     env = os.environ.copy()
+    env['PROBE_PRODUCT_CORRECTION'] = str(int(args.product_correction))
     env.update(OPEN_KERNELS_SPEC=str(spec_path), OPEN_KERNELS_UNVALIDATED="1",
                OPEN_KERNELS_WIDE_GLUE_PROBE="1")
     env["PATH"] = "/opt/xilinx/xrt/bin:" + env["PATH"]
@@ -123,6 +128,7 @@ def main():
         design_path = out / "glue_probe.py"
         design_path.write_text(isolate_glue(source))
     metadata = {"python": sys.version, "ffn": args.ffn, "scope": args.scope, "hardware_validated": False,
+                "product_correction": args.product_correction,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}
     if args.scope == "projection":
         metadata.update(projection_k=args.projection_k, projection_n=args.projection_n, correction=args.projection_correction, weight_format="q4_1")

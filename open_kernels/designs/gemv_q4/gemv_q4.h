@@ -205,7 +205,9 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     part.from_vector(aie::to_float<float>(vi, sh[kb]));
 #if GEMV_Q4_CORRECTION
     const auto vr = aie::concat(re[0], re[1], ro[0], ro[1]);
+#if !GEMV_Q4_PRODUCT_CORRECTION
     part = aie::add(part, aie::to_float<float>(vr, sh[kb] + 15));
+#endif
 #endif
     const aie::vector<bfloat16, kRows> hi = part.template to_vector<bfloat16>();
     const aie::vector<bfloat16, kRows> lo = aie::sub(part, hi).template to_vector<bfloat16>();
@@ -218,6 +220,35 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     const aie::vector<bfloat16, kRows> mperm = aie::concat(me.template extract<16>(0), mo.template extract<16>(0));
     const aie::vector<bfloat16, kRows> ds = aie::mul(dperm, dsc).template to_vector<bfloat16>();   // exact
 
+#if GEMV_Q4_PRODUCT_CORRECTION
+    // Reduce the nine product components locally before the persistent Kahan
+    // sum. Carrying an unnormalized two-component sum over all K blocks fails
+    // the repeated small-residual cancellation case on AIE2P.
+    const auto previous = acc;
+    const auto previous_error = compensation;
+    acc = aie::zeros<accfloat, kRows>();
+    compensation = aie::zeros<float, kRows>();
+    const auto tail = aie::sub(aie::sub(part, hi), lo).template to_vector<bfloat16>();
+    aie::accum<accfloat, kRows> residual;
+    residual.from_vector(aie::to_float<float>(vr, sh[kb] + 15));
+    const auto rh = residual.template to_vector<bfloat16>();
+    const auto rl = aie::sub(residual, rh).template to_vector<bfloat16>();
+    const auto rt = aie::sub(aie::sub(residual, rh), rl).template to_vector<bfloat16>();
+    q4_product_add(acc, compensation, hi, ds);
+    q4_product_add(acc, compensation, lo, ds);
+    q4_product_add(acc, compensation, tail, ds);
+    q4_product_add(acc, compensation, rh, ds);
+    q4_product_add(acc, compensation, rl, ds);
+    q4_product_add(acc, compensation, rt, ds);
+    q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xsh[kb]));
+    q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xsl[kb]));
+    q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xst[kb]));
+    const auto block = aie::add(acc, compensation);
+    const auto corrected = aie::sub(block, previous_error);
+    const auto next = aie::add(previous, corrected);
+    compensation = aie::sub(aie::sub(next, previous), corrected).template to_vector<float>();
+    acc = next;
+#else
 #if GEMV_Q4_CORRECTION
     const auto previous = acc;
     acc = aie::zeros<accfloat, kRows>();
@@ -236,6 +267,7 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     const auto next = aie::add(previous, corrected);
     compensation = aie::sub(aie::sub(next, previous), corrected).template to_vector<float>();
     acc = next;
+#endif
 #endif
   }
 

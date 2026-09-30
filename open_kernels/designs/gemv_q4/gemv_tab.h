@@ -25,6 +25,34 @@
 #ifndef GEMV_Q4_CORRECTION
 #define GEMV_Q4_CORRECTION 0
 #endif
+#ifndef GEMV_Q4_PRODUCT_CORRECTION
+#define GEMV_Q4_PRODUCT_CORRECTION 0
+#endif
+#if GEMV_Q4_PRODUCT_CORRECTION && !GEMV_Q4_CORRECTION
+#error "product correction requires the residual activation table"
+#endif
+
+#if GEMV_Q4_PRODUCT_CORRECTION
+// TwoSum retains the rounding error even when cancellation reverses the
+// relative magnitudes. All operations are FP32 vector adds, never scalar FP.
+static inline void q4_two_sum(aie::accum<accfloat, 32> &sum,
+                              aie::vector<float, 32> &low,
+                              const aie::accum<accfloat, 32> &term) {
+  const auto next = aie::add(sum, term);
+  const auto recovered = aie::sub(next, sum);
+  const auto error = aie::add(aie::sub(sum, aie::sub(next, recovered)),
+                             aie::sub(term, recovered));
+  low = aie::add(error, low).template to_vector<float>();
+  sum = next;
+}
+
+__attribute__((noinline)) inline void q4_product_add(
+    aie::accum<accfloat, 32> &sum, aie::vector<float, 32> &low,
+    const aie::vector<bfloat16, 32> &a, const aie::vector<bfloat16, 32> &b) {
+  // A BF16 product is exact in FP32 (for the normal model range).
+  q4_two_sum(sum, low, aie::mul(a, b));
+}
+#endif
 
 // Sum of 32 bf16 values -> fp32, returned as 32-lane bf16 hi/lo broadcast
 // vectors (hi + lo == sum to ~2^-16). Vector-only: accumulator adds fold
@@ -97,6 +125,26 @@ __attribute__((noinline)) inline void gemv_q4_prep_block(const aie::vector<bfloa
   // block sum of the exact bf16 x (fp32 tree) as bf16 hi/lo
   aie::accum<accfloat, 32> xa;
   xa.from_vector(xv);
+#if GEMV_Q4_PRODUCT_CORRECTION
+  auto sum = xa;
+  auto low = aie::zeros<float, 32>();
+#pragma clang loop unroll(disable)
+  for (unsigned st = 16; st >= 1; st >>= 1) {
+    aie::accum<accfloat, 32> shifted, shifted_low;
+    shifted.from_vector(aie::shuffle_down_rotate(sum.template to_vector<float>(), st));
+    shifted_low.from_vector(aie::shuffle_down_rotate(low, st));
+    low = aie::add(shifted_low, low).template to_vector<float>();
+    q4_two_sum(sum, low, shifted);
+  }
+  aie::accum<accfloat, 32> bc;
+  bc.from_vector(aie::broadcast<float, 32>(sum.template to_vector<float>()[0]));
+  const auto hi = bc.template to_vector<bfloat16>();
+  const auto rest = aie::add(aie::sub(bc, hi), aie::broadcast<float, 32>(low[0]));
+  const auto lo = rest.template to_vector<bfloat16>();
+  xsh[kb] = hi[0];
+  xsl[kb] = lo[0];
+  xst[kb] = aie::sub(rest, lo).template to_vector<bfloat16>()[0];
+#else
   const aie::vector<float, 32> v32 = xa.template to_vector<float>();
   aie::accum<accfloat, 16> a16, b16;
   a16.from_vector(v32.template extract<16>(0));
@@ -123,6 +171,7 @@ __attribute__((noinline)) inline void gemv_q4_prep_block(const aie::vector<bfloa
 #if GEMV_Q4_CORRECTION
   const auto tail = aie::sub(aie::sub(bc, hi), lo).template to_vector<bfloat16>();
   xst[kb] = tail[0];
+#endif
 #endif
 }
 

@@ -116,4 +116,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build compensated projection/FFN, precise attention and RMSNorm probes, and replay the real 64-layer model against unchanged reference fixtures.</description>
     <location>.opencode/skill/open-wide-model-precision/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-q4-product-precision</name>
+    <description>Reproduce Q4 block cancellation and build compensated-product projection/FFN probes with unchanged full-model replay gates.</description>
+    <location>.opencode/skill/open-q4-product-precision/SKILL.md</location>
+  </skill>
 </available_skills>

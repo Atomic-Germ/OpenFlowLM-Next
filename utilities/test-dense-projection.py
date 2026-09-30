@@ -17,7 +17,23 @@ from wide_deltanet_reference import metric
 GUARD = bytes([0xA5]) * 64
 
 
-def prepare(out):
+def cancellation_case(n, k):
+    """Exact -2^-24 per block, despite cancellation of two unit terms.
+
+    W starts [0, 0, -1]; x starts [1, 2^-24, 2^-24]. Joining the
+    coarse and residual integer dots in FP32 loses the second component.
+    """
+    blocks = np.zeros((n, k // 32, 20), np.uint8)
+    blocks[..., :2] = np.array([1], np.float16).view(np.uint8)
+    blocks[..., 2:4] = np.array([-1], np.float16).view(np.uint8)
+    blocks[..., 4:6] = 1
+    x = np.zeros(k, bfloat16)
+    x[::32] = 1
+    x[1::32] = x[2::32] = 2.0 ** -24
+    return pack_q4_1_pool(blocks, 2), x
+
+
+def prepare(out, cancellation=False):
     meta = json.loads((out / "probe-toolchain.json").read_text())
     k, n = meta["projection_k"], meta["projection_n"]
     rng = np.random.default_rng(2961)
@@ -31,11 +47,28 @@ def prepare(out):
         x = np.zeros(k, bfloat16)
         x[index] = 1
         inputs.append(x)
+    cancellation_start = None
+    files = ["final.xclbin", "insts.bin", "weights.bin", "projection.cfg"]
+    if cancellation or meta.get('product_correction', False):
+        cancellation_pool, x = cancellation_case(n, k)
+        cases = [(x.astype(np.float32) * scale).astype(bfloat16)
+                 for scale in (1, -1, 2, 0, 1)]
+        if cancellation:
+            pool, inputs, cancellation_start = cancellation_pool, cases, 0
+            pool.tofile(out / "weights.bin")
+        else:
+            cancellation_start = len(inputs)
+            inputs += cases
+            cancellation_pool.tofile(out / 'cancellation-weights.bin')
+            files.append('cancellation-weights.bin')
     chunks = (k + 2047) // 2048
     (out / "poison.bin").write_bytes(np.full(n, np.nan, np.float32).tobytes() + GUARD)
     cfg = ["device", "xclbin p final.xclbin", "kernelx p p insts.bin",
            f"buf w {pool.nbytes} weights.bin", f"buf x {chunks * 4096}", f"buf y {n * 4 + len(GUARD)}"]
     for i, x in enumerate(inputs):
+        if i == cancellation_start and not cancellation:
+            cfg.append('load w cancellation-weights.bin')
+            pool = cancellation_pool
         # A partial last element must not consume padding beyond logical K.
         padded = np.full(chunks * 2048, np.nan, bfloat16)
         padded[:k] = x
@@ -44,9 +77,10 @@ def prepare(out):
         cfg += [f"load x x{i}.bin", "load y poison.bin", "run p w x y", f"dump y got{i}.bin {n * 4 + len(GUARD)}"]
         (out / f"got{i}.bin").unlink(missing_ok=True)
     (out / "projection.cfg").write_text("\n".join(cfg) + "\n")
-    metadata = dict(k=k, n=n, inputs=len(inputs), seed=2961,
+    metadata = dict(k=k, n=n, inputs=len(inputs), seed=2961, cancellation=cancellation,
+                    cancellation_inputs=[] if cancellation_start is None else list(range(cancellation_start, len(inputs))),
                     sha256={f: hashlib.sha256((out / f).read_bytes()).hexdigest()
-                            for f in ("final.xclbin", "insts.bin", "weights.bin", "projection.cfg")})
+                            for f in files})
     (out / "projection-fixture.json").write_text(json.dumps(metadata, indent=2) + "\n")
     (out / "projection-results.json").unlink(missing_ok=True)
     print(f"Prepared {len(inputs)} Q4 projection inputs, N={n}, K={k}")
@@ -77,9 +111,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("stage", choices=("prepare", "compare"))
     p.add_argument("--build-dir", type=Path, required=True)
+    p.add_argument("--cancellation", action="store_true", help="exact cancellation regression fixture (use a separate build directory)")
     args = p.parse_args()
     if args.stage == "prepare":
-        prepare(args.build_dir)
+        prepare(args.build_dir, args.cancellation)
         return 0
     return compare(args.build_dir)
 
