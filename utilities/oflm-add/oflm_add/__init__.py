@@ -759,18 +759,76 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     return obtained
 
 
-def copy_from_dir(src_dir, target, force=False):
+def copy_from_dir(src_dir, target, force=False, quiet=False):
+    """Copy a model directory's files into place, replacing any that DIFFER.
+
+    Installing the same model twice is an UPDATE, not a no-op: the usual reason
+    to re-add a model is that a newer conversion of it exists, and silently
+    keeping the old weights would leave the user testing the artifact they
+    already had -- which reads as "my new pack is broken" when it is not there.
+    So the test is same NAME and same CONTENT, not same name: an identical file
+    is left alone (a 16 GB re-copy for no reason is worse than useless), and a
+    different one is replaced, whatever its size. `force` still replaces
+    identical files too.
+
+    What is replaced is logged, because a 20 GB -> 16 GB swap is exactly the
+    kind of change that would otherwise go unnoticed and then get tested as if
+    it had not happened.
+    """
     obtained = []
+    replaced = []
     for fname in ALL_FILES:
         src = src_dir / fname
-        if src.is_file():
-            dest = target / fname
-            if dest.is_file() and not force:
-                obtained.append(fname)
-                continue
-            shutil.copy2(src, dest)
+        if not src.is_file():
+            continue
+        dest = target / fname
+        if dest.is_file() and not force and _same_file(src, dest):
             obtained.append(fname)
+            continue
+        if dest.is_file():
+            replaced.append((fname, dest.stat().st_size, src.stat().st_size))
+        shutil.copy2(src, dest)
+        obtained.append(fname)
+    if replaced and not quiet:
+        for fname, was, now in replaced:
+            log(f"[INFO] replaced {fname} ({human(was)} -> {human(now)})")
     return obtained
+
+
+def human(n):
+    """Bytes as a short human string; the repo's installs are 0.5-20 GB."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Are these two files byte-identical? Size first, then a sampled hash.
+
+    The container is 16-20 GB, so hashing it whole on every install would cost
+    more than the copy it might save. Size plus a hash of the head and tail --
+    where a truncated or half-replaced file shows up first -- is enough to tell
+    "the same model, already here" from "a different conversion", which is the
+    only decision this makes.
+    """
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+    except OSError:
+        return False
+    if a.stat().st_size == 0:
+        return True
+    n = 1 << 20
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        if fa.read(n) != fb.read(n):
+            return False
+        if a.stat().st_size > 2 * n:
+            fa.seek(-n, os.SEEK_END)
+            fb.seek(-n, os.SEEK_END)
+            return fa.read(n) == fb.read(n)
+    return True
 
 
 # ---------------------------------------------------------------- registry
@@ -1260,14 +1318,14 @@ def main():
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
         target.mkdir(parents=True, exist_ok=True)
-        files = copy_from_dir(local_dir, target, force=args.force)
+        files = copy_from_dir(local_dir, target, force=args.force, quiet=args.quiet)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
             target.mkdir(parents=True, exist_ok=True)
-            files = copy_from_dir(snapshot, target, force=args.force)
+            files = copy_from_dir(snapshot, target, force=args.force, quiet=args.quiet)
         else:
             if not args.quiet:
                 log(f"[INFO] Downloading model files from {'ModelScope' if args.modelscope else 'Hugging Face'}: {repo}")

@@ -1240,6 +1240,24 @@ def assemble_model_assets(
         print("[WARN] No source model found; generating config.json from GGUF metadata.")
         print("[WARN] tokenizer files may not exactly match the official model.")
         config = generate_config_from_gguf(reader)
+        # A GGUF-derived config is a FALLBACK, and for a linear-attention family
+        # it is not a usable one: the GGUF mapping has no fields for the DeltaNet
+        # geometry, so linear_num_value_heads / linear_key_head_dim /
+        # full_attention_interval all come out absent, and head_dim falls back to a
+        # rope dimension that is not the head width. Qwen3.8-27B packed this way
+        # produced a config with head_dim 64 where the model is 256, and the
+        # runtime died in a zero-sized buffer allocation rather than at the load
+        # that should have said so. Three warnings and a 16 GB container is the
+        # wrong trade: fail here, naming the flag, before the weights are written.
+        missing = [k for k in ("linear_num_value_heads", "linear_key_head_dim",
+                               "full_attention_interval", "head_dim")
+                   if not config.get(k)]
+        if missing:
+            raise RuntimeError(
+                "No source model found, and a config generated from the GGUF alone is "
+                f"missing {missing}, which the runtime needs. Pass -s <repo> to name "
+                "the model the assets come from, e.g. -s Qwen/Qwen3.8-27B. The GGUF "
+                "does not carry this geometry, so it cannot be reconstructed here.")
 
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
