@@ -237,9 +237,26 @@ void ModelDownloader::model_not_found(const std::string& model_tag) {
     }
 }
 
+/// Files whose on-disk size is NOT a completeness criterion.
+///
+/// The size check exists to catch an interrupted download leaving a truncated
+/// weight -- observed for real as a 50 MB model.safetensors where the manifest
+/// said 417 MB, reported as verified. That is a failure mode of multi-gigabyte
+/// binary blobs.
+///
+/// These are not weights. They are small, human-authored text that changes
+/// between conversions and, on an official model, whenever its template is
+/// updated. `model_info.json` is a frozen snapshot of a repo listing, so
+/// comparing one against it reports a correct install as damaged and re-pulls
+/// on every `oflm list` forever, because the replacement is the same newer file
+/// and the stale expectation never moves. No re-pull fixes a stale manifest.
+static bool is_size_checked(const std::string& filename) {
+    return filename != "chat_template.jinja";
+}
+
 /// \brief Get missing files
-/// \param model_tag the model tag
-/// \return the missing files
+/// \param model_tag The model tag
+/// \return The missing files
 std::vector<std::string> ModelDownloader::get_missing_files(const std::string& model_tag) {
     std::vector<std::string> missing_files;
 
@@ -251,14 +268,34 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
 
         // Check if this is a VLM model (default to false if key doesn't exist)
 
-        // The manifest, for the expected sizes below. Absent or unreadable is
-        // not an error here -- build_download_list() is where that is
-        // reported; this only means the size check is skipped.
+        // The expected sizes, for the check below. PREFER THE LIVE REPO LISTING:
+        // `file_url` is the same endpoint `oflm add` reads, and it is the repo as
+        // it is now. The shipped model_info.json is a frozen snapshot of that
+        // listing, which is why updating a model otherwise needed an app
+        // release -- a model whose chat template changed read as a broken
+        // install, permanently, and no re-pull could fix it. The snapshot is
+        // kept for the offline case, where there is nothing to ask, and the
+        // snapshot is a strict improvement over no sizes at all.
         nlohmann::json manifest;
-        try {
-            std::ifstream mf(utils::find_model_info());
-            manifest = nlohmann::json::parse(mf).at(new_model_tag);
-        } catch (const std::exception&) {}
+        bool live = false;
+        if (model_info.contains("file_url") && model_info["file_url"].is_string()) {
+            try {
+                const std::string body = download_utils::download_string(
+                    model_info["file_url"].get<std::string>(), true);
+                auto j = nlohmann::json::parse(body, nullptr, false);
+                if (j.is_array() && !j.empty()) { manifest = j; live = true; }
+            } catch (const std::exception&) {
+                // Offline, rate-limited, or the endpoint moved. The snapshot
+                // below is what there is, and an absent one just skips the
+                // check. Neither is worth an error at status time.
+            }
+        }
+        if (!live) {
+            try {
+                std::ifstream mf(utils::find_model_info());
+                manifest = nlohmann::json::parse(mf).at(new_model_tag);
+            } catch (const std::exception&) {}
+        }
 
         // Check each required model file
         for (int i = 0; i < model_files.size(); ++i) {
@@ -283,7 +320,25 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
             // hash would be stronger and costs a full read of every file on
             // every status check; size catches truncation, which is what
             // interruption produces.
-            if (manifest.is_array()) {
+            //
+            // ...for the WEIGHTS. `chat_template.jinja` is exempt, because
+            // model_info.json is a frozen snapshot of a repo listing and the
+            // template is small, human-authored text that legitimately changes
+            // -- between conversions, and on an official model when its
+            // template is updated. Judging today's file against a number
+            // captured weeks ago reports a correct install as damaged:
+            //
+            //   chat_template.jinja is 27172 bytes, the manifest says 7545
+            //   -- treating it as missing
+            //
+            // and it re-pulls on every `oflm list`, forever, because the pull
+            // replaces it with the same newer file and the stale expectation
+            // never changes. Truncation is not a real failure mode for a few KB
+            // of text the way it is for a weight, and `oflm add` already takes
+            // this file from the LIVE repo listing, so its source is known
+            // without asking the snapshot. A mismatch here is a stale manifest,
+            // not a broken install, and re-pulling cannot fix a stale manifest.
+            if (manifest.is_array() && is_size_checked(filename)) {
                 for (const auto& f : manifest) {
                     if (!f.contains("path") || f["path"] != filename) continue;
                     if (!f.contains("size")) break;

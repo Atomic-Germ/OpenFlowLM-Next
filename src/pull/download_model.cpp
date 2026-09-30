@@ -240,7 +240,7 @@ static bool download_with_retry(const std::string& url, const std::string& local
 /// \brief Download content from URL to a string
 /// \param url the URL to download from
 /// \return the downloaded string
-std::string download_string(const std::string& url) {
+std::string download_string(const std::string& url, bool quiet) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::cerr << "Failed to initialize CURL" << std::endl;
@@ -264,11 +264,13 @@ std::string download_string(const std::string& url) {
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     if (res != CURLE_OK || http_code < 200 || http_code >= 300) {
-        if (res == CURLE_OK) {
-            std::cerr << "HTTP " << http_code << " for " << url << std::endl;
-        }
-        else {
-            std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
+        if (!quiet) {
+            if (res == CURLE_OK) {
+                std::cerr << "HTTP " << http_code << " for " << url << std::endl;
+            }
+            else {
+                std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
+            }
         }
         return "";
     }

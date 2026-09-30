@@ -35,8 +35,14 @@ int progress_callback(void* clientp, double dltotal, double dlnow, double ultota
 bool download_file(const std::string& url, const std::string& local_path, bool is_lfs, std::string remote_oid,
                    std::function<void(double)> progress_cb = nullptr);
 
-// Download content from URL to a string
-std::string download_string(const std::string& url);
+// Download content from URL to a string.
+//
+// `quiet` suppresses the stderr report on failure. Pass it for an OPTIONAL
+// fetch that has a fallback -- a status check asking a repo what it currently
+// holds, say. "Could not connect" is the normal answer offline and there is
+// something else to use, so it is not something to tell the user about; a
+// download that failed, with nothing behind it, still reports.
+std::string download_string(const std::string& url, bool quiet = false);
 
 // Download multiple files with progress tracking
 bool download_multiple_files(const nlohmann::json downloads,
