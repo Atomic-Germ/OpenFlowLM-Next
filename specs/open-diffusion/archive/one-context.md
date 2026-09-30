@@ -207,7 +207,7 @@ The step ends with a decision recorded here before step 3.
 - **Reconfiguration leaving state behind.** Register writes do not reset the array the
   way a PDI load does. Whole images came out byte-identical 3 times, and the new test
   keeps checking.
-- **Unmeasured side effect:** `--image 1` holding one context instead of six should make
+- **Unmeasured side effect:** `--imagegen 1` holding one context instead of six should make
   residency beside `--asr` / `--embed` easier. It will be checked in step 5, not claimed
   now.
 
