@@ -590,7 +590,15 @@ def _readme_banner(meta: dict) -> str:
         rows.append(f"| OFLM version | `{meta['oflm_version']}` |")
     if meta.get("date"):
         rows.append(f"| Converted | {meta['date']} |")
+    if meta.get("prune_ffn_kept"):
+        rows.append(
+            f"| FFN | **pruned** {meta.get('prune_ffn_from')} -> "
+            f"{meta['prune_ffn_kept']} by imatrix importance |")
     parts.append("\n".join(rows))
+    if meta.get("prune_note"):
+        # Directly under the table, before anything else: this is the one fact
+        # that decides whether the artifact is the model someone asked for.
+        parts += ["", meta["prune_note"], ""]
     parts += [
         "",
         "## Install and run",
@@ -693,6 +701,14 @@ def assemble_readme(
         print(f"[INFO] Writing README.md based on {source_id}'s model card")
     else:
         print("[INFO] No source model card found; writing a minimal README.md")
+    # A pruned FFN is not the source model at its trained width, so the card
+    # says so in the banner rather than in a footnote nobody reads. The
+    # numbers come from what the converter recorded, not from re-deriving them.
+    if meta.get("prune_ffn_kept"):
+        from q4nx.imatrix_prune import pruned_note
+        meta["prune_note"] = pruned_note(
+            meta["prune_ffn_kept"], meta.get("prune_ffn_from") or 0,
+            meta.get("prune_ffn_retained"))
     (output_dir / "README.md").write_text(generate_readme(readme_text, meta), encoding="utf-8")
 
 
@@ -1115,6 +1131,7 @@ def assemble_model_assets(
     oflm_version: Optional[str] = None,
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
+    prune_meta: Optional[dict] = None,
 ) -> None:
     """Build a complete, uploadable model directory.
 
@@ -1158,6 +1175,24 @@ def assemble_model_assets(
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
+    # The FFN in model.q4nx is NARROWER than the source model's, so the config
+    # that ships beside it has to say so. Left at the source width, the kernel
+    # recipe builds a set for a tensor shape that does not exist in this
+    # container, and the mismatch surfaces as a link failure at load time rather
+    # than as an obviously wrong number here.
+    if prune_meta and prune_meta.get("kept"):
+        was = config.get("intermediate_size")
+        config["intermediate_size"] = int(prune_meta["kept"])
+        config["oflm_pruned_ffn"] = {
+            "from": int(prune_meta.get("frm") or was or 0),
+            "to": int(prune_meta["kept"]),
+            "method": "imatrix importance, per layer",
+            "activation_mass_retained": (
+                round(float(prune_meta["retained"]), 4)
+                if prune_meta.get("retained") is not None else None),
+        }
+        print(f"[INFO] config.json intermediate_size {was} -> {prune_meta['kept']} "
+              f"(the FFN in this container is that wide)")
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
@@ -1181,6 +1216,14 @@ def assemble_model_assets(
             print("[INFO] Writing chat_template.jinja from GGUF metadata.")
             chat_template_path.write_text(chat_template, encoding="utf-8")
 
-    assemble_readme(output_dir, candidates, build_readme_meta(output_dir, oflm_version), source_file)
+    # The prune facts are re-read from the config this run just wrote, so the card
+    # and the config cannot disagree: one source, written once.
+    _meta = build_readme_meta(output_dir, oflm_version)
+    _pf = config.get("oflm_pruned_ffn")
+    if _pf:
+        _meta["prune_ffn_kept"] = _pf.get("to")
+        _meta["prune_ffn_from"] = _pf.get("from")
+        _meta["prune_ffn_retained"] = _pf.get("activation_mass_retained")
+    assemble_readme(output_dir, candidates, _meta, source_file)
 
     print(f"[INFO] Model directory ready: {output_dir}")
