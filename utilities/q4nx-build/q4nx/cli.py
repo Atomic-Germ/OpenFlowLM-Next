@@ -63,6 +63,22 @@ def _resolve_imatrix_hint(args, input_path):
     return p
 
 
+def _layer_count(model):
+    """How many layers the converted container holds, from its own tensors.
+
+    The right source of truth for num_hidden_layers: the GGUF's block_count
+    counts the MTP block, the source config may or may not have excluded it,
+    and only the tensors just written settle it.
+    """
+    n = 0
+    for name in getattr(model, "q4nx_tensors", {}):
+        parts = name.split(".")
+        if len(parts) > 2 and parts[0] == "model" and parts[1] == "layers" \
+                and parts[2].isdigit():
+            n = max(n, int(parts[2]) + 1)
+    return n or None
+
+
 def _prune_meta(model):
     """What the converter recorded about an imatrix prune, for the card + config.
 
@@ -75,6 +91,8 @@ def _prune_meta(model):
         "frm": getattr(model, "prune_ffn_from", None),
         "retained": getattr(model, "prune_ffn_retained", None),
         "mtp_dropped": getattr(model, "mtp_dropped", 0),
+        # measured, not declared: the layer count the manifest will carry
+        "layers_actual": _layer_count(model),
     }
 
 

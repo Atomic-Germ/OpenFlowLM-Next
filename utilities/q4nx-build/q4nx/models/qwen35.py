@@ -378,6 +378,13 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
             data = quantize(w.to(torch.float32).numpy(), GGMLQuantizationType.Q4_1).copy()
             d, m, qw = gguf_tensor.unpack_q4_1(data, rows)
             return (d, -m, qw)
+        # NOT the bfloat16 round trip gguf_tensor._requantize_to uses. There `w` is
+        # a raw byte buffer and `.view(torch.float32)` reinterprets those bytes; here
+        # `w` is an already-dequantized float tensor, so the same call halves the
+        # last axis and quantizes HALF the FFN -- a container that declares
+        # intermediate_size 12288 while carrying 6144 columns. Round-tripping through
+        # a real cast costs nothing here, and the float16 scale that _pack_q8nx
+        # asserts on is applied at the pack boundary instead (see _pack).
         data = quantize(w.to(torch.float32).numpy(), target).copy()
         if target == GGMLQuantizationType.Q4_1:
             d, m, qw = gguf_tensor.unpack_q4_1(data, rows)

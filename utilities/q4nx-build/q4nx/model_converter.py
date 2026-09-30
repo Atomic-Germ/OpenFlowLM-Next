@@ -613,6 +613,19 @@ class __Q4NX_Converter(ABC):
             # Q8NX format: scale array (d, bf16) followed by int8 data, no min
             # array. This matches the official Q8_0-packed tensors (alpha/beta/
             # out_proj/lm_head) which use 8704-byte chunks (256 blocks x 34).
+            if d is not None and d.dtype != torch.float16:
+                # _pack_q8nx reinterprets the scale bytes AS float16 rather than
+                # converting them, so it requires float16 in. unpack_q8_0 hands
+                # back float16 (it read them as float16); unpack_q4_k hands back
+                # float32, because it holds S*s_j factored and that product needs
+                # 17 bits to stay exact. Both are right for their own format and
+                # neither is a value error -- the cast rounds to the 11-bit
+                # significand the container stores, which is what an fp16 scale
+                # would have been in the first place. Without this, any tensor
+                # whose SOURCE is Q4_K and whose TARGET is Q8_0 -- Qwen3.5's
+                # ssm_alpha_proj / ssm_beta_proj -- dies in a bare assert with no
+                # name on it, so a Q4_K/Q4_K_M pack could not be converted at all.
+                d = d.to(torch.float16)
             return self._pack_q8nx(data=qw, scales=d, m=None)
         else:
             return self._pack_q4nx(d, m, qw)
