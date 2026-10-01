@@ -83,22 +83,40 @@ inferred.** Four independent axes, because a route needs all four:
 
 **These are the actionable list.** Nothing below needs a kernel written.
 
-- **`granite`** — Granite 4.2-3B. `granite` dispatches to `recipes/dense.py`, its
-  `model_type` is routed, and `granite.json` exists on both sides. A spec derives
-  (`h2560-L40`, heads 40/8, head_dim 64, vocab 100352) and the recipe accepted it
-  first try. Its set was **built and verified 2026-09-06** (`head_dim 64`,
-  `num_heads 40`, `gemv_q4 K 8192` all entered `catalogue.py`) from
-  `dense/build_granite_h2560`, `ln/build_2560_1e-05`, `lm_head_q4/build_100352`
-  — see the `open-granite-kernels` skill. It is simply **not in this checkout's
-  `src/xclbins`**, because that directory holds what was built here. **Build it.**
-- **`nanbeige`** — Nanbeige4.1-3B, the `phi3` recipe (`open-phi3-nanbeige-kernels`
-  covers both). Converter and `nanbeige.json` config both exist; no built set here.
-  **Build it.**
-- **`hunyuan`** — recipe dispatches to `dense.py`, `hunyuan_dense` and
-  `hunyuan_v1_dense` are routed, `hunyuan.json` exists. No spec derives **only
-  because `hy-mt2-flash` is an empty object in the shipped catalogue** — the
-  family key exists with zero models. It needs a model, then a spec, then a
-  build.
+> **These three are DONE and one is PROVEN ON HARDWARE (2026-10-01).**
+> The durable fix for all of them was a `src/model_list.json` **entry**, not a
+> hand-written spec: `recipes/specs/` is gitignored, and
+> `gen_catalogue_specs.py` *deletes every spec* and regenerates from the
+> catalogue on each build. A hand-written spec is wiped, silently.
+
+- **`granite`** — Granite 4.2-3B. **Built, linked, and PROVEN on hardware**:
+  `oflm run granite:3b` answers correctly ("Paris"), and there are **no closed
+  granite kernels installed**, so it ran entirely on kernels built in this
+  checkout. `spec_hash sha256:fea8ba46bd39`; catalogue URL is
+  `OpenFlowLM/Granite-4.2-3B-NPU2` (that repo's README carries
+  `oflm-family: granite`; the `vegahyo/` original does **not**, so `oflm add`
+  cannot infer the family from it).
+- **`nanbeige`** — Nanbeige4.1-3B, the `phi3` recipe. **Needs nothing.** It is
+  `model_type: llama` at h2560-L32, so it resolved to the pre-existing
+  `llama3-h2560-L32` set with an **identical `spec_hash` (3213be526345)** and
+  byte-identical contents. Built again for the proof; it deduplicated.
+- **`hunyuan`** — **Kernels DONE for both dense sizes, engine MISSING.**
+  - `hy-mt2:1.8b` → `hunyuan-h2048-L32`, `sha256:d6ef13a70b6e`
+  - `hy-mt2:7b` → `hunyuan-h4096-L32`, `sha256:96485aee63e2`
+
+  Both build (`dx`, `dx_attn`, `ln`, `lm_head_q4`, 4 GEMM prefill sets) and both
+  link. The 1.8B needed one `catalogue.py` attn tuple added —
+  `(128, 16, 4, 128, qk_norm, attn_gate=False, post_rope=True, bias=False)`,
+  which is the 7B's post-rope qk-norm at a GQA group of 4, so the compiled path
+  already existed. **Packing: the dense pair only converts from a Q8_0 source**;
+  from Q4_1 the `lm_head` comes back a float passthrough the q4_1 head cannot
+  read, and the converter refuses with a clear message.
+
+  **The remaining gap is an ENGINE, not a kernel:** `SupportedModelFamily` in
+  `src/include/AutoModel/model_families.hpp` has no `hunyuan` member, so the
+  runtime refuses with *"family 'hunyuan', which this build has no engine for"*.
+  Kernels + converter + catalogue can all be complete and the model still cannot
+  run. Treat family presence in that enum as a separate checklist item.
 
 ### Routes that need CODE
 
@@ -217,3 +235,23 @@ Dense Qwen3.5 currently covers hidden 1024 / 2048 / 2560 / 4096, and 5120 once
   this project. A model that needs a newer FastFlowLM than you have will
   install and then fail deep in a closed loader; that is a version gate, not a
   bug in anything here.
+- **To see NPU memory, use `xrt-smi examine --batch`.** Bare `xrt-smi` prints
+  only its help text, so a grep for `%` finds nothing and the device looks
+  idle when it is fully loaded. Concluding "the NPU is not being used" from
+  that is a measurement error — confirm with a BO submission in the run log
+  (`Submitted BO …`) before believing it.
+- **`[ a = b* ]` is string equality, not a glob.** A `[ $m = Granite* ]` guard
+  is false for `Granite-4.2-3B-NPU2`, which silently passed the wrong
+  `--family` and registered Granite as `hunyuan` — so the engine refused it
+  with a plausible-looking family error. Use `case "$m" in Granite*) …`.
+
+## Open bugs found 2026-10-01
+
+- **Server dies on cached prompt + system-prompt change.** Reproduced on
+  `granite:3b` via `oflm-test --llm` (3 PASS, then 2 ERROR): the log reads
+  `Use cached prompt!` → `Matched 1 out of 3 messages` →
+  `System prompt changed! Clearing context...` → 1686-token prefill →
+  `Start generating...` → death immediately after `Submitted BO 389`, with no
+  signal or assertion text. **Not** a kernel or length problem: a 700-token
+  single-turn prompt generating a long answer runs clean. The suspect is the
+  context-reuse/KV-cache path after a system-prompt change. Unfixed.

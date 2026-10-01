@@ -1386,8 +1386,8 @@
         "granite": {
             "3b": {
                 "name": "Granite-4.2-3B-NPU2",
-                "url": "https://huggingface.co/vegahyo/Granite-4.2-3B-NPU2",
-                "file_url": "https://huggingface.co/api/models/vegahyo/Granite-4.2-3B-NPU2/tree/main",
+                "url": "https://huggingface.co/OpenFlowLM/Granite-4.2-3B-NPU2",
+                "file_url": "https://huggingface.co/api/models/OpenFlowLM/Granite-4.2-3B-NPU2/tree/main",
                 "ms_url": "https://modelscope.cn/models/amd/Granite-4.2-3B-NPU2",
                 "modified_at": "2026-09-30T00:00:00Z",
                 "size": 3000000000,
