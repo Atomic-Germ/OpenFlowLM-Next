@@ -1444,8 +1444,15 @@ _ATTN_HF = {"self_attn.q_proj.weight": "attn", "self_attn.k_proj.weight": "attn"
 _FFN_HF = {"mlp.up_proj.weight": "ffn", "mlp.gate_proj.weight": "ffn", "mlp.down_proj.weight": "ffn"}
 # `self_attn.gate_proj` is the LINEAR layer's z projection, not an attention tensor: a
 # full-attention layer's gate is the second half of the fused `q_proj`.
+# `ssm_alpha_proj` / `ssm_beta_proj` are the gated DeltaNet's other two value-head
+# projections. Every qwen3.5 config writes all THREE at Q8_0, not just
+# `ssm_out_proj`; leaving two out here made the quant map (and therefore spec_hash)
+# describe fewer q8 tensors than the container actually holds, which is the silent
+# corruption the hash exists to prevent.
 _LIN_HF = {"linear_attn.qkv_proj.weight": "linear", "self_attn.gate_proj.weight": "linear",
-           "linear_attn.ssm_out_proj.weight": "linear_out"}
+           "linear_attn.ssm_out_proj.weight": "linear_out",
+           "linear_attn.ssm_alpha_proj.weight": "linear_alpha",
+           "linear_attn.ssm_beta_proj.weight": "linear_beta"}
 _MOE_HF = {"mlp.up_exps_proj.weight": "experts", "mlp.gate_exps_proj.weight": "experts",
            "mlp.down_exps_proj.weight": "experts",
            "mlp.share_up_exps_proj.weight": "shared", "mlp.share_gate_exps_proj.weight": "shared",
