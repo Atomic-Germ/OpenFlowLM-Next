@@ -40,18 +40,19 @@ def test_a_never_run_combination_of_validated_values_is_refused():
 
 def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take_it():
     """3072 stopped being an example on 2026-09-06, when Llama 3.2 3B put it in the
-    `ln` and `gemv_q4` sets; 5120 is the nearest width nobody has built."""
-    spec = dataclasses.replace(default_spec(), hidden=5120)
-    with pytest.raises(OpRangeError, match=r"ln: width=5120 is outside the validated set "
-                                          r"\{1024, 2048, 2560, 3072, 3840, 4096\}"):
+    `ln` and `gemv_q4` sets, and 5120 on 2026-10-01 with Qwen3.8-27B; 6144 is the nearest
+    width nobody has built."""
+    spec = dataclasses.replace(default_spec(), hidden=6144)
+    with pytest.raises(OpRangeError, match=r"ln: width=6144 is outside the validated set "
+                                          r"\{1024, 2048, 2560, 3072, 3840, 4096, 5120\}"):
         Q.recipe(spec)
 
 
 def test_an_unvalidated_gemv_k_is_refused():
-    with pytest.raises(OpRangeError, match=r"gemv_q4: K=5120 is outside the validated set "
-                                          r"\{1024, 2048, 2560, 3072, 3584, 3840, 4096, 6144, 8192, 9216, 9728, 10240, 10752, "
-                                          r"11264, 12288, 14336, 15360\}"):
-        require("gemv_q4", K=5120)
+    with pytest.raises(OpRangeError, match=r"gemv_q4: K=7168 is outside the validated set "
+                                          r"\{1024, 2048, 2560, 3072, 3584, 3840, 4096, 5120, 6144, 8192, 9216, 9728, 10240, "
+                                          r"10752, 11264, 12288, 14336, 15360\}"):
+        require("gemv_q4", K=7168)
 
 
 def test_unknown_template_and_parameter():
