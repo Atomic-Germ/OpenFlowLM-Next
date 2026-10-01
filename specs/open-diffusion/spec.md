@@ -285,11 +285,13 @@ as the pyxrt runner.
 **Verification:** manual
 
 - `q4nx-build --open-diffusion -i black-forest-labs/FLUX.2-klein-4B -o <dir>` builds the
-  whole model directory from the checkpoint (flat: 17 files, ~9 GB) and
+  whole model directory from the checkpoint (flat: 21 files, ~9.1 GB, with the edit
+  configurations 512e512 and 1024e1024 and the encoder's weights) and
   `model_info_entry.json`. It refuses a checkpoint whose pipeline class, transformer or
   text-encoder geometry is not klein 4B's, naming the fields.
-- `export_dit_kernels.py` builds the six kernel sets, then assembles them into one full
-  ELF per resolution (`open_kernels/compose_elf.py`, `diffusion_r<R>.elf`).
+- `export_dit_kernels.py --resolutions 512,1024 --edits 512,1024` builds the six kernel
+  sets, then assembles them into one full ELF per configuration (`open_kernels/compose_elf.py`,
+  `diffusion_r<R>.elf` and `diffusion_r<R>e<R>.elf`; 4 ELFs, 85.9 MiB).
   `--install <dir>` copies only the ELFs and their description, removes an earlier
   install's kernel-set files, and writes `diffusion_kernels.json` (format
   `oflm-open-diffusion-kernels-v2`) last. It refuses a directory built from other stream
@@ -302,7 +304,12 @@ as the pyxrt runner.
   given), `<model dir>/open_kernels`, then `<root>/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
   for each xclbins root. The installer ships the last.
 - `oflm pull flux2-klein:4b` installs the model from `Cyronius/FLUX.2-klein-4B-NPU2`,
-  verifying every file's hash.
+  verifying every file's hash. The registry pins a commit (`url` is `.../resolve/<sha>`):
+  a layout change is published to a new commit on another branch, so a build that predates
+  it keeps pulling the files it can run.
+- Upgrading an installed model across a layout change takes `oflm remove flux2-klein:4b`,
+  then `oflm pull`. `pull` fetches only missing files, and a changed file is reported
+  but kept, so the old `bundle.json` would stay and its layout would be refused.
 
 **Verification (manual):**
 1. Build the model directory into an empty models root with `q4nx-build --open-diffusion`;
@@ -311,7 +318,7 @@ as the pyxrt runner.
    root").
 3. Point `OFLM_DIFFUSION_KERNELS_DIR` at a copy of the set whose manifest layout is
    edited: refused, naming both hashes.
-4. On a machine without the model: `oflm pull flux2-klein:4b` downloads 17 files and
+4. On a machine without the model: `oflm pull flux2-klein:4b` downloads 21 files and
    reports them verified.
 
 **Verified 2026-09-28:** built from `black-forest-labs/FLUX.2-klein-4B` (layout
@@ -321,6 +328,15 @@ into an empty models root verified all 17 hashes, and the pulled model's 512² s
 has the same bytes as the locally built one. `oflm image` found the shipped kernel set
 with nothing set ("an xclbins root"). A manifest with an edited layout was refused,
 naming both hashes.
+
+**Verified 2026-10-01, with edits:**
+- Built (layout `e667e5952ca22004`), byte-identical to the tested bundle, and uploaded to
+  branch `edits` of `Cyronius/FLUX.2-klein-4B-NPU2`, commit
+  `d84e3fd6119ced433c88fa2735593474a2c94cf4`. `main` keeps the 2026-09-28 model.
+- The live tree listing matched the builder's prediction for all 21 files.
+- `oflm pull` into an empty models root downloaded and verified all 21.
+- From that pull, with the shipped kernel set ("an xclbins root"), `oflm image` made the
+  512² fox and an `--image` edit.
 
 ### OPEN-DIFFUSION-EDIT: an edit follows its prompt and keeps its reference
 **Applies to:** `open_kernels/klein_pipeline.py` (`plan(R, edit=True)`), `open_kernels/vae_encoder.py`, `src/open_diffusion`, `oflm image --image`, `/v1/images/edits`

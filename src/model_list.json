@@ -1338,10 +1338,10 @@
         "flux2-klein": {
             "4b": {
                 "name": "FLUX.2-klein-4B-NPU2",
-                "url": "https://huggingface.co/Cyronius/FLUX.2-klein-4B-NPU2",
-                "file_url": "https://huggingface.co/api/models/Cyronius/FLUX.2-klein-4B-NPU2/tree/main",
+                "url": "https://huggingface.co/Cyronius/FLUX.2-klein-4B-NPU2/resolve/d84e3fd6119ced433c88fa2735593474a2c94cf4",
+                "file_url": "https://huggingface.co/api/models/Cyronius/FLUX.2-klein-4B-NPU2/tree/d84e3fd6119ced433c88fa2735593474a2c94cf4",
                 "ms_url": "",
-                "size": 9019198608,
+                "size": 9076316615,
                 "oflm_min_version": "0.1.0",
                 "files": [
                     "LICENSE.md",
@@ -1354,16 +1354,24 @@
                     "qin_1024.bin",
                     "qin_512.bin",
                     "schedule_1024.json",
+                    "schedule_1024e1024.json",
                     "schedule_512.json",
+                    "schedule_512e512.json",
                     "tf_1024.bin",
                     "tf_512.bin",
                     "tokenizer.json",
                     "vae_S.bin",
                     "vae_W.bin",
+                    "vae_enc_S.bin",
+                    "vae_enc_W.bin",
                     "weights.bin"
                 ],
                 "image": true,
                 "image_sizes": [
+                    512,
+                    1024
+                ],
+                "image_edit_sizes": [
                     512,
                     1024
                 ],

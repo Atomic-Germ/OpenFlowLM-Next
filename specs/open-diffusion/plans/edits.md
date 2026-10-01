@@ -371,3 +371,11 @@ s2d views fail, a real stride-2 read in `dit_conv`'s memtile is ~3 more days.
     Scaled to quiet: ~7.4 s per step, ~32 s per edit, as estimated.
 - `src/model_list.json`: `image_edit_sizes` [512, 1024]. Its `files` and `url` change at the
   publish (decision 6), which waits for the owner's OK.
+- **8.4 published (2026-10-01, owner's OK).**
+  - Branch `edits` of `Cyronius/FLUX.2-klein-4B-NPU2`, commit `d84e3fd6`: 21 files, layout
+    `e667e5952ca22004`; `main` unchanged.
+  - `model_list.json` pins `resolve/<sha>`; `model_info.json` holds the hub's listing.
+  - The kernel set is installed in `src/xclbins` and `src/out/xclbins`.
+  - Clean `oflm pull` verified all 21 files; `oflm image`, with and without `--image`, ran
+    from it.
+  - PR #146 (stacked on #141).
