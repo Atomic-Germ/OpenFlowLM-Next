@@ -315,6 +315,9 @@ def gemv_bands(win, yout, tab, gy, nbands, ngroups, per_band, rs, ms=None):
         yout.release(1)
 
 
+XE_CHUNK = 2                    # x elements acquired at once by prep_bands; see its docstring
+
+
 def role_gemv_bands(win, yout, B, K, role, nbands, KK):
     """`nbands` bands of a KK-wide projection of `role`, at that role's weight format.
     A q4_1 role runs exactly the call it always ran, unless this core carries the folded
@@ -333,28 +336,53 @@ def prep_bands(win, xin, yout, B, K, kk, n_elems, nbands, role="attn"):
     """Prepare the KK-wide activation from `n_elems` 4 KB x elements (the kernel derives
     each element's block range from its index, so no arithmetic on the loop variable),
     then run `nbands` bands of it at `role`'s weight format. The dense counterpart of the
-    MoE's fixed prep entries."""
+    MoE's fixed prep entries.
+
+    The x elements are acquired in CHUNKS of at most XE_CHUNK, not all at once. A single
+    `acquire(n_elems)` makes the x channel's depth the largest element count any model
+    needs, and its buffer that many 4 KB elements in L1 -- at Qwen3.8-27B's four og
+    elements that is 16 KB, which no FFN width can fit beside (the widest that still
+    fits is 8192, and it is 512 B short).
+
+    Chunking is safe because `xe` is SCRATCH: `prep` copies each element into the table
+    and `role_gemv_bands` reads only the table, never `xe`. So an element is dead the
+    moment its `prep` returns, and the same two buffers can carry four elements. The
+    element INDEX still has to be the global one -- `dense_prep` derives its block range
+    as 64*i -- so a chunk at offset `c` passes `c + j`, not `j`. The fill side is
+    unchanged: it still writes all `n_elems` contiguously, and the fifo hands them out in
+    order across the chunk acquires.
+    """
     tab = B["tab"]
-    xe = xin.acquire(n_elems)
-    if n_elems == 1:
-        K["prep"](xe, tab, kk, 0)
-    else:
-        for i in range(n_elems):
-            K["prep"](xe[i], tab, kk, i)
+    for c in range(0, n_elems, XE_CHUNK):
+        got = min(XE_CHUNK, n_elems - c)
+        xe = xin.acquire(got)
+        if got == 1:
+            K["prep"](xe, tab, kk, c)
+        else:
+            for j in range(got):
+                K["prep"](xe[j], tab, kk, c + j)
+        xin.release(got)
     role_gemv_bands(win, yout, B, K, role, nbands, kk)
-    xin.release(n_elems)
 
 
 def ffn_body(win, xin, yout, B, K):
     """up | gate per 64-row band into `ms`, act(gate) * up out through y, then the down
     GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements)."""
     tab, ms = B["tab"], B["ms"]
-    me = xin.acquire(FFN.XM_ELEMS)
-    if FFN.XM_ELEMS == 1:
-        K["prep"](me, tab, HID, 0)
-    else:
-        for i in range(FFN.XM_ELEMS):
-            K["prep"](me[i], tab, HID, i)
+    # Chunked for the same reason as prep_bands' xn/og, and on the same fact: `me`
+    # is scratch. `prep` copies each element into the table and nothing below reads
+    # it again, so the buffers can be reused across a third element. XM_ELEMS is
+    # ceil(HID*2/4096), which is 3 at hidden 5120 and would otherwise want a
+    # 3-deep x channel on its own.
+    for c in range(0, FFN.XM_ELEMS, XE_CHUNK):
+        got = min(XE_CHUNK, FFN.XM_ELEMS - c)
+        me = xin.acquire(got)
+        if got == 1:
+            K["prep"](me, tab, HID, c)
+        else:
+            for j in range(got):
+                K["prep"](me[j], tab, HID, c + j)
+        xin.release(got)
     if "ffn" in Q8:
         gms, pb_h, ng_h = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
     elif FOLD:
@@ -385,7 +413,9 @@ def ffn_body(win, xin, yout, B, K):
             ye = yout.acquire(1)
         K["act"](ms, ye)
         yout.release(1)
-    xin.release(FFN.XM_ELEMS)
+    # No release here: the chunk loop above already released each xm element as
+    # soon as its `prep` had copied it, and a trailing release would release
+    # elements that were never acquired.
     for i in range_(FFN.H_ELEMS):
         he = xin.acquire(1)
         K["prepf"](he, tab, FF, i)

@@ -173,6 +173,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (64, 32, 8, 64, True, False, False, False),      # LFM2-1.2B's six attention layers: the Llama 3.2 1B
                                                                  # shape WITH q/k norms, 2026-09-13 (OPEN-SHORT-CONV-KERNEL)
                  (256, 16, 4, 64, True, True, False, False),      # Qwen3.5 4B: gated, partial RoPE 64 (OPEN-FAMILY-QWEN35)
+                (256, 24, 4, 64, True, True, False, False),      # Qwen3.8-27B: the 4B's gated partial-RoPE shape at 24 heads
                  (256, 8, 2, 64, True, True, False, False),       # Qwen3.5 2B / 0.8B: the same, 8 heads over 2 kv (OPEN-FAMILY-QWEN35)
                  (64, 40, 8, 64, False, False, False, False),    # Granite 4.2 3B (OPEN-FAMILY-GRANITE)
                  (128, 20, 4, 128, False, False, False, False),  # Nanbeige4.1-3B: GQA group 5, two q heads per element (OPEN-FAMILY-LLAMA3)
@@ -247,7 +248,7 @@ def mixed_core_fits(family: str, hidden: int) -> bool:
 LIMITS = {
     "max_buffer_args": 8,        # ERT state 6 above that (opcode-3 runs)
     "n_cols": 8,                 # main cores: one per column
-    "shim_fills": 13,            # per design (phase 2 whole-layer plan)
+    "shim_fills": 14,            # per design (phase 2 whole-layer plan)
     "shim_drains": 11,
     "program_bytes": 16384,      # per core; only the build can measure it
 }
