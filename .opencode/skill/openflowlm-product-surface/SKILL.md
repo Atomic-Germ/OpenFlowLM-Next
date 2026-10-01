@@ -47,6 +47,81 @@ the kernel build can read the same quant map, `spec_hash` can include it, and
 "which kernels belong to this container" stops being a question a human
 answers.
 
+## Complete open-route inventory
+
+**This is the answer to "what can we build?", and it is read from the code, not
+inferred.** Four independent axes, because a route needs all four:
+
+1. **Packer** — `utilities/q4nx-build`: 18 `ModelArch` values, 18 converters
+   registered. No gap: every arch the packer knows can emit a container.
+2. **Recipe** — `open_kernels/recipes/families.py`: 10 dispatchable families
+   (`gemma3 granite hunyuan lfm2 llama3 phi3 qwen2 qwen3 qwen35 qwen36moe`),
+   six of them sharing `recipes/dense.py`. Plus exactly one family explicitly
+   marked not implemented (`gptoss`).
+3. **Spec derivation** — `HF_FAMILIES` in `recipes/spec.py` maps a model's
+   `model_type` to a builder. This is the authoritative model_type → recipe
+   bridge; 22 model_types are routed.
+4. **Built sets** — `src/xclbins/*/open_kernels`, which is **gitignored**
+   (kernels are built, never checked in, and never shipped inside a model).
+
+### Routes that are complete (pack → derive → build → run)
+
+| recipe | geometry built | engine | notes |
+|---|---|---|---|
+| `qwen35` | h1024/2048/2560/4096 dense | `open_qwen36` | lx/ax dense line |
+| `qwen36moe` | h2048-L40 | `open_qwen36` | Qwen3.6-MoE 35B-A3B, verified running |
+| `qwen3` | h1024/2048/2560/4096 | `open_npue` | |
+| `llama3` | h2048/2560/3072/4096 | `open_npue` | |
+| `gemma3` | h768/h1152/h2560 | `open_npue` + `open_gemma3` | |
+| `phi3` | h3072-L32 | `open_npue` | Phi-4-mini |
+| `qwen2` | h2048-L36 | `open_npue` | also serves Qwen2.5-VL's text half |
+| `lfm2` | h2048-L16/L30 | `open_npue` | short_conv |
+| *(whisper)* | v3 turbo | `open_whisper` | own xclbins, not a recipe |
+| *(embeddings)* | all-minilm, bge ×3, gte, nomic, embed-gemma | `open_embedding` | no kernels |
+
+### Routes that need only a BUILD (the code is all here)
+
+**These are the actionable list.** Nothing below needs a kernel written.
+
+- **`granite`** — Granite 4.2-3B. `granite` dispatches to `recipes/dense.py`, its
+  `model_type` is routed, and `granite.json` exists on both sides. A spec derives
+  (`h2560-L40`, heads 40/8, head_dim 64, vocab 100352) and the recipe accepted it
+  first try. Its set was **built and verified 2026-09-06** (`head_dim 64`,
+  `num_heads 40`, `gemv_q4 K 8192` all entered `catalogue.py`) from
+  `dense/build_granite_h2560`, `ln/build_2560_1e-05`, `lm_head_q4/build_100352`
+  — see the `open-granite-kernels` skill. It is simply **not in this checkout's
+  `src/xclbins`**, because that directory holds what was built here. **Build it.**
+- **`nanbeige`** — Nanbeige4.1-3B, the `phi3` recipe (`open-phi3-nanbeige-kernels`
+  covers both). Converter and `nanbeige.json` config both exist; no built set here.
+  **Build it.**
+- **`hunyuan`** — recipe dispatches to `dense.py`, `hunyuan_dense` and
+  `hunyuan_v1_dense` are routed, `hunyuan.json` exists. No spec derives **only
+  because `hy-mt2-flash` is an empty object in the shipped catalogue** — the
+  family key exists with zero models. It needs a model, then a spec, then a
+  build.
+
+### Routes that need CODE
+
+- **`gptoss`** — the one family with a written, reasoned refusal
+  (`recipes/families.py` `NOT_IMPLEMENTED`, plan in
+  `.claude/plans/gptoss-bringup.md`). The arithmetic is done and tested
+  (`model/replica_gptoss.py`); what is missing is that no kernel computes it —
+  experts want a clamped SwiGLU, `o_proj`/router/all three expert projections
+  carry a bias no design has room for, the MoE FFN must compose with
+  sliding-window layers, and the expert intermediate equals hidden
+  (`OPEN-MOE-WIDE-FF`). Packer side is complete; this is purely kernel work.
+- **DeepSeek-R1 / R1-0528** — in the catalogue, but **no `ModelArch` and no
+  recipe at all**. It needs a converter *and* a recipe. The largest genuine hole.
+
+### A model_type worth remembering
+
+`gemma3_text_only` exists in `HF_FAMILIES` because Gemma's own 1B-class towers
+publish that model_type rather than `gemma3_text` — and its absence is why
+`oflm add` on Gemma3-1B derived no spec and found no kernels while every other
+Gemma3 size worked. When a container is right but no kernels link, check the
+model_type is in `HF_FAMILIES` before anything else.
+
+
 ## Why the closed stack cannot do this
 
 Not a claim about their intentions — only about what the structure implies.
