@@ -1,0 +1,109 @@
+---
+name: openflowlm-product-surface
+description: What OpenFlowLM-Next ships and how a model reaches the NPU - oflm pack, oflm add, oflm pull, the q4nx-build packer, and the open-kernel catalogue. Use when packaging a model, diagnosing "no open kernels found" or a kernel-set mismatch, onboarding someone to the project, or explaining where any of it came from.
+---
+
+# The product surface
+
+A load-bearing accident with a load-bearing result. The fork happened at
+FastFlowLM 1.0.1 — immediately before they changed their packer and broke
+every model not packed by that internal version, which mobilised the
+community. The first symptom was personal: a finetune that would not load on
+hardware that had been deliberately undersold. Their docs said kernels were
+per-model and sold a service to add new ones. So: write a packer.
+
+That packer then packed every NPU2 model on HuggingFace not on the FastFlowLM
+account, and when that team was absorbed by AMD, the field landed. A great deal
+came out of the simple desire to load a finetune.
+
+**There is no upstream.** AMD does not support this project and is adversarial
+toward it. Every open file here is community-written. `oflm add` has no closed
+parallel because their answer to a new model was a service engagement, and
+this one's answer is a converter. Do not plan around an upstream merge or a
+fix "coming in a later version" — if a capability does not exist, it gets
+built here.
+
+## The four commands
+
+| | does |
+|---|---|
+| `oflm pack` | GGUF/safetensors → q4nx container, via the bundled `q4nx-build` |
+| `oflm add` | install a container, resolve its family, link a kernel set |
+| `oflm pull` | fetch from the registry; live listings, not a frozen snapshot |
+| `oflm list` | installed + available, network-free in the fast path (~0.15 s) |
+
+`oflm pack` is a **dispatcher** to the bundled Python packer, not a C++ port.
+
+## Family resolution, in order
+
+1. exact `oflm-family` in the repo README frontmatter
+2. `config.json` `model_type`
+3. the model's name
+
+Normalised exactly, so `qwen3_5` and `qwen3.5` are the same family. A
+`oflm-family` value is a declaration by whoever made the conversion, so it
+outranks name inference. When no kernel set matches, `oflm add` **still
+installs** and prints a prefilled GitHub issue link naming the model — a model
+that loads on the closed kernels is a working install, and a request for open
+kernels is not an error.
+
+## The packer
+
+`utilities/q4nx-build/`, a family-per-model registry. This is the piece with
+no closed parallel, and the reason is structural: the container format is an
+*output* of the packer and its configs are the *input*, so the kernel build can
+read the same quant map the packer used and the two cannot disagree. That
+agreement is why `spec_hash` includes the quant map, and why the kernel side
+**refuses rather than assumes** when it cannot resolve one — a kernel set that
+disagrees with a container's quant is worse than no kernels.
+
+Per-family converter classes (`q4nx/models/qwen35.py` and friends) plus a
+JSON config per family carrying the block geometry and a per-role dtype map.
+`--quant` overrides the family's default; roles that pin their own type in the
+config keep it.
+
+Two things to know before changing it:
+
+- **The embedding is always bf16**, written unconditionally, no dtype lookup.
+  AMD's equivalent carries a `# this should be bf16` comment beside a
+  `tied_embedding` branch that skips writing the embed at all — and the
+  container that started the 27B investigation had an **I8** embed, which the
+  closed loader refused with a size mismatch. Ours cannot produce that.
+- **`.gitignore` has `!utilities/q4nx-build/q4nx/models/**`**, which re-admits
+  that directory's `__pycache__` along with the converters. There is a
+  re-ignore line after it. Keep it.
+
+## The kernel catalogue
+
+`open_kernels/gen_catalogue_specs.py` derives one buildable spec per
+`(family, size)` from the registry — 44 catalogue models became 21 sets
+covering 30 models. Specs under `open_kernels/recipes/specs/` are **generated
+and gitignored**; the hand-written ones are gone, and a spec you create there
+will not be committed.
+
+Kernel identity is `(family, geometry)`, not the tokenizer: `real_vocab` is no
+longer part of it, the engine reads the model's tokenizer bounds and clamps to
+padded vocab. A new finetune of a known family therefore reuses the family's
+kernel set with no work.
+
+Dense Qwen3.5 currently covers hidden 1024 / 2048 / 2560 / 4096, and 5120 once
+`of_lni` clears (see `open-qwen36-kernels`).
+
+## Rules
+
+- **`oflm add` overwrites a differing file and says so.** Installing a model
+  twice is an update, not a no-op; the common reason is a newer conversion.
+  It compares content (size plus head/tail hash — hashing 16 GB per install
+  costs more than the copy it saves) and logs the swap, so a 20 GB → 16 GB
+  change is never invisible.
+- **Never hand-edit a container's config.** The engine walks
+  `num_hidden_layers`, the kernel recipe builds for `intermediate_size`, and
+  both must match the tensors actually in the file. Repack instead. If a pack
+  produced an inconsistent config, that is a bug in the packer.
+- `/tmp` is an 18 GB tmpfs and `/` sits near capacity. Before packing a large
+  model, check `df`, and delete the source GGUF afterwards if you are short —
+  the container is the artifact.
+- The closed kernels are a **fallback**, and are versioned independently of
+  this project. A model that needs a newer FastFlowLM than you have will
+  install and then fail deep in a closed loader; that is a version gate, not a
+  bug in anything here.
