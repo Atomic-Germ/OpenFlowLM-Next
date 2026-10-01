@@ -23,6 +23,41 @@ this one's answer is a converter. Do not plan around an upstream merge or a
 fix "coming in a later version" — if a capability does not exist, it gets
 built here.
 
+## What this replaced, and the shape of it
+
+The pre-fork state, all of it now gone:
+
+- **A build that did not easily produce an installable package.** Now
+  `cmake --preset linux-default` → `cpack`, and an RPM carrying 18 open-kernel
+  manifests, 5 BERT sets and Whisper, with no partial files in it.
+- **Developer instructions shown to end users**, because nothing could work
+  out how to link a kernel set that did in fact exist. Now family resolution
+  is automatic and a miss still installs.
+- **`flm pack`, poor.** Now a dispatcher to a real packer with per-family
+  converters, per-role dtype maps, `--quant`, `--prune-ffn`, and a refusal to
+  write a container known not to load.
+- **Manual kernel builds.** Now the catalogue derives the specs, the exporter
+  builds the sets, and `toolchain.json` records versions, commit and sha256s
+  so a rebuild can be diffed against a previous one.
+
+These were not unrelated conveniences. They were all one problem: a container
+format treated as a fixed artifact instead of as an **output with a derivable
+input**. Once `q4nx-build/configs/` is the input and the manifest the output,
+the kernel build can read the same quant map, `spec_hash` can include it, and
+"which kernels belong to this container" stops being a question a human
+answers.
+
+## Why the closed stack cannot do this
+
+Not a claim about their intentions — only about what the structure implies.
+Their registry entries carry hand-written `details` per model, their containers
+are pinned to whatever an internal packer produced, and "kernels are
+per-model" is stated in their own docs with support sold for new ones. There is
+no way to derive a spec from a catalogue entry, so a new finetune is a support
+engagement by construction. Whether they run a reproducible build internally is
+not something we can observe; the absence of a way to *express* one is visible
+in the artifact either way.
+
 ## The four commands
 
 | | does |
