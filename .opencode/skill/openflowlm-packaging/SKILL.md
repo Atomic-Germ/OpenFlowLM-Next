@@ -112,3 +112,46 @@ the `openflowlm-release` skill and [RELEASE.md](../../../../RELEASE.md).
   on the build host.
 - Engine-only validation (fast): configure with `OFLM_BUILD_KERNELS=OFF` and a
   writable prefix, then run `cmake --install DESTDIR=...` and `cpack`.
+
+## Two workflows, and conflating them causes small wrong turns
+
+Most of the confusion in this area comes from treating a dev action as if it
+were a user action, or the reverse. They are different jobs.
+
+**Dev** — build new kernels, add catalogue entries, produce containers.
+  - edits `open_kernels/`, `utilities/q4nx-build/configs/`, `src/model_list.json`
+  - runs `cmake -B build --preset linux-default && cmake --build build
+    --preset linux-default && cpack --config build/CPackConfig.cmake -G RPM`
+  - the goal of that pipeline is one shippable package containing every
+    kernel the specs describe, from a fresh clone, with no models on the
+    machine and no network beyond the toolchain
+
+**User** — install the package, pull a model we support, run it.
+  - `oflm pull <tag>` then `oflm run` / `oflm serve`. Out of the box, nothing
+    compiled, nothing hand-placed.
+
+**Both** — `oflm pack` converts a GGUF into a container. A dev uses it to
+produce an official container; a user uses it for a fine-tune or a model that
+has no official build.
+
+**`oflm add`** is for models that are NOT official: it installs a container and
+links whatever kernels match by `spec_hash`, falling back to the shipped closed
+ones. It is not the path for a supported model — `oflm pull` is.
+
+### The rule that follows
+
+**Catalogue membership means "we support this."** A model belongs in
+`src/model_list.json` only once its kernel set builds and runs, because a user
+who sees it there will `oflm pull` it and expect it to work. The Qwen3.8-27B
+was in the catalogue for one commit while its spec could not build
+(`aie.tile (0,3)` wants 77824 B of 65536); that put a model in front of users
+whose kernels do not exist, and it is the reason the entry and the spec both
+came out again. A model awaiting a kernel is an `oflm add` model, not a
+catalogue one.
+
+Corollary: an unbuildable spec does not get committed, and does not get a
+catalogue entry to justify it. `recipes/specs/` is committed and the generator
+refreshes rather than wipes, so a new spec is easy to add — but adding one
+that cannot build turns every build red, and a permanently red build is a
+build nobody runs. A blocked model is recorded in a skill, not in the build
+set.
