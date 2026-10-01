@@ -70,6 +70,7 @@ struct NonStreamResult {
 };
 
 #include "AutoModel/stop_reason.hpp"   // stop_reason_t, stop_reason_to_string
+#include "AutoModel/request_error.hpp"
 
 struct chat_meta_info_t {
 	int max_prefill_len;
@@ -204,6 +205,13 @@ protected:
 	bool _shared_insert(chat_meta_info_t& meta_info, std::vector<int>& tokens, std::function<bool()> is_cancelled = [] { return false; }, void* payload = nullptr, int first_len_run = 0);
 	buffer<bf16> _chunked_insert(chat_meta_info_t& meta_info, std::vector<int>& tokens, std::function<bool()> is_cancelled = [] { return false; }, void* payload = nullptr, int first_len_run = 0);
 	std::string _shared_generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os, std::function<bool()> is_cancelled = [] { return false; });
+
+	/// \brief Render the client's conversation through the chat template
+	/// \note A template that refuses the conversation (roles out of order, a message
+	///       with no content) raises a plain std::runtime_error from inside minja;
+	///       this rethrows it as request_error, so the server answers 400, not 500.
+	std::string _shared_apply_template(const minja::chat_template_inputs& inputs,
+	                                   const minja::chat_template_options& opts = minja::chat_template_options()) const;
 
 	StreamResult _shared_think_tool_calling_pasrsed(const std::string content);
 
@@ -391,7 +399,8 @@ public:
 	virtual bool insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled = [] { return false; }) = 0;
 
 	/// \brief Generate the tokens with prompt
-	virtual std::string generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os = std::cout) = 0;
+	/// \param is_cancelled polled through prefill and decode, as insert() and generate() do
+	virtual std::string generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os = std::cout, std::function<bool()> is_cancelled = [] { return false; }) = 0;
 
 	/// \brief Configure a parameter with type-erased value
 	/// \param parameter_name the name of the parameter

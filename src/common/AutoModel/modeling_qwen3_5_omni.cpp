@@ -159,7 +159,7 @@ std::string Qwen3_5_Omni::apply_chat_template(nlohmann::ordered_json& messages, 
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
     if (!tools.empty()) inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Qwen3_5_Omni::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -672,12 +672,12 @@ std::string Qwen3_5_Omni::generate(chat_meta_info_t& meta_info, int length_limit
     return result;
 }
 
-std::string Qwen3_5_Omni::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Qwen3_5_Omni::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
     header_print("OFLM", "Prompt inserted, starting generation...");
-    return this->generate(meta_info, length_limit, os);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 buffer<bf16> Qwen3_5_Omni::say(std::string wav_out_path) {

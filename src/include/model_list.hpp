@@ -124,9 +124,14 @@ class model_list {
             // check if size is specified
             if (new_tag.find(':') == std::string::npos) {
                 // get the first size in the subset
-                std::string model_type = new_tag;
-                std::string model_size = this->config["models"][model_type].begin().key();
-                new_tag = model_type + ":" + model_size;
+                // Indexing a const json with a missing key is undefined behaviour,
+                // and callers do reach here with tags that are not in the list --
+                // the "model-faker" sentinel among them (#135). Leave those as they are.
+                const nlohmann::json& models = this->config["models"];
+                auto it = models.find(new_tag);
+                if (it != models.end() && it->is_object() && !it->empty()) {
+                    new_tag = new_tag + ":" + it->begin().key();
+                }
             }
             return new_tag;
         }

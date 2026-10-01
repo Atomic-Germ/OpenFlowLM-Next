@@ -56,7 +56,7 @@ std::string Nanbeige::apply_chat_template(nlohmann::ordered_json& messages, nloh
     inputs.messages = messages;
     // inputs.tools = tools;
     inputs.extra_context = this->extra_context;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 std::string Nanbeige::nanbeige_filter(int token) {
@@ -191,74 +191,12 @@ std::string Nanbeige::generate(chat_meta_info_t& meta_info, int length_limit, st
     return result;
 }
 
-std::string Nanbeige::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Nanbeige::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    std::vector<int> sampled_tokens;
-    std::string result;
-    if (length_limit > 0){
-        sampled_tokens.reserve(length_limit);
-    }
-    else{
-        sampled_tokens.reserve(4096);
-    }
-    assert(this->last_token != -1);
-
-    stop_reason_t reason = EOT_DETECTED;
-    int last_sampled_token = this->last_token;
-    this->token_history.push_back(this->last_token);
-    if (this->is_normal_token(last_sampled_token) && last_sampled_token != -1){
-        std::string token_str = this->nanbeige_filter(last_sampled_token);
-        result += token_str;
-        os << token_str << std::flush;
-
-    }
-    if (this->is_eos(last_sampled_token)){
-        return result;
-    }
-    this->profiler_list[DECODING_TIME].reset();
-    this->profiler_list[TKOEN_DECODE_TIME].reset();
-    if (this->total_tokens >= this->MAX_L){
-        header_print("WARNING", "Max length reached, stopping generation...");
-        reason = MAX_LENGTH_REACHED;
-        return result;
-    }
-    while (this->total_tokens < this->MAX_L){
-        this->profiler_list[DECODING_TIME].start();
-        buffer<bf16> y = this->lm_engine->forward(last_sampled_token);
-        this->profiler_list[DECODING_TIME].stop(1);
-
-        this->profiler_list[SAMPLING_TIME].start();
-        int sampled_token = this->sampler->sample(y);
-        this->profiler_list[SAMPLING_TIME].stop(1);
-        this->total_tokens++;
-        last_sampled_token = sampled_token;
-
-        this->profiler_list[TKOEN_DECODE_TIME].start();
-        if (this->is_normal_token(sampled_token)){ // filter out special tokens
-            std::string token_str = this->nanbeige_filter(sampled_token);
-            os << token_str << std::flush;
-            result += token_str;
-        }
-        this->profiler_list[TKOEN_DECODE_TIME].stop(1);
-        this->token_history.push_back(sampled_token);
-        if (this->is_eos(sampled_token)){
-            this->lm_engine->forward(last_sampled_token);
-            break;
-        }
-        meta_info.generated_tokens++;
-        if ((length_limit > 0) && (meta_info.generated_tokens >= length_limit)){
-            reason = MAX_LENGTH_REACHED;
-            break;
-        }
-    }
-    meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
-    meta_info.stop_reason = reason;
-    if (this->total_tokens >= this->MAX_L){
-        header_print("WARNING", "Max length reached, stopping generation...");
-    }
-    return result;
+    // The same decode as generate(), which is the one that polls is_cancelled.
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 NonStreamResult Nanbeige::parse_nstream_content(const std::string response_text) {
