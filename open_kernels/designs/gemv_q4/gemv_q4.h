@@ -243,11 +243,27 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xsh[kb]));
     q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xsl[kb]));
     q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xst[kb]));
+#if GEMV_Q4_BLOCK_CARRY
+    // Keep both components of the block result through the global reduction.
+    // Renormalize after every block rather than letting the low part grow.
+    const auto block = acc;
+    const auto block_error = compensation;
+    acc = previous;
+    compensation = previous_error;
+    q4_two_sum(acc, compensation, block);
+    aie::accum<accfloat, kRows> small;
+    small.from_vector(block_error);
+    q4_two_sum(acc, compensation, small);
+    small.from_vector(compensation);
+    compensation = aie::zeros<float, kRows>();
+    q4_two_sum(acc, compensation, small);
+#else
     const auto block = aie::add(acc, compensation);
     const auto corrected = aie::sub(block, previous_error);
     const auto next = aie::add(previous, corrected);
     compensation = aie::sub(aie::sub(next, previous), corrected).template to_vector<float>();
     acc = next;
+#endif
 #else
 #if GEMV_Q4_CORRECTION
     const auto previous = acc;
@@ -273,6 +289,9 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
 
 #if GEMV_Q4_CORRECTION
   aie::store_v(cp, compensation);
+#endif
+#if GEMV_Q4_BLOCK_CARRY
+  if (last) acc = aie::add(acc, compensation);
 #endif
   const aie::vector<float, kRows> yv = acc.template to_vector<float>();
   if (last) {

@@ -5,6 +5,9 @@ This stage isolates a reproducible Q4 cancellation error. Runtime/catalogue
 promotion and performance tuning remain outside this probe.
 **Full-model acceptance remains FAIL; PR4 is not complete.**
 
+Follow-up: [real FFN boundaries and block carry](qwen38-ffn-boundary.md)
+isolates the layer1 up/gate error and closes its strict BF16 activation gate.
+
 ## Reproduction and change
 
 Before editing the arithmetic, an NPU regression reproduced a zero result

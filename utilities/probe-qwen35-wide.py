@@ -73,9 +73,12 @@ def main():
     p.add_argument("--projection-correction", action="store_true", help="diagnostic Q4 activation residual correction")
     p.add_argument("--ffn-correction", action="store_true", help="corrected full FFN with K4096 down segments")
     p.add_argument("--product-correction", action="store_true", help="compensate Q4 block products and sums (requires projection/FFN correction)")
+    p.add_argument("--block-carry", action="store_true", help="retain and renormalize the Q4 block sum residual (requires product correction)")
     p.add_argument("--projection-n", type=int, default=1024, help="isolated Q4 projection output rows")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
+    if args.block_carry and not args.product_correction:
+        p.error('--block-carry requires --product-correction')
     if args.trace and args.scope != "ffn":
         p.error("--trace requires --scope ffn")
     if args.final_only and args.scope != "down":
@@ -101,6 +104,7 @@ def main():
     spec_path.write_text(json.dumps(spec, indent=2) + "\n")
     env = os.environ.copy()
     env['PROBE_PRODUCT_CORRECTION'] = str(int(args.product_correction))
+    env['PROBE_BLOCK_CARRY'] = str(int(args.block_carry))
     env.update(OPEN_KERNELS_SPEC=str(spec_path), OPEN_KERNELS_UNVALIDATED="1",
                OPEN_KERNELS_WIDE_GLUE_PROBE="1")
     env["PATH"] = "/opt/xilinx/xrt/bin:" + env["PATH"]
@@ -129,6 +133,7 @@ def main():
         design_path.write_text(isolate_glue(source))
     metadata = {"python": sys.version, "ffn": args.ffn, "scope": args.scope, "hardware_validated": False,
                 "product_correction": args.product_correction,
+                "block_carry": args.block_carry,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}
     if args.scope == "projection":
         metadata.update(projection_k=args.projection_k, projection_n=args.projection_n, correction=args.projection_correction, weight_format="q4_1")
