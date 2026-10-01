@@ -145,3 +145,59 @@ reading its consumer. `glue_ab_tile` settled wall 2 in one step after three
 layers of inference got it wrong. `utilities/kernel-size.py` and
 `utilities/why-no-fifo.py` exist because of that, and `--trace` settled the
 accounting that reading could not.
+
+## Re-measured 2026-10-01 on the imx12288 container (pruned, 12.92 GB)
+
+The container is `hidden 5120 / intermediate 12288 / 64 layers / 24 heads over 4
+kv / head_dim 256 / vocab 248320`, `oflm_pruned_ffn 17408 -> 12288`,
+`activation_mass_retained 0.8849`. Both files in one snapshot dir:
+`Qwen3.8-27B-Q8_0.gguf` and `Qwen3.8-27B.imatrix.gguf`.
+
+**A spec is NOT the barrier.** Derived from the container
+(`cat_family='qwen3.5', size='9b'` — the quant map resolves through
+`qwen3.5_9b.json`; passing no size refuses) and `recipes.qwen35` **accepts** it.
+The attention tuple `(256, 24, 4, 64, ...)` is already in the validated set:
+`partial_rotary_factor 0.25 x head_dim 256` gives rotary 64, and
+`attn_output_gate: True` gives the gate. The build then dies exactly where it
+always has:
+
+    aie.tile (0,3) buffers exceeded available memory
+      stack 6144 + lno 10240 + 6 x lni_cons_buff 10240 = 77824 B  vs 65536
+
+**The prune does not help, and cannot.** `lni` scales with **hidden** (5120),
+not with the FFN width. Narrowing 17408 -> 12288 shrinks a different buffer.
+
+| lni depth | bytes | |
+|---|---|---|
+| 6 | 77824 | over by 12288 |
+| 5 | 67584 | over by 2048 |
+| **4** | **57344** | **fits, 8192 spare** |
+| 3 | 47104 | fits, 18432 spare |
+
+Removing `lno` entirely still leaves depth 6 over by 2048 B, so the operand
+count itself has to come down. **Depth 4 is the target: 6 -> 4.** This is the
+same wall as before, unchanged in kind; `why-no-fifo.py --trace` showed all five
+norm operands live for `mean((x+a)^2)` plus a two-element cross-layer carry, so
+the fix is to stop holding every operand at once, which is what #122's
+"streamed residual RMSNorm at width 5120" is.
+
+### Unresolved: the spec's quant does not match the container
+
+Deriving the spec prints:
+
+    open_kernels: warning: q8 (8-bit) weights are not implemented yet for
+    qwen35 hidden 5120 -- the kernel does not fit in program memory.
+    Falling back to q4_1.
+
+so the spec comes out `quant=q4_1`, but the container stores **q8 (8704-byte
+chunks)** for `linear_attn.ssm_alpha_proj`, `ssm_beta_proj` and `ssm_out_proj`
+in every layer. Kernels built from this spec would read 5120-byte q4_1 chunks
+where the container holds q8 — silent corruption, not an error. Two ways out,
+and this is a decision, not a detail:
+
+- make q8 at hidden 5120 work, so the spec states the container's real format
+  (#122 claims to have validated the q8 head at K5120, all 248320 logits), or
+- repack the container with those three roles at q4_1 so it matches the spec.
+
+Also note `recipes/specs/` is gitignored and wiped by `gen_catalogue_specs.py`,
+so a hand-written spec needs a `src/model_list.json` entry to survive.
