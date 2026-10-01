@@ -1237,13 +1237,13 @@ KERNEL_SOURCES = [
     "designs/attn/*.cc", "designs/attn/*.h",
     "designs/dn_glue/*.cc", "designs/dn_glue/*.h", "designs/dn_post/*.cc",
     "designs/router/*.cc", "designs/router/*.h",
-    "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/ln/ln_stream.py",
+    "designs/ln/ln.h", "designs/ln/ln_rne.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/ln/ln_stream.py",
     "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
-    "include/vecmath.h", "include/vecmath_precise.h", "include/fp32_add_rne.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/vecmath_precise.h", "include/fp32_add_rne.h", "include/fp32_mul_rne.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

@@ -32,6 +32,13 @@ EPS = float(os.environ.get("LN_EPS", "1e-6"))
 ELEM = N * 2
 COMPENSATED = os.environ.get('LN_STREAM_COMPENSATED') == '1'
 RESIDUAL_RNE = os.environ.get('LN_RESIDUAL_RNE') == '1'
+NORM_RNE = os.environ.get('LN_NORM_RNE') == '1'
+if NORM_RNE and (N <= 4096 or not COMPENSATED or not RESIDUAL_RNE):
+    raise ValueError('norm RNE requires compensated wide LN with exact residuals')
+TRACE = os.environ.get('LN_TRACE_STATS') == '1'
+TRACE_INDEX = int(os.environ.get('LN_TRACE_INDEX', '786')) if TRACE else 0
+if TRACE and (N <= 4096 or not COMPENSATED or not 0 <= TRACE_INDEX < N):
+    raise ValueError('statistics trace requires compensated wide LN and a valid index')
 if RESIDUAL_RNE and N <= 4096:
     raise ValueError('exact residual probe requires streamed wide LN')
 if COMPENSATED and N <= 4096:
@@ -51,6 +58,10 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
         flags.append('-DLN_STREAM_COMPENSATED=1')
     if RESIDUAL_RNE:
         flags.append('-DLN_RESIDUAL_RNE=1')
+    if NORM_RNE:
+        flags.append('-DLN_NORM_RNE=1')
+    if TRACE:
+        flags += ['-DLN_TRACE_STATS=1', f'-DLN_TRACE_INDEX={TRACE_INDEX}']
     if N <= 2048:
         # the fused kernel: five inputs and three outputs held at once (32 KB of 4 KB elements)
         fn = ExternalFunction("ln_fn", source_file=str(HERE / "ln.cc"),
@@ -126,5 +137,7 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) +
                 [(HERE / "ln.h").read_bytes(), (HERE / "ln_stream.py").read_bytes(),
                  (HERE.parent.parent / "include" / "vecmath.h").read_bytes(),
                  (HERE.parent.parent / "include" / "vecmath_precise.h").read_bytes()])
+_src += (HERE / 'ln_rne.h').read_bytes()
 _src += (HERE.parent.parent / 'include' / 'fp32_add_rne.h').read_bytes()
-SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr((COMPENSATED,RESIDUAL_RNE)).encode()).hexdigest()[:8], 16)}
+_src += (HERE.parent.parent / 'include' / 'fp32_mul_rne.h').read_bytes()
+SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr((COMPENSATED,RESIDUAL_RNE,NORM_RNE,TRACE,TRACE_INDEX)).encode()).hexdigest()[:8], 16)}

@@ -21,12 +21,19 @@ all384 captured residual sums, including channel3390. Its experimental full
 replay still fails11 numerical checks (versus4 previously); it is not promoted
 as the accepted default. The next isolated target is layer3 attention.
 
-Latest follow-up: [real attention rounding](qwen38-attention-boundary.md)
+Follow-up: [real attention rounding](qwen38-attention-boundary.md)
 makes layer3 new K/V and gated attention output exact using block-carry Q/K/V/gate
 projection and precise attention. The full replay fails6 checks versus11, but
 final residual/norm errors increase, so it remains experimental. The first
 changed norm boundary is now layer4 xn, one local RMSNorm error at channel786.
 PR4 remains incomplete; runtime and catalogue defaults are unchanged.
+
+Latest follow-up (2026-10-02): [RMSNorm rounding](qwen38-norm-precision.md)
+closes layer4/channel786 and reduces local norm differences from26 to9.
+The first ten norm boundaries are exact. Full acceptance still fails6 checks;
+final residual/norm errors decrease but exceed their bounds. The next isolated
+target is layer4 FFN activation14949, whose BF16 rounding differs despite exact
+xm. The new norm mode is slower and remains opt-in; PR4 is not complete.
 
 ## Sources and format
 

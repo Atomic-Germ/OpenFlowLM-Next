@@ -141,4 +141,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Isolate real attention rounding with captured Q/K/V/gate and cache, then validate block-carry projections and precise attention against unchanged full-model references.</description>
     <location>.opencode/skill/open-attention-boundary/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-norm-rne</name>
+    <description>Trace real wide RMSNorm statistics and validate integer-lane FP32 products and compensated sums against unchanged full-model references.</description>
+    <location>.opencode/skill/open-norm-rne/SKILL.md</location>
+  </skill>
 </available_skills>

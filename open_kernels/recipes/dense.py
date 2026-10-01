@@ -639,12 +639,12 @@ KERNEL_SOURCES = [
     "designs/gemv_q4/gemv_q4.h", "designs/gemv_q4/gemv_tab.h", "designs/gemv_q4/gemv_q4_prep_rt.cc",
     "designs/gemv_q4/gemv_q4_prep_f32_rt.cc",
     "designs/attn/*.cc", "designs/attn/*.h",
-    "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/ln/ln_stream.py",
+    "designs/ln/ln.h", "designs/ln/ln_rne.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/ln/ln_stream.py",
     "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q4/*.py",
     # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
-    "include/vecmath.h", "include/vecmath_precise.h", "include/fp32_add_rne.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/vecmath_precise.h", "include/fp32_add_rne.h", "include/fp32_mul_rne.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
 Q8_ROLES = frozenset({"attn", "ffn"})     # the only two roles a dense layer has
