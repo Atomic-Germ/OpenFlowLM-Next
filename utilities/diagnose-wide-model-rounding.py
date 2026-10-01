@@ -15,6 +15,12 @@ spec.loader.exec_module(M)
 from wide_slice_reference import norm
 
 
+def residual_error(x, add, got):
+    expected = (x.astype(np.float64)+add.astype(np.float64)).astype(np.float32)
+    ids = np.flatnonzero(got.view(np.uint32)!=expected.view(np.uint32))
+    return dict(mismatches=len(ids), first_indices=ids[:32].tolist())
+
+
 def diagnose(out):
     meta = json.loads((out/'slice-fixture.json').read_text())
     params = {}
@@ -33,12 +39,16 @@ def diagnose(out):
         if not np.isfinite(a.astype(np.float32)).all():
             raise ValueError(f'{name}: nonfinite logical input')
         return a
-    rows = []
+    rows, residuals = [], []
     for case in meta['cases']:
         tag, i = case['tag'], case['layer']
         if i not in params: params[i] = dict(checked(f'layer{i}/params.npz'))
         ref = checked(f'{tag}-ref.npz')
         sizes = meta['outputs']['d' if case['kind']==M.LINEAR else 'a']
+        for field, left, right in (('res1',f'{tag}-input-x.bin',f'{tag}-got-projout.bin'),
+                                    ('y',f'{tag}-got-res1.bin',f'{tag}-got-fo.bin')):
+            operands = [capture(name,np.float32,M.H*4) for name in (left,right,f'{tag}-got-{field}.bin')]
+            residuals.append(dict(tag=tag,field=field,**residual_error(*operands)))
         for field, input_name, weight in (('xn',f'{tag}-input-x.bin','lnw'),
                                           ('xm',f'{tag}-got-res1.bin','postw')):
             x = capture(input_name,np.float32,M.H*4)
@@ -51,9 +61,12 @@ def diagnose(out):
                 local_norm=int(np.count_nonzero(bits!=conditional)),
                 propagated_input=int(np.count_nonzero(conditional!=expected))))
     result = dict(diagnostic_only=True,boundaries=rows,
+                  residual_additions=residuals,
+                  residual_mismatches=sum(row['mismatches'] for row in residuals),
                   totals={key:sum(row[key] for row in rows)
                           for key in ('device_vs_reference','local_norm','propagated_input')})
     print(json.dumps(result['totals']),flush=True)
+    print('Residual addition mismatches:',result['residual_mismatches'],flush=True)
     print('First changed boundaries:',rows[:6],flush=True)
     (out/'rounding-diagnosis.json').write_text(json.dumps(result,indent=2)+'\n')
 

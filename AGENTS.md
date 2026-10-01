@@ -131,4 +131,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate compensated segmented Q4 down reduction, including real layer0 rounding and unchanged full-model replay.</description>
     <location>.opencode/skill/open-down-segment-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-residual-rne</name>
+    <description>Build and validate exact vector FP32 residual addition in wide RMSNorm, including signed zero and unchanged full-model replay.</description>
+    <location>.opencode/skill/open-residual-rne/SKILL.md</location>
+  </skill>
 </available_skills>

@@ -26,7 +26,7 @@ def metrics(got, ref):
     return dict(passed=passed, max_relative=rel, cosine=cos, mismatches=ndiff)
 
 
-def prepare(out, n, eps):
+def prepare(out, n, eps, exact_residual=False):
     if n <= 0 or n % 64 or not np.isfinite(eps) or eps <= 0:
         raise ValueError('width must be positive/divisible by 64; epsilon must be finite/positive')
     rng = np.random.default_rng(2962)
@@ -43,6 +43,23 @@ def prepare(out, n, eps):
         impulse = zero.copy()
         impulse[index] = 1
         cases.append((f'impulse{index}', impulse, zero))
+    if exact_residual:
+        # Captured matching inputs whose device sum first flips layer3 BF16.
+        a, b = np.float32(-0.03440730646252632), np.float32(0.005703141447156668)
+        cases.append(('real_layer1_3390', np.resize([a,b,-a,-b],n).astype(np.float32),
+                      np.resize([b,a,-b,-a],n).astype(np.float32)))
+        # Tie, sticky, opposite signs and cancellation across exponent gaps.
+        left = np.resize(np.array([1,-1,1,-1,1,-1,0,-0.0],np.float32),n)
+        right = np.resize(np.array([2**-24,2**-24,3*2**-24,-3*2**-24,
+                                    -(1-2**-24),1-2**-24,-0.0,-0.0],np.float32),n)
+        cases.append(('rounding_edges',left,right))
+        for i in range(4):
+            operands=[]
+            for _ in range(2):
+                bits=(rng.integers(87,168,n,dtype=np.uint32)<<23) | rng.integers(0,1<<23,n,dtype=np.uint32)
+                bits |= rng.integers(0,2,n,dtype=np.uint32)<<31
+                operands.append(bits.view(np.float32))
+            cases.append((f'exponent_gaps{i}',*operands))
     cases.append(('repeat_first', cases[0][1], cases[0][2]))
     w.tofile(out / 'w.bin')
     (out / 'poison_y.bin').write_bytes(np.full(n, np.nan, np.float32).tobytes() + GUARD)
@@ -65,7 +82,7 @@ def prepare(out, n, eps):
     (out / 'ln.cfg').write_text('\n'.join(cfg) + '\n')
     files = ['final.xclbin', 'insts.bin', 'ln.cfg', 'w.bin', 'poison_y.bin', 'poison_xn.bin']
     files += [f'{prefix}{i}.bin' for i in range(len(cases)) for prefix in ('x', 'add', 'ref_y', 'ref_xn')]
-    meta = dict(n=n, eps=eps, seed=2962, cases=[c[0] for c in cases],
+    meta = dict(n=n, eps=eps, seed=2962, exact_residual=exact_residual, cases=[c[0] for c in cases],
                 sha256={f: hashlib.sha256((out / f).read_bytes()).hexdigest() for f in files})
     (out / 'ln-fixture.json').write_text(json.dumps(meta, indent=2) + '\n')
     (out / 'ln-results.json').unlink(missing_ok=True)
@@ -94,6 +111,11 @@ def compare(out):
         rel = error / scale if finite and scale else (0.0 if error == 0 else None)
         my = dict(passed=rel is not None and rel < 1e-6, max_relative=rel,
                   exact=bool(np.array_equal(gy, ry)))
+        if meta.get('exact_residual'):
+            ref_bits=np.fromfile(out / f'ref_y{i}.bin',np.uint32)
+            my['mismatches']=int(np.count_nonzero(got['y'].view(np.uint32)!=ref_bits))
+            my['exact']=my['mismatches']==0
+            my['passed']=my['passed'] and my['exact']
         mx = metrics(got['xn'], np.fromfile(out / f'ref_xn{i}.bin', bfloat16))
         result = dict(case=name, passed=my['passed'] and mx['passed'], y=my, xn=mx)
         results.append(result)
@@ -113,9 +135,10 @@ def main():
     p.add_argument('--build-dir', required=True, type=Path)
     p.add_argument('--width', type=int, default=5120)
     p.add_argument('--eps', type=float, default=1e-6)
+    p.add_argument('--exact-residual', action='store_true', help='prepare additional FP32 rounding cases and enforce exact residual bits')
     args = p.parse_args()
     if args.stage == 'prepare':
-        prepare(args.build_dir, args.width, args.eps)
+        prepare(args.build_dir, args.width, args.eps,args.exact_residual)
         return 0
     return compare(args.build_dir)
 

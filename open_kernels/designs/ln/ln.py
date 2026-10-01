@@ -31,6 +31,9 @@ N = int(os.environ.get("LN_N", 2048))     # the width; elements are N*2 bytes (l
 EPS = float(os.environ.get("LN_EPS", "1e-6"))
 ELEM = N * 2
 COMPENSATED = os.environ.get('LN_STREAM_COMPENSATED') == '1'
+RESIDUAL_RNE = os.environ.get('LN_RESIDUAL_RNE') == '1'
+if RESIDUAL_RNE and N <= 4096:
+    raise ValueError('exact residual probe requires streamed wide LN')
 if COMPENSATED and N <= 4096:
     raise ValueError('compensated statistics require streamed wide LN')
 if N > 4096:
@@ -46,6 +49,8 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
     flags = [f"-DLN_N={N}", f"-DLN_EPS={EPS:g}f"]
     if COMPENSATED:
         flags.append('-DLN_STREAM_COMPENSATED=1')
+    if RESIDUAL_RNE:
+        flags.append('-DLN_RESIDUAL_RNE=1')
     if N <= 2048:
         # the fused kernel: five inputs and three outputs held at once (32 KB of 4 KB elements)
         fn = ExternalFunction("ln_fn", source_file=str(HERE / "ln.cc"),
@@ -121,4 +126,5 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) +
                 [(HERE / "ln.h").read_bytes(), (HERE / "ln_stream.py").read_bytes(),
                  (HERE.parent.parent / "include" / "vecmath.h").read_bytes(),
                  (HERE.parent.parent / "include" / "vecmath_precise.h").read_bytes()])
-SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr(COMPENSATED).encode()).hexdigest()[:8], 16)}
+_src += (HERE.parent.parent / 'include' / 'fp32_add_rne.h').read_bytes()
+SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr((COMPENSATED,RESIDUAL_RNE)).encode()).hexdigest()[:8], 16)}

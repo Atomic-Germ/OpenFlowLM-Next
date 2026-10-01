@@ -10,11 +10,16 @@ compensated projection/FFN and opt-in attention/LN modes. Output correction alon
 reduces the failures to two; the gate remains open. A reproducible first BF16
 divergence is localized to layer1/channel2931, propagated from layer0 GEMV error.
 
-Latest follow-up (2026-10-01): [segmented down precision](qwen38-down-segment-precision.md)
+Follow-up (2026-10-01): [segmented down precision](qwen38-down-segment-precision.md)
 closes that channel's rounding regression and makes both norms in the first
 three layers exact. Full acceptance still fails four numerical checks; the
 next isolated target is layer1 residual addition at channel3390. PR4 remains
 incomplete.
+
+Latest follow-up: [exact residual addition](qwen38-residual-precision.md) fixes
+all384 captured residual sums, including channel3390. Its experimental full
+replay still fails11 numerical checks (versus4 previously); it is not promoted
+as the accepted default. The next isolated target is layer3 attention.
 
 ## Sources and format
 

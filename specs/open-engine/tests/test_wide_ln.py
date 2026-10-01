@@ -127,3 +127,4 @@ def test_recipe_cache_covers_precise_wide_norm(family):
              for pattern in recipe.KERNEL_SOURCES
              for p in (ROOT / 'open_kernels').glob(pattern)}
     assert 'include/vecmath_precise.h' in files
+    assert 'include/fp32_add_rne.h' in files

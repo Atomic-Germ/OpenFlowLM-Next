@@ -1,5 +1,17 @@
 #include "ln.h"
 #include "vecmath_precise.h"
+#if LN_RESIDUAL_RNE
+using namespace aie::operators;
+#include "fp32_add_rne.h"
+struct ResidualRne {
+  using V = aie::vector<uint32_t, 32>;
+  static V v(uint32_t x) { return aie::broadcast<uint32_t, 32>(x); }
+  static V choose(aie::mask<32> c, V a, V b) { return aie::select(b, a, c); }
+};
+__attribute__((noinline)) static v32f residual_add_rne(v32f a, v32f b) {
+  return fp32_add_rne<ResidualRne>(a.cast_to<uint32_t>(), b.cast_to<uint32_t>()).cast_to<float>();
+}
+#endif
 
 extern "C" void ln_stream_acc(const float *__restrict add, float *__restrict saved,
                               float *__restrict sums, float *__restrict out, int half) {
@@ -12,7 +24,11 @@ extern "C" void ln_stream_acc(const float *__restrict add, float *__restrict sav
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < kHalf; j += kV) {
     float *yp = saved + half * kHalf + j;
+#if LN_RESIDUAL_RNE
+    const v32f y = residual_add_rne(aie::load_v<kV>(yp), aie::load_v<kV>(add + j));
+#else
     const v32f y = fadd32(aie::load_v<kV>(yp), aie::load_v<kV>(add + j));
+#endif
     aie::store_v(yp, y);
     aie::store_v(out + j, y);
 #if LN_STREAM_COMPENSATED
