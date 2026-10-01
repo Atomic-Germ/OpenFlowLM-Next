@@ -80,13 +80,20 @@ def qk_params(wq, wk) -> np.ndarray:
     return np.concatenate([e0, tab])
 
 
+REF_T = 10                        # diffusers' time coordinate of an edit's first reference
+
+
 def rope_ref(y, g, n_txt, grid_w):
-    """Interleaved 4-axis RoPE of y [..., 128] (float64) for global token indices g."""
+    """Interleaved 4-axis RoPE of y [..., 128] (float64) for global token indices g:
+    text (0, 0, 0, l), generated (0, h, w, 0), then reference (REF_T, h, w, 0)."""
     f = rope_freqs()
     pos = np.zeros((len(g), 4))
     txt = g < n_txt
     pos[txt, 3] = g[txt]
     k = g[~txt] - n_txt
+    ref = k >= grid_w * grid_w
+    k = np.where(ref, k - grid_w * grid_w, k)
+    pos[~txt, 0] = np.where(ref, REF_T, 0)
     pos[~txt, 1], pos[~txt, 2] = k // grid_w, k % grid_w
     ang = np.concatenate([np.outer(pos[:, a], f) for a in range(4)], axis=1)   # [T, 64]
     cos = np.repeat(np.cos(ang), 2, axis=1)[:, None, :]
@@ -110,12 +117,15 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--build", default=None, help="build dir: write run.cfg against it")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--edit", action="store_true",
+                    help="qk: an edit's [text | generated | reference] sequence at 512² "
+                         "(grid 32, T = 512 + 2 x 1024)")
     a = ap.parse_args()
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(a.seed)
     op = a.op
-    T = a.T or {"silu": 16, "euler": 4096}.get(op, 4608)
+    T = a.T or {"silu": 16, "euler": 4096}.get(op, 2560 if a.edit else 4608)
     row = lambda T_, off=0, ld=EL, E=1: {"off": off, "ld": ld, "T": T_, "E": E}  # noqa: E731
     pvec = lambda n: (rng.standard_normal((n, EL)) * 0.5).astype(np.float32)  # noqa: E731
     bufs, ref, spec = {}, {}, {"op": op}
@@ -146,7 +156,7 @@ def main() -> int:
     elif op == "qk":
         qkv = bf(rng.standard_normal((T, 3 * EL)) * 2)
         wq, wk = rng.uniform(0.5, 1.5, HD), rng.uniform(0.5, 1.5, HD)
-        n_txt, grid_w = 512, 64
+        n_txt, grid_w = 512, 32 if a.edit else 64
         bufs = {"X": qkv, "B": qkv, "P": with_pad(qk_params(wq, wk).reshape(3, EL))}
         spec |= {"a": row(T, 0, 3 * EL), "b": row(T, EL, 3 * EL), "y": row(T), "z": row(T),
                  "p_off": EL, "n_par": 3, "tok0": 0, "n_txt": n_txt, "grid_w": grid_w,

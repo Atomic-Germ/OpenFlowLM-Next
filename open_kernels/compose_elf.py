@@ -1,8 +1,9 @@
-r"""compose_elf: a diffusion kernel directory's six sets as one full ELF per resolution
-(diffusion_r<R>.elf), so a whole image runs in one hardware context. Plan:
-specs/open-diffusion/archive/one-context.md; measurements: utilities/reconfig-probe/README.md.
+r"""compose_elf: a diffusion kernel directory's six sets as one full ELF per configuration
+(diffusion_r<key>.elf: a resolution, "512", or an edit, "512e512"), so a whole image runs in
+one hardware context. Plan: specs/open-diffusion/archive/one-context.md; measurements:
+utilities/reconfig-probe/README.md.
 
-Each ELF holds only the streams that resolution's schedule (klein_pipeline.plan) runs:
+Each ELF holds only the streams that configuration's schedule (klein_pipeline.plan) runs:
 every kernel an XRT context creates walks all of the ELF's control code (~2 ms per MB),
 and the 1024^2 streams alone are ~9 MB.
 
@@ -58,8 +59,9 @@ FLAGS = ["--get-full-elf", "--expand-load-pdis", "--no-progress"]
 ELF_META = "diffusion_elf.json"
 
 
-def elf_name(R: int) -> str:
-    return f"diffusion_r{R}.elf"
+def elf_name(key) -> str:
+    """A configuration's ELF: key is klein_pipeline.config_key's ("512", "512e512")."""
+    return f"diffusion_r{key}.elf"
 
 
 VL_STREAM, VL_PROBE_STREAM, VL_BASE, VL_PROBE, VL_MAX = "te_attn", "te_attn_vlprobe", 512, 77, 512
@@ -322,20 +324,22 @@ def build_elf(kdir: Path, jobs: int = 6, log=print) -> Path:
             vl_inst.append({"TXN_ctrl_code_file": str(write(vl_dir / f"{vl_kernel(n)}.bin", hw.tobytes()).resolve()),
                             "id": vl_kernel(n)})
 
-    # One ELF per resolution, holding only the streams its schedule runs: XRT's kernel
+    # One ELF per configuration, holding only the streams its schedule runs: XRT's kernel
     # creation walks all of an ELF's control code (~2 ms per MB per kernel), and the
     # 1024^2 streams alone are ~9 MB.
     import klein_pipeline as kp  # noqa: E402
-    resolutions = json.loads((kdir / "dit_kernels.json").read_text(encoding="utf-8"))["resolutions"]
+    marker = json.loads((kdir / "dit_kernels.json").read_text(encoding="utf-8"))
+    keys = [kp.config_key(R) for R in marker["resolutions"]] +         [kp.config_key(R, True) for R in marker.get("edits", [])]
     elfs, used_by = {}, {}
-    for R in resolutions:
+    for R in keys:
         used = {s: [] for s in sets}
-        for o in kp.plan(R).ops:
+        r, edit = kp.parse_config(R)
+        for o in kp.plan(r, edit=edit).ops:
             if o["stream"] not in used[o["set"]]:
                 used[o["set"]].append(o["stream"])
         missing = [f"{s}:{n}" for s, ns in used.items() for n in ns if n not in streams[s]]
         if missing:
-            raise SystemExit(f"the {R}^2 schedule runs streams this kernel directory lacks: {missing}")
+            raise SystemExit(f"the {R} schedule runs streams this kernel directory lacks: {missing}")
         out_kernels = [{"name": "main", "PDIs": pdis, "arguments": kernels["main"]["arguments"],
                         "instance": cfg_inst}]
         for s in sets:

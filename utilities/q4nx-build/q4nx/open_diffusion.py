@@ -26,6 +26,10 @@ from .open_embedding import sha256_file
 MODEL_INFO_ARTIFACT = "model_info_entry.json"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# The configurations the shipped kernel set is built for (export_dit_kernels.py --resolutions
+# 512,1024 --edits 512,1024): the model's schedules and layout hash must name the same ones.
+RESOLUTIONS, EDITS = [512, 1024], [512, 1024]
+
 # The only geometry the kernel sets are built for (open_kernels/export_dit_kernels.py).
 TRANSFORMER = {"_class_name": "Flux2Transformer2DModel", "attention_head_dim": 128,
                "num_attention_heads": 24, "num_layers": 5, "num_single_layers": 20,
@@ -41,15 +45,20 @@ pipeline_tag: text-to-image
 tags:
 - oflm
 - npu
+- image-to-image
 ---
 
 # FLUX.2 [klein] 4B for OpenFlowLM (XDNA2 NPU)
 
 [FLUX.2 [klein] 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) converted for
 OpenFlowLM's open diffusion engine: text encoder, 4 denoising steps and VAE decoder all run
-on an AMD XDNA2 NPU.
+on an AMD XDNA2 NPU -- and for an edit, the VAE encoder too.
 
     oflm image flux2-klein:4b "a red fox in fresh snow" -o fox.png
+    oflm image flux2-klein:4b "make it night" --image photo.jpg -o night.png
+
+Sizes: 512 and 1024 square. An edit's reference is centre-cropped to a square at the
+output's size.
 
 The GEMM weights are packed in dit_gemm's bfp16 tile layout for the kernel set OpenFlowLM
 ships (layout `{layout}`); they are not usable by other runtimes. Built with
@@ -101,8 +110,8 @@ def build_open_diffusion_repo(source: str, output_dir: str, npu_assets: Optional
     import export_bundle  # noqa: E402
 
     out = Path(output_dir)
-    files = export_bundle.build(src, out.resolve(), [512, 1024], jobs,
-                                Path(pack_cache) if pack_cache else None)
+    files = export_bundle.build(src, out.resolve(), RESOLUTIONS, jobs,
+                                Path(pack_cache) if pack_cache else None, EDITS)
     layout = json.loads((out / "config.json").read_text(encoding="utf-8"))["layout"]
     (out / "README.md").write_text(README.replace("{layout}", layout), encoding="utf-8")
     files = sorted(files + ["README.md"])
