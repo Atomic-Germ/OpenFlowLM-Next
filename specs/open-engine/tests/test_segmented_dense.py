@@ -84,8 +84,8 @@ def worker_functions(ns):
     exec(compile(ast.Module(body=body, type_ignores=[]), str(path), 'exec'), ns)
 
 
-@pytest.mark.parametrize('limit', [8192,4096])
-def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit):
+@pytest.mark.parametrize('limit,carry', [(8192,False),(4096,False),(4096,True)])
+def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit,carry):
     from test_dense_activation_stream import Fifo
     from recipes.segmented_dense import segments
     f = replace(Q.ffn_geometry(spec()),DOWN_SEGMENTS=segments(17408,limit))
@@ -111,13 +111,17 @@ def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit
         if group == 0:
             scratch[:64] = 0
         scratch[:64] += w + 1
-    def acc(scratch, sums, band, first):
+    def acc(scratch, sums, band, first, *extra):
+        if carry:
+            assert extra[0] is tab and extra[1] == tab[1]
+        else:
+            assert not extra
         events.append((tab[0], band, first))
         sl = slice(band * 64, (band + 1) * 64)
         sums[sl] = scratch[:64] if first else sums[sl] + scratch[:64]
     def emit(sums, y, band):
         y[:] = sums[band * 64:(band + 1) * 64]
-    ns = dict(FFN=f, range_=range, ELEM=4096, per_band=lambda k: k // 128,
+    ns = dict(FFN=f, SEGMENT_CARRY=carry, range_=range, ELEM=4096, per_band=lambda k: k // 128,
               n_groups=lambda k: k // 256)
     worker_functions(ns)
     total_groups = nbands * sum(width // 256 for _, width in f.DOWN_SEGMENTS)

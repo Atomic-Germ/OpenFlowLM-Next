@@ -34,6 +34,9 @@
 #if GEMV_Q4_BLOCK_CARRY && !GEMV_Q4_PRODUCT_CORRECTION
 #error "block carry requires product correction"
 #endif
+#if GEMV_Q4_SEGMENT_CARRY && !GEMV_Q4_BLOCK_CARRY
+#error "segment carry requires block carry"
+#endif
 #if GEMV_Q4_PRODUCT_CORRECTION && !GEMV_Q4_CORRECTION
 #error "product correction requires the residual activation table"
 #endif

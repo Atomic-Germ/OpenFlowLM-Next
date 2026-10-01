@@ -126,4 +126,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Diagnose real FFN activation boundaries with up/gate traces and validate Q4 block-residual carry against unchanged full-model references.</description>
     <location>.opencode/skill/open-q4-block-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-down-segment-carry</name>
+    <description>Build and validate compensated segmented Q4 down reduction, including real layer0 rounding and unchanged full-model replay.</description>
+    <location>.opencode/skill/open-down-segment-carry/SKILL.md</location>
+  </skill>
 </available_skills>

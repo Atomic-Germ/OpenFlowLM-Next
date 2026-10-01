@@ -120,7 +120,7 @@ def prepare_trace(source, tag, kernel, out):
     print(out/'trace.cfg', flush=True)
 
 
-def compare_trace(out):
+def compare_trace(out, exact_fo_channels=()):
     meta = json.loads((out/'trace-fixture.json').read_text())
     for name, digest in meta['sha256'].items():
         if sha(out/name)!=digest: raise ValueError(f'trace fixture changed: {name}')
@@ -130,6 +130,8 @@ def compare_trace(out):
     if len(raw)!=meta['act_bytes']+64 or raw[-64:]!=GUARD: raise ValueError('act size/canary')
     h = capture(out/'got0.bin',meta['act_bytes'],np.float32,logical=F,offset=meta['h_offset'])
     fo = capture(out/'got0.bin',meta['act_bytes'],np.float32,logical=H,offset=meta['out_offset'])
+    if any(i < 0 or i >= H for i in exact_fo_channels):
+        raise ValueError('fo channel out of range')
     source = (out/'act.bin').read_bytes()
     original_h = np.frombuffer(source,np.float32,count=F,offset=meta['h_offset'])
     original_fo = capture(out/'source-fo.bin',H*4,np.float32)
@@ -146,12 +148,18 @@ def compare_trace(out):
                   differences=[dict(index=int(i),up=float(u[i]),up_ref=float(ref['up'][i]),
                                     gate=float(g[i]),gate_ref=float(ref['gate'][i]),h=float(h[i]),
                                     h_ref=float(ref['h'][i]),h_local=float(local_h[i])) for i in ids])
+    if 'fo' in ref:
+        result['fo'] = measure(fo, ref['fo'])
+    result['exact_fo_channels'] = [dict(channel=i, got=float(fo[i]), ref=float(ref['fo'][i]),
+                                      passed=bool(fo[i]==ref['fo'][i])) for i in exact_fo_channels]
     (out/'trace-results.json').write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result,indent=2),flush=True)
     return result
 
 
-def diagnose(out, tag):
+def diagnose(out, tag, down_segments=False, down_channel=2931):
+    if down_segments and not 0 <= down_channel < H:
+        raise ValueError('down channel out of range')
     meta = json.loads((out/'slice-fixture.json').read_text())
     case = next(c for c in meta['cases'] if c['tag'] == tag)
     spec = importlib.util.spec_from_file_location('full_model', ROOT/'utilities/test-wide-full-model.py')
@@ -180,6 +188,13 @@ def diagnose(out, tag):
     result.update(tag=tag, xm_bf16_differences=int(np.count_nonzero(xm!=ref['xm'].astype(bfloat16))),
                   device_fo_vs_independent=measure(fo, ref['fo']),
                   capture_sha256={p.name:sha(p) for p in (act_path,out/f'{tag}-got-xm.bin',out/f'{tag}-got-fo.bin')})
+    if down_segments:
+        from wide_down_reference import partial_reference, reduction_diagnosis
+        parts = partial_reference(pool[layout.POOL_FFN_DOWN:layout.POOL_FFN_DOWN+H*F//8192*5120],h,H,F)
+        values = reduction_diagnosis(parts)
+        result['down_segments'] = dict(channel=down_channel, parts=parts[:,down_channel].tolist(),
+                                      got=float(fo[down_channel]),**{k:float(v[down_channel]) for k,v in values.items()})
+        refs.update(segment_partials=parts,**{'segment_'+k:v for k,v in values.items()})
     np.savez(out/f'{tag}-ffn-diagnostic-ref.npz', **refs)
     (out/f'{tag}-ffn-diagnosis.json').write_text(json.dumps(result, indent=2)+'\n')
     print(json.dumps(result, indent=2), flush=True)
@@ -194,17 +209,23 @@ if __name__ == '__main__':
     p.add_argument('--trace-out', type=Path)
     p.add_argument('--compare-trace', action='store_true')
     p.add_argument('--require-exact-h-bf16', action='store_true')
+    p.add_argument('--require-exact-fo-channel', type=int, action='append', default=[])
+    p.add_argument('--down-segments', action='store_true', help='diagnose five down partials in FP64')
+    p.add_argument('--down-channel', type=int, default=2931, help='channel to report for --down-segments (default: 2931)')
     a = p.parse_args()
     if a.require_exact_h_bf16 and not a.compare_trace:
         p.error('--require-exact-h-bf16 requires --compare-trace')
+    if a.require_exact_fo_channel and not a.compare_trace:
+        p.error('--require-exact-fo-channel requires --compare-trace')
     if a.compare_trace and a.trace_build:
         p.error('--compare-trace cannot prepare a trace')
     if a.compare_trace:
-        result = compare_trace(a.out)
-        if not result['repeat_exact'] or (a.require_exact_h_bf16 and result['h_bf16_differences']):
+        result = compare_trace(a.out, a.require_exact_fo_channel)
+        if (not result['repeat_exact'] or (a.require_exact_h_bf16 and result['h_bf16_differences'])
+                or any(not c['passed'] for c in result['exact_fo_channels'])):
             sys.exit(1)
     elif a.trace_build:
         if a.trace_out is None: p.error('--trace-build requires --trace-out')
         prepare_trace(a.out,a.tag,a.trace_build,a.trace_out)
     else:
-        diagnose(a.out, a.tag)
+        diagnose(a.out, a.tag,a.down_segments,a.down_channel)

@@ -287,11 +287,20 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
 #endif
   }
 
+#if GEMV_Q4_SEGMENT_CARRY
+  // Preserve the residual of the final FP32 interface rounding. The down
+  // reducer consumes it before the next band overwrites the table scratch.
+  if (last) {
+    aie::accum<accfloat, kRows> small;
+    small.from_vector(compensation);
+    compensation = aie::zeros<float, kRows>();
+    q4_two_sum(acc, compensation, small);
+  }
+#elif GEMV_Q4_BLOCK_CARRY
+  if (last) acc = aie::add(acc, compensation);
+#endif
 #if GEMV_Q4_CORRECTION
   aie::store_v(cp, compensation);
-#endif
-#if GEMV_Q4_BLOCK_CARRY
-  if (last) acc = aie::add(acc, compensation);
 #endif
   const aie::vector<float, kRows> yv = acc.template to_vector<float>();
   if (last) {

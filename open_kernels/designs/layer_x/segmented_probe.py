@@ -30,6 +30,12 @@ DIAGNOSTIC = not FULL and os.environ.get('PROBE_PARTIALS', '1') == '1'
 CORRECTION = os.environ.get('PROBE_FFN_CORRECTION') == '1'
 PRODUCT_CORRECTION = os.environ.get('PROBE_PRODUCT_CORRECTION') == '1'
 BLOCK_CARRY = os.environ.get('PROBE_BLOCK_CARRY') == '1'
+SEGMENT_CARRY = os.environ.get('PROBE_SEGMENT_CARRY') == '1'
+if SEGMENT_CARRY:
+    if not FULL or not BLOCK_CARRY or X.DS_FLOATS < 2 * X.FFN.DOWN_PC * 64:
+        raise ValueError('segment carry requires full FFN block carry and two down scratch planes')
+    X.SEGMENT_CARRY = True
+    X.OS += ['-DGEMV_Q4_SEGMENT_CARRY=1', f'-DDENSE_DOWN_ROWS={X.FFN.DOWN_PC * 64}']
 if BLOCK_CARRY and not PRODUCT_CORRECTION:
     raise ValueError('block carry requires product correction')
 if BLOCK_CARRY:
@@ -128,4 +134,4 @@ _sources = [Path(__file__), HERE / 'xcommon.py', HERE / 'gen_kernels.py', ROOT /
             *sorted((ROOT / 'include').glob('*.h'))]
 SPECIALIZE = {'source_hash': int(hashlib.sha256(b''.join(p.read_bytes() for p in _sources)
                          + b''.join(X.source_hash_inputs())
-                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
+                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}

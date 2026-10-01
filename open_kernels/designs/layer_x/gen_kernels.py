@@ -234,14 +234,39 @@ void dense_trace(const float *__restrict ms, float *__restrict y, int32_t offset
 '''
         out["dense_down_acc.cc"] = '''// Accumulate a finished Q4 segment band in dead DeltaNet scratch.
 #include "vecmath.h"
+#if GEMV_Q4_SEGMENT_CARRY
+#include "gemv_tab.h"
+#endif
 extern "C" {
-void dense_down_acc(const float *__restrict ms, float *__restrict ds, int32_t band, int32_t first) {
+void dense_down_acc(const float *__restrict ms, float *__restrict ds, int32_t band, int32_t first
+#if GEMV_Q4_SEGMENT_CARRY
+                    , const uint8_t *__restrict tab, int32_t K
+#endif
+                    ) {
   float *dst = ds + 64 * band;
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < 64; j += 32) {
+#if GEMV_Q4_SEGMENT_CARRY
+    const float *cp = (const float *)(tab + 4 * K + K / 4 + K / 16) + j;
+    const auto perm = aie::load_v<32>(cp);
+    auto [r0, r1] = aie::interleave_zip(perm.template extract<16>(0), perm.template extract<16>(1), 1);
+    aie::accum<accfloat, 32> sum, term;
+    sum.from_vector(first ? aie::zeros<float, 32>() : aie::load_v<32>(dst + j));
+    auto low = first ? aie::zeros<float, 32>() : aie::load_v<32>(dst + DENSE_DOWN_ROWS + j);
+    term.from_vector(aie::load_v<32>(ms + j));
+    q4_two_sum(sum, low, term);
+    term.from_vector(aie::concat(r0, r1));
+    q4_two_sum(sum, low, term);
+    term.from_vector(low);
+    low = aie::zeros<float, 32>();
+    q4_two_sum(sum, low, term);
+    aie::store_v(dst + j, sum.template to_vector<float>());
+    aie::store_v(dst + DENSE_DOWN_ROWS + j, low);
+#else
     auto v = aie::load_v<32>(ms + j);
     if (!first) v = fadd32(aie::load_v<32>(dst + j), v);
     aie::store_v(dst + j, v);
+#endif
   }
 }
 }
@@ -249,8 +274,14 @@ void dense_down_acc(const float *__restrict ms, float *__restrict ds, int32_t ba
         out["dense_down_out.cc"] = '''#include "vecmath.h"
 extern "C" {
 void dense_down_out(const float *__restrict ds, float *__restrict y, int32_t band) {
+#if GEMV_Q4_SEGMENT_CARRY
+  for (unsigned j = 0; j < 64; j += 32)
+    aie::store_v(y + j, fadd32(aie::load_v<32>(ds + 64 * band + j),
+                              aie::load_v<32>(ds + DENSE_DOWN_ROWS + 64 * band + j)));
+#else
   aie::store_v(y, aie::load_v<32>(ds + 64 * band));
   aie::store_v(y + 32, aie::load_v<32>(ds + 64 * band + 32));
+#endif
 }
 }
 '''

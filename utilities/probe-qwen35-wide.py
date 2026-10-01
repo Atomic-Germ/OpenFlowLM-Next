@@ -74,9 +74,14 @@ def main():
     p.add_argument("--ffn-correction", action="store_true", help="corrected full FFN with K4096 down segments")
     p.add_argument("--product-correction", action="store_true", help="compensate Q4 block products and sums (requires projection/FFN correction)")
     p.add_argument("--block-carry", action="store_true", help="retain and renormalize the Q4 block sum residual (requires product correction)")
+    p.add_argument("--segment-carry", action="store_true", help="retain down segment residuals (requires full FFN block carry)")
     p.add_argument("--projection-n", type=int, default=1024, help="isolated Q4 projection output rows")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
+    if args.segment_carry and not args.block_carry:
+        p.error('--segment-carry requires --block-carry')
+    if args.segment_carry and args.scope != 'ffn':
+        p.error('--segment-carry requires --scope ffn')
     if args.block_carry and not args.product_correction:
         p.error('--block-carry requires --product-correction')
     if args.trace and args.scope != "ffn":
@@ -105,6 +110,7 @@ def main():
     env = os.environ.copy()
     env['PROBE_PRODUCT_CORRECTION'] = str(int(args.product_correction))
     env['PROBE_BLOCK_CARRY'] = str(int(args.block_carry))
+    env['PROBE_SEGMENT_CARRY'] = str(int(args.segment_carry))
     env.update(OPEN_KERNELS_SPEC=str(spec_path), OPEN_KERNELS_UNVALIDATED="1",
                OPEN_KERNELS_WIDE_GLUE_PROBE="1")
     env["PATH"] = "/opt/xilinx/xrt/bin:" + env["PATH"]
@@ -134,6 +140,7 @@ def main():
     metadata = {"python": sys.version, "ffn": args.ffn, "scope": args.scope, "hardware_validated": False,
                 "product_correction": args.product_correction,
                 "block_carry": args.block_carry,
+                "segment_carry": args.segment_carry,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}
     if args.scope == "projection":
         metadata.update(projection_k=args.projection_k, projection_n=args.projection_n, correction=args.projection_correction, weight_format="q4_1")

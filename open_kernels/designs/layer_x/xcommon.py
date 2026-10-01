@@ -37,6 +37,7 @@ from recipes.segmented_dense import weight_slice
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 ELEM = 4096
+SEGMENT_CARRY = False  # Explicitly enabled only by the precision probe.
 
 
 def _gemv_prep_entry(k: int) -> Path:
@@ -215,7 +216,7 @@ def kernels(inc, t):
         k["prep"] = ef("dense_prep", [x, tab, i32, i32])
         k["prepf"] = ef("dense_prep_f32", [x, tab, i32, i32])
         if FFN.DOWN_SEGMENTS:
-            k["down_acc"] = ef("dense_down_acc", [ms, ds, i32, i32])
+            k["down_acc"] = ef("dense_down_acc", [ms, ds, i32, i32] + ([tab, i32] if SEGMENT_CARRY else []))
             k["down_out"] = ef("dense_down_out", [ds, y, i32])
         k["vcopy"] = dnf("dnx_vcopy", [e, ds])
         k["p1"] = dnf("dnx_pass1", [e, ds, i32])
@@ -418,7 +419,10 @@ def segmented_down_body(win, xin, yout, B, K, diagnostic=False):
                 we = win.acquire(1)
                 K["gms"](we, tab, ms, g, per_band(width), 0)
                 win.release(1)
-            K["down_acc"](ms, ds, band, int(start == 0))
+            if SEGMENT_CARRY:
+                K["down_acc"](ms, ds, band, int(start == 0), tab, width)
+            else:
+                K["down_acc"](ms, ds, band, int(start == 0))
         if diagnostic or start + width == FFN.FF:
             for band in range_(FFN.DOWN_PC):
                 ye = yout.acquire(1)

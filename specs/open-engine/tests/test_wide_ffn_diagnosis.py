@@ -92,13 +92,17 @@ def test_trace_replay_checks_repeat_and_immutable_references(diagnosis, monkeypa
     for name in ('act','got0','got1'): (tmp_path/f'{name}.bin').write_bytes(arena)
     for name in ('trace0','trace1'): (tmp_path/f'{name}.bin').write_bytes(trace)
     (tmp_path/'source-fo.bin').write_bytes(np.zeros(4,np.float32).tobytes()+m.GUARD)
-    np.savez(tmp_path/'reference.npz',up=np.zeros(64),gate=np.zeros(64),h=np.zeros(64))
+    np.savez(tmp_path/'reference.npz',up=np.zeros(64),gate=np.zeros(64),h=np.zeros(64),fo=np.array([0,0,1,0]))
     meta = dict(tag='test',act_bytes=272,h_offset=0,out_offset=256,
                 sha256={n:m.sha(tmp_path/n) for n in ('act.bin','source-fo.bin','reference.npz')})
     (tmp_path/'trace-fixture.json').write_text(json.dumps(meta))
     r = m.compare_trace(tmp_path)
     assert r['h_bf16_differences']==0 and r['repeat_exact']
     assert r['matches_recorded_h'] and r['matches_recorded_fo']
+    r = m.compare_trace(tmp_path, [0,2])
+    assert [c['passed'] for c in r['exact_fo_channels']] == [True,False]
+    with pytest.raises(ValueError,match='channel out of range'):
+        m.compare_trace(tmp_path, [4])
     (tmp_path/'trace1.bin').write_bytes(np.ones(128,np.float32).tobytes()+m.GUARD)
     assert not m.compare_trace(tmp_path)['repeat_exact']
     (tmp_path/'reference.npz').write_bytes(b'changed')
