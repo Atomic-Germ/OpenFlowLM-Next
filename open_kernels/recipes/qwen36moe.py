@@ -188,6 +188,32 @@ def ab_lanes(spec: ModelSpec) -> int:
     return roundup(spec.lin_value_heads, AB_LANES)
 
 
+AB_ROWS = 64                     # dn_glue.h's kAbRows: rows of the xn per A/B weight tile
+
+
+def ab_tiles(spec: ModelSpec) -> int:
+    """How many A/B weight tiles cover the xn -- a tile COUNT, and HID / AB_ROWS.
+
+    It used to be computed as `hidden * ab_lanes * 2 // ELEM`, which reads as if
+    the lane width and the two accumulators (alpha, beta) each contributed a
+    factor. They do not: a tile is AB_ROWS rows by the accumulator width, which is
+    exactly one 4 KB xn element, so the count is just the number of AB_ROWS-row
+    tiles in the xn. At 32 lanes the expression happens to reduce to HID/64 --
+    the 32 cancels against the fixed tile width and the *2 accounts for the two
+    accumulators being walked, not for size.
+
+    That reduction is what hid the coupling. Every model validated so far has 16
+    or 32 value heads, so `ab_lanes` was always 32 and the two forms agreed.
+    Qwen3.8-27B has 48, which rounds to 64 lanes, and the count silently doubled
+    to 160 against an xn holding 80 tiles of data -- so the glue core was told to
+    fetch twice the weight stream it has, and SIDE_BYTES (which multiplies this
+    count) claimed 1368 KB of side channel for it. Nothing else in the recipe
+    scales with the accumulator width, so the count does not either: express it
+    as what it is, and a future kV=64 is a dn_glue.h change alone.
+    """
+    return spec.hidden // AB_ROWS
+
+
 class _Alloc:
     """Sequential byte allocator for a buffer layout: name -> offset, in order."""
 
@@ -801,7 +827,7 @@ def linear(spec: ModelSpec) -> Linear | None:
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=out_pc,
         QKV_DIM=nch, VW=vw,
         NCH=nch, NHEAD=spec.lin_value_heads, TILE=tile, NT=nch // tile,
-        AB_ELEMS=spec.hidden * ab_lanes(spec) * 2 // ELEM, G=tile, NG=vw // tile,
+        AB_ELEMS=ab_tiles(spec), G=tile, NG=vw // tile,
         KEY_WIDTH=key_width, HEADS_PER_TILE=tile // spec.lin_value_dim, VALUE_TILE0=2 * key_width // tile,
         RECORD_BYTES=DN_RECORD_FLOATS * 4, O_HEAD_BYTES=spec.lin_value_dim * 4,
         OUT_K=vw, QKV_K=spec.hidden,
