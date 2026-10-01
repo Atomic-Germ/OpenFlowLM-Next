@@ -81,10 +81,21 @@ PROJ_ROLES = ("attn", "ffn")
 
 
 def mixed(R) -> bool:
-    """The spec's roles mix formats on one main core: something is q8, something is still
-    q4_1, and the q4_1 side is the `gy` + `gms` pair the fold replaces."""
+    """Whether this spec folds the q4_1 GEMV pair into one `gemv_q4_gyms`.
+
+    Whenever BOTH q4_1 entries would be resident -- the same condition as the
+    layer_x generator's, for the same reason. `gemv_q4_pool_group_rt` is
+    `static inline`, so `gemv_q4_gy` and `gemv_q4_gms` each carry their own copy
+    of the band walk: two entries are two bodies on a 16 KB core, and that
+    overflowed `dx` for an all-q4_1 dense model exactly as it overflowed `lx`.
+    The folded entry picks its destination from a runtime argument and
+    hard-codes the row split the pair already used, so it is correct with or
+    without a q8 body beside it. The condition is therefore the two q4_1 roles
+    alone, NOT `bool(q8)`. An all-q8 spec has no q4_1 entry and folds nothing.
+    See xcommon.FOLD and designs/layer_x/gen_kernels.py mixed().
+    """
     q8 = R.spec.q8_roles
-    return bool(q8) and "ffn" not in q8 and any(r not in q8 for r in PROJ_ROLES)
+    return "ffn" not in q8 and any(r not in q8 for r in PROJ_ROLES)
 
 
 # Generated only for a spec that needs them; removed again when it does not, so a family's
