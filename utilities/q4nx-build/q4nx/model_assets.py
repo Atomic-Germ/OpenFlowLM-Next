@@ -599,6 +599,21 @@ def _readme_banner(meta: dict) -> str:
         # Directly under the table, before anything else: this is the one fact
         # that decides whether the artifact is the model someone asked for.
         parts += ["", meta["prune_note"], ""]
+    if meta.get("packed_with"):
+        # The command that made this container. A finetune of this base should be
+        # packed the same way, and "the same way" should not live in someone's head.
+        parts += [
+            "",
+            "## Reproduce this conversion",
+            "",
+            "This container was produced by exactly this command, so a fine-tune of the",
+            "same base can be packed the same way:",
+            "",
+            "```bash",
+            meta["packed_with"],
+            "```",
+            "",
+        ]
     parts += [
         "",
         "## Install and run",
@@ -1071,6 +1086,7 @@ def assemble_model_assets_hf(
     oflm_version: Optional[str] = None,
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
+    packed_with: Optional[str] = None,
 ) -> None:
     """Build a complete model directory from an HF safetensors source.
 
@@ -1111,6 +1127,8 @@ def assemble_model_assets_hf(
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
+    if packed_with:
+        config["oflm_packed_with"] = packed_with
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -1132,6 +1150,7 @@ def assemble_model_assets(
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
     prune_meta: Optional[dict] = None,
+    packed_with: Optional[str] = None,
 ) -> None:
     """Build a complete, uploadable model directory.
 
@@ -1221,6 +1240,8 @@ def assemble_model_assets(
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
+    if packed_with:
+        config["oflm_packed_with"] = packed_with
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -1250,6 +1271,7 @@ def assemble_model_assets(
         _meta["prune_ffn_from"] = _pf.get("from")
         _meta["prune_ffn_retained"] = _pf.get("activation_mass_retained")
         _meta["mtp_dropped"] = config.get("oflm_mtp_dropped") or 0
+    _meta["packed_with"] = config.get("oflm_packed_with")
     assemble_readme(output_dir, candidates, _meta, source_file)
 
     print(f"[INFO] Model directory ready: {output_dir}")
