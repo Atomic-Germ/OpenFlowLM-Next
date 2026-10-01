@@ -53,11 +53,12 @@ def default_spec() -> ModelSpec:
     candidates = sorted(SPECS.glob("*.json")) if SPECS.is_dir() else []
     if not candidates:
         raise SpecError(
-            f"no derived specs in {SPECS}. They are generated from the model "
-            "catalogue: run open_kernels/gen_catalogue_specs.py, or build with "
-            "OFLM_BUILD_KERNELS=ON, which does it. There is no hand-written "
-            "default any more -- a hardcoded one is how this ended up building a "
-            "model nobody asked for.")
+            f"no specs in {SPECS}. They are committed: restore them with "
+            "`git checkout -- open_kernels/recipes/specs`, or regenerate the "
+            "derivable ones with open_kernels/gen_catalogue_specs.py (a build with "
+            "OFLM_BUILD_KERNELS=ON does that). There is no hand-written default any "
+            "more -- a hardcoded one is how this ended up building a model nobody "
+            "asked for.")
     for pat in ("qwen36moe-*.json", "qwen35-*.json", "qwen3-*.json"):
         for c in candidates:
             if c.name.startswith(pat[:-len("*.json")]):

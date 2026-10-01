@@ -237,14 +237,15 @@ def spec_list(names: str) -> list[Path]:
             else:
                 missing.append(name)
         if missing:
-            # Named a spec that is not there. The specs are derived, so the fix is
-            # to derive them; say that, and say what IS there, rather than failing
-            # three lines later with a FileNotFoundError from inside the exporter.
+            # Named a spec that is not there. Specs are committed, so the fix is
+            # usually to add the spec rather than to derive one; say what IS
+            # there, rather than failing three lines later with a
+            # FileNotFoundError from inside the exporter.
             have = _derived_specs()
             print(f"FATAL: no such spec: {', '.join(missing)}\n"
-                  f"  Specs are derived from the model catalogue, not hand-written. "
-                  f"Run without --specs to derive them all, or name one of:\n"
-                  f"  {', '.join(have) if have else '(none derived yet)'}",
+                  f"  Specs are committed under {SPECS_DIR}; add the spec there, or "
+                  f"name one of the {len(have)} present:\n"
+                  f"  {', '.join(have) if have else '(none yet)'}",
                   file=sys.stderr)
             raise SystemExit(1)
         return specs
