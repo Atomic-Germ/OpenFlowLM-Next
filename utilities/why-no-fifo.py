@@ -2,7 +2,9 @@
 """Name the IRON fifo behind a dataflow error, instead of guessing which one.
 
     python utilities/why-no-fifo.py --spec open_kernels/recipes/specs/qwen35-h5120-L64.json \
-        --design lx [--kernel-size]
+        --design layer_x/lx.py [--kernel-size]
+
+    python utilities/why-no-fifo.py --spec ... --design layer_x/lx.py --trace lni
 
 WHY. IRON raises, from ObjectFifo.acquire:
 
@@ -40,6 +42,9 @@ KERNELS = REPO / "open_kernels"
 # The frame lines worth showing: a design or a helper, skipping iron's own
 # plumbing, which is a fixed ladder that tells you nothing about the caller.
 KEEP = ("open_kernels/", "utilities/")
+
+# One trace list per patched class, so main() can print them after a run.
+TRACES: list = []
 
 
 def patch_acquire() -> tuple[object, str]:
@@ -84,7 +89,42 @@ def patch_acquire() -> tuple[object, str]:
                 f"{self._depth}\n{_site()}")
         return orig_release(self, num_elem)
 
-    cls.acquire, cls.release = acquire, release
+    # --trace wants the ELEMENT STREAM: which elements enter a fifo, in what
+    # order, and which acquire consumes how many. That is the whole question
+    # behind a depth that "would not scale" -- whether the acquire is
+    # irreducible, or whether it only looks large because a neighbouring
+    # stage's element is still in flight when it is issued. The shim's fills
+    # and acquires are both on the handle, so both get wrapped here.
+    trace: list[str] = []
+
+    def _nm(self) -> str:
+        return _name(self)
+
+    def fill(self, source, *a, **kw):
+        r = orig_fill(self, source, *a, **kw)
+        tap = kw.get("tap")
+        n = getattr(tap, "size", None)
+        trace.append(f"  fill   {_nm(self):6} x{'-' if n is None else n:<4} {tap!s:.60}")
+        return r
+
+    def drain(self, target, *a, **kw):
+        tap = kw.get("tap")
+        n = getattr(tap, "size", None)
+        trace.append(f"  drain  {_nm(self):6} x{'-' if n is None else n:<4} -> {type(target).__name__}")
+        return orig_drain(self, target, *a, **kw)
+
+    def acquire_traced(self, num_elem: int):
+        trace.append(f"  ACQUIRE {_nm(self):6} n={num_elem}  (depth {self._depth})")
+        return orig_acquire(self, num_elem)
+
+    def release_traced(self, num_elem: int):
+        trace.append(f"  release {_nm(self):6} n={num_elem}")
+        return orig_release(self, num_elem)
+
+    orig_fill, orig_drain = cls.fill, cls.drain
+    cls.fill, cls.drain = fill, drain
+    cls.acquire, cls.release = acquire_traced, release_traced
+    TRACES.append(trace)
     return cls, "patched"
 
 
@@ -146,6 +186,14 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=REPO / "build" / "why-no-fifo")
     ap.add_argument("--kernel-size", action="store_true",
                     help="afterwards, report per-TU .text via utilities/kernel-size.py")
+    ap.add_argument("--trace", metavar="FIFO", default=None,
+                    help="print every fill / drain / acquire / release on the named fifo, "
+                         "in order. This is how a depth is audited: if the acquire is "
+                         "satisfied partly by a neighbouring stage's element still in "
+                         "flight, the interleaving shows it, and the acquire is not "
+                         "irreducible. `--trace all` for every fifo.")
+    ap.add_argument("--trace-limit", type=int, default=400,
+                    help="cap the printed trace lines per fifo (default 400)")
     a = ap.parse_args()
 
     os.environ["OPEN_KERNELS_SPEC"] = str(a.spec.resolve())
@@ -154,6 +202,17 @@ def main() -> int:
         rc = run_design(a.design, a.out)
     finally:
         restore(cls)
+
+    if a.trace:
+        for t in TRACES:
+            keep = [l for l in t if a.trace == "all" or l.split()[1] == a.trace]
+            if not keep:
+                continue
+            print(f"\n=== fifo {a.trace} ===", file=sys.stderr)
+            for line in keep[: a.trace_limit]:
+                print(line, file=sys.stderr)
+            if len(keep) > a.trace_limit:
+                print(f"  ... {len(keep) - a.trace_limit} more", file=sys.stderr)
 
     if a.kernel_size:
         k = subprocess.run(
