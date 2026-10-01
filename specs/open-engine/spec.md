@@ -1276,6 +1276,32 @@ dense FFN in place of the MoE block, and runs its q8 out projection there as an 
 into two q4_1 halves rather than re-quantising it -- 13.5-17x faster prefill at every size
 tested with the greedy output unchanged. See `OPEN-PREFILL-BATCH`.
 
+### OPEN-CONVERT-QWEN35-VHEADS: a GGUF's tiled value heads come back in grouped order
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/models/qwen35.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_qwen35_vheads.py`
+
+llama.cpp's converter stores a Qwen3.5 / 3.8 gated DeltaNet's value heads tiled -- GGUF head
+`r * num_k + kh` is HF head `kh * grp + r`, `grp = num_v / num_k` -- and the engine reads HF's
+grouped order. When `num_v != num_k`, q4nx-build shall untile every value-indexed tensor with
+the GGUF's own head counts (`qwen35.ssm.group_count`, `time_step_rank`, `state_size`,
+`inner_size`): qkv's value rows and conv1d's value channels (both after the
+`2 * num_k * head_k` rows of q and k, which keep their order), z's rows, out_proj's columns,
+alpha / beta's rows, `ssm_a` and `ssm_dt.bias`. When `num_v == num_k` nothing is reordered.
+
+**Acceptance criteria:**
+- At 32 value heads over 16 (the 4B / 9B) and 48 over 16 (the 27B), rows, columns and per-head
+  vectors tiled by llama.cpp's rule come back in grouped order exactly.
+- qkv's untile leaves the first `2 * num_k * head_k` rows in place and restores the value rows.
+- The pre-fix rule (`grp` fixed at 2, the value rows taken as the second half) restores the 9B
+  and fails the 27B -- the scramble `Atomic-Germ/Qwen3.8-27B-NPU2` shipped with.
+
+**Verification (manual), whole containers:** `python open_kernels/model/container_vs_hf.py
+--model-dir <container> --hf-shard <the HF shard holding layers 0 and 3>` correlates every
+tensor of a linear and a full layer with its source after the converter's expected transform;
+`ALL MATCH` (each quantized projection >= 0.99) is the bar. Run on the reconverted 27B on
+2026-10-01: ALL MATCH; on the published one, 8 mismatches, all value-indexed.
+
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
 `designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `model/dense_probe.py`,
