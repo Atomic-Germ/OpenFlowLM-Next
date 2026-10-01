@@ -136,4 +136,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate exact vector FP32 residual addition in wide RMSNorm, including signed zero and unchanged full-model replay.</description>
     <location>.opencode/skill/open-residual-rne/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-attention-boundary</name>
+    <description>Isolate real attention rounding with captured Q/K/V/gate and cache, then validate block-carry projections and precise attention against unchanged full-model references.</description>
+    <location>.opencode/skill/open-attention-boundary/SKILL.md</location>
+  </skill>
 </available_skills>

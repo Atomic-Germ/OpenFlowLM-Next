@@ -16,10 +16,17 @@ three layers exact. Full acceptance still fails four numerical checks; the
 next isolated target is layer1 residual addition at channel3390. PR4 remains
 incomplete.
 
-Latest follow-up: [exact residual addition](qwen38-residual-precision.md) fixes
+Follow-up: [exact residual addition](qwen38-residual-precision.md) fixes
 all384 captured residual sums, including channel3390. Its experimental full
 replay still fails11 numerical checks (versus4 previously); it is not promoted
 as the accepted default. The next isolated target is layer3 attention.
+
+Latest follow-up: [real attention rounding](qwen38-attention-boundary.md)
+makes layer3 new K/V and gated attention output exact using block-carry Q/K/V/gate
+projection and precise attention. The full replay fails6 checks versus11, but
+final residual/norm errors increase, so it remains experimental. The first
+changed norm boundary is now layer4 xn, one local RMSNorm error at channel786.
+PR4 remains incomplete; runtime and catalogue defaults are unchanged.
 
 ## Sources and format
 

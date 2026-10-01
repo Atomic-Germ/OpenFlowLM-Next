@@ -15,7 +15,7 @@ def sha(path):
         return hashlib.file_digest(f,'sha256').hexdigest()
 
 
-def replay(source, out, kernel, *, ffn=None, attention=None, ln=None):
+def replay(source, out, kernel, *, ffn=None, attention=None, ln=None, attention_projection=None):
     source, out, kernel = source.resolve(), out.resolve(), kernel.resolve()
     meta = json.loads((source/'slice-fixture.json').read_text())
     fixture = json.loads((kernel/'projection-fixture.json').read_text())
@@ -26,6 +26,14 @@ def replay(source, out, kernel, *, ffn=None, attention=None, ln=None):
         raise ValueError('output projection primitive gate failed')
     replacements = dict(out=kernel)
     fixtures = dict(out=fixture)
+    if attention_projection is not None:
+        ap = attention_projection.resolve()
+        pf = json.loads((ap/'projection-fixture.json').read_text())
+        if (pf['k'],pf['n']) != (5120,14336):
+            raise ValueError('attention projection geometry must be K5120/N14336')
+        if not json.loads((ap/'projection-results.json').read_text())['passed']:
+            raise ValueError('attention projection primitive gate failed')
+        replacements['a_qkvg'], fixtures['a_qkvg'] = ap, pf
     if ffn is not None:
         ffn = ffn.resolve()
         ff = json.loads((ffn/'segmented-fixture.json').read_text())
@@ -98,5 +106,6 @@ if __name__ == '__main__':
     p.add_argument('--ffn',type=Path)
     p.add_argument('--attention',type=Path)
     p.add_argument('--ln',type=Path)
+    p.add_argument('--attention-projection',type=Path)
     a = p.parse_args()
-    replay(a.source,a.out,a.output_projection,ffn=a.ffn,attention=a.attention,ln=a.ln)
+    replay(a.source,a.out,a.output_projection,ffn=a.ffn,attention=a.attention,ln=a.ln,attention_projection=a.attention_projection)

@@ -198,3 +198,24 @@ def test_model_replay_rejects_ln_with_different_epsilon(replay_fixture):
     with pytest.raises(ValueError,match='LN geometry'):
         module.replay(source,out,kernel,ln=ln)
     assert not out.exists()
+
+
+def test_model_replay_validates_and_replaces_attention_projection(replay_fixture):
+    m,source,kernel,out = replay_fixture
+    import json
+    proj=kernel.parent/'qkvg';proj.mkdir()
+    for n in ('final.xclbin','insts.bin'):(proj/n).write_bytes(b'qkvg')
+    fixture=dict(k=5120,n=14336,sha256={n:m.sha(proj/n) for n in ('final.xclbin','insts.bin')})
+    (proj/'projection-fixture.json').write_text(json.dumps(fixture))
+    (proj/'projection-results.json').write_text(json.dumps(dict(passed=True)))
+    old=source/'old-qkvg';old.write_bytes(b'old qkvg')
+    inst=source/'old-qkvg-insts';inst.write_bytes(b'old instructions')
+    cfg=source/'decode.cfg';cfg.write_text(cfg.read_text()+f'xclbin a_qkvg {old}\nkernelx a_qkvg a_qkvg {inst}\n')
+    meta=json.loads((source/'slice-fixture.json').read_text());meta['fixtures']['decode.cfg']=m.sha(cfg)
+    meta['kernels'].update({str(p):m.sha(p) for p in (old,inst)})
+    (source/'slice-fixture.json').write_text(json.dumps(meta))
+    m.replay(source,out,kernel,attention_projection=proj)
+    assert f'xclbin a_qkvg {proj}/final.xclbin' in (out/'decode.cfg').read_text()
+    fixture['n']=5120;(proj/'projection-fixture.json').write_text(json.dumps(fixture))
+    with pytest.raises(ValueError,match='attention projection geometry'):
+        m.replay(source,out.parent/'invalid',kernel,attention_projection=proj)
