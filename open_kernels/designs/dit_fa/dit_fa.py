@@ -76,6 +76,7 @@ STACK = 0x1000                         # softmax_step with FA_EXP_FIX spills a 3
 RTP_HEADS, RTP_PASSES, RTP_CHUNKS, RTP_VALID, RTP_CAUSAL, RTP_ROW0 = range(6)
 RTP_LEN = 8
 EXP_FIX = int(os.environ.get("DF_EXP_FIX", 0))   # fa_dit.cc FA_EXP_FIX (a build-wide choice)
+TAU = int(os.environ.get("DF_TAU", 32))          # fa_dit.cc FA_TAU, the lazy-rescale threshold
 _EXPT = os.environ.get("DF_EXPT", "").split(",")  # ablation builds only
 
 
@@ -125,7 +126,7 @@ def dit_fa(
     rtp_ty = np.ndarray[(RTP_LEN,), np.dtype[np.int32]]
 
     flags = [f"-DFA_TQ={TQ}", f"-DFA_LKP={LKP}", f"-DFA_DC={DC}", f"-DFA_DFULL={DFULL}",
-             f"-DFA_QROWS_PASS={QROWS_PASS}", f"-DFA_EXP_FIX={EXP_FIX}",
+             f"-DFA_QROWS_PASS={QROWS_PASS}", f"-DFA_EXP_FIX={EXP_FIX}", f"-DFA_TAU={TAU}",
              "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
              "-Wno-deprecated-declarations"]
     # One ExternalFunction compiles the file; every call goes through a plain Kernel

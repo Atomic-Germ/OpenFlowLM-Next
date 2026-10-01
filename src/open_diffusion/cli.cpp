@@ -161,6 +161,16 @@ int main(int argc, char** argv) {
                 std::printf("  per set (ms):");
                 for (auto& [s, ms] : by_set) std::printf(" %s %.0f", s.c_str(), ms);
                 std::printf("\n");
+                std::map<std::string, std::pair<int, double>> by_stream;
+                for (size_t i = 0; i < t.op_ms.size(); ++i) {
+                    auto& e = by_stream[std::get<0>(ops[i]) + ":" + std::get<1>(ops[i])];
+                    ++e.first;
+                    e.second += t.op_ms[i];
+                }
+                std::vector<std::pair<std::string, std::pair<int, double>>> rows(by_stream.begin(), by_stream.end());
+                std::sort(rows.begin(), rows.end(), [](auto& x, auto& y) { return x.second.second > y.second.second; });
+                std::printf("  per stream (ms, calls):\n");
+                for (auto& [s, e] : rows) std::printf("    %-28s %8.1f %5d\n", s.c_str(), e.second, e.first);
             }
         }
     } catch (const std::exception& e) {

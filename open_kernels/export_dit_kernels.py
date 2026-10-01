@@ -118,6 +118,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 DESIGN = HERE / "designs" / "dit_gemm" / "dit_gemm.py"
 FA_DESIGN = HERE / "designs" / "dit_fa" / "dit_fa.py"
+FA_TAU = 32          # dit_fa.py DF_TAU: the lazy-rescale threshold (phase7-speed.md step 0b)
 EW_DESIGN = HERE / "designs" / "dit_ew" / "dit_ew.py"
 CONV_DESIGN = HERE / "designs" / "dit_conv" / "dit_conv.py"
 VEW_DESIGN = HERE / "designs" / "vae_ew" / "vae_ew.py"
@@ -527,10 +528,10 @@ def main() -> int:
         keys = ("L", "heads", "kv_heads", "causal", "valid_len", "layout")
 
         def fa_job(s):
-            return ({**{k: s[k] for k in keys}, "exp_fix": fix},
+            return ({**{k: s[k] for k in keys}, "exp_fix": fix, "tau": FA_TAU},
                     {"DF_L": s["L"], "DF_HEADS": s["heads"],
                      "DF_KV_HEADS": s["kv_heads"], "DF_CAUSAL": s["causal"],
-                     "DF_VALID_LEN": s["valid_len"], "DF_EXP_FIX": fix,
+                     "DF_VALID_LEN": s["valid_len"], "DF_EXP_FIX": fix, "DF_TAU": FA_TAU,
                      "DF_QKV_LD": s["layout"].get("qkv_ld", 0),
                      "DF_K_COL": s["layout"].get("k_col", 0),
                      "DF_V_COL": s["layout"].get("v_col", 0),
@@ -557,6 +558,7 @@ def main() -> int:
             "head_dim": 128,
             "q_k_v_o": "bf16 [tokens, heads*128] token-major (K/V: kv_heads*128)",
             "exp_fix": fix,
+            "tau": FA_TAU,
             "resolutions": resolutions,
             "streams": fa_streams,
             "patch": patch,
