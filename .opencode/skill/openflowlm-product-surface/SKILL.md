@@ -245,13 +245,15 @@ Dense Qwen3.5 currently covers hidden 1024 / 2048 / 2560 / 4096, and 5120 once
   `--family` and registered Granite as `hunyuan` — so the engine refused it
   with a plausible-looking family error. Use `case "$m" in Granite*) …`.
 
-## Open bugs found 2026-10-01
+## Bugs: one found 2026-10-01, now fixed upstream
 
-- **Server dies on cached prompt + system-prompt change.** Reproduced on
-  `granite:3b` via `oflm-test --llm` (3 PASS, then 2 ERROR): the log reads
-  `Use cached prompt!` → `Matched 1 out of 3 messages` →
-  `System prompt changed! Clearing context...` → 1686-token prefill →
-  `Start generating...` → death immediately after `Submitted BO 389`, with no
-  signal or assertion text. **Not** a kernel or length problem: a 700-token
-  single-turn prompt generating a long answer runs clean. The suspect is the
-  context-reuse/KV-cache path after a system-prompt change. Unfixed.
+- **~~Server dies on cached prompt + system-prompt change.~~ FIXED by
+  `e4c022e` (#135/#138), confirmed 2026-10-01.** It first showed as
+  `granite:3b` failing `oflm-test --llm` with 3 PASS then 2 ERROR: the log
+  read `Use cached prompt!` -> `Matched 1 out of 3 messages` ->
+  `System prompt changed! Clearing context...` -> 1686-token prefill ->
+  `Start generating...` -> death right after `Submitted BO 389`, no signal
+  text. Rebuilt after merging main, the same suite is **5 PASS, 0 failures**,
+  context retention included. Worth remembering that a *kernel* stack can be
+  entirely correct and a *server* still die on context reuse -- the two layers
+  fail independently, and "the kernels build" never implied "the server works".
