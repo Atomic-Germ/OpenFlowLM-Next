@@ -16,9 +16,12 @@
 // The host blocks (XRT's wait sleeps) only at phase boundaries, when its window of
 // stretches in flight is full, and on the last one.
 //
-// One engine serves every resolution the bundle has. The weights are loaded once; a
-// resolution's context, kernels and activations (1.4 GiB at 512, 4.6 GiB at 1024) are
-// made the first time it is selected and kept. The constructor that takes a size makes
+// One engine serves every resolution the bundle has, and every edit configuration
+// (select(size, steps, true): an output of size x size from one reference of that size,
+// whose VAE encoder runs as an "encode" phase before the steps; plans/edits.md). The
+// weights are loaded once; a configuration's context, kernels and activations (1.4 GiB at
+// 512, 4.6 GiB at 1024, 1.7 GiB for a 512 edit) are made the first time it is selected
+// and kept. The constructor that takes a size makes
 // that one's context and kernels on a thread while the weights load. The step count is free up to kMaxSteps: a step
 // is the bundle's step template with its modulation and dt views moved on, and a count
 // other than the bundle's gets its sigmas from schedule.hpp.
@@ -86,13 +89,16 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     std::vector<int> sizes() const;          // the bundle's resolutions, ascending
+    std::vector<int> edit_sizes() const;     // the sizes it can edit at, ascending (maybe none)
     int default_steps() const;               // the bundle's step count (4)
-    // Make size x size at `steps` denoising steps (0: default_steps()) the current image.
-    // The first selection of a size allocates its activations; an unknown size or a step
-    // count outside 1..kMaxSteps throws, naming what is supported.
-    void select(int size, int steps = 0);
+    // Make size x size at `steps` denoising steps (0: default_steps()) the current image;
+    // edit: an edit of a size x size reference (set_reference). The first selection of a
+    // configuration allocates its activations; an unknown size or a step count outside
+    // 1..kMaxSteps throws, naming what is supported.
+    void select(int size, int steps = 0, bool edit = false);
 
     int size() const;               // the current selection's; 0 before select()
+    bool editing() const;           // whether the current selection is an edit
     int steps() const;
     int image_tokens() const;       // (size / 16)^2
     int latent_channels() const;    // 128
@@ -105,6 +111,9 @@ public:
     void set_tokens(const std::vector<int64_t>& ids);
     // The initial latents, packed [image_tokens, 128] bf16 bits.
     void set_noise(const std::vector<uint16_t>& bf16_bits);
+    // An edit's reference, [size, size, 3] RGB8 (reference.hpp prepare_reference makes it
+    // from file bytes).
+    void set_reference(const std::vector<uint8_t>& rgb);
     // bf16 bits of N(0, 1) samples from a seed (the engine's own generator).
     std::vector<uint16_t> seeded_noise(uint64_t seed) const;
 

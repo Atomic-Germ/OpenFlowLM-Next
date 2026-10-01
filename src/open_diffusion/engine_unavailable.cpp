@@ -39,9 +39,11 @@ Engine::Engine(const std::string&, const std::string&, int) { unavailable(); }
 Engine::~Engine() = default;
 
 std::vector<int> Engine::sizes() const { unavailable(); }
+std::vector<int> Engine::edit_sizes() const { unavailable(); }
 int Engine::default_steps() const { unavailable(); }
-void Engine::select(int, int) { unavailable(); }
+void Engine::select(int, int, bool) { unavailable(); }
 int Engine::size() const { unavailable(); }
+bool Engine::editing() const { unavailable(); }
 int Engine::steps() const { unavailable(); }
 int Engine::image_tokens() const { unavailable(); }
 int Engine::latent_channels() const { unavailable(); }
@@ -50,6 +52,7 @@ int Engine::pad_id() const { unavailable(); }
 const std::string& Engine::prompt_template() const { unavailable(); }
 void Engine::set_tokens(const std::vector<int64_t>&) { unavailable(); }
 void Engine::set_noise(const std::vector<uint16_t>&) { unavailable(); }
+void Engine::set_reference(const std::vector<uint8_t>&) { unavailable(); }
 std::vector<uint16_t> Engine::seeded_noise(uint64_t) const { unavailable(); }
 Timing Engine::run(bool) { unavailable(); }
 std::vector<uint8_t> Engine::rgb() { unavailable(); }

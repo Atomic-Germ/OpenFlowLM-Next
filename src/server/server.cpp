@@ -1127,12 +1127,14 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
                 std::vector<ImageUpload> uploads;
                 for (const auto& [name, part] : parts) {
                     if (name == "image" || name == "image[]" || name == "mask")
-                        uploads.push_back(ImageUpload{name, part.filename, part.content_type, part.content.size()});
+                        uploads.push_back(ImageUpload{name, part.filename, part.content_type, part.content.size(),
+                                                      part.content});
                     else
                         fields.emplace_back(name, part.content);
                 }
                 rest_handler->handle_openai_images_edits(openai_compat::images_form_json(fields), uploads,
-                                                         send_response, send_streaming_response);
+                                                         cancellation_token, send_response,
+                                                         send_streaming_response);
         });
 
     server->register_handler("POST", "/v1/completions",
