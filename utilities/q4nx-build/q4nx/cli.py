@@ -79,6 +79,32 @@ def _layer_count(model):
     return n or None
 
 
+def _packed_command(args, input_path, output_folder, source_model, prune_meta):
+    """The `oflm pack` line that reproduces this container, for the model card.
+
+    Reconstructed from the parsed arguments rather than read from sys.argv,
+    because `oflm pack` re-invokes this module through `python -c` and argv
+    would only show that wrapper. What decides the artifact is these flags, so
+    these flags are what the card records -- a finetune can then be packed the
+    same way the base was, without anyone having to remember.
+    """
+    cmd = ["oflm pack", "-i", str(input_path), "-o", str(output_folder)]
+    if source_model:
+        cmd += ["-s", str(source_model)]
+    if getattr(args, "force_model_type", ""):
+        cmd += ["-f", str(args.force_model_type)]
+    if getattr(args, "quant", None):
+        cmd += ["--quant", str(args.quant)]
+    if getattr(args, "pad_to_fit", False):
+        cmd.append("--pad-to-fit")
+    if prune_meta.get("kept"):
+        cmd += ["--prune-ffn", str(args.prune_ffn)]
+        cmd += ["--imatrix", str(args.imatrix or "<path to the imatrix GGUF>")]
+    if getattr(args, "deploy_tag", None):
+        cmd += ["--deploy", str(args.deploy_tag)]
+    return " ".join(cmd)
+
+
 def _prune_meta(model):
     """What the converter recorded about an imatrix prune, for the card + config.
 
@@ -413,6 +439,8 @@ def main(argv=None) -> int:
             source_file=source_file,
             model_arch=model.model_arch,
             prune_meta=_prune_meta(model),
+            packed_with=_packed_command(
+                args, input_path, output_folder, source_model or hf_input, _prune_meta(model)),
         )
     else:
         model = create_converter(input_path, args.force_model_type)
@@ -435,6 +463,8 @@ def main(argv=None) -> int:
             source_file=source_file,
             model_arch=model.model_arch,
             prune_meta=_prune_meta(model),
+            packed_with=_packed_command(
+                args, input_path, output_folder, source_model, _prune_meta(model)),
         )
 
     if args.deploy_tag:
