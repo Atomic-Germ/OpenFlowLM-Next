@@ -126,8 +126,8 @@ int main(int argc, char** argv) {
             if (kernels.empty()) throw std::runtime_error("no kernel set found: pass --kernels");
         }
         auto t0 = GetTickCount64();
-        open_diffusion::Engine eng(a["model"], kernels);
-        eng.select(size, steps);
+        open_diffusion::Engine eng(a["model"], kernels, size);   // the size known up front: see engine.hpp
+        if (steps) eng.select(size, steps);
         std::printf("loaded %dx%d, %d steps, in %.1f s\n", size, size, eng.steps(), (GetTickCount64() - t0) / 1e3);
 
         std::vector<uint16_t> noise;

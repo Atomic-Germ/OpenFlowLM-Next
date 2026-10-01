@@ -17,11 +17,13 @@ The schedule is one list, `open_kernels/klein_pipeline.py`:
 - text encoder, conditioning, 4 steps, VAE;
 - 1050 dispatches over six kernel sets.
 
-The exporter builds its streams (`open_kernels/export_dit_kernels.py`). Two runners replay
-the same list:
-- `utilities/dit-chain/generate.py` (pyxrt);
-- `src/open_diffusion/` (native), from the model directory `utilities/dit-chain/export_bundle.py`
-  writes (`q4nx-build --open-diffusion`). `oflm image` runs it.
+The exporter builds its streams (`open_kernels/export_dit_kernels.py`) into six kernel sets,
+then assembles those into one full ELF per resolution (`open_kernels/compose_elf.py`). Two
+runners replay the same list:
+- `utilities/dit-chain/generate.py` (pyxrt), on the six sets' own xclbin contexts;
+- `src/open_diffusion/` (native), in one hardware context per resolution, from the model
+  directory `utilities/dit-chain/export_bundle.py` writes (`q4nx-build --open-diffusion`).
+  `oflm image` and `oflm serve` run it.
 
 ## Requirements
 
@@ -33,11 +35,14 @@ During a generation the host may do only these things:
 - tokenize the prompt;
 - gather the prompt's 512 embedding rows;
 - write the seeded noise;
-- patch `te_attn`'s `valid_len`;
+- set `te_attn`'s `valid_len`: the pyxrt runner patches its instruction words, the native
+  engine picks the prompt length's head kernel (`fa:te_attn_vl<n>`);
 - read the RGBA and encode the PNG or JPEG.
 
-Everything else is an NPU dispatch. The host queues runs within one kernel set and blocks,
-without polling, on the last run before switching sets.
+Everything else is an NPU dispatch. In the native engine every run of a resolution goes to
+one hardware context, queued. The host blocks, without polling, only at phase boundaries,
+when its window of runs in flight is full, and on the image's last run. The pyxrt runner
+queues runs within one kernel set and blocks on the last one before switching sets.
 
 **Verification (manual):** run `generate.py` (or the native CLI) on a quiet machine and
 compare the process CPU time per image with the NPU wall time. The report prints both
@@ -45,6 +50,9 @@ compare the process CPU time per image with the NPU wall time. The report prints
 
 **Measured 2026-09-27** (pyxrt runner): 0.1-0.45 s of host CPU per image, against 6.5-7.4 s
 (512²) and 20 s (1024²) of NPU time.
+
+**Measured 2026-09-29** (native engine, one context): 0.1-0.2 s of host CPU per image at
+512² and 0.14-0.34 s at 1024², against 3.7 s and 12.0 s of NPU time.
 
 ### OPEN-DIFFUSION-QUALITY: not broken, and within the predicted drift
 **Applies to:** the whole pipeline
@@ -206,6 +214,13 @@ as the pyxrt runner.
 - Two `oflm image flux2-klein:4b "a red fox in fresh snow" --size 512 --seed 1` runs
   write identical PNG files (`specs/open-diffusion/tests/test_cli_determinism.py`; needs
   the NPU, `oflm.exe` and the installed model, and says which is missing when skipped).
+- The native engine's pixels for study prompts 0 and 1 at 512², given their own token ids
+  and the study's noise, equal `generate.py`'s
+  (`specs/open-diffusion/tests/test_engine_matches_pyxrt.py`). The engine runs one
+  register-configured context and the runner six xclbin contexts, so this catches a wrong
+  reconfiguration, which would only drift the image. The test needs the NPU, the engine
+  CLI, a built kernel directory and the study inputs, and says which is missing when
+  skipped.
 
 ### OPEN-DIFFUSION-PACKAGE: the model and its kernels are built and found with no manual step
 **Applies to:** `utilities/q4nx-build` (`--open-diffusion`), `open_kernels/export_dit_kernels.py` (`--install`), `src/open_diffusion`, `src/model_list.json`, `src/model_info.json`
@@ -215,12 +230,16 @@ as the pyxrt runner.
   whole model directory from the checkpoint (flat: 17 files, ~9 GB) and
   `model_info_entry.json`. It refuses a checkpoint whose pipeline class, transformer or
   text-encoder geometry is not klein 4B's, naming the fields.
-- `export_dit_kernels.py --install <dir>` copies a built kernel directory's runtime files
-  only and writes `diffusion_kernels.json` last. It refuses a directory built from other
-  stream specs than the tree's.
+- `export_dit_kernels.py` builds the six kernel sets, then assembles them into one full
+  ELF per resolution (`open_kernels/compose_elf.py`, `diffusion_r<R>.elf`).
+  `--install <dir>` copies only the ELFs and their description, removes an earlier
+  install's kernel-set files, and writes `diffusion_kernels.json` (format
+  `oflm-open-diffusion-kernels-v2`) last. It refuses a directory built from other stream
+  specs than the tree's, or whose ELFs are missing or older than its sets.
 - The model directory and the kernel set carry the same layout hash (every stream spec
   and the weight packing). The engine refuses a kernel set whose manifest is missing,
-  incomplete, of another format or of another layout, naming which.
+  incomplete, of another format (a v1 set of six xclbins included) or of another layout,
+  or whose ELFs are missing, naming which.
 - The engine finds its kernels in this order: `OFLM_DIFFUSION_KERNELS_DIR` (used as
   given), `<model dir>/open_kernels`, then `<root>/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
   for each xclbins root. The installer ships the last.
@@ -257,7 +276,40 @@ A time quoted for this pipeline must meet all of these:
 
 A number measured under load says so.
 
-**Measured 2026-09-27, native engine, quiet machine** (CPU load 3-5% before each run),
+**Measured 2026-09-29, native engine, one hardware context per resolution**
+(`specs/open-diffusion/archive/one-context.md`). Turbo; light load (CPU 11-23%
+before each run: chat and editor apps, nothing computing). The study's prompt 0 with its
+own 29 token ids and the study's noise; 2 processes × 3 warm runs each:
+
+| | 512² | 1024² |
+|---|---:|---:|
+| image, warm | **3.66-3.69 s** | **11.98-12.02 s** |
+| text encoder | 0.32 s | 0.32 s |
+| conditioning | 0.03-0.04 s | 0.03-0.04 s |
+| one denoising step | 0.75 s | 2.61-2.65 s |
+| VAE | 0.32-0.33 s | 1.09-1.13 s |
+| first image after load | 3.68-3.69 s | 12.02 s |
+| load (cached) | 5.5-5.7 s | 5.7-5.9 s |
+| host CPU per image | 0.06-0.20 s | 0.11-0.22 s |
+
+The six-context engine (the one below, rebuilt from `feat/images-api`) was interleaved
+with it under the same conditions: 5.14-5.31 s at 512² and 13.42-13.48 s at 1024² in its
+least-loaded rounds, loading in 5.7-5.9 s. The one-context engine is 28% faster at 512²
+and 11% at 1024². What it removes is ~822 kernel-set switches of ~2.1 ms each, now
+configurations of 0.3-0.7 ms. The pixels are the same bytes
+(OPEN-DIFFUSION-DETERMINISM).
+
+**Contention:** another process using the NPU during an image
+(`utilities/reconfig-probe/contention_trial.ps1`, a six-xclbin-context contender).
+- At the engine's high QoS priority: 6 of 6 trials (24 images, 3 of them 1024²) were
+  byte-identical, and the contender kept running. Images took ~10-25% longer while it
+  ran.
+- At normal priority every variant hung: 8 of 8 trials (`ERT_CMD_STATE_TIMEOUT`), usually
+  taking the contender down too.
+- Not tested: a contender that itself runs at high or realtime priority (Windows Studio
+  Effects may).
+
+**Measured 2026-09-27, native engine (six xclbin contexts), quiet machine** (CPU load 3-5% before each run),
 turbo, the study's prompts 0-1 and noise (`goldens_pipe_<R>\ids_i.npy`, `noise_i.npy`),
 4 runs each:
 

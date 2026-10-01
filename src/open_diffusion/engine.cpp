@@ -3,14 +3,18 @@
 #include "schedule.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <tuple>
@@ -23,6 +27,9 @@
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
+#include "xrt/experimental/xrt_elf.h"
+#include "xrt/experimental/xrt_ext.h"
+#include "xrt/experimental/xrt_kernel.h"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -30,7 +37,18 @@ using json = nlohmann::json;
 namespace open_diffusion {
 namespace {
 
-constexpr int kOpcode = 3;   // mlir-aie: run a DPU instruction sequence
+// Stretches (runlists) in flight on the context at most: the host blocks on the oldest
+// beyond this.
+constexpr size_t kWindow = 32;
+
+// The context's QoS priority (amdxdna's "high"; normal is 0x200). A set configured by
+// register writes is not one the firmware can restore: at normal priority, another
+// process's context preempting ours mid-image hangs both (ERT_CMD_STATE_TIMEOUT, 8 of 8
+// trials over four variants, utilities/reconfig-probe/contention_trial.ps1). At high
+// priority the other context runs only between our stretches, and each stretch starts
+// from a reset (6 of 6 trials, both sizes, the images byte-identical and the other
+// process unharmed).
+constexpr uint32_t kPriority = 0x180;
 
 std::vector<char> read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary | std::ios::ate);
@@ -71,6 +89,15 @@ bool read_manifest(const fs::path& dir, const std::string& layout, json* out, st
                " is not the model's " + layout + " (built from other kernel code; rebuild one of them)";
         return false;
     }
+    if (!j.contains("elf") || !j["elf"].is_object() || j["elf"].empty()) {
+        *why = "diffusion_kernels.json names no ELF";
+        return false;
+    }
+    for (auto& [res, elf] : j["elf"].items())
+        if (!elf.is_string() || !fs::is_regular_file(dir / elf.get<std::string>())) {
+            *why = "the kernel set's " + res + " ELF is missing";
+            return false;
+        }
     if (out) *out = std::move(j);
     return true;
 }
@@ -103,31 +130,26 @@ std::string find_kernels(const std::string& model_dir, const std::string& env_di
 }
 
 struct Engine::Impl {
-    struct Stream {
-        xrt::bo instr;
-        std::vector<uint32_t> words;
-    };
-    struct Set {
-        xrt::hw_context ctx;
-        xrt::kernel kernel;
-        fs::path dir;
-        std::map<std::string, Stream> streams;
-    };
     struct Buf {
         xrt::bo bo;
         size_t bytes = 0;
         std::map<std::pair<size_t, size_t>, xrt::bo> views;
-    };
-    struct Op {
-        int set;
-        std::string stream, phase;
-        xrt::run run;
     };
     // An op's argument as the schedule names it; in step k of the step template it is at
     // off + k * stride.
     struct Arg {
         std::string buf;
         size_t off = 0, n = 0, stride = 0;
+    };
+    struct Op {
+        int set;
+        std::string stream, phase;
+        std::vector<Arg> args;
+        size_t k = 0;
+        xrt::run run;
+        // te_attn: its valid_len head for the prompt's length, run first (compose_elf.py)
+        bool has_pre = false;
+        xrt::run pre;
     };
     struct StepOp {
         int set;
@@ -144,6 +166,17 @@ struct Engine::Impl {
         std::vector<std::vector<Op>> step_ops;  // step k's runs, built on first use
         std::vector<char> tf0, dt0;             // the bundle's TF / DT (its step count)
         int steps = 0;                          // the count TF / DT hold now
+        int vl = 0;                             // the valid_len the te_attn heads are bound to
+        // The resolution's ELF as its one hardware context, and its kernels.
+        xrt::elf elf;
+        xrt::hw_context ctx;
+        std::map<std::string, xrt::ext::kernel> kernels;   // "<set>:<stream>", made on first use
+        // Per set, its two configure-only kernels (main:cfg_<set>_a / _b), and per variant
+        // one run per configure in an image. They differ only in the empty device they reset
+        // the array with; alternating them keeps the firmware from skipping that reset.
+        std::vector<std::array<xrt::ext::kernel, 2>> cfg_kernel;
+        std::vector<std::array<std::deque<xrt::run>, 2>> cfg_runs;
+        int flip = 0;                                      // the variant the next configure uses
     };
 
     fs::path dir, kdir;
@@ -152,30 +185,28 @@ struct Engine::Impl {
     std::string templ;
     xrt::device dev;
     std::vector<std::string> set_names;
-    std::vector<std::unique_ptr<Set>> sets;
     std::map<std::string, int> set_index;
-    xrt::memory_group group{};
     std::map<std::string, Buf> weights;         // shared by every resolution
     std::map<int, std::unique_ptr<Res>> res;
     Res* cur = nullptr;
     int cur_steps = 0;
-    Stream* vl_stream = nullptr;
-    std::vector<size_t> vl_words;
+    std::string vl_stream, vl_head;             // te_attn, and its per-length head ("{n}")
+    int vl_max = 0, vl = 0;                     // vl: the prompt's length (set_tokens)
     std::ifstream embed;
 
-    Stream& stream(int s, const std::string& name) {
-        Set& set = *sets[s];
-        auto it = set.streams.find(name);
-        if (it != set.streams.end()) return it->second;
-        auto d = read_file(set.dir / ("insts_" + name + ".bin"));
-        if (d.size() % 4) throw std::runtime_error(name + ": instruction stream not word-sized");
-        Stream st;
-        st.words.resize(d.size() / 4);
-        std::memcpy(st.words.data(), d.data(), d.size());
-        st.instr = xrt::bo(dev, d.size(), xrt::bo::flags::cacheable, set.kernel.group_id(1));
-        std::memcpy(st.instr.map<void*>(), d.data(), d.size());
-        st.instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-        return set.streams.emplace(name, std::move(st)).first->second;
+    // Creating a kernel walks all of the ELF's control code (~2 ms per MB): hence one ELF per
+    // resolution, and te_attn's per-length heads split off small (compose_elf.py).
+    xrt::ext::kernel& kernel(Res& r, const std::string& name) {
+        auto it = r.kernels.find(name);
+        if (it == r.kernels.end()) it = r.kernels.emplace(name, xrt::ext::kernel(r.ctx, name)).first;
+        return it->second;
+    }
+
+    // te_attn's head for the prompt's length (before set_tokens, the unmasked one).
+    std::string head_name(int set) const {
+        std::string k = vl_head;
+        k.replace(k.find("{n}"), 3, std::to_string(vl ? vl : vl_max));
+        return set_names[set] + ":" + k;
     }
 
     Buf& buf(Res& r, const std::string& name) {
@@ -201,10 +232,19 @@ struct Engine::Impl {
 
     Buf alloc(size_t bytes) {
         Buf b;
-        b.bo = xrt::bo(dev, bytes, xrt::bo::flags::host_only, group);
+        b.bo = xrt::ext::bo(dev, bytes);
         b.bytes = bytes;
         std::memset(b.bo.map<void*>(), 0, bytes);
         return b;
+    }
+
+    // A run of the op's kernel with its arguments bound (step k of the template).
+    void bind(Res& r, Op& op) {
+        op.run = xrt::run(kernel(r, set_names[op.set] + ":" + op.stream));
+        int i = 0;
+        for (const auto& a : op.args) op.run.set_arg(i++, view(r, a.buf, a.off + op.k * a.stride, a.n));
+        op.has_pre = op.stream == vl_stream;
+        if (op.has_pre) op.pre = xrt::run(kernel(r, head_name(op.set)));
     }
 
     Op make_op(Res& r, int set, const std::string& name, const std::string& phase,
@@ -213,18 +253,26 @@ struct Engine::Impl {
         op.set = set;
         op.stream = name;
         op.phase = phase;
-        Stream& st = stream(set, name);
-        op.run = xrt::run(sets[set]->kernel);
-        op.run.set_arg(0, kOpcode);
-        op.run.set_arg(1, st.instr);
-        op.run.set_arg(2, static_cast<int>(st.words.size()));
-        int i = 3;
-        for (const auto& a : args) op.run.set_arg(i++, view(r, a.buf, a.off + k * a.stride, a.n));
+        op.args = args;
+        op.k = k;
+        bind(r, op);
         return op;
     }
 
+    // Point r's te_attn heads at the prompt's length if it changed since they were made.
+    void bind_vl(Res& r) {
+        if (r.vl == vl) return;
+        for (auto& op : r.head)
+            if (op.has_pre) op.pre = xrt::run(kernel(r, head_name(op.set)));
+        r.vl = vl;
+    }
+
+    std::map<int, std::future<std::unique_ptr<Res>>> prepared;   // open_res started early
+    std::unique_ptr<Res> open_res(int size);
     Res& load_res(int size);
     void set_steps(Res& r, int steps);
+    void init(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev,
+              int prefetch_size);
     static std::vector<Arg> op_args(const json& o);
     static Res& selected(Res* r);
     static std::vector<Op*> op_order(Res& r, int steps);   // a selection's runs, in order
@@ -270,17 +318,55 @@ std::vector<Engine::Impl::Op*> Engine::Impl::op_order(Res& r, int steps) {
     return out;
 }
 
-Engine::Impl::Res& Engine::Impl::load_res(int size) {
-    auto found = res.find(size);
-    if (found != res.end()) return *found->second;
+// A resolution's schedule, its ELF as one hardware context, and a kernel for every stream it
+// runs. It touches nothing but the new Res and read-only engine state, so the constructor
+// runs it on a thread while the weights load: creating ~80 kernels costs ~1-2.5 s of CPU
+// inside XRT, the weights ~5 s of reading.
+std::unique_ptr<Engine::Impl::Res> Engine::Impl::open_res(int size) {
     auto rp = std::make_unique<Res>();
     Res& r = *rp;
+    // the resolution's ELF: every set as one hardware context (compose_elf.py)
+    const json& elfs = manifest.at("elf");
+    if (!elfs.contains(std::to_string(size)))
+        throw std::runtime_error("kernel set " + kdir.string() + " has no ELF for " + std::to_string(size));
+    fs::path elf = kdir / elfs.at(std::to_string(size)).get<std::string>();
+    r.elf = xrt::elf(elf.string());
+    try {
+        r.ctx = xrt::hw_context(dev, r.elf, {{"priority", kPriority}}, xrt::hw_context::access_mode::shared);
+    } catch (const std::exception& e) {
+        throw std::runtime_error("cannot open a hardware context from " + elf.string() +
+                                 " (the NPU driver must support full ELFs with several PDIs): " + e.what());
+    }
+    for (const auto& name : set_names) {
+        const json& c = manifest.at("cfg").at(name);
+        if (!c.is_array() || c.size() != 2)
+            throw std::runtime_error("kernel set " + kdir.string() + ": set " + name + " needs two cfg kernels");
+        r.cfg_kernel.push_back({xrt::ext::kernel(r.ctx, c[0].get<std::string>()),
+                                xrt::ext::kernel(r.ctx, c[1].get<std::string>())});
+    }
+    r.cfg_runs.resize(set_names.size());
     r.sched = read_json(dir / bundle.at("resolutions").at(std::to_string(size)).get<std::string>());
     r.R = r.sched.at("R").get<int>();
     r.T = r.sched.at("image_tokens").get<int>();
     r.C = r.sched.at("latent_channels").get<int>();
     r.token_row = r.sched.at("inputs").at("token_row_elems").get<int>();
     r.bundle_steps = r.sched.at("steps").get<int>();
+    for (const auto& o : r.sched.at("ops")) kernel(r, o[0].get<std::string>() + ":" + o[1].get<std::string>());
+    return rp;
+}
+
+Engine::Impl::Res& Engine::Impl::load_res(int size) {
+    auto found = res.find(size);
+    if (found != res.end()) return *found->second;
+    std::unique_ptr<Res> rp;
+    auto pending = prepared.find(size);
+    if (pending != prepared.end()) {
+        rp = pending->second.get();
+        prepared.erase(pending);
+    } else {
+        rp = open_res(size);
+    }
+    Res& r = *rp;
 
     // Split the op list: head, bundle_steps contiguous step groups, tail.
     std::vector<std::vector<const json*>> groups;
@@ -362,6 +448,7 @@ Engine::Impl::Res& Engine::Impl::load_res(int size) {
     for (const json* o : tail)
         r.tail.push_back(make_op(r, set_index.at((*o)[0].get<std::string>()), (*o)[1].get<std::string>(),
                                  (*o)[3].get<std::string>(), op_args(*o), 0));
+    r.vl = vl;
     return *res.emplace(size, std::move(rp)).first->second;
 }
 
@@ -396,9 +483,9 @@ void Engine::Impl::set_steps(Res& r, int steps) {
     r.steps = steps;
 }
 
-Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev)
-    : impl_(std::make_unique<Impl>()) {
-    Impl& m = *impl_;
+void Engine::Impl::init(const std::string& model_dir, const std::string& kernels_dir,
+                        const oflm_rt::device* device, int prefetch_size) {
+    Impl& m = *this;
     m.dir = model_dir;
     m.kdir = kernels_dir;
     m.bundle = read_json(m.dir / "bundle.json");
@@ -413,21 +500,25 @@ Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, con
     const json& resolutions = m.bundle.at("resolutions");
     if (resolutions.empty()) throw std::runtime_error("the bundle has no resolutions");
     m.bundle_steps = read_json(m.dir / resolutions.begin().value().get<std::string>()).at("steps").get<int>();
-    m.dev = dev ? *dev : xrt::device(0u);
+    m.dev = device ? *device : xrt::device(0u);
 
-    for (auto& [name, sub] : m.manifest.at("sets").items()) {
-        auto s = std::make_unique<Impl::Set>();
-        s->dir = m.kdir / sub.get<std::string>();
-        xrt::xclbin xcl((s->dir / "final.xclbin").string());
-        auto uuid = m.dev.register_xclbin(xcl);
-        s->ctx = xrt::hw_context(m.dev, uuid);
-        s->kernel = xrt::kernel(s->ctx, "MLIR_AIE");
-        m.set_index[name] = static_cast<int>(m.sets.size());
+    for (const auto& s : m.manifest.at("sets")) {
+        std::string name = s.get<std::string>();
+        m.set_index[name] = static_cast<int>(m.set_names.size());
         m.set_names.push_back(name);
-        m.sets.push_back(std::move(s));
     }
-    // npu2 has one memory group for data arguments (npu_device.cpp); take arg 3's
-    m.group = m.sets.front()->kernel.group_id(3);
+    const json& vl = m.manifest.at("valid_len");
+    m.vl_stream = vl.at("stream").get<std::string>();
+    m.vl_head = vl.at("head").get<std::string>();
+    m.vl_max = vl.at("max").get<int>();
+    if (m.vl_head.find("{n}") == std::string::npos || m.vl_max < m.max_tokens)
+        throw std::runtime_error("kernel set " + kernels_dir + ": its valid_len kernels do not cover " +
+                                 std::to_string(m.max_tokens) + " tokens");
+    if (prefetch_size && m.bundle.at("resolutions").contains(std::to_string(prefetch_size)) &&
+        m.manifest.at("elf").contains(std::to_string(prefetch_size)))
+        m.prepared.emplace(prefetch_size, std::async(std::launch::async, [&m, prefetch_size] {
+            return m.open_res(prefetch_size);
+        }));
 
     fs::path wpath = m.dir / m.bundle.at("weights_file").get<std::string>();
     std::ifstream wf(wpath, std::ios::binary | std::ios::ate);
@@ -444,17 +535,19 @@ Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, con
         m.weights.emplace(name, std::move(b));
     }
 
-    m.vl_stream = &m.stream(m.set_index.at("fa"), "te_attn");
-    // the words are the kernel set's (a probe build found them), not the model's
-    json fa_meta = read_json(m.kdir / m.manifest.at("sets").at("fa").get<std::string>() / "dit_fa.json");
-    for (const auto& w : fa_meta.at("patch").at("te_attn").at("valid_len"))
-        m.vl_words.push_back(w.get<size_t>());
     m.embed.open(m.dir / m.bundle.at("embed").at("file").get<std::string>(), std::ios::binary);
     if (!m.embed) throw std::runtime_error("cannot open the embedding table");
 }
 
+Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->init(model_dir, kernels_dir, dev, 0);
+}
+
 Engine::Engine(const std::string& model_dir, const std::string& kernels_dir, int size)
-    : Engine(model_dir, kernels_dir, static_cast<const oflm_rt::device*>(nullptr)) {
+    : impl_(std::make_unique<Impl>()) {
+    // the size is known up front: its context and kernels are made while the weights load
+    impl_->init(model_dir, kernels_dir, nullptr, size);
     select(size);
 }
 
@@ -514,11 +607,10 @@ void Engine::set_tokens(const std::vector<int64_t>& ids) {
         m.embed.read(reinterpret_cast<char*>(x + static_cast<size_t>(t) * r.token_row), m.embed_dim * 2);
     }
     xt.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    // te_attn masks keys at or past valid_len: the prompt's length
-    Impl::Stream& st = *m.vl_stream;
-    for (size_t w : m.vl_words) st.words[w] = static_cast<uint32_t>(n_real);
-    std::memcpy(st.instr.map<void*>(), st.words.data(), st.words.size() * 4);
-    st.instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    // te_attn masks keys at or past valid_len, the prompt's length: its heads switch to
+    // that length's kernel
+    m.vl = n_real;
+    m.bind_vl(r);
 }
 
 void Engine::set_noise(const std::vector<uint16_t>& bits) {
@@ -543,45 +635,73 @@ std::vector<uint16_t> Engine::seeded_noise(uint64_t seed) const {
 Timing Engine::run(bool profile) {
     Impl& m = *impl_;
     Impl::Res& r = Impl::selected(m.cur);
+    m.bind_vl(r);
     using clk = std::chrono::steady_clock;
     auto secs = [](clk::time_point a, clk::time_point b) {
         return std::chrono::duration<double>(b - a).count();
     };
-    auto wait = [&](xrt::run& run, const Impl::Op& op) {
-        auto st = run.wait();
-        if (st != ERT_CMD_STATE_COMPLETED)
-            throw std::runtime_error(m.set_names[op.set] + "/" + op.stream + ": state " +
-                                     std::to_string(static_cast<int>(st)));
-    };
     Timing t;
-    // the runs queued on the current hardware context, oldest first; every one is waited
-    // on (a run never waited on keeps a stale state and cannot be started again)
-    std::vector<Impl::Op*> queued;
-    auto drain = [&] {
-        for (Impl::Op* q : queued) wait(q->run, *q);
-        queued.clear();
+    // A stretch is one set's configure-only run and the ops after it on that set, submitted
+    // as ONE xrt::runlist, which XRT executes atomically. The configuration is register
+    // writes the firmware does not know about: if another process's context takes the NPU
+    // between two of our commands, ours comes back without it and the next op hangs. So
+    // every stretch configures first, and a switch can only fall between stretches.
+    // Every stretch is waited on (a run never waited on cannot be started again).
+    struct Stretch {
+        xrt::runlist list;
+        std::string what;
     };
+    std::deque<Stretch> inflight;
+    std::optional<Stretch> open;
+    auto wait_oldest = [&] {
+        Stretch s = std::move(inflight.front());
+        inflight.pop_front();
+        try {
+            s.list.wait();
+        } catch (const xrt::runlist::command_error& e) {
+            throw std::runtime_error(s.what + ": state " + std::to_string(static_cast<int>(e.get_command_state())));
+        }
+    };
+    auto close = [&] {
+        if (!open) return;
+        if (inflight.size() >= kWindow) wait_oldest();
+        open->list.execute();
+        inflight.push_back(std::move(*open));
+        open.reset();
+    };
+    auto drain = [&] {
+        close();
+        while (!inflight.empty()) wait_oldest();
+    };
+    std::vector<std::array<size_t, 2>> cfg_used(m.set_names.size(), {0, 0});
     int cur_set = -1;
     std::string cur_phase;
     auto t0 = clk::now(), tp = t0;
     for (Impl::Op* opp : Impl::op_order(r, m.cur_steps)) {
         Impl::Op& op = *opp;
-        if (op.set != cur_set || op.phase != cur_phase) {
-            // runs queued across two hardware contexts hang the array: drain first
+        if (op.phase != cur_phase) {
             drain();
-            if (op.phase != cur_phase) {
-                auto now = clk::now();
-                if (!cur_phase.empty()) t.phases.emplace_back(cur_phase, secs(tp, now));
-                tp = now;
-                cur_phase = op.phase;
-            }
-            cur_set = op.set;
+            auto now = clk::now();
+            if (!cur_phase.empty()) t.phases.emplace_back(cur_phase, secs(tp, now));
+            tp = now;
+            cur_phase = op.phase;
         }
         auto ts = clk::now();
-        op.run.start();
-        queued.push_back(&op);
+        if (!open || op.set != cur_set) {
+            close();
+            open = Stretch{xrt::runlist(r.ctx), m.set_names[op.set] + "/" + op.stream};
+            int v = r.flip;
+            r.flip ^= 1;
+            auto& pool = r.cfg_runs[op.set][v];   // a deque: runs in a list keep their address
+            size_t i = cfg_used[op.set][v]++;
+            if (i == pool.size()) pool.emplace_back(r.cfg_kernel[op.set][v]);
+            open->list.add(pool[i]);
+            cur_set = op.set;
+        }
+        if (op.has_pre) open->list.add(op.pre);
+        open->list.add(op.run);
         if (profile) {
-            drain();
+            drain();                              // the next op configures again
             t.op_ms.push_back(1e3 * secs(ts, clk::now()));
         }
     }
