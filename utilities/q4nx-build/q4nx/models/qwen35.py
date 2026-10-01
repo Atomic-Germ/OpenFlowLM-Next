@@ -66,6 +66,26 @@ def pad_hidden_axis_t(w: torch.Tensor, actual: int, target: int) -> torch.Tensor
         return torch.cat([w, w.new_zeros((target - actual, w.shape[1]))])
     return w
 
+
+def v_untile(t: torch.Tensor, grp: int, unit: int, axis: int = 0) -> torch.Tensor:
+    """llama.cpp's tiled value-head order -> HF's grouped one, along rows (axis 0) or columns.
+
+    llama.cpp's converter stores the gated DeltaNet's value heads TILED so ggml can broadcast
+    the key heads: position r * num_k + kh holds HF's head kh * grp + r, grp = num_v // num_k.
+    The engine reads HF's grouped order. `unit` is one head's extent along the axis -- its
+    rows in a weight, its columns in an unpacked block array, 1 for a per-head vector.
+    grp is 2 for the 4B / 9B and 3 for the 27B; it was hard-coded to 2."""
+    if axis == 0:
+        return rearrange(t, '(q g p) ... -> (g q p) ...', q=grp, p=unit).contiguous()
+    return rearrange(t, 'r (q g p) -> r (g q p)', q=grp, p=unit).contiguous()
+
+
+def untile_qkv(t: torch.Tensor, qk_rows: int, grp: int, head_v: int) -> torch.Tensor:
+    """qkv's rows (or conv1d's channels): q and k first, `qk_rows` = 2 * num_k * head_k of
+    them in their own order, then the value rows, tiled. The split is the tensor's half only
+    when v is exactly as wide as q | k (32 value heads over 16 key heads)."""
+    return torch.cat([t[:qk_rows], v_untile(t[qk_rows:], grp, head_v)]).contiguous()
+
 class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
     pad_to_fit = False  # --pad-to-fit: zero-pad the hidden axis to the variant dim
     # --prune-ffn K: narrow the dense FFN to K intermediate neurons, chosen per
@@ -360,16 +380,31 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
         else:
             raise ValueError(f"--prune-ffn: cannot quantize {name} to {target.name}")
         return (d, m, qw)
+    def _linear_heads(self):
+        """(num_k, num_v, head_k, head_v) of the gated DeltaNet, from the GGUF's own ssm keys
+        (llama.cpp writes group_count = key heads, time_step_rank = value heads, state_size =
+        the key head dim, inner_size = value heads x the value head dim)."""
+        f = self.gguf_reader.fields
+
+        def get(key):
+            if key not in f:
+                raise KeyError(f"GGUF lacks {key}: cannot place the DeltaNet value heads")
+            return int(f[key].contents())
+
+        num_k, num_v = get("qwen35.ssm.group_count"), get("qwen35.ssm.time_step_rank")
+        return num_k, num_v, get("qwen35.ssm.state_size"), get("qwen35.ssm.inner_size") // num_v
 
     def _convert_gguf(self, q4nx_path: str, weights_type: str):
         if weights_type == "language":
             self._resolve_pad_target()
             self._resolve_prune()
-            reorder_linear_required = True
-            if self.gguf_reader.fields["qwen35.feed_forward_length"].contents() <= 6144:
-                reorder_linear_required = False
+            # llama.cpp tiles the value heads only when there are more of them than key heads
+            # (the 4B / 9B / 27B; not the 2B / 0.8B), and q | k precede v in qkv and conv1d.
+            num_k, num_v, head_k, head_v = self._linear_heads()
+            reorder_linear_required = num_v != num_k
+            grp, qk_rows = num_v // num_k, 2 * num_k * head_k
             if reorder_linear_required:
-                print("[INFO] Reorder linear required!")
+                print(f"[INFO] Reorder linear required! ({num_v} value heads over {num_k} key heads)")
 
             if not self._has_lm_head():
                 print("[INFO] Model does not have a lm_head, use embedding weights as lm_head")
@@ -447,43 +482,22 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                     if "self_attn.gate_proj" in self.forward_name_map[gguf_tensor.name]:
                         if reorder_linear_required:
                             print("[INFO] Reorder Gate")
-                            DH = self.gguf_reader.fields["qwen35.ssm.state_size"].contents()
-                            d, m, qw = unpacked
-                            d = rearrange(d, '(q g p) c -> (g q p) c', p = DH, q = 2).contiguous()
-                            m = rearrange(m, '(q g p) c -> (g q p) c', p = DH, q = 2).contiguous()
-                            qw = rearrange(qw, '(q g p) c -> (g q p) c', p = DH, q = 2).contiguous()
-                            unpacked = (d, m, qw)
+                            unpacked = tuple(v_untile(x, grp, head_v) for x in unpacked)
 
                     if "qkv_proj" in self.forward_name_map[gguf_tensor.name]:
                         if reorder_linear_required:
-                            print("[INFO] Seperate q, gate for q_proj")
-                            DH = self.gguf_reader.fields["qwen35.ssm.state_size"].contents()
-                            d, m, qw = unpacked
-                            d0, d1 = d.chunk(2, dim = 0)
-                            m0, m1 = m.chunk(2, dim = 0)
-                            qw0, qw1 = qw.chunk(2, dim = 0)
-                            print(d0.shape, d1.shape, m0.shape, m1.shape, qw0.shape, qw1.shape)
-                            pp = DH
-
-                            d1 = rearrange(d1, '(q g p) c -> (g q p) c', p = pp, q = 2).contiguous()
-                            m1 = rearrange(m1, '(q g p) c -> (g q p) c', p = pp, q = 2).contiguous()
-                            qw1 = rearrange(qw1, '(q g p) c -> (g q p) c', p = pp, q = 2).contiguous()
-
-                            d = torch.cat([d0, d1], dim = 0).contiguous()
-                            m = torch.cat([m0, m1], dim = 0).contiguous()
-                            qw = torch.cat([qw0, qw1], dim = 0).contiguous()
-                            unpacked = (d, m, qw)
+                            print("[INFO] Reorder the value rows of qkv")
+                            unpacked = tuple(untile_qkv(x, qk_rows, grp, head_v) for x in unpacked)
 
                     if "ssm_out_proj" in self.forward_name_map[gguf_tensor.name]:
                         if reorder_linear_required:
                             print(f"[INFO] Reorder for {self.forward_name_map[gguf_tensor.name]}")
                             d, m, qw = unpacked
-                            DH = self.gguf_reader.fields["qwen35.ssm.state_size"].contents()
-                            DH = DH // 32
+                            # columns: d / m per 32-value block, qw per value
                             BLOCK_SIZE = 32
-                            d = rearrange(d, 'r (q g p) -> r (g q p)', p = DH, q = 2).contiguous()
-                            m = rearrange(m, 'r (q g p) -> r (g q p)', p = DH, q = 2).contiguous()
-                            qw = rearrange(qw, 'r (q g p) -> r (g q p)', p = DH * BLOCK_SIZE, q = 2).contiguous()
+                            d = v_untile(d, grp, head_v // BLOCK_SIZE, axis=1)
+                            m = v_untile(m, grp, head_v // BLOCK_SIZE, axis=1)
+                            qw = v_untile(qw, grp, head_v, axis=1)
 
                             unpacked = (d, m, qw)
 
@@ -491,16 +505,14 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                         d, m, qw = unpacked
                         w = gguf_tensor.dequantize()
                         if reorder_linear_required:
-                            w = rearrange(w, '(q g) c -> (g q) c', q = 2).contiguous()
+                            w = v_untile(w, grp, 1)
 
                         new_name = self.forward_name_map[gguf_tensor.name]
                         new_name = new_name.replace("alpha_proj", "alpha_proj.bf16").replace("beta_proj", "beta_proj.bf16")
                         self.q4nx_tensors[new_name] = w
                         if reorder_linear_required:
                             print(f"[INFO] Reorder for {self.forward_name_map[gguf_tensor.name]}")
-                            d = rearrange(d, '(q g) c -> (g q) c', q = 2).contiguous()
-                            m = rearrange(m, '(q g) c -> (g q) c', q = 2).contiguous()
-                            qw = rearrange(qw, '(q g) c -> (g q) c', q = 2).contiguous()
+                            d, m, qw = (v_untile(x, grp, 1) for x in (d, m, qw))
 
                         if (d.shape[0] < 32):
                             d = repeat(d, 'd c -> (r d) c', r = 2).contiguous()
@@ -513,29 +525,24 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                     if "ssm_conv1d" in self.forward_name_map[gguf_tensor.name]:
                         print("[INFO] transpose conv1d")
 
-                        DH = self.gguf_reader.fields["qwen35.ssm.state_size"].contents()
                         d = unpacked[0]
-                        
-                        if reorder_linear_required:
-                            d0, d1 = d.chunk(2, dim = 0)
 
-                            d1 = rearrange(d1, '(q g p) c -> (g q p) c', p = DH, q = 2).contiguous()
-                        
-                            d = torch.cat([d0, d1], dim = 0).contiguous()
+                        if reorder_linear_required:
+                            d = untile_qkv(d, qk_rows, grp, head_v)      # the conv channels are qkv's rows
                         d = d.T.contiguous()
                         unpacked = [d]
                 
                     if "ssm_a" in gguf_tensor.name[-5:]:
                         val = unpacked[0].to(torch.float32).contiguous()
                         if reorder_linear_required:
-                            val = rearrange(val, '(q g) -> (g q)', q = 2).contiguous()
+                            val = v_untile(val, grp, 1)
                         self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = val
                         continue
 
                     if "ssm_dt" in gguf_tensor.name:
                         val = unpacked[0].to(torch.float32).contiguous()
                         if reorder_linear_required:
-                            val = rearrange(val, '(q g) -> (g q)', q = 2).contiguous()
+                            val = v_untile(val, grp, 1)
                         self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = val
                         continue
 
