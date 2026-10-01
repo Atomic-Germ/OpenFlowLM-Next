@@ -147,7 +147,12 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
     # ---- fifos
     of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=2) for c in range(N_CORES)]
     of_y = [ObjectFifo(t["y"], name=f"y{c}", depth=2) for c in range(N_CORES)]
-    of_x = ObjectFifo(t["x"], name="x", depth=2)           # broadcast; og is acquired as 2 elements
+    # The x channel carries the xn AND the og, acquired together by
+    # prep_bands, so the depth is whichever is larger -- not the 2 that every
+    # model so far happened to need. Qwen3.8-27B is the first to exceed it:
+    # XN_ELEMS 3 at hidden 5120, OG_ELEMS 4 at a 8192-wide linear value, and
+    # `depth=2` there is a depth that would not scale rather than a limit.
+    of_x = ObjectFifo(t["x"], name="x", depth=max(XN_ELEMS, OG_ELEMS))
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)        # [x0 x1 w] | [x0 x1 w a0 a1] | W x256
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1 if DENSE else 3)   # dense: one output element per call
     of_side = ObjectFifo(u8_4k, name="side", depth=2)
