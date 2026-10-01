@@ -15,6 +15,7 @@ The design module must expose DESIGN (an @iron.jit callable) and SPECIALIZE
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 import time
@@ -35,6 +36,13 @@ def main() -> int:
 
     # Trap 1 (LLMNpuTest): without this IRON silently targets aie2 / NPU1.
     iron.set_current_device(from_name("npu2", n_cols=None))
+
+    # Debug: a failed aiecc run empties its work dir, so a core that overflowed program memory
+    # leaves nothing to measure. OFLM_KEEP_FAILED=1 keeps final.prj (the per-core ELFs) for
+    # `llvm-size`; the build still fails.
+    if os.environ.get("OFLM_KEEP_FAILED") == "1":
+        import aie.utils.compile.jit.compilabledesign as _cd
+        _cd._cleanup_failed_compilation = lambda _dir: None
 
     spec = importlib.util.spec_from_file_location(src.stem, src)
     mod = importlib.util.module_from_spec(spec)
