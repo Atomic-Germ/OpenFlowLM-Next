@@ -87,6 +87,11 @@ blocks, 512 text tokens), per resolution R with T = (R/16)^2 image tokens:
     r<R>_sgl_out  (T+512) x 12288 x 3072
 and, independent of resolution, the text stream of the double blocks (M = 512):
     txt_qkv, txt_out, txt_ffin, txt_ffout
+An edit configuration (--edits R, an R x R output from one R x R reference; klein_pipeline's
+plan(R, edit=True)) has 2T image rows: its r<R>e<R>_img_* and r<R>e<R>_sgl_* streams (and
+attention and dit_ew streams likewise) run at 2T and 2T + 512 rows; the per-resolution
+streams (x_emb, proj_out, euler, the decoder's, the text part's) are R's own. Its VAE
+encoder's streams (vae_encoder.py) join the conv, conv1, vew, gemm and fa sets.
 
 Attention streams (dit_fa, head dim 128):
     r<R>_attn     joint attention, Q/K/V/O each token-major [T, 3072] (the standalone test)
@@ -141,8 +146,16 @@ def fu_width(hidden: int, mlp: int) -> int:
     return 3 * hidden + 2 * hidden + 2 * mlp
 
 
+def configs(resolutions: list[int], edits: list[int], patch_px: int) -> list[tuple[str, int]]:
+    """(configuration key, image rows of the joint sequence): each resolution's T, then each
+    edit's 2T (klein_pipeline.config_key)."""
+    T = lambda R: (R // patch_px) ** 2  # noqa: E731
+    return [(klein_pipeline.config_key(R), T(R)) for R in resolutions] + \
+        [(klein_pipeline.config_key(R, True), 2 * T(R)) for R in edits]
+
+
 def klein_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: int,
-                  patch_px: int) -> dict[str, dict]:
+                  patch_px: int, edits: list[int] = ()) -> dict[str, dict]:
     h, f, L = hidden, mlp, text_tokens
     fu = fu_width(h, f)
     ffin = {"epi": {"first_cb": 0}}                       # SwiGLU epilogue everywhere
@@ -153,20 +166,19 @@ def klein_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: in
         "txt_ffin": dict(M=L, K=h, N=2 * f, layout=ffin, role="double.text.ff_in"),
         "txt_ffout": dict(M=L, K=f, N=h, layout=ffout, role="double.text.ff_out"),
     }
-    for R in resolutions:
-        T = (R // patch_px) ** 2
+    for key, T in configs(resolutions, edits, patch_px):
         M = T + L
         streams.update({
-            f"r{R}_img_qkv": dict(M=T, K=h, N=3 * h, role="double.image.qkv"),
-            f"r{R}_img_out": dict(M=T, K=h, N=h, role="double.image.out"),
-            f"r{R}_img_ffin": dict(M=T, K=h, N=2 * f, layout=ffin, role="double.image.ff_in"),
-            f"r{R}_img_ffout": dict(M=T, K=f, N=h, layout=ffout, role="double.image.ff_out"),
-            f"r{R}_sgl_in": dict(M=M, K=h, N=3 * h + 2 * f, role="single.qkv_mlp_in",
-                                 layout={"ldc": fu, "epi": {"first_cb": 3 * h // 1024,
-                                                            "gap": 2 * h}}),
-            f"r{R}_sgl_out": dict(M=M, K=h + f, N=h, role="single.out",
-                                  layout={"a_gather": True, "a_col": 3 * h, "lda": fu,
-                                          "a_size": M * fu}),
+            f"r{key}_img_qkv": dict(M=T, K=h, N=3 * h, role="double.image.qkv"),
+            f"r{key}_img_out": dict(M=T, K=h, N=h, role="double.image.out"),
+            f"r{key}_img_ffin": dict(M=T, K=h, N=2 * f, layout=ffin, role="double.image.ff_in"),
+            f"r{key}_img_ffout": dict(M=T, K=f, N=h, layout=ffout, role="double.image.ff_out"),
+            f"r{key}_sgl_in": dict(M=M, K=h, N=3 * h + 2 * f, role="single.qkv_mlp_in",
+                                   layout={"ldc": fu, "epi": {"first_cb": 3 * h // 1024,
+                                                              "gap": 2 * h}}),
+            f"r{key}_sgl_out": dict(M=M, K=h + f, N=h, role="single.out",
+                                    layout={"a_gather": True, "a_col": 3 * h, "lda": fu,
+                                            "a_size": M * fu}),
         })
     # Step entry / exit and conditioning, zero-padded to the shape rules by packing only:
     # a K below 512 is read with row stride K as K = 512 against zero weight rows (the
@@ -205,18 +217,20 @@ def qwen3_te_streams(L: int, hidden=TE["hidden"], heads=TE["heads"], kv_heads=TE
 
 
 def klein_fa_streams(resolutions: list[int], heads: int, text_tokens: int, patch_px: int,
-                     mlp: int, te_heads: int, te_kv_heads: int) -> dict[str, dict]:
+                     mlp: int, te_heads: int, te_kv_heads: int,
+                     edits: list[int] = ()) -> dict[str, dict]:
     streams = {}
     h3 = 3 * heads * 128
-    for R in resolutions:
-        T = (R // patch_px) ** 2 + text_tokens
+    for key, T_img in configs(resolutions, edits, patch_px):
+        T = T_img + text_tokens
         base = dict(L=T, heads=heads, kv_heads=heads, causal=0, valid_len=0)
-        streams[f"r{R}_attn"] = base | dict(layout={}, role="joint.attention")
-        streams[f"r{R}_attn_dbl"] = base | dict(
+        if "e" not in key:                                # the standalone test's layout
+            streams[f"r{key}_attn"] = base | dict(layout={}, role="joint.attention")
+        streams[f"r{key}_attn_dbl"] = base | dict(
             layout=dict(qkv_ld=h3, k_col=h3 // 3, v_col=2 * h3 // 3, o_ld=h3 // 3),
             role="double.attention")
         fu = h3 + 2 * (h3 // 3) + 2 * mlp
-        streams[f"r{R}_attn_sgl"] = base | dict(
+        streams[f"r{key}_attn_sgl"] = base | dict(
             layout=dict(qkv_ld=fu, k_col=h3 // 3, v_col=2 * h3 // 3, o_ld=fu, o_col=h3,
                         o_interleave=1),
             role="single.attention")
@@ -232,7 +246,7 @@ EW_EL = 3072
 
 
 def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens: int,
-                     patch_px: int) -> dict[str, dict]:
+                     patch_px: int, edits: list[int] = ()) -> dict[str, dict]:
     """dit_ew specs over the layout in the module docstring."""
     assert hidden == EW_EL, "dit_ew's row element is FLUX.2 [klein]'s hidden size"
     h, L = hidden, text_tokens
@@ -242,21 +256,25 @@ def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens:
         return {"off": off, "ld": ld, "T": T, "E": E}
 
     streams = {}
-    for R in resolutions:
-        T_img = (R // patch_px) ** 2
+    for key, T_img in configs(resolutions, edits, patch_px):
+        R = klein_pipeline.parse_config(key)[0]
         rows = {"txt": (L, 0), "img": (T_img, L), "all": (T_img + L, 0)}
+        if "e" in key:                                    # the text part's are R's own
+            del rows["txt"]
         for part, (T, tok0) in rows.items():
-            streams[f"r{R}_ln_{part}"] = {
+            streams[f"r{key}_ln_{part}"] = {
                 "op": "ln_mod", "a": view(T), "y": view(T), "p_off": EW_EL, "n_par": 2,
                 "idx": {"shift": 0, "scale": 1},
                 "sizes": {"X": T * h, "B": EW_EL, "P": 4 * EW_EL, "Y": T * h, "Z": EW_EL}}
-            streams[f"r{R}_res_{part}"] = {
+            streams[f"r{key}_res_{part}"] = {
                 "op": "res_ln_mod", "a": view(T), "b": view(T), "y": view(T), "z": view(T),
                 "p_off": EW_EL, "n_par": 3, "idx": {"gate": 0, "shift": 1, "scale": 2},
                 "sizes": {"X": T * h, "B": T * h, "P": 5 * EW_EL, "Y": T * h, "Z": T * h}}
         for part, ld in (("txt", 3 * h), ("img", 3 * h), ("sgl", fu_width(h, mlp))):
+            if part not in rows and part != "sgl":
+                continue
             T, tok0 = rows["all" if part == "sgl" else part]
-            streams[f"r{R}_qk_{part}"] = {
+            streams[f"r{key}_qk_{part}"] = {
                 "op": "qk", "a": view(T, ld), "b": view(T, ld, h), "y": view(T, ld),
                 "z": view(T, ld, h), "p_off": EW_EL, "n_par": 3, "tok0": tok0, "n_txt": L,
                 "grid_w": R // patch_px, "heads": h // 128,
@@ -282,22 +300,29 @@ def klein_ew_streams(resolutions: list[int], hidden: int, mlp: int, text_tokens:
     return streams
 
 
-def set_streams(family: str, resolutions: list[int], vae: bool = True) -> dict[str, dict]:
-    """{set: {stream: spec}}: what main() builds, and each set's marker lists as `streams`."""
-    sets = {"gemm": klein_streams(resolutions, **FAMILIES[family])}
+def set_streams(family: str, resolutions: list[int], vae: bool = True,
+                edits: list[int] = ()) -> dict[str, dict]:
+    """{set: {stream: spec}}: what main() builds, and each set's marker lists as `streams`.
+    edits: the resolutions that also get an edit configuration (each must be a resolution)."""
+    assert set(edits) <= set(resolutions), (edits, resolutions)
+    sets = {"gemm": klein_streams(resolutions, **FAMILIES[family], edits=edits)}
     if family in FA_FAMILIES:
-        sets["fa"] = klein_fa_streams(resolutions, **FA_FAMILIES[family])
-    sets["ew"] = klein_ew_streams(resolutions, **FAMILIES[family])
+        sets["fa"] = klein_fa_streams(resolutions, **FA_FAMILIES[family], edits=edits)
+    sets["ew"] = klein_ew_streams(resolutions, **FAMILIES[family], edits=edits)
     if vae:
         import vae_decoder  # noqa: E402
-        v = vae_decoder.stream_specs(resolutions)
-        for n, sp in v.get("gemm", {}).items():
-            sets["gemm"][n] = sp | {"role": "vae.attention.qkv"}
-        for n, sp in v.get("fa", {}).items():
-            sets.setdefault("fa", {})[n] = sp | {"role": "vae.attention"}
-        for k in ("conv", "conv1", "vew"):
-            if v.get(k):
-                sets[k] = v[k]
+        import vae_encoder  # noqa: E402
+        for coder, rs, what in ((vae_decoder, resolutions, "vae"), (vae_encoder, edits, "vae_enc")):
+            if not rs:
+                continue
+            v = coder.stream_specs(list(rs))
+            for n, sp in v.get("gemm", {}).items():
+                sets["gemm"][n] = sp | {"role": f"{what}.attention.qkv"}
+            for n, sp in v.get("fa", {}).items():
+                sets.setdefault("fa", {})[n] = sp | {"role": f"{what}.attention"}
+            for k in ("conv", "conv1", "vew"):
+                if v.get(k):
+                    sets.setdefault(k, {}).update(v[k])
     return sets
 
 
@@ -336,14 +361,17 @@ def install(src: Path, dst: Path, family: str) -> None:
             raise SystemExit(f"{src / sub / SET_MARKERS[s]}: missing or incomplete; build the set first")
         markers[s] = m
     resolutions = markers["gemm"]["resolutions"]
+    edits = markers["gemm"].get("edits", [])
+    keys = [klein_pipeline.config_key(R) for R in resolutions] + \
+        [klein_pipeline.config_key(R, True) for R in edits]
     sets = {s: m["streams"] for s, m in markers.items()}
-    want = set_streams(family, resolutions)
+    want = set_streams(family, resolutions, edits=edits)
     if json.loads(json.dumps(want)) != sets:
         raise SystemExit(f"{src} was built from other stream specs than this tree's; rebuild it")
     elf_meta = _read_json(src / compose_elf.ELF_META)
     newest_set = max((src / sub / SET_MARKERS[s]).stat().st_mtime for s, sub in SET_DIRS.items())
     elfs = [src / n for n in (elf_meta or {}).get("elf", {}).values()]
-    if elf_meta is None or sorted(elf_meta["elf"]) != sorted(str(r) for r in resolutions) or \
+    if elf_meta is None or sorted(elf_meta["elf"]) != sorted(keys) or \
             any(not e.is_file() or e.stat().st_mtime < newest_set for e in elfs):
         raise SystemExit(f"{src}: the resolutions' ELFs are missing or older than the sets; "
                          f"run compose_elf.py (or the export) again")
@@ -363,7 +391,7 @@ def install(src: Path, dst: Path, family: str) -> None:
         shutil.copyfile(src / f, dst / f)
     (dst / MANIFEST).write_text(json.dumps({
         "format": MANIFEST_FORMAT, "family": family, "resolutions": resolutions,
-        "layout": layout_hash(sets), "elf": elf_meta["elf"], "sets": elf_meta["sets"],
+        "edits": edits, "layout": layout_hash(sets), "elf": elf_meta["elf"], "sets": elf_meta["sets"],
         "cfg": elf_meta["cfg"], "valid_len": elf_meta["valid_len"], "complete": True},
         indent=2) + "\n", encoding="utf-8")
     mib = sum(e.stat().st_size for e in elfs) / 2**20
@@ -423,6 +451,34 @@ def build_many(jobs: dict[str, tuple], force: bool, workers: int = 4) -> dict[st
         return {n: f.result() for n, f in futs.items()}
 
 
+def stream_job(kset: str, s: dict, out: Path, fa_exp_fix: int = 0) -> tuple:
+    """build_many's (stamp, env, design, out) for one stream spec of a kernel set."""
+    if kset == "gemm":
+        return ({"M": s["M"], "K": s["K"], "N": s["N"],
+                 **({"layout": s["layout"]} if "layout" in s else {})},
+                {"DG_M": s["M"], "DG_K": s["K"], "DG_N": s["N"],
+                 "DG_LAYOUT": json.dumps(s.get("layout", {}))}, DESIGN, out)
+    if kset == "fa":
+        keys = ("L", "heads", "kv_heads", "causal", "valid_len", "layout")
+        lay = s.get("layout", {})
+        return ({**{k: s[k] for k in keys}, "exp_fix": fa_exp_fix, "tau": FA_TAU},
+                {"DF_L": s["L"], "DF_HEADS": s["heads"], "DF_KV_HEADS": s["kv_heads"],
+                 "DF_CAUSAL": s["causal"], "DF_VALID_LEN": s["valid_len"],
+                 "DF_EXP_FIX": fa_exp_fix, "DF_TAU": FA_TAU,
+                 "DF_QKV_LD": lay.get("qkv_ld", 0), "DF_K_COL": lay.get("k_col", 0),
+                 "DF_V_COL": lay.get("v_col", 0), "DF_O_LD": lay.get("o_ld", 0),
+                 "DF_O_COL": lay.get("o_col", 0), "DF_O_INTERLEAVE": lay.get("o_interleave", 0)},
+                FA_DESIGN, out)
+    if kset == "ew":
+        return (s, {"DE_SPEC": json.dumps(s)}, EW_DESIGN, out)
+    if kset in ("conv", "conv1"):
+        taps = {"DC_TAPS": 9 if kset == "conv" else 1}
+        return (s | taps, {"DC_SPEC": json.dumps(s), **taps}, CONV_DESIGN, out)
+    if kset == "vew":
+        return (s, {"VE_SPEC": json.dumps(s)}, VEW_DESIGN, out)
+    raise ValueError(kset)
+
+
 def assemble(out: Path, dirs: dict[str, Path], marker: Path, meta: dict) -> None:
     """One xclbin for every stream (refused otherwise), their instruction streams, and the
     marker json last -- a half-written set must not look complete."""
@@ -450,6 +506,9 @@ def main() -> int:
     ap.add_argument("--family", default="FLUX.2-klein-4B-NPU2", choices=sorted(FAMILIES))
     ap.add_argument("--resolutions", default="512,1024",
                     help="square output sizes; (R/16)^2 image tokens must be a multiple of 512")
+    ap.add_argument("--edits", default="",
+                    help="resolutions that also get an edit configuration (R x R from an "
+                         "R x R reference), e.g. 512")
     ap.add_argument("--out", default=None, help="default src/xclbins/<family>/open_kernels")
     ap.add_argument("--force", action="store_true", help="rebuild streams even if kept")
     ap.add_argument("--no-fa", action="store_true", help="skip the dit_fa (attention) set")
@@ -468,6 +527,10 @@ def main() -> int:
     args = ap.parse_args()
 
     resolutions = [int(r) for r in args.resolutions.split(",")]
+    edits = [int(r) for r in args.edits.split(",") if r]
+    bad = [why for R in edits if (why := klein_pipeline.check_edit(R, R))]
+    if bad or not set(edits) <= set(resolutions):
+        raise SystemExit(f"--edits {args.edits}: {bad or 'each must be one of --resolutions'}")
     if args.install:
         if not args.out:
             raise SystemExit("--install needs --out: the built kernel directory")
@@ -476,7 +539,7 @@ def main() -> int:
 
     from dit_gemm import check_shape  # noqa: E402  (imports IRON)
 
-    sets = set_streams(args.family, resolutions, vae=not args.no_vae)
+    sets = set_streams(args.family, resolutions, vae=not args.no_vae, edits=edits)
     streams = sets["gemm"]
     vae = {k: sets[k] for k in ("conv", "conv1", "vew") if k in sets}
     bad = {n: why for n, s in streams.items() if (why := check_shape(s["M"], s["K"], s["N"]))}
@@ -505,7 +568,7 @@ def main() -> int:
             "a": "bf16 [M, K] row-major",
             "b": "bfp16ebs8, open_kernels/designs/dit_gemm/pack.py pack_b",
             "c": "bf16 [M, N] row-major",
-            "resolutions": resolutions,
+            "resolutions": resolutions, "edits": edits,
             "streams": streams,
         })
         print(f"OK: {len(streams)} dit_gemm streams over one xclbin -> {out}")
@@ -559,7 +622,7 @@ def main() -> int:
             "q_k_v_o": "bf16 [tokens, heads*128] token-major (K/V: kv_heads*128)",
             "exp_fix": fix,
             "tau": FA_TAU,
-            "resolutions": resolutions,
+            "resolutions": resolutions, "edits": edits,
             "streams": fa_streams,
             "patch": patch,
         })
@@ -584,7 +647,7 @@ def main() -> int:
             "family": args.family,
             "kernel": "dit_ew",
             "row_element": EW_EL,
-            "resolutions": resolutions,
+            "resolutions": resolutions, "edits": edits,
             "streams": ew_streams,
         })
         print(f"OK: {len(ew_streams)} dit_ew streams over one xclbin -> {ew_out}")
@@ -604,7 +667,7 @@ def main() -> int:
         dirs = build_many({n: (sp | extra, {env_key: json.dumps(sp), **extra}, design, kout)
                            for n, sp in specs.items()}, args.force, args.jobs)
         assemble(kout, dirs, marker, {"family": args.family, "kernel": kernel, **extra,
-                                      "resolutions": resolutions, "streams": specs})
+                                      "resolutions": resolutions, "edits": edits, "streams": specs})
         print(f"OK: {len(specs)} {kernel} streams over one xclbin -> {kout}")
 
     # the six sets as one full ELF per resolution (one hardware context): what --install ships
