@@ -1334,6 +1334,79 @@
                 "footprint": 0.63,
                 "npue_design_family": "BERT-h768-gated-bfp16"
             }
+        },
+        "hy-mt2": {
+            "1.8b": {
+                "name": "Hy-MT2-1.8B-NPU2",
+                "url": "https://huggingface.co/Atomic-Germ/Hy-MT2-1.8B-NPU2",
+                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Hy-MT2-1.8B-NPU2/tree/main",
+                "ms_url": "https://modelscope.cn/models/amd/Hy-MT2-1.8B-NPU2",
+                "modified_at": "2026-09-30T00:00:00Z",
+                "size": 1800000000,
+                "oflm_min_version": "0.1.0",
+                "default_context_length": 32768,
+                "max_prefill_len": 4096,
+                "files": [
+                    "config.json",
+                    "model.q4nx",
+                    "tokenizer.json",
+                    "tokenizer_config.json"
+                ],
+                "details": {
+                    "family": "hunyuan",
+                    "think": true,
+                    "parameter_size": "1.8B",
+                    "quantization_level": "Q4_1"
+                }
+            },
+            "7b": {
+                "name": "Hy-MT2-7B-NPU2",
+                "url": "https://huggingface.co/Atomic-Germ/Hy-MT2-7B-NPU2",
+                "file_url": "https://huggingface.co/api/models/Atomic-Germ/Hy-MT2-7B-NPU2/tree/main",
+                "ms_url": "https://modelscope.cn/models/amd/Hy-MT2-7B-NPU2",
+                "modified_at": "2026-09-30T00:00:00Z",
+                "size": 7000000000,
+                "oflm_min_version": "0.1.0",
+                "default_context_length": 32768,
+                "max_prefill_len": 4096,
+                "files": [
+                    "config.json",
+                    "model.q4nx",
+                    "tokenizer.json",
+                    "tokenizer_config.json"
+                ],
+                "details": {
+                    "family": "hunyuan",
+                    "think": true,
+                    "parameter_size": "7B",
+                    "quantization_level": "Q4_1"
+                }
+            }
+        },
+        "granite": {
+            "3b": {
+                "name": "Granite-4.2-3B-NPU2",
+                "url": "https://huggingface.co/vegahyo/Granite-4.2-3B-NPU2",
+                "file_url": "https://huggingface.co/api/models/vegahyo/Granite-4.2-3B-NPU2/tree/main",
+                "ms_url": "https://modelscope.cn/models/amd/Granite-4.2-3B-NPU2",
+                "modified_at": "2026-09-30T00:00:00Z",
+                "size": 3000000000,
+                "oflm_min_version": "0.1.0",
+                "default_context_length": 131072,
+                "max_prefill_len": 4096,
+                "files": [
+                    "config.json",
+                    "model.q4nx",
+                    "tokenizer.json",
+                    "tokenizer_config.json"
+                ],
+                "details": {
+                    "family": "granite",
+                    "think": false,
+                    "parameter_size": "3B",
+                    "quantization_level": "Q4_1"
+                }
+            }
         }
     }
 }
