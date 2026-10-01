@@ -300,17 +300,14 @@ def main() -> int:
 
     out: Path = a.out
     out.mkdir(parents=True, exist_ok=True)
-    # The specs directory is DERIVED and wholly owned by this script, so it is
-    # cleared rather than merged into. A spec left over from an earlier naming
-    # scheme otherwise stays a valid-looking file that the exporter globs, and
-    # the same kernels get built twice under two names -- which is what happened
-    # when `real_vocab` left the name and the two naming schemes briefly coexisted.
-    # The bookkeeping stamp is rewritten below, so it goes too.
-    for stale in sorted(out.glob("*.json")):
-        stale.unlink()
-    stamp = out / ".stamp.json"
-    if stamp.exists():
-        stamp.unlink()
+    # Specs are COMMITTED, not build products: a spec is the only durable record
+    # of a model's geometry and weight format, because we do not ship containers
+    # and a build must not need the network to learn what a model is. So this
+    # script refreshes what it can derive and leaves everything else in place --
+    # a hand-added spec, or one for a model not in the catalogue, is kept. The
+    # unlink-everything behaviour this replaced is what made a new model
+    # unrepresentable without also editing the catalogue.
+    stale_named: set[str] = set()
     written = 0
     # Two different specs must never land on one file: the exporter reads
     # extra["model"] to decide its output directory, so a collision is one set
@@ -333,8 +330,18 @@ def main() -> int:
         s.extra["serves"] = v["members"]
         p = out / f"{nm}.json"
         p.write_text(s.to_json(), encoding="utf-8", newline="\n")
+        stale_named.add(p.name)
         written += 1
     print(f"\n-- wrote {written} spec file(s) to {out}")
+    # Anything else in the directory is a spec this run did not derive. It is
+    # kept, not stale: named for a model the catalogue does not carry, or added
+    # by hand. Say so, so "why is the build compiling a spec the catalogue
+    # never mentioned" has an answer in the build log.
+    kept = sorted(p.name for p in out.glob("*.json") if p.name not in stale_named)
+    if kept:
+        print(f"-- kept {len(kept)} committed spec(s) this run did not derive:")
+        for name in kept:
+            print(f"   {name}")
     if a.check and unbuildable:
         return 1
     return 0
