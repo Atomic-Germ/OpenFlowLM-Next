@@ -28,12 +28,19 @@ final residual/norm errors increase, so it remains experimental. The first
 changed norm boundary is now layer4 xn, one local RMSNorm error at channel786.
 PR4 remains incomplete; runtime and catalogue defaults are unchanged.
 
-Latest follow-up (2026-10-02): [RMSNorm rounding](qwen38-norm-precision.md)
+Follow-up (2026-10-02): [RMSNorm rounding](qwen38-norm-precision.md)
 closes layer4/channel786 and reduces local norm differences from26 to9.
 The first ten norm boundaries are exact. Full acceptance still fails6 checks;
 final residual/norm errors decrease but exceed their bounds. The next isolated
 target is layer4 FFN activation14949, whose BF16 rounding differs despite exact
 xm. The new norm mode is slower and remains opt-in; PR4 is not complete.
+
+Latest follow-up: [FFN activation rounding](qwen38-activation-precision.md)
+closes layer4 h14949 with compensated products and exact FP32 additions.
+The full replay fails2 checks versus6, but final residual/norm maxrel increase;
+it remains experimental. The next first norm error is local to layer5/channel3295
+and is reproduced separately. PR4 still requires numerical closure and runtime
+integration; defaults and catalogue support are unchanged.
 
 ## Sources and format
 

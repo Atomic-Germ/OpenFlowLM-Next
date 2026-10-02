@@ -184,7 +184,11 @@ void gemv_q4_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, flo
 ''',
         "dense_act.cc": f'''// h band = silu(g) * u for one 64-row band (ms: u @{F.MS_U}, g @{F.MS_G}) -> one f32 y element.
 // silu(x) = x sigmoid(x). Vector ops only (no scalar float on this core).
+#if DENSE_ACT_CARRY
+#include "dense_activation_carry.h"
+#else
 #include "{act_header}"
+#endif
 
 extern "C" {{
 void dense_act(const float *__restrict ms, float *__restrict h) {{
@@ -193,7 +197,11 @@ void dense_act(const float *__restrict ms, float *__restrict h) {{
   const float *__restrict g = ms + {F.MS_G};
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < 64; j += 32)
+#if DENSE_ACT_CARRY
+    aie::store_v(h + j, act_gated_silu_carry(aie::load_v<32>(g + j), aie::load_v<32>(u + j)));
+#else
     aie::store_v(h + j, {act_mul}({act_silu}(aie::load_v<32>(g + j)), aie::load_v<32>(u + j)));
+#endif
 }}
 }}
 ''',

@@ -84,8 +84,9 @@ def worker_functions(ns):
     exec(compile(ast.Module(body=body, type_ignores=[]), str(path), 'exec'), ns)
 
 
-@pytest.mark.parametrize('limit,carry', [(8192,False),(4096,False),(4096,True)])
-def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit,carry):
+@pytest.mark.parametrize('limit,carry,compact', [(8192,False,False),(4096,False,False),(4096,True,False),
+                                                (8192,False,True),(4096,False,True),(4096,True,True)])
+def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit,carry,compact,monkeypatch):
     from test_dense_activation_stream import Fifo
     from recipes.segmented_dense import segments
     f = replace(Q.ffn_geometry(spec()),DOWN_SEGMENTS=segments(17408,limit))
@@ -121,7 +122,15 @@ def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit
         sums[sl] = scratch[:64] if first else sums[sl] + scratch[:64]
     def emit(sums, y, band):
         y[:] = sums[band * 64:(band + 1) * 64]
-    ns = dict(FFN=f, SEGMENT_CARRY=carry, range_=range, ELEM=4096, per_band=lambda k: k // 128,
+    if compact:
+        from aie.dialects import arith
+        from aie.extras import types as T
+        monkeypatch.setattr(T,'i32',lambda:None)
+        monkeypatch.setattr(T,'index',lambda:None)
+        monkeypatch.setattr(arith,'constant',lambda ty,value:value)
+        monkeypatch.setattr(arith,'cmpi',lambda pred,a,b:a==b)
+        monkeypatch.setattr(arith,'extui',lambda ty,value:int(value))
+    ns = dict(FFN=f, SEGMENT_CARRY=carry, COMPACT_DOWN=compact, range_=range, ELEM=4096, per_band=lambda k: k // 128,
               n_groups=lambda k: k // 256)
     worker_functions(ns)
     total_groups = nbands * sum(width // 256 for _, width in f.DOWN_SEGMENTS)

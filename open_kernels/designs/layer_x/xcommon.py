@@ -38,6 +38,7 @@ HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 ELEM = 4096
 SEGMENT_CARRY = False  # Explicitly enabled only by the precision probe.
+COMPACT_DOWN = False  # Loop identical segments instead of cloning the core body.
 
 
 def _gemv_prep_entry(k: int) -> Path:
@@ -409,6 +410,38 @@ def segmented_down_body(win, xin, yout, B, K, diagnostic=False):
     only the final sums. Neither path feeds snapshots back into the core.
     """
     tab, ms, ds = B["tab"], B["ms"], B["ds"]
+    if COMPACT_DOWN:
+        from itertools import groupby
+        from aie.dialects import arith
+        from aie.extras import types as T
+        for width, group in groupby(FFN.DOWN_SEGMENTS, key=lambda segment: segment[1]):
+            entries = list(group)
+            for segment in range_(len(entries)):
+                first = arith.extui(T.i32(), arith.cmpi('eq', segment, arith.constant(T.index(), 0))) if entries[0][0] == 0 else 0
+                for i in range_((width * 4 + ELEM - 1) // ELEM):
+                    he = xin.acquire(1)
+                    K["prepf"](he, tab, width, i)
+                    xin.release(1)
+                for band in range_(FFN.DOWN_PC):
+                    for g in range_(n_groups(width)):
+                        we = win.acquire(1)
+                        K["gms"](we, tab, ms, g, per_band(width), 0)
+                        win.release(1)
+                    if SEGMENT_CARRY:
+                        K["down_acc"](ms, ds, band, first, tab, width)
+                    else:
+                        K["down_acc"](ms, ds, band, first)
+                if diagnostic:
+                    for band in range_(FFN.DOWN_PC):
+                        ye = yout.acquire(1)
+                        K["down_out"](ds, ye, band)
+                        yout.release(1)
+        if not diagnostic:
+            for band in range_(FFN.DOWN_PC):
+                ye = yout.acquire(1)
+                K["down_out"](ds, ye, band)
+                yout.release(1)
+        return
     for start, width in FFN.DOWN_SEGMENTS:
         for i in range_((width * 4 + ELEM - 1) // ELEM):
             he = xin.acquire(1)
