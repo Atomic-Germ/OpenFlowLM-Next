@@ -53,6 +53,14 @@ static void send_error(const openai_compat::StreamState& stream,
     }
 }
 
+///@brief Log a caught exception and return the fixed body the client gets (#135)
+///@param where the handler, for the log line
+///@param e the exception; its text goes to the server log only
+static json exception_error(const char* where, const std::exception& e) {
+    header_print("ERROR", std::string(where) + ": " + e.what());
+    return openai_compat::exception_body(e);
+}
+
 ///@brief Normalize messages by merging consecutive user messages (like Ollama does)
 ///@param messages the original messages
 ///@return normalized messages with consecutive user messages merged
@@ -407,7 +415,7 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
         }
     }
     else {
-        this->current_model_tag = "model-faker";
+        set_current_model_tag("model-faker");
     }
     this->prompt_cache = PromptCache();
 }
@@ -478,6 +486,9 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
                                  "previous model leaves the NPU and must be reloaded");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Clear the tag before the engine goes: GET /api/ps reads it from another
+        // thread, and between the two it would report a model that is not loaded.
+        set_current_model_tag("model-faker");
         if (auto_chat_engine != nullptr) {
             auto_chat_engine.reset();
         }
@@ -490,7 +501,7 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             // unreachable while null meant only "unsupported tag" (checked above); it
             // stopped being unreachable the moment null also meant "not a chat model".
             header_print("ERROR", "no engine for '" + ensure_tag + "'; nothing is loaded now");
-            this->current_model_tag = "model-faker";
+            set_current_model_tag("model-faker");
             return ModelLoad::NotChatModel;
         }
         // A request may name a model that is in the list but not on disk, or one an update
@@ -506,7 +517,7 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
                 header_print("ERROR", "model '" + ensure_tag + "' is not compatible with this "
                                       "version of OpenFlowLM; nothing is loaded now");
                 this->auto_chat_engine.reset();
-                this->current_model_tag = "model-faker";
+                set_current_model_tag("model-faker");
                 return ModelLoad::LoadFailed;
         }
         auto [new_ensure_tag, model_info] = supported_models.get_model_info(ensure_tag);
@@ -520,16 +531,26 @@ RestHandler::ModelLoad RestHandler::ensure_model_loaded(const std::string& model
             this->auto_chat_engine.reset();
             this->npu_device_inst.reset();
             this->npu_device_inst = oflm_rt::device(0);
-            this->current_model_tag = "model-faker";
+            set_current_model_tag("model-faker");
             return ModelLoad::LoadFailed;
         }
         
         if (this->prefill_chunk_len == -1) {
             this->prefill_chunk_len = model_info["max_prefill_len"].get<int>();;
         }
-        current_model_tag = ensure_tag;
+        set_current_model_tag(ensure_tag);
     }
     return ModelLoad::Ok;
+}
+
+void RestHandler::set_current_model_tag(const std::string& tag) {
+    std::lock_guard<std::mutex> lock(this->current_model_tag_mutex);
+    this->current_model_tag = tag;
+}
+
+std::string RestHandler::loaded_model_tag() const {
+    std::lock_guard<std::mutex> lock(this->current_model_tag_mutex);
+    return this->current_model_tag;
 }
 
 ///@brief Ensure the asr model is loaded
@@ -756,8 +777,7 @@ void RestHandler::handle_show(const json& request,
         send_response(info);
     }
     catch (const std::exception& e) {
-        json error_response = { {"error", e.what()} };
-        send_response(error_response);
+        send_response(exception_error("handle_show", e));
     }
 }
 
@@ -769,6 +789,9 @@ void RestHandler::handle_generate(const json& request,
                                  std::function<void(const json&)> send_response,
                                  StreamResponseCallback send_streaming_response,
                                  std::shared_ptr<CancellationToken> cancellation_token) {
+    // A client disconnect or POST /api/cancel sets the token; prefill and decode
+    // both poll it, so a cancelled request stops using the NPU (#135).
+    auto is_cancelled = [&cancellation_token] { return cancellation_token && cancellation_token->cancelled(); };
     // Every frame goes through this, so an error knows whether the stream is open.
     openai_compat::StreamState stream_state;
     auto ndjson_stream_callback = [&send_streaming_response, &stream_state](const json& data, bool is_final) {
@@ -807,8 +830,13 @@ void RestHandler::handle_generate(const json& request,
             streaming_ostream ostream(model, ndjson_stream_callback, false);
             uniformed_input.prompt = prompt;
             try {
-                bool success = auto_chat_engine->insert(meta_info, uniformed_input);
-                if (!success){
+                bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
+                if (!success && (meta_info.stop_reason == CANCEL_DETECTED || is_cancelled())) {
+                    // Nothing to decode. The response below still goes out: it is
+                    // what releases the NPU queue.
+                    meta_info.stop_reason = CANCEL_DETECTED;
+                    header_print("❌ ", "Prefill Cancelled!");
+                } else if (!success) {
                     json error_response = {{"error", {
                         {"message", "the prompt does not fit this model's context window"},
                         {"type", "invalid_request_error"},
@@ -820,17 +848,18 @@ void RestHandler::handle_generate(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_generate", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
             try {
-                auto_chat_engine->generate(meta_info, length_limit, ostream);
+                if (meta_info.stop_reason != CANCEL_DETECTED) {
+                    auto_chat_engine->generate(meta_info, length_limit, ostream, is_cancelled);
+                }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
+                const json error_response = exception_error("handle_generate", e);
                 // Tokens may already be on the wire, and then only a frame reaches the client.
-                send_error(stream_state, openai_compat::StreamWire::Ndjson, e.what(),
+                send_error(stream_state, openai_compat::StreamWire::Ndjson, error_response["error"]["message"].get<std::string>(),
                            error_response, send_response, ndjson_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
@@ -839,6 +868,10 @@ void RestHandler::handle_generate(const json& request,
             auto history = this->auto_chat_engine->get_history();
             // std::cout << "history: " << history.first << std::endl;
             meta_info.total_duration = (uint64_t)time_utils::duration_ns(total_start_time, total_end_time).first;
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Request cancelled; clearing its context");
+                this->auto_chat_engine->clear_context();
+            }
             ostream.finalize_generate(meta_info, history.second);
         } else {
             // Non-streaming response
@@ -847,8 +880,13 @@ void RestHandler::handle_generate(const json& request,
             std::ostream ostream(&obuf);
             uniformed_input.prompt = prompt;
             try {
-                bool success = auto_chat_engine->insert(meta_info, uniformed_input);
-                if (!success){
+                bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
+                if (!success && (meta_info.stop_reason == CANCEL_DETECTED || is_cancelled())) {
+                    // Nothing to decode. The response below still goes out: it is
+                    // what releases the NPU queue.
+                    meta_info.stop_reason = CANCEL_DETECTED;
+                    header_print("❌ ", "Prefill Cancelled!");
+                } else if (!success) {
                     json error_response = {{"error", {
                         {"message", "the prompt does not fit this model's context window"},
                         {"type", "invalid_request_error"},
@@ -860,16 +898,16 @@ void RestHandler::handle_generate(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_generate", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
             try {
-                auto_chat_engine->generate(meta_info, length_limit, ostream);
+                if (meta_info.stop_reason != CANCEL_DETECTED) {
+                    auto_chat_engine->generate(meta_info, length_limit, ostream, is_cancelled);
+                }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_generate", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -888,12 +926,16 @@ void RestHandler::handle_generate(const json& request,
                 {"eval_duration", meta_info.decoding_duration},
                 {"done_reason", stop_reason_to_string(meta_info.stop_reason)}
             };
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Request cancelled; clearing its context");
+                this->auto_chat_engine->clear_context();
+            }
             // std::cout << "history: " << history.first << std::endl;
             send_response(response);
         }
     } catch (const std::exception& e) {
-        json error_response = {{"error", e.what()}};
-        send_error(stream_state, openai_compat::StreamWire::Ndjson, e.what(),
+        const json error_response = exception_error("handle_generate", e);
+        send_error(stream_state, openai_compat::StreamWire::Ndjson, error_response["error"]["message"].get<std::string>(),
                    error_response, send_response, ndjson_stream_callback);
     }
 }
@@ -906,6 +948,14 @@ void RestHandler::handle_chat(const json& request,
                              std::function<void(const json&)> send_response,
                              StreamResponseCallback send_streaming_response,
                              std::shared_ptr<CancellationToken> cancellation_token) {
+    // A client disconnect or POST /api/cancel sets the token; prefill and decode
+    // both poll it, so a cancelled request stops using the NPU (#135).
+    auto is_cancelled = [&cancellation_token] { return cancellation_token && cancellation_token->cancelled(); };
+    // Every frame goes through this, so an error knows whether the stream is open.
+    openai_compat::StreamState stream_state;
+    auto ndjson_stream_callback = [&send_streaming_response, &stream_state](const json& data, bool is_final) {
+        openai_compat::send_tracked(stream_state, is_final, [&] { send_streaming_response(data, is_final); });
+        };
     try {
         // Checked before reading, like the other handlers (#70).
         if (json err = openai_compat::require_field(request, "messages", openai_compat::FieldType::Array);
@@ -938,11 +988,16 @@ void RestHandler::handle_chat(const json& request,
         if (stream) {
             // Streaming response using streaming_ostream
             auto total_start_time = time_utils::now();
-            streaming_ostream ostream(model, send_streaming_response, true);  // true for chat format
+            streaming_ostream ostream(model, ndjson_stream_callback, true);  // true for chat format
             uniformed_input.messages = messages;
             try {
-                bool success = auto_chat_engine->insert(meta_info, uniformed_input);
-                if (!success){
+                bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
+                if (!success && (meta_info.stop_reason == CANCEL_DETECTED || is_cancelled())) {
+                    // Nothing to decode. The response below still goes out: it is
+                    // what releases the NPU queue.
+                    meta_info.stop_reason = CANCEL_DETECTED;
+                    header_print("❌ ", "Prefill Cancelled!");
+                } else if (!success) {
                     json error_response = {{"error", {
                         {"message", "the prompt does not fit this model's context window"},
                         {"type", "invalid_request_error"},
@@ -954,29 +1009,27 @@ void RestHandler::handle_chat(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_chat", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
+            // This used to be a second insert() and no generate() (#134): the second
+            // insert matched the whole prompt against the history the first had just
+            // written, erased every token and sampled an empty logits buffer.
             try {
-                bool success = auto_chat_engine->insert(meta_info, uniformed_input);
-                if (!success){
-                    json error_response = {{"error", {
-                        {"message", "the prompt does not fit this model's context window"},
-                        {"type", "invalid_request_error"},
-                        {"param", "messages"},
-                        {"code", "context_length_exceeded"}
-                    }}};
-                    send_response(error_response);
-                    this->auto_chat_engine->clear_context();
-                    return;
+                if (meta_info.stop_reason != CANCEL_DETECTED) {
+                    auto_chat_engine->generate(meta_info, length_limit, ostream, is_cancelled);
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                const json error_response = exception_error("handle_chat", e);
+                // Tokens may already be on the wire, and then only a frame reaches the client.
+                send_error(stream_state, openai_compat::StreamWire::Ndjson, error_response["error"]["message"].get<std::string>(),
+                           error_response, send_response, ndjson_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
+            }
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Generation Cancelled!");
             }
             auto total_end_time = time_utils::now();
             meta_info.total_duration = (uint64_t)time_utils::duration_ns(total_start_time, total_end_time).first;
@@ -993,12 +1046,16 @@ void RestHandler::handle_chat(const json& request,
             //std::string response_text = auto_chat_engine->generate_with_prompt(meta_info, uniformed_input, length_limit, std::cout);
             std::string response_text;
             try {
-                response_text = auto_chat_engine->generate_with_prompt(meta_info, uniformed_input, length_limit, nstream);
+                // generate_with_prompt, not insert() + generate(): some models write
+                // their own framing around the decode (GPT-OSS, the thinking models).
+                response_text = auto_chat_engine->generate_with_prompt(meta_info, uniformed_input, length_limit, nstream, is_cancelled);
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_chat", e));
                 this->auto_chat_engine->clear_context();
                 return;
+            }
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Request cancelled");
             }
             //std::string response_text = chat_engine->generate_with_prompt(meta_info, prompts, length_limit, std::cout, payload);
             auto total_end_time = time_utils::now();
@@ -1027,8 +1084,9 @@ void RestHandler::handle_chat(const json& request,
             this->auto_chat_engine->clear_context();
         }
     } catch (const std::exception& e) {
-        json error_response = {{"error", e.what()}};
-        send_response(error_response);
+        const json error_response = exception_error("handle_chat", e);
+        send_error(stream_state, openai_compat::StreamWire::Ndjson, error_response["error"]["message"].get<std::string>(),
+                   error_response, send_response, ndjson_stream_callback);
     }
 }
 
@@ -1353,8 +1411,7 @@ void RestHandler::handle_embeddings(const json& request,
         send_response(response);
     }
     catch (const std::exception& e) {
-        json error_response = {{"error", e.what()}};
-        send_response(error_response);
+        send_response(exception_error("handle_embeddings", e));
     }
 }
 
@@ -1369,8 +1426,7 @@ void RestHandler::handle_models(const json& request,
         json models = supported_models.get_all_models_ollama();
         send_response(models);
     } catch (const std::exception& e) {
-        json error_response = {{"error", e.what()}};
-        send_response(error_response);
+        send_response(exception_error("handle_models", e));
     }
 }
 
@@ -1399,8 +1455,7 @@ void RestHandler::handle_models_openai(const json& request,
         send_response(models);
     }
     catch (const std::exception& e) {
-        json error_response = { {"error", e.what()} };
-        send_response(error_response);
+        send_response(exception_error("handle_models_openai", e));
     }
 }
 
@@ -1443,23 +1498,45 @@ void RestHandler::handle_ps(const json& request,
         
         std::string expires_at = expires_ss.str();
         
-        auto [new_current_model_tag, model_info] = supported_models.get_model_info(current_model_tag);
-        json response = {
-            {"models", json::array({
-                {
-                    {"name", current_model_tag},
-                    {"model", current_model_tag},
-                    {"size", model_info["size"]},
-                    {"details", model_info["details"]},
+        json models = json::array();
+        // A copy taken under the lock: ensure_model_loaded() writes the tag on the
+        // NPU thread while this route runs unqueued (#135). With no chat model it
+        // is the "model-faker" sentinel -- also during a load, since the tag is set
+        // only once the engine is up -- and get_model_info() is only safe for a
+        // supported tag: rectify_model_tag() indexes the model list by it.
+        const std::string chat_tag = loaded_model_tag();
+        if (supported_models.is_model_supported(chat_tag)) {
+            auto [new_chat_tag, model_info] = supported_models.get_model_info(chat_tag);
+            models.push_back({
+                {"name", chat_tag},
+                {"model", chat_tag},
+                {"size", model_info["size"]},
+                {"details", model_info["details"]},
+                {"expires_at", expires_at},
+            });
+        }
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+        // Like Ollama, list every loaded model, the embedding model included. It is
+        // loaded once, in the constructor, so reading it here does not race.
+        if (this->embed && this->auto_embedding_engine) {
+            const std::string embedding_tag = this->auto_embedding_engine->get_current_model();
+            if (supported_models.is_model_supported(embedding_tag)) {
+                auto [new_embedding_tag, embedding_info] = supported_models.get_model_info(embedding_tag);
+                models.push_back({
+                    {"name", embedding_tag},
+                    {"model", embedding_tag},
+                    {"size", embedding_info["size"]},
+                    {"details", embedding_info["details"]},
                     {"expires_at", expires_at},
-                }
-            })}
-        };
+                });
+            }
+        }
+#endif
+        json response = {{"models", models}};
         // std::cout << "response: " << response.dump(4) << std::endl;
         send_response(response);
     } catch (const std::exception& e) {
-        json error_response = {{"error", e.what()}};
-        send_response(error_response);
+        send_response(exception_error("handle_ps", e));
     }
 }
 
@@ -1629,8 +1706,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_openai_chat_completion", e));
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1639,9 +1715,9 @@ void RestHandler::handle_openai_chat_completion(const json& request,
             try {
                 auto_chat_engine->generate(meta_info, length_limit, ostream, [&] { return cancellation_token->cancelled(); });
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
+                const json error_response = exception_error("handle_openai_chat_completion", e);
                 // Tokens may already be on the wire, and then only a frame reaches the client.
-                send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                send_error(stream_state, openai_compat::StreamWire::Sse, error_response["error"]["message"].get<std::string>(),
                            error_response, send_response, openai_stream_callback);
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
@@ -1683,8 +1759,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_openai_chat_completion", e));
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1693,8 +1768,7 @@ void RestHandler::handle_openai_chat_completion(const json& request,
             try {
                 response_text = auto_chat_engine->generate(meta_info, length_limit, nstream, [&] { return cancellation_token->cancelled(); });
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_openai_chat_completion", e));
                 this->auto_chat_engine->clear_context();
                 this->prompt_cache.reset();
                 return;
@@ -1731,14 +1805,8 @@ void RestHandler::handle_openai_chat_completion(const json& request,
         }
 
     } catch (const std::exception& e) {
-        json error_response = {
-            {"error", {
-                {"message", e.what()},
-                {"type", "server_error"},
-                {"code", 500}
-            }}
-        };
-        send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+        const json error_response = exception_error("handle_openai_chat_completion", e);
+        send_error(stream_state, openai_compat::StreamWire::Sse, error_response["error"]["message"].get<std::string>(),
                    error_response, send_response, openai_stream_callback);
     }
 }
@@ -1833,13 +1901,7 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
         //this->whisper_engine->clear_context();
     }
     catch (const std::exception& e) {
-        json error_response = {
-            {"error", {
-                {"message", e.what()},
-                {"type", "server_error"},
-                {"code", 500}
-            }}
-        };
+        const json error_response = exception_error("handle_openai_audio_transcriptions", e);
         send_response(error_response);
     }
 }
@@ -1852,6 +1914,9 @@ void RestHandler::handle_openai_completion(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response,
     std::shared_ptr<CancellationToken> cancellation_token) {
+    // A client disconnect or POST /api/cancel sets the token; prefill and decode
+    // both poll it, so a cancelled request stops using the NPU (#135).
+    auto is_cancelled = [&cancellation_token] { return cancellation_token && cancellation_token->cancelled(); };
     // Every frame goes through this, so an error knows whether the stream is open.
     openai_compat::StreamState stream_state;
     // Passes the pre-formatted SSE string directly
@@ -1897,8 +1962,13 @@ void RestHandler::handle_openai_completion(const json& request,
             streaming_ostream_openai ostream(model, openai_stream_callback);  // streaming in completion format
             uniformed_input.prompt = prompt;
             try {
-                bool success = auto_chat_engine->insert(meta_info, uniformed_input);
-                if (!success) {
+                bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
+                if (!success && (meta_info.stop_reason == CANCEL_DETECTED || is_cancelled())) {
+                    // Nothing to decode. The response below still goes out: it is
+                    // what releases the NPU queue.
+                    meta_info.stop_reason = CANCEL_DETECTED;
+                    header_print("❌ ", "Prefill Cancelled!");
+                } else if (!success) {
                     json error_response = {{"error", {
                         {"message", "the prompt does not fit this model's context window"},
                         {"type", "invalid_request_error"},
@@ -1910,20 +1980,24 @@ void RestHandler::handle_openai_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_openai_completion", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
             try {
-                auto_chat_engine->generate(meta_info, length_limit, ostream);
+                if (meta_info.stop_reason != CANCEL_DETECTED) {
+                    auto_chat_engine->generate(meta_info, length_limit, ostream, is_cancelled);
+                }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
+                const json error_response = exception_error("handle_openai_completion", e);
                 // Tokens may already be on the wire, and then only a frame reaches the client.
-                send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+                send_error(stream_state, openai_compat::StreamWire::Sse, error_response["error"]["message"].get<std::string>(),
                            error_response, send_response, openai_stream_callback);
                 this->auto_chat_engine->clear_context();
                 return;
+            }
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Generation Cancelled!");
             }
             ostream.finalize(meta_info);
 
@@ -1935,8 +2009,13 @@ void RestHandler::handle_openai_completion(const json& request,
             std::ostream ostream(&obuf);
             uniformed_input.prompt = prompt;
             try {
-                bool success = auto_chat_engine->insert(meta_info, uniformed_input);
-                if (!success) {
+                bool success = auto_chat_engine->insert(meta_info, uniformed_input, is_cancelled);
+                if (!success && (meta_info.stop_reason == CANCEL_DETECTED || is_cancelled())) {
+                    // Nothing to decode. The response below still goes out: it is
+                    // what releases the NPU queue.
+                    meta_info.stop_reason = CANCEL_DETECTED;
+                    header_print("❌ ", "Prefill Cancelled!");
+                } else if (!success) {
                     json error_response = {{"error", {
                         {"message", "the prompt does not fit this model's context window"},
                         {"type", "invalid_request_error"},
@@ -1948,16 +2027,16 @@ void RestHandler::handle_openai_completion(const json& request,
                     return;
                 }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_openai_completion", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
             try {
-                auto_chat_engine->generate(meta_info, length_limit, ostream);
+                if (meta_info.stop_reason != CANCEL_DETECTED) {
+                    auto_chat_engine->generate(meta_info, length_limit, ostream, is_cancelled);
+                }
             } catch (const std::exception& e) {
-                json error_response = {{"error", e.what()}};
-                send_response(error_response);
+                send_response(exception_error("handle_openai_completion", e));
                 this->auto_chat_engine->clear_context();
                 return;
             }
@@ -1983,18 +2062,16 @@ void RestHandler::handle_openai_completion(const json& request,
                     {"total_tokens", meta_info.prompt_tokens + meta_info.generated_tokens}
                 }}
             };
+            if (meta_info.stop_reason == CANCEL_DETECTED) {
+                header_print("❌ ", "Request cancelled; clearing its context");
+                this->auto_chat_engine->clear_context();
+            }
             send_response(response);
         }
     }
     catch (const std::exception& e) {
-        json error_response = {
-            {"error", {
-                {"message", e.what()},
-                {"type", "server_error"},
-                {"code", 500}
-            }}
-        };
-        send_error(stream_state, openai_compat::StreamWire::Sse, e.what(),
+        const json error_response = exception_error("handle_openai_completion", e);
+        send_error(stream_state, openai_compat::StreamWire::Sse, error_response["error"]["message"].get<std::string>(),
                    error_response, send_response, openai_stream_callback);
     }
 }
