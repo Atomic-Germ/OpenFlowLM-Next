@@ -209,7 +209,7 @@ std::string identify_npu_arch() {
 
 #endif
 
-/// rief Open the NPU the way `run` and `serve` do, through the device runtime.
+/// \brief Open the NPU the way `run` and `serve` do, through the device runtime.
 /// The driver-side checks in sanity_check_npu_stack() can all pass on a machine
 /// where this fails (#81): on Linux XRT finds an NPU only if it can load its
 /// userspace plugin, libxrt_driver_xdna.so.2, which is not part of XRT.
@@ -217,6 +217,13 @@ std::string identify_npu_arch() {
 static bool runtime_can_open_npu(std::string& why) {
     try {
         oflm_rt::device probe(0);
+#ifdef OFLM_USE_HRX
+        // hrx::device does not throw when initialisation fails; it records it.
+        if (!hrx::rt().ok) {
+            why = "HRX device initialisation failed";
+            return false;
+        }
+#endif
         return true;
     } catch (const std::exception& e) {
         why = e.what();
