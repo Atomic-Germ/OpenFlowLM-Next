@@ -129,4 +129,5 @@ def test_recipe_cache_covers_precise_wide_norm(family):
     assert 'include/vecmath_precise.h' in files
     assert 'include/fp32_add_rne.h' in files
     assert 'include/fp32_mul_rne.h' in files
+    assert 'include/fp32_scale_carry.h' in files
     assert 'designs/ln/ln_rne.h' in files

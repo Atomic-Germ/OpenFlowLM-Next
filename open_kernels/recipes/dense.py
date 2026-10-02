@@ -644,7 +644,7 @@ KERNEL_SOURCES = [
     "designs/lm_head_q4/*.py",
     # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
-    "include/vecmath.h", "include/vecmath_precise.h", "include/fp32_add_rne.h", "include/fp32_mul_rne.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/vecmath_precise.h", "include/fp32_add_rne.h", "include/fp32_mul_rne.h", "include/fp32_scale_carry.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
 Q8_ROLES = frozenset({"attn", "ffn"})     # the only two roles a dense layer has

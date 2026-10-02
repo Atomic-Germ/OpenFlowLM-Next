@@ -33,6 +33,9 @@ ELEM = N * 2
 COMPENSATED = os.environ.get('LN_STREAM_COMPENSATED') == '1'
 RESIDUAL_RNE = os.environ.get('LN_RESIDUAL_RNE') == '1'
 NORM_RNE = os.environ.get('LN_NORM_RNE') == '1'
+SCALE_CARRY = os.environ.get('LN_SCALE_CARRY') == '1'
+if SCALE_CARRY and not NORM_RNE:
+    raise ValueError('scale carry requires norm RNE')
 if NORM_RNE and (N <= 4096 or not COMPENSATED or not RESIDUAL_RNE):
     raise ValueError('norm RNE requires compensated wide LN with exact residuals')
 TRACE = os.environ.get('LN_TRACE_STATS') == '1'
@@ -60,6 +63,8 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
         flags.append('-DLN_RESIDUAL_RNE=1')
     if NORM_RNE:
         flags.append('-DLN_NORM_RNE=1')
+    if SCALE_CARRY:
+        flags.append('-DLN_SCALE_CARRY=1')
     if TRACE:
         flags += ['-DLN_TRACE_STATS=1', f'-DLN_TRACE_INDEX={TRACE_INDEX}']
     if N <= 2048:
@@ -140,4 +145,5 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) +
 _src += (HERE / 'ln_rne.h').read_bytes()
 _src += (HERE.parent.parent / 'include' / 'fp32_add_rne.h').read_bytes()
 _src += (HERE.parent.parent / 'include' / 'fp32_mul_rne.h').read_bytes()
-SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr((COMPENSATED,RESIDUAL_RNE,NORM_RNE,TRACE,TRACE_INDEX)).encode()).hexdigest()[:8], 16)}
+_src += (HERE.parent.parent / 'include' / 'fp32_scale_carry.h').read_bytes()
+SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src+repr((COMPENSATED,RESIDUAL_RNE,NORM_RNE,SCALE_CARRY,TRACE,TRACE_INDEX)).encode()).hexdigest()[:8], 16)}

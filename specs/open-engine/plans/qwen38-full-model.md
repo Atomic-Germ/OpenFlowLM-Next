@@ -42,6 +42,14 @@ it remains experimental. The next first norm error is local to layer5/channel329
 and is reproduced separately. PR4 still requires numerical closure and runtime
 integration; defaults and catalogue support are unchanged.
 
+Latest follow-up: [RMSNorm scale compensation](qwen38-norm-scale-precision.md)
+closes layer5/channel3295 by retaining product residuals. The first eighteen
+norm boundaries are now exact. Full replay still fails2 checks, but final
+residual/norm maxrel fall to0.0229053 and0.0128205. The first changed norm is
+layer9 xn, with14 propagated differences; a separate layer8 FFN trace isolates
+one activation rounding error at749 despite exact up/gate. The mode
+adds runtime cost and remains experimental. PR4 is not complete.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

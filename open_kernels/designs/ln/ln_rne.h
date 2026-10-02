@@ -26,3 +26,19 @@ static inline void ln_two_sum(v32f &sum,v32f &low,v32f term) {
   const auto error=ln_add_rne(ln_sub_rne(sum,ln_sub_rne(next,recovered)),ln_sub_rne(term,recovered));
   low=ln_add_rne(low,error);sum=next;
 }
+
+#if LN_SCALE_CARRY
+#include "fp32_scale_carry.h"
+struct LnScaleLanes {
+  using V=v32f;
+  static V add(V a,V b) { return ln_add_rne(a,b); }
+  static V sub(V a,V b) { return ln_sub_rne(a,b); }
+  static V mul(V a,V b) { return ln_mul_rne(a,b); }
+  static V high(V a) {
+    return (a.cast_to<uint32_t>() & LnIntegerLanes::v(0xfffff000)).cast_to<float>();
+  }
+};
+__attribute__((noinline)) inline v32f ln_scale_carry(v32f x,v32f w,v32f inv) {
+  return fp32_scale_carry<LnScaleLanes>(x,w,inv);
+}
+#endif

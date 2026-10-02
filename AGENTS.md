@@ -151,4 +151,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build compensated FFN activation math with exact additions and compact down loops, then validate real rounding boundaries and full-model replay.</description>
     <location>.opencode/skill/open-ffn-activation-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-norm-scale-carry</name>
+    <description>Build compensated RMSNorm scaling and validate real layer5 rounding, prior norm behavior and unchanged full-model references.</description>
+    <location>.opencode/skill/open-norm-scale-carry/SKILL.md</location>
+  </skill>
 </available_skills>

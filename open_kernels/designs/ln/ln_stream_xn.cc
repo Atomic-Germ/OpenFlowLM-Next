@@ -30,7 +30,12 @@ extern "C" void ln_stream_xn(const float *__restrict saved, const float *__restr
     accf32 weight(aie::load_v<kV>(w + j));
 #if LN_NORM_RNE
     const v32f t = ln_mul_rne(aie::load_v<kV>(saved+j),weight.to_vector<float>());
+#if LN_SCALE_CARRY
+    accf32 o(ln_scale_carry(aie::load_v<kV>(saved+j),weight.to_vector<float>(),
+                          aie::broadcast<float,kV>(inv)));
+#else
     accf32 o(ln_mul_rne(t,aie::broadcast<float,kV>(inv)));
+#endif
 #else
     const v32f t = precise_mulN<kV>(aie::load_v<kV>(saved + j), weight.template to_vector<float>());
     accf32 o(precise_mulN<kV>(t, aie::broadcast<float, kV>(inv)));
