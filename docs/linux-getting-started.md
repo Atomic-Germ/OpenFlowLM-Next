@@ -107,7 +107,7 @@ If it points under `kernel/drivers/accel/amdxdna/`, the stock kernel driver is s
 xrt-smi examine
 ```
 
-The output should list an NPU under the device table. If `oflm validate` succeeds but `oflm run` fails with `No such device with index '0'`, XRT usually cannot see the NPU. Confirm `xrt-plugin-amdxdna` is installed and that `xrt-smi examine` lists the device before trying `oflm run` again.
+The output should list an NPU under the device table. If `oflm validate` reports that the device runtime cannot open the NPU, XRT usually cannot see it. Confirm `xrt-plugin-amdxdna` is installed and that `xrt-smi examine` lists the device before trying `oflm run` again.
 
 #### 4. Firmware note for Linux 6.19
 

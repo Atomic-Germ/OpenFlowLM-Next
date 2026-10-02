@@ -210,7 +210,7 @@ You should see output similar to:
 [Linux]  Memlock Limit: infinity
 ```
 
-On Linux, `oflm validate` checks the kernel DRM path. `oflm run` uses XRT. If validation succeeds but running a model fails with `No such device with index '0'`, run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution.
+On Linux, `oflm validate` checks the kernel DRM path and then opens the NPU through XRT, as `oflm run` does. If it reports that the device runtime cannot open the NPU, run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution.
 
 ---
 
