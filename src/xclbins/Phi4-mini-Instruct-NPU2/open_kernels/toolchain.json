@@ -1,12 +1,12 @@
 {
   "model": "Phi4-mini-Instruct-NPU2",
   "spec_hash": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
-  "build_key": "sha256:f1bac5dbe3750027870204e0aa2db660b48eaa296b00fa8900454ab164befa4d",
-  "built": "2026-10-02T11:17:27-0700",
+  "build_key": "sha256:45c95d350d69f3aab1787cecc815f8a442a43e17dd6dbaa737e41d92a361f6d8",
+  "built": "2026-10-02T13:26:10-0700",
   "mlir_aie_version": "1.4.2",
   "peano_version": "21.0.0.2026080301+c9c5ecb7",
-  "mlir_aie_git_head": "2208956c43fe34a96621e308d3684dd454f9cc57",
-  "source_git_head": "fd5fa1e484c5dc4f621e3f0c9f7321cf54f3f1a0",
+  "mlir_aie_git_head": "c928b1deea33d19a0d81a684773579333cfc61dc",
+  "source_git_head": "1f1525391ac82c9a4bed4985621fd598ec9547fa",
   "sets": {
     "dx": {
       "design": "open_kernels/designs/dense/dx.py",
@@ -65,21 +65,21 @@
     }
   },
   "sha256": {
-    "dx/final.xclbin": "d5af594b79be8611eb3290e5df11bd2cec09d74fcf770ef8d72fd904847a34e3",
+    "dx/final.xclbin": "c1af46dfd88268b22cb005b78f3c6034f98e50a8256960ee8cb416a49d516df6",
     "dx/insts.bin": "c111daf00e7187dcda40e33c30b59c64f15beba60745c23a4ba61015e2748fb1",
-    "ln/final.xclbin": "f2343311bd6925af6c3aa9ef59aca3029242ee3dfbc134e85cb6d318c6d16bfe",
+    "ln/final.xclbin": "f1f75f316ba9b578f2e8eda048372775f365eb0e6282ec4032586ee6ab271c75",
     "ln/insts.bin": "f21b0381db30f419a4d05ed316e429f6638312d9ee3fa3620e85e73b5c35eb44",
-    "lm_head_q4/final.xclbin": "7a8807b47d457c84811e9e2bbbaf4555c6bf355ef1f5597dea683a1e51ac048e",
+    "lm_head_q4/final.xclbin": "ad451def9b20bc7b9ea88bac2229cfb22070d422cee86fa6e73a7c68096e8e05",
     "lm_head_q4/insts.bin": "d8ae92891148ff5d8abad22a62fbba88a46fab7cfd56963064377d6c411e2ff9",
-    "dx_attn/final.xclbin": "1a5dda3d190a1829d0a2c9548a8ec479a5df1d68404eda8990cfb6cbe9026049",
+    "dx_attn/final.xclbin": "99efa30aeccf8ec05ffdc8192d5977f510f4f879eaa5eb876d097927135352f1",
     "dx_attn/insts.bin": "6f388d28b00b564f6f5755961a3b7718f7a82714ed85fff460091fe13eb19f96",
-    "gemm_n3072_k3072/final.xclbin": "8a8de924c8fc28eca0a923125ec46fe3b7030632901841124cefe1a463549fb4",
+    "gemm_n3072_k3072/final.xclbin": "e4ebc56b29302815f4af0e75b8db2e8366350b36c0cb19a4379696be4d422c2b",
     "gemm_n3072_k3072/insts.bin": "df2e7a9810759f2fe9d84e335f2a7cd9f4899108b42f291404c4f00f4cac25a5",
-    "gemm_n3072_k8192/final.xclbin": "a624816e9a95dcca073e13339f7f7eedd63d5877856969236fc76d76ff79c6ef",
+    "gemm_n3072_k8192/final.xclbin": "51a425b871bef5fe12f2e867b1e09ec4a7ba648c9204af1ca1cdd17f1f638cc2",
     "gemm_n3072_k8192/insts.bin": "525383a1097b6b1f6ec263d871d6f4884bfa90a4cd22e5c491bcc42f903443b1",
-    "gemm_n5120_k3072/final.xclbin": "f4131b91db6c6f7bc30561300653754d454acab826fbf2f0c1917dd50d91ff36",
+    "gemm_n5120_k3072/final.xclbin": "7d392dd92b56236ce8d3ee1b86271476722654fb4d0ea1527ca0649add5ee5e4",
     "gemm_n5120_k3072/insts.bin": "e2253fc7d83dd6f4a97cb60324edc6184bcc423b0fb6c8c5199fb08cf2aeb602",
-    "gemm_n8192_k3072/final.xclbin": "d0abe61148e2101d8cdf8b8596f3e4abd75dd71cfa25a7023104bc4e7738078c",
+    "gemm_n8192_k3072/final.xclbin": "c086c6c59739d94f3a2d4acdc93a6bffdd893e41bdd908a86fdcd2b4ca3f9db6",
     "gemm_n8192_k3072/insts.bin": "79aa2adbd0c57f05f0e76164730c901f7776a15ff675251207777cd02bd870f3"
   }
 }

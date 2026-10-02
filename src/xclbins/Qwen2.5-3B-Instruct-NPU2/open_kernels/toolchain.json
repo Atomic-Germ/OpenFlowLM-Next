@@ -1,12 +1,12 @@
 {
   "model": "Qwen2.5-3B-Instruct-NPU2",
   "spec_hash": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
-  "build_key": "sha256:ba9101298e7740447898960c3747efa71a0883f48d977008e8942ea0cb5415d0",
-  "built": "2026-10-02T11:18:27-0700",
+  "build_key": "sha256:20d4518a4c3d2841d6a6353d940a6d9f0e7caf9ace7073a061ba7e71f239453d",
+  "built": "2026-10-02T13:27:01-0700",
   "mlir_aie_version": "1.4.2",
   "peano_version": "21.0.0.2026080301+c9c5ecb7",
-  "mlir_aie_git_head": "2208956c43fe34a96621e308d3684dd454f9cc57",
-  "source_git_head": "fd5fa1e484c5dc4f621e3f0c9f7321cf54f3f1a0",
+  "mlir_aie_git_head": "c928b1deea33d19a0d81a684773579333cfc61dc",
+  "source_git_head": "1f1525391ac82c9a4bed4985621fd598ec9547fa",
   "sets": {
     "dx": {
       "design": "open_kernels/designs/dense/dx.py",
@@ -29,11 +29,11 @@
     }
   },
   "sha256": {
-    "dx/final.xclbin": "0845936ab7600324e12402bfd7b003fadf6fa333d2d5168b9a396b638bae7159",
+    "dx/final.xclbin": "71b7077cc0a91f0b171609db39a524e33dd10515c2a78170d615fd73c656fc07",
     "dx/insts.bin": "813a4b966db89728b7c5a2da70836190e83e2d41f7f59c2ae336c2dbb8ee4a9f",
-    "ln/final.xclbin": "37f401d702125cc39cb335d73b5afe7a667e629c55b43ac548baf20aecb00e56",
+    "ln/final.xclbin": "80c678736fadf5d8cb6ac041a0a115ee7b015904c925f78bccad7b01d68e7e83",
     "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
-    "lm_head_q4/final.xclbin": "651c3a1c7e4ef67a396c62c18672d736412f51a247a12594eee5f464d9a7822c",
+    "lm_head_q4/final.xclbin": "6899e2fb2282dc22c1f659d8d19fcf7da245cfeada83ef4add9eeccfa05d0cb0",
     "lm_head_q4/insts.bin": "ac952fa9fe3ceda04db00d8d4cd0d76831c8c62bbb78bbdef234dd87c2c3c0af"
   }
 }

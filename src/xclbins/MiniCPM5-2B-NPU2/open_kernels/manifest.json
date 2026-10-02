@@ -82,7 +82,7 @@
   }
  },
  "spec_hash": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
- "build_key": "sha256:894dacf94eead771b16079963f3c0f8bae983ef1092c79fc0898502521d7beeb",
+ "build_key": "sha256:d8c6e19cf5a8b6f332ddc6ee88883d8dc96d9b70a7434087a7665942252c9eb1",
  "max_ctx_default": 4096,
  "hf_config_check": {
   "model_type": [

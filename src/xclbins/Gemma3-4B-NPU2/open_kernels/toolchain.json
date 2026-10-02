@@ -1,12 +1,12 @@
 {
   "model": "Gemma3-4B-NPU2",
   "spec_hash": "sha256:3496169f71a4b2d6679065fb35888493ccf695084625797ce8f200e6f0d84681",
-  "build_key": "sha256:28abc0c18c16cb2060dd99c3cbdf0126aa68378a2ffc684b7418b2a1643412df",
-  "built": "2026-10-02T11:02:01-0700",
+  "build_key": "sha256:b43a83b9a7233c015bb87f3687ca299ae197159cdd18ec19794258b5cb102535",
+  "built": "2026-10-02T13:12:52-0700",
   "mlir_aie_version": "1.4.2",
   "peano_version": "21.0.0.2026080301+c9c5ecb7",
-  "mlir_aie_git_head": "2208956c43fe34a96621e308d3684dd454f9cc57",
-  "source_git_head": "fd5fa1e484c5dc4f621e3f0c9f7321cf54f3f1a0",
+  "mlir_aie_git_head": "c928b1deea33d19a0d81a684773579333cfc61dc",
+  "source_git_head": "1f1525391ac82c9a4bed4985621fd598ec9547fa",
   "sets": {
     "dx": {
       "design": "open_kernels/designs/dense/dx.py",
@@ -65,21 +65,21 @@
     }
   },
   "sha256": {
-    "dx/final.xclbin": "0d1420259b524210edde236a6bec9ca83e80caa44f5674954c76dab44261d4de",
+    "dx/final.xclbin": "85cc34559026133e815a8f652215f695761887e2a8fbaf158a4ae0523c991477",
     "dx/insts.bin": "b9a77e2b098cd802545d6fc0664657fa7cc198aba5bfae24142df82a2dffa7f6",
-    "ln/final.xclbin": "d8bee878b9927c7038ca86366eacec1345b39a5b4c5e92f4b9ce85780a02e2fc",
+    "ln/final.xclbin": "33e03ae13980d3acd5f13bc17979bbaec4747429629208c6d3bbf700f9860b54",
     "ln/insts.bin": "7f9fd0d6ebc95a4dde540944fff61649144b023e332dbf07c4e93a88b7e74d53",
-    "lm_head_q4/final.xclbin": "78388a53be0a5f32dd0f3015e9039b35e5cee11511b2abcb01a193513f986f1d",
+    "lm_head_q4/final.xclbin": "876aa47373899bb2e1b0ad60755eda49d5ad767113da226b14a105ed318c86d9",
     "lm_head_q4/insts.bin": "3b46ba0a039bbec6e0179d7e4be69108f72576f498efb3b1abd0031bcc6c486d",
-    "dx_attn/final.xclbin": "d83a4d00b1a91215cba68baa93633fbf668186cd3768c002fd84abe0cce856f9",
+    "dx_attn/final.xclbin": "abeafe1ee65a0910d1ebf973695cb58623b36ee32a7c009f170fef73d133133f",
     "dx_attn/insts.bin": "98a9b43ad2f4570a9799990db7af7111292cd9bdc6cf159c400432ff06593128",
-    "gemm_n2560_k2048/final.xclbin": "ef42f35c41741132712145193c9bea99c5b22f8c034af32abfb651a809a31714",
+    "gemm_n2560_k2048/final.xclbin": "3d7c1edf048033c38e2b5cf113e33e431b631b8cfc086cc92d14749d4cf252fb",
     "gemm_n2560_k2048/insts.bin": "0e874e4a355d535455c9587f0760ca675448173cf36dfc685b768958fd2bf396",
-    "gemm_n2560_k10240/final.xclbin": "547f3e1383f8fe5de9a9d4e10ee93c71180db0b4c2d8f12106ee14cd94cc3229",
+    "gemm_n2560_k10240/final.xclbin": "81e62d38c5563023eb3f162ed918719d0efdf410fe2c3c754f6bd3f8fcbae954",
     "gemm_n2560_k10240/insts.bin": "2ea7d7c9bf38dfd0639e5208eeab9e6b6a5fd52bfa8d7c6c7abc17a220b4e25b",
-    "gemm_n4096_k2560/final.xclbin": "f22e7395b987de42fe092be5ed78341162eabd95a16eba6902060eae81b408ea",
+    "gemm_n4096_k2560/final.xclbin": "cdeec59b57b810e3c663b56857c636e6fa3694a7d49d38f993dc58cae81e66cc",
     "gemm_n4096_k2560/insts.bin": "0c2f60a775ea0a124e45c17d9053d495c67ce69bd48699d38945c4c2c8c13eb9",
-    "gemm_n10240_k2560/final.xclbin": "d3698de7959fb3c9122c1fb3819b2f6c32d781d33ed59c5c8d28353c544d32b7",
+    "gemm_n10240_k2560/final.xclbin": "86b684472508d6860c52e3ef34509cdf10ae83dd9ccfd9cc9cca71250b7c98cc",
     "gemm_n10240_k2560/insts.bin": "520822ef44717887843f4c8ada89b85b069326d1626c7522e26af06d19f310d0"
   }
 }

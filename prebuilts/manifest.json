@@ -23,10 +23,10 @@
       "kernel_files": 451,
       "npu_driver": "unknown",
       "source_trees": {
-        "npu_offload": "5eecb538bd55898923c1f8976b2dbc3604dc23dd",
-        "open_kernels": "11ca4f305be55c03da90656ce7507941436b1ef6"
+        "npu_offload": "3e1901532610fda9fa9919a76c132661843900ec",
+        "open_kernels": "a997c0c48f75a4bf176e8b540a74ed87a0be14ea"
       },
-      "staged_utc": "2026-10-02T18:51:51Z",
+      "staged_utc": "2026-10-02T20:59:50Z",
       "xrt": "XRT Build Version: 2.26.0"
     },
     "windows": {

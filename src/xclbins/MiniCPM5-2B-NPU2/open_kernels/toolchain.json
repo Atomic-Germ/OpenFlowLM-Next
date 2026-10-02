@@ -1,12 +1,12 @@
 {
   "model": "MiniCPM5-2B-NPU2",
   "spec_hash": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
-  "build_key": "sha256:894dacf94eead771b16079963f3c0f8bae983ef1092c79fc0898502521d7beeb",
-  "built": "2026-10-02T11:14:37-0700",
+  "build_key": "sha256:d8c6e19cf5a8b6f332ddc6ee88883d8dc96d9b70a7434087a7665942252c9eb1",
+  "built": "2026-10-02T13:23:45-0700",
   "mlir_aie_version": "1.4.2",
   "peano_version": "21.0.0.2026080301+c9c5ecb7",
-  "mlir_aie_git_head": "2208956c43fe34a96621e308d3684dd454f9cc57",
-  "source_git_head": "fd5fa1e484c5dc4f621e3f0c9f7321cf54f3f1a0",
+  "mlir_aie_git_head": "c928b1deea33d19a0d81a684773579333cfc61dc",
+  "source_git_head": "1f1525391ac82c9a4bed4985621fd598ec9547fa",
   "sets": {
     "dx": {
       "design": "open_kernels/designs/dense/dx.py",
@@ -65,21 +65,21 @@
     }
   },
   "sha256": {
-    "dx/final.xclbin": "6fbac5a6e586fc0b98c7641713f8fde78af79a6da769ebad06cc40a9a71b0c71",
+    "dx/final.xclbin": "08babc582a7ec9beeeeae05ee18618c683c0e4974e7433b5acd035d6b379b3a6",
     "dx/insts.bin": "bfae956a0cb1456241262f79482ede25bf27508af334d29b40aeed5487ebd3b5",
-    "ln/final.xclbin": "5db85e041e7496cc1a47d387771557df86d837a7e18f5b5836e46fd6972617cd",
+    "ln/final.xclbin": "ec4e863fabfdaafb0a68b125eda50d61ec1f76ab4eb930a611166d73e13863eb",
     "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
-    "lm_head_q4/final.xclbin": "f045d5ecbfe9424914428fec696b8722000194e9d98001d4327f636da43b9cac",
+    "lm_head_q4/final.xclbin": "f7ca33d902896573b074bc550a501fb3c8bd0e02e31a57877211827c057336a5",
     "lm_head_q4/insts.bin": "f244b2c5deed72367afea2b0dcff6a2adc1c37beedf26bcc2c05e258a2ec3ebd",
-    "dx_attn/final.xclbin": "18acf354f6f3e475c8a4bae5a8b284fc8eea4f60a698be1f1cd18ff6d4ad25bc",
+    "dx_attn/final.xclbin": "b265da669a509b8875117ec215bd3e1e9152c31dd40e0e8c525da3ee3d1f2816",
     "dx_attn/insts.bin": "a16e243096347d8328363bbb75225edbb5592f4297c0a637b8b07beb4635bf1e",
-    "gemm_n2048_k2048/final.xclbin": "67dfda9e9adaec4573c43feaed2857618c19b0ae62155dd450943b8c402b61af",
+    "gemm_n2048_k2048/final.xclbin": "91d2352609abe25fca08bf7da1b973ecc4c1255a8aaf8454301276c60f63bfc7",
     "gemm_n2048_k2048/insts.bin": "6b006581efc8fb1a85d619af0f0e5da8c7abac67e3a5bd041ec2e65ced73192b",
-    "gemm_n2048_k6144/final.xclbin": "5594ea7f1cad86af02688b078eb28676dfe1e8b69c1b36027d3b09fd85128059",
+    "gemm_n2048_k6144/final.xclbin": "27a222ac289dab7f5987b99322e4f27843beabb6fc65107e841e081a509ce991",
     "gemm_n2048_k6144/insts.bin": "6a8d2838caf5549355f3d01f767be6f6c1c6f82dfee44ef483f8233e99d93bc2",
-    "gemm_n4096_k2048/final.xclbin": "3fedd2323be0b2bf19e02669c6a78f19bcaece0bdad213d201c8491a1b62a43d",
+    "gemm_n4096_k2048/final.xclbin": "af378d334a7a15e229d5ac8d4607826921760edadbf714d7ea7fe15c13aa25db",
     "gemm_n4096_k2048/insts.bin": "6204c64ddc63fe21a50b5f8148e422c20bbb19331a10496f0761c37cc393c5e7",
-    "gemm_n6144_k2048/final.xclbin": "51d7080a8c64704eaaaf4e5e1bdc560080523604dc67d5634e242d6f6dec900a",
+    "gemm_n6144_k2048/final.xclbin": "8467af728e36899053074a0640b5a044e6d001f80f2b8c2b807e00a1b7fec94a",
     "gemm_n6144_k2048/insts.bin": "e71f7a810c541357e5293608047d9640a6d30b2e2db775b7b155671cd3d2619b"
   }
 }

@@ -76,7 +76,7 @@
   }
  },
  "spec_hash": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
- "build_key": "sha256:9990dc3c352f7b0800ce0302f7da9916d664cd3774798511444a4d74c3b515b1",
+ "build_key": "sha256:6244dff57baaf67ca40fa309568435f7c6fb60682e71bc7f45799b3373db14ff",
  "max_ctx_default": 4096,
  "hf_config_check": {
   "model_type": [
