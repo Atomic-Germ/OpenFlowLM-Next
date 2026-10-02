@@ -50,6 +50,13 @@ layer9 xn, with14 propagated differences; a separate layer8 FFN trace isolates
 one activation rounding error at749 despite exact up/gate. The mode
 adds runtime cost and remains experimental. PR4 is not complete.
 
+Main integration (2026-10-03): [merge regression review](qwen38-main-merge.md)
+checks main through06b98bc. Its general head-order fix matches our existing27B
+converter; the new block-prefill route is separate from this NPU-only harness.
+The rebuilt FFN and full replay produce identical captures to the preceding
+stage. Both numerical failures remain; there is no measured decode precision
+improvement or regression from this merge.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

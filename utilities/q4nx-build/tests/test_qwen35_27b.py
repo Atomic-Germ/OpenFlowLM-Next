@@ -34,6 +34,32 @@ def test_qkv_only_reorders_value_rows_and_q_gate_is_split():
     assert torch.equal(restore_order('model.layers.3.self_attn.q_proj.weight',q.reshape(-1,1)).ravel(),expected)
 
 
+@pytest.mark.parametrize('suffix,shape,axis,unit,block', [
+    ('self_attn.gate_proj.weight', (6144, 3), 0, 128, 1),
+    ('linear_attn.ssm_alpha_proj.weight', (48, 3), 0, 1, 1),
+    ('linear_attn.ssm_beta_proj.weight', (48, 3), 0, 1, 1),
+    ('linear_attn.ssm_a', (48,), 0, 1, 1),
+    ('linear_attn.ssm_dt.bias', (48,), 0, 1, 1),
+    ('linear_attn.ssm_out_proj.weight', (3, 6144), 1, 128, 1),
+    ('linear_attn.ssm_out_proj.weight', (3, 192), 1, 4, 32),
+])
+def test_wide_order_agrees_with_upstream_general_head_fix(suffix, shape, axis, unit, block):
+    from q4nx.models.qwen35 import v_untile
+    from q4nx.models.qwen35_wide import restore_order
+    x = torch.arange(int(np.prod(shape))).reshape(shape)
+    assert torch.equal(restore_order('model.layers.0.'+suffix, x, block),
+                       v_untile(x, 3, unit, axis))
+
+
+def test_wide_qkv_and_conv_agree_with_upstream_explicit_qk_split():
+    from q4nx.models.qwen35 import untile_qkv
+    from q4nx.models.qwen35_wide import restore_order
+    x = torch.arange(10240*4).reshape(10240, 4)
+    expected = untile_qkv(x, 4096, 3, 128)
+    assert torch.equal(restore_order('linear_attn.qkv_proj.weight', x), expected)
+    assert torch.equal(restore_order('linear_attn.ssm_conv1d.weight', x), expected.T)
+
+
 def test_streamed_safetensors_roundtrip_and_incomplete_write(tmp_path):
     from q4nx.streaming import TensorWriter
     out=tmp_path/'model.q4nx'

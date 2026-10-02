@@ -156,4 +156,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build compensated RMSNorm scaling and validate real layer5 rounding, prior norm behavior and unchanged full-model references.</description>
     <location>.opencode/skill/open-norm-scale-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>qwen38-main-integration</name>
+    <description>Rebuild corrected FFN after main integration and check converter head-order equivalence, runtime compatibility and full-model regressions.</description>
+    <location>.opencode/skill/qwen38-main-integration/SKILL.md</location>
+  </skill>
 </available_skills>

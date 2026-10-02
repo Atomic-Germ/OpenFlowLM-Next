@@ -805,6 +805,25 @@ int main() {
     std::printf("      requant_q4_1 fnv1a = 0x%016llx\n", static_cast<unsigned long long>(got));
     check(got == want, "requant_q4_1: byte-identical to the NumPy packer");
 
+    // ---- split_q4_1_chunks: a q8 projection as the exact sum of two q4_1 ones (OPEN-PREFILL-BATCH)
+    {
+        std::vector<uint8_t> hi(NCH * 5120), lo(NCH * 5120);
+        open_qwen36::pools::split_q4_1_chunks(src.data(), NCH, true, hi.data());
+        open_qwen36::pools::split_q4_1_chunks(src.data(), NCH, false, lo.data());
+        bool exact = true;
+        for (size_t c = 0; c < NCH && exact; ++c)
+            for (unsigned r = 0; r < 32 && exact; ++r)
+                for (unsigned b = 0; b < 8 && exact; ++b)
+                    for (unsigned i = 0; i < 32 && exact; ++i)
+                        exact = q4_read(hi.data() + c * 5120, r, b, i) + q4_read(lo.data() + c * 5120, r, b, i) ==
+                                q8_read(src.data() + c * 8704, r, b, i);
+        check(exact, "split_q4_1: hi + lo reads back every q8 value exactly");
+        const uint64_t gh = fnv1a(hi.data(), hi.size()), gl = fnv1a(lo.data(), lo.size());
+        std::printf("      split hi fnv1a = 0x%016llx, lo = 0x%016llx\n", static_cast<unsigned long long>(gh),
+                    static_cast<unsigned long long>(gl));
+        check(gh == 0x011857df63d905ceull && gl == 0x1a95b8ae739769d2ull, "split_q4_1: byte-identical to the NumPy packer");
+    }
+
     // ---- transpose: [32, 64] of 2-byte values
     std::vector<uint8_t> t_src(32 * 64 * 2), t_dst(32 * 64 * 2);
     for (size_t i = 0; i < t_src.size(); ++i) t_src[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
