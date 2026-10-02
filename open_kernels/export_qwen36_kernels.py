@@ -140,6 +140,24 @@ def git_head(root: Path) -> str:
         return "unavailable"
 
 
+PROGRAM_MEMORY = 16384                                  # bytes per AIE2P core
+
+
+def fullest_core(bdir: Path) -> int | None:
+    """The largest .text among a finished build's core ELFs (aiecc keeps them in final.prj),
+    or None when they or Peano's llvm-size cannot be found."""
+    try:
+        from aie.utils.config import peano_install_dir
+        size = Path(peano_install_dir()) / "bin" / "llvm-size"
+        used = []
+        for elf in (bdir / "final.prj").glob("elfs_*/*.elf"):
+            r = subprocess.run([str(size), "-A", str(elf)], capture_output=True, text=True, timeout=30)
+            used += [int(l.split()[1]) for l in r.stdout.splitlines() if l.startswith(".text")]
+        return max(used) if used else None
+    except Exception:
+        return None
+
+
 def build(name: str, sets: dict, spec_file: Path) -> Path:
     src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
@@ -149,10 +167,26 @@ def build(name: str, sets: dict, spec_file: Path) -> Path:
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
           f"{out.relative_to(HERE).as_posix()}", flush=True)
-    r = subprocess.run([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env, cwd=str(HERE))
-    if r.returncode != 0:
-        sys.exit(f"[{name}] build FAILED ({r.returncode})")
+    # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
+    # reports a core whose program does not fit only as an invalid ELF.
+    p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
+                         cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail, overflow = b"", False
+    for chunk in iter(lambda: p.stdout.read1(4096), b""):
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.flush()
+        tail = (tail + chunk)[-4096:]
+        overflow = overflow or b"Overflow of program memory" in tail
+    if p.wait() != 0:
+        if overflow:
+            sys.exit(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
+                     "program memory. This is a bug in the kernels for this model, not in your setup; "
+                     "please report it with this log.")
+        sys.exit(f"[{name}] build FAILED ({p.returncode})")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
+    used = fullest_core(out)
+    if used:
+        print(f"[{name}] program memory: fullest core {used} of {PROGRAM_MEMORY} B ({PROGRAM_MEMORY - used} B free)")
     return out
 
 

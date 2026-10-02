@@ -293,10 +293,12 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
                     const auto expect =
                         static_cast<std::uintmax_t>(f["size"].get<double>());
                     if (!ec && on_disk != expect) {
-                        header_print("WARNING", filename + " is " +
-                                     std::to_string(on_disk) + " bytes, the "
-                                     "manifest says " + std::to_string(expect) +
-                                     " -- treating it as missing");
+                        // stderr, not stdout: `oflm list --json` reaches this
+                        // and its stdout has to stay one JSON document (#133).
+                        header_print_r("WARNING", filename + " is " +
+                                       std::to_string(on_disk) + " bytes, the "
+                                       "manifest says " + std::to_string(expect) +
+                                       " -- treating it as missing");
                         missing_files.push_back(filename);
                     }
                     break;
