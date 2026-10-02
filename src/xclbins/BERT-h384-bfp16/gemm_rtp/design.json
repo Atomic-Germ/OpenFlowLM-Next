@@ -1,0 +1,207 @@
+{
+  "name": "gemm_rtp",
+  "kind": "gemm_rtp",
+  "kernel": "MLIR_AIE",
+  "M": 8192,
+  "buffers": [
+    25165824,
+    1179648,
+    25165824
+  ],
+  "c_dtype": "bf16",
+  "a_dtype": "bf16",
+  "emulate_bfp16": true,
+  "b_layout_hash": "94266693ea31aa674279b0cb124eb9a731276064eae1442ac55841dc266dddaf",
+  "b_layout": {
+    "kind": "block_panel",
+    "tile_k": 64,
+    "tile_n": 48,
+    "order": "k,n,kt,nt",
+    "inner": "s,t",
+    "mac_s": 8,
+    "mac_t": 8,
+    "dtype": "BF16"
+  },
+  "cols": 8,
+  "batch": 128,
+  "tiers": [
+    4,
+    16,
+    32,
+    128
+  ],
+  "seq": 64,
+  "hidden": 384,
+  "intermediate": 1536,
+  "gated_ffn": false,
+  "qkv_n": 1152,
+  "tile": {
+    "m": 64,
+    "k": 64,
+    "n": 48
+  },
+  "tb_max_n_rows": 4,
+  "tg_depth": 2,
+  "streams": [
+    {
+      "op": "qkv",
+      "batch": 4,
+      "slot": 1,
+      "file": "insts_qkv_b4.bin",
+      "M": 256,
+      "K": 384,
+      "N": 1152,
+      "src": "44965a24f62e14cf3d01f9b1"
+    },
+    {
+      "op": "attn_out",
+      "batch": 4,
+      "slot": 2,
+      "file": "insts_attn_out_b4.bin",
+      "M": 256,
+      "K": 384,
+      "N": 384,
+      "src": "994682b8ee6f3a88be9ff9ea"
+    },
+    {
+      "op": "ffn_up",
+      "batch": 4,
+      "slot": 3,
+      "file": "insts_ffn_up_b4.bin",
+      "M": 256,
+      "K": 384,
+      "N": 1536,
+      "src": "6f581dd1763bc2c894126f05"
+    },
+    {
+      "op": "ffn_down",
+      "batch": 4,
+      "slot": 4,
+      "file": "insts_ffn_down_b4.bin",
+      "M": 256,
+      "K": 1536,
+      "N": 384,
+      "src": "88d41cd506524987ea91d7de"
+    },
+    {
+      "op": "qkv",
+      "batch": 16,
+      "slot": 5,
+      "file": "insts_qkv_b16.bin",
+      "M": 1024,
+      "K": 384,
+      "N": 1152,
+      "src": "dd90543b6e66d683af4d17da"
+    },
+    {
+      "op": "attn_out",
+      "batch": 16,
+      "slot": 6,
+      "file": "insts_attn_out_b16.bin",
+      "M": 1024,
+      "K": 384,
+      "N": 384,
+      "src": "ae8e023f30ef7070183f7869"
+    },
+    {
+      "op": "ffn_up",
+      "batch": 16,
+      "slot": 7,
+      "file": "insts_ffn_up_b16.bin",
+      "M": 1024,
+      "K": 384,
+      "N": 1536,
+      "src": "575e66746e3074f2fb52454d"
+    },
+    {
+      "op": "ffn_down",
+      "batch": 16,
+      "slot": 8,
+      "file": "insts_ffn_down_b16.bin",
+      "M": 1024,
+      "K": 1536,
+      "N": 384,
+      "src": "46f2aa2c89b07e3f3a88ef3f"
+    },
+    {
+      "op": "qkv",
+      "batch": 32,
+      "slot": 9,
+      "file": "insts_qkv_b32.bin",
+      "M": 2048,
+      "K": 384,
+      "N": 1152,
+      "src": "07602abbf9ecc9bb29d5f4cd"
+    },
+    {
+      "op": "attn_out",
+      "batch": 32,
+      "slot": 10,
+      "file": "insts_attn_out_b32.bin",
+      "M": 2048,
+      "K": 384,
+      "N": 384,
+      "src": "8ad3dcf28de86ce65363c78e"
+    },
+    {
+      "op": "ffn_up",
+      "batch": 32,
+      "slot": 11,
+      "file": "insts_ffn_up_b32.bin",
+      "M": 2048,
+      "K": 384,
+      "N": 1536,
+      "src": "0cd21c413f84a860078f1194"
+    },
+    {
+      "op": "ffn_down",
+      "batch": 32,
+      "slot": 12,
+      "file": "insts_ffn_down_b32.bin",
+      "M": 2048,
+      "K": 1536,
+      "N": 384,
+      "src": "a04985bdd1054ab26bbb3ec8"
+    },
+    {
+      "op": "qkv",
+      "batch": 128,
+      "slot": 13,
+      "file": "insts_qkv_b128.bin",
+      "M": 8192,
+      "K": 384,
+      "N": 1152,
+      "src": "e09f4543984457cfa4a25bad"
+    },
+    {
+      "op": "attn_out",
+      "batch": 128,
+      "slot": 14,
+      "file": "insts_attn_out_b128.bin",
+      "M": 8192,
+      "K": 384,
+      "N": 384,
+      "src": "e0edcf3fdb2e89c11395b916"
+    },
+    {
+      "op": "ffn_up",
+      "batch": 128,
+      "slot": 15,
+      "file": "insts_ffn_up_b128.bin",
+      "M": 8192,
+      "K": 384,
+      "N": 1536,
+      "src": "2f9253788b7721279442fd09"
+    },
+    {
+      "op": "ffn_down",
+      "batch": 128,
+      "slot": 16,
+      "file": "insts_ffn_down_b128.bin",
+      "M": 8192,
+      "K": 1536,
+      "N": 384,
+      "src": "899c58b31302ca952d3c9377"
+    }
+  ]
+}

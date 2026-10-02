@@ -1,0 +1,48 @@
+{
+  "model": "LFM2-1.2B-NPU2",
+  "spec_hash": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
+  "build_key": "sha256:b092794aecfb00af978c35de302bf310c66b471a0975128962a3f890e7f011d1",
+  "built": "2026-10-02T11:09:30-0700",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "2208956c43fe34a96621e308d3684dd454f9cc57",
+  "source_git_head": "fd5fa1e484c5dc4f621e3f0c9f7321cf54f3f1a0",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2048",
+        "LN_EPS": "1e-05"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "65536",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "short_conv": {
+      "design": "open_kernels/designs/short_conv/cx.py",
+      "env": {
+        "SC_HID": "2048",
+        "SC_TAPS": "3"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "72d7915fe8cb9a5335f2d04f3762345476c93950df4fa77eb8ddaa3c5fa86c87",
+    "dx/insts.bin": "0ab6e1e8436312f05b652537c329a91e84d368f4f9d80d332fc1ce949a2317a2",
+    "ln/final.xclbin": "e407a0923402ab3fe049217ee732b1bd633aafb6b020580f7466939a435a2bc2",
+    "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
+    "lm_head_q4/final.xclbin": "b26b6ee371e9d80b19bc878d5295e186a9ac12686a4a12c42a97c7030886051b",
+    "lm_head_q4/insts.bin": "547010eb7ef89cfcf7e22e7101632ee5b5af223682dbb017bd1d09765f755324",
+    "short_conv/final.xclbin": "54f4fc694be2b2f575efb85c051b23356af9ba9f78f6540e222bb575ca1f7a3a",
+    "short_conv/insts.bin": "018785dc2721f0a8d742cac132e27a6362c8c0a6f9aa631527b51146d0ae4851"
+  }
+}

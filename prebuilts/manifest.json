@@ -1,13 +1,42 @@
 {
-    "schema":  2,
-    "platforms":  {
-                      "windows":  {
-                                      "staged_utc":  "2026-09-29T14:05:34Z",
-                                      "for_version":  "0.1.0",
-                                      "xrt_version":  "2.21.75",
-                                      "npu_driver":  "32.00.20102.3931",
-                                      "import_lib_bytes":  276898,
-                                      "header_files":  52
-                                  }
-                  }
+  "platforms": {
+    "linux": {
+      "families": [
+        "BERT-h1024-bfp16",
+        "BERT-h384-bf16",
+        "BERT-h384-bfp16",
+        "BERT-h768-bfp16",
+        "BERT-h768-gated-bfp16",
+        "Gemma3-4B-NPU2",
+        "Granite-4.2-3B-NPU2",
+        "Hy-MT2-7B-NPU2",
+        "LFM2-1.2B-NPU2",
+        "Llama-3.1-8B-NPU2",
+        "MiniCPM5-2B-NPU2",
+        "Phi4-mini-Instruct-NPU2",
+        "Qwen2.5-3B-Instruct-NPU2",
+        "Qwen3-4B-NPU2",
+        "Qwen3.6-35B-A3B-NPU2",
+        "Qwen3.8-Distilled-9B-NPU2"
+      ],
+      "for_version": "0.1.0",
+      "kernel_files": 451,
+      "npu_driver": "unknown",
+      "source_trees": {
+        "npu_offload": "5eecb538bd55898923c1f8976b2dbc3604dc23dd",
+        "open_kernels": "11ca4f305be55c03da90656ce7507941436b1ef6"
+      },
+      "staged_utc": "2026-10-02T18:51:51Z",
+      "xrt": "XRT Build Version: 2.26.0"
+    },
+    "windows": {
+      "for_version": "0.1.0",
+      "header_files": 52,
+      "import_lib_bytes": 276898,
+      "npu_driver": "32.00.20102.3931",
+      "staged_utc": "2026-09-29T14:05:34Z",
+      "xrt_version": "2.21.75"
+    }
+  },
+  "schema": 2
 }
