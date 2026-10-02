@@ -516,6 +516,21 @@ reduces over `lin_value_width` -- 4096 on the 9B and 4B, 2048 on the 2B and 0.8B
 `hidden`, so both K were already validated by the 35B pass and all four sizes compose with
 no `OPEN_KERNELS_UNVALIDATED`.
 
+**Result 2026-09-24 (the all-q8 35B stopped building; fixed).** #78's DeltaNet slice update
+(dnx.h pass 2) grew the MoE main core, and the q4_1 35B still fit, so nothing rebuilt a q8
+one: every all-q8 35B -- Ornith, its siblings and Atomic-Germ's own mirror -- failed `lx0`
+with `Overflow of program memory`, reported by a user. The core measured 16 608 B against
+16 384. The fix compiles only `gemv_q4_gup` (the routed experts' up | gate) at `-Oz`, only on
+an all-q8 MoE spec: 16 304 B. Per-TU `-Oz` elsewhere grows the linked core (`gemv_q4_gdown`
+with it: 16 448, over), and the pre-#78 per-row pass 2 fits (16 080) but runs `lx0` at 2.48
+ms a call against 2.02. The rebuilt Ornith set scores 0.999996 / 0.999998 / 0.999989 against
+the replica on the 8-layer / 3-token slice, argmax and top-5 identical, bit-identical to
+the per-row variant, and decodes a 40-layer step in 140.5 ms against 152.9 (per-row) and
+159.3 (the 2026-09-07 set), three interleaved rounds. q4_1 specs compile exactly as before.
+The mixed Qwen3.5 cores were not affected (9B 14 304 B, 0.8B 14 416 B). The exporter now
+prints each set's fullest core against 16 384 B, and names this failure in plain words
+when aiecc hits it; the all-q8 35B has 80 B left.
+
 ### OPEN-QUANT-Q4K: the packers read Q4_K containers
 **Applies to:** openflowlm-next (`open_kernels/model/q4nx.py`,
 `open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`,
@@ -1341,6 +1356,32 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 dense FFN in place of the MoE block, and runs its q8 out projection there as an exact split
 into two q4_1 halves rather than re-quantising it -- 13.5-17x faster prefill at every size
 tested with the greedy output unchanged. See `OPEN-PREFILL-BATCH`.
+
+### OPEN-CONVERT-QWEN35-VHEADS: a GGUF's tiled value heads come back in grouped order
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/models/qwen35.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_qwen35_vheads.py`
+
+llama.cpp's converter stores a Qwen3.5 / 3.8 gated DeltaNet's value heads tiled -- GGUF head
+`r * num_k + kh` is HF head `kh * grp + r`, `grp = num_v / num_k` -- and the engine reads HF's
+grouped order. When `num_v != num_k`, q4nx-build shall untile every value-indexed tensor with
+the GGUF's own head counts (`qwen35.ssm.group_count`, `time_step_rank`, `state_size`,
+`inner_size`): qkv's value rows and conv1d's value channels (both after the
+`2 * num_k * head_k` rows of q and k, which keep their order), z's rows, out_proj's columns,
+alpha / beta's rows, `ssm_a` and `ssm_dt.bias`. When `num_v == num_k` nothing is reordered.
+
+**Acceptance criteria:**
+- At 32 value heads over 16 (the 4B / 9B) and 48 over 16 (the 27B), rows, columns and per-head
+  vectors tiled by llama.cpp's rule come back in grouped order exactly.
+- qkv's untile leaves the first `2 * num_k * head_k` rows in place and restores the value rows.
+- The pre-fix rule (`grp` fixed at 2, the value rows taken as the second half) restores the 9B
+  and fails the 27B -- the scramble `Atomic-Germ/Qwen3.8-27B-NPU2` shipped with.
+
+**Verification (manual), whole containers:** `python open_kernels/model/container_vs_hf.py
+--model-dir <container> --hf-shard <the HF shard holding layers 0 and 3>` correlates every
+tensor of a linear and a full layer with its source after the converter's expected transform;
+`ALL MATCH` (each quantized projection >= 0.99) is the bar. Run on the reconverted 27B on
+2026-10-01: ALL MATCH; on the published one, 8 mismatches, all value-indexed.
 
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,

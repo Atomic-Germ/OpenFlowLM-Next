@@ -221,14 +221,9 @@ plausible number rather than an error.
 **The two guards have different reach, and it is worth knowing which.**
 `--max-batch` and `--prompt-name` are checked **above** the early exits in
 `parse_options`, so they are refused for every other command, `bench`
-included. The serve-only five are checked **below** them, so they are refused
-for `run`, `pull`, `remove`, `check` and `bench-embed` and NOT for `bench`,
-`list`, `version`, `port` or `validate`. Measured, not assumed.
-
-That is a pre-existing hole, and it is left alone because it is not the
-one-line fix it looks like: `oflm port --port 8123` prints
-`Server Port: 8123`, so the `port` command really does consume `--port`, and
-hoisting the guard above the early exits would break it.
+included. The serve-only five are checked there too, with one exemption:
+`oflm port --port 8123` prints `Server Port: 8123`, so the `port` command
+really does consume `--port`.
 
 The task policy is decided by `openai_compat::task_policy()` -- the endpoint's
 own predicate -- so a task this benchmark accepts is one a client could also

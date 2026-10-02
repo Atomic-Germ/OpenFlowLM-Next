@@ -53,7 +53,7 @@ std::string Llama3::apply_chat_template(nlohmann::ordered_json& messages, nlohma
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Llama3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -88,11 +88,11 @@ std::string Llama3::generate(chat_meta_info_t& meta_info, int length_limit, std:
     return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
-std::string Llama3::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Llama3::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 /************              DeepSeek_r1_8b family            **************/
@@ -144,7 +144,7 @@ std::string DeepSeek_r1_8b::apply_chat_template(nlohmann::ordered_json& messages
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool DeepSeek_r1_8b::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -263,11 +263,11 @@ std::string DeepSeek_r1_8b::generate(chat_meta_info_t& meta_info, int length_lim
     return result;
 }
 
-std::string DeepSeek_r1_8b::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string DeepSeek_r1_8b::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->generate(meta_info, length_limit, os);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 NonStreamResult DeepSeek_r1_8b::parse_nstream_content(const std::string response_text) {

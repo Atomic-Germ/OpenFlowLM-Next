@@ -73,7 +73,7 @@ std::string Granite::apply_chat_template(nlohmann::ordered_json& messages,
     // prompt that never tells the model the tools exist.
     if (!tools.empty())
         inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Granite::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
@@ -105,9 +105,9 @@ std::string Granite::generate(chat_meta_info_t& meta_info, int length_limit, std
 }
 
 std::string Granite::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input,
-                                          int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+                                          int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }

@@ -51,7 +51,7 @@ oflm run llama3.2:1b
 
 > `oflm` is short for OpenFlowLM. If the model isn't available locally, it will be downloaded automatically. This launches OpenFlowLM in CLI mode.
 
-> **Linux note:** `oflm validate` checks the kernel DRM device, while `oflm run` opens the NPU through XRT. If validation succeeds but `oflm run` fails with `No such device with index '0'`, confirm XRT can see the NPU:
+> **Linux note:** `oflm validate` checks the kernel DRM device and then opens the NPU through XRT, the way `oflm run` does. If it reports that the device runtime cannot open the NPU (`runtime_ok: false` with `--json`), confirm XRT can see the NPU:
 > ```shell
 > xrt-smi examine
 > ```
@@ -255,7 +255,7 @@ oflm serve llama3.2:1b --host 127.0.0.1
 
 ⚠️ Note: --host applies only to the current session. It does not modify the default host configuration (default: `127.0.0.1`).
 
-> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. (`bench`, `list`, `version`, `port` and `validate` still accept it; see #68.)
+> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. `bench`, `list`, `version`, `port` and `validate` refuse the serve-only options too; the one exception is `oflm port --port N`, which prints the port that value resolves to.
 
 ---
 
