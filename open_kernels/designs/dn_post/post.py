@@ -9,6 +9,7 @@ out = 2 KB elements, one per group.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -25,10 +26,12 @@ from aie.helpers.taplib import TensorAccessPattern
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent.parent))
 from ironutil import Pipeline, include_dirs  # noqa: E402
+from recipes.wide_deltanet_layer import post_groups
 
-D = 4096
+HEADS = int(os.environ.get("DN_POST_HEADS", "32"))
+D = HEADS * 128
 G = 1024            # floats per group (8 heads)
-NG = D // G
+NG = post_groups(HEADS)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -41,7 +44,8 @@ def dn_post(o: In, z: In, nw: In, og: Out, *, srchash: CompileTime[int] = 0):
     b_out = np.ndarray[(D,), np.dtype[bfloat16]]
     inc = include_dirs()
     fn = ExternalFunction("post_fn", source_file=str(HERE / "post.cc"),
-                          arg_types=[u8i, u8i, nw_ty, u8o], include_dirs=inc)
+                          arg_types=[u8i, u8i, nw_ty, u8o], include_dirs=inc,
+                          compile_flags=["-DPOST_PRECISE=1"])
     fcopy = ExternalFunction("post_copy_nw", source_file=str(HERE / "post_copy.cc"),
                              arg_types=[u8i, nw_ty], include_dirs=inc)
     of_in = ObjectFifo(u8i, name="in", depth=2)
@@ -76,5 +80,5 @@ def dn_post(o: In, z: In, nw: In, og: Out, *, srchash: CompileTime[int] = 0):
 
 
 DESIGN = dn_post
-_src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + [(HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+_src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + [(HERE.parent.parent / "include" / "vecmath.h").read_bytes(), (HERE.parent.parent / "include" / "vecmath_precise.h").read_bytes()]) + f"heads={HEADS}".encode()
 SPECIALIZE = {"srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

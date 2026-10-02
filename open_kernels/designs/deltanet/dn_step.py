@@ -12,6 +12,7 @@ Build (WSL):  python build_design.py designs/deltanet/dn_step.py
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -29,7 +30,8 @@ from aie.utils import config
 HERE = Path(__file__).parent
 
 D = 128
-HEADS = 32
+HEADS = int(os.environ.get("DN_HEADS", 32))
+PRECISE = os.environ.get("DN_STEP_PRECISE") == "1"
 SLICE_ROWS = 16
 NBLK = D // SLICE_ROWS
 VEC = 512                       # fp32 per head: k, q, v, decay, beta, pad
@@ -48,29 +50,39 @@ def _include_dirs() -> list[str]:
     root = Path(config.cxx_header_path()) / "aie_kernels"
     inc.append(str(root))
     inc.append(str(root / _detect_arch()))
+    if PRECISE:
+        inc.append(str(HERE.parent.parent / "include"))
     return inc
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
 def dn_step(s_in: In, vec: In, s_out: Out, o: Out, *, n_cores: CompileTime[int],
-            act_f32: CompileTime[int] = 0, vec_off: CompileTime[int] = 0, o_off: CompileTime[int] = 0):
-    heads_per_core = HEADS // n_cores
+            act_f32: CompileTime[int] = 0, vec_off: CompileTime[int] = 0, o_off: CompileTime[int] = 0,
+            n_heads: CompileTime[int] = 32, source_hash: CompileTime[int] = 0):
+    if not 1 <= n_cores <= 8 or n_heads <= 0 or n_heads % n_cores:
+        raise ValueError("DeltaNet heads must divide evenly over 1..8 cores")
+    if vec_off < 0 or o_off < 0 or (act_f32 and
+            (vec_off + n_heads * VEC > act_f32 or o_off + n_heads * D > act_f32)):
+        raise ValueError("DeltaNet records/output exceed activation buffer")
+    if not act_f32 and (vec_off or o_off):
+        raise ValueError("DeltaNet offsets require DN_ACT_F32")
+    heads_per_core = n_heads // n_cores
     s_elems = D * D                       # fp32 per head
     slice_ty = np.ndarray[(SLICE_ROWS * D,), np.dtype[np.float32]]
     vec_ty = np.ndarray[(VEC,), np.dtype[np.float32]]
     o_ty = np.ndarray[(D,), np.dtype[np.float32]]
     f128 = np.ndarray[(D,), np.dtype[np.float32]]
     b256 = np.ndarray[(2 * D,), np.dtype[bfloat16]]
-    S_all = np.ndarray[(HEADS * s_elems,), np.dtype[np.float32]]
-    vec_all = np.ndarray[(act_f32 or HEADS * VEC,), np.dtype[np.float32]]
-    o_all = np.ndarray[(act_f32 or HEADS * D,), np.dtype[np.float32]]
+    S_all = np.ndarray[(n_heads * s_elems,), np.dtype[np.float32]]
+    vec_all = np.ndarray[(act_f32 or n_heads * VEC,), np.dtype[np.float32]]
+    o_all = np.ndarray[(act_f32 or n_heads * D,), np.dtype[np.float32]]
 
     pass1 = ExternalFunction("dn_pass1", source_file=str(HERE / "dn_pass1.cc"),
                              arg_types=[slice_ty, vec_ty, f128, b256, b256, np.int32],
-                             include_dirs=_include_dirs())
+                             include_dirs=_include_dirs(), compile_flags=["-DDN_STEP_PRECISE=1"] if PRECISE else [])
     pass2 = ExternalFunction("dn_pass2", source_file=str(HERE / "dn_pass2.cc"),
                              arg_types=[slice_ty, slice_ty, vec_ty, f128, f128, b256, b256, b256, np.int32],
-                             include_dirs=_include_dirs())
+                             include_dirs=_include_dirs(), compile_flags=["-DDN_STEP_PRECISE=1"] if PRECISE else [])
 
     of_s = [ObjectFifo(slice_ty, name=f"s{c}", depth=2) for c in range(n_cores)]
     of_so = [ObjectFifo(slice_ty, name=f"so{c}", depth=2) for c in range(n_cores)]
@@ -116,17 +128,17 @@ def dn_step(s_in: In, vec: In, s_out: Out, o: Out, *, n_cores: CompileTime[int],
     # S in: per core, heads_per_core heads, each sent twice. (A single 4-D tap
     # with a zero-stride repeat dimension is rejected by the dma_bd verifier,
     # so it is two plain fills per head, queued on the core's shim channel.)
-    s_taps = [[TensorAccessPattern((1, HEADS * s_elems), (c * heads_per_core + hh) * s_elems,
+    s_taps = [[TensorAccessPattern((1, n_heads * s_elems), (c * heads_per_core + hh) * s_elems,
                                    [1, 1, 1, s_elems], [0, 0, 0, 1])
                for hh in range(heads_per_core)]
               for c in range(n_cores)]
-    so_taps = [TensorAccessPattern((1, HEADS * s_elems), c * heads_per_core * s_elems,
+    so_taps = [TensorAccessPattern((1, n_heads * s_elems), c * heads_per_core * s_elems,
                                    [1, 1, 1, heads_per_core * s_elems], [0, 0, 0, 1])
                for c in range(n_cores)]
-    v_taps = [TensorAccessPattern((1, act_f32 or HEADS * VEC), vec_off + c * heads_per_core * VEC,
+    v_taps = [TensorAccessPattern((1, act_f32 or n_heads * VEC), vec_off + c * heads_per_core * VEC,
                                   [1, 1, 1, heads_per_core * VEC], [0, 0, 0, 1])
               for c in range(n_cores)]
-    o_taps = [TensorAccessPattern((1, act_f32 or HEADS * D), o_off + c * heads_per_core * D,
+    o_taps = [TensorAccessPattern((1, act_f32 or n_heads * D), o_off + c * heads_per_core * D,
                                   [1, 1, 1, heads_per_core * D], [0, 0, 0, 1])
               for c in range(n_cores)]
 
@@ -164,4 +176,10 @@ def dn_step(s_in: In, vec: In, s_out: Out, o: Out, *, n_cores: CompileTime[int],
 
 
 DESIGN = dn_step
-SPECIALIZE = {"n_cores": N_CORES, "act_f32": ACT_F32, "vec_off": VEC_OFF, "o_off": O_OFF}
+_sources = [Path(__file__), *sorted(HERE.glob("*.cc")), HERE / "dn_step.h"]
+if PRECISE:
+    _sources += [HERE / "dn_step_precise.h", HERE.parent.parent / "include/vecmath.h",
+                 HERE.parent.parent / "include/vecmath_precise.h"]
+SPECIALIZE = {"n_cores": N_CORES, "act_f32": ACT_F32, "vec_off": VEC_OFF, "o_off": O_OFF,
+              "n_heads": HEADS,
+              "source_hash": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources) + str(PRECISE).encode()).hexdigest()[:8], 16)}

@@ -92,6 +92,7 @@ def mixed(R) -> bool:
 # translation-unit set (and its build key) never gains a file it does not compile.
 Q8_FILES = ("gemv_q8_gy.cc", "gemv_q8_gms.cc")
 FOLD_FILES = ("gemv_q4_gyms.cc",)
+SEGMENT_FILES = ("dense_down_acc.cc", "dense_down_out.cc", "dense_trace.cc")
 
 
 DNX = {
@@ -156,6 +157,11 @@ def dense_files(R) -> dict[str, str]:
     directory is a duplicate-symbol trap. One extern "C" entry per file, as everywhere.
     """
     C, F = R.common, R.ffn
+    # A later bf16 rounding amplifies the old ~1e-5 SiLU/product error in the
+    # segmented FFN. Keep the established legacy entries byte-identical.
+    act_header = "vecmath_precise.h" if F.DOWN_SEGMENTS else "vecmath.h"
+    act_mul = "precise_mulN<32>" if F.DOWN_SEGMENTS else "fmul32"
+    act_silu = "precise_siluN<32>" if F.DOWN_SEGMENTS else "vsiluN<32>"
     hdr = f'''#define GEMV_PER_CALL {C.PER_CALL}
 #include "gemv_q4.h"
 '''
@@ -178,7 +184,7 @@ void gemv_q4_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, flo
 ''',
         "dense_act.cc": f'''// h band = silu(g) * u for one 64-row band (ms: u @{F.MS_U}, g @{F.MS_G}) -> one f32 y element.
 // silu(x) = x sigmoid(x). Vector ops only (no scalar float on this core).
-#include "vecmath.h"
+#include "{act_header}"
 
 extern "C" {{
 void dense_act(const float *__restrict ms, float *__restrict h) {{
@@ -187,7 +193,7 @@ void dense_act(const float *__restrict ms, float *__restrict h) {{
   const float *__restrict g = ms + {F.MS_G};
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < 64; j += 32)
-    aie::store_v(h + j, fmul32(vsiluN<32>(aie::load_v<32>(g + j)), aie::load_v<32>(u + j)));
+    aie::store_v(h + j, {act_mul}({act_silu}(aie::load_v<32>(g + j)), aie::load_v<32>(u + j)));
 }}
 }}
 ''',
@@ -216,6 +222,38 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
 }
 ''',
     }
+    if F.DOWN_SEGMENTS:
+        out["dense_trace.cc"] = '''// Diagnostic-only copy of up/gate before SiLU. No arithmetic or production use.
+#include "vecmath.h"
+extern "C" {
+void dense_trace(const float *__restrict ms, float *__restrict y, int32_t offset) {
+  aie::store_v(y, aie::load_v<32>(ms + offset));
+  aie::store_v(y + 32, aie::load_v<32>(ms + offset + 32));
+}
+}
+'''
+        out["dense_down_acc.cc"] = '''// Accumulate a finished Q4 segment band in dead DeltaNet scratch.
+#include "vecmath.h"
+extern "C" {
+void dense_down_acc(const float *__restrict ms, float *__restrict ds, int32_t band, int32_t first) {
+  float *dst = ds + 64 * band;
+#pragma clang loop unroll(disable)
+  for (unsigned j = 0; j < 64; j += 32) {
+    auto v = aie::load_v<32>(ms + j);
+    if (!first) v = fadd32(aie::load_v<32>(dst + j), v);
+    aie::store_v(dst + j, v);
+  }
+}
+}
+'''
+        out["dense_down_out.cc"] = '''#include "vecmath.h"
+extern "C" {
+void dense_down_out(const float *__restrict ds, float *__restrict y, int32_t band) {
+  aie::store_v(y, aie::load_v<32>(ds + 64 * band));
+  aie::store_v(y + 32, aie::load_v<32>(ds + 64 * band + 32));
+}
+}
+'''
     if mixed(R):
         # The mixed-format core cannot hold both q4_1 entries beside the q8 body, so the
         # pair becomes one folded entry with a runtime destination. Nothing else moves.
@@ -411,7 +449,7 @@ def generate(R, out: Path = HERE) -> int:
         p = out / name
         if not p.is_file() or p.read_text(encoding="utf-8") != src:
             p.write_text(src, encoding="utf-8", newline="\n")
-    gone = list(STALE) + [n for n in Q8_FILES + FOLD_FILES if n not in fs]
+    gone = list(STALE) + [n for n in Q8_FILES + FOLD_FILES + SEGMENT_FILES if n not in fs]
     if mixed(R):                      # the folded entry replaces the pair on disk too
         gone += [n for n in ("gemv_q4_gy.cc", "gemv_q4_gms.cc") if n not in fs]
     for name in gone:
