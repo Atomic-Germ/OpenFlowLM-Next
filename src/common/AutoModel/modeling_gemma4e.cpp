@@ -56,7 +56,7 @@ std::string Gemma4e::apply_chat_template(nlohmann::ordered_json& messages, nlohm
     inputs.extra_context["enable_thinking"] = this->enable_think;
     if (!tools.empty())
         inputs.tools = gemma4_tools::normalize_tools(tools);
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -530,8 +530,8 @@ std::string Gemma4e::generate(chat_meta_info_t& meta_info, int length_limit, std
     return result;
 }
 
-std::string Gemma4e::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Gemma4e::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
     if (this->enable_think) {
@@ -542,7 +542,7 @@ std::string Gemma4e::generate_with_prompt(chat_meta_info_t& meta_info, lm_unifor
     int checkpoint_idx = gemma4e_engine->checkpoint();
     int restore_idx = gemma4e_engine->restore();
     header_print_r("OFLM", "Checkpoint before generation: " << checkpoint_idx << ", restore point: " << restore_idx << ", user context length: " << this->token_history.size());
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 // Non-stream
