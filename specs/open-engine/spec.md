@@ -1108,8 +1108,9 @@ context grew underneath it, not because the family is slow.
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,
-`designs/lm_head_q8`, `recipes/pack.py`, `src/open_qwen36/pools.cpp`, `manifest.cpp`,
-`model/replica_qwen35.py`)
+`glue_ab_w.cc`, `designs/ln/ln.py`, `ln_add2.cc`, `ln_add3.cc`, `designs/lm_head_q8`,
+`recipes/pack.py`, `src/open_qwen36/pools.cpp`, `manifest.cpp`, `model/replica_qwen35.py`,
+`model/replica_prompt.py`, `model/container_vs_hf.py`)
 **Test category:** manual (needs the NPU and a Qwen3.5 container); the derivation, the
 composed layout and the pack ops are unit-tested in `tests/test_qwen35.py`,
 `tests/test_pack_plan.py` and `src/open_qwen36/{manifest_test,pools_test}.cpp`
@@ -1129,19 +1130,25 @@ their bf16 `[heads, hidden]` copies through `transpose` into the `[hidden, heads
 layout `glue_ab` reads. Images are refused as on the other VLM families.
 
 **Acceptance criteria (unit):**
-- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the nested `text_config` (`qwen3_5_text`) and OFLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
+- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the 27B's (`Atomic-Germ/Qwen3.8-27B-NPU2`) gives hidden 5120, 64 layers, `intermediate` 17408, 24/4 heads and `lin_value_heads` 48; the nested `text_config` (`qwen3_5_text`) and OFLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
 - Swapping only the FFN moves nothing in the attention half: the 27B spec and a dense twin of it (an FFN narrow enough to keep 10 KB weight elements) give identical DeltaNet / attention / state / KV / lm_head constants, and `qwen35.layout` is `qwen36moe.layout(..., ffn="dense")`, not a copy.
 - The 9B layout: `PER_CALL 1` (a 12288-wide activation table leaves no room for two 10 KB weight elements beside the streams), `DN_ROWS 10 / DN_SLICES 13 / DN_PAD 130`, `S_ROWS 130`, `ELN 8192` (so the split `ln_y` / `ln_xn` norm entries), `E_A 2048` with 2 f32 heads per attention element and 4 og heads, `KV_ROW 4096`, `PTAB_ROW 2048`; the pool holds q4-sized `up | gate | down` first, at the same offsets for both layer types.
 - No `moe` block, no `rout_idx_off`, no router or shared-expert tensor anywhere in the manifest; each layer type's program is one `run`, with `attnpos` on the full-attention kernel only.
 - The manifest fixture parses in `manifest_test.cpp` (a linear-attention layer type with a one-step program and no `moe`); `ssm_out_proj` is a plain `std_perm` with no source-format field, and the two `transpose` ops carry the sizes `pools::apply` needs.
 - **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. The value head's key head is `h / (lin_value_heads / lin_key_heads)` -- 2 value heads per key head at 32, one at 16.
 - **The alpha / beta projection is padded to the accumulator's 32 lanes**, not narrowed: a W element stays 64 rows x 32 bf16 = 4 KB, `AB_ELEMS` is `hidden / 64` whatever the head count, and a 16-head model's `transpose` op carries `dst_rows` so columns 16..31 are zero. `dt_bias` sits at `lin_value_heads` floats inside `small`, not at a fixed 32.
-- **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048) / 64` weight tiles, which is 32 and 8 at HID 2560. The side channel's fills are `2 + 4 * ceil(hidden*2 / 4096)` and the recipe refuses a hidden width whose count exceeds `LIMITS["shim_fills"]`, naming the number.
+- **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048)` rows, one 4 KB weight tile per 64 of them, which is 32 and 8 tiles at HID 2560. Walked accumulator-outer, the side channel's fills are `2 + 4 * halves`; a width whose count would exceed `LIMITS["shim_fills"]` (three halves: 14) walks half-outer instead -- each half carried once, then both accumulators' tiles for it -- for `2 + 3 * halves` (11 at the 27B's 5120). The recipe refuses a width whose count still exceeds the budget (four halves: 14), naming the number. Every published size keeps its accumulator-outer walk.
+- **More than 32 value heads widen the alpha / beta accumulator** to the next multiple of 32 lanes rather than narrowing anything: at 48 heads the projection is packed `[hidden, 64]` (`transpose` with `dst_rows 64`, columns 48..63 zero), a 4 KB tile is 32 rows of it, and `glue_ab_w.cc` carries two 32-lane halves. 48 value heads over 16 key heads is 3 value heads per key head (`h / 3`), 6 value conv tiles against 4 key tiles, and one record per value head.
+- **A down GEMV whose table does not fit runs in K pieces.** When the dense FFN's `FF`-wide activation table leaves a main core over its L1 even at 5 KB weight elements (the 27B: FF 17408, 39 168 B of table), `qwen36moe.down_split` cuts the reduction into two pieces at an f32 element of `h` (1024 values) -- 8192 + 9216 at the 27B, both K's the GEMV already ran -- and each piece is an ordinary GEMV with its own table into its own act region (`out2`, `out2b`). The pool is not repacked: inside a band, pool chunk c covers k-tile c / 2, so a piece is a contiguous run of every band's chunks and a strided DMA tap reads it. The table is sized for the widest piece. Every published size runs one down GEMV and has no `out2b`.
+- **A norm helper that cannot hold its fused residual stage streams it.** `[x0 x1 w a0 a1]` plus one output must fit the norm core's 64 KB with its stack; past HID 4096 they do not (the 27B: 67 584 B). There (`norm_split`) the residual is added half by half (`ln_add2`), sent to DDR, and normalized on the way back through the layer-entry norm's `ln_nr` -- the same `fadd32` sum, so the same bits -- and the layer's closing residual adds both down pieces (`ln_add3`). The standalone final `ln` takes the same split past 4096. Every published size keeps the fused stages.
+- **An activation wider than the x fifo is deep is prepared element by element.** The main cores' x fifo is 2 deep; the 27B's xn / xm (5120) and og (6144) are three 4 KB elements, so they are prepared into the table and released one at a time (the GEMV reads only the table). Two elements or fewer are held as before.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
 then the engine CLI, then `chat.py` (the Qwen template). The same procedure runs each
-published size: 4B (passed 2026-09-06), 9B, 2B and 0.8B. The new kernel points (K 12288
+published size: 4B (passed 2026-09-06), 9B, 2B and 0.8B, and the 27B (2026-10-01). A new
+container is also checked against its HF source with `model/container_vs_hf.py` before the
+chat step: a conversion bug passes every kernel compare (OPEN-CONVERT-QWEN35-VHEADS). The new kernel points (K 12288
 GEMVs, `lm_head_q8` at K 4096, a 16/4-head gated attention at HD 256, `deltanet
 heads=16`, an 8/2-head gated attention at HD 256) are built with
 `OPEN_KERNELS_UNVALIDATED=1` until this passes, then added to `recipes/catalogue.py`.
@@ -1275,6 +1282,45 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 dense FFN in place of the MoE block, and runs its q8 out projection there as an exact split
 into two q4_1 halves rather than re-quantising it -- 13.5-17x faster prefill at every size
 tested with the greedy output unchanged. See `OPEN-PREFILL-BATCH`.
+
+**Result 2026-10-01 (Qwen3.8-27B, HID 5120 / 64 layers / FFN 17408 / 48 value heads): PASS,
+on a reconverted container.** The fifth size needed four design changes, all gated on its
+geometry (the criteria above: the K-split down GEMV, the streamed norm helper, the half-outer
+64-lane glue walk, element-by-element preparation of 3-element activations). With them `lx`,
+`ax`, `ln` and `lm_head_q8` build (fullest cores: `lx` 15 584 B -- the glue core; its main
+cores 14 624 -- and `ax` 14 400 of 16 384), and the 9B (q4_1 and mixed), 0.8B and 35B rebuilt
+on the same sources give byte-identical `insts.bin` and stamps-only `final.xclbin` against
+`origin/main` (`--check`).
+
+| check | result |
+|---|---|
+| 8-layer slice, 3 tokens from `[248045]` | logits corr 0.999998 / 0.999997 / 0.999998, argmax + top-5 match, residual corr 0.999999 every layer |
+| the engine on the same slice | bit-identical (0.000e+00 over 248 320 logits at every position); request 2 reproduces request 1 |
+| a 23-token chat prompt, engine vs the reference (`model/replica_prompt.py`) at 8 / 12 / 20 / 32 / 48 layers | corr 0.999998 / 0.999998 / 0.999998 / 0.999998 / 0.999989, argmax + top-5 match at every depth |
+| all 64 layers, the NPU prompt, greedy, the reconverted container | *An NPU, or Neural Processing Unit, is a specialized hardware component designed to efficiently execute the mathematical operations required for artificial intelligence and machine learning tasks. Unlike general-purpose CPUs or GPUs, NPUs are optimized for low power consumption and high performance...* then `<\|im_end\|>` at token 68 |
+| speed (a 300-token prompt, a quiet box, power mode pinned) | prefill 386 ms/token one token at a time, **50 ms/token** on the block route (115.9 s -> 14.9 s, 7.8x); decode 419-450 ms/token (2.2-2.4 tok/s) |
+
+**The published container was wrong, and no kernel compare could see it.** Against
+`Atomic-Germ/Qwen3.8-27B-NPU2` the same kernels matched the reference at every depth and still
+answered in fragments: both read the same bytes. `model/container_vs_hf.py` against the
+original `Qwen/Qwen3.8-27B` safetensors found every value-head-indexed DeltaNet tensor
+permuted (qkv's value rows, z, out_proj's columns, alpha / beta, A, dt_bias, conv1d) and every
+other tensor right -- the converter's untile hard-coded the 9B's 2 value heads per key head.
+Fixed under OPEN-CONVERT-QWEN35-VHEADS; the reconverted container matches the source
+tensor for tensor. Points added to `recipes/catalogue.py`: `ln` 5120, `lm_head_q8` K 5120,
+`gemv_q4` K 5120, `deltanet heads=48`, the `attn` tuple `(256, 24, 4, 64, True, True, False)`.
+
+**The block prefill route (OPEN-PREFILL-BATCH step 7), #148.** All 37 route kernels build:
+the attention products at AG_M 1536 and five GEMM shapes, `gemm_n5120_k6144`,
+`gemm_n5120_k17408`, `gemm_n14336_k5120`, `gemm_n16384_k5120` and `gemm_n34816_k5120` (fullest
+core 4 784 B). Each GEMM passes the harness against fp64 at rel_fro 1.64-1.77e-3 (gate 5e-3),
+17-95 ms per 256-token dispatch. On a 300-token prompt (two blocks) over 4 layers with
+`--prefill-logits`, the route against the sequential path gives argmax 300/300 and top-5
+299/300 with corr >= 0.999993 at every position, and layer-major against `--block-major` is
+byte-identical at all 300. Over all 64 layers with `--max-tokens 8` the 8 greedy tokens are
+the same, and the last prompt position and every decode step have equal argmax and top-5
+(corr >= 0.999971). Not run for the 27B: `oflm-test --llm` through `oflm serve`, which cannot
+load it -- the 27B is not in `src/model_list.json`.
 
 ### OPEN-CONVERT-QWEN35-VHEADS: a GGUF's tiled value heads come back in grouped order
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/models/qwen35.py`)

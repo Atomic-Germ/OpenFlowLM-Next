@@ -129,7 +129,7 @@ class Template:
 
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
-             {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 6144, 8192, 9216, 9728, 10240,
+             {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
                           10752, 11264, 12288, 14336, 15360),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
@@ -138,7 +138,9 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                  # 9216: Qwen3.5 4B; 6144: Qwen3.5 2B; 3584: Qwen3.5 0.8B;
                                                  # 10752: Nanbeige4.1-3B (OPEN-FAMILY-LLAMA3, 2026-09-10);
                                                  # 3840 / 15360: Gemma 3 12B;
-                                                 # 11264: Qwen2.5-3B (OPEN-ATTN-QKV-BIAS, 2026-09-12)
+                                                 # 11264: Qwen2.5-3B (OPEN-ATTN-QKV-BIAS, 2026-09-12);
+                                                 # 5120: Qwen3.8-27B (OPEN-FAMILY-QWEN35, 2026-10-01; its
+                                                 # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
               "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)
@@ -177,6 +179,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (64, 40, 8, 64, False, False, False, False),    # Granite 4.2 3B (OPEN-FAMILY-GRANITE)
                  (128, 20, 4, 128, False, False, False, False),  # Nanbeige4.1-3B: GQA group 5, two q heads per element (OPEN-FAMILY-LLAMA3)
                  (128, 24, 8, 96, False, False, False, False),   # Phi4-mini: 96 of 128 dims rotated, the 16-lane tail (OPEN-FAMILY-PHI3)
+                 (256, 24, 4, 64, True, True, False, False),     # Qwen3.8-27B: 24 heads over 4 kv, six cores x 4 (OPEN-FAMILY-QWEN35)
                  (128, 16, 2, 128, False, False, False, True),   # Qwen2.5-3B: a q/k/v bias, and the narrowest
                                                                  # attention element yet at 512 B (OPEN-ATTN-QKV-BIAS)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
@@ -189,10 +192,11 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "because each value came from a different model. A new tuple needs a family "
                   "procedure run at exactly that configuration"),
     Template("deltanet", "designs/layer_x/dnx.h",
-             {"heads": values(16, 32), "dim": values(128), "key_heads": values(16), "conv_kernel": values(4)},
+             {"heads": values(16, 32, 48), "dim": values(128), "key_heads": values(16), "conv_kernel": values(4)},
              note="Qwen3-Next / 3.5 / 3.6 families only; heads/key_heads is the value heads per "
                   "key head (dn_glue.h kGrp) and 16 heads pack the alpha/beta projection padded "
-                  "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass"),
+                  "to 32 lanes; 16 entered with OPEN-FAMILY-QWEN35's 2B / 0.8B pass, 48 (64 lanes, "
+                  "glue_ab_w.cc) with its 27B pass"),
     Template("short_conv", "designs/short_conv/sc.h",
              {"taps": values(3), "width": values(2048)},
              note="LFM2's depthwise causal conv, which REPLACES attention in a layer. (3, 2048) is "
@@ -200,19 +204,21 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "the core holds taps - 1 state rows, so another tap count is a design change, "
                   "not a knob"),
     Template("ln", "designs/ln/ln.cc",
-             {"width": values(1024, 2048, 2560, 3072, 3840, 4096)}),
+             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)}),
                                 # LN_N; 1024 / 2048 take the fused single-core path (N <= 2048),
-                                # 2560 / 3072 / 4096 the split-output one
+                                # 2560 / 3072 / 4096 the split-output one, 5120 the streamed
+                                # residual (ln.py SPLIT; the layer designs' norm_split)
     Template("router", "designs/router/router.h",
              {"experts": values(256), "topk": values(8)}),
     Template("moe", "designs/layer_x/moe_*.cc",
              {"ff": values(512), "experts": values(256), "topk": values(8), "shared_expert": values(True),
               "hidden": values(2048), "n_cores": values(8)}),
     Template("lm_head_q8", "designs/lm_head_q8/lm_head_q8.h",
-             {"K": values(1024, 2048, 2560, 4096), "vocab": multiple_of(128)},
+             {"K": values(1024, 2048, 2560, 4096, 5120), "vocab": multiple_of(128)},
              note="K is LMHEAD_K, a compile-time knob of the kernel and of the pool's supertile "
                   "order (pack.py lmhead_q8 reads it as in_dim); 2560 entered with OPEN-FAMILY-QWEN35, "
-                  "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family"),
+                  "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family, 5120 with "
+                  "the 27B"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
              {"K": values(1024, 2048, 2560, 3072, 3840, 4096), "vocab": multiple_of(64)},
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
