@@ -75,9 +75,11 @@ def _check(spec: ModelSpec) -> None:
     pc = per_call(spec, FFN)
     require("ln", width=spec.hidden)
     require("lm_head_q8", K=spec.hidden, vocab=spec.vocab)
-    # the FFN tail (recipes/dense.py's GEMV points, at this family's widths)
+    # the FFN tail (recipes/dense.py's GEMV points, at this family's widths); a split down
+    # GEMV asks for each piece's K, which is what the core actually runs
     require_gemv(spec, "ffn", spec.hidden, spec.intermediate // n, pc)
-    require_gemv(spec, "ffn", spec.intermediate, spec.hidden // n, pc)
+    for k in M.down_split(spec) or (spec.intermediate,):
+        require_gemv(spec, "ffn", k, spec.hidden // n, pc)
     if spec.has_linear:
         require("deltanet", heads=spec.lin_value_heads, dim=spec.lin_value_dim,
                 key_heads=spec.lin_key_heads, conv_kernel=spec.conv_kernel)
@@ -90,9 +92,9 @@ def _check(spec: ModelSpec) -> None:
         if fills > LIMITS["shim_fills"]:
             raise OpRangeError(
                 f"qwen35: the glue's side channel needs {fills} fills at hidden {spec.hidden} "
-                f"(xn half + its weight tiles, per accumulator, then small and conv), over the "
-                f"{LIMITS['shim_fills']} a whole-layer design's shim budget allows. The fallback is "
-                f"a second side-class fifo for the xn halves (a design change, not a knob).")
+                f"(each xn half, then both accumulators' weight tiles for it, then small and conv), "
+                f"over the {LIMITS['shim_fills']} a whole-layer design's shim budget allows. The "
+                f"fallback is a second side-class fifo for the xn halves (a design change, not a knob).")
     if spec.has_full:
         require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
                 rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm,
@@ -100,6 +102,9 @@ def _check(spec: ModelSpec) -> None:
         require_gemv(spec, "attn", spec.hidden, spec.attn_q_width // n, pc)
         require_gemv(spec, "attn", spec.hidden, spec.attn_kv_width // n, pc)
         require_gemv(spec, "attn", spec.attn_q_width, spec.hidden // n, pc)
+    if M.norm_split(spec) and 4 * spec.hidden * 2 + M.STACK > M.NORM_L1:
+        raise OpRangeError(f"qwen35: the norm helper cannot hold three {spec.hidden * 2} B elements and "
+                           f"one output at hidden {spec.hidden}, even split")
 
 
 def xn_side_elems(spec: ModelSpec) -> int:
@@ -108,21 +113,26 @@ def xn_side_elems(spec: ModelSpec) -> int:
 
 
 def ab_tiles_per_half(spec: ModelSpec) -> list[int]:
-    """Alpha (or beta) weight tiles that belong to each 4 KB half of the xn: a tile is 64 rows
-    of the projection and a half carries min(2048, HID - h*2048) of them. Equal halves only
-    when HID is a multiple of 2048 -- at HID 2560 the two halves are 32 and 8 tiles."""
+    """Alpha (or beta) weight tiles that belong to each 4 KB half of the xn: a tile is one
+    4 KB element of the projection -- 64 rows at 32 lanes, 32 rows at the 27B's 64 -- and a
+    half carries min(2048, HID - h*2048) rows. Equal halves only when HID is a multiple of
+    2048 -- at HID 2560 the two halves are 32 and 8 tiles."""
     rows = ELEM // 2                                  # bf16 rows in one 4 KB element
-    return [min(rows, spec.hidden - h * rows) // 64 for h in range(xn_side_elems(spec))]
+    per_tile = ELEM // (2 * ab_lanes(spec))
+    return [min(rows, spec.hidden - h * rows) // per_tile for h in range(xn_side_elems(spec))]
 
 
 def glue_side_fills(spec: ModelSpec) -> int:
-    """DMA fills the glue's `side` channel issues in one linear-attention dispatch: for each
-    of the two accumulators, each xn half and that half's weight tiles, then `small` and the
-    conv taps. One half (HID <= 2048) makes 6, two (the 4B and the 9B) make 10 -- against the
-    2 a single-element xn used to need. designs/layer_x/lx.py's `dense_sequence` issues
-    exactly these, throttled through ironutil.Pipeline: a shim channel's start queue is 4 BDs
-    deep, so they cannot go into one TaskGroup."""
-    return 2 * 2 * xn_side_elems(spec) + 2
+    """DMA fills the glue's `side` channel issues in one linear-attention dispatch: each xn
+    half and its weight tiles, then `small` and the conv taps. Walked accumulator-outer (each
+    half carried once per accumulator) one half (HID <= 2048) makes 6 and two (the 4B and the
+    9B) make 10; three (the 27B) would make 14, so there the walk turns half-outer, carrying
+    each half once for both accumulators, and makes 11 (`qwen36moe.glue_fills`).
+    designs/layer_x/lx.py's `dense_sequence` issues exactly these, throttled through
+    ironutil.Pipeline: a shim channel's start queue is 4 BDs deep, so they cannot go into
+    one TaskGroup."""
+    x = xn_side_elems(spec)
+    return M.glue_fills(x, M.glue_fills(x, False) > LIMITS["shim_fills"])
 
 
 def layout(spec: ModelSpec, max_ctx: int = 4096):

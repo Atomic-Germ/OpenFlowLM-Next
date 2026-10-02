@@ -454,6 +454,38 @@ is not a multiple of the 4 KB activation element, so its glue walks two unequal 
 its main core is already the largest of the four -- it stays on the re-quantizing fallback
 until the FFN tail moves off that core. `.claude/plans/q8m-hw-results.md`.
 
+**The 27B (2026-10-01).** Qwen3.8-27B is the family at hidden 5120, FFN 17408 and **48
+value heads**, and four things in the composition did not stretch that far. Each is now a
+recipe field that is off for every other size, so their kernels compile byte for byte as
+before:
+
+* the FFN down GEMV's 17408-wide activation table does not fit a main core, so it runs as
+  two GEMVs over K 8192 + 9216, each a strided slice of the same pool bands
+  (`qwen36moe.down_split`), into two act regions;
+* the norm helper cannot hold `[x0 x1 w a0 a1]` at 10 KB elements, so it streams the
+  residual half by half and normalizes it on the way back (`norm_split`, `ln_add2/3.cc`);
+  the final `ln` does the same;
+* 48 value heads need a 64-lane alpha / beta accumulator (`glue_ab_w.cc`), and three xn
+  halves walked per accumulator would be 14 side fills, so the glue walks them half-outer (11);
+* the 5120-wide xn / xm and 6144-wide og are three x elements in a 2-deep fifo, so they are
+  prepared and released one at a time.
+
+```
+python utilities/q4nx-build/convert.py -i Qwen3.8-27B-Q8_0.gguf -o %USERPROFILE%\.flm\models\Qwen3.8-27B-NPU2 -s Atomic-Germ/Qwen3.8-27B-NPU2
+python open_kernels/model/container_vs_hf.py --model-dir <that dir> --hf-shard model-00001-of-00018.safetensors   # ALL MATCH
+python open_kernels/export_qwen36_kernels.py --model-dir %USERPROFILE%\.flm\models\Qwen3.8-27B-NPU2
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Qwen3.8-27B-NPU2 --kernels src\xclbins\Qwen3.8-27B-NPU2\open_kernels
+```
+
+The slice and the engine pass as every other size does (OPEN-FAMILY-QWEN35's table). The
+container needed converting again: q4nx-build's GGUF path untiled llama.cpp's value heads
+assuming 2 per key head, which scrambles a 3-per-key-head model's DeltaNet while every kernel
+compare still passes (OPEN-CONVERT-QWEN35-VHEADS). The block prefill route builds at this
+width too (AG_M 1536 and five GEMM shapes, K 17408 among them) and takes a 300-token prompt in
+14.9 s against 115.9 s one token at a time (50 against 386 ms/token) with the same greedy
+output. Decode is 419-450 ms/token (2.2-2.4 tok/s) on a quiet box -- every token streams
+~17.5 GB of weights.
+
 ## q8 weights: run them at q8, or re-quantize them
 
 OFLM's newer converter stores the non-expert projections of the 35B-A3B fine-tunes --
