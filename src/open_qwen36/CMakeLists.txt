@@ -45,7 +45,7 @@ target_include_directories(manifest_test PRIVATE ${_inc})
 # vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
 add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
 target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
-find_package(OpenMP QUIET)
+find_package(OpenMP REQUIRED)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(vit_test PRIVATE OpenMP::OpenMP_CXX)
 endif()
@@ -53,6 +53,17 @@ endif()
 # block_host_test (no XRT): the block prefill's host stages against replica_block.py's fixture
 add_executable(block_host_test block_host_test.cpp block_host.cpp)
 target_include_directories(block_host_test PRIVATE ${_inc})
+
+# block_host.cpp uses AVX2/FMA intrinsics in both targets. The parent app and
+# Windows build.cmd already enable them; the standalone CMake build must too.
+foreach(t open_qwen36_cli block_host_test)
+    target_link_libraries(${t} PRIVATE OpenMP::OpenMP_CXX)
+    if(MSVC)
+        target_compile_options(${t} PRIVATE /arch:AVX2)
+    else()
+        target_compile_options(${t} PRIVATE -mavx2 -mfma)
+    endif()
+endforeach()
 
 foreach(t open_qwen36_cli manifest_test vit_test block_host_test)
     if(MSVC)
