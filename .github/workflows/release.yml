@@ -12,8 +12,8 @@ name: Release
 # The kernels and the Windows XRT inputs are the reason this cannot be one job:
 # they need an NPU, and GitHub does not have one. They are therefore part of the
 # source. Each is built on a machine that has the hardware, by a script that
-# commits it to the staging branch, and a release is tagged from that branch, so
-# by the time this workflow runs the checkout already has them:
+# commits it to the release branch (release/X.Y), and a release is tagged from
+# that branch, so by the time this workflow runs the checkout already has them:
 #
 #   src/xclbins/<family>/open_kernels/**    stage-prebuilts.sh        (Linux + NPU)
 #   src/xclbins/BERT-h*/**                  stage-prebuilts.sh        (Linux + NPU)
@@ -37,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to cut a release from (e.g. v0.1.0). Defaults to the current ref.'
+        description: 'Tag to cut a release from (e.g. v0.1.0). Defaults to the current ref. With dry_run, only the version to build as: the commit is the ref picked in "Use workflow from", so a release branch can be built before its tag exists.'
         required: false
         type: string
       skip_prebuilts:
@@ -87,12 +87,15 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       version_tag: ${{ steps.v.outputs.version_tag }}
+      checkout_ref: ${{ steps.v.outputs.checkout_ref }}
       windows_deps: ${{ steps.p.outputs.windows_deps }}
     steps:
+      # A dry run builds the commit it was dispatched from (a release branch,
+      # before the tag exists); everything else builds the tag.
       - name: Checkout the tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.dry_run && github.sha || inputs.tag || github.ref }}
           submodules: recursive
           fetch-depth: 0
 
@@ -130,6 +133,11 @@ jobs:
           done
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "version_tag=v$version" >> "$GITHUB_OUTPUT"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "checkout_ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=v$version" >> "$GITHUB_OUTPUT"
+          fi
           echo "OK: $tag, OFLM_VERSION matches both presets"
 
       - name: This release does not already exist
@@ -163,8 +171,8 @@ jobs:
         id: p
         run: |
           set -euo pipefail
-          # The kernels are already in the checkout: they were committed to
-          # staging, and this tag was cut from staging. What is left to prove is
+          # The kernels are already in the checkout: they were committed to the
+          # release branch, and this tag was cut from it. What is left to prove is
           # that they were built from this source, for this version.
           args=(--version "${{ steps.v.outputs.version }}")
           if [ "$SKIP_PREBUILTS" = "true" ]; then
@@ -186,7 +194,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.verify.outputs.version_tag }}
+          ref: ${{ needs.verify.outputs.checkout_ref }}
           submodules: recursive
 
       - name: Install build dependencies
@@ -291,7 +299,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.verify.outputs.version_tag }}
+          ref: ${{ needs.verify.outputs.checkout_ref }}
           submodules: recursive
 
       - name: The NPU driver version floor, from the presets
@@ -459,7 +467,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.verify.outputs.version_tag }}
+          ref: ${{ needs.verify.outputs.checkout_ref }}
 
       - name: The TGZ this flake will package
         uses: actions/download-artifact@v4

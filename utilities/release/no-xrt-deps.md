@@ -5,11 +5,12 @@ compile `oflm.exe` against.
 
 `xrt_coreutil.lib` and the XRT headers are the two Windows build inputs that
 exist only on a machine with the Ryzen AI NPU driver installed. The driver *is*
-the NPU runtime. They are staged into the repository, on the `staging` branch,
+the NPU runtime. They are staged into the repository, on the release branch
+(`release/X.Y`, cut from `main` for the version being released),
 by the same machine that has the driver:
 
 ```powershell
-git checkout staging
+git switch release/X.Y
 git pull
 utilities\release\stage-prebuilts-win.ps1
 ```
@@ -19,7 +20,7 @@ checks out the XRT headers (generating `xrt/detail/version-slim.h`, which does
 not exist in a checkout and without which every XRT header fails to compile).
 The recipe and the reasons are in `src/WinSetup.md`.
 
-Then tag from `staging` (not from `main`, which has no binaries) and re-run
+Then tag from the release branch (not from `main`, which has no binaries) and re-run
 the release. The Linux kernels, if already staged, are left alone: each script
 owns one section of `prebuilts/manifest.json`.
 

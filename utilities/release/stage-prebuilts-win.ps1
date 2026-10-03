@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     Stage the Windows build dependencies of a release: the XRT headers and the
-    xrt_coreutil import library, checked in and pushed to the staging branch.
+    xrt_coreutil import library, checked in and pushed to the release branch
+    (release/X.Y, cut from main for this version).
 
 .DESCRIPTION
     Runs on a Windows machine that has the Ryzen AI NPU driver installed, and
@@ -28,7 +29,7 @@
     Each script owns exactly one section of the manifest and rewrites only that
     section, so running them in either order, any number of times, is safe.
 
-    GUARDS. The branch must be the staging branch, and the working tree must have
+    GUARDS. The branch must be the release branch, and the working tree must have
     no changes outside the paths the two scripts own: a release commit that
     happens to carry an uncommitted source edit is a release nobody reviewed and
     no CI run tested.
@@ -47,7 +48,8 @@
     or System32\AMD depending on the version; both are looked for.
 
 .PARAMETER Branch
-    The staging branch. Default: staging.
+    The release branch. Default: $env:OFLM_STAGING_BRANCH if set, otherwise
+    release/MAJOR.MINOR of OFLM_VERSION (release/0.1 for 0.1.0).
 
 .PARAMETER NoCommit
     Write prebuilts\win\ and the manifest, stage them, and stop.
@@ -63,7 +65,7 @@
 param(
     [string]$XrtTag = '2.21.75',
     [string]$DriverDll,
-    [string]$Branch = $(if ($env:OFLM_STAGING_BRANCH) { $env:OFLM_STAGING_BRANCH } else { 'staging' }),
+    [string]$Branch = $env:OFLM_STAGING_BRANCH,   # empty: release/MAJOR.MINOR, from the version below
     [switch]$NoCommit,
     [switch]$NoPush
 )
@@ -81,20 +83,44 @@ $Manifest = Join-Path $RepoRoot 'prebuilts\manifest.json'
 $Dest = Join-Path ([System.IO.Path]::GetTempPath()) ('oflm-win-prebuilts-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $Win = Join-Path $Dest 'win\'
 
+# -------------------------------------------------------------------- version
+# Before the guards: the default branch is named after it.
+$versions = @()
+foreach ($rel in 'CMakePresets.json', 'src\CMakePresets.json') {
+    $presets = Get-Content (Join-Path $RepoRoot $rel) -Raw | ConvertFrom-Json
+    $common = $presets.configurePresets | Where-Object { $_.name -eq 'common-default' }
+    $versions += [string]$common.cacheVariables.OFLM_VERSION
+}
+if (($versions | Sort-Object -Unique).Count -ne 1) {
+    throw @"
+the presets disagree about OFLM_VERSION ($($versions -join ' vs ')). The release
+workflow checks this too, but finding it here is twenty minutes cheaper than
+finding it in CI. One of them was not bumped.
+"@
+}
+$version = $versions[0]
+if ($version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "OFLM_VERSION is '$version', which is not X.Y.Z. The release tag is v$version."
+}
+if (-not $Branch) { $Branch = 'release/' + ($version -replace '\.\d+$', '') }
+Write-Host "==> version: $version"
+Write-Host "==> branch:  $Branch"
+
 # --------------------------------------------------------------------- guards
 $current = (git -C $RepoRoot branch --show-current).Trim()
 if ($current -ne $Branch) {
     throw @"
-you are on '$current', not '$Branch'. The prebuilts are committed to a branch that
-is not main, and a release is tagged from it. One-time setup, from a clean clone
-of main:
+you are on '$current', not '$Branch'. The prebuilts are committed to a release
+branch, never to main, and the release is tagged from it. If $Branch exists,
+check it out:
 
-    git checkout -b $Branch
+    git fetch origin
+    git switch $Branch
+
+If it does not, cut it from main once per MAJOR.MINOR (see RELEASE.md):
+
+    git switch -c $Branch --no-track origin/main
     git push -u origin $Branch
-
-Then merge main into it at the start of each release cycle:
-
-    git merge main
 "@
 }
 
@@ -240,12 +266,12 @@ Neither xrt\detail\version-slim.h nor its template src\CMake\config\version-slim
 is in the $XrtTag checkout. The tag moved; see the recipe in src/WinSetup.md.
 "@
         }
-        $version = $XrtTag -replace '^v', ''
-        $parts = $version.Split('.')
+        $xrtVersion = $XrtTag -replace '^v', ''
+        $parts = $xrtVersion.Split('.')
         $body = (Get-Content $tmpl -Raw) `
             -replace '@XRT_VERSION_MAJOR@', $parts[0] `
             -replace '@XRT_VERSION_MINOR@', $parts[1] `
-            -replace '@XRT_VERSION@', $version
+            -replace '@XRT_VERSION@', $xrtVersion
         # Do not trust the substitution to have covered the file: a placeholder
         # that survived becomes a compile error about an undefined macro, far
         # from the cause.
@@ -256,7 +282,7 @@ is in the $XrtTag checkout. The tag moved; see the recipe in src/WinSetup.md.
         }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $slim) | Out-Null
         Set-Content -Encoding ascii -NoNewline -Path $slim -Value $body
-        Write-Host "  generated xrt/detail/version-slim.h from the template ($version)"
+        Write-Host "  generated xrt/detail/version-slim.h from the template ($xrtVersion)"
     } else {
         Write-Host "  xrt/detail/version-slim.h came from the checkout"
     }
@@ -320,24 +346,6 @@ foreach ($sub in 'xrt-include', 'xrt-lib') {
 # Read-modify-write, one key. This script owns "windows" and nothing else, so it
 # never clobbers the "linux" section stage-prebuilts.sh wrote, whichever order
 # the two of you run in and however often.
-$versions = @()
-foreach ($rel in 'CMakePresets.json', 'src\CMakePresets.json') {
-    $presets = Get-Content (Join-Path $RepoRoot $rel) -Raw | ConvertFrom-Json
-    $common = $presets.configurePresets | Where-Object { $_.name -eq 'common-default' }
-    $versions += [string]$common.cacheVariables.OFLM_VERSION
-}
-if (($versions | Sort-Object -Unique).Count -ne 1) {
-    throw @"
-the presets disagree about OFLM_VERSION ($($versions -join ' vs ')). The release
-workflow checks this too, but finding it here is twenty minutes cheaper than
-finding it in CI. One of them was not bumped.
-"@
-}
-$version = $versions[0]
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw "OFLM_VERSION is '$version', which is not X.Y.Z. The release tag is v$version."
-}
-
 if (Test-Path $Manifest) {
     $doc = Get-Content $Manifest -Raw | ConvertFrom-Json
 } else {

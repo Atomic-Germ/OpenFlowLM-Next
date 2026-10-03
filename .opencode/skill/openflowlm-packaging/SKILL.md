@@ -98,7 +98,7 @@ manifests only if a recipe actually changed.
 
 For a *release* build, note the two differences: the release workflow configures
 with `OFLM_BUILD_KERNELS=OFF` and the kernels are already in the tag (committed
-to `staging` by `stage-prebuilts.sh`, not fetched), and it checks the result
+to the release branch by `stage-prebuilts.sh`, not fetched), and it checks the result
 with `utilities/release/verify-package.sh build/packages --version <v>`, which
 asserts the open-kernel and BERT xclbins are actually present. A local
 `OFLM_BUILD_KERNELS=OFF` build of `main` legitimately fails that check — see

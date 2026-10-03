@@ -3,8 +3,8 @@
 
 The kernels and the Windows XRT inputs cannot be built by CI: they need an NPU.
 They are built on a machine that has one, by utilities/release/stage-prebuilts.sh
-and utilities/release/stage-prebuilts-win.ps1, committed to the staging branch,
-and a release is tagged from that branch. So by the time anything is packaged,
+and utilities/release/stage-prebuilts-win.ps1, committed to the release branch
+(release/X.Y), and a release is tagged from that branch. So by the time anything is packaged,
 they are in the tree already, and this asks the only question left to ask:
 
     are these the binaries THIS source was built for?
@@ -12,7 +12,7 @@ they are in the tree already, and this asks the only question left to ask:
 The three ways to get it wrong, all of which otherwise show up much later and
 much less clearly:
 
-  * a source-only commit landed on staging after the kernels were built, so the
+  * a source-only commit landed on the release branch after the kernels were built, so the
     manifest records a different open_kernels/ or npu_offload/ tree than the tag
     has. The package loads and then fails to find a kernel, or worse, runs a
     kernel compiled for a different source revision.
@@ -107,7 +107,7 @@ def main() -> int:
             "The kernel sets need an NPU, so they are built by\n"
             "  utilities/release/stage-prebuilts.sh       (Linux, with an NPU)\n"
             "  utilities/release/stage-prebuilts-win.ps1 (Windows, with an NPU)\n"
-            "and committed to the staging branch, which the tag is then cut from.\n"
+            "and committed to the release branch (release/X.Y), which the tag is cut from.\n"
             "This tree looks like main, which has no binaries in it. See RELEASE.md.")
 
     doc = json.load(open(path))
@@ -120,14 +120,14 @@ def main() -> int:
     if not linux:
         raise Failure(f"{args.manifest} has no platforms.linux section, so no machine "
                       "has staged the open kernels. Run "
-                      "utilities/release/stage-prebuilts.sh on an NPU machine and "
-                      "push staging.")
+                      "utilities/release/stage-prebuilts.sh on an NPU machine, on the "
+                      "release branch.")
 
     # 1. staged for this version
     if linux.get("for_version") != version:
         raise Failure(f"the kernels were staged for {linux.get('for_version')!r} but "
-                      f"this release is {version!r}. Merge main into staging, re-stage "
-                      "the kernels there, and tag again.")
+                      f"this release is {version!r}. Re-stage the kernels on the "
+                      "release branch for this version, and tag again.")
 
     # 2. built from this source
     trees = linux.get("source_trees") or {}
@@ -136,7 +136,7 @@ def main() -> int:
         if trees.get(key) != actual:
             raise Failure(
                 f"{key}/ in this tree is {actual[:12]}, but the kernels were built "
-                f"from {str(trees.get(key))[:12]}. Something was committed to staging "
+                f"from {str(trees.get(key))[:12]}. Something was committed to the branch "
                 "after the kernels were built, so the package would ship kernels for "
                 "a different engine. Re-stage them on the NPU machine.")
 

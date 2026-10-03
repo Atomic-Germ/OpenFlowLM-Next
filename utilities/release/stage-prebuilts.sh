@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Stage the Linux prebuilts for a release: build every open kernel set on a
-# machine that has an NPU, check the results in, and push them to `staging`.
+# machine that has an NPU, check the results in, and push them to the release
+# branch (`release/X.Y`, cut from main for this version).
 #
 #   utilities/release/stage-prebuilts.sh [--version X.Y.Z] [--no-build]
 #                                        [--no-commit] [--no-push]
@@ -11,7 +12,7 @@
 # BERT design sets allocate NPU tensors (device="npu"), so `export-kernels.py`
 # needs a card, and the XRT import library the MSI links against comes out of the
 # Windows driver's own DLL. Both are built by a person on a machine that has the
-# thing, and both end up in the `staging` branch, which is what a release is
+# thing, and both end up on the release branch, which is what a release is
 # tagged from. The tag therefore *is* the commit that has the binaries: there is
 # no payload to fetch, no hash to reconcile, and no way for a release to ship
 # kernels generated from source other than the source in the tag.
@@ -27,11 +28,11 @@
 #
 # The manifest records the source TREE hashes of the two directories the kernels
 # are generated from (open_kernels/ and npu_offload/). The release workflow
-# compares them against the tag, so a source-only commit pushed to staging after
-# the kernels were built fails the release instead of shipping kernels the engine
-# was not built for. Tree hashes, not a commit hash: the version bump lands on
-# main and is merged in, so the commit moves while these stay put, and a rebuild
-# that changes nothing is still a match.
+# compares them against the tag, so a source-only commit pushed to the release
+# branch after the kernels were built fails the release instead of shipping
+# kernels the engine was not built for. Tree hashes, not a commit hash: the other
+# machine's commit and a cherry-picked fix outside these directories move the
+# commit while these stay put, and a rebuild that changes nothing is a match.
 #
 # WHY `git add -f`. .gitignore excludes the built kernels (they are build
 # products on a dev box, and main must never carry them), but a tracked file is
@@ -44,10 +45,11 @@
 #                 committed.
 #   --no-commit   stage the files and write the manifest, but do not commit.
 #   --no-push     commit locally, do not push.
-#   --branch      the staging branch (default: staging)
+#   --branch      the release branch (default: release/MAJOR.MINOR of the version,
+#                 e.g. release/0.1 for 0.1.0; or $OFLM_STAGING_BRANCH)
 #   --message     commit message (default: one naming the platform and count)
 #
-# GUARDS. The branch must be the staging branch, and the working tree must be
+# GUARDS. The branch must be the release branch, and the working tree must be
 # clean: a release commit that is one developer's uncommitted source edit is a
 # release nobody reviewed, and a CI run that never tested that source is worse.
 # The build products themselves are ignored, so a dirty tree means something else
@@ -56,7 +58,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BRANCH="${OFLM_STAGING_BRANCH:-staging}"
+BRANCH="${OFLM_STAGING_BRANCH:-}"   # empty: release/MAJOR.MINOR, once the version is known
 PLATFORM="linux"
 MANIFEST="prebuilts/manifest.json"
 
@@ -77,7 +79,7 @@ while [ $# -gt 0 ]; do
         --no-build) DO_BUILD=0; shift ;;
         --no-commit) DO_COMMIT=0; shift ;;
         --no-push)  DO_PUSH=0; shift ;;
-        -h|--help)  sed -n '3,49p' "$0"; exit 0 ;;
+        -h|--help)  sed -n '3,51p' "$0"; exit 0 ;;
         *)          die "unknown argument: $1" ;;
     esac
 done
@@ -112,20 +114,22 @@ case "$VERSION" in
     *) die "version '$VERSION' is not MAJOR.MINOR.PATCH. A release tag with a
        pre-release suffix in it cannot be packaged as an RPM or a DEB." ;;
 esac
+[ -n "$BRANCH" ] || BRANCH="release/${VERSION%.*}"
 say "version: $VERSION"
 say "branch:  $BRANCH"
 
 # ------------------------------------------------------------------- guards
 current="$(git branch --show-current)"
 [ "$current" = "$BRANCH" ] || die "you are on '$current', not '$BRANCH'.
-   The prebuilts are committed to a branch that is not main, and a release is
-   tagged from it. One-time setup, from a clean clone of main:
+   The prebuilts are committed to a release branch, never to main, and the
+   release is tagged from it. If $BRANCH exists, check it out:
 
-       git checkout -b $BRANCH
-       git push -u origin $BRANCH
+       git fetch origin && git switch $BRANCH
 
-   Then merge main into it at the start of each release cycle:
-       git merge main"
+   If it does not, cut it from main once per MAJOR.MINOR (see RELEASE.md):
+
+       git switch -c $BRANCH --no-track origin/main
+       git push -u origin $BRANCH"
 
 # Changes under the paths this script owns are the whole point of it -- a rebuild
 # that drops a kernel, adds a family, or updates a spec -- so they are allowed,
@@ -275,7 +279,7 @@ platforms[os.environ["PLATFORM"]] = {
     "kernel_files": int(os.environ["NXCLBINS"]),
     "families": os.environ["FAMILIES"].split(),
     # Recorded, and checked by the release workflow against the tag: a
-    # source-only commit pushed to staging after the kernels were built fails the
+    # source-only commit pushed to the branch after the kernels were built fails the
     # release instead of shipping kernels the engine was not built for.
     "source_trees": {"open_kernels": os.environ["TREE_OPEN"],
                      "npu_offload": os.environ["TREE_NPU"]},
