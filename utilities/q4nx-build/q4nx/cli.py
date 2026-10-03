@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Console-script entry point for q4nx-build."""
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -60,13 +61,48 @@ def _is_hf_source(path: str) -> bool:
     return False
 
 
-def _resolve_imatrix_hint(args, input_path):
+# mradermacher splits one model's files across TWO repos of the same name: the
+# bare `-GGUF` carries the K-quants, Q8_0, f16 and the mmproj, while `-i1-GGUF`
+# carries the I-quants AND the imatrix they were made with. Neither half packs a
+# pruned model on its own -- `--prune-ffn` needs the imatrix, and the imatrix is
+# only in the second repo -- so someone naming the first gets a refusal that
+# names neither repo. The convention is `Base-GGUF` / `Base-i1-GGUF`, i.e. `-i1`
+# spliced in before the suffix.
+#
+# Scoped to that one publisher deliberately. The name pattern is a quirk of his
+# layout, not a Hub convention, and guessing at sibling repos for an arbitrary
+# owner means network calls nobody asked for and a real chance of joining two
+# unrelated models that happen to share a stem. A wrong imatrix prunes the FFN
+# by the wrong neurons, which is silent.
+IMATRIX_SIBLING_OWNERS = ("mradermacher/",)
+IMATRIX_SIBLING_TAG = "-i1-GGUF"
+
+
+def _imatrix_sibling_repo(repo_id):
+    """The `-i1-GGUF` sibling of a split repo, or None when there is no rule.
+
+    Refuses a repo whose stem already carries an `-i<N>` tag, so that naming the
+    I-quant half does not produce `...-i1-i1-GGUF` -- that repo is where the
+    imatrix already is, and there is nothing further to look up.
+    """
+    if not repo_id or not repo_id.endswith("-GGUF"):
+        return None
+    if not repo_id.startswith(IMATRIX_SIBLING_OWNERS):
+        return None
+    stem = repo_id[: -len("-GGUF")]
+    if re.search(r"-i\d+$", stem):
+        return None
+    return stem + IMATRIX_SIBLING_TAG
+
+
+def _resolve_imatrix_hint(args, input_path, source_repo=None):
     """Where the importance matrix lives, for --prune-ffn.
 
     An explicit --imatrix wins; then OFLM_IMATRIX, so a pack driven through
     `oflm pack` (which shells out to this tool) can name it in the environment
     rather than requiring the flag to be threaded through; then a sidecar next
-    to the model file. Returns None when there is nothing, which the converter
+    to the model file; then, for a split publisher, the sibling repo that
+    actually holds it. Returns None when there is nothing, which the converter
     turns into an explanation instead of a silent full-width pack.
     """
     from q4nx.imatrix_prune import imatrix_path, env_imatrix
@@ -81,6 +117,18 @@ def _resolve_imatrix_hint(args, input_path):
               f"(no *.in_sum2 tensors)")
         raise SystemExit(2)
     if args.prune_ffn and p is None:
+        sibling = _imatrix_sibling_repo(source_repo)
+        if sibling:
+            from q4nx.model_assets import find_repo_imatrix
+            found = find_repo_imatrix(sibling)
+            if found:
+                path, filename = found
+                print(f"[INFO] {source_repo} does not publish an imatrix; this "
+                      f"model's files are split across two repos. Took "
+                      f"{filename} from {sibling} instead.")
+                return path
+            print(f"[WARN] {sibling} publishes no imatrix either; continuing "
+                  f"without one.")
         print(f"[ERROR] --prune-ffn {args.prune_ffn} needs an imatrix and none was "
               f"found. Pass --imatrix PATH or put the imatrix GGUF beside the model.")
         raise SystemExit(2)
@@ -534,7 +582,7 @@ def main(argv=None) -> int:
         model = create_hf_converter(hf_input, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
         model.prune_ffn = args.prune_ffn
-        model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path)
+        model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path, source_repo)
         if args.quant:
             model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
@@ -562,7 +610,7 @@ def main(argv=None) -> int:
         model = create_converter(input_path, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
         model.prune_ffn = args.prune_ffn
-        model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path)
+        model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path, source_repo)
         if args.quant:
             model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
@@ -574,6 +622,12 @@ def main(argv=None) -> int:
         # Staged AFTER the conversion and BEFORE the assets are written, so the
         # recorded command names a file that is already in the directory it names.
         imatrix_ref = _stage_imatrix(model, output_folder, prune_meta)
+        if source_repo and not source_file:
+            # A local GGUF has no repo-relative path, so the card could name the
+            # repo but not the file in it. These publishers keep GGUFs at the
+            # repository ROOT, so the basename IS the repo-relative name and the
+            # two rows pair up into something a reader can resolve by hand.
+            source_file = os.path.basename(input_path)
         assemble_model_assets(
             model.gguf_reader,
             model.q4nx_config,

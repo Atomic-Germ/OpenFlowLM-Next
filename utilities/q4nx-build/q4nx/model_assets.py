@@ -405,6 +405,37 @@ def find_repo_gguf(
     return path, filename
 
 
+def find_repo_imatrix(repo_id: str) -> Optional[Tuple[str, str]]:
+    """Download an imatrix from an HF repo, if it publishes one.
+
+    Symmetric with find_repo_gguf: returns (local_path, repo_filename), or None
+    when the repo has no imatrix or cannot be reached. Used to reach a sibling
+    repo, since some publishers split one model's files across two repos and
+    neither half is complete on its own.
+    """
+    try:
+        from huggingface_hub import list_repo_files
+    except ImportError:
+        print("[WARN] huggingface_hub not installed; cannot look for an imatrix "
+              f"in {repo_id}")
+        return None
+    try:
+        files = list_repo_files(repo_id)
+    except Exception as e:
+        print(f"[WARN] Could not list files in {repo_id}: {e}")
+        return None
+    names = [f for f in files if f.lower().endswith(".gguf") and "imatrix" in f.lower()]
+    if not names:
+        return None
+    # Prefer the shortest name: it is the plain imatrix rather than a per-layer or
+    # per-epoch variant, and a tie on that is broken deterministically.
+    filename = sorted(names, key=lambda f: (len(f), f.lower()))[0]
+    path = _hf_download_file(repo_id, filename)
+    if path is None:
+        return None
+    return path, filename
+
+
 def fetch_hf_repo_info(repo_id: str) -> dict:
     """Fetch HF repo metadata for README enrichment; {} if unavailable/offline."""
     try:
