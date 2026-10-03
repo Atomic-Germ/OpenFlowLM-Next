@@ -90,3 +90,4 @@ src/xclbins/*/open_kernels*/
 # Nix build result symlinks
 result
 result-*
+bin/
