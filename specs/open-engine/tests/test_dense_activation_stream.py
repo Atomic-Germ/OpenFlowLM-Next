@@ -31,8 +31,9 @@ class Fifo:
 
 
 def functions(ns):
+    ns.setdefault("ROLLED", False)
     tree = ast.parse(SOURCE.read_text())
-    names = {"prep_bands", "ffn_body", "prep_stream"}
+    names = {"prep_bands", "ffn_body", "prep_stream", "band_range"}
     body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), ns)
 

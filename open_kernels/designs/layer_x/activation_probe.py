@@ -21,7 +21,7 @@ SERIES=os.environ.get('PROBE_ACTIVATION_SERIES')=='1'
 def probe(x: In,y: Out,*,key: CompileTime[int]):
     it=np.ndarray[(64,),np.dtype[np.float32]]
     ot=np.ndarray[(320,),np.dtype[np.float32]]
-    fn=ExternalFunction('activation_probe',source_file=str(HERE/'activation_probe.cc'),
+    fn=ExternalFunction('activation_probe',source_file=str(HERE/'activation_probe.cpp'),
                         arg_types=[it,ot],include_dirs=include_dirs()+[str(ROOT/'designs/gemv_q4')],
                         compile_flags=['-Os','-DGEMV_Q4_CORRECTION=1','-DGEMV_Q4_PRODUCT_CORRECTION=1',
                                        f'-DDENSE_ACT_SERIES={int(SERIES)}'])
@@ -38,7 +38,7 @@ def probe(x: In,y: Out,*,key: CompileTime[int]):
 
 
 DESIGN=probe
-files=[HERE/'activation_probe.cc',HERE/'activation_probe.py',HERE/'dense_activation_carry.h',HERE/'sigmoid_series.h',
+files=[HERE/'activation_probe.cpp',HERE/'activation_probe.py',HERE/'dense_activation_carry.h',HERE/'sigmoid_series.h',
        ROOT/'include/vecmath.h',ROOT/'include/vecmath_precise.h',ROOT/'include/fp32_add_rne.h',
        ROOT/'designs/gemv_q4/gemv_tab.h']
 SPECIALIZE={'key':int(hashlib.sha256(b''.join(p.read_bytes() for p in files)+str(SERIES).encode()).hexdigest()[:8],16)}

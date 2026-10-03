@@ -166,4 +166,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Trace real SiLU stages and build the small-argument sigmoid series with compact FFN loops, then validate rounding boundaries and full-model references.</description>
     <location>.opencode/skill/open-ffn-sigmoid-series/SKILL.md</location>
   </skill>
+  <skill>
+    <name>qwen38-wide-main-integration</name>
+    <description>Merge shared WideDeltaNet and rolled-band upstream changes while preserving and checking later precision modes.</description>
+    <location>.opencode/skill/qwen38-wide-main-integration/SKILL.md</location>
+  </skill>
 </available_skills>

@@ -65,6 +65,11 @@ state checks pass. The mode remains experimental; PR4 is incomplete. The next
 target is layer10 DeltaNet before its post norm, where seven differences are
 propagated from earlier operations in that layer.
 
+Main integration follow-up (2026-10-03): [shared WideDeltaNet merge](qwen38-main-oct3.md)
+includes upstream/main b16e6ab via origin/main 0ceb46d. All8190 full-model
+captures match the preceding stage bytewise after rebuilding FFN. The six
+numerical failures remain; upstream's rolled-band fix targets H2560, not H5120.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

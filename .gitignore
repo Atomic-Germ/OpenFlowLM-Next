@@ -1,6 +1,7 @@
 build
 build_*/
 build-*/
+npu-cache
 .vscode
 .codegraph/
 *.egg-info/
