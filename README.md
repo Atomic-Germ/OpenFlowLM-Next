@@ -173,3 +173,26 @@ See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions.
 ```bash
 cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b
 ```
+#### Docker build
+
+Also you can build fast and simple with Docker.
+
+Simply run(linux-package preset is used by default):
+
+```bash
+./build_in_docker.sh
+```
+
+Or specify a workflow preset(for deb package in this example):
+
+```bash
+./build_in_docker.sh linux-package-deb
+```
+
+The script builds `openflowlm-build:ubuntu26`, passes `/dev/accel/accel0` into the container, enables XRT memory locking, and persists the build and NPU cache directories.
+
+The host must have the AMD XDNA driver installed and expose:
+
+```text
+/dev/accel/accel0
+```

@@ -1,6 +1,7 @@
 build
 build_*/
 build-*/
+npu-cache
 .vscode
 .codegraph/
 *.egg-info/
@@ -85,3 +86,4 @@ src/xclbins/*/open_kernels*/
 
 # repro-open-timeout.sh output (server logs, per-attempt client logs)
 .repro-open-timeout/
+bin/
