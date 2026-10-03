@@ -32,6 +32,13 @@ PRODUCT_CORRECTION = os.environ.get('PROBE_PRODUCT_CORRECTION') == '1'
 BLOCK_CARRY = os.environ.get('PROBE_BLOCK_CARRY') == '1'
 SEGMENT_CARRY = os.environ.get('PROBE_SEGMENT_CARRY') == '1'
 ACTIVATION_CARRY = os.environ.get('PROBE_ACTIVATION_CARRY') == '1'
+ACTIVATION_SERIES = os.environ.get('PROBE_ACTIVATION_SERIES') == '1'
+if ACTIVATION_SERIES:
+    if not ACTIVATION_CARRY:
+        raise ValueError('activation series requires activation carry')
+    X.OS.append('-DDENSE_ACT_SERIES=1')
+    X.DYNAMIC_DOWN = True
+    X.COMPACT_UP = True
 if ACTIVATION_CARRY:
     if not FULL or not PRODUCT_CORRECTION:
         raise ValueError('activation carry requires full FFN product correction')
@@ -84,7 +91,8 @@ def segmented(pool: In, act: InOut, trace: Out, *, source_hash: CompileTime[int]
             tout, copy = args[-2:]
             act_fn = functions['act']
             def traced_act(ms, y):
-                for offset in (X.C.MS_U, X.C.MS_G):
+                offsets=X.range_(X.C.MS_U,X.C.MS_G+1,X.C.MS_G-X.C.MS_U) if ACTIVATION_SERIES else (X.C.MS_U,X.C.MS_G)
+                for offset in offsets:
                     te = tout.acquire(1)
                     copy(ms, te, offset)
                     tout.release(1)
@@ -140,4 +148,4 @@ _sources = [Path(__file__), HERE / 'xcommon.py', HERE / 'gen_kernels.py', ROOT /
             *sorted((ROOT / 'include').glob('*.h'))]
 SPECIALIZE = {'source_hash': int(hashlib.sha256(b''.join(p.read_bytes() for p in _sources)
                          + b''.join(X.source_hash_inputs())
-                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, ACTIVATION_CARRY, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
+                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, ACTIVATION_CARRY, ACTIVATION_SERIES, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}

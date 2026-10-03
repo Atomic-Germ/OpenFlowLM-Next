@@ -85,7 +85,8 @@ def worker_functions(ns):
 
 
 @pytest.mark.parametrize('limit,carry,compact', [(8192,False,False),(4096,False,False),(4096,True,False),
-                                                (8192,False,True),(4096,False,True),(4096,True,True)])
+                                                (8192,False,True),(4096,False,True),(4096,True,True),
+                                                (8192,False,'dynamic'),(4096,False,'dynamic'),(4096,True,'dynamic')])
 def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit,carry,compact,monkeypatch):
     from test_dense_activation_stream import Fifo
     from recipes.segmented_dense import segments
@@ -130,7 +131,8 @@ def test_worker_retains_all_bands_until_last_segment_and_resets_next_token(limit
         monkeypatch.setattr(arith,'constant',lambda ty,value:value)
         monkeypatch.setattr(arith,'cmpi',lambda pred,a,b:a==b)
         monkeypatch.setattr(arith,'extui',lambda ty,value:int(value))
-    ns = dict(FFN=f, SEGMENT_CARRY=carry, COMPACT_DOWN=compact, range_=range, ELEM=4096, per_band=lambda k: k // 128,
+        monkeypatch.setattr(arith,'select',lambda cond,a,b:a if cond else b)
+    ns = dict(FFN=f, SEGMENT_CARRY=carry, COMPACT_DOWN=compact, DYNAMIC_DOWN=compact=='dynamic', range_=range, ELEM=4096, per_band=lambda k: k // 128,
               n_groups=lambda k: k // 256)
     worker_functions(ns)
     total_groups = nbands * sum(width // 256 for _, width in f.DOWN_SEGMENTS)

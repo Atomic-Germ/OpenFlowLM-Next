@@ -62,7 +62,8 @@ def test_projection_stream_prepares_all_blocks_and_preserves_legacy_lifetimes(wi
 
 
 @pytest.mark.parametrize("width", [2048, 4096, 5120])
-def test_ffn_xm_releases_wide_input_before_up_gate_and_then_consumes_h(width):
+@pytest.mark.parametrize("compact", [False, True])
+def test_ffn_xm_releases_wide_input_before_up_gate_and_then_consumes_h(width,compact):
     chunks = (width + 2047) // 2048
     x = Fifo(chunks + 1)
     weights = Fifo(2)
@@ -72,13 +73,14 @@ def test_ffn_xm_releases_wide_input_before_up_gate_and_then_consumes_h(width):
             return np.zeros(64)
         def release(self, n):
             assert n == 1
-    calls = []
+    calls, projections = [], []
     def prep(e, tab, k, i):
         assert e == i and k == width
         calls.append(("xm", i))
     def gms(*args):
         assert x.held == (chunks if chunks <= 2 else 0)
         assert calls == [("xm", i) for i in range(chunks)]
+        projections.append((args[0],args[-1]))
     def prepf(e, tab, k, i):
         assert e == chunks and i == 0 and k == 1024
         calls.append(("h", i))
@@ -86,10 +88,11 @@ def test_ffn_xm_releases_wide_input_before_up_gate_and_then_consumes_h(width):
         assert not x.values and not x.held
         calls.append(("down", 0))
     ns = dict(range_=range, FFN=SimpleNamespace(XM_ELEMS=chunks, UP_PC=1, H_ELEMS=1, DOWN_PC=1, DOWN_SEGMENTS=()),
-              HID=width, FF=1024, Q8=(), MIXED=False, C=SimpleNamespace(MS_U=0, MS_G=64),
+              HID=width, FF=1024, Q8=(), MIXED=False, COMPACT_UP=compact, C=SimpleNamespace(MS_U=0, MS_G=64),
               per_band=lambda k: 1, n_groups=lambda k: 1, role_gemv_bands=down)
     functions(ns)
     ns["ffn_body"](weights, x, Output(), {"tab": None, "ms": None},
                    {"prep": prep, "gms": gms, "act": lambda *a: None, "prepf": prepf})
     assert calls[-2:] == [("h", 0), ("down", 0)]
     assert not weights.values
+    assert projections == [(0,0),(1,64)]

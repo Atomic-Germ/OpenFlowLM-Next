@@ -57,6 +57,14 @@ The rebuilt FFN and full replay produce identical captures to the preceding
 stage. Both numerical failures remain; there is no measured decode precision
 improvement or regression from this merge.
 
+Follow-up (2026-10-03): [small-gate sigmoid precision](qwen38-sigmoid-precision.md)
+closes layer8 activation749 and makes the first 21 norm boundaries exact.
+The complete replay nevertheless worsens to six numerical failures from two:
+four layer47 attention heads plus the final residual/norm. Tokens, reset and
+state checks pass. The mode remains experimental; PR4 is incomplete. The next
+target is layer10 DeltaNet before its post norm, where seven differences are
+propagated from earlier operations in that layer.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

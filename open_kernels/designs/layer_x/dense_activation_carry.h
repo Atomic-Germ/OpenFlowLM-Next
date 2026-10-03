@@ -29,6 +29,19 @@ __attribute__((noinline)) inline v32f act_mul_carry(v32f a,v32f b) {
 static inline v32f act_v(float a) { return aie::broadcast<float,32>(a); }
 static inline v32f act_neg(v32f a) { return (a.cast_to<uint32_t>()^ActivationAddLanes::v(0x80000000)).cast_to<float>(); }
 
+#if DENSE_ACT_SERIES
+#include "sigmoid_series.h"
+struct ActivationSeries {
+  using V=v32f;
+  static V v(float x) { return act_v(x); }
+  static V mul(V a,V b) { return act_mul_carry(a,b); }
+  static V add(V a,V b) { return act_add(a,b); }
+};
+__attribute__((noinline)) inline v32f act_sigmoid_series(v32f g) {
+  return sigmoid_series<ActivationSeries>(g);
+}
+#endif
+
 __attribute__((noinline)) inline v32f act_exp_carry(v32f x) {
   x=aie::min(aie::max(x,act_v(-87.f)),act_v(88.f));
   const auto t=act_mul_carry(x,act_v(1.44269504f));
@@ -45,10 +58,26 @@ __attribute__((noinline)) inline v32f act_exp_carry(v32f x) {
   const auto bits=aie::upshift(aie::add(n,aie::broadcast<int32_t,32>(127)),23);
   return act_mul_carry(p,bits.cast_to<float>());
 }
+#if DENSE_ACT_SERIES
+__attribute__((noinline)) inline v32f act_sigmoid_carry(v32f g) {
+  const auto d=act_add(act_exp_carry(act_neg(g)),act_v(1.f));
+  auto r=aie::inv(d);
+#pragma clang loop unroll(disable)
+  for(unsigned i=0;i<2;++i)
+    r=act_mul_carry(r,act_add(act_v(2.f),act_neg(act_mul_carry(d,r))));
+  const auto small=aie::le(aie::abs(g),act_v(.5f));
+  // Mask speculative polynomial lanes outside its interval before evaluation.
+  return aie::select(r,act_sigmoid_series(aie::select(act_v(0.f),g,small)),small);
+}
+#endif
 __attribute__((noinline)) inline v32f act_gated_silu_carry(v32f g,v32f u) {
+#if DENSE_ACT_SERIES
+  const auto r=act_sigmoid_carry(g);
+#else
   const auto d=act_add(act_exp_carry(act_neg(g)),act_v(1.f));
   auto r=aie::inv(d);
   r=act_mul_carry(r,act_add(act_v(2.f),act_neg(act_mul_carry(d,r))));
   r=act_mul_carry(r,act_add(act_v(2.f),act_neg(act_mul_carry(d,r))));
+#endif
   return act_mul_carry(act_mul_carry(g,r),u);
 }

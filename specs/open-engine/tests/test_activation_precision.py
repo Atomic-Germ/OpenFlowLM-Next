@@ -10,3 +10,11 @@ def test_activation_carry_rejects_non_ffn_before_build(tmp_path):
         '--scope','projection','--activation-carry','--out',str(tmp_path/'absent')],capture_output=True,text=True)
     assert p.returncode==2 and '--activation-carry requires --scope ffn' in p.stderr
     assert not (tmp_path/'absent').exists()
+
+
+def test_activation_series_requires_carry_before_build(tmp_path):
+    root=Path(__file__).resolve().parents[3]
+    p=subprocess.run([sys.executable,str(root/'utilities/probe-qwen35-wide.py'),
+        '--scope','ffn','--activation-series','--out',str(tmp_path/'absent')],capture_output=True,text=True)
+    assert p.returncode==2 and '--activation-series requires --activation-carry' in p.stderr
+    assert not (tmp_path/'absent').exists()

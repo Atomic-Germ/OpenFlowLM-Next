@@ -161,4 +161,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Rebuild corrected FFN after main integration and check converter head-order equivalence, runtime compatibility and full-model regressions.</description>
     <location>.opencode/skill/qwen38-main-integration/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-ffn-sigmoid-series</name>
+    <description>Trace real SiLU stages and build the small-argument sigmoid series with compact FFN loops, then validate rounding boundaries and full-model references.</description>
+    <location>.opencode/skill/open-ffn-sigmoid-series/SKILL.md</location>
+  </skill>
 </available_skills>

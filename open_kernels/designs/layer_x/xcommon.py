@@ -39,6 +39,8 @@ GEMV = HERE.parent / "gemv_q4"
 ELEM = 4096
 SEGMENT_CARRY = False  # Explicitly enabled only by the precision probe.
 COMPACT_DOWN = False  # Loop identical segments instead of cloning the core body.
+DYNAMIC_DOWN = False  # One body for equal full segments and their shorter tail.
+COMPACT_UP = False  # One up/gate loop, preserving their consecutive weight order.
 
 
 def _gemv_prep_entry(k: int) -> Path:
@@ -390,14 +392,19 @@ def ffn_body(win, xin, yout, B, K):
 
     for _ in range_(FFN.UP_PC):
         ye = yout.acquire(1) if MIXED else None
-        for g in range_(ng_h):
-            we = win.acquire(1)
-            band(we, ye, g, C.MS_U)
-            win.release(1)
-        for g in range_(ng_h):
-            we = win.acquire(1)
-            band(we, ye, g, C.MS_G)
-            win.release(1)
+        if COMPACT_UP:
+            for dst in range_(C.MS_U,C.MS_G+1,C.MS_G-C.MS_U):
+                for g in range_(ng_h):
+                    we=win.acquire(1);band(we,ye,g,dst);win.release(1)
+        else:
+            for g in range_(ng_h):
+                we = win.acquire(1)
+                band(we, ye, g, C.MS_U)
+                win.release(1)
+            for g in range_(ng_h):
+                we = win.acquire(1)
+                band(we, ye, g, C.MS_G)
+                win.release(1)
         if not MIXED:
             ye = yout.acquire(1)
         K["act"](ms, ye)
@@ -421,6 +428,35 @@ def segmented_down_body(win, xin, yout, B, K, diagnostic=False):
     only the final sums. Neither path feeds snapshots back into the core.
     """
     tab, ms, ds = B["tab"], B["ms"], B["ds"]
+    if DYNAMIC_DOWN:
+        from aie.dialects import arith
+        from aie.extras import types as T
+        full=FFN.DOWN_SEGMENTS[0][1];tail=FFN.DOWN_SEGMENTS[-1][1]
+        if any(width!=full for _,width in FFN.DOWN_SEGMENTS[:-1]) or tail>full:
+            raise ValueError('dynamic down requires equal full segments and a shorter tail')
+        for segment in range_(len(FFN.DOWN_SEGMENTS)):
+            last=arith.cmpi('eq',segment,arith.constant(T.index(),len(FFN.DOWN_SEGMENTS)-1))
+            def pick(a,b,ty):
+                return arith.select(last,arith.constant(ty,b),arith.constant(ty,a))
+            width=pick(full,tail,T.i32())
+            ng=pick(n_groups(full),n_groups(tail),T.index())
+            pb=pick(per_band(full),per_band(tail),T.i32())
+            ne=pick((full*4+ELEM-1)//ELEM,(tail*4+ELEM-1)//ELEM,T.index())
+            first=arith.extui(T.i32(),arith.cmpi('eq',segment,arith.constant(T.index(),0)))
+            for i in range_(ne):
+                he=xin.acquire(1);K['prepf'](he,tab,width,i);xin.release(1)
+            for band in range_(FFN.DOWN_PC):
+                for g in range_(ng):
+                    we=win.acquire(1);K['gms'](we,tab,ms,g,pb,0);win.release(1)
+                if SEGMENT_CARRY:K['down_acc'](ms,ds,band,first,tab,width)
+                else:K['down_acc'](ms,ds,band,first)
+            if diagnostic:
+                for band in range_(FFN.DOWN_PC):
+                    ye=yout.acquire(1);K['down_out'](ds,ye,band);yout.release(1)
+        if not diagnostic:
+            for band in range_(FFN.DOWN_PC):
+                ye=yout.acquire(1);K['down_out'](ds,ye,band);yout.release(1)
+        return
     if COMPACT_DOWN:
         from itertools import groupby
         from aie.dialects import arith
