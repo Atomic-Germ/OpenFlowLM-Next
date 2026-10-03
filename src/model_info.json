@@ -3403,5 +3403,181 @@
             "size": 190,
             "path": "1_Pooling/config.json"
         }
+    ],
+    "flux2-klein:4b": [
+        {
+            "type": "file",
+            "oid": "0afa7632c1a195ea6627a3c53e6ebf18d1be3aa5",
+            "size": 9584,
+            "path": "LICENSE.md"
+        },
+        {
+            "type": "file",
+            "oid": "99e8165abe84e1efe881827d59263a8daff2df48",
+            "size": 14685,
+            "path": "bundle.json"
+        },
+        {
+            "type": "file",
+            "oid": "305d499c73c026c810753b409f439700d1fab8da",
+            "size": 158,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "oid": "d7702d19fca59082f3ca2d40d17dda9c48def5f7",
+            "size": 98304,
+            "lfs": {
+                "oid": "1f0608ebc7e60d473a44c4d1abfc78c08f87b042cc6a0e3f0a950785e431779d",
+                "size": 98304,
+                "pointerSize": 130
+            },
+            "xetHash": "8f102c4ed91804b452918bbb8a912ba1130b4fa03c2e5e87927cef3068101e97",
+            "path": "dt_1024.bin"
+        },
+        {
+            "type": "file",
+            "oid": "10cb9e8bad0b2edd55ab5cd1e81ba7f22e518d01",
+            "size": 98304,
+            "lfs": {
+                "oid": "a2cd742b525523e74b0418177cf217807769b2562150052718c61124bc6177dd",
+                "size": 98304,
+                "pointerSize": 130
+            },
+            "xetHash": "a8801ed437851f4280af20f6d8b787f0c85143759d48c2fa2e877fd8f4a0adb1",
+            "path": "dt_512.bin"
+        },
+        {
+            "type": "file",
+            "oid": "78156550ade09064b699fac7028e514efae86056",
+            "size": 777912320,
+            "lfs": {
+                "oid": "eabe5625fc0575bf517c424041e9701c0fd521889e0f547c8522d2aa20e8c0f8",
+                "size": 777912320,
+                "pointerSize": 134
+            },
+            "xetHash": "074e1dfac67ff40aee8a24ccd6f3fa64ae08a8f3d8342ca75954f7b3e0040f74",
+            "path": "embed.bin"
+        },
+        {
+            "type": "file",
+            "oid": "21454e500a0fde9743dc7f85e66a616809aaae68",
+            "size": 2994176,
+            "lfs": {
+                "oid": "796c440932efb8b43dc58d9a021930e9d012c2b0283bff78eb2dda89483f47a5",
+                "size": 2994176,
+                "pointerSize": 132
+            },
+            "xetHash": "31773b18deec1a593e6514889b6ff86b4270c7d843d83bfae9fc2c45b0463ce2",
+            "path": "params.bin"
+        },
+        {
+            "type": "file",
+            "oid": "d699226d0e563f6d91cb5b39df8ea628f1433caf",
+            "size": 33554432,
+            "lfs": {
+                "oid": "03834abe8a194352572d2f4551183f7fb3c17baff214b5af70bb45528dd4713c",
+                "size": 33554432,
+                "pointerSize": 133
+            },
+            "xetHash": "7d9db92126bd2d1696502eb4840c07a0c421d7f4e77c7136274093c895c2c166",
+            "path": "qin_1024.bin"
+        },
+        {
+            "type": "file",
+            "oid": "208afcc92a33a019a2e0f62b7ddd5a18fd2a4d61",
+            "size": 8388608,
+            "lfs": {
+                "oid": "f194d96d6c45dbf490bc952bf191baf9614853cc6dbf2be00de2ce3764d47f9f",
+                "size": 8388608,
+                "pointerSize": 132
+            },
+            "xetHash": "d7a91ab5f4bcd5835b0ecb3ba18da78951719048a187758e821786753ec1a894",
+            "path": "qin_512.bin"
+        },
+        {
+            "type": "file",
+            "oid": "8970e95a6f43b1bfdaf0936f2714dcc16799fe84",
+            "size": 114011,
+            "path": "schedule_1024.json"
+        },
+        {
+            "type": "file",
+            "oid": "257cd078bd4d577aa22536f4717c25f93bf087f6",
+            "size": 112928,
+            "path": "schedule_512.json"
+        },
+        {
+            "type": "file",
+            "oid": "dfae070a43c7c83fd2b3c6555b7c7c341ebc1d80",
+            "size": 263168,
+            "lfs": {
+                "oid": "6ed07522074346cad22a10d796822ad3a4918aad5f555c77050f9ec740bd9476",
+                "size": 263168,
+                "pointerSize": 131
+            },
+            "xetHash": "7e55bef6f7909c353b4dd5eca1dc1b87091abd35390f406b61c88667fea5ba47",
+            "path": "tf_1024.bin"
+        },
+        {
+            "type": "file",
+            "oid": "cf63d17e898c67935b2f5049cdc220769106fae8",
+            "size": 263168,
+            "lfs": {
+                "oid": "a03dc88fab026b4aa67f99910a525784fee0ccd0bdec23d2f8de3ef39f9d960f",
+                "size": 263168,
+                "pointerSize": 131
+            },
+            "xetHash": "a9ff846f485049f2e91241ca93cf4b287559a9d52acc86990b1cf8a79a1cfe5b",
+            "path": "tf_512.bin"
+        },
+        {
+            "type": "file",
+            "oid": "cd71f61a15a522601badb3dc960d800d9cb3766c",
+            "size": 11422654,
+            "lfs": {
+                "oid": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+                "size": 11422654,
+                "pointerSize": 133
+            },
+            "xetHash": "693ec4b3922b0bd306bf7b4989e115ffbfeb7b0c08b31bc6d956818c6bb07f61",
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "e5facb2c581cc3cb35d0af59ba06e45aa8d8a14c",
+            "size": 4669440,
+            "lfs": {
+                "oid": "d7ff8151061f3e96539031d7e712512bd7469b0fd242375194ee1f933567156d",
+                "size": 4669440,
+                "pointerSize": 132
+            },
+            "xetHash": "c660551aeb72a4ae3af2901cdc64c0c0fd539d4d924304e3ac38e07ad0a75e0b",
+            "path": "vae_S.bin"
+        },
+        {
+            "type": "file",
+            "oid": "894d2fbbbed57e7adbda9b0b8465dc5f28d47e59",
+            "size": 76869632,
+            "lfs": {
+                "oid": "e2ce5093e6175195cab560ec4c45dd06b91609fdd2d2a63b83f021351d6b7847",
+                "size": 76869632,
+                "pointerSize": 133
+            },
+            "xetHash": "52a95382d7855aa7be4d90e259e01c7f6329b255ec3818aebe658abeb781c1fc",
+            "path": "vae_W.bin"
+        },
+        {
+            "type": "file",
+            "oid": "87f6f0a6a38f2364ebbb2e8605a5fd5a77471c0c",
+            "size": 8102412288,
+            "lfs": {
+                "oid": "f579dbde7f0a884fc6c6c1480bffc0b03e554b704d309089e2ac293a3a254da3",
+                "size": 8102412288,
+                "pointerSize": 135
+            },
+            "xetHash": "67fb9d303442814a9f34699f9938e6002b66c2df9a251e5a72ad922de7af9692",
+            "path": "weights.bin"
+        }
     ]
 }
