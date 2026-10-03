@@ -26,6 +26,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdio>
 
 #include <cstddef>
 #include <cstdint>
@@ -105,6 +106,7 @@ struct StepTiming {
     double moe_run_ms = 0;    ///< the mx dispatch itself
     double moe_read_ms = 0;   ///< xres back
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
+    double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
 };
 
 class Core {
@@ -126,6 +128,14 @@ public:
     /// One decode step for `token` at the current position. Logits (f32,
     /// vocab) are computed only when asked for; read them with logits().
     void step(int token, bool want_logits);
+    /// Stage 2.7 Gate A: the runtime decode route selector -- "npu" / "host" /
+    /// "auto" (throws on anything else). Overrides the constructor env default
+    /// at any moment, including between steps of one process (the mid-stream
+    /// switch). Since the stage 2.10 promotion Auto is NPU-first (the fast
+    /// attention path wins at every measured window; OFLM_DECODE_AUTO_THRESHOLD
+    /// forces the old position split) and is what the step lines log.
+    void set_decode_route(const std::string& route);
+    std::string decode_route_at(size_t pos) const;
     /// One step whose input is a hidden vector instead of a token -- an image token's
     /// embedding from the vision tower -- at the M-RoPE position `mpos` = (t, h, w). The
     /// (t, h, w) counter is not advanced; the caller does that per image (mrope_advance).
@@ -403,9 +413,47 @@ private:
 
     std::vector<float> logits_host_;
     StepTiming timing_;
+    /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
+    /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the
+    /// window-dependence of each phase regresses from a single run. Null = off,
+    /// zero cost. Measurement only -- never touches a computed value.
+    FILE* dxb_log_ = nullptr;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;
+    /// Stage 2.5 Gate B (OFLM_OPEN_HOST_ATTN=1): the dense route's attention
+    /// computed on the host instead of T per-token dxB dispatches. Same
+    /// semantics as the dxB kernel (attn.h:22) for the K2 dense shape only:
+    /// no qk-norm, no gate, half-split RoPE over the full head, GQA
+    /// h -> kv head h/(nh/kvh), scale 1/sqrt(hd) on the scores, causal window
+    /// [0, pos] inclusive, fp32 dots + fp64 softmax denominator, cache rows
+    /// bf16 [K|V]. Checks its geometry against the manifest's own
+    /// hf_config_check and refuses anything else (fail-closed).
+    bool host_attn_on_ = false;
+    /// Stage 2.6 Gate B (OFLM_OPEN_HOST_ATTN_DECODE=1): the decode step through
+    /// the Stage 2.5 gemm-block chain at T=1 -- host attention (the same
+    /// host_attn_layer, forced via in_host_decode_) plus the NPU gemm-block
+    /// GEMMs padded to the kernel set's compiled T -- instead of the fused
+    /// per-layer dx dispatch. Decode-only: the gemm-block prefill route keeps
+    /// its own selector (host_attn_on_ / OFLM_OPEN_HOST_ATTN), so the two
+    /// routings stay independently switchable in one binary.
+    bool host_attn_decode_on_ = false;
+    /// Stage 2.7 Gate A: the RUNTIME decode route selector. The 2.6 env stays
+    /// as the constructor-time default (compat/debug: env on -> initial route
+    /// Host); set_decode_route() overrides it any time -- including between
+    /// steps of one process, which is the mid-stream switch Stage 2.7 tests.
+    /// Auto resolves per step against the measured 2.6 crossover brackets:
+    /// threshold 896 (mid-bracket of the measured (768,1024) host-win bracket
+    /// at default threading; 640 for <=4 OMP threads, mid-bracket of the
+    /// measured (512,768)). A measured constant, not a fit; overridable via
+    /// OFLM_DECODE_AUTO_THRESHOLD for experimentation.
+    enum class DecodeRoute { Npu, Host, Auto };
+    DecodeRoute decode_route_ = DecodeRoute::Npu;
+    size_t decode_auto_threshold_ = 0;
+    /// Set only while step_host_decode drives its per-layer chain, so
+    /// step_gemm_block_layer takes the host-attention branch for the decode
+    /// route without the prefill env having to be on.
+    bool in_host_decode_ = false;
     bool route_check_ = false;                 ///< OFLM_ROUTE_CHECK: re-read every router record, count changes
     uint64_t route_checks_ = 0, route_stale_ = 0;
     std::vector<std::pair<int, std::vector<uint8_t>>> route_log_;
@@ -477,14 +525,23 @@ private:
     /// `region_bytes` limits it to [region_off, +region_bytes) of the slice; 0 moves all of it.
     void shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,
                      size_t region_off = 0, size_t region_bytes = 0);
+    /// Stage 2.5 Gate B: the dense route's attention on the host (see
+    /// host_attn_on_). y_qkv3 is the fused projection's [n_qkv3, T] output;
+    /// fills og [T, qw] and the layer's KV cache rows [pos_, pos_+T).
+    void host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, std::vector<float>& og);
     /// out[t,:] = x[t,:] / sqrt(mean(x[t,:]^2) + eps) * w[:], reduction and
     /// the final multiply both in fp64. w is bf16 (hidden elements).
+    /// groups > 1 splits each row into equal groups and RMSes each separately
+    /// (K2's GroupRMSNorm, the LN_GROUPS=2 `ln` kernel's semantics); groups = 1
+    /// is bit-identical to the classic whole-row form.
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
-                             const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out);
+                             const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out,
+                             size_t groups = 1);
     /// The same norm, for a weight already dequantised to f32 (the sandwich route's two extra
     /// norms, read straight from the file by tensor name rather than from packed consts bytes).
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
-                             const std::vector<float>& w_f32, double eps, std::vector<float>& out);
+                             const std::vector<float>& w_f32, double eps, std::vector<float>& out,
+                             size_t groups = 1);
     /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64, MAC 8x8, tile_n 32)
     /// -- the layout gemm_q4_prefill.py streams its activation in.
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
@@ -494,6 +551,14 @@ private:
     /// dispatches -> GEMM o -> residual + post-attn RMSNorm -> GEMM gate, up -> host
     /// SwiGLU -> GEMM down -> residual. `xres` is T*hidden fp64, updated in place.
     void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
+    /// Stage 2.6 Gate B: one decode step on the host route (see
+    /// host_attn_decode_on_). The layer = step_gemm_block_layer at T=1 with
+    /// host attention forced; the residual rides the xres global between
+    /// steps exactly as the NPU route's does, and the KV rows are the same
+    /// bf16 cache rows, so the routes can switch mid-stream either direction.
+    void step_host_decode(int token, const float* x, bool want_logits);
+    /// The route a step at the current position takes (internal convenience).
+    inline bool decode_step_is_host() const { return decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_)) == "host"; }
     /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
     void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
     /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the
