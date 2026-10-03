@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Console-script entry point for q4nx-build."""
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -79,7 +80,55 @@ def _layer_count(model):
     return n or None
 
 
-def _packed_command(args, input_path, output_folder, source_model, prune_meta):
+IMATRIX_NAME = "imatrix.gguf"
+# A pruned container is only reproducible with the imatrix that chose its
+# neurons, and --prune-ffn refuses without one. Recording the flag therefore
+# records a dependency the reader does not have, which is how "the base was
+# pruned with an imatrix" ends up living in one person's head. An imatrix is
+# activation SUMS, not weights: 13.6 MB for a 27B, so shipping it costs
+# nothing beside a 16 GB container. Past this it is still copied -- dropping it
+# silently would reintroduce the gap -- but it is worth saying out loud.
+IMATRIX_LARGE_BYTES = 256 * 1024 * 1024
+
+
+def _stage_imatrix(model, output_folder, prune_meta):
+    """Copy the imatrix that chose this container's neurons into the container.
+
+    Returns the path to record in the reproduction command, or None when no
+    prune ran (nothing to stage) or the copy could not be made -- in which case
+    the command falls back to naming a path the reader must supply.
+    """
+    if not prune_meta.get("kept"):
+        return None
+    src = getattr(model, "imatrix_path_hint", None)
+    if not src:
+        return None
+    src = Path(src)
+    dst = Path(output_folder) / IMATRIX_NAME
+    if not src.is_file():
+        print(f"[WARN] {src} is gone; the recorded command will name it as a path "
+              f"the reader has to supply rather than shipping it with the container.")
+        return None
+    try:
+        if src.resolve() == dst.resolve():
+            return dst                      # already packed in place; nothing to copy
+        n = src.stat().st_size
+        shutil.copy2(src, dst)
+    except OSError as e:
+        print(f"[WARN] could not copy the imatrix into the container ({e}); the "
+              f"recorded command will name it as a path the reader must supply.")
+        return None
+    print(f"[INFO] Shipped the imatrix that chose these neurons: {IMATRIX_NAME} "
+          f"({n / 1e6:.1f} MB)")
+    if n > IMATRIX_LARGE_BYTES:
+        print(f"[WARN] that imatrix is {n / 1e6:.1f} MB, which is large next to a "
+              f"model card. It was copied anyway: without it the prune cannot be "
+              f"reproduced at all.")
+    return dst
+
+
+def _packed_command(args, input_path, output_folder, source_model, prune_meta,
+                    imatrix_ref=None):
     """The `oflm pack` line that reproduces this container, for the model card.
 
     Reconstructed from the parsed arguments rather than read from sys.argv,
@@ -99,7 +148,12 @@ def _packed_command(args, input_path, output_folder, source_model, prune_meta):
         cmd.append("--pad-to-fit")
     if prune_meta.get("kept"):
         cmd += ["--prune-ffn", str(args.prune_ffn)]
-        cmd += ["--imatrix", str(args.imatrix or "<path to the imatrix GGUF>")]
+        # The staged copy when there is one, so the command reproduces from the
+        # container alone. The fallback names a path rather than pretending:
+        # an unrunnable recipe is better than one that points at a file the
+        # reader has to guess the name of.
+        cmd += ["--imatrix", str(imatrix_ref or args.imatrix
+                                 or "<path to the imatrix GGUF>")]
     if getattr(args, "deploy_tag", None):
         cmd += ["--deploy", str(args.deploy_tag)]
     return " ".join(cmd)
@@ -430,6 +484,9 @@ def main(argv=None) -> int:
             model.convert(q4nx_path=output_folder, weights_type="vision")
         else:
             model.convert(q4nx_path=output_folder, weights_type=weights_type)
+        # Always empty here: --prune-ffn needs a GGUF source (the safetensors
+        # path has no imatrix to rank columns with), so there is nothing to ship.
+        prune_meta = _prune_meta(model)
         assemble_model_assets_hf(
             model.hf_source,
             model.q4nx_config,
@@ -438,9 +495,9 @@ def main(argv=None) -> int:
             oflm_version=oflm_version,
             source_file=source_file,
             model_arch=model.model_arch,
-            prune_meta=_prune_meta(model),
+            prune_meta=prune_meta,
             packed_with=_packed_command(
-                args, input_path, output_folder, source_model or hf_input, _prune_meta(model)),
+                args, input_path, output_folder, source_model or hf_input, prune_meta),
         )
     else:
         model = create_converter(input_path, args.force_model_type)
@@ -454,6 +511,10 @@ def main(argv=None) -> int:
             model.convert(q4nx_path=output_folder, weights_type="vision")
         else:
             model.convert(q4nx_path=output_folder, weights_type=weights_type)
+        prune_meta = _prune_meta(model)
+        # Staged AFTER the conversion and BEFORE the assets are written, so the
+        # recorded command names a file that is already in the directory it names.
+        imatrix_ref = _stage_imatrix(model, output_folder, prune_meta)
         assemble_model_assets(
             model.gguf_reader,
             model.q4nx_config,
@@ -462,9 +523,11 @@ def main(argv=None) -> int:
             oflm_version=oflm_version,
             source_file=source_file,
             model_arch=model.model_arch,
-            prune_meta=_prune_meta(model),
+            prune_meta=prune_meta,
             packed_with=_packed_command(
-                args, input_path, output_folder, source_model, _prune_meta(model)),
+                args, input_path, output_folder, source_model, prune_meta,
+                imatrix_ref=imatrix_ref),
+            imatrix_name=imatrix_ref.name if imatrix_ref else None,
         )
 
     if args.deploy_tag:

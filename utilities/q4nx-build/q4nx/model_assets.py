@@ -594,6 +594,11 @@ def _readme_banner(meta: dict) -> str:
         rows.append(
             f"| FFN | **pruned** {meta.get('prune_ffn_from')} -> "
             f"{meta['prune_ffn_kept']} by imatrix importance |")
+    if meta.get("imatrix_name"):
+        # The file is IN this repository, so the recipe below is runnable from
+        # the card alone. Saying so is the difference between a recorded command
+        # and one somebody has to reconstruct.
+        rows.append(f"| Importance matrix | `{meta['imatrix_name']}` (shipped) |")
     parts.append("\n".join(rows))
     if meta.get("prune_note"):
         # Directly under the table, before anything else: this is the one fact
@@ -1151,6 +1156,7 @@ def assemble_model_assets(
     model_arch: Optional[ModelArch] = None,
     prune_meta: Optional[dict] = None,
     packed_with: Optional[str] = None,
+    imatrix_name: Optional[str] = None,
 ) -> None:
     """Build a complete, uploadable model directory.
 
@@ -1242,6 +1248,8 @@ def assemble_model_assets(
         config["model_type"] = vision_model_type
     if packed_with:
         config["oflm_packed_with"] = packed_with
+    if imatrix_name:
+        config["oflm_imatrix"] = imatrix_name
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -1271,6 +1279,8 @@ def assemble_model_assets(
         _meta["prune_ffn_from"] = _pf.get("from")
         _meta["prune_ffn_retained"] = _pf.get("activation_mass_retained")
         _meta["mtp_dropped"] = config.get("oflm_mtp_dropped") or 0
+    if config.get("oflm_imatrix"):
+        _meta["imatrix_name"] = config["oflm_imatrix"]
     _meta["packed_with"] = config.get("oflm_packed_with")
     assemble_readme(output_dir, candidates, _meta, source_file)
 
