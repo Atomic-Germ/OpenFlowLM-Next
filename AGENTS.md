@@ -176,4 +176,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Diagnose real DeltaNet boundaries and validate compensated QKV/Z projections against immutable full-model fixtures.</description>
     <location>.opencode/skill/open-deltanet-projection-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-ab-carry</name>
+    <description>Build compensated banked AB projections, isolate dot and nonlinear errors, and replay immutable full-model fixtures.</description>
+    <location>.opencode/skill/open-wide-ab-carry/SKILL.md</location>
+  </skill>
 </available_skills>

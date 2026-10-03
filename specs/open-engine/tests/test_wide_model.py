@@ -254,3 +254,37 @@ def test_model_replay_validates_and_replaces_deltanet_projection(replay_fixture)
     (proj/'insts.bin').write_bytes(b'tampered')
     with pytest.raises(ValueError, match='artifact changed'):
         m.replay(source, out.parent/'tampered', kernel, deltanet_projection=proj)
+
+
+def test_model_replay_validates_and_replaces_banked_ab(replay_fixture):
+    m, source, kernel, out = replay_fixture
+    ab = kernel.parent/'ab'; ab.mkdir()
+    for n in ('final.xclbin', 'insts.bin'): (ab/n).write_bytes(b'ab')
+    geometry = dict(hidden=5120, key_heads=16, value_heads=48, key_dim=128, value_dim=128)
+    fixture = dict(geometry=geometry, sha256={n:m.sha(ab/n) for n in ('final.xclbin','insts.bin')})
+    (ab/'ab-fixture.json').write_text(json.dumps(fixture))
+    (ab/'ab-results.json').write_text(json.dumps(dict(passed=True)))
+    old = source/'ab-old'; old.write_bytes(b'old ab')
+    inst = source/'ab-old-insts'; inst.write_bytes(b'old insts')
+    cfg = source/'decode.cfg'
+    cfg.write_text(cfg.read_text()+f'xclbin d_ab {old}\nkernelx d_ab d_ab {inst}\n')
+    meta = json.loads((source/'slice-fixture.json').read_text())
+    meta['fixtures']['decode.cfg'] = m.sha(cfg)
+    meta['kernels'].update({str(p):m.sha(p) for p in (old,inst)})
+    (source/'slice-fixture.json').write_text(json.dumps(meta))
+    m.replay(source,out,kernel,deltanet_ab=ab)
+    assert f'xclbin d_ab {ab}/final.xclbin' in (out/'decode.cfg').read_text()
+    assert (out/'weights.bin').read_bytes() == b'weights'
+    geometry['hidden'] = 2560
+    (ab/'ab-fixture.json').write_text(json.dumps(fixture))
+    with pytest.raises(ValueError,match='AB geometry'):
+        m.replay(source,out.parent/'bad-width',kernel,deltanet_ab=ab)
+    geometry['hidden'] = 5120
+    (ab/'ab-fixture.json').write_text(json.dumps(fixture))
+    (ab/'ab-results.json').write_text(json.dumps(dict(passed=False)))
+    with pytest.raises(ValueError,match='AB primitive gate failed'):
+        m.replay(source,out.parent/'bad-gate',kernel,deltanet_ab=ab)
+    (ab/'ab-results.json').write_text(json.dumps(dict(passed=True)))
+    (ab/'insts.bin').write_bytes(b'changed')
+    with pytest.raises(ValueError,match='artifact changed'):
+        m.replay(source,out.parent/'bad-hash',kernel,deltanet_ab=ab)

@@ -77,6 +77,14 @@ error but a new layer61 residual failure. Tokens and reset pass; the mode remain
 experimental and PR4 incomplete. The next isolated boundary is layer10/head4 AB:
 its error reproduces the remaining gated-output BF16 difference at604.
 
+Follow-up (2026-10-03): [banked AB compensation](qwen38-ab-precision.md)
+makes all96 alpha/beta-logits at layer10 exact and closes head4 beta rounding.
+Full replay still fails four numerical checks; final residual/norm maxrel
+improve to0.01929895/0.00854701, but remain above their bounds. Two attention
+heads replace the previous head11/layer61 failures. The remaining layer10
+channel604 error is now local to post RMSNorm/gate. Defaults remain unchanged;
+PR4 is not complete.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

@@ -30,17 +30,23 @@ G = WideDeltaNet(hidden=int(os.environ.get("WIDE_DN_HIDDEN", "5120")),
                 key_heads=16, value_heads=48, key_dim=128, value_dim=128)
 
 
+CARRY = os.environ.get("WIDE_AB_CARRY") == "1"
+
+
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
 def wide_ab(side: In, xn: In, result: Out, *, dummy: CompileTime[int] = 0):
     elem = np.ndarray[(4096,), np.dtype[np.uint8]]
     xchunk = np.ndarray[(2048,), np.dtype[bfloat16]]
-    acc = np.ndarray[(32,), np.dtype[np.float32]]
+    acc = np.ndarray[(64 if CARRY else 32,), np.dtype[np.float32]]
     res = np.ndarray[(4 * G.value_heads,), np.dtype[np.float32]]
     side_ty = np.ndarray[(G.side_bytes,), np.dtype[np.uint8]]
     xn_ty = np.ndarray[(G.xn_chunks * 4096,), np.dtype[np.uint8]]
-    inc = include_dirs() + [str(GLUE)]
+    inc = include_dirs() + [str(GLUE), str(HERE.parent / "gemv_q4")]
     flags = [f"-DDNGLUE_NHEAD={G.value_heads}"]
-    fab = ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
+    if CARRY:
+        flags += ["-DWIDE_AB_CARRY=1", "-DGEMV_Q4_CORRECTION=1", "-DGEMV_Q4_PRODUCT_CORRECTION=1"]
+    fab = ExternalFunction("wide_ab_carry" if CARRY else "glue_ab_e",
+                           source_file=str(HERE / "ab_carry.cpp" if CARRY else GLUE / "glue_ab_e.cc"),
                            arg_types=[elem, xchunk, acc, np.int32, np.int32], include_dirs=inc,
                            compile_flags=flags)
     fcopy = ExternalFunction("glue_copy_xn", source_file=str(GLUE / "glue_copy.cc"),
@@ -94,5 +100,7 @@ DESIGN = wide_ab
 _sources = [Path(__file__), ROOT / "recipes/wide_deltanet.py", ROOT / "ironutil.py",
             ROOT / "include/vecmath.h", HERE / "ab_store.cc",
             *sorted(GLUE.glob("*.h")), GLUE / "glue_ab_e.cc", GLUE / "glue_copy.cc"]
+if CARRY:
+    _sources += [HERE / "ab_carry.cpp", HERE.parent / "gemv_q4/gemv_tab.h"]
 SPECIALIZE = {"dummy": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources)
-                                        + repr(G).encode()).hexdigest()[:8], 16)}
+                                        + repr((G, CARRY)).encode()).hexdigest()[:8], 16)}
