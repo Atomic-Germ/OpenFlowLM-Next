@@ -581,6 +581,11 @@ def _readme_banner(meta: dict) -> str:
         rows.append(f"| Source model | [`{source}`]({meta['source_url']}) |")
     elif source:
         rows.append(f"| Source model | `{source}` |")
+    if meta.get("source_repo"):
+        # The repo id is what re-resolves; the filename below is only a name and
+        # means nothing without it. Together the two are the download.
+        rows.append(f"| Source repo | [`{meta['source_repo']}`]"
+                    f"(https://huggingface.co/{meta['source_repo']}) |")
     if meta.get("source_file"):
         rows.append(f"| Source GGUF | `{meta['source_file']}` |")
     if meta.get("weight_size"):
@@ -1157,6 +1162,7 @@ def assemble_model_assets(
     prune_meta: Optional[dict] = None,
     packed_with: Optional[str] = None,
     imatrix_name: Optional[str] = None,
+    source_repo: Optional[str] = None,
 ) -> None:
     """Build a complete, uploadable model directory.
 
@@ -1250,6 +1256,11 @@ def assemble_model_assets(
         config["oflm_packed_with"] = packed_with
     if imatrix_name:
         config["oflm_imatrix"] = imatrix_name
+    if source_repo:
+        # Pairs with source_file (the filename chosen inside it). Either alone is
+        # ambiguous: a filename means nothing without its repo, and a repo does not
+        # say which of its GGUFs this artifact was built from.
+        config["oflm_source_repo"] = source_repo
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -1281,6 +1292,8 @@ def assemble_model_assets(
         _meta["mtp_dropped"] = config.get("oflm_mtp_dropped") or 0
     if config.get("oflm_imatrix"):
         _meta["imatrix_name"] = config["oflm_imatrix"]
+    if config.get("oflm_source_repo"):
+        _meta["source_repo"] = config["oflm_source_repo"]
     _meta["packed_with"] = config.get("oflm_packed_with")
     assemble_readme(output_dir, candidates, _meta, source_file)
 

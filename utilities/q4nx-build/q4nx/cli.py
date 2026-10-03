@@ -128,16 +128,23 @@ def _stage_imatrix(model, output_folder, prune_meta):
 
 
 def _packed_command(args, input_path, output_folder, source_model, prune_meta,
-                    imatrix_ref=None):
+                    imatrix_ref=None, source_repo=None):
     """The `oflm pack` line that reproduces this container, for the model card.
 
-    Reconstructed from the parsed arguments rather than read from sys.argv,
+Reconstructed from the parsed arguments rather than read from sys.argv,
     because `oflm pack` re-invokes this module through `python -c` and argv
-    would only show that wrapper. What decides the artifact is these flags, so
+    would only show that wrapper. What determines the artifact is these flags, so
     these flags are what the card records -- a finetune can then be packed the
-    same way the base was, without anyone having to remember.
+    same way as the base was, without anyone having to remember.
+
+    `-i` records the repo id when the pack came from one, never the file it
+    downloaded to. A resolved HF cache path names a content-addressed snapshot
+    on ONE machine: it does not resolve on the reader's, and it is not even the
+    same path after a cache eviction. The repo id re-resolves, and the exact
+    filename chosen is recorded beside it as the card's "Source GGUF" row, so
+    the pair says both which repository and which file in it.
     """
-    cmd = ["oflm pack", "-i", str(input_path), "-o", str(output_folder)]
+    cmd = ["oflm pack", "-i", str(source_repo or input_path), "-o", str(output_folder)]
     if source_model:
         cmd += ["-s", str(source_model)]
     if getattr(args, "force_model_type", ""):
@@ -310,6 +317,13 @@ def main(argv=None) -> int:
     input_path = args.input_flag or args.input_file
     if not input_path:
         sys.exit("Error: Input file is required. Use -i <file> or provide as positional argument.")
+
+    # What was ASKED for, before any resolution. A repo id is about to be
+    # replaced by the local file it downloads to -- a path under the HF cache
+    # carrying a content-addressed snapshot hash -- and that path is useless to
+    # anyone but this machine, so the repo id has to be kept to be recorded.
+    requested_input = input_path
+    source_repo = input_path if _is_hf_repo_id(input_path) else None
 
     # Reference oracle: usable either alongside a build (reference the freshly
     # built dir) or standalone against an existing model directory.
@@ -497,7 +511,8 @@ def main(argv=None) -> int:
             model_arch=model.model_arch,
             prune_meta=prune_meta,
             packed_with=_packed_command(
-                args, input_path, output_folder, source_model or hf_input, prune_meta),
+                args, input_path, output_folder, source_model or hf_input, prune_meta,
+                source_repo=source_repo),
         )
     else:
         model = create_converter(input_path, args.force_model_type)
@@ -526,8 +541,9 @@ def main(argv=None) -> int:
             prune_meta=prune_meta,
             packed_with=_packed_command(
                 args, input_path, output_folder, source_model, prune_meta,
-                imatrix_ref=imatrix_ref),
+                imatrix_ref=imatrix_ref, source_repo=source_repo),
             imatrix_name=imatrix_ref.name if imatrix_ref else None,
+            source_repo=source_repo,
         )
 
     if args.deploy_tag:
