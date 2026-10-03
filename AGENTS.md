@@ -46,4 +46,24 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
     <location>.opencode/skill/open-wide-deltanet-chain/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-dense-activation-stream</name>
+    <description>Build and validate layer_x Q4 projection probes at K5120/K6144 using depth-two streamed xn/xm inputs and actual main-core scratch.</description>
+    <location>.opencode/skill/open-dense-activation-stream/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-ln</name>
+    <description>Build and validate streamed residual RMSNorm at width 5120, including actual L1 placement and legacy 2048/4096 hardware regression.</description>
+    <location>.opencode/skill/open-wide-ln/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-lm-head</name>
+    <description>Build and validate the standalone Q8 LM head at K5120 with full vocabulary, production packing, independent FP64 references and K4096 regression.</description>
+    <location>.opencode/skill/open-wide-lm-head/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-attention</name>
+    <description>Build and validate Q24/KV4/HD256/ROT64 attention using the production ax worker, per-head gates, device-carried KV state and Q16/KV4 regression.</description>
+    <location>.opencode/skill/open-wide-attention/SKILL.md</location>
+  </skill>
 </available_skills>
