@@ -171,4 +171,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Merge shared WideDeltaNet and rolled-band upstream changes while preserving and checking later precision modes.</description>
     <location>.opencode/skill/qwen38-wide-main-integration/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-deltanet-projection-carry</name>
+    <description>Diagnose real DeltaNet boundaries and validate compensated QKV/Z projections against immutable full-model fixtures.</description>
+    <location>.opencode/skill/open-deltanet-projection-carry/SKILL.md</location>
+  </skill>
 </available_skills>

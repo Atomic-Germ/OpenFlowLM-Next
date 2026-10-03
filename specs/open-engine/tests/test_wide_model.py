@@ -219,3 +219,38 @@ def test_model_replay_validates_and_replaces_attention_projection(replay_fixture
     fixture['n']=5120;(proj/'projection-fixture.json').write_text(json.dumps(fixture))
     with pytest.raises(ValueError,match='attention projection geometry'):
         m.replay(source,out.parent/'invalid',kernel,attention_projection=proj)
+
+
+def test_model_replay_validates_and_replaces_deltanet_projection(replay_fixture):
+    m, source, kernel, out = replay_fixture
+    proj = kernel.parent / 'qz'
+    proj.mkdir()
+    for name in ('final.xclbin', 'insts.bin'):
+        (proj / name).write_bytes(b'qz')
+    fixture = dict(k=5120, n=16384, sha256={n: m.sha(proj/n) for n in ('final.xclbin', 'insts.bin')})
+    (proj/'projection-fixture.json').write_text(json.dumps(fixture))
+    (proj/'projection-results.json').write_text(json.dumps(dict(passed=True)))
+    old, inst = source/'old-qz', source/'old-qz-insts'
+    old.write_bytes(b'old qz'); inst.write_bytes(b'old inst')
+    cfg = source/'decode.cfg'
+    cfg.write_text(cfg.read_text()+f'xclbin d_qz {old}\nkernelx d_qz d_qz {inst}\n')
+    meta = json.loads((source/'slice-fixture.json').read_text())
+    meta['fixtures']['decode.cfg'] = m.sha(cfg)
+    meta['kernels'].update({str(p): m.sha(p) for p in (old, inst)})
+    (source/'slice-fixture.json').write_text(json.dumps(meta))
+    m.replay(source, out, kernel, deltanet_projection=proj)
+    assert f'xclbin d_qz {proj}/final.xclbin' in (out/'decode.cfg').read_text()
+    assert (out/'weights.bin').read_bytes() == b'weights'
+    fixture['n'] = 14336
+    (proj/'projection-fixture.json').write_text(json.dumps(fixture))
+    with pytest.raises(ValueError, match='DeltaNet projection geometry'):
+        m.replay(source, out.parent/'invalid', kernel, deltanet_projection=proj)
+    fixture['n'] = 16384
+    (proj/'projection-fixture.json').write_text(json.dumps(fixture))
+    (proj/'projection-results.json').write_text(json.dumps(dict(passed=False)))
+    with pytest.raises(ValueError, match='primitive gate failed'):
+        m.replay(source, out.parent/'failed', kernel, deltanet_projection=proj)
+    (proj/'projection-results.json').write_text(json.dumps(dict(passed=True)))
+    (proj/'insts.bin').write_bytes(b'tampered')
+    with pytest.raises(ValueError, match='artifact changed'):
+        m.replay(source, out.parent/'tampered', kernel, deltanet_projection=proj)

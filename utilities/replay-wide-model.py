@@ -15,7 +15,8 @@ def sha(path):
         return hashlib.file_digest(f,'sha256').hexdigest()
 
 
-def replay(source, out, kernel, *, ffn=None, attention=None, ln=None, attention_projection=None):
+def replay(source, out, kernel, *, ffn=None, attention=None, ln=None, attention_projection=None,
+           deltanet_projection=None):
     source, out, kernel = source.resolve(), out.resolve(), kernel.resolve()
     meta = json.loads((source/'slice-fixture.json').read_text())
     fixture = json.loads((kernel/'projection-fixture.json').read_text())
@@ -26,6 +27,14 @@ def replay(source, out, kernel, *, ffn=None, attention=None, ln=None, attention_
         raise ValueError('output projection primitive gate failed')
     replacements = dict(out=kernel)
     fixtures = dict(out=fixture)
+    if deltanet_projection is not None:
+        dp = deltanet_projection.resolve()
+        pf = json.loads((dp/'projection-fixture.json').read_text())
+        if (pf['k'],pf['n']) != (5120,16384):
+            raise ValueError('DeltaNet projection geometry must be K5120/N16384 (QKV then Z)')
+        if not json.loads((dp/'projection-results.json').read_text())['passed']:
+            raise ValueError('DeltaNet projection primitive gate failed')
+        replacements['d_qz'], fixtures['d_qz'] = dp, pf
     if attention_projection is not None:
         ap = attention_projection.resolve()
         pf = json.loads((ap/'projection-fixture.json').read_text())
@@ -107,5 +116,7 @@ if __name__ == '__main__':
     p.add_argument('--attention',type=Path)
     p.add_argument('--ln',type=Path)
     p.add_argument('--attention-projection',type=Path)
+    p.add_argument('--deltanet-projection',type=Path)
     a = p.parse_args()
-    replay(a.source,a.out,a.output_projection,ffn=a.ffn,attention=a.attention,ln=a.ln,attention_projection=a.attention_projection)
+    replay(a.source,a.out,a.output_projection,ffn=a.ffn,attention=a.attention,ln=a.ln,
+           attention_projection=a.attention_projection,deltanet_projection=a.deltanet_projection)

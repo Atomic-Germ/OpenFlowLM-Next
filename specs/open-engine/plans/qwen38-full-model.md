@@ -70,6 +70,13 @@ includes upstream/main b16e6ab via origin/main 0ceb46d. All8190 full-model
 captures match the preceding stage bytewise after rebuilding FFN. The six
 numerical failures remain; upstream's rolled-band fix targets H2560, not H5120.
 
+Follow-up (2026-10-03): [DeltaNet projection compensation](qwen38-deltanet-boundary.md)
+reduces layer10 QKV differences from8027 to1 and makes Z/conv-state exact.
+Full replay fails four numerical checks versus six, with lower final residual
+error but a new layer61 residual failure. Tokens and reset pass; the mode remains
+experimental and PR4 incomplete. The next isolated boundary is layer10/head4 AB:
+its error reproduces the remaining gated-output BF16 difference at604.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.
