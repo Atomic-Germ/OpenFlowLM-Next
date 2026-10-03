@@ -11,13 +11,20 @@ parent: Models
 - **Think:** No
 - **Tool Calling Support:** No
 - **Base Model:** [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
-- **Max Context Length:** NA
-- **Default Context Length:** NA
+- **Quantization:** Q4_1
+- **Max Context Length:** 448 tokens (the Whisper encoder window -- fixed, not configurable)
+- **Default Context Length:** 448 tokens
+
+> ⚠️ **The shipped `whisper-v3:turbo` container runs the closed engine.** It ships
+> only `model.q4nx`; the open Whisper path needs both `model.open.safetensors`
+> and a kernel set, which the published container does not have. Its decoder also
+> runs entirely on the host in fp32 -- the open Whisper README makes no NPU
+> performance claim for it.
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 
 > The ASR model must be used with an LLM (loaded concurrently) in CLI Mode.
-> The ASR model can be used as an independent ASR model in Server Mode (oflm v0.9.21 and after).
+> The ASR model can be used as an independent ASR model in Server Mode .
 
 ### CLI Mode   
 
@@ -78,11 +85,11 @@ client = OpenAI(
 )
 
 # Open the audio file in binary mode and create a transcription request
-# - model: name of the speech-to-text model exposed by OFLM (e.g., "whisper-v3")
+# - model: name of the speech-to-text model exposed by OFLM (e.g., "whisper-v3:turbo")
 # - file: file-like object pointing to your audio
 with open("audio.mp3", "rb") as f:
     resp = client.audio.transcriptions.create(
-        model="whisper-v3",
+        model="whisper-v3:turbo",
         file=f,
     )
 
@@ -100,7 +107,7 @@ print(resp.text)
 - Enter:
 > API Base URL: `http://127.0.0.1:52625/v1` (Open WebUI Desktop) or `http://host.docker.internal:52625/v1` (Open WebUI in Docker)   
 > API KEY: oflm (any value works)    
-> STT Model: whisper-large-v3-turbo (type in the model name; can be different)    
+> STT Model: whisper-v3:turbo (type the tag; can be a different ASR model)    
 - Save the setting.
 - You're ready to upload audio files! (Choose an LLM to load and use concurrently)
 

@@ -20,7 +20,7 @@ Tests should be **fast, focused, and coverage-rich**.
 
 ## Test Structure
 
-Tests live in `src/tests/`.
+Tests live in `src/test/`.
 
 **Common test types:**
 - **Unit tests** -- Test individual functions
@@ -94,10 +94,12 @@ private:
 
 ### Test Organization
 
-- **Unit tests** → `src/tests/unit/`
-- **Integration tests** → `src/tests/integration/`
-- **Kernel tests** → `src/tests/kernels/`
-- **CLI tests** → `src/tests/cli/`
+`src/test/` holds per-model harness directories and `common.mk`. The helpers
+`npu_test_setup()` and `add_npu_test()` come from `src/test/CMakeLists.txt`.
+There are no `unit/`, `integration/`, `kernels/` or `cli/` subdirectories --
+the four tests registered with CTest are standalone executables wired up
+inline in `src/CMakeLists.txt`: `oflm_smoke`, `openai_compat`,
+`OPEN-VISION-IMAGE-READ` and `bench_embed`.
 
 ---
 
@@ -126,7 +128,7 @@ ctest --preset linux-default --output-on-failure
 ctest --preset linux-default -V
 
 # Run specific test file
-ctest --preset linux-default -T <test_name>
+ctest --preset linux-default -R <test_name>
 ```
 
 ---
@@ -165,7 +167,7 @@ TEST(KernelDispatch, select_attention) {
 ```cpp
 TEST(CLI, run_command) {
     auto env = Env::create();
-    env.set("FLM_OPEN_KERNELS_DIR", "tests/kernels");
+    env.set("OFLM_OPEN_KERNELS_DIR", "tests/kernels");
     
     auto result = cmd("run", "test-model");
     
@@ -245,7 +247,7 @@ TEST(KernelVerification, manifest) {
 ctest --preset linux-default -V
 
 # Run specific test
-ctest --preset linux-default -T <test_name>
+ctest --preset linux-default -R <test_name>
 
 # Run with output on failure
 ctest --preset linux-default --output-on-failure
@@ -374,16 +376,15 @@ oflm bench qwen3.5:4b --ctx-len 131072
 - **Ask questions** on PRs or in issues
 
 **Test-specific resources:**
-- `src/tests/` -- Existing tests to follow
-- `src/tests/unit/` -- Unit test patterns
-- `src/tests/integration/` -- Integration test patterns
-- `src/tests/kernels/` -- Kernel test patterns
+- `src/test/` -- Existing harnesses to follow
+- `src/test/common.mk` -- Shared harness build fragment
+- `src/CMakeLists.txt` -- Where the CTest tests are registered
 
 ---
 
 ## Quick Links
 
 - [Code contributions](../contributing/code-contributions.md)
-- [Kernel contributions](../kernel-contributions.md)
-- [Documentation](../docs/contributing/doc-contributions.md)
-- [Tools](../docs/contributing/tool-contributions.md)
+- [Kernel contributions](kernel-contributions.md)
+- [Documentation](doc-contributions.md)
+- [Tools](tool-contributions.md)
