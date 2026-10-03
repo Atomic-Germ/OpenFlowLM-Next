@@ -153,8 +153,10 @@ passed**, maximum relative1.444e-5, minimum cosine0.999999999963. Reproduce with
 ## Next milestone
 
 Resume Track B on `implement-qwen38-27b-support`: integrate the separate chain
-into the 27B layer program; resolve main-core `acquire(3)` versus depth2 at
-H5120 and implement segmented FFN8192/8192/1024. Then validate the remaining
+into the 27B layer program and implement segmented FFN8192/8192/1024.
+The subsequent [dense input stage](dense-wide-input.md) resolved main-core
+`acquire(3)` versus depth2 and validated Q4 projections at K5120/K6144.
+Then validate the remaining
 primitive points, a real layer, the 8-layer slice and the full64-layer model.
 Model conversion, q4nx registration, packaging and LLM tests remain pending.
 
