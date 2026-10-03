@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.ir import Attribute, InsertionPoint
 from aie.iron import Buffer
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
@@ -36,6 +37,22 @@ from layout import R, SPEC, POOL_BYTES, POOL_DOWN, POOL_SHARE_DOWN, POOL_SHARE_G
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 ELEM = 4096
+
+# Band loops LLVM must leave rolled on the widths recipes/catalogue.py ROLLED_BANDS lists
+# (every other spec: a plain range_, so its cores compile exactly as before).
+from recipes.catalogue import rolled_bands  # noqa: E402
+ROLLED = rolled_bands(SPEC.family, SPEC.hidden)
+
+
+def band_range(n):
+    """range_(n) over a band's weight elements. On a ROLLED width the loop carries LLVM's
+    unroll.disable: scf-to-cf moves the attribute onto the latch branch, so `opt` sees
+    !llvm.loop {llvm.loop.unroll.disable} and keeps one call site instead of n."""
+    for i in range_(n):
+        if ROLLED:
+            InsertionPoint.current.block.owner.attributes["loop_annotation"] = Attribute.parse(
+                "#llvm.loop_annotation<unroll = <disable = true>>")
+        yield i
 
 
 def _gemv_prep_entry(k: int) -> Path:
@@ -296,7 +313,7 @@ def gemv_bands(win, yout, tab, gy, nbands, ngroups, per_band, rs, ms=None):
     picks between them with dst (-1 = this band's y element)."""
     for _ in range_(nbands):
         ye = yout.acquire(1)
-        for g in range_(ngroups):
+        for g in band_range(ngroups):
             we = win.acquire(1)
             if ms is None:
                 gy(we, tab, ye, g, per_band, rs)
@@ -364,11 +381,11 @@ def ffn_body(win, xin, yout, B, K):
 
     for _ in range_(FFN.UP_PC):
         ye = yout.acquire(1) if MIXED else None
-        for g in range_(ng_h):
+        for g in band_range(ng_h):
             we = win.acquire(1)
             band(we, ye, g, C.MS_U)
             win.release(1)
-        for g in range_(ng_h):
+        for g in band_range(ng_h):
             we = win.acquire(1)
             band(we, ye, g, C.MS_G)
             win.release(1)
