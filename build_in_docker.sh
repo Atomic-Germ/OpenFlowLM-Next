@@ -20,7 +20,7 @@ docker run --rm -it \
   -e CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
   -e CTEST_PARALLEL_LEVEL="$(nproc)" \
   -e NPU_CACHE_HOME=/root/.npu/cache \
-  -v "$PWD/build:/code/build" \
+  -v "$PWD:/code" \
   -v "$PWD/npu-cache:/root/.npu/cache" \
   "$IMAGE" \
   cmake --workflow --preset "$PRESET"
