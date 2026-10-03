@@ -16,7 +16,7 @@ def sha(path):
 
 
 def replay(source, out, kernel, *, ffn=None, attention=None, ln=None, attention_projection=None,
-           deltanet_projection=None, deltanet_ab=None):
+           deltanet_projection=None, deltanet_ab=None, deltanet_post=None):
     source, out, kernel = source.resolve(), out.resolve(), kernel.resolve()
     meta = json.loads((source/'slice-fixture.json').read_text())
     fixture = json.loads((kernel/'projection-fixture.json').read_text())
@@ -27,6 +27,15 @@ def replay(source, out, kernel, *, ffn=None, attention=None, ln=None, attention_
         raise ValueError('output projection primitive gate failed')
     replacements = dict(out=kernel)
     fixtures = dict(out=fixture)
+    if deltanet_post is not None:
+        post = deltanet_post.resolve()
+        pf = json.loads((post/'post-fixture.json').read_text())
+        if pf['heads'] != 48 or pf['trace'] or pf['diagnostic_only']:
+            raise ValueError('post geometry must be 48 heads without trace or conditional fixtures')
+        pr = json.loads((post/'post-results.json').read_text())
+        if not pr['passed'] or pr['diagnostic_only']:
+            raise ValueError('post primitive gate failed or is diagnostic only')
+        replacements['d_post'], fixtures['d_post'] = post, pf
     if deltanet_ab is not None:
         ab = deltanet_ab.resolve()
         af = json.loads((ab/'ab-fixture.json').read_text())
@@ -126,7 +135,8 @@ if __name__ == '__main__':
     p.add_argument('--attention-projection',type=Path)
     p.add_argument('--deltanet-projection',type=Path)
     p.add_argument('--deltanet-ab',type=Path)
+    p.add_argument('--deltanet-post',type=Path)
     a = p.parse_args()
     replay(a.source,a.out,a.output_projection,ffn=a.ffn,attention=a.attention,ln=a.ln,
            attention_projection=a.attention_projection,deltanet_projection=a.deltanet_projection,
-           deltanet_ab=a.deltanet_ab)
+           deltanet_ab=a.deltanet_ab,deltanet_post=a.deltanet_post)

@@ -85,6 +85,15 @@ heads replace the previous head11/layer61 failures. The remaining layer10
 channel604 error is now local to post RMSNorm/gate. Defaults remain unchanged;
 PR4 is not complete.
 
+Follow-up (2026-10-03): [DeltaNet post product carry](qwen38-post-precision.md)
+closes layer10/channel604 and all three downstream xm differences. The first23
+norm boundaries now match (previously21); the next is layer11/xm[4872], with
+propagated residual error and exact conditional norm. All4122 decode checks
+pass, including final_norm, but four slice checks still fail (18892/18896).
+The combined gate remains failed, with new layer55 residual and cold-2/layer39
+head4 failures. Compensation stays opt-in and has a substantial isolated-call
+cost; PR4 is incomplete.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

@@ -12,13 +12,21 @@
 #include "vecmath.h"
 #endif
 
+#if POST_CARRY
+#include "post_carry.h"
+#endif
+
 static constexpr unsigned kHD = 128;
 static constexpr unsigned kV = 32;
 static constexpr unsigned kHeads = 8;
 
 extern "C" {
 void post_fn(const float *__restrict o, const float *__restrict z, const bfloat16 *__restrict nw,
-             bfloat16 *__restrict og) {
+             bfloat16 *__restrict og
+#if POST_TRACE
+             , float *__restrict trace
+#endif
+             ) {
   aie::set_rounding(aie::rounding_mode::conv_even);
 #pragma clang loop unroll(disable)
   for (unsigned h = 0; h < kHeads; ++h) {
@@ -32,14 +40,36 @@ void post_fn(const float *__restrict o, const float *__restrict z, const bfloat1
       const v32f v = aie::load_v<kV>(oh + j);
       ss = aie::add(ss, precise_mulN<kV>(v, v));
     }
-    const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + 1e-6f);
+    const float sum_sq = aie::reduce_add(ss.template to_vector<float>());
+    const float inv = srsqrt(sum_sq * (1.0f / kHD) + 1e-6f);
 #pragma clang loop unroll(disable)
     for (unsigned j = 0; j < kHD; j += kV) {
+#if POST_CARRY
+      const auto ov = aie::load_v<kV>(oh+j), zv = aie::load_v<kV>(zh+j);
+      const auto iv = aie::broadcast<float,kV>(inv);
+      accf32 weight(aie::load_v<kV>(nw+j));
+      const auto wv = weight.to_vector<float>();
+      const auto sigmoid = post_sigmoid(zv);
+      const auto r = post_product(ov,iv,wv,zv,sigmoid);
+#if POST_TRACE
+      const auto on = ln_mul_rne(ov,iv), t = ln_mul_rne(on,wv), sz = ln_mul_rne(zv,sigmoid);
+#endif
+#else
       const v32f on = precise_mulN<kV>(aie::load_v<kV>(oh + j), aie::broadcast<float, kV>(inv));
       accf32 weight(aie::load_v<kV>(nw + j));
       const v32f t = precise_mulN<kV>(on, weight.template to_vector<float>());
       const v32f sz = precise_siluN<kV>(aie::load_v<kV>(zh + j));
       const v32f r = precise_mulN<kV>(t, sz);
+#endif
+#if POST_TRACE
+      const unsigned off = h * kHD + j;
+      aie::store_v(trace + off, aie::broadcast<float,kV>(sum_sq));
+      aie::store_v(trace + 1024 + off, aie::broadcast<float,kV>(inv));
+      aie::store_v(trace + 2048 + off, on);
+      aie::store_v(trace + 3072 + off, t);
+      aie::store_v(trace + 4096 + off, sz);
+      aie::store_v(trace + 5120 + off, r);
+#endif
       accf32 rr;
       rr.from_vector(r);
       aie::store_v(gh + j, rr.template to_vector<bfloat16>());

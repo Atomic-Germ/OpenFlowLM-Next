@@ -181,4 +181,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build compensated banked AB projections, isolate dot and nonlinear errors, and replay immutable full-model fixtures.</description>
     <location>.opencode/skill/open-wide-ab-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-wide-post-carry</name>
+    <description>Trace DeltaNet post rounding, build compensated five-factor products for 32/48 heads, and replay immutable full-model fixtures.</description>
+    <location>.opencode/skill/open-wide-post-carry/SKILL.md</location>
+  </skill>
 </available_skills>

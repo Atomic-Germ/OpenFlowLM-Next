@@ -288,3 +288,34 @@ def test_model_replay_validates_and_replaces_banked_ab(replay_fixture):
     (ab/'insts.bin').write_bytes(b'changed')
     with pytest.raises(ValueError,match='artifact changed'):
         m.replay(source,out.parent/'bad-hash',kernel,deltanet_ab=ab)
+
+
+def test_model_replay_requires_nondiagnostic_48_head_post(replay_fixture):
+    m,source,kernel,out=replay_fixture
+    post=kernel.parent/'post';post.mkdir()
+    for n in ('final.xclbin','insts.bin'):(post/n).write_bytes(b'post')
+    fixture=dict(heads=48,trace=False,diagnostic_only=False,
+                 sha256={n:m.sha(post/n) for n in ('final.xclbin','insts.bin')})
+    (post/'post-fixture.json').write_text(json.dumps(fixture))
+    (post/'post-results.json').write_text(json.dumps(dict(passed=True,diagnostic_only=False)))
+    old=source/'old-post';old.write_bytes(b'old')
+    inst=source/'old-post-insts';inst.write_bytes(b'old insts')
+    cfg=source/'decode.cfg';cfg.write_text(cfg.read_text()+f'xclbin d_post {old}\nkernelx d_post d_post {inst}\n')
+    meta=json.loads((source/'slice-fixture.json').read_text());meta['fixtures']['decode.cfg']=m.sha(cfg)
+    meta['kernels'].update({str(p):m.sha(p) for p in (old,inst)})
+    (source/'slice-fixture.json').write_text(json.dumps(meta))
+    m.replay(source,out,kernel,deltanet_post=post)
+    assert f'xclbin d_post {post}/final.xclbin' in (out/'decode.cfg').read_text()
+    for key,value in (('heads',32),('trace',True),('diagnostic_only',True)):
+        bad=dict(fixture,**{key:value});(post/'post-fixture.json').write_text(json.dumps(bad))
+        with pytest.raises(ValueError,match='post geometry'):
+            m.replay(source,out.parent/'bad',kernel,deltanet_post=post)
+    (post/'post-fixture.json').write_text(json.dumps(fixture))
+    for bad in (dict(passed=False,diagnostic_only=False),dict(passed=True,diagnostic_only=True)):
+        (post/'post-results.json').write_text(json.dumps(bad))
+        with pytest.raises(ValueError,match='post primitive gate'):
+            m.replay(source,out.parent/'bad-gate',kernel,deltanet_post=post)
+    (post/'post-results.json').write_text(json.dumps(dict(passed=True,diagnostic_only=False)))
+    (post/'insts.bin').write_bytes(b'changed')
+    with pytest.raises(ValueError,match='artifact changed'):
+        m.replay(source,out.parent/'bad-hash',kernel,deltanet_post=post)
