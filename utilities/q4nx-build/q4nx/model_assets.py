@@ -277,10 +277,22 @@ def _gguf_quant_priority(
     return GGUF_QUANT_PRIORITY
 
 
+def _is_auxiliary_gguf(filename: str) -> bool:
+    """True for a GGUF that is not the language model -- an mmproj, in practice.
+
+    llama.cpp writes the vision projector as `mmproj-<model>-<quant>.gguf`. It
+    shares the model's quant token, so any quant-preference search finds it, and
+    it is not convertible as a language model: it has no block layers, and
+    packing it produces a container with no layers in it.
+    """
+    return "mmproj" in os.path.basename(filename).lower()
+
+
 def select_repo_gguf(
     repo_id: str,
     override_model_arch: str = "",
     family_hint: Optional[str] = None,
+    pin_quant: Optional[str] = None,
 ) -> Optional[str]:
     """Pick the best quantized GGUF filename in an HF repo, without downloading.
 
@@ -303,10 +315,49 @@ def select_repo_gguf(
         f for f in files if f.lower().endswith(".gguf")
     ]
     priority = _gguf_quant_priority(override_model_arch, repo_id, gguf_filenames, family_hint)
+    if pin_quant:
+        # `-i repo:Q8_0` narrows the search to that one quant instead of
+        # re-deriving a preference order, so the card's recipe keeps producing
+        # this artifact after the repo gains a better-quantized file.
+        #
+        # Deliberately NOT validated against GGUF_QUANT_PRIORITY: that list is a
+        # preference order for an unpinned search, and it is narrower than what
+        # the repos actually ship (no q4_k, though Q4_K_M sources are the ones
+        # 2f4a8e1 was written for). A pin is explicit intent, so it is checked
+        # against the REPO's filenames instead, and a pin nothing matches is an
+        # error naming what is there -- never a silent fall back to a preference
+        # pick, which would pack a different quant than the card records.
+        want = pin_quant.lower()
+        if not any(want in os.path.basename(f).lower() for f in gguf_filenames):
+            raise ValueError(
+                f"{repo_id} has no {want.upper()} GGUF. It has: "
+                + (", ".join(sorted(os.path.basename(f) for f in gguf_filenames))
+                   or "(no GGUFs)"))
+
+    # An mmproj is the VISION projector, never the language model, and it carries
+    # the same quant token as the model beside it -- so it matches at the same
+    # priority index and then wins the alphabetical tiebreak ("mmproj-..." sorts
+    # before the model name). Left unfiltered, `oflm pack -i <a VLM GGUF repo>`
+    # picked mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf and converted a projector as if
+    # it were a 8B language model. Nothing downstream can catch it: the pack
+    # succeeds, and the container is a projector.
+    candidates = [f for f in gguf_filenames
+                  if not _is_auxiliary_gguf(f)
+                  and (not pin_quant or pin_quant.lower() in os.path.basename(f).lower())]
+    if not candidates:
+        print(f"[WARN] {repo_id} has GGUFs but none of them are a language model "
+              f"(only auxiliary projectors)")
+        return None
 
     matches = []  # (priority_index, filename)
     other_ggufs = []
-    for fname in gguf_filenames:
+    for fname in candidates:
+        if pin_quant:
+            # Already narrowed to the pinned quant, which need not be a token the
+            # preference order knows (q4_k, f16). Every survivor is equally
+            # wanted, so the tiebreak is the filename alone.
+            matches.append((0, fname))
+            continue
         low = os.path.basename(fname).lower()
         found = next(
             (q for q in priority if q in low), None
@@ -332,6 +383,7 @@ def find_repo_gguf(
     repo_id: str,
     override_model_arch: str = "",
     family_hint: Optional[str] = None,
+    pin_quant: Optional[str] = None,
 ) -> Optional[Tuple[str, str]]:
     """Search an HF repo for a quantized GGUF, in family-preferred order.
 
@@ -344,7 +396,7 @@ def find_repo_gguf(
     Returns (local_path, repo_filename) using the HF cache (downloading if
     needed), or None if the repo has no matching GGUF.
     """
-    filename = select_repo_gguf(repo_id, override_model_arch, family_hint)
+    filename = select_repo_gguf(repo_id, override_model_arch, family_hint, pin_quant)
     if filename is None:
         return None
     path = _hf_download_file(repo_id, filename)

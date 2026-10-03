@@ -27,6 +27,29 @@ def _is_hf_repo_id(path: str) -> bool:
     return len(parts) == 2 and all(parts) and "\\" not in path
 
 
+def _split_repo_quant(spec: str):
+    """`-i org/name:Q8_0` -> (repo_id, "q8_0"); anything else -> (spec, None).
+
+    llama.cpp's syntax, so the coordinate a reader already has off a model page
+    works unchanged. The quant is a PIN rather than a preference: it is the only
+    thing that keeps a recorded recipe producing the same artifact once the repo
+    gains a better-quantized file.
+
+    Only split when what precedes the colon is itself a repo id. A Windows path
+    (`D:/models/x.gguf`) contains a colon and must survive intact, and a quant
+    token is not a path -- so requiring the `org/name` shape on the left is what
+    keeps the two apart.
+    """
+    if not spec or ":" not in spec or spec.endswith(".gguf"):
+        return spec, None
+    head, _, tail = spec.rpartition(":")
+    if not head or "/" not in head:
+        return spec, None
+    if not _is_hf_repo_id(head):
+        return spec, None
+    return head, tail.strip().lower()
+
+
 def _is_hf_source(path: str) -> bool:
     """True if path is a local HF-safetensors model dir."""
     if os.path.isdir(path):
@@ -128,7 +151,7 @@ def _stage_imatrix(model, output_folder, prune_meta):
 
 
 def _packed_command(args, input_path, output_folder, source_model, prune_meta,
-                    imatrix_ref=None, source_repo=None):
+                    imatrix_ref=None, source_repo=None, pin_quant=None):
     """The `oflm pack` line that reproduces this container, for the model card.
 
 Reconstructed from the parsed arguments rather than read from sys.argv,
@@ -144,7 +167,12 @@ Reconstructed from the parsed arguments rather than read from sys.argv,
     filename chosen is recorded beside it as the card's "Source GGUF" row, so
     the pair says both which repository and which file in it.
     """
-    cmd = ["oflm pack", "-i", str(source_repo or input_path), "-o", str(output_folder)]
+    # The pin goes back into the recorded command: dropping it would leave a
+    # recipe that re-runs the preference search and can pick a different file.
+    src = source_repo or input_path
+    if pin_quant:
+        src = f"{src}:{pin_quant.upper()}"
+    cmd = ["oflm pack", "-i", str(src), "-o", str(output_folder)]
     if source_model:
         cmd += ["-s", str(source_model)]
     if getattr(args, "force_model_type", ""):
@@ -228,6 +256,12 @@ def _parse_args(argv):
              "skeleton). Default: the first ancestor in the repo card's "
              "base_model chain with an {org}/{base}-NPU2 mirror "
              "(orgs: Atomic-Germ, then OpenFlowLM).",
+    )
+    parser.add_argument(
+        "--source-repo", dest="source_repo", default=None, metavar="ORG/NAME",
+        help="Declare the HF repo a LOCAL GGUF came from, so the recorded pack "
+             "command names a repo instead of a path only this machine has. Use "
+             "with -i <file.gguf>; ignored when -i is already a repo id.",
     )
     parser.add_argument(
         "--dry-run", dest="dry_run", action="store_true",
@@ -323,7 +357,15 @@ def main(argv=None) -> int:
     # carrying a content-addressed snapshot hash -- and that path is useless to
     # anyone but this machine, so the repo id has to be kept to be recorded.
     requested_input = input_path
-    source_repo = input_path if _is_hf_repo_id(input_path) else None
+    input_path, pin_quant = _split_repo_quant(input_path)
+    # --source-repo says "this local GGUF came from that repo". Without it a
+    # locally downloaded file has no coordinate at all, and its card cannot be
+    # reproduced from by anyone -- including its author, once the file moves.
+    source_repo = args.source_repo or (input_path if _is_hf_repo_id(input_path) else None)
+    if args.source_repo and _is_hf_repo_id(input_path):
+        print("[WARN] --source-repo names the repo the GGUF came from, but -i is "
+              "already a repo id. Ignoring it; -i wins.")
+        source_repo = input_path
 
     # Reference oracle: usable either alongside a build (reference the freshly
     # built dir) or standalone against an existing model directory.
@@ -453,11 +495,13 @@ def main(argv=None) -> int:
     selected_gguf = None
     if _is_hf_repo_id(input_path):
         if args.dry_run:
-            selected_gguf = select_repo_gguf(input_path, args.force_model_type, family_hint)
+            selected_gguf = select_repo_gguf(input_path, args.force_model_type, family_hint,
+                                             pin_quant)
             if selected_gguf is None:
                 hf_input = input_path
         else:
-            found = find_repo_gguf(input_path, args.force_model_type, family_hint=family_hint)
+            found = find_repo_gguf(input_path, args.force_model_type,
+                                   family_hint=family_hint, pin_quant=pin_quant)
             if found is not None:
                 input_path, source_file = found
                 source_model = source_model or input_path
@@ -512,7 +556,7 @@ def main(argv=None) -> int:
             prune_meta=prune_meta,
             packed_with=_packed_command(
                 args, input_path, output_folder, source_model or hf_input, prune_meta,
-                source_repo=source_repo),
+                source_repo=source_repo, pin_quant=pin_quant),
         )
     else:
         model = create_converter(input_path, args.force_model_type)
@@ -541,7 +585,7 @@ def main(argv=None) -> int:
             prune_meta=prune_meta,
             packed_with=_packed_command(
                 args, input_path, output_folder, source_model, prune_meta,
-                imatrix_ref=imatrix_ref, source_repo=source_repo),
+                imatrix_ref=imatrix_ref, source_repo=source_repo, pin_quant=pin_quant),
             imatrix_name=imatrix_ref.name if imatrix_ref else None,
             source_repo=source_repo,
         )
