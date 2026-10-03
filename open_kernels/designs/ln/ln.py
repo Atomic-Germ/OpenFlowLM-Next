@@ -114,5 +114,6 @@ def ln(x: In, add: In, w: In, y: Out, xn: Out, *, n: CompileTime[int] = 2048, ep
 DESIGN = ln
 _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) +
                 [(HERE / "ln.h").read_bytes(), (HERE / "ln_stream.py").read_bytes(),
-                 (HERE.parent.parent / "include" / "vecmath.h").read_bytes()])
+                 (HERE.parent.parent / "include" / "vecmath.h").read_bytes(),
+                 (HERE.parent.parent / "include" / "vecmath_precise.h").read_bytes()])
 SPECIALIZE = {"n": N, "eps": int(round(-1e6 * __import__("math").log10(EPS))) if EPS > 0 else 0, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

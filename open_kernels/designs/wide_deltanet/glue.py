@@ -5,6 +5,7 @@ Other BOs: qkv f32[10240], old/new conv state bf16[3,10240], records f32[48,512]
 The same design serves both hidden widths: xn is consumed by the AB dispatch.
 """
 import hashlib
+import os
 from pathlib import Path
 import sys
 
@@ -31,6 +32,7 @@ KEY_TILES = 2 * KEY_WIDTH // TILE
 VALUE_TILES = NT - KEY_TILES
 HEADS_PER_TILE = TILE // HD
 SIDE_BYTES = 4096 + NT * 4 * TILE * 2
+PRECISE = os.environ.get("DNGLUE_PRECISE") == "1"
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -47,6 +49,8 @@ def wide_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out,
     vec_ty = np.ndarray[(NHEAD * 512,), np.dtype[np.float32]]
     inc = include_dirs() + [str(GLUE)]
     flags = [f"-DDNGLUE_NHEAD={NHEAD}"]
+    if PRECISE:
+        flags.append("-DDNGLUE_PRECISE=1")
     fload = ExternalFunction("wide_glue_load_ab", source_file=str(HERE / "load_ab.cc"),
                              arg_types=[u8s, heads, heads], include_dirs=inc, compile_flags=flags)
     fconv = ExternalFunction("glue_conv", source_file=str(GLUE / "glue_conv.cc"),
@@ -109,4 +113,6 @@ def wide_glue(side: In, qkv: In, state: In, nstate: Out, vec: Out,
 DESIGN = wide_glue
 _sources = [Path(__file__), HERE / "load_ab.cc", ROOT / "ironutil.py", ROOT / "include/vecmath.h",
             GLUE / "dn_glue.h", GLUE / "glue_conv.cc", GLUE / "glue_emit.cc"]
-SPECIALIZE = {"dummy": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources)).hexdigest()[:8], 16)}
+if PRECISE:
+    _sources.append(ROOT / "include/vecmath_precise.h")
+SPECIALIZE = {"dummy": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources) + str(PRECISE).encode()).hexdigest()[:8], 16)}

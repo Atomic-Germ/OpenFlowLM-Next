@@ -1191,6 +1191,33 @@ layout `glue_ab` reads. Images are refused as on the other VLM families.
   buffers plus stack occupy59392 B/core. FFN xm has unit/IR coverage only;
   whole-layer placement still hits the fused glue DMA limit. See the
   [wide input report](plans/dense-wide-input.md). No catalogue promotion.
+- **Segmented dense down.** When a full FFN table cannot fit L1 even with
+  one-chunk weight elements, the dense composition uses8192-wide segments.
+  H5120/FF17408 uses8192+8192+1024, segment-major across all output bands,
+  slicing the original Q4 pool and retaining partials in reusable ds scratch.
+  Partial/final down comparisons pass44 hardware gates. The subsequent precise
+  SiLU/product path resolves an h-to-bf16 rounding amplification: full FFN now
+  passes13 synthetic inputs, with and without up/gate tracing. Its optional
+  vector helper retains three bf16 components and six products; legacy TUs
+  remain unchanged. See [precision report](plans/dense-ffn-precision.md).
+  Whole-layer integration remains behind `OPEN_KERNELS_UNVALIDATED`; mixed Q8 is unimplemented.
+  See [segmented FFN report](plans/segmented-dense-ffn.md). No model/catalogue promotion.
+
+- **Complete synthetic wide DeltaNet layer.** A byte-only composition
+  of standalone LN, QKV/Z, AB, glue, recurrence, post, output projection and
+  segmented FFN executes cold/warm four-token sequences plus reset repeat.
+  Production128-active/140-padded state rows and separate AB bank regions are
+  adapted explicitly. Corrected Q4, precise conv and compensated recurrence
+  close the original precision failure:874 checks pass, worst final
+  maxrel0.00017123 versus0.005. See the [precision follow-up](plans/wide-deltanet-precision.md).
+- **Complete synthetic wide attention layer.** Production Q4 packing and
+  Q/K/V/gate projection, Q24/KV4/HD256/ROT64 attention, residual RMSNorm and
+  segmented FFN pass458 checks over63 NPU dispatches. The device carries its
+  KV cache across cold/warm sequences at positions0–3 and253–256. Worst final
+  maxrel1.66353e-5 versus0.005; per-head and strict conditional gates also pass.
+  See the [attention-layer report](plans/wide-attention-layer.md). Both layer
+  gates use sequential standalone contexts, not fused placement. The8-layer
+  slice, runtime/model integration and catalogue promotion remain pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;

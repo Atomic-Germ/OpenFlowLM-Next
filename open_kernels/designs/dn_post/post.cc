@@ -1,7 +1,16 @@
 // DeltaNet post step for 8 heads (one 4 KB element of o and of z):
 //   og[h] = bf16( o[h] * rsqrt(mean(o[h]^2) + 1e-6) * ssm_norm_w * silu(z[h]) )
 // (tools/kernel-interp/decode_step.py: og = (rms(o) * nw).reshape(4096) * z_silu)
+// Keep legacy fused arithmetic unchanged. Standalone acceptance at both
+// 32 and 48 heads opts into the precise BF16-boundary path.
+#ifndef POST_PRECISE
+#define POST_PRECISE 0
+#endif
+#if POST_PRECISE
+#include "vecmath_precise.h"
+#else
 #include "vecmath.h"
+#endif
 
 static constexpr unsigned kHD = 128;
 static constexpr unsigned kV = 32;
@@ -16,6 +25,26 @@ void post_fn(const float *__restrict o, const float *__restrict z, const bfloat1
     const float *oh = o + h * kHD;
     const float *zh = z + h * kHD;
     bfloat16 *gh = og + h * kHD;
+#if POST_PRECISE
+    accf32 ss = aie::zeros<accfloat, kV>();
+#pragma clang loop unroll(disable)
+    for (unsigned j = 0; j < kHD; j += kV) {
+      const v32f v = aie::load_v<kV>(oh + j);
+      ss = aie::add(ss, precise_mulN<kV>(v, v));
+    }
+    const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kHD) + 1e-6f);
+#pragma clang loop unroll(disable)
+    for (unsigned j = 0; j < kHD; j += kV) {
+      const v32f on = precise_mulN<kV>(aie::load_v<kV>(oh + j), aie::broadcast<float, kV>(inv));
+      accf32 weight(aie::load_v<kV>(nw + j));
+      const v32f t = precise_mulN<kV>(on, weight.template to_vector<float>());
+      const v32f sz = precise_siluN<kV>(aie::load_v<kV>(zh + j));
+      const v32f r = precise_mulN<kV>(t, sz);
+      accf32 rr;
+      rr.from_vector(r);
+      aie::store_v(gh + j, rr.template to_vector<bfloat16>());
+    }
+#else
     accf32 ss = aie::zeros<accfloat, kV>();
 #pragma clang loop unroll(disable)
     for (unsigned j = 0; j < kHD; j += kV) {
@@ -40,6 +69,7 @@ void post_fn(const float *__restrict o, const float *__restrict z, const bfloat1
       rr.from_vector(r);
       aie::store_v(gh + j, rr.template to_vector<bfloat16>());
     }
+#endif
   }
 }
 }

@@ -1,6 +1,10 @@
 // DeltaNet pass 1 entry point (one TU per entry point: IRON compiles the
 // source once per ExternalFunction).
+#if DN_STEP_PRECISE
+#include "dn_step_precise.h"
+#else
 #include "dn_step.h"
+#endif
 
 extern "C" {
 void dn_pass1(const float *__restrict S, const float *__restrict vec, float *__restrict t,

@@ -95,7 +95,10 @@ Validated xclbin SHA256:
 - K5120: `99ef54ddf2621bd984bfde8a6c36282c1a0eb205a05505aa9294ea4c98b401a4`
 - K6144: `e4c93d4518900b9124544f7b6a434ecaf35e748b6d7eada7601b170125e2fb8e`
 
-Next: segmented down GEMV8192+8192+1024, with segment-major scheduling across
+Subsequent stage: [segmented dense FFN](segmented-dense-ffn.md) implements and
+validates the down projection; its full-FFN accuracy gate remains open.
+
+Next at the time of this stage: segmented down GEMV8192+8192+1024, with segment-major scheduling across
 output bands, local partial accumulation and unchanged packed matrix layout;
 integrate the separate AB/conv/recurrence chain. LN5120, LM head5120, attention
 24/4/256/64, real layers and model validation remain outstanding. These tests

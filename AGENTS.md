@@ -52,6 +52,16 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <location>.opencode/skill/open-dense-activation-stream/SKILL.md</location>
   </skill>
   <skill>
+    <name>open-segmented-dense</name>
+    <description>Build and validate segmented dense Q4 down GEMV at K17408, segment-major DMA and local accumulation, including the remaining full-FFN bf16 rounding accuracy gate.</description>
+    <location>.opencode/skill/open-segmented-dense/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-dense-ffn-precision</name>
+    <description>Reproduce the strict synthetic FFN accuracy gate with up/gate traces, precise vector SiLU, and scale-invariant cosine for tiny tensors.</description>
+    <location>.opencode/skill/open-dense-ffn-precision/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-wide-ln</name>
     <description>Build and validate streamed residual RMSNorm at width 5120, including actual L1 placement and legacy 2048/4096 hardware regression.</description>
     <location>.opencode/skill/open-wide-ln/SKILL.md</location>
@@ -65,5 +75,20 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <name>open-wide-attention</name>
     <description>Build and validate Q24/KV4/HD256/ROT64 attention using the production ax worker, per-head gates, device-carried KV state and Q16/KV4 regression.</description>
     <location>.opencode/skill/open-wide-attention/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-deltanet-layer</name>
+    <description>Build the baseline synthetic H5120/FF17408 DeltaNet layer, prerequisite kernels and padded state adapters.</description>
+    <location>.opencode/skill/open-wide-deltanet-layer/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-deltanet-precision</name>
+    <description>Build and validate the corrected Q4, precise conv and compensated recurrence composition that closes the synthetic H5120 DeltaNet layer gate.</description>
+    <location>.opencode/skill/open-wide-deltanet-precision/SKILL.md</location>
+  </skill>
+  <skill>
+    <name>open-wide-attention-layer</name>
+    <description>Build and validate the complete synthetic H5120/FF17408 attention layer with production packing, segmented FFN and persistent device KV cache.</description>
+    <location>.opencode/skill/open-wide-attention-layer/SKILL.md</location>
   </skill>
 </available_skills>

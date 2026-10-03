@@ -110,6 +110,13 @@ insts.bin      29fe75a6fbfc46032ec6adfef5cbbdd97d4cdd7ae42a3c0c16de019211eef05e
 ln-results.json 36d5dcaed5697de4bc17d22a7f158127cc9c6c9487f0e82d26e8fc57fefe9c14
 ```
 
+## Follow-up
+
+The [complete DeltaNet layer bring-up](wide-deltanet-layer.md) replaces the wide
+streamed norm products with the precise helper. Its12 standalone cases now
+have exact BF16 xn; placed data remains57472 B and text becomes3808 B.
+The hashes above describe the original primitive milestone, not that rebuild.
+
 ## Remaining gates
 
 Follow-up: [LM head K5120](wide-lm-head.md) passes full-vocabulary hardware

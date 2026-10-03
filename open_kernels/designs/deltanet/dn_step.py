@@ -31,6 +31,7 @@ HERE = Path(__file__).parent
 
 D = 128
 HEADS = int(os.environ.get("DN_HEADS", 32))
+PRECISE = os.environ.get("DN_STEP_PRECISE") == "1"
 SLICE_ROWS = 16
 NBLK = D // SLICE_ROWS
 VEC = 512                       # fp32 per head: k, q, v, decay, beta, pad
@@ -49,6 +50,8 @@ def _include_dirs() -> list[str]:
     root = Path(config.cxx_header_path()) / "aie_kernels"
     inc.append(str(root))
     inc.append(str(root / _detect_arch()))
+    if PRECISE:
+        inc.append(str(HERE.parent.parent / "include"))
     return inc
 
 
@@ -76,10 +79,10 @@ def dn_step(s_in: In, vec: In, s_out: Out, o: Out, *, n_cores: CompileTime[int],
 
     pass1 = ExternalFunction("dn_pass1", source_file=str(HERE / "dn_pass1.cc"),
                              arg_types=[slice_ty, vec_ty, f128, b256, b256, np.int32],
-                             include_dirs=_include_dirs())
+                             include_dirs=_include_dirs(), compile_flags=["-DDN_STEP_PRECISE=1"] if PRECISE else [])
     pass2 = ExternalFunction("dn_pass2", source_file=str(HERE / "dn_pass2.cc"),
                              arg_types=[slice_ty, slice_ty, vec_ty, f128, f128, b256, b256, b256, np.int32],
-                             include_dirs=_include_dirs())
+                             include_dirs=_include_dirs(), compile_flags=["-DDN_STEP_PRECISE=1"] if PRECISE else [])
 
     of_s = [ObjectFifo(slice_ty, name=f"s{c}", depth=2) for c in range(n_cores)]
     of_so = [ObjectFifo(slice_ty, name=f"so{c}", depth=2) for c in range(n_cores)]
@@ -174,6 +177,9 @@ def dn_step(s_in: In, vec: In, s_out: Out, o: Out, *, n_cores: CompileTime[int],
 
 DESIGN = dn_step
 _sources = [Path(__file__), *sorted(HERE.glob("*.cc")), HERE / "dn_step.h"]
+if PRECISE:
+    _sources += [HERE / "dn_step_precise.h", HERE.parent.parent / "include/vecmath.h",
+                 HERE.parent.parent / "include/vecmath_precise.h"]
 SPECIALIZE = {"n_cores": N_CORES, "act_f32": ACT_F32, "vec_off": VEC_OFF, "o_off": O_OFF,
               "n_heads": HEADS,
-              "source_hash": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources)).hexdigest()[:8], 16)}
+              "source_hash": int(hashlib.sha256(b"".join(p.read_bytes() for p in _sources) + str(PRECISE).encode()).hexdigest()[:8], 16)}

@@ -113,7 +113,11 @@ static constexpr unsigned kRowSplit = GEMV_ROWSPLIT;
 __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict tile,
                                                    const uint8_t *__restrict tab, unsigned K,
                                                    unsigned kt, bool first, bool last,
-                                                   float *__restrict y) {
+                                                   float *__restrict y
+#if GEMV_Q4_CORRECTION
+                                                   , unsigned partition = 0
+#endif
+                                                   ) {
   event0();
 #ifdef GEMV_NULL
   if (first) {
@@ -133,12 +137,22 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
   const int32_t *__restrict sh = (const int32_t *)(tab + 2 * K) + kt * kKBlocks;
   const bfloat16 *__restrict xsh = (const bfloat16 *)(tab + 2 * K + 4 * NB) + kt * kKBlocks;
   const bfloat16 *__restrict xsl = xsh + NB;
+#if GEMV_Q4_CORRECTION
+  const int16_t *__restrict xr = (const int16_t *)(tab + 2 * K + K / 4) + kt * kTileK;
+  const bfloat16 *__restrict xst = (const bfloat16 *)(tab + 4 * K + K / 4) + kt * kKBlocks;
+#endif
 
   aie::accum<accfloat, kRows> acc;
   if (first)
     acc = aie::zeros<accfloat, kRows>();
   else
     acc.from_vector(aie::load_v<kRows>(y));
+#if GEMV_Q4_CORRECTION
+  // Correction scratch follows the activation tables, in the same even/odd
+  // lane order as y. Each row partition persists until its last K tile.
+  float *cp = (float *)(const_cast<uint8_t *>(tab) + 4 * K + K / 4 + K / 16) + partition * kRows;
+  aie::vector<float, kRows> compensation = first ? aie::zeros<float, kRows>() : aie::load_v<kRows>(cp);
+#endif
 
   // [1 x16 | 1/16 x16]: the odd rows' high-nibble value is 16*nib
   const aie::vector<bfloat16, kRows> dsc =
@@ -148,10 +162,16 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
 #pragma clang loop unroll(disable)
   for (unsigned kb = 0; kb < kKBlocks; ++kb) {
     aie::vector<int32_t, 8> ve[2], vo[2];
+#if GEMV_Q4_CORRECTION
+    aie::vector<int32_t, 8> re[2], ro[2];
+#endif
 #pragma clang loop unroll(full)
     for (unsigned rb = 0; rb < 2; ++rb) {
       const uint8_t *__restrict src = (rb == 0 ? nib0 : nib1) + kb * 256;
       aie::mmul<4, 8, 8, int16_t, uint8_t> Ce, Co;
+#if GEMV_Q4_CORRECTION
+      aie::mmul<4, 8, 8, int16_t, uint8_t> Re, Ro;
+#endif
 #pragma clang loop unroll(full)
       for (unsigned oc = 0; oc < 4; ++oc) {
         const aie::vector<int16_t, 32> A =
@@ -166,14 +186,27 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
           Ce.mac(A, e);
           Co.mac(A, o);
         }
+#if GEMV_Q4_CORRECTION
+        const auto R = aie::load_v<8>(xr + kb * kKInBlock + oc * 8).template grow_replicate<32>();
+        if (oc == 0) { Re.mul(R, e); Ro.mul(R, o); }
+        else { Re.mac(R, e); Ro.mac(R, o); }
+#endif
       }
       ve[rb] = Ce.template to_vector<int32_t>().template extract<8>(0);
       vo[rb] = Co.template to_vector<int32_t>().template extract<8>(0);
+#if GEMV_Q4_CORRECTION
+      re[rb] = Re.template to_vector<int32_t>().template extract<8>(0);
+      ro[rb] = Ro.template to_vector<int32_t>().template extract<8>(0);
+#endif
     }
     // [rb0 evens | rb1 evens | rb0 odds | rb1 odds] = [evens 0..30 | odds 1..31]
     const aie::vector<int32_t, kRows> vi = aie::concat(ve[0], ve[1], vo[0], vo[1]);
     aie::accum<accfloat, kRows> part;
     part.from_vector(aie::to_float<float>(vi, sh[kb]));
+#if GEMV_Q4_CORRECTION
+    const auto vr = aie::concat(re[0], re[1], ro[0], ro[1]);
+    part = aie::add(part, aie::to_float<float>(vr, sh[kb] + 15));
+#endif
     const aie::vector<bfloat16, kRows> hi = part.template to_vector<bfloat16>();
     const aie::vector<bfloat16, kRows> lo = aie::sub(part, hi).template to_vector<bfloat16>();
 
@@ -185,12 +218,30 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     const aie::vector<bfloat16, kRows> mperm = aie::concat(me.template extract<16>(0), mo.template extract<16>(0));
     const aie::vector<bfloat16, kRows> ds = aie::mul(dperm, dsc).template to_vector<bfloat16>();   // exact
 
+#if GEMV_Q4_CORRECTION
+    const auto previous = acc;
+    acc = aie::zeros<accfloat, kRows>();
+#endif
     acc = aie::mac(acc, hi, ds);
     acc = aie::mac(acc, lo, ds);
+#if GEMV_Q4_CORRECTION
+    const auto tail = aie::sub(aie::sub(part, hi), lo).template to_vector<bfloat16>();
+    acc = aie::mac(acc, tail, ds);
+#endif
     acc = aie::mac(acc, mperm, xsh[kb]);
     acc = aie::mac(acc, mperm, xsl[kb]);
+#if GEMV_Q4_CORRECTION
+    acc = aie::mac(acc, mperm, xst[kb]);
+    const auto corrected = aie::sub(acc, compensation);
+    const auto next = aie::add(previous, corrected);
+    compensation = aie::sub(aie::sub(next, previous), corrected).template to_vector<float>();
+    acc = next;
+#endif
   }
 
+#if GEMV_Q4_CORRECTION
+  aie::store_v(cp, compensation);
+#endif
   const aie::vector<float, kRows> yv = acc.template to_vector<float>();
   if (last) {
     auto [r0, r1] = aie::interleave_zip(yv.template extract<16>(0), yv.template extract<16>(1), 1);
@@ -225,7 +276,11 @@ static inline void gemv_q4_pool_group(const uint8_t *__restrict chunks,
     const unsigned c = group * kPerCall + i;   // index within the band
     const unsigned part = c % kRowSplit;       // which 32-row slice of the band
     const unsigned kt = c / kRowSplit;
-    gemv_q4_tile(chunks + i * kTileBytes, tab, kK, kt, kt == 0, kt == kKt - 1, y + part * kRows);
+    gemv_q4_tile(chunks + i * kTileBytes, tab, kK, kt, kt == 0, kt == kKt - 1, y + part * kRows
+#if GEMV_Q4_CORRECTION
+                 , part
+#endif
+                 );
   }
 }
 
@@ -254,7 +309,11 @@ static inline void gemv_q4_pool_group_rt(const uint8_t *__restrict chunks,
     const unsigned c = group * kPerCall + i;
     const unsigned part = c & (rs - 1);
     const unsigned kt = c >> sh;
-    gemv_q4_tile(chunks + i * kTileBytes, tab, K, kt, kt == 0, kt == kt_last, y + part * kRows);
+    gemv_q4_tile(chunks + i * kTileBytes, tab, K, kt, kt == 0, kt == kt_last, y + part * kRows
+#if GEMV_Q4_CORRECTION
+                 , part
+#endif
+                 );
   }
 }
 

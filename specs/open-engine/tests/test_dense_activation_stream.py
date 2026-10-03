@@ -31,9 +31,8 @@ class Fifo:
 
 
 def functions(ns):
-    ns.setdefault("ROLLED", False)
     tree = ast.parse(SOURCE.read_text())
-    names = {"prep_bands", "ffn_body", "prep_stream", "band_range"}
+    names = {"prep_bands", "ffn_body", "prep_stream"}
     body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), ns)
 
@@ -86,7 +85,7 @@ def test_ffn_xm_releases_wide_input_before_up_gate_and_then_consumes_h(width):
     def down(*args):
         assert not x.values and not x.held
         calls.append(("down", 0))
-    ns = dict(range_=range, FFN=SimpleNamespace(XM_ELEMS=chunks, UP_PC=1, H_ELEMS=1, DOWN_PC=1),
+    ns = dict(range_=range, FFN=SimpleNamespace(XM_ELEMS=chunks, UP_PC=1, H_ELEMS=1, DOWN_PC=1, DOWN_SEGMENTS=()),
               HID=width, FF=1024, Q8=(), MIXED=False, C=SimpleNamespace(MS_U=0, MS_G=64),
               per_band=lambda k: 1, n_groups=lambda k: 1, role_gemv_bands=down)
     functions(ns)
