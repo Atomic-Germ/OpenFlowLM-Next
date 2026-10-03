@@ -1323,6 +1323,28 @@ dense FFN in place of the MoE block, and runs its q8 out projection there as an 
 into two q4_1 halves rather than re-quantising it -- 13.5-17x faster prefill at every size
 tested with the greedy output unchanged. See `OPEN-PREFILL-BATCH`.
 
+**Result 2026-10-01 (the 4B stopped building; fixed, #145).** On `main` every 4B export failed
+`lx` with `Overflow of program memory`: its eight main cores linked to 16 480 B of 16 384. The
+kernels had not grown -- the core's control program had. aiecc runs Peano's `opt` at
+`default<O2>` with fixed flags (an `--unroll-full-max-count` given to aiecc is accepted and
+never reaches it), and `opt` fully unrolls a loop whose trip count is small enough. The 4B's
+bands are 20 weight elements where the 9B's are 32, so its main core carried 40 call sites of
+`gemv_q4_gms` and 28 of `gemv_q4_gy` against the 9B's 8 and 12: a control program of 8 208 B
+against 5 568. #78's DeltaNet pass 2 grew the same core on 2026-09-24 and is the likely trigger
+(not bisected); the Qwen3.5 cores measured then were the mixed 9B and 0.8B. The 2B (16-element
+bands, mixed) still builds on `main`, 14 592 B.
+
+The fix keeps the band loops rolled at the widths `catalogue.ROLLED_BANDS` lists -- the 4B
+alone: `xcommon.band_range` gives each band's `scf.for` a
+`#llvm.loop_annotation<unroll = <disable = true>>`, which scf-to-cf moves onto the latch as
+`llvm.loop.unroll.disable`. The main cores drop to 12 496 B (2 and 3 call sites), leaving the
+glue core's 15 344 B the fullest; `ax` 13 872, `ln` 3 424, `lm_head_q8` 3 008. The MLIR handed
+to aiecc is byte-identical to `main`'s for the 9B (mixed), the 0.8B and the 35B, `lx` and `ax`
+alike; the 4B's differs by the 40 annotations alone. On the NPU the 4B's slice gives
+0.999999 / 0.999993 / 0.999986, argmax 228793 / 695 / 3966 and top-5 identical, residual corr
+>= 0.999989; the engine is bit-identical to the harness (0.000e+00 x 3, request 2 reproduced),
+and the chat prompt is answered coherently, `[eos]` @60 as on 2026-09-07. Speed was measured beside an
+unrelated CPU-bound job (90 % CPU): 223 ms/token, not comparable to the quiet-box 138.
 ### OPEN-CONVERT-QWEN35-VHEADS: a GGUF's tiled value heads come back in grouped order
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/models/qwen35.py`)
 **Verification:** test
