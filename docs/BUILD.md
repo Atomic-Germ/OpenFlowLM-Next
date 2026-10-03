@@ -36,6 +36,12 @@ to rebuild everything each time. The rest of this page covers it.
 Both directories contain a preset called `linux-default` and the two do
 different things, so where you run the command from matters.
 
+**On Nix / NixOS.** A flake ships the same two artifacts — the engine package
+and a package of open NPU kernel xclbins — plus dev shells, a NixOS module and
+a standalone `nix-shell` entry point. See [NIX.md](../NIX.md). Everything below
+still applies to a `nix develop` shell; the flake just supplies the toolchain
+(mlir-aie, Peano, XRT + the amdxdna plugin) instead of a distro package.
+
 ---
 
 ## Presets Overview
@@ -207,7 +213,11 @@ The `export_kernels.py` script supports:
 | Flag | Description |
 |---|---|
 | `--specs <list>` | Comma-separated spec names (empty = all) |
+| `--skip-specs <list>` | Comma-separated spec names to skip (a recipe with a known gap) |
 | `--force` | Rebuild even when build cache is current |
+| `--skip-bert` | Skip the open_npue BERT sets (they need an NPU at build time) |
+| `--bert-only` | Build only the open_npue BERT sets |
+| `-j, --jobs N` | Kernel sets to build in parallel within a spec (default 1) |
 | `--only` | Build only one spec/family |
 | `--check DIR` | Verify against reference directory |
 
@@ -215,6 +225,9 @@ The `export_kernels.py` script supports:
 ```bash
 python utilities/export-kernels.py --specs qwen3-4b,gemma3-4b --only qwen3-4b:ax0
 ```
+
+Each flag is forwarded to `open_kernels/export_qwen36_kernels.py` where it
+applies (`--only`, `--check`, `-j`), so that script takes them too.
 
 ### Kernel Build Requirements
 

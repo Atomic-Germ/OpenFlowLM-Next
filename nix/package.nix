@@ -32,9 +32,10 @@
 }:
 
 let
-  # The tokenizers-cpp submodule is listed in .gitmodules but its gitlink is
-  # not in the index, so `fetchSubmodules` on the main repo does not populate
-  # it. Fetch it explicitly here.
+  # A flake source is a plain directory copy: git submodules are not checked
+  # out into it, so third_party/tokenizers-cpp arrives empty even though the
+  # gitlink is in the index. Fetch it (with its own submodules) at the pinned
+  # revision the index records, and drop it in during postPatch.
   tokenizers-cpp = fetchFromGitHub {
     owner = "mlc-ai";
     repo = "tokenizers-cpp";
@@ -100,6 +101,10 @@ stdenv.mkDerivation rec {
     "-DOFLM_VERSION=${version}"
     "-DNPU_VERSION=${npuVersion}"
     "-DOFLM_BUILD_KERNELS=OFF"
+    # The /etc/profile.d + /usr/bin plumbing is for an /opt prefix on a normal
+    # distro; under Nix it would write outside $out (and fail in the sandbox).
+    # NixOS puts the package on PATH itself.
+    "-DOFLM_INSTALL_PATH_PLUMBING=OFF"
     "-DCMAKE_BUILD_TYPE=Release"
     "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
     # sentencepiece defaults to FetchContent'ing abseil-cpp. Tell it to use
@@ -114,6 +119,12 @@ stdenv.mkDerivation rec {
     cp -r ${tokenizers-cpp} third_party/tokenizers-cpp
     chmod -R +w third_party/tokenizers-cpp
     cp ${./tokenizers-cpp-cargo.lock} third_party/tokenizers-cpp/rust/Cargo.lock
+
+    # src/xclbins is git-ignored, so a flake source built from a working tree
+    # carries whatever the developer last built locally and CMake would install
+    # it alongside the packaged kernels. The kernels arrive from the
+    # openflowlm-open-kernels input instead; start from an empty directory.
+    rm -rf src/xclbins
   '';
 
   preConfigure = ''
@@ -122,16 +133,28 @@ stdenv.mkDerivation rec {
   '';
 
   postInstall = ''
-    # The OFLM binary doesn't search $HOME for the model registry or xclbins.
-    # Use a launcher script to point it at the user-level data that `oflm add`
-    # writes.  This matches the desktop-launcher pattern used by lemonade and
-    # other Nix-packaged tools that mix a read-only package with user state.
+    # The kernels are a separate store path (they are built by a derivation that
+    # needs the IRON toolchain). Point the engine's own "exe_dir/../share/oflm"
+    # root at it, so `nix run .#oflm` finds the shipped sets with no environment
+    # set up at all. The engine already searches ~/.config/oflm/xclbins on its
+    # own, so a model added with `oflm add` is found alongside these.
+    if [ -d ${openflowlm-open-kernels}/share/oflm/xclbins ]; then
+      mkdir -p $out/share/oflm
+      rm -rf $out/share/oflm/xclbins
+      ln -s ${openflowlm-open-kernels}/share/oflm/xclbins $out/share/oflm/xclbins
+    fi
+
+    # The binary does not search $HOME for the model registry. Use a launcher
+    # that defaults those variables to the user-level data `oflm add` writes,
+    # falling back to nothing (the binary's own search finds the in-package
+    # share/oflm). ":-" so an explicit export from the caller still wins.
     mv $out/bin/oflm $out/bin/.oflm-wrapped
     cat > $out/bin/oflm <<'EOF'
     #!/usr/bin/env bash
-    export OFLM_CONFIG_PATH="$HOME/.config/oflm/model_list.json"
-    export OFLM_MODELINFO_PATH="$HOME/.config/oflm/model_info.json"
-    export OFLM_XCLBIN_PATH="$HOME/.config/oflm"
+    export OFLM_CONFIG_PATH="''${OFLM_CONFIG_PATH:-$HOME/.config/oflm/model_list.json}"
+    export OFLM_MODELINFO_PATH="''${OFLM_MODELINFO_PATH:-$HOME/.config/oflm/model_info.json}"
+    # Deliberately NOT set OFLM_XCLBIN_PATH: it may point into the read-only
+    # store, and oflm-add would then try to write model xclbins there.
     exec "@out@/bin/.oflm-wrapped" "$@"
     EOF
     chmod +x $out/bin/oflm
@@ -141,7 +164,25 @@ stdenv.mkDerivation rec {
       --set-default XILINX_XRT "${xrt-combined}" \
       --prefix LD_LIBRARY_PATH : "${xrt-combined}/lib" \
       --prefix PATH : "${lib.makeBinPath [ xrt-combined python3 ]}"
+
+    # oflm-test and q4nx-build are CMake-generated launchers that exec a bare
+    # `python3`, and oflm-add.py starts with `#!/usr/bin/env python3`. None of
+    # those resolve on a NixOS host, which has no /usr/bin/python3, so give each
+    # one a Python to fall back on. It goes at the END of PATH: these tools need
+    # third-party packages (openai, gguf, torch) that this package does not
+    # vendor, and a venv or conda environment the user built should win.
+    for prog in oflm-test q4nx-build; do
+      if [ -x $out/bin/$prog ]; then
+        wrapProgram $out/bin/$prog --suffix PATH : "${lib.makeBinPath [ python3 ]}"
+      fi
+    done
+    if [ -f $out/share/oflm/oflm-add/oflm-add.py ]; then
+      substituteInPlace $out/share/oflm/oflm-add/oflm-add.py \
+        --replace "#!/usr/bin/env python3" "#!${python3}/bin/python3"
+    fi
   '';
+
+  doCheck = true;
 
   preCheck = ''
     # oflm_smoke runs `oflm list` which tries to create ~/.config/oflm on

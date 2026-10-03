@@ -19,16 +19,18 @@ Two kernel families share the one toolchain venv:
     (device="npu"), so it needs pyxrt and an installed NPU.
 
 Requirements (assumed present, or set up here):
-  * XRT installed at /opt/xilinx/xrt (xclbinutil/aiebu-asm on PATH, pyxrt).
+  * XRT installed at /opt/xilinx/xrt, or wherever XILINX_XRT points
+    (xclbinutil/aiebu-asm on PATH, pyxrt under <prefix>/python).
   * ironvenv/ created here from ironvenv-requirements.txt (mlir-aie + Peano).
   * third_party/mlir-aie cloned here (best-effort; only used for toolchain.json
     version metadata).
 
-Why Python 3.11: the installed XRT build ships pyxrt (its Python binding) for
-3.11 only, and the open_npue export needs it. mlir-aie 1.4.2 and the llvm-aie
-(Peano) wheel support 3.11, so one venv serves both families.
+The venv is created for the same Python minor version as the interpreter
+running this script, because the open_npue export needs pyxrt and pyxrt is
+built for one specific Python. mlir-aie and the llvm-aie (Peano) wheels ship
+for that version too, so one venv serves both families.
 
-This SCRIPT is Linux-only -- its venv/path handling (`/opt/xilinx/xrt`,
+This SCRIPT is Linux-only -- its venv/path handling (`$XILINX_XRT`,
 `bin/python`, `lib/python*/site-packages/...`) is POSIX-specific, so the CMake
 target that drives it is guarded to non-Windows builds. The underlying build
 it drives is not: `open_kernels/export_qwen36_kernels.py` and
@@ -62,14 +64,19 @@ BERT_SPEC = GEMM_RTP / "families.json"
 BERT_CHECK = GEMM_RTP / "check_design_sets.py"
 XCLBINS = REPO / "src" / "xclbins"
 
-XRT_ROOT = Path("/opt/xilinx/xrt")
+# XILINX_XRT is honoured when set so a relocated XRT (the Nix builds combine
+# XRT with the amdxdna plugin in their own prefix) supplies pyxrt too.
+XRT_ROOT = Path(os.environ.get("XILINX_XRT") or "/opt/xilinx/xrt")
 XRT_BIN = XRT_ROOT / "bin"
 XRT_PY = XRT_ROOT / "python"
 
-# Use the Python major.minor of the interpreter running this script.
-# The nix-amd-ai XRT currently ships pyxrt for 3.12, so the dev shell
-# and package build both use Python 3.12.
-PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
+# Build the venv for the same Python minor version as the interpreter running
+# this script when the IRON wheels ship for it (cp311..cp314 today): the
+# open_npue export needs pyxrt, and pyxrt is built for one specific Python. A
+# newer interpreter than that (3.15) has no wheel, so fall back to 3.11.
+PY_MIN, PY_MAX = 11, 14
+PY = f"{sys.version_info.major}.{sys.version_info.minor}"
+PYTHON = PY if PY_MIN <= sys.version_info.minor <= PY_MAX else "3.11"
 
 
 def venv_python() -> Path:
@@ -179,8 +186,8 @@ def main() -> int:
                     help="skip open_npue BERT embedding sets (they need an NPU at build time)")
     ap.add_argument("--bert-only", action="store_true",
                     help="only build open_npue BERT embedding sets, skip open_kernels dense specs")
-    ap.add_argument("-j", "--jobs", type=int, default=max(1, os.cpu_count() // 2),
-                   help="parallel kernel-set builds within each spec (default: os.cpu_count()//2)")
+    ap.add_argument("-j", "--jobs", type=int, default=1,
+                   help="kernel-set builds to run in parallel within each spec (default: 1)")
     a = ap.parse_args()
 
     if a.skip_bert and a.bert_only:

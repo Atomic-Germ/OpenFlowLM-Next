@@ -18,14 +18,14 @@
   # override with skipBert = false (or use the openflowlm-open-kernels-with-bert
   # / oflm-with-bert flake packages).
   skipBert ? true,
-  # Three dense specs currently fail with the upstream 1.4.3/20260923
-  # mlir-aie + Peano toolchain on Python 3.12:
-  #   - qwen25-3b: dx_attn.py lacks a bias stream for this spec's q/k/v bias.
-  #   - minicpm5-2b, phi4-mini-4b: aiecc fails with
-  #     "aie.objectfifo.pool op segment 0 has no filler" in dx_attn placement.
-  # These are recipe/toolchain issues, not Nix/Python-version regressions.
-  # Skip them until open_kernels/recipes/dense.py or dx_attn.py covers them.
-  skipSpecs ? "qwen25-3b,minicpm5-2b,phi4-mini-4b",
+  # No spec is skipped by default. An earlier revision of this derivation
+  # skipped qwen25-3b, minicpm5-2b and phi4-mini-4b, which failed with the
+  # mlir-aie 1.4.3 / Peano 20260923 toolchain pinned in open-kernels-env.nix
+  # (qwen25-3b: no bias stream in dx_attn; the other two: an aiecc
+  # "aie.objectfifo.pool op segment 0 has no filler" placement error). Both are
+  # recipe problems that have since been fixed upstream, and all 13 specs build
+  # today -- re-add a name here if a future recipe regresses.
+  skipSpecs ? "",
 }:
 
 let
@@ -47,9 +47,23 @@ stdenv.mkDerivation rec {
 
   buildPhase = ''
     export HOME=$TMPDIR
-    export XILINX_XRT="${xrt}/opt/xilinx/xrt"
+    export XILINX_XRT="${env.xrtCombined}"
     export OFLM_VENV_DIR="$TMPDIR/ironvenv"
     export OFLM_SKIP_VENV_SETUP=1
+
+    # The export writes build directories (open_kernels/designs/*/build) and the
+    # finished sets (src/xclbins) into the source tree, which a Nix store path
+    # does not allow. Build from a writable copy under $TMPDIR instead of
+    # pointing the scripts at a second, hand-maintained checkout.
+    buildTree="$TMPDIR/openflowlm"
+    export buildTree
+    cp -R . "$buildTree"
+    chmod -R u+w "$buildTree"
+    # src/xclbins is git-ignored, so a developer checkout carries whatever they
+    # last built locally; copying it would ship those sets into the store next
+    # to this build's output. Start from an empty tree.
+    rm -rf "$buildTree/src/xclbins"
+    cd "$buildTree"
 
     # utilities/export-kernels.py expects a writable venv.  Materialize it
     # under $TMPDIR so the source tree is never modified (important both for
@@ -80,10 +94,7 @@ stdenv.mkDerivation rec {
       fi
     done
 
-    # A few specs fail on dx_attn with the current recipe/toolchain:
-    #   - qwen25-3b: attention bias not supported by this design
-    #   - minicpm5-2b, phi4-mini-4b: aiecc objectfifo.pool placement error
-    # Skip them until the open_kernels recipe covers them.
+    # Skip whatever skipSpecs names (see the derivation's argument for why).
     python utilities/export-kernels.py --force --jobs "''${NIX_BUILD_CORES:-4}" \
       ${lib.optionalString skipBert "--skip-bert"} \
       ${lib.optionalString (skipSpecs != "") "--skip-specs ${skipSpecs}"}
@@ -91,7 +102,7 @@ stdenv.mkDerivation rec {
 
   installPhase = ''
     mkdir -p $out/share/oflm
-    cp -r src/xclbins $out/share/oflm/
+    cp -r "$buildTree/src/xclbins" $out/share/oflm/
   '';
 
   # The open_npue BERT embedding sets need pyxrt and an NPU at build time.

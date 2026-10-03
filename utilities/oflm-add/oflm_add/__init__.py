@@ -172,9 +172,6 @@ def find_system_xclbin_root():
     return None
 
 
-
-
-
 def user_xclbin_dir(arg):
     """Resolve the user-level xclbins directory (where symlinks are added).
 

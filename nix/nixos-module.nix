@@ -1,30 +1,39 @@
 # NixOS module for OpenFlowLM.
-# Import this via your flake's nixosConfigurations using
-#   inputs.openflowlm.nixosModules.default
-# It wires:
+# Import it through the flake's `nixosModules.default`/`nixosModules.openflowlm`,
+# which add the overlay these option defaults rely on and pull in the nix-amd-ai
+# NPU module.  It wires:
 #   - the openflowlm engine package onto PATH
-#   - the open NPU kernel xclbins into /run/current-system/sw/share/oflm/xclbins
-#     (matching the engine's default search path)
-#   - the nix-amd-ai XRT + amdxdna plugin when the NPU is enabled
+#   - the open NPU kernel xclbins into the engine package's share/oflm/xclbins
+#     (the engine's own default search root)
+#   - hardware.amd-npu.enable (a mkDefault, so a host's own setting wins)
 {
   config,
   lib,
   pkgs,
-  self,
   ...
 }:
 
 let
   cfg = config.programs.openflowlm;
   inherit (lib) mkEnableOption mkIf mkOption types;
+
+  # Each kernel package contributes <pkg>/share/oflm/xclbins. Merge them into
+  # one tree, then link that tree into the engine package -- the engine looks at
+  # <exe_dir>/../share/oflm before any environment variable is set, so this is
+  # what makes the system-wide kernels work for every user with no profile edit.
+  kernelXclbins = pkgs.symlinkJoin {
+    name = "openflowlm-xclbins";
+    paths = map (p: p + "/share/oflm/xclbins") ([ cfg.kernelsPackage ] ++ cfg.extraXclbinPackages);
+  };
+
+  engine = cfg.package.overrideAttrs (old: {
+    postInstall = (old.postInstall or "") + ''
+      mkdir -p $out/share/oflm
+      ln -sfn ${kernelXclbins} $out/share/oflm/xclbins
+    '';
+  });
 in
 {
-  # nix-amd-ai owns the NPU kernel module, udev rules, PAM memlock limits, and
-  # XRT + amdxdna plugin wiring.  Import it unconditionally: NixOS modules are
-  # idempotent, so hosts that already import it are unaffected, while hosts
-  # that don't can enable the NPU via programs.openflowlm.enableNPU below.
-  imports = [ self.inputs.nix-amd-ai.nixosModules.default ];
-
   options.programs.openflowlm = {
     enable = mkEnableOption "OpenFlowLM NPU-offloaded LLM inference engine";
 
@@ -72,6 +81,6 @@ in
     # nix-amd-ai or sets hardware.amd-npu.enable, this default has no effect.
     hardware.amd-npu.enable = lib.mkDefault cfg.enableNPU;
 
-    environment.systemPackages = [ cfg.package cfg.kernelsPackage ] ++ cfg.extraXclbinPackages;
+    environment.systemPackages = [ engine ];
   };
 }

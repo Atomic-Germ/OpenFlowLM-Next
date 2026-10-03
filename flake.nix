@@ -22,13 +22,19 @@
         };
 
         nixosModules = {
+          # nix-amd-ai owns the NPU kernel module, udev rules, PAM memlock
+          # limits, and the XRT + amdxdna plugin wiring; programs.openflowlm
+          # below sets hardware.amd-npu.enable (the option it defines). It is
+          # imported here rather than from nix/nixos-module.nix because a NixOS
+          # module has no `self` argument -- resolving one from _module.args
+          # recurses infinitely -- while `inputs` is in scope here.
           default = { config, lib, pkgs, ... }: {
             nixpkgs.overlays = [ inputs.self.overlays.default ];
-            imports = [ ./nix/nixos-module.nix ];
+            imports = [ inputs.nix-amd-ai.nixosModules.default ./nix/nixos-module.nix ];
           };
           openflowlm = { config, lib, pkgs, ... }: {
             nixpkgs.overlays = [ inputs.self.overlays.default ];
-            imports = [ ./nix/nixos-module.nix ];
+            imports = [ inputs.nix-amd-ai.nixosModules.default ./nix/nixos-module.nix ];
           };
         };
       };
@@ -67,6 +73,15 @@
               source = inputs.self;
               openflowlm-open-kernels = config.packages.openflowlm-open-kernels;
             };
+            # XRT's plugin loader resolves libxrt_driver_xdna next to
+            # libxrt_core, so the dev shell needs the amdxdna plugin combined
+            # with XRT -- plain `xrt` cannot enumerate the NPU.
+            xrt-combined = pkgs.runCommand "xrt-combined" {} ''
+              mkdir -p $out
+              cp -rs ${pkgs.xrt}/opt/xilinx/xrt/* $out/
+              chmod -R u+w $out/lib
+              ln -sf ${pkgs.xrt-plugin-amdxdna}/opt/xilinx/xrt/lib/libxrt_driver_xdna* $out/lib/
+            '';
           in pkgs.mkShell {
             name = "oflm-dev";
             nativeBuildInputs = with pkgs; [
@@ -79,9 +94,11 @@
             ];
             buildInputs = oflmPkg.buildInputs;
             shellHook = ''
-              export XILINX_XRT="${pkgs.xrt}/opt/xilinx/xrt"
-              export PKG_CONFIG_PATH="${pkgs.xrt}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-
+              export XILINX_XRT="${xrt-combined}"
+              export PKG_CONFIG_PATH="${xrt-combined}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+              # Build-tree runs find no share/oflm next to the binary, so point
+              # the engine at the kernel package while developing.
+              export OFLM_XCLBIN_PATH="${config.packages.openflowlm-open-kernels}/share/oflm"
             '';
           };
 

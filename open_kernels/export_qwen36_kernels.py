@@ -212,8 +212,11 @@ def main() -> int:
     ap.add_argument("--check", metavar="DIR",
                     help="a previous export (or a shipped xclbins/<model>/open_kernels dir) to compare "
                          "against; non-zero exit on any difference beyond the per-build UUID/timestamp stamps")
-    ap.add_argument("-j", "--jobs", type=int, default=max(1, os.cpu_count() // 2),
-                    help="parallel kernel-set builds within this spec (default: os.cpu_count()//2)")
+    # Sequential by default: each build drives aiecc over the whole design, so
+    # running several at once needs several times the memory of one. Callers that
+    # know their machine (the Nix package build passes NIX_BUILD_CORES) opt in.
+    ap.add_argument("-j", "--jobs", type=int, default=1,
+                    help="kernel-set builds to run in parallel within this spec (default: 1)")
     a = ap.parse_args()
 
     # ---- the spec, its recipe, and the kernel sets that recipe names
