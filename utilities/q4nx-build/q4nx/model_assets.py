@@ -518,6 +518,50 @@ def build_readme_meta(output_dir: Path, oflm_version: Optional[str]) -> dict:
     return meta
 
 
+# The `model_type` a generated config.json publishes -> the family OFLM names it.
+# Kept here rather than imported from open_kernels so that packing does not
+# require the recipes: q4nx-build is usable on its own, and the mapping is a
+# property of the two formats, not of the kernel tree.
+_OFLM_FAMILY_OF_MODEL_TYPE = {
+    "qwen3_5_moe": "qwen3.6-moe", "qwen3_5_moe_text": "qwen3.6-moe",
+    "qwen3_next": "qwen3.6-moe",
+    "qwen3_5": "qwen3.5", "qwen3_5_text": "qwen3.5",
+    "qwen3": "qwen3", "qwen3_vl": "qwen3vl", "qwen3_vl_text": "qwen3vl",
+    "qwen2": "qwen2", "qwen2_5_vl": "qwen2.5vl", "qwen2_5_vl_text": "qwen2.5vl",
+    "llama": "llama3", "llama2": "llama3",
+    "gemma3": "gemma3", "gemma3_text": "gemma3", "gemma3_text_only": "gemma3",
+    "gemma4_text": "gemma4", "gemma4": "gemma4",
+    "hunyuan_v1_dense": "hunyuan", "granite": "granite",
+    "phi3": "phi3", "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss",
+}
+
+# Tags every OFLM conversion carries. `npu2`/`q4nx` say what the file IS;
+# `oflm`/`openflowlm` say which runtime wants it. They are what let `oflm add`
+# recognise a repository as servable without a registry entry, and they are how
+# a FINETUNE -- republished under any name at all -- stays recognisable.
+_OFLM_MARKER_TAGS = ("oflm", "openflowlm", "npu2", "q4nx")
+
+
+def oflm_family_of(output_dir: Path) -> Optional[str]:
+    """The OFLM family for the config.json just written, or None.
+
+    Read from the generated config rather than inferred from the source name,
+    because the config is what the runtime will read back: `model_type` there is
+    the same field the recipes derive the spec from, so this cannot disagree
+    with it. A finetune of Qwen3.8 that reports `qwen3_5` gets `qwen3.5`, which
+    is the point -- the family is a property of the weights, not of the name
+    someone uploaded them under.
+    """
+    try:
+        cfg = json.loads((output_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    mt = cfg.get("model_type")
+    if not isinstance(mt, str):
+        return None
+    return _OFLM_FAMILY_OF_MODEL_TYPE.get(mt.lower())
+
+
 def _build_frontmatter(meta: dict) -> str:
     """Build YAML frontmatter block for the README."""
     lines = ["---"]
@@ -540,7 +584,22 @@ def _build_frontmatter(meta: dict) -> str:
     pipeline = meta.get("pipeline_tag")
     if pipeline:
         lines.append(f"pipeline_tag: {pipeline}")
-    tags = meta.get("tags")
+    # The family's DECLARATION, not a hint. `oflm add` reads it ahead of the
+    # registry, ahead of the repo name, and ahead of the tag list -- so a
+    # finetune uploaded under a name that says nothing at all still resolves to
+    # the right engine and the right kernel set. Optional everywhere it is
+    # consumed, and impossible to infer correctly from a name like
+    # `Qwable-9B-Claude-Fable-5`; the config.json beside it can.
+    family = meta.get("oflm_family")
+    if family:
+        lines.append(f"oflm-family: {family}")
+    tags = list(meta.get("tags") or [])
+    # Appended, never replacing: these say what the file IS and which runtime
+    # wants it, and the source repo's own tags (its architecture, its licence,
+    # its lineage) stay first because that is what a human reads.
+    for marker in _OFLM_MARKER_TAGS:
+        if marker not in tags:
+            tags.append(marker)
     if tags:
         lines.append("tags:")
         for t in tags:
@@ -693,6 +752,16 @@ def assemble_readme(
         print(f"[INFO] Writing README.md based on {source_id}'s model card")
     else:
         print("[INFO] No source model card found; writing a minimal README.md")
+    # From the config.json this run produced, so the declaration matches the
+    # weights rather than the name they were uploaded under. Absent for a pack
+    # that produced no config, and then the README simply has no oflm-family --
+    # which is a model nothing can guess, and says so by omission.
+    family = oflm_family_of(output_dir)
+    if family:
+        meta["oflm_family"] = family
+    else:
+        print("[INFO] No config.json with a known model_type; README will carry no "
+              "oflm-family tag (inference will fall back to the name and the tags)")
     (output_dir / "README.md").write_text(generate_readme(readme_text, meta), encoding="utf-8")
 
 
