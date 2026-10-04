@@ -1,8 +1,9 @@
 # Dense block prefill: the attention products, and the route's host stages
 
-**Status (2026-10-04):** implemented on `perf/dense-prefill`, `spec.md` updated. The full-model
-check passes on Qwen3-8B. **Open:** `oflm-test --llm` through `oflm serve`. Move this plan to
-`archive/` once that passes.
+**Status (2026-10-04): done.** Implemented on `perf/dense-prefill`, `spec.md` updated. The
+full-model check passes on Qwen3-8B, and `oflm-test --llm` passes through `oflm serve` (PASS 5,
+no hard failures) with `OFLM_OPEN_KERNELS_DIR` on the qwen3 set and the block route's attention
+on the NPU.
 
 ## Why
 
