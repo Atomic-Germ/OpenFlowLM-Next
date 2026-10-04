@@ -18,7 +18,7 @@ parent: Models
 ▶️ Run with OpenFlowLM in PowerShell:  
 
 > The embedding model must be used with an LLM (loaded concurrently) in Server Mode.
-> The embedding model does not work in CLI Mode (`oflm run` refuses `--embed`).
+> The embedding model does not work in CLI Mode (`oflm run --embed`), serving only the llm and gives a warning.
 
 > Unlike the BERT-family encoders, this one ships **unquantized bf16 safetensors** -- there is no Q4NX container. See [BERT-family NPU encoders](/docs/models/#-bert-family-npu-encoders) for the other six encoders.
 

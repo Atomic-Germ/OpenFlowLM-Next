@@ -367,8 +367,8 @@ encoder with `--embeddingmodel` (default `embed-gemma:300m`):
 oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
 ```
 
-> ⚠️ `--embed` is **server-only**. `oflm run` refuses it and tells you to use
-> `oflm serve -e 1`.
+> ⚠️ `--embed` (`embed-gemma:300m`) is **server-only**. `oflm run` it drops the
+> embedding and advices using `oflm serve -e 1`.
 >
 > The shipped encoders are `embed-gemma:300m` plus the BERT-family set
 > (`bge-base:en-v1.5`, `bge-small:en-v1.5`, `bge-large:en-v1.5`,
