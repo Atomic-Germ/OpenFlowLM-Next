@@ -8,54 +8,12 @@
 #
 set -e
 
-echo "=== Step 1: Checking command line tools (this may open a popup)..."
-if ! xcode-select -p >/dev/null 2>&1; then
-  echo "Command Line Tools not found. Installing..."
-  xcode-select --install || true
-  echo
-  echo "If you saw a popup, please click 'Install' and wait until it finishes."
-  echo "Then run this script again."
-  exit 0
-fi
-
-echo
-echo "=== Step 2: Installing Homebrew (the package manager) if needed... ==="
-if ! command -v brew >/dev/null 2>&1; then
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-  # Add Homebrew to PATH for Apple Silicon and Intel
-  if [ -d "/opt/homebrew/bin" ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [ -d "/usr/local/Homebrew/bin" ]; then
-    eval "$(/usr/local/Homebrew/bin/brew shellenv)"
-  fi
-else
-  echo "Homebrew already installed. Updating..."
-  brew update
-fi
-
-# Make sure brew is on PATH in this script
-if command -v brew >/dev/null 2>&1; then
-  eval "$(brew shellenv)"
-fi
-
-echo
-echo "=== Step 3: Installing Ruby via Homebrew... ==="
-brew install ruby
-
-# Ensure Homebrew Ruby is on PATH for this script run
-if [ -d "/opt/homebrew/opt/ruby/bin" ]; then
-  export PATH="/opt/homebrew/opt/ruby/bin:$PATH"
-elif [ -d "/usr/local/opt/ruby/bin" ]; then
-  export PATH="/usr/local/opt/ruby/bin:$PATH"
-fi
-
 echo
 echo "Ruby version:"
 ruby -v
 
 echo
-echo "=== Step 4: Installing Jekyll and Bundler gems (user-local)... ==="
+echo "=== Step 1: Installing Jekyll and Bundler gems (user-local)... ==="
 gem install --user-install bundler jekyll
 
 # Add gem user path to PATH so 'jekyll' is found

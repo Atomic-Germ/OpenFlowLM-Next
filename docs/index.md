@@ -2,16 +2,16 @@
 layout: page
 title: "OpenFlowLM"
 permalink: /
-description: "NPU-native runtime that unlocks AMD Ryzen AI NPUs with instant installs, rich models, and matching docs."
+description: "Fast and open inferrence runtime for AMD Ryzen AI NPUs."
 sections:
   - type: hero
     id: top
     kicker: "NPU-first runtime"
-    title: "The fastest, most efficient LLM inference on NPUs"
+    title: "LLM inference on NPUs, Opened"
     body: |
-      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k -- with no GPU in the loop.
+      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built for AMD Ryzen™ AI NPU.
       
-      The OpenFlowLM team is now part of AMD.
+      The OpenFlowLM team is not part of AMD.
     ctas:
       - label: "Download OpenFlowLM (Windows)"
         href: "https://github.com/Atomic-Germ/OpenFlowLM/releases/latest/download/oflm-setup.msi"
@@ -31,12 +31,12 @@ sections:
       #   href: "/demos/"
       #   style: ghost
       - label: "Discord"
-        href: "https://discord.com/invite/jtWZdMJ8ee?utm_source=site"
+        href: "https://discord.gg/UR4nQrxd"
         style: ghost
         external: true
     stats:
       - label: "Runtime size"
-        value: "~17 MB"
+        value: "~20 MB"
       - label: "Context"
         value: "Up to 256k tokens"
       - label: "Supported chips"
@@ -69,7 +69,7 @@ sections:
               metrics:
                 - value: "256k"
                   label: "Context Tokens"
-                - value: "~17 MB"
+                - value: "~20 MB"
                   label: "Runtime Size"
           - title: "Multi‑Modal AI Support"
             description: "Run language models, vision models, audio processing, embeddings, and support Mixture‑of‑Experts (MoE) architectures."
@@ -149,7 +149,7 @@ sections:
       kicker: "Install"
       title: "From download to first token in under a minute"
       body: |
-        OpenFlowLM ships as a 17 MB runtime with a familiar single-command CLI and a server compatible with the OpenAI API.
+        OpenFlowLM ships as a 20 MB runtime with a familiar single-command CLI and a server compatible with the OpenAI API.
         No drivers, no guesswork--just run the installer, pull a model, and start chatting.
       items:
         - heading: "Zero-conf installer"
