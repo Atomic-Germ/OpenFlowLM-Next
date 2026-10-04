@@ -720,7 +720,7 @@
         {
             "type": "file",
             "oid": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3",
-            "size": 8952,
+            "size": 27167,
             "path": "chat_template.jinja"
         }
     ],
