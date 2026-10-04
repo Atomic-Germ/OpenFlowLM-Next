@@ -20,11 +20,7 @@ parent: Models
 > The embedding model must be used with an LLM (loaded concurrently) in Server Mode.
 > The embedding model does not work in CLI Mode (`oflm run` refuses `--embed`).
 
-> ⚠️ **EmbeddingGemma is a CPU engine by default.** Unlike the BERT-family
-> encoders, this one ships **unquantized bf16 safetensors** -- there is no Q4NX
-> container -- and its NPU BF16 matmul backend is opt-in rather than the
-> default. See [BERT-family NPU encoders](/docs/models/#-bert-family-npu-encoders)
-> for the six encoders that do run on the NPU out of the box.
+> Unlike the BERT-family encoders, this one ships **unquantized bf16 safetensors** -- there is no Q4NX container. See [BERT-family NPU encoders](/docs/models/#-bert-family-npu-encoders) for the other six encoders.
 
 ### Server Mode 
 
