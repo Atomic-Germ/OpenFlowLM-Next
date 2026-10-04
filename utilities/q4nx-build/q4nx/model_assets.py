@@ -1297,31 +1297,6 @@ def assemble_model_assets(
     if prune_meta and prune_meta.get("kept"):
         was = config.get("intermediate_size")
         config["intermediate_size"] = int(prune_meta["kept"])
-        # ...and the DEPTH, when the MTP block was dropped. `block_count` counts the
-        # speculative block, so a generated config says 65 for a container that holds
-        # 64 layers. The kernel recipe builds a per-layer set and the engine walks
-        # num_hidden_layers, so an inflated depth is a link-time mismatch -- and the
-        # 65th layer is not in the container to be found.
-        if prune_meta.get("mtp_dropped"):
-            # Set the depth to what the container ACTUALLY holds, rather than
-            # adjusting the source's number. A source config may already exclude
-            # the MTP block (Qwen3.8-27B's does: num_hidden_layers 64 against
-            # block_count 65), in which case subtracting again is wrong -- that
-            # is how a 64-layer container came to be labelled 63. A generated
-            # config from block_count has not excluded it, and there subtracting
-            # is right. The layer count is measured from the manifest either way,
-            # so both agree without knowing which source we had.
-            actual = prune_meta.get("layers_actual")
-            if actual:
-                declared = config.get("num_hidden_layers")
-                config["num_hidden_layers"] = int(actual)
-                if declared != actual:
-                    print(f"[INFO] config.json num_hidden_layers {declared} -> {actual} "
-                          f"(what model.q4nx holds; the MTP block is not converted)")
-                else:
-                    print(f"[INFO] config.json num_hidden_layers {actual} matches the "
-                          f"container; the source config already excluded MTP")
-            config["oflm_mtp_dropped"] = int(prune_meta.get("mtp_dropped") or 0)
         config["oflm_pruned_ffn"] = {
             "from": int(prune_meta.get("frm") or was or 0),
             "to": int(prune_meta["kept"]),
@@ -1332,6 +1307,30 @@ def assemble_model_assets(
         }
         print(f"[INFO] config.json intermediate_size {was} -> {prune_meta['kept']} "
               f"(the FFN in this container is that wide)")
+    # The DEPTH, whenever the MTP block was dropped -- not only for a pruned pack.
+    # `block_count` counts the speculative block, so a generated config says 65 for a
+    # container that holds 64 layers. The kernel recipe builds a per-layer set and the
+    # engine walks num_hidden_layers, so an inflated depth is a link-time mismatch --
+    # and the 65th layer is not in the container to be found.
+    if prune_meta and prune_meta.get("mtp_dropped"):
+        # Set the depth to what the container ACTUALLY holds, rather than adjusting the
+        # source's number. A source config may already exclude the MTP block
+        # (Qwen3.8-27B's does: num_hidden_layers 64 against block_count 65), in which
+        # case subtracting again is wrong -- that is how a 64-layer container came to be
+        # labelled 63. A generated config from block_count has not excluded it, and there
+        # subtracting is right. The layer count is measured from the written tensors
+        # either way, so both agree without knowing which source we had.
+        actual = prune_meta.get("layers_actual")
+        if actual:
+            declared = config.get("num_hidden_layers")
+            config["num_hidden_layers"] = int(actual)
+            if declared != actual:
+                print(f"[INFO] config.json num_hidden_layers {declared} -> {actual} "
+                      f"(what model.q4nx holds; the MTP block is not converted)")
+            else:
+                print(f"[INFO] config.json num_hidden_layers {actual} matches the "
+                      f"container; the source config already excluded MTP")
+        config["oflm_mtp_dropped"] = int(prune_meta.get("mtp_dropped") or 0)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type

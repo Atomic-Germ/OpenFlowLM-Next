@@ -97,9 +97,11 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
 
     @property
     def mtp_dropped(self) -> int:
-        """How many speculative blocks a pruned pack omits. 0 for an unpruned
-        pack, which keeps every tensor it has always kept."""
-        if self.imatrix is None or self.gguf_reader is None:
+        """How many speculative blocks this pack omits. Not prune-dependent: the
+        runtime has no speculative decoding, so the MTP block's weights are dead
+        for a pruned and an unpruned pack alike (b3eccb5 left the unpruned case
+        open; the block is dropped either way)."""
+        if self.gguf_reader is None:
             return 0
         return len(self._mtp_blocks())
     _ffn_keep = {}        # layer -> sorted index array, the ONE set per layer
@@ -416,11 +418,13 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                 unpacked = self._maybe_pad(emb, unpacked, GGMLQuantizationType.Q8_0)
                 self.q4nx_tensors["lm_head.weight"] = self._pack(*unpacked, tensor_type=target_dtype)
 
-            # Only a PRUNED pack drops the MTP block. An unpruned pack keeps every
-            # converted tensor it has always kept: a container with an extra layer
-            # loads and runs today, so changing that is not this flag's business,
-            # and a 65-layer container is a separate question with its own answer.
-            mtp = self._mtp_blocks() if self.imatrix is not None else set()
+            # The MTP block is dropped from EVERY pack, pruned or not. It exists
+            # only to feed speculative decoding, which this runtime has no use
+            # for, and converting it yields a container with MORE layers than
+            # config.json declares: the kernel recipe builds a per-layer set and
+            # the engine walks num_hidden_layers, so that is a link-time mismatch
+            # and the extra layer is not in the file to be found.
+            mtp = self._mtp_blocks()
             if mtp:
                 print(f"[INFO] Dropping MTP block(s) {sorted(mtp)}: the next-token "
                       f"prediction head has no use without speculative decoding, and "

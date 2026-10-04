@@ -245,10 +245,18 @@ Reconstructed from the parsed arguments rather than read from sys.argv,
 def _prune_meta(model):
     """What the converter recorded about an imatrix prune, for the card + config.
 
-    Empty when no prune ran, so every unpruned pack is byte-identical to before.
+    `mtp_dropped` and `layers_actual` are always reported: a Qwen3.5 export
+    carries one EXTRA transformer block for multi-token prediction, this runtime
+    has no speculative decoding, so that block is never converted and the depth
+    config.json declares must be what model.q4nx actually holds (Qwen3.8-27B:
+    block_count 65, num_hidden_layers 64). The prune-specific keys stay absent
+    when no prune ran, so an unpruned pack's FFN declarations are untouched.
     """
     if not getattr(model, "imatrix", None):
-        return {}
+        return {
+            "mtp_dropped": getattr(model, "mtp_dropped", 0),
+            "layers_actual": _layer_count(model),
+        }
     return {
         "kept": getattr(model, "prune_ffn_kept", None),
         "frm": getattr(model, "prune_ffn_from", None),
