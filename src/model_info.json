@@ -719,7 +719,7 @@
         },
         {
             "type": "file",
-            "oid": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3",
+            "oid": "a7d899308adc631cf150bd22e5aeb5da99ceb2e8",
             "size": 27167,
             "path": "chat_template.jinja"
         }
