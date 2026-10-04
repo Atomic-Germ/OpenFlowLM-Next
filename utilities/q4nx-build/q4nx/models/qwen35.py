@@ -3,12 +3,16 @@ from pprint import pp
 from ..model_converter import __Q4NX_Converter
 from ..constants import ModelArch, ModelArchNames, QWEN35_VARIANT_DIMS
 from ..gguf_tensor import GGUFTensor
+from ..prism import PrismRotation
+from ..safetensors_stream import SafetensorsStream
+from ..utils import create_dir_if_not_exists
 from gguf import GGUFReader, dequantize, quantize, GGMLQuantizationType
 from safetensors.torch import save_file
 from einops import rearrange, repeat
 import numpy as np
 import torch
 import json
+import os
 
 # Tensors whose last dimension is the hidden size (hidden as INPUT):
 # zero-padding appends inert columns. --pad-to-fit uses these so a finetune
@@ -211,6 +215,24 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
             if reorder_linear_required:
                 print(f"[INFO] Reorder linear required! ({num_v} value heads over {num_k} key heads)")
 
+            # PrismML's Hadamard-rotated ternary GGUFs (Ternary Bonsai 2): see q4nx/prism.py.
+            prism = PrismRotation(self.gguf_reader) if PrismRotation.present(self.gguf_reader) else None
+            if prism is not None:
+                print(f"[INFO] Hadamard-rotated ternary GGUF (block {prism.block}): q4_1 projections, "
+                      "signs folded, embedding and lm head un-rotated")
+                if self._pad_hidden is not None:
+                    raise ValueError("--pad-to-fit cannot pad a Hadamard-rotated model")
+                if reorder_linear_required and not prism.v_grouped:
+                    raise ValueError("rotated ssm_out with tiled value heads (gdn_v_grouped false) "
+                                     "cannot be untiled under the rotation")
+                self.q4nx_config["config_json_extra"] = {"prism_hadamard": prism.config_entry()}
+                # Streamed to disk tensor by tensor: holding the 19 GB container for save_file
+                # grew the pagefile. Same bytes as save_file (q4nx/safetensors_stream.py).
+                out_file = q4nx_path if q4nx_path.endswith("model.q4nx") else os.path.join(q4nx_path, "model.q4nx")
+                create_dir_if_not_exists(os.path.dirname(out_file) or ".")
+                print(f"[INFO] Streaming Q4NX tensors to {out_file}")
+                self.q4nx_tensors = SafetensorsStream(out_file)
+
             if not self._has_lm_head():
                 print("[INFO] Model does not have a lm_head, use embedding weights as lm_head")
                 emb = self.gguf_tensors["token_embd.weight"]
@@ -219,13 +241,17 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                 unpacked = self._maybe_pad(emb, unpacked, GGMLQuantizationType.Q8_0)
                 self.q4nx_tensors["lm_head.weight"] = self._pack(*unpacked, tensor_type=target_dtype)
 
-            for key, gguf_tensor in self.gguf_tensors.items():
+            order = self.gguf_tensors.items() if prism is None else prism.stream_order(self.gguf_tensors, self.forward_name_map)
+            for key, gguf_tensor in order:
                 if ".nextn." in gguf_tensor.name:
                     print(f"[SKIP] {gguf_tensor.name} (MTP next-token prediction weights, absent from official Q4NX)")
                     continue
                 target_dtype = gguf_tensor.get_used_quantization_type(self.tensor_q4nx_type_map[gguf_tensor.name])
                 print(f"Processing tensor: {gguf_tensor.name} with type {gguf_tensor.tensor_type.name} -> {self.forward_name_map[gguf_tensor.name]} with dtype {target_dtype.name}")
                 if "token_embd.weight" in gguf_tensor.name:
+                    if prism is not None:
+                        self.q4nx_tensors.write_rows(self.forward_name_map[gguf_tensor.name], prism.embedding_rows(gguf_tensor))
+                        continue
                     w = dequantize(gguf_tensor.data, gguf_tensor.tensor_type)
                     w = torch.from_numpy(w).contiguous()
                     if self._pad_hidden is not None:
@@ -237,8 +263,18 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                 
                 new_name = self.forward_name_map[gguf_tensor.name]
 
-                unpacked = gguf_tensor.unpack(target_dtype)
-                unpacked = self._maybe_pad(gguf_tensor, unpacked, target_dtype)
+                if prism is not None and gguf_tensor.name == "output.weight":
+                    self.q4nx_tensors.write_rows(new_name, (self._pack(*b, tensor_type=GGMLQuantizationType.Q8_0)
+                                                            for b in prism.lm_head_q8_0_bands(gguf_tensor)))
+                    continue
+                if prism is not None:
+                    unpacked, stored = prism.unpack(gguf_tensor, target_dtype)
+                    if stored != target_dtype:
+                        print(f"[INFO] {gguf_tensor.name}: stored as {stored.name}")
+                    target_dtype = stored
+                else:
+                    unpacked = gguf_tensor.unpack(target_dtype)
+                    unpacked = self._maybe_pad(gguf_tensor, unpacked, target_dtype)
 
                 # Only full-attention layers produce a self_attn.q_proj target
                 # (linear layers fuse q/k/v into attn_qkv). Branch on the
@@ -265,8 +301,9 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                             print("[INFO] Reorder the value rows of qkv")
                             unpacked = tuple(untile_qkv(x, qk_rows, grp, head_v) for x in unpacked)
 
+                    # A rotated GGUF with gdn_v_grouped already holds ssm_out's columns grouped.
                     if "ssm_out_proj" in self.forward_name_map[gguf_tensor.name]:
-                        if reorder_linear_required:
+                        if reorder_linear_required and prism is None:
                             print(f"[INFO] Reorder for {self.forward_name_map[gguf_tensor.name]}")
                             d, m, qw = unpacked
                             # columns: d / m per 32-value block, qw per value
@@ -280,6 +317,8 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                     if "ssm_alpha_proj" in self.forward_name_map[gguf_tensor.name] or "ssm_beta_proj" in self.forward_name_map[gguf_tensor.name]:
                         d, m, qw = unpacked
                         w = gguf_tensor.dequantize()
+                        if prism is not None:
+                            w = prism.fold_cols(w)
                         if reorder_linear_required:
                             w = v_untile(w, grp, 1)
 
@@ -324,6 +363,9 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
 
                 self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = self._pack(*unpacked, tensor_type=target_dtype)
             self._extract_tokenizer_json(q4nx_path)                
+            if prism is not None:
+                self.q4nx_tensors.close()
+                return
         elif weights_type == "vision":
             # Some GGUF quantizers ship vision weights as a separate mmproj
             # file, leaving the language GGUF without any v.* tensors. Skip

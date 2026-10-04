@@ -155,6 +155,15 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
              note="a q8 projection streams 16-row half-tiles of the container's chunks; a new K needs "
                   "the OPEN-QUANT-Q8 procedure (the 8-layer slice against the container's own q8 values) "
                   "at that K first"),
+    Template("gemv_t2", "designs/gemv_q4/gemv_t2.h",
+             {"K": values(5120, 6144, 8192, 9216),   # Ternary Bonsai 2 27B (Qwen3.8-27B's widths;
+                                                     # FF 17408 as K 8192 + 9216). Probe 0a measured
+                                                     # gate [17408 x 5120] and down [5120 x 8192] at
+                                                     # their DMA floor (designs/gemv_t2).
+              "rs": values(2),
+              "rows_per_core": multiple_of(64),
+              "per_call": values(1)},                # one 2560 B chunk per w element (probe 0a: same DMA floor)
+             note="2-bit ternary chunks from an exact-q4_1 ternary container (OPEN-QUANT-T2)"),
     Template("gemv_q4_prep_f32", "designs/gemv_q4/gemv_tab.h",
              {"K": values(512)},                 # the expert hidden h (moe_experts' law)
              note="validated through the whole-layer MoE block only"),

@@ -402,6 +402,7 @@ private:
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
+    std::vector<float> xh_buf_;           ///< gemm_run's rotated copy of x (OPEN-HADAMARD models only)
     StepTiming timing_;
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.

@@ -37,6 +37,14 @@ ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
 PER_CALL = 2                 # chunks per w element
 CALL_BYTES = PER_CALL * CHUNK
+# t2 (OPEN-QUANT-T2): 32 rows x 256 K of 2-bit ternary codes + a bf16 scale per (row, 128 K),
+# 2176 B, padded to 2560 (5 x 512) and streamed ONE per w element. Two per 5 KB element halved
+# the core program's GEMV trip counts and overflowed the 27B's lx main core (LLVM unrolled the
+# loops; then the second call per element cost 1.3 KB of argument setup). One per element keeps
+# the q4_1 loop shapes; the DeltaNet S slices follow the element (5 rows x 26 slices = the same
+# 130 padded rows as 10 x 13), and probe 0a measured 2.5 KB elements at the same DMA floor.
+T2_CHUNK = 2560
+T2_PER_CALL = 1
 MB = 1 << 20
 POOL_BYTES = 512 * MB        # one layer's weight pool (fixed BO size; the recipe checks it fits)
 PTAB_ROW = 1024              # the position record: [i32 pos | i32 nf | ... cos @512 | sin @640]
@@ -120,12 +128,29 @@ def mixed_check(spec: ModelSpec, who: str, roles) -> None:
                            f"Set ffn back to q4_1, or every role to q8")
 
 
+def is_t2(spec: ModelSpec) -> bool:
+    """Every projection at t2 (the only t2 form there is: one GEMV body per main core)."""
+    return any(f == "t2" for f in spec.quant_map.values())
+
+
+def t2_check(spec: ModelSpec, who: str, roles) -> None:
+    if not is_t2(spec):
+        return
+    if any(spec.quant_of(r) != "t2" for r in roles):
+        raise OpRangeError(f"{who}: quant t2 on some projections only -- the main core holds one GEMV "
+                           f"body, so t2 is every projection or none")
+    if not spec.hadamard:
+        raise OpRangeError(f"{who}: quant t2 without spec.hadamard -- the t2 preps are the rotated-basis "
+                           f"ones (OPEN-HADAMARD); no unrotated ternary model has been brought up")
+
+
 def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: int,
             in_dim: int, chunk0: int | None = None) -> dict:
     """The pack op for one weight projection: `std_perm` at q4_1 (unchanged), `q8_perm` at
     q8 (twice the pool elements, 16-row half-tiles). `chunk0` is a SOURCE file-chunk offset
     in either format, so the fused [q | gate] split reads the same way."""
-    op: dict = {"op": "q8_perm" if spec.quant_of(role) == "q8" else "std_perm", "tensor": tensor, "dst": dst}
+    q = spec.quant_of(role)
+    op: dict = {"op": {"q8": "q8_perm", "t2": "t2_perm"}.get(q, "std_perm"), "tensor": tensor, "dst": dst}
     if chunk0 is not None:
         op["chunk0"] = chunk0
     op["nch"] = role_chunks(spec, role, rows, cols)
@@ -138,6 +163,8 @@ def require_gemv(spec: ModelSpec, role: str, K: int, rows_per_core: int, pc: int
     exactly what it always asked; a q8 one asks the gemv_q8 template at rs 4."""
     if spec.quant_of(role) == "q8":
         require("gemv_q8", K=K, rs=4, rows_per_core=rows_per_core, per_call=pc)
+    elif spec.quant_of(role) == "t2":
+        require("gemv_t2", K=K, rs=rs, rows_per_core=rows_per_core, per_call=pc)
     else:
         require("gemv_q4", K=K, rs=rs, rows_per_core=rows_per_core, per_call=pc)
 
@@ -384,7 +411,15 @@ DN_SCRATCH_FLOATS = 1280               # `ds` (dnx.h)
 FFN_MS_FLOATS = 2 * BAND_ROWS          # `ms` for the dense tail: u[64] | g[64]
 
 
-def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int:
+def xh_l1(spec: ModelSpec) -> int:
+    """A rotated-basis (Hadamard) model's extra main-core L1: wht.h's fp32 scratch block and
+    the attention output's sign bits (gen_kernels.xh_signs_h). 0 for every other model."""
+    hd = spec.hadamard
+    return 0 if not hd else 1024 * 4 + len(hd["og_signs"]) // 8
+
+
+def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL, extra: int = 0,
+            chunk: int = CHUNK) -> int:
     """A main core's L1 bytes for a given scratch layout.
 
     Every main core carries the same six things and nothing else
@@ -395,7 +430,7 @@ def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int
     shared -- two copies of a budget drift, and the one that drifts is the one no shipped
     model exercises."""
     return (tab + ms_floats * 4 + ds_floats * 4
-            + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
+            + 2 * pc * chunk + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK + extra)
 
 
 def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
@@ -407,8 +442,13 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
         return PER_CALL
     wide = kwide(spec, ffn)
     ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
+    if is_t2(spec):
+        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, T2_PER_CALL, xh_l1(spec), T2_CHUNK) <= L1_BUDGET:
+            return T2_PER_CALL
+        raise OpRangeError(f"qwen35 t2: two {T2_CHUNK} B chunks per w element do not fit a core's L1 "
+                           f"beside a {wide}-wide table")
     for pc in (2, 1):
-        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc) <= L1_BUDGET:
+        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc, xh_l1(spec)) <= L1_BUDGET:
             return pc
     raise OpRangeError(f"qwen35: a {wide}-wide activation table does not leave room for the streams "
                        f"in a core's L1 ({tab_bytes(wide)} B of table, {L1_BUDGET} B budget)")
@@ -444,12 +484,12 @@ def down_split(spec: ModelSpec) -> tuple[int, ...]:
                spec.attn_q_width if spec.has_full else 0)
     ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
     ff = spec.intermediate
-    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1) <= L1_BUDGET:
+    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1, xh_l1(spec)) <= L1_BUDGET:
         return ()
     e = ELEM // 4
     k0 = ff // 2 // e * e
     pieces = (k0, ff - k0)
-    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1) > L1_BUDGET
+    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1, xh_l1(spec)) > L1_BUDGET
                                for k in pieces):
         raise OpRangeError(f"qwen35: an FF of {ff} does not fit a main core's L1 in two pieces of "
                            f"whole f32 elements ({pieces}); a three-way split is not implemented")
@@ -552,13 +592,14 @@ def _common_dense(spec: ModelSpec) -> Common:
     n = LIMITS["n_cols"]
     hid, ff = spec.hidden, spec.intermediate
     pc = per_call(spec, "dense")
-    call_bytes = pc * CHUNK
+    tile = T2_CHUNK if is_t2(spec) else CHUNK
+    call_bytes = pc * tile
     wide = kwide(spec, "dense")
     dn_rows, dn_slices, dn_pad, dn_heads_pc, dn_dim = _dn_geometry(spec, call_bytes, n)
     return Common(
         N_CORES=n, HID=hid, FF=ff, NE=0, NX=0,
-        TILE=CHUNK, PER_CALL=pc, CALL_BYTES=call_bytes,
-        STRIPE=0, HALF=0, PAIR=2 * CHUNK, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
+        TILE=tile, PER_CALL=pc, CALL_BYTES=call_bytes,
+        STRIPE=0, HALF=0, PAIR=2 * tile, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
         BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=0,
         MS_FLOATS=FFN_MS_FLOATS, DS_FLOATS=DN_SCRATCH_FLOATS if dn_dim else 0,
         TAB_BYTES=tab_bytes(wide), H_TAB_OFF=0, KWIDE=wide,
@@ -1179,6 +1220,9 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     # final.xclbin for the whole GEMM route and one insts.bin per shape.
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
+    # The attention GEMMs read q / k / v / P rows only -- no weight format, no rotation -- so a
+    # rotated-basis or t2 spec shares the plain one's build directories; a q8 one keeps its own.
+    asfx = sfx if spec.q8_roles else ""
     kinds = [k for lt, k in ((LINEAR, "linear"), (FULL, "full")) if lt in types and not dense]
     for kind in kinds:
         name = f"mx_{kind}"
@@ -1209,7 +1253,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
             for tag, K, N in (("s", hd, Lw), ("pv", Lw, hd)):
                 name = f"ag_{tag}{Lw}"
                 out["kernels"][name] = {"context": "ag", "insts": f"{name}/insts.bin", "build": name}
-                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{sfx}",
+                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{asfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K), "AG_N": str(N)}}
         # a: Q or P rows [m, K] bf16; b: the tiled K^T or V [K, N] bf16; c: [m, N] f32 -- sized for the widest
         out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2

@@ -1856,6 +1856,15 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
         throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals are smaller than [" +
                                  std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(N) + "]");
     auto t0 = std::chrono::steady_clock::now();
+    if (man_.hadamard_block) {
+        // OPEN-HADAMARD: the rotated-basis weights want H(x)/32 per 1024 block, the attention
+        // output (the only input that wide) sign-flipped first -- what the lx / ax preps do.
+        if (xh_buf_.size() < T * K) xh_buf_.resize(T * K);
+        std::copy(x, x + T * K, xh_buf_.begin());
+        const bool og = K == man_.hadamard_og_signs.size();
+        host::hadamard_rows(xh_buf_.data(), T, K, man_.hadamard_block, og ? man_.hadamard_og_signs.data() : nullptr);
+        x = xh_buf_.data();
+    }
     host::tile_x(x, T, K, xb.map<uint16_t*>());          // straight into the mapped buffer
     timing_.part1_ms += ms_since(t0);
     timing_.gemm_tile_ms += ms_since(t0);

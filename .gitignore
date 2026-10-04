@@ -63,6 +63,10 @@ open_kernels/designs/lm_head_q4/*.cc
 open_kernels/designs/gemv_q4/gemv_q4_prep_k*.cc
 open_kernels/designs/gemm_q4/*.cc
 open_kernels/designs/gemm_q4/layout_m*.txt
+# The per-model Hadamard sign table (layer_x/gen_kernels.py) and the gemv_t2 probe's
+# entries (designs/gemv_t2/gemv_t2.py writes one per format / shape it builds).
+open_kernels/designs/layer_x/xh_signs.h
+open_kernels/designs/gemv_t2/*.cc
 
 # npu_offload/matmul generated fixtures (make_test.py) and run configs
 npu_offload/matmul/[abyr]_m*.bin

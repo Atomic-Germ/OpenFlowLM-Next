@@ -28,6 +28,8 @@ def tracked(pattern: str) -> list[str]:
     "open_kernels/designs/layer_x/*.cc",
     "open_kernels/designs/lm_head_q4/*.cc",
     "open_kernels/designs/gemv_q4/gemv_q4_prep_k*.cc",
+    "open_kernels/designs/layer_x/xh_signs.h",
+    "open_kernels/designs/gemv_t2/*.cc",
 ])
 def test_no_generated_tu_is_tracked(pattern):
     files = tracked(pattern)

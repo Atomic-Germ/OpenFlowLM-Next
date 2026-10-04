@@ -976,6 +976,8 @@ def inject_oflm_keys(config: dict, q4nx_config: dict, output_dir: Path, oflm_ver
     for key in ("addr_qk", "addr_kv", "addr_kk", "addr_l_begin_mha", "addr_l_end_mha"):
         if key in q4nx_config:
             config.setdefault(key, q4nx_config[key])
+    # Keys a converter derived from the weights themselves (e.g. prism_hadamard, q4nx/prism.py).
+    config.update(q4nx_config.get("config_json_extra", {}))
     # Token ids: prefer text_config / generation defaults used by Darwin.
     if config.get("bos_token_id") is None and config.get("pad_token_id") is not None:
         config["bos_token_id"] = config["pad_token_id"]

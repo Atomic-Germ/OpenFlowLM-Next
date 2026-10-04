@@ -65,7 +65,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "t2_perm" || p.op == "put" || p.op == "expert_down" ||
         p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
@@ -73,7 +73,7 @@ PackOp parse_op(const json& j, const std::string& where) {
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "t2_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose") need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
     else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
@@ -132,6 +132,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
     m.max_ctx_default = j.value("max_ctx_default", 4096ull);
+    if (j.contains("spec") && j["spec"].is_object() && j["spec"].contains("hadamard") &&
+        j["spec"]["hadamard"].is_object()) {
+        const json& hd = j["spec"]["hadamard"];
+        m.hadamard_block = hd.value("block", 0ull);
+        if (m.hadamard_block != 1024) fail(where, "spec.hadamard.block must be 1024");
+        for (const auto& v : hd.at("og_signs")) m.hadamard_og_signs.push_back(v.get<float>());
+    }
 
     const json& lay = need(j, "layout", where);
     const std::string lw = where + " layout";

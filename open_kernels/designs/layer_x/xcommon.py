@@ -142,6 +142,12 @@ NEED_Q4_GMS = "ffn" not in Q8              # the dense tail's up | gate bands
 # GEMV TUs are compiled -Oz. An all-q4_1 or an all-q8 spec sees exactly the entries, the
 # flags and the call sequence it saw before: the DNX_PAD lesson -- what is not identical moves.
 MIXED = KIND == "dense" and bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
+# OPEN-QUANT-T2: every projection at t2 -- the `gy` / `gms` slots hold the t2 twins (same
+# signatures; recipes/qwen36moe.py sets TILE / PER_CALL so the band helpers above already
+# count t2 chunks). Nothing else on the core changes.
+T2 = any(f == "t2" for f in R.spec.quant_map.values())
+GY_SYM, GMS_SYM = ("gemv_t2_gy", "gemv_t2_gms") if T2 else ("gemv_q4_gy", "gemv_q4_gms")
+T2_SUB = 1 << 16    # the t2 entries take one chunk per call: per_band + T2_SUB is the element's second
 OZ = ["-Oz"] + OS[1:]                      # OS at -Oz, keeping -DGEMV_NULL (the ODR note above)
 GEMV_OS = OZ if MIXED else OS              # size over speed, harder, on the crowded core only
 
@@ -221,15 +227,17 @@ def kernels(inc, t):
             k["gyms"] = ef("gemv_q4_gyms", [e, tab, y, ms, i32, i32, i32], GEMV_OS)
         # A projection band into its y element (the same entry as the MoE path).
         if NEED_Q4_GY and not MIXED:
-            k["gy"] = ef("gemv_q4_gy", [e, tab, y, i32, i32, i32])
+            k["gy"] = ef(GY_SYM, [e, tab, y, i32, i32, i32])
         # The dense FFN tail (designs/dense/dx.py's kernels, generated into this design):
         # an up | gate band into the silu scratch, act(gate) * up, and the two element-indexed
         # activation preps (the core loops over 4 KB elements; the kernel derives the blocks).
         if NEED_Q4_GMS and not MIXED:
-            k["gms"] = ef("gemv_q4_gms", [e, tab, ms, i32, i32, i32])
+            k["gms"] = ef(GMS_SYM, [e, tab, ms, i32, i32, i32])
         k["act"] = ef("dense_act", [ms, y])
-        k["prep"] = ef("dense_prep", [x, tab, i32, i32])
-        k["prepf"] = ef("dense_prep_f32", [x, tab, i32, i32])
+        # t2: the preps (Hadamard, og signs, per-128 table) at -Oz -- they run once per x
+        # element, and the 27B's lx main core has no program memory to spare (OPEN-QUANT-T2)
+        k["prep"] = ef("dense_prep", [x, tab, i32, i32], OZ if T2 else None)
+        k["prepf"] = ef("dense_prep_f32", [x, tab, i32, i32], OZ if T2 else None)
         k["vcopy"] = dnf("dnx_vcopy", [e, ds])
         k["p1"] = dnf("dnx_pass1", [e, ds, i32])
         k["delta"] = dnf("dnx_delta", [ds])
@@ -306,6 +314,8 @@ def gemv_bands(win, yout, tab, gy, nbands, ngroups, per_band, rs, ms=None):
             we = win.acquire(1)
             if ms is None:
                 gy(we, tab, ye, g, per_band, rs)
+                if T2 and PER_CALL == 2:          # two t2 chunks per element: one call each
+                    gy(we, tab, ye, g, per_band + T2_SUB, rs)
             else:
                 gy(we, tab, ye, ms, g, per_band, -1)
             win.release(1)
@@ -389,6 +399,8 @@ def ffn_body(win, xin, yout, B, K):
             gms(we, tab, ye, ms, g, pb_h, dst)
         else:
             gms(we, tab, ms, g, pb_h, dst)
+            if T2 and PER_CALL == 2:
+                gms(we, tab, ms, g, pb_h + T2_SUB, dst)
 
     for _ in range_(FFN.UP_PC):
         ye = yout.acquire(1) if MIXED else None

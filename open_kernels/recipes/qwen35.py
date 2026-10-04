@@ -42,7 +42,7 @@ from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, Q8_CHUNK, Recipe, ab_lanes, ffn_geometry, mixed_check,
-                        per_call, proj_op, q4_chunks, quant_check, require_gemv, roundup)
+                        per_call, proj_op, q4_chunks, quant_check, require_gemv, roundup, t2_check)
 from .spec import FULL, LINEAR, ModelSpec
 
 FAMILY = "qwen35"
@@ -55,6 +55,7 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError(f"qwen35 recipe given a {spec.family!r} spec")
     quant_check(spec, "qwen35")
     mixed_check(spec, "qwen35", ("attn", "linear", "linear_out", "ffn"))
+    t2_check(spec, "qwen35", ("attn", "linear", "linear_out", "ffn"))
     if spec.quant_of("experts") == "q8" or spec.quant_of("shared") == "q8":
         raise OpRangeError("qwen35: this family has no experts; the 'experts' / 'shared' roles "
                            "cannot be set")
@@ -236,10 +237,33 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     byte for byte what it was: a projection at q8, or a size whose projections the GEMM cannot
     tile (not a multiple of 256) -- refused here rather than failing the whole export, since
     the sequential path serves that size either way."""
+    plan = pack_plan(spec)["layer_types"]
     try:
-        return M.gemm_route(spec, FFN, pack_plan(spec)["layer_types"])
+        route = M.gemm_route(spec, FFN, plan)
     except OpRangeError:
         return None
+    if M.is_t2(spec):
+        _t2_gemm_weights(route, plan)
+    return route
+
+
+def _t2_gemm_weights(route: dict, plan: dict) -> None:
+    """OPEN-QUANT-T2: the decode pool holds 2-bit chunks, and the block route's GEMM reads the
+    q4_1 band law only. Every GEMM weight that pointed into the pool or the consts therefore
+    becomes its own `pack` buffer of std_perm ops over the container's exact q4_1 copy -- the
+    route already copies each weight into a buffer of its own, so this costs no extra memory."""
+    for lt, g in route["layer_types"].items():
+        for key in ("weights", "ffn_weights", "shared_weights"):
+            for name, w in list(g.get(key, {}).items()):
+                if w.get("from") not in ("pool", "consts"):
+                    continue
+                ops, dst = [], 0
+                for i in w["ops"]:
+                    op = dict(plan[lt][w["from"]][i])
+                    op.update(op="std_perm", dst=dst)
+                    ops.append(op)
+                    dst += op["nch"] * CHUNK
+                g[key][name] = {"from": "pack", "pack": ops}
 
 
 # ---- the step program: ONE run per layer type (nothing is routed, so no part split)

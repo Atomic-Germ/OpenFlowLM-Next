@@ -208,6 +208,12 @@ struct Manifest {
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;
+    /// spec.hadamard (OPEN-HADAMARD): 0 for every model but a rotated-basis ternary one; then every
+    /// projection input goes through H/sqrt(block) per block, and the inputs as wide as
+    /// hadamard_og_signs (the attention output) through those signs first. The kernels do it
+    /// themselves; the host does it for the block route's GEMMs (Core::gemm_run).
+    size_t hadamard_block = 0;
+    std::vector<float> hadamard_og_signs;
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
     nlohmann::json hf_config_check;

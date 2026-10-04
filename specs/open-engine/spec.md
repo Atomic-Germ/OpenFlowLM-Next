@@ -651,6 +651,97 @@ integers, and is what lets a GEMV keep its multiply integer (`.claude/plans/gpto
 halves, and reshaping the scale array transposed each break two tests. The suite is not
 passing by construction.
 
+### OPEN-HADAMARD: a rotated-basis model's projection inputs go through the Walsh-Hadamard
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `designs/gemv_q4/wht.h`,
+`designs/layer_x/gen_kernels.py`, `src/open_qwen36/block_host.cpp`, `core.cpp`, `manifest.cpp`)
+**Verification:** test (the spec field, the generated sign table, the build-directory suffix) and
+manual (the transform on the NPU)
+**Tests:** `tests/test_ternary_hadamard.py`
+
+PrismML's Ternary Bonsai 2 stores every projection after a blockwise Walsh-Hadamard rotation, so
+the engine shall take each projection input through `H(x)/32` per 1024-value block before its
+GEMV. The 6144-wide attention output (DeltaNet and full attention alike) shall be multiplied by the
+model's ±1 signs first; every other sign is folded into weights by the converter
+(OPEN-CONVERT-PRISM-TERNARY). The decode path does it in the main cores' preps (`dense_prep`,
+`dense_prep_f32`: fp32 in a 4 KB scratch block, written back as bf16), and the block prefill route
+does it on the host in `Core::gemm_run` (`host::hadamard_rows`). The container's
+`prism_hadamard {block_size, og_signs}` becomes `ModelSpec.hadamard {block, og_signs}`, which is
+absent from `to_dict()` when unset, so no shipped spec hash moves.
+
+**Acceptance criteria:**
+- A config with `prism_hadamard` derives `hadamard = {"block": 1024, "og_signs": [...]}`. A block
+  other than 1024, a sign vector of the wrong width, or values other than ±1 are refused by name.
+- A plain 27B config derives no `hadamard`, `quant_hash() == ""`, and an unchanged `to_dict()`;
+  two different sign vectors give two different `quant_hash()` values.
+- The generated `xh_signs.h` has bit `32w + b` set exactly where `og_signs` is -1. A Hadamard
+  spec changes only `dense_prep.cc` and `dense_prep_f32.cc` and adds `xh_signs.h`; a plain spec's
+  TU set is unchanged.
+
+**Verification (manual):** export `OFLM_TERNARY_FORMAT=q4_1` kernels for the converted container
+and run `open_qwen36_cli --ids-file` on "The capital of France is Paris. The three largest planets
+in the solar system, in order, are" (20 tokens), 40 greedy tokens. They must equal PrismML's
+llama.cpp greedy output on the PQ2_0 GGUF.
+**Result 2026-10-03:** all 40 tokens identical (" Jupiter, Saturn, and Uranus. The capital of Italy
+is Rome. ..."). The lx main core fits at 16 016 of 16 384 B with the transform.
+
+### OPEN-QUANT-T2: ternary projections stream as 2-bit codes
+**Applies to:** openflowlm-next (`open_kernels/designs/gemv_q4/gemv_t2.h`, `recipes/qwen36moe.py`,
+`recipes/qwen35.py`, `recipes/catalogue.py`, `designs/layer_x/xcommon.py`, `gen_kernels.py`,
+`src/open_qwen36/pools.cpp`, `manifest.cpp`, `open_kernels/t2_pack.py`)
+**Verification:** test (recipe geometry, pack plan, packing against PrismML's decode) and manual
+(the kernel and the whole model on the NPU)
+**Tests:** `tests/test_ternary_hadamard.py`
+
+An all-`t2` spec (the default for a rotated-basis ternary container; `OFLM_TERNARY_FORMAT=q4_1`
+keeps q4_1) shall stream its projections as 2-bit chunks. A chunk is 32 rows x 256 K: bf16 scales
+per (row, 128 K) at `[0, 128)`; codes at `[128, 2176)`, byte `(kb, oc, kk, p)` holding rows `8j + p`
+in bits `2j`; zero padding to 2560 B. Value is `s*code - s`. The engine shall pack these at load
+from the container's exact q4_1 copy (`t2_perm`: std_perm's band order) and refuse any chunk that
+is not exact ternary (`q > 2`, `m != -d`, or four 32-blocks of a 128-group with unequal `d`). The
+GEMV is gemv_q4's integer mmul over one masked 2-bit field per product, with the activation table
+and the float epilogue per 128 K. One chunk per w element: two per element made the lx main core's
+control program overflow (LLVM fully unrolled the halved GEMV loops, and a second call per element
+cost 1.3 KB of argument setup). The DeltaNet slices follow the element: 5 rows x 26 slices, the
+same 130 padded rows as 10 x 13. The block prefill GEMMs read q4_1 only, so a t2 route packs each
+GEMM weight as std_perm `from: pack` buffers; the route already copies every weight into its own
+buffer, so this adds no memory.
+
+**Acceptance criteria:**
+- The t2 recipe's Common is `TILE 2560, PER_CALL 1, CALL_BYTES 2560, DN_ROWS 5, DN_PAD 130`.
+- Every projection op in the pack plan is `t2_perm`. Every block-route GEMM weight is a contiguous
+  `pack` run of std_perm ops, `dst` advancing by `nch * 5120`.
+- t2 on only some projections, or t2 without `hadamard`, is refused by the recipe.
+- PQ2_0 blocks round-trip, decode to `(code - 1) * s` (PrismML `runtime/codec.py`), and pack into
+  t2 and q4_1 pool chunks that both dequantize to the same values.
+
+**Verification (manual):**
+- Probe 0a (`designs/gemv_t2`, `probe.py gate`): the production body at its DMA floor and bit-exact
+  against fp64. Result: 0.793 ms against a 0.773 ms floor, 2.2x the q4_1 GEMV on the same weights.
+- The whole model: the same 40-token check as OPEN-HADAMARD with the default (t2) export.
+  **Result 2026-10-03:** identical to Phase 1 and to llama.cpp. The lx main core fits at 15 904 B.
+
+### OPEN-CONVERT-PRISM-TERNARY: q4nx-build converts PrismML's ternary GGUF
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/prism.py`, `models/qwen35.py`,
+`safetensors_stream.py`)
+**Verification:** manual (the converter's validation against the GGUF reference)
+
+q4nx-build shall read a `qwen35` GGUF carrying `prism.hadamard.*` metadata and PQ2_0 (type 142)
+tensors, and write an exact-ternary q4_1 container:
+- **Projections:** each one is written as q4_1 with `q = code`, `d = s`, `m = -s` (ssm_out
+  included, at q4_1 rather than q8).
+- **Sign folds:** the 5120-wide signs fold into `attn_norm` / `post_attention_norm` and the alpha/beta
+  columns; the 17408-wide signs fold into `ffn_up`'s rows.
+- **Embedding and head:** the embedding is un-rotated to bf16, and the lm head is un-rotated to q8.
+- **Value-head order:** `ssm_out`'s grouped value-head columns are left unpermuted, as
+  `gdn_v_grouped` says.
+- **Config:** config.json gains `prism_hadamard {block_size, og_signs}`.
+
+The save streams tensor by tensor (peak ~3.6 GiB).
+**Result 2026-10-03:** 19.18 GB container. 1232 structural checks over all 64 layers are
+bit-exact. Every projection matches the reference math exactly at bf16 scale precision. The lm head
+gives cosine 0.99998 with argmax and top-10 identical. The remaining gap to PrismML's fp16 path is
+the bf16 scale storage (~0.2%).
+
 ### OPEN-PACK-CHUNK-FUSE: two half-width chunks make one pool chunk
 **Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`)
 **Test category:** unit (`tests/test_chunk_fuse.py`, `src/open_qwen36/pools_test.cpp`)

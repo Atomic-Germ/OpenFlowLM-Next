@@ -35,6 +35,11 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
 /// x [T, K] fp32 -> the GEMM's tiled bf16 activation layout ([K, T] "k,n" order, 64 x 32
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
+/// The activation side of a rotated-basis ternary model (OPEN-HADAMARD, Ternary Bonsai 2): every
+/// `block`-wide run of each row of x [T, K] becomes H(signs * run) / sqrt(block) in place, H the
+/// Sylvester Walsh-Hadamard matrix. `signs` (K values of +-1) may be null. The NPU preps do the
+/// same per 4 KB element (open_kernels/designs/gemv_q4/wht.h); this is the block route's copy.
+void hadamard_rows(float* x, size_t T, size_t K, size_t block, const float* signs);
 
 struct DeltaGeom {
     size_t T = 0, t_real = 0, hid = 0;

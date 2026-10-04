@@ -139,6 +139,27 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
     }
 }
 
+void hadamard_rows(float* x, size_t T, size_t K, size_t block, const float* signs) {
+    const float scale = 1.0f / std::sqrt(static_cast<float>(block));   // 1/32 for 1024: exact
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t) {
+        float* row = x + static_cast<size_t>(t) * K;
+        if (signs)
+            for (size_t j = 0; j < K; ++j) row[j] *= signs[j];
+        for (size_t b0 = 0; b0 + block <= K; b0 += block) {
+            float* v = row + b0;
+            for (size_t h = 1; h < block; h <<= 1)
+                for (size_t i = 0; i < block; i += 2 * h)
+                    for (size_t j = i; j < i + h; ++j) {
+                        const float a = v[j], c = v[j + h];
+                        v[j] = a + c;
+                        v[j + h] = a - c;
+                    }
+            for (size_t j = 0; j < block; ++j) v[j] *= scale;
+        }
+    }
+}
+
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
     // [T,K] fp32 -> bf16, pre-tiled [K,T] in "k,n" order: K_TILE 64 x tile_n 32 tiles, each
     // tile in (8 x 8) MAC sub-tiles -- the layout gemm_q4_prefill.py streams its activation in
