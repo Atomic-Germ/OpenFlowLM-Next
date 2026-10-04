@@ -27,22 +27,26 @@ required.
 ## What is different from upstream
 
 - **Open kernels.** `open_kernels/` holds the AIE designs the engine
-  dispatches -- source, not pre-compiled binaries. Seven model families run on a
-  shared recipe that works each model's shape out of its own `config.json`.
+  dispatches -- source, not pre-compiled binaries. Ten model families run on a
+  shared recipe that works each model's shape out of its own `config.json`:
+  Qwen3.6-MoE, Qwen3.5, Qwen3, Qwen2.5, Llama 3, Gemma 3, Phi-3/4, LFM2,
+  HunYuan and Granite.
 - **A second embedding backend.** Six encoder models beyond the one upstream
   ships, through [`src/open_npue/`](src/open_npue/).
 - **GGUF and Q4_K containers**, so models are not confined to one weight format.
 - **Built from source.** Use CMake presets for building; see
   [docs/BUILD.md](docs/BUILD.md).
 
-Upstream remains the place to go for a turnkey install and for the closed,
-tuned kernels.
+Not every model runs on open kernels. Vision, audio and the Gemma 4, GPT-OSS
+and Whisper families have no open design yet and dispatch to the closed engine
+binaries. See [the support-status matrix](docs/docs/models/index.md) for exactly
+what is open today.
 
 ---
 
 ## Getting started
 
-1. **The NPU driver** -- use **32.0.203.311 or above** (Task Manager →
+1. **The NPU driver** -- use **32.0.203.304 or above** (Task Manager →
     Performance → NPU, or Device Manager). Earlier versions are not supported.
     Windows Update or [AMD's driver download](https://www.amd.com/en/support) is
     the recommended route; the
@@ -80,14 +84,11 @@ tuned kernels.
 ## License
 
 - Orchestration code and CLI tools are open source under the
-  [MIT License](./LICENSE_RUNTIME.txt).
+  [MIT License](./LICENSE_OPEN_RUNTIME.md).
 - The open AIE kernels in `open_kernels/` are part of this repository and carry
   its licence.
 - Any closed binary kernels retained from upstream remain FastFlowLM's, under
   the terms upstream sets, and are not redistributed by this repository.
-
-- All orchestration code and CLI tools are open-source under the [MIT License](./LICENSE_RUNTIME.txt).  
-- These NPU-accelerated binary kernels are completely free for any use, including commercial use.
 - Please acknowledge the upstream FastFlowLM and OpenFlowLM in your README/project page.
   
 ---

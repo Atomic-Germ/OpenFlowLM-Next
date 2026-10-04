@@ -161,11 +161,11 @@ oflm run qwen3vl-it:4b
 You can control image resizing when running or serving the model using the `--img-pre-resize` flag or simply `-r`:
 
 ```shell
-oflm run qwen3vl-it:3b -r 1
+oflm run qwen3vl-it:4b -r 1
 ```
 
 ```shell
-oflm serve qwen3vl-it:3b -r 1
+oflm serve qwen3vl-it:4b -r 1
 ```
 
 The `-r` option determines the image's height:
@@ -182,16 +182,20 @@ The `-r` option determines the image's height:
 
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
 
 ## 🧩 Model Card: [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
 
 - **Type:** Text-to-Text
-- **Think:** No
+- **Think:** Yes
 - **Tool Calling Support:** No  
 - **Base Model:** [Qwen/Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
-- **Quantization:** Q4_1
+- **Quantization:** Q4_0
 - **Max Context Length:** 32k tokens  
 - **Default Context Length:** 32k tokens ([change default](https://openflowlm.com/docs/instructions/cli/#-change-default-context-length-max))  
 - **[Set Context Length at Launch](https://openflowlm.com/docs/instructions/cli/#-set-context-length-at-launch)**
@@ -207,7 +211,7 @@ oflm run qwen2.5-it:3b
 ## 🧩 Model Card: [Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)
 
 - **Type:** Image-Text-to-Text
-- **Think:** No
+- **Think:** Yes
 - **Tool Calling Support:** No  
 - **Base Model:** [Qwen/Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)
 - **Quantization:** Q4_1
@@ -247,13 +251,17 @@ The `-r` option determines the image's height:
 
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
 
 ## 🧩 Model Card: [Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B)
 
 - **Type:** Image-Text-to-Text
-- **Think:** Toggleable
+- **Think:** Yes
 - **Tool Calling Support:** No  
 - **Base Model:** [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B)
 - **Quantization:** Q4_K
@@ -294,13 +302,17 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-0.8B model card](https://huggingface.co/Qwen/Qwen3.5-0.8B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
 
 ## 🧩 Model Card: [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)
 
 - **Type:** Image-Text-to-Text
-- **Think:** Toggleable
+- **Think:** Yes
 - **Tool Calling Support:** Yes  
 - **Base Model:** [Qwen/Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)
 - **Quantization:** Q4_K
@@ -341,13 +353,17 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-2B model card](https://huggingface.co/Qwen/Qwen3.5-2B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
 
 ## 🧩 Model Card: [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)
 
 - **Type:** Image-Text-to-Text
-- **Think:** Toggleable
+- **Think:** Yes
 - **Tool Calling Support:** Yes  
 - **Base Model:** [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)
 - **Quantization:** Q4_K
@@ -388,13 +404,17 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-4B model card](https://huggingface.co/Qwen/Qwen3.5-4B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
 
 ## 🧩 Model Card: [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B)
 
 - **Type:** Image-Text-to-Text
-- **Think:** Toggleable
+- **Think:** Yes
 - **Tool Calling Support:** Yes  
 - **Base Model:** [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B)
 - **Quantization:** Q4_K
@@ -435,13 +455,17 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.5-9B model card](https://huggingface.co/Qwen/Qwen3.5-9B#using-qwen35-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 ---
 
 ## 🧩 Model Card: [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 
 - **Type:** Image-Text-to-Text
-- **Think:** Toggleable
+- **Think:** Yes
 - **Tool Calling Support:** Yes  
 - **Base Model:** [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 - **Quantization:** Q4_K
@@ -482,3 +506,7 @@ The `-r` option determines the image's height:
 - Optimal sampling parameters for generation vary depending on the task. Check the [Qwen3.6-35B-A3B model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B#using-qwen36-via-the-chat-completions-api) for details.
 - Image understanding adapts to image size. Image TTFT can range from under 1 second to ~200 seconds depending on resolution. Use lower-resolution images (720p or below) unless high resolution is required (e.g. OCR on small text).
 - Video understanding is not supported yet.
+- ⚠️ **Vision runs on the closed engine.** The open kernels cover the text path
+  only; sending an image selects the closed engine even for a model whose text
+  path runs open kernels. See the
+  [support-status matrix](/docs/models/#open-vs-closed-support-status).

@@ -15,6 +15,13 @@ This section reports the performance on NPU with OpenFlowLM (OFLM).
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
+
 ---
 
 ### **Test System 1:** 
@@ -33,7 +40,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
 | **Qwen2.5-3B-Instruct**  | NPU (OFLM)    | 23.5	| 22.5	| 19.8	| 16.8	| 12.5	| 8.4|
-| **Qwen2.5-VL-3B-Instruct**  | NPU (OFLM)    | 23.5	| 22.5	| 19.8	| 16.8	| 12.5	| 8.4|
+| **Qwen2.5-VL-3B-Instruct**  | NPU (OFLM)    | ?| ?| ?| ?| ?| ?
 
 ---
 
@@ -42,7 +49,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
 | **Qwen2.5-3B-Instruct**  | NPU (OFLM)    | 660	| 809	| 899	| 891	| 741	| 532 | 
-| **Qwen2.5-VL-3B-Instruct**  | NPU (OFLM)    | 660	| 809	| 899	| 891	| 741	| 532 | 
+| **Qwen2.5-VL-3B-Instruct**  | NPU (OFLM)    | ?| ?| ?| ?| ?| ?
 
 ---
 
@@ -64,3 +71,15 @@ Prefill time-to-first-token (TTFT) for Qwen2.5-VL-3B-Instruct on NPU (OpenFlowLM
 | Qwen2.5-VL-3B-Instruct  | NPU (OFLM) |           13.3 |             36.4 |
 
 > This test uses a short prompt: “Describe this image.”
+
+---
+
+> ⚠️ **The Qwen2.5-VL rows above are unmeasured.** They previously carried
+> numbers byte-identical to the Qwen2.5-3B-Instruct rows in the same columns.
+> That is not plausible -- `qwen2.5vl-it:3b` is a distinct tag with a larger
+> footprint (3.8 GB vs 2.5 GB) and carries `vision_weight.q4nx` on top of
+> `model.q4nx`. The VL row has been replaced with `?` pending a real run:
+>
+> ```shell
+> oflm bench qwen2.5vl-it:3b
+> ```
