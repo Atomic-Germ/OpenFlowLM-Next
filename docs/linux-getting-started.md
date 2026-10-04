@@ -195,5 +195,5 @@ xrt-smi examine
 ```
 
 Use `oflm validate --json` to see each check as a field (`kernel_ok`,
-`drm_version_ok`, `amd_device_found`, `all_fw_ok`, `enough_cols`,
-`memlock_ok`, `runtime_ok`, and the aggregate `ready`).
+`amd_device_found`, `all_fw_ok`, `enough_cols`, `memlock_ok`, 
+`runtime_ok`, and the aggregate `ready`).

@@ -252,11 +252,10 @@ You should see output similar to:
 The NPU line reports the AIE column count. `oflm validate` performs two checks:
 it opens `/dev/accel/accelN` through the DRM ioctls, then asks the device
 runtime to open the NPU the way `oflm run` does. If the runtime check fails it
-prints `ERROR ... the device runtime cannot open it`; run `xrt-smi examine` and
-install the XRT AMD XDNA plugin for your distribution. Use
+prints `ERROR ... the device runtime cannot open it`; run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution. Use
 `oflm validate --json` to see each check as a field (`kernel_ok`,
-`drm_version_ok`, `amd_device_found`, `all_fw_ok`, `enough_cols`, `memlock_ok`,
-`runtime_ok`, and the aggregate `ready`).
+`amd_device_found`, `all_fw_ok`, `enough_cols`, `memlock_ok`, `runtime_ok`, 
+and the aggregate `ready`).
 
 ---
 
