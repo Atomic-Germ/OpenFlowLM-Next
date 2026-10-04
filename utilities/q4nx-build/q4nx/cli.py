@@ -61,6 +61,57 @@ def _is_hf_source(path: str) -> bool:
     return False
 
 
+def _report_speculative(model) -> None:
+    """End-of-pack roll call for the speculative (best-effort) path.
+
+    _WarnDict already prints each unknown tensor as it appears; this closes
+    the loop so the user is not left assembling a mid-log of warnings. If
+    anything was passed through unmapped, the container *may* not load in any
+    runtime -- say so plainly rather than leaving a plausible-looking
+    model.q4nx on disk.
+    """
+    unknown = getattr(getattr(model, "forward_name_map", None), "unknown", [])
+    missing = getattr(model, "_missing_config_entries", [])
+    unknown_types = getattr(getattr(model, "tensor_q4nx_type_map", None), "unknown", [])
+    if unknown or missing or unknown_types:
+        print("\n[WARN] Speculative pack: the converter produced a best-effort container.")
+        if unknown:
+            print(f"[WARN]   {len(unknown)} GGUF tensor(s) had no config mapping and were "
+                  f"carried through under their GGUF names:")
+            for n in unknown:
+                print(f"           {n}")
+        if unknown_types:
+            print(f"[WARN]   {len(unknown_types)} tensor(s) fell back to the default type; "
+                  f"check the dtype policy matches this model:")
+            for n in unknown_types:
+                print(f"           {n}")
+        if missing:
+            print(f"[WARN]   {len(missing)} config tensor(s) were absent from the GGUF:")
+            for n in missing:
+                print(f"           {n}")
+        print("[WARN] If this build is wrong, an OFLM runtime will refuse to load it or "
+              "misdecode weights; do not publish it as support for this architecture.")
+        # Which supported family would have mapped this model best? Pure
+        # coverage scoring over the configs' own templates -- it does not make
+        # the model supported, it only tells the user the least-wrong -f.
+        # Only meaningful for a GGUF source.
+        ranked = []
+        if getattr(model, "gguf_reader", None) is not None:
+            try:
+                from q4nx.model_converter import config_coverage_report
+                ranked = config_coverage_report(list(getattr(model, "gguf_tensors", {}).keys()))
+            except Exception:
+                ranked = []
+        if ranked:
+            print("[WARN] Nearest config families by tensor coverage (support guessing aid):")
+            for fname, covered, total, frac in ranked[:3]:
+                print(f"         {fname:<22} {covered}/{total} templates ({frac:.0%})")
+            best, bc, bt, bf = ranked[0]
+            if bf >= 0.99:
+                print(f"[WARN] {best} covers the GGUF's tensor layout fully; retrying with "
+                      f"'-f {best.replace('.json', '')}' should produce a proper pack.")
+
+
 # mradermacher splits one model's files across TWO repos of the same name: the
 # bare `-GGUF` carries the K-quants, Q8_0, f16 and the mmproj, while `-i1-GGUF`
 # carries the I-quants AND the imatrix they were made with. Neither half packs a
@@ -627,6 +678,7 @@ def main(argv=None) -> int:
         else:
             model.convert(q4nx_path=output_folder, weights_type=weights_type)
         prune_meta = _prune_meta(model)
+        _report_speculative(model)
         # Staged AFTER the conversion and BEFORE the assets are written, so the
         # recorded command names a file that is already in the directory it names.
         imatrix_ref = _stage_imatrix(model, output_folder, prune_meta)

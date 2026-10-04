@@ -30,6 +30,87 @@ from gguf import Q8_0, GGUFReader, dequantize, quantize, GGMLQuantizationType
 # Registry to store model classes by architecture
 _MODEL_REGISTRY: Dict[ModelArch, Type['__Q4NX_Converter']] = {}
 
+
+class _WarnDict(dict):
+    """A name map that refuses to crash a speculative pack.
+
+    Every __getitem__ for a name the config does not describe is passed
+    through unchanged (best-effort container: the tensor is carried under
+    its GGUF name rather than dropped or fatal) and reported once. The
+    full list of unknown names is collected in .unknown so the caller can
+    print one summary at the end instead of a traceback.
+    """
+
+    def __init__(self, *args, missing_value=None, missing_label="tensor", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unknown: List[str] = []
+        self._missing_value = missing_value
+        self._missing_label = missing_label
+
+    def __missing__(self, key):
+        if key not in self.unknown:
+            self.unknown.append(key)
+            print(f"[WARN] Undefined {self._missing_label}: '{key}' not in the "
+                  f"{self._missing_label} map for this architecture's config. "
+                  f"Carrying it through under its GGUF name; an OFLM runtime "
+                  f"kernel likely cannot consume this tensor.")
+        return self._missing_value if self._missing_value is not None else key
+
+
+def config_coverage_report(gguf_tensor_names, configs_dir: str | None = None) -> List[tuple]:
+    """Rank supported configs by how much of this GGUF they would map.
+
+    Used when a pack is speculative: instead of only naming the tensors that
+    were carried through, state which supported family *would* have claimed
+    the most of them, so the user can retry with the right -f (or see that
+    no family is close). Matching on the config's own gguf_name templates
+    avoids a dependency on Guanaco's llama.cpp naming tables.
+    """
+    if configs_dir is None:
+        configs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs")
+    names = set(gguf_tensor_names)
+    out = []
+    seen_maps: set = set()
+    for fname in sorted(os.listdir(configs_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            cfg = json.load(open(os.path.join(configs_dir, fname)))
+        except Exception:
+            continue
+        # The dense qwen3.5 variants ship five configs with the same name_map;
+        # score it once.
+        map_key = json.dumps(cfg.get("name_map", {}), sort_keys=True)
+        if map_key in seen_maps:
+            continue
+        seen_maps.add(map_key)
+        covered = 0
+        total = 0
+        for param_info in cfg.get("name_map", {}).values():
+            template = param_info["gguf_name"]
+            total += 1
+            regex = re.compile("^" + re.escape(template).replace(r"\{bid\}", r"(\d+)") + "$")
+            if any(regex.match(n) for n in names):
+                covered += 1
+        if total:
+            out.append((fname, covered, total, covered / total))
+    return sorted(out, key=lambda x: (x[3], x[1]), reverse=True)
+
+
+def _warn_missing_config_entries(config_name_map: Dict, gguf_tensors: Dict) -> List[str]:
+    """Config entries a GGUF never supplied, for the end-of-pack report."""
+    missing = []
+    for param_info in config_name_map.values():
+        gguf_template = param_info["gguf_name"]
+        if "{bid}" in gguf_template:
+            regex = re.compile(
+                "^" + re.escape(gguf_template).replace(r"\{bid\}", r"(\d+)") + "$")
+            if not any(regex.match(name) for name in gguf_tensors):
+                missing.append(gguf_template)
+        elif gguf_template not in gguf_tensors:
+            missing.append(gguf_template)
+    return missing
+
 class __Q4NX_Converter(ABC):
     model_arch: ModelArch
     gguf_reader: GGUFReader
@@ -233,9 +314,20 @@ class __Q4NX_Converter(ABC):
                 print(f"\tConverted {gguf_template} to {param_info['q4nx_name']}")
 
         # sort the name map by the name alphabetically
-        self.forward_name_map = dict(sorted(self.forward_name_map.items(), key=lambda item: item[0]))
-        self.backward_name_map = dict(sorted(self.backward_name_map.items(), key=lambda item: item[0]))
-        self.tensor_q4nx_type_map = dict(sorted(self.tensor_q4nx_type_map.items(), key=lambda item: item[0]))
+        self.forward_name_map = _WarnDict(sorted(self.forward_name_map.items(), key=lambda item: item[0]))
+        self.backward_name_map = _WarnDict(sorted(self.backward_name_map.items(), key=lambda item: item[0]))
+        self.tensor_q4nx_type_map = _WarnDict(sorted(self.tensor_q4nx_type_map.items(), key=lambda item: item[0]),
+                                              missing_value=self.default_tensor_type, missing_label="tensor type")
+
+        # Reverse coverage: what the config expected but this GGUF never
+        # supplied. Only meaningful for a GGUF source; the HF path builds
+        # its own tensor iterators and would warn on every entry.
+        self._missing_config_entries = []
+        if self.gguf_reader is not None:
+            self._missing_config_entries = _warn_missing_config_entries(self.q4nx_config["name_map"], self.gguf_tensors)
+            for name in self._missing_config_entries:
+                print(f"[WARN] Config expects '{name}' but the GGUF has no such tensor; "
+                      f"the packed model will not have it.")
 
 
     # ------------------------------------------------------------------ HF utilities
