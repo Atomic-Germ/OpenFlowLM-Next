@@ -21,6 +21,7 @@ class ModelArch(IntEnum):
     PHI4    = auto()
     GPT_OSS = auto()
     NANBEIGE = auto()
+    K2 = auto()
     HUNYUAN_DENSE = auto()
     GRANITE = auto()
 
@@ -69,7 +70,8 @@ ModelArchNames: dict[ModelArch, list[str]] = {
     ModelArch.GPT_OSS: ["gpt-oss"],
     ModelArch.NANBEIGE: ["nanbeige"],
     ModelArch.HUNYUAN_DENSE: ["hunyuan-dense", "hunyuan_v1_dense", "hy-mt2", "hy_mt2"],
-    ModelArch.GRANITE: ["granite", "granitemoe"]
+    ModelArch.GRANITE: ["granite", "granitemoe"],
+    ModelArch.K2: ["k2_horizon", "k2-horizon", "k2"]
 }
 
 ModelArchConfigs: dict[ModelArch, str] = {
@@ -90,5 +92,6 @@ ModelArchConfigs: dict[ModelArch, str] = {
     ModelArch.GPT_OSS: "gpt-oss.json",
     ModelArch.NANBEIGE: "nanbeige.json",
     ModelArch.HUNYUAN_DENSE: "hunyuan.json",
-    ModelArch.GRANITE: "granite.json"
+    ModelArch.GRANITE: "granite.json",
+    ModelArch.K2: "k2.json"
 }
