@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .arch_detect import ARCH_TO_FAMILY, family_from_text, resolve_override_arch
-from .constants import ModelArch
+from .constants import ModelArch, ModelArchConfigs
 
 ASSET_FILES = ["vision_weight.q4nx","audio_weight.q4nx","config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"]
 REQUIRED_ASSETS = ["config.json", "tokenizer.json", "tokenizer_config.json"]
@@ -236,12 +236,42 @@ def _hf_download_file(repo_id: str, filename: str) -> Optional[str]:
 # listed falls back to GGUF_QUANT_PRIORITY. The order is resolved per call from
 # the -f flag (exact) or, as a best-effort fallback, the repo id / GGUF
 # filenames (so the user only needs -f when auto-detection guesses wrong).
-GGUF_QUANT_PRIORITY: Tuple[str, ...] = ("q4_1", "q4_0", "q8_0")
+GGUF_QUANT_PRIORITY: Tuple[str, ...] = ("q4_1", "q4_k", "q4_0", "q8_0")
 
 GGUF_QUANT_PRIORITY_BY_FAMILY: Dict[str, Tuple[str, ...]] = {
-    "lfm2": ("q4_0", "q4_1", "q8_0"),
-    "gpt-oss": ("q4_1", "q4_0", "q8_0", "mxfp4"),
+    "lfm2": ("q4_0", "q4_1", "q4_k", "q8_0"),
+    "gpt-oss": ("q4_1", "q4_0", "q4_k", "q8_0", "mxfp4"),
 }
+
+# Source-quant preference, derived from the family config's target type when
+# that is knowable. The ordering encodes "least re-quant work": source tokens
+# whose block structure the packer preserves exactly (Q4_0/Q4_1/Q4_K share the
+# uint4-per-32-group layout) come first, sources that must be fully
+# dequantize -> re-quantized (Q5_K/Q6_K/IQ*) last.
+_SOURCE_TOKENS_BY_TARGET: Dict[str, Tuple[str, ...]] = {
+    "Q4_K": ("q4_k", "q4_1", "q4_0", "q8_0", "f16", "bf16", "mxfp4", "q5", "q6", "iq", "tq"),
+    "Q4_1": ("q4_1", "q4_k", "q4_0", "q8_0", "f16", "bf16", "mxfp4", "q5", "q6", "iq", "tq"),
+    "Q4_0": ("q4_0", "q8_0", "f16", "bf16", "q4_1", "q4_k", "mxfp4", "q5", "q6", "iq", "tq"),
+    "Q8_0": ("q8_0", "f16", "bf16", "q4_1", "q4_k", "q4_0", "mxfp4", "q5", "q6", "iq", "tq"),
+}
+
+_FAMILY_TO_ARCH: Dict[str, ModelArch] = {}
+for _arch, _fam in ARCH_TO_FAMILY.items():
+    _FAMILY_TO_ARCH.setdefault(_fam, _arch)
+
+
+def _target_quant_for_family(family: Optional[str]) -> Optional[str]:
+    """The family config's default_tensor_type (e.g. 'Q4_1'), or None."""
+    if not family:
+        return None
+    arch = _FAMILY_TO_ARCH.get(family)
+    if arch is None or arch not in ModelArchConfigs:
+        return None
+    cfg_path = Path(__file__).resolve().parent.parent / "configs" / ModelArchConfigs[arch]
+    try:
+        return json.load(open(cfg_path)).get("default_tensor_type")
+    except Exception:
+        return None
 
 
 def _gguf_quant_priority(
@@ -274,6 +304,13 @@ def _gguf_quant_priority(
                 break
     if family and family in GGUF_QUANT_PRIORITY_BY_FAMILY:
         return GGUF_QUANT_PRIORITY_BY_FAMILY[family]
+    # No family override: prefer the source whose blocks need the least
+    # re-quant work for this family's target type. Families whose config's
+    # only native-source token (e.g. q4_k for a Q4_K target) differs from the
+    # global default now get a deterministic, on-log choice.
+    target = _target_quant_for_family(family)
+    if target in _SOURCE_TOKENS_BY_TARGET:
+        return _SOURCE_TOKENS_BY_TARGET[target]
     return GGUF_QUANT_PRIORITY
 
 
