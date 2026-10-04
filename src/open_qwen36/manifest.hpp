@@ -24,7 +24,7 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
+    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose | transpose_banked
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity

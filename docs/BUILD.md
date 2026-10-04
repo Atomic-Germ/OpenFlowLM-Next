@@ -285,6 +285,43 @@ ctest --preset linux-default --test-name-pattern <pattern>
 
 ---
 
+### Docker build
+
+Build fast and simple with Docker.
+
+Simply run(linux-package preset is used by default):
+
+```bash
+./build_in_docker.sh
+```
+
+Or specify a workflow preset(for deb package in this example):
+
+```bash
+./build_in_docker.sh linux-package-deb
+```
+
+The script builds `openflowlm-build:ubuntu26` Docker image, passes `/dev/accel/accel0` into the container, enables XRT memory locking, and persists the build and NPU cache directories.
+
+The host must have the AMD XDNA driver installed and expose:
+
+```text
+/dev/accel/accel0
+```
+
+Verify NPU access with:
+
+```bash
+docker run --rm -it \
+  --device=/dev/accel/accel0 \
+  --cap-add=IPC_LOCK \
+  --ulimit memlock=-1:-1 \
+  openflowlm-build:ubuntu26 \
+  xrt-smi examine
+```
+
+---
+
 ## Windows Build
 
 Windows builds use Visual Studio. Run from a Visual Studio developer environment.
