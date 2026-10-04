@@ -56,6 +56,10 @@
 #include "aie_kernel_utils.h"
 #include <stdint.h>
 
+#if defined(GQD_TWO_PASS) && defined(GQD_R8)
+#error "GQD_TWO_PASS writes the (4 x 8) A-block layout only; the bfp16 mmul (GQD_R8) needs the fused pass"
+#endif
+
 static constexpr unsigned GQD_M = 64;    // rows per band = m (one AIE row's m-tile)
 static constexpr unsigned GQD_K64 = 64;  // one matmul k-tile (= s * colA)
 static constexpr unsigned GQD_R = 4;     // mac_dims r (aie2p bf16, non-emulated: (4,8,8))
@@ -352,15 +356,92 @@ __attribute__((noinline)) inline void gqd_fused_ky(const uint8_t *__restrict ban
         const aie::vector<bfloat16, 64> te = aie::transpose(we, GQD_S, GQD_S);
         const aie::vector<bfloat16, 64> to = aie::transpose(wo, GQD_S, GQD_S);
         const auto z = aie::interleave_zip(te, to, GQD_S);
+#ifdef GQD_R8
+        // The bfp16 mmul's A operand is (8 rows x 8 k) blocks (mac_dims r = 8): z.first is
+        // rows 0..7 of these 16 and z.second rows 8..15, each already one row-major block.
+        bfloat16 *__restrict dst = scratch + sub * (8 * GQD_S);
+        const unsigned ib8 = ib0 / 2;
+        aie::store_v(dst + (ib8 + 0) * GQD_COLA * (8 * GQD_S), z.first);
+        aie::store_v(dst + (ib8 + 1) * GQD_COLA * (8 * GQD_S), z.second);
+#else
         bfloat16 *__restrict dst = scratch + sub * (GQD_R * GQD_S);
         aie::store_v(dst + (ib0 + 0) * GQD_COLA * (GQD_R * GQD_S), z.first.template extract<32>(0));
         aie::store_v(dst + (ib0 + 1) * GQD_COLA * (GQD_R * GQD_S), z.first.template extract<32>(1));
         aie::store_v(dst + (ib0 + 2) * GQD_COLA * (GQD_R * GQD_S), z.second.template extract<32>(0));
         aie::store_v(dst + (ib0 + 3) * GQD_COLA * (GQD_R * GQD_S), z.second.template extract<32>(1));
+#endif
       }
     }
   }
 }
+
+#ifdef GQD_T2
+#ifndef GQD_R8
+#error "the t2 dequant writes the bfp16 mmul's (8 x 8) A blocks; build it with GQD_R8"
+#endif
+// ---------------------------------------------------------------------------
+// The band as two OPEN-QUANT-T2 chunk bodies (OPEN-GEMM-T2), 2176 B each, rows 0..31 then
+// 32..63: [s: 2 x 32 bf16, group g = k / 128, row r | 2048 B of codes]. Code byte
+// 128 + k8 * 64 + kk * 8 + p holds rows 8j + p in bits 2j, at k = 8 k8 + kk; the weight is
+// (code - 1) * s.
+//
+// A 64-byte group is [8 k][8 p]. One 8-bit transpose makes it [8 p][8 k], and then field j of
+// every byte is already one whole (8 rows x 8 k) A block, rows 8j..8j+7 -- so the four masks of
+// one load give four A blocks, with no float shuffles at all (the q4_1 pass above transposes
+// and zips every result). The scale is per row and constant over a 128-k group, so each row
+// block's 64-lane scale vector (its eight rows' s, each over its eight k lanes) is built once
+// per chunk per call. (code - 1) * s is exact in bf16 for code in 0..2.
+// ---------------------------------------------------------------------------
+static constexpr unsigned GQD_T2_BODY = 2176;
+#ifndef GQD_KC
+#define GQD_KC 64          // k per matmul call (the design's GQP_KT): 64 or 128
+#endif
+static constexpr unsigned GQD_T2_COLA = GQD_KC / GQD_S;   // A-operand column blocks per call
+
+// [s0 x8, s1 x8, ..., s7 x8] for the four 8-row blocks of a chunk's 32 row scales
+static inline void gqd_t2_scales(const bfloat16 *__restrict sp, aie::vector<bfloat16, 64> (&sv)[4]) {
+  const aie::vector<bfloat16, 32> v = aie::load_v<32>(sp);
+  const auto l1 = aie::interleave_zip(v, v, 1);                  // rows 0..15 x2 | 16..31 x2
+  const auto a = aie::interleave_zip(l1.first, l1.first, 1);     // rows 0..7 x4 | 8..15 x4
+  const auto b = aie::interleave_zip(l1.second, l1.second, 1);   // rows 16..23 x4 | 24..31 x4
+  const auto a0 = aie::interleave_zip(a.first, a.first, 1);
+  const auto a1 = aie::interleave_zip(a.second, a.second, 1);
+  const auto b0 = aie::interleave_zip(b.first, b.first, 1);
+  const auto b1 = aie::interleave_zip(b.second, b.second, 1);
+  sv[0] = aie::concat(a0.first, a0.second);
+  sv[1] = aie::concat(a1.first, a1.second);
+  sv[2] = aie::concat(b0.first, b0.second);
+  sv[3] = aie::concat(b1.first, b1.second);
+}
+
+__attribute__((noinline)) inline void gqd_t2_ky(const uint8_t *__restrict band, unsigned ky,
+                                                bfloat16 *__restrict scratch) {
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  const unsigned g = ky * GQD_KC / 128;                // the call's 128-k scale group
+  AIE_LOOP_RANGE(2, 2)
+  for (unsigned c = 0; c < 2; ++c) {                   // the band's two chunks: rows 0..31, 32..63
+    const uint8_t *__restrict chunk = band + c * GQD_T2_BODY;
+    aie::vector<bfloat16, 64> sv[4];
+    gqd_t2_scales(reinterpret_cast<const bfloat16 *>(chunk) + g * 32, sv);
+    const uint8_t *__restrict codes = chunk + 128 + ky * GQD_T2_COLA * 64;
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned kb8 = 0; kb8 < GQD_T2_COLA; ++kb8) { // 8 k at a time = one A-operand column block
+      const aie::vector<int8_t, 64> q =
+          aie::vector_cast<int8_t>(aie::transpose(aie::load_v<64>(codes + kb8 * 64), 8, 8));
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned j = 0; j < 4; ++j) {
+        // field j is code << 2j; minus 1 << 2j (wrapping, so j = 3's 128 - 64 lands on 64) is
+        // (code - 1) << 2j, and the conversion's shift leaves code - 1 in {-1, 0, 1}
+        const aie::vector<int8_t, 64> f =
+            aie::sub(aie::bit_and((int8_t)(3u << (2 * j)), q), (int8_t)(1u << (2 * j)));
+        const aie::vector<bfloat16, 64> cf = aie::to_float<bfloat16>(f, 2 * j);
+        aie::store_v(scratch + ((c * 4 + j) * GQD_T2_COLA + kb8) * 64,
+                     aie::mul(cf, sv[j]).template to_vector<bfloat16>());
+      }
+    }
+  }
+}
+#endif
 
 // One entry point: dequantise k-slice `ky` (0..3) of `band` (10240 B, one
 // pool-order band-k-group) into `scratch` (bf16[64*64], block-ordered A
@@ -385,7 +466,11 @@ __attribute__((noinline)) inline void gqd_dequant_ky(
 #else
   (void)nib_scr;
 #if !defined(GQD_NULL_GATHER) && !defined(GQD_NULL_DEQUANT)
+#ifdef GQD_T2
+  gqd_t2_ky(band, ky, scratch);
+#else
   gqd_fused_ky(band, ky, scratch);
+#endif
 #endif
 #endif
   event1();

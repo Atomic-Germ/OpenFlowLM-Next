@@ -32,14 +32,20 @@ struct TransposePart {
 /// y [N, T] transposed straight into the ranges the caller is going to read it as, so a
 /// fused projection needs no [T, N] copy in between. The ranges may not overlap.
 void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_t n_parts);
+/// The same ranges out of a token-major y [T, N] (a GQP_YT GEMM, OPEN-GEMM-T2): row copies.
+void split_rows(const float* y, size_t T, size_t N, const TransposePart* parts, size_t n_parts);
 /// x [T, K] fp32 -> the GEMM's tiled bf16 activation layout ([K, T] "k,n" order, 64 x 32
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
-void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
+void tile_x(const float* x, size_t T, size_t K, uint16_t* out, size_t tk = 64);
 /// The activation side of a rotated-basis ternary model (OPEN-HADAMARD, Ternary Bonsai 2): every
 /// `block`-wide run of each row of x [T, K] becomes H(signs * run) / sqrt(block) in place, H the
 /// Sylvester Walsh-Hadamard matrix. `signs` (K values of +-1) may be null. The NPU preps do the
 /// same per 4 KB element (open_kernels/designs/gemv_q4/wht.h); this is the block route's copy.
 void hadamard_rows(float* x, size_t T, size_t K, size_t block, const float* signs);
+/// hadamard_rows on a copy of x followed by tile_x, in one pass over x and leaving x as it was:
+/// bit-identical to the two, without the [T, K] copy.
+void hadamard_tile_x(const float* x, size_t T, size_t K, size_t block, const float* signs, uint16_t* out,
+                     size_t tk = 64);
 
 struct DeltaGeom {
     size_t T = 0, t_real = 0, hid = 0;

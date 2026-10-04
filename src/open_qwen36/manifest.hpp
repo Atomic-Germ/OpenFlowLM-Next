@@ -37,7 +37,7 @@ struct PackOp {
                                              ///< supertile height of the file raster
     uint64_t experts = 0, stripes = 0, stripe_bytes = 0, expert_bytes = 0;   ///< expert_stripes / expert_down
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
-    uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)
+    uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk); t2_perm (the POOL chunk, default T2_CHUNK)
     uint64_t rows = 0, cols = 0, elem = 0;                              ///< transpose
     std::string split;                                                  ///< std_perm of a q8 source: "hi" |
                                                                         ///< "lo", one half of its exact q4_1
@@ -110,6 +110,8 @@ struct AttnBlock {
 struct GemmBlockProgram {
     uint64_t t = 0;               ///< 0 = no route for this layer type
     std::string kind;             ///< dense | linear | full
+    bool y_tn = false;            ///< every GEMM's y is [T, N], token-major, not [N, T] (OPEN-GEMM-T2)
+    uint64_t x_tile_k = 64;       ///< k per activation tile the GEMM streams (128 for OPEN-GEMM-T2)
     std::vector<Step> program;
     std::map<std::string, GemmWeight> weights;
     double eps = 0;               ///< RMSNorm eps for the host norms

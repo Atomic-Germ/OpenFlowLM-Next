@@ -7,11 +7,11 @@
 // q4_1 copy (src/open_qwen36/pools.cpp t2_perm). Probe 0a (designs/gemv_t2) measured this
 // body at its DMA floor: 2.18x the q4_1 GEMV on the 27B's gate, 2.07x on its down half.
 //
-//   chunk = 32 output rows x 256 K, GEMV_T2_CHUNK (2560) B:
+//   chunk = 32 output rows x 256 K, GEMV_T2_CHUNK (2176) B, unpadded:
 //     s    [2][32] bf16 at [0 : 128]      group g = k / 128 of the chunk, row r
 //     code [8 kb][4 oc][8 kk][8 p] B at [128 : 2176]
 //          byte (kb, oc, kk, p), bits 2j..2j+1 = code(row 8j + p, k = 32 kb + 8 oc + kk)
-//     pad  to 2560, so two chunks fill the 5 KB w element the q4_1 27B streams
+//   (padded to 2560 until 2026-10-03; the stride only matters past the first chunk of an element)
 //
 // The band law is gemv_q4's (64-row bands, half = c % rs, k-tile = c / rs). The inner
 // product is gemv_q4's mmul<4, 8, 8, int16, uint8> with B = one 64 B block masked to one
@@ -34,7 +34,7 @@
 #include "gemv_tab.h"   // gemv_q4_absmask
 
 #ifndef GEMV_T2_CHUNK
-#define GEMV_T2_CHUNK 2560
+#define GEMV_T2_CHUNK 2176
 #endif
 #ifndef GEMV_PER_CALL
 #define GEMV_PER_CALL 2

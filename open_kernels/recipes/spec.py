@@ -89,7 +89,9 @@ class ModelSpec:
     # {"block": 1024, "og_signs": [+-1 x attention-output width]}. Every projection input goes
     # through H/sqrt(block) per block before its GEMV; the converter folded every other sign
     # into weights (OPEN-HADAMARD). None for every other model, and then absent from to_dict(),
-    # so no shipped spec_hash moves.
+    # so no shipped spec_hash moves. "lm_head": "rotated" when the container's head is the
+    # rotated ternary weight itself (its input goes through the transform too; the recipe runs
+    # it as t2) -- absent for a container whose head was un-rotated to q8 at conversion.
     hadamard: dict | None = None
 
     # ---- derived
@@ -479,7 +481,13 @@ def _prism_hadamard(ph: Mapping[str, Any], spec_width: int) -> dict:
     signs = [int(v) for v in ph.get("og_signs", [])]
     if len(signs) != spec_width or any(v not in (1, -1) for v in signs):
         raise SpecError(f"prism_hadamard.og_signs: want {spec_width} values of +-1, got {len(signs)}")
-    return {"block": block, "og_signs": signs}
+    hd = {"block": block, "og_signs": signs}
+    head = ph.get("lm_head", "unrotated")
+    if head == "rotated":
+        hd["lm_head"] = "rotated"            # OPEN-QUANT-T2: the head runs as t2 (lm_head_t2)
+    elif head != "unrotated":
+        raise SpecError(f"prism_hadamard.lm_head {head!r}: 'rotated' or 'unrotated'")
+    return hd
 
 
 def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:

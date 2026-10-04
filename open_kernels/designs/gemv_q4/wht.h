@@ -16,27 +16,40 @@
 //   stride >= 16: six stages of vector pairs through the scratch block;
 //   stride 1..8:  four in-register stages per 16-lane vector (rotates + selects),
 //                 then the 1/32 -- a power of two, so exact -- and the bf16 rounding.
-// Measured on its own (designs/gemv_t2, probe 0a): ~5 us per 1024 block per core,
-// 864 B of program memory, 4 KB of data memory for the scratch block.
+// Measured on its own (designs/gemv_t2, probe 0a): ~5 us per 1024 block per core in the
+// one-stage-per-pass form, 864 B of program memory, 4 KB of data memory for the scratch block.
 
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
 static float xh_wht_scratch[1024] __attribute__((aligned(64)));
 
-// The six wide stages over the scratch block.
+// The six wide stages over the scratch block, two per pass (strides t and 2t, t = 16, 64, 256):
+// four vectors in, both butterfly levels in registers, four out. The same fp32 adds and
+// subtracts on the same operands as one stage per pass -- stage t makes a+b, a-b, c+d, c-d and
+// stage 2t pairs (j, j+2t) and (j+t, j+3t) -- so the same bits, in half the passes and a third
+// of the loop iterations (the single-stage form was loop- and latency-bound, ~5 us a block).
 __attribute__((noinline)) inline void xh_wht_wide(float *__restrict v) {
 #pragma clang loop unroll(disable)
-  for (unsigned t = 16; t < 1024; t <<= 1) {
+  for (unsigned t = 16; t < 1024; t <<= 2) {
 #pragma clang loop unroll(disable)
-    for (unsigned i = 0; i < 1024; i += 2 * t) {
+    for (unsigned i = 0; i < 1024; i += 4 * t) {
 #pragma clang loop unroll(disable)
       for (unsigned j = i; j < i + t; j += 16) {
-        aie::accum<accfloat, 16> a, b;
+        aie::accum<accfloat, 16> a, b, c, d;
         a.from_vector(aie::load_v<16>(v + j));
         b.from_vector(aie::load_v<16>(v + j + t));
-        aie::store_v(v + j, aie::add(a, b).template to_vector<float>());
-        aie::store_v(v + j + t, aie::sub(a, b).template to_vector<float>());
+        c.from_vector(aie::load_v<16>(v + j + 2 * t));
+        d.from_vector(aie::load_v<16>(v + j + 3 * t));
+        aie::accum<accfloat, 16> s1, d1, s2, d2;
+        s1.from_vector(aie::add(a, b).template to_vector<float>());
+        d1.from_vector(aie::sub(a, b).template to_vector<float>());
+        s2.from_vector(aie::add(c, d).template to_vector<float>());
+        d2.from_vector(aie::sub(c, d).template to_vector<float>());
+        aie::store_v(v + j, aie::add(s1, s2).template to_vector<float>());
+        aie::store_v(v + j + 2 * t, aie::sub(s1, s2).template to_vector<float>());
+        aie::store_v(v + j + t, aie::add(d1, d2).template to_vector<float>());
+        aie::store_v(v + j + 3 * t, aie::sub(d1, d2).template to_vector<float>());
       }
     }
   }
@@ -46,7 +59,9 @@ __attribute__((noinline)) inline void xh_wht_wide(float *__restrict v) {
 __attribute__((noinline)) inline void xh_wht_narrow_out(const float *__restrict v, bfloat16 *out) {
   aie::set_rounding(aie::rounding_mode::conv_even);
   const aie::vector<bfloat16, 16> inv32 = aie::broadcast<bfloat16, 16>((bfloat16)0.03125f);
-#pragma clang loop unroll(disable)
+  // Two vectors per iteration: each one's four stages are a dependent chain, and two chains
+  // side by side fill the bundles one leaves empty.
+#pragma clang loop unroll_count(2)
   for (unsigned j = 0; j < 1024; j += 16) {
     aie::vector<float, 16> y = aie::load_v<16>(v + j);
 #pragma clang loop unroll(full)

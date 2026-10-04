@@ -5,7 +5,8 @@
 ///        both sides build the SAME synthetic q8 chunks from the LCG below and
 ///        both assert the same FNV-1a hash of the result, so a divergence in
 ///        either implementation fails one of the two tests.
-// Traces: OPEN-PACK-PLAN, OPEN-FAMILY-QWEN35, OPEN-PACK-CHUNK-FUSE, OPEN-WIDTH-PAD, OPEN-EMBED-STRIDE
+// Traces: OPEN-PACK-PLAN, OPEN-FAMILY-QWEN35, OPEN-PACK-CHUNK-FUSE, OPEN-WIDTH-PAD, OPEN-EMBED-STRIDE,
+//         OPEN-QUANT-T2
 //         (canonical spec: specs/open-engine/spec.md)
 #include <algorithm>
 #include <cmath>
@@ -196,6 +197,62 @@ open_qwen36::PackOp std_perm_op(const char* tensor, uint64_t dst) {
     op.nch = NCH;
     op.in_dim = IN_DIM;
     return op;
+}
+
+// ---- OPEN-QUANT-T2: t2_perm packs at the stride the manifest names (2176 since the pad was
+// dropped; an op without one means the first t2 sets' 2560). The 2176 chunk bytes are the same
+// at either stride and anything past them is zero.
+void t2_stride_tests() {
+    const char* T2_NAME = "model.layers.0.mlp.gate_proj.weight";
+    std::vector<uint8_t> q4(NCH * Q4_CH, 0);              // exact-ternary q4_1: codes 0..2, m = -d,
+    uint32_t s = 0x7E57u;                                 // one d per (row, 128-column group)
+    for (size_t c = 0; c < NCH; ++c) {
+        uint8_t* p = q4.data() + c * Q4_CH;
+        for (unsigned g = 0; g < 2; ++g)
+            for (unsigned r = 0; r < 32; ++r) {
+                s = s * 1664525u + 1013904223u;
+                const uint16_t d = static_cast<uint16_t>(0x3B00u | (s >> 24));
+                const uint16_t m = static_cast<uint16_t>(d ^ 0x8000u);
+                for (unsigned kb = 4 * g; kb < 4 * g + 4; ++kb) {
+                    std::memcpy(p + 2 * (kb * 32 + r), &d, 2);
+                    std::memcpy(p + 512 + 2 * (kb * 32 + r), &m, 2);
+                }
+            }
+        for (size_t i = 1024; i < Q4_CH; ++i) {
+            s = s * 1664525u + 1013904223u;
+            p[i] = static_cast<uint8_t>(((s >> 24) % 3) | (((s >> 16) & 0xFFu) % 3) << 4);
+        }
+    }
+    const std::string path = write_container("open_qwen36_pools_t2", {{T2_NAME, Q4_CH, &q4}});
+    open_qwen36::Q4nxFile f(path);
+    auto op_at = [&](uint64_t stride) {
+        open_qwen36::PackOp op;
+        op.op = "t2_perm";
+        op.tensor = T2_NAME;
+        op.nch = NCH;
+        op.in_dim = IN_DIM;
+        op.chunk_bytes = stride;
+        return op;
+    };
+    std::vector<uint8_t> p2176(NCH * 2176, 0xAB), p2560(NCH * 2560, 0xAB), plegacy(NCH * 2560, 0xCD);
+    open_qwen36::pools::apply(op_at(2176), f, 0, p2176.data(), p2176.size(), Q4_CH);
+    open_qwen36::pools::apply(op_at(2560), f, 0, p2560.data(), p2560.size(), Q4_CH);
+    open_qwen36::pools::apply(op_at(0), f, 0, plegacy.data(), plegacy.size(), Q4_CH);
+    bool same = true, zero = true, nonzero = false;
+    for (size_t c = 0; c < NCH; ++c) {
+        same = same && std::memcmp(p2176.data() + c * 2176, p2560.data() + c * 2560, 2176) == 0;
+        for (size_t i = 2176; i < 2560; ++i) zero = zero && p2560[c * 2560 + i] == 0;
+        for (size_t i = 128; i < 2176; ++i) nonzero = nonzero || p2176[c * 2176 + i] != 0;
+    }
+    check(same && zero && nonzero, "t2_perm: the same 2176 B chunks at stride 2176 and 2560, zero past them");
+    check(plegacy == p2560, "t2_perm: an op without chunk_bytes packs at the first t2 sets' 2560");
+    std::string msg;
+    try {
+        open_qwen36::pools::apply(op_at(2112), f, 0, p2560.data(), p2560.size(), Q4_CH);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    check(msg.find("chunk_bytes 2112") != std::string::npos, "t2_perm: a stride under 2176 B is refused (\"" + msg + "\")");
 }
 
 void mixed_container_tests() {
@@ -763,6 +820,91 @@ void ptab_switch_tests() {
     check(ok, "build_ptab: kSwitchNever reads inv_freq for every row, long_inv_freq never touched");
 }
 
+
+/// OPEN-QUANT-T2, the rotated lm head's pool: `t2_perm` re-derives 2-bit chunks from an
+/// exact-ternary q4_1 tensor (q = code, m = -d, one d per 128 columns -- q4nx-build's Bonsai
+/// container), in std_perm's band order, at the POOL chunk `chunk_bytes` names (2176, unpadded,
+/// for the head; T2_CHUNK 2560 for the layer pools when absent). Decoded here independently of
+/// pools.cpp: every pool chunk must read back the source codes and scales of the rows / columns
+/// the band law puts there, the two strides must differ only by the zero padding, and nothing may
+/// be written past nch * chunk_bytes.
+void t2_head_tests() {
+    std::printf("  -- OPEN-QUANT-T2 (the rotated head's t2_perm)\n");
+    constexpr size_t ROWS = 128, K = 512, NC = ROWS / 32 * (K / 256), HEAD = 2176, PAD = 2560;
+    // codes 0..2 and one bf16 scale per (row, 128 columns), from an LCG
+    std::vector<uint8_t> code(ROWS * K);
+    std::vector<uint16_t> scale(ROWS * (K / 128));
+    uint32_t st = 0x7E57AB1Eu;
+    for (auto& c : code) { st = st * 1664525u + 1013904223u; c = static_cast<uint8_t>((st >> 24) % 3); }
+    for (auto& v : scale) { st = st * 1664525u + 1013904223u; v = static_cast<uint16_t>(0x3C00u | (st >> 25)); }
+    // the container's q4_1 chunks (rowblock32, ktile) at rowblock32 * ncol + ktile
+    std::vector<uint8_t> q4(NC * Q4_CH, 0);
+    const size_t ncol = K / 256;
+    for (size_t rb = 0; rb < ROWS / 32; ++rb)
+        for (size_t kt = 0; kt < ncol; ++kt) {
+            uint8_t* ch = q4.data() + (rb * ncol + kt) * Q4_CH;
+            for (unsigned r = 0; r < 32; ++r)
+                for (unsigned k = 0; k < 256; ++k) {
+                    const size_t row = 32 * rb + r, col = 256 * kt + k;
+                    const uint16_t d = scale[row * (K / 128) + col / 128];
+                    const uint16_t m = static_cast<uint16_t>(d ^ 0x8000u);
+                    std::memcpy(ch + 2 * ((k / 32) * 32 + r), &d, 2);
+                    std::memcpy(ch + 512 + 2 * ((k / 32) * 32 + r), &m, 2);
+                    const unsigned idx = (r / 16) * 4096 + k * 16 + (r % 16);
+                    ch[1024 + idx / 2] |= static_cast<uint8_t>(code[row * K + col] << (4 * (idx & 1)));
+                }
+        }
+    const char* name = "lm_head.weight";
+    const std::string path = write_container("open_qwen36_t2_head_test", {{name, Q4_CH, &q4}});
+    open_qwen36::Q4nxFile f(path);
+    auto op = [&](uint64_t chunk_bytes) {
+        open_qwen36::PackOp o;
+        o.op = "t2_perm";
+        o.tensor = name;
+        o.dst = 0;
+        o.nch = NC;
+        o.in_dim = K;
+        o.chunk_bytes = chunk_bytes;
+        return o;
+    };
+    std::vector<uint8_t> head(NC * HEAD + 64, 0xAB), pad(NC * PAD, 0xCD);
+    open_qwen36::pools::apply(op(HEAD), f, 0, head.data(), head.size(), Q4_CH);
+    open_qwen36::pools::apply(op(0), f, 0, pad.data(), pad.size(), Q4_CH);
+
+    // every pool chunk reads back its rows / columns: c -> (64 band + 32 half, 256 ktile)
+    bool vals = true;
+    const size_t per_band = K / 128;
+    for (size_t c = 0; c < NC && vals; ++c) {
+        const uint8_t* t = head.data() + c * HEAD;
+        const size_t r0 = 64 * (c / per_band) + 32 * (c % 2), c0 = 256 * ((c % per_band) / 2);
+        for (unsigned r = 0; r < 32 && vals; ++r)
+            for (unsigned k = 0; k < 256 && vals; ++k) {
+                uint16_t sv;
+                std::memcpy(&sv, t + 2 * ((k / 128) * 32 + r), 2);
+                const uint8_t b = t[128 + (k / 8) * 64 + (k % 8) * 8 + (r % 8)];
+                const unsigned q = (b >> (2 * (r / 8))) & 3u;
+                vals = q == code[(r0 + r) * K + c0 + k] && sv == scale[(r0 + r) * (K / 128) + (c0 + k) / 128];
+            }
+    }
+    check(vals, "t2_perm at chunk_bytes 2176: each head chunk holds its band's codes and bf16 scales");
+    bool same = true, zero = true;
+    for (size_t c = 0; c < NC; ++c) {
+        same = same && std::memcmp(head.data() + c * HEAD, pad.data() + c * PAD, HEAD) == 0;
+        for (size_t i = HEAD; i < PAD; ++i) zero = zero && pad[c * PAD + i] == 0;
+    }
+    check(same && zero, "t2_perm: the 2176 B head chunks are the 2560 B pool chunks without their zero pad");
+    bool canary = true;
+    for (size_t i = NC * HEAD; i < head.size(); ++i) canary = canary && head[i] == 0xAB;
+    check(canary, "t2_perm at chunk_bytes 2176: nothing written past nch * 2176");
+    std::string msg;
+    try {
+        open_qwen36::pools::apply(op(2048), f, 0, head.data(), head.size(), Q4_CH);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    check(msg.find("chunk_bytes 2048") != std::string::npos, "t2_perm: a pool chunk under 2176 B is refused (\"" + msg + "\")");
+}
+
 }  // namespace
 
 int main() {
@@ -858,7 +1000,9 @@ int main() {
     ptab_switch_tests();
     ktile_guard_tests();
     chunk_fuse_tests();
+    t2_head_tests();
     embed_stride_tests();
+    t2_stride_tests();
 
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

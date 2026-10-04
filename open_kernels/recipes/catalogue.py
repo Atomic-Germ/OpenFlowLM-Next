@@ -162,7 +162,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                      # their DMA floor (designs/gemv_t2).
               "rs": values(2),
               "rows_per_core": multiple_of(64),
-              "per_call": values(1)},                # one 2560 B chunk per w element (probe 0a: same DMA floor)
+              "per_call": values(1)},                # one 2176 B chunk per w element (probe 0a: same DMA floor)
              note="2-bit ternary chunks from an exact-q4_1 ternary container (OPEN-QUANT-T2)"),
     Template("gemv_q4_prep_f32", "designs/gemv_q4/gemv_tab.h",
              {"K": values(512)},                 # the expert hidden h (moe_experts' law)
@@ -231,6 +231,10 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
              {"K": values(1024, 2048, 2560, 3072, 3840, 4096), "vocab": multiple_of(64)},
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
+    Template("lm_head_t2", "designs/lm_head_t2/lm_head_t2.py",
+             {"K": values(5120), "vocab": multiple_of(64)},
+             note="a rotated-basis ternary head (Ternary Bonsai 2): gemv_t2.h's tile on unpadded 2176 B "
+                  "chunks, wht.h's FWHT in the prep (OPEN-QUANT-T2); validated at the 27B's K"),
 ]}
 
 

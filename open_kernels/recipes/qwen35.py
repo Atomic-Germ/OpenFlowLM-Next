@@ -40,13 +40,36 @@ from __future__ import annotations
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
-from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
+import os
+
+from .attnknobs import probe_env as _attn_probe_env
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, Q8_CHUNK, Recipe, ab_lanes, ffn_geometry, mixed_check,
                         per_call, proj_op, q4_chunks, quant_check, require_gemv, roundup, t2_check)
 from .spec import FULL, LINEAR, ModelSpec
 
 FAMILY = "qwen35"
 FFN = "dense"
+# OPEN-QUANT-T2's rotated head: a 2-bit chunk (32 rows x 256 K) at its unpadded size -- the head
+# has its own pool and its own design (designs/lm_head_t2), so none of the layer pools' padding.
+LM_T2_CHUNK = 2176
+LM_T2_BAND_ROWS = 64
+
+
+def head_t2(spec: ModelSpec) -> bool:
+    """The container's head is PrismML's rotated ternary weight itself (prism_hadamard.lm_head
+    "rotated", q4nx-build's exact q4_1 copy): it runs as t2 through lm_head_t2, with the FWHT on
+    its input, whatever format the layers stream. Every other spec keeps the q8 head."""
+    return bool(spec.hadamard) and spec.hadamard.get("lm_head") == "rotated"
+
+
+def lm_t2_chunks(spec: ModelSpec) -> int:
+    """t2 chunks in the rotated head: 32-row blocks x 256-wide k-tiles."""
+    return spec.vocab // 32 * (spec.hidden // 256)
+
+
+def lm_t2_pool_bytes(spec: ModelSpec) -> int:
+    """The head pool: exactly the chunks lm_head_t2 streams (pack_lmhead zeroes and fills it)."""
+    return lm_t2_chunks(spec) * LM_T2_CHUNK
 
 
 def _check(spec: ModelSpec) -> None:
@@ -75,7 +98,10 @@ def _check(spec: ModelSpec) -> None:
                                f"(64-row bands over {n} cores)")
     pc = per_call(spec, FFN)
     require("ln", width=spec.hidden)
-    require("lm_head_q8", K=spec.hidden, vocab=spec.vocab)
+    if head_t2(spec):
+        require("lm_head_t2", K=spec.hidden, vocab=spec.vocab)
+    else:
+        require("lm_head_q8", K=spec.hidden, vocab=spec.vocab)
     # the FFN tail (recipes/dense.py's GEMV points, at this family's widths); a split down
     # GEMV asks for each piece's K, which is what the core actually runs
     require_gemv(spec, "ffn", spec.hidden, spec.intermediate // n, pc)
@@ -163,9 +189,7 @@ def pack_plan(spec: ModelSpec) -> dict:
         proj_op(spec, "ffn", pre + "mlp.down_proj.weight", L.POOL_FFN_DOWN, hid, ff, ff),
     ]
     plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK, "layer_types": {},
-                  "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                              "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight",
-                                       "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]},
+                  "lm_head": lm_head_plan(spec),
                   "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
                   "norm": {"tensor": "model.norm.weight", "bytes": hid * 2}}
     if spec.has_linear:
@@ -231,6 +255,19 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+def lm_head_plan(spec: ModelSpec) -> dict:
+    """The lmpool's pack: the q8 head's supertile order, or -- for a rotated ternary head --
+    `t2_perm` (std_perm's 64-row band order, the order lm_head_t2 streams) into unpadded
+    LM_T2_CHUNK chunks, re-derived at load from the container's exact q4_1 copy."""
+    hid = spec.hidden
+    if head_t2(spec):
+        return {"pool_bytes": lm_t2_pool_bytes(spec),
+                "ops": [{"op": "t2_perm", "tensor": "lm_head.weight", "dst": 0, "nch": lm_t2_chunks(spec),
+                         "in_dim": hid, "chunk_bytes": LM_T2_CHUNK}]}
+    return {"pool_bytes": layout(spec).LMHEAD_POOL_BYTES,
+            "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight", "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]}
+
+
 def gemm_route(spec: ModelSpec) -> dict | None:
     """The block prefill route (OPEN-PREFILL-BATCH): `qwen36moe.gemm_route` over this family's
     pack plan, with the dense FFN in place of the MoE block. None means the sequential set,
@@ -248,10 +285,12 @@ def gemm_route(spec: ModelSpec) -> dict | None:
 
 
 def _t2_gemm_weights(route: dict, plan: dict) -> None:
-    """OPEN-QUANT-T2: the decode pool holds 2-bit chunks, and the block route's GEMM reads the
-    q4_1 band law only. Every GEMM weight that pointed into the pool or the consts therefore
-    becomes its own `pack` buffer of std_perm ops over the container's exact q4_1 copy -- the
-    route already copies each weight into a buffer of its own, so this costs no extra memory."""
+    """OPEN-GEMM-T2: the block route's GEMM reads the 2-bit chunks the decode pool holds, but the
+    t2 pack plan keeps q4_1's 5120 B slot per chunk (each op fills the first half of its run), so
+    a fused weight (qkv | z, up | gate, ...) is not one contiguous region of the pool. Every GEMM
+    weight that pointed into the pool or the consts therefore becomes its own `pack` buffer of the
+    same t2_perm ops (their `chunk_bytes` stride, T2_CHUNK), packed back to back -- the route copies
+    each weight into a buffer of its own either way."""
     for lt, g in route["layer_types"].items():
         for key in ("weights", "ffn_weights", "shared_weights"):
             for name, w in list(g.get(key, {}).items()):
@@ -260,32 +299,73 @@ def _t2_gemm_weights(route: dict, plan: dict) -> None:
                 ops, dst = [], 0
                 for i in w["ops"]:
                     op = dict(plan[lt][w["from"]][i])
-                    op.update(op="std_perm", dst=dst)
+                    assert op["op"] == "t2_perm", op
+                    op["dst"] = dst
                     ops.append(op)
-                    dst += op["nch"] * CHUNK
+                    dst += op["nch"] * M.T2_CHUNK
                 g[key][name] = {"from": "pack", "pack": ops}
+
+
+# ---- OPEN-DECODE-ONE-CONTEXT: both layer types on one image (designs/layer_x/dux.py)
+def one_context(spec: ModelSpec) -> bool:
+    """The decode layer loop as ONE hardware context. OPEN_LAYER_ONE_CTX=1 at export forces it
+    on and =0 off. Unset, it is on for an all-t2 spec (Ternary Bonsai 2 27B, the one model it
+    was measured and validated on) and off for every other dense model until each is."""
+    env = os.environ.get("OPEN_LAYER_ONE_CTX")
+    if env is not None:
+        return env != "0"
+    return bool(spec.quant_map) and all(f == "t2" for f in spec.quant_map.values())
+
+
+def merged_image(spec: ModelSpec) -> bool:
+    """Whether this spec's layer kernels are dux.py's merged image: it needs both layer types,
+    no q8 role (the merged main core holds one GEMV entry), the split norm helper, and the two
+    og projections at one shape -- dux.py's own asserts, checked here first so a spec that
+    cannot merge keeps lx / ax instead of failing its build."""
+    if not (one_context(spec) and spec.has_linear and spec.has_full and not spec.q8_roles):
+        return False
+    R = recipe(spec)
+    D, A = R.linear, R.attn
+    return (bool(R.ln_split) and (D.OUT_PC, D.OUT_K, D.OG_ELEMS) == (A.O_PC, A.O_K, A.OG_ELEMS)
+            and D.XN_SIDE_ELEMS == R.ffn.XN_ELEMS and A.ACORES > 1 and A.NHL == A.HPO)
+
+
+def probe_env() -> dict[str, str]:
+    """The build key's probe variables (cache.py). An explicit OPEN_LAYER_ONE_CTX joins them: it
+    changes what `builds` compiles, and nothing else in the key sees it. Unset, the flavour is a
+    function of the spec, which the key already hashes."""
+    e = dict(_attn_probe_env())
+    if os.environ.get("OPEN_LAYER_ONE_CTX") is not None:
+        e["OPEN_LAYER_ONE_CTX"] = os.environ["OPEN_LAYER_ONE_CTX"]
+    return e
 
 
 # ---- the step program: ONE run per layer type (nothing is routed, so no part split)
 def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     L = layout(spec)
+    lm = "lm_head_t2" if head_t2(spec) else "lm_head_q8"
     out: dict = {
-        "contexts": {"ln": "ln/final.xclbin", "lm": "lm_head_q8/final.xclbin"},
+        "contexts": {"ln": "ln/final.xclbin", "lm": f"{lm}/final.xclbin"},
         "kernels": {"ln": {"context": "ln", "insts": "ln/insts.bin", "build": "ln"},
-                    "lm": {"context": "lm", "insts": "lm_head_q8/insts.bin", "build": "lm_head_q8"}},
+                    "lm": {"context": "lm", "insts": f"{lm}/insts.bin", "build": lm}},
         "layer_types": {},
         "tail": [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
         "globals": {"xres": spec.hidden * 4, "zero": spec.hidden * 4, "normw": spec.hidden * 2,
                     "xresf": spec.hidden * 4, "hn": spec.hidden * 2, "logits": spec.vocab * 4,
-                    "lmpool": L.LMHEAD_POOL_BYTES,
+                    "lmpool": lm_head_plan(spec)["pool_bytes"],
                     "ptab": {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq()}},
     }
+    # The merged image (dux.py) carries both layer types, so both run in the context named here
+    # and the linear stream takes the attention layer's six buffer arguments -- one image, one
+    # kernel signature; its `ptab` is never touched (OPEN-DECODE-ONE-CONTEXT).
+    merged = merged_image(spec)
+    lin_ctx, full_ctx = ("layer", "layer") if merged else ("lx", "ax")
     if spec.has_linear:
-        args = ["pool", "xres", "consts", "state", "act"]
+        args = ["pool", "xres", "consts", "state", "act", "ptab"] if merged else ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx/final.xclbin"
-        out["kernels"]["lx"] = {"context": "lx", "insts": "lx/insts.bin", "build": "lx"}
+        out["contexts"][lin_ctx] = "lx/final.xclbin"
+        out["kernels"]["lx"] = {"context": lin_ctx, "insts": "lx/insts.bin", "build": "lx"}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
@@ -294,8 +374,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax/final.xclbin"
-        out["kernels"]["ax"] = {"context": "ax", "insts": "ax/insts.bin", "patch": "attnpos", "build": "ax"}
+        out["contexts"].setdefault(full_ctx, "ax/final.xclbin")
+        out["kernels"]["ax"] = {"context": full_ctx, "insts": "ax/insts.bin", "patch": "attnpos", "build": "ax"}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES,
                         "state": {"kind": "kv", "row": L.KV_ROW}},
@@ -324,7 +404,8 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     return {
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
         "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
-        "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,
+        "lmhead_pool_bytes": lm_head_plan(spec)["pool_bytes"],
+        "lmhead_chunk_bytes": LM_T2_CHUNK if head_t2(spec) else Q8_CHUNK,
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim,
         "rope_theta": spec.rope_theta, "rope_inv_freq": spec.rope_inv_freq(),
     }
@@ -337,20 +418,34 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     b: dict[str, dict] = {}
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
-    if spec.has_linear:
-        b["lx"] = {"design": "layer_x/lx.py",
-                   "build_dir": f"layer_x/build_{spec.family}_lx_h{spec.hidden}{sfx}",
-                   "env": {"LX_PART": "0"}}
-    if spec.has_full:
-        b["ax"] = {"design": "layer_x/ax.py",
-                   "build_dir": f"layer_x/build_{spec.family}_ax_h{spec.hidden}{sfx}",
-                   "env": {"AX_PART": "0"}}
+    if merged_image(spec):
+        # Same set names (lx, ax), so the manifest's kernel names and an export's --only list
+        # do not move: one design, two parts, one image (OPEN-DECODE-ONE-CONTEXT).
+        for name, part in (("lx", 0), ("ax", 1)):
+            b[name] = {"design": "layer_x/dux.py",
+                       "build_dir": f"layer_x/build_{spec.family}_dux{part}_h{spec.hidden}{sfx}",
+                       "env": {"DUX_PART": str(part)}}
+    else:
+        if spec.has_linear:
+            b["lx"] = {"design": "layer_x/lx.py",
+                       "build_dir": f"layer_x/build_{spec.family}_lx_h{spec.hidden}{sfx}",
+                       "env": {"LX_PART": "0"}}
+        if spec.has_full:
+            b["ax"] = {"design": "layer_x/ax.py",
+                       "build_dir": f"layer_x/build_{spec.family}_ax_h{spec.hidden}{sfx}",
+                       "env": {"AX_PART": "0"}}
     b["ln"] = {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}",
                "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}}
-    b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py",
-                       "build_dir": f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}",
-                       "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
-                               "LMHEAD_CORES": str(n)}}
+    if head_t2(spec):
+        b["lm_head_t2"] = {"design": "lm_head_t2/lm_head_t2.py",
+                           "build_dir": f"lm_head_t2/build_{spec.vocab}_k{spec.hidden}",
+                           "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
+                                   "LMHEAD_CORES": str(n)}}
+    else:
+        b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py",
+                           "build_dir": f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}",
+                           "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
+                                   "LMHEAD_CORES": str(n)}}
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
@@ -370,6 +465,10 @@ KERNEL_SOURCES = [
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
+# a rotated ternary head (head_t2) compiles these; listed only for such a spec (recipes/cache.py),
+# so no other kernel set's build key moves
+KERNEL_SOURCES_T2_HEAD = ["designs/lm_head_t2/*.py", "designs/lm_head_t2/*.cc",
+                          "designs/gemv_q4/gemv_t2.h", "designs/gemv_q4/wht.h"]
 # every projection this family runs goes through `gemv_q4_gy` or `gemv_q4_gms`, both of
 # which have q8 twins, so every role it has can be streamed at q8 (OPEN-QUANT-Q8)
 Q8_ROLES = frozenset({"attn", "linear", "linear_out", "ffn"})

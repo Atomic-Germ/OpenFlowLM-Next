@@ -168,11 +168,49 @@ int main(int argc, char** argv) {
                             for (size_t t = 0; t < 8; ++t)
                                 ref[w++] = f32_to_bf16(x[(nb * 32 + ti * 8 + t) * K2 + kb * 64 + si * 8 + s]);
         check(tiled == ref, "tile_x: the GEMM's k,n tiled bf16 layout");
+        // the fused rotated-basis path against hadamard_rows on a copy + tile_x, bit for bit,
+        // with and without the sign vector (Traces: OPEN-HADAMARD)
+        for (int with_signs = 0; with_signs < 2; ++with_signs)
+            for (size_t tk : {size_t{64}, size_t{128}}) {
+                const size_t T3 = 64, K3 = 256, blk = 128;
+                std::vector<float> x3(T3 * K3), sg(K3), cp;
+                for (size_t i = 0; i < x3.size(); ++i) x3[i] = static_cast<float>((i * 104729) % 2001) / 91.f - 11.f;
+                for (size_t j = 0; j < K3; ++j) sg[j] = ((j * 37) % 5) < 2 ? -1.f : 1.f;
+                cp = x3;
+                host::hadamard_rows(cp.data(), T3, K3, blk, with_signs ? sg.data() : nullptr);
+                std::vector<uint16_t> want(K3 * T3), got(K3 * T3), ref3(K3 * T3);
+                host::tile_x(cp.data(), T3, K3, want.data(), tk);
+                const std::vector<float> before = x3;
+                host::hadamard_tile_x(x3.data(), T3, K3, blk, with_signs ? sg.data() : nullptr, got.data(), tk);
+                check(got == want && x3 == before,
+                      std::string("hadamard_tile_x: bit-identical to hadamard_rows + tile_x, tk ") + std::to_string(tk) +
+                          (with_signs ? ", signed" : ""));
+                // tile_x at this tile width against the obvious loops (OPEN-GEMM-T2's 128-k tiles)
+                size_t w3 = 0;
+                for (size_t kb = 0; kb < K3 / tk; ++kb)
+                    for (size_t nb = 0; nb < T3 / 32; ++nb)
+                        for (size_t si = 0; si < tk / 8; ++si)
+                            for (size_t ti = 0; ti < 4; ++ti)
+                                for (size_t s8 = 0; s8 < 8; ++s8)
+                                    for (size_t t8 = 0; t8 < 8; ++t8)
+                                        ref3[w3++] = f32_to_bf16(cp[(nb * 32 + ti * 8 + t8) * K3 + kb * tk + si * 8 + s8]);
+                if (!with_signs) check(want == ref3, "tile_x: the k,n tiled layout at tk " + std::to_string(tk));
+            }
         host::transpose(y.data(), N2, T2, yt.data());
         bool ok = true;
         for (size_t n = 0; n < N2; ++n)
             for (size_t t = 0; t < T2; ++t) ok = ok && yt[t * N2 + n] == y[n * T2 + t];
         check(ok, "transpose: [N, T] -> [T, N]");
+        // split_rows on the token-major y gives what transpose_parts gives on y [N, T]
+        // (Traces: OPEN-GEMM-T2)
+        {
+            std::vector<float> a(T2 * 40), b(T2 * 56), a2(T2 * 40), b2(T2 * 56);
+            const host::TransposePart pt[2] = {{a.data(), 0, 40}, {b.data(), 40, 56}};
+            const host::TransposePart pr[2] = {{a2.data(), 0, 40}, {b2.data(), 40, 56}};
+            host::transpose_parts(y.data(), T2, pt, 2);
+            host::split_rows(yt.data(), T2, N2, pr, 2);
+            check(a == a2 && b == b2, "split_rows: a token-major y's column ranges");
+        }
     }
 
     std::printf("%s\n", failures ? "FAIL" : "PASS");

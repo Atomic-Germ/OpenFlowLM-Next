@@ -13,8 +13,10 @@ embedding is the inverse, e = signs * H(row) / sqrt(B).
 
 The open NPU kernels apply only a plain H / sqrt(B) to each projection input, plus explicit
 signs on the attention / DeltaNet output (the 6144-wide inputs). Every other sign is folded
-into the weights at conversion (PrismRotation.unpack), the lm head and the embedding are
-un-rotated, and the 6144-wide signs travel in config.json for the engine to apply.
+into the weights at conversion (PrismRotation.unpack), the embedding is un-rotated, and the
+6144-wide signs travel in config.json for the engine to apply. The lm head stays rotated and
+ternary like every projection; its hidden-wide signs fold into the final norm's gain, the only
+thing that reads that norm's output.
 """
 from __future__ import annotations
 
@@ -27,8 +29,9 @@ PQ2_0_ID = 142
 QK = 128            # values per PQ2_0 block (one scale)
 PQ2_BYTES = 34      # fp16 s + 32 bytes of 2-bit codes
 
-# Tensors that read the 5120-wide hidden state through a norm whose gain absorbs s_hidden.
-_NORMS_FOLDED = ("attn_norm.weight", "post_attention_norm.weight")
+# Tensors that read the 5120-wide hidden state through a norm whose gain absorbs s_hidden
+# (output_norm feeds only the lm head, which reads it rotated like every projection).
+_NORMS_FOLDED = ("attn_norm.weight", "post_attention_norm.weight", "output_norm.weight")
 # Unrotated readers of that same norm output: their columns take s_hidden instead.
 _COLS_FOLDED = ("ssm_alpha.weight", "ssm_beta.weight")
 
@@ -78,6 +81,13 @@ def fwht(x: np.ndarray, block: int) -> np.ndarray:
         y = np.stack([y[:, :, 0] + y[:, :, 1], y[:, :, 0] - y[:, :, 1]], axis=2)
         h *= 2
     return y.reshape(shape) / np.sqrt(block)
+
+
+def ternary_q4_1(codes: np.ndarray, s: np.ndarray):
+    """PQ2_0 (codes, s) of an [rows, cols] matrix -> the q4nx packer's q4_1 (d, m, q): q = code,
+    d = s, m = -s over each 128-group's four 32-blocks. Exact: value = d*q + m = s*code - s."""
+    d = torch.from_numpy(np.repeat(s.astype(np.float32), QK // 32, axis=1))
+    return d, -d, torch.from_numpy(codes.astype(np.float32))
 
 
 def q8_0_tuple(w: np.ndarray):
@@ -138,15 +148,16 @@ class PrismRotation:
         return {
             "block_size": self.block,
             "og_signs": [int(v) for v in self.s_out],
-            "folded": "attn_norm,post_attention_norm,ssm_alpha_cols,ssm_beta_cols,ffn_up_rows",
-            "lm_head": "unrotated",
+            "folded": "attn_norm,post_attention_norm,output_norm,ssm_alpha_cols,ssm_beta_cols,ffn_up_rows",
+            # rotated: lm_head.weight is exact-ternary q4_1 in the rotated basis, and the engine
+            # takes its input through H/sqrt(B) (the s_hidden signs are in output_norm's gain)
+            "lm_head": "rotated",
             "embedding": "unrotated",
         }
 
     def unrotated_rows(self, t, rows_per_pass: int = 8192):
         """Yield (r0, r1, float64 rows) of a rotated [rows, hidden] PQ2_0 matrix in the plain
-        basis: s_hidden * H(row) / sqrt(B) per block. That is the embedding's inverse transform,
-        and equally the lm head as W' @ blockdiag(H / sqrt(B)) @ diag(s_hidden) (H is symmetric)."""
+        basis: s_hidden * H(row) / sqrt(B) per block -- the embedding's inverse transform."""
         cols = int(t.shape[0])
         rows = int(np.prod(t.shape[1:]))
         if cols != self.hidden:
@@ -163,12 +174,22 @@ class PrismRotation:
         for _, _, rows in self.unrotated_rows(t):
             yield torch.from_numpy(rows.astype(np.float32)).to(torch.bfloat16)
 
-    def lm_head_q8_0_bands(self, t):
-        """output.weight un-rotated to a dense matrix and ggml-Q8_0 quantized, as (d, d, qw) row
-        bands. A band is 8192 rows, a multiple of the q4nx row block, so packing the bands one by
-        one gives the packed tensor's own consecutive byte ranges."""
-        for _, _, rows in self.unrotated_rows(t, rows_per_pass=8192):
-            yield q8_0_tuple(rows)
+    def lm_head_q4_1_bands(self, t, rows_per_pass: int = 8192):
+        """output.weight as exact-ternary q4_1 (d, m, q) row bands, in the ROTATED basis -- the
+        same re-expression as every projection (ternary_q4_1); its input signs are output_norm's
+        (_NORMS_FOLDED). A band is 8192 rows, a multiple of the q4nx row block, so packing the
+        bands one by one gives the packed tensor's own consecutive byte ranges, and the head
+        never sits in memory whole (1.3 G codes)."""
+        cols = int(t.shape[0])
+        rows = int(np.prod(t.shape[1:]))
+        if cols != self.hidden:
+            raise ValueError(f"{t.name}: input width {cols} is not the hidden size {self.hidden}")
+        if rows_per_pass % 32:
+            raise ValueError("lm head bands must be whole 32-row q4nx row blocks")
+        data = t.data.reshape(rows, -1)
+        for r0 in range(0, rows, rows_per_pass):
+            r1 = min(rows, r0 + rows_per_pass)
+            yield ternary_q4_1(*decode_pq2(data[r0:r1], r1 - r0, cols))
 
     def stream_order(self, tensors: dict, out_name: dict):
         """(name, tensor) in the order a streamed container needs them: everything that is not a
@@ -186,14 +207,14 @@ class PrismRotation:
         PQ2_0 projections become q4_1 exactly (q = code, d = s, m = -s over each 128-group's four
         32-blocks), ffn_up with its rows flipped by s_ffn (code -> 2 - code). The two hidden-input
         norms take s_hidden in their gain, and alpha / beta, which read that norm output
-        unrotated, take it in their columns. The lm head and the embedding are un-rotated row
-        band by row band instead (lm_head_q8_0_bands, embedding_rows)."""
+        unrotated, take it in their columns. The lm head (lm_head_q4_1_bands) and the embedding
+        (embedding_rows, un-rotated) are written row band by row band instead."""
         name = t.name
         if t.tensor_type == PQ2_0_ID:
             if name not in self.weight_names:
                 raise ValueError(f"{name} is PQ2_0 but not rotated; the kernels would rotate its input")
             if name in self.inverse_names or name == "output.weight":
-                raise ValueError(f"{name} is un-rotated band by band, not unpacked whole")
+                raise ValueError(f"{name} is written band by band, not unpacked whole")
             cols = int(t.shape[0])
             rows = int(np.prod(t.shape[1:]))
             codes, s = decode_pq2(t.data, rows, cols)
@@ -201,8 +222,7 @@ class PrismRotation:
                 if rows != self.ffn:
                     raise ValueError(f"{name}: {rows} rows, expected {self.ffn}")
                 codes = np.where((self.s_ffn < 0)[:, None], np.uint8(2) - codes, codes)
-            d = torch.from_numpy(np.repeat(s.astype(np.float32), QK // 32, axis=1))
-            return (d, -d, torch.from_numpy(codes.astype(np.float32))), GGMLQuantizationType.Q4_1
+            return ternary_q4_1(codes, s), GGMLQuantizationType.Q4_1
         if name.endswith(_NORMS_FOLDED):
             (w,) = t.unpack(target)
             return [w * torch.from_numpy(self.s_hidden)], target

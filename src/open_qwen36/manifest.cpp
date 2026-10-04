@@ -213,6 +213,10 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             g.t = get<uint64_t>(gj, "t", gw);
             if (g.t == 0) fail(gw, "t must be > 0 when gemm_block is present");
             g.kind = gj.value("kind", "dense");
+            g.y_tn = gj.value("y_tn", false);
+            g.x_tile_k = gj.value("x_tile_k", uint64_t{64});
+            if (g.x_tile_k != 64 && g.x_tile_k != 128) fail(gw, "x_tile_k must be 64 or 128");
+            if (g.y_tn && g.kind == "dense") fail(gw, "y_tn is the linear / full route's (the dense chain transposes its own)");
             g.eps = get<double>(gj, "eps", gw);
             g.program = parse_program(need(gj, "program", gw), gw + ".program");
             for (const auto& s : g.program) {
@@ -230,9 +234,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         for (const auto& oj : need(wj, "pack", gw + "." + key + "." + name))
                             w.pack.push_back(parse_op(oj, gw + "." + key + "." + name));
                         if (w.pack.empty()) fail(gw, "weight " + name + " packs nothing");
+                        // the band law the GEMM reads: q4_1 chunks (std_perm), or the 2-bit chunks of
+                        // a t2 route (t2_perm, OPEN-GEMM-T2) -- one kind per weight
                         for (const auto& o : w.pack)
-                            if (o.op != "std_perm")
-                                fail(gw, "weight " + name + ": a packed weight is std_perm ops only (the band law the GEMM reads)");
+                            if (o.op != w.pack.front().op || (o.op != "std_perm" && o.op != "t2_perm"))
+                                fail(gw, "weight " + name + ": a packed weight is std_perm ops only, or t2_perm ops only (the band law the GEMM reads)");
                         into[name] = w;
                         continue;
                     }

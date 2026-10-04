@@ -510,6 +510,38 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a split out projection parses: ") + e.what());
             }
         }
+        // OPEN-GEMM-T2: a ternary route packs its GEMM weights as t2_perm runs, and its GEMM writes
+        // y token-major from 128-k activation tiles
+        auto t2_out = [](json& j) {
+            json& gb = j["layer_types"]["linear_attention"]["gemm_block"];
+            json a = {{"op", "t2_perm"}, {"tensor", "model.layers.{l}.linear_attn.ssm_out_proj.weight"},
+                      {"nch", 2048}, {"in_dim", 4096}, {"dst", 0}};
+            gb["weights"]["gout_w"] = {{"from", "pack"}, {"pack", {a}}};
+            gb["y_tn"] = true;
+            gb["x_tile_k"] = 128;
+        };
+        {
+            std::ifstream f(argv[5]);
+            json j = json::parse(f);
+            t2_out(j);
+            try {
+                Manifest q = Manifest::parse(j, "edited");
+                const auto& g = q.layer_types.at("linear_attention").gemm_block;
+                check(g.y_tn && g.x_tile_k == 128 && g.weights.at("gout_w").pack.at(0).op == "t2_perm",
+                      "qwen35: a t2_perm packed weight, y_tn and x_tile_k 128 parse");
+            } catch (const std::exception& e) {
+                check(false, std::string("qwen35: a t2 route parses: ") + e.what());
+            }
+        }
+        refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight mixing std_perm and t2_perm is refused",
+                         [&](json& j) {
+                             split_out(j);
+                             json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];
+                             o["op"] = "t2_perm";
+                             o.erase("split");
+                         });
+        refused_manifest(argv[5], "x_tile_k must be 64 or 128", "qwen35: an activation tile the host does not write is refused",
+                         [&](json& j) { j["layer_types"]["linear_attention"]["gemm_block"]["x_tile_k"] = 96; });
         refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);

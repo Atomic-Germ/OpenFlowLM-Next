@@ -218,8 +218,8 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
             # PrismML's Hadamard-rotated ternary GGUFs (Ternary Bonsai 2): see q4nx/prism.py.
             prism = PrismRotation(self.gguf_reader) if PrismRotation.present(self.gguf_reader) else None
             if prism is not None:
-                print(f"[INFO] Hadamard-rotated ternary GGUF (block {prism.block}): q4_1 projections, "
-                      "signs folded, embedding and lm head un-rotated")
+                print(f"[INFO] Hadamard-rotated ternary GGUF (block {prism.block}): q4_1 projections and "
+                      "lm head (rotated), signs folded, embedding un-rotated")
                 if self._pad_hidden is not None:
                     raise ValueError("--pad-to-fit cannot pad a Hadamard-rotated model")
                 if reorder_linear_required and not prism.v_grouped:
@@ -264,8 +264,9 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                 new_name = self.forward_name_map[gguf_tensor.name]
 
                 if prism is not None and gguf_tensor.name == "output.weight":
-                    self.q4nx_tensors.write_rows(new_name, (self._pack(*b, tensor_type=GGMLQuantizationType.Q8_0)
-                                                            for b in prism.lm_head_q8_0_bands(gguf_tensor)))
+                    print(f"[INFO] {gguf_tensor.name}: stored as Q4_1 (exact ternary, rotated basis)")
+                    self.q4nx_tensors.write_rows(new_name, (self._pack(*b, tensor_type=GGMLQuantizationType.Q4_1)
+                                                            for b in prism.lm_head_q4_1_bands(gguf_tensor)))
                     continue
                 if prism is not None:
                     unpacked, stored = prism.unpack(gguf_tensor, target_dtype)

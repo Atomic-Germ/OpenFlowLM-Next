@@ -13,8 +13,10 @@
 #include <omp.h>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "open_qwen36/q4nx_file.hpp"   // bf16_to_f32 / f32_to_bf16
@@ -139,6 +141,15 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
     }
 }
 
+void split_rows(const float* y, size_t T, size_t N, const TransposePart* parts, size_t n_parts) {
+#pragma omp parallel for
+    for (long long t = 0; t < static_cast<long long>(T); ++t)
+        for (size_t i = 0; i < n_parts; ++i) {
+            const TransposePart& q = parts[i];
+            std::memcpy(q.dst + static_cast<size_t>(t) * q.width, y + static_cast<size_t>(t) * N + q.off, q.width * 4);
+        }
+}
+
 void hadamard_rows(float* x, size_t T, size_t K, size_t block, const float* signs) {
     const float scale = 1.0f / std::sqrt(static_cast<float>(block));   // 1/32 for 1024: exact
 #pragma omp parallel for
@@ -160,11 +171,64 @@ void hadamard_rows(float* x, size_t T, size_t K, size_t block, const float* sign
     }
 }
 
-void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
-    // [T,K] fp32 -> bf16, pre-tiled [K,T] in "k,n" order: K_TILE 64 x tile_n 32 tiles, each
-    // tile in (8 x 8) MAC sub-tiles -- the layout gemm_q4_prefill.py streams its activation in
-    constexpr size_t TK = 64, MAC = 8, TN = 32;
-    if (K % TK || T % TN) throw std::runtime_error("open_qwen36: tile_x: K or T does not tile by (64, 32)");
+void hadamard_tile_x(const float* x, size_t T, size_t K, size_t block, const float* signs, uint16_t* out,
+                     size_t tk) {
+    // hadamard_rows into a copy and then tile_x walked x five times (copy read and write, the
+    // transform's read and write, the tile's read) and the out buffer once -- ~1.75 ms a GEMM at
+    // the 27B, all memory traffic. Here one task owns one tile_x token group (32 rows) and one
+    // transform block, transforms its 32 runs in a private buffer with the very loops
+    // hadamard_rows runs (same operations, same order, so the same floats), and writes that
+    // block's 64-k tiles. x is read once and out written once.
+    constexpr size_t MAC = 8, TN = 32;
+    const size_t TK = tk;
+    if ((TK != 64 && TK != 128) || K % TK || T % TN || block % TK || K % block)
+        throw std::runtime_error("open_qwen36: hadamard_tile_x: K, T or the block does not tile by (" +
+                                 std::to_string(TK) + ", 32)");
+    const size_t NB = T / TN, KBLK = K / block;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(block));
+#pragma omp parallel
+    {
+        std::vector<float> buf(TN * block);
+#pragma omp for schedule(static)
+        for (long long task = 0; task < static_cast<long long>(NB * KBLK); ++task) {
+            const size_t nb = static_cast<size_t>(task) / KBLK, b0 = (static_cast<size_t>(task) % KBLK) * block;
+            for (size_t r = 0; r < TN; ++r) {
+                float* v = buf.data() + r * block;
+                const float* src = x + (nb * TN + r) * K + b0;
+                if (signs)
+                    for (size_t j = 0; j < block; ++j) v[j] = src[j] * signs[b0 + j];
+                else
+                    std::copy(src, src + block, v);
+                for (size_t h = 1; h < block; h <<= 1)
+                    for (size_t i = 0; i < block; i += 2 * h)
+                        for (size_t j = i; j < i + h; ++j) {
+                            const float a = v[j], c = v[j + h];
+                            v[j] = a + c;
+                            v[j + h] = a - c;
+                        }
+                for (size_t j = 0; j < block; ++j) v[j] *= scale;
+            }
+            for (size_t kl = 0; kl < block / TK; ++kl) {
+                const size_t kb = b0 / TK + kl;
+                uint16_t* w = out + (kb * NB + nb) * TK * TN;
+                for (size_t si = 0; si < TK / MAC; ++si)
+                    for (size_t ti = 0; ti < TN / MAC; ++ti)
+                        for (size_t s = 0; s < MAC; ++s)
+                            for (size_t t = 0; t < MAC; ++t)
+                                *w++ = f32_to_bf16(buf[(ti * MAC + t) * block + kl * TK + si * MAC + s]);
+            }
+        }
+    }
+}
+
+void tile_x(const float* x, size_t T, size_t K, uint16_t* out, size_t tk) {
+    // [T,K] fp32 -> bf16, pre-tiled [K,T] in "k,n" order: K_TILE tk (64, or 128 for a GQP_KT=128
+    // GEMM) x tile_n 32 tiles, each tile in (8 x 8) MAC sub-tiles -- the layout
+    // gemm_q4_prefill.py streams its activation in
+    constexpr size_t MAC = 8, TN = 32;
+    const size_t TK = tk;
+    if ((TK != 64 && TK != 128) || K % TK || T % TN)
+        throw std::runtime_error("open_qwen36: tile_x: K or T does not tile by (" + std::to_string(TK) + ", 32)");
     const size_t NB = T / TN;
 #pragma omp parallel for
     for (long long kb = 0; kb < static_cast<long long>(K / TK); ++kb)
@@ -200,7 +264,7 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
     std::vector<float> Q(R * key_w), Kk(R * key_w), V(R * vw), decay(R * g.value_heads), beta(R * g.value_heads);
 #pragma omp parallel
     {
-        std::vector<float> c(nch), al(g.lanes), be(g.lanes);
+        std::vector<float> c(nch);
 #pragma omp for
         for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
             const size_t t = static_cast<size_t>(tt);
@@ -234,21 +298,43 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
                     for (size_t j = 0; j < dim; ++j) dst[j] = src[j] * r;
                 }
             std::copy(c.begin() + 2 * key_w, c.end(), V.begin() + t * vw);
-            std::fill(al.begin(), al.end(), 0.f);
-            std::fill(be.begin(), be.end(), 0.f);
-            const float* x = xn + t * g.hid;
-            for (size_t i = 0; i < g.hid; ++i) {
-                const float xi = x[i];
-                const float* wa = Wa + i * g.lanes;
-                const float* wb = Wb + i * g.lanes;
-                for (size_t h = 0; h < g.lanes; ++h) {
-                    al[h] += xi * wa[h];
-                    be[h] += xi * wb[h];
+        }
+    }
+    // alpha / beta: [R, hid] x [hid, lanes] twice, a few tokens per pass over Wa / Wb. Token by
+    // token, every token streamed both matrices (2 x hid x lanes floats, ~2 MB at the 27B) out of
+    // the cache again, which made this the larger part of the per-token phase. Each token's sums
+    // still run over i in order from zero, the same expression, so the result is bit-identical.
+    {
+        // one block per thread where that fits (256 tokens over 24 threads: 11 each), at most 16
+        const size_t nthr = static_cast<size_t>(std::max(1, omp_get_max_threads()));
+        const size_t TB = std::min<size_t>(16, std::max<size_t>(1, (R + nthr - 1) / nthr));
+        const long long nblk = static_cast<long long>((R + TB - 1) / TB);
+#pragma omp parallel
+        {
+            std::vector<float> al(TB * g.lanes), be(TB * g.lanes);
+#pragma omp for
+            for (long long bb = 0; bb < nblk; ++bb) {
+                const size_t t0 = static_cast<size_t>(bb) * TB, nt = std::min(TB, R - t0);
+                std::fill(al.begin(), al.end(), 0.f);
+                std::fill(be.begin(), be.end(), 0.f);
+                for (size_t i = 0; i < g.hid; ++i) {
+                    const float* __restrict wa = Wa + i * g.lanes;
+                    const float* __restrict wb = Wb + i * g.lanes;
+                    for (size_t u = 0; u < nt; ++u) {
+                        const float xi = xn[(t0 + u) * g.hid + i];
+                        float* __restrict a = al.data() + u * g.lanes;
+                        float* __restrict b = be.data() + u * g.lanes;
+                        for (size_t h = 0; h < g.lanes; ++h) {
+                            a[h] += xi * wa[h];
+                            b[h] += xi * wb[h];
+                        }
+                    }
                 }
-            }
-            for (size_t h = 0; h < g.value_heads; ++h) {
-                decay[t * g.value_heads + h] = std::exp(A[h] * softplus(al[h] + dtb[h]));
-                beta[t * g.value_heads + h] = sigmoid(be[h]);
+                for (size_t u = 0; u < nt; ++u)
+                    for (size_t h = 0; h < g.value_heads; ++h) {
+                        decay[(t0 + u) * g.value_heads + h] = std::exp(A[h] * softplus(al[u * g.lanes + h] + dtb[h]));
+                        beta[(t0 + u) * g.value_heads + h] = sigmoid(be[u * g.lanes + h]);
+                    }
             }
         }
     }

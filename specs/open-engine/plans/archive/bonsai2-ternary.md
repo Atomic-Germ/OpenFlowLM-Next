@@ -42,3 +42,14 @@ checkout's `.claude/plans/bonsai-2-ternary.md`.
 and `quant_hash()` is unchanged for every q4_1 and q8 spec. The attention-GEMM build
 directories carry the quant suffix only for q8 specs, so a rotated or t2 spec shares the
 plain 27B's.
+
+## Addendum 2026-10-03: the lm head as t2
+
+PrismML's head is its own ternary PQ2_0 tensor (rotated, untied), so the q8 un-rotation was a
+lossy step with 4x the bytes. Spec impact: **modified OPEN-CONVERT-PRISM-TERNARY** (the head is
+written as exact ternary q4_1 in the rotated basis, s5120 folded into output_norm,
+`prism_hadamard.lm_head = "rotated"`; now `test` + manual), **modified OPEN-QUANT-T2** (a rotated
+head runs through `designs/lm_head_t2` from unpadded 2176 B t2 chunks; `t2_perm` takes an
+optional pool `chunk_bytes`), **modified OPEN-HADAMARD** (`hadamard.lm_head`). The shared
+container keeps its q8 head and its kernel set is unchanged byte for byte; the new head needs the
+re-converted container. Working notes: the lmhead worktree's `.claude/plans/lmhead-ternary.md`.

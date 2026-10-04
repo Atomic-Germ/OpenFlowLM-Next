@@ -436,7 +436,9 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
             if (from == "pack") {
                 size_t bytes = 0;
-                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + o.nch * man_.chunk_bytes);
+                for (const PackOp& o : gw.pack)       // t2_perm writes chunks at its own stride (OPEN-GEMM-T2)
+                    bytes = std::max<size_t>(bytes, o.dst + o.nch * (o.op == "t2_perm" ? (o.chunk_bytes ? o.chunk_bytes : 2560)
+                                                                                       : man_.chunk_bytes));
                 xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
                 std::memset(w.map<uint8_t*>(), 0, padup(bytes));
                 for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, man_.chunk_bytes);
@@ -1859,13 +1861,13 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     if (man_.hadamard_block) {
         // OPEN-HADAMARD: the rotated-basis weights want H(x)/32 per 1024 block, the attention
         // output (the only input that wide) sign-flipped first -- what the lx / ax preps do.
-        if (xh_buf_.size() < T * K) xh_buf_.resize(T * K);
-        std::copy(x, x + T * K, xh_buf_.begin());
+        // Transformed and tiled in one pass, straight into the mapped buffer.
         const bool og = K == man_.hadamard_og_signs.size();
-        host::hadamard_rows(xh_buf_.data(), T, K, man_.hadamard_block, og ? man_.hadamard_og_signs.data() : nullptr);
-        x = xh_buf_.data();
+        host::hadamard_tile_x(x, T, K, man_.hadamard_block, og ? man_.hadamard_og_signs.data() : nullptr,
+                              xb.map<uint16_t*>(), types_[layer]->gemm_block.x_tile_k);
+    } else {
+        host::tile_x(x, T, K, xb.map<uint16_t*>(), types_[layer]->gemm_block.x_tile_k);   // straight into the mapped buffer
     }
-    host::tile_x(x, T, K, xb.map<uint16_t*>());          // straight into the mapped buffer
     timing_.part1_ms += ms_since(t0);
     timing_.gemm_tile_ms += ms_since(t0);
     auto ts = std::chrono::steady_clock::now();
@@ -1885,7 +1887,12 @@ void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int
     const float* y = gemm_run(s, x, T, K, N, layer);
     auto t1 = std::chrono::steady_clock::now();
     if (out.size() < T * N) out.resize(T * N);             // grow-only, so only the first block pays for it
-    host::transpose(y, N, T, out.data());                  // [N, T] on the device -> [T, N]
+    if (types_[layer]->gemm_block.y_tn) {                  // already [T, N] (OPEN-GEMM-T2): a copy
+        const host::TransposePart all{out.data(), 0, N};
+        host::split_rows(y, T, N, &all, 1);
+    } else {
+        host::transpose(y, N, T, out.data());              // [N, T] on the device -> [T, N]
+    }
     timing_.part1_ms += ms_since(t1);
     timing_.gemm_tr_ms += ms_since(t1);
 }
@@ -2480,7 +2487,8 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     {
         auto tt = std::chrono::steady_clock::now();
         const host::TransposePart parts[2] = {{qkv, 0, nch}, {z, nch, vw}};
-        host::transpose_parts(yq, T, parts, 2);
+        if (gb.y_tn) host::split_rows(yq, T, nch + vw, parts, 2);
+        else host::transpose_parts(yq, T, parts, 2);
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }
@@ -2653,7 +2661,8 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
                                               {k, qw, kvw},
                                               {v, qw + kvw, kvw},
                                               {gate, qw + 2 * kvw, qw}};
-        host::transpose_parts(yf, T, parts, 4);
+        if (gb.y_tn) host::split_rows(yf, T, nf, parts, 4);
+        else host::transpose_parts(yf, T, parts, 4);
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }

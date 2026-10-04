@@ -1,4 +1,4 @@
-# Traces: OPEN-HADAMARD, OPEN-QUANT-T2 (canonical spec: specs/open-engine/spec.md)
+# Traces: OPEN-HADAMARD, OPEN-QUANT-T2, OPEN-CONVERT-PRISM-TERNARY (canonical spec: specs/open-engine/spec.md)
 """Ternary Bonsai 2 27B on the open kernels: the rotated-basis spec field, the t2 weight
 format's recipe geometry and pack plan, the generated sign table, and the 2-bit packing
 against PrismML's own decode rule.
@@ -33,9 +33,11 @@ def _signs(n: int = 6144, seed: int = 7) -> list[int]:
     return [r.choice((1, -1)) for _ in range(n)]
 
 
-def _cfg(signs=None) -> dict:
+def _cfg(signs=None, head=None) -> dict:
     cfg = json.loads((FIX / "config_qwen35_27b.json").read_text(encoding="utf-8"))
     cfg["prism_hadamard"] = {"block_size": 1024, "og_signs": signs or _signs()}
+    if head is not None:
+        cfg["prism_hadamard"]["lm_head"] = head
     return cfg
 
 
@@ -75,12 +77,26 @@ def test_ternary_format_switch(tmp_path, monkeypatch):
     assert spec_from_model_dir(tmp_path).quant == "q4_1"
 
 
-def test_t2_geometry_one_chunk_per_element_same_state_layout():
-    q4, t2 = Q35.recipe(_spec("q4_1")).common, Q35.recipe(_spec("t2")).common
+def test_t2_geometry_unpadded_chunk_per_element_and_state_slices():
+    rq4, rt2 = Q35.recipe(_spec("q4_1")), Q35.recipe(_spec("t2"))
+    q4, t2 = rq4.common, rt2.common
+    # one unpadded 2176 B chunk per w element: 2048 B of codes + 64 bf16 scales, nothing else
+    assert Q36.T2_CHUNK == 2048 + 64 * 2
     assert (t2.TILE, t2.PER_CALL, t2.CALL_BYTES) == (Q36.T2_CHUNK, 1, Q36.T2_CHUNK)
-    # the S slices follow the element, and the padded state rows come out the same
-    assert t2.DN_ROWS == t2.CALL_BYTES // (4 * t2.DN_DIM) == 5
-    assert t2.DN_PAD == q4.DN_PAD == 130
+    # 2176 B is 4.25 state rows: the slices are 4 rows at a 2048 B stride, and a head is
+    # exactly its 128 rows (no pad rows); the state buffer ends in the 128 B the last head's
+    # last element reads past its slice
+    assert (t2.DN_ROWS, t2.DN_SLICES, t2.DN_PAD) == (4, 32, 128)
+    assert Q36.dn_slice_bytes(t2) == 2048 and Q36.dn_state_tail(t2) == 128
+    L = rt2.layout
+    assert (L.S_ROWS, L.S_HEAD_BYTES) == (128, 128 * 128 * 4)
+    heads = rt2.spec.lin_value_heads
+    last_read = L.STATE_S_OFF + (heads - 1) * L.S_HEAD_BYTES + (t2.DN_SLICES - 1) * 2048 + t2.CALL_BYTES
+    assert L.STATE_BYTES == L.STATE_S_OFF + heads * L.S_HEAD_BYTES + 128 == last_read
+    # q4_1 keeps its geometry: slices are whole elements, 130 rows, no tail
+    assert (q4.DN_ROWS, q4.DN_SLICES, q4.DN_PAD) == (10, 13, 130)
+    assert Q36.dn_slice_bytes(q4) == q4.CALL_BYTES and Q36.dn_state_tail(q4) == 0
+    assert rq4.layout.STATE_BYTES == rq4.layout.STATE_S_OFF + heads * rq4.layout.S_HEAD_BYTES
     assert Q36.xh_l1(_spec()) == 1024 * 4 + 6144 // 8
 
 
@@ -97,15 +113,35 @@ def test_t2_pack_plan_and_gemm_weights():
     plan = Q35.pack_plan(spec)["layer_types"]
     projs = [o for lt in plan.values() for k in ("pool", "consts") for o in lt[k] if "nch" in o]
     assert projs and all(o["op"] == "t2_perm" for o in projs)
+    # the engine packs at the stride the kernels stream (an op without one means the old 2560)
+    assert all(o["chunk_bytes"] == Q36.T2_CHUNK for o in projs)
     route = Q35.gemm_route(spec)
     for g in route["layer_types"].values():
         for key in ("weights", "ffn_weights"):
             for w in g.get(key, {}).values():
-                assert w["from"] == "pack" and all(o["op"] == "std_perm" for o in w["pack"])
+                # OPEN-GEMM-T2: the GEMM reads 2-bit chunks, packed back to back in its own buffer
+                assert w["from"] == "pack" and all(o["op"] == "t2_perm" for o in w["pack"])
                 dst = 0
                 for o in w["pack"]:                 # one contiguous run, in the order the GEMM reads
                     assert o["dst"] == dst
-                    dst += o["nch"] * Q36.CHUNK
+                    dst += o["nch"] * Q36.T2_CHUNK
+
+
+# Traces: OPEN-GEMM-T2
+def test_t2_gemm_builds_and_token_major_output():
+    plain = ModelSpec.from_hf_config(json.loads((FIX / "config_qwen35_27b.json").read_text(encoding="utf-8")))
+    t2_env = {"GQP_BFP16": "1", "GQP_WFMT": "t2", "GQP_KT": "128", "GQP_YT": "1",
+              "GQP_T2_STRIDE": str(Q36.T2_CHUNK)}
+    for spec, t2 in ((_spec("t2"), True), (_spec("q4_1"), False), (plain, False)):
+        gemms = {k: b for k, b in Q35.builds(spec).items() if k.startswith("gemm_")}
+        assert gemms, "the 27B has a block route"
+        for b in gemms.values():
+            extra = {k: v for k, v in b["env"].items() if k not in ("GQP_N", "GQP_K", "GQP_T")}
+            assert extra == (t2_env if t2 else {})      # a q4_1 spec's build is the one it always was
+            assert b["build_dir"].endswith("_t2ky") is t2
+        for g in Q35.gemm_route(spec)["layer_types"].values():
+            assert g.get("y_tn", False) is t2
+            assert g.get("x_tile_k", 64) == (128 if t2 else 64)
 
 
 def _gen_kernels():
@@ -145,3 +181,94 @@ def test_t2_chunks_reproduce_prismml_decode():
     want = dequant(codes, s, bfloat16)                     # what both pools hold: bf16 scales
     assert np.array_equal(dequant_t2_pool(pack_t2_pool(codes, s, 2), 256, 1024, 2), want)
     assert np.array_equal(dequant_pool(pack_q4_1_pool(as_q4_1_blocks(codes, s), 2), 256, 1024, 2), want)
+
+
+# ---- the rotated ternary lm head (OPEN-QUANT-T2's head, OPEN-CONVERT-PRISM-TERNARY's head)
+
+def test_rotated_head_is_a_spec_field_that_moves_no_layer_build():
+    unrot = ModelSpec.from_hf_config(_cfg(head="unrotated"))
+    rot = ModelSpec.from_hf_config(_cfg(head="rotated"))
+    assert unrot == ModelSpec.from_hf_config(_cfg())            # absent reads as "unrotated"
+    assert "lm_head" not in unrot.hadamard and rot.hadamard["lm_head"] == "rotated"
+    assert rot.spec_hash() != unrot.spec_hash()                 # a different kernel set...
+    assert rot.quant_hash() == unrot.quant_hash()               # ...sharing the lx / ax build dirs
+    assert ModelSpec.from_dict(rot.to_dict()) == rot
+    with pytest.raises(SpecError):
+        ModelSpec.from_hf_config(_cfg(head="q8"))
+
+
+@pytest.mark.parametrize("quant", ["t2", "q4_1"])
+def test_rotated_head_runs_as_t2_whatever_the_layers_stream(quant):
+    spec = dataclasses.replace(ModelSpec.from_hf_config(_cfg(head="rotated")), quant=quant)
+    Q35.recipe(spec)
+    head = Q35.pack_plan(spec)["lm_head"]
+    nch = spec.vocab // 32 * (spec.hidden // 256)
+    assert head["ops"] == [{"op": "t2_perm", "tensor": "lm_head.weight", "dst": 0, "nch": nch,
+                            "in_dim": spec.hidden, "chunk_bytes": Q35.LM_T2_CHUNK}]
+    # unpadded: exactly PrismML's own PQ2_0 bytes for the head (34 B per 128 weights)
+    assert Q35.LM_T2_CHUNK == 2176 and head["pool_bytes"] == nch * 2176 == spec.vocab * spec.hidden // 128 * 34
+    prog = Q35.programs(spec)
+    assert prog["contexts"]["lm"] == "lm_head_t2/final.xclbin" and prog["kernels"]["lm"]["build"] == "lm_head_t2"
+    assert prog["tail"][-1] == {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}
+    lay = Q35.manifest_layout(spec, 4096)
+    assert prog["globals"]["lmpool"] == lay["lmhead_pool_bytes"] == head["pool_bytes"]
+    assert lay["lmhead_chunk_bytes"] == 2176
+    b = Q35.builds(spec)
+    assert "lm_head_q8" not in b and b["lm_head_t2"]["env"] == {
+        "LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": "8"}
+
+
+def test_unrotated_head_keeps_the_q8_head():
+    spec = _spec("t2")
+    assert [o["op"] for o in Q35.pack_plan(spec)["lm_head"]["ops"]] == ["lmhead_q8"]
+    assert Q35.programs(spec)["contexts"]["lm"] == "lm_head_q8/final.xclbin"
+    assert "lm_head_q8" in Q35.builds(spec) and "lm_head_t2" not in Q35.builds(spec)
+
+
+def _prism():
+    """q4nx-build's q4nx/prism.py, by path: open_kernels/model/q4nx.py owns the name `q4nx` here."""
+    path = OK.parent / "utilities" / "q4nx-build" / "q4nx" / "prism.py"
+    s = importlib.util.spec_from_file_location("q4nx_build_prism", path)
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+def test_converter_head_bands_are_the_ternary_weights_in_the_rotated_basis():
+    """q4nx-build writes output.weight as q4_1 row bands with q = code, d = s, m = -s, untouched
+    by any sign or transform (the signs go to output_norm), so the engine can re-derive the 2-bit
+    codes exactly."""
+    P = _prism()
+    sys.path.insert(0, str(OK))
+    from t2_pack import encode_pq2, random_pq2_codes
+    from types import SimpleNamespace
+    rows, cols = 96, 1024
+    codes, s = random_pq2_codes(rows, cols, np.random.default_rng(3))
+    t = SimpleNamespace(name="output.weight", shape=[cols, rows], data=encode_pq2(codes, s).reshape(-1))
+    rot = object.__new__(P.PrismRotation)
+    rot.hidden = cols
+    bands = list(rot.lm_head_q4_1_bands(t, rows_per_pass=64))
+    assert [b[2].shape[0] for b in bands] == [64, 32]           # whole 32-row blocks, ragged last band
+    d, m, q = (np.concatenate([b[i].numpy() for b in bands]) for i in range(3))
+    assert np.array_equal(q, codes.astype(np.float32)) and np.array_equal(m, -d)
+    assert np.array_equal(d, np.repeat(s.astype(np.float32), 4, axis=1))   # one scale per 128, fp16 exact
+    w = np.repeat(d, 32, axis=1) * q + np.repeat(m, 32, axis=1)
+    assert np.array_equal(w, (codes.astype(np.float32) - 1) * np.repeat(s.astype(np.float32), 128, axis=1))
+    with pytest.raises(ValueError):
+        next(rot.lm_head_q4_1_bands(t, rows_per_pass=48))
+
+
+def test_converter_folds_the_hidden_signs_into_output_norm():
+    P = _prism()
+    import torch
+    from types import SimpleNamespace
+    rot = object.__new__(P.PrismRotation)
+    rot.weight_names, rot.inverse_names = {"output.weight"}, {"token_embd.weight"}
+    rot.s_hidden = np.array(_signs(8, seed=5), dtype=np.float32)
+    g = torch.arange(1, 9, dtype=torch.float32)
+    t = SimpleNamespace(name="output_norm.weight", tensor_type=0, unpack=lambda target: [g])
+    (w,), _ = rot.unpack(t, None)
+    assert torch.equal(w, g * torch.from_numpy(rot.s_hidden))
+    rot.block, rot.s_out = 1024, np.ones(6144, np.float32)
+    e = rot.config_entry()
+    assert e["lm_head"] == "rotated" and "output_norm" in e["folded"].split(",")

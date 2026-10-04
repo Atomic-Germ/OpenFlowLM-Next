@@ -84,6 +84,9 @@ OS = ["-Os"]                          # main-core kernels: size over speed (the 
 # compiled the null body is an ODR violation the linker resolves either way.
 if os.environ.get("LX_NULL_GEMV") == "1":
     OS = OS + ["-DGEMV_NULL"]
+# timing-only (output garbage): LX_STAMP=1 builds the dense main core with an event log of
+# its timer (gen_kernels.py STAMP); the down GEMV's second piece carries it out.
+STAMP = os.environ.get("LX_STAMP") == "1"
 
 # scratch layouts (floats) -- gen_kernels.py writes the same offsets into the kernel TUs
 MS_FLOATS = C.MS_FLOATS
@@ -555,23 +558,26 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
 
 # ---- DeltaNet on the main cores (dnx.h): S slices ride the w stream, S' rows leave through y
 DN_ROWS, DN_SLICES, DN_HEADS_PC = C.DN_ROWS, C.DN_SLICES, C.DN_HEADS_PC
+DN_SLICE = DN_ROWS * C.DN_DIM * 4     # S bytes per slice: CALL_BYTES, except t2 (recipes dn_slice_bytes)
 
 
-def dn_body(win, yout, B, K):
+def dn_body(win, yout, B, K, nheads=DN_HEADS_PC, nslices=DN_SLICES):
     """This core's heads: the record (copied out of its element: release() frees the OLDEST held
     element), DN_SLICES slices (pass 1), delta, DN_SLICES slices x 2*DN_ROWS half rows (pass 2, into
-    y elements), o."""
+    y elements), o. `nheads` and `nslices` may be run-time values (dux.py's RTP words: 0 heads in
+    a full layer; a run-time slice count also stops LLVM unrolling pass 1 into DN_SLICES call
+    sites, which on the 27B's 26 slices cost the main core over 1 KB of program memory)."""
     ds = B["ds"]
-    for _ in range_(DN_HEADS_PC):
+    for _ in range_(nheads):
         re_ = win.acquire(1)
         K["vcopy"](re_, ds)
         win.release(1)
-        for blk in range_(DN_SLICES):
+        for blk in range_(nslices):
             se = win.acquire(1)
             K["p1"](se, ds, blk)
             win.release(1)
         K["delta"](ds)
-        for blk in range_(DN_SLICES):
+        for blk in range_(nslices):
             se = win.acquire(1)
             for j in range_(2 * DN_ROWS):
                 ye = yout.acquire(1)
@@ -599,14 +605,25 @@ def dn_sequence(pipe_w, pipe_y, a_state, a_act, w_prods, y_conss, A_BYTES, A_VEC
     been issued, so the cores run their heads side by side and the waits resolve together.
     """
     rec, ohb = R.linear.RECORD_BYTES, R.linear.O_HEAD_BYTES
+
+    def s_tap(off: int) -> TensorAccessPattern:
+        # one head's S as DN_SLICES w elements. Where a slice is the whole element (q4_1, q8)
+        # this is the plain linear fill it always was. t2's 2176 B element carries 4 rows
+        # (2048 B), so the slices are read at that stride, each element running 128 B into the
+        # next slice (never read; the state buffer has a tail for the last head's last one).
+        if DN_SLICE == CALL_BYTES:
+            return bt(STATE_BYTES, off, S_HEAD_BYTES)
+        assert off + (DN_SLICES - 1) * DN_SLICE + CALL_BYTES <= STATE_BYTES, (off, STATE_BYTES)
+        return TensorAccessPattern((1, STATE_BYTES), off, [1, 1, DN_SLICES, CALL_BYTES], [0, 0, DN_SLICE, 1])
+
     for h in range(DN_HEADS_PC):
         for c in range(N_CORES):
             hd = c * DN_HEADS_PC + h
             pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_VEC + hd * rec, CALL_BYTES))
-            pipe_w.fill(w_prods[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
+            pipe_w.fill(w_prods[c], a_state, s_tap(STATE_S_OFF + hd * S_HEAD_BYTES))
             pipe_y.drain(y_conss[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_O + hd * ohb, ohb))
-            pipe_w.fill(w_prods[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
+            pipe_w.fill(w_prods[c], a_state, s_tap(STATE_S_OFF + hd * S_HEAD_BYTES))
 
 
 # ---- the norm + router helper core (both layer types): ln_nr -> ln(+residual) -> router

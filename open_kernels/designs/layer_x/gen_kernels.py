@@ -9,6 +9,7 @@ Scratch layouts (floats; xcommon.MS_FLOATS / DS_FLOATS), for the 27B:
   ds (DeltaNet, 1280): vec[512] @0 | t[128] @512 | o[128] @640 | k_hl bf16[320] @768 | q_hl @928
                        | delta_hl bf16[256] @1088 | dd bf16[16] @1216
 """
+import os
 import sys
 from pathlib import Path
 
@@ -361,9 +362,72 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
     return out
 
 
+# ---- LX_STAMP=1: a TIMING-ONLY build (its outputs are garbage). The dense main core keeps an event
+# log of its timer (the core module's Timer_Low) and the down GEMV's second K piece writes it over
+# each of its band results (K = 9216 is that piece's width alone: per_band 72), so the last band's
+# y element -- act[A_OUT2B | AA_OUT2B] + (10 c + 9) * 256 -- carries the whole layer's log to DDR
+# with no extra kernel call, element or transfer (the lx main core had 480 B to spend). Read it
+# with --dump-act; agents/stream/stamps.py decodes it. Events, in order, per layer:
+#   prep (xn, og, xm: 3 elements each): G (the last GEMV exit), T at entry
+#   [linear] each DeltaNet head's delta step: T
+#   each down piece's first h element: G, T
+# then slot 62 = the band's end time, slot 63 = the event count.
+# Timer reads go over the processor bus, which the stream must enable first: only dux.py (the
+# merged image) does, so a stamped two-context lx/ax build hangs on its first layer.
+# Nothing here is generated unless LX_STAMP=1, so every other build's text is unchanged.
+STAMP = os.environ.get("LX_STAMP") == "1"
+STAMP_PRE = """// LX_STAMP: timing-only event log (gen_kernels.py)
+#include <aie_api/aie.hpp>
+#include <stdint.h>
+// get_cycles() is declared by the aie2p compat header but defined nowhere; read the memory
+// module's Timer_Low (0x140F8, xaie2pgbl_params.h) over the processor bus instead; the stream
+// must set Core_Processor_Bus.Enable first (dux.py) or the core hangs. Scheduling barriers on
+// both sides: Peano must not pack the lda.tm with other accesses (mlir-aie issue #2346).
+static inline __attribute__((always_inline)) uint32_t lxs_now() {
+  __builtin_aie2p_sched_barrier();
+  const uint32_t v = (uint32_t)__builtin_aie2p_read_tm((int *)(0x80000 + 0x140F8));
+  __builtin_aie2p_sched_barrier();
+  return v;
+}
+#define LXS_NOW() lxs_now()
+extern "C" {
+__attribute__((weak)) uint32_t lxs_buf[64] __attribute__((aligned(64)));
+__attribute__((weak)) uint32_t lxs_n;      // events logged this layer
+__attribute__((weak)) uint32_t lxs_g;      // the last GEMV call's exit time
+__attribute__((weak, noinline)) void lxs_mark(uint32_t v) { lxs_buf[lxs_n & 63u] = v; lxs_n = lxs_n + 1; }
+}
+"""
+
+
+def stamp_files(fs: dict[str, str]) -> dict[str, str]:
+    def sub(name: str, old: str, new: str) -> None:
+        assert fs[name].count(old) == 1, (name, old)
+        fs[name] = fs[name].replace(old, new)
+
+    for name in ("gemv_t2_gy.cc", "dense_act.cc", "dense_prep.cc", "dense_prep_f32.cc", "dnx_delta.cc"):
+        fs[name] = STAMP_PRE + fs[name]
+    sub("gemv_t2_gy.cc", "// per_band | sub << 16\n}",
+        "// per_band | sub << 16\n  lxs_g = LXS_NOW();\n"
+        "  if (per_band == 72 && group == 71) {                       // a band of the K = 9216 down piece is done\n"
+        "    lxs_buf[62] = lxs_g;\n"
+        "    if (lxs_n) { lxs_buf[63] = lxs_n; lxs_n = 0; }\n"
+        "    uint32_t *__restrict o = (uint32_t *)y;\n"
+        "#pragma clang loop unroll(disable)\n"
+        "    for (unsigned i = 0; i < 64; i += 16) aie::store_v(o + i, aie::load_v<16>(lxs_buf + i));\n"
+        "  }\n}")
+    assert fs["dense_act.cc"].endswith("}\n}\n")
+    fs["dense_act.cc"] = fs["dense_act.cc"][:-4] + "  lxs_g = LXS_NOW();\n}\n}\n"
+    sub("dense_prep.cc", "  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n",
+        "  lxs_mark(lxs_g);\n  lxs_mark(LXS_NOW());\n  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n")
+    sub("dense_prep_f32.cc", "  xh_wht_f32((const float *)e, e);\n",
+        "  if (i == 0) { lxs_mark(lxs_g); lxs_mark(LXS_NOW()); }\n  xh_wht_f32((const float *)e, e);\n")
+    sub("dnx_delta.cc", "  dnx_delta_head(ds);\n", "  lxs_mark(LXS_NOW());\n  dnx_delta_head(ds);\n")
+    return fs
+
+
 def files(R) -> dict[str, str]:
     if getattr(R, "kind", "moe") == "dense":
-        return dense_files(R)
+        return stamp_files(dense_files(R)) if STAMP else dense_files(R)
     C, L = R.common, R.layout
     hid, ff, ne = C.HID, C.FF, C.NE
     kw = C.KWIDE

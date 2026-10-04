@@ -353,13 +353,15 @@ void transpose_bytes(const uint8_t* src, uint64_t rows, uint64_t cols, uint64_t 
 }
 
 /// OPEN-QUANT-T2: one exact-ternary q4_1 chunk (q = code in 0..2, m = -d, one d per 128 K) ->
-/// the 2-bit chunk gemv_q4/gemv_t2.h reads: [s 2 x 32 bf16 | 2048 B of codes | pad to 2560].
+/// the 2-bit chunk gemv_q4/gemv_t2.h reads: [s 2 x 32 bf16 | 2048 B of codes], 2176 B, zero
+/// padded to `stride` (the manifest's pool stride: 2176 since 2026-10-03, 2560 before).
 /// Byte (k8, kk, p) of the codes holds rows 8j + p (j = 0..3, bits 2j) at k = 8 k8 + kk.
 /// Returns false when the chunk is not ternary in that exact form.
-constexpr size_t T2_CHUNK = 2560;
-bool t2_chunk(const uint8_t* s, uint8_t* o) {
+constexpr size_t T2_BODY = 2176;
+constexpr size_t T2_CHUNK_LEGACY = 2560;     // a t2_perm op without chunk_bytes (the first t2 sets)
+bool t2_chunk(const uint8_t* s, uint8_t* o, size_t stride) {
     bool ok = true;
-    std::memset(o, 0, T2_CHUNK);
+    std::memset(o, 0, stride);
     uint16_t d[256], mm[256];
     std::memcpy(d, s, 512);
     std::memcpy(mm, s + 512, 512);
@@ -459,19 +461,26 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
     } else if (op.op == "t2_perm") {
         // OPEN-QUANT-T2: the std_perm band order, each pool chunk the 2-bit twin of the
         // container's exact-ternary q4_1 chunk (q4nx-build's Bonsai path writes those).
+        // `chunk_bytes` is the POOL chunk: the unpadded 2176 for the layer pools and the rotated
+        // lm head (designs/lm_head_t2), 2560 when absent (the first t2 kernel sets).
         const std::string name = with_layer(op.tensor, layer);
         if (op.nch == 0 || op.in_dim == 0) fail("t2_perm " + name + " without nch / in_dim");
         if (m.chunk_bytes(name) != Q4_CHUNK)
             fail("t2_perm " + name + ": the source must be q4_1 (" + std::to_string(Q4_CHUNK) + " B chunks), not " +
                  std::to_string(m.chunk_bytes(name)));
-        bounds(op, op.nch * T2_CHUNK, dst_bytes);
+        // the pool stride is the kernels' w element (recipes/qwen36moe.py T2_CHUNK)
+        const size_t stride = op.chunk_bytes ? op.chunk_bytes : T2_CHUNK_LEGACY;
+        if (stride < T2_BODY || stride % 64)
+            fail("t2_perm " + name + ": chunk_bytes " + std::to_string(stride) + " -- a t2 chunk is " +
+                 std::to_string(T2_BODY) + " B, at a 64-byte multiple stride");
+        bounds(op, op.nch * stride, dst_bytes);
         std::vector<uint8_t> tmp;
         const uint8_t* src = q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp);
         const auto perm = std_perm(op.nch, op.in_dim);
         long long bad = -1;
 #pragma omp parallel for
         for (long long c = 0; c < static_cast<long long>(op.nch); ++c)
-            if (!t2_chunk(src + perm[c] * Q4_CHUNK, dst + op.dst + c * T2_CHUNK)) bad = c;
+            if (!t2_chunk(src + perm[c] * Q4_CHUNK, dst + op.dst + c * stride, stride)) bad = c;
         if (bad >= 0)
             fail("t2_perm " + name + ": chunk " + std::to_string(bad) + " is not exact ternary q4_1 "
                  "(q in 0..2, m = -d, one d per 128 columns) -- not a q4nx-build ternary container");

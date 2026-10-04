@@ -38,12 +38,14 @@ BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
 PER_CALL = 2                 # chunks per w element
 CALL_BYTES = PER_CALL * CHUNK
 # t2 (OPEN-QUANT-T2): 32 rows x 256 K of 2-bit ternary codes + a bf16 scale per (row, 128 K),
-# 2176 B, padded to 2560 (5 x 512) and streamed ONE per w element. Two per 5 KB element halved
-# the core program's GEMV trip counts and overflowed the 27B's lx main core (LLVM unrolled the
-# loops; then the second call per element cost 1.3 KB of argument setup). One per element keeps
-# the q4_1 loop shapes; the DeltaNet S slices follow the element (5 rows x 26 slices = the same
-# 130 padded rows as 10 x 13), and probe 0a measured 2.5 KB elements at the same DMA floor.
-T2_CHUNK = 2560
+# 2176 B, unpadded, streamed ONE per w element. Two per element halved the core program's GEMV
+# trip counts and overflowed the 27B's lx main core (LLVM unrolled the loops; then the second
+# call per element cost 1.3 KB of argument setup). One per element keeps the q4_1 loop shapes,
+# and probe 0a measured 2176 B elements at the same DMA floor. 2176 is not a whole number of
+# 512 B DeltaNet state rows, so the S slices are 4 rows (2048 B) at a 2048 B stride inside the
+# 2176 B elements (`dn_slice_bytes`; xcommon.dn_sequence's overlapping tap). It was padded to
+# 2560 (5 rows) until 2026-10-03: 15% of every layer's weight stream was zeros.
+T2_CHUNK = 2176
 T2_PER_CALL = 1
 MB = 1 << 20
 POOL_BYTES = 512 * MB        # one layer's weight pool (fixed BO size; the recipe checks it fits)
@@ -155,6 +157,8 @@ def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: 
         op["chunk0"] = chunk0
     op["nch"] = role_chunks(spec, role, rows, cols)
     op["in_dim"] = in_dim
+    if q == "t2":
+        op["chunk_bytes"] = T2_CHUNK      # the pool stride pools.cpp packs at: the kernels' w element
     return op
 
 
@@ -574,10 +578,25 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
     )
 
 
+def dn_slice_bytes(C: Common) -> int:
+    """The bytes of S one streamed slice carries: DN_ROWS whole rows. Equal to the w element
+    for every q4_1 / q8 element size (10 KB, 5 KB); smaller for t2's 2176 B element, whose
+    4.25 rows round down to 4. Then the slices sit at this stride in the state buffer and each
+    element also carries the next slice's first CALL_BYTES - this bytes, which nothing reads
+    (xcommon.dn_sequence), and the state buffer ends in `dn_state_tail` bytes so the last
+    head's last element stays inside it."""
+    return C.DN_ROWS * C.DN_DIM * 4
+
+
+def dn_state_tail(C: Common) -> int:
+    return C.CALL_BYTES - dn_slice_bytes(C) if C.DN_DIM else 0
+
+
 def _dn_geometry(spec: ModelSpec, call_bytes: int, n: int):
     """The DeltaNet slicing for a given weight-element size: S rows per element, slices per
     head, the padded row count dnx.h's kPad must be, heads per core. At 10 KB elements and
-    dim 128 this is the 27B's 20 / 7 / 140 / 4; at 5 KB it is 10 / 13 / 130 / 4."""
+    dim 128 this is the 27B's 20 / 7 / 140 / 4; at 5 KB it is 10 / 13 / 130 / 4; at t2's
+    2176 B it is 4 / 32 / 128 / 6 (4.25 rows round down: see dn_slice_bytes)."""
     dim = spec.lin_value_dim if spec.has_linear else 0
     if not dim:
         return 0, 0, 0, 0, 0
@@ -815,7 +834,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         s_head = C.DN_PAD * C.DN_DIM * 4
         s_off = (spec.conv_kernel - 1) * nch * 2
         kv.update(S_ROWS=C.DN_PAD, S_HEAD_BYTES=s_head, STATE_S_OFF=s_off,
-                  STATE_BYTES=s_off + spec.lin_value_heads * s_head)
+                  STATE_BYTES=s_off + spec.lin_value_heads * s_head + dn_state_tail(C))
     else:
         kv.update({k: 0 for k in ("C_LNW", "C_SIDE", "C_NW", "C_POSTLN", "C_RW", "C_SGW", "C_WOUT", "C_BYTES",
                                   "GLUE_SIDE_BYTES", "SIDE_ALPHA", "SIDE_BETA", "SIDE_SMALL", "SIDE_CONV",
@@ -1211,6 +1230,10 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         }
         if attn_block:
             types[FULL]["attn_block"] = attn_block
+    if is_t2(spec):
+        for g in types.values():
+            g["y_tn"] = True            # OPEN-GEMM-T2: the GEMM writes y [T, N] ...
+            g["x_tile_k"] = 128         # ... and streams x in 128-k tiles
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight
     # columns, so contexts time-share the array, and changing one costs ~2.5 ms):
@@ -1259,6 +1282,12 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2
         out["globals"]["ag_b"] = ATTN_LMAX * hd * 2
         out["globals"]["ag_c"] = ag_m * ATTN_LMAX * 4
+    # OPEN-GEMM-T2: a ternary (t2) model's GEMM runs the bf16 matmul on aie2p's bfp16 datapath,
+    # ~2.6x the native bf16 form on this array. Its weights are exact there (three values per
+    # 128-k scale block, so every 8-k block shares one exponent), and the activations take a
+    # block-of-8 shared-exponent rounding. A q4_1 model's 16-level weights are not exact in bfp16,
+    # so every other spec keeps the native bf16 build, byte for byte.
+    bfp = is_t2(spec)
     for N, K in sorted(shapes):
         name, ctx = f"gemm_n{N}_k{K}", "gemm"
         if ctx not in out["contexts"]:
@@ -1266,9 +1295,14 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}
         out["globals"][f"gemm_x_k{K}"] = K * T * 2
         out["globals"][f"gemm_y_n{N}"] = N * T * 4
+        env = {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}
+        if bfp:
+            # OPEN-GEMM-T2: and it reads the decode pool's 2-bit chunks (copied per weight, as the
+            # q4_1 route copies its own), 128 k per matmul call, and writes y token-major
+            env.update(GQP_BFP16="1", GQP_WFMT="t2", GQP_KT="128", GQP_YT="1", GQP_T2_STRIDE=str(T2_CHUNK))
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
-                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}",
-                               "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}}
+                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2ky" if bfp else ""),
+                               "env": env}
     return out
 
 

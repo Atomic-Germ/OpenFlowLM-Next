@@ -110,6 +110,32 @@ def dequant_t2_pool(pool: np.ndarray, n: int, k: int, rs: int) -> np.ndarray:
     return w
 
 
+T2_POOL_CHUNK = 2560   # the engine's pool chunk: the 2176 B body padded (src/open_qwen36/pools.cpp)
+
+
+def t2_from_q4_1_pool(pool: np.ndarray) -> np.ndarray:
+    """A q4_1 pool of exact-ternary chunks (5120 B: d[256] | m[256] | nibbles, q in 0..2,
+    m = -d, one d per 128 k) -> the same chunks in the engine's t2 pool form (2560 B each),
+    the NumPy twin of pools.cpp `t2_chunk`. Chunk order is kept, so a std_perm pool becomes a
+    t2_perm one."""
+    ch = pool.reshape(-1, 5120)
+    out = np.zeros((ch.shape[0], T2_POOL_CHUNK), np.uint8)
+    d = ch[:, :512].copy().view(np.uint16).reshape(-1, 8, 32)              # [c, kb, r]
+    m = ch[:, 512:1024].copy().view(np.uint16).reshape(-1, 8, 32)
+    assert (d[:, 0::4][:, :, None] == d.reshape(-1, 2, 4, 32)).all(), "d not constant over 128 k"
+    assert (m == (d ^ 0x8000)).all(), "m != -d"
+    out[:, :128] = d[:, [0, 4], :].reshape(-1, 64).view(np.uint8).reshape(-1, 128)
+    nib = ch[:, 1024:]                                                      # p = (r//16)*4096 + k*16 + r%16
+    lo, hi = nib & 15, nib >> 4
+    q = np.stack([lo, hi], axis=-1).reshape(-1, 2, 256, 16)                # [c, r//16, k, r%16]
+    q = q.transpose(0, 1, 3, 2).reshape(-1, 32, 256)                        # [c, r, k]
+    assert q.max() <= 2, "not ternary"
+    q = q.reshape(-1, 4, 8, 32, 8)                                          # [c, j, p, k8, kk]
+    q = q.transpose(0, 3, 4, 2, 1)                                          # [c, k8, kk, p, j]
+    out[:, 128:2176] = (q[..., 0] | (q[..., 1] << 2) | (q[..., 2] << 4) | (q[..., 3] << 6)).reshape(-1, 2048)
+    return out.reshape(-1)
+
+
 def as_q4_1_blocks(codes: np.ndarray, s: np.ndarray) -> np.ndarray:
     """The same weights as GGUF Q4_1 blocks: q = code, d = s, m = -s (exact)."""
     n, k = codes.shape
