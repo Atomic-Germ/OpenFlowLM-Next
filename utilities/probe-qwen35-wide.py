@@ -75,11 +75,14 @@ def main():
     p.add_argument("--product-correction", action="store_true", help="compensate Q4 block products and sums (requires projection/FFN correction)")
     p.add_argument("--block-carry", action="store_true", help="retain and renormalize the Q4 block sum residual (requires product correction)")
     p.add_argument("--segment-carry", action="store_true", help="retain down segment residuals (requires full FFN block carry)")
+    p.add_argument("--down-rne", action="store_true", help="exact FP32 rounding of compensated down output (requires segment carry)")
     p.add_argument("--activation-carry", action="store_true", help="experimental compensated SiLU/product (full FFN only)")
     p.add_argument("--activation-series", action="store_true", help="direct sigmoid series for |gate|<=0.5 (requires activation carry)")
     p.add_argument("--projection-n", type=int, default=1024, help="isolated Q4 projection output rows")
     p.add_argument("--out", type=Path, default=ROOT / "open_kernels/designs/layer_x/build_wide_probe")
     args = p.parse_args()
+    if args.down_rne and not args.segment_carry:
+        p.error('--down-rne requires --segment-carry')
     if args.activation_series and not args.activation_carry:
         p.error('--activation-series requires --activation-carry')
     if args.activation_carry and args.scope != 'ffn':
@@ -118,6 +121,7 @@ def main():
     env = os.environ.copy()
     env['PROBE_PRODUCT_CORRECTION'] = str(int(args.product_correction))
     env['PROBE_BLOCK_CARRY'] = str(int(args.block_carry))
+    env['PROBE_DOWN_RNE'] = str(int(args.down_rne))
     env['PROBE_SEGMENT_CARRY'] = str(int(args.segment_carry))
     env['PROBE_ACTIVATION_CARRY'] = str(int(args.activation_carry))
     env['PROBE_ACTIVATION_SERIES'] = str(int(args.activation_series))
@@ -151,6 +155,7 @@ def main():
                 "product_correction": args.product_correction,
                 "block_carry": args.block_carry,
                 "segment_carry": args.segment_carry,
+                "down_rne": args.down_rne,
                 "activation_carry": args.activation_carry,
                 "activation_series": args.activation_series,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}

@@ -94,6 +94,14 @@ The combined gate remains failed, with new layer55 residual and cold-2/layer39
 head4 failures. Compensation stays opt-in and has a substantial isolated-call
 cost; PR4 is incomplete.
 
+Follow-up (2026-10-04): [residual propagation and final down rounding](qwen38-residual-boundary.md)
+traces layer11/xm[4872] to the first scalar discrepancy in layer0/down[4872].
+Changing final down addition to IEEE round-to-nearest fixes a different channel,
+2743, but leaves4872 open. All384 xn/xm captures and all decode check results
+match the preceding stage; the same four slice failures remain. Exact segment
+reducers exceeded the16 KiB instruction budget and are not retained. Next
+isolate down-only segment residuals before changing the full FFN. PR4 is incomplete.
+
 ## Sources and format
 
 Weights live in the existing ignored `Models/qwen38-27b/` directory.

@@ -31,6 +31,11 @@ CORRECTION = os.environ.get('PROBE_FFN_CORRECTION') == '1'
 PRODUCT_CORRECTION = os.environ.get('PROBE_PRODUCT_CORRECTION') == '1'
 BLOCK_CARRY = os.environ.get('PROBE_BLOCK_CARRY') == '1'
 SEGMENT_CARRY = os.environ.get('PROBE_SEGMENT_CARRY') == '1'
+DOWN_RNE = os.environ.get('PROBE_DOWN_RNE') == '1'
+if DOWN_RNE:
+    if not SEGMENT_CARRY:
+        raise ValueError('down RNE requires segment carry')
+    X.OS.append('-DDENSE_DOWN_RNE=1')
 ACTIVATION_CARRY = os.environ.get('PROBE_ACTIVATION_CARRY') == '1'
 ACTIVATION_SERIES = os.environ.get('PROBE_ACTIVATION_SERIES') == '1'
 if ACTIVATION_SERIES:
@@ -148,4 +153,4 @@ _sources = [Path(__file__), HERE / 'xcommon.py', HERE / 'gen_kernels.py', ROOT /
             *sorted((ROOT / 'include').glob('*.h'))]
 SPECIALIZE = {'source_hash': int(hashlib.sha256(b''.join(p.read_bytes() for p in _sources)
                          + b''.join(X.source_hash_inputs())
-                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, ACTIVATION_CARRY, ACTIVATION_SERIES, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
+                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, DOWN_RNE, ACTIVATION_CARRY, ACTIVATION_SERIES, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}

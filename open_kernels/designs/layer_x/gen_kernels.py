@@ -280,11 +280,20 @@ void dense_down_acc(const float *__restrict ms, float *__restrict ds, int32_t ba
 }
 '''
         out["dense_down_out.cc"] = '''#include "vecmath.h"
+#if DENSE_DOWN_RNE
+#include "dense_activation_carry.h"
+#endif
 extern "C" {
 void dense_down_out(const float *__restrict ds, float *__restrict y, int32_t band) {
 #if GEMV_Q4_SEGMENT_CARRY
   for (unsigned j = 0; j < 64; j += 32)
-    aie::store_v(y + j, fadd32(aie::load_v<32>(ds + 64 * band + j),
+    aie::store_v(y + j,
+#if DENSE_DOWN_RNE
+                     act_add(
+#else
+                     fadd32(
+#endif
+                              aie::load_v<32>(ds + 64 * band + j),
                               aie::load_v<32>(ds + DENSE_DOWN_ROWS + 64 * band + j)));
 #else
   aie::store_v(y, aie::load_v<32>(ds + 64 * band));

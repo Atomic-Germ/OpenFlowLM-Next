@@ -186,4 +186,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Trace DeltaNet post rounding, build compensated five-factor products for 32/48 heads, and replay immutable full-model fixtures.</description>
     <location>.opencode/skill/open-wide-post-carry/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-down-rne</name>
+    <description>Diagnose propagated residual rounding, validate exact final down addition, and track segment-compensation program limits.</description>
+    <location>.opencode/skill/open-down-rne/SKILL.md</location>
+  </skill>
 </available_skills>
