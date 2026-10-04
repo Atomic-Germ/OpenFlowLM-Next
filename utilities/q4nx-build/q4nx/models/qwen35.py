@@ -891,3 +891,7 @@ class Qwen35_08B(Qwen35, model_arch=ModelArch.QWEN35_08B):
 
 class Qwen35_9B(Qwen35, model_arch=ModelArch.QWEN35_9B):
     pass
+
+
+class Qwen35_27B(Qwen35, model_arch=ModelArch.QWEN35_27B):
+    pass

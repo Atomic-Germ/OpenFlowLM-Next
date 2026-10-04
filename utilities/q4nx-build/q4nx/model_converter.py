@@ -1575,4 +1575,6 @@ def _infer_qwen35_variant_from_name(name: str) -> ModelArch | None:
         return ModelArch.QWEN35_4B
     elif size_b <= 10:
         return ModelArch.QWEN35_9B
+    elif size_b <= 30:
+        return ModelArch.QWEN35_27B
     return None

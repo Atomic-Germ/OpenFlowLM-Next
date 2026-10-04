@@ -35,6 +35,7 @@ ARCH_TO_SIZE: Dict[ModelArch, str] = {
     ModelArch.QWEN35_2B: "2b",
     ModelArch.QWEN35_4B: "4b",
     ModelArch.QWEN35_9B: "9b",
+    ModelArch.QWEN35_27B: "27b",
     ModelArch.QWEN35MOE: "35b-a3b",
     ModelArch.QWEN3: "0.6b",
     ModelArch.QWEN3VL: "4b",

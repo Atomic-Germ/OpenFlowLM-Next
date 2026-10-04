@@ -22,6 +22,7 @@ QWEN35_VISION_ARCHS = frozenset({
     ModelArch.QWEN35_2B,
     ModelArch.QWEN35_4B,
     ModelArch.QWEN35_9B,
+    ModelArch.QWEN35_27B,
     ModelArch.QWEN35MOE,
 })
 
@@ -31,6 +32,7 @@ QWEN35_VISION_MODEL_TYPES = {
     ModelArch.QWEN35_2B: "qwen3_5",
     ModelArch.QWEN35_4B: "qwen3_5",
     ModelArch.QWEN35_9B: "qwen3_5",
+    ModelArch.QWEN35_27B: "qwen3_5",
     ModelArch.QWEN35MOE: "qwen3_5_moe",
 }
 
