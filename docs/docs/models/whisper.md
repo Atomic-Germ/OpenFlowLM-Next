@@ -12,8 +12,8 @@ parent: Models
 - **Tool Calling Support:** No
 - **Base Model:** [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
 - **Quantization:** Q4_1
-- **Max Context Length:** 448 tokens (the Whisper encoder window -- fixed, not configurable)
-- **Default Context Length:** 448 tokens
+- **Max Output Length:** 448 tokens (fixed)
+- **Maximum Encoder Window:** 30 seconds of audio (1500 frames)
 
 > ⚠️ **The shipped `whisper-v3:turbo` container runs the closed engine.** It ships
 > only `model.q4nx`; the open Whisper path needs both `model.open.safetensors`
