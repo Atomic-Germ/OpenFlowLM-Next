@@ -98,6 +98,14 @@ class DenseRecipe:
 # families whose q/k RMSNorm weight multiplies AFTER the rotation (HunYuan's
 # query_layernorm(apply_rotary_pos_emb(q))); everyone else norms first.
 QKNORM_POST_ROPE = ("hunyuan",)
+# families whose block prefill runs its attention as the two NPU products (OPEN-PREFILL-ATTN)
+# rather than T single-token dxB dispatches. The engine's host half (block_host.cpp
+# attention_prep) does exactly one thing before the products: q/k RMSNorm, then the half-split
+# rotation over rotary_dim, with no bias, no output gate and no sliding window -- so a family
+# joins only if that is its attention, and by measurement against its dxB route, as
+# FAST_ATTENTION does. The manifest says so as attn_block.prep, which the engine refuses to
+# guess: a dense attn_block without it is left to the dxB route.
+BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
 # families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
@@ -419,6 +427,9 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
                       "kernels_s": {str(Lw): f"ag_s{Lw}" for Lw in ag_tiers},
                       "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}}
+        if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
+                and not spec.attn_gate):
+            attn_block["prep"] = "qknorm_rope"
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 

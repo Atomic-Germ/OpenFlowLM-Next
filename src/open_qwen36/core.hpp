@@ -399,6 +399,10 @@ private:
         std::vector<float> sh;          ///< the shared expert's silu(gate) * up
         std::vector<uint16_t> qb;       ///< attention_npu: one KV group's queries as bf16
         std::vector<float> m, lsum, acc;///< attention_npu: the merged softmax's running state
+        std::vector<uint16_t> p_all;    ///< attention_npu, one chunk: every kv group's P between the two passes
+        /// the dense route's token rows: o / gate / up / down outputs, silu(gate) * up, the residual
+        std::vector<float> d_o, d_gate, d_up, d_down, d_h;
+        std::vector<double> d_res, d_row;
         std::vector<size_t> pos;        ///< attention_npu: each product row's absolute position
         /// `v` grown to at least `n` (never shrunk) and its data pointer.
         template <class T>
@@ -547,10 +551,15 @@ private:
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
     /// The scalar original of tile_gemm_x, kept only as the reference host::tile_x is checked against.
     static void tile_gemm_x_reference(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
-    /// One dense layer of the route (0167/#32): entry RMSNorm -> GEMM qkv3 -> T dxB
-    /// dispatches -> GEMM o -> residual + post-attn RMSNorm -> GEMM gate, up -> host
-    /// SwiGLU -> GEMM down -> residual. `xres` is T*hidden fp64, updated in place.
-    void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
+    /// One dense layer of the route (0167/#32): entry RMSNorm -> GEMM qkv3 -> the attention
+    /// (T dxB dispatches, or the products when the set declares attn_block.prep) -> GEMM o ->
+    /// residual + post-attn RMSNorm -> GEMM gate, up -> host SwiGLU -> GEMM down -> residual.
+    /// `xres` is T*hidden fp64, updated in place; t_real (0 = T) is how many of the T are real.
+    void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T, size_t t_real = 0);
+    /// The dense route's attention as the two NPU products (OPEN-PREFILL-ATTN), for a layer
+    /// whose attn_block.prep is "qknorm_rope": y_qkv3 [n_qkv3, T] in, og [T, qw] out, the
+    /// layer's KV rows [pos_, pos_ + t_real) written on the host and synced to the device.
+    void dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t T, size_t t_real, std::vector<float>& og);
     /// Stage 2.6 Gate B: one decode step on the host route (see
     /// host_attn_decode_on_). The layer = step_gemm_block_layer at T=1 with
     /// host attention forced; the residual rides the xres global between
@@ -596,7 +605,8 @@ private:
     /// The full-attention layer's attention over the block as GEMM dispatches (OPEN-PREFILL-ATTN):
     /// per kv head, the group's queries against the window's K rows for the scores, the row
     /// softmax on the host, then against the V rows. Q [T, nh*hd] as attention_prep leaves it,
-    /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated.
+    /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated by
+    /// sigmoid(gate) -- or ungated when gate is null (a dense layer).
     void attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
                        size_t kv_row_elems, float* og);
 };
