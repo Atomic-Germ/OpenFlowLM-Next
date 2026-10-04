@@ -682,6 +682,48 @@
             "path": "vision_weight.q4nx"
         }
     ],
+    "qwen3.8:27b": [
+        {
+            "type": "file",
+            "oid": "86ba62a24bb1122b87f8e2d0016b4b1ecf6b19fe",
+            "size": 3092,
+            "path": "config.json"
+        },
+        {
+            "type": "file",
+            "oid": "1691975f562fc6c33338b4ab6873eab20172cb88",
+            "size": 19844633616,
+            "lfs": {
+                "oid": "1f78e62b723f66ad540e8a35a5cb31de67e2ae48c3a58e226873eefa10b349a9",
+                "size": 19844633616
+            },
+            "xetHash": "fec115cbb3f25cf98448a50fce1cd960eccfeb7a67a199cdff0e3daf2a40d6c1",
+            "path": "model.q4nx"
+        },
+        {
+            "type": "file",
+            "oid": "9328ce9c41e80f6dd7bc2c66d8ae1fc93bf87440",
+            "size": 12809320,
+            "lfs": {
+                "oid": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+                "size": 12809320
+            },
+            "xetHash": "ddca7e708ff0da8902fdcef5209d5eea8bf922715733eb02f93026a37478e426",
+            "path": "tokenizer.json"
+        },
+        {
+            "type": "file",
+            "oid": "1e0c8bd02befc490280bbb70af3861d3727fbafa",
+            "size": 16445,
+            "path": "tokenizer_config.json"
+        },
+        {
+            "type": "file",
+            "oid": "a7d899308adc631cf150bd22e5aeb5da99ceb2e8",
+            "size": 27167,
+            "path": "chat_template.jinja"
+        }
+    ],
     "qwen3.6-moe:35b-a3b": [
         {
             "type": "file",

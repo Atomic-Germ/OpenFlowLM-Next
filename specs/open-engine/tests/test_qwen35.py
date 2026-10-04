@@ -313,13 +313,19 @@ def test_the_projection_is_walked_in_4_kb_halves(name, halves, monkeypatch):
 def test_the_glue_side_fills_stay_inside_the_shim_budget(name, fills, monkeypatch):
     """Per accumulator, per half: the xn half then its weight tiles; then `small` and the conv
     taps. The recipe counts them so a too-wide model is refused here, not by a late IRON
-    failure -- LIMITS['shim_fills'] is 13, so HID 6144 (three halves, 14 fills) is the wall."""
-    spec, _ = _linear(name, monkeypatch)
+    failure. LIMITS['shim_fills'] is 13: three halves walked that way would be 14, so a
+    three-half width (the 27B's 5120, or 6144) walks half-outer instead -- each half once,
+    then both accumulators' tiles, 3 fills a half -- and the wall moves to four halves."""
+    spec, R = _linear(name, monkeypatch)
     assert Q35.glue_side_fills(spec) == fills <= LIMITS["shim_fills"]
-    wide = ModelSpec.from_dict(dict(spec.to_dict(), hidden=6144, intermediate=6144))
-    assert Q35.glue_side_fills(wide) == 14
+    assert R.linear.GLUE_HALF_OUTER is False          # every published size keeps its walk
+    for hid, halves, want in ((5120, 3, 11), (6144, 3, 11), (8192, 4, 14)):
+        wide = ModelSpec.from_dict(dict(spec.to_dict(), hidden=hid))
+        assert Q35.xn_side_elems(wide) == halves
+        assert Q35.glue_side_fills(wide) == want
+        assert Q36.linear(wide).GLUE_HALF_OUTER is True
     with pytest.raises(OpRangeError, match="side channel needs 14 fills"):
-        Q35.recipe(wide)
+        Q35.recipe(ModelSpec.from_dict(dict(spec.to_dict(), hidden=8192)))
 
 
 def test_the_catalogue_takes_sixteen_value_heads_and_still_refuses_eight(monkeypatch, capsys):
@@ -333,12 +339,12 @@ def test_the_catalogue_takes_sixteen_value_heads_and_still_refuses_eight(monkeyp
         Q35.recipe(ModelSpec.from_hf_config(cfg(name)))
     assert capsys.readouterr().err == ""
 
-    with pytest.raises(OpRangeError, match=r"deltanet: heads=8 is outside the validated set \{16, 32\}"):
+    with pytest.raises(OpRangeError, match=r"deltanet: heads=8 is outside the validated set \{16, 32, 48\}"):
         catalogue.require("deltanet", heads=8, dim=128, key_heads=16, conv_kernel=4)
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
     monkeypatch.setattr(catalogue, "_WARNED", set())
     catalogue.require("deltanet", heads=8, dim=128, key_heads=16, conv_kernel=4)
-    assert "deltanet: heads=8 is outside the validated set {16, 32}" in capsys.readouterr().err
+    assert "deltanet: heads=8 is outside the validated set {16, 32, 48}" in capsys.readouterr().err
 
 
 def test_the_padded_transpose_zeroes_the_unused_lanes():
@@ -372,8 +378,121 @@ def test_every_published_size_composes_and_a_neighbour_nobody_built_does_not(spe
     Q35.recipe(spec9)
     for name in ("9b", "4b", "2b", "0p8b"):
         Q35.recipe(ModelSpec.from_hf_config(cfg(name)))
-    with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(5120, 1\) is outside"):
-        Q35.recipe(dataclasses.replace(spec9, hidden=5120))
+    Q35.recipe(ModelSpec.from_hf_config(cfg("27b")))           # the fifth size, 2026-10-01
+    with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(6144, 1\) is outside"):
+        Q35.recipe(dataclasses.replace(spec9, hidden=6144))
+
+
+# ------------------------------------------------- the 27B: hidden 5120, FFN 17408, 48 value heads
+PUBLISHED = ("9b", "4b", "2b", "0p8b")
+
+
+def test_the_27b_config_derives():
+    """`Atomic-Germ/Qwen3.8-27B-NPU2`'s own config.json (OFLM's flat container form)."""
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    assert s.family == "qwen35" and s.num_experts == 0
+    assert (s.hidden, s.num_layers, s.intermediate) == (5120, 64, 17408)
+    assert (s.num_heads, s.num_kv_heads, s.head_dim, s.rotary_dim) == (24, 4, 256, 64)
+    assert (s.lin_key_heads, s.lin_value_heads, s.lin_key_dim, s.lin_value_dim) == (16, 48, 128, 128)
+    assert s.layer_types == tuple(FULL if (l + 1) % 4 == 0 else LINEAR for l in range(64))
+
+
+def test_the_27b_down_gemv_runs_in_two_k_pieces(monkeypatch):
+    """FF 17408's activation table is 39 168 B, and a main core is over its L1 with it even at
+    5 KB weight elements. The down GEMV runs as two GEMVs over K pieces cut at an f32 element
+    of h (1024 values): 8192 + 9216, both K's the GEMV already runs, and the core fits with the
+    wider piece's table. Every published size keeps one GEMV and its layout."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    assert Q36.core_l1(Q36.tab_bytes(17408), Q36.FFN_MS_FLOATS, Q36.DN_SCRATCH_FLOATS, 1) > Q36.L1_BUDGET
+    assert Q36.down_split(s) == (8192, 9216)
+    R = Q35.recipe(s)
+    C, L = R.common, R.layout
+    assert R.ffn.DOWN_SPLIT == (8192, 9216) and C.KWIDE == 9216 and C.PER_CALL == 1
+    assert Q36.core_l1(C.TAB_BYTES, C.MS_FLOATS, C.DS_FLOATS, C.PER_CALL) == 51456 <= Q36.L1_BUDGET
+    # the second piece's output sits right after the first's, in both layer types
+    assert L.A_OUT2B == L.A_OUT2 + 5120 * 4 and L.AA_OUT2B == L.AA_OUT2 + 5120 * 4
+    assert L.A_BYTES >= L.A_OUT2B + 5120 * 4 and L.AA_BYTES >= L.AA_OUT2B + 5120 * 4
+    # a piece of h is whole f32 elements, and each piece's bands are whole half-chunk DMA rows
+    for k in R.ffn.DOWN_SPLIT:
+        assert k % 1024 == 0 and Q36.band_bytes(k) % (Q36.CHUNK // 2) == 0
+    assert sum(Q36.band_bytes(k) for k in R.ffn.DOWN_SPLIT) == Q36.band_bytes(17408)
+    for name in PUBLISHED:
+        p = ModelSpec.from_hf_config(cfg(name))
+        assert Q36.down_split(p) == () and Q35.recipe(p).ffn.DOWN_SPLIT == ()
+        assert Q35.layout(p).A_OUT2B == 0 and Q35.layout(p).AA_OUT2B == 0
+
+
+def test_a_k_piece_is_a_run_of_every_bands_chunks():
+    """The split streams each piece as a strided DMA tap over the pool the packer already
+    writes -- right only because of the band law: inside a band, pool chunk c covers row half
+    c % 2 and k-tile c // 2. So the first 2 K0 / 256 chunks of every FF-wide band are exactly
+    a K0-wide band's, in order, and the rest are a (FF - K0)-wide band's with the k-tiles
+    shifted by K0 / 256. A different law would leave every number plausible and wrong."""
+    from recipes import pack
+
+    hid, ff, k0 = 5120, 17408, 8192
+    k1 = ff - k0
+    nbands = hid // 64
+    rb, kt = (a.reshape(nbands, ff // 128) for a in pack.band_rowblock_ktile(Q36.q4_chunks(hid, ff), ff))
+    rb0, kt0 = (a.reshape(nbands, k0 // 128) for a in pack.band_rowblock_ktile(Q36.q4_chunks(hid, k0), k0))
+    rb1, kt1 = (a.reshape(nbands, k1 // 128) for a in pack.band_rowblock_ktile(Q36.q4_chunks(hid, k1), k1))
+    n0 = k0 // 128
+    assert np.array_equal(rb[:, :n0], rb0) and np.array_equal(kt[:, :n0], kt0)
+    assert np.array_equal(rb[:, n0:], rb1) and np.array_equal(kt[:, n0:], kt1 + k0 // 256)
+    assert n0 * Q36.CHUNK == Q36.band_bytes(k0)          # the tap's offset inside a band
+
+
+def test_the_27b_glue_is_64_lanes_and_walks_half_outer(monkeypatch):
+    """48 value heads do not fit dn_glue's 32-lane accumulator: the projection is packed
+    [hid, 64] (columns 48..63 zero), a 4 KB element is 32 rows of it, and glue_ab_w.cc carries
+    two 32-lane halves. Three xn halves walked per accumulator would be 14 side fills; walked
+    half-outer they are 11. Every published size keeps 32 lanes, 64-row tiles and its walk."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    D = Q35.recipe(s).linear
+    assert (D.AB_LANES, D.AB_ROWS, D.GLUE_HALF_OUTER) == (64, 32, True)
+    assert D.AB_ELEMS == 5120 * 64 * 2 // 4096 == 160
+    assert Q35.ab_tiles_per_half(s) == [64, 64, 32] and sum(Q35.ab_tiles_per_half(s)) == D.AB_ELEMS
+    assert Q35.glue_side_fills(s) == 11
+    # one record per value head: 6 value tiles of 8, against 4 key tiles; 3 value heads a key head
+    assert (D.NT, D.VALUE_TILE0, D.HEADS_PER_TILE) == (10, 4, 8)
+    assert (D.NT - D.VALUE_TILE0) * D.HEADS_PER_TILE == D.NHEAD == 48
+    ops = {o["tensor"]: o for o in Q35.pack_plan(s)["layer_types"][LINEAR]["consts"] if "tensor" in o}
+    a = ops["model.layers.{l}.linear_attn.ssm_alpha_proj.bf16.weight"]
+    assert (a["rows"], a["cols"], a["dst_rows"]) == (48, 5120, 64)
+    small = Q35.layout(s).C_SIDE + Q35.layout(s).SIDE_SMALL
+    assert ops["model.layers.{l}.linear_attn.ssm_dt.bias"]["dst"] == small + 48 * 4
+    for name in PUBLISHED:
+        P = Q35.recipe(ModelSpec.from_hf_config(cfg(name))).linear
+        assert (P.AB_LANES, P.AB_ROWS, P.GLUE_HALF_OUTER) == (32, 64, False)
+
+
+def test_the_27b_norm_helper_streams_its_residual(monkeypatch):
+    """[x0 x1 w a0 a1] plus an output at 10 KB elements is 67 584 B with the stack, over the
+    norm core's 64 KB; split, it never holds more than three inputs and one output (46 KB).
+    The published sizes (largest: the 9B's 8 KB, 55 296 B) keep the fused stages."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    assert Q36.norm_split(s) and Q35.recipe(s).ln_split
+    assert 6 * 10240 + Q36.STACK > Q36.NORM_L1 >= 4 * 10240 + Q36.STACK
+    for name in PUBLISHED:
+        p = ModelSpec.from_hf_config(cfg(name))
+        assert not Q36.norm_split(p) and not Q35.recipe(p).ln_split
+
+
+def test_the_27b_composes_with_no_override(capsys):
+    """Its five new points -- ln 5120, lm_head_q8 K 5120, gemv_q4 K 5120, deltanet heads 48
+    and the (256, 24, 4) attention tuple -- entered the catalogue with its hardware pass, so
+    it composes without OPEN_KERNELS_UNVALIDATED, and asks for no K 17408: the down GEMV runs
+    as its two pieces."""
+    from recipes import catalogue
+
+    catalogue.require("deltanet", heads=48, dim=128, key_heads=16, conv_kernel=4)
+    Q35.recipe(ModelSpec.from_hf_config(cfg("27b")))
+    assert capsys.readouterr().err == ""
+    with pytest.raises(OpRangeError, match="gemv_q4: K=17408 is outside"):
+        catalogue.require("gemv_q4", K=17408, rs=2, rows_per_core=640, per_call=1)
 
 
 # --------------------------------------------------------------- pack ops
