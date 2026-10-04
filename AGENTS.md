@@ -191,4 +191,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Diagnose propagated residual rounding, validate exact final down addition, and track segment-compensation program limits.</description>
     <location>.opencode/skill/open-down-rne/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-down-segment-trace</name>
+    <description>Capture down-segment high/low values and distinguish Q4 segment error from reduction error on real FFN activations.</description>
+    <location>.opencode/skill/open-down-segment-trace/SKILL.md</location>
+  </skill>
 </available_skills>

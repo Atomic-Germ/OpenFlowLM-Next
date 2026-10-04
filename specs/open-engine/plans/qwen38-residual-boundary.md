@@ -148,3 +148,11 @@ isolation and canaries pass.
 The failing set and max errors are unchanged. Tiny FP32 improvements do not
 close a model gate in this run. PR4/runtime/catalogue promotion remain incomplete;
 keep the mode opt-in and proceed with the isolated down-segment diagnosis.
+
+## Follow-up: segment trace
+
+[The down-only replay](qwen38-down-segment-trace.md) now reproduces the complete
+FFN output bytewise. At channel4872 the error is already inside segment3,
+K12288..16383; reduction of captured high/low segments is exact. Channels392
+and1769 likewise have intra-segment errors. The next target is Q4 block
+accumulation within those segments, rather than a larger segment reducer.

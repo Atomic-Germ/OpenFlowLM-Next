@@ -68,13 +68,14 @@ def main():
     p.add_argument("--ffn", type=int, default=8192, help="synthetic FFN width (default 8192)")
     p.add_argument("--scope", choices=("layer", "glue", "projection", "down", "ffn"), default="layer")
     p.add_argument("--trace", action="store_true", help="FFN up/gate diagnostic output")
+    p.add_argument("--down-trace", action="store_true", help="down-only segment and accumulator high/low trace")
     p.add_argument("--final-only", action="store_true", help="down probe emits only final sums")
     p.add_argument("--projection-k", type=int, default=5120, help="isolated Q4 projection width")
     p.add_argument("--projection-correction", action="store_true", help="diagnostic Q4 activation residual correction")
-    p.add_argument("--ffn-correction", action="store_true", help="corrected full FFN with K4096 down segments")
+    p.add_argument("--ffn-correction", action="store_true", help="corrected FFN/down probe with K4096 down segments")
     p.add_argument("--product-correction", action="store_true", help="compensate Q4 block products and sums (requires projection/FFN correction)")
     p.add_argument("--block-carry", action="store_true", help="retain and renormalize the Q4 block sum residual (requires product correction)")
-    p.add_argument("--segment-carry", action="store_true", help="retain down segment residuals (requires full FFN block carry)")
+    p.add_argument("--segment-carry", action="store_true", help="retain down segment residuals (requires FFN/down block carry)")
     p.add_argument("--down-rne", action="store_true", help="exact FP32 rounding of compensated down output (requires segment carry)")
     p.add_argument("--activation-carry", action="store_true", help="experimental compensated SiLU/product (full FFN only)")
     p.add_argument("--activation-series", action="store_true", help="direct sigmoid series for |gate|<=0.5 (requires activation carry)")
@@ -91,18 +92,20 @@ def main():
         p.error('--activation-carry requires --product-correction')
     if args.segment_carry and not args.block_carry:
         p.error('--segment-carry requires --block-carry')
-    if args.segment_carry and args.scope != 'ffn':
-        p.error('--segment-carry requires --scope ffn')
+    if args.segment_carry and args.scope not in ('ffn', 'down'):
+        p.error('--segment-carry requires --scope ffn or down')
+    if args.down_trace and (args.scope != 'down' or not args.segment_carry):
+        p.error('--down-trace requires --scope down and --segment-carry')
     if args.block_carry and not args.product_correction:
         p.error('--block-carry requires --product-correction')
     if args.trace and args.scope != "ffn":
         p.error("--trace requires --scope ffn")
     if args.final_only and args.scope != "down":
         p.error("--final-only requires --scope down")
-    if args.ffn_correction and args.scope != 'ffn':
-        p.error('--ffn-correction requires --scope ffn')
+    if args.ffn_correction and args.scope not in ('ffn', 'down'):
+        p.error('--ffn-correction requires --scope ffn or down')
     if args.product_correction and not ((args.scope == 'projection' and args.projection_correction)
-                                        or (args.scope == 'ffn' and args.ffn_correction)):
+                                        or (args.scope in ('ffn', 'down') and args.ffn_correction)):
         p.error('--product-correction requires a corrected projection or FFN probe')
     out = args.out.resolve()
     if args.scope == "glue":
@@ -122,6 +125,7 @@ def main():
     env['PROBE_PRODUCT_CORRECTION'] = str(int(args.product_correction))
     env['PROBE_BLOCK_CARRY'] = str(int(args.block_carry))
     env['PROBE_DOWN_RNE'] = str(int(args.down_rne))
+    env['PROBE_DOWN_TRACE'] = str(int(args.down_trace))
     env['PROBE_SEGMENT_CARRY'] = str(int(args.segment_carry))
     env['PROBE_ACTIVATION_CARRY'] = str(int(args.activation_carry))
     env['PROBE_ACTIVATION_SERIES'] = str(int(args.activation_series))
@@ -156,6 +160,7 @@ def main():
                 "block_carry": args.block_carry,
                 "segment_carry": args.segment_carry,
                 "down_rne": args.down_rne,
+                "down_trace": args.down_trace,
                 "activation_carry": args.activation_carry,
                 "activation_series": args.activation_series,
                 "packages": {n: importlib.metadata.version(n) for n in ("mlir-aie", "llvm-aie", "numpy")}}

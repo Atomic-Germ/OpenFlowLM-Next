@@ -21,15 +21,15 @@ from wide_deltanet_reference import metric
 GUARD = bytes([0xA5]) * 64
 
 
-def reference(pool, inputs, n, k, partials=False):
+def reference(pool, inputs, n, k, partials=False, segment_k=8192):
     """Independent float64 math directly from original pool chunk coordinates."""
     _, _, rows, cols = chunk_geometry(n, k, 2)
-    nseg = (k + 8191) // 8192 if partials else 1
+    nseg = (k + segment_k - 1) // segment_k if partials else 1
     sums = np.zeros((len(inputs), nseg, n), np.float64)
     x = inputs.astype(bfloat16).astype(np.float64)
     for c, (r, col) in enumerate(zip(rows, cols)):
         w = dequant_chunk(pool[c * 5120:(c + 1) * 5120]).astype(np.float64)
-        sums[:, col // 8192 if partials else 0, r:r + 32] += x[:, col:col + 256] @ w.T
+        sums[:, col // segment_k if partials else 0, r:r + 32] += x[:, col:col + 256] @ w.T
     return sums.cumsum(axis=1).astype(np.float32)
 
 
@@ -40,6 +40,7 @@ def prepare(out):
     f = replace(f, DOWN_SEGMENTS=segments(spec.intermediate,tool.get('segment_k',8192)))
     full = tool['scope'] == 'ffn'
     trace = full and tool.get('trace', False)
+    down_trace = tool.get('down_trace', False)
     extra_buffer = tool.get('buffer_args', 3 if trace else 2) == 3
     snapshots = len(f.DOWN_SEGMENTS) if not full and not tool['final_only'] else 1
     act_bytes = max(l.A_BYTES, l.A_OUT2 + spec.hidden * 4 * len(f.DOWN_SEGMENTS))
@@ -86,7 +87,7 @@ def prepare(out):
             inputs.append(x)
         inputs.append(inputs[0].copy())  # deterministic repeat after other inputs
         inputs = np.array(inputs)
-        refs = reference(down, inputs, n, k, partials=True)
+        refs = reference(down, inputs, n, k, partials=True, segment_k=tool.get('segment_k',8192))
         if snapshots == 1:
             refs = refs[:, -1:]
     pool.flush()
@@ -94,6 +95,8 @@ def prepare(out):
     cfg = ['device', 'xclbin p final.xclbin', 'kernelx p p insts.bin',
            f'buf w {l.POOL_BYTES} pool.bin', f'buf a {act_bytes + len(GUARD)}']
     trace_bytes = (2 * k if trace else 1) * 4
+    if down_trace:
+        trace_bytes = len(f.DOWN_SEGMENTS)*n*4*4
     if extra_buffer:
         (out / 'trace-poison.bin').write_bytes(np.full(trace_bytes // 4, np.nan, np.float32).tobytes() + GUARD)
         cfg += [f'buf t {trace_bytes + len(GUARD)}']
@@ -108,7 +111,7 @@ def prepare(out):
         if extra_buffer:
             cfg += ['load t trace-poison.bin']
         cfg += ['run p w a' + (' t' if extra_buffer else ''), f'dump a got{i}.bin {len(raw)}']
-        if trace:
+        if trace or down_trace:
             cfg += [f'dump t trace{i}.bin {trace_bytes + len(GUARD)}']
             (out / f'trace{i}.bin').unlink(missing_ok=True)
         (out / f'got{i}.bin').unlink(missing_ok=True)
@@ -120,6 +123,7 @@ def prepare(out):
     if trace:
         files += [f'{prefix}{i}.bin' for i in range(len(inputs)) for prefix in ('uref', 'gref')]
     meta = dict(k=k, n=n, inputs=len(inputs), full=full, trace=trace, repeated_last=True, snapshots=snapshots,
+                down_trace=down_trace, trace_bytes=trace_bytes, segments=len(f.DOWN_SEGMENTS),
                 act_bytes=act_bytes, out_offset=l.A_OUT2, h_offset=l.A_H, seed=38417,
                 sha256={name: digest(out / name) for name in files})
     (out / 'segmented-fixture.json').write_text(json.dumps(meta, indent=2) + '\n')
@@ -144,6 +148,14 @@ def compare(out):
         pool = np.memmap(out / 'pool.bin', mode='r', dtype=np.uint8)
         down = pool[l.POOL_FFN_DOWN:l.POOL_FFN_DOWN + meta['n'] * meta['k'] // 8192 * 5120]
     for i in range(meta['inputs']):
+        if meta.get('down_trace'):
+            from wide_down_trace import decode_trace
+            traw = (out / f'trace{i}.bin').read_bytes()
+            if len(traw) != meta['trace_bytes']+64 or traw[-64:] != GUARD:
+                raise ValueError('down trace size/canary')
+            decoded = decode_trace(np.frombuffer(traw[:-64],np.float32),meta['n'],meta['segments'])
+            if i == meta['inputs']-1 and (out/'trace0.bin').read_bytes()!=traw:
+                raise ValueError('down trace repeat differs')
         raw = (out / f'got{i}.bin').read_bytes()
         if len(raw) != meta['act_bytes'] + len(GUARD) or raw[-len(GUARD):] != GUARD:
             raise ValueError(f'input {i}: wrong length or damaged canary')
@@ -152,6 +164,10 @@ def compare(out):
         for j, (g, r) in enumerate(zip(got, ref)):
             m = metric(g, r, .9999999)
             results.append(dict(input=i, snapshot=j, **m))
+        if meta.get('down_trace'):
+            reconstructed = (decoded[:,2].astype(np.float64)+decoded[:,3]).astype(np.float32)
+            if meta['snapshots']==1: reconstructed=reconstructed[-1:]
+            results.append(dict(input=i,tensor='trace_output',passed=bool(np.array_equal(got,reconstructed))))
         if meta['full']:
             h = np.frombuffer(raw, np.float32, count=meta['k'], offset=meta['h_offset'])
             href = np.fromfile(out / f'href{i}.bin', np.float32)

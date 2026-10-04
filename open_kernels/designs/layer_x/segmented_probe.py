@@ -26,6 +26,7 @@ from recipes.wide_deltanet_layer import projection_table_bytes
 
 FULL = os.environ.get('PROBE_FULL_FFN') == '1'
 TRACE = FULL and os.environ.get('PROBE_FFN_TRACE') == '1'
+DOWN_TRACE = os.environ.get('PROBE_DOWN_TRACE') == '1'
 DIAGNOSTIC = not FULL and os.environ.get('PROBE_PARTIALS', '1') == '1'
 CORRECTION = os.environ.get('PROBE_FFN_CORRECTION') == '1'
 PRODUCT_CORRECTION = os.environ.get('PROBE_PRODUCT_CORRECTION') == '1'
@@ -50,8 +51,8 @@ if ACTIVATION_CARRY:
     X.OS.append('-DDENSE_ACT_CARRY=1')
     X.COMPACT_DOWN = True
 if SEGMENT_CARRY:
-    if not FULL or not BLOCK_CARRY or X.DS_FLOATS < 2 * X.FFN.DOWN_PC * 64:
-        raise ValueError('segment carry requires full FFN block carry and two down scratch planes')
+    if not BLOCK_CARRY or X.DS_FLOATS < 2 * X.FFN.DOWN_PC * 64:
+        raise ValueError('segment carry requires block carry and two down scratch planes')
     X.SEGMENT_CARRY = True
     X.OS += ['-DGEMV_Q4_SEGMENT_CARRY=1', f'-DDENSE_DOWN_ROWS={X.FFN.DOWN_PC * 64}']
 if BLOCK_CARRY and not PRODUCT_CORRECTION:
@@ -63,13 +64,17 @@ if PRODUCT_CORRECTION and not CORRECTION:
 if PRODUCT_CORRECTION:
     X.OS.append('-DGEMV_Q4_PRODUCT_CORRECTION=1')
 if CORRECTION:
-    if not FULL or X.HID != 5120 or X.FF != 17408 or X.Q8:
-        raise ValueError('corrected FFN probe requires H5120/FF17408 all-Q4 full FFN')
+    if X.HID != 5120 or X.FF != 17408 or X.Q8:
+        raise ValueError('corrected FFN/down probe requires H5120/FF17408 all-Q4')
     # A corrected K8192 table would exceed L1. Reuse the exact pool and worker
     # with K4096 segments; up/gate K5120 now sets the maximum table size.
     X.FFN = replace(X.FFN, DOWN_SEGMENTS=segments(X.FF,4096))
     X.TAB_BYTES = projection_table_bytes(X.HID,X.TAB_BYTES,True)
     X.OS.append('-DGEMV_Q4_CORRECTION=1')
+if DOWN_TRACE and (FULL or not SEGMENT_CARRY):
+    raise ValueError('down trace requires down-only segment carry')
+if not FULL and CORRECTION:
+    X.DYNAMIC_DOWN = True
 L = X.R.layout
 OUT = L.A_OUT2
 ACT_BYTES = max(L.A_BYTES, OUT + X.HID * 4 * len(X.FFN.DOWN_SEGMENTS))
@@ -86,12 +91,26 @@ def segmented(pool: In, act: InOut, trace: Out, *, source_hash: CompileTime[int]
     xf = ObjectFifo(t['x'], name='x', depth=2)
     yf = [ObjectFifo(t['y'], name=f'y{c}', depth=2) for c in range(X.N_CORES)]
 
-    tf = [ObjectFifo(t['y'], name=f't{c}', depth=2) for c in range(X.N_CORES)] if TRACE else []
+    tf = [ObjectFifo(t['y'], name=f't{c}', depth=2) for c in range(X.N_CORES)] if TRACE or DOWN_TRACE else []
     trace_fn = ExternalFunction('dense_trace', source_file=str(HERE / 'dense_trace.cc'),
                                 arg_types=[t['ms'], t['y'], np.int32], include_dirs=inc) if TRACE else None
+    if DOWN_TRACE:
+        trace_fn = ExternalFunction('dense_down_trace', source_file=str(HERE / 'down_trace.cpp'),
+                                    arg_types=[t['ms'], t['ds'], t['tab'], t['y'], np.int32, np.int32, np.int32],
+                                    include_dirs=inc, compile_flags=X.OS)
 
     def core_body(win, xin, yout, *args):
-        buffers, functions = X.unpack_args(args[:-2] if TRACE else args)
+        buffers, functions = X.unpack_args(args[:-2] if TRACE or DOWN_TRACE else args)
+        if DOWN_TRACE:
+            tout, copy = args[-2:]
+            accumulate = functions['down_acc']
+            def traced_acc(ms, ds, band, first, tab, width):
+                accumulate(ms, ds, band, first, tab, width)
+                for plane in X.range_(4):
+                    te = tout.acquire(1)
+                    copy(ms, ds, tab, te, band, width, plane)
+                    tout.release(1)
+            functions['down_acc'] = traced_acc
         if TRACE:
             tout, copy = args[-2:]
             act_fn = functions['act']
@@ -111,20 +130,22 @@ def segmented(pool: In, act: InOut, trace: Out, *, source_hash: CompileTime[int]
     workers = [Worker(core_body,
                       fn_args=[wf[c].cons(), xf.cons(), yf[c].prod(),
                                *X.worker_args(X.core_buffers(t, c), kernels),
-                               *([tf[c].prod(), trace_fn] if TRACE else [])],
+                               *([tf[c].prod(), trace_fn] if TRACE or DOWN_TRACE else [])],
                       tile=Tile(c, 2), stack_size=0x1800) for c in range(X.N_CORES)]
     wty = np.ndarray[(X.POOL_BYTES,), np.dtype[np.uint8]]
     aty = np.ndarray[(ACT_BYTES,), np.dtype[np.uint8]]
 
     trace_size = X.FF * 2 if TRACE else 1
+    if DOWN_TRACE:
+        trace_size = len(X.FFN.DOWN_SEGMENTS) * X.HID * 4
     tty = np.ndarray[(trace_size,), np.dtype[np.float32]]
 
     def sequence(a_w, a_act, a_trace, w_prods, x_prod, y_conss, t_conss):
         pw, px, py = Pipeline(3), Pipeline(3), Pipeline(3)
         pt = Pipeline(3)
-        if TRACE:
+        if TRACE or DOWN_TRACE:
             for c in range(X.N_CORES):
-                count = X.FFN.UP_PC * X.BAND_ROWS * 2
+                count = trace_size // X.N_CORES
                 pt.drain(t_conss[c], a_trace, X.bt(trace_size, c * count, count))
         if FULL:
             X.ffn_sequence(pw, px, py, a_w, a_act, w_prods, x_prod, y_conss,
@@ -148,9 +169,10 @@ def segmented(pool: In, act: InOut, trace: Out, *, source_hash: CompileTime[int]
 
 DESIGN = segmented
 _sources = [Path(__file__), HERE / 'xcommon.py', HERE / 'gen_kernels.py', ROOT / 'ironutil.py',
+            HERE / 'down_trace.cpp',
             *sorted(HERE.glob('*.cc')), *sorted(HERE.glob('*.h')),
             *sorted((HERE.parent / 'gemv_q4').glob('*.h')),
             *sorted((ROOT / 'include').glob('*.h'))]
 SPECIALIZE = {'source_hash': int(hashlib.sha256(b''.join(p.read_bytes() for p in _sources)
                          + b''.join(X.source_hash_inputs())
-                         + repr((FULL, TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, DOWN_RNE, ACTIVATION_CARRY, ACTIVATION_SERIES, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
+                         + repr((FULL, TRACE, DOWN_TRACE, DIAGNOSTIC, CORRECTION, PRODUCT_CORRECTION, BLOCK_CARRY, SEGMENT_CARRY, DOWN_RNE, ACTIVATION_CARRY, ACTIVATION_SERIES, X.C, X.FFN, L)).encode()).hexdigest()[:8], 16)}
