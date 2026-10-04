@@ -462,7 +462,14 @@ class GGUFTensor:
             # (shortconv / ssm-style weights) -- cannot be packed that way, so
             # keep them as a float passthrough rather than crashing in
             # gguf.quantize.
-            if wants_quantized_target and self.shape and self.shape[-1] % 32 != 0:
+            # The columns (matul K axis) are shape[0] in GGUF's innermost-first
+            # order -- that is exactly the symmetry the native unpackers use
+            # (unpack_q4_1(tensor, self.shape[0])). Checking shape[-1]
+            # instead sends a Q6_K [hidden, vocab] token embedding (vocab is
+            # almost never a multiple of 32) down the float-passthrough
+            # escape hatch, which then crashes a head that needs a quantized
+            # triple (hunyuan's lm_head padding path).
+            if wants_quantized_target and self.shape and self.shape[0] % 32 != 0:
                 w = dequantize(self.data, self.tensor_type)
                 w = torch.from_numpy(w).contiguous()
                 if self.tensor_type == GGMLQuantizationType.BF16:

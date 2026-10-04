@@ -236,6 +236,12 @@ class __Q4NX_Converter(ABC):
                 "its own fixed per-role targets (_store_q), so it would write a q4_1 "
                 "container while claiming Q4_K. Convert from the family's GGUF instead."
             )
+        # A same-value --quant (the common case: --quant Q4_1 on a Q4_1-default
+        # family) must not trigger the full name-map rebuild -- it is what made
+        # "Creating name maps..." and every per-tensor Mapping line print twice
+        # per pack (once from _load_config, once here).
+        if self.q4nx_config.get("default_tensor_type") == q4nx_name:
+            return
         self.q4nx_config["default_tensor_type"] = q4nx_name
         self.default_tensor_type = self.get_ggml_type(q4nx_name)
         self._create_name_maps()
@@ -303,7 +309,7 @@ class __Q4NX_Converter(ABC):
                     else:
                         self.tensor_q4nx_type_map[gguf_name] = self.default_tensor_type
                     if bid == 0:
-                        print(f"\tConverted {gguf_name} to {q4nx_name}")
+                        print(f"\tMapped {gguf_name} to {q4nx_name}")
             else:
                 self.forward_name_map[gguf_template] = param_info["q4nx_name"]
                 self.backward_name_map[param_info["q4nx_name"]] = gguf_template
@@ -311,7 +317,9 @@ class __Q4NX_Converter(ABC):
                     self.tensor_q4nx_type_map[gguf_template] = self.get_ggml_type(param_info["default_tensor_type"])
                 else:
                     self.tensor_q4nx_type_map[gguf_template] = self.default_tensor_type
-                print(f"\tConverted {gguf_template} to {param_info['q4nx_name']}")
+                if gguf_template in self.gguf_tensors:
+                    print(f"\tMapped {gguf_template} to {param_info['q4nx_name']}")
+                # absent templates are covered by the missing-entry warning below
 
         # sort the name map by the name alphabetically
         self.forward_name_map = _WarnDict(sorted(self.forward_name_map.items(), key=lambda item: item[0]))
@@ -327,7 +335,9 @@ class __Q4NX_Converter(ABC):
             self._missing_config_entries = _warn_missing_config_entries(self.q4nx_config["name_map"], self.gguf_tensors)
             for name in self._missing_config_entries:
                 print(f"[WARN] Config expects '{name}' but the GGUF has no such tensor; "
-                      f"the packed model will not have it.")
+                      f"relying on a converter fallback when one exists (e.g. a "
+                      f"missing lm_head is synthesized from the embedding), otherwise "
+                      f"the packed model will be incomplete.")
 
 
     # ------------------------------------------------------------------ HF utilities

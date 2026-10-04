@@ -61,6 +61,46 @@ def _is_hf_source(path: str) -> bool:
     return False
 
 
+def _build_spec(output_folder: str) -> None:
+    """Derive the model's open-kernels ModelSpec and write spec.json.
+
+    Mirrors oflm-add's fallback: spec_from_model_dir() reads the packed
+    config.json + the container's own quant map, the spec_hash tells it which
+    kernel set would drive the model, and for families with a recipe module
+    the export command is printed; for a NOT_IMPLEMENTED family (gptoss), its
+    gap message is -- never suggest kernels that cannot exist.
+    """
+    checkout = os.environ.get("OPEN_KERNELS_DIR")
+    candidates = [Path(checkout)] if checkout else []
+    candidates += [p / "open_kernels" for p in Path(__file__).resolve().parents]
+    candidates.append(Path.cwd() / "open_kernels")
+    root = next((c for c in candidates if (c / "recipes" / "spec.py").is_file()), None)
+    if root is None:
+        print("[WARN] --build-spec: no open_kernels checkout found "
+              "(set OPEN_KERNELS_DIR); spec not written.")
+        return
+    sys.path.insert(0, str(root))
+    try:
+        from recipes.load import spec_from_model_dir
+        from recipes.families import for_spec, NOT_IMPLEMENTED
+    except Exception as e:
+        print(f"[WARN] --build-spec: could not import recipes from {root}: {e}")
+        return
+    spec = spec_from_model_dir(Path(output_folder))
+    out = Path(output_folder) / "spec.json"
+    out.write_text(spec.to_json(), encoding="utf-8")
+    print(f"[INFO] --build-spec: wrote {out}")
+    print(f"[INFO] spec_hash {spec.spec_hash()[:19]} family {spec.family} quant {spec.quant}")
+    if spec.family in NOT_IMPLEMENTED:
+        print(f"[INFO] --build-spec: the open kernels have no recipe for family "
+              f"{spec.family!r} yet: {NOT_IMPLEMENTED[spec.family]}")
+        return
+    export = root / ("export_whisper_kernels.py" if spec.family in ("whisper",)
+                     else "export_qwen36_kernels.py")
+    print(f"[INFO] Build kernels with: python {export} --model-dir {output_folder} "
+          f"(reads the recipe for family {spec.family!r} from the spec)")
+
+
 def _report_speculative(model) -> None:
     """End-of-pack roll call for the speculative (best-effort) path.
 
@@ -71,8 +111,29 @@ def _report_speculative(model) -> None:
     model.q4nx on disk.
     """
     unknown = getattr(getattr(model, "forward_name_map", None), "unknown", [])
-    missing = getattr(model, "_missing_config_entries", [])
     unknown_types = getattr(getattr(model, "tensor_q4nx_type_map", None), "unknown", [])
+    # Missing entries that the converter's fallbacks (tied lm_head, synthesized
+    # vision weights) actually supplied are not missing for the runtime:
+    # drop them from the report.
+    missing = []
+    import re as _re
+    config = getattr(model, "q4nx_config", {}) or {}
+    gguf_names = getattr(model, "gguf_tensors", {}) or {}
+    packed = getattr(model, "q4nx_tensors", {}) or {}
+    for param_info in config.get("name_map", {}).values():
+        template = param_info["gguf_name"]
+        if "{bid}" in template:
+            rx = _re.compile("^" + _re.escape(template).replace(r"\{bid\}", r"(\d+)") + "$")
+            present = any(rx.match(n) for n in gguf_names)
+        else:
+            present = template in gguf_names
+        if present:
+            continue
+        qname = param_info["q4nx_name"]
+        produced = (qname in packed
+                    or any(k.startswith(qname.split("{bid}")[0]) for k in packed))
+        if not produced:
+            missing.append(template)
     if unknown or missing or unknown_types:
         print("\n[WARN] Speculative pack: the converter produced a best-effort container.")
         if unknown:
@@ -389,6 +450,13 @@ def _parse_args(argv):
              "imatrix: --imatrix PATH, or a sidecar GGUF beside the model. Refuses "
              "without one rather than chopping the first K, which retains only "
              "K/width of the activation mass by construction.",
+    )
+    parser.add_argument(
+        "--build-spec", dest="build_spec", action="store_true", default=False,
+        help="After packing, derive the model's open-kernels ModelSpec "
+             "(the way oflm add finds kernels), write spec.json into the output "
+             "directory, and print the export command for it. Use it for new or "
+             "foreign models that have no checked-in specs/*.json.",
     )
     parser.add_argument(
         "--imatrix", dest="imatrix", default=None, metavar="PATH",
@@ -714,6 +782,9 @@ def main(argv=None) -> int:
             model_dir_name=args.deploy_name,
             deploy_from=args.deploy_from,
         )
+
+    if getattr(args, "build_spec", False):
+        _build_spec(output_folder)
 
     print(f"[INFO] Conversion complete! Output saved to {output_folder}")
     return 0
