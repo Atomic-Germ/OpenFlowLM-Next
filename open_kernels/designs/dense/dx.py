@@ -151,6 +151,8 @@ ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
+if SPEC.norm_groups != 1:                  # ln.h defaults it to 1; adding the flag would change
+    LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")   # every other family's build line (K2: 2)
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

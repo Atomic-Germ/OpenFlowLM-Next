@@ -204,10 +204,18 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "the core holds taps - 1 state rows, so another tap count is a design change, "
                   "not a knob"),
     Template("ln", "designs/ln/ln.cc",
-             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)}),
-                                # LN_N; 1024 / 2048 take the fused single-core path (N <= 2048),
-                                # 2560 / 3072 / 4096 the split-output one, 5120 the streamed
-                                # residual (ln.py SPLIT; the layer designs' norm_split)
+             {"width": values(1024, 2048, 2560, 3072, 3840, 4096, 5120)},
+             combos=(combination(
+                 # (width, groups); 1024 / 2048 take the fused single-core path (N <= 2048),
+                 # 2560 / 3072 / 4096 the split-output one, 5120 the streamed residual (ln.py
+                 # SPLIT; the layer designs' norm_split). (2560, 2) entered with K2's
+                 # GroupRMSNorm(2) -- E3, the physical NPU parity pass on the user's
+                 # Krackan 2026-09-27 (x86-emu + compile + hardware, byte-identical to
+                 # the emulator). A grouped width has to be WIDE: the fused kernel has a
+                 # single reduction (ln.py refuses N <= 2048 with groups).
+                 (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (5120, 1),
+                 keys=("width", "groups"),
+                 defaults={"groups": 1}),),),
     Template("router", "designs/router/router.h",
              {"experts": values(256), "topk": values(8)}),
     Template("moe", "designs/layer_x/moe_*.cc",

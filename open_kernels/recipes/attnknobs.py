@@ -47,8 +47,14 @@ RB_SUPPORTED = (1, 2, 4)      # attn_stepb.cc has bodies for 2 and 4; 1 is the u
 # lfm2 (2026-09-13, the first HYBRID measured: only six of sixteen layers are attention and
 # the ten conv ones were already flat, so the sweep moves 527 -> 35.6 ms at position 2048
 # purely on those six; 250/250 greedy tokens identical, corr min 0.9999413).
+# k2 (2026-09-28, the generic dense family -- K2 Horizon 3.7B, GQA 32/8 at hd 128; the
+# ATTN_FAST probe measured against the shipped slow kernel: the decode context slope
+# 1.488 -> 0.0251 ms per position-token (59.2x), 463.7 ms at position 16382, 0.52 CPU
+# cores at 8192; France 22+12 greedy tokens token-for-token identical, corr min 0.99985,
+# argmax 12/12; the 2L boundary hybrids at 8190/16382 and the 16384 capacity guard
+# unchanged -- stage 2.9).
 FAST_ATTENTION = ("granite", "qwen3", "llama3", "hunyuan", "gemma3", "qwen35", "qwen36moe", "phi3",
-                  "qwen2", "lfm2")
+                  "qwen2", "lfm2", "k2")
 # Both designs put attention core c at Tile(2 + c, 3) and its og drain at Tile(3 + c, 0):
 # six columns for the split, whatever the head count.
 MAX_ATTN_CORES = 6
