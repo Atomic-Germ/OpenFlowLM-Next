@@ -178,9 +178,28 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 4 with the single-row kernel retired (RB 2 from 2026-09-22 until Track E the same day); Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+- **Retiring the single-row kernel** (`attn.h ATTN_BLOCK_ONLY`, set only by
+  `designs/layer_x/ax.py`) is what lets head dim 256 WITH the output gate block at
+  all: the gate's exponential and reciprocal are on the attention core, and a plain
+  `ATTN_RB=2` overflows its 16 KB of program memory beside the single-row path. On
+  that path every row goes through `attn_stepb`, including the new position's: the
+  driver streams `RB*ceil((valid+1)/RB) - 1` cached rows, the kernel runs `pb[4] =
+  pb[0] / RB` full blocks off the fifo and peels the last one (`attn_stepb_new`,
+  whose final slot is the new row from core scratch), and the padding rows between
+  `pos` and the end of that block are masked with `-1e30` -- the same mechanism the
+  kernel already uses for padding LANES. A family joins by the same rule
+  `FAST_ATTENTION` uses, measurement not declaration: `BLOCK_ONLY_MEASURED` holds
+  `qwen36moe` only, and Qwen3.5 keeps RB 1 at the same head dim and gate until
+  someone runs the compare. `BLOCK` follows `RB`: an `ATTN_RB=1` probe on a measured
+  family gets the single-row kernel back.
+- The rows-per-call travels in the manifest beside the kernel (`kernels.ax0.rb`) and
+  `stream_patch::attn_apply` pads the streamed row count from it. It has to: the
+  kernel derives its own block count from the same position record, and a kernel
+  built one way against a driver patching the other way deadlocks on the `ain` fifo
+  rather than answering wrongly. Absent means 1.
 
 **Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
 directory; one decode step at positions 0 / 256 / 1024 / 2048 through
@@ -235,6 +254,58 @@ end, since it is the round that starts with the first one's answer in context.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Measured (2026-09-22, the 35B at RB 4):**
+`ax0` was the only decode dispatch that grew with the prompt, and the 35B was the one
+fast family with no row block: at head dim 256 with the output gate, the block kernel
+did not fit beside the single-row one in the attention core's 16 KB of program memory.
+Three changes make it fit at RB 4, all confined to the block-only path
+(`ATTN_BLOCK_ONLY`); every other family's attention translation units preprocess
+token-identical to the base (`utilities/attn_pp_identical.sh`: 38/38 at Gemma3-4B,
+Qwen3-4B, Qwen3.5-9B and the 35B's previous RB 1 flags).
+
+1. **The single-row kernel is retired on this path.** The new token's row joins the
+   last block and padding rows are masked; the manifest carries the block size as `rb`.
+2. **No soft-float.** The attention core's `__mulsf3` / `__divsf3` / `__muldi3` -- 2,112
+   bytes for norm_rope's RMS scale and 1/sqrt Newton steps and attn_fin's `1/l` --
+   became integer routines (`open_kernels/include/scalar_fp.h`) that give the IEEE
+   round-to-nearest-even result bit for bit on every operand those sites can see
+   (`utilities/scalar_fp_test.cpp`). Dumps are bit-identical to the same kernel with
+   the soft-float (max |diff| 0.0 over 105 dumps).
+3. **A cheaper block kernel (`ATTN_TREE`).** The score phase reduces all RB x NHL dot
+   products as one tree whose levels pair lanes exactly as `aie::reduce_add` does; the
+   PV loop writes four head-dim slices per block, so the compiler no longer serialises
+   every slice behind the last one's store; and the rescale factor's exponential rides
+   in row 0's padding lanes of the block's one `vexpN<32>`. Bit-identical to (2) and
+   deterministic over three runs.
+
+The tightest attention core is 14,208 bytes (2,176 free). `ax0` in the real walk,
+minimum of 20 over 3 alternated rounds, clean box, measured on the one-context layer
+image (PR #116, whose attention cores compile the same program as `ax.py`'s). The RB 1
+row is from an earlier session on `ax.py`'s own image, for scale:
+
+| position | 1 | 1024 | 2048 | 4000 |
+|---|---|---|---|---|
+| RB 1 (before) | 0.71 | 1.63 | 2.57 | 4.32 ms |
+| RB 2, block-only | 0.64 | 1.44 | 2.22 | 3.73 ms |
+| RB 4 + (2) and (3) | 0.63 | 1.03 | 1.41 | 2.15 ms |
+
+The step's sum of minima at 4000 goes 100.1 -> 84.2 ms against RB 2. An `ATTN_NULL`
+build (every fifo transfer kept, no arithmetic) puts `ax0` at 1.24 ms at 4000, so the
+walk is now ~0.9 ms of arithmetic on a ~1.24 ms stream, down from ~2.5; the stream is
+the floor. A deeper `ain` fifo (two whole blocks) was tried and rejected: no gain, and
+the 8-layer dumps became non-deterministic. An `aie::mmul` score phase fits and is
+correct but is slower: building its A tile from four 128-bit K loads is shuffle-bound.
+
+**Not bit-exact against RB 1.** Blocking reorders the sums. Greedy continuation after
+the 1122-token prompt (block prefill, so the prefill KV is identical) is identical for
+48 tokens, then flips at a 0.045-logit near-tie that every blocked variant hits at the same
+position with the same token; RB 4's 64-token
+continuation is 64/64 identical to RB 2's. Teacher-forced over 64 positions at RB 2:
+64/64 argmax, and positions with a masked padding row match unmasked ones in median corr
+(0.99929 / 0.99920), so the mask adds nothing. The corr spread elsewhere (min 0.984) is
+the routed experts flipping on near-ties, as recorded for this family's first
+fast-attention pass.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
