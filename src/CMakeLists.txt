@@ -1479,6 +1479,7 @@ if(NOT OFLM_USE_HRX)
     add_test(NAME open_diffusion_tokens
              COMMAND open_diffusion_tokens_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
+    set_tests_properties(open_diffusion_tokens PROPERTIES SKIP_RETURN_CODE 77)
 
     # OPEN-DIFFUSION-STEPS: schedule.hpp's sigmas / timestep features / dts against the
     # installed model's own tf_<R>.bin and dt_<R>.bin. Header-only; no device, no XRT.
@@ -1490,6 +1491,7 @@ if(NOT OFLM_USE_HRX)
         target_compile_definitions(open_diffusion_schedule_test PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
     add_test(NAME open_diffusion_schedule COMMAND open_diffusion_schedule_test)
+    set_tests_properties(open_diffusion_schedule PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # ————————————————————————————————————————————————————————————
