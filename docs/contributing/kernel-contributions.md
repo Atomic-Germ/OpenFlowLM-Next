@@ -34,7 +34,7 @@ The executable builds with CMake, but the kernel xclbins need a separate toolcha
 
 ### Prerequisites
 
-See [docs/linux-getting-started.md](../docs/linux-getting-started.md) for full setup.
+See [docs/linux-getting-started.md](../linux-getting-started.md) for full setup.
 
 ---
 
@@ -174,7 +174,7 @@ Build flags live in `families.json`, not the script:
 - Run `oflm list` to confirm kernel set resolution
 
 **Build fails on NPU**
-- Ensure NPU driver is installed (32.0.203.311+)
+- Ensure NPU driver is installed (32.0.203.304+)
 - Check XRT is installed and accessible
 - Run `oflm list` to verify kernel set was built
 
@@ -185,7 +185,7 @@ Build flags live in `families.json`, not the script:
 oflm list
 
 # Show kernel set resolution
-oflm run <model> --log-level debug
+/verbose
 
 # Check kernel manifest
 cat src/xclbins/<model>/open_kernels/manifest.json
@@ -254,7 +254,7 @@ Each family has a recipe that defines how models are exported:
 
 ## License
 
-OpenFlowLM is released under the MIT License. See [LICENSE_RUNTIME.txt](./LICENSE_RUNTIME.txt) for details.
+OpenFlowLM is released under the MIT License. See [LICENSE_OPEN_RUNTIME.md](../../LICENSE_OPEN_RUNTIME.md) for details.
 
 **Kernel families:**
 - Open engine kernels (XDNA2) -- MIT licensed

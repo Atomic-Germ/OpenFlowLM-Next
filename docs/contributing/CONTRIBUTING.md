@@ -8,11 +8,11 @@ OpenFlowLM is a community-driven project. We welcome contributions from everyone
 
 | What you're interested in | Where to look |
 |---|---|
-| General code contributions | [docs/contributing/code-contributions.md](docs/contributing/code-contributions.md) |
+| General code contributions | [docs/contributing/code-contributions.md](./code-contributions.md) |
 | Building kernels (NPU xclbins) | [kernel-contributions.md](kernel-contributions.md) |
-| Documentation | [docs/contributing/doc-contributions.md](docs/contributing/doc-contributions.md) |
-| Tests | [docs/contributing/test-contributions.md](docs/contributing/test-contributions.md) |
-| Tools (oflm-add, q4nx-build, etc.) | [docs/contributing/tool-contributions.md](docs/contributing/tool-contributions.md) |
+| Documentation | [docs/contributing/doc-contributions.md](./doc-contributions.md) |
+| Tests | [docs/contributing/test-contributions.md](./test-contributions.md) |
+| Tools (oflm-add, q4nx-build, etc.) | [docs/contributing/tool-contributions.md](./tool-contributions.md) |
 
 ---
 
@@ -33,6 +33,7 @@ We use a **clean, clear** style that makes the purpose of each branch obvious at
 - `refactor/` -- Code restructuring (no behavior change)
 - `chore/` -- Maintenance, dependencies
 - `test/` -- Test additions or modifications
+- `bugfix/` -- Also accepted; CI triggers on `bugfix/**` as well as `feat/**`
 
 **Rules:**
 - Lowercase with hyphens between words
@@ -103,12 +104,20 @@ improve decode time by 32.1x.
    - Keep changes focused -- one feature per branch
 
 3. **Test your changes**
-   - Run `cmake --build --preset linux-default` to build
-   - Run `ctest --preset linux-default` to run tests
+   - Configure, build and test from the **repository root**:
+     `cmake --preset linux-default`, `cmake --build --preset linux-default`,
+     `ctest --preset linux-default`
    - Test locally with `oflm run` or `oflm serve`
 
+   CI (`.github/workflows/cmake-build-test.yml`) does not use the presets for
+   build or test -- it configures `cmake -B build -G Ninja --preset linux-debug`
+   and then runs `cmake --build build --parallel` and
+   `ctest --test-dir build --output-on-failure`. That is the engine-only debug
+   configuration, so a change that only touches kernel export will not be
+   exercised by CI. Test kernel changes with `linux-default` locally.
+
 4. **Write tests** if you're adding new functionality
-   - Add tests to `src/tests/`
+   - Add tests to `src/test/`
    - Follow existing test patterns and naming
 
 5. **Submit a pull request**
@@ -145,19 +154,24 @@ Documentation should be **clear, concise, and accurate**. When you change code, 
 Tests should be **fast, focused, and coverage-rich**.
 
 **Writing tests:**
-1. Add tests to `src/tests/`
+1. Add tests to `src/test/`
 2. Follow existing test patterns
 3. Use fixtures for reusable setup
 4. Write tests that fail clearly when broken
 
 **Running tests:**
 ```bash
+# From the repository root
+cmake --preset linux-default
 cmake --build --preset linux-default
 ctest --preset linux-default
+
+# One test only
+ctest --preset linux-default -R <test_name>
 ```
 
 **Adding new tests:**
-- Add to `src/tests/` for new features
+- Add to `src/test/` for new features
 - Fix existing tests to pass after your changes
 - Consider adding integration tests for complex flows
 
@@ -206,7 +220,7 @@ OpenFlowLM thrives on contributions. We're happy to help you get started!
 
 ## License
 
-OpenFlowLM is released under the MIT License. See [LICENSE_RUNTIME.txt](./LICENSE_RUNTIME.txt) for details.
+OpenFlowLM is released under the MIT License. See [LICENSE_OPEN_RUNTIME.md](../../LICENSE_OPEN_RUNTIME.md) for details.
 
 **For developers:**
 - OpenFlowLM code is MIT licensed

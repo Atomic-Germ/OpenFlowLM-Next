@@ -50,7 +50,7 @@ ATTN = HERE.parent / "attn"
 sys.path.insert(0, str(HERE.parent.parent))
 sys.path.insert(0, str(HERE))
 from ironutil import Pipeline, include_dirs  # noqa: E402
-from layout import (AA_BYTES, AA_H, AA_HP, AA_KVN, AA_OG, AA_OUT, AA_OUT2, AA_QG, AA_RES, AA_ROUT,  # noqa: E402
+from layout import (AA_BYTES, AA_H, AA_HP, AA_KVN, AA_OG, AA_OUT, AA_OUT2, AA_OUT2B, AA_QG, AA_RES, AA_ROUT,  # noqa: E402
                     AA_XM, AA_XN, CA_BYTES, CA_LNW, CA_META, CA_POSTLN, CA_RW, CA_SGW, ELN, KV_BYTES,
                     KV_ROW, POOL_BYTES, POOL_FFN_DOWN, POOL_FFN_GATE, POOL_FFN_UP, POOL_GATE, POOL_K,
                     POOL_O, POOL_Q, POOL_V, PTAB_BYTES, PTAB_ROW, R, SPEC)
@@ -165,15 +165,26 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         px.fill(x_prod, a_act, bt(AA_BYTES, AA_OG, OG_ELEMS * ELEM))
         py.finish()                                               # out is in DDR
         # res = xres + out; xm = post_attention_norm(res)
-        tg_ln2 = TaskGroup()
-        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
-        lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln2)
-        lno.drain(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln2)
-        lno.drain(a_act, tap=bt(AA_BYTES, AA_XM, ELN), wait=True, group=tg_ln2)
-        lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
-        tg_ln2.finish()                                           # res, xm are in DDR
+        if X.LN_SPLIT:
+            X.ln_split_residual_norm(lni, lno, c_xres, a_act, a_consts, AA_BYTES, CA_BYTES, AA_OUT, AA_RES, AA_XM,
+                                     CA_POSTLN)
+        else:
+            tg_ln2 = TaskGroup()
+            lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
+            lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(AA_BYTES, AA_XM, ELN), wait=True, group=tg_ln2)
+            lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
+            tg_ln2.finish()                                       # res, xm are in DDR
         X.ffn_sequence(pw, px, py, a_pool, a_act, w_prods, x_prod, y_conss,
-                       AA_BYTES, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN)
+                       AA_BYTES, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, AA_OUT2B)
+        if X.LN_SPLIT:
+            py.finish()                                           # out2 (and out2b) are in DDR
+            X.ln_split_close(lni, lno, c_xres, a_act, AA_BYTES, AA_RES, AA_OUT2, AA_OUT2B)
+            pw.finish()
+            px.finish()
+            pa_in.finish()
+            return
         tg_ln3 = TaskGroup()
         lni.fill(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln3)
         lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln3)    # unused w

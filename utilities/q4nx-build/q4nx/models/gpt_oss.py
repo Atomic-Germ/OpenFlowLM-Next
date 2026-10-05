@@ -43,7 +43,14 @@ class GPTOSS(__Q4NX_Converter, model_arch=ModelArch.GPT_OSS):
                         ]
             for i in range(len(weight_name_list)):
                 weight = result_tensors_map[weight_name_list[i]]
-                bias = result_tensors_map[bias_name_list[i]]            
+                bias = result_tensors_map.get(bias_name_list[i])
+                if bias is None:
+                    # Speculative: GPT-OSS carries expert biases; foreign MoEs
+                    # (OLMoE) do not. Skip the bias weave for this weight
+                    # rather than crash, and say where.
+                    print(f"[WARN] {bias_name_list[i]} absent from the source; "
+                          f"{weight_name_list[i]} converted without the bias weave")
+                    continue
 
                 if weight.shape[1] %NUM_CT_PER_COLUMN != 0:
                     pad_amount = (NUM_CT_PER_COLUMN - (weight.shape[1] % NUM_CT_PER_COLUMN)) % NUM_CT_PER_COLUMN
@@ -111,6 +118,15 @@ class GPTOSS(__Q4NX_Converter, model_arch=ModelArch.GPT_OSS):
             down_weight =result_tensors_map[f"model.layers.{layer_idx}.ffn_down_exps.weight"]
             
             num_expert = gate_proj_weight.shape[0]
+            if gate_proj_weight.dim() < 5 or up_proj_weight.dim() < 5 or down_weight.dim() < 5:
+                # Speculative: the expert tensors did not pack into the 5-D
+                # layout post_gpt_oss_process expects (foreign MoE dims).
+                # Leave the per-expert weights in place rather than crash.
+                print(f"[WARN] layer {layer_idx}: expert weights are not in the GPT-OSS "
+                      f"block layout (shapes {tuple(gate_proj_weight.shape)} / "
+                      f"{tuple(up_proj_weight.shape)} / {tuple(down_weight.shape)}); "
+                      f"kept per-expert, no ffn_gate_up_down_exps concat")
+                continue
             assert num_expert == gate_proj_weight.shape[0]
             weight_row_block_div_4 = gate_proj_weight.shape[1]
             weight_col_block = gate_proj_weight.shape[2]
@@ -194,13 +210,20 @@ class GPTOSS(__Q4NX_Converter, model_arch=ModelArch.GPT_OSS):
             elif gguf_tensor.tensor_type == GGMLQuantizationType.MXFP4:
                 self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = self._pack_MXFP4_q4nx(*unpacked)
             elif gguf_tensor.tensor_type == GGMLQuantizationType.F32:
-                if gguf_tensor.name.endswith("ffn_gate_inp.weight"):
-                    assert len(unpacked) ==1
+                # An F32 tensor can come back as a single float tensor (1-D /
+                # non-quantizable) OR as a quantized (d, m, qw) triple when it
+                # is a 2-D matrix and the target is a Q4 type. The second case
+                # is the speculative path -- GPT-OSS's own router is 1-D, but a
+                # foreign MoE's (OLMoE's ffn_gate_inp) is 2-D. Pack it rather
+                # than trip the float-tensor assert.
+                if gguf_tensor.name.endswith("ffn_gate_inp.weight") and len(unpacked) == 1:
                     new_name = self.forward_name_map[gguf_tensor.name]
                     self.process_gptoss_router_weights(weight=unpacked[0], new_name=new_name, result_tensors_map=self.q4nx_tensors)
-                elif gguf_tensor.name.endswith(".bias") or gguf_tensor.name.endswith(".weight") :
-                    assert len(unpacked) ==1
+                elif len(unpacked) == 1 and (gguf_tensor.name.endswith(".bias") or gguf_tensor.name.endswith(".weight")):
                     self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = unpacked[0].to(torch.bfloat16)
+                elif len(unpacked) == 3:
+                    # 2-D F32 matrix quantized into the family target; pack it.
+                    self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = self._pack_q4nx(*unpacked)
                 else:
                     raise ValueError(f"Unsupported F32 tensor {gguf_tensor.name} in GPTOSS model")
             else:

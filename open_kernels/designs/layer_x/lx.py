@@ -48,7 +48,7 @@ sys.path.insert(0, str(HERE.parent.parent))
 sys.path.insert(0, str(HERE))
 from ironutil import Pipeline, include_dirs  # noqa: E402
 from layout import (A_BYTES, A_O, A_OG, A_OUT, A_QKV, A_RES, A_VEC, A_XM, A_XN, A_Z, A_HP,  # noqa: E402
-                    A_H, A_OUT2, A_ROUT, C_BYTES, C_LNW, C_NW, C_POSTLN, C_SGW, C_SIDE, C_WOUT,
+                    A_H, A_OUT2, A_OUT2B, A_ROUT, C_BYTES, C_LNW, C_NW, C_POSTLN, C_SGW, C_SIDE, C_WOUT,
                     ELN, GLUE_SIDE_BYTES, POOL_BYTES, POOL_FFN_DOWN, POOL_FFN_GATE, POOL_FFN_UP,
                     POOL_QKV, POOL_Z, SIDE_ALPHA, SIDE_BETA, SIDE_CONV, SIDE_SMALL,
                     STATE_BYTES, STATE_S_OFF, S_HEAD_BYTES, R, SPEC)
@@ -66,7 +66,7 @@ VW, OUT_K = D.VW, D.OUT_K
 # dn_glue / dn_post: their constants, kernels, bodies and this layer's part-0 host sequence
 # live in xlayer.py, shared with the merged image (ux.py)
 TILE, NT, G, NG, KEY_TILES = XL.TILE, XL.NT, XL.G, XL.NG, XL.KEY_TILES
-AB_TILES, rows3 = XL.AB_TILES, XL.rows3
+AB_TILES, HALF_OUTER, rows3 = XL.AB_TILES, XL.HALF_OUTER, XL.rows3
 DENSE = X.KIND == "dense"                     # the Qwen3.5 composition: a dense FFN tail, ONE stream
 PART = int(os.environ.get("LX_PART", 0))
 STOP = int(os.environ.get("LX_STOP", 99))     # debug: truncate part 0 after the glue (1) / DeltaNet (2)
@@ -156,12 +156,20 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         # and one TaskGroup of 10 would silently drop the rest (ironutil.Pipeline). The count
         # is `qwen35.glue_side_fills`, checked against the shim budget by the recipe.
         ps = Pipeline(3)
-        for reg in (SIDE_ALPHA, SIDE_BETA):
+        if HALF_OUTER:
             off = 0
             for h, ntiles in enumerate(AB_TILES):
                 ps.fill(side_p, a_act, bt(A_BYTES, A_XN + h * ELEM, ELEM))
-                ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + reg + off, ntiles * ELEM))
+                for reg in (SIDE_ALPHA, SIDE_BETA):
+                    ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + reg + off, ntiles * ELEM))
                 off += ntiles * ELEM
+        else:
+            for reg in (SIDE_ALPHA, SIDE_BETA):
+                off = 0
+                for h, ntiles in enumerate(AB_TILES):
+                    ps.fill(side_p, a_act, bt(A_BYTES, A_XN + h * ELEM, ELEM))
+                    ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + reg + off, ntiles * ELEM))
+                    off += ntiles * ELEM
         ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_SMALL, ELEM))
         ps.fill(side_p, a_consts, bt(C_BYTES, C_SIDE + SIDE_CONV, GLUE_SIDE_BYTES - SIDE_CONV))
         py.finish()                                      # qkv, z are in DDR
@@ -195,16 +203,26 @@ def lx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, *, part: Com
         px.fill(x_prod, a_act, bt(A_BYTES, A_OG, OG_ELEMS * ELEM))
         py.finish()                                      # out is in DDR
         # 7. res = xres + out; xm = post_attention_norm(res)  (three output elements, one per call)
-        tg_ln2 = TaskGroup()
-        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
-        lni.fill(a_consts, tap=bt(C_BYTES, C_POSTLN, ELN), wait=True, group=tg_ln2)
-        lno.drain(a_act, tap=bt(A_BYTES, A_RES, HID * 4), wait=True, group=tg_ln2)
-        lno.drain(a_act, tap=bt(A_BYTES, A_XM, ELN), wait=True, group=tg_ln2)
-        lni.fill(a_act, tap=bt(A_BYTES, A_OUT, HID * 4), wait=True, group=tg_ln2)
-        tg_ln2.finish()                                  # res, xm are in DDR
-        # 8. the dense FFN: up | gate -> h, down -> out2
+        if X.LN_SPLIT:
+            X.ln_split_residual_norm(lni, lno, c_xres, a_act, a_consts, A_BYTES, C_BYTES, A_OUT, A_RES, A_XM, C_POSTLN)
+        else:
+            tg_ln2 = TaskGroup()
+            lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
+            lni.fill(a_consts, tap=bt(C_BYTES, C_POSTLN, ELN), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(A_BYTES, A_RES, HID * 4), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(A_BYTES, A_XM, ELN), wait=True, group=tg_ln2)
+            lni.fill(a_act, tap=bt(A_BYTES, A_OUT, HID * 4), wait=True, group=tg_ln2)
+            tg_ln2.finish()                              # res, xm are in DDR
+        # 8. the dense FFN: up | gate -> h, down -> out2 (and out2b when the down GEMV is split)
         X.ffn_sequence(pw, px, py, a_pool, a_act, w_prods, x_prod, y_conss,
-                       A_BYTES, A_XM, A_H, A_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN)
+                       A_BYTES, A_XM, A_H, A_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, A_OUT2B)
+        if X.LN_SPLIT:
+            # 9. xres = res + out2 (+ out2b), half by half
+            py.finish()                                  # out2 (and out2b) are in DDR
+            X.ln_split_close(lni, lno, c_xres, a_act, A_BYTES, A_RES, A_OUT2, A_OUT2B)
+            pw.finish()
+            px.finish()
+            return
         # 9. xres = res + out2 (the norm output is junk; nothing reads it)
         tg_ln3 = TaskGroup()
         lni.fill(a_act, tap=bt(A_BYTES, A_RES, HID * 4), wait=True, group=tg_ln3)

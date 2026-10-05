@@ -805,6 +805,25 @@ int main() {
     std::printf("      requant_q4_1 fnv1a = 0x%016llx\n", static_cast<unsigned long long>(got));
     check(got == want, "requant_q4_1: byte-identical to the NumPy packer");
 
+    // ---- split_q4_1_chunks: a q8 projection as the exact sum of two q4_1 ones (OPEN-PREFILL-BATCH)
+    {
+        std::vector<uint8_t> hi(NCH * 5120), lo(NCH * 5120);
+        open_qwen36::pools::split_q4_1_chunks(src.data(), NCH, true, hi.data());
+        open_qwen36::pools::split_q4_1_chunks(src.data(), NCH, false, lo.data());
+        bool exact = true;
+        for (size_t c = 0; c < NCH && exact; ++c)
+            for (unsigned r = 0; r < 32 && exact; ++r)
+                for (unsigned b = 0; b < 8 && exact; ++b)
+                    for (unsigned i = 0; i < 32 && exact; ++i)
+                        exact = q4_read(hi.data() + c * 5120, r, b, i) + q4_read(lo.data() + c * 5120, r, b, i) ==
+                                q8_read(src.data() + c * 8704, r, b, i);
+        check(exact, "split_q4_1: hi + lo reads back every q8 value exactly");
+        const uint64_t gh = fnv1a(hi.data(), hi.size()), gl = fnv1a(lo.data(), lo.size());
+        std::printf("      split hi fnv1a = 0x%016llx, lo = 0x%016llx\n", static_cast<unsigned long long>(gh),
+                    static_cast<unsigned long long>(gl));
+        check(gh == 0x011857df63d905ceull && gl == 0x1a95b8ae739769d2ull, "split_q4_1: byte-identical to the NumPy packer");
+    }
+
     // ---- transpose: [32, 64] of 2-byte values
     std::vector<uint8_t> t_src(32 * 64 * 2), t_dst(32 * 64 * 2);
     for (size_t i = 0; i < t_src.size(); ++i) t_src[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
@@ -831,6 +850,57 @@ int main() {
             pok = p_dst[(c * 32 + r) * 2] == 0 && p_dst[(c * 32 + r) * 2 + 1] == 0;
     }
     check(pok, "transpose: [16, 64] bf16 -> [64, 32] with columns 16..31 zero");
+
+    // Bank-major AB packing through the runtime interpreter, including the 48-head tail.
+    std::vector<std::pair<size_t, size_t>> ab_shapes = {{48, 7}, {48, 64}, {48, 2560}, {48, 5120}};
+    for (size_t tail = 1; tail <= 32; ++tail) ab_shapes.emplace_back(32 + tail, 13);
+    for (auto [heads, hidden] : ab_shapes) {
+        std::vector<uint8_t> src(heads * hidden * 2);
+        for (size_t i = 0; i < heads * hidden; ++i) {
+            uint16_t value = static_cast<uint16_t>(i * 37 + 11);
+            src[2 * i] = value & 0xff;
+            src[2 * i + 1] = value >> 8;
+        }
+        auto path = write_container("oflm_banked_ab", {{"ab", hidden * 2, &src, "BF16", hidden}});
+        open_qwen36::Q4nxFile file(path);
+        open_qwen36::PackOp op;
+        op.op = "transpose_banked";
+        op.tensor = "ab";
+        op.rows = heads; op.cols = hidden; op.elem = 2; op.dst = 8;
+        std::vector<uint8_t> dst(2 * hidden * 32 * 2 + 16, 0xAB);
+        try {
+            open_qwen36::pools::apply(op, file, 0, dst.data(), dst.size(), 5120);
+            bool equal = true;
+            for (size_t bank = 0; bank < 2; ++bank)
+                for (size_t c = 0; c < hidden; ++c)
+                    for (size_t lane = 0; lane < 32; ++lane) {
+                        size_t h = bank * 32 + lane;
+                        size_t off = 8 + ((bank * hidden + c) * 32 + lane) * 2;
+                        equal &= h < heads ? std::memcmp(dst.data() + off, src.data() + (h * hidden + c) * 2, 2) == 0
+                                        : dst[off] == 0 && dst[off + 1] == 0;
+                    }
+            for (size_t i = 0; i < 8; ++i)
+                equal &= dst[i] == 0xAB && dst[dst.size() - 1 - i] == 0xAB;
+            check(equal, "transpose_banked: exact bank/lane bytes and zero tail K=" + std::to_string(hidden)
+                         + " heads=" + std::to_string(heads));
+            for (int invalid = 0; invalid < 5; ++invalid) {
+                auto bad = op;
+                if (invalid == 0) bad.rows = 0;
+                if (invalid == 1) bad.cols = 0;
+                if (invalid == 2) bad.elem = 0;
+                if (invalid == 3) bad.rows = heads + 1;
+                if (invalid == 4) bad.dst = dst.size();
+                auto before = dst;
+                bool refused = false;
+                try { open_qwen36::pools::apply(bad, file, 0, dst.data(), dst.size(), 5120); }
+                catch (const std::exception&) { refused = true; }
+                check(refused && dst == before, "transpose_banked: invalid geometry refused before writing");
+            }
+        } catch (const std::exception& e) {
+            check(false, std::string("transpose_banked: ") + e.what());
+        }
+        std::filesystem::remove(path);
+    }
 
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
     mixed_container_tests();

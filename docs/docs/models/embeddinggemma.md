@@ -11,14 +11,16 @@ parent: Models
 - **Think:** No
 - **Tool Calling Support:** No
 - **Base Model:** [google/embeddinggemma-300m](https://huggingface.co/google/embeddinggemma-300m)
-- **Quantization:** Q4_1
-- **Max Chunk Size:** 2048
-- **Default Context Length:** NA
+- **Quantization:** none (bf16 safetensors -- ships unquantized, with no Q4NX container)
+- **Max Chunk Size:** 2048 tokens
+- **Default Context Length:** 2048 tokens
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 
 > The embedding model must be used with an LLM (loaded concurrently) in Server Mode.
-> The embedding model does not work in CLI Mode.
+> The embedding model does not work in CLI Mode (`oflm run --embed`), serving only the llm and gives a warning.
+
+> Unlike the BERT-family encoders, this one ships **unquantized bf16 safetensors** -- there is no Q4NX container. See [BERT-family NPU encoders](/docs/models/#-bert-family-npu-encoders) for the other six encoders.
 
 ### Server Mode 
 

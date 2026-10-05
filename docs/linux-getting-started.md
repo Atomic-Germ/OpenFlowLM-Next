@@ -5,13 +5,14 @@ This guide will help you get started with OpenFlowLM on Linux, including setup f
 ## Supported Distributions
 - Ubuntu 24.04 LTS
 - Ubuntu 25.10
+- Ubuntu 26.04
 - Arch Linux
 - Other (Generic Linux)
 
 ---
 
 ## Prerequisites
-- `amdxdna` driver (included in kernel 7.0+, or via `amdxdna-dkms`)
+- `amdxdna` driver (in-tree since kernel 6.17, or via `amdxdna-dkms`)
 - NPU firmware version 1.1.0.0 or later
 - Python 3.8+
 - XRT stack from AMD
@@ -42,10 +43,20 @@ sudo reboot
 ```
 
 #### 4. Install OpenFlowLM
-- Download the latest `.deb` package from the [Releases page](https://github.com/Atomic-Germ/OpenFlowLM/releases):
+- Download the package for your distribution from the
+  [Releases page](https://github.com/Atomic-Germ/OpenFlowLM/releases):
 
 ```sh
+# Debian / Ubuntu (.deb)
 sudo apt install ./openflowlm*.deb
+
+# Fedora / RHEL (.rpm) -- needs glibc 2.39+ (Fedora 41+, RHEL 10+)
+sudo dnf install ./openflowlm*.rpm
+
+# Any Linux, no package manager (bundles XRT/XDNA; expects /opt/openflowlm)
+tar xf openflowlm-<version>-Linux.tar.gz
+sudo cp -r openflowlm-<version>-Linux/opt/openflowlm /opt/
+export PATH=/opt/openflowlm/bin:$PATH
 ```
 
 #### 5. (NPU) Check memlock limit
@@ -64,7 +75,7 @@ sudo apt install ./openflowlm*.deb
 
 ### Arch Linux
 
-Arch requires both the kernel-side `amdxdna` driver and the XRT userspace plugin. `oflm validate` can see the NPU through `/dev/accel/accel0`, but `oflm run` uses XRT (`xrt::device(0)`), so both layers must be working.
+Arch requires both the kernel-side `amdxdna` driver and the XRT userspace plugin. `oflm validate` opens `/dev/accel/accel0` through the DRM ioctls and then separately asks the device runtime to open the NPU, and `oflm run` uses XRT (`xrt::device(0)`) -- so both layers must be working, and `validate` reports on both.
 
 #### 1. Install the runtime packages
 
@@ -107,7 +118,7 @@ If it points under `kernel/drivers/accel/amdxdna/`, the stock kernel driver is s
 xrt-smi examine
 ```
 
-The output should list an NPU under the device table. If `oflm validate` succeeds but `oflm run` fails with `No such device with index '0'`, XRT usually cannot see the NPU. Confirm `xrt-plugin-amdxdna` is installed and that `xrt-smi examine` lists the device before trying `oflm run` again.
+The output should list an NPU under the device table. If `oflm validate` reports that the device runtime cannot open the NPU, XRT usually cannot see it. Confirm `xrt-plugin-amdxdna` is installed and that `xrt-smi examine` lists the device before trying `oflm run` again.
 
 #### 4. Firmware note for Linux 6.19
 
@@ -160,18 +171,39 @@ To validate your NPU setup, run:
 ```sh
 oflm validate
 ```
-You should see output similar to:
+You should see output similar to this, with more or fewer debug lines per
+your driver configuration:
 ```
-[Linux]  Kernel: 7.0.0-rc1-00052-g27936bfca73d
-[Linux]  NPU: /dev/accel/accel0
+[Linux]  Kernel: 7.3.0-0.rc4.260925g165768bb7026.42.fc46.x86_64
+[Linux]  NPU: /dev/accel/accel0 with 8 columns
 [Linux]  NPU FW Version: 1.1.2.64
+[Linux]  amdxdna version: 0.10
 [Linux]  Memlock Limit: infinity
+251 (139936403511488): PID(35118): Created pcidev (0000:c2:00.1)
+843716 (139936403511488): PID(35118): Opened /dev/accel/accel0 as 3, sysfs: /sys/bus/pci/devices/0000:c2:00.1
+873802 (139936403511488): PID(35118): Expanding BO from 0 to 67108864
+14209799 (139936403511488): PID(35118): Created expandable AMDXDNA_BO_DEV_HEAP: hdl=1 sz=0x4000000 paddr=0x4000000 vaddr=0x7f4558000000 uptr=0x0
+14230859 (139936403511488): PID(35118): Created device (0000:c2:00.1) ...
+14251958 (139936403511488): PID(35118): Destroying device (0000:c2:00.1) ...
+14258370 (139936403511488): PID(35118): Destroying AMDXDNA_BO_DEV_HEAP: hdl=1 sz=0x4000000 paddr=0x4000000 vaddr=0x7f4558000000 uptr=0x0
+17945498 (139936403511488): PID(35118): Closed 3
+[Linux]  Device runtime: NPU opened
+18243027 (139936403511488): PID(35118): Destroying pcidev (0000:c2:00.1)
 ```
 
-If validation passes but running a model fails, check XRT separately:
+Note that the NPU line reports the AIE **column count**, and that
+`oflm validate` prints both a DRM-level check and a
+`Device runtime: NPU opened` line. If the runtime line is missing or reads
+`ERROR ... the device runtime cannot open it`, XRT could not load its NPU
+plugin (`libxrt_driver_xdna.so.2`, built from
+https://github.com/amd/xdna-driver). `xrt-smi examine` listing 0 devices is the
+same symptom. If validation passes but running a model still fails, check XRT
+separately:
 
 ```sh
 xrt-smi examine
 ```
 
-`oflm validate` uses the kernel DRM device directly, while `oflm run` uses XRT. On Linux, a passing validation does not guarantee XRT can open device index `0`.
+Use `oflm validate --json` to see each check as a field (`kernel_ok`,
+`amd_device_found`, `all_fw_ok`, `enough_cols`, `memlock_ok`, 
+`runtime_ok`, and the aggregate `ready`).

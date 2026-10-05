@@ -70,7 +70,7 @@ def main_fifos(t):
 
 def ln_fifos(tl):
     u8_ln = tl["u8_ln"] if DENSE else np.ndarray[(ELEM,), np.dtype[np.uint8]]   # the norm helper's element
-    of_lni = ObjectFifo(u8_ln, name="lni", depth=5)        # [x0 x1 w] | [x0 x1 w a0 a1] | W x256
+    of_lni = ObjectFifo(u8_ln, name="lni", depth=X.LNI_DEPTH)   # [x0 x1 w] | [x0 x1 w a0 a1] | W x256
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1 if DENSE else 3)   # dense: one output element per call
     return of_lni, of_lno
 
@@ -78,8 +78,8 @@ def ln_fifos(tl):
 def ln_worker(of_lni, of_lno, tl, L):
     """The norm (+ router) helper at Tile(0, 3)."""
     if DENSE:
-        return Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
-                      tile=Tile(0, 3), stack_size=STACK)
+        ln_fn, ln_args = X.ln_dense_worker(of_lni, of_lno, L)
+        return Worker(ln_fn, fn_args=ln_args, tile=Tile(0, 3), stack_size=STACK)
     return Worker(X.ln_router_body,
                   fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
                            L["ln_nr"], L["ln"], L["rcopy"], L["racc"], L["rfin"]],
@@ -114,10 +114,13 @@ if D is not None:
     GLUE_NHEAD_DEFAULT = 32                                 # dn_glue.h's #ifndef DNGLUE_NHEAD value
     XN_ELEMS = D.XN_SIDE_ELEMS                              # 4 KB x / side elements the xn arrives in
     # The alpha / beta weight tiles that belong to each 4 KB half of the xn (DENSE only: the glue
-    # core holds ONE 4 KB half at a time, so the projection is walked half by half). A tile is 64
-    # rows, a half carries up to 2048 of them, and at HID 2560 the two halves are 32 and 8.
-    AB_TILES = [min(ELEM // 2, HID - h * (ELEM // 2)) // 64 for h in range(XN_ELEMS)]
+    # core holds ONE 4 KB half at a time, so the projection is walked half by half). A tile is one
+    # 4 KB element -- 64 rows at 32 lanes, 32 at 64 -- a half carries up to 2048 rows, and at HID
+    # 2560 the two halves are 32 and 8 tiles.
+    AB_TILES = [min(ELEM // 2, HID - h * (ELEM // 2)) // D.AB_ROWS for h in range(XN_ELEMS)]
     assert sum(AB_TILES) == AB_ELEMS, (AB_TILES, AB_ELEMS)
+    AB_WIDE = D.AB_LANES > 32                               # more than 32 value heads: glue_ab_w.cc's 64-lane tile
+    HALF_OUTER = D.GLUE_HALF_OUTER                          # three xn halves: carry each once, for both accumulators
     # dn_glue's head count. Passed ONLY when it differs from the header default, so the shipped
     # 27B's five glue TUs keep the compile command they were built with (the DNX_PAD lesson).
     GLUE_FLAGS = {} if NHEAD == GLUE_NHEAD_DEFAULT else {"compile_flags": [f"-DDNGLUE_NHEAD={NHEAD}"]}
@@ -137,6 +140,9 @@ def glue_post_types():
     g["u8_2k"] = np.ndarray[(2048,), np.dtype[np.uint8]]
     g["nw"] = np.ndarray[(SPEC.lin_value_dim,), np.dtype[bfloat16]]
     g["f32"] = np.ndarray[(NHEAD,), np.dtype[np.float32]]
+    # The alpha / beta accumulators are a W row wide; past 32 heads that is wider than NHEAD
+    # (the 27B: 64 lanes for 48 heads). Every other spec keeps the type it always had.
+    g["facc"] = np.ndarray[(D.AB_LANES,), np.dtype[np.float32]] if AB_WIDE else g["f32"]
     g["fqk"] = np.ndarray[(2 * D.KEY_WIDTH,), np.dtype[np.float32]]
     g["fvt"] = np.ndarray[(TILE,), np.dtype[np.float32]]
     # The glue core's private copy of the layer-entry norm output. On the dense path it is
@@ -148,14 +154,18 @@ def glue_post_types():
 
 def glue_post_kernels(inc, g):
     u8_4k, u8_2k, f32, fqk, fvt, fxn, nw_ty = g["u8_4k"], g["u8_2k"], g["f32"], g["fqk"], g["fvt"], g["fxn"], g["nw"]
+    facc = g["facc"]
     k = {}
-    k["ab"] = (ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
+    k["ab"] = (ExternalFunction("glue_ab_w", source_file=str(GLUE / "glue_ab_w.cc"),
+                                arg_types=[u8_4k, fxn, facc, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS)
+               if AB_WIDE else
+               ExternalFunction("glue_ab_e", source_file=str(GLUE / "glue_ab_e.cc"),
                                 arg_types=[u8_4k, fxn, f32, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS)
                if DENSE else
                ExternalFunction("glue_ab", source_file=str(GLUE / "glue_ab.cc"), arg_types=[u8_4k, fxn, f32, np.int32],
                                 include_dirs=inc, **GLUE_FLAGS))
     k["small"] = ExternalFunction("glue_small_fn", source_file=str(GLUE / "glue_small.cc"),
-                                  arg_types=[u8_4k, f32, f32, f32, f32], include_dirs=inc, **GLUE_FLAGS)
+                                  arg_types=[u8_4k, facc, facc, f32, f32], include_dirs=inc, **GLUE_FLAGS)
     k["conv"] = ExternalFunction("glue_conv", source_file=str(GLUE / "glue_conv.cc"),
                                  arg_types=[u8_2k, u8_2k, u8_2k, u8_2k, u8_2k, u8_4k, u8_4k, u8_2k, u8_2k, u8_2k,
                                             fqk, fvt, np.int32, np.int32], include_dirs=inc, **GLUE_FLAGS)
@@ -183,7 +193,19 @@ def glue_post_fifos(g):
 
 
 def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall, fconv, femit, fcopy):
-    if DENSE:
+    if DENSE and HALF_OUTER:
+        # Three halves: each is carried once and both accumulators' tiles for it follow,
+        # 3 side fills a half instead of 4 (recipes/qwen36moe.py glue_fills). Same sums.
+        for h, ntiles in enumerate(AB_TILES):
+            e0 = sin.acquire(1)
+            fcopy(e0, xn, 0)
+            sin.release(1)
+            for acc in (acc_a, acc_b):
+                for tile in range_(ntiles):
+                    ww = sin.acquire(1)
+                    fab(ww, xn, acc, tile, 1 if h == 0 else 0)
+                    sin.release(1)
+    elif DENSE:
         # One accumulator at a time, one 4 KB half of the xn at a time: copy the half in
         # (so the fifo element can be released -- release(n) frees the OLDEST n), then run
         # that half's weight tiles off the same fifo. `first` resets the accumulator in the
@@ -241,13 +263,13 @@ def glue_post_workers(of_side, of_gact, of_gout, of_pin, of_pout, g, k, glue_til
     """[post at Tile(1, 3), glue at `glue_tile`] -- in that order. lx puts the glue at
     Tile(2, 3); the merged image moves it to Tile(2, 4), where it does not take the
     attention core's tile."""
-    f32 = g["f32"]
+    f32, facc = g["f32"], g["facc"]
     return [Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), Buffer(g["nw"], name="nwb"),
                                        k["post"], k["post_copy"]],
                    tile=Tile(1, 3), stack_size=STACK),
             Worker(glue_body,
                    fn_args=[of_side.cons(), of_gact.cons(), of_gout.prod(),
-                            Buffer(f32, name="acc_a"), Buffer(f32, name="acc_b"), Buffer(f32, name="decay"),
+                            Buffer(facc, name="acc_a"), Buffer(facc, name="acc_b"), Buffer(f32, name="decay"),
                             Buffer(f32, name="beta"), Buffer(g["fqk"], name="qk"), Buffer(g["fvt"], name="vt"),
                             Buffer(g["fxn"], name="xnb"),
                             k["ab"], k["small"], k["conv"], k["emit"], k["copy"]],

@@ -313,13 +313,19 @@ def test_the_projection_is_walked_in_4_kb_halves(name, halves, monkeypatch):
 def test_the_glue_side_fills_stay_inside_the_shim_budget(name, fills, monkeypatch):
     """Per accumulator, per half: the xn half then its weight tiles; then `small` and the conv
     taps. The recipe counts them so a too-wide model is refused here, not by a late IRON
-    failure -- LIMITS['shim_fills'] is 13, so HID 6144 (three halves, 14 fills) is the wall."""
-    spec, _ = _linear(name, monkeypatch)
+    failure. LIMITS['shim_fills'] is 13: three halves walked that way would be 14, so a
+    three-half width (the 27B's 5120, or 6144) walks half-outer instead -- each half once,
+    then both accumulators' tiles, 3 fills a half -- and the wall moves to four halves."""
+    spec, R = _linear(name, monkeypatch)
     assert Q35.glue_side_fills(spec) == fills <= LIMITS["shim_fills"]
-    wide = ModelSpec.from_dict(dict(spec.to_dict(), hidden=6144, intermediate=6144))
-    assert Q35.glue_side_fills(wide) == 14
+    assert R.linear.GLUE_HALF_OUTER is False          # every published size keeps its walk
+    for hid, halves, want in ((5120, 3, 11), (6144, 3, 11), (8192, 4, 14)):
+        wide = ModelSpec.from_dict(dict(spec.to_dict(), hidden=hid))
+        assert Q35.xn_side_elems(wide) == halves
+        assert Q35.glue_side_fills(wide) == want
+        assert Q36.linear(wide).GLUE_HALF_OUTER is True
     with pytest.raises(OpRangeError, match="side channel needs 14 fills"):
-        Q35.recipe(wide)
+        Q35.recipe(ModelSpec.from_dict(dict(spec.to_dict(), hidden=8192)))
 
 
 def test_the_catalogue_takes_sixteen_value_heads_and_still_refuses_eight(monkeypatch, capsys):
@@ -333,12 +339,12 @@ def test_the_catalogue_takes_sixteen_value_heads_and_still_refuses_eight(monkeyp
         Q35.recipe(ModelSpec.from_hf_config(cfg(name)))
     assert capsys.readouterr().err == ""
 
-    with pytest.raises(OpRangeError, match=r"deltanet: heads=8 is outside the validated set \{16, 32\}"):
+    with pytest.raises(OpRangeError, match=r"deltanet: heads=8 is outside the validated set \{16, 32, 48\}"):
         catalogue.require("deltanet", heads=8, dim=128, key_heads=16, conv_kernel=4)
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
     monkeypatch.setattr(catalogue, "_WARNED", set())
     catalogue.require("deltanet", heads=8, dim=128, key_heads=16, conv_kernel=4)
-    assert "deltanet: heads=8 is outside the validated set {16, 32}" in capsys.readouterr().err
+    assert "deltanet: heads=8 is outside the validated set {16, 32, 48}" in capsys.readouterr().err
 
 
 def test_the_padded_transpose_zeroes_the_unused_lanes():
@@ -372,8 +378,121 @@ def test_every_published_size_composes_and_a_neighbour_nobody_built_does_not(spe
     Q35.recipe(spec9)
     for name in ("9b", "4b", "2b", "0p8b"):
         Q35.recipe(ModelSpec.from_hf_config(cfg(name)))
-    with pytest.raises(OpRangeError, match=r"ln: width=5120 is outside"):
-        Q35.recipe(dataclasses.replace(spec9, hidden=5120))
+    Q35.recipe(ModelSpec.from_hf_config(cfg("27b")))           # the fifth size, 2026-10-01
+    with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(6144, 1\) is outside"):
+        Q35.recipe(dataclasses.replace(spec9, hidden=6144))
+
+
+# ------------------------------------------------- the 27B: hidden 5120, FFN 17408, 48 value heads
+PUBLISHED = ("9b", "4b", "2b", "0p8b")
+
+
+def test_the_27b_config_derives():
+    """`Atomic-Germ/Qwen3.8-27B-NPU2`'s own config.json (OFLM's flat container form)."""
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    assert s.family == "qwen35" and s.num_experts == 0
+    assert (s.hidden, s.num_layers, s.intermediate) == (5120, 64, 17408)
+    assert (s.num_heads, s.num_kv_heads, s.head_dim, s.rotary_dim) == (24, 4, 256, 64)
+    assert (s.lin_key_heads, s.lin_value_heads, s.lin_key_dim, s.lin_value_dim) == (16, 48, 128, 128)
+    assert s.layer_types == tuple(FULL if (l + 1) % 4 == 0 else LINEAR for l in range(64))
+
+
+def test_the_27b_down_gemv_runs_in_two_k_pieces(monkeypatch):
+    """FF 17408's activation table is 39 168 B, and a main core is over its L1 with it even at
+    5 KB weight elements. The down GEMV runs as two GEMVs over K pieces cut at an f32 element
+    of h (1024 values): 8192 + 9216, both K's the GEMV already runs, and the core fits with the
+    wider piece's table. Every published size keeps one GEMV and its layout."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    assert Q36.core_l1(Q36.tab_bytes(17408), Q36.FFN_MS_FLOATS, Q36.DN_SCRATCH_FLOATS, 1) > Q36.L1_BUDGET
+    assert Q36.down_split(s) == (8192, 9216)
+    R = Q35.recipe(s)
+    C, L = R.common, R.layout
+    assert R.ffn.DOWN_SPLIT == (8192, 9216) and C.KWIDE == 9216 and C.PER_CALL == 1
+    assert Q36.core_l1(C.TAB_BYTES, C.MS_FLOATS, C.DS_FLOATS, C.PER_CALL) == 51456 <= Q36.L1_BUDGET
+    # the second piece's output sits right after the first's, in both layer types
+    assert L.A_OUT2B == L.A_OUT2 + 5120 * 4 and L.AA_OUT2B == L.AA_OUT2 + 5120 * 4
+    assert L.A_BYTES >= L.A_OUT2B + 5120 * 4 and L.AA_BYTES >= L.AA_OUT2B + 5120 * 4
+    # a piece of h is whole f32 elements, and each piece's bands are whole half-chunk DMA rows
+    for k in R.ffn.DOWN_SPLIT:
+        assert k % 1024 == 0 and Q36.band_bytes(k) % (Q36.CHUNK // 2) == 0
+    assert sum(Q36.band_bytes(k) for k in R.ffn.DOWN_SPLIT) == Q36.band_bytes(17408)
+    for name in PUBLISHED:
+        p = ModelSpec.from_hf_config(cfg(name))
+        assert Q36.down_split(p) == () and Q35.recipe(p).ffn.DOWN_SPLIT == ()
+        assert Q35.layout(p).A_OUT2B == 0 and Q35.layout(p).AA_OUT2B == 0
+
+
+def test_a_k_piece_is_a_run_of_every_bands_chunks():
+    """The split streams each piece as a strided DMA tap over the pool the packer already
+    writes -- right only because of the band law: inside a band, pool chunk c covers row half
+    c % 2 and k-tile c // 2. So the first 2 K0 / 256 chunks of every FF-wide band are exactly
+    a K0-wide band's, in order, and the rest are a (FF - K0)-wide band's with the k-tiles
+    shifted by K0 / 256. A different law would leave every number plausible and wrong."""
+    from recipes import pack
+
+    hid, ff, k0 = 5120, 17408, 8192
+    k1 = ff - k0
+    nbands = hid // 64
+    rb, kt = (a.reshape(nbands, ff // 128) for a in pack.band_rowblock_ktile(Q36.q4_chunks(hid, ff), ff))
+    rb0, kt0 = (a.reshape(nbands, k0 // 128) for a in pack.band_rowblock_ktile(Q36.q4_chunks(hid, k0), k0))
+    rb1, kt1 = (a.reshape(nbands, k1 // 128) for a in pack.band_rowblock_ktile(Q36.q4_chunks(hid, k1), k1))
+    n0 = k0 // 128
+    assert np.array_equal(rb[:, :n0], rb0) and np.array_equal(kt[:, :n0], kt0)
+    assert np.array_equal(rb[:, n0:], rb1) and np.array_equal(kt[:, n0:], kt1 + k0 // 256)
+    assert n0 * Q36.CHUNK == Q36.band_bytes(k0)          # the tap's offset inside a band
+
+
+def test_the_27b_glue_is_64_lanes_and_walks_half_outer(monkeypatch):
+    """48 value heads do not fit dn_glue's 32-lane accumulator: the projection is packed
+    [hid, 64] (columns 48..63 zero), a 4 KB element is 32 rows of it, and glue_ab_w.cc carries
+    two 32-lane halves. Three xn halves walked per accumulator would be 14 side fills; walked
+    half-outer they are 11. Every published size keeps 32 lanes, 64-row tiles and its walk."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    D = Q35.recipe(s).linear
+    assert (D.AB_LANES, D.AB_ROWS, D.GLUE_HALF_OUTER) == (64, 32, True)
+    assert D.AB_ELEMS == 5120 * 64 * 2 // 4096 == 160
+    assert Q35.ab_tiles_per_half(s) == [64, 64, 32] and sum(Q35.ab_tiles_per_half(s)) == D.AB_ELEMS
+    assert Q35.glue_side_fills(s) == 11
+    # one record per value head: 6 value tiles of 8, against 4 key tiles; 3 value heads a key head
+    assert (D.NT, D.VALUE_TILE0, D.HEADS_PER_TILE) == (10, 4, 8)
+    assert (D.NT - D.VALUE_TILE0) * D.HEADS_PER_TILE == D.NHEAD == 48
+    ops = {o["tensor"]: o for o in Q35.pack_plan(s)["layer_types"][LINEAR]["consts"] if "tensor" in o}
+    a = ops["model.layers.{l}.linear_attn.ssm_alpha_proj.bf16.weight"]
+    assert (a["rows"], a["cols"], a["dst_rows"]) == (48, 5120, 64)
+    small = Q35.layout(s).C_SIDE + Q35.layout(s).SIDE_SMALL
+    assert ops["model.layers.{l}.linear_attn.ssm_dt.bias"]["dst"] == small + 48 * 4
+    for name in PUBLISHED:
+        P = Q35.recipe(ModelSpec.from_hf_config(cfg(name))).linear
+        assert (P.AB_LANES, P.AB_ROWS, P.GLUE_HALF_OUTER) == (32, 64, False)
+
+
+def test_the_27b_norm_helper_streams_its_residual(monkeypatch):
+    """[x0 x1 w a0 a1] plus an output at 10 KB elements is 67 584 B with the stack, over the
+    norm core's 64 KB; split, it never holds more than three inputs and one output (46 KB).
+    The published sizes (largest: the 9B's 8 KB, 55 296 B) keep the fused stages."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = ModelSpec.from_hf_config(cfg("27b"))
+    assert Q36.norm_split(s) and Q35.recipe(s).ln_split
+    assert 6 * 10240 + Q36.STACK > Q36.NORM_L1 >= 4 * 10240 + Q36.STACK
+    for name in PUBLISHED:
+        p = ModelSpec.from_hf_config(cfg(name))
+        assert not Q36.norm_split(p) and not Q35.recipe(p).ln_split
+
+
+def test_the_27b_composes_with_no_override(capsys):
+    """Its five new points -- ln 5120, lm_head_q8 K 5120, gemv_q4 K 5120, deltanet heads 48
+    and the (256, 24, 4) attention tuple -- entered the catalogue with its hardware pass, so
+    it composes without OPEN_KERNELS_UNVALIDATED, and asks for no K 17408: the down GEMV runs
+    as its two pieces."""
+    from recipes import catalogue
+
+    catalogue.require("deltanet", heads=48, dim=128, key_heads=16, conv_kernel=4)
+    Q35.recipe(ModelSpec.from_hf_config(cfg("27b")))
+    assert capsys.readouterr().err == ""
+    with pytest.raises(OpRangeError, match="gemv_q4: K=17408 is outside"):
+        catalogue.require("gemv_q4", K=17408, rs=2, rows_per_core=640, per_call=1)
 
 
 # --------------------------------------------------------------- pack ops
@@ -496,3 +615,154 @@ def test_the_manifest_carries_what_the_engine_needs(spec9, monkeypatch):
         assert d["pack"]["pool"] and d["pack"]["consts"]
     assert m["layer_types"][FULL]["buffers"]["state"] == {"kind": "kv", "row": 4096}
     assert m["layer_types"][LINEAR]["buffers"]["state"]["kind"] == "linear"
+
+
+# ------------------------------------------------ the block prefill route (OPEN-PREFILL-BATCH)
+T = 256
+
+
+def _run(kernel, w, x, y):
+    return {"op": "run", "kernel": kernel, "args": [w, x, y]}
+
+
+def test_the_9b_carries_the_35b_route_with_a_dense_ffn(spec9, monkeypatch):
+    """The linear / full halves are the 35B's; the MoE block is replaced by up|gate then
+    down over the block -- the shared expert's two GEMMs without its sigmoid gate."""
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    m = manifest(spec9)
+    lin = m["layer_types"][LINEAR]
+    full = m["layer_types"][FULL]
+    lg, fg = lin["gemm_block"], full["gemm_block"]
+    assert (lg["kind"], lg["t"], fg["kind"], fg["t"]) == ("linear", T, "full", T)
+    assert lg["program"] == [_run("gemm_n12288_k4096", "gqkvz_w", "gemm_x_k4096", "gemm_y_n12288"),
+                             _run("gemm_n4096_k4096", "gout_w", "gemm_x_k4096", "gemm_y_n4096")]
+    assert fg["program"] == [_run("gemm_n10240_k4096", "gqkvg_w", "gemm_x_k4096", "gemm_y_n10240"),
+                             _run("gemm_n4096_k4096", "go_w", "gemm_x_k4096", "gemm_y_n4096")]
+    ffn = [_run("gemm_n24576_k4096", "gffn_ug_w", "gemm_x_k4096", "gemm_y_n24576"),
+           _run("gemm_n4096_k12288", "gffn_down_w", "gemm_x_k12288", "gemm_y_n4096")]
+    for gb, d in ((lg, lin), (fg, full)):
+        assert gb["ffn_program"] == ffn and gb["ff"] == 12288
+        w = gb["ffn_weights"]
+        assert w == {"gffn_ug_w": {"from": "pool", "ops": [0, 1]}, "gffn_down_w": {"from": "pool", "ops": [2]}}
+        pool = d["pack"]["pool"]
+        assert [pool[i]["tensor"].split(".")[-2] for i in (0, 1, 2)] == ["up_proj", "gate_proj", "down_proj"]
+        assert all(pool[i]["op"] == "std_perm" for i in (0, 1, 2))
+        # contiguous, up first: the one GEMM's output is [up | gate], as the shared expert's
+        assert pool[1]["dst"] == pool[0]["dst"] + pool[0]["nch"] * m["layout"]["chunk_bytes"]
+        # none of the MoE tail
+        assert not {"moe_kernel", "moe_args", "shared_program", "shared_weights", "moe_batch", "a_rout"} & set(gb)
+    # the q8 out projection is re-quantised into a std_perm the GEMM can read
+    consts = lin["pack"]["consts"]
+    assert lg["weights"]["gout_w"] == {"from": "consts", "ops": [8]}
+    assert consts[8]["op"] == "std_perm" and consts[8]["tensor"].endswith("ssm_out_proj.weight")
+    assert lg["weights"]["gqkvz_w"] == {"from": "pool", "ops": [3, 4]}
+    assert fg["weights"] == {"gqkvg_w": {"from": "pool", "ops": [3, 4, 5, 6]}, "go_w": {"from": "pool", "ops": [7]}}
+
+
+def test_the_9b_route_is_one_gemm_context_and_no_expert_kernels(spec9, monkeypatch):
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    m = manifest(spec9)
+    assert sorted(m["contexts"]) == ["ag", "ax", "gemm", "lm", "ln", "lx"]
+    gemms = sorted(k for k in m["kernels"] if k.startswith("gemm_"))
+    assert gemms == ["gemm_n10240_k4096", "gemm_n12288_k4096", "gemm_n24576_k4096", "gemm_n4096_k12288",
+                     "gemm_n4096_k4096"]
+    assert all(m["kernels"][k]["context"] == "gemm" for k in gemms)
+    assert not [k for k in m["kernels"] if k.startswith(("mx_", "mb_"))]
+    assert not [k for k in m["globals"] if k.startswith("mb_")]
+    assert m["globals"]["gemm_y_n24576"] == 24576 * T * 4 and m["globals"]["gemm_x_k12288"] == 12288 * T * 2
+    # 16 query heads over 4 kv heads: the attention GEMM is built for 4 x 256 rows, in its own
+    # directory (the 35B's 8 x 256 builds keep theirs)
+    ab = m["layer_types"][FULL]["gemm_block"]["attn_block"]
+    assert ab["m"] == 1024 and ab["hd"] == 256
+    b = Q35.builds(spec9)
+    assert b["ag_s256"]["env"]["AG_M"] == "1024" and b["ag_s256"]["build_dir"] == "attn_block/build_s256_m1024"
+    assert b["gemm_n24576_k4096"]["env"] == {"GQP_N": "24576", "GQP_K": "4096", "GQP_T": str(T)}
+
+
+def test_every_published_size_gets_a_route():
+    for name in ("9b", "4b", "2b", "0p8b"):
+        s = ModelSpec.from_hf_config(cfg(name))
+        r = Q35.gemm_route(s)
+        assert r is not None, name
+        assert set(r["layer_types"]) == {LINEAR, FULL}, name
+        ff = s.intermediate
+        assert r["layer_types"][LINEAR]["ffn_program"][0]["kernel"] == f"gemm_n{2 * ff}_k{s.hidden}", name
+
+
+def test_a_q8_projection_or_an_untileable_width_leaves_the_sequential_set(spec9, monkeypatch):
+    """The GEMM reads the q4_1 band law and tiles 256 x 256: a spec outside either keeps
+    exactly the manifest it had, rather than failing the export. (The out projection is the
+    exception: see the next test.)"""
+    import dataclasses
+
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    # ffn at q8 alone is a spec the recipe refuses outright (a mixed-format main core), so the
+    # ffn case is every role at q8
+    every = {r: "q8" for r in ("attn", "linear", "linear_out", "ffn")}
+    for quant in ({"attn": "q8"}, {"linear": "q8"}, every):
+        s = dataclasses.replace(spec9, quant=quant)
+        assert Q35.gemm_route(s) is None, quant
+        m = manifest(s)
+        assert all("gemm_block" not in d for d in m["layer_types"].values()), quant
+        assert not [k for k in m["kernels"] if k.startswith(("gemm_", "ag_"))], quant
+    assert Q35.gemm_route(dataclasses.replace(spec9, intermediate=12160)) is None
+
+
+def test_the_build_key_covers_the_route_sources(spec9):
+    from recipes.cache import source_files
+
+    files = [f.as_posix() for f in source_files(spec9)]
+    for must in ("designs/gemm_q4_prefill/gemm_q4_prefill.py", "designs/attn_block/attn_gemm.py"):
+        assert any(f.endswith(must) for f in files), must
+
+
+def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, monkeypatch):
+    """The published 9B containers store ssm_out_proj at q8 and the sequential kernel streams
+    it at q8 (the spec derived from such a model says linear_out=q8), because re-quantising it
+    costs real quality (OPEN-QUANT-Q8). The GEMM reads q4_1 only, so the route packs the q8
+    weight as two q4_1 halves whose readings sum to it exactly, stacked in one buffer: one
+    GEMM of 2 x hid rows, the halves added on the host."""
+    import dataclasses
+
+    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    s = dataclasses.replace(spec9, quant={"linear_out": "q8"})
+    m = manifest(s)
+    lin = m["layer_types"][LINEAR]
+    gb = lin["gemm_block"]
+    op = {"op": "std_perm", "tensor": "model.layers.{l}.linear_attn.ssm_out_proj.weight", "nch": 2048, "in_dim": 4096}
+    assert gb["weights"]["gout_w"] == {"from": "pack", "pack": [{**op, "dst": 0, "split": "hi"},
+                                                                {**op, "dst": 2048 * 5120, "split": "lo"}]}
+    assert gb["out_split"] is True
+    assert gb["program"][1] == _run("gemm_n8192_k4096", "gout_w", "gemm_x_k4096", "gemm_y_n8192")
+    assert "gemm_n8192_k4096" in m["kernels"]
+    # the sequential kernel still reads its q8 pack of the same tensor
+    seq = [o for o in lin["pack"]["consts"] if o.get("tensor", "").endswith("ssm_out_proj.weight")]
+    assert len(seq) == 1 and seq[0]["op"] == "q8_perm"
+    # every other weight, and the q4_1 spec's route, are unchanged
+    q4 = manifest(spec9)["layer_types"][LINEAR]["gemm_block"]
+    assert {k: v for k, v in gb["weights"].items() if k != "gout_w"} ==         {k: v for k, v in q4["weights"].items() if k != "gout_w"}
+    assert "out_split" not in q4 and q4["program"][1]["kernel"] == "gemm_n4096_k4096"
+
+
+def test_the_q8_split_is_exact_and_matches_the_cpp_packer():
+    """hi + lo read back every q8 value exactly (the q4_1 re-quantisation of the same chunks
+    is off by up to d/2), and both halves are byte-identical to pools.cpp split_q4_1_chunks
+    on the shared vector (pools_test.cpp asserts the same two FNV-1a values)."""
+    from q4nx import dq_chunks_q4_1, dq_chunks_q8
+
+    src = _shared_q8_vector(12)
+    hi, lo = pack.split_q8_q4_1(src, "hi"), pack.split_q8_q4_1(src, "lo")
+    want = np.asarray(dq_chunks_q8(np.asarray(src)), np.float64)
+    got = np.asarray(dq_chunks_q4_1(hi), np.float64) + np.asarray(dq_chunks_q4_1(lo), np.float64)
+    np.testing.assert_array_equal(got, want)
+    rq = np.asarray(dq_chunks_q4_1(pack.requant_q4_1(src)), np.float64)
+    assert np.abs(rq - want).max() > 0.01, "the re-quantisation this replaces really is lossy"
+    assert _fnv1a(hi.tobytes()) == 0x011857DF63D905CE, "split hi changed; update pools_test.cpp too"
+    assert _fnv1a(lo.tobytes()) == 0x1A95B8AE739769D2, "split lo changed; update pools_test.cpp too"
+
+
+def test_a_split_needs_a_q8_source():
+    dst = np.zeros(5120, np.uint8)
+    m = _Bytes({"w": b"\0" * 5120})
+    with pytest.raises(ValueError, match="must be q8"):
+        pack.apply_op({"op": "std_perm", "tensor": "w", "dst": 0, "nch": 1, "in_dim": 256, "split": "hi"}, m, 0, dst)
