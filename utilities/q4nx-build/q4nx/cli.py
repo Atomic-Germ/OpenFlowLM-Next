@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Console-script entry point for q4nx-build."""
+import json
 import os
 import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 from q4nx import create_converter, create_hf_converter
 from q4nx.arch_detect import family_from_text
@@ -61,6 +63,14 @@ def _is_hf_source(path: str) -> bool:
     return False
 
 
+def slug(spec, dir_name: str) -> str:
+    """Model-scoped spec-file name, matching the checked-in hy-mt2-7b.json /
+    qwen35-9b.json convention: lowercase, spaces to dashes, `-NPU2` stripped.
+    A 27B gets a distinct file per model, never one shared family file."""
+    s = dir_name.lower().replace("-npu2", "").replace("_", "-").strip("-")
+    return re.sub(r"[^a-z0-9.-]+", "-", s)
+
+
 def _build_spec(output_folder: str) -> None:
     """Derive the model's open-kernels ModelSpec and write spec.json.
 
@@ -90,6 +100,34 @@ def _build_spec(output_folder: str) -> None:
     out = Path(output_folder) / "spec.json"
     out.write_text(spec.to_json(), encoding="utf-8")
     print(f"[INFO] --build-spec: wrote {out}")
+    try:
+        F = for_spec(spec)
+        F.recipe(spec)  # raises when the spec is outside the validated catalogue points
+        print(f"[INFO] --build-spec: spec passes the family's recipe validation")
+    except Exception as e:
+        from recipes.catalogue import OpRangeError
+        if isinstance(e, OpRangeError):
+            print(f"[INFO] --build-spec: spec written. Note for the kernel step: {e}")
+            print(f"       -- this K has not been built and fixture-tested, so export needs")
+            print(f"       an explicit opt-in:")
+            print(f"       OPEN_KERNELS_UNVALIDATED=1 python open_kernels/export_qwen36_kernels.py "
+                  f"--model-dir {output_folder}")
+        else:
+            print(f"[INFO] --build-spec: recipe not resolvable here ({e}); export will report")
+    # In-tree staging: when an OFLM checkout is available and family recipes
+    # can see this family's spec, drop the derived spec next to the checked-in
+    # ones so the next kernel export and CI use it directly rather than a
+    # one-off in the output directory.
+    try:
+        specs_dir = root / "recipes" / "specs"
+        if specs_dir.is_dir() and not any(
+                sj.name.lower().split(".")[0] == slug(spec, Path(output_folder).name).lower()
+                for sj in specs_dir.glob("*.json")):
+            target = specs_dir / (slug(spec, Path(output_folder).name) + ".json")
+            target.write_text(spec.to_json(), encoding="utf-8")
+            print(f"[INFO] --build-spec: staged {target} for the next in-tree kernel export")
+    except Exception as e:
+        print(f"[WARN] --build-spec: could not stage the spec in-tree ({e})")
     print(f"[INFO] spec_hash {spec.spec_hash()[:19]} family {spec.family} quant {spec.quant}")
     if spec.family in NOT_IMPLEMENTED:
         print(f"[INFO] --build-spec: the open kernels have no recipe for family "
@@ -99,6 +137,93 @@ def _build_spec(output_folder: str) -> None:
                      else "export_qwen36_kernels.py")
     print(f"[INFO] Build kernels with: python {export} --model-dir {output_folder} "
           f"(reads the recipe for family {spec.family!r} from the spec)")
+
+    _support_audit(root.parent if root else None, spec, Path(output_folder).name)
+
+
+def _support_audit(repo_root: Optional[Path], spec, model_dir_name: str) -> None:
+    """Print which of the support-pipeline steps are still open for this
+    container. Everything it checks is on disk -- no network, and it NEVER
+    edits anything: wiring up support is the point, so the report names the
+    exact files. A no-op on installs without an OFLM source checkout."""
+    if repo_root is None:
+        return
+    repo = Path(repo_root)
+    fam = spec.family
+    checks = []
+    has_specs_entry = False
+    try:
+        for sj in (repo / "open_kernels" / "recipes" / "specs").glob("*.json"):
+            if json.load(open(sj)).get("family") == fam:
+                has_specs_entry = True
+                break
+    except Exception:
+        pass
+    checks.append((f"recipes/specs entry for family {fam!r}", has_specs_entry))
+    checks.append((f"staged kernel set src/xclbins/{model_dir_name}",
+                   (repo / "src" / "xclbins" / model_dir_name).is_dir()))
+
+    # Tighten the engine-entry gap: a new family almost never needs a new
+    # ENGINE, almost always a model_families.hpp alias. The strongest public
+    # evidence is whether the family's config.json produces the same q4nx
+    # tensor naming contract as an already-registered family -- that is what
+    # routes onto a registered engine. Report the exact match.
+    alias_candidates = []
+    try:
+        mine = None
+        cfgs_dir = repo / "utilities" / "q4nx-build" / "configs"
+        for cfg_name in os.listdir(cfgs_dir):
+            c = json.load(open(cfgs_dir / cfg_name))
+            names = {p["q4nx_name"] for p in c.get("name_map", {}).values()}
+            if fam in cfg_name:
+                mine = names
+                break
+        if not mine:
+            # The family config may be named after the model, not the family:
+            # fall back to matching against the saved pack's own name_map via
+            # the spec's extra['model_type'].
+            mt = spec.extra.get("model_type")
+            for cfg_name in os.listdir(cfgs_dir):
+                c = json.load(open(cfgs_dir / cfg_name))
+                if c.get("name_map") and str(mt).replace("_v1_dense", "") in json.dumps(c):
+                    mine = {p["q4nx_name"] for p in c["name_map"].values()}
+                    break
+        if mine:
+            for cfg_name in sorted(os.listdir(cfgs_dir)):
+                if cfg_name == fam + ".json" or fam in cfg_name:
+                    continue
+                c = json.load(open(cfgs_dir / cfg_name))
+                theirs = {p["q4nx_name"] for p in c.get("name_map", {}).values()}
+                if theirs and theirs == mine:
+                    alias_candidates.append(cfg_name)
+    except Exception:
+        pass
+    if alias_candidates:
+        tags = [c[:-5] for c in alias_candidates]
+        print(f"[INFO]   engine alias hint: family '{fam}' has the exact q4nx name "
+              f"contract of {tags} (registered engines); model_families.hpp "
+              f"likely wants e.g. {{'{fam}': SupportedModelFamily::{tags[0]}}} "
+              f"instead of a new engine class")
+    ml = repo / "src" / "model_list.json"
+    try:
+        listed = model_dir_name.lower().replace("-npu2", "") in ml.read_text().lower()
+    except Exception:
+        listed = False
+    checks.append(("model_list.json entry for this model", listed))
+    hpp = repo / "src" / "include" / "AutoModel" / "model_families.hpp"
+    try:
+        checks.append(("engine family registered in model_families.hpp",
+                       fam in hpp.read_text()))
+    except Exception:
+        checks.append(("engine family registered in model_families.hpp", False))
+    try:
+        alias = repo / "utilities" / "oflm-add" / "oflm_add" / "__init__.py"
+        checks.append(("oflm-add FAMILY_ALIASES entry", fam in alias.read_text()))
+    except Exception:
+        checks.append(("oflm-add FAMILY_ALIASES entry", False))
+    print(f"[INFO] Support audit for {model_dir_name} (family {fam}):")
+    for label, ok in checks:
+        print(f"         [{'ok' if ok else 'MISSING'}] {label}")
 
 
 def _report_speculative(model) -> None:
@@ -373,6 +498,13 @@ def _prune_meta(model):
         "kept": getattr(model, "prune_ffn_kept", None),
         "frm": getattr(model, "prune_ffn_from", None),
         "retained": getattr(model, "prune_ffn_retained", None),
+        # MoE variants (qwen35moe only)
+        "kept_experts": getattr(model, "prune_experts_kept", None),
+        "frm_experts": getattr(model, "prune_experts_from", None),
+        "retained_experts": getattr(model, "prune_experts_retained", None),
+        "kept_moe_ffn": getattr(model, "prune_moe_ffn_kept", None),
+        "frm_moe_ffn": getattr(model, "prune_moe_ffn_from", None),
+        "retained_moe_ffn": getattr(model, "prune_moe_ffn_retained", None),
         "mtp_dropped": getattr(model, "mtp_dropped", 0),
         # measured, not declared: the layer count the manifest will carry
         "layers_actual": _layer_count(model),
@@ -452,6 +584,20 @@ def _parse_args(argv):
              "K/width of the activation mass by construction.",
     )
     parser.add_argument(
+        "--prune-moe-ffn", dest="prune_moe_ffn", type=int, default=None, metavar="K",
+        help="MoE analogue of --prune-ffn: narrow the per-expert moe_intermediate "
+             "axis to K neurons per expert, scored by imatrix activation energy "
+             "on ffn_down_exps. Needs an imatrix GGUF. Applies to the MoE "
+             "converter (qwen35moe) only.",
+    )
+    parser.add_argument(
+        "--prune-experts", dest="prune_experts", type=int, default=None, metavar="K",
+        help="Keep only the K most-active experts per layer (by calibration "
+             "dispatch frequency, the same per-expert counts the Guanaco "
+             "imatrix prior pins). Applies to the MoE converter only; the "
+             "config.json num_experts is narrowed accordingly.",
+    )
+    parser.add_argument(
         "--build-spec", dest="build_spec", action="store_true", default=False,
         help="After packing, derive the model's open-kernels ModelSpec "
              "(the way oflm add finds kernels), write spec.json into the output "
@@ -475,7 +621,15 @@ def _parse_args(argv):
     )
     parser.add_argument(
         "-d", "--deploy", dest="deploy_tag", default=None, metavar="NAME:SIZE",
-        help="Deploy the converted model into oflm's models dir and register it under this tag (e.g. 'qwen3.5-claude:9b')",
+        help="Deploy to the user-level OFLM models registry",
+    )
+    parser.add_argument(
+        "--model-list", dest="model_list", default=None, metavar="PATH",
+        help="Registry to write when deploying. Default: the user-level "
+             "~/.config/oflm/model_list.json. Set it to the repo's "
+             "src/model_list.json to stage a repo-wide entry instead of a "
+             "user one; the entry is derived from --deploy-from when given, "
+             "otherwise from the first arch-matching entry in the tree.",
     )
     parser.add_argument(
         "--deploy-from", dest="deploy_from", default=None, metavar="SOURCE_TAG",
@@ -706,6 +860,9 @@ def main(argv=None) -> int:
     print(f"[INFO] Converting {input_path} to {output_folder}...")
 
     if hf_input is not None:
+        if args.prune_moe_ffn or args.prune_experts:
+            sys.exit("--prune-moe-ffn/--prune-experts only apply to a GGUF source (no "
+                     "imatrix signal otherwise). Use a GGUF input.")
         model = create_hf_converter(hf_input, args.force_model_type)
         model.pad_to_fit = args.pad_to_fit
         model.prune_ffn = args.prune_ffn
@@ -738,6 +895,8 @@ def main(argv=None) -> int:
         model.pad_to_fit = args.pad_to_fit
         model.prune_ffn = args.prune_ffn
         model.imatrix_path_hint = _resolve_imatrix_hint(args, input_path, source_repo)
+        model.prune_moe_ffn = args.prune_moe_ffn
+        model.prune_experts = args.prune_experts
         if args.quant:
             model.set_default_tensor_type(args.quant)
         if weights_type == "vision":
@@ -781,6 +940,7 @@ def main(argv=None) -> int:
             model.model_arch,
             model_dir_name=args.deploy_name,
             deploy_from=args.deploy_from,
+            model_list_path=args.model_list,
         )
 
     if getattr(args, "build_spec", False):

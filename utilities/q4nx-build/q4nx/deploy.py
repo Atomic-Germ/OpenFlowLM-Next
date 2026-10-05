@@ -290,6 +290,7 @@ def deploy_model(
     model_arch: ModelArch,
     model_dir_name: Optional[str] = None,
     deploy_from: Optional[str] = None,
+    model_list_path: Optional[str] = None,
 ) -> dict:
     """Copy the assembled model into OFLM's models dir and register the tag.
 
@@ -318,6 +319,31 @@ def deploy_model(
     for filename in files:
         shutil.copy2(output_dir / filename, target / filename)
 
+    # Copies end up truncated when the target filesystem is full -- and a
+    # truncated model.q4nx only fails at runtime with "tensor X past EOF".
+    # Check the q4nx copy's extent against its own header and warn at cart
+    # time rather than at engine load time.
+    import struct as _struct
+    for filename in files:
+        if not filename.endswith(".q4nx"):
+            continue
+        try:
+            copied = target / filename
+            with open(copied, "rb") as _f:
+                _n = _struct.unpack("<Q", _f.read(8))[0]
+                _hdr = json.loads(_f.read(_n))
+            _ends = []
+            for _v in _hdr.values():
+                if isinstance(_v, dict) and "data_offsets" in _v:
+                    _ends.append(_v["data_offsets"][1])
+            expect = _n + 8 + (max(_ends) if _ends else 0)
+            if expect > copied.stat().st_size:
+                print(f"[WARN] {copied} looks truncated: header declares {expect} bytes, "
+                      f"file is {copied.stat().st_size}. Re-copy with free disk space -- "
+                      f"the runtime will fail with 'past EOF' otherwise.")
+        except Exception:
+            pass
+
     size_value = base_entry.get("size") if base_entry else None
     if size_value is None:
         size_value = _estimate_params(target / "config.json")
@@ -328,7 +354,7 @@ def deploy_model(
         entry.setdefault("details", {}).setdefault("family", family)
         entry.setdefault("oflm_min_version", "0.9.45")
 
-    user_registry = get_user_registry_path()
+    user_registry = Path(model_list_path) if model_list_path else get_user_registry_path()
     register_model(tag, entry, user_registry, system_list)
 
     print(f"[INFO] Deployed model files to: {target}")

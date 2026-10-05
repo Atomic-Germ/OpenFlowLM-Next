@@ -1415,6 +1415,25 @@ def assemble_model_assets(
         }
         print(f"[INFO] config.json intermediate_size {was} -> {prune_meta['kept']} "
               f"(the FFN in this container is that wide)")
+    if prune_meta and prune_meta.get("kept_moe_ffn"):
+        was = config.get("moe_intermediate_size") or config.get("intermediate_size")
+        config["moe_intermediate_size"] = int(prune_meta["kept_moe_ffn"])
+        config["intermediate_size"] = int(prune_meta["kept_moe_ffn"])
+        print(f"[INFO] config.json moe_intermediate_size {was} -> {prune_meta['kept_moe_ffn']} "
+              f"(the MoE FFN in this container is that wide)")
+    if prune_meta and prune_meta.get("kept_experts"):
+        was = config.get("num_experts")
+        config["num_experts"] = int(prune_meta["kept_experts"])
+        if isinstance(config.get("num_experts_per_tok"), int) and config["num_experts_per_tok"] > config["num_experts"]:
+            config["num_experts_per_tok"] = config["num_experts"]
+        # vllm-style top-k key, if the skeleton has one
+        t = config.get("expert_top_k") or config.get("moe_top_k")
+        if isinstance(t, int) and t > config["num_experts"]:
+            if "expert_top_k" in config:
+                config["expert_top_k"] = config["num_experts"]
+            if "moe_top_k" in config:
+                config["moe_top_k"] = config["num_experts"]
+        print(f"[INFO] config.json num_experts {was} -> {prune_meta['kept_experts']}")
     # The DEPTH, whenever the MTP block was dropped -- not only for a pruned pack.
     # `block_count` counts the speculative block, so a generated config says 65 for a
     # container that holds 64 layers. The kernel recipe builds a per-layer set and the
