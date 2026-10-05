@@ -1233,7 +1233,8 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     if is_t2(spec):
         for g in types.values():
             g["y_tn"] = True            # OPEN-GEMM-T2: the GEMM writes y [T, N] ...
-            g["x_tile_k"] = 128         # ... and streams x in 128-k tiles
+            g["x_tile_k"] = 128         # ... and streams x in 128-k tiles ...
+            g["x_bfp"] = True           # ... of bfp16 blocks the host makes (GQP_XBFP)
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight
     # columns, so contexts time-share the array, and changing one costs ~2.5 ms):
@@ -1293,15 +1294,18 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         if ctx not in out["contexts"]:
             out["contexts"][ctx] = f"{name}/final.xclbin"
         out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}
-        out["globals"][f"gemm_x_k{K}"] = K * T * 2
+        out["globals"][f"gemm_x_k{K}"] = K * T * 9 // 8 if bfp else K * T * 2
         out["globals"][f"gemm_y_n{N}"] = N * T * 4
         env = {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}
         if bfp:
             # OPEN-GEMM-T2: and it reads the decode pool's 2-bit chunks (copied per weight, as the
             # q4_1 route copies its own), 128 k per matmul call, and writes y token-major
-            env.update(GQP_BFP16="1", GQP_WFMT="t2", GQP_KT="128", GQP_YT="1", GQP_T2_STRIDE=str(T2_CHUNK))
+            # -- and (GQP_XBFP) both operands reach the matmul as bfp16 blocks: the activation from
+            # the host at 9 B per 8 values, the weight from the dequant, so the core converts nothing
+            env.update(GQP_BFP16="1", GQP_WFMT="t2", GQP_KT="128", GQP_YT="1", GQP_T2_STRIDE=str(T2_CHUNK),
+                       GQP_XBFP="1")
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
-                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2ky" if bfp else ""),
+                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2kyx" if bfp else ""),
                                "env": env}
     return out
 

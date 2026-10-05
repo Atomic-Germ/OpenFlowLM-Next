@@ -330,13 +330,27 @@ def merged_image(spec: ModelSpec) -> bool:
             and D.XN_SIDE_ELEMS == R.ffn.XN_ELEMS and A.ACORES > 1 and A.NHL == A.HPO)
 
 
+def tail_in_layer(spec: ModelSpec) -> bool:
+    """Whether the final norm and the head run as the merged image's third stream (dux.py part 2)
+    instead of their own ln / lm_head_t2 images, so a decode step never leaves the layer context
+    (OPEN-DECODE-ONE-CONTEXT-DENSE). It needs the merged image, the rotated ternary head (the
+    main cores' t2 GEMV streams it: the layers' own chunk size and band law) and a head that
+    splits into whole bands per core. OPEN_LAYER_TAIL=0 at export keeps the ln / lm_head_t2 images
+    (an explicit value is in the build key, as OPEN_LAYER_ONE_CTX's)."""
+    if os.environ.get("OPEN_LAYER_TAIL") == "0":
+        return False
+    return (merged_image(spec) and head_t2(spec) and M.T2_CHUNK == LM_T2_CHUNK
+            and (spec.vocab // LM_T2_BAND_ROWS) % LIMITS["n_cols"] == 0)
+
+
 def probe_env() -> dict[str, str]:
     """The build key's probe variables (cache.py). An explicit OPEN_LAYER_ONE_CTX joins them: it
     changes what `builds` compiles, and nothing else in the key sees it. Unset, the flavour is a
     function of the spec, which the key already hashes."""
     e = dict(_attn_probe_env())
-    if os.environ.get("OPEN_LAYER_ONE_CTX") is not None:
-        e["OPEN_LAYER_ONE_CTX"] = os.environ["OPEN_LAYER_ONE_CTX"]
+    for k in ("OPEN_LAYER_ONE_CTX", "OPEN_LAYER_TAIL"):
+        if os.environ.get(k) is not None:
+            e[k] = os.environ[k]
     return e
 
 
@@ -361,6 +375,17 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     # kernel signature; its `ptab` is never touched (OPEN-DECODE-ONE-CONTEXT).
     merged = merged_image(spec)
     lin_ctx, full_ctx = ("layer", "layer") if merged else ("lx", "ax")
+    if tail_in_layer(spec):
+        # The tail is the image's third stream (dux.py part 2): the final norm on the norm helper,
+        # the head on the main cores, in the layer context. Its six arguments in the image's
+        # order: the head pool, xres, the final norm's weight (as consts), logits (as state), a
+        # scratch act (hn, and the norm helper's junk stages), ptab (untouched).
+        del out["contexts"]["ln"], out["contexts"]["lm"], out["kernels"]["ln"]
+        out["kernels"]["lm"] = {"context": "layer", "insts": "lm/insts.bin", "build": "lm"}
+        out["tail"] = [{"op": "run", "kernel": "lm", "args": ["lmpool", "xres", "normw", "logits", "lmact", "ptab"]}]
+        for g in ("zero", "xresf", "hn"):
+            del out["globals"][g]
+        out["globals"]["lmact"] = 64 * 1024
     if spec.has_linear:
         args = ["pool", "xres", "consts", "state", "act", "ptab"] if merged else ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
@@ -376,6 +401,11 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         check_buffer_args("ax", args)
         out["contexts"].setdefault(full_ctx, "ax/final.xclbin")
         out["kernels"]["ax"] = {"context": full_ctx, "insts": "ax/insts.bin", "patch": "attnpos", "build": "ax"}
+        A = recipe(spec).attn
+        if merged and A.RB > 1:
+            # attn.h ATTN_BLOCK_WIN (dux.py): the host streams the window as whole blocks of RB
+            # rows, padded past `pos`; a kernel and a driver that disagree deadlock the fifo
+            out["kernels"]["ax"]["rb_win"] = A.RB
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES,
                         "state": {"kind": "kv", "row": L.KV_ROW}},
@@ -421,10 +451,12 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     if merged_image(spec):
         # Same set names (lx, ax), so the manifest's kernel names and an export's --only list
         # do not move: one design, two parts, one image (OPEN-DECODE-ONE-CONTEXT).
-        for name, part in (("lx", 0), ("ax", 1)):
+        for name, part in (("lx", 0), ("ax", 1)) + ((("lm", 2),) if tail_in_layer(spec) else ()):
             b[name] = {"design": "layer_x/dux.py",
                        "build_dir": f"layer_x/build_{spec.family}_dux{part}_h{spec.hidden}{sfx}",
                        "env": {"DUX_PART": str(part)}}
+        if tail_in_layer(spec):
+            return {**b, **(gemm_route(spec) or {}).get("builds", {})}
     else:
         if spec.has_linear:
             b["lx"] = {"design": "layer_x/lx.py",
@@ -462,7 +494,7 @@ KERNEL_SOURCES = [
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
-    "include/vecmath.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
 # a rotated ternary head (head_t2) compiles these; listed only for such a spec (recipes/cache.py),

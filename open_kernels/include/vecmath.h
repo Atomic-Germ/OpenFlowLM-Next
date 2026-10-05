@@ -92,6 +92,16 @@ static inline vfN<N> fscaleN(const vfN<N> &a, float s) {
   return mac_vs<N>(acc, a, sh, sl).template to_vector<float>();
 }
 
+// VECMATH_COMPACT: vexpN's Horner chain and vrecipN's Newton steps as loops over their
+// coefficients, `unroll(disable)` -- the same operations in the same order, so the same bits, in
+// about a third of the program memory. For a core with none to spare (the Ternary Bonsai 2 27B's
+// dense main core, xcommon.py); it costs a few cycles a call. These are COMDAT (one copy per core
+// program), so every translation unit of one core must agree on the macro.
+#ifdef VECMATH_COMPACT
+static const float vexp_coef[7] __attribute__((aligned(32))) = {
+    1.54035304e-4f, 1.33335581e-3f, 9.61812911e-3f, 5.55041087e-2f, 2.40226507e-1f, 6.93147181e-1f, 1.0f};
+#endif
+
 // exp(x) to ~1e-7 relative: 2^(x*log2e) = 2^n * 2^f, |f| <= 0.5, degree-6 poly.
 template <unsigned N>
 __attribute__((noinline)) inline vfN<N> vexpN(vfN<N> x) {
@@ -101,6 +111,12 @@ __attribute__((noinline)) inline vfN<N> vexpN(vfN<N> x) {
   const aie::vector<int32_t, N> n = aie::to_fixed<int32_t>(t, 0);      // round (conv_even)
   const vfN<N> nf = aie::to_float<float>(n, 0);
   const vfN<N> f = fsubN<N>(t, nf);                                     // [-0.5, 0.5]
+#ifdef VECMATH_COMPACT
+  vfN<N> p = aie::broadcast<float, N>(vexp_coef[0]);
+#pragma clang loop unroll(disable)
+  for (unsigned i = 1; i < 7; ++i)
+    p = faddN<N>(fmulN<N>(p, f), aie::broadcast<float, N>(vexp_coef[i]));
+#else
   vfN<N> p = aie::broadcast<float, N>(1.54035304e-4f);
   p = faddN<N>(fmulN<N>(p, f), aie::broadcast<float, N>(1.33335581e-3f));
   p = faddN<N>(fmulN<N>(p, f), aie::broadcast<float, N>(9.61812911e-3f));
@@ -108,6 +124,7 @@ __attribute__((noinline)) inline vfN<N> vexpN(vfN<N> x) {
   p = faddN<N>(fmulN<N>(p, f), aie::broadcast<float, N>(2.40226507e-1f));
   p = faddN<N>(fmulN<N>(p, f), aie::broadcast<float, N>(6.93147181e-1f));
   p = faddN<N>(fmulN<N>(p, f), aie::broadcast<float, N>(1.0f));
+#endif
   const aie::vector<int32_t, N> bits =
       aie::upshift(aie::add(n, aie::broadcast<int32_t, N>(127)), 23);
   const vfN<N> scale = bits.template cast_to<float>();                  // exact power of two
@@ -126,8 +143,14 @@ template <unsigned N>
 __attribute__((noinline)) inline vfN<N> vrecipN(const vfN<N> &d) {
   vfN<N> r = aie::inv(d);
   const vfN<N> two = aie::broadcast<float, N>(2.0f);
+#ifdef VECMATH_COMPACT
+#pragma clang loop unroll(disable)
+  for (unsigned i = 0; i < 2; ++i)
+    r = fmulN<N>(r, fsubN<N>(two, fmulN<N>(d, r)));
+#else
   r = fmulN<N>(r, fsubN<N>(two, fmulN<N>(d, r)));
   r = fmulN<N>(r, fsubN<N>(two, fmulN<N>(d, r)));
+#endif
   return r;
 }
 

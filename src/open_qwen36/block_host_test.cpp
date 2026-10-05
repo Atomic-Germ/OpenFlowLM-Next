@@ -111,6 +111,25 @@ int main(int argc, char** argv) {
         bool zero_tail = true;
         for (size_t i = t_real * g.value_heads * g.head_dim; i < og.size(); ++i) zero_tail = zero_tail && og[i] == 0.f;
         check(zero_tail, "deltanet_block: og past t_real is zero");
+        // qkv and z read in place out of one token-major GEMM output [T, nch + vw] (qkv_ld / z_ld)
+        // give the packed call's every bit (Traces: OPEN-GEMM-T2)
+        {
+            const size_t vw = g.value_heads * g.head_dim, nch = qkv.size() / T, ld = nch + vw;
+            std::vector<float> y(T * ld);
+            for (size_t t = 0; t < T; ++t) {
+                std::memcpy(y.data() + t * ld, qkv.data() + t * nch, nch * 4);
+                std::memcpy(y.data() + t * ld + nch, z.data() + t * vw, vw * 4);
+            }
+            auto cs2 = to_bf16(read<float>(dir, "conv_state.f32"));
+            auto S2 = read<float>(dir, "S.f32");
+            std::vector<float> og2(og.size(), 7.f);
+            host::DeltaGeom g2 = g;
+            g2.qkv_ld = g2.z_ld = ld;
+            host::deltanet_block(g2, y.data(), y.data() + nch, xn.data(), convw.data(), Wa.data(), Wb.data(), A.data(),
+                                 dtb.data(), nw.data(), cs2.data(), S2.data(), og2.data());
+            check(og2 == og && S2 == Sst && cs2 == conv_state,
+                  "deltanet_block: qkv / z at a token-major y's row stride, bit-identical to the packed call");
+        }
     }
 
     // ---- the attention stage
@@ -136,6 +155,58 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < g.pos0 * kv_row; ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
         for (size_t i = (g.pos0 + t_real) * kv_row; i < kv.size(); ++i) untouched = untouched && bf16_to_f32(kv[i]) == kv_in[i];
         check(untouched, "attention_block: rows before the block and past t_real are untouched");
+        // q / k / v / gate read in place out of one token-major GEMM output [T, 2 qw + 2 kvw]
+        // (Traces: OPEN-GEMM-T2): attention_block and attention_prep give the packed calls' bits
+        {
+            const size_t qw = g.nh * g.hd, kvw = g.kvh * g.hd, ld = 2 * qw + 2 * kvw;
+            std::vector<float> y(T * ld);
+            for (size_t t = 0; t < T; ++t) {
+                std::memcpy(y.data() + t * ld, q.data() + t * qw, qw * 4);
+                std::memcpy(y.data() + t * ld + qw, k.data() + t * kvw, kvw * 4);
+                std::memcpy(y.data() + t * ld + qw + kvw, v.data() + t * kvw, kvw * 4);
+                std::memcpy(y.data() + t * ld + qw + 2 * kvw, gate.data() + t * qw, qw * 4);
+            }
+            host::AttnGeom g2 = g;
+            g2.q_ld = g2.k_ld = g2.v_ld = g2.g_ld = ld;
+            auto kv2 = to_bf16(read<float>(dir, "kv.f32"));
+            std::vector<float> og2(og.size());
+            host::attention_block(g2, y.data(), y.data() + qw, y.data() + qw + kvw, y.data() + qw + 2 * kvw, qn.data(),
+                                  kn.data(), inv_freq.data(), kv2.data(), kv_row, og2.data());
+            check(og2 == og && kv2 == kv, "attention_block: inputs at a token-major y's row stride, bit-identical");
+            auto kv3 = to_bf16(read<float>(dir, "kv.f32")), kv4 = kv3;
+            std::vector<float> Q3(T * qw), Q4(T * qw);
+            host::attention_prep(g, q.data(), k.data(), v.data(), qn.data(), kn.data(), inv_freq.data(), kv3.data(), kv_row,
+                                 Q3.data());
+            host::attention_prep(g2, y.data(), y.data() + qw, y.data() + qw + kvw, qn.data(), kn.data(), inv_freq.data(),
+                                 kv4.data(), kv_row, Q4.data());
+            check(Q3 == Q4 && kv3 == kv4, "attention_prep: inputs at a token-major y's row stride, bit-identical");
+            // the NPU route's per-group host steps against the loops core.cpp used to run inline
+            // (Traces: OPEN-PREFILL-ATTN)
+            const size_t grp = g.nh / g.kvh;
+            for (size_t gh = 0; gh < g.kvh; ++gh) {
+                std::vector<uint16_t> qb(grp * T * g.hd), qb_ref(grp * T * g.hd);
+                host::attn_group_queries(Q3.data(), T, g.nh, g.kvh, g.hd, gh, qb.data());
+                for (size_t hl = 0; hl < grp; ++hl)
+                    for (size_t t = 0; t < T; ++t)
+                        for (size_t j = 0; j < g.hd; ++j)
+                            qb_ref[(hl * T + t) * g.hd + j] = f32_to_bf16(Q3[t * qw + (gh * grp + hl) * g.hd + j]);
+                std::vector<float> acc(grp * T * g.hd), lsum(grp * T), o1(T * qw, 0.f), o2(T * qw, 0.f);
+                for (size_t i = 0; i < acc.size(); ++i) acc[i] = static_cast<float>((i * 7) % 13) - 6.f;
+                for (size_t i = 0; i < lsum.size(); ++i) lsum[i] = 1.f + static_cast<float>(i % 5);
+                host::attn_group_out(acc.data(), lsum.data(), y.data() + qw + 2 * kvw, T, t_real, g.nh, g.kvh, g.hd, gh,
+                                     ld, o1.data());
+                for (size_t hl = 0; hl < grp; ++hl)
+                    for (size_t t = 0; t < t_real; ++t) {
+                        const size_t r = hl * T + t, h = gh * grp + hl;
+                        const float inv = 1.0f / lsum[r];
+                        for (size_t j = 0; j < g.hd; ++j)
+                            o2[t * qw + h * g.hd + j] =
+                                acc[r * g.hd + j] * inv / (1.0f + std::exp(-gate[t * qw + h * g.hd + j]));
+                    }
+                check(qb == qb_ref && o1 == o2,
+                      "attn_group_queries / attn_group_out: the inline loops' bits, group " + std::to_string(gh));
+            }
+        }
     }
 
     // ---- the router
@@ -196,6 +267,82 @@ int main(int argc, char** argv) {
                                         ref3[w3++] = f32_to_bf16(cp[(nb * 32 + ti * 8 + t8) * K3 + kb * tk + si * 8 + s8]);
                 if (!with_signs) check(want == ref3, "tile_x: the k,n tiled layout at tk " + std::to_string(tk));
             }
+        // the transform at the production block (1024, 128-k tiles), signed, against the two-step form
+        {
+            const size_t T3 = 64, K3 = 2048, blk = 1024;
+            std::vector<float> x3(T3 * K3), sg(K3), cp;
+            for (size_t i = 0; i < x3.size(); ++i) x3[i] = static_cast<float>((i * 7919) % 3001) / 77.f - 19.f;
+            for (size_t j = 0; j < K3; ++j) sg[j] = ((j * 13) % 7) < 3 ? -1.f : 1.f;
+            cp = x3;
+            host::hadamard_rows(cp.data(), T3, K3, blk, sg.data());
+            std::vector<uint16_t> want(K3 * T3), got(K3 * T3);
+            host::tile_x(cp.data(), T3, K3, want.data(), 128);
+            host::hadamard_tile_x(x3.data(), T3, K3, blk, sg.data(), got.data(), 128);
+            check(got == want, "hadamard_tile_x: bit-identical to hadamard_rows + tile_x at block 1024, tk 128");
+            // the FFN's down projection input made on the fly from the up|gate output [T, 2 ff],
+            // against Core::ffn_block's loop (scalar, as MSVC compiles it there) + hadamard_tile_x
+            const size_t ff = K3;
+            std::vector<float> ug(T3 * 2 * ff), h(T3 * ff);
+            for (size_t i = 0; i < ug.size(); ++i) ug[i] = static_cast<float>((i * 104729) % 4001) / 500.f - 4.f;
+            for (size_t t = 0; t < T3; ++t) {
+                const float* u = ug.data() + t * 2 * ff;
+                const float* gg = u + ff;
+#pragma loop(no_vector)
+                for (size_t j = 0; j < ff; ++j) h[t * ff + j] = gg[j] / (1.f + std::exp(-gg[j])) * u[j];
+            }
+            std::vector<uint16_t> want2(K3 * T3), got2(K3 * T3);
+            host::hadamard_tile_x(h.data(), T3, ff, blk, nullptr, want2.data(), 128);
+            host::hadamard_tile_swiglu(ug.data(), T3, ff, 2 * ff, blk, got2.data(), 128);
+            check(got2 == want2, "hadamard_tile_swiglu: bit-identical to the silu(g) * u loop + hadamard_tile_x");
+            // the bfp16 activation tiles (OPEN-GEMM-T2, GQP_XBFP): every block is the conversion of
+            // the very bf16 values the bf16 tiles hold -- E the block's largest exponent, each int8
+            // mantissa the 8-bit significand shifted right by E - e + 1, nearest even, and E + 1 for
+            // the block when a value would round out of int8 (the NPU's own conversion, matched byte
+            // for byte by open_kernels/designs/bfp_cvt) -- laid out [token block pair][k block]
+            // [token block % 2] x [exponent | 8 mantissas] x 8 tokens
+            auto ref_tiles = [&](const std::vector<uint16_t>& bf, size_t Tn, size_t Kn) {
+                const size_t NBn = Tn / 32;
+                std::vector<uint8_t> o(Kn * Tn * 9 / 8);
+                for (size_t kb = 0; kb < Kn / 128; ++kb)
+                    for (size_t nb = 0; nb < NBn; ++nb)
+                        for (size_t ti = 0; ti < 4; ++ti)
+                            for (size_t si = 0; si < 16; ++si) {
+                                uint8_t* v = o.data() + (kb * NBn + nb) * 4608 + ((ti / 2) * 32 + si * 2 + ti % 2) * 72;
+                                for (size_t tt = 0; tt < 8; ++tt) {
+                                    uint16_t b8[8];
+                                    int e[8], E = 0;
+                                    for (size_t s8 = 0; s8 < 8; ++s8) {
+                                        b8[s8] = bf[(kb * NBn + nb) * 4096 + (si * 4 + ti) * 64 + s8 * 8 + tt];
+                                        e[s8] = (b8[s8] >> 7) & 0xFF;
+                                        E = std::max(E, e[s8]);
+                                    }
+                                    auto mant = [&](int Eb, size_t s8) {
+                                        const int sig = e[s8] ? ((b8[s8] & 0x7F) | 0x80) : 0;
+                                        const int sh = std::min(Eb - e[s8] + 1, 9);
+                                        int q = sig >> sh;
+                                        const int rem = sig & ((1 << sh) - 1), half = 1 << (sh - 1);
+                                        if (rem > half || (rem == half && (q & 1))) ++q;
+                                        return (b8[s8] & 0x8000) ? -q : q;
+                                    };
+                                    bool over = false;          // a value rounding out of int8 bumps the block
+                                    for (size_t s8 = 0; s8 < 8; ++s8) {
+                                        const int q = mant(E, s8);
+                                        over = over || q > 127 || q < -128;
+                                    }
+                                    if (over) ++E;
+                                    v[tt * 9] = static_cast<uint8_t>(E);
+                                    for (size_t s8 = 0; s8 < 8; ++s8)
+                                        v[tt * 9 + 1 + s8] = static_cast<uint8_t>(static_cast<int8_t>(mant(E, s8)));
+                                }
+                            }
+                return o;
+            };
+            std::vector<uint8_t> bfp(K3 * T3 * 9 / 8), bfp2(K3 * T3 * 9 / 8);
+            host::hadamard_tile_x_bfp(x3.data(), T3, K3, blk, sg.data(), bfp.data());
+            host::hadamard_tile_swiglu_bfp(ug.data(), T3, ff, 2 * ff, blk, bfp2.data());
+            check(bfp == ref_tiles(want, T3, K3), "hadamard_tile_x_bfp: the bf16 tiles' values as bfp16 blocks");
+            check(bfp2 == ref_tiles(want2, T3, ff), "hadamard_tile_swiglu_bfp: the bf16 tiles' values as bfp16 blocks");
+        }
         host::transpose(y.data(), N2, T2, yt.data());
         bool ok = true;
         for (size_t n = 0; n < N2; ++n)

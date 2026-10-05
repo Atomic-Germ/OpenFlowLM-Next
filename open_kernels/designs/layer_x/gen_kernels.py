@@ -94,7 +94,7 @@ def mixed(R) -> bool:
 Q8_FILES = ("gemv_q8_gy.cc", "gemv_q8_gms.cc")
 FOLD_FILES = ("gemv_q4_gyms.cc",)
 XH_FILES = ("xh_signs.h",)            # a rotated-basis (Hadamard) model only
-T2_FILES = ("gemv_t2_gy.cc", "gemv_t2_gms.cc")   # an all-t2 spec only (OPEN-QUANT-T2)
+T2_FILES = ("gemv_t2_gy.cc", "gemv_t2_gms.cc", "dense_wht_f32.cc")   # an all-t2 spec only (OPEN-QUANT-T2)
 
 
 def is_t2(R) -> bool:
@@ -148,16 +148,33 @@ void dense_prep(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int3
 ''',
         "dense_prep_f32.cc": '''// Element i of an fp32 activation of K values (1024 per 4 KB element; the fifo types it as bf16)
 // into the per-128 t2 table: groups [8 i, 8 i + 8) -- the block through H/32 in fp32, rounded
-// to bf16 in the element's first half, then the table.
+// to bf16 in the element's first half, then the table. K < 0: the activation arrives through
+// H/32 already, as bf16 (dux.py HPREP: the row-4 prep core ran the same xh_wht_f32), 2048 values
+// per element, so element i is the table of groups [16 i, min(16 i + 16, -K / 128)) alone.
 #include "gemv_t2.h"
 #include "wht.h"
 
 extern "C" {
 void dense_prep_f32(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {
+  if (K < 0) {
+    const unsigned k = (unsigned)(-K), tk = k / 128, h0 = 16u * (unsigned)i;
+    gemv_t2_prep_groups(e, tab, k, h0, (h0 + 16u <= tk) ? 16u : tk - h0);
+    return;
+  }
   const unsigned total = (unsigned)K / 128, g0 = 8u * (unsigned)i;
   const unsigned ng = (g0 + 8u <= total) ? 8u : total - g0;
   xh_wht_f32((const float *)e, e);
   gemv_t2_prep_groups(e, tab, (unsigned)K, g0, ng);
+}
+}
+''',
+        "dense_wht_f32.cc": '''// The row-4 prep core's kernel (dux.py HPREP): one 1024 block of an fp32 activation through
+// H/32 (OPEN-HADAMARD) into bf16 -- xh_wht_f32, the routine dense_prep_f32 runs on the main cores.
+#include "wht.h"
+
+extern "C" {
+void dense_wht_f32(const float *__restrict e, bfloat16 *__restrict o) {
+  xh_wht_f32(e, o);
 }
 }
 ''',
@@ -367,9 +384,10 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
 # each of its band results (K = 9216 is that piece's width alone: per_band 72), so the last band's
 # y element -- act[A_OUT2B | AA_OUT2B] + (10 c + 9) * 256 -- carries the whole layer's log to DDR
 # with no extra kernel call, element or transfer (the lx main core had 480 B to spend). Read it
-# with --dump-act; agents/stream/stamps.py decodes it. Events, in order, per layer:
-#   prep (xn, og, xm: 3 elements each): G (the last GEMV exit), T at entry
-#   [linear] each DeltaNet head's delta step: T
+# with --dump-act; utilities/lx_stamps.py decodes it. Events, in order, per layer (62 at most):
+#   prep (xn, og, xm: 3 elements each): element 0 also G (the last GEMV exit); then T at entry,
+#     T after the FWHT (before the per-128 table)
+#   [linear] each DeltaNet head: T at the record copy, T at the delta step
 #   each down piece's first h element: G, T
 # then slot 62 = the band's end time, slot 63 = the event count.
 # Timer reads go over the processor bus, which the stream must enable first: only dux.py (the
@@ -395,6 +413,7 @@ __attribute__((weak)) uint32_t lxs_buf[64] __attribute__((aligned(64)));
 __attribute__((weak)) uint32_t lxs_n;      // events logged this layer
 __attribute__((weak)) uint32_t lxs_g;      // the last GEMV call's exit time
 __attribute__((weak, noinline)) void lxs_mark(uint32_t v) { lxs_buf[lxs_n & 63u] = v; lxs_n = lxs_n + 1; }
+__attribute__((weak, noinline)) void lxs_t() { lxs_mark(lxs_now()); }   // one argument-free call per site
 }
 """
 
@@ -404,7 +423,8 @@ def stamp_files(fs: dict[str, str]) -> dict[str, str]:
         assert fs[name].count(old) == 1, (name, old)
         fs[name] = fs[name].replace(old, new)
 
-    for name in ("gemv_t2_gy.cc", "dense_act.cc", "dense_prep.cc", "dense_prep_f32.cc", "dnx_delta.cc"):
+    for name in ("gemv_t2_gy.cc", "dense_act.cc", "dense_prep.cc", "dense_prep_f32.cc", "dnx_delta.cc",
+                 "dnx_vcopy.cc"):
         fs[name] = STAMP_PRE + fs[name]
     sub("gemv_t2_gy.cc", "// per_band | sub << 16\n}",
         "// per_band | sub << 16\n  lxs_g = LXS_NOW();\n"
@@ -417,11 +437,16 @@ def stamp_files(fs: dict[str, str]) -> dict[str, str]:
         "  }\n}")
     assert fs["dense_act.cc"].endswith("}\n}\n")
     fs["dense_act.cc"] = fs["dense_act.cc"][:-4] + "  lxs_g = LXS_NOW();\n}\n}\n"
+    prep_call = "  gemv_t2_prep_groups(e, tab, (unsigned)K, g0, ng);\n"
     sub("dense_prep.cc", "  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n",
-        "  lxs_mark(lxs_g);\n  lxs_mark(LXS_NOW());\n  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n")
+        "  if (i == 0) lxs_mark(lxs_g);\n  lxs_t();\n"
+        "  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n")
+    sub("dense_prep.cc", prep_call, "  lxs_t();\n" + prep_call)
     sub("dense_prep_f32.cc", "  xh_wht_f32((const float *)e, e);\n",
-        "  if (i == 0) { lxs_mark(lxs_g); lxs_mark(LXS_NOW()); }\n  xh_wht_f32((const float *)e, e);\n")
-    sub("dnx_delta.cc", "  dnx_delta_head(ds);\n", "  lxs_mark(LXS_NOW());\n  dnx_delta_head(ds);\n")
+        "  if (i == 0) { lxs_mark(lxs_g); lxs_t(); }\n  xh_wht_f32((const float *)e, e);\n")
+    sub("dense_prep_f32.cc", "  if (K < 0) {\n", "  if (K < 0) {\n    if (i == 0) { lxs_mark(lxs_g); lxs_t(); }\n")
+    sub("dnx_delta.cc", "  dnx_delta_head(ds);\n", "  lxs_t();\n  dnx_delta_head(ds);\n")
+    sub("dnx_vcopy.cc", "float *__restrict ds) {\n", "float *__restrict ds) {\n  lxs_t();\n")
     return fs
 
 

@@ -414,6 +414,58 @@ static inline void gqd_t2_scales(const bfloat16 *__restrict sp, aie::vector<bflo
   sv[3] = aie::concat(b1.first, b1.second);
 }
 
+#ifdef GQD_BFPA
+// GQP_XBFP: the same A blocks written as bfp16ebs8 (gemm_bfp_mm.cc reads them without converting).
+// (code - 1) * s is exact in bf16 and in the fp32 accumulator, so converting the product straight
+// to bfp16 here gives the bytes the bf16 path's matmul made from its bf16 copy of it: the same
+// accumulator value, the same conversion, the same rounding mode.
+__attribute__((noinline)) inline void gqd_t2_ky_bfp(const uint8_t *__restrict band, unsigned ky,
+                                                    bfp16ebs8 *__restrict scratch) {
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  const unsigned g = ky * GQD_KC / 128;
+  // gemm_bfp_mm.cc's A order is [row block pair][k block][row block % 2], and walking it in that
+  // order -- chunk, pair, k block, then the pair's two row blocks -- writes every block where the
+  // last one ended, so one output stream serves the whole call with no seeks (a seek per block
+  // cost a flush per block and spilled; and sixteen unrolled copies of seek + push crashed
+  // Peano's encoder, "Register not in mBMs"). Each pair loads and transposes its code bytes
+  // again, 32 extra 64-byte loads a call against 128 blocks of work.
+  aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out(scratch);
+  AIE_LOOP_RANGE(2, 2)
+  for (unsigned c = 0; c < 2; ++c) {
+    const uint8_t *__restrict chunk = band + c * GQD_T2_BODY;
+    aie::vector<bfloat16, 64> sv[4];
+    gqd_t2_scales(reinterpret_cast<const bfloat16 *>(chunk) + g * 32, sv);
+    const uint8_t *__restrict codes = chunk + 128 + ky * GQD_T2_COLA * 64;
+    AIE_LOOP_UNROLL_FULL
+    for (unsigned pr = 0; pr < 2; ++pr) {
+      AIE_LOOP_RANGE(GQD_T2_COLA, GQD_T2_COLA)
+      for (unsigned kb8 = 0; kb8 < GQD_T2_COLA; ++kb8) {
+        const aie::vector<int8_t, 64> q =
+            aie::vector_cast<int8_t>(aie::transpose(aie::load_v<64>(codes + kb8 * 64), 8, 8));
+        AIE_LOOP_UNROLL_FULL
+        for (unsigned jj = 0; jj < 2; ++jj) {
+          const unsigned j = 2 * pr + jj;      // row block c * 4 + j: rows 8j..8j+7 of chunk c
+          const aie::vector<int8_t, 64> f =
+              aie::sub(aie::bit_and((int8_t)(3u << (2 * j)), q), (int8_t)(1u << (2 * j)));
+          const aie::vector<bfloat16, 64> cf = aie::to_float<bfloat16>(f, 2 * j);
+          out << aie::mul(cf, sv[j]).template to_vector<bfp16ebs8>();
+        }
+      }
+    }
+  }
+}
+
+__attribute__((noinline)) inline void gqd_dequant_ky_bfp(const uint8_t *__restrict band, unsigned ky,
+                                                         uint8_t *__restrict nib_scr, bfp16ebs8 *__restrict scratch) {
+  event0();
+  (void)nib_scr;
+#if !defined(GQD_NULL_GATHER) && !defined(GQD_NULL_DEQUANT)
+  gqd_t2_ky_bfp(band, ky, scratch);
+#endif
+  event1();
+}
+#endif
+
 __attribute__((noinline)) inline void gqd_t2_ky(const uint8_t *__restrict band, unsigned ky,
                                                 bfloat16 *__restrict scratch) {
   aie::set_rounding(aie::rounding_mode::conv_even);

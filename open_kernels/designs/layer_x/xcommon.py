@@ -236,7 +236,9 @@ def kernels(inc, t):
         # activation preps (the core loops over 4 KB elements; the kernel derives the blocks).
         if NEED_Q4_GMS and not MIXED:
             k["gms"] = ef(GMS_SYM, [e, tab, ms, i32, i32, i32])
-        k["act"] = ef("dense_act", [ms, y])
+        # t2: the main core's one vecmath user, with vexpN / vrecipN as loops (vecmath.h
+        # VECMATH_COMPACT: same operations, ~1 KB less program; dense_act runs 68 times a layer)
+        k["act"] = ef("dense_act", [ms, y], OS + ["-DVECMATH_COMPACT"] if T2 else None)
         # t2: the preps (Hadamard, og signs, per-128 table) at -Oz -- they run once per x
         # element, and the 27B's lx main core has no program memory to spare (OPEN-QUANT-T2)
         k["prep"] = ef("dense_prep", [x, tab, i32, i32], OZ if T2 else None)
@@ -373,13 +375,16 @@ def prep_stream(xin, prep, tab, kk, n_elems):
         xin.release(1)
 
 
-def ffn_body(win, xin, yout, B, K):
+def ffn_body(win, xin, yout, B, K, rt=None):
     """up | gate per 64-row band into `ms`, act(gate) * up out through y, then the down
-    GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements)."""
+    GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements).
+    `rt` (dux.py RT_COUNTS) gives the short loops' counts as run-time values -- nx (xm elements),
+    ng (w elements per K = HID band), np (down pieces) and the per-piece buffers hk / hn / hg (K,
+    h elements, w elements per band) -- so the same loops run with counts LLVM cannot unroll."""
     tab, ms = B["tab"], B["ms"]
     held = FFN.XM_ELEMS <= X_DEPTH             # else streamed: the bands read only the table
     if not held:
-        prep_stream(xin, K["prep"], tab, HID, FFN.XM_ELEMS)
+        prep_stream(xin, K["prep"], tab, HID, FFN.XM_ELEMS if rt is None else rt["nx"])
     elif FFN.XM_ELEMS == 1:
         me = xin.acquire(FFN.XM_ELEMS)
         K["prep"](me, tab, HID, 0)
@@ -393,6 +398,9 @@ def ffn_body(win, xin, yout, B, K):
         gms, pb_h, ng_h = K["gyms"], per_band(HID), n_groups(HID)
     else:
         gms, pb_h, ng_h = K["gms"], per_band(HID), n_groups(HID)
+    if rt is not None:
+        assert not MIXED and "ffn" not in Q8 and pb_h == ng_h, (pb_h, ng_h)
+        pb_h = ng_h = rt["ng"]
 
     def band(we, ye, g, dst):
         """One up | gate band into ms + dst. The folded entry takes the y pointer too, so
@@ -421,6 +429,17 @@ def ffn_body(win, xin, yout, B, K):
         yout.release(1)
     if held:
         xin.release(FFN.XM_ELEMS)
+    if DOWN_SPLIT and rt is not None:
+        # The pieces below as ONE run-time loop over a per-piece table (dux.py RT_COUNTS): one
+        # call site for every h element and one GEMV body for both pieces.
+        assert "ffn" not in Q8 and not MIXED
+        for p in range_(rt["np"]):
+            for i in range_(rt["hn"][p]):
+                he = xin.acquire(1)
+                K["prepf"](he, tab, rt["hk"][p], i)
+                xin.release(1)
+            gemv_bands(win, yout, tab, K["gy"], FFN.DOWN_PC, rt["hg"][p], rt["hg"][p], 2)
+        return
     if DOWN_SPLIT:
         # The down GEMV in K pieces (recipes/qwen36moe.py down_split): each piece's h elements
         # into the table -- which only ever holds one piece -- then that piece's bands, an
@@ -450,11 +469,15 @@ def piece_tap(off: int, band_stride: int, n: int, nbands: int) -> TensorAccessPa
 
 
 def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss,
-                 A_BYTES, A_XM, A_H, A_OUT2, POOL_UP, POOL_GATE, POOL_DOWN_FFN, A_OUT2B=0):
+                 A_BYTES, A_XM, A_H, A_OUT2, POOL_UP, POOL_GATE, POOL_DOWN_FFN, A_OUT2B=0, hprep=None):
     """Host side of ffn_body. The h drains are issued before the per-band weight fills so a
     core is never blocked on a full y fifo while the host is still pacing its w stream.
     With the down GEMV split, each piece is its h elements, its strided slice of every band
-    and its own output region (A_OUT2, then A_OUT2B)."""
+    and its own output region (A_OUT2, then A_OUT2B).
+    hprep = (hpi, hpo, A_HT) (dux.py HPREP): the second piece's h goes to the prep core right
+    behind the first piece's x fill, comes back through H/32 as bf16 at act[A_HT], and the cores'
+    x fill for that piece reads it there. The wait for it comes after the first piece's transfers
+    are issued, so it blocks nothing the first piece needs."""
     bb_h, bb_f, yb = role_band_bytes("ffn", HID), role_band_bytes("ffn", FF), BAND_ROWS * 4
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, FFN.XM_ELEMS * ELEM))
     for c in range(N_CORES):
@@ -467,8 +490,19 @@ def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss
     if DOWN_SPLIT:
         assert len(DOWN_SPLIT) == 2 and A_OUT2B, (DOWN_SPLIT, A_OUT2B)
         k0 = 0
-        for k, dst in zip(DOWN_SPLIT, (A_OUT2, A_OUT2B)):
-            pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H + k0 * 4, k * 4))
+        for p, (k, dst) in enumerate(zip(DOWN_SPLIT, (A_OUT2, A_OUT2B))):
+            if p == 1 and hprep is not None:
+                ph.finish()                                   # piece 1 through H/32, bf16, is in DDR
+                pipe_x.fill(x_prod, a_act, bt(A_BYTES, a_ht, -(-k * 2 // ELEM) * ELEM))
+            else:
+                pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H + k0 * 4, k * 4))
+            if p == 0 and hprep is not None:
+                # behind piece 0's x fill (its h preps start at once) and before its weights (not
+                # needed for the ~20 us those preps take): piece 1's h to the prep core and back
+                hpi, hpo, a_ht = hprep
+                ph = Pipeline(3)
+                ph.fill(hpi, a_act, bt(A_BYTES, A_H + k * 4, DOWN_SPLIT[1] * 4))
+                ph.drain(hpo, a_act, bt(A_BYTES, a_ht, DOWN_SPLIT[1] * 2))
             for c in range(N_CORES):
                 pipe_w.fill(w_prods[c], a_pool, piece_tap(POOL_DOWN_FFN + c * FFN.DOWN_PC * bb_f + role_band_bytes("ffn", k0),
                                                           bb_f, role_band_bytes("ffn", k), FFN.DOWN_PC))

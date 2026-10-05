@@ -52,6 +52,10 @@ struct AttnGeometry {
     uint64_t kv_row = 2048;
     uint64_t ptab_row = 1024;
     uint64_t window = 0;             ///< rows of a sliding window (0 = every cached row); Gemma's local layers
+    /// Cached rows the kernel takes per call when it walks the WINDOW in whole blocks and the new
+    /// position's row in a block of its own (attn.h ATTN_BLOCK_WIN, the merged dense layer image).
+    /// 1 = every other kernel: the row count is the window's own.
+    uint64_t rb_win = 1;
 };
 
 /// The cached rows position `pos` attends to: [start, pos), streamed as nf rows (>= 1: position 0
@@ -264,6 +268,15 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
                        const AttnGeometry& g = AttnGeometry{}) {
     uint64_t start, nf;
     attn_window(pos, g.window, &start, &nf);
+    if (g.rb_win > 1) {
+        // The window as whole blocks (attn.h ATTN_BLOCK_WIN): ceil(valid / rb) of them, and one
+        // all-padding block when there is nothing cached (a fill cannot be empty). The rows past
+        // `pos` are padding the kernel masks; the highest is pos + rb - 2 at most, so the KV
+        // buffer carries rb rows of slack above the context capacity (Core::load_weights).
+        const uint64_t valid = pos - start;
+        const uint64_t nb = (valid + g.rb_win - 1) / g.rb_win;
+        nf = g.rb_win * (nb ? nb : 1);
+    }
     for (const auto& p : table) {
         uint64_t v = p.kind == 0   ? nf * g.kv_row / 4  // a BD length is in words
                      : p.kind == 1 ? pos * g.kv_row

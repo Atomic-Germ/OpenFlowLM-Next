@@ -112,6 +112,7 @@ struct GemmBlockProgram {
     std::string kind;             ///< dense | linear | full
     bool y_tn = false;            ///< every GEMM's y is [T, N], token-major, not [N, T] (OPEN-GEMM-T2)
     uint64_t x_tile_k = 64;       ///< k per activation tile the GEMM streams (128 for OPEN-GEMM-T2)
+    bool x_bfp = false;           ///< the GEMM streams x as bfp16ebs8 tiles, 9 B per 8 values (GQP_XBFP, OPEN-GEMM-T2)
     std::vector<Step> program;
     std::map<std::string, GemmWeight> weights;
     double eps = 0;               ///< RMSNorm eps for the host norms
@@ -171,6 +172,10 @@ struct KernelDesc {
     std::string insts;                       ///< relative path of insts.bin
     std::string patch;                       ///< "" | moeroute2 | attnpos
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
+    /// attnpos: rows per block when the kernel walks the window in whole blocks and the new row in
+    /// a block of its own (attn.h ATTN_BLOCK_WIN); the driver pads the streamed count to match, or
+    /// the fifo deadlocks. 1 = unblocked.
+    uint64_t rb_win = 1;
 };
 
 /// A global sized max_ctx x row: the position record table(s).

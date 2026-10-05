@@ -131,17 +131,24 @@ def test_t2_pack_plan_and_gemm_weights():
 def test_t2_gemm_builds_and_token_major_output():
     plain = ModelSpec.from_hf_config(json.loads((FIX / "config_qwen35_27b.json").read_text(encoding="utf-8")))
     t2_env = {"GQP_BFP16": "1", "GQP_WFMT": "t2", "GQP_KT": "128", "GQP_YT": "1",
-              "GQP_T2_STRIDE": str(Q36.T2_CHUNK)}
+              "GQP_T2_STRIDE": str(Q36.T2_CHUNK), "GQP_XBFP": "1"}
     for spec, t2 in ((_spec("t2"), True), (_spec("q4_1"), False), (plain, False)):
         gemms = {k: b for k, b in Q35.builds(spec).items() if k.startswith("gemm_")}
         assert gemms, "the 27B has a block route"
         for b in gemms.values():
             extra = {k: v for k, v in b["env"].items() if k not in ("GQP_N", "GQP_K", "GQP_T")}
             assert extra == (t2_env if t2 else {})      # a q4_1 spec's build is the one it always was
-            assert b["build_dir"].endswith("_t2ky") is t2
-        for g in Q35.gemm_route(spec)["layer_types"].values():
+            assert b["build_dir"].endswith("_t2kyx") is t2
+        route = Q35.gemm_route(spec)
+        for g in route["layer_types"].values():
             assert g.get("y_tn", False) is t2
             assert g.get("x_tile_k", 64) == (128 if t2 else 64)
+            assert g.get("x_bfp", False) is t2          # the activation streams as bfp16 blocks ...
+        T = next(iter(route["layer_types"].values()))["t"]
+        for name, size in route["globals"].items():
+            if name.startswith("gemm_x_k"):             # ... 9 B per 8 values instead of 16
+                K = int(name[len("gemm_x_k"):])
+                assert size == (K * T * 9 // 8 if t2 else K * T * 2)
 
 
 def _gen_kernels():
@@ -208,14 +215,27 @@ def test_rotated_head_runs_as_t2_whatever_the_layers_stream(quant):
     # unpadded: exactly PrismML's own PQ2_0 bytes for the head (34 B per 128 weights)
     assert Q35.LM_T2_CHUNK == 2176 and head["pool_bytes"] == nch * 2176 == spec.vocab * spec.hidden // 128 * 34
     prog = Q35.programs(spec)
-    assert prog["contexts"]["lm"] == "lm_head_t2/final.xclbin" and prog["kernels"]["lm"]["build"] == "lm_head_t2"
-    assert prog["tail"][-1] == {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}
+    # On the all-t2 spec the merged layer image streams the head itself, as its third part, in the
+    # layer context (OPEN-DECODE-ONE-CONTEXT-DENSE); the q4_1 build keeps lm_head_t2's own image.
+    tail = Q35.tail_in_layer(spec)
+    assert tail == (quant == "t2")
+    if tail:
+        assert prog["kernels"]["lm"] == {"context": "layer", "insts": "lm/insts.bin", "build": "lm"}
+        assert prog["tail"] == [{"op": "run", "kernel": "lm",
+                                 "args": ["lmpool", "xres", "normw", "logits", "lmact", "ptab"]}]
+    else:
+        assert prog["contexts"]["lm"] == "lm_head_t2/final.xclbin" and prog["kernels"]["lm"]["build"] == "lm_head_t2"
+        assert prog["tail"][-1] == {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}
     lay = Q35.manifest_layout(spec, 4096)
     assert prog["globals"]["lmpool"] == lay["lmhead_pool_bytes"] == head["pool_bytes"]
     assert lay["lmhead_chunk_bytes"] == 2176
     b = Q35.builds(spec)
-    assert "lm_head_q8" not in b and b["lm_head_t2"]["env"] == {
-        "LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": "8"}
+    assert "lm_head_q8" not in b
+    if tail:
+        assert "lm_head_t2" not in b and b["lm"]["env"] == {"DUX_PART": "2"}
+    else:
+        assert b["lm_head_t2"]["env"] == {
+            "LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": "8"}
 
 
 def test_unrotated_head_keeps_the_q8_head():

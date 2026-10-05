@@ -5,6 +5,15 @@ boundary (OPEN-DECODE-ONE-CONTEXT; the dense twin of the MoE family's ux.py upst
 
     part 0 = lx.py's dense stream   (ln -> qkv|z -> glue -> DeltaNet -> post -> out -> ln -> FFN)
     part 1 = ax.py's dense stream   (ln -> q|gate|k|v -> attention -> o -> ln -> FFN)
+    part 2 = the tail               (the final norm -> the rotated ternary lm head)
+
+Part 2 (OPEN-DECODE-ONE-CONTEXT-DENSE): the tail used to be two more images (ln, lm_head_t2), so
+a step switched hardware context three times (layer -> ln -> lm -> layer). Here the final norm is
+the norm helper's stage 1 with the final norm's weight, and the head is the main cores' first
+GEMV with nbands = vocab / 64 / 8 -- the head is 64-row bands of K = HID in the layers' own t2
+chunk law, so the same entry streams it -- and a fourth RTP word (`rest` = 0) skips the rest of
+the layer body. The norm helper has no such word: it runs its stage 2 and 3 on junk elements the
+tail stream feeds it and drains to a scratch region, so it is back on stage 1 for the next layer.
 
 Two CompileTime `part` values, hence two instruction streams over one image. The manifest names
 them lx / ax and points both at one context, "layer", so the engine's submit-ahead (which queues
@@ -47,10 +56,12 @@ through the other's.
   (2, 4)       glue              linear only; MOVED from lx.py's Tile(2, 3), which is attention
                                  core 0; rows 4 and 5 are empty in both designs
   (2..7, 3)    attention         full only; parked on `ain` through a linear layer
+  (7, 4)       h prep            both types (HPREP, t2 only): the down projection's second K piece
+                                 through H/32; parked on `hpi` through the tail
 
 SHIM BUDGET (2 fills + 2 drains per shim tile, 16 + 16 over the array)
-  fills  14: lni+w0 | x+w1 | side+w2 | gact+w3 | pin+w4 | ain+w5 | w6 | w7
-  drains 13: lno+y0 | pout+y1 | gout+y2 | ogj+y3 | aout+y4 | y5 | y6 | y7
+  fills  14: lni+w0 | x+w1 | side+w2 | gact+w3 | pin+w4 | ain+w5 | w6 | w7        (+ hpi on (7, 0): 15)
+  drains 13: lno+y0 | pout+y1 | gout+y2 | ogj+y3 | aout+y4 | y5 | y6 | y7        (+ hpo on (7, 0): 14)
 lx.py + ax.py's endpoints would need 17 drains (the 27B's attention runs on six cores, each
 draining its own og element). So attention cores 1..5's og elements are JOINED in a memtile into
 one element (`ogj`, one 10 KB drain to act[AA_OG + one core's og]); core 0 keeps `aout` for the
@@ -134,6 +145,43 @@ DN_HEADS_PC = X.DN_HEADS_PC                      # RTP word 1, linear stream (fu
 if XN_ELEMS <= X.X_DEPTH or OG_ELEMS <= X.X_DEPTH:
     sys.exit("dux.py: the merged main-core program streams the xn and og element by element (prep_stream)")
 
+# The main core's short loop counts as data words (t2 only). With compile-time counts LLVM unrolled
+# every short loop of main_body into one call site per trip -- on the t2 27B 17 dense_prep_f32 call
+# sites, 9 dense_prep, 16 gemv_t2_gy and 8 gemv_t2_gms, each with its acquire and release, a third
+# of the core's control program. Read from per-core constant buffers (initialised in the image and
+# never written by the stream, so unlike the RTP words they cost no instruction per dispatch) the
+# counts are opaque to LLVM, and every loop keeps one call site. The two down pieces become one
+# run-time loop over a per-piece table. Same calls in the same order, so the same bytes out. Only
+# the t2 spec, whose main core needs the room: every other merged image builds exactly as before.
+#   kc: [xn / og / xm elements, w elements per K = HID band, per K = OUT_K band, down pieces]
+#   hk / hn / hg: per down piece, K, h elements and w elements per band
+RT_COUNTS = X.T2 and len(X.DOWN_SPLIT) == 2 and X.PER_CALL == 1
+if RT_COUNTS:
+    assert OG_ELEMS == XN_ELEMS == X.FFN.XM_ELEMS, (OG_ELEMS, XN_ELEMS, X.FFN.XM_ELEMS)
+    assert all(X.n_groups(k) == X.per_band(k) for k in (HID, OUT_K, *X.DOWN_SPLIT))
+    KC = [XN_ELEMS, X.n_groups(HID), X.n_groups(OUT_K), len(X.DOWN_SPLIT)]
+    KH = {"hk": list(X.DOWN_SPLIT), "hn": [k * 4 // ELEM for k in X.DOWN_SPLIT],
+          "hg": [X.n_groups(k) for k in X.DOWN_SPLIT]}
+
+# The down projection's second K piece through H/32 on a row-4 prep core (OPEN-HADAMARD). The main
+# cores spend ~2.4 us a 1024 block on the Hadamard, and piece 1's nine blocks (~22 us a layer) sat on
+# the critical path although nothing needs them before piece 0's h preps and GEMV (~250 us) are done.
+# So piece 1's f32 h goes to the prep core as soon as the up | gate bands land; it writes each block
+# through xh_wht_f32 -- the routine the main cores ran -- as bf16 into a region of act that is dead
+# by the FFN (the qkv bands, or q | gate), and the cores' x fill for piece 1 reads that instead: five
+# bf16 elements whose prep is the per-128 table alone (dense_prep_f32 with K < 0). The same
+# arithmetic on the same values, so the same bytes. Endpoints: one fill and one drain on shim (7, 0),
+# both channels free; the core (7, 4) is otherwise empty. DUX_HPREP=0 at export builds without it.
+HPREP = RT_COUNTS and os.environ.get("DUX_HPREP", "1") != "0"
+HPREP_TILE = Tile(7, 4)
+if HPREP:
+    H1_K = X.DOWN_SPLIT[1]
+    H1_BLOCKS = H1_K // 1024
+    H1_X = -(-H1_K * 2 // ELEM)                   # bf16 x elements the cores read for piece 1 (5 at the 27B)
+    assert H1_K % 1024 == 0 and H1_X * ELEM <= A_Z - A_QKV and H1_X * ELEM <= AA_KVN - AA_QG, (H1_K, H1_X)
+    KH["hk"][1] = -H1_K                           # dense_prep_f32: K < 0 = already through H/32, bf16
+    KH["hn"][1] = H1_X
+
 # ---- the linear layer's helpers (lx.py)
 NCH, NHEAD = D.NCH, D.NHEAD
 TILE, NT = D.TILE, D.NT
@@ -155,6 +203,11 @@ ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATT
               f"-DATTN_VEXP={A.VEXP}", f"-DATTN_NHL={A.NHL}"]
 if A.RB > 1:
     ATTN_FLAGS.append(f"-DATTN_RB={A.RB}")
+    # the block-only walk in this image's window-first order (attn.h ATTN_BLOCK_WIN: the window in
+    # whole blocks, the new row in a block of its own, no single-row kernel), with PR #115's room
+    # makers -- the scalar fp ops as integer routines and the score phase as one reduction tree,
+    # both bit-identical to what they replace; recipes/attnknobs.py gives this image RB 4
+    ATTN_FLAGS += ["-DATTN_BLOCK_WIN=1", "-DATTN_INTFP=1", "-DATTN_TREE=1"]
 for _k, _v in probe_env().items():
     if _k not in ("ATTN_RB", "ATTN_FAST"):
         ATTN_FLAGS.append(f"-D{_k}={_v}")
@@ -171,9 +224,24 @@ OG_BYTES = NHL * HD * 2                          # one core's og element
 WINDOW_FIRST = os.environ.get("DUX_WINDOW_FIRST", "1") != "0"
 OGJ_TILE = Tile(3, 1)                            # the memtile joining attention cores 1..5's og
 
-PART = int(os.environ.get("DUX_PART", 0))        # 0 = the linear stream (lx), 1 = the full stream (ax)
-if PART not in (0, 1):
-    sys.exit(f"dux.py: DUX_PART={PART} (0 = lx, 1 = ax)")
+PART = int(os.environ.get("DUX_PART", 0))        # 0 = the linear stream (lx), 1 = the full stream (ax), 2 = lm
+if PART not in (0, 1, 2):
+    sys.exit(f"dux.py: DUX_PART={PART} (0 = lx, 1 = ax, 2 = lm)")
+
+# ---- part 2, the tail: the head's 64-row K = HID bands, split evenly over the main cores, in
+# the layers' t2 chunk law (recipes/qwen35.py head_t2 / lm_head_plan: t2_perm, unpadded chunks)
+LM_BANDS = SPEC.vocab // X.BAND_ROWS
+LM_BANDS_PC = LM_BANDS // N_CORES
+LM_BAND_BYTES = X.role_band_bytes("linear", HID)  # 40 chunks of K = 5120 at the 27B
+LM_POOL = LM_BANDS * LM_BAND_BYTES
+LM_ACT = 64 * 1024                                # the tail's act: hn at 0, junk drains at LM_JUNK
+LM_JUNK = 32 * 1024
+from recipes import qwen35 as _Q35                         # noqa: E402
+TAIL = _Q35.tail_in_layer(SPEC)                  # the image carries part 2 (OPEN_LAYER_TAIL=0 at export: no)
+if PART == 2:
+    if not TAIL or LM_POOL != _Q35.lm_t2_pool_bytes(SPEC):
+        sys.exit("dux.py: part 2 needs the rotated ternary head in the layers' chunk law, split evenly over the cores")
+    assert XN_ELEMS * ELEM <= LM_JUNK and 3 * ELN <= LM_ACT - LM_JUNK, (XN_ELEMS, ELN)
 
 # ONE set of buffer-argument shapes for both streams, so both builds emit the same image.
 CONSTS_T = max(C_BYTES, CA_BYTES)
@@ -196,13 +264,13 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     u8_4k = np.ndarray[(ELEM,), np.dtype[np.uint8]]
     u8_2k = np.ndarray[(2048,), np.dtype[np.uint8]]
     u8_ln = tl["u8_ln"]
-    pool_ty = np.ndarray[(POOL_BYTES,), np.dtype[np.uint8]]
+    pool_ty = np.ndarray[(LM_POOL if part == 2 else POOL_BYTES,), np.dtype[np.uint8]]
     xres_ty = np.ndarray[(HID,), np.dtype[np.float32]]
     consts_ty = np.ndarray[(CONSTS_T,), np.dtype[np.uint8]]
     state_ty = np.ndarray[(STATE_T,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(ACT_T,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(PTAB_BYTES,), np.dtype[np.uint8]]
-    rtp_ty = np.ndarray[(3,), np.dtype[np.int32]]
+    rtp_ty = np.ndarray[(4,), np.dtype[np.int32]]
     # glue / post (lx.py)
     nw_ty = np.ndarray[(SPEC.lin_value_dim,), np.dtype[bfloat16]]
     f32 = np.ndarray[(NHEAD,), np.dtype[np.float32]]
@@ -255,8 +323,10 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     f_k = af("attn_k", [u8_1k, b256, f64, f256, b512, np.int32])
     f_v = af("attn_v", [u8_1k, b512, np.int32])
     f_init = af("attn_init", [foacc, fml])
-    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg)
-    f_stepn = af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg)
+    # RB > 1 here is attn.h ATTN_BLOCK_WIN: no single-row kernel; the new row is a block of its own
+    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg) if RB == 1 else None
+    f_stepn = (af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg) if RB == 1 else
+               af("attn_stepb_nr", [b512, b512, fq, foacc, fml] + h0_arg))
     f_stepb = af("attn_stepb", [u8_1k] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg) if RB > 1 else None
     f_fin = af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32])
 
@@ -279,21 +349,57 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                                  names=[f"og{c}" for c in range(1, ACORES)])
 
     # The per-core parameter words. Zeros in the image: the counts belong to the stream.
-    rtp = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(3, dtype=np.int32), use_write_rtp=True)
+    rtp = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(4, dtype=np.int32), use_write_rtp=True)
            for c in range(N_CORES)]
+
+    def count_bufs(c):                                     # RT_COUNTS' constant words (none otherwise)
+        if not RT_COUNTS:
+            return []
+        i32n = lambda v: np.array(v, dtype=np.int32)
+        return ([Buffer(np.ndarray[(len(KC),), np.dtype[np.int32]], name=f"kc{c}", initial_value=i32n(KC))]
+                + [Buffer(np.ndarray[(len(v),), np.dtype[np.int32]], name=f"{n}{c}", initial_value=i32n(v))
+                   for n, v in KH.items()])
 
     # ---- the main cores: lx's dense program with nA and nh read at run time
     def main_body(win, xin, yout, my_rtp, *args):
+        if RT_COUNTS:
+            kc, hk, hn, hg, *args = args
+            nx, ng_hid, ng_out = kc[0], kc[1], kc[2]
+        else:
+            nx, ng_hid, ng_out = XN_ELEMS, X.n_groups(HID), X.n_groups(OUT_K)
         B, K = X.unpack_args(args)
         tab = B["tab"]
-        X.prep_stream(xin, K["prep"], tab, HID, XN_ELEMS)      # the xn: the stream wrote the words first
-        nbands = my_rtp[0]                                     # QKV_PC + Z_PC | 2 Q_PC + 2 KV_PC
+        X.prep_stream(xin, K["prep"], tab, HID, nx)            # the xn: the stream wrote the words first
+        if TAIL:
+            # One padding x element after the xn and one after DeltaNet, so the x fifo advances an
+            # even number of elements through the body and through the `rest` loop (3 + 1, and
+            # 3 + 3 + 17 + 1): the objectfifo transform then keeps its static buffer indices across
+            # that 0/1-trip loop. With the odd counts the core program was 448 B larger.
+            xe = xin.acquire(1)
+            xin.release(1)
+        nbands = my_rtp[0]                                     # QKV_PC + Z_PC | 2 Q_PC + 2 KV_PC | the head's
         nheads = my_rtp[1]                                     # DN_HEADS_PC | 0
         nslices = my_rtp[2]                                    # DN_SLICES (run-time: no unrolled pass 1)
-        X.gemv_bands(win, yout, tab, K["gy"], nbands, X.n_groups(HID), X.per_band(HID), 2)
-        X.dn_body(win, yout, B, K, nheads, nslices)
-        X.prep_bands(win, xin, yout, B, K, OUT_K, OG_ELEMS, OUT_PC, "linear_out")
-        X.ffn_body(win, xin, yout, B, K)
+        X.gemv_bands(win, yout, tab, K["gy"], nbands, ng_hid, ng_hid if RT_COUNTS else X.per_band(HID), 2)
+
+        def layer_rest():
+            X.dn_body(win, yout, B, K, nheads, nslices)
+            if TAIL:
+                xe = xin.acquire(1)
+                xin.release(1)
+            if RT_COUNTS:                                      # prep_bands' two halves, counts read
+                X.prep_stream(xin, K["prep"], tab, OUT_K, nx)
+                X.gemv_bands(win, yout, tab, K["gy"], OUT_PC, ng_out, ng_out, 2)
+                X.ffn_body(win, xin, yout, B, K, dict(nx=nx, ng=ng_hid, np=kc[3], hk=hk, hn=hn, hg=hg))
+            else:
+                X.prep_bands(win, xin, yout, B, K, OUT_K, OG_ELEMS, OUT_PC, "linear_out")
+                X.ffn_body(win, xin, yout, B, K)
+
+        if TAIL:
+            for _ in range_(my_rtp[3]):                        # 1 | 0: the tail stops after the head
+                layer_rest()
+        else:
+            layer_rest()
 
     # ---- glue and post (lx.py's dense bodies)
     def glue_body(sin, ain, oout, acc_a, acc_b, decay, beta, qk, vt, xn, fab, fsmall, fconv, femit, fcopy):
@@ -380,14 +486,10 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         def window():
             fi(oacc, ml)
             if RB > 1:
-                for _ in range_(pb[4]):
+                for _ in range_(pb[4]):                    # whole blocks, the tail past pos masked
                     e = ain.acquire(2 * RB)
                     fsb(*([e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb, h0]))
                     ain.release(2 * RB)
-                for _ in range_(pb[5]):
-                    e = ain.acquire(2)
-                    fs(e[0], e[1], qs, oacc, ml, pb, h0)
-                    ain.release(2)
             else:
                 for _ in range_(pb[1]):
                     e = ain.acquire(2)
@@ -415,12 +517,13 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             ain.release(2)
 
     if RB > 1:
-        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, fs, fsn, ff, fsb):
-            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, fs, fsn, ff, fsb, 0)
+        # no single-row kernel (ATTN_BLOCK_WIN): fsn is attn_stepb_nr, the new row's own block
+        def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, fsn, ff, fsb):
+            _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, None, fsn, ff, fsb, 0)
 
         def make_attn_body(c):
-            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, fs, fsn, ff, fsb):
-                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, fs, fsn, ff,
+            def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, fsn, ff, fsb):
+                _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq_, fk, fv, fi, None, fsn, ff,
                       fsb, c)
             return body
     else:
@@ -444,9 +547,27 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     workers = [Worker(ln_fn, fn_args=ln_args, tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
-                              fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), rtp[c],
+                              fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), rtp[c], *count_bufs(c),
                                        *X.worker_args(X.core_buffers(t, c), K)],
                               tile=Tile(c, 2), stack_size=0x1800))
+    if HPREP:
+        f32_1k = np.ndarray[(1024,), np.dtype[np.float32]]
+        b16_1k = np.ndarray[(1024,), np.dtype[bfloat16]]
+        of_hpi = ObjectFifo(f32_1k, name="hpi", depth=2)
+        of_hpo = ObjectFifo(b16_1k, name="hpo", depth=2)
+        f_hwht = ExternalFunction("dense_wht_f32", source_file=str(HERE / "dense_wht_f32.cc"),
+                                  arg_types=[f32_1k, b16_1k], include_dirs=inc, compile_flags=X.OZ)
+
+        def hprep_body(hin, hout, fw):
+            for _ in range_(H1_BLOCKS):
+                e = hin.acquire(1)
+                o = hout.acquire(1)
+                fw(e, o)
+                hout.release(1)
+                hin.release(1)
+
+        workers.append(Worker(hprep_body, fn_args=[of_hpi.cons(), of_hpo.prod(), f_hwht], tile=HPREP_TILE,
+                              stack_size=0x800))
     workers.append(Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), Buffer(nw_ty, name="nwb"), post_fn, post_copy],
                           tile=Tile(1, 3), stack_size=0x1800))
     workers.append(Worker(glue_body,
@@ -455,7 +576,8 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                                    Buffer(f32, name="beta"), Buffer(fqk, name="qk"), Buffer(fvt, name="vt"),
                                    Buffer(fxn, name="xnb"), f_ab, f_small, f_conv, f_emit, f_copy],
                           tile=GLUE_TILE, stack_size=0x1800))
-    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+    afns = ([f_meta, f_q, f_k, f_v, f_init, f_stepn, f_fin, f_stepb] if RB > 1 else
+            [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin])
     workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
                           tile=Tile(2, 3), stack_size=0x1800))
     for c in range(1, ACORES):
@@ -465,11 +587,12 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     bt = X.bt
     YB = X.BAND_ROWS * 4
 
-    def set_rtp(nbands: int, nheads: int):
+    def set_rtp(nbands: int, nheads: int, rest: int = 1):     # rest: the 4th word, read only with TAIL
         for c in range(N_CORES):
             rtp[c][0] = nbands
             rtp[c][1] = nheads
             rtp[c][2] = X.DN_SLICES
+            rtp[c][3] = rest
         if X.STAMP:
             # LX_STAMP timing builds read a tile timer over the processor bus (gen_kernels.py);
             # without Core_Processor_Bus.Enable the core hangs on its first lda.tm.
@@ -507,15 +630,24 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             assert off + (X.DN_SLICES - 1) * X.DN_SLICE + X.CALL_BYTES <= STATE_BYTES, (off, STATE_BYTES)
             return TensorAccessPattern((1, STATE_T), off, [1, 1, X.DN_SLICES, X.CALL_BYTES], [0, 0, X.DN_SLICE, 1])
 
+        def s_read2(off: int):
+            """s_read twice in ONE transfer (the BD's repeat dimension, stride 0): pass 1's slices,
+            then pass 2's. A DeltaNet round is bound by how fast the stream issues transfers --
+            ~0.7 us each, 40 a round (the stamps' per-core stagger) -- not by its bytes, so the
+            fills a round issues are what to cut. Pass 2 re-reads slice k before its S' can land:
+            the drain carries what the core made from that very read."""
+            if X.DN_SLICE == X.CALL_BYTES:
+                return TensorAccessPattern((1, STATE_T), off, [2, 1, 1, S_HEAD_BYTES], [0, 0, 0, 1])
+            return TensorAccessPattern((1, STATE_T), off, [2, 1, X.DN_SLICES, X.CALL_BYTES], [0, 0, X.DN_SLICE, 1])
+
         for h in range(DN_HEADS_PC):
             for c in range(N_CORES):
                 hd = h * N_CORES + c
                 s_off = STATE_S_OFF + hd * S_HEAD_BYTES
                 pw.fill(w_prods[c], a_act, bt(ACT_T, A_VEC + hd * rec, X.CALL_BYTES))
-                pw.fill(w_prods[c], a_state, s_read(s_off))
+                pw.fill(w_prods[c], a_state, s_read2(s_off))                       # S for pass 1 and pass 2
                 py.drain(y_conss[c], a_state, bt(STATE_T, s_off, S_HEAD_BYTES))     # S' back, whole rows
                 py.drain(y_conss[c], a_act, bt(ACT_T, A_O + hd * ohb, ohb))
-                pw.fill(w_prods[c], a_state, s_read(s_off))
             if h:
                 assert all(len(py._q(e)) == 3 for e in y_conss)
                 py.finish_oldest(*y_conss)                 # round h-1's o: post group h-1 is in DDR
@@ -526,7 +658,7 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
     # ---- part 0: lx.py's dense_sequence, against the merged totals
     def linear_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                        side_p, gact_p, gout_c, pin_p, pout_c):
+                        side_p, gact_p, gout_c, pin_p, pout_c, hp=()):
         set_rtp(NBANDS_LIN, DN_HEADS_PC)
         BB_HID, BB_OUT = X.role_band_bytes("linear", HID), X.role_band_bytes("linear_out", OUT_K)
         tg_ln = TaskGroup()
@@ -534,13 +666,16 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         lni.fill(a_consts, tap=bt(CONSTS_T, C_LNW, ELN), wait=True, group=tg_ln)
         lno.drain(a_act, tap=bt(ACT_T, A_XN, ELN), wait=True, group=tg_ln)
         pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
+        # Only each core's first weight fill before the norm lands, then the xn at once: the stream
+        # needs ~0.7 us a transfer, and the other 24 of this GEMV's are not needed for ~10 us.
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_QKV + c * QKV_PC * BB_HID, QKV_PC * BB_HID))
+        tg_ln.finish()
+        px.fill(x_prod, a_act, bt(ACT_T, A_XN, (XN_ELEMS + TAIL) * ELEM))     # + the padding element
+        for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_Z + c * Z_PC * BB_HID, Z_PC * BB_HID))
             py.drain(y_conss[c], a_act, bt(ACT_T, A_QKV + c * QKV_PC * YB, QKV_PC * YB))
             py.drain(y_conss[c], a_act, bt(ACT_T, A_Z + c * Z_PC * YB, Z_PC * YB))
-        tg_ln.finish()
-        px.fill(x_prod, a_act, bt(ACT_T, A_XN, XN_ELEMS * ELEM))
         ps = Pipeline(3)
         if HALF_OUTER:
             off = 0
@@ -574,14 +709,18 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         pipe.finish()
         ps.finish()
         dn_post_sequence(pw, py, a_state, a_act, a_consts, w_prods, y_conss, pin_p, pout_c)
+        # the og to the cores first, the out projection's 16 transfers after (as the xn above)
+        if TAIL:
+            px.fill(x_prod, a_act, bt(ACT_T, A_OG, ELEM))                   # the padding element
+        px.fill(x_prod, a_act, bt(ACT_T, A_OG, OG_ELEMS * ELEM))
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_consts, bt(CONSTS_T, C_WOUT + c * OUT_PC * BB_OUT, OUT_PC * BB_OUT))
             py.drain(y_conss[c], a_act, bt(ACT_T, A_OUT + c * OUT_PC * YB, OUT_PC * YB))
-        px.fill(x_prod, a_act, bt(ACT_T, A_OG, OG_ELEMS * ELEM))
         py.finish()
         X.ln_split_residual_norm(lni, lno, c_xres, a_act, a_consts, ACT_T, CONSTS_T, A_OUT, A_RES, A_XM, C_POSTLN)
         X.ffn_sequence(pw, px, py, a_pool, a_act, w_prods, x_prod, y_conss,
-                       ACT_T, A_XM, A_H, A_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, A_OUT2B)
+                       ACT_T, A_XM, A_H, A_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, A_OUT2B,
+                       hprep=(*hp, A_QKV) if hp else None)
         py.finish()
         X.ln_split_close(lni, lno, c_xres, a_act, ACT_T, A_RES, A_OUT2, A_OUT2B)
         pw.finish()
@@ -589,7 +728,7 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
     # ---- part 1: ax.py's dense_sequence, against the merged totals, og through the join
     def full_sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
-                      ain_p, aout_c, ogj_c):
+                      ain_p, aout_c, ogj_c, hp=()):
         set_rtp(NBANDS_FULL, 0)
         BB_HID, BB_O = X.role_band_bytes("attn", HID), X.role_band_bytes("attn", O_K)
 
@@ -609,13 +748,16 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         lni.fill(a_consts, tap=bt(CONSTS_T, CA_LNW, ELN), wait=True, group=tg_ln)
         lno.drain(a_act, tap=bt(ACT_T, AA_XN, ELN), wait=True, group=tg_ln)
         pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
+        # Only each core's first weight fill before the norm lands, then the xn (as the linear stream)
         for c in range(N_CORES):
-            for off, n in w_regions(c)[:3]:
+            pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[0]))
+        tg_ln.finish()
+        px.fill(x_prod, a_act, bt(ACT_T, AA_XN, (XN_ELEMS + TAIL) * ELEM))   # + the padding element
+        for c in range(N_CORES):
+            for off, n in w_regions(c)[1:3]:
                 pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, off, n))
             for off, n in y_regions(c)[:3]:
                 py.drain(y_conss[c], a_act, bt(ACT_T, off, n))
-        tg_ln.finish()
-        px.fill(x_prod, a_act, bt(ACT_T, AA_XN, XN_ELEMS * ELEM))
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[3]))
             py.drain(y_conss[c], a_act, bt(ACT_T, *y_regions(c)[3]))
@@ -645,25 +787,56 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             pa_in.fill(ain_p, a_kv, bt(STATE_T, 0, KV_ROW))               # the window: rows [0, nf) (attnpos)
         pa_in.fill(ain_p, a_act, bt(ACT_T, AA_QG + QW * 4, QW * 4))
         pa_out.finish()                                                   # og (and the new cache row) are in DDR
+        if TAIL:
+            px.fill(x_prod, a_act, bt(ACT_T, AA_OG, ELEM))                  # the padding element
         px.fill(x_prod, a_act, bt(ACT_T, AA_OG, OG_ELEMS * ELEM))
         py.finish()
         X.ln_split_residual_norm(lni, lno, c_xres, a_act, a_consts, ACT_T, CONSTS_T, AA_OUT, AA_RES, AA_XM, CA_POSTLN)
         X.ffn_sequence(pw, px, py, a_pool, a_act, w_prods, x_prod, y_conss,
-                       ACT_T, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, AA_OUT2B)
+                       ACT_T, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, AA_OUT2B,
+                       hprep=(*hp, AA_QG) if hp else None)
         py.finish()
         X.ln_split_close(lni, lno, c_xres, a_act, ACT_T, AA_RES, AA_OUT2, AA_OUT2B)
         pw.finish()
         px.finish()
         pa_in.finish()
 
+    # ---- part 2: the tail. Args: lmpool, xres, normw (as consts), logits (as state), a scratch act.
+    def lm_sequence(a_pool, c_xres, a_norm, a_logits, a_act, lni, lno, w_prods, x_prod, y_conss):
+        set_rtp(LM_BANDS_PC, 0, 0)
+        assert (XN_ELEMS + 1) * ELEM <= LM_JUNK
+        tg_ln = TaskGroup()                                       # hn = final_norm(xres): stage 1
+        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln)
+        lni.fill(a_norm, tap=bt(ELN, 0, ELN), wait=True, group=tg_ln)
+        lno.drain(a_act, tap=bt(LM_ACT, 0, ELN), wait=True, group=tg_ln)
+        pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
+        for c in range(N_CORES):
+            pw.fill(w_prods[c], a_pool, bt(LM_POOL, c * LM_BANDS_PC * LM_BAND_BYTES, LM_BANDS_PC * LM_BAND_BYTES))
+            py.drain(y_conss[c], a_logits, bt(STATE_T, c * LM_BANDS_PC * YB, LM_BANDS_PC * YB))
+        tg_ln.finish()
+        px.fill(x_prod, a_act, bt(LM_ACT, 0, (XN_ELEMS + 1) * ELEM))          # hn + the padding element
+        # The norm helper's stages 2 and 3 on junk (ln_split_body3: [x a] -> r twice, [r0 r1 w] -> xm,
+        # [r o o2] -> x twice), so its loop is back on stage 1 when the next layer's stream arrives.
+        pj = Pipeline(3)
+        for n_in in (2, 2, 3, 3, 3):
+            for _ in range(n_in):
+                pj.fill(lni, a_act, bt(LM_ACT, 0, ELN))
+            pj.drain(lno, a_act, bt(LM_ACT, LM_JUNK, ELN))
+        pj.finish()
+        py.finish()
+        pw.finish()
+        px.finish()
+
     def sequence(a_pool, c_xres, a_consts, a_state, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
-                 side_p, gact_p, gout_c, pin_p, pout_c, ain_p, aout_c, ogj_c):
-        if part == 0:
+                 side_p, gact_p, gout_c, pin_p, pout_c, ain_p, aout_c, ogj_c, *hp):
+        if part == 2:
+            lm_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss)
+        elif part == 0:
             linear_sequence(a_pool, c_xres, a_consts, a_state, a_act, lni, lno, w_prods, x_prod, y_conss,
-                            side_p, gact_p, gout_c, pin_p, pout_c)
+                            side_p, gact_p, gout_c, pin_p, pout_c, hp)
         else:
             full_sequence(a_pool, c_xres, a_consts, a_state, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
-                          ain_p, aout_c, ogj_c)
+                          ain_p, aout_c, ogj_c, hp)
 
     rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, state_ty, act_ty, ptab_ty,
                             of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
@@ -672,7 +845,8 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_side.prod(tile=Tile(2, 0)), of_gact.prod(tile=Tile(3, 0)), of_gout.cons(tile=Tile(2, 0)),
                             of_pin.prod(tile=Tile(4, 0)), of_pout.cons(tile=Tile(1, 0)),
-                            of_ain.prod(tile=Tile(5, 0)), of_aout.cons(tile=Tile(4, 0)), of_ogj.cons(tile=Tile(3, 0))])
+                            of_ain.prod(tile=Tile(5, 0)), of_aout.cons(tile=Tile(4, 0)), of_ogj.cons(tile=Tile(3, 0))]
+                 + ([of_hpi.prod(tile=Tile(7, 0)), of_hpo.cons(tile=Tile(7, 0))] if HPREP else []))
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
 
@@ -685,5 +859,6 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + [(X.LN / "ln.cc").read_bytes(), (X.LN / "ln.h").read_bytes(), (X.LINL / "ln_nr.cc").read_bytes(),
                    (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(), (GEMV / "wht.h").read_bytes(),
                    (GEMV / "gemv_t2.h").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes(),
-                   SPEC.spec_hash().encode(), b"window_first=%d" % WINDOW_FIRST])
+                   (HERE.parent.parent / "include" / "scalar_fp.h").read_bytes(),
+                   SPEC.spec_hash().encode(), b"window_first=%d" % WINDOW_FIRST, b"tail=%d" % TAIL, b"hprep=%d" % HPREP])
 SPECIALIZE = {"part": PART, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

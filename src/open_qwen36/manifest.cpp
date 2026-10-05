@@ -183,6 +183,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.insts = get<std::string>(v, "insts", where + " kernel " + k);
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
+        d.rb_win = v.value("rb_win", 1ull);
+        // attn_stepb*.cc build RB 2 and 4 only; any other count pads the stream for rows the
+        // kernel never takes, and the core waits on its fifo forever
+        if (d.rb_win != 1 && d.rb_win != 2 && d.rb_win != 4)
+            fail(where, "kernel " + k + ": rb_win " + std::to_string(d.rb_win) + " is not 1, 2 or 4");
+        if (d.rb_win > 1 && d.patch != "attnpos")
+            fail(where, "kernel " + k + ": rb_win " + std::to_string(d.rb_win) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
@@ -217,6 +224,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             g.x_tile_k = gj.value("x_tile_k", uint64_t{64});
             if (g.x_tile_k != 64 && g.x_tile_k != 128) fail(gw, "x_tile_k must be 64 or 128");
             if (g.y_tn && g.kind == "dense") fail(gw, "y_tn is the linear / full route's (the dense chain transposes its own)");
+            g.x_bfp = gj.value("x_bfp", false);
+            if (g.x_bfp && (!g.y_tn || g.x_tile_k != 128))
+                fail(gw, "x_bfp is the token-major, 128-k tiled GEMM's (OPEN-GEMM-T2)");
             g.eps = get<double>(gj, "eps", gw);
             g.program = parse_program(need(gj, "program", gw), gw + ".program");
             for (const auto& s : g.program) {

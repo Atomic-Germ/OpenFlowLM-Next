@@ -97,7 +97,7 @@ struct Args {
     bool gemm_block = false;        // 0167/#32: prefill via step_gemm_block()
     bool block_major = false;       // --block-major: force the old block-at-a-time schedule
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
-    std::string dump_act;           // bring-up: "<layer>:<off>:<bytes>:<path>"
+    std::vector<std::string> dump_act;   // bring-up: "<layer>:<off>:<bytes>:<path>", repeatable
     int bench = 0;                  // --bench N[:LAYER]: time the route's dispatches instead of running a prompt
     int bench_layer = 0;            // which layer's route -- the 35B's two types run different GEMM shapes
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
@@ -171,7 +171,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--twice") a.twice = true;
         else if (k == "--repeat") a.repeat = std::atoi(val().c_str());
         else if (k == "--at-position") a.at_position = std::atoi(val().c_str());
-        else if (k == "--dump-act") a.dump_act = val();            // "<layer>:<off>:<n>:<path>"
+        else if (k == "--dump-act") a.dump_act.push_back(val());   // "<layer>:<off>:<n>:<path>"
         else if (k == "--quiet") a.cfg.verbose = false;
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--block-major") a.block_major = true;
@@ -396,7 +396,7 @@ int main(int argc, char** argv) {
             return bad ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
-        if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
+        for (const std::string& d : a.dump_act) dump_act_slice(core, d);   // all from the same last step
         int reps = a.twice ? 2 : a.repeat;
         for (int r = 1; r < reps; ++r) {
             // The app checkpoints after the prompt and restores before the next

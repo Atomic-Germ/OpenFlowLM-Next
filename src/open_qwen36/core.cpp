@@ -400,6 +400,7 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.attn = stream_patch::attn_table(k.words, name, man_.attn);
         k.geom = man_.attn;
         k.geom.window = d.window;
+        k.geom.rb_win = d.rb_win;
     }
 }
 
@@ -565,7 +566,14 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
         act_.push_back(alloc(lt.act_bytes));
-        state_.push_back(alloc(lt.state_kind == "kv" ? cfg_.max_ctx * lt.state_row : lt.state_bytes));
+        // A window walked in whole blocks (manifest `rb_win`) streams padding rows up to
+        // pos + rb - 2 (stream_patch::attn_apply), past the context capacity at its last
+        // positions: the slack is allocated -- and zeroed, so the masked rows are finite --
+        // rather than clamped, since a stream shorter than the kernel's block count deadlocks.
+        uint64_t kv_slack = 0;
+        for (const auto& [kn, kd] : man_.kernels)
+            if (kd.patch == "attnpos" && kd.rb_win > 1) kv_slack = std::max<uint64_t>(kv_slack, kd.rb_win);
+        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
@@ -1778,11 +1786,14 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
             }
         }
     }
-    // The tail's norm reads the same xres, from its own hardware context, so only level 2
-    // queues it behind the last layer.
+    // The tail's first dispatch reads the xres the last layer writes. In its own hardware
+    // context only level 2 queues it behind that layer; in the SAME context (the merged dense
+    // image's tail stream, OPEN-DECODE-ONE-CONTEXT-DENSE) level 1 does, exactly as it queues
+    // one layer behind the next.
     Inflight tail0;
-    if (want_logits && submit_ahead_ >= 2 && tail_in.active() && !man_.tail.empty() &&
-        man_.tail.front().op == "run") {
+    if (want_logits && tail_in.active() && !man_.tail.empty() && man_.tail.front().op == "run" &&
+        (submit_ahead_ >= 2 ||
+         (submit_ahead_ >= 1 && kerns_.at(man_.tail.front().kernel).ctx == tail_in.k->ctx))) {
         tail0 = start_run(kerns_.at(man_.tail.front().kernel), man_.tail.front().args, 0);
         timing_.dispatch_ms += tail0.submit_ms;
     }
@@ -1851,27 +1862,45 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
     throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
 }
 
-const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
+const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
+                            const float* swiglu_ug) {
     xrt::bo& xb = buffer(s.args[1], 0);
     xrt::bo& yb = buffer(s.args[2], 0);
-    if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
+    const bool xbfp = types_[layer]->gemm_block.x_bfp;
+    const size_t xbytes = xbfp ? K * T * 9 / 8 : K * T * 2;
+    if (xbfp && !man_.hadamard_block)
+        throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": bfp16 activation tiles are made by the rotated path only");
+    if (xb.size() < xbytes || yb.size() < N * T * 4)
         throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals are smaller than [" +
                                  std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(N) + "]");
     auto t0 = std::chrono::steady_clock::now();
-    if (man_.hadamard_block) {
+    if (swiglu_ug) {
+        // the FFN's down projection: silu(g) * u straight into the transform and the tiles
+        if (!man_.hadamard_block || K == man_.hadamard_og_signs.size())
+            throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the fused SwiGLU input is the rotated, unsigned path's");
+        if (xbfp)
+            host::hadamard_tile_swiglu_bfp(swiglu_ug, T, K, 2 * K, man_.hadamard_block, xb.map<uint8_t*>());
+        else
+            host::hadamard_tile_swiglu(swiglu_ug, T, K, 2 * K, man_.hadamard_block, xb.map<uint16_t*>(),
+                                       types_[layer]->gemm_block.x_tile_k);
+    } else if (man_.hadamard_block) {
         // OPEN-HADAMARD: the rotated-basis weights want H(x)/32 per 1024 block, the attention
         // output (the only input that wide) sign-flipped first -- what the lx / ax preps do.
         // Transformed and tiled in one pass, straight into the mapped buffer.
         const bool og = K == man_.hadamard_og_signs.size();
-        host::hadamard_tile_x(x, T, K, man_.hadamard_block, og ? man_.hadamard_og_signs.data() : nullptr,
-                              xb.map<uint16_t*>(), types_[layer]->gemm_block.x_tile_k);
+        const float* sg = og ? man_.hadamard_og_signs.data() : nullptr;
+        if (xbfp)   // OPEN-GEMM-T2, GQP_XBFP: the bfp16 blocks the GEMM's core used to make itself
+            host::hadamard_tile_x_bfp(x, T, K, man_.hadamard_block, sg, xb.map<uint8_t*>());
+        else
+            host::hadamard_tile_x(x, T, K, man_.hadamard_block, sg, xb.map<uint16_t*>(),
+                                  types_[layer]->gemm_block.x_tile_k);
     } else {
         host::tile_x(x, T, K, xb.map<uint16_t*>(), types_[layer]->gemm_block.x_tile_k);   // straight into the mapped buffer
     }
     timing_.part1_ms += ms_since(t0);
     timing_.gemm_tile_ms += ms_since(t0);
     auto ts = std::chrono::steady_clock::now();
-    xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
+    xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xbytes, 0);
     timing_.sync_ms += ms_since(ts);
     timing_.part1_ms += ms_since(ts);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
@@ -1882,19 +1911,18 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     return yb.map<float*>();
 }
 
-void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
-                std::vector<float>& out) {
-    const float* y = gemm_run(s, x, T, K, N, layer);
+const float* Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
+                        std::vector<float>& out, const float* swiglu_ug) {
+    const float* y = gemm_run(s, x, T, K, N, layer, swiglu_ug);
+    // already [T, N] (OPEN-GEMM-T2): read in place. Copying it out was ~0.4 s of a 512-token
+    // prefill at the 27B, and every consumer finishes before the next GEMM on this buffer.
+    if (types_[layer]->gemm_block.y_tn) return y;
     auto t1 = std::chrono::steady_clock::now();
     if (out.size() < T * N) out.resize(T * N);             // grow-only, so only the first block pays for it
-    if (types_[layer]->gemm_block.y_tn) {                  // already [T, N] (OPEN-GEMM-T2): a copy
-        const host::TransposePart all{out.data(), 0, N};
-        host::split_rows(y, T, N, &all, 1);
-    } else {
-        host::transpose(y, N, T, out.data());              // [N, T] on the device -> [T, N]
-    }
+    host::transpose(y, N, T, out.data());                  // [N, T] on the device -> [T, N]
     timing_.part1_ms += ms_since(t1);
     timing_.gemm_tr_ms += ms_since(t1);
+    return out.data();
 }
 
 void Core::tail_logits(const float* row) {
@@ -2429,27 +2457,35 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
 // moe_accfin: h = silu(g) * u, out += sigmoid(xm . sgw) * down(h). xm is rounded to bf16
 // first because that is what the dispatch would have seen.
 void Core::ffn_block(int l, const std::vector<Step>& prog, size_t ff, const float* xm, float* res, size_t T,
-                     size_t t_real, const std::vector<float>* gate_w) {
+                     size_t t_real, const std::vector<float>* gate_w, float* dense_out) {
     const size_t hid = man_.hidden;
-    gemm(prog[0], xm, T, hid, 2 * ff, l, sg_ug_);
-    const std::vector<float>& ug = sg_ug_;
-    auto t0 = std::chrono::steady_clock::now();
-    float* h = BlockScratch::fit(bs_.sh, T * ff);
+    const float* ug = gemm(prog[0], xm, T, hid, 2 * ff, l, sg_ug_);
+    const float* y = nullptr;
+    if (man_.hadamard_block && ff != man_.hadamard_og_signs.size()) {
+        // a rotated-basis model: silu(g) * u is made inside the down projection's transform and
+        // tile pass (bit-identical to the loop below, without writing h and reading it back)
+        y = gemm(prog[1], nullptr, T, ff, hid, l, sg_y_, ug);
+    } else {
+        auto t0 = std::chrono::steady_clock::now();
+        float* h = BlockScratch::fit(bs_.sh, T * ff);
 #pragma omp parallel for
-    for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
-        const float* u = ug.data() + static_cast<size_t>(tt) * 2 * ff;
-        const float* g = u + ff;
-        float* ho = h + static_cast<size_t>(tt) * ff;
-        for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
+        for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
+            const float* u = ug + static_cast<size_t>(tt) * 2 * ff;
+            const float* g = u + ff;
+            float* ho = h + static_cast<size_t>(tt) * ff;
+            for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
+        }
+        timing_.shared_ms += ms_since(t0);
+        y = gemm(prog[1], h, T, ff, hid, l, sg_y_);
     }
-    timing_.shared_ms += ms_since(t0);
-    gemm(prog[1], h, T, ff, hid, l, sg_y_);
-    const std::vector<float>& y = sg_y_;
     auto t1 = std::chrono::steady_clock::now();
     if (!gate_w) {
-        // a dense FFN: every row, padding included, so the block's residual stays defined
+        // a dense FFN: every row, padding included, so the block's residual stays defined.
+        // Written straight to the layer's output rows when the caller has them, rather than
+        // into res and then copied there: the same sum, one pass instead of two.
+        float* dst = dense_out ? dense_out : res;
 #pragma omp parallel for
-        for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] += y[static_cast<size_t>(i)];
+        for (long long i = 0; i < static_cast<long long>(T * hid); ++i) dst[i] = res[i] + y[i];
         timing_.shared_ms += ms_since(t1);
         return;
     }
@@ -2461,7 +2497,7 @@ void Core::ffn_block(int l, const std::vector<Step>& prog, size_t ff, const floa
         double d = 0;
         for (size_t i = 0; i < hid; ++i) d += static_cast<double>(bf16_to_f32(f32_to_bf16(x[i]))) * sgw[i];
         const float gate = 1.f / (1.f + std::exp(-static_cast<float>(d)));
-        const float* yr = y.data() + t * hid;
+        const float* yr = y + t * hid;
         float* r = res + t * hid;
         for (size_t i = 0; i < hid; ++i) r[i] += gate * yr[i];
     }
@@ -2482,13 +2518,21 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     timing_.part1_ms += ms_since(tn);
     timing_.prenorm_ms += ms_since(tn);
     const float* yq = gemm_run(gb.program[0], xn, T, hid, nch + vw, l);
-    float* qkv = BlockScratch::fit(bs_.part[0], T * nch);
-    float* z = BlockScratch::fit(bs_.part[1], T * vw);
-    {
+    // a token-major y (OPEN-GEMM-T2) is read in place, qkv and z at its row stride; nothing
+    // writes this output buffer again before deltanet_block is done with it
+    const float* qkv = yq;
+    const float* z = yq + nch;
+    size_t qkv_ld = nch + vw, z_ld = nch + vw;
+    if (!gb.y_tn) {
         auto tt = std::chrono::steady_clock::now();
-        const host::TransposePart parts[2] = {{qkv, 0, nch}, {z, nch, vw}};
-        if (gb.y_tn) host::split_rows(yq, T, nch + vw, parts, 2);
-        else host::transpose_parts(yq, T, parts, 2);
+        float* qkv_t = BlockScratch::fit(bs_.part[0], T * nch);
+        float* z_t = BlockScratch::fit(bs_.part[1], T * vw);
+        const host::TransposePart parts[2] = {{qkv_t, 0, nch}, {z_t, nch, vw}};
+        host::transpose_parts(yq, T, parts, 2);
+        qkv = qkv_t;
+        z = z_t;
+        qkv_ld = nch;
+        z_ld = vw;
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }
@@ -2505,6 +2549,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     g.T = T; g.t_real = t_real; g.hid = hid;
     g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
     g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    g.qkv_ld = qkv_ld; g.z_ld = z_ld;
     float* og = BlockScratch::fit(bs_.og, T * vw);
     auto t0 = std::chrono::steady_clock::now();
     double phase[2] = {0, 0};
@@ -2522,19 +2567,17 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     if (gb.out_split) {
         // a q8 out projection as its exact q4_1 split: rows [0, hid) are the hi half's
         // output and [hid, 2 hid) the lo half's, and the projection is their sum
-        gemm(gb.program[1], og, T, vw, 2 * hid, l, gout_);
+        const float* y = gemm(gb.program[1], og, T, vw, 2 * hid, l, gout_);
         t1 = std::chrono::steady_clock::now();
-        const std::vector<float>& y = gout_;
 #pragma omp parallel for
         for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
             const size_t t = static_cast<size_t>(tt);
-            const float* a = y.data() + t * 2 * hid;
+            const float* a = y + t * 2 * hid;
             for (size_t c = 0; c < hid; ++c) res[t * hid + c] = xres[t * hid + c] + (a[c] + a[hid + c]);
         }
     } else {
-        gemm(gb.program[1], og, T, vw, hid, l, gout_);
+        const float* out = gemm(gb.program[1], og, T, vw, hid, l, gout_);
         t1 = std::chrono::steady_clock::now();
-        const std::vector<float>& out = gout_;
 #pragma omp parallel for
         for (long long i = 0; i < static_cast<long long>(T * hid); ++i) res[i] = xres[i] + out[i];
     }
@@ -2542,8 +2585,7 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     if (gb.has_dense_ffn()) {
         timing_.part1_ms += ms_since(t1);
         timing_.tail_ms += ms_since(t1);
-        ffn_block(l, gb.ffn_program, gb.ff, xm, res, T, t_real, nullptr);
-        std::memcpy(xres, res, T * hid * 4);         // the layer's output; block_layer_moe has nothing to add
+        ffn_block(l, gb.ffn_program, gb.ff, xm, res, T, t_real, nullptr, xres);   // the layer's output rows
         return;
     }
     host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,
@@ -2576,12 +2618,7 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
     std::fill(og, og + T * qw, 0.f);
     for (size_t gh = 0; gh < g.kvh; ++gh) {
         auto th = std::chrono::steady_clock::now();
-        for (size_t hl = 0; hl < grp; ++hl)
-            for (size_t t = 0; t < T; ++t) {
-                const float* src = Q + t * qw + (gh * grp + hl) * hd;
-                uint16_t* dst = qb + (hl * T + t) * hd;
-                for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
-            }
+        host::attn_group_queries(Q, T, g.nh, g.kvh, hd, gh, qb);
         std::fill(m, m + M, -std::numeric_limits<float>::infinity());
         std::fill(lsum, lsum + M, 0.f);
         std::fill(acc, acc + M * hd, 0.f);
@@ -2616,20 +2653,12 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
             th = std::chrono::steady_clock::now();
-            const float* c = bc.map<float*>();
-            for (size_t i = 0; i < M * hd; ++i) acc[i] += c[i];
+            host::add_into(acc, bc.map<float*>(), M * hd);
             timing_.mid_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
         }
         th = std::chrono::steady_clock::now();
-        for (size_t hl = 0; hl < grp; ++hl)
-            for (size_t t = 0; t < g.t_real; ++t) {
-                const size_t r = hl * T + t, h = gh * grp + hl;
-                const float inv = 1.0f / lsum[r];
-                const float* gt = gate + t * qw + h * hd;
-                float* out = og + t * qw + h * hd;
-                for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv / (1.0f + std::exp(-gt[j]));
-            }
+        host::attn_group_out(acc, lsum, gate, T, g.t_real, g.nh, g.kvh, hd, gh, g.g_ld, og);
         timing_.mid_ms += ms_since(th);
         timing_.part1_ms += ms_since(th);
     }
@@ -2651,18 +2680,26 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.part1_ms += ms_since(tn);
     timing_.prenorm_ms += ms_since(tn);
     const float* yf = gemm_run(gb.program[0], xn, T, hid, nf, l);
-    float* q = BlockScratch::fit(bs_.part[0], T * qw);
-    float* k = BlockScratch::fit(bs_.part[1], T * kvw);
-    float* v = BlockScratch::fit(bs_.part[2], T * kvw);
-    float* gate = BlockScratch::fit(bs_.part[3], T * qw);
-    {
+    // a token-major y (OPEN-GEMM-T2) is read in place at its row stride: the attention runs
+    // its own dispatches on other buffers, and gate is read before the next GEMM on this one
+    const float* q = yf;
+    const float* k = yf + qw;
+    const float* v = yf + qw + kvw;
+    const float* gate = yf + qw + 2 * kvw;
+    size_t q_ld = nf, kv_ld = nf, g_ld = nf;
+    if (!gb.y_tn) {
         auto tt = std::chrono::steady_clock::now();
-        const host::TransposePart parts[4] = {{q, 0, qw},
-                                              {k, qw, kvw},
-                                              {v, qw + kvw, kvw},
-                                              {gate, qw + 2 * kvw, qw}};
-        if (gb.y_tn) host::split_rows(yf, T, nf, parts, 4);
-        else host::transpose_parts(yf, T, parts, 4);
+        float* qt = BlockScratch::fit(bs_.part[0], T * qw);
+        float* kt = BlockScratch::fit(bs_.part[1], T * kvw);
+        float* vt = BlockScratch::fit(bs_.part[2], T * kvw);
+        float* gt = BlockScratch::fit(bs_.part[3], T * qw);
+        const host::TransposePart parts[4] = {{qt, 0, qw},
+                                              {kt, qw, kvw},
+                                              {vt, qw + kvw, kvw},
+                                              {gt, qw + 2 * kvw, qw}};
+        host::transpose_parts(yf, T, parts, 4);
+        q = qt; k = kt; v = vt; gate = gt;
+        q_ld = qw; kv_ld = kvw; g_ld = qw;
         timing_.part1_ms += ms_since(tt);
         timing_.gemm_tr_ms += ms_since(tt);
     }
@@ -2678,6 +2715,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
     g.pos0 = pos0; g.eps = gb.eps;
+    g.q_ld = q_ld; g.k_ld = kv_ld; g.v_ld = kv_ld; g.g_ld = g_ld;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
     if (attn_block_on_ && gb.attn_block.present()) {
@@ -2697,8 +2735,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, pos0 * row);
     timing_.state_ms += ms_since(ts);
     timing_.attn_ms += timing_.mid_ms - mid0;
-    gemm(gb.program[1], og, T, qw, hid, l, gout_);
-    const std::vector<float>& out = gout_;
+    const float* out = gemm(gb.program[1], og, T, qw, hid, l, gout_);
 
     auto t1 = std::chrono::steady_clock::now();
 #pragma omp parallel for
@@ -2707,8 +2744,7 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     if (gb.has_dense_ffn()) {
         timing_.part1_ms += ms_since(t1);
         timing_.tail_ms += ms_since(t1);
-        ffn_block(l, gb.ffn_program, gb.ff, xm, res, T, t_real, nullptr);
-        std::memcpy(xres, res, T * hid * 4);         // the layer's output; block_layer_moe has nothing to add
+        ffn_block(l, gb.ffn_program, gb.ff, xm, res, T, t_real, nullptr, xres);   // the layer's output rows
         return;
     }
     host::router_block(t_real, hid, E, topk, xm, hc.router.data(), moe_.probs.data() + row0 * E,

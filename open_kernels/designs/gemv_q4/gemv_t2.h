@@ -90,6 +90,12 @@ static inline void gemv_t2_sum32(const aie::vector<float, 32> &v32, bfloat16 &hi
 
 // Groups g0 .. g0+ng-1 of a K-long bf16 activation into the per-128 table (x points at
 // group g0). Integer scalar work only; the float work is vector ops.
+//
+// One straight body per group: its four 32-lane vectors are loaded once and both passes over
+// them are written out, where they were two four-trip loops that reloaded the vectors (283
+// bundles a group at -Oz by kernel_remarks; this is 94, and no larger). The same operations in
+// the same order on every lane -- the max is exact, and the sum stays ((x0 + x1) + x2) + x3 -- so
+// the same table.
 __attribute__((noinline)) inline void gemv_t2_prep_groups(const bfloat16 *__restrict x, uint8_t *__restrict tab,
                                                           unsigned K, unsigned g0, unsigned ng) {
   const unsigned NG = K / 128;
@@ -103,25 +109,32 @@ __attribute__((noinline)) inline void gemv_t2_prep_groups(const bfloat16 *__rest
   for (unsigned j = 0; j < ng; ++j) {
     const unsigned g = g0 + j;
     const bfloat16 *__restrict xb = x + j * 128;
-    aie::vector<int16_t, 32> mx = aie::zeros<int16_t, 32>();
-#pragma clang loop unroll(disable)   // program memory: the lx main core is full
-    for (unsigned i = 0; i < 4; ++i)
-      mx = aie::max(mx, aie::bit_and(aie::load_v<32>(xb + 32 * i).template cast_to<uint8_t>(), absmask)
-                            .template cast_to<int16_t>());
+    const aie::vector<bfloat16, 32> x0 = aie::load_v<32>(xb), x1 = aie::load_v<32>(xb + 32);
+    const aie::vector<bfloat16, 32> x2 = aie::load_v<32>(xb + 64), x3 = aie::load_v<32>(xb + 96);
+    auto mag = [&](const aie::vector<bfloat16, 32> &v) {   // |v| as ordered int16 bits
+      return aie::bit_and(v.template cast_to<uint8_t>(), absmask).template cast_to<int16_t>();
+    };
+    const aie::vector<int16_t, 32> mx =
+        aie::max(aie::max(aie::max(aie::max(aie::zeros<int16_t, 32>(), mag(x0)), mag(x1)), mag(x2)), mag(x3));
     int s = 141 - (aie::reduce_max(mx) >> 7);    // 14 - (e - 127): positive floats order as their bits
     if (s > 126) s = 126;                        // zero / tiny block: any scale works
     sh[g] = s;
     const aie::vector<bfloat16, 32> sc =
         aie::broadcast<int16_t, 32>((int16_t)((127 + s) << 7)).template cast_to<bfloat16>();
-    aie::accum<accfloat, 32> sum = aie::zeros<accfloat, 32>();
-#pragma clang loop unroll(disable)   // program memory: the lx main core is full
-    for (unsigned i = 0; i < 4; ++i) {
-      const aie::vector<bfloat16, 32> xv = aie::load_v<32>(xb + 32 * i);
-      aie::store_v(xi + g * 128 + 32 * i, aie::to_fixed<int16_t>(aie::mul(xv, sc), 0));
-      aie::accum<accfloat, 32> xa;
-      xa.from_vector(xv);
-      sum = aie::add(sum, xa);
-    }
+    int16_t *__restrict xo = xi + g * 128;
+    aie::store_v(xo, aie::to_fixed<int16_t>(aie::mul(x0, sc), 0));
+    aie::store_v(xo + 32, aie::to_fixed<int16_t>(aie::mul(x1, sc), 0));
+    aie::store_v(xo + 64, aie::to_fixed<int16_t>(aie::mul(x2, sc), 0));
+    aie::store_v(xo + 96, aie::to_fixed<int16_t>(aie::mul(x3, sc), 0));
+    aie::accum<accfloat, 32> sum = aie::zeros<accfloat, 32>(), xa;
+    xa.from_vector(x0);
+    sum = aie::add(sum, xa);
+    xa.from_vector(x1);
+    sum = aie::add(sum, xa);
+    xa.from_vector(x2);
+    sum = aie::add(sum, xa);
+    xa.from_vector(x3);
+    sum = aie::add(sum, xa);
     gemv_t2_sum32(sum.template to_vector<float>(), xsh[g], xsl[g]);
   }
 }

@@ -140,7 +140,16 @@ def knobs(spec: ModelSpec, nh: int, hpo: int) -> AttnKnobs:
         # available memory`, before any program-memory limit is reached. RB 1 builds and
         # costs little: RB 1 -> 2 measured 1.22x of the attention ARITHMETIC on granite,
         # and that arithmetic is ~18% of a decode step.
-        cap = 4 if spec.head_dim < 256 else (1 if (spec.attn_gate or nhl > 2) else 2)
+        # ... and FOUR at 256 with the gate on Ternary Bonsai 2 27B (the all-t2 spec, whose layer
+        # kernels are the merged image designs/layer_x/dux.py): there the attention core's soft-float
+        # goes to attn.h's integer routines (ATTN_INTFP), the block's score phase to one reduction
+        # tree (ATTN_TREE), and the single-row kernel is retired (ATTN_BLOCK_WIN: the window in
+        # whole blocks, the new row in a block of its own -- PR #115's block-only walk reordered
+        # for dux.py, whose attention cores take the window before the new row's k and v). With
+        # the single-row kernel kept, RB 4 overflowed those cores by 768-1152 B. Measured against
+        # RB 1 on the greedy gates (OPEN-ATTN-CONTEXT); every other gated head-dim-256 family keeps 1.
+        t2 = bool(spec.quant_map) and all(f == "t2" for f in spec.quant_map.values())
+        cap = 4 if (spec.head_dim < 256 or (spec.attn_gate and t2)) else (1 if (spec.attn_gate or nhl > 2) else 2)
         rb = max((r for r in (4, 2, 1) if r <= cap and (r * block_lanes(nhl)) in (8, 16, 32)), default=1)
         rb = _probe_rb(rb, nhl)
     return AttnKnobs(VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb)
