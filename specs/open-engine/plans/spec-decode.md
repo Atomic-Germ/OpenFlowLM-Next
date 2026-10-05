@@ -23,26 +23,39 @@ one.
 - Output must be **lossless**: at temperature 0, the same tokens plain decode would give,
   except where the top two logits are a near-tie.
 
-## Expected gain (revised after #116)
+## Expected gain (measured where possible, 2026-10-05)
 
-**Decode is now about twice as fast as this plan first assumed.** #116 (merged 2026-10-05)
-runs the 35B's whole decode layer loop in one hardware context: a step went from ~76 to
-~59-69 ms (OPEN-DECODE-ONE-CONTEXT), so ~15 tok/s rather than the ~7 the plan started from.
-Speculation has to beat that faster baseline, so the expected gain shrinks.
+**The baseline.** On a q4_1 kernel set, #116 runs the decode layer loop in one hardware
+context: **69-70 ms a token, 14.4 tok/s** (this machine, two prompts, 199 tokens each). The
+official `Atomic-Germ/Qwen3.6-35B-A3B-NPU2` container stores attention and DeltaNet at q8,
+which turns off both that and the block prefill route: **156-167 ms, ~6.2 tok/s.** The
+verify pass is built on q4_1 kernels, so the comparison below is against 14.4 tok/s.
 
-At the uniform-routing bound, with switching inside the verify pass fixed (see below):
+**The expert set a block touches, measured** (`utilities/spec-decode/route_union.py`, the
+same two prompts, both kernel sets agree):
 
-| | verify pass | tokens kept per pass | tok/s | vs ~15 tok/s today |
-|---|---|---|---|---|
-| B = 8, q4 experts | ~230 ms | ~5 | ~22 | **~1.4x** |
-| B = 16, q4 experts | ~335 ms | ~6.5 | ~19 | ~1.3x |
-| B = 8, 2-bit experts | ~185 ms | ~5 | ~27 | **~1.75x** |
-| B = 8, switching NOT fixed | ~455 ms | ~5 | ~11 | **slower than today** |
+| block | distinct experts per layer | uniform-routing estimate |
+|---|---|---|
+| 8 tokens | 34-36 | 57 |
+| 16 tokens | 53-56 | 102 |
 
-So: **B = 8 beats B = 16, 2-bit experts matter more than before, and fixing the switch cost
-is mandatory.** The uniform-routing bound is pessimistic: consecutive tokens tend to reuse
-experts, which shrinks the set a verify pass has to read. PR 3 measures the real set size
-first, because it moves every row of this table.
+Consecutive tokens reuse experts, so a verify pass reads 40-48% less expert weight than
+first assumed.
+
+**Estimated verify pass and speedup.** Experts at the batched kernel's measured ~33 GB/s
+at these slot counts. Not yet measured: the other projections (~35 ms assumed), reconfiguring
+inside one ELF (~40 ms a pass), the drafter (~12 ms), and how many guesses are accepted
+(~4 plus the one bonus token at B = 8, ~5.5 plus one at B = 16).
+
+| | experts | verify pass | tokens kept | tok/s | vs 14.4 tok/s |
+|---|---|---|---|---|---|
+| B = 8, q4 experts | 81 ms | ~185 ms | ~5 | ~27 | **~1.9x** |
+| B = 16, q4 experts | 129 ms | ~240 ms | ~6.5 | ~27 | ~1.9x |
+| B = 8, 2-bit experts | 52 ms | ~155 ms | ~5 | ~32 | **~2.25x** |
+| B = 8, switching NOT fixed | 81 ms | ~410 ms | ~5 | ~12 | **slower than today** |
+
+Fixing the switch cost inside the verify pass is still mandatory. B = 8 and B = 16 come out
+even; acceptance on real chat decides between them.
 
 ## What the existing code says
 
