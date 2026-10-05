@@ -138,6 +138,19 @@ class Imatrix:
                 out.add(L)
         return sorted(out)
 
+    def counts(self, gguf_name: str) -> np.ndarray:
+        """The `.counts` companion of a tensor's in_sum2.
+
+        For per-tensor imatrix this is one scalar (token count over the
+        calibration run); for FUSED EXPERT tensors it is per-expert (shape
+        [1, num_experts]) -- the dispatch frequency that drives Guanaco's
+        imatrix prior, and the score used to rank experts for pruning.
+        """
+        key = f"{gguf_name}.counts"
+        if key not in self._raw:
+            raise KeyError(f"imatrix {self.path.name}: no {key}")
+        return np.asarray(self._raw[key].data, dtype=np.float64)
+
 
 def ffn_index_set(imx: Imatrix, layer: int, keep: int) -> np.ndarray:
     """The K surviving intermediate columns for ONE layer, as a sorted index array.

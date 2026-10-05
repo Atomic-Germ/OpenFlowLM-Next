@@ -121,7 +121,27 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
             raise ValueError(f"Unsupported weights_type: {weights_type} for Qwen35Moe")
         self.q4nx_tensors = {}
         if self.gguf_reader is not None:
+            self.prune_experts = getattr(self, "prune_experts", None)
+            self.prune_moe_ffn = getattr(self, "prune_moe_ffn", None)
+            self.imatrix_path_hint = getattr(self, "imatrix_path_hint", None)
+            self._resolve_moe_prune()
+            # MTP scaffolding is dropped from every pack -- MTP (spec decoding)
+            # is recorded as its own future artifact (see README), not half-
+            # converted silently. A conforming source ships blk.N.nextn.*.
+            mtp_layers = {
+                int(nm.split(".")[1]) for nm in self.gguf_tensors
+                if nm.startswith("blk.") and ".nextn." in nm}
+            if mtp_layers:
+                print(f"[INFO] Skipping MTP block(s) {sorted(mtp_layers)}: next-token-prediction "
+                      f"scaffolding has no kernel consumer today and is intentionally not "
+                      f"carried into the pack.")
             for name in sorted(self.gguf_tensors):
+                if name.startswith("blk.") and ".nextn." in name:
+                    print(f"[SKIP] {name} (MTP)")
+                    continue
+                if name.startswith("blk.") and int(name.split(".")[1]) in mtp_layers:
+                    print(f"[SKIP] {name} (MTP block scaffolding)")
+                    continue
                 self._process_gguf_tensor(name)
             print(f"[INFO] Produced {len(self.q4nx_tensors)} Q4NX tensors")
             self._export_weights(q4nx_path, weights_type)
@@ -225,6 +245,124 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         """Undo llama.cpp tiling on rank/head vectors: (q g)->(g q)."""
         return rearrange(w, "(q g) c -> (g q) c", q=2).contiguous()
 
+    def _resolve_moe_prune(self):
+        """Imatrix-derived index sets for optional MoE pruning.
+
+        --prune-experts K: per layer, keep the K experts with the highest
+        calibration dispatch frequency (the same `.counts` signal Guanaco's
+        load_imatrix_prior uses to seed its hot-expert pinning).
+
+        --prune-moe-ffn K: narrow the moe_intermediate axis to K columns of
+        every routed expert, scored by the imatrix's per-neuron activation
+        energy on ffn_down_exps (per-expert columns' in_sum2 summed over all
+        experts). The SAME axis/index set is gathered from gate/up/down so
+        the three still describe one network.
+
+        Both verify the down-exps tensor names match the imatrix. Tied to
+        AUDITS: the retention reports tell you the activation mass kept and
+        are repeated from the dense path's semantics.
+
+        Attaches self._moe_idx (ffn K axis idx per layer) and
+        self._expert_idx (kept expert ids per layer). When a flag is given
+        but no imatrix is reachable the build stops here, never ships an
+        unmarked "full width with shorter name" container.
+        """
+        self._moe_ffn_idx = {}
+        self._expert_idx = {}
+        self.prune_moe_ffn_kept = None
+        self.prune_moe_ffn_from = None
+        self.prune_moe_ffn_retained = None
+        self.prune_experts_kept = None
+        self.prune_experts_from = None
+        self.prune_experts_retained = None
+        if getattr(self, "prune_ffn", None):
+            raise ValueError("--prune-ffn (the dense FFN pruner) does not apply to a MoE; "
+                             "use --prune-moe-ffn (intermediate width on the expert mats) "
+                             "and/or --prune-experts (per-layer expert count).")
+        if not (self.prune_experts or self.prune_moe_ffn):
+            return
+        if self.gguf_reader is None:
+            raise ValueError("--prune-moe-ffn/--prune-experts need a GGUF source; "
+                             "the HF-safetensors path has no imatrix to rank with")
+        if not self.imatrix_path_hint:
+            raise FileNotFoundError(
+                f"--prune-moe-ffn/--prune-experts asked for but no imatrix was found. Pass "
+                f"--imatrix PATH, or put a *.imatrix.gguf next to the model file.")
+        from .. import imatrix_prune as imx
+        self.imatrix = imx.Imatrix(self.imatrix_path_hint)
+        layers = self.imatrix.layers()
+        if not layers:
+            raise ValueError(f"--imatrix {self.imatrix_path_hint}: no *.in_sum2 tensors")
+
+        ffn_retained = []
+        for L in layers:
+            e_name = f"blk.{L}.ffn_gate_exps.weight"
+            down_name = f"blk.{L}.ffn_down_exps.weight"
+            counts = np.asarray(self.imatrix.counts(e_name)).reshape(-1)
+            E = counts.shape[0]
+            if self.prune_experts:
+                keep = min(self.prune_experts, E)
+                ranked = np.argsort(-counts)
+                idx = np.sort(ranked[:keep])
+                self._expert_idx[L] = idx
+            if self.prune_moe_ffn:
+                sc = np.asarray(self.imatrix.scores(down_name), dtype=np.float64)
+                if sc.ndim == 2:
+                    # [n, E] layout: the expert axis is whichever matches E.
+                    axis = 1 if sc.shape[1] == E else 0
+                    sc = sc.sum(axis=axis)
+                n = sc.shape[0]
+                keep = min(self.prune_moe_ffn, n)
+                top = np.argpartition(sc, n - keep)[n - keep:]
+                top.sort()
+                self._moe_ffn_idx[L] = top.astype(np.int64)
+                retained = float(sc[top].sum() / max(sc.sum(), 1e-12))
+                ffn_retained.append(retained)
+        if ffn_retained:
+            self.prune_moe_ffn_retained = sum(ffn_retained) / len(ffn_retained)
+
+        if self.prune_experts:
+            counts_l = [np.asarray(self.imatrix.counts(f"blk.{L}.ffn_gate_exps.weight")).reshape(-1) for L in layers]
+            self.prune_experts_kept = min(self.prune_experts, counts_l[0].shape[0])
+            self.prune_experts_from = int(counts_l[0].shape[0])
+            mean_r = sum(
+                float(c[idx].sum() / max(c.sum(), 1e-12))
+                for c, idx in zip(counts_l, [self._expert_idx[L] for L in layers])) / len(layers)
+            self.prune_experts_retained = mean_r
+            print(f"[INFO] --prune-experts {self.prune_experts_kept}: experts/layer {self.prune_experts_from} -> "
+                  f"{self.prune_experts_kept}; calibration dispatch retained {self.prune_experts_retained * 100:.1f}% (mean)")
+        if self.prune_moe_ffn:
+            first = np.asarray(self.imatrix.scores(f"blk.{layers[0]}.ffn_down_exps.weight"), dtype=np.float64)
+            if first.ndim == 2:
+                countsE = np.asarray(self.imatrix.counts(f"blk.{layers[0]}.ffn_gate_exps.weight")).reshape(-1)
+                axis = 1 if first.shape[1] == countsE.shape[0] else 0
+                # The score runs over the NON-expert axis after summing the
+                # expert axis away; a per-expert ffn length is that axis.
+                n = first.shape[1 - axis] if first.ndim == 2 else first.shape[0]
+            else:
+                n = first.shape[0]
+            self.prune_moe_ffn_kept = min(self.prune_moe_ffn, n)
+            self.prune_moe_ffn_from = int(n)
+            print(f"[INFO] --prune-moe-ffn {self.prune_moe_ffn_kept}: moe_intermediate/expert "
+                  f"{self.prune_moe_ffn_from} -> {self.prune_moe_ffn_kept}; activation mass "
+                  f"retained {self.prune_moe_ffn_retained * 100:.1f}% (mean over layers)")
+
+    def _moe_prune_tensor(self, w: torch.Tensor, L: int, kind: str) -> torch.Tensor:
+        """Gather one expert tensor by the resolved per-layer index sets.
+
+        kind is 'gate'/'up': natural [E, inter, hidden]; 'down': [E, hidden, inter];
+        'router': [E, hidden]."""
+        if L in self._expert_idx:
+            ids = torch.as_tensor(self._expert_idx[L], dtype=torch.long)
+            w = w.index_select(0, ids)
+        if L in self._moe_ffn_idx and kind in ("gate", "up"):
+            ids = torch.as_tensor(self._moe_ffn_idx[L], dtype=torch.long)
+            w = w.index_select(1, ids)
+        elif L in self._moe_ffn_idx and kind == "down":
+            ids = torch.as_tensor(self._moe_ffn_idx[L], dtype=torch.long)
+            w = w.index_select(2, ids)
+        return w.contiguous()
+
     def _process_gguf_tensor(self, gguf_name: str):
         # --- globals ---
         # gguf.dequantize() already returns the natural [out, in] / [vocab, hidden]
@@ -298,6 +436,9 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         # gguf.dequantize() returns ffn_gate_inp as natural [n_experts, hidden];
         # Q4NX wants [hidden, n_experts] (matches the HF mlp.gate.weight.t() convention).
         if rest == "ffn_gate_inp.weight":
+            if self._expert_idx and bid in self._expert_idx:
+                ids = torch.as_tensor(self._expert_idx[bid], dtype=torch.long)
+                w = w.index_select(0, ids)
             self.q4nx_tensors[prefix + "moe_router.weight"] = self._bf16(w.t())
             return
         if rest == "ffn_gate_inp_shexp.weight":
@@ -347,14 +488,17 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         # --- routed experts: gguf.dequantize() natural shape is already
         # [n_experts, inter, hidden] - just flatten expert-major, no permute. ---
         if rest == "ffn_gate_exps.weight":
+            w = self._moe_prune_tensor(w, bid, "gate")
             w = w.reshape(-1, w.shape[-1]).contiguous()
             self._store_q(prefix + "mlp.gate_exps_proj.weight", w)
             return
         if rest == "ffn_up_exps.weight":
+            w = self._moe_prune_tensor(w, bid, "up")
             w = w.reshape(-1, w.shape[-1]).contiguous()
             self._store_q(prefix + "mlp.up_exps_proj.weight", w)
             return
         if rest == "ffn_down_exps.weight":
+            w = self._moe_prune_tensor(w, bid, "down")
             w = w.reshape(-1, w.shape[-1]).contiguous()
             self._store_q(prefix + "mlp.down_exps_proj.weight", w)
             return

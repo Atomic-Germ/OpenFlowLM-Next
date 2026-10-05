@@ -366,11 +366,13 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
         w = gguf_tensor.dequantize()
         if not torch.is_tensor(w):          # gguf returns ndarray in some paths
             w = torch.from_numpy(np.ascontiguousarray(w))
-        w = w.contiguous()
         w = imx.gather_ffn(w, idx, ffn_width=self._ffn_width())
         rows = w.shape[0]
         cols = w.shape[1]
         target = self.tensor_q4nx_type_map[name]
+        # unpack_* takes the COLUMN COUNT of the gathered weight (its second
+        # dim), not its row count: the unpackers reshape the flat quant array
+        # as (-1, cols). Alluded to by the old comment below -- missed it.
         if target in (GGMLQuantizationType.F32, GGMLQuantizationType.F16,
                       GGMLQuantizationType.BF16):
             return [w]
@@ -378,7 +380,7 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
             # No Q4_K encoder in ggml; the packer fits the super-block itself
             # from a Q4_1-grid triple, whose min sign is SUBTRACTED not added.
             data = quantize(w.to(torch.float32).numpy(), GGMLQuantizationType.Q4_1).copy()
-            d, m, qw = gguf_tensor.unpack_q4_1(data, rows)
+            d, m, qw = gguf_tensor.unpack_q4_1(data, cols)
             return (d, -m, qw)
         # NOT the bfloat16 round trip gguf_tensor._requantize_to uses. There `w` is
         # a raw byte buffer and `.view(torch.float32)` reinterprets those bytes; here
@@ -389,11 +391,11 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
         # asserts on is applied at the pack boundary instead (see _pack).
         data = quantize(w.to(torch.float32).numpy(), target).copy()
         if target == GGMLQuantizationType.Q4_1:
-            d, m, qw = gguf_tensor.unpack_q4_1(data, rows)
+            d, m, qw = gguf_tensor.unpack_q4_1(data, cols)
         elif target == GGMLQuantizationType.Q4_0:
-            d, m, qw = gguf_tensor.unpack_q4_0(data, rows)
+            d, m, qw = gguf_tensor.unpack_q4_0(data, cols)
         elif target == GGMLQuantizationType.Q8_0:
-            d, m, qw = gguf_tensor.unpack_q8_0(data, rows)
+            d, m, qw = gguf_tensor.unpack_q8_0(data, cols)
         else:
             raise ValueError(f"--prune-ffn: cannot quantize {name} to {target.name}")
         return (d, m, qw)
@@ -890,4 +892,8 @@ class Qwen35_08B(Qwen35, model_arch=ModelArch.QWEN35_08B):
     pass
 
 class Qwen35_9B(Qwen35, model_arch=ModelArch.QWEN35_9B):
+    pass
+
+
+class Qwen35_27B(Qwen35, model_arch=ModelArch.QWEN35_27B):
     pass
