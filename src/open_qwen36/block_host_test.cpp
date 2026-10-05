@@ -1,4 +1,4 @@
-// Traces: OPEN-PREFILL-BATCH (canonical spec: specs/open-engine/spec.md)
+// Traces: OPEN-PREFILL-BATCH, OPEN-SPEC-VERIFY (canonical spec: specs/open-engine/spec.md)
 // The block prefill's host stages against open_kernels/model/replica_block.py's fixture:
 //   python open_kernels/model/replica_block.py --fixture <dir>
 //   block_host_test.exe <dir>
@@ -111,6 +111,64 @@ int main(int argc, char** argv) {
         bool zero_tail = true;
         for (size_t i = t_real * g.value_heads * g.head_dim; i < og.size(); ++i) zero_tail = zero_tail && og[i] == 0.f;
         check(zero_tail, "deltanet_block: og past t_real is zero");
+    }
+
+    // ---- the verify route's rollback (OPEN-SPEC-VERIFY)
+    // A verify runs B tokens through the layer and keeps only the accepted prefix, so the
+    // DeltaNet state has to come back to token k. The gate is that it lands exactly where k
+    // single-token blocks carrying the state would have left it -- bit for bit, not within a
+    // tolerance, because a speculative step that is only nearly lossless is not lossless.
+    {
+        host::DeltaGeom g;
+        g.T = T; g.t_real = t_real; g.hid = hid;
+        g.key_heads = S.at("key_heads"); g.value_heads = S.at("value_heads"); g.head_dim = S.at("head_dim");
+        g.taps = S.at("taps"); g.lanes = S.at("lanes"); g.s_rows = S.at("s_rows");
+        const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim;
+        const size_t nch = 2 * key_w + vw, s_elems = g.value_heads * g.s_rows * dim;
+        auto qkv = read<float>(dir, "qkv.f32"), z = read<float>(dir, "z.f32"), xn = read<float>(dir, "xn.f32");
+        auto convw = read<float>(dir, "convw.f32"), Wa = read<float>(dir, "Wa.f32"), Wb = read<float>(dir, "Wb.f32");
+        auto A = read<float>(dir, "A.f32"), dtb = read<float>(dir, "dtb.f32"), nw = read<float>(dir, "nw.f32");
+        const auto cs0 = to_bf16(read<float>(dir, "conv_state.f32"));
+        const auto S0 = read<float>(dir, "S.f32");
+
+        auto run_block = [&](const host::DeltaGeom& gg, const float* qkv_p, const float* z_p, const float* xn_p,
+                             std::vector<uint16_t>& cs, std::vector<float>& St, host::DeltaTape* tape) {
+            std::vector<float> og(gg.T * vw);
+            host::deltanet_block(gg, qkv_p, z_p, xn_p, convw.data(), Wa.data(), Wb.data(), A.data(), dtb.data(),
+                                 nw.data(), cs.data(), St.data(), og.data(), nullptr, tape);
+        };
+
+        // the whole block, taped
+        auto cs_b = cs0;
+        auto S_b = S0;
+        host::DeltaTape tape;
+        run_block(g, qkv.data(), z.data(), xn.data(), cs_b, S_b, &tape);
+        check(tape.t_real == t_real && tape.key.size() >= t_real * key_w && tape.S0 == S0 &&
+                  tape.conv_state0 == cs0,
+              "DeltaTape: the block-start state and the per-token rows the replay reads");
+
+        for (size_t k : {size_t{1}, t_real / 2, t_real - 1, t_real}) {
+            auto cs_k = cs0;
+            auto S_k = S0;
+            host::deltanet_rollback(g, tape, k, qkv.data(), cs_k.data(), S_k.data());
+
+            // the same k tokens one block at a time, the state carried between them
+            host::DeltaGeom g1 = g;
+            g1.T = 1; g1.t_real = 1;
+            auto cs_s = cs0;
+            auto S_s = S0;
+            for (size_t t = 0; t < k; ++t)
+                run_block(g1, qkv.data() + t * nch, z.data() + t * vw, xn.data() + t * hid, cs_s, S_s, nullptr);
+
+            const std::string at = " (k = " + std::to_string(k) + ")";
+            check(cs_k == cs_s, "deltanet_rollback: the conv state is the sequential one, bit for bit" + at);
+            check(std::memcmp(S_k.data(), S_s.data(), s_elems * sizeof(float)) == 0,
+                  "deltanet_rollback: S is the sequential one, bit for bit" + at);
+            if (k == t_real) {
+                check(cs_k == cs_b && std::memcmp(S_k.data(), S_b.data(), s_elems * sizeof(float)) == 0,
+                      "deltanet_rollback: accepting the whole block is the block's own final state, bit for bit");
+            }
+        }
     }
 
     // ---- the attention stage
