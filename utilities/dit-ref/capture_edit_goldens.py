@@ -228,9 +228,8 @@ def main() -> int:
     (dst / "prompts.json").write_text(json.dumps(edits, indent=2), encoding="utf-8")
 
     emb_path = dst / "prompt_embeds.pt"
-    if emb_path.exists():
-        embeds = torch.load(emb_path)
-    else:
+    embeds = torch.load(emb_path) if emb_path.exists() else None
+    if embeds is None or len(embeds) != len(edits):      # absent, or cached by a run with another --prompts
         pipe = kqs.load_pipe(torch.bfloat16)
         with torch.inference_mode():
             embeds = [pipe.encode_prompt(e["prompt"], device="cpu")[0] for e in edits]

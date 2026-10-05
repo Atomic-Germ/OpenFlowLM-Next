@@ -129,8 +129,10 @@ int jpeg_orientation(const uint8_t* d, size_t n) {
     if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return 1;
     size_t i = 2;
     while (i + 4 <= n && d[i] == 0xFF) {
+        if (d[i + 1] == 0xFF) { ++i; continue; }                // fill byte before a marker
         const uint8_t marker = d[i + 1];
         if (marker == 0xD9 || marker == 0xDA) break;            // end of image, start of scan
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { i += 2; continue; }   // no length
         const size_t len = be16(d + i + 2);
         if (len < 2 || i + 2 + len > n) break;
         const uint8_t* seg = d + i + 4;

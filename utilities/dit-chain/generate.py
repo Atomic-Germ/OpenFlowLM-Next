@@ -263,6 +263,21 @@ class Runner:
         return self.bufs["LAT"].read(np.uint16, 0, T * kp.LAT_CH).reshape(T, kp.LAT_CH)
 
 
+def load_ref(path: str, R: int) -> np.ndarray:
+    """An edit's reference as uint8 [R, R, 3]: a prepared .npy as is; any image file the way
+    capture_edit_goldens.prepare does (EXIF orientation, RGB, centre crop, LANCZOS)."""
+    if path.lower().endswith(".npy"):
+        return np.load(path)
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    s = min(img.size)
+    left, top = (img.width - s) // 2, (img.height - s) // 2
+    img = img.crop((left, top, left + s, top + s))
+    if s != R:
+        img = img.resize((R, R), Image.Resampling.LANCZOS)
+    return np.asarray(img, np.uint8)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--kernels", required=True)
@@ -318,7 +333,7 @@ def main() -> int:
     for j, p in enumerate(a.prompt):
         rng = np.random.default_rng(a.seed + j)
         noise = rng.standard_normal((T, kp.LAT_CH), np.float32).astype(bfloat16).view(np.uint16)
-        ref = np.load(a.ref[j]) if a.edit else None
+        ref = load_ref(a.ref[j], a.size) if a.edit else None
         jobs.append((f"p{j:02d}", p, noise, None, None, ref, None))
 
     report = {"size": a.size, "edit": a.edit, "images": []}

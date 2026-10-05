@@ -1125,12 +1125,14 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
                 // the file parts are the images and the mask; every other part is a text field
                 std::vector<std::pair<std::string, std::string>> fields;
                 std::vector<ImageUpload> uploads;
-                for (const auto& [name, part] : parts) {
-                    if (name == "image" || name == "image[]" || name == "mask")
-                        uploads.push_back(ImageUpload{name, part.filename, part.content_type, part.content.size(),
-                                                      part.content});
-                    else
-                        fields.emplace_back(name, part.content);
+                for (auto& [name, part] : parts) {   // moved out: the bodies can be hundreds of MB
+                    if (name == "image" || name == "image[]" || name == "mask") {
+                        const size_t bytes = part.content.size();
+                        uploads.push_back(ImageUpload{name, std::move(part.filename), std::move(part.content_type),
+                                                      bytes, std::move(part.content)});
+                    } else {
+                        fields.emplace_back(name, std::move(part.content));
+                    }
                 }
                 rest_handler->handle_openai_images_edits(openai_compat::images_form_json(fields), uploads,
                                                          cancellation_token, send_response,
