@@ -11,8 +11,8 @@ the output is meaningless. Only the time counts: it bounds what pre-converted ac
 (specs/open-diffusion/archive/phase7-speed.md, step 1) could buy. No layout options
 (gather, lda, epilogue).
 
-    DG_M=4608 DG_K=3072 DG_N=27648 python open_kernelsuild_design.py utilities\dit-gemm-benchfp16a\dit_gemm_bfp16a.py <out>
-    python utilities\dit-gemm-benchfp16a\probe.py ...   (builds, makes the cfgs, benches)
+    DG_M=4608 DG_K=3072 DG_N=27648 python open_kernels\build_design.py utilities\dit-gemm-bench\bfp16a\dit_gemm_bfp16a.py <out>
+    python utilities\dit-gemm-bench\bfp16a\probe.py ...   (builds, makes the cfgs, benches)
 """
 
 from __future__ import annotations

@@ -70,7 +70,7 @@ def main() -> int:
             r = subprocess.run([sys.executable, str(BENCH), str(d / "run.cfg"), "--driver",
                                 str(DRIVER), "--warm", "1"], capture_output=True, text=True)
             m = re.search(r"med=\s*([\d.]+)", r.stdout)
-            if not m:
+            if not m or "!!" in r.stdout or "driver exit" in r.stdout or r.returncode:
                 sys.stdout.write(r.stdout[-2000:] + r.stderr[-2000:])
                 raise SystemExit(f"bench of {d} failed")
             res[tag] = float(m.group(1))

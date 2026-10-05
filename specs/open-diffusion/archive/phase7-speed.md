@@ -24,7 +24,7 @@ profile ranks the work but doesn't size it. With `--profile`, every op includes 
 configure and ~1 ms of per-op wait. That adds up to 4.1 s at 512² and 12.6 s at 1024²,
 against 3.7 s and 12.0 s unprofiled.
 
-`open_diffusion_cli --profile` now prints a per-stream table too (`cli.cpp`, uncommitted).
+`open_diffusion_cli --profile` now prints a per-stream table too (`cli.cpp`).
 
 | 1024², ms per image | total | calls | per call | TFLOPS |
 |---|---:|---:|---:|---:|
