@@ -73,6 +73,29 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         self._load_config(config_file_path=config_json_path)
         if self.gguf_reader is None:
             self._read_hf_index()
+        else:
+            self._lin = self._linear_geom()
+        self.stream_export = getattr(self, "stream_export", False)
+        self._experts_pre_sliced = False
+
+    def _linear_geom(self):
+        """(num_k, num_v, head_k_dim, head_v_dim) of the gated DeltaNet from the GGUF's
+        own ssm keys. Suffix-matched so qwen4exp.* and qwen35moe.* both resolve:
+        llama.cpp writes group_count = key heads, time_step_rank = value heads,
+        state_size = key head dim, inner_size = value heads x value head dim."""
+        f = self.gguf_reader.fields
+
+        def get(suffix):
+            hits = [k for k in f if k.endswith(suffix)]
+            if not hits:
+                raise KeyError(f"GGUF lacks '*{suffix}': cannot place the DeltaNet value heads")
+            return int(f[hits[0]].contents())
+
+        nk = get("ssm.group_count")
+        nv = get("ssm.time_step_rank")
+        state = get("ssm.state_size")
+        inner = get("ssm.inner_size")
+        return nk, nv, state, inner // nv
 
     def _resolve_source(self, source: str) -> Path:
         path = Path(source)
@@ -125,6 +148,16 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
             self.prune_moe_ffn = getattr(self, "prune_moe_ffn", None)
             self.imatrix_path_hint = getattr(self, "imatrix_path_hint", None)
             self._resolve_moe_prune()
+            stream_writer = None
+            if self.stream_export:
+                from ..streaming_exporter import StreamingSafetensorsWriter, StreamingPack
+                import os as _os
+                out_path = _os.path.join(q4nx_path, "model.q4nx")
+                _os.makedirs(q4nx_path, exist_ok=True)
+                stream_writer = StreamingSafetensorsWriter(out_path)
+                self.q4nx_tensors = StreamingPack(stream_writer)
+                print(f"[INFO] Streaming tensor export to {out_path}; "
+                      f"input pages are dropped as each tensor converts")
             # MTP scaffolding is dropped from every pack -- MTP (spec decoding)
             # is recorded as its own future artifact (see README), not half-
             # converted silently. A conforming source ships blk.N.nextn.*.
@@ -135,16 +168,30 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
                 print(f"[INFO] Skipping MTP block(s) {sorted(mtp_layers)}: next-token-prediction "
                       f"scaffolding has no kernel consumer today and is intentionally not "
                       f"carried into the pack.")
+            total_tensors = len(self.gguf_tensors)
+            done = 0
             for name in sorted(self.gguf_tensors):
+                done += 1
                 if name.startswith("blk.") and ".nextn." in name:
                     print(f"[SKIP] {name} (MTP)")
                     continue
                 if name.startswith("blk.") and int(name.split(".")[1]) in mtp_layers:
                     print(f"[SKIP] {name} (MTP block scaffolding)")
                     continue
-                self._process_gguf_tensor(name)
-            print(f"[INFO] Produced {len(self.q4nx_tensors)} Q4NX tensors")
-            self._export_weights(q4nx_path, weights_type)
+                try:
+                    self._process_gguf_tensor(name)
+                finally:
+                    from ..memfree import drop_pages
+                    drop_pages(self.gguf_tensors[name].data)
+                filled = round(24 * done / total_tensors)
+                print(f"\r[INFO] convert {done}/{total_tensors} {'#'*filled}{'-'*(24-filled)} {name}   ", end="", flush=True)
+            print()
+            if stream_writer is not None:
+                stream_writer.close()
+                print(f"[INFO] Produced {len(self.q4nx_tensors)} Q4NX tensors (streamed to {stream_writer.path})")
+            else:
+                print(f"[INFO] Produced {len(self.q4nx_tensors)} Q4NX tensors")
+                self._export_weights(q4nx_path, weights_type)
             self._extract_tokenizer_json(q4nx_path)
         else:
             self._convert_hf(q4nx_path, weights_type)
@@ -222,28 +269,77 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         w = dequantize(gt.data, gt.tensor_type).copy()
         return torch.from_numpy(w).to(torch.float32).contiguous()
 
+    def _carry_through(self, gguf_name: str, w: torch.Tensor) -> None:
+        """Store a tensor the family has no mapping for.
+
+        2D weights that quantize cleanly go through the normal Q8NX pack;
+        anything that cannot (scalar-ish, or column counts that break the
+        256-block pack) travels as bf16 under its GGUF name so no bytes are
+        silently lost.
+        """
+        if w.ndim == 2:
+            try:
+                self._store_q(gguf_name, w)
+                return
+            except Exception:
+                pass  # too narrow / odd shape for Q8NX, fall back to bf16
+        self.q4nx_tensors[gguf_name] = self._bf16(w)
+
+    def _deq_gguf_bf16(self, name: str, rows: int = 16384) -> torch.Tensor:
+        """Row-chunked dequantise straight to bf16 (no full fp32 spike)."""
+        gt = self.gguf_tensors[name]
+        out = None
+        for i in range(0, gt.data.shape[0], rows):
+            W = dequantize(gt.data[i : i + rows], gt.tensor_type)
+            if out is None:
+                out = torch.empty((gt.data.shape[0], *W.shape[1:]), dtype=torch.bfloat16)
+            out[i : i + rows] = torch.from_numpy(W).to(torch.bfloat16)
+        return out
+
+    def _deq_gguf_expert_slices(self, name: str) -> torch.Tensor:
+        """Dequantize a fused expert tensor one expert at a time.
+
+        ffn_{gate,up,down}_exps are [n_experts, inter, hidden] with the expert
+        axis outermost in the byte layout, so each expert's quantized block is
+        contiguous and can be dequantized on its own -- peak is one expert
+        (~6.5 MB fp32 for Qwen3.8-Flash-Next) instead of the whole 3-of-48-
+        layer [288, 640, 2560] fp32 (~1.9 GB). When expert pruning is active
+        only the kept experts are ever read, so the pruned pack never even
+        touches the dropped data off the stone.
+        """
+        gt = self.gguf_tensors[name]
+        L = int(name.split(".")[1])
+        kept = self._expert_idx.get(L)
+        indices = range(gt.data.shape[0]) if kept is None or len(kept) == 0 else kept
+        blocks = [dequantize(gt.data[e], gt.tensor_type) for e in indices]
+        w = np.stack(blocks, axis=0)
+        return torch.from_numpy(w).to(torch.float32).contiguous()
+
     def _untile_head_params(self, w: torch.Tensor) -> torch.Tensor:
         """llama.cpp tiled head params [NVP, NK] -> engine grouped order [NK, NVP]."""
-        nvp = self.LINEAR_NUM_VALUE_HEADS // self.LINEAR_NUM_KEY_HEADS
-        nk = self.LINEAR_NUM_KEY_HEADS
+        nk, nv = self._lin[0], self._lin[1]
+        nvp = nv // nk
         w = w.reshape(nvp, nk).T.reshape(nk * nvp)
         return w.to(torch.float32).contiguous()
 
     def _untile_linear_rows(self, w: torch.Tensor) -> torch.Tensor:
         """Undo llama.cpp value-major tiling on linear-attn row dim: (q g p)->(g q p)."""
+        nk, nv, _, head_v = self._lin
         return rearrange(
-            w, "(q g p) c -> (g q p) c", p=self.LINEAR_KEY_HEAD_DIM, q=2
+            w, "(q g p) c -> (g q p) c", p=head_v, q=nv // nk
         ).contiguous()
 
     def _untile_linear_cols(self, w: torch.Tensor) -> torch.Tensor:
         """Undo llama.cpp value-major tiling on linear-attn col dim: (q g p)->(g q p)."""
+        nk, nv, _, head_v = self._lin
         return rearrange(
-            w, "r (q g p) -> r (g q p)", p=self.LINEAR_KEY_HEAD_DIM, q=2
+            w, "r (q g p) -> r (g q p)", p=head_v, q=nv // nk
         ).contiguous()
 
     def _untile_linear_heads(self, w: torch.Tensor) -> torch.Tensor:
         """Undo llama.cpp tiling on rank/head vectors: (q g)->(g q)."""
-        return rearrange(w, "(q g) c -> (g q) c", q=2).contiguous()
+        nk, nv = self._lin[0], self._lin[1]
+        return rearrange(w, "(q g) c -> (g q) c", q=nv // nk).contiguous()
 
     def _resolve_moe_prune(self):
         """Imatrix-derived index sets for optional MoE pruning.
@@ -294,7 +390,56 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         if not layers:
             raise ValueError(f"--imatrix {self.imatrix_path_hint}: no *.in_sum2 tensors")
 
+        # The imatrix must describe the same expert set as the GGUF. The
+        # matmul "reap" that produced a 288-expert GGUF does not invalidate
+        # its 512-entry counts: without this check the prune paths apply
+        # indices into the wrong axis entirely (this is a real mismatch the
+        # bundled imatrix has on qwen3.8-flash-next-reap-288).
+        counts0 = np.asarray(self.imatrix.counts(f"blk.{layers[0]}.ffn_gate_exps.weight")).reshape(-1)
+        gt0 = self.gguf_tensors.get(f"blk.{layers[0]}.ffn_gate_exps.weight")
+        if gt0 is not None:
+            shape = getattr(gt0, "shape", None)
+            E_gguf = int(shape[-1]) if shape is not None and len(shape) == 3 else None
+            if E_gguf is not None and E_gguf != counts0.shape[0]:
+                raise ValueError(
+                    f"--prune-moe-ffn/--prune-experts: imatrix lists {counts0.shape[0]} "
+                    f"experts but this GGUF tensor holds {E_gguf}. The imatrix predates\n"
+                    f"        the reaping it was supposed to rank -- regenerate it "
+                    f"(or drop the prune flags) and retry.")
+
         ffn_retained = []
+        if self.prune_moe_ffn:
+            # Snap K to a buildable MoE expert width *before* deriving the
+            # per-layer index sets, so every layer's keep set is the width we
+            # actually pack. The catalogue wants K as a multiple of 64 (the
+            # Q4NX panel rule needs 128 * K % 8192 == 0 from the packer side);
+            # an unbuildable K would produce a container even the recipe's own
+            # checks later refuse. Print, let the dev Ctrl-C A if they want
+            # the exact ff else we proceed — the reported line says what K the
+            # container ended up at.
+            first = np.asarray(self.imatrix.scores(f"blk.{layers[0]}.ffn_down_exps.weight"), dtype=np.float64)
+            if first.ndim == 2:
+                axis = 1 if first.shape[1] == len(counts0) else 0
+                n = first.shape[1 - axis]
+            else:
+                n = first.shape[0]
+            # The catalogue valid kernel frames for qwen36moe ask the expert
+            # width to be a multiple of 128 whose stripe count (K // 128)
+            # divides n_cols (= 8), i.e. K in {128, 256, 512, 1024}: an
+            # unbuildable K would produce a container even the recipe's own
+            # checks later refuse. Snap to the nearest valid one before we
+            # derive the per-layer index sets, so every keep set uses the
+            # width the container actually ships. Ctrl-C if you want the
+            # exact (unbuildable) width back.
+            candidates = [128 * d for d in (1, 2, 4, 8) if 128 * d <= n]
+            k_req = min(self.prune_moe_ffn, n)
+            if candidates and k_req not in candidates:
+                snap = min(candidates, key=lambda c: (abs(c - k_req), c))
+                print(f"[INFO] --prune-moe-ffn {k_req}: not packable as a qwen36moe "
+                      f"expert width (the recipe's stripe rule lets a width be "
+                      f"128*multiple-of-divisor-of-8: {candidates}); snapping to {snap} "
+                      f"(nearest valid; Ctrl-C to stop, or pass K={snap}).")
+                self.prune_moe_ffn = snap
         for L in layers:
             e_name = f"blk.{L}.ffn_gate_exps.weight"
             down_name = f"blk.{L}.ffn_down_exps.weight"
@@ -320,6 +465,7 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
                 ffn_retained.append(retained)
         if ffn_retained:
             self.prune_moe_ffn_retained = sum(ffn_retained) / len(ffn_retained)
+        self._catalogue_prune_check()
 
         if self.prune_experts:
             counts_l = [np.asarray(self.imatrix.counts(f"blk.{L}.ffn_gate_exps.weight")).reshape(-1) for L in layers]
@@ -346,13 +492,66 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
             print(f"[INFO] --prune-moe-ffn {self.prune_moe_ffn_kept}: moe_intermediate/expert "
                   f"{self.prune_moe_ffn_from} -> {self.prune_moe_ffn_kept}; activation mass "
                   f"retained {self.prune_moe_ffn_retained * 100:.1f}% (mean over layers)")
+            k = self.prune_moe_ffn_kept
+            if k % 64 != 0 or (k == 0) or (128 * (k // 128)) != k or (8 % ((k // 128) or 1) != 0):
+                print(f"[INFO]   --prune-moe-ffn {k} is not one this kernel set can pack: "
+                      f"the qwen36moe recipe requires the expert width to be a "
+                      f"multiple of 128 whose 128-row stripe count divides the 8 "
+                      f"columns; {k} fails that. Valid widths: 128, 256, 512 (and "
+                      f"1024 when the pool allows).")
+
+    def _prune_shexp(self, w: torch.Tensor, L: int, is_down: bool) -> torch.Tensor:
+        """Narrow the shared expert to the per-layer moe_ffn index set, IDENTICALLY
+        to the routed experts: they ride one call-site path in the kernels, so a
+        container that narrows only the routed experts is structurally refused.
+        gate/up: the kept axis is the leading one ([inter, hidden]); down: it is
+        the trailing one ([hidden, inter])."""
+        ids = self._moe_ffn_idx.get(L)
+        if ids is None or len(ids) == 0:
+            return w
+        ids = torch.as_tensor(ids, dtype=torch.long)
+        return w.index_select(1 if is_down else 0, ids).contiguous()
+
+    def _catalogue_prune_check(self) -> None:
+        """Info (never an error) when the pruned MoE FFN width is not one of the
+        kernel catalogue's validated points -- the losing path is simply 'no
+        validated kernels for this K yet', surfaced up front rather than after
+        a 20 GB container build. Mirrors _build_spec's discovery of open_kernels."""
+        k = self.prune_moe_ffn_kept
+        if k is None:
+            return
+        checkout = os.environ.get("OPEN_KERNELS_DIR")
+        candidates = [Path(checkout)] if checkout else []
+        candidates += [p / "open_kernels" for p in Path(__file__).resolve().parents]
+        candidates.append(Path.cwd() / "open_kernels")
+        root = next((c for c in candidates if (c / "recipes" / "catalogue.py").is_file()), None)
+        if root is None:
+            return
+        import sys
+        sys.path.insert(0, str(root))
+        try:
+            from recipes.catalogue import CATALOGUE
+        except Exception:
+            return
+        try:
+            template = CATALOGUE.get("moe")
+            if template is None:
+                return
+            p = template.params.get("ff")
+            if p is not None and not p.ok(int(k)):
+                print(f"[INFO] --prune-moe-ffn {k}: this K is outside the validated "
+                      f"kernel catalogue set {p.expected()} -- kernel export will "
+                      f"report 'UNVALIDATED point allowed by OPEN_KERNELS_UNVALIDATED: "
+                      f"moe: ff={k}'; pick one of {p.expected()} to ship with it")
+        except Exception:
+            return
 
     def _moe_prune_tensor(self, w: torch.Tensor, L: int, kind: str) -> torch.Tensor:
         """Gather one expert tensor by the resolved per-layer index sets.
 
         kind is 'gate'/'up': natural [E, inter, hidden]; 'down': [E, hidden, inter];
         'router': [E, hidden]."""
-        if L in self._expert_idx:
+        if L in self._expert_idx and not self._experts_pre_sliced:
             ids = torch.as_tensor(self._expert_idx[L], dtype=torch.long)
             w = w.index_select(0, ids)
         if L in self._moe_ffn_idx and kind in ("gate", "up"):
@@ -368,7 +567,7 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         # gguf.dequantize() already returns the natural [out, in] / [vocab, hidden]
         # numpy shape (same orientation as the HF safetensors path) - no transpose.
         if gguf_name == "token_embd.weight":
-            self.q4nx_tensors["model.embed_tokens.weight"] = self._bf16(self._deq_gguf(gguf_name))
+            self.q4nx_tensors["model.embed_tokens.weight"] = self._deq_gguf_bf16(gguf_name)
             return
         if gguf_name == "output.weight":
             self._store_q("lm_head.weight", self._deq_gguf(gguf_name))
@@ -379,7 +578,14 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         if gguf_name.startswith("blk."):
             self._process_gguf_layer_tensor(gguf_name)
             return
-        print(f"[WARN] Unhandled GGUF tensor: {gguf_name}")
+        if gguf_name == "per_layer_token_embd.weight":
+            # The PLE hash table is a n-gram-indexed [160, ~320M] store (35 GB as
+            # Q5_0): neither dequantizable nor a GEMM weight. A speculative pack
+            # records its presence and drops it, with its siblings (PLE layer).
+            print(f"[WARN] Skipping {gguf_name} (35 GB n-gram hash store); the speculative pack cannot dequantize it")
+            return
+        print(f"[WARN] Unhandled GGUF tensor: {gguf_name}; carrying through under its GGUF name")
+        self._carry_through(gguf_name, self._deq_gguf(gguf_name))
 
     def _process_gguf_layer_tensor(self, gguf_name: str):
         # name like: blk.0.attn_qkv.weight
@@ -388,7 +594,15 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         rest = ".".join(parts[2:])
         prefix = f"model.layer.{bid}."
 
-        w = self._deq_gguf(gguf_name)
+        self._experts_pre_sliced = is_expert = rest in (
+            "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight")
+        if is_expert:
+            # Streaming expert path: dequantize the (optionally pruned) set of
+            # experts one byte-block at a time instead of materializing the
+            # whole [n_experts, ...] float32 tensor at once.
+            w = self._deq_gguf_expert_slices(gguf_name)
+        else:
+            w = self._deq_gguf(gguf_name)
 
         # --- norms (GGUF already stores the Q4NX weight + 1 convention) ---
         if rest == "attn_norm.weight":
@@ -427,7 +641,8 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
             return
         if rest == "ssm_conv1d.weight":
             # Second half of channels is value-tiled; first half stays.
-            w0, w1 = w.chunk(2, dim=0)
+            nk, nv, state, head_v = self._lin
+            w0, w1 = w[: 2 * nk * state], w[2 * nk * state:]
             w = torch.cat([w0, self._untile_linear_rows(w1)], dim=0).contiguous()
             self.q4nx_tensors[prefix + "linear_attn.ssm_conv1d.weight"] = self._bf16(w.t())
             return
@@ -450,7 +665,8 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
         # Full-attn q in GGUF is HF-ordered (g p h); the engine wants (p g h)
         # (matches the dense converter and the official Q4NX layout).
         if rest == "attn_qkv.weight":
-            w0, w1 = w.chunk(2, dim=0)
+            nk, nv, state, head_v = self._lin
+            w0, w1 = w[: 2 * nk * state], w[2 * nk * state:]
             w = torch.cat([w0, self._untile_linear_rows(w1)], dim=0).contiguous()
             self._store_q(prefix + "linear_attn.qkv_proj.weight", w)
             return
@@ -476,12 +692,15 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
             self._store_q(prefix + "self_attn.o_proj.weight", w)
             return
         if rest == "ffn_gate_shexp.weight":
+            w = self._prune_shexp(w, bid, is_down=False)
             self._store_q(prefix + "mlp.share_gate_exps_proj.weight", w)
             return
         if rest == "ffn_up_shexp.weight":
+            w = self._prune_shexp(w, bid, is_down=False)
             self._store_q(prefix + "mlp.share_up_exps_proj.weight", w)
             return
         if rest == "ffn_down_shexp.weight":
+            w = self._prune_shexp(w, bid, is_down=True)
             self._store_q(prefix + "mlp.share_down_exps_proj.weight", w)
             return
 
@@ -503,7 +722,8 @@ class Qwen35Moe(__Q4NX_Converter, model_arch=ModelArch.QWEN35MOE):
             self._store_q(prefix + "mlp.down_exps_proj.weight", w)
             return
 
-        print(f"[WARN] Unhandled GGUF layer tensor: {gguf_name}")
+        print(f"[WARN] Unhandled GGUF layer tensor: {gguf_name}; carrying through under its GGUF name")
+        self._carry_through(gguf_name, w)
 
     def _process_tensor(self, hf_name: str):
         key = hf_name.replace("model.language_model.", "")

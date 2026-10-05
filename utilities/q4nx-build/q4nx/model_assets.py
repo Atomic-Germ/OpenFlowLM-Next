@@ -1421,6 +1421,12 @@ def assemble_model_assets(
         config["intermediate_size"] = int(prune_meta["kept_moe_ffn"])
         print(f"[INFO] config.json moe_intermediate_size {was} -> {prune_meta['kept_moe_ffn']} "
               f"(the MoE FFN in this container is that wide)")
+        was_shared = config.get("shared_expert_intermediate_size")
+        if isinstance(was_shared, int):
+            config["shared_expert_intermediate_size"] = int(prune_meta["kept_moe_ffn"])
+            print(f"[INFO] config.json shared_expert_intermediate_size {was_shared} -> "
+                  f"{prune_meta['kept_moe_ffn']} (the shared expert rides the routed "
+                  f"experts' call sites, so it must track their width)")
     if prune_meta and prune_meta.get("kept_experts"):
         was = config.get("num_experts")
         config["num_experts"] = int(prune_meta["kept_experts"])

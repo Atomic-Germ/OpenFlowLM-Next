@@ -598,6 +598,13 @@ def _parse_args(argv):
              "config.json num_experts is narrowed accordingly.",
     )
     parser.add_argument(
+        "--stream", action="store_true",
+        help="Stream packed tensors straight to disk as each converts, and drop "
+             "source pages after each tensor, instead of holding the whole "
+             "packed model in RAM (Guanaco-style mmap eviction). On by default "
+             "when the source GGUF is larger than ~80%% of available RAM.",
+    )
+    parser.add_argument(
         "--build-spec", dest="build_spec", action="store_true", default=False,
         help="After packing, derive the model's open-kernels ModelSpec "
              "(the way oflm add finds kernels), write spec.json into the output "
@@ -899,6 +906,22 @@ def main(argv=None) -> int:
         model.prune_experts = args.prune_experts
         if args.quant:
             model.set_default_tensor_type(args.quant)
+        # Streaming export: explicit --stream, or automatic when the source is
+        # ~80% or more of what RAM can hold. Today only qwen35moe consumes the
+        # flag; other converters ignore it.
+        _src = os.path.getsize(input_path)
+        try:
+            _avail = 0
+            for _line in open("/proc/meminfo"):
+                if _line.startswith("MemAvailable:"):
+                    _avail = int(_line.split()[1]) * 1024
+                    break
+        except (ValueError, OSError):
+            _avail = 0
+        if args.stream or (_avail and _src >= 0.8 * _avail):
+            model.stream_export = True
+            print(f"[INFO] Streaming export enabled (source {_src/1e9:.1f} GB, "
+                  f"available RAM {_avail/1e9:.1f} GB)")
         if weights_type == "vision":
             model.convert(q4nx_path=output_folder, weights_type="language")
             model.convert(q4nx_path=output_folder, weights_type="vision")
