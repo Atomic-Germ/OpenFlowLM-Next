@@ -53,7 +53,7 @@ ATTN = HERE.parent / "attn"
 sys.path.insert(0, str(HERE.parent.parent))
 sys.path.insert(0, str(HERE))
 from ironutil import Pipeline, include_dirs  # noqa: E402
-from layout import (AA_BYTES, AA_H, AA_HP, AA_KVN, AA_OG, AA_OUT, AA_OUT2, AA_QG, AA_RES, AA_ROUT,  # noqa: E402
+from layout import (AA_BYTES, AA_H, AA_HP, AA_KVN, AA_OG, AA_OUT, AA_OUT2, AA_OUT2B, AA_QG, AA_RES, AA_ROUT,  # noqa: E402
                     AA_XM, AA_XN, CA_BYTES, CA_LNW, CA_META, CA_POSTLN, CA_RW, CA_SGW, ELN, KV_BYTES,
                     KV_ROW, POOL_BYTES, POOL_FFN_DOWN, POOL_FFN_GATE, POOL_FFN_UP, POOL_GATE, POOL_K,
                     POOL_O, POOL_Q, POOL_V, PTAB_BYTES, PTAB_ROW, R, SPEC)
@@ -150,7 +150,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
     of_w = [ObjectFifo(t["elem"], name=f"w{c}", depth=2) for c in range(N_CORES)]
     of_y = [ObjectFifo(t["y"], name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(t["x"], name="x", depth=2)
-    of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
+    of_lni = ObjectFifo(u8_ln, name="lni", depth=X.LNI_DEPTH)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1 if DENSE else 3)
     of_ain = ObjectFifo(u8_1k, name="ain", depth=max(4, 2 * RB + 2))   # a block is acquired at once
     of_aout = ObjectFifo(b512, name="aout", depth=2)
@@ -285,8 +285,8 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
                 _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, fm, fq, fk, fv, fi, fs, fsn, ff, None, None, c)
             return body
 
-    workers = [Worker(X.ln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]],
-                      tile=Tile(0, 3), stack_size=0x1800)
+    ln_fn, ln_args = X.ln_dense_worker(of_lni, of_lno, L) if DENSE else (None, None)
+    workers = [Worker(ln_fn, fn_args=ln_args, tile=Tile(0, 3), stack_size=0x1800)
                if DENSE else
                Worker(X.ln_router_body,
                       fn_args=[of_lni.cons(), of_lno.prod(), Buffer(tl["xb"], name="rxs"), Buffer(tl["racc"], name="racc"),
@@ -366,15 +366,26 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         px.fill(x_prod, a_act, bt(AA_BYTES, AA_OG, OG_ELEMS * ELEM))
         py.finish()                                               # out is in DDR
         # res = xres + out; xm = post_attention_norm(res)
-        tg_ln2 = TaskGroup()
-        lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
-        lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln2)
-        lno.drain(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln2)
-        lno.drain(a_act, tap=bt(AA_BYTES, AA_XM, ELN), wait=True, group=tg_ln2)
-        lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
-        tg_ln2.finish()                                           # res, xm are in DDR
+        if X.LN_SPLIT:
+            X.ln_split_residual_norm(lni, lno, c_xres, a_act, a_consts, AA_BYTES, CA_BYTES, AA_OUT, AA_RES, AA_XM,
+                                     CA_POSTLN)
+        else:
+            tg_ln2 = TaskGroup()
+            lni.fill(c_xres, tap=bt(HID, 0, HID), wait=True, group=tg_ln2)
+            lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln2)
+            lno.drain(a_act, tap=bt(AA_BYTES, AA_XM, ELN), wait=True, group=tg_ln2)
+            lni.fill(a_act, tap=bt(AA_BYTES, AA_OUT, HID * 4), wait=True, group=tg_ln2)
+            tg_ln2.finish()                                       # res, xm are in DDR
         X.ffn_sequence(pw, px, py, a_pool, a_act, w_prods, x_prod, y_conss,
-                       AA_BYTES, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN)
+                       AA_BYTES, AA_XM, AA_H, AA_OUT2, POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN, AA_OUT2B)
+        if X.LN_SPLIT:
+            py.finish()                                           # out2 (and out2b) are in DDR
+            X.ln_split_close(lni, lno, c_xres, a_act, AA_BYTES, AA_RES, AA_OUT2, AA_OUT2B)
+            pw.finish()
+            px.finish()
+            pa_in.finish()
+            return
         tg_ln3 = TaskGroup()
         lni.fill(a_act, tap=bt(AA_BYTES, AA_RES, HID * 4), wait=True, group=tg_ln3)
         lni.fill(a_consts, tap=bt(CA_BYTES, CA_POSTLN, ELN), wait=True, group=tg_ln3)    # unused w

@@ -66,7 +66,7 @@ PackOp parse_op(const json& j, const std::string& where) {
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
     if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
-        p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose") {
+        p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
         if (p.up.empty() || p.gate.empty()) fail(where, "expert_stripes without up / gate");
@@ -75,7 +75,8 @@ PackOp parse_op(const json& j, const std::string& where) {
     }
     if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
-    else if (p.op == "transpose") need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
+    else if (p.op == "transpose" || p.op == "transpose_banked")
+        need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
     else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
     else if (p.op == "expert_down") need_all({{"expert_bytes", p.expert_bytes}, {"experts", p.experts}});
     else if (p.op == "put") need_all({{"cap", p.cap}});
@@ -392,6 +393,17 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             } else {
                 fail(gw, "unknown kind " + g.kind + " (dense | linear | full)");
             }
+            // K2's grouped host norms (Stage 2.2): 1 -- also the default when the
+            // field is absent -- keeps the plain whole-row RMSNorm byte for byte.
+            // Only the dense route's host chain norms; linear/full routes have no
+            // grouped host norm site, so they refuse the field rather than accept
+            // a manifest whose norms would silently compute wrong.
+            g.norm_groups = gj.value("norm_groups", 1ull);
+            if (g.norm_groups == 0 || m.hidden % g.norm_groups)
+                fail(gw, "norm_groups " + std::to_string(g.norm_groups) + " must divide hidden " +
+                            std::to_string(m.hidden));
+            if (g.kind != "dense" && g.norm_groups != 1)
+                fail(gw, "kind " + g.kind + " has no grouped host norms (norm_groups must be 1)");
             for (const auto& s : g.program)
                 if (!g.weights.count(s.args[0]))
                     fail(gw, "step " + s.kernel + " reads weight buffer " + s.args[0] + ", which weights does not define");

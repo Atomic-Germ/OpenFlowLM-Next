@@ -54,7 +54,7 @@ The quickstart guide below will help you install these requirements.
 | Item | Requirement |
 |---|---|
 | NPU firmware | Version 1.1.0.0 or later |
-| Kernel + driver | Kernel **7.0+** with `amdxdna`, or `amdxdna-dkms` |
+| Kernel + driver | Kernel **6.17+** with `amdxdna` (in-tree), or `amdxdna-dkms` |
 | Runtime | OpenFlowLM installed |
 | Memlock limit | Must be high enough for NPU execution |
 
@@ -72,7 +72,7 @@ The quickstart guide below will help you install these requirements.
 ---
 
 ## 1. Prerequisites
-- `amdxdna` driver (included in kernel 7.0+, or via `amdxdna-dkms`)
+- `amdxdna` driver (in-tree since kernel 6.17, or via `amdxdna-dkms`)
 - NPU firmware version 1.1.0.0 or later
 - Python 3.8+
 - XRT stack from AMD
@@ -102,11 +102,43 @@ sudo reboot
 ```
 
 #### 4. Install OpenFlowLM
-- Download the latest `.deb` package from the [Releases page](https://github.com/Atomic-Germ/OpenFlowLM/releases):
+- Download the package for your distribution from the
+  [Releases page](https://github.com/Atomic-Germ/OpenFlowLM/releases):
 
 ```sh
+# Debian / Ubuntu (.deb)
 sudo apt install ./openflowlm*.deb
+
+# Fedora / RHEL (.rpm)
+sudo dnf install ./openflowlm*.rpm
 ```
+
+> Pick the package that matches your distribution. The engine binary carries
+> the build host's glibc, FFmpeg and Boost sonames, so a `.deb` is only valid on
+> Debian/Ubuntu and an `.rpm` only on Fedora/RHEL. Both are built on
+> `ubuntu-24.04` in CI.
+
+##### Portable `.tar.gz`
+
+If you would rather not install packages, the release also publishes a relocatable
+tarball:
+
+```sh
+tar xf openflowlm-<version>-Linux.tar.gz
+sudo cp -r openflowlm-<version>-Linux/opt/openflowlm /opt/
+export PATH=/opt/openflowlm/bin:$PATH
+```
+
+The tarball unpacks to `openflowlm-<version>-Linux/opt/openflowlm/`, so it
+installs to the same `/opt/openflowlm` prefix as the packages, with the
+`profile.d` script and the `usr/bin/oflm` symlink already in the tree. It is
+not relocatable -- it expects `/opt/openflowlm`, so put it there and add the
+`bin` directory to `PATH` (the bundled `etc/profile.d/openflowlm.sh` does this
+for login shells).
+
+The tarball bundles the XRT/XDNA libraries, so it does not need system XRT. It
+does still need the kernel `amdxdna` driver and the NPU firmware. The `.rpm`
+additionally requires glibc 2.39 or newer (Fedora 41+, RHEL 10+).
 
 #### 5. (NPU) Check memlock limit
 - Run:
@@ -171,28 +203,33 @@ If `oflm validate` passes but `oflm run` fails with `No such device with index '
    git clone https://github.com/Atomic-Germ/OpenFlowLM.git
    cd OpenFlowLM
    ```
-2. Build:
+2. Build and install from the **repository root** (the root presets are what
+   produce the documented `/opt/openflowlm` layout):
+
    ```sh
-   cd src
    cmake --preset linux-default
    cmake --build --preset linux-default -j$(nproc)
-   cmake --install --preset linux-default
+   sudo cmake --install build
    ```
+
+   See [docs/BUILD.md](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/docs/BUILD.md)
+   for the full set of presets.
 
 #### Advanced Build Options
 
-**Static Build with Bundled XRT/XDNA**
+**Portable Build with Bundled XRT/XDNA**
 
-To build a fully static binary that bundles XRT and the XDNA driver (no system XRT required):
+To bundle the XRT/XDNA libraries into the install tree instead of depending on
+system XRT, use the `linux-portable` preset:
 
 ```sh
-cd src
-cmake --preset linux-static
-cmake --build build -j$(nproc)
+cmake --preset linux-portable
+cmake --build --preset linux-portable -j$(nproc)
 sudo cmake --install build
 ```
 
-This will automatically fetch and build XRT (v2.21.75) and the XDNA driver from source if not found on your system. The resulting binary is fully self-contained and more portable.
+There is no `linux-static` preset -- a truly static build that vendors XRT and
+the XDNA driver from source is not currently supported.
 
 ---
 
@@ -202,15 +239,33 @@ To validate your NPU setup, run:
 ```sh
 oflm validate
 ```
-You should see output similar to:
+You should see output similar to this, with more or fewer debug lines per
+your driver configuration:
 ```
-[Linux]  Kernel: 7.0.0-rc1-00052-g27936bfca73d
-[Linux]  NPU: /dev/accel/accel0
+[Linux]  Kernel: 7.3.0-0.rc4.260925g165768bb7026.42.fc46.x86_64
+[Linux]  NPU: /dev/accel/accel0 with 8 columns
 [Linux]  NPU FW Version: 1.1.2.64
+[Linux]  amdxdna version: 0.10
 [Linux]  Memlock Limit: infinity
+251 (139936403511488): PID(35118): Created pcidev (0000:c2:00.1)
+843716 (139936403511488): PID(35118): Opened /dev/accel/accel0 as 3, sysfs: /sys/bus/pci/devices/0000:c2:00.1
+873802 (139936403511488): PID(35118): Expanding BO from 0 to 67108864
+14209799 (139936403511488): PID(35118): Created expandable AMDXDNA_BO_DEV_HEAP: hdl=1 sz=0x4000000 paddr=0x4000000 vaddr=0x7f4558000000 uptr=0x0
+14230859 (139936403511488): PID(35118): Created device (0000:c2:00.1) ...
+14251958 (139936403511488): PID(35118): Destroying device (0000:c2:00.1) ...
+14258370 (139936403511488): PID(35118): Destroying AMDXDNA_BO_DEV_HEAP: hdl=1 sz=0x4000000 paddr=0x4000000 vaddr=0x7f4558000000 uptr=0x0
+17945498 (139936403511488): PID(35118): Closed 3
+[Linux]  Device runtime: NPU opened
+18243027 (139936403511488): PID(35118): Destroying pcidev (0000:c2:00.1)
 ```
 
-On Linux, `oflm validate` checks the kernel DRM path. `oflm run` uses XRT. If validation succeeds but running a model fails with `No such device with index '0'`, run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution.
+The NPU line reports the AIE column count. `oflm validate` performs two checks:
+it opens `/dev/accel/accelN` through the DRM ioctls, then asks the device
+runtime to open the NPU the way `oflm run` does. If the runtime check fails it
+prints `ERROR ... the device runtime cannot open it`; run `xrt-smi examine` and install the XRT AMD XDNA plugin for your distribution. Use
+`oflm validate --json` to see each check as a field (`kernel_ok`,
+`amd_device_found`, `all_fw_ok`, `enough_cols`, `memlock_ok`, `runtime_ok`, 
+and the aggregate `ready`).
 
 ---
 
@@ -218,6 +273,6 @@ On Linux, `oflm validate` checks the kernel DRM path. `oflm run` uses XRT. If va
 
 - [Lemonade-server🍋](https://lemonade-server.ai/)
 - [Lemonade GitHub issues](https://github.com/lemonade-ai/lemonade/issues)
-- [Lemonade Discord](https://discord.gg)
+- [Lemonade Discord](https://discord.com/invite/jtWZdMJ8ee)
 
 ---

@@ -1,5 +1,21 @@
 # Adding a New Model to OpenFlowLM
 
+> **Read this first.** There are now **two** ways to add a model, and you almost
+> certainly want the first one:
+>
+> 1. **A model whose shape already has open kernels** — no code at all. Pack the
+>    weights with [`utilities/q4nx-build`](../utilities/q4nx-build) and register
+>    it with [`oflm add`](../docs/docs/instructions/cli.md#-add-a-converted-model-oflm-add).
+>    Because every shape-identical model links to a shared **family** xclbin, a
+>    fine-tune or derivative of an existing architecture needs no kernel work and
+>    no `CMakeLists.txt` edit. This is the supported path.
+> 2. **A genuinely new architecture** — the steps below. This is the closed-engine
+>    path: it writes an `AutoModel` wrapper and links a **prebuilt** engine shared
+>    library. It is what the open-kernel work is *replacing*.
+>
+> The worked example below is `Gemma4-12B`, which is a closed-engine model today.
+> Follow it only when you are adding a new engine, not when you are adding a model.
+
 This document lists every step required to bring a new model online in OpenFlowLM,
 from the prebuilt NPU engine down to a standalone test harness.
 
@@ -9,8 +25,9 @@ from the prebuilt NPU engine down to a standalone test harness.
 | ---------------- | ----------------------- | --------------------------------------------------- |
 | `<model>`        | `gemma4_12b`            | file / directory / engine-library names (snake_case) |
 | `<Model>`        | `Gemma4_12B`            | the `AutoModel` subclass name                        |
-| `<family>`       | `gemma4-12b`            | model-list family key, CLI tag prefix (kebab-case)   |
-| `<ModelName>`    | `Gemma4-12B-IT-NPU2`    | HuggingFace repo, model folder, **and** xclbin folder |
+| `<family>`       | `gemma4-12b`            | model-list **top-level key**, CLI tag prefix (kebab-case) |
+| `<details.family>` | `gemma4-12b`          | the engine-family key in `all_models.hpp` — often the **same**, but not always (see Step 6) |
+| `<ModelName>`    | `Gemma4-12B-IT-NPU2`    | HuggingFace repo and model folder                      |
 
 All paths below are relative to `src/` unless stated otherwise.
 
@@ -44,6 +61,11 @@ Before writing any wrapper code, these artifacts must exist:
   - Windows: `lib/<model>_npu.dll` + `<model>_npu.lib`
 - **Kernel binaries** — `xclbins/<ModelName>/`
   The folder name must exactly match `name` in `model_list.json` (Step 6).
+
+> For an **open-kernel** model this is different: the xclbins live in a
+> *family* directory shared by every shape-identical model, and are linked by
+> `--family` at `oflm add` time rather than by folder name. A new model of an
+> existing shape therefore needs no xclbin directory of its own.
 - **Weights** — a `model.q4nx` plus `config.json`, `tokenizer.json`,
   `tokenizer_config.json` and (if separate) `chat_template.jinja`.
 
@@ -216,6 +238,9 @@ by `<|"|>` that need a normalizing rewrite pass before `nlohmann::json::parse`.
 enum class SupportedModelFamily { ... gemma4e, gemma4_12b, gpt_oss, ... };
 
 // 3. string -> enum map. The key MUST equal details.family in model_list.json
+//    (the *inner* details field, not the top-level models{} key -- they differ
+//    for entries like nanbeige4.1, where the key is nanbeige4.1 and
+//    details.family is nanbeige).
 {"gemma4-12b", SupportedModelFamily::gemma4_12b},
 
 // 4. factory switch case
@@ -231,8 +256,8 @@ A mismatch between (3) and `model_list.json` shows up at runtime as
 
 ## Step 5 — Link the engine library
 
-`CMakeLists.txt` — add the bare library name inside `target_link_libraries(oflm PUBLIC ...)`
-(around line 420):
+`src/CMakeLists.txt` — add the bare library name inside
+`target_link_libraries(oflm PUBLIC ...)` (around line 660):
 
 ```cmake
     gemma4e_npu
@@ -240,7 +265,7 @@ A mismatch between (3) and `model_list.json` shows up at runtime as
     gpt_oss_npu
 ```
 
-Your new `.cpp` files need **no** CMake change — line 238 globs
+Your new `.cpp` files need **no** CMake change — `src/CMakeLists.txt` globs
 `common/*/*.cpp` automatically. The `OFLM_USE_HRX` option selects whether the
 linker searches `lib/hrx` or `lib/xrt`.
 
@@ -248,8 +273,21 @@ linker searches `lib/hrx` or `lib/xrt`.
 
 ## Step 6 — Add the model-list entry
 
-`model_list.json` — add a family block keyed by `<family>`, with one entry per size
-variant. The CLI tag is `<family>:<variant>` (e.g. `gemma4-12b:12b`).
+`model_list.json` — add a family block under the top-level `models` object, keyed
+by `<family>`, with one entry per size variant. The CLI tag is
+`<family>:<variant>` (e.g. `gemma4-12b:12b`).
+
+The file's top level is:
+
+```json
+{
+  "model_path": "models",
+  "models": { "<family>": { "<variant>": { ...entry... } } }
+}
+```
+
+It currently holds 33 families. `model_info.json` is keyed by the **full tag**
+(`<family>:<variant>`) instead, and must be kept in step — see Step 7.
 
 ```json
 "gemma4-12b": {
@@ -259,7 +297,7 @@ variant. The CLI tag is `<family>:<variant>` (e.g. `gemma4-12b:12b`).
     "file_url": "https://huggingface.co/api/models/OpenFlowLM/Gemma4-12B-IT-NPU2/tree/main",
     "ms_url": "https://modelscope.cn/models/amd/Gemma4-12B-IT-NPU2",
     "size": 12000000000,
-    "oflm_min_version": "0.9.45",
+    "oflm_min_version": "0.1.0",
     "files": ["config.json", "model.q4nx", "tokenizer.json",
               "tokenizer_config.json", "chat_template.jinja"],
     "vlm": false,
@@ -269,6 +307,7 @@ variant. The CLI tag is `<family>:<variant>` (e.g. `gemma4-12b:12b`).
     "details": {
       "format": "NPU2",
       "family": "gemma4-12b",
+      "think_toggleable": false,
       "think": true,
       "parameter_size": "12B",
       "quantization_level": "Q4_1"
@@ -286,11 +325,17 @@ Field notes:
 - `files` — the minimum set `oflm pull` must fetch; a missing entry surfaces as a
   tokenizer or config load failure at first run.
 - `vlm` / `asr` — capability flags read by the runner to enable image / audio CLI paths.
-- `oflm_min_version` — refuses to load on older OFLM builds.
+- `oflm_min_version` — the oldest `oflm` that can load this model. The downloader
+  compares it against the running build and **warns** when the model is newer
+  than the binary, so set it to a version that actually exists. It was reset to
+  `0.1.0` by the `flm` → `oflm` rename; the `0.9.x` values still in the shipped
+  registry predate that rename and currently warn on every model.
+- `modified_at` — ISO-8601 timestamp; present on shipped entries.
 - `footprint` — GiB of memory reported to the user for model-fits checks.
 
 Model resolution at runtime:
-`get_models_directory()` = `$OFLM_MODEL_PATH` or `~/oflm`;
+`get_models_directory()` = `$OFLM_MODEL_PATH`, else `~/.oflm/models` on Windows or
+`~/.config/oflm/models` on Linux (older installs: `~/oflm/models`);
 `get_model_path(tag)` = `<models_dir>/<model_path>/<name>`.
 
 ---
@@ -300,7 +345,8 @@ Model resolution at runtime:
 `model_info.json` — a HuggingFace file listing keyed by the full tag
 (`"gemma4-12b:12b"`), containing one object per file with `type`, `oid`, `size`,
 `path`, and an `lfs` block for large files. Consumed by
-`pull/model_downloader.cpp` and installed by `CMakeLists.txt:878`.
+`pull/model_downloader.cpp`. It is copied beside the binary on Windows and
+installed to `share/oflm/` alongside `model_list.json` on Linux.
 
 You can regenerate the block from the HF tree API:
 

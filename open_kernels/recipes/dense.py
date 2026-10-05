@@ -41,6 +41,7 @@ import os
 from dataclasses import dataclass
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
+from .qwen36moe import ATTN_LMAX  # Path A: the widest attention GEMM stream (window chunk)
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, GEMM_T, MB, _op_index, band_bytes, proj_op, q4_chunks,
                         mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
@@ -104,7 +105,7 @@ QKNORM_POST_ROPE = ("hunyuan",)
 # that - attention_bias covers its o_proj, and all three expert projections carry one - so
 # adding it here is not enough on its own; it needs a fourth consts slot (gptoss-bringup.md).
 QKV_BIAS_FAMILIES = ("qwen2",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2")
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2")
 
 
 def qkv_bias(spec: ModelSpec) -> bool:
@@ -192,7 +193,7 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError("qwen3: hidden and intermediate must be multiples of 256 (one q4 k-tile)")
     if spec.num_kv_heads % 2:
         raise OpRangeError("qwen3: an odd kv-head count does not split into ain elements")
-    require("ln", width=spec.hidden)
+    require("ln", width=spec.hidden, groups=spec.norm_groups)
     require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
             rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
             qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE, qkv_bias=qkv_bias(spec))
@@ -401,6 +402,23 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     if G.QKVB or G.PTAB_ELEMS > 1:
         return None
     hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
+    # ---- the NPU block-attention option (Path A, OPEN-PREFILL-ATTN) ----
+    # The same two bf16 GEMMs per kv head the full route rides (designs/attn_block):
+    # S = Q_g . K_g^T and O = P_g . V_g with the row softmax on the host
+    # (block_host.cpp softmax_chunk). k2: GQA 32/8 -> grp 4, T 256 -> m 1024; head
+    # dim 128 is one quarter of the 35B's 256, so the pv product spans 4 of the 8
+    # AIE columns (AG_COLS in the design): same (64, 32) tiles, same engine-side
+    # tile order -- only the per-column slice the instruction stream walks.
+    # Dense-only: a family with a sliding-window layer keeps the dxB route.
+    ag_m = (spec.num_heads // spec.num_kv_heads) * T
+    ag_tiers = list(range(256, ATTN_LMAX + 1, 256))
+    ag_args = ["ag_a", "ag_b", "ag_c"]
+    check_buffer_args("attn_block", ag_args)
+    attn_block = None
+    if set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
+        attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
+                      "kernels_s": {str(Lw): f"ag_s{Lw}" for Lw in ag_tiers},
+                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}}
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 
@@ -460,7 +478,10 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
                                   "qw": qw, "kvw": kvw, "ff": ff,
                                   "ad_q": L.AD_Q, "ad_kvn": L.AD_KVN, "ad_og": L.AD_OG,
                                   "attn_kernel": kn, "attn_args": args,
-                                  "sandwich": spec.sandwich_norms, "act": spec.activation}
+                                  "sandwich": spec.sandwich_norms, "act": spec.activation,
+                                  "norm_groups": spec.norm_groups}
+        if attn_block:
+            out["layer_types"][lt]["attn_block"] = attn_block
     # The T-wide attention scratch: the engine writes every token's q/k/v into it, then
     # shuttles one token's slice in and out of the layer's own `act` around each attention
     # dispatch (core.cpp `shuttle_buf`), and reads all T og rows back out at the end. Shared
@@ -470,6 +491,57 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     # neither N nor K (the band count K/256 reaches each core as a runtime parameter), so
     # each shape is an instruction stream over one xclbin. Changing context costs ~2.5 ms
     # and the shapes alternate, so this is worth more here than anywhere else in the route.
+    if attn_block:
+        hd = spec.head_dim
+        pv_cols = next((c for c in (8, 4, 2) if hd % (32 * c) == 0), 0)
+        # n_aie_cols is structural, not an RTP parameter: s-tiers (cols=8) and
+        # pv-tiers (cols=4 at head_dim 128) are incompatible hardware families
+        # (a cross-family dispatch hangs, ERT state 8); one xclbin per family
+        # serves every tier. ag_s / ag_pv, each kernel wired to its family.
+        out["contexts"]["ag_s"] = f"ag_s{ag_tiers[0]}/final.xclbin"
+        out["contexts"]["ag_pv"] = f"ag_pv{ag_tiers[0]}/final.xclbin"
+        for Lw in ag_tiers:
+            for tag, K, N, cols in (("s", hd, Lw, 8), ("pv", Lw, hd, pv_cols)):
+                name = f"ag_{tag}{Lw}"
+                out["kernels"][name] = {"context": f"ag_{tag}", "insts": f"{name}/insts.bin", "build": name}
+                out["builds"][name] = {"design": "attn_block/attn_gemm.py",
+                                       "build_dir": f"attn_block/build_{tag}{Lw}{sfx}",
+                                       "env": {"AG_M": str(ag_m), "AG_K": str(K),
+                                                "AG_N": str(N), "AG_COLS": str(cols)}}
+        # a: the Q or P rows [M, K] bf16 (plain, the design streams A); b: the tiled
+        # K^T or V [K, N] bf16; c: the fp32 product [M, N] -- sized for the widest window
+        out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2
+        out["globals"]["ag_b"] = ATTN_LMAX * hd * 2
+        out["globals"]["ag_c"] = ag_m * ATTN_LMAX * 4
+        # D4 (observer brief 2026-10-01): an experimental n=16 / cols=8 family where BOTH
+        # products share one xclbin (n=16 with cols=8 tiles N=128 (pv) and every L tier
+        # (s)), so the block's chunk loop never switches hardware context between the
+        # scores and pv dispatches (~2.5 ms each today). Off by default: AG16=1 swaps
+        # the two-context set above for the unified one -- the canonical export is unchanged.
+        if os.environ.get("AG16") == "1":
+            for Lw in ag_tiers:
+                for tag in ("s", "pv"):
+                    out["kernels"].pop(f"ag_{tag}{Lw}", None)
+                    out["builds"].pop(f"ag_{tag}{Lw}", None)
+            out["contexts"].pop("ag_s", None)
+            out["contexts"].pop("ag_pv", None)
+            out["contexts"]["ag16"] = f"ag16_s{ag_tiers[0]}/final.xclbin"
+            # the unified family threads a 16-row B-tile: the engine reads
+            # attn_block.n_tile (validated {16, 32}; absent = 32) -- emitted here so
+            # the bank manifest needs no post-build JSON patch.
+            attn_block["n_tile"] = 16
+            # the layer's stream tables follow the family rename
+            attn_block["kernels_s"] = {str(Lw): f"ag16_s{Lw}" for Lw in ag_tiers}
+            attn_block["kernels_pv"] = {str(Lw): f"ag16_pv{Lw}" for Lw in ag_tiers}
+            for Lw in ag_tiers:
+                for tag, K, N in (("s", hd, Lw), ("pv", Lw, hd)):
+                    name = f"ag16_{tag}{Lw}"
+                    out["kernels"][name] = {"context": "ag16", "insts": f"{name}/insts.bin", "build": name}
+                    out["builds"][name] = {"design": "attn_block/attn_gemm.py",
+                                       "build_dir": f"attn_block/build16_{tag}{Lw}{sfx}",
+                                       "env": {"AG_M": str(ag_m), "AG_K": str(K),
+                                                "AG_N": str(N), "AG_COLS": "8", "AG_N_TILE": "16"}}
+
     for N, K in sorted(shapes):
         name = f"gemm_n{N}_k{K}"
         out["contexts"].setdefault("gemm", f"{name}/final.xclbin")
@@ -544,9 +616,17 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     n = cores_for(spec)
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
+    # ln's build dir carries the groups: a width/eps pair is shared by models of DIFFERENT
+    # group counts (Qwen3-4B and K2 are both 2560/1e-06), and the two kernel sets are not
+    # interchangeable -- without the suffix the second export would overwrite the first's
+    # xclbin. A grouped model also needs the env the design reads (ln.py's LN_GROUPS),
+    # for the same reason dx gets its groups from the spec through LN_FLAGS below.
+    gsfx = f"_g{spec.norm_groups}" if spec.norm_groups != 1 else ""
+    genv = {"LN_GROUPS": str(spec.norm_groups)} if spec.norm_groups != 1 else {}
     b = {
         "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}", "env": {}},
-        "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}", "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}"}},
+        "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}{gsfx}",
+               "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}", **genv}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
                        "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
     }
@@ -601,6 +681,18 @@ def hf_config_check(spec: ModelSpec) -> dict:
          "intermediate_size": spec.intermediate}
     if spec.family in ("qwen3", "gemma3", "hunyuan", "granite", "phi3"):
         d["head_dim"] = spec.head_dim          # Llama configs may omit it (hidden / heads)
+    if spec.family == "k2":
+        # The three fields the kernels bake in that the shape fields above cannot express:
+        # head_dim (K2 configs carry it; a same-shaped container built for 128 must not
+        # load against an inferred 80), the RoPE base (the position table's frequencies
+        # are export-time data, exactly Phi-3's argument above) and the norm's group
+        # count (ln_xn / ln_nr compile different reductions per group). rope_theta is
+        # emitted as the NESTED rope_parameters K2 configs actually carry: check_model
+        # compares the whole sub-object, so a config that moves the base or the type
+        # refuses at load rather than running with the wrong table.
+        d["head_dim"] = spec.head_dim
+        d["rope_parameters"] = {"rope_theta": spec.rope_theta, "rope_type": "default"}
+        d["layernorm_num_groups"] = spec.norm_groups
     if spec.family == "phi3":
         # The rotation width is compiled into the attention core (ATTN_ROT), and the
         # position table's frequencies (rope_theta, longrope's factor lists, the attention

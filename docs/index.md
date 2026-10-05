@@ -9,7 +9,7 @@ sections:
     kicker: "NPU-first runtime"
     title: "The fastest, most efficient LLM inference on NPUs"
     body: |
-      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k -- all with dramatically better efficiency than GPU-first stacks.
+      OpenFlowLM (OFLM) delivers a familiar single-command developer experience built exclusively for AMD Ryzen™ AI NPUs. Install in seconds, stream tokens instantly, and run context windows up to 256k -- with no GPU in the loop.
       
       The OpenFlowLM team is now part of AMD.
     ctas:
@@ -51,7 +51,6 @@ sections:
               title: "Ryzen™ AI"
               subtitle: "OpenFlowLM Runtime"
               metrics:
-                - "Over 10× power efficiency"
                 - "256k ctx"
                 - "Vision · Audio · OMNI · Text"
           - title: "Familiar Developer Flow"
@@ -63,13 +62,11 @@ sections:
                 oflm run qwen3.5:4b
                 oflm list
                 oflm serve qwen3.5:4b
-          - title: "Unmatched Performance and Efficiency"
-            description: "Ultra‑lightweight runtime with exceptional power efficiency and massive context windows."
+          - title: "Unmatched Performance"
+            description: "Ultra‑lightweight runtime built for the NPU's throughput, with massive context windows."
             visual:
               type: "metrics"
               metrics:
-                - value: "Over 10×"
-                  label: "Power Efficiency"
                 - value: "256k"
                   label: "Context Tokens"
                 - value: "~17 MB"
@@ -108,7 +105,7 @@ sections:
       href: "https://youtu.be/sZt1WyNoL2U?si=7U3z6u6E9KF6G_Dd"
       kicker: "GPT-OSS on NPU"
       body: |
-        Runs GPT-OSS-20B at 19 TPS (tokens per second) with 10× GPU efficiency -- the fastest MoE on any NPU.
+        Runs GPT-OSS-20B at 18.2 tok/s decode on the NPU -- a 20B-parameter MoE with no GPU in the loop.
 
   - type: media
     variant: alt
@@ -144,7 +141,7 @@ sections:
       href: "https://youtu.be/mPrr9FLd8ps?si=vsyHkmtrBjP4s-dq"
       kicker: "Llama 3.2 on NPU"
       body: |
-        Runs Meta Llama 3.2-3B at 28 TPS with over 10× GPU efficiency -- the fastest on any NPU.
+        Runs Meta Llama 3.2-3B at 26.3 tok/s decode on the NPU.
 
   - type: two_column
     id: install
@@ -205,7 +202,7 @@ sections:
       title: "Proof on silicon, not slides"
       body: |
         OpenFlowLM is tuned on real Ryzen™ AI hardware with synthetic and application-level workloads.
-        Expect steady 20–80 tok/s on models at < 2 W (CPU+NPU), plus deterministic latency for agentic chains.
+        Expect steady decode throughput in the tens of tok/s on small models, plus deterministic latency for agentic chains. Every number on this site comes from `oflm bench`; see the per-model results pages for the full tables.
       items:
         - heading: "Full-stack telemetry"
           body: "See exactly where compute goes with NPU, CPU, and memory counters."
@@ -220,15 +217,15 @@ sections:
           style: ghost
     right:
       metric_cards:
-        - label: "Llama3.2 1B @ Q4_1 (4-bit with bias)"
-          value: "66 tok/s"
-          desc: "Ryzen™ AI 7 HX 350 · ms-level latency"
-        - label: "Gemma 3 Vision"
-          value: "~2 sec"
-          desc: "Image understanding on XDNA2 NPU"
-        - label: "Power draw (CPU + NPU)"
-          value: "< 2 W"
-          desc: "Full assistant stack vs ~25 W GPU baseline"
+        - label: "Llama 3.2 1B"
+          value: "64.5 tok/s"
+          desc: "decode @ 1k · Ryzen™ AI 7 350"
+        - label: "Gemma 3 4B"
+          value: "44.4 tok/s"
+          desc: "decode @ 1k · Ryzen™ AI 7 350"
+        - label: "GPT-OSS 20B"
+          value: "18.2 tok/s"
+          desc: "decode @ 1k · Ryzen™ AI 9 HX 370"
 
   - type: two_column
     id: docs

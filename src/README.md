@@ -61,25 +61,28 @@ cmake --build build --target check_dependencies
 
 **Note:** Some custom libraries (XRT, NPU libraries) may still require DLLs if static versions aren't available.
 
-### Static Build (Portable Binary)
+### Portable Build (bundled XRT and FFmpeg)
 
-OpenFlowLM can be built as a portable static binary with XRT and FFmpeg bundled in. This eliminates the need for system dependencies and creates a truly self-contained executable.
+OpenFlowLM can be built with XRT and FFmpeg bundled in, so the install tree does
+not depend on system copies of either. This is what the release `.tar.gz`
+contains. There is **no `linux-static` preset and no `OFLM_STATIC_BUILD` option**
+-- the switch is `OFLM_PORTABLE_BUILD`, and it is what `linux-portable` sets.
 
-**Simple static build:**
+**Simple portable build** (from the repository root):
 
 ```bash
-# Use the linux-static preset
-cmake --preset linux-static
-cmake --build build -j$(nproc)
+cmake --preset linux-portable
+cmake --build --preset linux-portable -j$(nproc)
+sudo cmake --install build
 ```
 
 This will:
 1. Check if XRT and FFmpeg are installed via pkg-config
 2. If not found, automatically fetch from source:
-   - XRT (v2.21.75)
-   - FFmpeg (v7.1)
-3. Build both as static libraries
-4. Link them into the oflm binary
+   - XRT (v2.21.75, see `XRT_GIT_TAG`)
+   - FFmpeg (n7.1, see `FFMPEG_GIT_TAG`)
+3. Build both and bundle them into the install tree
+4. Install to `/opt/openflowlm`
 
 **What gets statically linked:**
 - ✅ XRT (Xilinx Runtime)
@@ -87,24 +90,25 @@ This will:
 
 **What remains dynamic:**
 - XDNA driver plugin (runtime plugin - see below)
-- Model-specific libraries (llama_npu, qwen_npu, etc.)
+- The **closed** model engines (`libllama_npu.so`, `libqwen3_npu.so`, ...) --
+  these are upstream prebuilt binaries and are never rebuilt from source here
 - System libraries (libc, libm, etc.)
 
 **Manual options:**
 
 ```bash
-# Enable static build manually
-cmake --preset linux-default -DOFLM_STATIC_BUILD=ON
+# Enable the portable build manually
+cmake --preset linux-default -DOFLM_PORTABLE_BUILD=ON
 cmake --build build -j$(nproc)
 ```
 
 **Customizing source versions:**
 
 ```bash
-cmake --preset linux-static \
+cmake --preset linux-portable \
   -DXRT_GIT_TAG=2.21.75 \
   -DFFMPEG_GIT_TAG=n7.1
-cmake --build build -j$(nproc)
+cmake --build --preset linux-portable -j$(nproc)
 ```
 
 **Benefits:**
@@ -119,7 +123,8 @@ cmake --build build -j$(nproc)
 - Subsequent builds are much faster (dependencies are cached)
 - Binary size increases by ~20MB due to embedded libraries
 - Requires build tools (git, gcc, cmake, make) during build
-- When static build is disabled, uses system packages
+- When the portable build is disabled (`OFLM_PORTABLE_BUILD=OFF`, the default),
+  the system XRT and FFmpeg packages are used instead
 
 **XDNA Driver Plugin:**
 The XDNA userspace plugin (`libxrt_driver_xdna.so.2`) is a runtime plugin that XRT loads dynamically. It is NOT statically linked. You need to either:
