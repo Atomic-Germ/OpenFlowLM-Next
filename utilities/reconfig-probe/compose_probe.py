@@ -94,7 +94,8 @@ def main() -> int:
     work = Path(a.work) / a.mode
     work.mkdir(parents=True, exist_ok=True)
     text, types = compose(Path(a.kernels), ops, work)
-    if not (work / "aie.elf").exists() or (work / "aie.mlir").read_text() != text:
+    mlir = work / "aie.mlir"
+    if not (work / "aie.elf").exists() or not mlir.exists() or mlir.read_text() != text:
         (work / "aie.mlir").write_text(text)
         t0 = time.time()
         r = subprocess.run(["aiecc", *MODES[a.mode], "aie.mlir"], cwd=work, capture_output=True, text=True)

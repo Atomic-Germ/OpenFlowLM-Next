@@ -81,7 +81,9 @@ def main() -> int:
         k = pyxrt.ext.kernel(ctx, f"{o['set']}:{want}")
         args = [arg(r) for r in o["args"]]
         chosen.append((o["set"], want, k, args))
-    cfg = {s: pyxrt.ext.kernel(ctx, man["cfg"][s]) for s in {c[0] for c in chosen}}
+    # v2 manifest: two configure kernels per set (_a/_b) that differ only in the empty device
+    # they reset the array with; the engine alternates them across stretches
+    cfg = {s: [pyxrt.ext.kernel(ctx, n) for n in man["cfg"][s]] for s in {c[0] for c in chosen}}
 
     def run_of(k, args):
         r = pyxrt.run(k)
@@ -94,7 +96,7 @@ def main() -> int:
     stretches = []                                   # (set, cfg run, [(name, run, args)])
     for s, name, k, args in chosen:
         if not stretches or stretches[-1][0] != s:
-            stretches.append((s, pyxrt.run(cfg[s]), []))
+            stretches.append((s, pyxrt.run(cfg[s][len(stretches) % 2]), []))
         stretches[-1][2].append((name, run_of(k, args), args))
     ops = [op for st in stretches for op in st[2]]
     lists = []

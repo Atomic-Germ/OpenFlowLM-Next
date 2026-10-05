@@ -5,11 +5,10 @@
 # the images match a reference PNG and whether the contender survived. One trial per call.
 #
 #   . C:\dev\mlir-aie\iron_env.ps1
-#   utilities\reconfig-probe\contention_trial.ps1 -Size 512 -Runs 4 -Priority 0x100 -Ref C:\dev\switch-work\elf512.png
+#   utilities\reconfig-probe\contention_trial.ps1 -Size 512 -Runs 4 -Ref C:\dev\switch-work\elf512.png
 param(
     [int]$Size = 512,
     [int]$Runs = 4,
-    [string]$Priority = "",
     [Parameter(Mandatory = $true)][string]$Ref,
     [string]$Model = "$env:USERPROFILE\.flm\models\FLUX.2-klein-4B-NPU2",
     [string]$Kernels = "C:\dev\klein-kernels-elf",
@@ -25,7 +24,6 @@ $contender = Start-Process -PassThru -WindowStyle Hidden -FilePath python `
 Start-Sleep -Seconds 30
 if ($contender.HasExited) { Write-Output "contender exited before the trial"; exit 2 }
 
-if ($Priority) { $env:OFLM_DIFFUSION_QOS_PRIORITY = $Priority } else { Remove-Item Env:OFLM_DIFFUSION_QOS_PRIORITY -ErrorAction SilentlyContinue }
 $out = Join-Path $Work "trial_$PID.png"
 Remove-Item $out -ErrorAction SilentlyContinue
 & "$root\src\open_diffusion\out\open_diffusion_cli.exe" --model $Model --kernels $Kernels --size $Size `
@@ -34,5 +32,5 @@ Remove-Item $out -ErrorAction SilentlyContinue
 $same = (Test-Path $out) -and ((Get-FileHash $out).Hash -eq (Get-FileHash $Ref).Hash)
 $alive = -not $contender.HasExited
 if ($alive) { Stop-Process -Id $contender.Id -Force; Get-CimInstance Win32_Process -Filter "ParentProcessId=$($contender.Id)" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
-Write-Output ("trial size={0} priority={1}: image {2}, contender {3}" -f $Size, ($(if ($Priority) { $Priority } else { "default" })),
+Write-Output ("trial size={0} priority=0x180 (fixed in the engine): image {1}, contender {2}" -f $Size,
     $(if ($same) { "byte-identical" } else { "WRONG OR MISSING" }), $(if ($alive) { "alive" } else { "DIED" }))
