@@ -136,7 +136,7 @@ One `Engine` serves every resolution the bundle has: the weights and kernel sets
 a resolution's activations are allocated the first time it is selected.
 
 **Acceptance criteria** (the `open_diffusion_schedule` CTest, `src/open_diffusion/schedule_test.cpp`,
-against the installed model; it fails naming the path without it):
+against the installed model; without it it skips, naming the path):
 - At 512 and 1024, 4 steps: `dt_params` equals `dt_<R>.bin` word for word, and
   `timestep_features` is within 2^-8 of `tf_<R>.bin` in every word. (5 of 131,584 words differ
   by one rounding: numpy's float32 `exp` is not correctly rounded, and schedule.hpp uses double.)
@@ -193,7 +193,8 @@ never the first pad.
 - A prompt of 400 words gives exactly 512 ids, the goldens' first 512.
 
 Run by the `open_diffusion_tokens` CTest (`src/open_diffusion/tokens_test.cpp`) against
-the installed model's `tokenizer.json`; it fails, naming the path, without it.
+the installed model's `tokenizer.json`; without it it skips (CTest SKIP), naming the path:
+the model is a gigabyte install, not a CI fixture.
 
 ### OPEN-DIFFUSION-DETERMINISM: same inputs, same bytes
 **Applies to:** `src/open_diffusion`, `oflm image`
