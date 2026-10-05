@@ -1,5 +1,6 @@
 # Traces: OPEN-DIFFUSION-DETERMINISM (canonical spec: specs/open-diffusion/spec.md)
-"""The native engine's pixels equal the pyxrt runner's on the same token ids and noise.
+"""The native engine's pixels equal the pyxrt runner's on the same token ids and noise (and,
+for an edit, the same prepared reference).
 
 The engine runs every set in one hardware context per resolution, configured by
 register writes (open_kernels/compose_elf.py); utilities/dit-chain/generate.py runs the
@@ -111,3 +112,52 @@ def test_engine_pixels_equal_pyxrt(tmp_path):
         assert got[:2] == want[:2] == (512, 512)
         diff = sum(1 for x, y in zip(got[2], want[2]) if x != y)
         assert diff == 0, f"prompt {i} ({n_real} tokens): {diff} of {len(want[2])} channel values differ"
+
+
+EDIT_GOLDENS = Path(os.environ.get("OFLM_DIFFUSION_EDIT_GOLDENS", r"C:\dev\ditref-out\klein_edit_512_s4"))
+
+
+def _has_edit_512() -> bool:
+    try:
+        bundle = json.loads((MODEL / "bundle.json").read_text())
+        manifest = json.loads((KERNELS / "diffusion_kernels.json").read_text())
+        build = json.loads((BUILD / "dit_kernels.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return ("512" in bundle.get("edits", {}) and "512e512" in manifest.get("elf", {})
+            and 512 in build.get("edits", []))
+
+
+EDIT_NEEDS = dict(NEEDS) | {
+    f"no 512 edit configuration in the model, the installed kernels and {BUILD}": _has_edit_512(),
+    f"no edit study inputs at {EDIT_GOLDENS} (utilities/dit-ref/capture_edit_goldens.py)":
+        (EDIT_GOLDENS / "ref_0.npy").is_file(),
+}
+
+
+@pytest.mark.skipif(not all(EDIT_NEEDS.values()), reason="; ".join(k for k, ok in EDIT_NEEDS.items() if not ok))
+def test_engine_edit_pixels_equal_pyxrt(tmp_path):
+    """An edit at 512^2 (its VAE encoder included): the engine's pixels equal generate.py --edit's."""
+    import numpy as np
+
+    ref_dir = tmp_path / "pyxrt"
+    env = dict(os.environ, PYTHONPATH=str(XRT_ROOT / "python"),
+               PATH=f"{XRT_ROOT};{XRT_ROOT / 'lib'};{os.environ.get('PATH', '')}")
+    r = subprocess.run([str(IRON_PY), str(REPO / "utilities" / "dit-chain" / "generate.py"),
+                        "--kernels", str(BUILD), "--size", "512", "--edit", "--study", str(EDIT_GOLDENS),
+                        "--prompts", "1", "--out", str(ref_dir)],
+                       capture_output=True, text=True, timeout=600, env=env)
+    assert (ref_dir / "report.json").is_file(), r.stdout[-2000:] + r.stderr[-2000:]
+    n_real = json.loads((ref_dir / "report.json").read_text())["images"][0]["tokens"]
+    ids = np.load(EDIT_GOLDENS / "ids_0.npy")[:n_real]
+    engine_png = tmp_path / "engine_edit.png"
+    r = subprocess.run([str(CLI), "--model", str(MODEL), "--kernels", str(KERNELS), "--size", "512",
+                        "--ids", ",".join(str(int(t)) for t in ids),
+                        "--noise", str(EDIT_GOLDENS / "noise_0.npy"), "--ref", str(EDIT_GOLDENS / "ref_0.npy"),
+                        "--out", str(engine_png)],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    want, got = png_rgb(ref_dir / "00.png"), png_rgb(engine_png)
+    assert got[:2] == want[:2] == (512, 512)
+    diff = sum(1 for x, y in zip(got[2], want[2]) if x != y)
+    assert diff == 0, f"edit 0 ({n_real} tokens): {diff} of {len(want[2])} channel values differ"

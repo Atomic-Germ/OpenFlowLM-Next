@@ -1,4 +1,4 @@
-# open_diffusion: FLUX.2 [klein] 4B text-to-image on the NPU
+# open_diffusion: FLUX.2 [klein] 4B text-to-image and edits on the NPU
 
 A native engine that replays `open_kernels/klein_pipeline.py`'s schedule. The schedule
 has 1050 dispatches over six kernel sets:
@@ -14,8 +14,15 @@ count from 1 to 50 runs: step k is the bundle's step 0 with its modulation and d
 moved on by their strides, and a count other than the bundle's gets its sigmas from
 `schedule.hpp` (OPEN-DIFFUSION-STEPS).
 
+An edit (`select(size, steps, true)`, then `set_reference`) is a configuration of its own,
+`<R>e<R>`, with its own ELF: the VAE encoder runs as an `encode` phase before the steps, and the
+reference's tokens follow the generated ones in every block (1143 dispatches at 512²).
+`reference.hpp` prepares the reference from file bytes: PNG or JPEG, EXIF orientation, a
+centre crop and PIL's LANCZOS (OPEN-DIFFUSION-REFERENCE). `open_diffusion_cli --ref` takes
+a file or a prepared `.npy`.
+
 Every op runs on the NPU. Per image, the host does only these things:
-- writes the prompt's 512 embedding rows and the noise;
+- writes the prompt's 512 embedding rows and the noise (and an edit's reference);
 - picks `te_attn`'s `valid_len` head for the prompt's length;
 - reads the RGBA and encodes the PNG or JPEG (`stb_image_write`, vendored in
   `third_party/stb`).
@@ -76,6 +83,7 @@ writes the study's. `--ids` takes the prompt's own tokens, unpadded: the study's
 
 ## Not implemented yet
 
-- **Image edits.** `/v1/images/edits` answers 501: klein's reference-image path needs a
-  VAE encoder on the NPU.
+- **Inpainting and multi-reference edits.** `/v1/images/edits` takes one reference and no
+  mask (`specs/open-diffusion/plans/edits.md`); a mask or a second image is a 400 naming it.
+- **Non-square references.** They are centre-cropped to a square (OPEN-DIFFUSION-REFERENCE).
 - **`oflm add` for klein derivatives.** `oflm-add` requires `model.q4nx`.

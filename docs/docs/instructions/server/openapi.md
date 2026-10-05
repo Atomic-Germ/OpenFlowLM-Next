@@ -52,7 +52,8 @@ The following endpoints are actively supported and maintained:
 - `v1/chat/completions`
 - `v1/audio/transcriptions`
 - `v1/embeddings`
-- `v1/images/generations` (FLUX.2 [klein] 4B on the NPU; `v1/images/edits` answers 501 for now)
+- `v1/images/generations` and `v1/images/edits` (FLUX.2 [klein] 4B on the NPU; an edit takes one
+  reference image, PNG or JPEG, centre-cropped to a square; `mask` is not implemented)
 
 ---
 

@@ -21,7 +21,7 @@ Sources:
   `q4nx-build --open-diffusion` runs it.
 - `src/open_diffusion/`: the engine; `prompt.cpp` (main build) templates and tokenizes;
   `src/src/image_command.hpp` is `oflm image`; `cli.cpp` is the standalone gate.
-- Serving: `/v1/images/generations` and `/v1/images/edits` (501) in
+- Serving: `/v1/images/generations` and `/v1/images/edits` (one reference; edits.md) in
   `src/server/rest_handler.cpp`; the request rules are `openai_compat::images_request()`.
   Spec: `specs/server-api/spec.md` SERVER-IMAGES-*; tests
   `specs/server-api/tests/test_images_api.py` (needs `oflm serve <chat model>`).

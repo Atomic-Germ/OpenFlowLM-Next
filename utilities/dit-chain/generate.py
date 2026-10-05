@@ -17,6 +17,13 @@ valid_len, and encode the PNG.
     --ctx-ref                    with --study: the bf16 text encoder's embeddings instead of
                                  the NPU's (isolates the DiT + VAE)
     --profile                    also time every op (a blocking wait after each)
+    --edit                       an edit (klein_pipeline.plan(R, edit=True)): with --study, a
+                                 capture_edit_goldens.py directory (prompts, prepared
+                                 references ref_<i>.npy, noise); with --prompt, --ref <npy|png>
+    --ref-tokens                 with --edit --study: diffusers' bf16 reference tokens
+                                 (reflat_<i>.npy) instead of the NPU encoder's (isolates the DiT)
+    --swap-ref K                 with --edit --study: edit i gets reference i + K (the
+                                 reference-ablation of OPEN-DIFFUSION-EDIT)
 
 Weights are packed once into <kernels>\packed\ (dit_gemm's bfp16 layout; ~8 GB).
 """
@@ -99,12 +106,12 @@ def embed_rows(st: SafeTensors, ids: np.ndarray) -> np.ndarray:
 
 
 class Runner:
-    def __init__(self, kdir: Path, R: int, pack_jobs: int):
+    def __init__(self, kdir: Path, R: int, pack_jobs: int, edit: bool = False):
         from npu_host import Npu
         import chain_test_vae as ctv
 
         t0 = time.time()
-        self.R, self.pl = R, kp.plan(R)
+        self.R, self.pl = R, kp.plan(R, edit=edit)
         md = model_dir()
         self.dit, self.te = SafeTensors(md / "transformer"), SafeTensors(md / "text_encoder")
         from tokenizers import Tokenizer
@@ -130,6 +137,12 @@ class Runner:
         self.vW.write(wbytes)
         self.vS.write(blocks)
         self.blk_bytes = ctv.vd.BLOCK * ctv.vd.EL * 2
+        if edit:
+            import chain_test_vae_enc as cte
+            wbytes, self.etable, blocks, self.eindex = cte.packed_weights(kdir / "venc_packed.npz")
+            self.eW, self.eS = npu.buf("venc_W", wbytes.size), npu.buf("venc_S", blocks.size * 2)
+            self.eW.write(wbytes)
+            self.eS.write(blocks)
 
         t1 = time.time()
         self.w = {}
@@ -162,6 +175,11 @@ class Runner:
             return self.vW.view(off, n)
         if kind == "vae_gn":
             return self.vS.view(self.vindex[ref[1]] * self.blk_bytes, self.blk_bytes)
+        if kind == "venc_w":
+            off, n = self.etable[ref[1]]
+            return self.eW.view(off, n)
+        if kind == "venc_gn":
+            return self.eS.view(self.eindex[ref[1]] * self.blk_bytes, self.blk_bytes)
         raise ValueError(ref)
 
     def set_prompt(self, prompt: str, ids_check: np.ndarray | None = None) -> int:
@@ -180,6 +198,21 @@ class Runner:
 
     def set_noise(self, lat_bits: np.ndarray) -> None:
         self.bufs["LAT"].write(np.ascontiguousarray(lat_bits, np.uint16))
+
+    def set_reference(self, rgb: np.ndarray) -> None:
+        """An edit's prepared reference (uint8 [R, R, 3]) as the encoder reads it: bf16
+        2 (x / 255) - 1 (float32, diffusers' arithmetic) in channels 0-2 of its
+        zero-bordered input."""
+        b = self.pl.enc.buffers["IN"]
+        x = np.zeros((b.H + 2, b.pitch, b.C), bfloat16)
+        x[1:b.H + 1, 1:b.W + 1, :3] = (np.float32(2) * (rgb.astype(np.float32) / np.float32(255))
+                                       - np.float32(1)).astype(bfloat16)
+        self.bufs[self.pl.enc_buffers["IN"]].write(x)
+
+    def set_ref_tokens(self, tok_bits: np.ndarray) -> None:
+        """REFLAT from outside (diffusers' packed, normalised reference tokens, bf16 bits);
+        run with skip=("encode",)."""
+        self.bufs["REFLAT"].write(np.ascontiguousarray(tok_bits, np.uint16))
 
     def run(self, skip=(), profile=False):
         """Every op in order. Returns (seconds per phase, per-op ms if profile)."""
@@ -230,6 +263,21 @@ class Runner:
         return self.bufs["LAT"].read(np.uint16, 0, T * kp.LAT_CH).reshape(T, kp.LAT_CH)
 
 
+def load_ref(path: str, R: int) -> np.ndarray:
+    """An edit's reference as uint8 [R, R, 3]: a prepared .npy as is; any image file the way
+    capture_edit_goldens.prepare does (EXIF orientation, RGB, centre crop, LANCZOS)."""
+    if path.lower().endswith(".npy"):
+        return np.load(path)
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    s = min(img.size)
+    left, top = (img.width - s) // 2, (img.height - s) // 2
+    img = img.crop((left, top, left + s, top + s))
+    if s != R:
+        img = img.resize((R, R), Image.Resampling.LANCZOS)
+    return np.asarray(img, np.uint8)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--kernels", required=True)
@@ -244,6 +292,11 @@ def main() -> int:
                          "lat_<i>.npy (capture_vae_goldens.py's goldens_vae_<size>)")
     ap.add_argument("--runs", type=int, default=1, help="generations of each prompt (timing)")
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--edit", action="store_true")
+    ap.add_argument("--ref", action="append", default=[],
+                    help="with --edit --prompt: the prepared reference (uint8 [R, R, 3] .npy)")
+    ap.add_argument("--ref-tokens", action="store_true")
+    ap.add_argument("--swap-ref", type=int, default=0)
     ap.add_argument("--pack-jobs", type=int, default=4)
     ap.add_argument("--pack-only", action="store_true", help="pack the weights and exit")
     ap.add_argument("--out", default=None)
@@ -260,34 +313,49 @@ def main() -> int:
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    r = Runner(Path(a.kernels), a.size, a.pack_jobs)
+    r = Runner(Path(a.kernels), a.size, a.pack_jobs, edit=a.edit)
     T = kp.image_tokens(a.size)
-    jobs = []                                   # (tag, prompt, noise bits, ids, ctx bits)
+    jobs = []                       # (tag, prompt, noise bits, ids, ctx bits, reference, tokens)
     if a.study:
         sd = Path(a.study)
         prompts = json.loads((sd / "prompts.json").read_text(encoding="utf-8"))
-        for i in range(min(a.prompts, len(prompts))):
+        n = min(a.prompts, len(prompts))
+        for i in range(n):
             ctx = np.load(sd / f"ctx_{i}.npy") if a.ctx_ref else None
-            jobs.append((f"{i:02d}", prompts[i], np.load(sd / f"noise_{i}.npy"),
-                         np.load(sd / f"ids_{i}.npy"), ctx))
+            ref = tok = None
+            if a.edit:
+                k = (i + a.swap_ref) % len(prompts)
+                ref = np.load(sd / f"ref_{k}.npy")
+                tok = np.load(sd / f"reflat_{k}.npy") if a.ref_tokens else None
+            p = prompts[i]["prompt"] if isinstance(prompts[i], dict) else prompts[i]
+            jobs.append((f"{i:02d}", p, np.load(sd / f"noise_{i}.npy"),
+                         np.load(sd / f"ids_{i}.npy"), ctx, ref, tok))
     for j, p in enumerate(a.prompt):
         rng = np.random.default_rng(a.seed + j)
         noise = rng.standard_normal((T, kp.LAT_CH), np.float32).astype(bfloat16).view(np.uint16)
-        jobs.append((f"p{j:02d}", p, noise, None, None))
+        ref = load_ref(a.ref[j], a.size) if a.edit else None
+        jobs.append((f"p{j:02d}", p, noise, None, None, ref, None))
 
-    report = {"size": a.size, "images": []}
-    for tag, prompt, noise, ids, ctx in jobs:
+    report = {"size": a.size, "edit": a.edit, "images": []}
+    for tag, prompt, noise, ids, ctx, ref, tok in jobs:
         for run in range(a.runs):
             h0 = time.perf_counter()
             c0 = time.process_time()
+            skip = []
             if ctx is not None:
                 r.set_ctx(ctx)
                 n_real = None
+                skip.append("text")
             else:
                 n_real = r.set_prompt(prompt, ids)
             r.set_noise(noise)
+            if tok is not None:
+                r.set_ref_tokens(tok)
+                skip.append("encode")
+            elif ref is not None:
+                r.set_reference(ref)
             host_ms = (time.perf_counter() - h0) * 1e3
-            ph, per_op = r.run(skip=("text",) if ctx is not None else (), profile=a.profile)
+            ph, per_op = r.run(skip=tuple(skip), profile=a.profile)
             cpu_s = time.process_time() - c0
             img = r.image()
             ctv.write_png(out / f"{tag}.png", np.ascontiguousarray(img))
@@ -296,12 +364,13 @@ def main() -> int:
                    "phases_s": {k: v for k, v in ph.items() if k != "total"}}
             report["images"].append(rec)
             steps = sum(v for k, v in ph.items() if k.startswith("step"))
+            enc = f", encode {ph['encode']:.2f}" if "encode" in ph else ""
             print(f"[{tag} run {run}] {ph['total']:.2f} s on the NPU (text {ph.get('text', 0):.2f}, "
-                  f"cond {ph.get('cond', 0):.3f}, steps {steps:.2f}, vae {ph.get('vae', 0):.2f}); "
+                  f"cond {ph.get('cond', 0):.3f}{enc}, steps {steps:.2f}, vae {ph.get('vae', 0):.2f}); "
                   f"host setup {host_ms:.0f} ms, host CPU {cpu_s:.2f} s  -> {out / f'{tag}.png'}",
                   flush=True)
             if a.profile:
-                profile(r, per_op, skip=("text",) if ctx is not None else ())
+                profile(r, per_op, skip=tuple(skip))
         lat = r.latents()
         np.save(out / f"lat_{tag}.npy", lat)
         ref = Path(a.ref_latents or "") / f"lat_{int(tag)}.npy" if a.ref_latents and tag.isdigit() else None
