@@ -93,18 +93,61 @@ down to about 1.25x, and no host schedule hides it: `OFLM_OPEN_SUBMIT_AHEAD=2`, 
 across a context change, **hangs the array** (OPEN-DECODE-PIPELINE).
 
 So the binding constraint on the verify route is not a kernel's throughput, it is
-**how many contexts one verify pass enters.** The small-B projections, the batched experts and
-the block attention products want to be ONE xclbin with an instruction stream per stage --
-`ax`'s own `part` trick, where one core program carries both halves of a layer and the stream
-picks which runs. The constraint on that is program memory: 16 KB a core, and `lx` has already
-linked at 16,480 B and been refused (OPEN-QUANT-Q8). It is plausible rather than certain,
-because `gemm_q4_prefill`'s fused q4_1 dequant and `moe_batch`'s are already the same function
-(`gqd_scale` is `mb_scale`'s twin, 2026-09-20), so the union of those two cores is much less
-than the sum.
+**how many contexts one verify pass enters.**
 
-Worth noting what the same collapse is worth to prefill, where it is pure profit and needs no
-speculation to pay off: **266 ms off every 256-token block**, against the 3.8 s the block costs
-today.
+### 0b-bis. Which is already solved, on this box, by the diffusion side
+
+The first reading of 0b was that the stages had to share one core program (`ax`'s `part`
+trick), with 16 KB of program memory as the risk. That is not the mechanism. The
+`feat/one-context` branch measured the alternative on this hardware
+(`utilities/reconfig-probe/README.md`, 2026-09-29, HX 370, turbo):
+
+| | cost |
+|---|---:|
+| a switch between two xclbin contexts | 2.0-2.4 ms, whatever the op or the set |
+| `load_pdi` inside one full ELF, real sets (120-440 KB PDIs) | ~2.0 ms -- it IS PDI loading |
+| **`aiecc --expand-load-pdis`, register writes in the instruction stream** | **0.30 / 0.51 / 0.70 ms** (gemm / ew / fa) |
+
+One full ELF holds a device per kernel set, each set keeping **its own core program**, plus a
+configure-only kernel `main:cfg_<set>` per set; the host issues `cfg_<set>` only where the set
+changes and then the stream's own sequence. So nothing shares a core, nothing competes for the
+16 KB, and a stage change costs 0.3-0.7 ms instead of 2.1-2.9. It is not a paper design: a whole
+512^2 image ran 831 dispatches + 632 configurations through one context at **3.51-3.54 s against
+4.53 s, latents and PNG byte-identical over three runs**, and `open_kernels/compose_elf.py` on
+that branch assembles the ELF (per-set configuration build + per-stream build +
+`full_elf_config.json` + `aiebu-asm`, because one composed module costs 671 s and 10 GB).
+
+What that does to 0b's table, at ~0.4 ms a change:
+
+| verify(B) built as | changes per pass | cost before any arithmetic |
+|---|---|---|
+| the block route's stages, xclbin contexts | 100 | 266 ms |
+| the same stages, one ELF + register writes | 100 | **~40 ms** |
+
+So the verify route does not need a new fused kernel at all. It needs the block route's stages
+at small B inside one ELF. The 2-2.5x in Expectations survives on that structure, and the
+program-memory risk goes away with the union core.
+
+**And it is worth more to plain decode than speculation is.** A decode step changes context 22
+times (`lx` <-> `ax`, OPEN-DECODE-PIPELINE), which at the measured 0.6-2.9 ms a change is
+13-64 ms of a ~105 ms step -- and queueing ahead across the change hangs the array, so no host
+schedule hides it. Register-write reconfiguration takes those 22 changes to ~9 ms. That is on
+the order of **30% off decode with no drafter, no quant work and no verify route**, on a
+mechanism already proven on this box. It is also the one thing every later step rides on: the
+same ELF has to carry the verify streams.
+
+Two things still to measure before it is a plan rather than an inference, and they are the
+probe step 1 now starts with:
+1. **What `--expand-load-pdis` costs on THESE sets.** klein's 0.30-0.70 ms scales with the
+   configuration bytes (`ew` writes ~340 KB). `lx` / `ax` are whole-layer programs over 32
+   cores and may write more. Probe: `compose_probe.py` on `lx0`/`ax0` and on a `gemm` + `mb`
+   pair out of `sets/k35main`.
+2. **ELF load time.** Every kernel an XRT context creates walks all of the ELF's control code
+   at ~2 ms per MB, and a 35B set's streams are many (the GEMM context alone carries 32). A
+   server that loads once can pay it; the CLI's start-up is the thing to watch.
+
+Worth noting what the same change is worth to prefill: **266 -> ~40 ms on every 256-token
+block**, against the 3.8 s a block costs today.
 
 ### 0c. The expectation arithmetic, with measured bandwidth
 
@@ -181,9 +224,10 @@ New pieces:
   `gemv_q4`'s band-parallel dataflow with an M dimension, promoted to a shipped kernel with a
   runtime band law at M = 8 / 16. `moe_batch` needs nothing: it already handles any multiple of
   `nt = 8`.
-- **One hardware context for the pass.** The projections, the experts and the attention
-  products as instruction streams over one core program (`ax`'s `part`), because the block
-  route's three contexts cost 266 ms a pass whatever B is (§0b). Program memory is the risk.
+- **One hardware context for the pass**, as one full ELF with a device per stage and
+  register-write reconfiguration between them (`--expand-load-pdis`), not as one shared core
+  program: the block route's xclbin contexts cost 266 ms a pass whatever B is, and ~40 ms this
+  way (§0b, §0b-bis). Nothing shares the 16 KB, so there is no program-memory risk.
 - **lm_head over B positions.** A block GEMM over N = 248320, plus top-k on the device so 16 MB
   of logits never reach the host.
 - **Feature taps.** The residual at the drafter's target layers for every accepted position:
@@ -245,7 +289,7 @@ holds. Kernel family: `dflash-qwen3-h2048` (one family xclbin, shared by every A
 
 | Step | Deliverable | Why this order |
 |---|---|---|
-| 1 | Verify route (1b) on the **stock 35B, q4_1**, with a B=1 self-check against sequential decode. In order: the host-stage rollback (unit, no hardware), then the one-context `designs/gemm_q4` promotion (§0a, §0b), then the block lm_head and the taps | Nothing waits on quant or training, and the rollback waits on no kernel at all |
+| 1 | Verify route (1b) on the **stock 35B, q4_1**, with a B=1 self-check against sequential decode. In order: the host-stage rollback (unit, no hardware, **DONE**), then the reconfiguration probe on `lx` / `ax` / `gemm` / `mb` (§0b-bis), then one ELF for the decode path -- which pays for itself on decode alone -- then `designs/gemm_q4` at M = 8/16, the block lm_head and the taps | Nothing waits on quant or training; the rollback waits on no kernel; and the ELF step is worth ~30% of decode by itself |
 | 2 | DFlash v1 drafter on the NPU (1c), drafts compared to the HF reference drafter fed the same features | Off-the-shelf drafter for this exact target |
 | 3 | Orchestration (1d), greedy then sampling; `oflm serve` wiring; `oflm-test --llm --tools` with speculation on | First end-to-end speedup |
 | 4 | T2 + Q2 formats (1a): converter, packers, `mx` + `mb` variants, two kernel sets; quality via logits corr against a fake-quant replica, then `oflm-test --llm --tools` | Formats plug into a working spec loop |
