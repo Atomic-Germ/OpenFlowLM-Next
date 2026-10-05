@@ -3,19 +3,32 @@
 // The engine replays a bundle (utilities/dit-chain/export_bundle.py): the schedule
 // open_kernels/klein_pipeline.py plans -- text encoder, conditioning, 4 denoising steps,
 // VAE; 1050 dispatches over six kernel sets -- as XRT runs built once. Per image the host
-// only writes the prompt's 512 embedding rows and the noise, patches te_attn's valid_len,
-// and reads the RGBA back. Runs on one hardware context are queued back to back; before
-// the next kernel set the host blocks on the last one (XRT's wait sleeps).
+// only writes the prompt's 512 embedding rows and the noise, picks te_attn's variant for
+// the prompt's length, and reads the RGBA back.
 //
-// One engine serves every resolution the bundle has. The weights and the kernel sets are
-// loaded once; a resolution's activations (1.4 GiB at 512, 4.6 GiB at 1024) are allocated
-// the first time it is selected and kept. The step count is free up to kMaxSteps: a step
+// A resolution's six sets are devices of one full ELF (open_kernels/compose_elf.py),
+// loaded as ONE hardware context. Where the schedule changes set, the engine first runs
+// that set's configure-only kernel (main:cfg_<set>: register writes, 0.3-0.7 ms, where
+// switching between six xclbin contexts cost ~2.1 ms). A set and the ops after it on that
+// set go to the NPU as one xrt::runlist (a stretch). The context runs at high QoS priority
+// and each stretch starts from a reset, so another process's context can take the NPU
+// only between stretches and cannot leave ours half-configured (engine.cpp, kPriority).
+// The host blocks (XRT's wait sleeps) only at phase boundaries, when its window of
+// stretches in flight is full, and on the last one.
+//
+// One engine serves every resolution the bundle has, and every edit configuration
+// (select(size, steps, true): an output of size x size from one reference of that size,
+// whose VAE encoder runs as an "encode" phase before the steps; plans/edits.md). The
+// weights are loaded once; a configuration's context, kernels and activations (1.4 GiB at
+// 512, 4.6 GiB at 1024, 1.7 GiB for a 512 edit) are made the first time it is selected
+// and kept. The constructor that takes a size makes
+// that one's context and kernels on a thread while the weights load. The step count is free up to kMaxSteps: a step
 // is the bundle's step template with its modulation and dt views moved on, and a count
 // other than the bundle's gets its sigmas from schedule.hpp.
 //
 // Two directories: the model (q4nx-build --open-diffusion: bundle.json, the schedules,
 // weights.bin, the embedding table) and a kernel set (export_dit_kernels.py --install:
-// diffusion_kernels.json and the six sets). They must carry the same layout hash: the
+// diffusion_kernels.json and a diffusion_r<R>.elf per resolution). They must carry the same layout hash: the
 // packed weights and the schedule are only valid against the streams they were made for.
 //
 // Tokenizing is the caller's: the engine takes token ids (prompt.hpp templates and
@@ -49,7 +62,7 @@ struct Timing {
 };
 
 // The installed kernel set's manifest format (export_dit_kernels.py's MANIFEST_FORMAT).
-constexpr const char* kKernelsFormat = "oflm-open-diffusion-kernels-v1";
+constexpr const char* kKernelsFormat = "oflm-open-diffusion-kernels-v2";
 
 // Whether dir holds a complete kernel set of this format and layout; *why says why not.
 bool kernels_usable(const std::string& dir, const std::string& layout, std::string* why);
@@ -65,23 +78,27 @@ public:
     static constexpr int kMaxSteps = 50;
 
     // model_dir: q4nx-build --open-diffusion's output; kernels_dir: an installed kernel
-    // set (find_kernels). dev: the device to open the kernel sets on (the server's, so its
+    // set (find_kernels). dev: the device to open the contexts on (the server's, so its
     // engines share one handle); null opens device 0. Nothing is selected yet.
     Engine(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev = nullptr);
-    // The same, then select(size).
+    // The same, then select(size) -- that size's context and kernels made while the
+    // weights load (the load then costs what the weights do).
     Engine(const std::string& model_dir, const std::string& kernels_dir, int size);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
     std::vector<int> sizes() const;          // the bundle's resolutions, ascending
+    std::vector<int> edit_sizes() const;     // the sizes it can edit at, ascending (maybe none)
     int default_steps() const;               // the bundle's step count (4)
-    // Make size x size at `steps` denoising steps (0: default_steps()) the current image.
-    // The first selection of a size allocates its activations; an unknown size or a step
-    // count outside 1..kMaxSteps throws, naming what is supported.
-    void select(int size, int steps = 0);
+    // Make size x size at `steps` denoising steps (0: default_steps()) the current image;
+    // edit: an edit of a size x size reference (set_reference). The first selection of a
+    // configuration allocates its activations; an unknown size or a step count outside
+    // 1..kMaxSteps throws, naming what is supported.
+    void select(int size, int steps = 0, bool edit = false);
 
     int size() const;               // the current selection's; 0 before select()
+    bool editing() const;           // whether the current selection is an edit
     int steps() const;
     int image_tokens() const;       // (size / 16)^2
     int latent_channels() const;    // 128
@@ -94,10 +111,14 @@ public:
     void set_tokens(const std::vector<int64_t>& ids);
     // The initial latents, packed [image_tokens, 128] bf16 bits.
     void set_noise(const std::vector<uint16_t>& bf16_bits);
+    // An edit's reference, [size, size, 3] RGB8 (reference.hpp prepare_reference makes it
+    // from file bytes).
+    void set_reference(const std::vector<uint8_t>& rgb);
     // bf16 bits of N(0, 1) samples from a seed (the engine's own generator).
     std::vector<uint16_t> seeded_noise(uint64_t seed) const;
 
-    // Every op in order. profile: a blocking wait after each op (per-op times).
+    // Every op in order. profile: a blocking wait after each op (per-op times; every op is
+    // then its own stretch, so each op's time includes a configure, 0.3-0.7 ms).
     Timing run(bool profile = false);
     // The image, [size, size, 3] RGB8.
     std::vector<uint8_t> rgb();

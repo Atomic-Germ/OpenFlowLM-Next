@@ -349,24 +349,42 @@ ones. Non-square sizes need their own stream sets and are a separate item.
 - `"768x768"` and `"1024x512"` are 400s with `param == "size"` whose message contains
   `512x512, 1024x1024`; `"big"`, `"1024"` and the number `1024` are 400s with `param == "size"`.
 
-### SERVER-IMAGES-EDITS: edits are checked, then answered 501 until the NPU has a VAE encoder
+### SERVER-IMAGES-EDITS: one reference image is edited; a mask or a second image is named as not implemented
 **Applies to:** openflowlm-next (`src/server/server.cpp`, `src/server/multipart.cpp`, `src/server/rest_handler.cpp`)
 **Verification:** test
 **Test:** `specs/server-api/tests/test_images_api.py`
 
-klein edits by appending the input images' VAE latents as reference tokens, which needs a VAE
-*encoder* on the NPU and DiT streams per reference size; `mask` is the inpainting pipeline on top.
-Until then `/v1/images/edits` parses its multipart form, checks it -- one or more non-empty
-`image` / `image[]` files (at most 16), at most one `mask`, then the same model and control rules
-as generations -- and answers 501 naming what is missing.
+klein edits by appending the reference's VAE latents to the joint sequence as tokens; the NPU
+encodes the reference first (OPEN-DIFFUSION-EDIT, `specs/open-diffusion/spec.md`).
+`/v1/images/edits` parses its multipart form and checks it, before the NPU is touched:
+- one or more non-empty `image` / `image[]` files (at most 16), at most one `mask`;
+- then the generations' model and control rules, with the model's `image_edit_sizes` for
+  `size`.
+
+The request is refused, naming the field:
+- a `mask` is a 400 naming inpainting as not implemented;
+- a second image is a 400 naming multiple references as not implemented;
+- a model without `image_edit_sizes` is a 400 on `model`;
+- an image over 32 MB is a 400;
+- a reference that can't be prepared is a 400 on `image` with OPEN-DIFFUSION-REFERENCE's
+  reason (not PNG or JPEG, too small, too elongated, over 64 MP, undecodable).
+
+`size: auto` (OpenAI's edit default) follows the reference: the largest of the edit sizes
+not above its shorter side, else the smallest. The response is the generations' shape:
+b64_json images and their seeds, `n` of them from consecutive seeds, with the same
+cancellation. An HRX build answers 501.
 
 The multipart parser accepts a quoted boundary (`boundary="..."`, RFC 2046), fills each part's
 `content_type`, finds headers case-insensitively, and keeps repeated parts (`image[]`), which used
 to overwrite each other.
 
 **Acceptance criteria:**
-- Two `image[]` parts, a `model` and a `prompt`, sent with a quoted boundary, are answered 501
-  with a message naming the VAE encoder.
+- One 512x512 PNG with `size` omitted is edited: 200, `size` "512x512", one 512x512 PNG.
+- The same edit request twice (same seed) returns the same bytes.
+- Two `image[]` parts, a `model` and a `prompt`, sent with a quoted boundary: a 400 with
+  `param == "image"`, its message saying "not implemented".
+- An image and a `mask`: a 400 with `param == "mask"`, naming inpainting.
+- A BMP as the image: a 400 with `param == "image"` naming "not PNG or JPEG".
 - A form with no image is a 400 with `param == "image"`.
 - A form with an image and `size: 768x768` is a 400 with `param == "size"`.
 
@@ -396,7 +414,9 @@ so each time. The chat model's tag is kept, so a chat request that names it, or 
 served by it again.
 
 `oflm serve <tag> --imagegen 1 [--imagemodel <tag>]` loads the image engine at startup beside the
-chat model, allocates every resolution, and never swaps. It still shares the NPU lock: resident
+chat model, allocates every configuration (each resolution and each edit size), and never
+swaps. With klein's four (512, 1024, 512e512, 1024e1024) that is 12.8 GiB of activations
+(1.33 + 4.22 + 1.70 + 5.58) beside the 7.5 GB of weights. It still shares the NPU lock: resident
 saves the load, not the queue. A startup that cannot load it exits naming why. `--imagemodel`
 alone sets the model a request naming none gets; a tag that is not an image model stops the
 server at startup. Both flags are refused by every other command.

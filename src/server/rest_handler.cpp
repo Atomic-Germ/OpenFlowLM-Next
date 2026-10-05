@@ -25,6 +25,7 @@
 #include "base64.hpp"
 #include "open_diffusion/engine.hpp"
 #include "open_diffusion/prompt.hpp"
+#include "open_diffusion/reference.hpp"
 #include "tokenizer/tokenizer.hpp"
 
 ///@brief Report a handler's error on the transport the client is actually reading (#64)
@@ -2117,9 +2118,10 @@ std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
         this->image_tokenizer = std::make_unique<Tokenizer>(model_dir);
         this->image_engine = std::make_unique<open_diffusion::Engine>(model_dir, kernels, &this->npu_device_inst);
         if (this->image_resident) {
-            // resident means every resolution's activations are held from the start, so a
+            // resident means every configuration's activations are held from the start, so a
             // server that cannot hold them says so now rather than on some later request
             for (int s : this->image_engine->sizes()) this->image_engine->select(s);
+            for (int s : this->image_engine->edit_sizes()) this->image_engine->select(s, 0, true);
         }
     }
     catch (const std::exception& e) {
@@ -2228,23 +2230,30 @@ void RestHandler::handle_openai_images_generations(const json& request,
     }
 }
 
-///@brief Handle the openai images edits request: validated, then 501 until the NPU has a VAE encoder
+///@brief Handle the openai images edits request: one reference image, edited as the prompt says
+///       (klein's reference-token edit; specs/open-diffusion/plans/edits.md). A mask (inpainting)
+///       or a second image is refused, naming it as not implemented.
 ///@param fields the form's text fields
 ///@param uploads the form's file parts
+///@param cancellation_token stops an n > 1 request after the current image
 ///@param send_response the send response
 ///@param send_streaming_response the send streaming response
 void RestHandler::handle_openai_images_edits(const json& fields, const std::vector<ImageUpload>& uploads,
+                                             std::shared_ptr<CancellationToken> cancellation_token,
                                              std::function<void(const json&)> send_response,
                                              StreamResponseCallback send_streaming_response) {
+    // an edit's reference, well under the 256 MB body limit (a 64 MP PNG fits)
+    constexpr size_t kMaxReferenceBytes = 32u << 20;
     try {
         size_t images = 0, masks = 0;
+        const ImageUpload* ref = nullptr;
         for (const auto& u : uploads) {
             const bool is_mask = u.field == "mask";
             if (u.bytes == 0)
                 return send_response(openai_compat::invalid_param(u.field, u.field + " is an empty file."));
             if (is_mask && ++masks > 1)
                 return send_response(openai_compat::invalid_param("mask", "at most one mask may be sent."));
-            if (!is_mask) ++images;
+            if (!is_mask && ++images == 1) ref = &u;
         }
         if (images == 0)
             return send_response(json{{"error", {
@@ -2252,22 +2261,94 @@ void RestHandler::handle_openai_images_edits(const json& fields, const std::vect
                 {"type", "invalid_request_error"}, {"param", "image"}, {"code", "missing_required_parameter"}}}});
         if (images > 16)
             return send_response(openai_compat::invalid_param("image", "at most 16 images may be sent."));
+        if (masks)
+            return send_response(openai_compat::invalid_param(
+                "mask", "mask (inpainting) is not implemented: edits take one reference image and a prompt.",
+                "not_implemented"));
+        if (images > 1)
+            return send_response(openai_compat::invalid_param(
+                "image", "editing from " + std::to_string(images) + " reference images is not implemented: "
+                         "send one image.", "not_implemented"));
+        if (ref->bytes > kMaxReferenceBytes)
+            return send_response(openai_compat::invalid_param(
+                "image", "the image is " + std::to_string(ref->bytes >> 20) + " MB; at most " +
+                         std::to_string(kMaxReferenceBytes >> 20) + " MB."));
 
         std::string tag;
         if (json err = resolve_image_model(fields, &tag); !err.is_null()) return send_response(err);
         auto [info_tag, info] = this->supported_models.get_model_info(tag);
-        std::vector<int> sizes = info.value("image_sizes", std::vector<int>{});
+        std::vector<int> sizes = info.value("image_edit_sizes", std::vector<int>{});
         std::sort(sizes.begin(), sizes.end());
+        if (sizes.empty())
+            return send_response(openai_compat::invalid_param(
+                "model", "'" + tag + "' has no edit configurations; image edits are not implemented for it.",
+                "not_implemented"));
+        // "auto" (OpenAI's edit default) follows the reference: the largest size not above its
+        // shorter side
+        const auto* data = reinterpret_cast<const uint8_t*>(ref->data.data());
+        int w = 0, h = 0;
+        int auto_size = open_diffusion::reference_dims(data, ref->data.size(), &w, &h)
+                            ? open_diffusion::default_edit_size(w, h, sizes) : sizes.front();
         openai_compat::ImagesRequest ir;
-        if (json err = openai_compat::images_request(fields, sizes, sizes.empty() ? 0 : sizes.back(), ir);
-            !err.is_null())
+        if (json err = openai_compat::images_request(fields, sizes, auto_size, ir); !err.is_null())
             return send_response(err);
-
-        send_response(json{{"error", {
-            {"message", "image edits are not implemented yet: FLUX.2 [klein] edits by encoding the input "
-                        "image into latents, which needs a VAE encoder on the NPU. "
-                        "/v1/images/generations works."},
-            {"type", "not_implemented_error"}, {"param", nullptr}, {"code", 501}}}});
+        open_diffusion::Reference prepared;
+        try {
+            prepared = open_diffusion::prepare_reference(data, ref->data.size(), ir.size);
+        }
+        catch (const open_diffusion::ReferenceError& e) {
+            return send_response(openai_compat::invalid_param("image", e.what()));
+        }
+        if (std::string why; !open_diffusion::available(&why))
+            return send_response(json{{"error", {{"message", why}, {"type", "not_implemented_error"},
+                                                 {"param", nullptr}, {"code", 501}}}});
+        if (std::string why = ensure_image_engine_loaded(tag); !why.empty()) {
+            header_print("ERROR", why);
+            return send_response(json{{"error", {{"message", why}, {"type", "server_error"}, {"param", "model"},
+                                                 {"code", "model_load_failed"}}}});
+        }
+        if (!ir.ignored.empty()) {
+            std::string names;
+            for (const auto& f : ir.ignored) names += (names.empty() ? "" : ", ") + f;
+            header_print("OFLM", "ignoring " + names + ": '" + tag + "' is guidance-distilled (no CFG)");
+        }
+        header_print("OFLM", prepared.describe());
+        uint64_t seed = ir.seed;
+        if (!ir.seeded) {
+            std::random_device rd;
+            seed = (static_cast<uint64_t>(rd()) << 32) | rd();
+        }
+        open_diffusion::Engine& eng = *this->image_engine;
+        eng.select(ir.size, ir.steps, true);
+        const std::vector<int64_t> ids =
+            open_diffusion::prompt_ids(*this->image_tokenizer, eng.prompt_template(), ir.prompt, eng.max_tokens());
+        eng.set_reference(prepared.rgb);
+        json out = json::array();
+        for (int k = 0; k < ir.n; ++k) {
+            if (cancellation_token && cancellation_token->cancelled()) {
+                header_print("OFLM", "client gone -- stopping after " + std::to_string(k) + " of " +
+                                     std::to_string(ir.n) + " images");
+                break;
+            }
+            const uint64_t seed_k = seed + static_cast<uint64_t>(k);
+            eng.set_tokens(ids);
+            eng.set_noise(eng.seeded_noise(seed_k));
+            open_diffusion::Timing t = eng.run();
+            std::vector<uint8_t> bytes = eng.encode(ir.output_format, ir.jpeg_quality);
+            char line[160];
+            std::snprintf(line, sizeof line, "Edit %d/%d: %dx%d, %d steps, seed %llu, %.1f s on the NPU",
+                          k + 1, ir.n, ir.size, ir.size, eng.steps(),
+                          static_cast<unsigned long long>(seed_k), t.total_s);
+            header_print("OFLM", std::string(line));
+            out.push_back(json{{"b64_json", base64::encode_into<std::string>(bytes.begin(), bytes.end())},
+                               {"seed", seed_k}});
+        }
+        const std::string size = std::to_string(ir.size) + "x" + std::to_string(ir.size);
+        send_response(json{{"created", static_cast<long long>(std::time(nullptr))},
+                           {"data", out},
+                           {"model", tag},
+                           {"output_format", ir.output_format},
+                           {"size", size}});
     }
     catch (const std::exception& e) {
         send_response(json{{"error", {{"message", e.what()}, {"type", "server_error"}, {"code", 500}}}});

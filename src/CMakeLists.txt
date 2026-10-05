@@ -463,6 +463,8 @@ endif()
 # flag of their own. The engine drives XRT directly; an HRX build compiles
 # engine_unavailable.cpp in its place, whose open_diffusion::available() is false.
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp")
+# an edit's reference image: decode, orient, crop, resize (host code, every build)
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/reference.cpp")
 if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp")
     # stb_image_write (vendored, public domain) encodes the PNG/JPEG; only engine.cpp

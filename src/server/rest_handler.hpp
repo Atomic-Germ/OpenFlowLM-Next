@@ -37,6 +37,7 @@ struct ImageUpload {
     std::string filename;
     std::string content_type;
     size_t bytes = 0;
+    std::string data;            // the file's bytes (an edit's reference is decoded from them)
 };
 
 ///@brief Stream callback type for sending streaming responses
@@ -125,6 +126,7 @@ public:
     /// \param fields the form's text fields (openai_compat::images_form_json)
     /// \param uploads its file parts
     void handle_openai_images_edits(const json& fields, const std::vector<ImageUpload>& uploads,
+                                    std::shared_ptr<CancellationToken> cancellation_token,
         std::function<void(const json&)> send_response,
         StreamResponseCallback send_streaming_response);
 

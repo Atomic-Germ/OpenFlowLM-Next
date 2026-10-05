@@ -143,7 +143,11 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("size", po::value<int>(&parsed_args.image_size)->default_value(1024),
              "Image width and height in pixels (for image command)")
             ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
-             "Noise seed, for a reproducible image (for image command; default random)");
+             "Noise seed, for a reproducible image (for image command; default random)")
+            ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
+             "Reference image to edit, .png or .jpg: the prompt says what to change (for "
+             "image command; the size then defaults to the largest one not above the "
+             "reference's shorter side)");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
@@ -213,7 +217,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // The same for image: its options, and the prompt positional, which any
             // other command would otherwise take and drop.
             if (parsed_args.command != "image") {
-                for (const char* opt : {"out", "size", "seed"}) {
+                for (const char* opt : {"out", "size", "seed", "image"}) {
                     if (!vm[opt].defaulted()) {
                         std::cerr << "Error: --" << opt << " is only supported with"
                                      " the image command!" << std::endl;
@@ -226,6 +230,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     return false;
                 }
             }
+            parsed_args.image_size_given = !vm["size"].defaulted();
 
             if (parsed_args.command == "version") {
                 return true;

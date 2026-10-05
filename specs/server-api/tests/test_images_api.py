@@ -1,5 +1,6 @@
 # Traces: SERVER-IMAGES-GENERATIONS, SERVER-IMAGES-PARAMS, SERVER-IMAGES-SIZE, SERVER-IMAGES-EDITS,
 #         SERVER-IMAGES-NPU (canonical spec: specs/server-api/spec.md)
+#         OPEN-DIFFUSION-EDIT's server half (canonical spec: specs/open-diffusion/spec.md)
 # Integration: needs `oflm serve <chat model>` on localhost:52625 with flux2-klein:4b installed (it is
 # pulled on first use otherwise) and the NPU. OFLM_TEST_MODEL names the chat model that is serving;
 # OFLM_TEST_IMAGE_MODEL the image model (default flux2-klein:4b). Images are made at 512x512 to keep
@@ -241,12 +242,48 @@ def test_auto_is_1024():
 
 # ---- SERVER-IMAGES-EDITS ------------------------------------------------------------------------
 
-def test_edits_validate_then_answer_501():
-    png = base64.b64decode(_generate()[1]["data"][0]["b64_json"])
+def _edit(png, **extra):
+    fields = {"model": IMAGE_MODEL, "prompt": "make it night", "seed": 1}
+    fields.update({k: v for k, v in extra.items() if v is not None})
+    return _post_form("/v1/images/edits", fields, [("image", "a.png", png)])
+
+
+def test_one_image_is_edited_at_its_size():
+    png = _images(_generate()[1])[0]                     # 512x512
+    status, body = _edit(png)                              # size auto: follows the reference
+    assert status == 200, (status, body)
+    assert body["size"] == "512x512" and len(body["data"]) == 1, body
+    assert _png_size(_images(body)[0]) == (512, 512)
+
+
+def test_the_same_edit_twice_gives_the_same_bytes():
+    png = _images(_generate()[1])[0]
+    a, b = _edit(png), _edit(png)
+    assert a[0] == b[0] == 200, (a, b)
+    assert _images(a[1]) == _images(b[1])
+
+
+def test_two_images_are_refused_as_not_implemented():
+    png = _images(_generate()[1])[0]
     status, body = _post_form("/v1/images/edits", {"model": IMAGE_MODEL, "prompt": "make it night"},
                               [("image[]", "a.png", png), ("image[]", "b.png", png)])
-    assert status == 501, (status, body)
-    assert "VAE encoder" in _err(body).get("message", ""), body
+    _assert_400(status, body, "image", "two images")
+    assert "not implemented" in _err(body).get("message", ""), body
+
+
+def test_a_mask_is_refused_as_inpainting_not_implemented():
+    png = _images(_generate()[1])[0]
+    status, body = _post_form("/v1/images/edits", {"model": IMAGE_MODEL, "prompt": "make it night"},
+                              [("image", "a.png", png), ("mask", "m.png", png)])
+    _assert_400(status, body, "mask", "a mask")
+    assert "inpainting" in _err(body).get("message", ""), body
+
+
+def test_a_reference_that_is_not_png_or_jpeg_is_refused_naming_it():
+    status, body = _post_form("/v1/images/edits", {"model": IMAGE_MODEL, "prompt": "x"},
+                              [("image", "a.bmp", b"BM" + bytes(200))])
+    _assert_400(status, body, "image", "a BMP")
+    assert "not PNG or JPEG" in _err(body).get("message", ""), body
 
 
 def test_edits_without_an_image_are_refused():
