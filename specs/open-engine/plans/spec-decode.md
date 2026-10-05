@@ -1,6 +1,6 @@
 # Speculative decoding for Qwen3.6-35B-A3B on the NPU
 
-2026-10-05. Status: **PR 1 under way** (branch `feat/spec-decode`).
+2026-10-05. Status: **PR 1 open as #169** (branch `feat/spec-decode`, on `main`).
 
 This is one of three plans that came out of the original "ternary experts + DFlash" plan:
 
@@ -12,16 +12,37 @@ This is one of three plans that came out of the original "ternary experts + DFla
 
 ## The idea
 
-Decode on the NPU spends most of each step waiting rather than computing. A small draft
-model guesses the next 8-16 tokens, the big model checks all of them in one pass (the
-**verify pass**), and we keep the guesses up to the first wrong one. If checking 16 tokens
-costs about 2.4 decode steps and ~5 guesses are accepted on average, decode gets about 2x
-faster.
+Decode on the NPU spends most of each step reading weights, one token at a time. A small
+draft model guesses the next 8-16 tokens, the big model checks all of them in one pass (the
+**verify pass**), and we keep the guesses up to the first wrong one. The weights are read
+once for the whole block, so the check costs far less than decoding the same tokens one by
+one.
 
 - Target and drafter both run on the NPU, on the open engine (`src/open_qwen36`).
 - Drafter: z-lab's DFlash v1 for Qwen3.6-35B-A3B, used as is.
 - Output must be **lossless**: at temperature 0, the same tokens plain decode would give,
   except where the top two logits are a near-tie.
+
+## Expected gain (revised after #116)
+
+**Decode is now about twice as fast as this plan first assumed.** #116 (merged 2026-10-05)
+runs the 35B's whole decode layer loop in one hardware context: a step went from ~76 to
+~59-69 ms (OPEN-DECODE-ONE-CONTEXT), so ~15 tok/s rather than the ~7 the plan started from.
+Speculation has to beat that faster baseline, so the expected gain shrinks.
+
+At the uniform-routing bound, with switching inside the verify pass fixed (see below):
+
+| | verify pass | tokens kept per pass | tok/s | vs ~15 tok/s today |
+|---|---|---|---|---|
+| B = 8, q4 experts | ~230 ms | ~5 | ~22 | **~1.4x** |
+| B = 16, q4 experts | ~335 ms | ~6.5 | ~19 | ~1.3x |
+| B = 8, 2-bit experts | ~185 ms | ~5 | ~27 | **~1.75x** |
+| B = 8, switching NOT fixed | ~455 ms | ~5 | ~11 | **slower than today** |
+
+So: **B = 8 beats B = 16, 2-bit experts matter more than before, and fixing the switch cost
+is mandatory.** The uniform-routing bound is pessimistic: consecutive tokens tend to reuse
+experts, which shrinks the set a verify pass has to read. PR 3 measures the real set size
+first, because it moves every row of this table.
 
 ## What the existing code says
 
@@ -37,43 +58,36 @@ tokens, so 16 fits in one pass. `moe_batch`, the batched expert kernel, already 
 
 **2. Switching kernel sets is the biggest cost, and it doesn't shrink with fewer tokens.**
 Each switch between hardware contexts costs 2.5-2.9 ms
-(`plans/archive/gemm-context-collapse.md`). Built from the prefill route's pieces, a verify
-pass switches 100 times, which is 266 ms (about two decode steps) before any arithmetic.
-Plain decode switches 22 times a step, between the two layer kernels `lx` and `ax`.
+(`plans/archive/gemm-context-collapse.md`). Built from the prefill route's pieces (GEMM,
+attention, experts: three separate binaries), a verify pass switches 100 times, which is
+266 ms before any arithmetic. #116 fixed this for plain decode only; the verify pass uses
+different kernels and still has the problem.
 
 **3. The expert kernel is fast enough to make verify cheap.** `mb_s256` reads expert
-weights at 35.8 GB/s, about 3x the rate decode manages. Checking 16 tokens touches up to 102
-experts per layer, about 8 GB in total, which takes 224 ms at that rate.
+weights at 35.8 GB/s, faster than decode's own weight reads. Checking 16 tokens touches up to
+102 experts per layer, about 8 GB in total, which takes 224 ms at that rate; 8 tokens touch up
+to 57, about 4.5 GB and 125 ms. The experts are most of a verify pass's cost, which is why the
+table above favours B = 8 and 2-bit experts.
 
-Putting it together, for one verify pass of 16 tokens:
+## Cutting the switch cost inside the verify pass
 
-| | experts | everything else | switching | total | in decode steps |
-|---|---|---|---|---|---|
-| switching kept to ~0.4 ms each | 224 ms | ~60 ms | ~40 ms | **~325 ms** | **2.3** |
-| switching as it is today | 224 ms | ~60 ms | 266 ms | ~550 ms | 3.9 |
+#116 merged the two decode layer kernels into one binary, and its main cores are now at
+16,256 of 16,384 B of program memory. There's no room to add the verify pass's batched
+kernels to that binary.
 
-The first row gives the ~2x speedup; the second gives about 1.25x. **Cutting the switch cost
-decides whether this is worth doing.**
+The way that fits is the one the diffusion engine uses (PR #140): **one ELF, reconfigured by
+register writes.** Each kernel set keeps its own program, and a switch rewrites the array's
+configuration from the instruction stream. On this machine that costs 0.3-0.7 ms instead of
+~2.5, and a whole image came out byte-identical
+(`utilities/reconfig-probe/README.md` on `feat/one-context`). Program memory doesn't matter
+here. The costs are more complex packaging (`compose_elf.py`) and a longer load.
 
-## Cutting the switch cost
+That is **PR 2**. It also takes ~266 -> ~40 ms off every 256-token prefill block, which is
+worth having on its own.
 
-There are two known ways to do it, both already working somewhere in the tree:
-
-- **One merged image.** Put both layer kernels in one binary as separate instruction
-  streams, so a step never switches. PR #161 does this for dense models
-  (OPEN-DECODE-ONE-CONTEXT-DENSE, `dux.py`). The limit is each core's 16 KB of program
-  memory, and the 35B's `lx` has already overflowed it once (16,480 B). So it may not fit
-  for the MoE model.
-- **One ELF, reconfigured by register writes.** Each kernel set keeps its own program, and
-  switching rewrites the array's configuration from the instruction stream. On the
-  diffusion side (PR #140) that costs 0.3-0.7 ms instead of ~2.1, and a whole image came
-  out byte-identical. Program memory doesn't matter here. The cost is more complex
-  packaging (`compose_elf.py`) and a longer load.
-
-Try the merged image first, because it's simpler and #161 has built it. Fall back to the
-ELF if program memory refuses. Either way this is **PR 2**, and it speeds up plain decode by
-itself (22 switches a step become ~0-9 ms, on the order of 30% of a ~105 ms step), with no
-drafter at all.
+Measure first: what one register-write reconfiguration costs for the GEMM, expert and
+attention sets. The diffusion numbers grow with configuration size, so they don't carry
+over directly.
 
 ## The pieces
 
@@ -109,24 +123,20 @@ links a model to its drafter.
 
 | PR | contents | waits on |
 |---|---|---|
-| **1** | this plan; the rollback and its test; OPEN-SPEC-VERIFY in `spec.md` | rebase onto #161 (both edit `deltanet_block`) |
-| **2** | one context for the 35B's decode (OPEN-DECODE-ONE-CONTEXT-MOE): merged image, else ELF | #161 (same `lx` / `ax` files) |
-| **3** | the verify pass on hardware: `gemm_q4` at B = 8/16, block lm_head, taps | 2 |
+| **1** (#169) | this plan; the rollback and its test; OPEN-SPEC-VERIFY in `spec.md` | nothing |
+| **2** | the verify pass's kernels (GEMM, experts, attention) in one ELF, switched by register writes. Also speeds up prefill | nothing |
+| **3** | the verify pass on hardware: measure the real expert set per block first, then `gemm_q4` at B = 8/16, block lm_head, taps | 2 |
 | **4** | the drafter on the NPU | 3, for the taps |
 | **5** | wiring + `oflm serve` + `oflm-test --llm --tools` with speculation on: the first real speedup number | 3, 4 |
 
-Before PR 2's design is settled, measure two things:
-1. whether `lx` and `ax` fit one merged image for the 35B (build it; the linker reports the
-   size);
-2. if not, what an ELF reconfiguration costs for `lx` / `ax` specifically. The diffusion
-   numbers grow with configuration size, and these are larger kernels.
+None of PRs 1-5 depend on #161. Only the 2-bit expert work (PR 6) does.
 
 ## Requirements
 
 | ID | verification | status |
 |---|---|---|
 | OPEN-SPEC-VERIFY | test + manual | in `spec.md`; unit part passing; hardware not run |
-| OPEN-DECODE-ONE-CONTEXT-MOE | test + manual | new, PR 2. The MoE twin of #161's OPEN-DECODE-ONE-CONTEXT-DENSE |
+| OPEN-SPEC-ONE-CONTEXT | test + manual | new, PR 2. The verify pass's (and the block prefill's) kernel sets in one ELF; bit-exact against the xclbin route |
 | OPEN-SPEC-DFLASH | manual | new, PR 4. Draft tokens match the HF reference given the same features |
 | OPEN-SPEC-LOSSLESS | test + manual | new, PR 5. Unit: the rejection sampler with a fixed seed gives the target distribution. Hardware: greedy output equal except near-ties |
 | OPEN-SPEC-PACKAGING | manual | new, PR 5. `oflm-add` links the drafter; serve finds it |
