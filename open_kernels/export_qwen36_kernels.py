@@ -56,7 +56,6 @@ HERE = Path(__file__).resolve().parent                 # open_kernels/
 REPO = HERE.parent
 DESIGNS = HERE / "designs"
 XCLBINS = REPO / "src" / "xclbins"
-DEFAULT_MODEL = "Qwen3.6-35B-A3B-NPU2"
 sys.path.insert(0, str(HERE))
 from recipes.cache import build_key  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
@@ -251,7 +250,14 @@ def main() -> int:
     if bad:
         sys.exit(f"unknown set(s) {bad}; the recipe builds {list(sets)}")
     key = build_key(spec)
-    out_root = Path(a.out).resolve() if a.out else (XCLBINS / spec.extra.get("model", DEFAULT_MODEL) / "open_kernels")
+    if not a.out and not spec.extra.get("model"):
+        # It used to fall back to the 35B's name, so exporting a spec without one wrote
+        # over the flagship's shipped set. Say so instead of guessing a published name.
+        sys.exit(f"{a.spec or a.model_dir or 'the default spec'}: no extra.model, so there is "
+                 f"no export destination. It is the src/xclbins/<name> directory, and the name "
+                 f"`oflm add` links a converted model's kernels by. Add it to the spec, or "
+                 f"pass --out.")
+    out_root = Path(a.out).resolve() if a.out else (XCLBINS / spec.extra["model"] / "open_kernels")
     out_root.mkdir(parents=True, exist_ok=True)
     spec_file = out_root / "spec.json"
     spec_file.write_text(spec.to_json(), encoding="utf-8", newline="\n")

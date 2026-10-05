@@ -67,7 +67,12 @@ def test_family_routes_to_dense_and_back():
 
 def test_checked_in_spec_round_trips():
     s = ModelSpec.from_json(SPEC_FILE.read_text())
-    assert s == derive()
+    # everything but extra.model, which is the export destination (recipes/load.py stamps
+    # it from the model directory) and is not derivable from a config.json
+    d = derive()
+    assert s.extra["model"] == "K2-Horizon-3.7B-NPU2"
+    s.extra.pop("model")
+    assert s == d
     assert json.loads(s.to_json())["norm_groups"] == 2
     with pytest.raises(SpecError):        # an unknown field stays a refusal
         ModelSpec.from_dict({**json.loads(SPEC_FILE.read_text()), "bogus": 1})

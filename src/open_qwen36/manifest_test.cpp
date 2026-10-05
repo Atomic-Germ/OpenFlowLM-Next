@@ -343,8 +343,9 @@ int main(int argc, char** argv) {
             check(lt.program.size() == 1 && lt.program[0].op == "run" && lt.program[0].kernel == "dx" && lt.program[0].args.size() == 6 &&
                   lt.state_kind == "kv" && lt.state_row == 4096, "qwen3: one run per layer");
             // dx / ln / lm plus the block prefill route's two: the attention dispatch's own
-            // xclbin ("dxa") and the ONE context every projection shape streams over ("gemm").
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 5, "qwen3: kernels");
+            // xclbin ("dxa") and the ONE context every projection shape streams over ("gemm"),
+            // and since the AG16 family landed, its attention pair ("ag_s", "ag_pv").
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
