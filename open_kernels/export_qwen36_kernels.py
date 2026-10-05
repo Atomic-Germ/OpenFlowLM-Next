@@ -41,6 +41,7 @@ xclbin and nowhere else (see src/open_qwen36/README.md).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -158,7 +159,8 @@ def fullest_core(bdir: Path) -> int | None:
         return None
 
 
-def build(name: str, sets: dict, spec_file: Path) -> Path:
+def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
+    """Build one kernel set. Worker for the parallel build; returns (name, bdir)."""
     src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
@@ -179,14 +181,20 @@ def build(name: str, sets: dict, spec_file: Path) -> Path:
         overflow = overflow or b"Overflow of program memory" in tail
     if p.wait() != 0:
         if overflow:
-            sys.exit(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
-                     "program memory. This is a bug in the kernels for this model, not in your setup; "
-                     "please report it with this log.")
-        sys.exit(f"[{name}] build FAILED ({p.returncode})")
+            raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
+                               "program memory. This is a bug in the kernels for this model, not in your setup; "
+                               "please report it with this log.")
+        raise RuntimeError(f"[{name}] build FAILED ({p.returncode})")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
         print(f"[{name}] program memory: fullest core {used} of {PROGRAM_MEMORY} B ({PROGRAM_MEMORY - used} B free)")
+    return name, out
+
+
+def build(name: str, sets: dict, spec_file: Path) -> Path:
+    """Sequential build of a single set (kept for callers that want it)."""
+    _, out = _build_one(name, sets, spec_file)
     return out
 
 
@@ -204,6 +212,11 @@ def main() -> int:
     ap.add_argument("--check", metavar="DIR",
                     help="a previous export (or a shipped xclbins/<model>/open_kernels dir) to compare "
                          "against; non-zero exit on any difference beyond the per-build UUID/timestamp stamps")
+    # Sequential by default: each build drives aiecc over the whole design, so
+    # running several at once needs several times the memory of one. Callers that
+    # know their machine (the Nix package build passes NIX_BUILD_CORES) opt in.
+    ap.add_argument("-j", "--jobs", type=int, default=1,
+                    help="kernel-set builds to run in parallel within this spec (default: 1)")
     a = ap.parse_args()
 
     # ---- the spec, its recipe, and the kernel sets that recipe names
@@ -265,9 +278,22 @@ def main() -> int:
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
         gen.generate(F.recipe(spec))
+    # Build the requested sets in parallel, then copy outputs in deterministic order.
+    bdirs: dict[str, Path] = {}
+    if a.no_build:
+        for n in names:
+            bdirs[n] = DESIGNS / sets[n]["build_dir"]
+    else:
+        workers = max(1, min(a.jobs, len(names)))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_build_one, n, sets, spec_file) for n in names]
+            for future in concurrent.futures.as_completed(futures):
+                n, bdir = future.result()
+                bdirs[n] = bdir
+
     hashes: dict[str, str] = {}
     for n in names:
-        bdir = DESIGNS / sets[n]["build_dir"] if a.no_build else build(n, sets, spec_file)
+        bdir = bdirs[n]
         dst = out_root / n
         dst.mkdir(parents=True, exist_ok=True)
         for f in FILES:
