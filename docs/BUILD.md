@@ -54,9 +54,13 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 |---|---|---|
 | `linux-default` | Full distribution | Builds executable + open NPU kernels + bundled utilities (default) |
 | `linux-debug` | Debug development | Engine only, kernels OFF (fast iteration) |
-| `fedora-default` | Fedora release | Like `linux-default`, with XRT discovered through pkg-config |
+| `fedora-default` | Fedora release | Alias of `linux-default` (XRT discovery is common to all Linux presets) |
+| `fedora-debug` | Fedora debug | Alias of `linux-debug` |
 | `linux-portable` | Portable bundle | Bundles XRT/XDNA libraries |
-| `windows-default` | Windows build | Visual Studio build (engine only; kernels Linux-only) |
+| `windows-default` | Windows build | Visual Studio 17 2022 generator (engine + kernels) |
+
+These are the **repository-root** presets, which build the full distribution
+(you also need one from `src/` when building from inside `src/`).
 
 ### Build Presets
 
@@ -71,13 +75,16 @@ All builds use CMake presets in `CMakePresets.json`. Presets define configure, b
 
 | Preset | Description |
 |---|---|
-| `linux-default` | Smoke test (`oflm list`) |
+| `linux-default` | Runs the four registered tests: `oflm_smoke`, `openai_compat`, `OPEN-VISION-IMAGE-READ`, `bench_embed` |
+
+Test presets exist only in the repository-root `CMakePresets.json`. Run
+`ctest --preset linux-default` from the repository root.
 
 ### Package Presets
 
 | Preset | Output |
 |---|---|
-| `linux-package` | Host-native `.rpm` + portable `.tar.gz` (one command) |
+| `linux-package` | `.rpm` + `.tar.gz` (one command) |
 | `linux-package-tgz` | `.tar.gz` distribution |
 | `linux-package-deb` | `.deb` package (build on Debian/Ubuntu or in a Debian container) |
 | `linux-package-rpm` | `.rpm` package |
@@ -111,7 +118,7 @@ cmake --install build
 - Bundled utilities (`oflm-test`, `q4nx-build`) and their launchers
 
 **Output:**
-- Binary in `build/bin/oflm`
+- Binary in `build/src/oflm`
 - Kernels in `src/xclbins/`
 - Installed to `/opt/openflowlm`
 - `/usr/bin/oflm` symlink + `/etc/profile.d/openflowlm.sh`, so `oflm` is on
@@ -125,8 +132,11 @@ cmake --install build
 cmake --workflow --preset linux-package
 ```
 
-This configures, builds, tests, and emits the host-native `.rpm` and portable
-`.tar.gz` into `build/packages/`. Packages depend on the system XRT (`xrt-base`
+This configures, builds, tests, and emits the `.rpm` and portable `.tar.gz` into
+`build/packages/`. Note that `linux-package-deb` and `linux-package-tgz` are
+*package* presets, not workflow presets -- drive them with
+`cmake --build --preset linux-package-deb && cpack --preset linux-package-deb`,
+not with `cmake --workflow`. Packages depend on the system XRT (`xrt-base`
 on Fedora, `libxrt-npu2` on Ubuntu), matching the runtime-prerequisite flow.
 
 `.deb` is intentionally **not** part of this preset: a DEB is only valid when
@@ -139,9 +149,8 @@ or inside a Debian container.
 Fast development iteration without kernel compilation.
 
 ```bash
-cmake -B build --preset linux-debug
-cmake --build build
-cmake --install --preset linux-debug
+cmake --preset linux-debug
+cmake --build --preset linux-debug
 ```
 
 **What builds:**
@@ -165,21 +174,28 @@ cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
 ```
 
 **Available specs:**
-- `qwen3-4b` -- Qwen3 dense 4B (all sizes)
-- `gemma3-4b` -- Gemma3 dense 4B
-- `llama-8b` -- Llama 3.1 8B
+- `qwen3-4b` -- Qwen3 dense (all sizes)
+- `qwen25-3b` -- Qwen2.5 dense 3B
+- `gemma3-4b`, `gemma3-12b` -- Gemma 3 dense
+- `llama31-8b` -- Llama 3.1 8B
 - `hy-mt2-7b` -- Hy-MT2-7B
-- `granite-3b` -- IBM Granite 4.2 3B
-- `qwen35-4b` -- Qwen3.5 dense 4B
-- `qwen36-moe` -- Qwen3.6-MoE
+- `granite42-3b` -- IBM Granite 4.2 3B
+- `qwen35-9b` -- Qwen3.5 dense (all sizes)
+- `qwen36-35b-a3b` -- Qwen3.6-MoE 35B-A3B
+- `phi4-mini-4b` -- Phi-4-mini
+- `lfm2-1.2b` -- LFM2 1.2B
+- `minicpm5-2b` -- MiniCPM 5 2B
 
 ### 4. Build Open NPUE Kernels Only
 
 Build only the BERT embedding kernels (open_npue).
 
 ```bash
-cmake -B build --preset linux-debug  # First, build engine only
-cmake -B --build --preset linux-default  # Then build kernels
+cmake --preset linux-debug
+cmake --build --preset linux-debug   # engine only, no kernel export
+
+cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b
+cmake --build --preset linux-default  # now builds that kernel spec too
 ```
 
 **Note:** Open NPUE kernels require the NPU present on the build host.
@@ -204,7 +220,7 @@ Kernels are exported as part of the CMake build via the `export_kernels` CMake t
    - Compiled by `npu_offload/gemm_rtp/export_gemm_rtp.py`
    - One command per family in `npu_offload/gemm_rtp/families.json`
    - Needs pyxrt and an installed NPU
-   - Output: `src/xclbins/<family>/`
+   - Output: `src/xclbins/<family>/` (e.g. `BERT-h768-bfp16`)
 
 ### Export Flags
 
@@ -221,9 +237,12 @@ The `export_kernels.py` script supports:
 | `--only` | Build only one spec/family |
 | `--check DIR` | Verify against reference directory |
 
+To build a single kernel within a spec, use the underlying exporter directly --
+`open_kernels/export_qwen36_kernels.py` takes `--only` and `--check`:
+
 **Example:**
 ```bash
-python utilities/export-kernels.py --specs qwen3-4b,gemma3-4b --only qwen3-4b:ax0
+python utilities/export-kernels.py --specs qwen3-4b,gemma3-4b
 ```
 
 Each flag is forwarded to `open_kernels/export_qwen36_kernels.py` where it
@@ -308,13 +327,23 @@ Simply run(linux-package preset is used by default):
 ./build_in_docker.sh
 ```
 
-Or specify a workflow preset(for deb package in this example):
+Or name a workflow preset:
 
 ```bash
-./build_in_docker.sh linux-package-deb
+./build_in_docker.sh linux-default
 ```
 
-The script builds `openflowlm-build:ubuntu26` Docker image, passes `/dev/accel/accel0` into the container, enables XRT memory locking, and persists the build and NPU cache directories.
+The script builds the `openflowlm-build:ubuntu26` image, passes
+`/dev/accel/accel0` into the container, enables XRT memory locking, and
+persists the NPU cache directory (`./npu-cache`). To produce a `.deb`, run the
+`linux-package-deb` package preset inside the container:
+
+```bash
+docker run --rm -it --device=/dev/accel/accel0 --cap-add=IPC_LOCK \
+  --ulimit memlock=-1:-1 -v "$PWD:/code" openflowlm-build:ubuntu26 \
+  cmake --preset linux-package-deb && cmake --build --preset linux-package-deb \
+  && cpack --preset linux-package-deb
+```
 
 The host must have the AMD XDNA driver installed and expose:
 
@@ -340,12 +369,13 @@ docker run --rm -it \
 Windows builds use Visual Studio. Run from a Visual Studio developer environment.
 
 ```powershell
-# Set up environment
-& "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+# Set up environment (the windows-default preset uses the VS 17 2022 generator;
+# for Visual Studio 18 2026 use the windows-vs18 preset instead)
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 
 # Configure and build
-cmake -B build --preset windows-default
-cmake --build build
+cmake --preset windows-default
+cmake --build --preset windows-default
 ```
 
 **Note:** the commands above build the engine only. The NPU kernels themselves
@@ -365,7 +395,9 @@ Linux-only (its path handling is POSIX-specific), not the build it drives.
 The binary lands in `src/build/oflm.exe`, with `model_list.json`,
 `model_info.json` and the engine DLLs copied beside it by the build — it will
 not start without those, and Windows reports a missing DLL as a silent exit
-before `main()`.
+before `main()`. The build also creates an `xclbins` junction beside the binary
+and warns if `OFLM_XCLBIN_PATH` is not set -- set it to that junction's path if
+kernel lookup fails.
 
 ### Linux
 
@@ -373,7 +405,9 @@ before `main()`.
 `apt install` line for the development packages this build needs, and the
 driver and XRT setup.
 
-Other presets: `linux-portable`, `linux-snap`, `windows-vs18`.
+Other presets in the repository-root `CMakePresets.json`: `linux-portable`.
+Two more exist only in `src/CMakePresets.json`: `linux-snap` and
+`windows-vs18` (the Visual Studio 18 2026 generator).
 
 ---
 
@@ -387,7 +421,7 @@ shell first:
 cd C:\dev\mlir-aie; . .\iron_env.ps1        # the leading dot is required
 ```
 
-On Linux, activate the equivalent `mlir-aie` virtualenv (`ironenv`), with
+On Linux, activate the equivalent `mlir-aie` virtualenv (`ironvenv`), with
 `xclbinutil` and `aiebu-asm` on `PATH` — both come from XRT, not from the
 mlir-aie wheel.
 
@@ -481,9 +515,14 @@ cmake --build --preset linux-debug
 
 ### "Kernel not loaded"
 
-- Check kernels were exported to `src/xclbins/`
-- Run `oflm list` to see which kernel set was loaded
-- Verify `model_list.json` includes your model
+- Check the kernel spec was actually built. `src/xclbins/` already contains
+  closed-source prebuilt directories, so the presence of that directory tells
+  you nothing; look for `src/xclbins/<model>/open_kernels*/` or
+  `src/xclbins/BERT-h*/`, which are the build outputs (and are gitignored).
+- Run `oflm list` to see which kernel set was loaded.
+- Verify `model_list.json` includes your model, and that `oflm` was not built
+  with `linux-debug` -- that preset sets `OFLM_BUILD_KERNELS=OFF`, so no
+  xclbins are produced and every model will report a missing design set.
 
 ### "Build fails on Windows"
 
@@ -504,18 +543,19 @@ have just rebuilt kernels and want to be sure the new ones ran, read that line.
 
 ## Quick Links
 
-- [Branch naming convention](../contributing/code-contributions.md)
-- [Code contributions](../contributing/code-contributions.md)
-- [Kernel contributions](../contributing/kernel-contributions.md)
-- [Testing](../contributing/test-contributions.md)
-- [Documentation](../contributing/doc-contributions.md)
-- [Tools](../contributing/tool-contributions.md)
+- [Branch naming convention](contributing/code-contributions.md)
+- [Code contributions](contributing/code-contributions.md)
+- [Kernel contributions](contributing/kernel-contributions.md)
+- [Testing](contributing/test-contributions.md)
+- [Documentation](contributing/doc-contributions.md)
+- [Tools](contributing/tool-contributions.md)
 - The Windows and embedding-set instructions above were run on this repository;
   the Linux presets and the LLM kernel export are transcribed from the build
   scripts' own documented usage.
 - The install layout and the environment variables were renamed with the
-  executable: `~/.oflm`, `share/oflm`, `lib/oflm`, `OFLM_*`. A pre-rename
-  install still works — `~/.flm` is searched after the oflm locations, and any
+  executable: `share/oflm`, `lib/oflm`, `OFLM_*`. The user model directory is
+  `~/.oflm/models` on Windows and `~/.config/oflm/models` on Linux (older
+  installs use `~/oflm/models`). A pre-rename install still works — `~/.flm` is searched after the oflm locations, and any
   variable read through `utils::getenv_oflm` accepts its old `FLM_*` name and
   prints a one-line notice naming the new one. `OFLM_OPEN_KERNELS_DIR` is the
   exception: the open engine reads it with plain `getenv`, so `FLM_OPEN_KERNELS_DIR`

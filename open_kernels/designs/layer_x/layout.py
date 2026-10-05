@@ -58,6 +58,7 @@ AA_BYTES = _L.AA_BYTES
 # HEAD_BYTES -- the MoE designs' hardwired ones.
 A_H, A_OUT2 = _L.A_H, _L.A_OUT2
 AA_H, AA_OUT2 = _L.AA_H, _L.AA_OUT2
+A_OUT2B, AA_OUT2B = _L.A_OUT2B, _L.AA_OUT2B        # the second down piece's output (down_split); 0 otherwise
 POOL_FFN_UP, POOL_FFN_GATE, POOL_FFN_DOWN = _L.POOL_FFN_UP, _L.POOL_FFN_GATE, _L.POOL_FFN_DOWN
 ELN, E_A = _L.ELN, _L.E_A
 

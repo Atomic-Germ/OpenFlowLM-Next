@@ -68,7 +68,7 @@
   "extra": {
    "model_type": "qwen3_5",
    "source": "hf_config",
-   "model": "Qwen3.8-Distilled-9B-NPU2"
+   "model": "Qwen3.5-9B-NPU2"
   }
  },
  "spec_hash": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",

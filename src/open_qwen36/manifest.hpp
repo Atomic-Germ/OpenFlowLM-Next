@@ -123,6 +123,12 @@ struct GemmBlockProgram {
     std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
     bool sandwich = false;
     std::string act = "silu";
+    // >1: the route's HOST norms split each row into `norm_groups` equal groups and
+    // RMS each group separately (K2's GroupRMSNorm(2)), the same split the `ln`
+    // design's LN_GROUPS bakes into the NPU kernel -- 1 is the plain whole-row
+    // RMSNorm every pre-2.2 manifest computed (also the default when the field
+    // is absent, so old kernel sets keep their behaviour byte for byte).
+    uint64_t norm_groups = 1;
     // linear: the fused qkv width, the value width, the DeltaNet geometry, the state layout
     uint64_t qkv_dim = 0, vw = 0, key_heads = 0, value_heads = 0, head_dim = 0, conv_kernel = 0;
     // linear: the out projection's GEMM returns 2 x hidden rows, the hi and lo halves of a q8

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .arch_detect import ARCH_TO_FAMILY, family_from_text, resolve_override_arch
-from .constants import ModelArch
+from .constants import ModelArch, ModelArchConfigs
 
 ASSET_FILES = ["vision_weight.q4nx","audio_weight.q4nx","config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"]
 REQUIRED_ASSETS = ["config.json", "tokenizer.json", "tokenizer_config.json"]
@@ -22,6 +22,7 @@ QWEN35_VISION_ARCHS = frozenset({
     ModelArch.QWEN35_2B,
     ModelArch.QWEN35_4B,
     ModelArch.QWEN35_9B,
+    ModelArch.QWEN35_27B,
     ModelArch.QWEN35MOE,
 })
 
@@ -31,6 +32,7 @@ QWEN35_VISION_MODEL_TYPES = {
     ModelArch.QWEN35_2B: "qwen3_5",
     ModelArch.QWEN35_4B: "qwen3_5",
     ModelArch.QWEN35_9B: "qwen3_5",
+    ModelArch.QWEN35_27B: "qwen3_5",
     ModelArch.QWEN35MOE: "qwen3_5_moe",
 }
 
@@ -236,12 +238,42 @@ def _hf_download_file(repo_id: str, filename: str) -> Optional[str]:
 # listed falls back to GGUF_QUANT_PRIORITY. The order is resolved per call from
 # the -f flag (exact) or, as a best-effort fallback, the repo id / GGUF
 # filenames (so the user only needs -f when auto-detection guesses wrong).
-GGUF_QUANT_PRIORITY: Tuple[str, ...] = ("q4_1", "q4_0", "q8_0")
+GGUF_QUANT_PRIORITY: Tuple[str, ...] = ("q4_1", "q4_k", "q4_0", "q8_0")
 
 GGUF_QUANT_PRIORITY_BY_FAMILY: Dict[str, Tuple[str, ...]] = {
-    "lfm2": ("q4_0", "q4_1", "q8_0"),
-    "gpt-oss": ("q4_1", "q4_0", "q8_0", "mxfp4"),
+    "lfm2": ("q4_0", "q4_1", "q4_k", "q8_0"),
+    "gpt-oss": ("q4_1", "q4_0", "q4_k", "q8_0", "mxfp4"),
 }
+
+# Source-quant preference, derived from the family config's target type when
+# that is knowable. The ordering encodes "least re-quant work": source tokens
+# whose block structure the packer preserves exactly (Q4_0/Q4_1/Q4_K share the
+# uint4-per-32-group layout) come first, sources that must be fully
+# dequantize -> re-quantized (Q5_K/Q6_K/IQ*) last.
+_SOURCE_TOKENS_BY_TARGET: Dict[str, Tuple[str, ...]] = {
+    "Q4_K": ("q4_k", "q4_1", "q4_0", "q8_0", "f16", "bf16", "mxfp4", "q5", "q6", "iq", "tq"),
+    "Q4_1": ("q4_1", "q4_k", "q4_0", "q8_0", "f16", "bf16", "mxfp4", "q5", "q6", "iq", "tq"),
+    "Q4_0": ("q4_0", "q8_0", "f16", "bf16", "q4_1", "q4_k", "mxfp4", "q5", "q6", "iq", "tq"),
+    "Q8_0": ("q8_0", "f16", "bf16", "q4_1", "q4_k", "q4_0", "mxfp4", "q5", "q6", "iq", "tq"),
+}
+
+_FAMILY_TO_ARCH: Dict[str, ModelArch] = {}
+for _arch, _fam in ARCH_TO_FAMILY.items():
+    _FAMILY_TO_ARCH.setdefault(_fam, _arch)
+
+
+def _target_quant_for_family(family: Optional[str]) -> Optional[str]:
+    """The family config's default_tensor_type (e.g. 'Q4_1'), or None."""
+    if not family:
+        return None
+    arch = _FAMILY_TO_ARCH.get(family)
+    if arch is None or arch not in ModelArchConfigs:
+        return None
+    cfg_path = Path(__file__).resolve().parent.parent / "configs" / ModelArchConfigs[arch]
+    try:
+        return json.load(open(cfg_path)).get("default_tensor_type")
+    except Exception:
+        return None
 
 
 def _gguf_quant_priority(
@@ -274,13 +306,32 @@ def _gguf_quant_priority(
                 break
     if family and family in GGUF_QUANT_PRIORITY_BY_FAMILY:
         return GGUF_QUANT_PRIORITY_BY_FAMILY[family]
+    # No family override: prefer the source whose blocks need the least
+    # re-quant work for this family's target type. Families whose config's
+    # only native-source token (e.g. q4_k for a Q4_K target) differs from the
+    # global default now get a deterministic, on-log choice.
+    target = _target_quant_for_family(family)
+    if target in _SOURCE_TOKENS_BY_TARGET:
+        return _SOURCE_TOKENS_BY_TARGET[target]
     return GGUF_QUANT_PRIORITY
+
+
+def _is_auxiliary_gguf(filename: str) -> bool:
+    """True for a GGUF that is not the language model -- an mmproj, in practice.
+
+    llama.cpp writes the vision projector as `mmproj-<model>-<quant>.gguf`. It
+    shares the model's quant token, so any quant-preference search finds it, and
+    it is not convertible as a language model: it has no block layers, and
+    packing it produces a container with no layers in it.
+    """
+    return "mmproj" in os.path.basename(filename).lower()
 
 
 def select_repo_gguf(
     repo_id: str,
     override_model_arch: str = "",
     family_hint: Optional[str] = None,
+    pin_quant: Optional[str] = None,
 ) -> Optional[str]:
     """Pick the best quantized GGUF filename in an HF repo, without downloading.
 
@@ -303,10 +354,49 @@ def select_repo_gguf(
         f for f in files if f.lower().endswith(".gguf")
     ]
     priority = _gguf_quant_priority(override_model_arch, repo_id, gguf_filenames, family_hint)
+    if pin_quant:
+        # `-i repo:Q8_0` narrows the search to that one quant instead of
+        # re-deriving a preference order, so the card's recipe keeps producing
+        # this artifact after the repo gains a better-quantized file.
+        #
+        # Deliberately NOT validated against GGUF_QUANT_PRIORITY: that list is a
+        # preference order for an unpinned search, and it is narrower than what
+        # the repos actually ship (no q4_k, though Q4_K_M sources are the ones
+        # 2f4a8e1 was written for). A pin is explicit intent, so it is checked
+        # against the REPO's filenames instead, and a pin nothing matches is an
+        # error naming what is there -- never a silent fall back to a preference
+        # pick, which would pack a different quant than the card records.
+        want = pin_quant.lower()
+        if not any(want in os.path.basename(f).lower() for f in gguf_filenames):
+            raise ValueError(
+                f"{repo_id} has no {want.upper()} GGUF. It has: "
+                + (", ".join(sorted(os.path.basename(f) for f in gguf_filenames))
+                   or "(no GGUFs)"))
+
+    # An mmproj is the VISION projector, never the language model, and it carries
+    # the same quant token as the model beside it -- so it matches at the same
+    # priority index and then wins the alphabetical tiebreak ("mmproj-..." sorts
+    # before the model name). Left unfiltered, `oflm pack -i <a VLM GGUF repo>`
+    # picked mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf and converted a projector as if
+    # it were a 8B language model. Nothing downstream can catch it: the pack
+    # succeeds, and the container is a projector.
+    candidates = [f for f in gguf_filenames
+                  if not _is_auxiliary_gguf(f)
+                  and (not pin_quant or pin_quant.lower() in os.path.basename(f).lower())]
+    if not candidates:
+        print(f"[WARN] {repo_id} has GGUFs but none of them are a language model "
+              f"(only auxiliary projectors)")
+        return None
 
     matches = []  # (priority_index, filename)
     other_ggufs = []
-    for fname in gguf_filenames:
+    for fname in candidates:
+        if pin_quant:
+            # Already narrowed to the pinned quant, which need not be a token the
+            # preference order knows (q4_k, f16). Every survivor is equally
+            # wanted, so the tiebreak is the filename alone.
+            matches.append((0, fname))
+            continue
         low = os.path.basename(fname).lower()
         found = next(
             (q for q in priority if q in low), None
@@ -332,6 +422,7 @@ def find_repo_gguf(
     repo_id: str,
     override_model_arch: str = "",
     family_hint: Optional[str] = None,
+    pin_quant: Optional[str] = None,
 ) -> Optional[Tuple[str, str]]:
     """Search an HF repo for a quantized GGUF, in family-preferred order.
 
@@ -344,9 +435,40 @@ def find_repo_gguf(
     Returns (local_path, repo_filename) using the HF cache (downloading if
     needed), or None if the repo has no matching GGUF.
     """
-    filename = select_repo_gguf(repo_id, override_model_arch, family_hint)
+    filename = select_repo_gguf(repo_id, override_model_arch, family_hint, pin_quant)
     if filename is None:
         return None
+    path = _hf_download_file(repo_id, filename)
+    if path is None:
+        return None
+    return path, filename
+
+
+def find_repo_imatrix(repo_id: str) -> Optional[Tuple[str, str]]:
+    """Download an imatrix from an HF repo, if it publishes one.
+
+    Symmetric with find_repo_gguf: returns (local_path, repo_filename), or None
+    when the repo has no imatrix or cannot be reached. Used to reach a sibling
+    repo, since some publishers split one model's files across two repos and
+    neither half is complete on its own.
+    """
+    try:
+        from huggingface_hub import list_repo_files
+    except ImportError:
+        print("[WARN] huggingface_hub not installed; cannot look for an imatrix "
+              f"in {repo_id}")
+        return None
+    try:
+        files = list_repo_files(repo_id)
+    except Exception as e:
+        print(f"[WARN] Could not list files in {repo_id}: {e}")
+        return None
+    names = [f for f in files if f.lower().endswith(".gguf") and "imatrix" in f.lower()]
+    if not names:
+        return None
+    # Prefer the shortest name: it is the plain imatrix rather than a per-layer or
+    # per-epoch variant, and a tie on that is broken deterministically.
+    filename = sorted(names, key=lambda f: (len(f), f.lower()))[0]
     path = _hf_download_file(repo_id, filename)
     if path is None:
         return None
@@ -640,6 +762,11 @@ def _readme_banner(meta: dict) -> str:
         rows.append(f"| Source model | [`{source}`]({meta['source_url']}) |")
     elif source:
         rows.append(f"| Source model | `{source}` |")
+    if meta.get("source_repo"):
+        # The repo id is what re-resolves; the filename below is only a name and
+        # means nothing without it. Together the two are the download.
+        rows.append(f"| Source repo | [`{meta['source_repo']}`]"
+                    f"(https://huggingface.co/{meta['source_repo']}) |")
     if meta.get("source_file"):
         rows.append(f"| Source GGUF | `{meta['source_file']}` |")
     if meta.get("weight_size"):
@@ -649,7 +776,35 @@ def _readme_banner(meta: dict) -> str:
         rows.append(f"| OFLM version | `{meta['oflm_version']}` |")
     if meta.get("date"):
         rows.append(f"| Converted | {meta['date']} |")
+    if meta.get("prune_ffn_kept"):
+        rows.append(
+            f"| FFN | **pruned** {meta.get('prune_ffn_from')} -> "
+            f"{meta['prune_ffn_kept']} by imatrix importance |")
+    if meta.get("imatrix_name"):
+        # The file is IN this repository, so the recipe below is runnable from
+        # the card alone. Saying so is the difference between a recorded command
+        # and one somebody has to reconstruct.
+        rows.append(f"| Importance matrix | `{meta['imatrix_name']}` (shipped) |")
     parts.append("\n".join(rows))
+    if meta.get("prune_note"):
+        # Directly under the table, before anything else: this is the one fact
+        # that decides whether the artifact is the model someone asked for.
+        parts += ["", meta["prune_note"], ""]
+    if meta.get("packed_with"):
+        # The command that made this container. A finetune of this base should be
+        # packed the same way, and "the same way" should not live in someone's head.
+        parts += [
+            "",
+            "## Reproduce this conversion",
+            "",
+            "This container was produced by exactly this command, so a fine-tune of the",
+            "same base can be packed the same way:",
+            "",
+            "```bash",
+            meta["packed_with"],
+            "```",
+            "",
+        ]
     parts += [
         "",
         "## Install and run",
@@ -752,6 +907,14 @@ def assemble_readme(
         print(f"[INFO] Writing README.md based on {source_id}'s model card")
     else:
         print("[INFO] No source model card found; writing a minimal README.md")
+    # A pruned FFN is not the source model at its trained width, so the card
+    # says so in the banner rather than in a footnote nobody reads. The
+    # numbers come from what the converter recorded, not from re-deriving them.
+    if meta.get("prune_ffn_kept"):
+        from q4nx.imatrix_prune import pruned_note
+        meta["prune_note"] = pruned_note(
+            meta["prune_ffn_kept"], meta.get("prune_ffn_from") or 0,
+meta.get("prune_ffn_retained"), meta.get("mtp_dropped") or 0)
     # From the config.json this run produced, so the declaration matches the
     # weights rather than the name they were uploaded under. Absent for a pack
     # that produced no config, and then the README simply has no oflm-family --
@@ -1124,6 +1287,7 @@ def assemble_model_assets_hf(
     oflm_version: Optional[str] = None,
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
+    packed_with: Optional[str] = None,
 ) -> None:
     """Build a complete model directory from an HF safetensors source.
 
@@ -1164,6 +1328,8 @@ def assemble_model_assets_hf(
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
+    if packed_with:
+        config["oflm_packed_with"] = packed_with
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -1184,6 +1350,10 @@ def assemble_model_assets(
     oflm_version: Optional[str] = None,
     source_file: Optional[str] = None,
     model_arch: Optional[ModelArch] = None,
+    prune_meta: Optional[dict] = None,
+    packed_with: Optional[str] = None,
+    imatrix_name: Optional[str] = None,
+    source_repo: Optional[str] = None,
 ) -> None:
     """Build a complete, uploadable model directory.
 
@@ -1227,9 +1397,79 @@ def assemble_model_assets(
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
+    # The FFN in model.q4nx is NARROWER than the source model's, so the config
+    # that ships beside it has to say so. Left at the source width, the kernel
+    # recipe builds a set for a tensor shape that does not exist in this
+    # container, and the mismatch surfaces as a link failure at load time rather
+    # than as an obviously wrong number here.
+    if prune_meta and prune_meta.get("kept"):
+        was = config.get("intermediate_size")
+        config["intermediate_size"] = int(prune_meta["kept"])
+        config["oflm_pruned_ffn"] = {
+            "from": int(prune_meta.get("frm") or was or 0),
+            "to": int(prune_meta["kept"]),
+            "method": "imatrix importance, per layer",
+            "activation_mass_retained": (
+                round(float(prune_meta["retained"]), 4)
+                if prune_meta.get("retained") is not None else None),
+        }
+        print(f"[INFO] config.json intermediate_size {was} -> {prune_meta['kept']} "
+              f"(the FFN in this container is that wide)")
+    if prune_meta and prune_meta.get("kept_moe_ffn"):
+        was = config.get("moe_intermediate_size") or config.get("intermediate_size")
+        config["moe_intermediate_size"] = int(prune_meta["kept_moe_ffn"])
+        config["intermediate_size"] = int(prune_meta["kept_moe_ffn"])
+        print(f"[INFO] config.json moe_intermediate_size {was} -> {prune_meta['kept_moe_ffn']} "
+              f"(the MoE FFN in this container is that wide)")
+    if prune_meta and prune_meta.get("kept_experts"):
+        was = config.get("num_experts")
+        config["num_experts"] = int(prune_meta["kept_experts"])
+        if isinstance(config.get("num_experts_per_tok"), int) and config["num_experts_per_tok"] > config["num_experts"]:
+            config["num_experts_per_tok"] = config["num_experts"]
+        # vllm-style top-k key, if the skeleton has one
+        t = config.get("expert_top_k") or config.get("moe_top_k")
+        if isinstance(t, int) and t > config["num_experts"]:
+            if "expert_top_k" in config:
+                config["expert_top_k"] = config["num_experts"]
+            if "moe_top_k" in config:
+                config["moe_top_k"] = config["num_experts"]
+        print(f"[INFO] config.json num_experts {was} -> {prune_meta['kept_experts']}")
+    # The DEPTH, whenever the MTP block was dropped -- not only for a pruned pack.
+    # `block_count` counts the speculative block, so a generated config says 65 for a
+    # container that holds 64 layers. The kernel recipe builds a per-layer set and the
+    # engine walks num_hidden_layers, so an inflated depth is a link-time mismatch --
+    # and the 65th layer is not in the container to be found.
+    if prune_meta and prune_meta.get("mtp_dropped"):
+        # Set the depth to what the container ACTUALLY holds, rather than adjusting the
+        # source's number. A source config may already exclude the MTP block
+        # (Qwen3.8-27B's does: num_hidden_layers 64 against block_count 65), in which
+        # case subtracting again is wrong -- that is how a 64-layer container came to be
+        # labelled 63. A generated config from block_count has not excluded it, and there
+        # subtracting is right. The layer count is measured from the written tensors
+        # either way, so both agree without knowing which source we had.
+        actual = prune_meta.get("layers_actual")
+        if actual:
+            declared = config.get("num_hidden_layers")
+            config["num_hidden_layers"] = int(actual)
+            if declared != actual:
+                print(f"[INFO] config.json num_hidden_layers {declared} -> {actual} "
+                      f"(what model.q4nx holds; the MTP block is not converted)")
+            else:
+                print(f"[INFO] config.json num_hidden_layers {actual} matches the "
+                      f"container; the source config already excluded MTP")
+        config["oflm_mtp_dropped"] = int(prune_meta.get("mtp_dropped") or 0)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
         config["model_type"] = vision_model_type
+    if packed_with:
+        config["oflm_packed_with"] = packed_with
+    if imatrix_name:
+        config["oflm_imatrix"] = imatrix_name
+    if source_repo:
+        # Pairs with source_file (the filename chosen inside it). Either alone is
+        # ambiguous: a filename means nothing without its repo, and a repo does not
+        # say which of its GGUFs this artifact was built from.
+        config["oflm_source_repo"] = source_repo
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -1250,6 +1490,20 @@ def assemble_model_assets(
             print("[INFO] Writing chat_template.jinja from GGUF metadata.")
             chat_template_path.write_text(chat_template, encoding="utf-8")
 
-    assemble_readme(output_dir, candidates, build_readme_meta(output_dir, oflm_version), source_file)
+    # The prune facts are re-read from the config this run just wrote, so the card
+    # and the config cannot disagree: one source, written once.
+    _meta = build_readme_meta(output_dir, oflm_version)
+    _pf = config.get("oflm_pruned_ffn")
+    if _pf:
+        _meta["prune_ffn_kept"] = _pf.get("to")
+        _meta["prune_ffn_from"] = _pf.get("from")
+        _meta["prune_ffn_retained"] = _pf.get("activation_mass_retained")
+        _meta["mtp_dropped"] = config.get("oflm_mtp_dropped") or 0
+    if config.get("oflm_imatrix"):
+        _meta["imatrix_name"] = config["oflm_imatrix"]
+    if config.get("oflm_source_repo"):
+        _meta["source_repo"] = config["oflm_source_repo"]
+    _meta["packed_with"] = config.get("oflm_packed_with")
+    assemble_readme(output_dir, candidates, _meta, source_file)
 
     print(f"[INFO] Model directory ready: {output_dir}")

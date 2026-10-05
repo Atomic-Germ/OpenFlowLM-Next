@@ -192,6 +192,14 @@ def ab_banks(spec: ModelSpec) -> int:
     """Number of sequential 32-lane AB projections, not a wider vector primitive."""
     return ab_lanes(spec) // AB_LANES
 
+def glue_fills(xn_elems: int, half_outer: bool) -> int:
+    """DMA fills the dense glue's `side` channel issues per linear-attention dispatch, for an
+    xn of `xn_elems` 4 KB halves. Accumulator-outer (lx.py's original walk) carries every half
+    once per accumulator, with that accumulator's tiles for it: 4 fills a half. Half-outer
+    carries the half once and then both accumulators' tiles: 3. Then `small` and the conv
+    taps."""
+    return (3 if half_outer else 4) * xn_elems + 2
+
 
 class _Alloc:
     """Sequential byte allocator for a buffer layout: name -> offset, in order."""
@@ -237,6 +245,8 @@ class Layout:
     # ffn="dense" only (the qwen35 composition): the FFN's pool block and the two extra act stages
     POOL_FFN_UP: int = 0; POOL_FFN_GATE: int = 0; POOL_FFN_DOWN: int = 0
     A_H: int = 0; A_OUT2: int = 0; AA_H: int = 0; AA_OUT2: int = 0
+    # ... and the second down piece's output when the down GEMV is split along K (`down_split`)
+    A_OUT2B: int = 0; AA_OUT2B: int = 0
 
     def constants(self) -> dict[str, int]:
         return dict(self.__dict__)
@@ -270,6 +280,14 @@ class Linear:
     OUT_K: int; QKV_K: int
     OG_ELEMS: int = 0                    # 4 KB x-stream elements the og (bf16[VW]) arrives in
     XN_SIDE_ELEMS: int = 0               # 4 KB side elements the glue's xn copy arrives in
+    # The alpha / beta projection's packed width and the rows of it one 4 KB side element
+    # holds: 32 lanes x 64 rows for every published size up to 32 value heads, 64 x 32 for
+    # the 27B's 48 (glue_ab_w.cc). And the glue's walk order: per accumulator then per xn
+    # half (every size that fits the side channel that way), or per half then per
+    # accumulator, which carries each half once -- 3 fills a half instead of 4.
+    AB_LANES: int = 32
+    AB_ROWS: int = 64
+    GLUE_HALF_OUTER: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,6 +318,10 @@ class Ffn:
     FF: int; UP_PC: int; DOWN_PC: int
     MS_U: int; MS_G: int; MS_FLOATS: int
     XN_ELEMS: int; XM_ELEMS: int; H_ELEMS: int
+    # The down GEMV's K pieces when FF's activation table does not fit a main core
+    # (`down_split`): each piece is a whole number of h's f32 elements and runs as its own
+    # GEMV into its own act region. Empty -- one GEMV over FF -- for every size that fits.
+    DOWN_SPLIT: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -313,6 +335,7 @@ class Recipe:
     ffn: Ffn | None = None               # ffn="dense": the FFN tail's geometry
     kind: str = "moe"                    # "moe" | "dense": which tail the designs build
     q8: frozenset = frozenset()          # the roles streamed at q8 (OPEN-QUANT-Q8); empty is today
+    ln_split: bool = False               # the dense norm helper streams its residual adds (`norm_split`)
 
 
 def _check(spec: ModelSpec) -> None:
@@ -398,10 +421,56 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
 def kwide(spec: ModelSpec, ffn: str = "moe") -> int:
     """The widest K a main core prepares a table for. The MoE keeps the expert hidden's table
     beside xm's (H_TAB_OFF); the dense tail runs its down GEMV after every up | gate band, so
-    h's table replaces xm's and FF joins the max instead (designs/dense/dx.py)."""
+    h's table replaces xm's and FF joins the max instead (designs/dense/dx.py) -- or, when
+    the down GEMV is split along K, its widest piece."""
     wide = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
                spec.attn_q_width if spec.has_full else 0)
-    return max(wide, spec.intermediate) if ffn == "dense" else wide
+    if ffn != "dense":
+        return wide
+    return max(wide, *(down_split(spec) or (spec.intermediate,)))
+
+
+def down_split(spec: ModelSpec) -> tuple[int, ...]:
+    """The dense down GEMV's K pieces, or () when FF's table fits a main core whole.
+
+    The down GEMV reduces over FF, and its activation table is 2.25 FF bytes. At the 27B's
+    FF 17408 that is 39 168 B, and the core is over its L1 even at 5 KB weight elements. So
+    the reduction runs in two pieces, each a GEMV of its own with its own table, results to
+    two act regions that the norm helper adds. The pieces cut at an f32 element of h (1024
+    values, what `dense_prep_f32` prepares per call), the first the largest such cut at or
+    below FF / 2. Nothing is repacked: inside a band, pool chunk c covers k-tile c / 2
+    (gemv_q4.h's band law), so the first 2 K0 / 256 chunks of every FF-wide band ARE a
+    K0-wide band and the rest a (FF - K0)-wide one, and each piece is a strided DMA tap over
+    the pool the packer already writes."""
+    if not spec.intermediate:
+        return ()
+    base = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
+               spec.attn_q_width if spec.has_full else 0)
+    ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
+    ff = spec.intermediate
+    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1) <= L1_BUDGET:
+        return ()
+    e = ELEM // 4
+    k0 = ff // 2 // e * e
+    pieces = (k0, ff - k0)
+    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1) > L1_BUDGET
+                               for k in pieces):
+        raise OpRangeError(f"qwen35: an FF of {ff} does not fit a main core's L1 in two pieces of "
+                           f"whole f32 elements ({pieces}); a three-way split is not implemented")
+    return pieces
+
+
+# The dense norm helper (Tile(0, 3)): the residual + norm stage holds [x0 x1 w a0 a1] and one
+# output element at once, six ELN-byte elements over a 0x1800 stack. At HID 4096 that is
+# 55 296 B; at the 27B's 5120 it is 67 584 B against the core's 64 KB.
+NORM_L1 = 64 * 1024
+
+
+def norm_split(spec: ModelSpec) -> bool:
+    """True when the norm helper's fused residual stage does not fit its core. The split
+    form streams the residual adds half by half (`ln_add2` / `ln_add3`), sends the sum to DDR
+    and normalizes it on the way back through `ln_nr`: never more than four elements held."""
+    return 6 * spec.hidden * 2 + STACK > NORM_L1
 
 
 def common(spec: ModelSpec, ffn: str = "moe") -> Common:
@@ -513,6 +582,7 @@ def ffn_geometry(spec: ModelSpec) -> Ffn:
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=FFN_MS_FLOATS,
         XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * 2, ELEM) // ELEM,
         H_ELEMS=roundup(ff * 4, ELEM) // ELEM,
+        DOWN_SPLIT=down_split(spec),
     )
 
 
@@ -699,9 +769,12 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         a.add("xm", F.XM_ELEMS * ELEM)
         a.add("h", F.H_ELEMS * ELEM)
         a.add("out2", hid * 4)
+        if F.DOWN_SPLIT:
+            a.add("out2b", hid * 4)
         kv.update(A_XN=a.off["xn"], A_QKV=a.off["qkv"], A_Z=a.off["z"], A_VEC=a.off["vec"], A_O=a.off["o"],
                   A_OG=a.off["og"], A_OUT=a.off["out"], A_RES=a.off["res"], A_XM=a.off["xm"],
-                  A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_BYTES=roundup(a.n, ELEM))
+                  A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_OUT2B=a.off.get("out2b", 0),
+                  A_BYTES=roundup(a.n, ELEM))
         s_head = C.DN_PAD * C.DN_DIM * 4
         s_off = (spec.conv_kernel - 1) * nch * 2
         kv.update(S_ROWS=C.DN_PAD, S_HEAD_BYTES=s_head, STATE_S_OFF=s_off,
@@ -737,9 +810,12 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         a.add("xm", F.XM_ELEMS * ELEM)
         a.add("h", F.H_ELEMS * ELEM)
         a.add("out2", hid * 4)
+        if F.DOWN_SPLIT:
+            a.add("out2b", hid * 4)
         kv.update(AA_XN=a.off["xn"], AA_QG=a.off["qg"], AA_KVN=a.off["kvn"], AA_OG=a.off["og"],
                   AA_OUT=a.off["out"], AA_RES=a.off["res"], AA_XM=a.off["xm"], AA_ROUT=0, AA_HP=0,
-                  AA_H=a.off["h"], AA_OUT2=a.off["out2"], AA_BYTES=roundup(a.n, ELEM))
+                  AA_H=a.off["h"], AA_OUT2=a.off["out2"], AA_OUT2B=a.off.get("out2b", 0),
+                  AA_BYTES=roundup(a.n, ELEM))
     else:
         kv.update({k: 0 for k in ("CA_LNW", "CA_POSTLN", "CA_META", "CA_RW", "CA_SGW", "CA_BYTES", "AA_XN",
                                   "AA_QG", "AA_KVN", "AA_OG", "AA_OUT", "AA_RES", "AA_XM", "AA_ROUT", "AA_HP",
@@ -801,7 +877,11 @@ def linear(spec: ModelSpec) -> Linear | None:
     nch, vw = spec.lin_qkv_dim, spec.lin_value_width
     tile = 1024                                     # dn_glue's channel tile
     key_width = spec.lin_key_heads * spec.lin_key_dim
+    lanes = ab_lanes(spec)
+    xn_elems = roundup(spec.hidden * 2, ELEM) // ELEM
     return Linear(
+        AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes),
+        GLUE_HALF_OUTER=glue_fills(xn_elems, False) > LIMITS["shim_fills"],
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=spec.hidden // BAND_ROWS // n,
         QKV_DIM=nch, VW=vw,
         NCH=nch, NHEAD=spec.lin_value_heads, TILE=tile, NT=nch // tile,
@@ -840,7 +920,7 @@ def recipe(spec: ModelSpec, max_ctx: int = 4096, ffn: str = "moe") -> Recipe:
         _check(spec)
     return Recipe(spec=spec, layout=layout(spec, max_ctx, ffn), common=common(spec, ffn), linear=linear(spec),
                   attn=attn(spec), max_ctx=max_ctx, ffn=ffn_geometry(spec) if ffn == "dense" else None,
-                  kind=ffn, q8=spec.q8_roles)
+                  kind=ffn, q8=spec.q8_roles, ln_split=ffn == "dense" and norm_split(spec))
 
 
 # ---- the packing plan: tensor -> offset -> chunk order. `{l}` is the layer index.

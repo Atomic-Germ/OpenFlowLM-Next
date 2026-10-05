@@ -11,6 +11,7 @@ class ModelArch(IntEnum):
     QWEN35_2B = auto()
     QWEN35_4B = auto()
     QWEN35_9B = auto()
+    QWEN35_27B = auto()
     QWEN35MOE = auto()
     QWEN2   = auto()
     QWEN2VL = auto()
@@ -21,6 +22,7 @@ class ModelArch(IntEnum):
     PHI4    = auto()
     GPT_OSS = auto()
     NANBEIGE = auto()
+    K2 = auto()
     HUNYUAN_DENSE = auto()
     GRANITE = auto()
 
@@ -28,12 +30,13 @@ class ModelArch(IntEnum):
 # Qwen3.5 variant detection: llama.cpp GGUFs expose general.architecture ==
 # 'qwen35' with no size suffix, so the variant is inferred from the embedding
 # dimension (qwen35.embedding_length). Values verified against upstream
-# Qwen/Qwen3.5-{0.8B,2B,4B,9B} config.json hidden_size (2026-08).
+# Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B} config.json hidden_size (2026-08).
 QWEN35_VARIANT_DIMS: dict[ModelArch, int] = {
     ModelArch.QWEN35_08B: 1024,
     ModelArch.QWEN35_2B: 2048,
     ModelArch.QWEN35_4B: 2560,
     ModelArch.QWEN35_9B: 4096,
+    ModelArch.QWEN35_27B: 5120,
 }
 
 
@@ -55,6 +58,7 @@ ModelArchNames: dict[ModelArch, list[str]] = {
     ModelArch.QWEN35_08B: ["qwen35-0.8B","qwen3.5-0.8B"],
     ModelArch.QWEN35_4B:  ["qwen35-4B","qwen3.5-4B"],
     ModelArch.QWEN35_9B:  ["qwen35-9B","qwen3.5-9B"],
+    ModelArch.QWEN35_27B: ["qwen35-27B","qwen3.5-27B","qwen3.8-27B"],
     ModelArch.QWEN35_2B:  ["qwen35-2B","qwen3.5-2B"],
     ModelArch.QWEN35MOE:  ["qwen35moe","qwen3.5moe","qwen3.5-moe","qwen3.6moe","qwen3.6-moe","qwen3.6-moe-text"],
     ModelArch.QWEN3VL: ["qwen3vl", "qwen3-vl"],
@@ -69,7 +73,8 @@ ModelArchNames: dict[ModelArch, list[str]] = {
     ModelArch.GPT_OSS: ["gpt-oss"],
     ModelArch.NANBEIGE: ["nanbeige"],
     ModelArch.HUNYUAN_DENSE: ["hunyuan-dense", "hunyuan_v1_dense", "hy-mt2", "hy_mt2"],
-    ModelArch.GRANITE: ["granite", "granitemoe"]
+    ModelArch.GRANITE: ["granite", "granitemoe"],
+    ModelArch.K2: ["k2_horizon", "k2-horizon", "k2"]
 }
 
 ModelArchConfigs: dict[ModelArch, str] = {
@@ -79,6 +84,7 @@ ModelArchConfigs: dict[ModelArch, str] = {
     ModelArch.QWEN3:   "qwen3.json",
     ModelArch.QWEN35_4B: "qwen3.5_4b.json",
     ModelArch.QWEN35_9B: "qwen3.5_9b.json",
+    ModelArch.QWEN35_27B: "qwen3.5_27b.json",
     ModelArch.QWEN35_2B: "qwen3.5_2b.json",
     ModelArch.QWEN35_08B: "qwen3.5_0.8b.json",
     ModelArch.QWEN35MOE: "qwen35moe.json",
@@ -90,5 +96,6 @@ ModelArchConfigs: dict[ModelArch, str] = {
     ModelArch.GPT_OSS: "gpt-oss.json",
     ModelArch.NANBEIGE: "nanbeige.json",
     ModelArch.HUNYUAN_DENSE: "hunyuan.json",
-    ModelArch.GRANITE: "granite.json"
+    ModelArch.GRANITE: "granite.json",
+    ModelArch.K2: "k2.json"
 }

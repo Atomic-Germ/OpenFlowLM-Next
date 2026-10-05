@@ -9,7 +9,7 @@ has_children: false
 
 **OFLM** is the only **NPU-first runtime** built for AMD Ryzen™ AI.  
 
-Run **LLMs -- now with Vision support -- in minutes**: **no GPU required**, **over 10× more power-efficient**, and with **context lengths up to 256k tokens**.  
+Run **LLMs -- now with Vision support -- in minutes**: **no GPU required**, on the NPU itself, with **context lengths up to 256k tokens**.  
 
 A **familiar single-command CLI -- laser-optimized for NPUs**.  
 

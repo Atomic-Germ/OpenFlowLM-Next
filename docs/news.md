@@ -64,7 +64,7 @@ sections:
 
   #     Before now, AI workloads hogged your computer. With OpenFlowLM, your NPU takes over the “brain work,” freeing your CPU and GPU to do everything else.
 
-  #     * **🔋 Incredible Battery Life:** Stop tethering yourself to a wall outlet. OpenFlowLM delivers **over 10× power efficiency vs GPU-based AI workloads**, so your battery lasts all day.      
+  #     * **🔋 Incredible Battery Life:** Stop tethering yourself to a wall outlet. The heavy GEMMs run on the NPU rather than the GPU, so your battery lasts all day.      
   #     * **🎮 Do It All at Once:** For the first time, you can run a **Pro AI assistant** while **Gaming** or on a **Zoom call**. Since the AI stays on the NPU, your game stays smooth and your video calls never lag.
   #     * **🤫 Quiet and Cool:** No more loud cooling fans turning on the second you start a smart task. Your laptop stays cool and quiet.
   #     * **🔒 Private & Secure:** Your data stays inside your laptop. No "cloud," no subscription, and no internet required.

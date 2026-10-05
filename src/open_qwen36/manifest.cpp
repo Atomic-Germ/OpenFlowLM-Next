@@ -386,6 +386,17 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             } else {
                 fail(gw, "unknown kind " + g.kind + " (dense | linear | full)");
             }
+            // K2's grouped host norms (Stage 2.2): 1 -- also the default when the
+            // field is absent -- keeps the plain whole-row RMSNorm byte for byte.
+            // Only the dense route's host chain norms; linear/full routes have no
+            // grouped host norm site, so they refuse the field rather than accept
+            // a manifest whose norms would silently compute wrong.
+            g.norm_groups = gj.value("norm_groups", 1ull);
+            if (g.norm_groups == 0 || m.hidden % g.norm_groups)
+                fail(gw, "norm_groups " + std::to_string(g.norm_groups) + " must divide hidden " +
+                            std::to_string(m.hidden));
+            if (g.kind != "dense" && g.norm_groups != 1)
+                fail(gw, "kind " + g.kind + " has no grouped host norms (norm_groups must be 1)");
             for (const auto& s : g.program)
                 if (!g.weights.count(s.args[0]))
                     fail(gw, "step " + s.kernel + " reads weight buffer " + s.args[0] + ", which weights does not define");
