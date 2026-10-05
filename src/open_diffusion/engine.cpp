@@ -1,5 +1,6 @@
 // open_diffusion engine: replays export_bundle.py's schedule. See engine.hpp.
 #include "engine.hpp"
+#include "reference.hpp"
 #include "schedule.hpp"
 
 #include <algorithm>
@@ -156,14 +157,20 @@ struct Engine::Impl {
         std::string stream;
         std::vector<Arg> args;
     };
-    // One resolution: its schedule, activations and runs.
+    // One configuration (a resolution, or an edit at one): its schedule, activations and runs.
     struct Res {
         json sched;
+        std::string key;                        // "512", or "512e512" for an edit
+        bool edit = false;
         int R = 0, T = 0, C = 0, token_row = 0, bundle_steps = 0;
         std::map<std::string, Buf> bufs;
         std::vector<Op> head, tail;             // conditioning + text encoder; the VAE
         std::vector<StepOp> step_tmpl;          // step 0
-        std::vector<std::vector<Op>> step_ops;  // step k's runs, built on first use
+        // Two sets of step runs, bound to step k and reused for step k + 2: the driver
+        // refuses past ~1800 live runs ("Cannot extend beyond 8 banks"), which one set per
+        // step reached at 9 steps (8 for an edit). run() rebinds a set's moving arguments
+        // at the phase boundary, after the step that last used it has drained.
+        std::vector<std::vector<Op>> step_ops;
         std::vector<char> tf0, dt0;             // the bundle's TF / DT (its step count)
         int steps = 0;                          // the count TF / DT hold now
         int vl = 0;                             // the valid_len the te_attn heads are bound to
@@ -187,7 +194,7 @@ struct Engine::Impl {
     std::vector<std::string> set_names;
     std::map<std::string, int> set_index;
     std::map<std::string, Buf> weights;         // shared by every resolution
-    std::map<int, std::unique_ptr<Res>> res;
+    std::map<std::string, std::unique_ptr<Res>> res;
     Res* cur = nullptr;
     int cur_steps = 0;
     std::string vl_stream, vl_head;             // te_attn, and its per-length head ("{n}")
@@ -267,15 +274,27 @@ struct Engine::Impl {
         r.vl = vl;
     }
 
-    std::map<int, std::future<std::unique_ptr<Res>>> prepared;   // open_res started early
-    std::unique_ptr<Res> open_res(int size);
-    Res& load_res(int size);
+    std::map<std::string, std::future<std::unique_ptr<Res>>> prepared;   // open_res started early
+    std::unique_ptr<Res> open_res(int size, bool edit);
+    Res& load_res(int size, bool edit);
+    // A configuration's name (klein_pipeline.config_key) and its schedule file, or "".
+    static std::string config_key(int size, bool edit) {
+        return edit ? std::to_string(size) + "e" + std::to_string(size) : std::to_string(size);
+    }
+    std::string schedule_file(int size, bool edit) const {
+        const char* map = edit ? "edits" : "resolutions";
+        if (!bundle.contains(map) || !bundle.at(map).contains(std::to_string(size))) return {};
+        return bundle.at(map).at(std::to_string(size)).get<std::string>();
+    }
     void set_steps(Res& r, int steps);
     void init(const std::string& model_dir, const std::string& kernels_dir, const oflm_rt::device* dev,
               int prefetch_size);
     static std::vector<Arg> op_args(const json& o);
     static Res& selected(Res* r);
-    static std::vector<Op*> op_order(Res& r, int steps);   // a selection's runs, in order
+    // A selection's runs in order, each with the step it runs as (-1: head or tail).
+    static std::vector<std::pair<Op*, int>> op_order(Res& r, int steps);
+    // Point a step set's runs at step k (only the arguments that move per step).
+    void rebind(Res& r, std::vector<Op>& set, int k);
 };
 
 namespace {
@@ -309,27 +328,41 @@ Engine::Impl::Res& Engine::Impl::selected(Res* r) {
     return *r;
 }
 
-std::vector<Engine::Impl::Op*> Engine::Impl::op_order(Res& r, int steps) {
-    std::vector<Op*> out;
-    for (auto& op : r.head) out.push_back(&op);
+std::vector<std::pair<Engine::Impl::Op*, int>> Engine::Impl::op_order(Res& r, int steps) {
+    std::vector<std::pair<Op*, int>> out;
+    for (auto& op : r.head) out.emplace_back(&op, -1);
     for (int k = 0; k < steps; ++k)
-        for (auto& op : r.step_ops[k]) out.push_back(&op);
-    for (auto& op : r.tail) out.push_back(&op);
+        for (auto& op : r.step_ops[k % 2]) out.emplace_back(&op, k);
+    for (auto& op : r.tail) out.emplace_back(&op, -1);
     return out;
+}
+
+void Engine::Impl::rebind(Res& r, std::vector<Op>& set, int k) {
+    for (auto& op : set) {
+        if (op.k == static_cast<size_t>(k)) continue;
+        op.k = static_cast<size_t>(k);
+        int i = 0;
+        for (const auto& a : op.args) {
+            if (a.stride) op.run.set_arg(i, view(r, a.buf, a.off + op.k * a.stride, a.n));
+            ++i;
+        }
+    }
 }
 
 // A resolution's schedule, its ELF as one hardware context, and a kernel for every stream it
 // runs. It touches nothing but the new Res and read-only engine state, so the constructor
 // runs it on a thread while the weights load: creating ~80 kernels costs ~1-2.5 s of CPU
 // inside XRT, the weights ~5 s of reading.
-std::unique_ptr<Engine::Impl::Res> Engine::Impl::open_res(int size) {
+std::unique_ptr<Engine::Impl::Res> Engine::Impl::open_res(int size, bool edit) {
     auto rp = std::make_unique<Res>();
     Res& r = *rp;
-    // the resolution's ELF: every set as one hardware context (compose_elf.py)
+    r.key = config_key(size, edit);
+    r.edit = edit;
+    // the configuration's ELF: every set as one hardware context (compose_elf.py)
     const json& elfs = manifest.at("elf");
-    if (!elfs.contains(std::to_string(size)))
-        throw std::runtime_error("kernel set " + kdir.string() + " has no ELF for " + std::to_string(size));
-    fs::path elf = kdir / elfs.at(std::to_string(size)).get<std::string>();
+    if (!elfs.contains(r.key))
+        throw std::runtime_error("kernel set " + kdir.string() + " has no ELF for " + r.key);
+    fs::path elf = kdir / elfs.at(r.key).get<std::string>();
     r.elf = xrt::elf(elf.string());
     try {
         r.ctx = xrt::hw_context(dev, r.elf, {{"priority", kPriority}}, xrt::hw_context::access_mode::shared);
@@ -345,7 +378,7 @@ std::unique_ptr<Engine::Impl::Res> Engine::Impl::open_res(int size) {
                                 xrt::ext::kernel(r.ctx, c[1].get<std::string>())});
     }
     r.cfg_runs.resize(set_names.size());
-    r.sched = read_json(dir / bundle.at("resolutions").at(std::to_string(size)).get<std::string>());
+    r.sched = read_json(dir / schedule_file(size, edit));
     r.R = r.sched.at("R").get<int>();
     r.T = r.sched.at("image_tokens").get<int>();
     r.C = r.sched.at("latent_channels").get<int>();
@@ -355,16 +388,17 @@ std::unique_ptr<Engine::Impl::Res> Engine::Impl::open_res(int size) {
     return rp;
 }
 
-Engine::Impl::Res& Engine::Impl::load_res(int size) {
-    auto found = res.find(size);
+Engine::Impl::Res& Engine::Impl::load_res(int size, bool edit) {
+    const std::string key = config_key(size, edit);
+    auto found = res.find(key);
     if (found != res.end()) return *found->second;
     std::unique_ptr<Res> rp;
-    auto pending = prepared.find(size);
+    auto pending = prepared.find(key);
     if (pending != prepared.end()) {
         rp = pending->second.get();
         prepared.erase(pending);
     } else {
-        rp = open_res(size);
+        rp = open_res(size, edit);
     }
     Res& r = *rp;
 
@@ -421,7 +455,10 @@ Engine::Impl::Res& Engine::Impl::load_res(int size) {
     for (const auto& sp : r.step_tmpl)
         for (const auto& a : sp.args)
             if (a.stride) {
-                size_t end = a.off + static_cast<size_t>(kMaxSteps - 1) * a.stride + a.n;
+                // the last step's view, and the whole of its slot: set_steps writes DT as
+                // kMaxSteps full slots (klein_pipeline.dt_params)
+                size_t end = a.off + std::max(static_cast<size_t>(kMaxSteps - 1) * a.stride + a.n,
+                                              static_cast<size_t>(kMaxSteps) * a.stride);
                 need[a.buf] = std::max(need[a.buf], end);
             }
     for (auto& [name, bytes] : r.sched.at("buffers").items()) {
@@ -449,11 +486,11 @@ Engine::Impl::Res& Engine::Impl::load_res(int size) {
         r.tail.push_back(make_op(r, set_index.at((*o)[0].get<std::string>()), (*o)[1].get<std::string>(),
                                  (*o)[3].get<std::string>(), op_args(*o), 0));
     r.vl = vl;
-    return *res.emplace(size, std::move(rp)).first->second;
+    return *res.emplace(key, std::move(rp)).first->second;
 }
 
 void Engine::Impl::set_steps(Res& r, int steps) {
-    while (static_cast<int>(r.step_ops.size()) < steps) {
+    while (static_cast<int>(r.step_ops.size()) < std::min(steps, 2)) {
         size_t k = r.step_ops.size();
         std::vector<Op> ops;
         for (const auto& sp : r.step_tmpl)
@@ -516,8 +553,8 @@ void Engine::Impl::init(const std::string& model_dir, const std::string& kernels
                                  std::to_string(m.max_tokens) + " tokens");
     if (prefetch_size && m.bundle.at("resolutions").contains(std::to_string(prefetch_size)) &&
         m.manifest.at("elf").contains(std::to_string(prefetch_size)))
-        m.prepared.emplace(prefetch_size, std::async(std::launch::async, [&m, prefetch_size] {
-            return m.open_res(prefetch_size);
+        m.prepared.emplace(std::to_string(prefetch_size), std::async(std::launch::async, [&m, prefetch_size] {
+            return m.open_res(prefetch_size, false);
         }));
 
     fs::path wpath = m.dir / m.bundle.at("weights_file").get<std::string>();
@@ -562,11 +599,23 @@ std::vector<int> Engine::sizes() const {
 
 int Engine::default_steps() const { return impl_->bundle_steps; }
 
-void Engine::select(int size, int steps) {
+std::vector<int> Engine::edit_sizes() const {
+    std::vector<int> out;
+    if (impl_->bundle.contains("edits"))
+        for (auto& [r, _] : impl_->bundle.at("edits").items()) out.push_back(std::stoi(r));
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void Engine::select(int size, int steps, bool edit) {
     Impl& m = *impl_;
-    if (!m.bundle.at("resolutions").contains(std::to_string(size))) {
+    if (m.schedule_file(size, edit).empty()) {
         std::string have;
-        for (int r : sizes()) have += (have.empty() ? "" : ", ") + std::to_string(r);
+        for (int r : edit ? edit_sizes() : sizes()) have += (have.empty() ? "" : ", ") + std::to_string(r);
+        if (edit)
+            throw std::runtime_error("edits are not supported at " + std::to_string(size) + " (supported: " +
+                                     (have.empty() ? std::string("none in this model") : have) +
+                                     "; the output is the reference's size)");
         throw std::runtime_error("unsupported size " + std::to_string(size) + " (supported: " + have + ")");
     }
     if (steps == 0) steps = m.bundle_steps;
@@ -575,13 +624,14 @@ void Engine::select(int size, int steps) {
                                  std::to_string(kMaxSteps) + ")");
     if (steps != m.bundle_steps && m.bundle_steps < 2)
         throw std::runtime_error("this bundle has a single step; no other count can be derived from it");
-    Impl::Res& r = m.load_res(size);
+    Impl::Res& r = m.load_res(size, edit);
     m.set_steps(r, steps);
     m.cur = &r;
     m.cur_steps = steps;
 }
 
 int Engine::size() const { return impl_->cur ? impl_->cur->R : 0; }
+bool Engine::editing() const { return impl_->cur && impl_->cur->edit; }
 int Engine::steps() const { return impl_->cur_steps; }
 int Engine::image_tokens() const { return Impl::selected(impl_->cur).T; }
 int Engine::latent_channels() const { return Impl::selected(impl_->cur).C; }
@@ -623,6 +673,32 @@ void Engine::set_noise(const std::vector<uint16_t>& bits) {
     lat.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, n * 2, 0);
 }
 
+void Engine::set_reference(const std::vector<uint8_t>& rgb) {
+    Impl& m = *impl_;
+    Impl::Res& r = Impl::selected(m.cur);
+    if (!r.edit) throw std::runtime_error("set_reference needs an edit selected (select(size, steps, true))");
+    if (rgb.size() != static_cast<size_t>(r.R) * r.R * 3)
+        throw std::runtime_error("the reference must be size x size x 3 RGB8");
+    // the encoder's input: bf16 2 (x / 255) - 1 in channels 0-2 of a zero-bordered
+    // [R + 2, pitch, channels] buffer (vae_encoder.py); the other channels and the border stay zero
+    const json& in = r.sched.at("inputs");
+    Impl::Buf& b = m.buf(r, in.at("reference").get<std::string>());
+    size_t pitch = in.at("reference_pitch").get<size_t>(), ch = in.at("reference_channels").get<size_t>();
+    if ((static_cast<size_t>(r.R) + 2) * pitch * ch * 2 > b.bytes)
+        throw std::runtime_error("the schedule's reference buffer is too small");
+    auto v = reference_bf16(rgb);
+    auto* x = b.bo.map<uint16_t*>();
+    for (int y = 0; y < r.R; ++y)
+        for (int px = 0; px < r.R; ++px) {
+            uint16_t* d = x + ((static_cast<size_t>(y) + 1) * pitch + px + 1) * ch;
+            const uint16_t* s = v.data() + (static_cast<size_t>(y) * r.R + px) * 3;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+        }
+    b.bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+}
+
 std::vector<uint16_t> Engine::seeded_noise(uint64_t seed) const {
     const Impl::Res& r = Impl::selected(impl_->cur);
     std::mt19937_64 rng(seed);
@@ -650,7 +726,17 @@ Timing Engine::run(bool profile) {
     struct Stretch {
         xrt::runlist list;
         std::string what;
+        int set = -1, v = 0;
+        size_t cfg = 0;                           // its configure run, pool index
     };
+    // A configure run goes back to its pool's free list once its stretch has completed, so
+    // an image holds about as many as are in flight, not one per stretch: the driver gives
+    // every run its own copy of its control code from a bounded heap ("Cannot extend beyond
+    // 8 banks"), and a configure's is a whole set's register writes.
+    std::vector<std::array<std::vector<size_t>, 2>> cfg_free(m.set_names.size());
+    for (size_t set = 0; set < cfg_free.size(); ++set)
+        for (int v = 0; v < 2; ++v)
+            for (size_t i = r.cfg_runs[set][v].size(); i-- > 0;) cfg_free[set][v].push_back(i);
     std::deque<Stretch> inflight;
     std::optional<Stretch> open;
     auto wait_oldest = [&] {
@@ -661,6 +747,7 @@ Timing Engine::run(bool profile) {
         } catch (const xrt::runlist::command_error& e) {
             throw std::runtime_error(s.what + ": state " + std::to_string(static_cast<int>(e.get_command_state())));
         }
+        cfg_free[s.set][s.v].push_back(s.cfg);
     };
     auto close = [&] {
         if (!open) return;
@@ -673,18 +760,19 @@ Timing Engine::run(bool profile) {
         close();
         while (!inflight.empty()) wait_oldest();
     };
-    std::vector<std::array<size_t, 2>> cfg_used(m.set_names.size(), {0, 0});
     int cur_set = -1;
     std::string cur_phase;
     auto t0 = clk::now(), tp = t0;
-    for (Impl::Op* opp : Impl::op_order(r, m.cur_steps)) {
+    for (auto [opp, k] : Impl::op_order(r, m.cur_steps)) {
         Impl::Op& op = *opp;
-        if (op.phase != cur_phase) {
+        const std::string phase = k < 0 ? op.phase : "step" + std::to_string(k);
+        if (phase != cur_phase) {
             drain();
             auto now = clk::now();
             if (!cur_phase.empty()) t.phases.emplace_back(cur_phase, secs(tp, now));
             tp = now;
-            cur_phase = op.phase;
+            cur_phase = phase;
+            if (k >= 0) m.rebind(r, r.step_ops[k % 2], k);   // its last user has drained
         }
         auto ts = clk::now();
         if (!open || op.set != cur_set) {
@@ -693,9 +781,14 @@ Timing Engine::run(bool profile) {
             int v = r.flip;
             r.flip ^= 1;
             auto& pool = r.cfg_runs[op.set][v];   // a deque: runs in a list keep their address
-            size_t i = cfg_used[op.set][v]++;
-            if (i == pool.size()) pool.emplace_back(r.cfg_kernel[op.set][v]);
+            auto& free = cfg_free[op.set][v];
+            size_t i = pool.size();
+            if (free.empty()) pool.emplace_back(r.cfg_kernel[op.set][v]);
+            else i = free.back(), free.pop_back();
             open->list.add(pool[i]);
+            open->set = op.set;
+            open->v = v;
+            open->cfg = i;
             cur_set = op.set;
         }
         if (op.has_pre) open->list.add(op.pre);
@@ -735,8 +828,8 @@ std::vector<uint8_t> Engine::rgb() {
 
 std::vector<std::tuple<std::string, std::string, std::string>> Engine::ops() const {
     std::vector<std::tuple<std::string, std::string, std::string>> out;
-    for (const Impl::Op* op : Impl::op_order(Impl::selected(impl_->cur), impl_->cur_steps))
-        out.emplace_back(impl_->set_names[op->set], op->stream, op->phase);
+    for (auto [op, k] : Impl::op_order(Impl::selected(impl_->cur), impl_->cur_steps))
+        out.emplace_back(impl_->set_names[op->set], op->stream, k < 0 ? op->phase : "step" + std::to_string(k));
     return out;
 }
 

@@ -1,4 +1,4 @@
-# Open diffusion: FLUX.2 [klein] 4B text-to-image on the NPU
+# Open diffusion: FLUX.2 [klein] 4B text-to-image and edits on the NPU
 
 What the open image engine must do, and what has been measured. Directory name gives the
 prefix: `OPEN-DIFFUSION`.
@@ -6,7 +6,9 @@ prefix: `OPEN-DIFFUSION`.
 The model is `black-forest-labs/FLUX.2-klein-4B` (distilled, 4 steps, no CFG):
 - the DiT has 5 double-stream and 20 single-stream blocks (hidden 3072, 24 heads of 128);
 - the text encoder is Qwen3-4B layers 1-27 (taps 9/18/27);
-- the VAE decoder is AutoencoderKLFlux2.
+- the VAE decoder is AutoencoderKLFlux2;
+- an edit adds its VAE encoder: klein's own pipeline with one reference image, whose latent
+  tokens follow the generated ones in the joint sequence (`specs/open-diffusion/plans/edits.md`).
 
 **The reference is the diffusers pipeline in bf16 on the CPU**
 (`utilities/dit-ref/klein_quant_study.py`, 8 fixed prompts, seed 1234 + i). The goal set
@@ -15,7 +17,9 @@ not.
 
 The schedule is one list, `open_kernels/klein_pipeline.py`:
 - text encoder, conditioning, 4 steps, VAE;
-- 1050 dispatches over six kernel sets.
+- 1050 dispatches over six kernel sets;
+- an edit (`plan(R, edit=True)`, configuration `<R>e<R>`) adds the VAE encoder
+  (`open_kernels/vae_encoder.py`) before the steps: 1143 dispatches at 512².
 
 The exporter builds its streams (`open_kernels/export_dit_kernels.py`) into six kernel sets,
 then assembles those into one full ELF per resolution (`open_kernels/compose_elf.py`). Two
@@ -37,6 +41,9 @@ During a generation the host may do only these things:
 - write the seeded noise;
 - set `te_attn`'s `valid_len`: the pyxrt runner patches its instruction words, the native
   engine picks the prompt length's head kernel (`fa:te_attn_vl<n>`);
+- for an edit, prepare the reference once per request, before the first NPU dispatch:
+  decode, orient, crop and resize it (OPEN-DIFFUSION-REFERENCE; refused above 64 MP), and
+  write its bf16 2 (x / 255) - 1 values;
 - read the RGBA and encode the PNG or JPEG.
 
 Everything else is an NPU dispatch. In the native engine every run of a resolution goes to
@@ -106,11 +113,21 @@ A square size R runs only when all of these hold:
 
 Any other size is refused with the reason named, never run wrong.
 
+An edit is an R x R output from one R x R reference (`check_edit(R, R_ref)`): dit_ew's qk op
+takes the reference tokens as the image tokens past grid_w², on the same grid. Its joint
+sequence is [text | generated | reference], 512 + 2 (R/16)² rows.
+
 **Acceptance criteria:**
 - 512 and 1024 pass `check_resolution`.
 - 768 is refused because 2304 image tokens is not a multiple of 512.
 - 520 and 0 are refused as not a positive multiple of 16.
 - `plan(768)` raises.
+- (512, 512) and (1024, 1024) pass `check_edit`. (1024, 512) and (512, 1024) are refused as
+  needing the reference at the output's size; (768, 768) for its token count.
+- `plan(512, edit=True)`: X holds 512 + 2T rows. The encoder phase precedes step 0. Each step
+  writes the reference rows (from row 512 + T) out of REFLAT. proj_out reads the T generated
+  rows only.
+- A text-to-image plan has no REFLAT and no encode phase.
 
 ### OPEN-DIFFUSION-SCHEDULE: the scheduler matches diffusers
 **Applies to:** `open_kernels/klein_pipeline.py`
@@ -155,19 +172,47 @@ fox in fresh snow" --size 512 --seed 1` and `"a lighthouse at dusk" --size 1024 
 x.jpg` wrote files byte-identical to the previous engine's. Through the server at 512², seed 1,
 the same fox: `steps: 2` softer (3.6 s), `steps: 8` sharper (10.4 s), both coherent.
 
+Edits take the step count the same way: the reference rows' x_emb arguments do not move
+between steps (stride 0), which the step-line derivation accepts.
+
+**Fixed 2026-10-01** (broken since the one-context engine of #140): above 8 steps for
+text-to-image (7 for a 512 edit), the driver refused the engine's runs with "Cannot extend
+beyond 8 banks". The driver gives each XRT run its own copy of its control code from a
+bounded heap. The engine had made one configure run per stretch (~140 per step), each a
+whole set's register writes, and one set of op runs per step. Now:
+- a configure run returns to a free list once its stretch completes;
+- two sets of step runs are rebound per step (their moving arguments only), after the step
+  that last used the set has drained.
+
+DT is also sized for kMaxSteps whole slots; 50 steps needed one slot more than the last
+view.
+
+**Verification (manual)**, 2026-10-01, `open_diffusion_cli`, 512²:
+- text-to-image at 12, 20 and 50 steps, and the edit at 8 and 50, are coherent;
+- 12 steps with rebinding equals 12 steps with one set per step, byte for byte;
+- 4 steps equals pyxrt, for text-to-image and for the edit.
+
 ### OPEN-DIFFUSION-CLI: `oflm image` writes one image
 **Applies to:** `oflm` (`src/src/image_command.hpp`, `src/include/utils/vm_args.hpp`, `src/include/AutoModel/model_families.hpp`)
 **Verification:** manual
 
-`oflm image <tag> "<prompt>" [-o FILE] [--size 512|1024] [--seed N]` writes one image and
-prints its path, the seed and the time on the NPU (text, steps, VAE).
+`oflm image <tag> "<prompt>" [-o FILE] [--size 512|1024] [--seed N] [--image FILE]` writes
+one image and prints its path, the seed and the time on the NPU (text, steps, VAE; for an
+edit, the encoder too). With `--image` it is an edit of that reference (OPEN-DIFFUSION-EDIT):
+- the reference is prepared and checked (OPEN-DIFFUSION-REFERENCE) before anything is
+  downloaded or loaded, and the CLI prints what was done to it ("reference 4000x3000
+  centre-cropped to 3000x3000, resized to 512x512");
+- the size defaults to the largest of the registry entry's `image_edit_sizes` not above the
+  reference's shorter side, or the smallest of them; `--size` overrides it;
+- an entry with no `image_edit_sizes` is refused as having no edit configurations.
 - The format comes from the extension: `.png`, `.jpg` or `.jpeg`, any case. Any other is
   refused before loading. The default file is `oflm-<seed>.png` in the current directory.
 - `--size` defaults to 1024. A size the registry entry's `image_sizes` does not list is
   refused before any download, naming the supported ones.
 - `--seed` defaults to a random 64-bit value.
 - A tag whose registry entry lacks `"image": true` is refused before any download.
-- `-o`, `--size`, `--seed` and a third positional are refused by every other command.
+- `-o`, `--size`, `--seed`, `--image` and a third positional are refused by every other
+  command.
 - `oflm run` and `oflm serve` refuse the image tag as not a chat model, before unloading
   anything. `/api/tags` does not list it; `/v1/models` does, for the Images API
   (SERVER-IMAGES-GENERATIONS in `specs/server-api/spec.md`).
@@ -179,8 +224,13 @@ prints its path, the seed and the time on the NPU (text, steps, VAE).
 2. The same with `-o fox.jpg`: a JPEG of the same image.
 3. Each of these fails with the named reason and loads nothing:
    `-o fox.webp`; `--size 768` (supported: 512, 1024); `oflm image llama3.2:1b "x"`
-   (not an image model); `oflm run llama3.2:1b --seed 1`; `oflm pull llama3.2:1b "x"`.
+   (not an image model); `oflm run llama3.2:1b --seed 1`; `oflm pull llama3.2:1b "x"`;
+   `oflm run llama3.2:1b --image a.png`; `--image` of a BMP, of a 40x40 PNG, of a missing file.
 4. `oflm run flux2-klein:4b` is refused as not a chat model.
+5. `oflm image flux2-klein:4b "Make it a watercolor painting" --image coffee.jpg --seed 7`,
+   with a phone-orientation JPEG (EXIF 6, 600x400 stored): the CLI prints "reference
+   400x600 (EXIF orientation 6 applied) centre-cropped to 400x400, upscaled to 512x512" and
+   writes an upright 512² watercolor of the cup (checked 2026-10-01).
 
 ### OPEN-DIFFUSION-TOKENS: oflm's prompt ids equal the pipeline's
 **Applies to:** `src/open_diffusion/prompt.cpp`, `src/open_diffusion/engine.cpp`
@@ -222,17 +272,27 @@ as the pyxrt runner.
   reconfiguration, which would only drift the image. The test needs the NPU, the engine
   CLI, a built kernel directory and the study inputs, and says which is missing when
   skipped.
+- Edits: two `oflm image ... --image ref.png --seed 1` runs write identical PNG files, which
+  differ from the reference (`test_cli_determinism.py`). The engine's pixels for edit study
+  0 at 512² equal `generate.py --edit`'s, encoder included (`test_engine_matches_pyxrt.py`;
+  the edit study inputs come from `utilities/dit-ref/capture_edit_goldens.py`). Both skip,
+  naming why, when the model or kernels have no 512 edit configuration.
+- Packing is reproducible: the VAE attention's rank-128 factorization fixes each singular
+  pair's sign, so numpy 2.4 and 2.5 pack identical weights. A sign flip once moved pixels by
+  up to 10 levels: bfp16's int8 mantissa is not sign-symmetric.
 
 ### OPEN-DIFFUSION-PACKAGE: the model and its kernels are built and found with no manual step
 **Applies to:** `utilities/q4nx-build` (`--open-diffusion`), `open_kernels/export_dit_kernels.py` (`--install`), `src/open_diffusion`, `src/model_list.json`, `src/model_info.json`
 **Verification:** manual
 
 - `q4nx-build --open-diffusion -i black-forest-labs/FLUX.2-klein-4B -o <dir>` builds the
-  whole model directory from the checkpoint (flat: 17 files, ~9 GB) and
+  whole model directory from the checkpoint (flat: 21 files, ~9.1 GB, with the edit
+  configurations 512e512 and 1024e1024 and the encoder's weights) and
   `model_info_entry.json`. It refuses a checkpoint whose pipeline class, transformer or
   text-encoder geometry is not klein 4B's, naming the fields.
-- `export_dit_kernels.py` builds the six kernel sets, then assembles them into one full
-  ELF per resolution (`open_kernels/compose_elf.py`, `diffusion_r<R>.elf`).
+- `export_dit_kernels.py --resolutions 512,1024 --edits 512,1024` builds the six kernel
+  sets, then assembles them into one full ELF per configuration (`open_kernels/compose_elf.py`,
+  `diffusion_r<R>.elf` and `diffusion_r<R>e<R>.elf`; 4 ELFs, 85.9 MiB).
   `--install <dir>` copies only the ELFs and their description, removes an earlier
   install's kernel-set files, and writes `diffusion_kernels.json` (format
   `oflm-open-diffusion-kernels-v2`) last. It refuses a directory built from other stream
@@ -245,7 +305,12 @@ as the pyxrt runner.
   given), `<model dir>/open_kernels`, then `<root>/xclbins/FLUX.2-klein-4B-NPU2/open_kernels`
   for each xclbins root. The installer ships the last.
 - `oflm pull flux2-klein:4b` installs the model from `Cyronius/FLUX.2-klein-4B-NPU2`,
-  verifying every file's hash.
+  verifying every file's hash. The registry pins a commit (`url` is `.../resolve/<sha>`):
+  a layout change is published to a new commit on another branch, so a build that predates
+  it keeps pulling the files it can run.
+- Upgrading an installed model across a layout change takes `oflm remove flux2-klein:4b`,
+  then `oflm pull`. `pull` fetches only missing files, and a changed file is reported
+  but kept, so the old `bundle.json` would stay and its layout would be refused.
 
 **Verification (manual):**
 1. Build the model directory into an empty models root with `q4nx-build --open-diffusion`;
@@ -254,7 +319,7 @@ as the pyxrt runner.
    root").
 3. Point `OFLM_DIFFUSION_KERNELS_DIR` at a copy of the set whose manifest layout is
    edited: refused, naming both hashes.
-4. On a machine without the model: `oflm pull flux2-klein:4b` downloads 17 files and
+4. On a machine without the model: `oflm pull flux2-klein:4b` downloads 21 files and
    reports them verified.
 
 **Verified 2026-09-28:** built from `black-forest-labs/FLUX.2-klein-4B` (layout
@@ -264,6 +329,137 @@ into an empty models root verified all 17 hashes, and the pulled model's 512² s
 has the same bytes as the locally built one. `oflm image` found the shipped kernel set
 with nothing set ("an xclbins root"). A manifest with an edited layout was refused,
 naming both hashes.
+
+**Verified 2026-10-01, with edits:**
+- Built (layout `e667e5952ca22004`), byte-identical to the tested bundle, and uploaded to
+  branch `edits` of `Cyronius/FLUX.2-klein-4B-NPU2`, commit
+  `d84e3fd6119ced433c88fa2735593474a2c94cf4`. `main` keeps the 2026-09-28 model.
+- The live tree listing matched the builder's prediction for all 21 files.
+- `oflm pull` into an empty models root downloaded and verified all 21.
+- From that pull, with the shipped kernel set ("an xclbins root"), `oflm image` made the
+  512² fox and an `--image` edit.
+
+### OPEN-DIFFUSION-EDIT: an edit follows its prompt and keeps its reference
+**Applies to:** `open_kernels/klein_pipeline.py` (`plan(R, edit=True)`), `open_kernels/vae_encoder.py`, `src/open_diffusion`, `oflm image --image`, `/v1/images/edits`
+**Verification:** manual
+
+klein's edit, as diffusers' `Flux2KleinPipeline(image=...)` runs it (diffusers 0.40):
+- the reference's VAE latents (the encoder's mean), patchified 2x2 and BN-normalised, are
+  T extra tokens after the generated ones;
+- their positions are (10, h, w, 0);
+- they get the generated tokens' timestep modulation in every block, and are never read
+  back;
+- the sigmas count the generated tokens only;
+- no mask, no strength, no guidance.
+
+One reference; a mask or a second reference is refused, naming it as not implemented.
+
+The edit study (`capture_edit_goldens.py`) has 12 references: the 8 study images, plus 4
+public-domain / CC0 photos, among them an EXIF-6 JPEG and a grayscale scan. Each comes with
+an edit prompt and fixed noise. The NPU's edits must be coherent, and must:
+- follow the prompt;
+- keep the reference's scene;
+- land near diffusers' bf16 edits in LPIPS;
+- **ablation:** with each edit given another study reference (`generate.py --swap-ref 1`),
+  LPIPS against diffusers' edit must be far higher. A DiT that ignored the reference would
+  still make coherent images, so only this catches it.
+
+**Verification (manual):**
+
+```
+C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\capture_edit_goldens.py --size 512
+python utilities\dit-chain\generate.py --kernels <set> --size 512 --edit --study C:\dev\ditref-out\klein_edit_512_s4 --prompts 12 --out <dir> [--swap-ref 1 | --ref-tokens]
+C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\score_images.py <dir> --test "{:02d}.png" --ref "{:02d}.png" --ref-dir C:\dev\ditref-out\klein_edit_512_s4\bf16 --n 12
+```
+
+**Measured 2026-10-01**, 512², 12 edits, LPIPS vs diffusers bf16:
+
+| run | LPIPS mean / max | PSNR |
+|---|---|---:|
+| **everything on the NPU** | **0.0133 / 0.041** | 33.1 dB |
+| the same with diffusers' bf16 reference tokens (`--ref-tokens`) | 0.0140 / 0.048 | 32.5 dB |
+| diffusers bf16, with the NPU encoder's tokens (CPU) | 0.0034 / 0.009 | 39.5 dB |
+| **ablation: each edit with the next edit's reference** | **0.73 / 0.85** | 9.5 dB |
+| 1024², 2 edits (study prompts 0-1), everything on the NPU | 0.0072 / 0.0088 | 36.4 dB |
+| 1024², the ablation | 0.84 / 0.85 | 8.2 dB |
+
+- All 12 are coherent and follow their prompts: OPEN → CLOSED, TOMATO → PUMPKIN (legible),
+  the red fox made arctic, the coffee photo's espresso made latte art, upright.
+- The drift is the DiT's and the text encoder's, not the encoder's: swapping in diffusers'
+  reference tokens changes nothing measurable.
+- Edits drift far less than generations (0.107), because the reference anchors them.
+- The CPU emulation's prediction (`capture_edit_goldens.py --variants npu-emul`) is not
+  measured yet.
+
+### OPEN-DIFFUSION-ENCODER: the NPU encoder's reference tokens decode like diffusers'
+**Applies to:** `open_kernels/vae_encoder.py`, `open_kernels/designs/vae_ew` (`npix`)
+**Verification:** manual
+
+The encoder runs as the decoder's kernels do. Where it needs more, it uses existing
+kernels with new layouts:
+- the three stride-2 downsamples run as space-to-depth: the residual add before each is 4
+  phase dispatches, then a 3x3 conv with zero -1 taps (`utilities/dit-chain/spike_s2d.py`);
+- the mid-block attention is factored at rank 128, like the decoder's;
+- conv_out, quant_conv's mean, the 2x2 patchify and the BN normalisation are one conv on
+  norm_out's space-to-depth grid.
+
+The tokens must decode, in fp32, to images close to the decode of diffusers' fp32 encoder
+mean. They are not compared token for token: the decoder ignores much of their error, and
+the DiT barely sees it (OPEN-DIFFUSION-EDIT).
+
+**Verification (manual):**
+
+```
+python utilities\dit-chain\chain_test_vae_enc.py --kernels <set root> [--build] --goldens C:\dev\ditref-out\klein_edit_512_s4
+C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\score_ref_latents.py C:\dev\ditref-out\klein_edit_512_s4
+C:\dev\ditref-venv\Scripts\python.exe utilities\dit-ref\encoder_study.py C:\dev\ditref-out\klein_edit_512_s4 --npu-dump <dir>
+```
+
+**Measured 2026-10-01**, 512², the 12 study references (1024², 2 references: decoded LPIPS
+0.0013 / 0.0014, PSNR 47.7 dB, tokens 11.3%):
+- Decoded LPIPS 0.0008 mean, 0.0010 max, PSNR 49.1 dB. Diffusers' bf16 encode: 0.0000,
+  63.3 dB.
+- Token rel_fro against the fp32 mean: 11.7% mean, 28% max. Diffusers' bf16: 1.0%.
+- `encoder_study.py` splits the rel_fro, with both factors also in the decoder:
+  - the rank-128 attention: 2.6% → 9.5% in emulation;
+  - dit_conv's bf16 accumulator re-rounding every 64 of K, which the emulation leaves out.
+- 89 dispatches, ~0.35-0.45 s in the engine.
+
+### OPEN-DIFFUSION-REFERENCE: the reference is prepared as diffusers' PIL path prepares it
+**Applies to:** `src/open_diffusion/reference.cpp` (`oflm image --image`, `/v1/images/edits`, `open_diffusion_cli --ref`)
+**Verification:** test
+**External tests:** none (`specs/open-diffusion/tests/test_reference.py`; the tool comes from `src/open_diffusion/build.cmd`)
+
+An edit's reference file becomes the R x R RGB8 image the encoder reads, as
+`diffusers.utils.load_image` and PIL would make it:
+- PNG and JPEG only (stb_image);
+- a JPEG's EXIF orientation applied, as `ImageOps.exif_transpose`;
+- RGB, alpha dropped and gray expanded, as `convert("RGB")`;
+- centre-cropped to a square;
+- resized to R with a port of PIL's LANCZOS: its coefficients, its two uint8 passes, its
+  truncated edges.
+
+Square-cropping deviates from diffusers, which keeps the aspect ratio: a non-square
+reference loses its sides, and the edit is square. A reference smaller than R is
+upscaled, where diffusers never upscales. Aspect buckets (an encoder per bucket, plus
+dit_fa's valid_len) are the path past this (`plans/edits.md`, decision 2).
+
+Refused, naming the reason, before decoding where the header shows it: a format other
+than PNG or JPEG (as not implemented); a side under 64 px; an aspect over 8:1; over
+64 megapixels; an undecodable file.
+
+**Acceptance criteria:**
+- A 512² PNG at R = 512 comes back byte for byte.
+- PNG crops resized to R are within 1 level of PIL's crop + LANCZOS, at every pixel:
+  4000x3000 and 640x480 to 512, 3000x4000 and 1000x750 to 1024, 300x300 up to 512.
+- A 4000x3000 JPEG with magenta bars outside its centred 3000x3000 square shows no
+  magenta. It is within JPEG decoding's differences of PIL (stb_image vs libjpeg): mean
+  under 0.5 levels, 99.9th percentile within 3.
+- RGBA, LA, L and P PNGs come back equal to PIL's `convert("RGB")`.
+- Each EXIF orientation 1-8 equals `ImageOps.exif_transpose` of the same decoded pixels.
+  Orientation 6 end to end is within JPEG decoding's differences of PIL's path.
+- 63x100, 100x63 and 900x100 PNGs, a 9000x8000 PNG, BMP/WebP/GIF files and a truncated
+  PNG are refused, each naming its reason.
 
 ### OPEN-DIFFUSION-PERF: what may be called a performance number
 **Applies to:** the whole pipeline
