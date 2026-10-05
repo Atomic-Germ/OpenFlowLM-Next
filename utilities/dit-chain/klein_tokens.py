@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -47,7 +48,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("prompt", nargs="?")
     ap.add_argument("out", nargs="?")
-    ap.add_argument("--bundle", default=str(Path.home() / ".oflm" / "models" / "FLUX.2-klein-4B-NPU2"),
+    ap.add_argument("--bundle", default=str(Path.home() / (".oflm" if os.name == "nt" else ".config/oflm") / "models"
+                                         / "FLUX.2-klein-4B-NPU2"),
                     help="the model directory (its tokenizer.json)")
     ap.add_argument("--goldens", default=None, help="write the OPEN-DIFFUSION-TOKENS fixture here")
     a = ap.parse_args()

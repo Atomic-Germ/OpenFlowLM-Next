@@ -96,6 +96,7 @@ def main() -> int:
         embeds.append(pe.to(torch.bfloat16))
         print(f"  {N_REAL['n']:3d} tokens: {p[:50]}", flush=True)
     dst = Path(a.out) / "klein_512_s4" / f"prompt_embeds_{a.tag}.pt"
+    dst.parent.mkdir(parents=True, exist_ok=True)
     torch.save(embeds, dst)
     print(f"-> {dst}")
     return 0

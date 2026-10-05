@@ -30,16 +30,22 @@ int main(int argc, char** argv) {
         model = argv[2];
     } else {
         const char* root = std::getenv("OFLM_MODEL_PATH");
+#ifdef _WIN32
         const char* home = std::getenv("USERPROFILE");
+        const fs::path dflt = ".oflm";
+#else
+        const char* home = std::getenv("HOME");
+        const fs::path dflt = fs::path(".config") / "oflm";
+#endif
         // utils::get_models_directory's root, then model_list.json's "models" subdirectory
-        model = root ? fs::path(root) : fs::path(home ? home : ".") / ".oflm";
+        model = root ? fs::path(root) : fs::path(home ? home : ".") / dflt;
         model /= fs::path("models") / "FLUX.2-klein-4B-NPU2";
     }
     for (const char* f : {"tokenizer.json", "bundle.json"}) {
         if (!fs::is_regular_file(model / f)) {
-            std::fprintf(stderr, "FAIL: %s is missing (install flux2-klein:4b or pass MODEL_DIR)\n",
+            std::fprintf(stderr, "SKIP: %s is missing (install flux2-klein:4b or pass MODEL_DIR)\n",
                          (model / f).string().c_str());
-            return 1;
+            return 77;  // CTest SKIP_RETURN_CODE: the model is an install, not a CI fixture
         }
     }
     nlohmann::json goldens = nlohmann::json::parse(std::ifstream(argv[1]));

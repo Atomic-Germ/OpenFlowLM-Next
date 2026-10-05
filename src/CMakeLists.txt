@@ -1476,6 +1476,7 @@ if(NOT OFLM_USE_HRX)
     add_test(NAME open_diffusion_tokens
              COMMAND open_diffusion_tokens_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
+    set_tests_properties(open_diffusion_tokens PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # ————————————————————————————————————————————————————————————

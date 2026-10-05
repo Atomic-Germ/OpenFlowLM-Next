@@ -60,6 +60,8 @@ inline int run(const program_args_t& a, model_list& models, ModelDownloader& dow
     } else {
         try {
             size_t used = 0;
+            if (a.image_seed.find_first_not_of("0123456789") != std::string::npos)
+                throw std::invalid_argument(a.image_seed);
             seed = std::stoull(a.image_seed, &used);
             if (used != a.image_seed.size()) throw std::invalid_argument(a.image_seed);
         } catch (const std::exception&) {

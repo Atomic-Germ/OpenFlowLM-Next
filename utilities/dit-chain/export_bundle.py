@@ -92,7 +92,14 @@ def build(ckpt: Path, out: Path, resolutions: list[int], jobs: int = 4,
     f_, meta = te._where["model.embed_tokens.weight"]
     mm, base = te._maps[f_]
     lo, hi = meta["data_offsets"]
-    np.asarray(mm[base + lo:base + hi]).tofile(out / "embed.bin")
+    raw = np.asarray(mm[base + lo:base + hi])
+    dt = meta["dtype"]
+    if dt == "BF16":
+        raw.tofile(out / "embed.bin")
+    elif dt in ("F32", "F16"):  # Engine::set_tokens reads bf16
+        raw.view(np.float32 if dt == "F32" else np.float16).astype(bfloat16).tofile(out / "embed.bin")
+    else:
+        raise SystemExit(f"embed_tokens dtype {dt} is not supported (BF16, F16 or F32)")
     shutil.copyfile(ckpt / "tokenizer" / "tokenizer.json", out / "tokenizer.json")
     shutil.copyfile(ckpt / "LICENSE.md", out / "LICENSE.md")
     files += ["embed.bin", "tokenizer.json", "LICENSE.md"]

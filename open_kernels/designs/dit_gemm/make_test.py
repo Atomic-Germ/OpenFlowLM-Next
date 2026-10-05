@@ -70,7 +70,12 @@ def main() -> int:
     if args.kernels:
         kdir = Path(args.kernels).resolve()
         meta = json.loads((kdir / "dit_kernels.json").read_text())
-        M, K, N = (meta["streams"][args.stream][x] for x in ("M", "K", "N"))
+        st = meta["streams"][args.stream]
+        if st.get("layout"):
+            raise SystemExit(f"stream {args.stream} has a layout {st['layout']}; this harness "
+                             "allocates compact A/B/C buffers and a plain-product reference, "
+                             "so it cannot test it")
+        M, K, N = (st[x] for x in ("M", "K", "N"))
         name = args.stream
         xclbin, insts = kdir / "final.xclbin", kdir / f"insts_{name}.bin"
     else:

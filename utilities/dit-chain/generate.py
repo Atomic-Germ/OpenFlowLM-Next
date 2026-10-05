@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
+import inspect
 import json
 import sys
 import time
@@ -65,11 +67,33 @@ def _pack_one(sub: str, name: str, cache: str, ckpt: str) -> tuple[str, float]:
     return name, time.time() - t0
 
 
+def pack_fingerprint(ckpt: Path) -> str:
+    """Identifies what a packed file was made from: the checkpoint's weight files (name, size and
+    samples of the head, middle and tail, so a retrained same-shape checkpoint differs) and the
+    packing code."""
+    h = hashlib.sha256(inspect.getsource(kp.pack_b_cols).encode())
+    for sub in ("transformer", "text_encoder"):
+        for p in sorted((ckpt / sub).glob("*.safetensors")):
+            n = p.stat().st_size
+            h.update(f"{sub}/{p.name}:{n}".encode())
+            with open(p, "rb") as f:
+                for at in (0, max(0, n // 2 - (1 << 19)), max(0, n - (1 << 20))):
+                    f.seek(at)
+                    h.update(f.read(1 << 20))
+    return h.hexdigest()
+
+
 def ensure_packed(cache: Path, jobs: int, ckpt: Path | None = None) -> dict[str, tuple[Path, int]]:
     """{name: (file, bytes)} for every DiT and text-encoder GEMM weight, packing the missing.
     ckpt: the checkpoint directory (default: the HF cache's snapshot)."""
     ckpt = ckpt or model_dir()
     cache.mkdir(parents=True, exist_ok=True)
+    stamp, fp = cache / "provenance.txt", pack_fingerprint(ckpt)
+    if stamp.exists() and stamp.read_text().strip() != fp:
+        print(f"{cache} was packed from another checkpoint or packing format; repacking", flush=True)
+        for p in cache.glob("*.bin"):
+            p.unlink()
+    stamp.write_text(fp + "\n")
     want = {n: ("transformer", K * N * 9 // 8) for n, (K, N, _) in kp.dit_weight_specs().items()}
     want |= {n: ("text_encoder", K * N * 9 // 8) for n, (K, N, _) in kp.te_weight_specs().items()}
     todo = [n for n, (_, nb) in want.items()
