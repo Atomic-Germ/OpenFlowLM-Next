@@ -42,20 +42,25 @@ same two prompts, both kernel sets agree):
 Consecutive tokens reuse experts, so a verify pass reads 40-48% less expert weight than
 first assumed.
 
+**Switching inside one ELF, measured** (`utilities/spec-decode/switch_probe.py`): with
+register writes a set change costs 0.45-1.09 ms (GEMM <-> experts 0.89-1.09, the costliest),
+against 2.5-2.9 ms between xclbin contexts. A verify pass makes ~100 changes, so ~80 ms.
+
 **Estimated verify pass and speedup.** Experts at the batched kernel's measured ~33 GB/s
-at these slot counts. Not yet measured: the other projections (~35 ms assumed), reconfiguring
-inside one ELF (~40 ms a pass), the drafter (~12 ms), and how many guesses are accepted
-(~4 plus the one bonus token at B = 8, ~5.5 plus one at B = 16).
+at these slot counts; switching as measured above. Not yet measured: the other projections
+(~35 ms assumed), the drafter (~12 ms), and how many guesses are accepted (~4 plus the bonus
+token at B = 8, ~5.5 plus one at B = 16).
 
-| | experts | verify pass | tokens kept | tok/s | vs 14.4 tok/s |
-|---|---|---|---|---|---|
-| B = 8, q4 experts | 81 ms | ~185 ms | ~5 | ~27 | **~1.9x** |
-| B = 16, q4 experts | 129 ms | ~240 ms | ~6.5 | ~27 | ~1.9x |
-| B = 8, 2-bit experts | 52 ms | ~155 ms | ~5 | ~32 | **~2.25x** |
-| B = 8, switching NOT fixed | 81 ms | ~410 ms | ~5 | ~12 | **slower than today** |
+| | experts | switching | verify pass | tokens kept | tok/s | vs 14.4 tok/s |
+|---|---|---|---|---|---|---|
+| B = 8, q4 experts | 81 ms | ~75 ms | ~220 ms | ~5 | ~23 | **~1.6x** |
+| B = 16, q4 experts | 129 ms | ~75 ms | ~275 ms | ~6.5 | ~24 | ~1.65x |
+| B = 8, 2-bit experts | 52 ms | ~75 ms | ~190 ms | ~5 | ~26 | **~1.85x** |
+| B = 8, xclbin switching | 81 ms | 266 ms | ~410 ms | ~5 | ~12 | **slower than today** |
 
-Fixing the switch cost inside the verify pass is still mandatory. B = 8 and B = 16 come out
-even; acceptance on real chat decides between them.
+Two levers on the switching left: running the full-attention layers' attention on the host
+at small B (it's 8 or 16 queries) removes ~20 of the ~100 changes, and a smaller
+configuration per set lowers each one.
 
 ## What the existing code says
 
