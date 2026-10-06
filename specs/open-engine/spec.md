@@ -3578,6 +3578,27 @@ sequential path, the 16-token continuation is identical, prefill 127.7 s -> 9.75
 continuation, and `oflm-test --llm` on `qwen3.5:0.8b` through `oflm serve` with no flag set
 PASSes 5 of 5.
 
+**Result 2026-10-06 (q8 projections as their exact split, the published 35B container):**
+the recipe now emits the route for `Qwen3.6-35B-A3B-NPU2` as published, with `attn`, `linear`
+and `linear_out` at q8, instead of no route. On the 656-token prompt, logits at every
+position, the block route against token by token on the same kernel set gives median corr
+**0.99938**, 642 / 656 argmax agreeing and 12 of the 14 flips near ties (reference margin
+< 0.5). That is no wider than the q4_1 container's own route against its own token by token
+(0.99926, 23 flips), where re-quantising the q8 weights to q4_1 instead is 0.987 with 86 flips.
+On a 1000-token prompt, all 40 layers with `--max-tokens 8`, the greedy continuation is the
+same both ways. Prefill, alternated seq / block / seq / block with nothing else on the box:
+**92.7 / 92.8 s -> 9.0 / 8.6 s** (about 10.5x); decode unchanged (108-110 ms/token).
+Through `oflm serve` with `OFLM_OPEN_KERNELS_DIR` at the set and no other flag,
+`oflm-test --llm` on `qwen3.6-moe:35b-a3b` PASSes 5 of 5, and a 2613-token question
+prefills in 31.0 s and is answered correctly from its own text.
+The first hardware run found a bug the unit tests could not: `gemm_run()` added the lo half
+into the hi half **in the mapped y buffer**, and the next `read_back`'s CLFLUSH wrote those
+dirty lines back over what the device had written there since. Two block runs of the same
+prompt then disagreed with each other (median corr 0.996), more so the faster the array ran.
+The sum now goes to host memory, one vector per y global, and repeated runs are
+bit-identical. Any host stage that writes into a mapped output buffer the device will write
+again has the same hazard. Details: `specs/open-engine/plans/archive/q8-block-prefill.md`.
+
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`

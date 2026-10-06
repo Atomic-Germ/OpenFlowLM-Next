@@ -1,6 +1,6 @@
 # Fast prefill for q8 containers, with the weights unchanged
 
-2026-10-06. Status: **plan, for review.** Branch `feat/q8-block-prefill`.
+2026-10-06. Status: **done** (results in `spec.md`, OPEN-PREFILL-BATCH, Result 2026-10-06). Branch `feat/q8-block-prefill`.
 
 ## Why
 
@@ -89,3 +89,28 @@ split emissions and the per-step `split` parse. No new IDs, and nothing is remov
 None blocking. If the hardware gate in step 2 shows the split's fp32 sum of two bf16 GEMMs
 spreading more than the q4_1 route does, the fallback is a q8-reading GEMM (a new dequant body
 in `gemm_q4_prefill`; the core has ~11 KB of program memory free).
+
+## Outcome (2026-10-06)
+
+All five hardware checks pass on `Qwen3.6-35B-A3B-NPU2` as published:
+
+| check | result |
+|---|---|
+| 656 positions, block vs token by token | median corr 0.99938, 14 flips (12 near ties); q4_1's own route is 0.99926, 23 flips |
+| 1000 tokens, 40 layers, `--max-tokens 8` | same continuation, all four runs |
+| prefill, 1000 tokens, alternated | 92.7 / 92.8 s -> 9.0 / 8.6 s; decode unchanged |
+| `oflm-test --llm` via `oflm serve` | PASS 5 of 5; 2613-token question in 31.0 s, answered correctly |
+
+The estimate was too pessimistic: block prefill on q8 costs about the same as on q4_1 (14.5 s
+against 14.3 s on the 656-token prompt with logits at every position), not 16-18 s.
+
+One bug turned up on hardware: the first `gemm_run()` folded lo into hi inside the mapped y
+buffer, and the next `read_back`'s CLFLUSH wrote those dirty lines back over the device's later
+output. Block runs disagreed with each other (median corr 0.996). Fixed by folding into host
+memory; repeated runs are now bit-identical. The q8-reading GEMM fallback from the open question
+is not needed.
+
+Seen in passing, not from this change: `oflm serve` warns that VCOMP140.DLL loaded before
+`OMP_WAIT_POLICY` could be set, despite `/DELAYLOAD:VCOMP140.DLL` on the link line, so the
+server's prefill runs with spinning workers (the 2613-token prefill at 84 tok/s against the
+CLI's ~113).
