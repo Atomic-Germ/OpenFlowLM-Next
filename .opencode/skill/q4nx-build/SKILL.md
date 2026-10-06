@@ -321,7 +321,112 @@ Two things that test had to get right, both consequences of the real code:
   container — but that is the only thing here that does, which is the useful
   consequence: layout is fully checkable in CI.
 
-## Rules
+## Accepting a container end to end
+
+Everything above is checkable in CI without a container. This is the one part
+that is not, and it is deliberately a short, repeatable procedure rather than
+something to derive: **a container is accepted when step 2 says `ALL MATCH` and
+step 4 produces coherent English.** Steps 1 and 3 are cheap; step 2 is the one
+that actually decides.
+
+Anyone can run this. You do not need to understand the converter to be the judge
+of its output.
+
+### 1. Convert
+
+```
+cd utilities/q4nx-build
+python convert.py -i <source.gguf> -o <out-dir> -s <hf-repo> -t language
+```
+
+Read the log before going further. A pack that prints
+`[WARN] Speculative pack: the converter produced a best-effort container` is not
+support for an architecture — it means tensors were carried through unmapped or
+were absent from the source. The report names the nearest supported family by
+config coverage; retry with that `-f` if one is offered. Add `--build-spec` to
+derive the kernel spec, and `--stream` (or nothing — it self-enables above ~80%
+of `MemAvailable`) for a source larger than RAM.
+
+### 2. The container IS the model — check it against HF
+
+```
+python open_kernels/model/container_vs_hf.py --model-dir <out-dir> \
+    --hf-shard <the shard holding the layers you name> --layers 0,3
+```
+
+Use the repo's `model.safetensors.index.json` to pick a shard that holds both a
+linear-attention and a full-attention layer. **The bar is `ALL MATCH`** (per
+tensor correlation > 0.99).
+
+**Scope, and what to do outside it.** This tool checks a fixed list of tensor
+pairs and is written for the **Qwen3.5 / 3.8 dense** families. It has no expert
+or MoE tensors in it, and it is not generic across families. So:
+
+- **Qwen3.5 / 3.8 dense** — step 2 works as written.
+- **Anything else** — there is no equivalent tool today. Say so in the model's
+  skill rather than letting `ALL MATCH` imply more coverage than it has. Until
+  one exists, that family's acceptance rests on step 4 plus its own tests, which
+  is a real gap and a reasonable thing for a newcomer to pick up and close.
+
+This is the only check that catches a conversion bug, and the reason is worth
+internalising once: `container_vs_hf.py`'s own docstring puts it — a slice
+compare *cannot* catch a conversion bug, because the kernels and the reference
+replica read the same container bytes and therefore agree on whatever is there.
+A scrambled container passes every kernel test in `open_kernels/model/`.
+
+**Reading a failure.** The tool reports both the transformed correlation and the
+untransformed one. Transformed low **and** untransformed low = the bytes are
+wrong (a real converter bug). Transformed low but untransformed high = the
+converter applied the wrong transform, so the weights are present and merely
+permuted — which is the value-head class of bug, and `test_qwen35_vheads.py`
+exists because it shipped. Head-indexed DeltaNet tensors near 0 with everything
+else ~0.997 is the signature: a head-grouping scramble.
+
+### 3. Optional but strong: the fp64 reference
+
+`open_kernels/model/README.md` has the recipe — `make_decode.py` then
+`compare_decode.py` — scoring a real decode step against an fp64 CPU replica on
+the same weights. Published result for the 35B: logits corr 0.999997, argmax
+identical at 846, top-5 identical, across all 40 layers. Note the README's own
+caveat: `make_decode.py` adopts the NPU router's expert choice wherever it
+differed from the reference, so a legitimate tie-break does not read as an
+error; `--strict-routing` turns that off.
+
+It needs the NPU plus 512 MB × layers of resident pools, so it is a bench job,
+not a per-convert one.
+
+### 4. Serve it and read the output
+
+```
+oflm serve <tag>:<size>
+utilities/oflm-test --llm --model <tag>:<size>
+```
+
+Then **actually read some completions.** `oflm-test` checks the API contract —
+non-empty content, `finish_reason`, sane `usage`. It cannot check that the
+weights are the right weights. The symptom of a bad container is fluent-shaped
+garbage: text arriving in fragments, or confidently wrong content. That is what
+the first published `Atomic-Germ/Qwen3.8-27B-NPU2` did, and every automated
+check passed.
+
+### What "coherent" means, concretely
+
+Multi-turn English that stays on topic, correct arithmetic or code when asked,
+stable formatting across turns, and no drift into fragments after a few hundred
+tokens. A container is not accepted because it loaded, and not because the API
+tests passed.
+
+### When to suspect what
+
+| symptom | suspect |
+|---|---|
+| fragments, fluent-shaped garbage | container: step 2. Head-indexed DeltaNet ≈ 0 → head grouping |
+| fails to load, "tensor past EOF" | truncated copy (disk full during `--deploy`) |
+| refuses with "no open kernels found" | kernel set absent for the spec, not a container fault |
+| specific tensors absent from the pack | config `name_map` missing an entry; check the step-1 warnings |
+| wrong on one arch, right on another | `-f` override picked the wrong family |
+
+### Rules
 
 - **`pyproject.toml` is the only dependency declaration.** `torch` is floored
   (`>=2.4`), not pinned, so ROCm/CPU/CUDA wheels all satisfy it. Do not add an
@@ -331,7 +436,10 @@ Two things that test had to get right, both consequences of the real code:
   axis wrong is silent.
 - Copy the neighbouring family's `_store_q` quant policy rather than inventing
   one; the engine's GEMV expects a specific choice per tensor class.
-- When a pack passes every kernel test but the text is wrong, suspect the
-  container first and check it against HF before touching kernels.
+- **Never accept a container on a kernel-test pass alone.** Run step 2 first, and
+  suspect the container before the kernels whenever the text is wrong.
+- A new family's acceptance run should record the source GGUF's quant, the
+  `--quant` used, the step-2 result, and the observed completions, in the model
+  skill — that record is what the next person inherits instead of your memory.
 - If closed behavior cannot be reproduced, return an explicit `not implemented`
   error rather than silently depending on the closed component.
