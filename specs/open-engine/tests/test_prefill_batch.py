@@ -103,17 +103,90 @@ def test_the_gemm_route_is_one_context_and_a_stream_per_shape(m):
             assert s["kernel"] in m["kernels"] and m["kernels"][s["kernel"]]["context"] in m["contexts"]
 
 
-def test_a_q8_role_emits_no_route():
-    """The GEMM dequantises the q4_1 pool law; a projection the kernel set streams at q8
-    (the 35B fine-tunes' attention / linear roles) has no route, and its manifest is
-    exactly the sequential one."""
-    q8 = dataclasses.replace(default_spec(), quant={"attn": "q8", "linear": "q8", "linear_out": "q8"})
-    m = manifest(q8)
+def _split_halves(w):
+    """A split weight's pack ops as (hi ops, lo ops), checked to be one mirrored pair."""
+    assert w["from"] == "pack" and len(w["pack"]) % 2 == 0, w
+    n = len(w["pack"]) // 2
+    hi, lo = w["pack"][:n], w["pack"][n:]
+    assert all(o["op"] == "std_perm" and o["split"] == "hi" for o in hi)
+    assert all(o["op"] == "std_perm" and o["split"] == "lo" for o in lo)
+    for h, l in zip(hi, lo):
+        assert {k: v for k, v in h.items() if k not in ("dst", "split")} ==             {k: v for k, v in l.items() if k not in ("dst", "split")}
+    # stacked with no gaps: every hi op, then every lo op, in order
+    off = 0
+    for o in hi + lo:
+        assert o["dst"] == off, (o, off)
+        off += o["nch"] * Q36.CHUNK
+    return hi, lo
+
+
+def test_q8_projections_run_as_their_exact_q4_1_split():
+    """The published 35B container stores attention and DeltaNet at q8, and the GEMM reads q4_1
+    only. Every q8 code is 16 hi + lo, so each q8 projection is packed as two q4_1 halves whose
+    readings sum to it exactly, hi then lo stacked in one buffer: one GEMM of twice the rows,
+    the halves added on the host (OPEN-PREFILL-BATCH). Re-quantising instead flips 13% of next
+    tokens (utilities/quant-compare/README.md)."""
+    spec = dataclasses.replace(default_spec(), quant={"attn": "q8", "linear": "q8", "linear_out": "q8"})
+    m = manifest(spec)
+    q4 = manifest(default_spec())
+    lin, full = m["layer_types"][LINEAR], m["layer_types"][FULL]
+    glin, gfull = lin["gemm_block"], full["gemm_block"]
+
+    # qkv | z: one GEMM over [hi | lo], twice the 12288 rows, marked split
+    assert glin["program"][0] == {**_run("gemm_n24576_k2048", "gqkvz_w", "gemm_x_k2048", "gemm_y_n24576"),
+                                  "split": True}
+    hi, _ = _split_halves(glin["weights"]["gqkvz_w"])
+    assert [o["tensor"].split(".")[-2] for o in hi] == ["qkv_proj", "gate_proj"]
+    # each half reads the q8 tensor the sequential kernel streams, one q4_1 chunk per q8 chunk
+    seq = {o["tensor"]: o for o in lin["pack"]["pool"] if "tensor" in o}
+    for o in hi:
+        assert seq[o["tensor"]]["op"] == "q8_perm" and seq[o["tensor"]]["nch"] == 2 * o["nch"]
+    # the out projection is the split it already was
+    assert glin["out_split"] is True
+    assert glin["program"][1]["kernel"] == "gemm_n4096_k4096"
+    _split_halves(glin["weights"]["gout_w"])
+
+    # q | k | v | gate and o, the same way; the fused q_proj's gate half keeps its chunk offset
+    assert gfull["program"][0] == {**_run("gemm_n18432_k2048", "gqkvg_w", "gemm_x_k2048", "gemm_y_n18432"),
+                                   "split": True}
+    assert gfull["program"][1] == {**_run("gemm_n4096_k4096", "go_w", "gemm_x_k4096", "gemm_y_n4096"),
+                                   "split": True}
+    hi, _ = _split_halves(gfull["weights"]["gqkvg_w"])
+    assert [o["tensor"].split(".")[-2] for o in hi] == ["q_proj", "k_proj", "v_proj", "q_proj"]
+    assert hi[0].get("chunk0", 0) == 0 and hi[3]["chunk0"] == hi[0]["nch"]
+    _split_halves(gfull["weights"]["go_w"])
+
+    # the shared expert and the routed experts are q4_1 either way, and keep their weights
     for lt in (LINEAR, FULL):
-        assert "gemm_block" not in m["layer_types"][lt]
-    assert not [k for k in m["contexts"] if k.startswith("gemm") or k.startswith("mx_")]
-    assert not [k for k in m["globals"] if k.startswith("gemm_")]
-    assert not [k for k in m["builds"] if k.startswith("gemm_") or k.startswith("mx_")]
+        assert m["layer_types"][lt]["gemm_block"]["shared_weights"] ==             q4["layer_types"][lt]["gemm_block"]["shared_weights"]
+    assert {"gemm_n24576_k2048", "gemm_n18432_k2048", "gemm_n4096_k4096", "mx_linear", "mx_full"} <= set(m["kernels"])
+    assert m["globals"]["gemm_y_n24576"] == 24576 * T * 4
+    # the sequential program still streams q8
+    assert [s["op"] for s in lin["program"]] == ["run", "moeroute2", "run"]
+
+
+def test_a_q4_1_spec_has_no_split_steps(m):
+    for lt in (LINEAR, FULL):
+        gb = m["layer_types"][lt]["gemm_block"]
+        for prog in ("program", "shared_program"):
+            assert not [s for s in gb[prog] if "split" in s], (lt, prog)
+        assert "out_split" not in gb
+        for w in gb["weights"].values():
+            assert w["from"] != "pack"
+
+
+def test_a_weight_mixing_q8_and_q4_1_ops_has_no_route():
+    """A split covers a whole GEMM weight or none of it: a weight whose ops mix q8 and q4_1
+    would need a lo half for an op that has none, so the recipe refuses the route instead."""
+    spec = default_spec()
+    plan = Q36.pack_plan(spec)["layer_types"]
+    pool = plan[LINEAR]["pool"]
+    i = Q36._op_index(pool, "linear_attn.qkv_proj.weight")
+    j = Q36._op_index(pool, "self_attn.gate_proj.weight")
+    mixed = [dict(o) for o in pool]
+    mixed[i] = {**mixed[i], "op": "q8_perm", "nch": 2 * mixed[i]["nch"]}
+    with pytest.raises(Q36.OpRangeError, match="mixes q8 and q4_1"):
+        Q36.gemm_weight(mixed, [i, j])
 
 
 def test_the_sequential_program_is_untouched(m):

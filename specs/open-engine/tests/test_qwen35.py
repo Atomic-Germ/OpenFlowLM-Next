@@ -689,22 +689,40 @@ def test_every_published_size_gets_a_route():
         assert r["layer_types"][LINEAR]["ffn_program"][0]["kernel"] == f"gemm_n{2 * ff}_k{s.hidden}", name
 
 
-def test_a_q8_projection_or_an_untileable_width_leaves_the_sequential_set(spec9, monkeypatch):
-    """The GEMM reads the q4_1 band law and tiles 256 x 256: a spec outside either keeps
-    exactly the manifest it had, rather than failing the export. (The out projection is the
-    exception: see the next test.)"""
+def test_a_q8_projection_runs_split_and_an_untileable_width_leaves_the_sequential_set(spec9, monkeypatch):
+    """A projection the container stores at q8 runs on the route as its exact q4_1 split: hi then
+    lo stacked, one GEMM of twice the rows, the step marked `split` so the host adds the halves
+    (OPEN-PREFILL-BATCH). Only the q8 roles' steps split. The GEMM still tiles 256 x 256: a width
+    outside that keeps exactly the sequential manifest rather than failing the export."""
     import dataclasses
 
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
     # ffn at q8 alone is a spec the recipe refuses outright (a mixed-format main core), so the
     # ffn case is every role at q8
     every = {r: "q8" for r in ("attn", "linear", "linear_out", "ffn")}
-    for quant in ({"attn": "q8"}, {"linear": "q8"}, every):
+
+    def split_steps(gb):
+        progs = [("program", gb["program"]), ("ffn_program", gb.get("ffn_program", []))]
+        return {(name, i) for name, prog in progs for i, st in enumerate(prog) if st.get("split")}
+
+    cases = (({"attn": "q8"}, {LINEAR: set(), FULL: {("program", 0), ("program", 1)}}),
+             ({"linear": "q8"}, {LINEAR: {("program", 0)}, FULL: set()}),
+             (every, {LINEAR: {("program", 0), ("ffn_program", 0), ("ffn_program", 1)},
+                      FULL: {("program", 0), ("program", 1), ("ffn_program", 0), ("ffn_program", 1)}}))
+    for quant, want in cases:
         s = dataclasses.replace(spec9, quant=quant)
-        assert Q35.gemm_route(s) is None, quant
+        assert Q35.gemm_route(s) is not None, quant
         m = manifest(s)
-        assert all("gemm_block" not in d for d in m["layer_types"].values()), quant
-        assert not [k for k in m["kernels"] if k.startswith(("gemm_", "ag_"))], quant
+        for lt, steps in want.items():
+            gb = m["layer_types"][lt]["gemm_block"]
+            assert split_steps(gb) == steps, (quant, lt)
+            for name, i in steps:
+                st = gb[name][i]
+                w = {**gb["weights"], **gb.get("ffn_weights", {})}[st["args"][0]]
+                assert w["from"] == "pack" and {o["split"] for o in w["pack"]} == {"hi", "lo"}, (quant, lt, name)
+                assert st["kernel"] in m["kernels"], st["kernel"]
+        # the out projection keeps its own flag, set exactly when linear_out is q8
+        assert m["layer_types"][LINEAR]["gemm_block"].get("out_split", False) == ("linear_out" in quant), quant
     assert Q35.gemm_route(dataclasses.replace(spec9, intermediate=12160)) is None
 
 
