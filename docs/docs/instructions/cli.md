@@ -775,6 +775,7 @@ The user override takes priority over the shipped copies. Set
 | `OFLM_SERVE_PORT` | Default server port (default `52625`) |
 | `OFLM_CONFIG_PATH` | Explicit `model_list.json` to load |
 | `OFLM_MODELINFO_PATH` | Explicit `model_info.json` to load |
+| `OFLM_HF_OWNER` | Hugging Face account to pull OpenFlowLM's own models from, instead of `model_list.json`'s `hf_owner` |
 | `OFLM_XCLBIN_PATH` | Extra directory to search for xclbins |
 | `OFLM_OPEN_KERNELS_DIR` | Where the open engine looks for exported kernels |
 
