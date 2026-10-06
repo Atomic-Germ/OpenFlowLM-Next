@@ -277,18 +277,49 @@ tests, dropping the Q4_K refusal fails 1, dropping the same-value early return
 fails 1, and breaking the `{bid}` regex escaping fails 3. If you change this
 code, that is the bar: break it and watch a test go red.
 
+**Writer/reader cross-checks — where they live and why.** All three readers
+(`dq_chunks_q4_1`, `dq_chunks_q8`, `dq_chunks_q4_k`) are in
+`open_kernels/model/q4nx.py`, so a writer cross-check needs only synthetic
+tensors. They belong in `specs/open-engine/tests/`, not in this package.
+
+- **Q4_K**: covered. `test_quant_q4k.py:304` packs synthetic triples through
+  `q4nx-build`'s writer, reads them with `dq_chunks_q4_k`, asserts the nibbles
+  exactly and the values to 1e-2, and pins an FNV-1a hash that
+  `src/open_qwen36/pools_test.cpp` asserts on the same bytes.
+- **Q4_1 and Q8_0**: `test_quant_writer_reader.py` (added alongside this skill)
+  packs synthetic `(scale, min, quant)` triples through `_pack_q4nx` /
+  `_pack_q8nx` and reads them back with `dq_chunks_q4_1` / `dq_chunks_q8`,
+  asserting an **exact** match plus chunk ordering. Both are 5120 B and 8704 B
+  per tile. Mutation-checked: swapping the q8 parallel regroup, swapping the
+  q4_1 scale/min planes, or flipping the q8 codes `int8`→`uint8` each fail 3.
+
+Two things that test had to get right, both consequences of the real code:
+
+- **The `q4nx` name collision is asymmetric.** `model_converter.py:27` does an
+  absolute `from q4nx.gguf_tensor import GGUFTensor`, so the converter cannot be
+  loaded under another name, nor file-by-file (its other imports are relative).
+  `gguf_tensor.py` has no such imports, which is why `test_quant_q4k.py` can load
+  it by path. Testing the *packers* therefore means temporarily repointing
+  `sys.modules["q4nx"]` at the converter and restoring it in a `finally`.
+- **The writers have narrower input contracts than they look.** `_pack_q8nx`
+  requires `float16` scales (it *reinterprets* the bytes, not converts), requires
+  `data` already `int8` (a float32 tensor quadruples the chunk to 33280 B), and
+  takes 2-D `(rows, cols)` data despite its docstring describing a 3-D
+  `(rows//parallel, cols, parallel)` form. `_pack_q4nx` takes f32.
+- **Scale width bounds the achievable accuracy.** The writer stores scales as
+  bf16, so ordinary f32 scales leave a small residual (fp16 has 11 significand
+  bits, bf16 has 8). Choose bf16-representable scales to assert *exact* layout
+  equality, and bound the unconstrained case separately.
+
 **Still uncovered:**
 
-- `unpack`'s inner unpackers (`unpack_q4_k`, `unpack_q4_0`, `unpack_q8_0`) are
-  pinned for *sign conventions* by `test_q4_source_repack.py` but not for byte
-  layout against a real kernel reader. `pack_q4k`'s docstring points at an
-  external suite (`specs/open-engine/tests/test_quant_q4k.py`).
-- `_pack_q4nx` / `_pack_q8nx` / `pack_q4k` output layout: no round-trip test
-  against the C++ side.
-- The per-pattern `num_layers = max(found) + 1` behaviour is documented here but
-  only indirectly pinned; two templates disagreeing is untested.
-- Vision/audio paths: `inject_oflm_keys` precedence is covered, the converters'
-  MM weight rearrangements are not.
+- The per-pattern `num_layers = max(found) + 1` disagreement case is untested,
+  and it is pure string work.
+- Vision/audio MM weight rearrangements are untested; only `inject_oflm_keys`
+  precedence is covered.
+- Whether a whole end-to-end pack loads and decodes still needs a real
+  container — but that is the only thing here that does, which is the useful
+  consequence: layout is fully checkable in CI.
 
 ## Rules
 
