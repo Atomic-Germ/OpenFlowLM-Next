@@ -33,8 +33,13 @@ Create a virtual environment using python 3.13
    ```
 2. Install dependencies (one time)
    ```bash
-   uv pip install -r requirements.txt
+   uv pip install -e .
    ```
+   Dependencies are declared in `pyproject.toml`. `torch` is bounded below
+   (`>=2.4`), not pinned, so you can install the build your own drivers need --
+   the ROCm, CPU or CUDA wheel all satisfy it. If you are converting from a
+   local checkout rather than installing, `uv pip install -r` has no
+   requirements file to read here; use the command above.
 
 ## Usage
 
