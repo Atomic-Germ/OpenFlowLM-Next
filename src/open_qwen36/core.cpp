@@ -2064,16 +2064,22 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     read_back(yb, rows * T * 4, 0);
     timing_.sync_ms += ms_since(ts);
     timing_.part1_ms += ms_since(ts);
-    float* y = yb.map<float*>();
-    if (s.split) {
-        ts = std::chrono::steady_clock::now();
-        const float* lo = y + N * T;
+    const float* y = yb.map<const float*>();
+    if (!s.split) return y;
+    // The sum goes to host memory, never back into the mapped y: the next read_back's
+    // CLFLUSH writes a dirty line back over whatever the device wrote there since, so
+    // folding in place corrupts a later dispatch's output -- by how much depends on what
+    // got evicted in between, and the route stops being deterministic.
+    ts = std::chrono::steady_clock::now();
+    std::vector<float>& sum = split_y_[s.args[2]];       // one per y global, so it lives as long as y would
+    if (sum.size() < N * T) sum.resize(N * T);
+    const float* lo = y + N * T;
+    float* o = sum.data();
 #pragma omp parallel for
-        for (long long i = 0; i < static_cast<long long>(N * T); ++i) y[i] += lo[i];
-        timing_.part1_ms += ms_since(ts);
-        timing_.gemm_tr_ms += ms_since(ts);
-    }
-    return y;
+    for (long long i = 0; i < static_cast<long long>(N * T); ++i) o[i] = y[i] + lo[i];
+    timing_.part1_ms += ms_since(ts);
+    timing_.gemm_tr_ms += ms_since(ts);
+    return o;
 }
 
 void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
