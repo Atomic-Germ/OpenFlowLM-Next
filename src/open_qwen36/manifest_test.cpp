@@ -602,6 +602,59 @@ int main(int argc, char** argv) {
                              split_out(j);
                              j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][0]["split"] = "mid";
                          });
+        // Any route step can read a q8 weight as its exact split (OPEN-PREFILL-BATCH): `split` on the
+        // step, a hi-then-lo pack on its weight. qkv | z here, from the fixture's own pool ops.
+        auto split_qkvz = [](json& j) {
+            json& lt = j["layer_types"]["linear_attention"];
+            json& gb = lt["gemm_block"];
+            json hi = json::array(), lo = json::array();
+            uint64_t dst = 0;
+            for (const char* part : {"hi", "lo"})
+                for (const auto& idx : gb["weights"]["gqkvz_w"]["ops"]) {
+                    json o = lt["pack"]["pool"][idx.get<size_t>()];
+                    o["op"] = "std_perm";
+                    o["dst"] = dst;
+                    o["split"] = part;
+                    dst += o["nch"].get<uint64_t>() * 5120;
+                    (std::string(part) == "hi" ? hi : lo).push_back(o);
+                }
+            json pack = hi;
+            for (auto& o : lo) pack.push_back(o);
+            gb["weights"]["gqkvz_w"] = {{"from", "pack"}, {"pack", pack}};
+            gb["program"][0]["split"] = true;
+        };
+        {
+            std::ifstream f(argv[5]);
+            json j = json::parse(f);
+            split_out(j);
+            split_qkvz(j);
+            try {
+                Manifest q = Manifest::parse(j, "edited");
+                const auto& g = q.layer_types.at("linear_attention").gemm_block;
+                check(g.program[0].split && g.weights.at("gqkvz_w").pack.size() == 4,
+                      "a split qkv | z step (split on the step, hi then lo on the weight) parses");
+                check(g.program[1].split, "out_split marks the out step split, so one host path adds every split's halves");
+                check(!q.layer_types.at("full_attention").gemm_block.program[0].split,
+                      "a step without `split` is not split");
+            } catch (const std::exception& e) {
+                check(false, std::string("a split qkv | z step parses: ") + e.what());
+            }
+        }
+        refused_manifest(argv[5], "is not a hi / lo split", "a split step whose weight is not a split is refused",
+                         [&](json& j) {
+                             j["layer_types"]["linear_attention"]["gemm_block"]["program"][0]["split"] = true;
+                         });
+        refused_manifest(argv[5], "without `split`", "a split weight read by a step that is not split is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["program"][0].erase("split");
+                         });
+        refused_manifest(argv[5], "is not a hi / lo split", "a split whose lo half does not mirror its hi half is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             auto& pack = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gqkvz_w"]["pack"];
+                             pack[3]["nch"] = pack[3]["nch"].get<uint64_t>() / 2;
+                         });
     }
     // ---- Phi-3: a 96-dim rotation, longrope's two tables, and hf_config_defaults -- the
     // compatibility check is two-way for keys a config may omit (OPEN-FAMILY-PHI3)

@@ -95,6 +95,7 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
         if (st.op == "run") {
             st.args = get<std::vector<std::string>>(s, "args", where);
             if (st.args.empty() || st.args.size() > 8) fail(where, "run " + st.kernel + ": " + std::to_string(st.args.size()) + " buffer args (1..8)");
+            st.split = s.value("split", false);
         } else if (st.op == "moeroute2") {
             st.act_off = get<uint64_t>(s, "act_off", where);
         } else {
@@ -387,6 +388,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
                     g.out_split = gj.value("out_split", false);
+                    // the flag predates per-step `split` and means the same thing for the out step
+                    if (g.out_split) g.program.at(1).split = true;
                     if (t.state_kind != "linear") fail(gw, "a linear route on a layer type whose state is not linear");
                     if (g.qkv_dim != 2 * g.key_heads * g.head_dim + g.value_heads * g.head_dim || g.vw != g.value_heads * g.head_dim)
                         fail(gw, "qkv_dim / vw disagree with the head counts");
@@ -424,6 +427,38 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             for (const auto& s : g.ffn_program)
                 if (!g.ffn_weights.count(s.args[0]))
                     fail(gw, "ffn step " + s.kernel + " reads weight buffer " + s.args[0] + ", which ffn_weights does not define");
+            // A split step reads [hi | lo] of a q8 projection's exact q4_1 split and the host adds
+            // the halves; any other step adds nothing. The two have to agree, or a step's output
+            // would be half a weight, or a weight's two halves stacked as if they were rows.
+            auto is_split = [](const GemmWeight& w) {
+                if (w.from != "pack" || w.pack.empty() || w.pack.size() % 2) return false;
+                const size_t n = w.pack.size() / 2;
+                for (size_t i = 0; i < n; ++i) {
+                    const PackOp& h = w.pack[i];
+                    const PackOp& l = w.pack[n + i];
+                    if (h.split != "hi" || l.split != "lo" || h.tensor != l.tensor || h.nch != l.nch ||
+                        h.in_dim != l.in_dim || h.chunk0 != l.chunk0)
+                        return false;
+                }
+                return true;
+            };
+            auto check_split = [&](const std::vector<Step>& prog, const std::map<std::string, GemmWeight>& ws,
+                                   const char* what) {
+                for (const auto& s : prog) {
+                    const GemmWeight& w = ws.at(s.args[0]);
+                    bool any = false;
+                    for (const auto& o : w.pack) any = any || !o.split.empty();
+                    if (s.split && !is_split(w))
+                        fail(gw, std::string(what) + " step " + s.kernel + " is split, but its weight " + s.args[0] +
+                                     " is not a hi / lo split (every op's hi half, then the same ops' lo halves)");
+                    if (!s.split && any)
+                        fail(gw, std::string(what) + " step " + s.kernel + " reads the split weight " + s.args[0] +
+                                     " without `split`");
+                }
+            };
+            check_split(g.program, g.weights, "program");
+            check_split(g.shared_program, g.shared_weights, "shared");
+            check_split(g.ffn_program, g.ffn_weights, "ffn");
         }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));

@@ -54,6 +54,8 @@ struct Step {
     std::string kernel;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
+    bool split = false;                      ///< run, block route: the weight is a q8 projection's exact q4_1
+                                             ///< split, [hi | lo]; the GEMM runs twice the rows and the halves add
 };
 
 /// The block prefill route (OPEN-PREFILL-BATCH): T tokens through a layer's
