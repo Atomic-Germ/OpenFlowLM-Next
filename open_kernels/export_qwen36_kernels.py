@@ -231,17 +231,23 @@ def main() -> int:
     except Exception as e:
         from recipes.catalogue import OpRangeError
         if isinstance(e, OpRangeError):
+            amp = ""
+            if os.environ.get("OPEN_KERNELS_UNVALIDATED"):
+                amp = ("\n\n(OPEN_KERNELS_UNVALIDATED is already set: the bypassable\n"
+                       "off-grid catalogue points have passed through already. The\n"
+                       "error above is a recipe *structural* rule or a missing mapping\n"
+                       "-- it is not resolved by that flag.)\n")
+            else:
+                amp = ("\n\nFor an experimenter the path through is deliberate:\n\n"
+                       f"  OPEN_KERNELS_UNVALIDATED=1 python {sys.argv[0]} ...\n\n"
+                       "to accept the off-grid point (you are saying you accept the build failing\n"
+                       "or producing an untested kernel), and the build's make compare fixture will\n"
+                       "tell you whether it matches. The point gets validated (and added to the\n"
+                       "catalogue) once its fixture passes.\n")
             sys.exit(
                 f"{e}\n\nThis is a *catalogue* wall, not a correctness verdict: the recipe is\n"
                 f"dim-correct for the kernel template, it just has not been built and fixture-tested\n"
-                f"at that (family, K, ...). For an experimenter the path through is deliberate:\n"
-                f"\n"
-                f"  OPEN_KERNELS_UNVALIDATED=1 python {sys.argv[0]} ...\n"
-                f"\n"
-                f"to accept the off-grid point (you are saying you accept the build failing\n"
-                f"or producing an untested kernel), and the build's make compare fixture will\n"
-                f"tell you whether it matches. The point gets validated (and added to the\n"
-                f"catalogue) once its fixture passes."
+                f"at that (family, K, ...).{amp}"
             )
         raise
     sets = F.builds(spec)
