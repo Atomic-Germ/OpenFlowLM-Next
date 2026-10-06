@@ -6,7 +6,6 @@ from gguf.constants import GGML_QUANT_SIZES
 from typing import Tuple
 
 from dataclasses import dataclass
-from mpmath.libmp import int_types
 import numpy as np
 import torch
 import torch.nn.functional as F

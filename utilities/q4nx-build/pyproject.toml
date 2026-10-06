@@ -11,20 +11,34 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Q4NX" }]
 dependencies = [
-    "numpy",
-    "torch",
-    "einops",
-    "matplotlib",
-    "safetensors",
-    "gguf",
-    "huggingface-hub",
-    "transformers",
-    "accelerate",
-    "modelscope",
+    "numpy>=1.24",
+    # bf16 is the container's default tensor type (70 uses of torch.bfloat16),
+    # and the streaming writer views bf16 as uint16 to emit raw safetensors
+    # bytes. 2.4 is the floor that pairs cleanly with the numpy>=2.2.6 that
+    # `gguf` requires, so a resolver cannot pair a new numpy with an old torch
+    # that predates numpy-2 support. NOT pinned to an exact version on
+    # purpose: ROCm/CPU/CUDA builds carry different local version suffixes
+    # (+rocm7.2, +cpu, ...) and an exact pin cannot satisfy all of them. Pick
+    # the build your drivers need; keep the floor.
+    "torch>=2.4",
+    "einops>=0.6",
+    "safetensors>=0.4",
+    "gguf>=0.10",
+    "huggingface-hub>=0.23",
+    # Read by model_converter._parse_readme_frontmatter to detect the base
+    # model's architecture; imported lazily, so a missing pyyaml silently
+    # degrades arch detection rather than failing loudly.
+    "pyyaml>=5.1",
 ]
 
 [project.optional-dependencies]
 dev = ["build", "twine"]
+# The --make-reference oracle (q4nx/reference.py) is deliberately NumPy-only --
+# see its module docstring for why it avoids torch and transformers -- so its
+# one non-stdlib import is kept out of the main dependency set. Install it if
+# you want real token ids: without it _encode() silently returns an EMPTY id
+# list and the emitted fixture is not a usable acceptance gate.
+reference = ["tokenizers>=0.15"]
 
 [project.scripts]
 q4nx-build = "q4nx.cli:main"
