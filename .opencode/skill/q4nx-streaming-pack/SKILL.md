@@ -5,6 +5,11 @@ description: Convert GGUF models larger than system RAM with q4nx-build's --stre
 
 # Streaming and pruned packs (q4nx-build)
 
+Before you trust that table, read `q4nx-build` itself: it derives the converter
+lifecycle, the configs/*.json contract, the GGUF innermost-first shape rule, and
+the two quantization paths this page leans on. This page covers only the
+streaming/pruning layer on top.
+
 The default pack path accumulates every converted tensor in `conv.q4nx_tensors`
 and hands the dict to `safetensors.torch.save_file` at the end, so peak RSS is
 roughly the size of the whole packed model. That is fine for a 27 GB GGUF and
