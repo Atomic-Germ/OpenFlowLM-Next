@@ -252,20 +252,43 @@ Four exist specifically to catch bugs that already shipped:
   tensor so codes do not move, and the deployed `config.json` states the
   post-fold value.
 
-### Known coverage gaps
+### Coverage added, and what is still uncovered
 
-Verified absent — worth adding before you rely on these areas:
+Three test files close the gaps that were here when this skill was written:
 
-- **No test asserts the `shape[0]` vs `shape[-1]` rule**, despite it being a
-  documented shipped bug. This is the highest-value missing test.
-- **No test exercises `_create_name_maps`** — not the `_WarnDict` passthrough,
-  not `{bid}` detection, not `_missing_config_entries`. All four duplicated regex
-  sites are therefore unpinned.
-- No test for `set_default_tensor_type`'s same-value early return, or the HF
-  Q4_K refusal.
-- No byte-layout test for `_pack_q4nx`/`_pack_q8nx`/`pack_q4k` against a real
-  kernel reader; `pack_q4k`'s docstring points at an external suite
-  (`specs/open-engine/tests/test_quant_q4k.py`).
+- `test_gguf_shape_order.py` — the `shape[0]` vs `shape[-1]` rule, now pinned.
+  Its shapes are deliberately tiny `(64, 33)` rather than a real
+  `4096 x 151669`: the guard reads only `shape[0] % 32`, and the realistic
+  version took ~13 s per call. One test asserts a real vocab size has the same
+  modulo property so the small fixture cannot drift into testing something
+  unrepresentative.
+- `test_name_maps.py` — `_WarnDict` passthrough and report-once,
+  `_warn_missing_config_entries`, and `config_coverage_report`'s ranking,
+  divide-by-zero guard, and name_map de-duplication.
+- `test_quant_override.py` — the `Q4_K`-on-HF refusal, the same-value early
+  return, and `get_ggml_type`. Two things it pins that are easy to get wrong:
+  `convert` is the only abstract method so the ABC refuses instantiation before
+  the explicit "virtual" `__init__` guard is reachable; and defining a subclass
+  overwrites `_MODEL_REGISTRY` on the class statement, so the test restores
+  `ModelArch.QWEN3` in a fixture rather than depending on collection order.
+
+Each was mutation-checked — reintroducing the old `shape[-1]` guard fails 4
+tests, dropping the Q4_K refusal fails 1, dropping the same-value early return
+fails 1, and breaking the `{bid}` regex escaping fails 3. If you change this
+code, that is the bar: break it and watch a test go red.
+
+**Still uncovered:**
+
+- `unpack`'s inner unpackers (`unpack_q4_k`, `unpack_q4_0`, `unpack_q8_0`) are
+  pinned for *sign conventions* by `test_q4_source_repack.py` but not for byte
+  layout against a real kernel reader. `pack_q4k`'s docstring points at an
+  external suite (`specs/open-engine/tests/test_quant_q4k.py`).
+- `_pack_q4nx` / `_pack_q8nx` / `pack_q4k` output layout: no round-trip test
+  against the C++ side.
+- The per-pattern `num_layers = max(found) + 1` behaviour is documented here but
+  only indirectly pinned; two templates disagreeing is untested.
+- Vision/audio paths: `inject_oflm_keys` precedence is covered, the converters'
+  MM weight rearrangements are not.
 
 ## Rules
 
