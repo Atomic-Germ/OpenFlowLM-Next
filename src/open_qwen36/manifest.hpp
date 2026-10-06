@@ -104,6 +104,9 @@ struct AttnBlock {
     std::map<size_t, std::string> kernels_s, kernels_pv;   ///< window rows -> the stream for that width
     std::vector<std::string> args;                         ///< the a / b / c globals
     size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
+    /// A dense layer's host half before the products: "qknorm_rope" (q/k RMSNorm, then the
+    /// half-split rotation; no bias, no gate). Empty on a full-attention layer, whose is fixed.
+    std::string prep;
     bool present() const { return !kernels_s.empty(); }
 };
 

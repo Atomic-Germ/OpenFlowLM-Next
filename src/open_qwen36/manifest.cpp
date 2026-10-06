@@ -244,6 +244,47 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 }
             };
             parse_weights("weights", g.weights);
+            // the attention products on the NPU: optional. A full-attention layer's host half
+            // is fixed (q/k norm, rotation, output gate); a dense layer's is whatever its
+            // family's attention is, so the manifest has to say (`prep`), and a dense
+            // attn_block that does not is left to the dxB route.
+            const bool dense_ab = g.kind == "dense" && gj.contains("attn_block") && gj["attn_block"].contains("prep");
+            if ((g.kind == "full" && gj.contains("attn_block")) || dense_ab) {
+                const json& aj = gj["attn_block"];
+                const std::string aw = gw + ".attn_block";
+                AttnBlock& a = g.attn_block;
+                a.m = get<uint64_t>(aj, "m", aw);
+                a.hd = get<uint64_t>(aj, "hd", aw);
+                a.l_max = get<uint64_t>(aj, "l_max", aw);
+                a.args = get<std::vector<std::string>>(aj, "args", aw);
+                if (dense_ab) {
+                    a.prep = get<std::string>(aj, "prep", aw);
+                    if (a.prep != "qknorm_rope") fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope)");
+                }
+                // the products tile K^T by (64, 32) and V by (64, 32): a dense head dim of 64 or
+                // 128 is a narrower product, the full layers' 256 the widest
+                if (a.m == 0 || a.m % 256 || a.l_max == 0 || a.l_max % 256 || a.hd == 0 || a.hd % (dense_ab ? 64 : 256))
+                    fail(aw, dense_ab ? "wants m and l_max as positive multiples of 256 and hd of 64"
+                                      : "wants m, hd and l_max as positive multiples of 256");
+                if (a.args.size() != 3) fail(aw, "wants three args (a, b, c)");
+                auto streams = [&](const char* key, std::map<size_t, std::string>& into) {
+                    for (const auto& [rows_s, kname] : need(aj, key, aw).items()) {
+                        const size_t rows = static_cast<size_t>(std::stoull(rows_s));
+                        if (rows == 0 || rows % 256 || rows > a.l_max)
+                            fail(aw, std::string(key) + ": window " + rows_s + " is not a positive multiple of 256 within l_max");
+                        auto it = m.kernels.find(kname.get<std::string>());
+                        if (it == m.kernels.end()) fail(aw, std::string(key) + " names unknown kernel " + kname.get<std::string>());
+                        into[rows] = it->first;
+                    }
+                };
+                streams("kernels_s", a.kernels_s);
+                streams("kernels_pv", a.kernels_pv);
+                if (a.kernels_s.empty() || !a.kernels_s.count(a.l_max)) fail(aw, "kernels_s must reach l_max");
+                std::vector<size_t> ks, kpv;
+                for (const auto& kv : a.kernels_s) ks.push_back(kv.first);
+                for (const auto& kv : a.kernels_pv) kpv.push_back(kv.first);
+                if (ks != kpv) fail(aw, "kernels_s and kernels_pv cover different windows");
+            }
             if (g.kind == "dense") {
                 if (g.program.size() != 5)
                     fail(gw, "a dense route has exactly 5 steps (qkv3, o, gate, up, down), has " + std::to_string(g.program.size()));
@@ -334,36 +375,6 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         }
                         if (b.kernels.empty()) fail(bw, "names no streams");
                     }
-                }
-                // the attention products on the NPU: optional, full attention only
-                if (g.kind == "full" && gj.contains("attn_block")) {
-                    const json& aj = gj["attn_block"];
-                    const std::string aw = gw + ".attn_block";
-                    AttnBlock& a = g.attn_block;
-                    a.m = get<uint64_t>(aj, "m", aw);
-                    a.hd = get<uint64_t>(aj, "hd", aw);
-                    a.l_max = get<uint64_t>(aj, "l_max", aw);
-                    a.args = get<std::vector<std::string>>(aj, "args", aw);
-                    if (a.m == 0 || a.m % 256 || a.hd == 0 || a.hd % 256 || a.l_max == 0 || a.l_max % 256)
-                        fail(aw, "wants m, hd and l_max as positive multiples of 256");
-                    if (a.args.size() != 3) fail(aw, "wants three args (a, b, c)");
-                    auto streams = [&](const char* key, std::map<size_t, std::string>& into) {
-                        for (const auto& [rows_s, kname] : need(aj, key, aw).items()) {
-                            const size_t rows = static_cast<size_t>(std::stoull(rows_s));
-                            if (rows == 0 || rows % 256 || rows > a.l_max)
-                                fail(aw, std::string(key) + ": window " + rows_s + " is not a positive multiple of 256 within l_max");
-                            auto it = m.kernels.find(kname.get<std::string>());
-                            if (it == m.kernels.end()) fail(aw, std::string(key) + " names unknown kernel " + kname.get<std::string>());
-                            into[rows] = it->first;
-                        }
-                    };
-                    streams("kernels_s", a.kernels_s);
-                    streams("kernels_pv", a.kernels_pv);
-                    if (a.kernels_s.empty() || !a.kernels_s.count(a.l_max)) fail(aw, "kernels_s must reach l_max");
-                    std::vector<size_t> ks, kpv;
-                    for (const auto& kv : a.kernels_s) ks.push_back(kv.first);
-                    for (const auto& kv : a.kernels_pv) kpv.push_back(kv.first);
-                    if (ks != kpv) fail(aw, "kernels_s and kernels_pv cover different windows");
                 }
                 if (g.kind == "linear") {
                     g.qkv_dim = get<uint64_t>(gj, "qkv_dim", gw);

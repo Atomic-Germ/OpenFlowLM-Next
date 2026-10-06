@@ -342,9 +342,9 @@ int main(int argc, char** argv) {
             const auto& lt = d.layer_types.at("dense");
             check(lt.program.size() == 1 && lt.program[0].op == "run" && lt.program[0].kernel == "dx" && lt.program[0].args.size() == 6 &&
                   lt.state_kind == "kv" && lt.state_row == 4096, "qwen3: one run per layer");
-            // dx / ln / lm plus the block prefill route's two: the attention dispatch's own
-            // xclbin ("dxa") and the ONE context every projection shape streams over ("gemm"),
-            // and since the AG16 family landed, its attention pair ("ag_s", "ag_pv").
+            // dx / ln / lm plus the block prefill route's four: the attention dispatch's own
+            // xclbin ("dxa"), the ONE context every projection shape streams over ("gemm"), and
+            // the attention products' two ("ag_s", "ag_pv": 8 and 4 columns wide at head dim 128)
             check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
@@ -369,6 +369,15 @@ int main(int argc, char** argv) {
             // every projection shape is an instruction stream over ONE hardware context
             check(d.kernels.at("gemm_n6144_k2560").context == "gemm" && d.kernels.at("gemm_n2560_k9728").context == "gemm",
                   "qwen3: one GEMM context for every shape");
+            // the attention products (OPEN-PREFILL-ATTN): qwen3 declares its host half, so the
+            // route runs them -- 4 query heads per kv head x 256 tokens, head dim 128
+            const auto& ab = dg.attn_block;
+            check(ab.present() && ab.prep == "qknorm_rope" && ab.m == 1024 && ab.hd == 128 && ab.l_max == 4096 &&
+                  ab.kernels_s.size() == 16 && ab.kernels_pv.size() == 16 &&
+                  d.kernels.at(ab.kernels_s.at(256)).context == "ag_s" && d.kernels.at(ab.kernels_pv.at(4096)).context == "ag_pv",
+                  "qwen3: the dense route's attention products, declared qknorm_rope");
+            refused_manifest(argv[2], "is not one this engine computes", "qwen3: an attn_block prep the engine does not compute is refused",
+                             [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "qknorm_post_rope"; });
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
@@ -434,6 +443,10 @@ int main(int argc, char** argv) {
             check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
             // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
             check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
+            // its norm follows the rotation, which the products' host half does not do: the
+            // recipe emits the streams but declares no prep, so the route keeps its dxB dispatches
+            check(!h.layer_types.at("dense").gemm_block.attn_block.present(),
+                  "hunyuan: an attn_block without a prep is left to the dxB route");
             check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
             json ok = matching_config(h);
             check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");
