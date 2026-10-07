@@ -4037,3 +4037,33 @@ two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; pos
 1024 79.3-80.3 / 80.5-83.0 against 62.9-63.6 / 64.4 (the walk's `ax0` penalty, +0.95 ms
 a call on two contexts, goes to noise). Detail:
 `.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.
+
+### OPEN-DECODE-COMPARE: complete, pinned decode references
+
+**Applies to:** `open_kernels/model/make_decode.py`, `decode_reference.py`,
+`compare_decode.py`. Tests: `tests/test_compare_decode.py`.
+
+A completed CPU reference writes `decode_reference.json` with manifest-derived
+hidden/logit sizes, layer/token counts, context capacity, spec/build identifiers,
+seed, routing mode and SHA256 hashes of every reference residual/logit file.
+Reference generation invalidates the previous metadata before writing captures;
+only a complete, finite, correctly sized reference publishes new metadata.
+A cfg-only rewrite verifies the existing metadata and hashes without updating
+reference provenance. This record does not hash all model weights or xclbins.
+
+The comparator requires every declared token and layer. `--tokens`, if given,
+must equal the declaration; omitting it checks the complete run. Both device
+and reference captures must have exactly the expected byte count and finite
+FP32 values. Reference hashes must match. Missing metadata fails with a request
+to regenerate the reference; coverage cannot be inferred from surviving files.
+
+Acceptance requires full-logit Pearson correlation > 0.9999 and equal argmax,
+and each residual's `max(abs(actual-reference))/max(abs(reference)) < 0.005`.
+A zero reference residual passes only an exactly zero actual residual. Undefined
+logit correlation fails. Top-5 and residual correlation are diagnostics, not
+additional gates. MoE references that permit device-selected experts are marked
+`device-assisted` and printed as such; this is not independent routing validation.
+
+These checks cover captured logits and residuals. State/cache isolation, source
+conversion correctness, serving and full-model hardware acceptance need their
+own evidence; passing this comparator alone does not establish those properties.

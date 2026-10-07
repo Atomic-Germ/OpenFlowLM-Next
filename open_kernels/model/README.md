@@ -35,11 +35,39 @@ lm_head pool — budget 512 MB × layers of disk AND of RAM, since every pool is
 resident device buffer for the whole run). `--reuse-pools` keeps them across
 runs; `--cfg-only` rewrites just the program.
 
+### Decode acceptance
+
+After completing the CPU reference, `make_decode.py` also writes
+`decode_reference.json`. It records the manifest-derived hidden/logit sizes,
+layer and token counts, context capacity, spec/build identifiers, seed token, routing mode and
+SHA256 hashes of every reference residual and logit file. This is fixture
+provenance; it does not hash all source weights or compiled kernels.
+
+`compare_decode.py` checks **all** declared tokens and layers by default.
+If supplied, `--tokens` must match the recorded count. Missing files, unequal
+sizes (including partial float bytes), non-finite values or changed reference
+hashes fail the comparison. Logits must have correlation > 0.9999 and equal
+argmax; each layer residual must have
+`max(abs(actual - reference)) / max(abs(reference)) < 0.005`.
+A zero reference residual requires an exactly zero result. Top-5 and residual
+correlation remain explicitly diagnostic, not additional acceptance gates.
+
+Fixtures without `decode_reference.json` must be regenerated with
+`make_decode.py` **without `--cfg-only`**. A cfg-only rewrite checks that its
+dimensions, context capacity, seed, routing mode, spec/build identifiers and pinned references
+match the existing fixture; it cannot create or update reference hashes.
+Interrupted reference generation removes the old metadata so it cannot be
+mistaken for a completed run. These checks validate captured residuals/logits,
+not recurrent state, source tensor conversion or serving behavior.
+
 Re-running `make_decode.py` after a run adopts the NPU router's expert choice
 wherever it differed from the reference's own, and says so. That is deliberate:
 the 8th of eight routed experts is often a near-tie, and a legitimate tie-break
 difference would otherwise show up as a large numerical error. `--strict-routing`
 turns the adoption off.
+The fixture records this mode as `device-assisted`; other families and
+`--strict-routing` use `independent`. The comparator prints the mode so a
+conditional MoE comparison is not presented as an independent routing check.
 
 ## What runs where
 

@@ -47,6 +47,7 @@ from recipes.load import spec_from_model_dir  # noqa: E402
 from recipes.manifest import manifest  # noqa: E402
 from recipes.spec import FULL  # noqa: E402
 from q4nx import Q4NX, f32_to_bf16  # noqa: E402
+from decode_reference import FILENAME, check_reference, save_reference  # noqa: E402
 
 DEFAULT_MODEL_DIR = os.environ.get(
     "OFLM_MODEL_DIR", str(Path.home() / ".oflm" / "models" / "Qwen3.6-35B-A3B-NPU2"))   # OFLM's default model store
@@ -155,6 +156,10 @@ def main() -> int:
     ap.add_argument("--strict-routing", action="store_true",
                     help="MoE: keep the reference's own top-8 even where a previous run shows the NPU picked differently")
     a = ap.parse_args()
+    if a.layers <= 0 or a.tokens <= 0 or a.max_ctx <= 0:
+        ap.error("--layers, --tokens and --max-ctx must be positive")
+    if a.tokens > a.max_ctx:
+        ap.error("--tokens must not exceed --max-ctx")
     if a.requant:
         os.environ["OPEN_KERNELS_FORCE_Q4_1"] = "1"      # read before the spec is derived
 
@@ -191,8 +196,13 @@ def main() -> int:
                                                 "granite": 100264, "phi3": 200021,
                                                 "qwen2": 151644}[spec.family]     # <|im_start|>, as Qwen3
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
+    routing = "device-assisted" if spec.family == "qwen36moe" and not a.strict_routing else "independent"
+    if a.cfg_only:
+        check_reference(out, m, nl, a.tokens, tok0, routing)
 
     if not a.cfg_only:
+        # An interrupted regeneration must not leave a valid-looking old contract.
+        (out / FILENAME).unlink(missing_ok=True)
         write(out / "zero.bin", np.zeros(spec.hidden, np.float32))
         for lt, d in m["layer_types"].items():
             st = d["buffers"]["state"]
@@ -267,6 +277,8 @@ def main() -> int:
 
     cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx)
     (out / "run_decode.cfg").write_text(cfg, newline="\n")
+    if not a.cfg_only:
+        save_reference(out, m, nl, a.tokens, tok0, routing)
     nruns = len([r for r in cfg.splitlines() if r.startswith("run ")])
     print(f"wrote {out / 'run_decode.cfg'}: {nl} layers, {a.tokens} token(s), {nruns} runs")
     return 0
