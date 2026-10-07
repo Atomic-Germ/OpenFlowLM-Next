@@ -44,6 +44,14 @@ extending to MoE, or changing the pack ops.
   refused with reasons). Registry entries keep format "NPU2" and add
   `details.weights = "gguf"`; q4nx models stay *-NPU2, GGUF installs are
   *-GGUF directories, so one of each kind can coexist.
+- **The user's HF cache is a first-class source.** A model fetched with
+  huggingface_hub / llama.cpp / ollama is on disk under
+  `~/.cache/huggingface/hub` (or `HF_HOME`/`HF_HUB_CACHE`). The installer
+  (`hf_cache_snapshot` -> `copy_from_dir`) copies a cached GGUF instead of
+  downloading, and verifies it from the local file (no network). The C++ pull
+  (`src/pull/download_model.cpp download_from_hf_cache`) reuses any resolve-URL
+  file from the cache before downloading, so `oflm pull` and the app's
+  auto-download never re-fetch a model the user already has.
 
 ## Integrated into main (2026-10-07, `feat/gguf-direct`)
 
