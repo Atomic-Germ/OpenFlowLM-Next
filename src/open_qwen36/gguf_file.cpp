@@ -446,7 +446,7 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
                         y[n + l + 96] = d * sc[is + 6] * q4;
                     }
                     ql += 64;
-                    qh += 16;
+                    qh += 32;   // 32 qh bytes per 128 values (4 values' high bits per byte)
                     sc += 8;
                 }
             }

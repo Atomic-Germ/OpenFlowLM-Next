@@ -100,6 +100,74 @@ Blocks make_blocks(unsigned rows, unsigned cols, const std::string& type, std::m
     return out;
 }
 
+/// Q6_K tensor blocks and the reference dequant. Q6_K is the one super-block
+/// quant whose embed_row had a real bug (the `qh` pointer advanced 16 B per
+/// 128-value half instead of 32, skewing every second half of a super-block),
+/// so this test is deliberately self-contained: it synthesizes the block with a
+/// known code layout and checks GgufFile::embed_row against it.
+struct BlocksQ6K {
+    unsigned rows, cols;                 // cols is a multiple of 256
+    std::vector<uint8_t> bytes;          // rows * (cols/256) * 210
+    std::vector<float> values;           // rows * cols
+};
+
+BlocksQ6K make_blocks_q6k(unsigned rows, unsigned cols, std::mt19937_64& rng) {
+    const unsigned nbs = cols / 256;                 // super-blocks per row
+    BlocksQ6K b;
+    b.rows = rows;
+    b.cols = cols;
+    b.bytes.assign(static_cast<size_t>(rows) * nbs * 210, 0);
+    b.values.resize(static_cast<size_t>(rows) * cols);
+    const uint16_t dh = f32_to_f16(0.5f);            // exactly representable
+    for (unsigned r = 0; r < rows; ++r) {
+        for (unsigned sb = 0; sb < nbs; ++sb) {
+            uint8_t* p = b.bytes.data() + (static_cast<size_t>(r) * nbs + sb) * 210;
+            std::memcpy(p + 208, &dh, 2);            // d
+            std::memset(p + 192, 1, 16);             // scales: all 1 (int8), so y = d * 1 * (code-32)
+            float* y = b.values.data() + static_cast<size_t>(r) * cols + sb * 256;
+            for (int v = 0; v < 256; ++v) {
+                const uint8_t code = static_cast<uint8_t>(rng() % 64);
+                // ql: one byte per value's LOW 4 bits; low nibble for the first 64 of a
+                // 128-half, high nibble for the next 64 (the dequant's q1/q2 vs q3/q4).
+                const unsigned ql_byte = (v >= 128 ? 64u : 0u) + static_cast<unsigned>(v & 63);
+                if ((v % 128) >= 64) p[ql_byte] |= static_cast<uint8_t>((code & 0xF) << 4);
+                else p[ql_byte] |= static_cast<uint8_t>(code & 0xF);
+                // qh: 32 bytes per 128-half, each covers 4 values (bits 0/2/4/6).
+                const unsigned rel = static_cast<unsigned>((v >= 128 ? v - 128 : v) % 128);
+                const unsigned l = rel % 32, which = rel / 32;
+                p[128 + (v >= 128 ? 32u + l : l)] |=
+                    static_cast<uint8_t>(((code >> 4) & 0x3) << (2 * which));
+                y[v] = 0.5f * static_cast<float>(static_cast<int>(code) - 32);
+            }
+        }
+    }
+    return b;
+}
+
+/// A one-tensor GGUF carrying a single Q6_K tensor (rows x 256).
+std::string write_gguf_q6k(const fs::path& dir, const BlocksQ6K& b) {
+    std::vector<uint8_t> f;
+    f.insert(f.end(), {'G', 'G', 'U', 'F'});
+    put_u32(f, 3);
+    put_u64(f, 1);                                    // tensors
+    put_u64(f, 1);                                    // kv pairs
+    put_kv_str(f, "general.architecture", "llama");
+    const auto align32 = [](size_t n) { return (n + 31) / 32 * 32; };
+    put_str(f, "blk.0.attn_q.weight");
+    put_u32(f, 2);
+    put_u64(f, b.cols);                               // cols (fastest)
+    put_u64(f, b.rows);
+    put_u32(f, 14);                                   // GGML_TYPE_Q6_K
+    put_u64(f, 0);                                    // RELATIVE offset (0: data sits at the data base)
+    const size_t data_off = align32(f.size());        // == the GGUF's data base
+    while (f.size() < data_off) f.push_back(0);
+    f.insert(f.end(), b.bytes.begin(), b.bytes.end());
+    const fs::path out = dir / "test-q6k.gguf";
+    std::ofstream of(out, std::ios::binary);
+    of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
+    return out.string();
+}
+
 std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb, const std::vector<float>& norm) {
     std::vector<uint8_t> f;
     f.insert(f.end(), {'G', 'G', 'U', 'F'});
@@ -315,6 +383,26 @@ int main() {
             }
         }
         std::printf("ok    embed_row Q8_0 (bit-exact)\n");
+    }
+
+    // ---- embed_row (Q6_K, the qh-advance regression: every super-block half)
+    {
+        BlocksQ6K q6 = make_blocks_q6k(4, 512, rng);      // 4 rows x 2 super-blocks
+        GgufFile g6(write_gguf_q6k(dir, q6));
+        std::vector<float> row(512);
+        bool bad6 = false;
+        for (unsigned r = 0; r < 4 && !bad6; ++r) {
+            g6.embed_row("blk.0.attn_q.weight", r, 512, row.data());
+            for (size_t i = 0; i < 512; ++i)
+                if (f32_bits(row[i]) != f32_bits(q6.values[static_cast<size_t>(r) * 512 + i])) {
+                    std::printf("FAIL embed_row(Q6_K)[r%u i%zu]: got %.9g want %.9g\n", r, i, row[i],
+                                q6.values[static_cast<size_t>(r) * 512 + i]);
+                    bad6 = true;
+                    break;
+                }
+        }
+        std::printf("%s embed_row Q6_K (both super-block halves bit-exact)\n", bad6 ? "FAIL" : "ok");
+        if (bad6) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");
