@@ -57,11 +57,23 @@ oflm-add . --tag qwen3.5-claude:9b
 
 `oflm-add`:
 
-1. Reads `config.json` from the target model directory to extract metadata (family, engine, size, context length).
+1. Reads the model's own `config.json` to derive its runtime family and geometry. A
+   `q4nx-build` `oflm-family` frontmatter field is a fallback when a model type is
+   not recognized. The repo/directory name and official registry are defaults, not
+   architecture gates.
 2. Validates that all required files exist (`model.q4nx`, `tokenizer.json`, etc.).
 3. Writes a user-level registry at `$OFLM_CONFIG_PATH/model_list.json` (default: `~/.config/oflm/model_list.json`).
-4. Adds a symlink into `$OFLM_XCLBIN_PATH/xclbins/` pointing to the model's kernel folder (`model.q4nx.xbin`). The xclbin directory name is taken from the matching official OpenFlowLM entry, keyed by family and size (e.g., `Darwin-36B-Opus-NPU2 -> Qwen3.6-35B-A3B-NPU2`). Custom OFLM models never ship xclbins because they are closed source binaries; the kernel symlink always comes from the official model it matches.
+4. Adds a symlink into `$OFLM_XCLBIN_PATH/xclbins/` to a known-good donor with the
+   same runtime family and nearest size, when one is shipped (e.g., a Qwen3.5
+   finetune can use a Qwen3.5 bundle). The model itself need not appear in
+   `model_list.json`; that file supplies convenient donor examples, not
+   eligibility.
 5. Links the **open kernel set** that matches the model, if one is installed (step 4's rule does not apply to it — see below).
+
+When no content-derived family or open-kernel candidate is known, it names the
+missing architecture/geometry instead of rejecting an unfamiliar repo name. Set
+`OFLM_SUPPORT_ISSUE_URL` to the project's current issue-new URL to include a
+prefilled report link; the destination is configurable for the organization move.
 
 ### Open kernels are matched by spec, not by model name
 
@@ -73,11 +85,13 @@ add one.
 
 So `oflm-add` derives the model's spec from what it just installed (`config.json`, the
 real vocabulary from `tokenizer.json`, and the per-tensor format read out of the
-`model.q4nx` header — no weight byte is touched), hashes it, and looks for an installed
-set whose `open_kernels/manifest.json` carries the same `spec_hash`. It searches the
-user xclbins directory first, then the system one, and prefers a set filed under the
-model's own name. Deriving the spec needs an `open_kernels/` checkout; `oflm-add` finds
-one beside itself in the repo, or at `$OPEN_KERNELS_DIR`.
+`model.q4nx` header — no weight byte is touched). An exact `spec_hash` match is
+preferred, but it is not a gate: when hashes differ it also considers same-family
+kernel manifests, ranked by recipe geometry. The candidate set is linked and the
+engine reports any concrete config fields it cannot use. It searches user xclbins
+first, then system xclbins, and prefers an exact match over any family candidate.
+Deriving a full recipe spec needs an `open_kernels/` checkout; `oflm-add` finds one
+beside itself in the repo, or at `$OPEN_KERNELS_DIR`.
 
 On a match it links the set at `<model dir>/open_kernels`, which is the second place
 the engine looks (`OFLM_OPEN_KERNELS_DIR`, then `<model dir>/open_kernels`, then
@@ -86,8 +100,9 @@ the engine looks (`OFLM_OPEN_KERNELS_DIR`, then `<model dir>/open_kernels`, then
 directory junction is used as the fallback; if neither works, `oflm-add` prints the
 `OFLM_OPEN_KERNELS_DIR=...` line to use instead.
 
-With no match, nothing changes — the model runs on the closed kernels — and `oflm-add`
-prints the exact command that would build a set for it:
+With no exact or same-family candidate, nothing is rejected because the model name is
+unknown. The model still installs; `oflm-add` prints the command to build a set for
+the derived spec:
 
 ```bash
 python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/<Model>

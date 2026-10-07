@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oflm-support"
+version = "0.1.0"
+description = "Inspect OpenFlowLM model, converter, and family-kernel compatibility"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+oflm-support = "oflm_support:main"
+
+[tool.setuptools]
+py-modules = ["oflm_support"]

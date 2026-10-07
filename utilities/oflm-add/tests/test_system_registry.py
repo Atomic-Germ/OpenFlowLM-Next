@@ -5,6 +5,7 @@
 # to actually be read or there is no way out of the failure.
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -91,5 +92,14 @@ def test_the_xclbin_link_falls_back_to_a_junction(monkeypatch, tmp_path):
         raise OSError(1314, "A required privilege is not held by the client")
 
     monkeypatch.setattr(oflm_add.os, "symlink", no_privilege)
+    # The production fallback is Windows' _winapi.CreateJunction. Inject a
+    # tiny stand-in so this branch is tested on Linux too; actual junction
+    # semantics belong to Windows integration testing, not this unit test.
+    def fake_junction(target, link):
+        assert Path(target).is_dir()
+        Path(link).mkdir()
+
+    monkeypatch.setitem(sys.modules, "_winapi",
+                        SimpleNamespace(CreateJunction=fake_junction))
     oflm_add.link_xclbins(system_root, user_root, "Off-NPU2", "Off-NPU2", quiet=True)
     assert (user_root / "Off-NPU2").is_dir()

@@ -1,9 +1,8 @@
 # Traces: OPEN-ADD-KERNEL-LINK (canonical spec: specs/open-engine/spec.md)
 #
-# oflm-add picks the open kernel set by ModelSpec, not by model name: the set
-# whose manifest.json carries the same spec_hash the model derives. Two fake
-# kernel dirs (one matching, one not) and a synthetic model directory
-# (config.json + a model.q4nx safetensors header) pin that choice down.
+# oflm-add prefers an exact ModelSpec hash, but may also select a same-family
+# candidate by geometry. Hashes describe provenance, not per-model eligibility.
+# Synthetic model directories and manifests pin both routes down.
 import json
 import struct
 import sys
@@ -53,11 +52,14 @@ def write_model(root, name="Synth-4B-NPU2"):
     return d
 
 
-def write_kernel_set(xclbins, model_name, spec_hash):
+def write_kernel_set(xclbins, model_name, spec_hash, spec=None):
     d = xclbins / model_name / "open_kernels"
     d.mkdir(parents=True)
+    manifest = {"manifest_version": 1, "family": "qwen3", "spec_hash": spec_hash}
+    if spec is not None:
+        manifest["spec"] = spec
     (d / "manifest.json").write_text(
-        json.dumps({"manifest_version": 1, "family": "qwen3", "spec_hash": spec_hash}),
+        json.dumps(manifest),
         encoding="utf-8",
     )
     return d
@@ -105,6 +107,59 @@ def test_no_match_selects_nothing(tmp_path, model_dir):
     write_kernel_set(xclbins, "Wrong-NPU2", OTHER_HASH)
 
     assert oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name) == (None, None)
+
+
+def test_hash_mismatch_does_not_hide_a_same_family_candidate(tmp_path):
+    xclbins = tmp_path / "xclbins"
+    candidate_spec = {
+        "family": "qwen3", "hidden": 256, "num_layers": 2,
+        "layer_types": ["dense", "dense"], "num_heads": 4,
+        "num_kv_heads": 2, "head_dim": 64, "rotary_dim": 64,
+        "rope_theta": 1_000_000.0, "intermediate": 512,
+        "quant": "q4_1", "extra": {"model": "an-unlisted-finetune"},
+    }
+    donor_spec = {**candidate_spec, "extra": {"model": "known-qwen"}}
+    donor = write_kernel_set(xclbins, "Qwen3-4B-NPU2", OTHER_HASH, donor_spec)
+
+    found, source = oflm_add.find_open_kernels(
+        "sha256:" + "ab" * 32, [xclbins], "Novel-Finetune-NPU2",
+        family="qwen3", model_spec=candidate_spec,
+    )
+
+    assert found == donor
+    assert source.startswith("Qwen3-4B-NPU2 (same family qwen3")
+
+
+def test_setup_links_same_family_candidate_when_hash_differs(tmp_path, model_dir, capsys):
+    spec, note = oflm_add.model_spec_for_dir(model_dir)
+    assert spec is not None, note
+    xclbins = tmp_path / "xclbins"
+    donor = write_kernel_set(xclbins, "Qwen3-family-bundle", OTHER_HASH, spec.to_dict())
+
+    linked = oflm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins])
+    if not linked:
+        pytest.skip("this account cannot create a directory link")
+
+    assert (model_dir / "open_kernels").resolve() == donor.resolve()
+    assert "hash differs" in capsys.readouterr().err
+
+
+def test_exact_hash_still_precedes_same_family_similarity(tmp_path, model_dir):
+    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
+    xclbins = tmp_path / "xclbins"
+    exact = write_kernel_set(xclbins, "Exact", spec_hash)
+    same_family = write_kernel_set(
+        xclbins, "Qwen3-family", OTHER_HASH,
+        {"family": "qwen3", "hidden": 256, "extra": {"model": "other"}},
+    )
+
+    found, source = oflm_add.find_open_kernels(
+        spec_hash, [xclbins], model_dir.name,
+        family="qwen3", model_spec={"family": "qwen3", "hidden": 256},
+    )
+
+    assert found == exact
+    assert source == "Exact"
 
 
 def test_setup_links_the_match_where_find_kernels_looks(tmp_path, model_dir, capsys):

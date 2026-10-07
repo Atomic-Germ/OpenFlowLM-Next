@@ -61,7 +61,7 @@ oflm run llama3.2:1b
 
 ### ⬇️ Pull a Model (Download Only)
 
-Download a model from HuggingFace without launching it:
+Download a **catalogued** model by its OpenFlowLM tag without launching it:
 
 ```shell
 oflm pull llama3.2:3b
@@ -786,23 +786,33 @@ exception: the open engine reads it with plain `getenv`, so
 
 ### 📦 Add a Converted Model (`oflm add`)
 
-Register a pre-converted Q4NX model that is not in the shipped registry. This
-is the supported way to install a model you packed yourself with `q4nx-build`,
-or one published under a HuggingFace repo that is not yet in `model_list.json`:
+`oflm pull` installs a model by its catalogue tag. `oflm add` installs a
+pre-converted Q4NX model by repository or local directory, even when its model
+name has never appeared in `model_list.json`. This is the normal route for models
+packed with the repo's `q4nx-build` and published directly to Hugging Face:
 
 ```shell
-oflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3
+oflm add Atomic-Germ/Qwen3.8-Distilled-2B-NPU2
 ```
+
+For q4nx-build outputs, the installer derives runtime family from the model's
+config (and its generated `oflm-family` README field when needed), then chooses
+a convenient xclbin donor by family and size. The donor entry is a known-good
+example, not a requirement that the added model itself be catalogued. If the
+family has no shipped donor, open-kernel family candidates are still checked;
+when architecture or kernel work is genuinely missing, the error points toward
+a support issue. Set `OFLM_SUPPORT_ISSUE_URL` to the project's current issue-new
+URL to enable a prefilled link.
 
 | flag | meaning |
 |---|---|
 | `--tag NAME` | local tag to register under (e.g. `mymodel:3b`) |
-| `--family NAME` | kernel family to link the xclbins from (required unless `--xclbin-dir` is given) |
+| `--family NAME` | override `details.family`; normally derived from q4nx model content |
 | `--config FILE` | a `model_list.json` entry to use verbatim instead of generating one |
 | `--models-root DIR` | install into this model store instead of the default |
-| `--xclbin-dir DIR` | take the xclbins from here instead of resolving by family |
-| `--xclbin-from REF` | source the family xclbins from another local model |
-| `--system-list` | also register the tag in the system `model_list.json` |
+| `--xclbin-dir DIR` | destination directory for the user's xclbin links |
+| `--xclbin-from REF` | explicitly choose a donor model directory in the system xclbin root |
+| `--system-list FILE` | official catalogue used for defaults and family:size xclbin donors; read-only |
 | `--modelscope` | pull weights from ModelScope instead of HuggingFace |
 | `--open-kernels DIR` | point the tag at a locally exported open-kernel set |
 | `--no-xclbin` | register the weights without any xclbins |
@@ -810,11 +820,11 @@ oflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3
 | `--force` | overwrite an existing installation |
 | `--dry-run` | print what would happen, change nothing |
 
-Every shape-identical model links to a **family** xclbin, so adding a new model
-of an existing shape needs no kernel work:
+Family/size is the normal xclbin selection key, not repo identity or a curated
+model entry. Fine-tunes and re-uploads do not need individual registrations:
 
 ```shell
-oflm add Someone/Nanbeige4.1-3B-finetune-OpenNPU2 --family nanbeige --tag nanbeige-ft:3b
+oflm add Someone/Nanbeige4.1-3B-finetune-OpenNPU2
 ```
 
 ### 🏷️ Print the Version
@@ -830,4 +840,3 @@ from `OFLM_VERSION` in `CMakePresets.json`.
 > ℹ️ Each registry entry carries an `oflm_min_version` -- the oldest `oflm`
 > that can load that model. The downloader compares it against the running
 > build and warns when the model is newer than the binary.
-

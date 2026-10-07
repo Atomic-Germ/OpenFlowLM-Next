@@ -13,17 +13,15 @@ Repo can be a Hugging Face repo id, a ModelScope repo id (--modelscope), a full
 Hugging Face URL, a ModelScope URL (www.modelscope.ai/.cn -- implies ModelScope
 without the flag), or a local directory holding the model files. The tag is
 derived from the repo name (e.g. Qwen3.5-9B-Claude-4.8-Opus-NPU2 ->
-qwen3.5-claude:9b); override with --tag. Defaults for the registry entry
-(family, engine, size, context length) are copied from the matching official
-OpenFlowLM entry.
+qwen3.5-claude:9b); override with --tag. If the name has no size marker, the
+tag is derived from the q4nx config. Registry defaults may be copied from a
+matching official entry, but runtime family is derived from model content first.
 
-Open kernels are handled separately. They belong to a model's *spec* (its
-shape plus the per-role weight format), not to an official model name, so any
-installed set whose manifest.json carries the same spec_hash as this model
-drives it. oflm-add derives the spec from the installed config.json (+
-tokenizer.json and the model.q4nx header) via the open_kernels/recipes
-checkout, finds the matching set, and links it at <model dir>/open_kernels --
-the second place open_qwen36::Engine::find_kernels looks.
+Open kernels are handled separately from the model registry. Exact spec hashes
+are preferred provenance, not an allowlist: when no exact hash exists,
+oflm-add can select a same-family set by the recipe-derived geometry, leaving
+the engine to report concrete config incompatibilities. The user may always
+name a set explicitly with --open-kernels.
 
 The script never rewrites the system model list or the system xclbins; it
 writes a user-level registry at ~/.config/oflm/model_list.json and adds a single
@@ -44,10 +42,11 @@ import re
 import shutil
 import sys
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 REQUIRED_FILES = ["config.json", "model.q4nx", "tokenizer.json", "tokenizer_config.json"]
-OPTIONAL_FILES = ["chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4nx"]
+OPTIONAL_FILES = ["README.md", "chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4nx"]
 ALL_FILES = REQUIRED_FILES + OPTIONAL_FILES
 
 SYSTEM_LIST_CANDIDATES = [
@@ -62,8 +61,8 @@ SYSTEM_XCLBIN_PREFIXES = [
     Path("/usr/local/share/oflm"),
 ]
 
-# Dir-name prefix -> runtime details.family, used only when no official entry
-# can be matched by name. The official model_list.json is the primary source.
+# Dir-name prefix -> runtime details.family, used only as a final fallback when
+# the model content and official entry do not identify a family.
 FAMILY_ALIASES = [
     ("qwen3.5-omni", "qwen3.5-omni"),
     ("qwen3.6", "qwen3.6-moe"),
@@ -105,6 +104,101 @@ FAMILY_ALIASES = [
     ("embed-gemma", "embed-gemma"),
 ]
 
+# Content architecture -> runtime family. This is intentionally a family map,
+# not a list of model repos. When a downloaded q4nx model publishes its own
+# model_type, that is stronger evidence than the repo/directory name or an
+# official model_list.json entry (finetunes frequently have unrelated names).
+MODEL_TYPE_FAMILIES = {
+    "qwen3_5": "qwen3.5", "qwen3_5_text": "qwen3.5",
+    "qwen3_5_omni": "qwen3.5-omni", "qwen3_5_omni_text": "qwen3.5-omni",
+    "qwen3_5_moe": "qwen3.6-moe", "qwen3_5_moe_text": "qwen3.6-moe",
+    "qwen3_6_moe": "qwen3.6-moe", "qwen3_6_moe_text": "qwen3.6-moe",
+    "qwen3_next": "qwen3.6-moe", "qwen3": "qwen3",
+    "qwen3_vl": "qwen3vl", "qwen3_vl_text": "qwen3vl",
+    "qwen2": "qwen2", "qwen2_vl": "qwen2vl",
+    "qwen2_5_vl": "qwen2.5vl", "qwen2_5_vl_text": "qwen2.5vl",
+    "llama": "llama3", "llama2": "llama3",
+    "gemma3": "gemma3", "gemma3_text": "gemma3", "gemma3_text_only": "gemma3",
+    "granite": "granite",
+    "phi3": "phi4", "phi4": "phi4", "lfm2": "lfm2",
+    "gpt_oss": "gpt-oss",
+    "nanbeige": "nanbeige", "whisper": "whisper-v3",
+}
+RUNTIME_FAMILIES = frozenset({
+    "qwen3.5", "qwen3.5-omni", "qwen3.6-moe", "qwen3", "qwen3vl", "qwen2", "qwen2vl",
+    "qwen2.5vl", "llama3", "gemma3", "gemma4e", "gemma4-12b", "granite",
+    "phi4", "lfm2", "lfm2.5-tk", "gpt-oss", "nanbeige", "whisper-v3",
+    "embed-gemma", "deepseek-r1", "deepseek-r1-0528",
+})
+
+QWEN35_SIZE_BY_HIDDEN = {1024: 800_000_000, 2048: 2_000_000_000,
+                        2560: 4_000_000_000, 4096: 9_000_000_000,
+                        5120: 27_000_000_000}
+
+
+def family_from_config(config):
+    """Runtime family from model content, preferring a nested text config.
+
+    No model name, repo name, card tags, or model_list lookup participates.
+    Unknown model_type returns None so the caller can preserve an explicit
+    --family/name fallback or produce a useful unsupported-architecture error.
+    """
+    if not isinstance(config, dict):
+        return None
+    text = config.get("text_config")
+    mt = text.get("model_type") if isinstance(text, dict) else None
+    mt = mt or config.get("model_type")
+    return MODEL_TYPE_FAMILIES.get(str(mt).lower()) if mt else None
+
+
+def family_from_readme(path):
+    """Read q4nx-build's machine-readable `oflm-family` frontmatter field.
+
+    q4nx-build writes this from the output config. Do not parse arbitrary model
+    card prose/tags as architecture signals; only accept the exact generated
+    scalar field in YAML frontmatter.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("---", 3)
+    if end < 0:
+        return None
+    match = re.search(r"^oflm-family:\s*([a-zA-Z0-9._-]+)\s*$", text[3:end], re.M)
+    if not match:
+        return None
+    family = match.group(1)
+    # A packer's architecture label is not necessarily an AutoModel family.
+    # Only use values the runtime can dispatch; e.g. `gemma4` must be resolved
+    # to gemma4e vs gemma4-12b by a known model/config shape, not routed as a
+    # nonexistent engine family.
+    return family if family in RUNTIME_FAMILIES else None
+
+
+def size_from_config(config, family=None):
+    """A family-aware size key from architecture geometry, with generic fallbacks.
+
+    Qwen3.5's hidden widths identify its shipped size variants exactly and are
+    more trustworthy than a deliberately arbitrary finetune/repo name.
+    """
+    if not isinstance(config, dict):
+        return None
+    text = config.get("text_config")
+    cfg = text if isinstance(text, dict) else config
+    family = family or family_from_config(config)
+    if family == "qwen3.5":
+        hidden = cfg.get("hidden_size")
+        if hidden is not None and int(hidden) in QWEN35_SIZE_BY_HIDDEN:
+            return QWEN35_SIZE_BY_HIDDEN[int(hidden)]
+    for key in ("num_parameters", "parameter_count", "total_parameters"):
+        value = cfg.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return None
+
 
 def log(msg):
     print(msg, file=sys.stderr)
@@ -112,6 +206,19 @@ def log(msg):
 
 def err(msg):
     print(f"[ERROR] {msg}", file=sys.stderr)
+
+
+def support_issue_url(title, details, base=None):
+    """Prefilled issue link when the maintainer configures a tracker endpoint.
+
+    The destination is environment-configurable because the project is moving
+    organizations. No personal/old repository URL is baked into this installer.
+    """
+    base = base or os.environ.get("OFLM_SUPPORT_ISSUE_URL")
+    if not base:
+        return None
+    query = urllib.parse.urlencode({"title": title, "body": details})
+    return base + ("&" if "?" in base else "?") + query
 
 
 def load_json(path):
@@ -218,15 +325,22 @@ def _extract_size(bare):
     return size, rest
 
 
-def derive_tag(dir_name, explicit=None):
+def derive_tag(dir_name, explicit=None, size_hint=None, size_authoritative=False):
     if explicit:
         return explicit
     size, rest = _extract_size(_strip_npu2(dir_name))
+    if size and size_hint and size_authoritative:
+        size = f"{size_hint / 1_000_000_000:g}b"
     if not size:
-        raise SystemExit(
-            f"Could not derive a size from '{dir_name}' (no 'NNb' marker). "
-            "Pass --tag name:size."
-        )
+        if size_hint:
+            # Unknown repository names (GRaPE-1.5-TEST-DONTDL, for example)
+            # can still be installed from their content. Keep the complete
+            # normalized name as the bucket and use the config-derived size.
+            slug = re.sub(r"[^a-z0-9.-]+", "-", _strip_npu2(dir_name).lower()).strip("-.")
+            billions = size_hint / 1_000_000_000
+            size = f"{billions:g}b"
+            return f"{slug or 'custom'}:{size}"
+        raise SystemExit(f"Could not derive a size from '{dir_name}' or config.json. Pass --tag name:size.")
     tokens = [t for t in re.split(r"[-_ ]+", rest) if t]
     if not tokens:
         raise SystemExit("Could not derive a tag from the repo name. Pass --tag name:size.")
@@ -291,8 +405,13 @@ def resolve_official(system_registry, dir_name, family, size):
     mismatch, or (None, None) when no official model matches.
     """
     official = match_official_entry(system_registry, dir_name)
-    if official:
-        return official, None
+    if official and official[3].get("details", {}).get("family") == family:
+        official_size = official[3].get("size")
+        # A name match is only a convenient donor when its family:size matches
+        # the model's content. A misleading or stale repo name must not outrank
+        # the dimensions in the q4nx config.
+        if not size or not official_size or official_size == size:
+            return official, None
     official = match_official_by_family_size(system_registry, family, size)
     if official:
         return official, None
@@ -314,9 +433,15 @@ def resolve_official(system_registry, dir_name, family, size):
     return None, None
 
 
-def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
+def derive_family(system_registry, dir_name, explicit=None, base_entry=None,
+                  config=None, readme_family=None, allow_unknown=False):
     if explicit:
         return explicit
+    content_family = family_from_config(config)
+    if content_family:
+        return content_family
+    if readme_family:
+        return readme_family
     if base_entry:
         fam = base_entry.get("details", {}).get("family")
         if fam:
@@ -325,9 +450,11 @@ def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
     for prefix, family in FAMILY_ALIASES:
         if lower.startswith(prefix.lower()):
             return family
+    if allow_unknown:
+        return None
     raise SystemExit(
-        f"Could not determine details.family for '{dir_name}'. "
-        "Pass --family (e.g. qwen3.5, qwen3.6-moe, nanbeige, llama3, ...)."
+        f"Could not determine details.family for '{dir_name}' from its config.json, "
+        "an official entry, or a known naming hint. Pass --family to override."
     )
 
 
@@ -701,8 +828,8 @@ def open_kernels_checkout():
     return None
 
 
-def model_spec_hash(model_dir):
-    """(spec_hash, note) for an installed model directory; (None, why) on failure.
+def model_spec_for_dir(model_dir):
+    """(ModelSpec, note) for an installed model directory; (None, why) on failure.
 
     Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
     config.json, the tokenizer's real vocab, and the per-role weight format off
@@ -718,7 +845,7 @@ def model_spec_hash(model_dir):
     try:
         from recipes.load import spec_from_model_dir
         spec = spec_from_model_dir(Path(model_dir))
-        return spec.spec_hash(), f"spec from {root}"
+        return spec, f"spec from {root}"
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
     finally:
@@ -729,23 +856,50 @@ def model_spec_hash(model_dir):
                 pass
 
 
-def kernel_set_spec_hash(kernel_dir):
-    """The manifest's spec_hash for a kernel set directory, or None."""
+def model_spec_hash(model_dir):
+    """(spec_hash, note) for compatibility with existing callers."""
+    spec, note = model_spec_for_dir(model_dir)
+    return (spec.spec_hash(), note) if spec is not None else (None, note)
+
+
+def kernel_set_manifest(kernel_dir):
+    """The kernel manifest for a set directory, or None."""
     try:
-        return load_json(Path(kernel_dir) / "manifest.json").get("spec_hash")
+        value = load_json(Path(kernel_dir) / "manifest.json")
+        return value if isinstance(value, dict) else None
     except Exception:
         return None
 
 
-def find_open_kernels(spec_hash, roots, dir_name):
-    """The installed open kernel set whose manifest matches `spec_hash`.
+def _spec_similarity(want, have):
+    """A deterministic ranking for same-family candidates, never an allow gate."""
+    if not isinstance(want, dict) or not isinstance(have, dict):
+        return (0, 0)
+    # These are architectural/geometry fields. Identity/provenance, tokenizer
+    # vocabulary tail, and the quant map are ranked separately below; none
+    # makes a same-family candidate disappear.
+    fields = ("hidden", "num_layers", "layer_types", "num_heads", "num_kv_heads",
+              "head_dim", "rotary_dim", "rope_theta", "lin_key_heads",
+              "lin_value_heads", "lin_key_dim", "lin_value_dim", "conv_kernel",
+              "intermediate", "activation", "num_experts", "experts_per_tok",
+              "moe_intermediate", "shared_expert_intermediate")
+    same = sum(want.get(k) == have.get(k) for k in fields)
+    # Quant compatibility is important to what a kernel can consume, but an
+    # experimenter should still see a same-family option when it differs.
+    quant_same = int(want.get("quant", "q4_1") == have.get("quant", "q4_1"))
+    return same, quant_same
+
+
+def find_open_kernels(spec_hash, roots, dir_name, family=None, model_spec=None):
+    """Find an exact open set first, otherwise expose a same-family candidate.
 
     Roots are xclbins directories (<root>/<model>/open_kernels). A set sitting
-    under this model's own name wins; otherwise the first match in root order.
+    under this model's own name wins among exact matches. Hashes are provenance,
+    not a model allowlist: when no exact match exists, any set carrying a
+    same-family manifest is a candidate, ranked by geometry similarity. The
+    runtime/manifest checks remain the place that reports concrete incompatibility.
     Returns (Path, source model name) or (None, None).
     """
-    if not spec_hash:
-        return None, None
     matches = []
     for root in roots:
         if not root or not Path(root).is_dir():
@@ -754,12 +908,40 @@ def find_open_kernels(spec_hash, roots, dir_name):
             k = model / "open_kernels"
             if not (k / "manifest.json").is_file():
                 continue
-            if kernel_set_spec_hash(k) == spec_hash:
-                matches.append((k, model.name))
-    for k, name in matches:
+            manifest = kernel_set_manifest(k)
+            if not manifest:
+                continue
+            if spec_hash and manifest.get("spec_hash") == spec_hash:
+                matches.append((k, model.name, manifest))
+    for k, name, _ in matches:
         if name == dir_name:
             return k, name
-    return matches[0] if matches else (None, None)
+    if matches:
+        k, name, _ = matches[0]
+        return k, name
+
+    if not family:
+        return None, None
+    same_family = []
+    for root in roots:
+        if not root or not Path(root).is_dir():
+            continue
+        for model in sorted(Path(root).iterdir()):
+            k = model / "open_kernels"
+            manifest = kernel_set_manifest(k)
+            # Older/synthetic manifests without a spec cannot describe a
+            # family variant and are not useful as automatic candidates.
+            if not manifest or not isinstance(manifest.get("spec"), dict):
+                continue
+            if manifest.get("family") != family:
+                continue
+            score = _spec_similarity(model_spec, manifest["spec"])
+            same_family.append((score, k, model.name))
+    if not same_family:
+        return None, None
+    same_family.sort(key=lambda item: (item[0], item[2] == dir_name), reverse=True)
+    _, kernel_dir, source = same_family[0]
+    return kernel_dir, f"{source} (same family {family}; hash differs)"
 
 
 def _make_dir_link(link, target):
@@ -821,21 +1003,35 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
 
-    spec_hash, note = model_spec_hash(model_dir)
-    if not spec_hash:
+    spec, note = model_spec_for_dir(model_dir)
+    if spec is None:
         if not quiet:
-            log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
+            log(f"[INFO] No open-kernel spec for this model ({note}); checking family xclbins only.")
         return False
-    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
+    spec_hash = spec.spec_hash()
+    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name,
+                                           family=spec.family, model_spec=spec.to_dict())
     if kernel_dir:
-        log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
-            f"this model's ({spec_hash[:19]})")
+        if "hash differs" in source:
+            log(f"[INFO] open kernels from '{source}'; model identity/hash is not a gate")
+        else:
+            log(f"[INFO] open kernels from '{source}': manifest spec_hash matches "
+                f"this model ({spec_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
     checkout = open_kernels_checkout()
     script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
-    log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
-        "the closed kernels stay in charge. Build one with:")
+    body = json.dumps({"model": dir_name, "kernel_family": spec.family,
+                       "spec": spec.to_dict(), "spec_hash": spec_hash,
+                       "searched_xclbin_roots": [str(r) for r in roots if r]}, indent=2)
+    issue = support_issue_url(f"Open kernel support for {dir_name}", body)
+    log(f"[INFO] No exact or same-family open kernel manifest was found for "
+        f"{spec.family} (spec_hash {spec_hash[:19]}). This does not block the model; "
+        "the family xclbins link is independent. Build or stage an open set with:")
     log(f'           python "{script}" --model-dir "{model_dir}"')
+    if issue:
+        log(f"[INFO] If this shape needs new kernel work, open a prefilled issue: {issue}")
+    elif not quiet:
+        log("[INFO] Set OFLM_SUPPORT_ISSUE_URL to enable a prefilled support issue link.")
     return False
 
 
@@ -914,14 +1110,14 @@ def main():
     )
     ap.add_argument("repo", help="Hugging Face repo id (Org/Name), ModelScope id (with --modelscope), URL, or local directory")
     ap.add_argument("--tag", help="Registry tag (default: derived from the repo name, e.g. qwen3.5-claude:9b)")
-    ap.add_argument("--family", help="details.family for engine dispatch (default: from matching official entry)")
+    ap.add_argument("--family", help="override details.family; default: q4nx config, then q4nx README, then registry/name hint")
     ap.add_argument("--config", help="model_list.json to update (default: $OFLM_CONFIG_PATH or ~/.config/oflm/model_list.json)")
     ap.add_argument("--models-root", help="models directory (default: $OFLM_MODEL_PATH or ~/.config/oflm/models)")
     ap.add_argument("--xclbin-dir", help="user xclbins directory (default: ~/.config/oflm/xclbins)")
     ap.add_argument("--xclbin-from", help="official model directory name to link xclbins from (default: best match, e.g. Qwen3.6-35B-A3B-NPU2)")
     ap.add_argument("--system-list", help="official model_list.json used for defaults (default: auto-detect)")
     ap.add_argument("--modelscope", action="store_true", help="Treat REPO as a ModelScope repo id (implied by www.modelscope.ai/.cn URLs)")
-    ap.add_argument("--open-kernels", help="open kernel set for this model (a directory holding manifest.json); default: the installed set whose manifest spec_hash matches")
+    ap.add_argument("--open-kernels", help="open kernel set for this model (a directory holding manifest.json); default: exact spec hash, then same-family candidate")
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
@@ -950,37 +1146,53 @@ def main():
     models_root = models_root_dir(args.models_root)
     target = models_root / dir_name
 
-    tag = derive_tag(dir_name, args.tag)
-    bucket, size_token = tag.split(":", 1)
-    official = match_official_entry(system_registry, dir_name)
-    base_entry = official[3] if official else None
-    family = derive_family(system_registry, dir_name, args.family, base_entry)
-    size_value = (base_entry or {}).get("size") or size_from_tag(tag)
-    official, official_note = resolve_official(system_registry, dir_name, family, size_value)
+    try:
+        tag = derive_tag(dir_name, args.tag)
+    except SystemExit:
+        # A repo name need not advertise its parameter count. Defer tag
+        # derivation until config.json is available after acquisition.
+        if args.tag:
+            raise
+        tag = None
+    named_official = match_official_entry(system_registry, dir_name)
+    base_entry = named_official[3] if named_official else None
+    local_config = None
+    local_readme_family = None
+    if local_dir and (local_dir / "config.json").is_file():
+        try:
+            local_config = load_json(local_dir / "config.json")
+        except Exception:
+            local_config = None
+    if local_dir:
+        local_readme_family = family_from_readme(local_dir / "README.md")
+    family = derive_family(system_registry, dir_name, args.family, base_entry,
+                           config=local_config, readme_family=local_readme_family,
+                           allow_unknown=True)
+    size_value = size_from_config(local_config, family)
+    size_value = size_value or ((base_entry or {}).get("size") if base_entry and
+                                base_entry.get("details", {}).get("family") == family else None)
+    size_value = size_value or (size_from_tag(tag) if tag else None)
+    official, official_note = resolve_official(system_registry, dir_name, family, size_value) if family else (None, None)
     base_entry = official[3] if official else None
     src_tag = f"{official[1]}:{official[2]}" if official else None
     xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
-    if not args.dry_run:
-        if official:
-            note = f" ({official_note})" if official_note else ""
-            log(f"[INFO] xclbins from official {src_tag}{note}")
-        else:
-            log("[WARN] No official model matched; no xclbins link. Pass --xclbin-from NAME (or --no-xclbin).")
 
     if args.dry_run:
         print(f"repo directory : {dir_name}")
-        print(f"tag            : {tag}")
-        print(f"details.family : {family}")
+        print(f"tag            : {tag or '(derive from config.json)'}")
+        print(f"details.family : {family or '(derive from downloaded config.json)'}")
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
         probe = args.open_kernels or (local_dir if local_dir else None)
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
-            sh, note = model_spec_hash(local_dir)
+            spec, note = model_spec_for_dir(local_dir)
             roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
-            found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
-            print(f"spec hash      : {sh or '(' + note + ')'}")
+            found, _ = find_open_kernels(spec.spec_hash(), roots, dir_name,
+                                         family=spec.family, model_spec=spec.to_dict()) if spec else (None, None)
+            print(f"kernel family  : {spec.family if spec else '(unavailable)'}")
+            print(f"spec hash      : {spec.spec_hash() if spec else '(' + note + ')'}")
             print(f"open kernels   : {found or '(none installed)'}")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
@@ -1009,8 +1221,80 @@ def main():
     if missing:
         raise SystemExit(f"Model is missing required files: {missing}")
 
+    # The downloaded container is authoritative. Repo/directory names and the
+    # curated registry are hints for defaults, never the architecture gate.
+    config = load_json(target / "config.json")
+    content_family = family_from_config(config)
+    declared_family = family_from_readme(target / "README.md")
+    if args.family:
+        family = args.family
+    elif content_family:
+        if family and family != content_family and not args.quiet:
+            log(f"[INFO] Config architecture selects family {content_family!r}; "
+                f"ignoring name/registry hint {family!r}")
+        if declared_family and declared_family != content_family and not args.quiet:
+            log(f"[WARN] q4nx README declares family {declared_family!r}, but config.json "
+                f"derives {content_family!r}; using config.json")
+        family = content_family
+    elif declared_family:
+        family = declared_family
+    if not family:
+        mt = config.get("text_config", {}).get("model_type", config.get("model_type")) \
+            if isinstance(config.get("text_config", {}), dict) else config.get("model_type")
+        body = json.dumps({"repo": repo, "model_name": dir_name,
+                           "model_type": mt,
+                           "architectures": config.get("architectures", []),
+                           "config": config}, indent=2)
+        issue = support_issue_url(f"Support model {dir_name}", body)
+        message = (
+            f"Could not derive an OpenFlowLM family from config.json model_type={mt!r} "
+            f"for {dir_name!r}. This model is not blocked by its name; its architecture "
+            f"needs a family mapping. Pass --family to try a family explicitly."
+        )
+        if issue:
+            message += f"\nOpen a prefilled support issue: {issue}"
+        else:
+            message += "\nSet OFLM_SUPPORT_ISSUE_URL to enable a prefilled issue link."
+        raise SystemExit(message)
+
+    # Re-resolve the donor only after content has selected the family. The
+    # registry provides convenient known-good family xclbin sources, but an
+    # absent model entry does not prevent installing the model or attempting
+    # family kernels.
+    measured_size = size_from_config(config, family) or estimate_size(target / "config.json")
+    if not args.tag and measured_size:
+        actual_tag = derive_tag(dir_name, size_hint=measured_size, size_authoritative=True)
+        if actual_tag != tag:
+            if not args.quiet:
+                log(f"[INFO] Repo-name tag {tag!r} disagrees with config geometry; "
+                    f"using {actual_tag!r}")
+            tag = actual_tag
+    if tag is None:
+        if not measured_size:
+            raise SystemExit(
+                f"Could not estimate parameter size from {target / 'config.json'}; "
+                "pass --tag name:size."
+            )
+        tag = derive_tag(dir_name, size_hint=measured_size)
+        if not args.quiet:
+            log(f"[INFO] Registry tag derived from config: {tag}")
+    size_value = measured_size or ((base_entry or {}).get("size") if base_entry and
+                                   base_entry.get("details", {}).get("family") == family else None)
+    size_value = size_value or size_from_tag(tag)
+    official, official_note = resolve_official(system_registry, dir_name, family, size_value)
+    base_entry = official[3] if official else None
+    src_tag = f"{official[1]}:{official[2]}" if official else None
+    xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
+    if not args.quiet:
+        if official:
+            note = f" ({official_note})" if official_note else ""
+            log(f"[INFO] xclbins from family donor {src_tag}{note}")
+        else:
+            log(f"[INFO] No curated xclbin donor for family {family!r}; "
+                "open family kernels are still checked independently.")
+
     if not size_value:
-        size_value = estimate_size(target / "config.json")
+        size_value = measured_size
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
 
