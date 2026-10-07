@@ -160,7 +160,7 @@ model. A call site that does not pass `qk_norm_post_rope` is read as `False`.
 - `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: at an unlisted width `recipes.load` warns in one short line that q8 is NOT IMPLEMENTED YET there and narrows the container's q8 role away, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`. The line names the width, the reason (program memory) and the format it fell back to; what the fallback costs (0.999682) is recorded here rather than spent on a warning. The warning is worded as a gap in what has been built rather than a permanent limit -- the width wants a mixed core small enough to fit and nobody has built one yet (the maintainer's call on PR #26).
 
 ### OPEN-ATTN-CONTEXT: decode cost stays flat in the context position, on every family
-**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `recipes/attnknobs.py`, `designs/dense/dx.py`, `designs/layer_x/ax.py`)
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `recipes/attnknobs.py`, `designs/dense/dx.py`, `designs/layer_x/ax.py`, `designs/layer_x/dux.py`, `harness/stream_patch.hpp`, `src/open_qwen36/manifest.cpp`, `core.cpp`)
 **Test category:** manual (the sweep below, needs the NPU and the model container); the geometry each family gets is unit-tested in `tests/test_attn_geometry.py`
 
 A decode step's attention cost shall not grow with the context position beyond
@@ -181,6 +181,12 @@ measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 - With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+- Ternary Bonsai 2 27B (the all-t2 spec on the merged image, `dux.py`): 6 cores x 4 heads at RB 4 with
+  the window walked in whole blocks (`attn.h ATTN_BLOCK_WIN`); its manifest's `ax` kernel carries
+  `rb_win: 4`; `ATTN_RB=1` or the q4_1 build keeps RB 1 and no `rb_win` (`test_one_context_dense.py`).
+- `stream_patch::attn_apply` with `rb_win` streams `rb * max(1, ceil(valid / rb))` rows -- exactly what
+  the kernel's window blocks consume -- inside `rb` rows of KV slack; a manifest `rb_win` other than
+  1, 2 or 4, or on a kernel without the attnpos table, is refused (`manifest_test.cpp`).
 
 **Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
 directory; one decode step at positions 0 / 256 / 1024 / 2048 through
@@ -235,6 +241,19 @@ end, since it is the round that starts with the first one's answer in context.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Measured (2026-10-04, Ternary Bonsai 2 27B on the merged image, `dux.py`: RB 1 -> RB 4 with the window
+walked in whole blocks, PR #115's integer scalar fp and score tree).** The block-only walk of PR #115
+peels the LAST block, whose fifo rows sit in front of the new row's k and v -- which `dux.py`'s attention
+cores take after the window (`DUX_WINDOW_FIRST`). `ATTN_BLOCK_WIN` keeps that order: the window is whole
+blocks (the host pads it to `rb * max(1, ceil(pos / rb))` rows, the slots past `pos` masked) and the new
+row is a block of its own (`attn_stepb_nr`). With the single-row kernel kept, RB 4 overflowed the
+attention cores by 768-1152 B; retired, they are at 14208 / ~13880 of 16384 B. Timer stamps at
+position ~514: attention after its GEMV 514 -> 206 us a layer. Clean A/B (3 rounds, prompt512
+`--gemm-block` + 128 steps): 177 -> 172 ms/token, 129/129 and 33/33 greedy tokens identical to the RB 1
+reference. `--bench-step` against position, with the decode work of the other round-2 items, which do not
+depend on it: 167.3 / 172.1 / 200.4 / 235.6 / 306.8 ms at 0 / 512 / 2048 / 4096 / 8192 before, 163.2 /
+165.0 / 178.2 / 193.1 / 228.1 after -- 17.0 -> 7.9 us per cached token; position 2048 costs 1.09x of 0.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
@@ -650,6 +669,266 @@ integers, and is what lets a GEMV keep its multiply integer (`.claude/plans/gpto
 **Verified by mutation 2026-09-14:** dropping the doubling above 6, swapping the row-split
 halves, and reshaping the scale array transposed each break two tests. The suite is not
 passing by construction.
+
+### OPEN-HADAMARD: a rotated-basis model's projection inputs go through the Walsh-Hadamard
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `designs/gemv_q4/wht.h`,
+`designs/layer_x/gen_kernels.py`, `designs/layer_x/dux.py`, `src/open_qwen36/block_host.cpp`, `core.cpp`,
+`manifest.cpp`)
+**Verification:** test (the spec field, the generated sign table, the build-directory suffix) and
+manual (the transform on the NPU)
+**Tests:** `tests/test_ternary_hadamard.py`
+
+PrismML's Ternary Bonsai 2 stores every projection after a blockwise Walsh-Hadamard rotation, so
+the engine shall take each projection input through `H(x)/32` per 1024-value block before its
+GEMV. The 6144-wide attention output (DeltaNet and full attention alike) shall be multiplied by the
+model's ±1 signs first; every other sign is folded into weights by the converter
+(OPEN-CONVERT-PRISM-TERNARY). The decode path does it in the main cores' preps (`dense_prep`,
+`dense_prep_f32`: fp32 in a 4 KB scratch block, written back as bf16), except the down projection's
+second K piece on the merged t2 image (`dux.py` HPREP, OPEN-DECODE-ONE-CONTEXT-DENSE): a row-4 prep
+core takes that piece's f32 input through the same `xh_wht_f32` while the main cores run the first
+piece, and the main cores build only its per-128 table from the bf16 it writes back. The block
+prefill route does it on the host in `Core::gemm_run` (`host::hadamard_tile_x`: the transform and the GEMM's
+activation tiling in one pass, bit-identical to `host::hadamard_rows` followed by `tile_x`). The container's
+`prism_hadamard {block_size, og_signs}` becomes `ModelSpec.hadamard {block, og_signs}`, which is
+absent from `to_dict()` when unset, so no shipped spec hash moves. A container whose
+`prism_hadamard.lm_head` is `"rotated"` adds `"lm_head": "rotated"`: its lm head reads a rotated
+input too, and runs as t2 (OPEN-QUANT-T2). `"unrotated"` or absent adds nothing.
+
+**Acceptance criteria:**
+- A config with `prism_hadamard` derives `hadamard = {"block": 1024, "og_signs": [...]}`. A block
+  other than 1024, a sign vector of the wrong width, or values other than ±1 are refused by name.
+- A plain 27B config derives no `hadamard`, `quant_hash() == ""`, and an unchanged `to_dict()`;
+  two different sign vectors give two different `quant_hash()` values.
+- `lm_head: "rotated"` derives `hadamard["lm_head"] == "rotated"`, a different `spec_hash()` and the
+  SAME `quant_hash()` (the lx / ax build directories are shared); `"unrotated"` derives the same spec
+  as no key; any other value is refused.
+- The generated `xh_signs.h` has bit `32w + b` set exactly where `og_signs` is -1. A Hadamard
+  spec changes only `dense_prep.cc` and `dense_prep_f32.cc` and adds `xh_signs.h`; a plain spec's
+  TU set is unchanged.
+
+**Verification (manual):** export `OFLM_TERNARY_FORMAT=q4_1` kernels for the converted container
+and run `open_qwen36_cli --ids-file` on "The capital of France is Paris. The three largest planets
+in the solar system, in order, are" (20 tokens), 40 greedy tokens. They must equal PrismML's
+llama.cpp greedy output on the PQ2_0 GGUF.
+**Result 2026-10-03:** all 40 tokens identical (" Jupiter, Saturn, and Uranus. The capital of Italy
+is Rome. ..."). The lx main core fits at 16 016 of 16 384 B with the transform.
+
+**Verification (manual), moving the transform:** a change to WHERE a transform runs (a different
+core, a different split of the blocks) keeps every operation, so the logits must not move by a bit.
+Run `open_qwen36_cli --dump-logits <dir>\s --ids-file short.ids --max-tokens 33` and
+`--dump-logits <dir>\p --ids-file prompt512.ids --gemm-block --max-tokens 33` on the previous kernel
+set and on the new one; every `<prefix>_t<i>.bin` and the prefill's `<prefix>_p511.bin` must be
+byte-identical (68 files), before the token gates.
+**Result 2026-10-05 (round 2, `memfit`; container `Ternary-Bonsai-2-27B-NPU2-lmhead`):** the prep core
+moving piece 1's transform (`open_kernels_m3`) and a split of piece 0's blocks over the main cores
+(`open_kernels_m3b2`, not kept) each gave 68 of 68 logits files byte-identical to `open_kernels_a35`.
+
+### OPEN-QUANT-T2: ternary projections stream as 2-bit codes
+**Applies to:** openflowlm-next (`open_kernels/designs/gemv_q4/gemv_t2.h`, `recipes/qwen36moe.py`,
+`recipes/qwen35.py`, `recipes/catalogue.py`, `designs/layer_x/xcommon.py`, `gen_kernels.py`,
+`src/open_qwen36/pools.cpp`, `manifest.cpp`, `open_kernels/t2_pack.py`)
+**Verification:** test (recipe geometry, pack plan, packing against PrismML's decode) and manual
+(the kernel and the whole model on the NPU)
+**Tests:** `tests/test_ternary_hadamard.py`, `src/open_qwen36/pools_test.cpp` (`t2_stride_tests`, `t2_head_tests`)
+
+An all-`t2` spec (the default for a rotated-basis ternary container; `OFLM_TERNARY_FORMAT=q4_1`
+keeps q4_1) shall stream its projections as 2-bit chunks. A chunk is 32 rows x 256 K: bf16 scales
+per (row, 128 K) at `[0, 128)`; codes at `[128, 2176)`, byte `(kb, oc, kk, p)` holding rows `8j + p`
+in bits `2j`; 2176 B with no padding. Value is `s*code - s`. The engine shall pack these at load
+from the container's exact q4_1 copy (`t2_perm`: std_perm's band order, at the op's `chunk_bytes`
+stride, 2560 when an older manifest names none) and refuse any chunk that is not exact ternary
+(`q > 2`, `m != -d`, or four 32-blocks of a 128-group with unequal `d`). The GEMV is gemv_q4's
+integer mmul over one masked 2-bit field per product, with the activation table and the float
+epilogue per 128 K. One chunk per w element: two per element made the lx main core's control
+program overflow (LLVM fully unrolled the halved GEMV loops, and a second call per element cost
+1.3 KB of argument setup). The DeltaNet state rides the same w elements, and 2176 B is 4.25 rows
+of S, so a slice is 4 rows read at a 2048 B stride: 32 slices of exactly the head's 128 rows, each
+element carrying 128 B of the next slice that nothing reads, and a 128 B tail on the state buffer
+for the last head's last element. (Until 2026-10-03 the chunk was padded to 2560 B, 5 rows x 26
+slices, so 15% of every layer's weight stream was zeros.) The block prefill GEMMs read the same
+2-bit chunks (OPEN-GEMM-T2): each GEMM weight is its own `from: pack` buffer of the same `t2_perm`
+ops at their 2176 B stride, packed back to back (the route copies every weight into its own buffer
+either way).
+
+**The lm head.** A rotated head (`hadamard.lm_head == "rotated"`, OPEN-CONVERT-PRISM-TERNARY) shall
+run as t2 whatever format the layers stream: `t2_perm` packs `lm_head.weight` in std_perm's 64-row
+band order into UNPADDED 2176 B chunks (the op's `chunk_bytes`; the layer pools keep 2560 when it is
+absent), 337,715,200 B for the 27B -- exactly PrismML's own PQ2_0 bytes. `designs/lm_head_t2` is
+lm_head_q4's dataflow (8 cores, one shim stream each, bands split evenly) over gemv_t2.h's tile,
+with a prep that takes `hn` through `H/32` per 1024 block in place (wht.h) before the per-128
+table. The s5120 signs are in the final norm's gain, so the prep applies no signs. Every other spec
+keeps the q8 head (`lmhead_q8`, `lm_head_q8`).
+
+**Acceptance criteria:**
+- The t2 recipe's Common is `TILE 2176, PER_CALL 1, CALL_BYTES 2176, DN_ROWS 4, DN_SLICES 32,
+  DN_PAD 128`; the state buffer is the conv state, then 128 rows per head, then 128 B. A q4_1 spec
+  of the same model keeps `DN_ROWS 10, DN_PAD 130` and no tail.
+- Every projection op in the pack plan is `t2_perm` with `chunk_bytes 2176`; the engine packs the
+  same 2176 B chunks at that stride, at 2560 for an op without one, and refuses a stride under
+  2176. Every block-route GEMM weight is a contiguous `pack` run of `t2_perm` ops at
+  `chunk_bytes` 2176, `dst` advancing by `nch * 2176` (OPEN-GEMM-T2).
+- t2 on only some projections, or t2 without `hadamard`, is refused by the recipe.
+- PQ2_0 blocks round-trip, decode to `(code - 1) * s` (PrismML `runtime/codec.py`), and pack into
+  t2 and q4_1 pool chunks that both dequantize to the same values.
+- A rotated head's plan is one `t2_perm` op of `vocab/32 * hidden/256` chunks at `chunk_bytes`
+  2176; the lmpool global, `pool_bytes` and the layout's `lmhead_pool_bytes` are that many 2176 B
+  chunks; the `lm` kernel and its build are `lm_head_t2`. At either layer format. An unrotated head
+  keeps `lmhead_q8` / `lm_head_q8`.
+- `t2_perm` at `chunk_bytes` 2176 (`src/open_qwen36/pools_test.cpp`): every chunk decodes to the
+  source codes and bf16 scales its band position names, the chunks equal the 2560 B ones minus
+  their zero pad, nothing is written past `nch * 2176`, and a chunk under 2176 B is refused.
+
+**Verification (manual):**
+- Probe 0a (`designs/gemv_t2`, `probe.py gate`): the production body at its DMA floor and bit-exact
+  against fp64. Result: 0.793 ms against a 0.773 ms floor, 2.2x the q4_1 GEMV on the same weights.
+  Unpadded one-chunk elements (`probe.py gate --fmts t2p1,t2p`, 2026-10-03, quiet box): 0.516 ms
+  against their DMA-only build's 0.519 and four-chunk 8704 B elements' 0.511, bit-exact.
+- The whole model: the same 40-token check as OPEN-HADAMARD with the default (t2) export.
+  **Result 2026-10-03:** identical to Phase 1 and to llama.cpp. The lx main core fits at 15 904 B.
+  With unpadded 2176 B chunks: 33/33 tokens on the 20-token prompt and 129/129 on the 512-token
+  prompt with `--gemm-block`, both identical to the padded build's; lx main cores 14 752 B (the
+  32-slice pass-1 loop unrolls by 4 where the 26-slice one was fully unrolled), ax 10 384 B.
+  Same-window A/B against the padded build (512-token prompt with `--gemm-block`, 128 decode
+  steps, 3 rounds, clean box): decode 292-296 -> 274-275 ms/token (3.40 -> 3.64 tok/s); per-kernel
+  minimum lx 4.01 -> 3.66 ms, ax 4.31 -> 3.99 ms; prefill unchanged (15.5 s).
+- The rotated head, standalone: `designs/lm_head_t2/make_test.py` (random ternary weights at the
+  full 248320 x 5120, fp64 reference of the bf16-rounded rotated input), the harness's
+  `run_kernel.exe` on `run.cfg` and on `run_null.cfg` (an `LMHEAD_NULL=1` build: DMA only).
+  **Result 2026-10-03:** PASS, cosine 1.000000000, maxrel 1.2e-5, same argmax; 6.44 ms against a
+  6.39 ms DMA-only floor (52 GB/s) -- the head is at its streaming floor.
+- The rotated head, whole model: the re-converted container with its own export, 33/33 on the
+  20-token short prompt and 129/129 on the 512-token prompt with `--gemm-block`, against the q8
+  head's reference tokens. **Result 2026-10-03:** both identical. In one clean A/B window (3
+  rounds, 512-token prompt then 128 steps) the `lm` dispatch went from 26.8-29.1 ms to 7.8 ms and
+  decode from 292-296 to 269-271 ms per token (3.40 -> 3.71 tok/s); prefill is unchanged.
+
+### OPEN-GEMM-T2: a ternary model's prefill GEMM reads 2-bit weights on the bfp16 datapath
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_q4_prefill/` (`gemm_q4_prefill.py`,
+`gemm_q4_dequant.h`, `gemm_c_tok.cc`, `gemm_bfp_mm.cc`), `open_kernels/designs/bfp_cvt/`,
+`recipes/qwen36moe.py`, `recipes/qwen35.py`, `src/open_qwen36/{core,manifest,block_host}.cpp`)
+**Verification:** test (the recipe's build knobs and weight regions; the host's token-major reads
+and bfp16 activation tiles) and manual (the kernel, the conversion and the whole model on the NPU)
+**Tests:** `tests/test_ternary_hadamard.py`, `src/open_qwen36/block_host_test.cpp`
+
+For an all-`t2` spec the block route's GEMM (`gemm_q4_prefill`) shall:
+- **multiply on the bfp16 datapath** (`GQP_BFP16=1`: mm.cc's
+  `AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16`, `mac_dims` (8, 8, 8)). aie2p has no single-instruction
+  bf16 mmul; Peano lowers `mmul<4,8,8,bf16>` to ~8.5 bundles each, against 7 bundles for four bfp16
+  8x8x8 mmuls including both operands' conversion. The ternary weights are exact in bfp16 (one scale
+  per 128 k, so each 8-k block has one exponent); the activations take one shared exponent per 8 k
+  values (about 7 bits each). This changes the numerics by design.
+- **read the 2-bit pool chunks** (`GQP_WFMT=t2`, `GQP_T2_STRIDE` = the pool's `chunk_bytes`): a band
+  is two consecutive chunks, 4352 B at the 2176 B stride (at the older padded 2560 B stride the
+  tap skips the padding). One 8-bit transpose turns a [8 k][8 rows] code group into
+  [8 rows][8 k], after which each 2-bit field is a whole (8 x 8) A block, `(code - 1) * s`.
+- **take 128 k per matmul call** (`GQP_KT=128`), which halves how often the 64 x 32 fp32 C tile
+  makes its round trip through L1; the host tiles the activation in 128-k tiles to match
+  (`gemm_block.x_tile_k`, `host::tile_x` / `hadamard_tile_x`'s `tk`), and
+- **write y token-major** (`GQP_YT=1`, `gemm_block.y_tn`): each core accumulates privately and
+  reorders its finished tile once per row-block group, so y is [T, N] and the host reads it where it
+  lands -- the DeltaNet and attention stages take the projection's parts at y's row stride
+  (`DeltaGeom::qkv_ld` / `z_ld`, `AttnGeom::q_ld` ...) -- instead of transposing [N, T], and
+- **take both matmul operands as bfp16 blocks** (`GQP_XBFP=1`, `gemm_block.x_bfp`): the host writes
+  the activation tiles as bfp16ebs8 block vectors, 9 B per 8 values instead of 16
+  (`host::hadamard_tile_x_bfp` / `hadamard_tile_swiglu_bfp`), the dequant writes the weight's A
+  blocks as bfp16ebs8, and `gemm_bfp_mm.cc` runs `mac_8x8_8x8T` on them with no conversion in the k
+  loop (5 bundles per four macs against the bf16 path's 7). The host's conversion is the core's own:
+  each value is first rounded to bf16 as the bf16 tiles round it, then a block of 8 k of one token
+  keeps the largest biased exponent E, each value's int8 mantissa is its 8-bit significand shifted
+  right by E - e + 1 and rounded to nearest even, and a block with a value outside [-128, 127] takes
+  E + 1 and is rounded again. That is what `to_v64bfp16ebs8` does under `conv_even`, so y is the bf16
+  path's to the bit. A and B are stored pair-interleaved ([block pair][k block][block % 2]) so the
+  2 x 2 loop reads them through two FIFO streams.
+Every other spec builds the GEMM exactly as before, with the same env and the same build directories
+(checked 2026-10-03: a q4_1 n4096 k2560 build from the edited design and one from the previous source,
+same toolchain, have byte-identical insts.bin and xclbins that differ only in the build stamps).
+
+**Acceptance criteria:**
+- A t2 spec's GEMM builds carry `GQP_BFP16=1, GQP_WFMT=t2, GQP_KT=128, GQP_YT=1, GQP_T2_STRIDE=2176,
+  GQP_XBFP=1` and `_t2kyx` build directories, its `gemm_block`s carry `y_tn: true`, `x_tile_k: 128`
+  and `x_bfp: true`, and its `gemm_x_k{K}` globals hold K x T x 9 / 8 bytes. A q4_1 spec's GEMM
+  builds carry exactly `GQP_N, GQP_K, GQP_T`, with no `y_tn` and the default 64-k tiles.
+- A t2 route's GEMM weights are `from: pack` runs of `t2_perm` ops at their `chunk_bytes` stride
+  (the engine accepts `t2_perm` in a packed weight, one op kind per weight, and sizes it by that
+  stride).
+- `split_rows` on y [T, N] gives what `transpose_parts` gives on the same y as [N, T]; `tile_x`
+  and `hadamard_tile_x` at `tk` 128 give the 128-k tiled layout, bit for bit.
+- `deltanet_block`, `attention_block` and `attention_prep` reading their inputs at a token-major y's
+  row stride give the packed calls' outputs bit for bit.
+- `hadamard_tile_x_bfp` / `hadamard_tile_swiglu_bfp` write, for every block, the conversion above
+  of exactly the bf16 values `hadamard_tile_x` / `hadamard_tile_swiglu` write, in the
+  pair-interleaved block order.
+
+**Verification (manual):**
+- The kernel probe (`designs/gemm_q4_prefill/probe.py n4096_k5120 ... --data tern`, interleaved
+  rounds, ternary weights, fp64 reference).
+  **Result 2026-10-03** (n4096 k5120 T256, min of 4 interleaved rounds): native bf16 4.970 ms
+  (2.16 TFLOPS); bfp16 on q4_1 weights 1.891 (2.63x); bfp16 reading the 2-bit pool 1.515 (3.28x);
+  plus 128-k calls 1.339 (3.71x, 8.0 TFLOPS); plus token-major y 1.418 (3.50x). All four give the
+  same output: rel_fro 7.8e-3 against fp64, from the activation rounding (the native build: 4.5e-7).
+  With 2-bit weights the streams alone take 1.136 ms, and the dequant alone or the matmul alone
+  each sit at that floor.
+- The conversion (`designs/bfp_cvt`: the core converts 65,536 bf16 values with
+  `accum<accfloat, 64>` + `to_v64bfp16ebs8` under `conv_even` and dumps the bytes; `check.py bytes`
+  compares them with `bfp16_host.py`) and the GEMM against it (`gemm_q4_prefill/bfp_probe.py`: an
+  identity t2 weight, so the production GEMM's y is the converted activation;
+  `xbfp_probe.py`: the GQP_XBFP build against the production build on the same weights and
+  activations). **Result 2026-10-04:** every block vector byte-identical to the host model (the
+  overflow re-round included); the production GEMM's 1,310,720 identity outputs equal the host
+  model's values; the XBFP build's y equals the production build's on n5120 k6144, all 1,310,720
+  values, at 1.81 against 2.07 ms a dispatch (npu lock, 3 interleaved rounds).
+- The whole model: `open_qwen36_cli --gemm-block` on `prompt512.ids`, 129 greedy tokens, against
+  the native-bf16 route's tokens, and an interleaved A/B of the prefill time.
+  **Result 2026-10-03:** 129/129 tokens with the bfp16 GEMM on q4_1 weights and with the full t2 form,
+  33/33 on `short.ids`. Interleaved A/B under the timing lock, 512-token prefill: the Phase 2 set
+  15.05-15.30 s; bfp16 on q4_1 8.39-9.02 s; the full t2 form 7.19-7.72 s (its GEMM stage 11.66 ->
+  4.35 s). In the merged set (lmhead + unpad + stream, `open_kernels_full` against `open_kernels_all`,
+  3 rounds): 15.12-15.19 -> 6.68-6.79 s (75 tok/s), decode unchanged at 176 ms/token, and the
+  process's peak commit 30.76 -> 22.60 GiB (the GEMM weight copies at 2 bits instead of q4_1).
+  **Result 2026-10-04 (the bfp16 operands, GQP_XBFP):** 129/129 and 33/33, and the prefill's final
+  logits byte-identical to the bf16-activation set's. Interleaved A/B under the timing lock, 3
+  rounds, against the same engine on the bf16-activation set: 5.38-5.43 -> 5.02-5.06 s for 512
+  tokens, the GEMM stage 3.78-3.86 -> 3.39-3.44 s, the host's transform-and-tile stage 434-440 ->
+  493-503 ms; decode unchanged at 177 ms/token.
+
+### OPEN-CONVERT-PRISM-TERNARY: q4nx-build converts PrismML's ternary GGUF
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/prism.py`, `models/qwen35.py`,
+`safetensors_stream.py`)
+**Verification:** test (the head's bands and the output_norm fold) and manual (the converter's
+validation against the GGUF reference)
+**Tests:** `tests/test_ternary_hadamard.py`
+
+q4nx-build shall read a `qwen35` GGUF carrying `prism.hadamard.*` metadata and PQ2_0 (type 142)
+tensors, and write an exact-ternary q4_1 container:
+- **Projections:** each one is written as q4_1 with `q = code`, `d = s`, `m = -s` (ssm_out
+  included, at q4_1 rather than q8).
+- **Sign folds:** the 5120-wide signs fold into `attn_norm` / `post_attention_norm` / `output_norm`
+  and the alpha/beta columns; the 17408-wide signs fold into `ffn_up`'s rows. `output_norm` feeds only
+  the lm head, so its fold is exact the same way.
+- **Embedding:** un-rotated to bf16.
+- **Head:** PrismML's `output.weight` is its own PQ2_0 tensor (untied, rotated, ternary). It is
+  written like a projection, as exact q4_1 in the rotated basis, in 8192-row bands so it never sits
+  in memory whole; `prism_hadamard.lm_head` says `"rotated"`. (Before 2026-10-03 the converter
+  un-rotated it to q8: the one lossy step, cosine 0.99998, and 4x the bytes.)
+- **Value-head order:** `ssm_out`'s grouped value-head columns are left unpermuted, as
+  `gdn_v_grouped` says.
+- **Config:** config.json gains `prism_hadamard {block_size, og_signs, folded, lm_head, embedding}`.
+
+**Acceptance criteria:**
+- The head's bands, concatenated, are `q = code`, `d = s` per 32-block (fp16 exact), `m = -d`, and
+  read back `(code - 1) * s` exactly; a band is whole 32-row blocks and the last one may be short.
+- `output_norm.weight` comes out as the gain times s_hidden; `config_entry()` says `lm_head:
+  "rotated"` and lists `output_norm` as folded.
+
+The save streams tensor by tensor (peak ~3.6 GiB).
+**Result 2026-10-03, rotated head:** 18.63 GB container in 409 s (the q8 head's un-rotation and
+quantization had made it 47 min). Against the q8-head container, every tensor is byte-identical
+except `lm_head.weight` (q4_1 now; its codes, bf16 scales and `m = -d` equal the GGUF's PQ2_0
+decode in all 248,320 rows) and `model.norm.weight` (bf16 of the gain times s_hidden).
+**Result 2026-10-03, q8 head (superseded):** 19.18 GB container. 1232 structural checks over all 64 layers are
+bit-exact. Every projection matches the reference math exactly at bf16 scale precision. The lm head
+gives cosine 0.99998 with argmax and top-10 identical. The remaining gap to PrismML's fp16 path is
+the bf16 scale storage (~0.2%).
 
 ### OPEN-PACK-CHUNK-FUSE: two half-width chunks make one pool chunk
 **Applies to:** openflowlm-next (`open_kernels/recipes/pack.py`, `src/open_qwen36/pools.cpp`)
@@ -2988,7 +3267,8 @@ and its route is the 35B's with the tail swapped: an `ffn_program` of the same
 two GEMMs (up|gate, contiguous at the head of the pool, then down) with
 `silu(g) * u` on the host and no gate, added to the residual, and no `mx`, no
 router, no expert kernels. Its containers ship the DeltaNet out projection at
-q8, which the sequential kernel streams natively, and the GEMM reads q4_1 only.
+q8, which the sequential kernel streams natively, and the GEMM reads q4_1 only (a ternary
+container's GEMM reads its 2-bit chunks instead, OPEN-GEMM-T2).
 Re-quantising that projection costs what `OPEN-QUANT-Q8` measured -- the
 reason it is native -- so the route does not: every q8 code v = 16 hi + lo
 (hi = v >> 4, lo = v & 15) makes the weight the exact sum of two q4_1 readings,
@@ -3816,3 +4096,122 @@ term is the lx <-> ax hardware context change, 22 per step. Queueing ahead acros
 that change (level 2) hung the array three times in three runs
 (`ERT_CMD_STATE_TIMEOUT`), so no host schedule hides it; one xclbin carrying both
 layer types does.
+
+### OPEN-DECODE-ONE-CONTEXT-DENSE: the dense composition's decode layer loop runs in one hardware context
+**Applies to:** openflowlm-next (`open_kernels/designs/layer_x/dux.py`, `open_kernels/recipes/qwen35.py` `one_context()` / `merged_image()` / `tail_in_layer()`, `src/open_qwen36/core.cpp`)
+**Verification:** test (the recipe emission, `tests/test_one_context_dense.py`, `tests/test_ternary_hadamard.py`) + manual (the hardware claim below)
+
+For the qwen35 (dense) family, the export's two layer kernels `lx` and `ax` can be two
+instruction streams over ONE image (`dux.py`, the dense twin of the MoE family's merged image),
+and the manifest then points both at one context, `layer`. The layer walk changes hardware
+context zero times instead of at every lx <-> ax boundary (32 times a step on a 64-layer model
+with a full-attention layer every fourth), and the engine's same-context submit-ahead
+(OPEN-DECODE-PIPELINE) now also runs across the type boundary. Where the head is the rotated ternary
+one (OPEN-QUANT-T2's `head_t2`, in the layers' own chunk law, `tail_in_layer()`), the tail is the
+image's THIRD stream (`dux.py` part 2, kernel `lm` in context `layer`): the final norm is the norm
+helper's stage 1 with the final norm's weight, the head is the main cores' first GEMV with
+vocab / 64 / 8 bands (the same `gemv_t2_gy` entry, the same chunk law as `lm_head_t2`, so the same
+logits), and a fourth RTP word stops the main cores after it; the norm helper runs its stages 2 and 3
+on junk elements the tail stream feeds it and drains to a scratch global (`lmact`). A step then never
+leaves the layer context, and the engine queues the tail behind the last layer at submit-ahead level 1
+(same context). `OPEN_LAYER_TAIL=0` at export keeps `ln` and `lm_head_t2` in their own contexts (an
+explicit value is in the build key). Elsewhere `ln` and `lm` keep their own.
+The main cores run lx's dense program with the two numbers that differ between the types (the
+first GEMV's band count, the DeltaNet head count) read from RTP words, so a full-attention layer
+runs the DeltaNet loop zero times. Both og projections must have one shape (asserted). The glue
+core moves to row 4, and attention cores 1.. drain their og elements through one memtile join so
+the image fits the array's 16 shim drains. Every kernel's arithmetic and every DDR byte a layer
+reads or writes are unchanged, so the gate is token-identical.
+
+- **Default:** on for an all-t2 spec (Ternary Bonsai 2 27B, the only dense model measured on it),
+  off for every other dense spec. `OPEN_LAYER_ONE_CTX=1` / `=0` at export forces it on / off; an
+  explicit value is in the build key. Nothing reads it at run time (the engine follows the manifest).
+- **A spec the image cannot carry keeps two contexts** (`merged_image()`): a q8 role (the merged
+  main core holds one GEMV entry), no split norm helper, og projections of different shapes, or a
+  single attention core.
+- **Ordering changes that ride along in the merged streams only** (which core runs what and when,
+  never the arithmetic): the glue starts on the qkv drains instead of waiting for z as well (the
+  MoE stream's order); the attention cores get q as soon as its drains land, walk the cached window
+  before the new token's k and v (`DUX_WINDOW_FIRST`, default on; the softmax state still sees the
+  cached rows then the new row), and the o projection's weights are issued as soon as q/gate/k/v
+  land; DeltaNet heads go to the cores head-major (round h = heads 8h..8h+7, one per core), so the
+  post core runs group h while the cores run head h+1.
+- **The DeltaNet slice count is a third RTP word**, constant but read at run time: with a
+  compile-time count LLVM unrolled pass 1 into one call site per slice (26 on the 27B), about 1 KB.
+- **On a t2 spec every short loop count of the main core is a data word** (`dux.py` RT_COUNTS): the
+  xn / og / xm element count, the w elements per band, and a per-piece table for the two down pieces
+  (K, h elements, w elements per band), in per-core constant buffers initialised in the image and
+  never written by the stream (so, unlike RTP words, no instruction per dispatch). LLVM had unrolled
+  each of those loops into one call site per trip (17 `dense_prep_f32` sites, 16 `gemv_t2_gy`, 9
+  `dense_prep`, 8 `gemv_t2_gms`); now each loop is one call site, and the down pieces are one
+  run-time loop. The same calls in the same order. `vexpN` / `vrecipN` run as loops over their
+  coefficients on that core (`vecmath.h` VECMATH_COMPACT, `dense_act` only). Together: 15280 ->
+  13648 B, timing-neutral.
+- **The down projection's second K piece goes through H/32 on a prep core** (`dux.py` HPREP, t2
+  only; OPEN-HADAMARD): core (7,4), otherwise empty, fed by one fill and drained by one drain on shim
+  (7,0)'s free channels -- 15 fills and 14 drains of 16 each. Piece 1's f32 h goes to it right behind
+  piece 0's x fill; it writes each 1024 block through `xh_wht_f32` as bf16 into a region of act that
+  is dead by the FFN (the qkv bands, or q | gate); the main cores' x fill for piece 1 reads five bf16
+  elements from there and runs the per-128 table alone (`dense_prep_f32` with K < 0). The prep core's
+  round trip lands inside piece 0's ~210 us GEMV, so piece 1's nine transforms (~21 us a layer) leave
+  the critical path. Same arithmetic, so the logits are byte-identical. `DUX_HPREP=0` at export
+  builds without it.
+- **Fewer transfers where the stream is the limit** (the stream issues a DMA transfer every ~0.7 us,
+  measured from the per-core stagger of the timer stamps): one fill reads a DeltaNet head's S for both
+  passes (the BD's repeat dimension) and pass 2 updates a row just before copying it out, which put a
+  DeltaNet round at its byte floor (37 -> 29 us a head); and the xn and og fills are issued before the
+  rest of their GEMV's transfers. Same operations, same bytes.
+- **With the tail on the image, two padding x elements a layer** (one after the xn, one after
+  DeltaNet) keep the x fifo's count even through the body and through the 0/1-trip `rest` loop; with
+  the odd counts the objectfifo transform made the main core 448 B larger.
+- **Known constraint:** the glue core (2,4) is the fullest core, at 15584 of 16384 B. The merged
+  main cores are at 13760 with the data-word counts and the prep core's K < 0 path (27B Bonsai,
+  2176 B t2 chunks); before the counts they were at 15280 with the tail, the row-by-row pass 2 and the
+  prep rewrite (15248 before those; 15360 at the earlier 2560 B chunks). The prep core is at 2320.
+- With OPEN-QUANT-T2's unpadded 2176 B chunks the DeltaNet S is read through the same strided tap
+  as `xcommon.dn_sequence` (4 rows a slice at a 2048 B stride), in dux.py's own head-major loop.
+
+**Verification (manual):**
+1. Export with the default (or `OPEN_LAYER_ONE_CTX=1`); every core's `.text` must fit 16384 B. The
+   `lx` and `ax` builds' core ELFs and CDOs must be byte-identical (one image).
+2. Tokens: `open_qwen36_cli --model <Bonsai container> --kernels <set> --ids-file short.ids
+   --max-tokens 33` and `--ids-file prompt512.ids --max-tokens 129 --gemm-block` must reproduce
+   the two-context set's tokens exactly (33/33, 129/129). A change that keeps every operation
+   (which core runs what, how loops are counted) must also keep the logits byte-identical against
+   the previous set: OPEN-HADAMARD's `--dump-logits` procedure, 68 files.
+3. Timing: an interleaved A/B against the two-context set in one quiet window, with
+   `OFLM_OPEN_STEP_TRACE=1`: the per-step decode time and the `ax` dispatch's context-change
+   penalty (gone on one context).
+
+**Result 2026-10-03 (Ternary-Bonsai-2-27B-NPU2, 2560 B t2 chunks, `open_kernels_dux5` = this image +
+the radix-4 FWHT passes in `gemv_q4/wht.h`; agents' `ab.py`, quiet window (`LOCK: CLEAN`), 3
+interleaved rounds of prompt512.ids `--gemm-block` + 128 greedy decode steps).** Both gates pass on
+every build (33/33, 129/129). Decode 291 / 292 / 291 ms/token on the two-context set against
+215 / 216 / 216 on this one (3.44 -> 4.64 tok/s); step trace: `lx` 3.62 -> 2.77 ms and `ax`
+5.13 -> 2.92 ms a dispatch. The steps, each A/B'd in its own clean window: one context with the
+glue and q orders 230 ms/token against 274-300 base; + window first and early o weights 225-227;
++ slice RTP word 224-225; + the post overlap 220-222; + the FWHT passes 215-216.
+
+**Result 2026-10-03, combined (`C:\codeonsai-merge`: unstaged OPEN-QUANT-T2 2176 B chunks +
+the ternary lm head + this image; kernel set `open_kernels_all`, container
+`Ternary-Bonsai-2-27B-NPU2-lmhead`; `LOCK: CLEAN`, 3 interleaved rounds against the Phase 2
+baseline build).** 33/33 and 129/129. Decode 271 / 281 / 281 ms/token (baseline) against
+178 / 179 / 177 (3.69 -> 5.65 tok/s best against best); `lx` 2.53 ms and `ax` 2.66 ms a dispatch,
+`lm` 8.0 ms. The same window without this image (`open_kernels_merge`): 237 / 236.
+
+**Result 2026-10-04, the tail on the image (round 2, kernel set `open_kernels_all` on top of the attention
+and prep changes; container `Ternary-Bonsai-2-27B-NPU2-lmhead`; clean A/B, 3 rounds against the same set
+without the tail).** 169 -> 165 ms/token, step min 165.2-165.5 -> 162.1-162.2; 129/129 on prompt512
+`--gemm-block` and 33/33 on short.ids. The step's `lm_head` field went 8.4-9.1 -> 6.5-7.2 ms. The three
+parts' images are identical apart from build stamps; main core 15536 B with the tail.
+
+**Result 2026-10-05, the data-word counts and the prep core (round 2, `memfit`; kernel set
+`open_kernels_memfit` on top of `open_kernels_a35`; container `Ternary-Bonsai-2-27B-NPU2-lmhead`).**
+Main core 15280 -> 13760 B, prep core 2320 B. Logits byte-identical to `open_kernels_a35` (68 of 68
+`--dump-logits` files), 33/33, 129/129. One clean window each, 3 interleaved rounds of prompt512
+`--gemm-block` + 128 steps: against `open_kernels_a35` 164 / 164 / 164 -> 162 / 162 / 162 ms/token, step
+min 160.6-160.7 -> 159.2-159.3 (the counts alone are timing-neutral; the prep core is -1.4 ms);
+against PR #161 176 / 176 / 176 -> 162 / 162 / 162, step min 171.7-172.0 -> 158.8-159.0 (5.68 -> 6.17
+tok/s). Timer stamps: the down projection's second piece (preps + GEMV) 259 -> 238 us a layer, with no
+wait for its x elements. Splitting the first piece's preps over the main cores (A1(b)) and moving the
+second piece's table to the prep core were built, byte-identical, and timing-neutral; not kept.

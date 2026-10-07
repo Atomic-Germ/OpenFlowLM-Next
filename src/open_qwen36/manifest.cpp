@@ -65,7 +65,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "t2_perm" || p.op == "put" || p.op == "expert_down" ||
         p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
@@ -73,7 +73,7 @@ PackOp parse_op(const json& j, const std::string& where) {
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "t2_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose") need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
     else if (p.op == "expert_stripes") need_all({{"stripe_bytes", p.stripe_bytes}, {"stripes", p.stripes}, {"experts", p.experts}, {"in_dim", p.in_dim}});
@@ -132,6 +132,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
     m.max_ctx_default = j.value("max_ctx_default", 4096ull);
+    if (j.contains("spec") && j["spec"].is_object() && j["spec"].contains("hadamard") &&
+        j["spec"]["hadamard"].is_object()) {
+        const json& hd = j["spec"]["hadamard"];
+        m.hadamard_block = hd.value("block", 0ull);
+        if (m.hadamard_block != 1024) fail(where, "spec.hadamard.block must be 1024");
+        for (const auto& v : hd.at("og_signs")) m.hadamard_og_signs.push_back(v.get<float>());
+    }
 
     const json& lay = need(j, "layout", where);
     const std::string lw = where + " layout";
@@ -176,6 +183,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.insts = get<std::string>(v, "insts", where + " kernel " + k);
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
+        d.rb_win = v.value("rb_win", 1ull);
+        // attn_stepb*.cc build RB 2 and 4 only; any other count pads the stream for rows the
+        // kernel never takes, and the core waits on its fifo forever
+        if (d.rb_win != 1 && d.rb_win != 2 && d.rb_win != 4)
+            fail(where, "kernel " + k + ": rb_win " + std::to_string(d.rb_win) + " is not 1, 2 or 4");
+        if (d.rb_win > 1 && d.patch != "attnpos")
+            fail(where, "kernel " + k + ": rb_win " + std::to_string(d.rb_win) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
         if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
@@ -206,6 +220,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             g.t = get<uint64_t>(gj, "t", gw);
             if (g.t == 0) fail(gw, "t must be > 0 when gemm_block is present");
             g.kind = gj.value("kind", "dense");
+            g.y_tn = gj.value("y_tn", false);
+            g.x_tile_k = gj.value("x_tile_k", uint64_t{64});
+            if (g.x_tile_k != 64 && g.x_tile_k != 128) fail(gw, "x_tile_k must be 64 or 128");
+            if (g.y_tn && g.kind == "dense") fail(gw, "y_tn is the linear / full route's (the dense chain transposes its own)");
+            g.x_bfp = gj.value("x_bfp", false);
+            if (g.x_bfp && (!g.y_tn || g.x_tile_k != 128))
+                fail(gw, "x_bfp is the token-major, 128-k tiled GEMM's (OPEN-GEMM-T2)");
             g.eps = get<double>(gj, "eps", gw);
             g.program = parse_program(need(gj, "program", gw), gw + ".program");
             for (const auto& s : g.program) {
@@ -223,9 +244,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         for (const auto& oj : need(wj, "pack", gw + "." + key + "." + name))
                             w.pack.push_back(parse_op(oj, gw + "." + key + "." + name));
                         if (w.pack.empty()) fail(gw, "weight " + name + " packs nothing");
+                        // the band law the GEMM reads: q4_1 chunks (std_perm), or the 2-bit chunks of
+                        // a t2 route (t2_perm, OPEN-GEMM-T2) -- one kind per weight
                         for (const auto& o : w.pack)
-                            if (o.op != "std_perm")
-                                fail(gw, "weight " + name + ": a packed weight is std_perm ops only (the band law the GEMM reads)");
+                            if (o.op != w.pack.front().op || (o.op != "std_perm" && o.op != "t2_perm"))
+                                fail(gw, "weight " + name + ": a packed weight is std_perm ops only, or t2_perm ops only (the band law the GEMM reads)");
                         into[name] = w;
                         continue;
                     }

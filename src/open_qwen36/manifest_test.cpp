@@ -7,6 +7,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "open_qwen36/manifest.hpp"
 
@@ -80,6 +81,33 @@ int main(int argc, char** argv) {
           "MoE pool geometry");
     check(m.contexts.count("lx") && m.contexts.count("ax") && m.contexts.count("ln") && m.contexts.count("lm"), "four contexts");
     check(m.kernels.at("ax0").patch == "attnpos" && m.kernels.at("lx1").patch == "moeroute2" && m.kernels.at("ln").patch.empty(), "kernel patch kinds");
+    {
+        // attnpos with `rb_win` (attn.h ATTN_BLOCK_WIN, the merged dense image): the window streams as
+        // whole blocks of rb rows -- ceil(valid / rb) of them, one all-padding block at position 0 --
+        // and the new row is a block of its own. attn_meta_impl derives pb[4] = max(1, ceil(pos / rb))
+        // from the same position; a stream that is not exactly rb * pb[4] rows deadlocks the fifo.
+        check(m.kernels.at("ax0").rb_win == 1, "attn: an unblocked kernel's rb_win is 1");
+        std::vector<uint32_t> iw(1, 0);
+        const std::vector<stream_patch::AttnPatch> tab{{0, 0, 0}};
+        stream_patch::AttnGeometry g;                     // kv_row 2048, no window
+        auto rows = [&](uint64_t pos, uint64_t rb) {
+            g.rb_win = rb;
+            stream_patch::attn_apply(iw.data(), tab, pos, g);
+            return static_cast<uint64_t>(iw[0]) * 4 / g.kv_row;
+        };
+        check(rows(0, 4) == 4 && rows(1, 4) == 4 && rows(4, 4) == 4 && rows(5, 4) == 8 && rows(1000, 4) == 1000 &&
+              rows(1001, 4) == 1004 && rows(3, 2) == 4, "attn_apply: rb_win pads the window to whole blocks");
+        check(rows(0, 1) == 1 && rows(5, 1) == 5, "attn_apply: rb_win 1 is the window's own count");
+        bool fits = true, slack = true;
+        for (uint64_t pos = 0; pos < 64; ++pos)
+            for (uint64_t rb = 2; rb <= 4; rb *= 2) {
+                const uint64_t nb = (pos + rb - 1) / rb;
+                fits = fits && rows(pos, rb) == rb * (nb ? nb : 1);
+                slack = slack && rows(pos, rb) <= pos + rb;        // Core::load_weights allocates rb rows of slack
+            }
+        check(fits, "attn_apply: the stream is exactly what the kernel's window blocks consume");
+        check(slack, "attn_apply: the padded window stays inside rb rows of KV slack");
+    }
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
     check(lin.consts_bytes == 11882496 && lin.act_bytes == 190464 && lin.state_kind == "linear" && lin.state_bytes == 2342912, "linear layer buffers");
@@ -221,6 +249,12 @@ int main(int argc, char** argv) {
     });
     refused_manifest(argv[1], "not a declared global", "an attn_block naming an undeclared buffer is refused", [](json& j) {
         j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["args"][2] = "ag_z";
+    });
+    refused_manifest(argv[1], "is not 1, 2 or 4", "a window block the attention kernel is not built for is refused", [](json& j) {
+        j["kernels"]["ax0"]["rb_win"] = 8;
+    });
+    refused_manifest(argv[1], "needs the attnpos", "a window block on a stream the host does not pad is refused", [](json& j) {
+        j["kernels"]["lx1"]["rb_win"] = 2;
     });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];
@@ -510,6 +544,38 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a split out projection parses: ") + e.what());
             }
         }
+        // OPEN-GEMM-T2: a ternary route packs its GEMM weights as t2_perm runs, and its GEMM writes
+        // y token-major from 128-k activation tiles
+        auto t2_out = [](json& j) {
+            json& gb = j["layer_types"]["linear_attention"]["gemm_block"];
+            json a = {{"op", "t2_perm"}, {"tensor", "model.layers.{l}.linear_attn.ssm_out_proj.weight"},
+                      {"nch", 2048}, {"in_dim", 4096}, {"dst", 0}};
+            gb["weights"]["gout_w"] = {{"from", "pack"}, {"pack", {a}}};
+            gb["y_tn"] = true;
+            gb["x_tile_k"] = 128;
+        };
+        {
+            std::ifstream f(argv[5]);
+            json j = json::parse(f);
+            t2_out(j);
+            try {
+                Manifest q = Manifest::parse(j, "edited");
+                const auto& g = q.layer_types.at("linear_attention").gemm_block;
+                check(g.y_tn && g.x_tile_k == 128 && g.weights.at("gout_w").pack.at(0).op == "t2_perm",
+                      "qwen35: a t2_perm packed weight, y_tn and x_tile_k 128 parse");
+            } catch (const std::exception& e) {
+                check(false, std::string("qwen35: a t2 route parses: ") + e.what());
+            }
+        }
+        refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight mixing std_perm and t2_perm is refused",
+                         [&](json& j) {
+                             split_out(j);
+                             json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];
+                             o["op"] = "t2_perm";
+                             o.erase("split");
+                         });
+        refused_manifest(argv[5], "x_tile_k must be 64 or 128", "qwen35: an activation tile the host does not write is refused",
+                         [&](json& j) { j["layer_types"]["linear_attention"]["gemm_block"]["x_tile_k"] = 96; });
         refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);

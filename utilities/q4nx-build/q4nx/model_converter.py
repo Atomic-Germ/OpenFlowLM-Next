@@ -12,6 +12,7 @@ from .arch_detect import (
 )
 from .constants import nearest_qwen35_variant
 from .gguf_tensor import GGUFTensor, GGMLQuantizationType, pack_q4k
+from .prism import register_pq2_0
 from typing import List, Dict, Type
 import os
 import json
@@ -1275,7 +1276,9 @@ def create_converter(gguf_path: str, override_model_arch:str) -> __Q4NX_Converte
         >>> converter.load_gguf("model.gguf")
         >>> converter.convert("configs")
     """
-    # Read the architecture from the GGUF file
+    # Read the architecture from the GGUF file. register_pq2_0 lets the reader map PrismML's
+    # ternary PQ2_0 tensors (q4nx/prism.py); it changes nothing for any other GGUF.
+    register_pq2_0()
     reader = GGUFReader(gguf_path)
     model_arch = get_model_arch_from_gguf(reader,override_model_arch )
     

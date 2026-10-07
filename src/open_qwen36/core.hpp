@@ -458,16 +458,20 @@ private:
     std::pair<size_t, size_t> op_region(const LayerType& lt, const std::string& from, size_t idx) const;
     /// The consts tensor whose name ends in `suffix`, with the layer index filled in.
     std::string const_tensor(const LayerType& lt, const std::string& suffix, int layer) const;
-    /// One GEMM step over x [T, K] (f32 row-major): tile, upload, run, download y as [T, N].
-    /// `out` is grown if it is short and then fully overwritten; pass a buffer that lives
-    /// across layers, so the 12 MB the widest GEMM returns is allocated once, not 40 times
-    /// a block.
-    void gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
-              std::vector<float>& out);
+    /// One GEMM step over x [T, K] (f32 row-major): tile, upload, run, and return y as [T, N].
+    /// A token-major GEMM (gemm_block.y_tn, OPEN-GEMM-T2) already leaves y as [T, N], so the
+    /// returned pointer is the output buffer's own mapping, valid until the next GEMM on that
+    /// buffer. Otherwise y [N, T] is transposed into `out` (grown if short, then fully
+    /// overwritten; pass a buffer that lives across layers) and `out`'s data is returned.
+    /// With `swiglu_ug` (a rotated-basis model's FFN down projection, K = ff) the input is not x
+    /// but silu(g) * u made on the fly from the up|gate output [T, 2 ff] (hadamard_tile_swiglu).
+    const float* gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
+                      std::vector<float>& out, const float* swiglu_ug = nullptr);
     /// The same dispatch without the transpose: y stays [N, T] in the output buffer and the
     /// mapping is returned, so a caller that is going to slice the output can transpose
     /// straight into its own arrays. Valid until the next GEMM on the same buffer.
-    const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer);
+    const float* gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
+                          const float* swiglu_ug = nullptr);
     /// The tail (final norm, lm_head) for one residual row into logits_host_.
     void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
@@ -500,9 +504,10 @@ private:
     /// sigmoid gate on the host, added into res [T, hid] in place.
     /// The FFN over a block as two GEMMs -- up|gate, then down -- with silu(g) * u on the host
     /// between them, added into `res`. With `gate_w` it is the 35B's shared expert (each real
-    /// token's output scaled by sigmoid(xm . gate_w)); without, Qwen3.5's dense FFN.
+    /// token's output scaled by sigmoid(xm . gate_w)); without, Qwen3.5's dense FFN, whose
+    /// res + FFN goes to `dense_out` when given (the layer's output rows) and res is left as is.
     void ffn_block(int l, const std::vector<Step>& prog, size_t ff, const float* xm, float* res, size_t T,
-                   size_t t_real, const std::vector<float>* gate_w);
+                   size_t t_real, const std::vector<float>* gate_w, float* dense_out = nullptr);
     /// A linear-attention layer of the block route, everything up to the MoE: GEMM qkv|z
     /// -> host DeltaNet (state in place through t_real tokens) -> GEMM out -> residual,
     /// norm, router -> the shared expert. `xres` is THIS block's T rows; the router's

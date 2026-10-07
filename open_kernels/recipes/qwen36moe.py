@@ -37,6 +37,16 @@ ELEM = 4096                  # one act / x-stream element
 BAND_ROWS = 64               # rows per GEMV band (one y element of 64 floats)
 PER_CALL = 2                 # chunks per w element
 CALL_BYTES = PER_CALL * CHUNK
+# t2 (OPEN-QUANT-T2): 32 rows x 256 K of 2-bit ternary codes + a bf16 scale per (row, 128 K),
+# 2176 B, unpadded, streamed ONE per w element. Two per element halved the core program's GEMV
+# trip counts and overflowed the 27B's lx main core (LLVM unrolled the loops; then the second
+# call per element cost 1.3 KB of argument setup). One per element keeps the q4_1 loop shapes,
+# and probe 0a measured 2176 B elements at the same DMA floor. 2176 is not a whole number of
+# 512 B DeltaNet state rows, so the S slices are 4 rows (2048 B) at a 2048 B stride inside the
+# 2176 B elements (`dn_slice_bytes`; xcommon.dn_sequence's overlapping tap). It was padded to
+# 2560 (5 rows) until 2026-10-03: 15% of every layer's weight stream was zeros.
+T2_CHUNK = 2176
+T2_PER_CALL = 1
 MB = 1 << 20
 POOL_BYTES = 512 * MB        # one layer's weight pool (fixed BO size; the recipe checks it fits)
 PTAB_ROW = 1024              # the position record: [i32 pos | i32 nf | ... cos @512 | sin @640]
@@ -120,16 +130,35 @@ def mixed_check(spec: ModelSpec, who: str, roles) -> None:
                            f"Set ffn back to q4_1, or every role to q8")
 
 
+def is_t2(spec: ModelSpec) -> bool:
+    """Every projection at t2 (the only t2 form there is: one GEMV body per main core)."""
+    return any(f == "t2" for f in spec.quant_map.values())
+
+
+def t2_check(spec: ModelSpec, who: str, roles) -> None:
+    if not is_t2(spec):
+        return
+    if any(spec.quant_of(r) != "t2" for r in roles):
+        raise OpRangeError(f"{who}: quant t2 on some projections only -- the main core holds one GEMV "
+                           f"body, so t2 is every projection or none")
+    if not spec.hadamard:
+        raise OpRangeError(f"{who}: quant t2 without spec.hadamard -- the t2 preps are the rotated-basis "
+                           f"ones (OPEN-HADAMARD); no unrotated ternary model has been brought up")
+
+
 def proj_op(spec: ModelSpec, role: str, tensor: str, dst: int, rows: int, cols: int,
             in_dim: int, chunk0: int | None = None) -> dict:
     """The pack op for one weight projection: `std_perm` at q4_1 (unchanged), `q8_perm` at
     q8 (twice the pool elements, 16-row half-tiles). `chunk0` is a SOURCE file-chunk offset
     in either format, so the fused [q | gate] split reads the same way."""
-    op: dict = {"op": "q8_perm" if spec.quant_of(role) == "q8" else "std_perm", "tensor": tensor, "dst": dst}
+    q = spec.quant_of(role)
+    op: dict = {"op": {"q8": "q8_perm", "t2": "t2_perm"}.get(q, "std_perm"), "tensor": tensor, "dst": dst}
     if chunk0 is not None:
         op["chunk0"] = chunk0
     op["nch"] = role_chunks(spec, role, rows, cols)
     op["in_dim"] = in_dim
+    if q == "t2":
+        op["chunk_bytes"] = T2_CHUNK      # the pool stride pools.cpp packs at: the kernels' w element
     return op
 
 
@@ -138,6 +167,8 @@ def require_gemv(spec: ModelSpec, role: str, K: int, rows_per_core: int, pc: int
     exactly what it always asked; a q8 one asks the gemv_q8 template at rs 4."""
     if spec.quant_of(role) == "q8":
         require("gemv_q8", K=K, rs=4, rows_per_core=rows_per_core, per_call=pc)
+    elif spec.quant_of(role) == "t2":
+        require("gemv_t2", K=K, rs=rs, rows_per_core=rows_per_core, per_call=pc)
     else:
         require("gemv_q4", K=K, rs=rs, rows_per_core=rows_per_core, per_call=pc)
 
@@ -384,7 +415,15 @@ DN_SCRATCH_FLOATS = 1280               # `ds` (dnx.h)
 FFN_MS_FLOATS = 2 * BAND_ROWS          # `ms` for the dense tail: u[64] | g[64]
 
 
-def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int:
+def xh_l1(spec: ModelSpec) -> int:
+    """A rotated-basis (Hadamard) model's extra main-core L1: wht.h's fp32 scratch block and
+    the attention output's sign bits (gen_kernels.xh_signs_h). 0 for every other model."""
+    hd = spec.hadamard
+    return 0 if not hd else 1024 * 4 + len(hd["og_signs"]) // 8
+
+
+def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL, extra: int = 0,
+            chunk: int = CHUNK) -> int:
     """A main core's L1 bytes for a given scratch layout.
 
     Every main core carries the same six things and nothing else
@@ -395,7 +434,7 @@ def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int
     shared -- two copies of a budget drift, and the one that drifts is the one no shipped
     model exercises."""
     return (tab + ms_floats * 4 + ds_floats * 4
-            + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
+            + 2 * pc * chunk + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK + extra)
 
 
 def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
@@ -407,8 +446,13 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
         return PER_CALL
     wide = kwide(spec, ffn)
     ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
+    if is_t2(spec):
+        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, T2_PER_CALL, xh_l1(spec), T2_CHUNK) <= L1_BUDGET:
+            return T2_PER_CALL
+        raise OpRangeError(f"qwen35 t2: two {T2_CHUNK} B chunks per w element do not fit a core's L1 "
+                           f"beside a {wide}-wide table")
     for pc in (2, 1):
-        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc) <= L1_BUDGET:
+        if core_l1(tab_bytes(wide), FFN_MS_FLOATS, ds, pc, xh_l1(spec)) <= L1_BUDGET:
             return pc
     raise OpRangeError(f"qwen35: a {wide}-wide activation table does not leave room for the streams "
                        f"in a core's L1 ({tab_bytes(wide)} B of table, {L1_BUDGET} B budget)")
@@ -444,12 +488,12 @@ def down_split(spec: ModelSpec) -> tuple[int, ...]:
                spec.attn_q_width if spec.has_full else 0)
     ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
     ff = spec.intermediate
-    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1) <= L1_BUDGET:
+    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1, xh_l1(spec)) <= L1_BUDGET:
         return ()
     e = ELEM // 4
     k0 = ff // 2 // e * e
     pieces = (k0, ff - k0)
-    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1) > L1_BUDGET
+    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1, xh_l1(spec)) > L1_BUDGET
                                for k in pieces):
         raise OpRangeError(f"qwen35: an FF of {ff} does not fit a main core's L1 in two pieces of "
                            f"whole f32 elements ({pieces}); a three-way split is not implemented")
@@ -534,10 +578,25 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
     )
 
 
+def dn_slice_bytes(C: Common) -> int:
+    """The bytes of S one streamed slice carries: DN_ROWS whole rows. Equal to the w element
+    for every q4_1 / q8 element size (10 KB, 5 KB); smaller for t2's 2176 B element, whose
+    4.25 rows round down to 4. Then the slices sit at this stride in the state buffer and each
+    element also carries the next slice's first CALL_BYTES - this bytes, which nothing reads
+    (xcommon.dn_sequence), and the state buffer ends in `dn_state_tail` bytes so the last
+    head's last element stays inside it."""
+    return C.DN_ROWS * C.DN_DIM * 4
+
+
+def dn_state_tail(C: Common) -> int:
+    return C.CALL_BYTES - dn_slice_bytes(C) if C.DN_DIM else 0
+
+
 def _dn_geometry(spec: ModelSpec, call_bytes: int, n: int):
     """The DeltaNet slicing for a given weight-element size: S rows per element, slices per
     head, the padded row count dnx.h's kPad must be, heads per core. At 10 KB elements and
-    dim 128 this is the 27B's 20 / 7 / 140 / 4; at 5 KB it is 10 / 13 / 130 / 4."""
+    dim 128 this is the 27B's 20 / 7 / 140 / 4; at 5 KB it is 10 / 13 / 130 / 4; at t2's
+    2176 B it is 4 / 32 / 128 / 6 (4.25 rows round down: see dn_slice_bytes)."""
     dim = spec.lin_value_dim if spec.has_linear else 0
     if not dim:
         return 0, 0, 0, 0, 0
@@ -552,13 +611,14 @@ def _common_dense(spec: ModelSpec) -> Common:
     n = LIMITS["n_cols"]
     hid, ff = spec.hidden, spec.intermediate
     pc = per_call(spec, "dense")
-    call_bytes = pc * CHUNK
+    tile = T2_CHUNK if is_t2(spec) else CHUNK
+    call_bytes = pc * tile
     wide = kwide(spec, "dense")
     dn_rows, dn_slices, dn_pad, dn_heads_pc, dn_dim = _dn_geometry(spec, call_bytes, n)
     return Common(
         N_CORES=n, HID=hid, FF=ff, NE=0, NX=0,
-        TILE=CHUNK, PER_CALL=pc, CALL_BYTES=call_bytes,
-        STRIPE=0, HALF=0, PAIR=2 * CHUNK, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
+        TILE=tile, PER_CALL=pc, CALL_BYTES=call_bytes,
+        STRIPE=0, HALF=0, PAIR=2 * tile, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
         BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=0,
         MS_FLOATS=FFN_MS_FLOATS, DS_FLOATS=DN_SCRATCH_FLOATS if dn_dim else 0,
         TAB_BYTES=tab_bytes(wide), H_TAB_OFF=0, KWIDE=wide,
@@ -774,7 +834,7 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         s_head = C.DN_PAD * C.DN_DIM * 4
         s_off = (spec.conv_kernel - 1) * nch * 2
         kv.update(S_ROWS=C.DN_PAD, S_HEAD_BYTES=s_head, STATE_S_OFF=s_off,
-                  STATE_BYTES=s_off + spec.lin_value_heads * s_head)
+                  STATE_BYTES=s_off + spec.lin_value_heads * s_head + dn_state_tail(C))
     else:
         kv.update({k: 0 for k in ("C_LNW", "C_SIDE", "C_NW", "C_POSTLN", "C_RW", "C_SGW", "C_WOUT", "C_BYTES",
                                   "GLUE_SIDE_BYTES", "SIDE_ALPHA", "SIDE_BETA", "SIDE_SMALL", "SIDE_CONV",
@@ -1170,6 +1230,11 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         }
         if attn_block:
             types[FULL]["attn_block"] = attn_block
+    if is_t2(spec):
+        for g in types.values():
+            g["y_tn"] = True            # OPEN-GEMM-T2: the GEMM writes y [T, N] ...
+            g["x_tile_k"] = 128         # ... and streams x in 128-k tiles ...
+            g["x_bfp"] = True           # ... of bfp16 blocks the host makes (GQP_XBFP)
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight
     # columns, so contexts time-share the array, and changing one costs ~2.5 ms):
@@ -1179,6 +1244,9 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     # final.xclbin for the whole GEMM route and one insts.bin per shape.
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
+    # The attention GEMMs read q / k / v / P rows only -- no weight format, no rotation -- so a
+    # rotated-basis or t2 spec shares the plain one's build directories; a q8 one keeps its own.
+    asfx = sfx if spec.q8_roles else ""
     kinds = [k for lt, k in ((LINEAR, "linear"), (FULL, "full")) if lt in types and not dense]
     for kind in kinds:
         name = f"mx_{kind}"
@@ -1209,22 +1277,36 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
             for tag, K, N in (("s", hd, Lw), ("pv", Lw, hd)):
                 name = f"ag_{tag}{Lw}"
                 out["kernels"][name] = {"context": "ag", "insts": f"{name}/insts.bin", "build": name}
-                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{sfx}",
+                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{msfx}{asfx}",
                                        "env": {"AG_M": str(ag_m), "AG_K": str(K), "AG_N": str(N)}}
         # a: Q or P rows [m, K] bf16; b: the tiled K^T or V [K, N] bf16; c: [m, N] f32 -- sized for the widest
         out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2
         out["globals"]["ag_b"] = ATTN_LMAX * hd * 2
         out["globals"]["ag_c"] = ag_m * ATTN_LMAX * 4
+    # OPEN-GEMM-T2: a ternary (t2) model's GEMM runs the bf16 matmul on aie2p's bfp16 datapath,
+    # ~2.6x the native bf16 form on this array. Its weights are exact there (three values per
+    # 128-k scale block, so every 8-k block shares one exponent), and the activations take a
+    # block-of-8 shared-exponent rounding. A q4_1 model's 16-level weights are not exact in bfp16,
+    # so every other spec keeps the native bf16 build, byte for byte.
+    bfp = is_t2(spec)
     for N, K in sorted(shapes):
         name, ctx = f"gemm_n{N}_k{K}", "gemm"
         if ctx not in out["contexts"]:
             out["contexts"][ctx] = f"{name}/final.xclbin"
         out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}
-        out["globals"][f"gemm_x_k{K}"] = K * T * 2
+        out["globals"][f"gemm_x_k{K}"] = K * T * 9 // 8 if bfp else K * T * 2
         out["globals"][f"gemm_y_n{N}"] = N * T * 4
+        env = {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}
+        if bfp:
+            # OPEN-GEMM-T2: and it reads the decode pool's 2-bit chunks (copied per weight, as the
+            # q4_1 route copies its own), 128 k per matmul call, and writes y token-major
+            # -- and (GQP_XBFP) both operands reach the matmul as bfp16 blocks: the activation from
+            # the host at 9 B per 8 values, the weight from the dequant, so the core converts nothing
+            env.update(GQP_BFP16="1", GQP_WFMT="t2", GQP_KT="128", GQP_YT="1", GQP_T2_STRIDE=str(T2_CHUNK),
+                       GQP_XBFP="1")
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
-                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}",
-                               "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}}
+                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2kyx" if bfp else ""),
+                               "env": env}
     return out
 
 

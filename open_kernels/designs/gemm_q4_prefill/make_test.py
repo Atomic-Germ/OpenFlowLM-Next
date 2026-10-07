@@ -46,6 +46,11 @@ def main() -> int:
     ap.add_argument("--tile-n", type=int, default=TILE_N, help="must match GQP_TILE_N the design was built with")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--runs", type=int, default=3, help="`run` lines in the cfg (timing)")
+    ap.add_argument("--k-tile", type=int, default=K_TILE,
+                    help="activation tile k (128 for a GQP_KT=128 build); x gets a _k128 suffix")
+    ap.add_argument("--ternary", action="store_true",
+                    help="Bonsai-style weights: q in {0,1,2}, m = -d, one d per 128 k (the q4_1 "
+                         "re-expression of PQ2_0); files get a _tern suffix")
     a = ap.parse_args()
 
     if a.shape in SHAPES:
@@ -61,11 +66,19 @@ def main() -> int:
         print(f"REFUSE: shape {a.shape} ({n_weight},{k}) does not tile (256-row blocks / 256-K bands)")
         return 1
 
-    tag = f"{a.shape}_t{T}"
+    name = a.shape + ("_tern" if a.ternary else "")
+    tag = f"{name}_t{T}"
     rng = np.random.default_rng(a.seed)
 
     print(f"packing q4_1 weight [{n_weight},{k}] ...")
     blocks = random_q4_1_blocks(n_weight, k, rng)
+    if a.ternary:
+        nb = k // 32
+        d = np.repeat((rng.random((n_weight, nb // 4), np.float32) * 0.02 + 1e-3).astype(np.float16), 4, axis=1)
+        q = rng.integers(0, 3, (n_weight, nb, 32), dtype=np.uint8)
+        blocks[..., 0:2] = d.view(np.uint8).reshape(n_weight, nb, 2)
+        blocks[..., 2:4] = (-d).view(np.uint8).reshape(n_weight, nb, 2)
+        blocks[..., 4:20] = q[..., :16] | (q[..., 16:] << 4)
     w = pack_q4_1_pool(blocks, rs=2)
     nbytes = len(w)
 
@@ -76,26 +89,35 @@ def main() -> int:
     assert len({x.tobytes() for x in xs}) == T, "activations collided -- not actually distinct"
     x_tk = np.stack(xs)  # [T, K] token-major, bf16
 
-    print("computing fp64 reference per token from the SAME pool bytes ...")
-    refs = np.stack([pool_reference(w, xs[t].astype(np.float32), n_weight, k, rs=2) for t in range(T)])  # [T, N_WEIGHT] f32
+    if a.k_tile != K_TILE:                  # only the activation's tiling differs from the k-64 run
+        refs = np.zeros((T, n_weight), np.float32)
+    else:
+        print("computing fp64 reference per token from the SAME pool bytes ...")
+        refs = np.stack([pool_reference(w, xs[t].astype(np.float32), n_weight, k, rs=2) for t in range(T)])  # [T, N_WEIGHT] f32
     # Device Y is [N_WEIGHT, T] row-major (weight-row-major, matching the
     # kernel's own C tap order) -- transpose the per-token stack to match.
     ref_dev = refs.T.astype(np.float32).copy()  # [N_WEIGHT, T]
 
     print("pre-tiling activation X^T[K,T] via tile_b ('k,n' order, s=8,t=8) ...")
     x_kt = np.ascontiguousarray(x_tk.T)  # [K, T] -- what the design's B role logically is
-    x_tiled = tile_b(x_kt.view(np.uint16), K_TILE, tile_n, MAC_S, MAC_T, order="k,n")
+    x_tiled = tile_b(x_kt.view(np.uint16), a.k_tile, tile_n, MAC_S, MAC_T, order="k,n")
     x_tiled_bf16 = x_tiled.view(bfloat16)
 
-    (HERE / f"w_{a.shape}.bin").write_bytes(w.tobytes())  # weight shared across T for a given (shape, seed)
-    (HERE / f"x_{tag}.bin").write_bytes(x_tiled_bf16.tobytes())
+    (HERE / f"w_{name}.bin").write_bytes(w.tobytes())
+    if a.ternary:   # the same weights as the engine's t2 pool chunks (GQP_WFMT=t2 builds read these)
+        from t2_pack import t2_from_q4_1_pool
+        (HERE / f"w_{name}_t2.bin").write_bytes(t2_from_q4_1_pool(w).tobytes())  # weight shared across T for a given (shape, seed)
+    xsfx = "" if a.k_tile == K_TILE else f"_k{a.k_tile}"
+    (HERE / f"x_{tag}{xsfx}.bin").write_bytes(x_tiled_bf16.tobytes())
+    if xsfx:
+        return 0                            # the weights and the reference are the k-64 run's
     (HERE / f"ref_{tag}.bin").write_bytes(ref_dev.tobytes())
 
     build = tag
     cfg = ["device",
            f"xclbin G build_{build}/final.xclbin",
            f"kernelx k G build_{build}/insts.bin",
-           f"buf w {nbytes} w_{a.shape}.bin",
+           f"buf w {nbytes} w_{name}.bin",
            f"buf x {x_tiled_bf16.nbytes} x_{tag}.bin",
            f"buf y {ref_dev.nbytes}"]
     cfg += ["run k w x y"] * a.runs

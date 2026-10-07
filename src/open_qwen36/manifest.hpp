@@ -37,7 +37,7 @@ struct PackOp {
                                              ///< supertile height of the file raster
     uint64_t experts = 0, stripes = 0, stripe_bytes = 0, expert_bytes = 0;   ///< expert_stripes / expert_down
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
-    uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)
+    uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk); t2_perm (the POOL chunk, default T2_CHUNK)
     uint64_t rows = 0, cols = 0, elem = 0;                              ///< transpose
     std::string split;                                                  ///< std_perm of a q8 source: "hi" |
                                                                         ///< "lo", one half of its exact q4_1
@@ -110,6 +110,9 @@ struct AttnBlock {
 struct GemmBlockProgram {
     uint64_t t = 0;               ///< 0 = no route for this layer type
     std::string kind;             ///< dense | linear | full
+    bool y_tn = false;            ///< every GEMM's y is [T, N], token-major, not [N, T] (OPEN-GEMM-T2)
+    uint64_t x_tile_k = 64;       ///< k per activation tile the GEMM streams (128 for OPEN-GEMM-T2)
+    bool x_bfp = false;           ///< the GEMM streams x as bfp16ebs8 tiles, 9 B per 8 values (GQP_XBFP, OPEN-GEMM-T2)
     std::vector<Step> program;
     std::map<std::string, GemmWeight> weights;
     double eps = 0;               ///< RMSNorm eps for the host norms
@@ -169,6 +172,10 @@ struct KernelDesc {
     std::string insts;                       ///< relative path of insts.bin
     std::string patch;                       ///< "" | moeroute2 | attnpos
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
+    /// attnpos: rows per block when the kernel walks the window in whole blocks and the new row in
+    /// a block of its own (attn.h ATTN_BLOCK_WIN); the driver pads the streamed count to match, or
+    /// the fifo deadlocks. 1 = unblocked.
+    uint64_t rb_win = 1;
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -208,6 +215,12 @@ struct Manifest {
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;
+    /// spec.hadamard (OPEN-HADAMARD): 0 for every model but a rotated-basis ternary one; then every
+    /// projection input goes through H/sqrt(block) per block, and the inputs as wide as
+    /// hadamard_og_signs (the attention output) through those signs first. The kernels do it
+    /// themselves; the host does it for the block route's GEMMs (Core::gemm_run).
+    size_t hadamard_block = 0;
+    std::vector<float> hadamard_og_signs;
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
     nlohmann::json hf_config_check;

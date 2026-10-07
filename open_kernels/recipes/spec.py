@@ -31,7 +31,7 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 # MoE / qwen35 recipes pack it with `lmhead_q8`, the dense recipes with `std_perm`), so
 # putting it in the map would move every shipped model's spec_hash for no kernel change.
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
-QUANT_FORMATS = ("q4_1", "q8", "mxfp4")
+QUANT_FORMATS = ("q4_1", "q8", "mxfp4", "t2")   # t2: 2-bit ternary chunks (OPEN-QUANT-T2), repacked from exact q4_1
 DEFAULT_QUANT = "q4_1"
 CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
 # 2560 is deliberately NOT in that table: GPT-OSS ships both its q4_1 projections and its
@@ -85,6 +85,14 @@ class ModelSpec:
     # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
     quant: str | dict = DEFAULT_QUANT
     extra: dict = field(default_factory=dict)   # informational (model name, source)
+    # Activation-side Walsh-Hadamard (PrismML's rotated-basis ternary models, Ternary Bonsai 2):
+    # {"block": 1024, "og_signs": [+-1 x attention-output width]}. Every projection input goes
+    # through H/sqrt(block) per block before its GEMV; the converter folded every other sign
+    # into weights (OPEN-HADAMARD). None for every other model, and then absent from to_dict(),
+    # so no shipped spec_hash moves. "lm_head": "rotated" when the container's head is the
+    # rotated ternary weight itself (its input goes through the transform too; the recipe runs
+    # it as t2) -- absent for a container whose head was un-rotated to q8 at conversion.
+    hadamard: dict | None = None
 
     # ---- derived
     @property
@@ -156,9 +164,15 @@ class ModelSpec:
         """A short stable hash of the quant map; "" when nothing is at q8. Build directory
         names carry it so a q8 variant is a different kernel set without renaming the
         directories every shipped model already builds into."""
-        if not self.q8_roles:
-            return ""
         q = self.canonical_quant()
+        if self.hadamard:
+            # a rotated-basis model is a different kernel set at either weight format
+            # (OPEN-HADAMARD): its preps carry the transform and the og sign table
+            key = {"quant": q, "hadamard": self.hadamard["block"],
+                   "og": hashlib.sha256(bytes(v < 0 for v in self.hadamard["og_signs"])).hexdigest()[:16]}
+            return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:8]
+        if q == DEFAULT_QUANT:
+            return ""
         return hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:8]
 
     def rope_inv_freq(self, local: bool = False, ctx: int | None = None) -> list[float]:
@@ -221,6 +235,8 @@ class ModelSpec:
         d = asdict(self)
         d["layer_types"] = list(self.layer_types)
         d["quant"] = self.canonical_quant()
+        if d.get("hadamard") is None:
+            d.pop("hadamard", None)
         return d
 
     def to_json(self) -> str:
@@ -445,10 +461,33 @@ def _qwen35_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     d.update(family="qwen35", intermediate=_need(tc, "intermediate_size"),
              activation="silu" if tc.get("hidden_act", "silu") == "silu" else tc["hidden_act"])
     d["extra"] = {"model_type": cfg.get("model_type", tc.get("model_type")), "source": "hf_config"}
+    ph = cfg.get("prism_hadamard")
+    if ph is not None:
+        d["hadamard"] = _prism_hadamard(ph, spec_width=d["lin_value_heads"] * d["lin_value_dim"]
+                                        or d["num_heads"] * d["head_dim"])
     spec = ModelSpec.from_dict(d)
     if spec.activation != "silu":
         raise SpecError(f"qwen3_5: hidden_act {spec.activation!r} is not silu")
     return spec
+
+
+def _prism_hadamard(ph: Mapping[str, Any], spec_width: int) -> dict:
+    """The container's `prism_hadamard` block (q4nx-build's Bonsai path) -> ModelSpec.hadamard.
+    Only the 1024 block the kernels implement, and an og sign vector as wide as the attention
+    output, are accepted -- anything else is a different model than the one this was built for."""
+    block = int(ph.get("block_size", 0))
+    if block != 1024:
+        raise SpecError(f"prism_hadamard.block_size {block}: only 1024 is implemented")
+    signs = [int(v) for v in ph.get("og_signs", [])]
+    if len(signs) != spec_width or any(v not in (1, -1) for v in signs):
+        raise SpecError(f"prism_hadamard.og_signs: want {spec_width} values of +-1, got {len(signs)}")
+    hd = {"block": block, "og_signs": signs}
+    head = ph.get("lm_head", "unrotated")
+    if head == "rotated":
+        hd["lm_head"] = "rotated"            # OPEN-QUANT-T2: the head runs as t2 (lm_head_t2)
+    elif head != "unrotated":
+        raise SpecError(f"prism_hadamard.lm_head {head!r}: 'rotated' or 'unrotated'")
+    return hd
 
 
 def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:

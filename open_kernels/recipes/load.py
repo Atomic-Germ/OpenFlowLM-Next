@@ -122,6 +122,13 @@ def spec_from_model_dir(model_dir: Path) -> ModelSpec:
     rv = tokenizer_vocab(model_dir / "tokenizer.json")
     spec = ModelSpec.from_hf_config(cfg, real_vocab=rv)
     spec = dataclasses.replace(spec, quant=quant_for(spec, Path(model_dir)))
+    if spec.hadamard and os.environ.get("OFLM_TERNARY_FORMAT", "t2") == "t2":
+        # OPEN-QUANT-T2: a rotated-basis ternary container (exact q4_1 on disk) runs its
+        # projections from 2-bit chunks the engine packs at load. OFLM_TERNARY_FORMAT=q4_1
+        # keeps the q4_1 kernels (the same weights, 2.35x the bytes) for comparison.
+        if spec.quant != "q4_1":
+            raise ValueError(f"{model_dir}: a ternary container whose projections are not all q4_1 ({spec.quant})")
+        spec = dataclasses.replace(spec, quant="t2")
     spec.extra["model"] = Path(model_dir).name
     return spec
 

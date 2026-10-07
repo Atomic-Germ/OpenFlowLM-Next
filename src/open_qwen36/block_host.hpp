@@ -32,9 +32,33 @@ struct TransposePart {
 /// y [N, T] transposed straight into the ranges the caller is going to read it as, so a
 /// fused projection needs no [T, N] copy in between. The ranges may not overlap.
 void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_t n_parts);
+/// The same ranges out of a token-major y [T, N] (a GQP_YT GEMM, OPEN-GEMM-T2): row copies.
+void split_rows(const float* y, size_t T, size_t N, const TransposePart* parts, size_t n_parts);
 /// x [T, K] fp32 -> the GEMM's tiled bf16 activation layout ([K, T] "k,n" order, 64 x 32
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
-void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
+void tile_x(const float* x, size_t T, size_t K, uint16_t* out, size_t tk = 64);
+/// The activation side of a rotated-basis ternary model (OPEN-HADAMARD, Ternary Bonsai 2): every
+/// `block`-wide run of each row of x [T, K] becomes H(signs * run) / sqrt(block) in place, H the
+/// Sylvester Walsh-Hadamard matrix. `signs` (K values of +-1) may be null. The NPU preps do the
+/// same per 4 KB element (open_kernels/designs/gemv_q4/wht.h); this is the block route's copy.
+void hadamard_rows(float* x, size_t T, size_t K, size_t block, const float* signs);
+/// hadamard_rows on a copy of x followed by tile_x, in one pass over x and leaving x as it was:
+/// bit-identical to the two, without the [T, K] copy.
+void hadamard_tile_x(const float* x, size_t T, size_t K, size_t block, const float* signs, uint16_t* out,
+                     size_t tk = 64);
+/// The FFN's down projection input made on the fly: hadamard_tile_x of h [T, ff], h = silu(g) * u
+/// with u = ug[t * ld + j] and g = ug[t * ld + ff + j] (the up|gate GEMM's output, read in place),
+/// evaluated exactly as Core::ffn_block's own loop does, so bit-identical to that loop followed
+/// by hadamard_tile_x, without writing h.
+void hadamard_tile_swiglu(const float* ug, size_t T, size_t ff, size_t ld, size_t block, uint16_t* out, size_t tk);
+/// The same two, writing the GEMM's bfp16ebs8 activation tiles (OPEN-GEMM-T2, a GQP_XBFP build)
+/// instead of bf16 ones: per 128-k x 32-token tile, 4608 bytes of 72-byte block vectors ordered
+/// [token block pair][k block][token block % 2], each eight tokens x eight k, one block (an
+/// exponent byte, eight int8 mantissas) per token. Every value is the bf16 the bf16 tile would
+/// hold, converted as the bfp16 GEMM's core converts its bf16 operand, so the GEMM's arithmetic
+/// is unchanged. out holds K * T * 9 / 8 bytes.
+void hadamard_tile_x_bfp(const float* x, size_t T, size_t K, size_t block, const float* signs, uint8_t* out);
+void hadamard_tile_swiglu_bfp(const float* ug, size_t T, size_t ff, size_t ld, size_t block, uint8_t* out);
 
 struct DeltaGeom {
     size_t T = 0, t_real = 0, hid = 0;
@@ -42,13 +66,16 @@ struct DeltaGeom {
     size_t lanes = 0;       ///< columns of the packed alpha / beta projection (the value heads, padded)
     size_t s_rows = 0;      ///< rows of one head's S in the state buffer (head_dim real, the rest zero)
     double eps = 1e-6;      ///< the gated norm's eps
+    /// Row strides of qkv and z in floats; 0 means packed (2*key_w + vw and vw). A token-major
+    /// GEMM output is read in place: qkv = y, z = y + nch, both strides nch + vw.
+    size_t qkv_ld = 0, z_ld = 0;
 };
 
 /// The linear-attention layer's middle over a block. qkv [T, 2*key_w + vw] and z [T, vw]
-/// are the fused projection's outputs (pre-activation), xn [T, hid] the normed layer
-/// input; convw [taps, nch], Wa / Wb [hid, lanes], A / dtb [value_heads], nw [head_dim].
-/// conv_state [taps-1, nch] (bf16) and S [value_heads, s_rows, head_dim] (f32) are the
-/// layer's state, updated in place through the first t_real tokens. og [T, vw] out
+/// are the fused projection's outputs (pre-activation; rows qkv_ld / z_ld apart), xn [T, hid]
+/// the normed layer input; convw [taps, nch], Wa / Wb [hid, lanes], A / dtb [value_heads],
+/// nw [head_dim]. conv_state [taps-1, nch] (bf16) and S [value_heads, s_rows, head_dim] (f32)
+/// are the layer's state, updated in place through the first t_real tokens. og [T, vw] out
 /// (zero past t_real). phase_ms, if given, gets the two halves' wall time: the
 /// per-token one then the delta rule.
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,
@@ -59,6 +86,9 @@ struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;
     size_t pos0 = 0;        ///< the block's first position (and KV row)
     double eps = 1e-6;      ///< the q / k norms' eps
+    /// Row strides of the q, k, v and gate inputs in floats; 0 means packed (nh*hd, kvh*hd,
+    /// kvh*hd, nh*hd). A token-major GEMM output is read in place, every stride its width.
+    size_t q_ld = 0, k_ld = 0, v_ld = 0, g_ld = 0;
 };
 
 /// The full-attention layer's middle over a block. q / gate [T, nh*hd], k / v [T, kvh*hd]
@@ -77,6 +107,16 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
 /// roped and written to the cache rows [pos0, pos0 + t_real) in bf16. Rows of Q past t_real are zero.
 void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
                     const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q);
+
+/// attention_npu's per-group host steps (OPEN-PREFILL-ATTN), threaded. Q [T, nh*hd] (packed):
+/// the group's grp query heads as bf16 rows qb [grp*T, hd], row hl*T + t.
+void attn_group_queries(const float* Q, size_t T, size_t nh, size_t kvh, size_t hd, size_t gh, uint16_t* qb);
+/// The group's epilogue: og row t, head gh*grp + hl = acc[hl*T + t] / lsum[hl*T + t] * sigmoid(gate),
+/// for t < t_real; gate rows g_ld apart (0 = packed nh*hd), og packed [T, nh*hd].
+void attn_group_out(const float* acc, const float* lsum, const float* gate, size_t T, size_t t_real, size_t nh,
+                    size_t kvh, size_t hd, size_t gh, size_t g_ld, float* og);
+/// acc[i] += c[i] over n floats, threaded.
+void add_into(float* acc, const float* c, size_t n);
 
 /// rows [n, k] bf16, `stride` elements apart (the cache's K or V half), as the GEMM's tiled B for
 /// B = rows^T [k, n] -- tile_x's layout from a bf16 source. Rows at or past n_real read as zero;

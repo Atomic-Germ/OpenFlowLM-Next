@@ -84,6 +84,9 @@ OS = ["-Os"]                          # main-core kernels: size over speed (the 
 # compiled the null body is an ODR violation the linker resolves either way.
 if os.environ.get("LX_NULL_GEMV") == "1":
     OS = OS + ["-DGEMV_NULL"]
+# timing-only (output garbage): LX_STAMP=1 builds the dense main core with an event log of
+# its timer (gen_kernels.py STAMP); the down GEMV's second piece carries it out.
+STAMP = os.environ.get("LX_STAMP") == "1"
 
 # scratch layouts (floats) -- gen_kernels.py writes the same offsets into the kernel TUs
 MS_FLOATS = C.MS_FLOATS
@@ -142,6 +145,12 @@ NEED_Q4_GMS = "ffn" not in Q8              # the dense tail's up | gate bands
 # GEMV TUs are compiled -Oz. An all-q4_1 or an all-q8 spec sees exactly the entries, the
 # flags and the call sequence it saw before: the DNX_PAD lesson -- what is not identical moves.
 MIXED = KIND == "dense" and bool(Q8) and NEED_Q4_GY and NEED_Q4_GMS
+# OPEN-QUANT-T2: every projection at t2 -- the `gy` / `gms` slots hold the t2 twins (same
+# signatures; recipes/qwen36moe.py sets TILE / PER_CALL so the band helpers above already
+# count t2 chunks). Nothing else on the core changes.
+T2 = any(f == "t2" for f in R.spec.quant_map.values())
+GY_SYM, GMS_SYM = ("gemv_t2_gy", "gemv_t2_gms") if T2 else ("gemv_q4_gy", "gemv_q4_gms")
+T2_SUB = 1 << 16    # the t2 entries take one chunk per call: per_band + T2_SUB is the element's second
 OZ = ["-Oz"] + OS[1:]                      # OS at -Oz, keeping -DGEMV_NULL (the ODR note above)
 GEMV_OS = OZ if MIXED else OS              # size over speed, harder, on the crowded core only
 
@@ -221,15 +230,19 @@ def kernels(inc, t):
             k["gyms"] = ef("gemv_q4_gyms", [e, tab, y, ms, i32, i32, i32], GEMV_OS)
         # A projection band into its y element (the same entry as the MoE path).
         if NEED_Q4_GY and not MIXED:
-            k["gy"] = ef("gemv_q4_gy", [e, tab, y, i32, i32, i32])
+            k["gy"] = ef(GY_SYM, [e, tab, y, i32, i32, i32])
         # The dense FFN tail (designs/dense/dx.py's kernels, generated into this design):
         # an up | gate band into the silu scratch, act(gate) * up, and the two element-indexed
         # activation preps (the core loops over 4 KB elements; the kernel derives the blocks).
         if NEED_Q4_GMS and not MIXED:
-            k["gms"] = ef("gemv_q4_gms", [e, tab, ms, i32, i32, i32])
-        k["act"] = ef("dense_act", [ms, y])
-        k["prep"] = ef("dense_prep", [x, tab, i32, i32])
-        k["prepf"] = ef("dense_prep_f32", [x, tab, i32, i32])
+            k["gms"] = ef(GMS_SYM, [e, tab, ms, i32, i32, i32])
+        # t2: the main core's one vecmath user, with vexpN / vrecipN as loops (vecmath.h
+        # VECMATH_COMPACT: same operations, ~1 KB less program; dense_act runs 68 times a layer)
+        k["act"] = ef("dense_act", [ms, y], OS + ["-DVECMATH_COMPACT"] if T2 else None)
+        # t2: the preps (Hadamard, og signs, per-128 table) at -Oz -- they run once per x
+        # element, and the 27B's lx main core has no program memory to spare (OPEN-QUANT-T2)
+        k["prep"] = ef("dense_prep", [x, tab, i32, i32], OZ if T2 else None)
+        k["prepf"] = ef("dense_prep_f32", [x, tab, i32, i32], OZ if T2 else None)
         k["vcopy"] = dnf("dnx_vcopy", [e, ds])
         k["p1"] = dnf("dnx_pass1", [e, ds, i32])
         k["delta"] = dnf("dnx_delta", [ds])
@@ -306,6 +319,8 @@ def gemv_bands(win, yout, tab, gy, nbands, ngroups, per_band, rs, ms=None):
             we = win.acquire(1)
             if ms is None:
                 gy(we, tab, ye, g, per_band, rs)
+                if T2 and PER_CALL == 2:          # two t2 chunks per element: one call each
+                    gy(we, tab, ye, g, per_band + T2_SUB, rs)
             else:
                 gy(we, tab, ye, ms, g, per_band, -1)
             win.release(1)
@@ -360,13 +375,16 @@ def prep_stream(xin, prep, tab, kk, n_elems):
         xin.release(1)
 
 
-def ffn_body(win, xin, yout, B, K):
+def ffn_body(win, xin, yout, B, K, rt=None):
     """up | gate per 64-row band into `ms`, act(gate) * up out through y, then the down
-    GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements)."""
+    GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements).
+    `rt` (dux.py RT_COUNTS) gives the short loops' counts as run-time values -- nx (xm elements),
+    ng (w elements per K = HID band), np (down pieces) and the per-piece buffers hk / hn / hg (K,
+    h elements, w elements per band) -- so the same loops run with counts LLVM cannot unroll."""
     tab, ms = B["tab"], B["ms"]
     held = FFN.XM_ELEMS <= X_DEPTH             # else streamed: the bands read only the table
     if not held:
-        prep_stream(xin, K["prep"], tab, HID, FFN.XM_ELEMS)
+        prep_stream(xin, K["prep"], tab, HID, FFN.XM_ELEMS if rt is None else rt["nx"])
     elif FFN.XM_ELEMS == 1:
         me = xin.acquire(FFN.XM_ELEMS)
         K["prep"](me, tab, HID, 0)
@@ -380,6 +398,9 @@ def ffn_body(win, xin, yout, B, K):
         gms, pb_h, ng_h = K["gyms"], per_band(HID), n_groups(HID)
     else:
         gms, pb_h, ng_h = K["gms"], per_band(HID), n_groups(HID)
+    if rt is not None:
+        assert not MIXED and "ffn" not in Q8 and pb_h == ng_h, (pb_h, ng_h)
+        pb_h = ng_h = rt["ng"]
 
     def band(we, ye, g, dst):
         """One up | gate band into ms + dst. The folded entry takes the y pointer too, so
@@ -389,6 +410,8 @@ def ffn_body(win, xin, yout, B, K):
             gms(we, tab, ye, ms, g, pb_h, dst)
         else:
             gms(we, tab, ms, g, pb_h, dst)
+            if T2 and PER_CALL == 2:
+                gms(we, tab, ms, g, pb_h + T2_SUB, dst)
 
     for _ in range_(FFN.UP_PC):
         ye = yout.acquire(1) if MIXED else None
@@ -406,6 +429,17 @@ def ffn_body(win, xin, yout, B, K):
         yout.release(1)
     if held:
         xin.release(FFN.XM_ELEMS)
+    if DOWN_SPLIT and rt is not None:
+        # The pieces below as ONE run-time loop over a per-piece table (dux.py RT_COUNTS): one
+        # call site for every h element and one GEMV body for both pieces.
+        assert "ffn" not in Q8 and not MIXED
+        for p in range_(rt["np"]):
+            for i in range_(rt["hn"][p]):
+                he = xin.acquire(1)
+                K["prepf"](he, tab, rt["hk"][p], i)
+                xin.release(1)
+            gemv_bands(win, yout, tab, K["gy"], FFN.DOWN_PC, rt["hg"][p], rt["hg"][p], 2)
+        return
     if DOWN_SPLIT:
         # The down GEMV in K pieces (recipes/qwen36moe.py down_split): each piece's h elements
         # into the table -- which only ever holds one piece -- then that piece's bands, an
@@ -435,11 +469,15 @@ def piece_tap(off: int, band_stride: int, n: int, nbands: int) -> TensorAccessPa
 
 
 def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss,
-                 A_BYTES, A_XM, A_H, A_OUT2, POOL_UP, POOL_GATE, POOL_DOWN_FFN, A_OUT2B=0):
+                 A_BYTES, A_XM, A_H, A_OUT2, POOL_UP, POOL_GATE, POOL_DOWN_FFN, A_OUT2B=0, hprep=None):
     """Host side of ffn_body. The h drains are issued before the per-band weight fills so a
     core is never blocked on a full y fifo while the host is still pacing its w stream.
     With the down GEMV split, each piece is its h elements, its strided slice of every band
-    and its own output region (A_OUT2, then A_OUT2B)."""
+    and its own output region (A_OUT2, then A_OUT2B).
+    hprep = (hpi, hpo, A_HT) (dux.py HPREP): the second piece's h goes to the prep core right
+    behind the first piece's x fill, comes back through H/32 as bf16 at act[A_HT], and the cores'
+    x fill for that piece reads it there. The wait for it comes after the first piece's transfers
+    are issued, so it blocks nothing the first piece needs."""
     bb_h, bb_f, yb = role_band_bytes("ffn", HID), role_band_bytes("ffn", FF), BAND_ROWS * 4
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, FFN.XM_ELEMS * ELEM))
     for c in range(N_CORES):
@@ -452,8 +490,19 @@ def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss
     if DOWN_SPLIT:
         assert len(DOWN_SPLIT) == 2 and A_OUT2B, (DOWN_SPLIT, A_OUT2B)
         k0 = 0
-        for k, dst in zip(DOWN_SPLIT, (A_OUT2, A_OUT2B)):
-            pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H + k0 * 4, k * 4))
+        for p, (k, dst) in enumerate(zip(DOWN_SPLIT, (A_OUT2, A_OUT2B))):
+            if p == 1 and hprep is not None:
+                ph.finish()                                   # piece 1 through H/32, bf16, is in DDR
+                pipe_x.fill(x_prod, a_act, bt(A_BYTES, a_ht, -(-k * 2 // ELEM) * ELEM))
+            else:
+                pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_H + k0 * 4, k * 4))
+            if p == 0 and hprep is not None:
+                # behind piece 0's x fill (its h preps start at once) and before its weights (not
+                # needed for the ~20 us those preps take): piece 1's h to the prep core and back
+                hpi, hpo, a_ht = hprep
+                ph = Pipeline(3)
+                ph.fill(hpi, a_act, bt(A_BYTES, A_H + k * 4, DOWN_SPLIT[1] * 4))
+                ph.drain(hpo, a_act, bt(A_BYTES, a_ht, DOWN_SPLIT[1] * 2))
             for c in range(N_CORES):
                 pipe_w.fill(w_prods[c], a_pool, piece_tap(POOL_DOWN_FFN + c * FFN.DOWN_PC * bb_f + role_band_bytes("ffn", k0),
                                                           bb_f, role_band_bytes("ffn", k), FFN.DOWN_PC))
@@ -543,23 +592,26 @@ def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prod
 
 # ---- DeltaNet on the main cores (dnx.h): S slices ride the w stream, S' rows leave through y
 DN_ROWS, DN_SLICES, DN_HEADS_PC = C.DN_ROWS, C.DN_SLICES, C.DN_HEADS_PC
+DN_SLICE = DN_ROWS * C.DN_DIM * 4     # S bytes per slice: CALL_BYTES, except t2 (recipes dn_slice_bytes)
 
 
-def dn_body(win, yout, B, K):
+def dn_body(win, yout, B, K, nheads=DN_HEADS_PC, nslices=DN_SLICES):
     """This core's heads: the record (copied out of its element: release() frees the OLDEST held
     element), DN_SLICES slices (pass 1), delta, DN_SLICES slices x 2*DN_ROWS half rows (pass 2, into
-    y elements), o."""
+    y elements), o. `nheads` and `nslices` may be run-time values (dux.py's RTP words: 0 heads in
+    a full layer; a run-time slice count also stops LLVM unrolling pass 1 into DN_SLICES call
+    sites, which on the 27B's 26 slices cost the main core over 1 KB of program memory)."""
     ds = B["ds"]
-    for _ in range_(DN_HEADS_PC):
+    for _ in range_(nheads):
         re_ = win.acquire(1)
         K["vcopy"](re_, ds)
         win.release(1)
-        for blk in range_(DN_SLICES):
+        for blk in range_(nslices):
             se = win.acquire(1)
             K["p1"](se, ds, blk)
             win.release(1)
         K["delta"](ds)
-        for blk in range_(DN_SLICES):
+        for blk in range_(nslices):
             se = win.acquire(1)
             for j in range_(2 * DN_ROWS):
                 ye = yout.acquire(1)
@@ -587,14 +639,25 @@ def dn_sequence(pipe_w, pipe_y, a_state, a_act, w_prods, y_conss, A_BYTES, A_VEC
     been issued, so the cores run their heads side by side and the waits resolve together.
     """
     rec, ohb = R.linear.RECORD_BYTES, R.linear.O_HEAD_BYTES
+
+    def s_tap(off: int) -> TensorAccessPattern:
+        # one head's S as DN_SLICES w elements. Where a slice is the whole element (q4_1, q8)
+        # this is the plain linear fill it always was. t2's 2176 B element carries 4 rows
+        # (2048 B), so the slices are read at that stride, each element running 128 B into the
+        # next slice (never read; the state buffer has a tail for the last head's last one).
+        if DN_SLICE == CALL_BYTES:
+            return bt(STATE_BYTES, off, S_HEAD_BYTES)
+        assert off + (DN_SLICES - 1) * DN_SLICE + CALL_BYTES <= STATE_BYTES, (off, STATE_BYTES)
+        return TensorAccessPattern((1, STATE_BYTES), off, [1, 1, DN_SLICES, CALL_BYTES], [0, 0, DN_SLICE, 1])
+
     for h in range(DN_HEADS_PC):
         for c in range(N_CORES):
             hd = c * DN_HEADS_PC + h
             pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_VEC + hd * rec, CALL_BYTES))
-            pipe_w.fill(w_prods[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
+            pipe_w.fill(w_prods[c], a_state, s_tap(STATE_S_OFF + hd * S_HEAD_BYTES))
             pipe_y.drain(y_conss[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
             pipe_y.drain(y_conss[c], a_act, bt(A_BYTES, A_O + hd * ohb, ohb))
-            pipe_w.fill(w_prods[c], a_state, bt(STATE_BYTES, STATE_S_OFF + hd * S_HEAD_BYTES, S_HEAD_BYTES))
+            pipe_w.fill(w_prods[c], a_state, s_tap(STATE_S_OFF + hd * S_HEAD_BYTES))
 
 
 # ---- the norm + router helper core (both layer types): ln_nr -> ln(+residual) -> router
