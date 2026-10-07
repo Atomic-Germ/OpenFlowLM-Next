@@ -633,7 +633,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             "buffers": {"consts": L.CD_BYTES, "act": L.AD_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": kn, "args": args}],
         }
-    r = gemm_route(spec, max_ctx)
+    # The block-prefill GEMM route (gemm_q4_prefill / attn_block) reads the pool's 5120 B
+    # bf16-scale chunks by a hardcoded law; the GGUF-direct pool is 6144 B f32-scale, so a
+    # f32-scale kernel set must NOT advertise it -- the engine then prefills through step()
+    # (decode-as-prefill), which is exact. BUILDING THE f32 TWINS of those GEMMs is the way
+    # to bring the route back (its GQD_CHUNK_BYTES / scale loads need the SCALES_F32 variant).
+    r = None if f32 else gemm_route(spec, max_ctx)
     if r:
         for k in ("contexts", "kernels", "globals"):
             out[k].update(r[k])

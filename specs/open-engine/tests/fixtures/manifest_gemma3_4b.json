@@ -1468,9 +1468,7 @@
   "contexts": {
    "dx": "dx_f32/final.xclbin",
    "ln": "ln/final.xclbin",
-   "lm": "lm_head_q4_f32/final.xclbin",
-   "dxa": "dx_attn/final.xclbin",
-   "gemm": "gemm_n2560_k2048/final.xclbin"
+   "lm": "lm_head_q4_f32/final.xclbin"
   },
   "kernels": {
    "ln": {
@@ -1496,40 +1494,6 @@
     "patch": "attnpos",
     "build": "dx_f32",
     "window": 1024
-   },
-   "dxB": {
-    "context": "dxa",
-    "insts": "dx_attn/insts.bin",
-    "patch": "attnpos",
-    "build": "dx_attn",
-    "window": 0
-   },
-   "dxB_local": {
-    "context": "dxa",
-    "insts": "dx_attn/insts.bin",
-    "patch": "attnpos",
-    "build": "dx_attn",
-    "window": 1024
-   },
-   "gemm_n2560_k2048": {
-    "context": "gemm",
-    "insts": "gemm_n2560_k2048/insts.bin",
-    "build": "gemm_n2560_k2048"
-   },
-   "gemm_n2560_k10240": {
-    "context": "gemm",
-    "insts": "gemm_n2560_k10240/insts.bin",
-    "build": "gemm_n2560_k10240"
-   },
-   "gemm_n4096_k2560": {
-    "context": "gemm",
-    "insts": "gemm_n4096_k2560/insts.bin",
-    "build": "gemm_n4096_k2560"
-   },
-   "gemm_n10240_k2560": {
-    "context": "gemm",
-    "insts": "gemm_n10240_k2560/insts.bin",
-    "build": "gemm_n10240_k2560"
    }
   },
   "layer_types": {
@@ -1556,110 +1520,6 @@
       ]
      }
     ],
-    "gemm_block": {
-     "kind": "dense",
-     "t": 256,
-     "eps": 1e-06,
-     "program": [
-      {
-       "op": "run",
-       "kernel": "gemm_n4096_k2560",
-       "args": [
-        "gqkv3_w",
-        "gemm_x_k2560",
-        "gemm_y_n4096"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n2560_k2048",
-       "args": [
-        "go_w",
-        "gemm_x_k2048",
-        "gemm_y_n2560"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n10240_k2560",
-       "args": [
-        "ggate_w",
-        "gemm_x_k2560",
-        "gemm_y_n10240"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n10240_k2560",
-       "args": [
-        "gup_w",
-        "gemm_x_k2560",
-        "gemm_y_n10240"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n2560_k10240",
-       "args": [
-        "gdown_w",
-        "gemm_x_k10240",
-        "gemm_y_n2560"
-       ]
-      }
-     ],
-     "weights": {
-      "gqkv3_w": {
-       "from": "pool",
-       "ops": [
-        0,
-        1,
-        2
-       ]
-      },
-      "go_w": {
-       "from": "pool",
-       "ops": [
-        3
-       ]
-      },
-      "ggate_w": {
-       "from": "pool",
-       "ops": [
-        5
-       ]
-      },
-      "gup_w": {
-       "from": "pool",
-       "ops": [
-        4
-       ]
-      },
-      "gdown_w": {
-       "from": "pool",
-       "ops": [
-        6
-       ]
-      }
-     },
-     "qw": 2048,
-     "kvw": 1024,
-     "ff": 10240,
-     "ad_q": 8192,
-     "ad_kvn": 16384,
-     "ad_og": 24576,
-     "attn_kernel": "dxB",
-     "attn_args": [
-      "pool",
-      "xres",
-      "consts",
-      "state",
-      "act",
-      "ptab"
-     ],
-     "sandwich": true,
-     "act": "gelu_tanh",
-     "norm_groups": 1
-    },
     "pack": {
      "pool": [
       {
@@ -1775,110 +1635,6 @@
       ]
      }
     ],
-    "gemm_block": {
-     "kind": "dense",
-     "t": 256,
-     "eps": 1e-06,
-     "program": [
-      {
-       "op": "run",
-       "kernel": "gemm_n4096_k2560",
-       "args": [
-        "gqkv3_w",
-        "gemm_x_k2560",
-        "gemm_y_n4096"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n2560_k2048",
-       "args": [
-        "go_w",
-        "gemm_x_k2048",
-        "gemm_y_n2560"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n10240_k2560",
-       "args": [
-        "ggate_w",
-        "gemm_x_k2560",
-        "gemm_y_n10240"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n10240_k2560",
-       "args": [
-        "gup_w",
-        "gemm_x_k2560",
-        "gemm_y_n10240"
-       ]
-      },
-      {
-       "op": "run",
-       "kernel": "gemm_n2560_k10240",
-       "args": [
-        "gdown_w",
-        "gemm_x_k10240",
-        "gemm_y_n2560"
-       ]
-      }
-     ],
-     "weights": {
-      "gqkv3_w": {
-       "from": "pool",
-       "ops": [
-        0,
-        1,
-        2
-       ]
-      },
-      "go_w": {
-       "from": "pool",
-       "ops": [
-        3
-       ]
-      },
-      "ggate_w": {
-       "from": "pool",
-       "ops": [
-        5
-       ]
-      },
-      "gup_w": {
-       "from": "pool",
-       "ops": [
-        4
-       ]
-      },
-      "gdown_w": {
-       "from": "pool",
-       "ops": [
-        6
-       ]
-      }
-     },
-     "qw": 2048,
-     "kvw": 1024,
-     "ff": 10240,
-     "ad_q": 8192,
-     "ad_kvn": 16384,
-     "ad_og": 24576,
-     "attn_kernel": "dxB_local",
-     "attn_args": [
-      "pool",
-      "xres",
-      "consts",
-      "state",
-      "act",
-      "ptab_local"
-     ],
-     "sandwich": true,
-     "act": "gelu_tanh",
-     "norm_groups": 1
-    },
     "pack": {
      "pool": [
       {
@@ -2269,14 +2025,7 @@
      0.00010746078283213175
     ],
     "window": 1024
-   },
-   "gact": 34603008,
-   "gemm_x_k2048": 1048576,
-   "gemm_y_n2560": 2621440,
-   "gemm_x_k10240": 5242880,
-   "gemm_x_k2560": 1310720,
-   "gemm_y_n4096": 4194304,
-   "gemm_y_n10240": 10485760
+   }
   },
   "builds": {
    "dx": {
