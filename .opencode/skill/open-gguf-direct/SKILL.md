@@ -87,9 +87,28 @@ was adapted to that, not the reverse:
     all 36 layers resident, and answer
     `<think>\nOkay, the question is asking for the capital of` -- byte-identical
     token streams from the two quants.
-  - `Qwen3-8B.Q8_0.gguf` and `Qwen3-8B.Q4_K_M.gguf` (requant paths) load too.
-- The model dir needs only `model.gguf` (no config.json -- derived from KV,
-  no tokenizer for the id-level CLI).
+  - `Qwen3-8B.Q8_0.gguf` and `Qwen3-8B.Q4_K_M.gguf` (requant paths) load and
+    answer ` thinking\nOkay, the user is asking` -- identical to each other.
+- **`oflm run`** (the app, `model_backend` + tokenizer + chat template) loads
+  the same GGUF through the open kernels and generates the same coherent
+  reasoning. Set `OFLM_MODEL_PATH` / `OFLM_OPEN_KERNELS_DIR` /
+  `OFLM_CONFIG_PATH` / `OFLM_MODELINFO_PATH`; the model dir needs
+  `config.json` + `model.gguf` + `tokenizer.json` + `tokenizer_config.json`
+  (use `extract_tokenizer_from_gguf` for the last two).
+- The id-level CLI needs only `model.gguf` (config derived from KV, no
+  tokenizer).
+
+### Q6_K dequant bug fixed (2026-10-07)
+
+The Q6_K `embed_row` advanced `qh` 16 B per 128-value half instead of 32,
+skewing every Q6_K tensor (typically a Q4_K_M GGUF's `output.weight`). The
+exact packs and Q8_0 worked but Q4_K_M gave word salad. Root-caused with a
+`dq_dump` harness (dumps one dequantized row to compare against the gguf
+Python reference; `gguf_pack_test` had no K-quant coverage). Fixed
+(`qh += 32`), matched the reference (maxabs 5e-10), and a self-contained Q6_K
+`embed_row` regression now lives in `gguf_pack_test`. The Q8_0/Q4_K/Q6_K
+*dequant* is what needed the K-quant unit coverage; the shared re-quantizer
+was already covered for Q4_0/Q4_1.
 
 ### The block-prefill route is NOT f32-scale (fixed 2026-10-07)
 
