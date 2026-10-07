@@ -3349,6 +3349,27 @@ prefill with the weights already resident, so the open side through
 like-for-like one -- it wins at every length below 4096 as well. Details:
 `.claude/plans/prefill-parity-2026-09-21.md`.
 
+**Result 2026-10-07 (the DeltaNet's per-token half, where MSVC left it scalar):**
+`/Qvec-report:2` on `block_host.cpp` shows MSVC already vectorising the router's
+expert loop and every loop of the delta rule, but not two loops of the per-token
+half: the conv over `qkv` (the bf16 round trip) and the alpha/beta projection
+(reason 501: it cannot prove `g.lanes` constant across the stores to `al` / `be`),
+about 1 G scalar multiply-adds a 256-token block. Both are now hand-written AVX2 --
+the round as `f32_to_bf16`'s own integer formula, alpha/beta as sixteen lanes held
+in registers across all of `hid` -- each output still a multiply then an add in the
+old order, so nothing moves: a host benchmark at the 35B's block geometry matches
+og, S and the conv state bit for bit, and on hardware (the q8 35B on its split set)
+the last prompt position's logits and all eight decode steps are identical across
+the two binaries. **`dn conv` per prompt: 1024 tokens 605 -> 448 ms, 2582 tokens
+1428 -> 1081 ms** (warm means, 6 and 12 reps an arm, every rep of the new binary
+below every rep of the old). End to end, alternated processes, `--repeat 4`, warm
+reps: 1024 tokens **9042 -> 8607 ms (113 -> 119 tok/s)**, each pair clean; at 2582
+tokens the change is not resolvable on this box -- the GEMM and per-token columns,
+which it does not touch, moved by up to 2.5 s between reps of one process, against
+a 0.35 s saving. Tried and not kept: the delta rule and the router as explicit FMA
+(the port of an out-of-tree fork's GCC-side win) -- no faster than what MSVC
+already emits, and they change the bits.
+
 **Result 2026-09-21 (the dispatch log re-taken with PASSIVE in force):** every
 per-kernel in-block figure recorded before the delay-load fix above — including
 the 1.4-1.6x "in-block penalty" — was measured with the workers spinning.
