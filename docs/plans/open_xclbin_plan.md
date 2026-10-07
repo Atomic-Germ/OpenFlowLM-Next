@@ -1,5 +1,13 @@
 # Open OpenFlowLM XCLBIN and Kernel replacement plan
 
+> **Status 2026-09-18.** Historical plan from the embedding-OpenFlowLM work
+> (per-model `open_<family>/engine.cpp` C++ engines). The open-engine direction
+> that actually shipped is the shared recipe one -- `open_kernels/recipes` and
+> `open_kernels/designs/dense|qwen35|qwen36`, compiled by the CMake presets, with
+> per-family evidence in [`../..` specs/open-engine/spec.md](../../specs/open-engine/spec.md).
+> Kept for the family priority ordering (section 3.1), which still matches the
+> build order of today's specs.
+
 ## Decisions and Assumptions
 - For the open embedding integration into upstream OpenFlowLM, should we keep the closed `libgemma_embedding.so` as a compile-time fallback (behind `OFLM_USE_OPEN_EMBEDDING=OFF`), or should the open engine become the sole embedding path?
   Replace entirely

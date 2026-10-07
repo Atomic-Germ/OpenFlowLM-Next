@@ -189,33 +189,40 @@ std::string find_artifacts(const std::filesystem::path& dir, const json& info) {
         return fs::is_regular_file(d / "gemm_rtp" / "design.json", ec);
     };
 
+    // 1) A model can ship its own design set alongside the checkpoint. This lets a
+    //    brand-new geometry be promoted model-by-model before it joins a family.
     const fs::path local = dir / "npue_designs";
     if (has_design(local)) return local.string();
 
-    std::string prefix;
-    try {
-        prefix = utils::find_xclbin_path();
-    } catch (const std::exception&) {
-        prefix.clear();
-    }
-    if (!prefix.empty() && info.contains("npue_design_family") &&
+    // 2) Otherwise the design set is keyed by GEMM geometry (family) and ships
+    //    pre-built with the package. The family name is a GEOMETRY, not a model:
+    //    one BERT-768 set also serves gte-multilingual and nomic, because their
+    //    GEMM shapes match bit for bit. Scan EVERY known xclbin root so the set
+    //    is found wherever the package put it -- the user tree (flm-add install),
+    //    the relocatable install prefix (chat kernels), or the separately-shipped
+    //    embedding design tree -- without a manual symlink or FLM_XCLBIN_PATH.
+    if (info.contains("npue_design_family") &&
         info["npue_design_family"].is_string()) {
-        const fs::path cand = fs::path(prefix) / "xclbins" /
-                              info["npue_design_family"].get<std::string>();
-        if (has_design(cand)) return cand.string();
+        const std::string family =
+            info["npue_design_family"].get<std::string>();
+        for (const std::string& root : utils::xclbin_roots()) {
+            const fs::path cand = fs::path(root) / "xclbins" / family;
+            if (has_design(cand)) return cand.string();
+        }
     }
     throw std::runtime_error(
         "NpueEmbedding: no design set for this model.\n"
-        "Looked for " + local.string() + "/gemm_rtp/design.json and, if the "
-        "model entry names \"npue_design_family\", for that family under the "
+        "Looked for " + local.string() + "/gemm_rtp/design.json and, for the "
+        "family named by the model entry's \"npue_design_family\", under every "
         "installed xclbin tree.\n"
         "A design set is four instruction streams over one xclbin, compiled "
         "for this model's GEMM geometry -- one set serves every model whose "
         "shapes match, which is why it is keyed by geometry rather than by "
         "model name.\n"
-        "The design sets are BUILT, not checked in: see "
+        "The design sets ship pre-built in the distributed package (the "
+        "embedding xclbin tree). If missing, see "
         "npu_offload/gemm_rtp/README.md for the one command that builds this "
-        "family. They ship pre-built in the distributed package only.");
+        "family.");
 }
 
 }  // namespace

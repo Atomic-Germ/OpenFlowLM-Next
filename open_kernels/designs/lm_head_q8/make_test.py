@@ -21,6 +21,9 @@ from ml_dtypes import bfloat16
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 import fixture_paths as FX  # noqa: E402
+sys.path.insert(0, str(HERE.parent.parent))
+from gguf_pool import (CH_Q8 as CH_GGUF, dequant_pool_lmhead as gg_dequant,  # noqa: E402
+                       pack_q8_pool_lmhead as gg_pack, random_q8_0_blocks as gg_random)  # noqa: E402
 CH = 8704
 K = 2048
 PER_BAND = 32
@@ -57,18 +60,55 @@ def reference(w_bytes: np.ndarray, x: np.ndarray, n: int, batch: int = 2048) -> 
     return y.astype(np.float32)
 
 
+def q4nx_pack_synthetic(n: int, k: int) -> np.ndarray:
+    """Synthetic Q8_0 blocks in the q4nx supertile layout: bf16 scales at
+    [0:512), int8 codes 16-lane interleaved at [512:8704) (lm_head_q8.h)."""
+    rng = np.random.default_rng(0)
+    blocks = gg_random(n, k, rng)
+    dm = blocks[..., 0:2].copy().view(np.float16).astype(np.float32).reshape(n, k // 32)
+    v = blocks[..., 2:].copy().view(np.int8).reshape(n, k)
+    d16 = dm.astype(bfloat16).view(np.uint16)
+    nch = n * k // (32 * 256)
+    ncol = k // 256
+    file_chunks = np.empty((nch, CH), np.uint8)
+    for f in range(nch):
+        r0, c0 = 32 * (f // ncol), 256 * (f % ncol)
+        b = np.empty(CH, np.uint8)
+        b[0:512] = d16[r0:r0 + 32, c0 // 32:c0 // 32 + 8].T.reshape(-1).view(np.uint8)
+        q = v[r0:r0 + 32, c0:c0 + 256].reshape(2, 16, 256).transpose(0, 2, 1).reshape(-1)
+        b[512:] = q.view(np.uint8)
+        file_chunks[f] = b
+    out = np.empty((nch, CH), np.uint8)
+    for p in range(nch):
+        s_, r_ = divmod(p, 32)
+        out[p] = file_chunks[(4 * s_ + r_ % 4) * 8 + r_ // 4]
+    return out.reshape(-1)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bands", type=int, default=None, help="first B bands only (default: all 1940)")
     ap.add_argument("--x", default="random")
+    ap.add_argument("--source", default="captured", choices=["captured", "gguf", "synthetic"],
+                    help="gguf: synthetic Q8_0 blocks -> f32-scale supertile chunks "
+                         "(build with LMHEAD_SCALES_F32=1; CH=9216). synthetic: the same "
+                         "Q8_0 blocks in the q4nx supertile layout (bf16 scales, CH=8704)")
     a = ap.parse_args()
     bands = a.bands or N_ALL // BAND_ROWS
     n = bands * BAND_ROWS
-    nbytes = bands * PER_BAND * CH
+    ch = CH_GGUF if a.source == "gguf" else CH
+    nbytes = bands * PER_BAND * ch
     tag = "full" if not a.bands else f"b{bands}"
-    pool = Path(os.environ["LMHEAD_POOL"]) if os.environ.get("LMHEAD_POOL") else FX.caps("m0d/000127.bo")
-    with pool.open("rb") as f:
-        w = np.frombuffer(f.read(nbytes), np.uint8)
+    if a.source == "gguf":
+        tag += "_gguf"
+        w = gg_pack(gg_random(n, K, np.random.default_rng(0)))[:nbytes]
+    elif a.source == "synthetic":
+        tag += "_syn"
+        w = q4nx_pack_synthetic(n, K)[:nbytes]
+    else:
+        pool = Path(os.environ["LMHEAD_POOL"]) if os.environ.get("LMHEAD_POOL") else FX.caps("m0d/000127.bo")
+        with pool.open("rb") as f:
+            w = np.frombuffer(f.read(nbytes), np.uint8)
     assert len(w) == nbytes
 
     if a.x == "ones":
@@ -82,7 +122,11 @@ def main() -> int:
     else:
         x = np.random.default_rng(0).standard_normal(K).astype(np.float32).astype(bfloat16)
 
-    ref = reference(w, x, n)
+    if a.source == "gguf":
+        ref = ((gg_dequant(w, n, K, bfloat16) @ x.astype(np.float32)).astype(np.float32)
+               if a.source == "gguf" else reference(w, x, n))
+    else:
+        ref = reference(w, x, n)
     (HERE / f"w_{tag}.bin").write_bytes(w.tobytes())
     (HERE / f"x_{tag}.bin").write_bytes(x.tobytes())
     (HERE / f"ref_{tag}.bin").write_bytes(ref.tobytes())

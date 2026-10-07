@@ -6,6 +6,8 @@
 /// \note This class for curl download
 #pragma once
 
+#include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <memory>
@@ -17,6 +19,16 @@ namespace download_utils {
 
 std::string calculate_file_sha256(const std::string& file_path);
 std::string calculate_git_blob_oid(const std::string& file_path);
+
+enum class HashAlgorithm { Sha256, GitBlobSha1 };
+
+struct DownloadRequest {
+    std::string url;
+    std::filesystem::path destination;
+    std::uint64_t expected_size;
+    HashAlgorithm hash_algorithm;
+    std::string expected_hash;
+};
 
 // Cursor control functions
 void hide_cursor();
@@ -34,6 +46,15 @@ int progress_callback(void* clientp, double dltotal, double dlnow, double ultota
 // Download a file from URL to a local file
 bool download_file(const std::string& url, const std::string& local_path, bool is_lfs, std::string remote_oid,
                    std::function<void(double)> progress_cb = nullptr);
+
+// Download to a same-directory temporary file, verify size + hash, then
+// atomically promote it. Resumes a previous `.part` file when one exists.
+// Ported from the FastFlowLM fork (MIT); the strict verify here applies to
+// pinned (file_sources) downloads, while the legacy path above stays
+// advisory for the existing catalog.
+bool download_file_atomic(
+    const DownloadRequest& request,
+    std::function<void(double)> progress_cb = nullptr);
 
 // Download content from URL to a string
 std::string download_string(const std::string& url);

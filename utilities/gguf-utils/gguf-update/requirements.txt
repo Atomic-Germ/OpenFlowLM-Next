@@ -1,0 +1,12 @@
+certifi
+charset-normalizer
+gguf
+idna
+jinja2
+markupsafe
+numpy
+pip
+pyyaml
+requests
+tqdm
+urllib3
