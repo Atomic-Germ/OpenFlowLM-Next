@@ -35,13 +35,95 @@ extending to MoE, or changing the pack ops.
   fields (Granite's folded multipliers) still need a config.json.
 - **Tensor names**: GgufFile::gguf_name maps HF-style manifest names
   (model.layers.N.self_attn.q_proj.weight) to llama.cpp names
-  (blk.N.attn_q.weight); pools' `std_perm_gguf` accepts Q4_0/Q4_1 only;
+  (blk.N.attn_q.weight); pools' `std_perm_gguf` packs Q4_0/Q4_1 byte-exactly
+  and requantizes Q8_0 / Q4_K / Q6_K to the pool's q4 layout (everything else
+  is refused at pack time, pointing at q4nx-build);
   `put`/`pack_norm` convert f32/f16 small weights to the bf16 consts blob.
 - **oflm-add**: repos with llama.cpp-style GGUFs install one compatible file
   as `model.gguf` (preference Q4_1 > Q4_0 > Q8_0; multi-part and other quants
   refused with reasons). Registry entries keep format "NPU2" and add
   `details.weights = "gguf"`; q4nx models stay *-NPU2, GGUF installs are
   *-GGUF directories, so one of each kind can coexist.
+
+## Integrated into main (2026-10-07, `feat/gguf-direct`)
+
+The branch merged into current main (commit `b3e8f1f`). Main had moved a lot
+since the branch forked (sandwich norms, qknorm_rope, the alpha/beta
+transpose, `split_q4_1_chunks`, the OpenMP wait policy and read fence,
+`det_step`/`run_split`/`start_run`, the block-prefill route). The GGUF work
+was adapted to that, not the reverse:
+
+- **`WeightFile` is the seam** (`weight_file.hpp`). Extend it with the read
+  methods main's host stages call -- `bf16` / `f32` / `meta` / `bf16_row` --
+  and implement them on `GgufFile` (`meta` returns the row-major [rows, cols]
+  shape; GGUF stores dims fastest-first). `Q4nxFile` implements the same
+  interface. `TensorMeta` moved into `weight_file.hpp`. So a polymorphic
+  `file_` serves both containers, and main's `file_->bf16(...)` host reads
+  compile unchanged. Do NOT re-minimise the interface: main's dense-route host
+  code calls those four by name.
+- **`core.cpp`**: every model/layout field goes through the weights view `w_`
+  (`man_` or `man_.gguf.get()`). Only `man_.gguf`, `man_.family` and
+  `man_.spec_hash` are read from the primary manifest. `derive_config()`
+  reconstructs the checked fields from GGUF KV. The q4nx container still wins
+  when both `model.q4nx` and `model.gguf` exist.
+- **`pools.cpp`**: main's q8 split (`split_q4_1_chunks`) and the branch's
+  `std_perm_gguf` / `pack_norm` coexist inside `apply`; the q4nx-only ops
+  `dynamic_cast<const Q4nxFile*>` (and the split branch does too, since only a
+  q4nx container stores q8 chunks to split).
+- **`dx_attn.py`**: main's og-element geometry (OGH/N_OG, one og fifo per
+  core) combined with the branch's q/k/v bias stream and split position
+  record. Four worker-body shapes (QKVB x RB); the bias fifo is the worker's
+  SECOND argument.
+
+### Validation (2026-10-07, this box, NPU present)
+
+- `open_qwen36` standalone build + `GGUF-PACK` / `OPEN-MANIFEST` ctests pass;
+  the full `oflm` app builds; `gguf_pool.py` self-tests bit-exact;
+  `oflm-add` tests pass; the 798-test spec suite passes.
+- **End-to-end**: `qwen3-8b` recipe spec added (`open_kernels/recipes/specs/`),
+  exported (both layouts) into `src/xclbins/Qwen3-8B-NPU2/open_kernels/`, and
+  run with `open_qwen36_cli --model <dir with model.gguf>`:
+  - `mradermacher/Qwen3-8B-i1-GGUF` **Q4_1 and Q4_0** (exact packs) both load,
+    all 36 layers resident, and answer
+    `<think>\nOkay, the question is asking for the capital of` -- byte-identical
+    token streams from the two quants.
+  - `Qwen3-8B.Q8_0.gguf` and `Qwen3-8B.Q4_K_M.gguf` (requant paths) load too.
+- The model dir needs only `model.gguf` (no config.json -- derived from KV,
+  no tokenizer for the id-level CLI).
+
+### The block-prefill route is NOT f32-scale (fixed 2026-10-07)
+
+`gemm_q4_prefill` / `attn_block` read the pool by a hardcoded
+`GQD_CHUNK_BYTES = 5120` bf16-scale law, so a f32-scale (GGUF) pool of 6144 B
+chunks would be misread. `recipes/dense.py programs()` therefore emits **no
+`gemm_block` for the `q4_1_f32` spec** (`r = None if f32 else gemm_route(...)`):
+a GGUF kernel set prefills through `step()` (decode-as-prefill), which is
+exact, and the engine's `layer_major_ok()` correctly reports the route absent
+(`block prefill route: T = 0`). The q4nx primary keeps its block route. To
+bring the route back for GGUF, add `SCALES_F32` twins of those GEMMs (their
+GQD scale loads and chunk size) -- a perf job, not a correctness gate.
+
+## Toward deprecating q4nx
+
+The pieces to drop the q4nx container for a family, in order:
+
+1. **Export the family with the f32 twins.** `recipes/dense.py builds()` already
+   emits `dx_f32` / `lm_head_q4_f32` beside the q4nx pair, and the nested
+   `gguf` manifest. `utilities/build-all.sh` or
+   `python open_kernels/export_qwen36_kernels.py --spec <spec> --out src/xclbins/<Model>-NPU2/open_kernels`
+   produces a set that serves BOTH layouts.
+2. **Point the catalogue at a GGUF source repo.** A `model_list.json` entry can
+   name a llama.cpp-style repo (e.g. a `mradermacher/*-i1-GGUF`); `oflm add`
+   installs the best compatible file as `model.gguf` and links the family
+   `*-NPU2` kernel set by the same `details.family`/size. It refuses to install
+   unless the linked kernels carry a `"gguf"` manifest section
+   (`manifest_supports_gguf`), which step 1 guarantees.
+3. **The embedding path is already there**: `embed-gemma:300m` ships as a GGUF
+   (`embeddinggemma-300M-Q8_0.gguf`) and the open embedding engine loads it.
+
+Once a family's catalogue entry is a GGUF repo, `model.q4nx` is dead weight for
+that family. q4nx stays only for K-quants the pack ops refuse (Q5_K/IQ/etc.),
+which still go through `q4nx-build`.
 
 ## Build + verify (this machine)
 
