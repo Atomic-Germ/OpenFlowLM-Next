@@ -34,9 +34,11 @@ def main() -> int:
         x = np.fromfile(pa[pos], np.float32).astype(np.float64)
         y = np.fromfile(pb[pos], np.float32).astype(np.float64)
         corr.append(np.corrcoef(x, y)[0, 1])
-        px = np.exp(x - x.max()); px /= px.sum()
-        py = np.exp(y - y.max()); py /= py.sum()
-        kl.append(float(np.sum(px * (np.log(px + 1e-30) - np.log(py + 1e-30)))))
+        # log-softmax directly: an epsilon inside the logs would cap a token the candidate
+        # all but rules out at log(1e-30) and understate exactly the divergences that matter
+        lx = x - x.max(); lx -= np.log(np.exp(lx).sum())
+        ly = y - y.max(); ly -= np.log(np.exp(ly).sum())
+        kl.append(float(np.sum(np.exp(lx) * (lx - ly))))
         ax, ay = int(x.argmax()), int(y.argmax())
         if ax != ay:
             flips += 1
