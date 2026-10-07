@@ -592,8 +592,15 @@ if(NOT OFLM_USE_HRX)
         # initialiser set a variable the runtime had already read past. Delay-loading
         # vcomp moves its load to the first call into it, which is after that. Worth
         # 20.5 -> 17.1 s on a 2582-token prefill; see the note above OmpWaitPolicy.
+        # The eight closed model DLLs below import vcomp themselves, so linking them at load
+        # time loaded vcomp first anyway and the workers spun regardless (#176); they are
+        # delay-loaded for that reason alone. A closed DLL added later that imports vcomp
+        # belongs on this list, and Core's WARNING names the symptom if it is left off.
         if(MSVC)
-            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL")
+            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL"
+                "/DELAYLOAD:qwen3_6_moe_npu.dll" "/DELAYLOAD:qwen3_5vl_npu.dll" "/DELAYLOAD:qwen3_5_omni_npu.dll"
+                "/DELAYLOAD:qwen3vl_npu.dll" "/DELAYLOAD:gemma_npu.dll" "/DELAYLOAD:gemma4e_npu.dll"
+                "/DELAYLOAD:gemma4_12b_npu.dll" "/DELAYLOAD:gpt_oss_npu.dll")
             target_link_libraries(oflm PRIVATE delayimp)
         endif()
     endif()
