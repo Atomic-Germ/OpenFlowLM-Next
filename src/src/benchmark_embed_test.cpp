@@ -463,6 +463,59 @@ static void test_model_tags(const std::string& list_path) {
        "'model-faker' -- what an omitted positional looks like -- is not a real tag");
 }
 
+// ---------------------------------------------------------------------------
+// The Hugging Face account: named once in the list, filled in at load (#173)
+// ---------------------------------------------------------------------------
+static void set_env(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);          // an empty value removes it
+#else
+    if (*value) setenv(name, value, 1);
+    else unsetenv(name);
+#endif
+}
+
+static void test_hf_owner(const std::string& list_path) {
+    std::printf("\n-- hf_owner (%s) --\n", list_path.c_str());
+    std::string path = list_path, exe_dir = ".";   // the ctor takes non-const references
+    const nlohmann::json raw = nlohmann::json::parse(std::ifstream(list_path));
+    const std::string owner = raw.value("hf_owner", std::string());
+    ok(!owner.empty(), "model_list.json names its hf_owner");
+
+    // Which entries are ours is read from the file itself: the ones written with the slot.
+    auto ours = [&](const std::string& type, const std::string& size) {
+        return raw["models"][type][size].value("file_url", std::string()).find("{hf_owner}") != std::string::npos;
+    };
+    auto run = [&](const std::string& want, const std::string& what) {
+        model_list ml(path, exe_dir);
+        int left = 0, wrong = 0, moved = 0, n_ours = 0;
+        const nlohmann::json all = ml.get_all_models();   // kept: the loop reads into it
+        for (const auto& m : all["models"]) {
+            const std::string tag = m["name"].get<std::string>();
+            const std::string type = tag.substr(0, tag.find(':')), size = tag.substr(tag.find(':') + 1);
+            for (const char* key : {"url", "file_url"}) {
+                const std::string got = m.value(key, std::string());
+                if (got.find('{') != std::string::npos) ++left;
+                if (ours(type, size)) {
+                    if (got.find("/" + want + "/") == std::string::npos) ++wrong;
+                } else if (got != raw["models"][type][size].value(key, std::string())) {
+                    ++moved;
+                }
+            }
+            n_ours += ours(type, size);
+        }
+        ok(n_ours > 0, what + ": the list has entries of ours");
+        eqi(left, 0, what + ": no url is left with a slot in it");
+        eqi(wrong, 0, what + ": every entry of ours is under " + want);
+        eqi(moved, 0, what + ": a third-party entry is exactly as written");
+    };
+    set_env("OFLM_HF_OWNER", "");
+    run(owner, "the list's own account");
+    set_env("OFLM_HF_OWNER", "Some-Other-Account");
+    run("Some-Other-Account", "OFLM_HF_OWNER");
+    set_env("OFLM_HF_OWNER", "");
+}
+
 int main(int argc, char** argv) {
     const std::string list_path = argc > 1 ? argv[1] : "model_list.json";
 
@@ -475,6 +528,7 @@ int main(int argc, char** argv) {
 
     if (fs::exists(list_path)) {
         test_model_tags(list_path);
+        test_hf_owner(list_path);
     } else {
         std::printf("\nFATAL model_list.json not found at '%s' -- pass its path as argv[1]\n",
                     list_path.c_str());
