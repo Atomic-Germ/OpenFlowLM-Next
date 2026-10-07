@@ -196,4 +196,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Capture down-segment high/low values and distinguish Q4 segment error from reduction error on real FFN activations.</description>
     <location>.opencode/skill/open-down-segment-trace/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-down-block-trace</name>
+    <description>Trace individual Q4 down blocks, local compensation and activation sums using original packed weights.</description>
+    <location>.opencode/skill/open-down-block-trace/SKILL.md</location>
+  </skill>
 </available_skills>

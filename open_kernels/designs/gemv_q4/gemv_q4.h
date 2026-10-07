@@ -117,6 +117,9 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
 #if GEMV_Q4_CORRECTION
                                                    , unsigned partition = 0
 #endif
+#if GEMV_Q4_BLOCK_TRACE
+                                                   , float *trace = nullptr
+#endif
                                                    ) {
   event0();
 #ifdef GEMV_NULL
@@ -248,6 +251,12 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     // Renormalize after every block rather than letting the low part grow.
     const auto block = acc;
     const auto block_error = compensation;
+#if GEMV_Q4_BLOCK_TRACE
+    if (trace) {
+      aie::store_v(trace + kb*128, block.template to_vector<float>());
+      aie::store_v(trace + kb*128 + 32, block_error);
+    }
+#endif
     acc = previous;
     compensation = previous_error;
     q4_two_sum(acc, compensation, block);
@@ -257,6 +266,12 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     small.from_vector(compensation);
     compensation = aie::zeros<float, kRows>();
     q4_two_sum(acc, compensation, small);
+#if GEMV_Q4_BLOCK_TRACE
+    if (trace) {
+      aie::store_v(trace + kb*128 + 64, acc.template to_vector<float>());
+      aie::store_v(trace + kb*128 + 96, compensation);
+    }
+#endif
 #else
     const auto block = aie::add(acc, compensation);
     const auto corrected = aie::sub(block, previous_error);

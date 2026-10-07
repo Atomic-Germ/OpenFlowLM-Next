@@ -69,3 +69,7 @@ reducer based on the now-disproved explanation for these three channels.
 Reproduction: [open-down-segment-trace](../../../.opencode/skill/open-down-segment-trace/SKILL.md).
 Artifacts are under `open_kernels/designs/wide_deltanet/build_down_trace`;
 logs are `/tmp/down-trace-*.log`. CPU suite: 877 passed, 47 skipped.
+
+Follow-up: [Q4 block traces](qwen38-down-block-trace.md) locate the channel4872
+error at block53/K13984..14015. The captured activation sum and persistent
+block reduction are exact; investigate local weighted-block evaluation next.
