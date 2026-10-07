@@ -21,11 +21,38 @@ offset fails that test before it reaches a build.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
-from .attnknobs import knobs as attn_knobs, probe_env  # noqa: F401  (probe_env: cache.py reads it off the family module)
+from .attnknobs import knobs as attn_knobs, probe_env as _attn_probe_env
 from .spec import FULL, LINEAR, QUANT_FORMATS, ModelSpec
+
+
+def one_context() -> bool:
+    """The decode layer loop as ONE hardware context: the two whole-layer designs merged into
+    designs/layer_x/ux.py's four instruction streams over one image (OPEN-DECODE-ONE-CONTEXT).
+    On by default; OPEN_LAYER_ONE_CTX=0 at export rolls back to the two-context lx/ax sets.
+    A spec the merged image cannot carry stays on two contexts anyway (`merged_image`)."""
+    return os.environ.get("OPEN_LAYER_ONE_CTX", "1") != "0"
+
+
+def merged_image(spec: ModelSpec) -> bool:
+    """Whether this spec's layer kernels are the merged image. It needs both layer types, and
+    no q8 projection role: ux.py's main-core program has room for ONE GEMV entry (the main
+    cores sit at 16256 of 16384 bytes), so a q8 model of the family keeps lx/ax."""
+    return one_context() and spec.has_linear and spec.has_full and not spec.q8_roles
+
+
+def probe_env() -> dict[str, str]:
+    """The build key's probe variables (cache.py reads this off the family module). The
+    merged-image flavour joins them: it changes what `builds` compiles and what `programs`
+    emits, and nothing else in the key can see it, so without this a merged set and an
+    lx/ax set would share a key and the second would be skipped."""
+    e = dict(_attn_probe_env())
+    if one_context():
+        e["OPEN_LAYER_ONE_CTX"] = "1"
+    return e
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
@@ -192,6 +219,14 @@ def ab_banks(spec: ModelSpec) -> int:
     """Number of sequential 32-lane AB projections, not a wider vector primitive."""
     return ab_lanes(spec) // AB_LANES
 
+def glue_fills(xn_elems: int, half_outer: bool) -> int:
+    """DMA fills the dense glue's `side` channel issues per linear-attention dispatch, for an
+    xn of `xn_elems` 4 KB halves. Accumulator-outer (lx.py's original walk) carries every half
+    once per accumulator, with that accumulator's tiles for it: 4 fills a half. Half-outer
+    carries the half once and then both accumulators' tiles: 3. Then `small` and the conv
+    taps."""
+    return (3 if half_outer else 4) * xn_elems + 2
+
 
 class _Alloc:
     """Sequential byte allocator for a buffer layout: name -> offset, in order."""
@@ -237,6 +272,8 @@ class Layout:
     # ffn="dense" only (the qwen35 composition): the FFN's pool block and the two extra act stages
     POOL_FFN_UP: int = 0; POOL_FFN_GATE: int = 0; POOL_FFN_DOWN: int = 0
     A_H: int = 0; A_OUT2: int = 0; AA_H: int = 0; AA_OUT2: int = 0
+    # ... and the second down piece's output when the down GEMV is split along K (`down_split`)
+    A_OUT2B: int = 0; AA_OUT2B: int = 0
 
     def constants(self) -> dict[str, int]:
         return dict(self.__dict__)
@@ -270,6 +307,14 @@ class Linear:
     OUT_K: int; QKV_K: int
     OG_ELEMS: int = 0                    # 4 KB x-stream elements the og (bf16[VW]) arrives in
     XN_SIDE_ELEMS: int = 0               # 4 KB side elements the glue's xn copy arrives in
+    # The alpha / beta projection's packed width and the rows of it one 4 KB side element
+    # holds: 32 lanes x 64 rows for every published size up to 32 value heads, 64 x 32 for
+    # the 27B's 48 (glue_ab_w.cc). And the glue's walk order: per accumulator then per xn
+    # half (every size that fits the side channel that way), or per half then per
+    # accumulator, which carries each half once -- 3 fills a half instead of 4.
+    AB_LANES: int = 32
+    AB_ROWS: int = 64
+    GLUE_HALF_OUTER: bool = False
 
 
 @dataclass(frozen=True)
@@ -290,6 +335,9 @@ class Attn:
     # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
     # kernel every family compiled before it existed
     VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
+    BLOCK: int = 0                       # 1: attn.h ATTN_BLOCK_ONLY -- no single-row kernel is built,
+                                         # and the driver pads the streamed row count to a whole
+                                         # number of blocks (stream_patch::attn_apply, manifest `rb`)
 
 
 @dataclass(frozen=True)
@@ -300,6 +348,10 @@ class Ffn:
     FF: int; UP_PC: int; DOWN_PC: int
     MS_U: int; MS_G: int; MS_FLOATS: int
     XN_ELEMS: int; XM_ELEMS: int; H_ELEMS: int
+    # The down GEMV's K pieces when FF's activation table does not fit a main core
+    # (`down_split`): each piece is a whole number of h's f32 elements and runs as its own
+    # GEMV into its own act region. Empty -- one GEMV over FF -- for every size that fits.
+    DOWN_SPLIT: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -313,6 +365,7 @@ class Recipe:
     ffn: Ffn | None = None               # ffn="dense": the FFN tail's geometry
     kind: str = "moe"                    # "moe" | "dense": which tail the designs build
     q8: frozenset = frozenset()          # the roles streamed at q8 (OPEN-QUANT-Q8); empty is today
+    ln_split: bool = False               # the dense norm helper streams its residual adds (`norm_split`)
 
 
 def _check(spec: ModelSpec) -> None:
@@ -398,10 +451,56 @@ def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
 def kwide(spec: ModelSpec, ffn: str = "moe") -> int:
     """The widest K a main core prepares a table for. The MoE keeps the expert hidden's table
     beside xm's (H_TAB_OFF); the dense tail runs its down GEMV after every up | gate band, so
-    h's table replaces xm's and FF joins the max instead (designs/dense/dx.py)."""
+    h's table replaces xm's and FF joins the max instead (designs/dense/dx.py) -- or, when
+    the down GEMV is split along K, its widest piece."""
     wide = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
                spec.attn_q_width if spec.has_full else 0)
-    return max(wide, spec.intermediate) if ffn == "dense" else wide
+    if ffn != "dense":
+        return wide
+    return max(wide, *(down_split(spec) or (spec.intermediate,)))
+
+
+def down_split(spec: ModelSpec) -> tuple[int, ...]:
+    """The dense down GEMV's K pieces, or () when FF's table fits a main core whole.
+
+    The down GEMV reduces over FF, and its activation table is 2.25 FF bytes. At the 27B's
+    FF 17408 that is 39 168 B, and the core is over its L1 even at 5 KB weight elements. So
+    the reduction runs in two pieces, each a GEMV of its own with its own table, results to
+    two act regions that the norm helper adds. The pieces cut at an f32 element of h (1024
+    values, what `dense_prep_f32` prepares per call), the first the largest such cut at or
+    below FF / 2. Nothing is repacked: inside a band, pool chunk c covers k-tile c / 2
+    (gemv_q4.h's band law), so the first 2 K0 / 256 chunks of every FF-wide band ARE a
+    K0-wide band and the rest a (FF - K0)-wide one, and each piece is a strided DMA tap over
+    the pool the packer already writes."""
+    if not spec.intermediate:
+        return ()
+    base = max(spec.hidden, spec.lin_value_width if spec.has_linear else 0,
+               spec.attn_q_width if spec.has_full else 0)
+    ds = DN_SCRATCH_FLOATS if spec.has_linear else 0
+    ff = spec.intermediate
+    if core_l1(tab_bytes(max(base, ff)), FFN_MS_FLOATS, ds, 1) <= L1_BUDGET:
+        return ()
+    e = ELEM // 4
+    k0 = ff // 2 // e * e
+    pieces = (k0, ff - k0)
+    if not k0 or ff % e or any(core_l1(tab_bytes(max(base, k)), FFN_MS_FLOATS, ds, 1) > L1_BUDGET
+                               for k in pieces):
+        raise OpRangeError(f"qwen35: an FF of {ff} does not fit a main core's L1 in two pieces of "
+                           f"whole f32 elements ({pieces}); a three-way split is not implemented")
+    return pieces
+
+
+# The dense norm helper (Tile(0, 3)): the residual + norm stage holds [x0 x1 w a0 a1] and one
+# output element at once, six ELN-byte elements over a 0x1800 stack. At HID 4096 that is
+# 55 296 B; at the 27B's 5120 it is 67 584 B against the core's 64 KB.
+NORM_L1 = 64 * 1024
+
+
+def norm_split(spec: ModelSpec) -> bool:
+    """True when the norm helper's fused residual stage does not fit its core. The split
+    form streams the residual adds half by half (`ln_add2` / `ln_add3`), sends the sum to DDR
+    and normalizes it on the way back through `ln_nr`: never more than four elements held."""
+    return 6 * spec.hidden * 2 + STACK > NORM_L1
 
 
 def common(spec: ModelSpec, ffn: str = "moe") -> Common:
@@ -513,6 +612,7 @@ def ffn_geometry(spec: ModelSpec) -> Ffn:
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=FFN_MS_FLOATS,
         XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * 2, ELEM) // ELEM,
         H_ELEMS=roundup(ff * 4, ELEM) // ELEM,
+        DOWN_SPLIT=down_split(spec),
     )
 
 
@@ -699,9 +799,12 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         a.add("xm", F.XM_ELEMS * ELEM)
         a.add("h", F.H_ELEMS * ELEM)
         a.add("out2", hid * 4)
+        if F.DOWN_SPLIT:
+            a.add("out2b", hid * 4)
         kv.update(A_XN=a.off["xn"], A_QKV=a.off["qkv"], A_Z=a.off["z"], A_VEC=a.off["vec"], A_O=a.off["o"],
                   A_OG=a.off["og"], A_OUT=a.off["out"], A_RES=a.off["res"], A_XM=a.off["xm"],
-                  A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_BYTES=roundup(a.n, ELEM))
+                  A_ROUT=0, A_HP=0, A_H=a.off["h"], A_OUT2=a.off["out2"], A_OUT2B=a.off.get("out2b", 0),
+                  A_BYTES=roundup(a.n, ELEM))
         s_head = C.DN_PAD * C.DN_DIM * 4
         s_off = (spec.conv_kernel - 1) * nch * 2
         kv.update(S_ROWS=C.DN_PAD, S_HEAD_BYTES=s_head, STATE_S_OFF=s_off,
@@ -737,9 +840,12 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         a.add("xm", F.XM_ELEMS * ELEM)
         a.add("h", F.H_ELEMS * ELEM)
         a.add("out2", hid * 4)
+        if F.DOWN_SPLIT:
+            a.add("out2b", hid * 4)
         kv.update(AA_XN=a.off["xn"], AA_QG=a.off["qg"], AA_KVN=a.off["kvn"], AA_OG=a.off["og"],
                   AA_OUT=a.off["out"], AA_RES=a.off["res"], AA_XM=a.off["xm"], AA_ROUT=0, AA_HP=0,
-                  AA_H=a.off["h"], AA_OUT2=a.off["out2"], AA_BYTES=roundup(a.n, ELEM))
+                  AA_H=a.off["h"], AA_OUT2=a.off["out2"], AA_OUT2B=a.off.get("out2b", 0),
+                  AA_BYTES=roundup(a.n, ELEM))
     else:
         kv.update({k: 0 for k in ("CA_LNW", "CA_POSTLN", "CA_META", "CA_RW", "CA_SGW", "CA_BYTES", "AA_XN",
                                   "AA_QG", "AA_KVN", "AA_OG", "AA_OUT", "AA_RES", "AA_XM", "AA_ROUT", "AA_HP",
@@ -801,7 +907,11 @@ def linear(spec: ModelSpec) -> Linear | None:
     nch, vw = spec.lin_qkv_dim, spec.lin_value_width
     tile = 1024                                     # dn_glue's channel tile
     key_width = spec.lin_key_heads * spec.lin_key_dim
+    lanes = ab_lanes(spec)
+    xn_elems = roundup(spec.hidden * 2, ELEM) // ELEM
     return Linear(
+        AB_LANES=lanes, AB_ROWS=ELEM // (2 * lanes),
+        GLUE_HALF_OUTER=glue_fills(xn_elems, False) > LIMITS["shim_fills"],
         QKV_PC=nch // BAND_ROWS // n, Z_PC=vw // BAND_ROWS // n, OUT_PC=spec.hidden // BAND_ROWS // n,
         QKV_DIM=nch, VW=vw,
         NCH=nch, NHEAD=spec.lin_value_heads, TILE=tile, NT=nch // tile,
@@ -831,7 +941,7 @@ def attn(spec: ModelSpec) -> Attn | None:
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
         OG_ELEMS=roundup(qw * 2, ELEM) // ELEM,
-        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB,
+        VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
     )
 
 
@@ -840,7 +950,7 @@ def recipe(spec: ModelSpec, max_ctx: int = 4096, ffn: str = "moe") -> Recipe:
         _check(spec)
     return Recipe(spec=spec, layout=layout(spec, max_ctx, ffn), common=common(spec, ffn), linear=linear(spec),
                   attn=attn(spec), max_ctx=max_ctx, ffn=ffn_geometry(spec) if ffn == "dense" else None,
-                  kind=ffn, q8=spec.q8_roles)
+                  kind=ffn, q8=spec.q8_roles, ln_split=ffn == "dense" and norm_split(spec))
 
 
 # ---- the packing plan: tensor -> offset -> chunk order. `{l}` is the layer index.
@@ -1167,12 +1277,18 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     out["contexts"]["lm"] = "lm_head_q8/final.xclbin"
     out["kernels"]["ln"] = {"context": "ln", "insts": "ln/insts.bin", "build": "ln"}
     out["kernels"]["lm"] = {"context": "lm", "insts": "lm_head_q8/insts.bin", "build": "lm_head_q8"}
+    # The merged image (ux.py) carries both layer types, so both run in the context named
+    # here and the linear stream takes the attention layer's six buffer arguments -- one
+    # image, one kernel signature; its `ptab` is never touched (OPEN-DECODE-ONE-CONTEXT).
+    merged = merged_image(spec)
+    lin_ctx, full_ctx = ("layer", "layer") if merged else ("lx", "ax")
     if spec.has_linear:
-        args = ["pool", "xres", "consts", "state", "act"]
+        args = ["pool", "xres", "consts", "state", "act", "ptab"] if merged else \
+               ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx0/final.xclbin"
-        out["kernels"]["lx0"] = {"context": "lx", "insts": "lx0/insts.bin", "build": "lx0"}
-        out["kernels"]["lx1"] = {"context": "lx", "insts": "lx1/insts.bin", "patch": "moeroute2", "build": "lx1"}
+        out["contexts"][lin_ctx] = "lx0/final.xclbin"
+        out["kernels"]["lx0"] = {"context": lin_ctx, "insts": "lx0/insts.bin", "build": "lx0"}
+        out["kernels"]["lx1"] = {"context": lin_ctx, "insts": "lx1/insts.bin", "patch": "moeroute2", "build": "lx1"}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES, "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
             "program": [{"op": "run", "kernel": "lx0", "args": args},
@@ -1182,9 +1298,20 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax0/final.xclbin"
-        out["kernels"]["ax0"] = {"context": "ax", "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
-        out["kernels"]["ax1"] = {"context": "ax", "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
+        out["contexts"].setdefault(full_ctx, "ax0/final.xclbin")
+        ax0 = {"context": full_ctx, "insts": "ax0/insts.bin", "patch": "attnpos", "build": "ax0"}
+        _A = attn(spec)
+        if _A and _A.BLOCK:
+            # The blocked walk consumes cached + new rows in whole blocks of RB, so the
+            # driver streams RB*ceil((valid+1)/RB) - 1 cached rows rather than `valid` --
+            # the padding rows sit at or past `pos` and the kernel masks them. The count
+            # has to come off the manifest: the row count is patched per token by the
+            # host, and a kernel built one way against a driver patching the other way
+            # deadlocks on the fifo rather than answering wrongly. The merged image
+            # (OPEN_LAYER_ONE_CTX) carries the same attention cores, so the same rb.
+            ax0["rb"] = _A.RB
+        out["kernels"]["ax0"] = ax0
+        out["kernels"]["ax1"] = {"context": full_ctx, "insts": "ax1/insts.bin", "patch": "moeroute2", "build": "ax1"}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES, "state": {"kind": "kv", "row": L.KV_ROW}},
             "program": [{"op": "run", "kernel": "ax0", "args": args},
@@ -1235,12 +1362,19 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     # no q8 role keeps the name every shipped build already uses (OPEN-QUANT-Q8).
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""
-    if spec.has_linear:
-        b["lx0"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx0{sfx}", "env": {"LX_PART": "0"}}
-        b["lx1"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx1{sfx}", "env": {"LX_PART": "1"}}
-    if spec.has_full:
-        b["ax0"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax0{sfx}", "env": {"AX_PART": "0"}}
-        b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
+    if merged_image(spec):
+        # Same four set names, so the manifest, the driver's kernel names and an export's
+        # --only list do not move; one design, four parts, one image.
+        for name, part in (("lx0", 0), ("lx1", 1), ("ax0", 2), ("ax1", 3)):
+            b[name] = {"design": "layer_x/ux.py", "build_dir": f"layer_x/build_ux{part}{sfx}",
+                       "env": {"UX_PART": str(part)}}
+    else:
+        if spec.has_linear:
+            b["lx0"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx0{sfx}", "env": {"LX_PART": "0"}}
+            b["lx1"] = {"design": "layer_x/lx.py", "build_dir": f"layer_x/build_lx1{sfx}", "env": {"LX_PART": "1"}}
+        if spec.has_full:
+            b["ax0"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax0{sfx}", "env": {"AX_PART": "0"}}
+            b["ax1"] = {"design": "layer_x/ax.py", "build_dir": f"layer_x/build_ax1{sfx}", "env": {"AX_PART": "1"}}
     b["ln"] = {"design": "ln/ln.py", "build_dir": "ln/build", "env": {}}
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
@@ -1264,7 +1398,7 @@ KERNEL_SOURCES = [
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
-    "include/vecmath.h", "ironutil.py", "build_design.py",
+    "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]

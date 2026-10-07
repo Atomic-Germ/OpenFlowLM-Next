@@ -464,7 +464,8 @@
      "ptab"
     ],
     "sandwich": true,
-    "act": "gelu_tanh"
+    "act": "gelu_tanh",
+    "norm_groups": 1
    },
    "pack": {
     "pool": [
@@ -682,7 +683,8 @@
      "ptab_local"
     ],
     "sandwich": true,
-    "act": "gelu_tanh"
+    "act": "gelu_tanh",
+    "norm_groups": 1
    },
    "pack": {
     "pool": [

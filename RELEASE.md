@@ -222,8 +222,14 @@ The packages are not the source of truth: the tag is. Fix forward.
 * **A package is missing something**: `verify-package.sh` is the checklist, and
   the release workflow runs it. Reproduce locally from the tag
   (`git checkout v1.2.3`) with
-  `cmake --preset linux-default -DOFLM_BUILD_KERNELS=OFF && cpack`. The kernels
-  are already in that tree.
+  `cmake --preset linux-default -DOFLM_BUILD_KERNELS=OFF`. The kernels are
+  already in that tree. Note that a bare `cpack` produces **TGZ only** --
+  `CPACK_GENERATOR` defaults to `TGZ`, so all three formats need the loop the CI
+  uses:
+
+  ```sh
+  for gen in DEB RPM TGZ; do cpack -G "$gen"; done
+  ```
 * **A release was published broken**: `gh release delete v1.2.3 --yes`, fix, and
   tag a new patch version. Do not re-tag a published version: the RPM and DEB
   keep the same filename and the same version, and a user who already installed

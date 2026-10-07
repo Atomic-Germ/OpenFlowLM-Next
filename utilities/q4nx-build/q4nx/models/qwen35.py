@@ -1,6 +1,7 @@
 from pprint import pp
 
 from ..model_converter import __Q4NX_Converter
+from .. import imatrix_prune as imx
 from ..constants import ModelArch, ModelArchNames, QWEN35_VARIANT_DIMS
 from ..gguf_tensor import GGUFTensor
 from gguf import GGUFReader, dequantize, quantize, GGMLQuantizationType
@@ -87,6 +88,23 @@ def untile_qkv(t: torch.Tensor, qk_rows: int, grp: int, head_v: int) -> torch.Te
 
 class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
     pad_to_fit = False  # --pad-to-fit: zero-pad the hidden axis to the variant dim
+    # --prune-ffn K: narrow the dense FFN to K intermediate neurons, chosen per
+    # layer by imatrix importance. None = pack the FFN at its trained width.
+    prune_ffn = None
+    imatrix_path_hint = None   # --imatrix, or a sidecar found next to the GGUF
+    imatrix = None        # imx.Imatrix, resolved once per convert
+    _mtp_cache = None     # block indices that are MTP scaffolding
+
+    @property
+    def mtp_dropped(self) -> int:
+        """How many speculative blocks this pack omits. Not prune-dependent: the
+        runtime has no speculative decoding, so the MTP block's weights are dead
+        for a pruned and an unpruned pack alike (b3eccb5 left the unpruned case
+        open; the block is dropped either way)."""
+        if self.gguf_reader is None:
+            return 0
+        return len(self._mtp_blocks())
+    _ffn_keep = {}        # layer -> sorted index array, the ONE set per layer
 
     def __init__(self, source, config_json_path=None):
         variant = ModelArchNames.get(self.model_arch, str(self.model_arch))
@@ -200,9 +218,192 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
         num_k, num_v = get("qwen35.ssm.group_count"), get("qwen35.ssm.time_step_rank")
         return num_k, num_v, get("qwen35.ssm.state_size"), get("qwen35.ssm.inner_size") // num_v
 
+    def _resolve_prune(self):
+        """--prune-ffn setup: one index set per layer, from the imatrix.
+
+        Fails LOUDLY rather than packing full width. A wide FFN does not fit a
+        core's L1, so the export dies in aiecc minutes later with a message that
+        names memory rather than the real cause; and a silently-unpruned pack
+        would produce a 20 GB container that cannot run, which is the worst
+        outcome of all.
+        """
+        self._ffn_keep = {}
+        self.imatrix = None
+        keep = self.prune_ffn
+        if not keep:
+            return
+        if self.gguf_reader is None:
+            raise ValueError("--prune-ffn needs a GGUF source; the HF-safetensors "
+                             "path has no imatrix to rank columns with")
+        if self.imatrix_path_hint is None:
+            raise FileNotFoundError(
+                f"--prune-ffn {keep} was asked for but no imatrix was found. Pass "
+                f"--imatrix PATH, or put the imatrix GGUF beside the model file. "
+                f"Without one the only alternative is chopping the first {keep} "
+                f"neurons, which retains {keep / self._ffn_width() * 100:.0f}% of the "
+                f"FFN's activation mass by construction.")
+        self.imatrix = imx.Imatrix(self.imatrix_path_hint)
+        layers = self.imatrix.layers()
+        if not layers:
+            raise ValueError(f"--imatrix {self.imatrix_path_hint}: no *.in_sum2 tensors; "
+                             f"that file does not look like an importance matrix")
+        w = self._ffn_width()
+        if keep >= w:
+            print(f"[INFO] --prune-ffn {keep} is not narrower than the FFN ({w}); "
+                  f"nothing to prune")
+            return
+        if keep % (64 * 8):
+            print(f"[WARN] --prune-ffn {keep} is not a multiple of 512 (64-row bands "
+                  f"over 8 cores); the kernel recipe will refuse this width. Nearest "
+                  f"is {(keep // 512) * 512}.")
+        mtp = self._mtp_blocks()
+        if mtp:
+            missing = mtp - set(layers)
+            print(f"[INFO]   MTP block(s) {sorted(mtp)} are dropped (no speculative "
+                  f"decoding), so their FFN is never narrowed"
+                  + (f"; the imatrix also lacks them" if missing else ""))
+        live = [L for L in layers if L not in mtp]
+        for L in live:
+            self._ffn_keep[L] = imx.ffn_index_set(self.imatrix, L, keep)
+        rep = imx.retention_report(self.imatrix, keep, live)
+        mean = sum(r for _, r in rep) / len(rep)
+        worst = min(rep, key=lambda x: x[1])
+        print(f"[INFO] --prune-ffn {keep}: narrowing the FFN {w} -> {keep} across "
+              f"{len(layers)} layers by imatrix importance")
+        print(f"[INFO]   activation mass retained: mean {mean * 100:.1f}%, "
+              f"worst layer {worst[0]} at {worst[1] * 100:.1f}% "
+              f"(a tail chop would keep {keep / w * 100:.1f}%)")
+        self.prune_ffn_kept = keep
+        self.prune_ffn_from = w
+        self.prune_ffn_retained = mean
+
+    def _declared_layers(self):
+        """num_hidden_layers from the GGUF, or None when it is not declared."""
+        f = self.gguf_reader.fields.get("qwen35.block_count")
+        if f is None:
+            return None
+        n = int(f.contents())
+        return n - len(self._mtp_blocks())
+
+    def _ffn_width(self) -> int:
+        f = self.gguf_reader.fields.get("qwen35.feed_forward_length")
+        return int(f.contents()) if f else 0
+
+    def _mtp_blocks(self) -> set:
+        """Blocks that exist only to serve multi-token prediction, and are dropped.
+
+        Qwen3.5 exports its MTP head as one EXTRA transformer block: the whole
+        model ships `block_count` blocks of which the last carries the `.nextn.*`
+        tensors (`eh_proj`, `enorm`, `hnorm`, `shared_head_norm`) and nothing else
+        does. Qwen3.8-27B is block_count 65 with `num_hidden_layers` 64 and
+        `mtp_num_hidden_layers` 1 -- so `blk.64` is that block, and it is
+        speculative-decode scaffolding: this runtime has no MTP, so the weights
+        are dead.
+
+        Identified by the `.nextn.` tensors being PRESENT in a block, not by index
+        arithmetic against the layer count: that is what actually marks the block,
+        and it stays right for a model that ships no MTP at all, or ships two.
+        """
+        if self._mtp_cache is None:
+            self._mtp_cache = {L for L in (imx.layer_of(n) for n in self.gguf_tensors)
+                               if L is not None and any(
+                                   n.startswith(f"blk.{L}.nextn.") for n in self.gguf_tensors)}
+        return self._mtp_cache
+
+    def _is_mtp_block(self, layer: int) -> bool:
+        return layer in self._mtp_blocks()
+
+    def _prune_tensor(self, gguf_tensor):
+        """(d, m, qw) for one narrowed FFN tensor, or None when it is not one.
+
+        Applies ONLY to a name this layer's index set was derived for, and uses
+        that set verbatim -- `ffn_down`'s ranking, applied to all three tensors.
+        Scoring each tensor's own columns separately would give a container that
+        converts cleanly and computes a different network than the log claims.
+
+        The dequantize -> gather -> quantize -> unpack sequence mirrors
+        gguf_tensor's own `_requantize_to`, so the packed bytes are laid out by
+        the same rules as an unpruned tensor: quantize the NARROWED matrix, then
+        unpack it back into the (scale, min, quants) triple `_pack` takes. The
+        unpack is fed the narrowed row count, not the source's -- passing the
+        source's would mis-view the block array.
+        """
+        if self.imatrix is None:
+            return None
+        name = gguf_tensor.name
+        L = imx.layer_of(name)
+        if L is None or L not in self._ffn_keep:
+            # No index set for this layer: the imatrix does not cover it. That is
+            # NORMAL, not an error -- a model can carry an MTP block past the last
+            # calibrated layer (Qwen3.8-27B has 65 blocks, the imatrix 64), and the
+            # converter skips those tensors anyway. Leaving one FFN at full width
+            # would be worse than useless: the container would declare a narrowed
+            # intermediate_size while this layer still carried 17408 columns, which
+            # the kernel recipe would build for and the runtime would misread.
+            if L is not None and self.imatrix is not None and any(
+                    name.endswith(r) for r in (imx.FFN_DOWN, imx.FFN_UP, imx.FFN_GATE)) \
+                    and not self._is_mtp_block(L):
+                raise ValueError(
+                    f"--prune-ffn: layer {L} ({name}) is a real converted layer with an "
+                    f"FFN, but the imatrix has no entry for it, so it cannot be narrowed. "
+                    f"A pruned container must have EVERY FFN at the same width, because "
+                    f"config.json declares ONE intermediate_size and the kernel recipe "
+                    f"builds for it -- a layer left at {self._ffn_width()} would be read "
+                    f"as {self.prune_ffn_kept}. "
+                    f"The imatrix covers layers {min(self._ffn_keep)}.."
+                    f"{max(self._ffn_keep)}; this model has a layer past that. "
+                    f"Re-run the imatrix calibration over the whole model (it must include "
+                    f"layer {L}), or pass an imatrix that does.")
+            return None
+        role = None
+        for r in (imx.FFN_DOWN, imx.FFN_UP, imx.FFN_GATE):
+            if name.endswith(r):
+                role = r
+                break
+        if role is None:
+            return None
+        idx = self._ffn_keep[L]
+        w = gguf_tensor.dequantize()
+        if not torch.is_tensor(w):          # gguf returns ndarray in some paths
+            w = torch.from_numpy(np.ascontiguousarray(w))
+        w = imx.gather_ffn(w, idx, ffn_width=self._ffn_width())
+        rows = w.shape[0]
+        cols = w.shape[1]
+        target = self.tensor_q4nx_type_map[name]
+        # unpack_* takes the COLUMN COUNT of the gathered weight (its second
+        # dim), not its row count: the unpackers reshape the flat quant array
+        # as (-1, cols). Alluded to by the old comment below -- missed it.
+        if target in (GGMLQuantizationType.F32, GGMLQuantizationType.F16,
+                      GGMLQuantizationType.BF16):
+            return [w]
+        if target == GGMLQuantizationType.Q4_K:
+            # No Q4_K encoder in ggml; the packer fits the super-block itself
+            # from a Q4_1-grid triple, whose min sign is SUBTRACTED not added.
+            data = quantize(w.to(torch.float32).numpy(), GGMLQuantizationType.Q4_1).copy()
+            d, m, qw = gguf_tensor.unpack_q4_1(data, cols)
+            return (d, -m, qw)
+        # NOT the bfloat16 round trip gguf_tensor._requantize_to uses. There `w` is
+        # a raw byte buffer and `.view(torch.float32)` reinterprets those bytes; here
+        # `w` is an already-dequantized float tensor, so the same call halves the
+        # last axis and quantizes HALF the FFN -- a container that declares
+        # intermediate_size 12288 while carrying 6144 columns. Round-tripping through
+        # a real cast costs nothing here, and the float16 scale that _pack_q8nx
+        # asserts on is applied at the pack boundary instead (see _pack).
+        data = quantize(w.to(torch.float32).numpy(), target).copy()
+        if target == GGMLQuantizationType.Q4_1:
+            d, m, qw = gguf_tensor.unpack_q4_1(data, cols)
+        elif target == GGMLQuantizationType.Q4_0:
+            d, m, qw = gguf_tensor.unpack_q4_0(data, cols)
+        elif target == GGMLQuantizationType.Q8_0:
+            d, m, qw = gguf_tensor.unpack_q8_0(data, cols)
+        else:
+            raise ValueError(f"--prune-ffn: cannot quantize {name} to {target.name}")
+        return (d, m, qw)
+
     def _convert_gguf(self, q4nx_path: str, weights_type: str):
         if weights_type == "language":
             self._resolve_pad_target()
+            self._resolve_prune()
             # llama.cpp tiles the value heads only when there are more of them than key heads
             # (the 4B / 9B / 27B; not the 2B / 0.8B), and q | k precede v in qkv and conv1d.
             num_k, num_v, head_k, head_v = self._linear_heads()
@@ -219,9 +420,29 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                 unpacked = self._maybe_pad(emb, unpacked, GGMLQuantizationType.Q8_0)
                 self.q4nx_tensors["lm_head.weight"] = self._pack(*unpacked, tensor_type=target_dtype)
 
+            # The MTP block is dropped from EVERY pack, pruned or not. It exists
+            # only to feed speculative decoding, which this runtime has no use
+            # for, and converting it yields a container with MORE layers than
+            # config.json declares: the kernel recipe builds a per-layer set and
+            # the engine walks num_hidden_layers, so that is a link-time mismatch
+            # and the extra layer is not in the file to be found.
+            mtp = self._mtp_blocks()
+            if mtp:
+                print(f"[INFO] Dropping MTP block(s) {sorted(mtp)}: the next-token "
+                      f"prediction head has no use without speculative decoding, and "
+                      f"config.json declares num_hidden_layers "
+                      f"{self._declared_layers()} which already excludes it")
             for key, gguf_tensor in self.gguf_tensors.items():
                 if ".nextn." in gguf_tensor.name:
                     print(f"[SKIP] {gguf_tensor.name} (MTP next-token prediction weights, absent from official Q4NX)")
+                    continue
+                if imx.layer_of(gguf_tensor.name) in mtp:
+                    # Not one of the .nextn. tensors, but the rest of a block that
+                    # exists only to feed them. Converting it would produce a
+                    # container with MORE layers than config.json declares, and at a
+                    # pruned FFN width the kernel set would be built for the wrong
+                    # depth.
+                    print(f"[SKIP] {gguf_tensor.name} (MTP scaffolding block)")
                     continue
                 target_dtype = gguf_tensor.get_used_quantization_type(self.tensor_q4nx_type_map[gguf_tensor.name])
                 print(f"Processing tensor: {gguf_tensor.name} with type {gguf_tensor.tensor_type.name} -> {self.forward_name_map[gguf_tensor.name]} with dtype {target_dtype.name}")
@@ -236,6 +457,17 @@ class Qwen35(__Q4NX_Converter, model_arch=ModelArch.QWEN35_4B):
                     continue
                 
                 new_name = self.forward_name_map[gguf_tensor.name]
+
+                pruned = self._prune_tensor(gguf_tensor)
+                if pruned is not None:
+                    # The FFN axis was narrowed before quantization, so this
+                    # tensor is re-quantized from the gathered weight rather
+                    # than unpacked from the source GGUF's own layout.
+                    if isinstance(pruned, list):
+                        self.q4nx_tensors[new_name] = pruned[0]
+                    else:
+                        self.q4nx_tensors[new_name] = self._pack(*pruned, tensor_type=target_dtype)
+                    continue
 
                 unpacked = gguf_tensor.unpack(target_dtype)
                 unpacked = self._maybe_pad(gguf_tensor, unpacked, target_dtype)
@@ -660,4 +892,8 @@ class Qwen35_08B(Qwen35, model_arch=ModelArch.QWEN35_08B):
     pass
 
 class Qwen35_9B(Qwen35, model_arch=ModelArch.QWEN35_9B):
+    pass
+
+
+class Qwen35_27B(Qwen35, model_arch=ModelArch.QWEN35_27B):
     pass

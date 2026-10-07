@@ -5,7 +5,7 @@
             <h2 class="headline-md">Proof on silicon, not slides</h2>
             <p class="copy-md">
                 OpenFlowLM is tuned on real Ryzen™ AI hardware with synthetic and application-level workloads.
-                Expect steady 40–80 tok/s on 7B models at < 10 W, plus deterministic latency for agentic chains. </p>
+                Expect steady decode throughput in the tens of tok/s on small models, plus deterministic latency for agentic chains. </p>
                     <ul class="feature-list">
                         <li class="feature-list__item">
                             <span class="feature-list__bullet"></span>
@@ -29,19 +29,14 @@
         </div>
         <div class="section-block section-block--panel">
             <div class="metric-card">
-                <p class="metric-card__label">Llama3.2 3B @ 4-bit</p>
-                <p class="metric-card__value">72 tok/s</p>
-                <p class="metric-card__desc">Ryzen™ AI 9 HX 370 · 8 ms median latency</p>
+                <p class="metric-card__label">Llama 3.2 1B</p>
+                <p class="metric-card__value">64.5 tok/s</p>
+                <p class="metric-card__desc">decode @ 1k · Ryzen™ AI 7 350</p>
             </div>
             <div class="metric-card">
-                <p class="metric-card__label">Gemma 3 4B Vision</p>
-                <p class="metric-card__value">18 fps</p>
-                <p class="metric-card__desc">Vision + text pipeline on XDNA2 with shared memory.</p>
-            </div>
-            <div class="metric-card">
-                <p class="metric-card__label">Power draw</p>
-                <p class="metric-card__value">9.6 W</p>
-                <p class="metric-card__desc">Full assistant stack vs ~45 W GPU baseline.</p>
+                <p class="metric-card__label">Gemma 3 4B</p>
+                <p class="metric-card__value">44.4 tok/s</p>
+                <p class="metric-card__desc">decode @ 1k · Ryzen™ AI 7 350</p>
             </div>
         </div>
     </div>

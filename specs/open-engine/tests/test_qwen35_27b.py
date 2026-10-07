@@ -1,4 +1,4 @@
-"""Qwen3.8-27B text tower: existing qwen35 family, hardware gates remain closed.
+"""Qwen3.8-27B text tower: the existing qwen35 family, on the fused layer path.
 
 Traces: OPEN-FAMILY-QWEN35, OPEN-OP-RANGE.
 """
@@ -44,11 +44,13 @@ def test_nested_and_flat_text_towers_derive_identically(spec27):
     assert a == b
 
 
-def test_three_xn_chunks_exceed_legacy_side_schedule(spec27):
+def test_three_xn_chunks_walk_half_outer_to_fit_the_side_schedule(spec27):
     assert Q35.xn_side_elems(spec27) == 3
-    assert Q35.ab_tiles_per_half(spec27) == [32, 32, 16]
-    # Even a single AB bank would exhaust the legacy shared FIFO schedule.
-    assert Q35.glue_side_fills(spec27) == 14 > LIMITS["shim_fills"]
+    assert Q35.ab_tiles_per_half(spec27) == [64, 64, 32]     # 32-row tiles at 64 lanes
+    # Walked once per accumulator, three halves would exhaust the shared side schedule;
+    # carrying each half once for both accumulators fits it.
+    assert Q36.glue_fills(3, half_outer=False) == 14 > LIMITS["shim_fills"]
+    assert Q35.glue_side_fills(spec27) == Q36.glue_fills(3, half_outer=True) == 11 <= LIMITS["shim_fills"]
 
 
 def test_full_ffn_table_exceeds_l1_even_with_one_weight_chunk(spec27):
@@ -67,17 +69,19 @@ def test_48_heads_need_two_fixed_width_ab_banks(spec27):
     assert bank_bytes == 327680 == 80 * Q36.ELEM
 
 
-def test_27b_points_are_not_hardware_validated(spec27, monkeypatch):
+def test_27b_points_are_hardware_validated(spec27, monkeypatch):
+    """They entered the catalogue with #149's hardware pass (2026-10-01). K 17408 did not:
+    the down projection runs as two GEMVs of K 8192 and 9216."""
     monkeypatch.delenv("OPEN_KERNELS_UNVALIDATED", raising=False)
     for op, kwargs in (
         ("ln", dict(width=spec27.hidden)),
         ("gemv_q4", dict(K=spec27.hidden)),
-        ("gemv_q4", dict(K=spec27.intermediate)),
         ("lm_head_q8", dict(K=spec27.hidden, vocab=spec27.vocab)),
         ("deltanet", dict(heads=spec27.lin_value_heads)),
     ):
-        with pytest.raises(OpRangeError, match="outside the validated"):
-            require(op, **kwargs)
+        require(op, **kwargs)
+    with pytest.raises(OpRangeError, match="outside the validated"):
+        require("gemv_q4", K=spec27.intermediate)
 
 
 class BytesModel:
@@ -131,13 +135,23 @@ def test_banked_transpose_rejects_invalid_geometry_before_writing(change, match)
     assert np.all(dst == 0xAB)
 
 
-def test_wide_heads_select_banked_pack_without_changing_legacy_ops(spec27):
-    # Isolate AB packing from the still-unimplemented 17408-wide FFN.
-    narrow_ffn = ModelSpec.from_dict(dict(spec27.to_dict(), intermediate=8192))
-    ops = Q35.pack_plan(narrow_ffn)["layer_types"][LINEAR]["consts"]
-    ab = [o for o in ops if "ssm_alpha_proj" in o.get("tensor", "") or
-          "ssm_beta_proj" in o.get("tensor", "")]
+def ab_ops(spec):
+    ops = Q35.pack_plan(spec)["layer_types"][LINEAR]["consts"]
+    return [o for o in ops if "ssm_alpha_proj" in o.get("tensor", "") or
+            "ssm_beta_proj" in o.get("tensor", "")]
+
+
+def test_wide_heads_pack_64_lane_rows_without_changing_legacy_ops(spec27):
+    """glue_ab_w.cc reads one [hidden, 64] W, columns 48..63 zero: the ordinary `transpose`
+    widened with dst_rows. The bank-major `transpose_banked` stays for the standalone
+    WideDeltaNet AB design; the fused layer does not use it."""
+    ab = ab_ops(spec27)
     assert len(ab) == 2
-    assert all(o["op"] == "transpose_banked" and o["rows"] == 48 and
-               o["cols"] == 5120 and "dst_rows" not in o for o in ab)
-    assert ab[1]["dst"] - ab[0]["dst"] == 2 * 327680
+    assert all(o["op"] == "transpose" and o["rows"] == 48 and
+               o["cols"] == 5120 and o["dst_rows"] == 64 for o in ab)
+    assert ab[1]["dst"] - ab[0]["dst"] == 5120 * 64 * 2 == 2 * 327680
+    # up to 32 heads the op is what it always was: padded to 32 lanes only when narrower
+    for heads, pad in ((32, {}), (16, {"dst_rows": 32})):
+        for o in ab_ops(ModelSpec.from_dict(dict(spec27.to_dict(), lin_value_heads=heads))):
+            assert o["op"] == "transpose" and o["rows"] == heads
+            assert {k: o[k] for k in ("dst_rows",) if k in o} == pad

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "open_qwen36/manifest.hpp"
 
@@ -106,6 +107,39 @@ int main(int argc, char** argv) {
           "MoE pool geometry");
     check(m.contexts.count("lx") && m.contexts.count("ax") && m.contexts.count("ln") && m.contexts.count("lm"), "four contexts");
     check(m.kernels.at("ax0").patch == "attnpos" && m.kernels.at("lx1").patch == "moeroute2" && m.kernels.at("ln").patch.empty(), "kernel patch kinds");
+    // attnpos pads the streamed row count to whole blocks of `rb` (attn.h ATTN_BLOCK_ONLY);
+    // every other kernel is unblocked and the field is absent from its manifest entry.
+    check(m.kernels.at("ax0").rb == 4 && m.kernels.at("lx1").rb == 1, "attn rows per call");
+    {
+        // The blocked walk covers the cached rows AND the new position's row in whole
+        // blocks of `rb`, taking the new row as the last block's final slot -- so the
+        // stream carries one row less than those blocks hold, and the extra rows over
+        // the real count sit at or past `pos`, where the kernel masks them. At rb 2 the
+        // highest row read is exactly `pos`: inside the cache, and written by this very
+        // dispatch. A count that does not match what attn_meta_impl derives from the
+        // same position deadlocks the fifo, so this is the arithmetic both sides run.
+        std::vector<uint32_t> iw(1, 0);
+        const std::vector<stream_patch::AttnPatch> tab{{0, 0, 0}};
+        stream_patch::AttnGeometry g;                     // kv_row 2048, no window
+        auto rows = [&](uint64_t pos, uint64_t rb) {
+            g.rb = rb;
+            stream_patch::attn_apply(iw.data(), tab, pos, g);
+            return static_cast<uint64_t>(iw[0]) * 4 / g.kv_row;
+        };
+        check(rows(0, 2) == 1 && rows(1, 2) == 1 && rows(2, 2) == 3 && rows(3, 2) == 3 &&
+              rows(4, 2) == 5 && rows(1000, 2) == 1001, "attn_apply: rows padded to whole blocks of 2");
+        check(rows(0, 1) == 1 && rows(2, 1) == 2 && rows(1000, 1) == 1000, "attn_apply: rb 1 is the window's own count");
+        bool top = true, fits = true;
+        for (uint64_t pos = 0; pos < 64; ++pos) {
+            top = top && rows(pos, 2) - 1 <= pos;
+            // What attn_meta_impl will do with the same position: pb[4] = pb[0] / kRB full
+            // blocks off the fifo, then one peeled block of kRB - 1 more. If that is not
+            // exactly what the fill delivers, the core blocks forever on an acquire.
+            for (uint64_t rb = 2; rb <= 4; rb *= 2) fits = fits && rb * (pos / rb) + rb - 1 == rows(pos, rb);
+        }
+        check(top, "attn_apply: the padded window never reads past the position's own row");
+        check(fits, "attn_apply: the stream is exactly what the kernel's block count consumes");
+    }
     const auto& lin = m.layer_types.at("linear_attention");
     const auto& full = m.layer_types.at("full_attention");
     check(lin.consts_bytes == 11882496 && lin.act_bytes == 190464 && lin.state_kind == "linear" && lin.state_bytes == 2342912, "linear layer buffers");
@@ -248,6 +282,12 @@ int main(int argc, char** argv) {
     refused_manifest(argv[1], "not a declared global", "an attn_block naming an undeclared buffer is refused", [](json& j) {
         j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["args"][2] = "ag_z";
     });
+    refused_manifest(argv[1], "is not 1, 2 or 4", "a row block the attention kernel is not built for is refused", [](json& j) {
+        j["kernels"]["ax0"]["rb"] = 8;
+    });
+    refused_manifest(argv[1], "needs the attnpos", "a row block on a stream the host does not pad is refused", [](json& j) {
+        j["kernels"]["lx1"]["rb"] = 2;
+    });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];
         p.push_back(p[1]);
@@ -302,9 +342,10 @@ int main(int argc, char** argv) {
             const auto& lt = d.layer_types.at("dense");
             check(lt.program.size() == 1 && lt.program[0].op == "run" && lt.program[0].kernel == "dx" && lt.program[0].args.size() == 6 &&
                   lt.state_kind == "kv" && lt.state_row == 4096, "qwen3: one run per layer");
-            // dx / ln / lm plus the block prefill route's two: the attention dispatch's own
-            // xclbin ("dxa") and the ONE context every projection shape streams over ("gemm").
-            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 5, "qwen3: kernels");
+            // dx / ln / lm plus the block prefill route's four: the attention dispatch's own
+            // xclbin ("dxa"), the ONE context every projection shape streams over ("gemm"), and
+            // the attention products' two ("ag_s", "ag_pv": 8 and 4 columns wide at head dim 128)
+            check(d.kernels.at("dx").patch == "attnpos" && d.kernels.count("lm") && d.contexts.size() == 7, "qwen3: kernels");
             check(lt.pool.size() == 7 && lt.pool[0].op == "std_perm" && lt.pool[0].in_dim == 2560 && lt.consts.size() == 4,
                   "qwen3: packing plan");
             check(d.lmhead_ops.size() == 1 && d.lmhead_ops[0].op == "std_perm" && d.lmhead_ops[0].nch == 47480, "qwen3: q4 head");
@@ -328,6 +369,15 @@ int main(int argc, char** argv) {
             // every projection shape is an instruction stream over ONE hardware context
             check(d.kernels.at("gemm_n6144_k2560").context == "gemm" && d.kernels.at("gemm_n2560_k9728").context == "gemm",
                   "qwen3: one GEMM context for every shape");
+            // the attention products (OPEN-PREFILL-ATTN): qwen3 declares its host half, so the
+            // route runs them -- 4 query heads per kv head x 256 tokens, head dim 128
+            const auto& ab = dg.attn_block;
+            check(ab.present() && ab.prep == "qknorm_rope" && ab.m == 1024 && ab.hd == 128 && ab.l_max == 4096 &&
+                  ab.kernels_s.size() == 16 && ab.kernels_pv.size() == 16 &&
+                  d.kernels.at(ab.kernels_s.at(256)).context == "ag_s" && d.kernels.at(ab.kernels_pv.at(4096)).context == "ag_pv",
+                  "qwen3: the dense route's attention products, declared qknorm_rope");
+            refused_manifest(argv[2], "is not one this engine computes", "qwen3: an attn_block prep the engine does not compute is refused",
+                             [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "qknorm_post_rope"; });
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",
@@ -393,6 +443,10 @@ int main(int argc, char** argv) {
             check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
             // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
             check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
+            // its norm follows the rotation, which the products' host half does not do: the
+            // recipe emits the streams but declares no prep, so the route keeps its dxB dispatches
+            check(!h.layer_types.at("dense").gemm_block.attn_block.present(),
+                  "hunyuan: an attn_block without a prep is left to the dxB route");
             check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
             json ok = matching_config(h);
             check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");
