@@ -59,6 +59,15 @@ bool download_file_atomic(
 // Download content from URL to a string
 std::string download_string(const std::string& url);
 
+// Reuse a file the user already has in the local Hugging Face cache
+// (HF_HUB_CACHE / HF_HOME/hub, else ~/.cache/huggingface/hub) instead of the
+// network. `url` is a huggingface.co/<repo>/resolve/<rev>/<file> URL; when the
+// cached file's size matches `expected_size` (0 skips the size guard) it is
+// copied to `local_path` and this returns true, so the caller can skip the
+// download. Returns false when the file is not cached.
+bool download_from_hf_cache(const std::string& url, const std::string& local_path,
+                            uint64_t expected_size);
+
 // Download multiple files with progress tracking
 bool download_multiple_files(const nlohmann::json downloads,
                            std::function<void(size_t, size_t)> progress_cb = nullptr);

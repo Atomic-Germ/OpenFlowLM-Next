@@ -6,6 +6,7 @@
 ///       fallback. The strict download/verify behavior keyed off the pinning
 ///       needs a model tree and is exercised by oflm-add's installer tests.
 #include "model_downloader.hpp"
+#include "download_model.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -300,6 +301,48 @@ void test_remove_refuses_unknown_and_escape() {
     fs::remove_all(sandbox, ec);
 }
 
+void test_hf_cache_reuse() {
+    namespace fs = std::filesystem;
+    // download_from_hf_cache: a synthetic HF cache under HF_HOME, and the
+    // resolve URL for the same repo/file, must be copied (no network) rather
+    // than re-downloaded -- and a size mismatch must not reuse.
+    std::error_code ec;
+    const std::string home = (fs::temp_directory_path() / "oflm-hf-cache-test").string();
+    fs::remove_all(home, ec);
+    const std::string rev = "0123456789abcdef0123456789abcdef01234567";
+    const auto cached =
+        fs::path(home) / "hub" / "models--org--Widget" / "snapshots" / rev / "widget.gguf";
+    fs::create_directories(cached.parent_path(), ec);
+    {
+        std::ofstream of(cached.string());
+        of << "fake gguf bytes 0123456789";
+    }
+    const std::uint64_t expected = static_cast<std::uint64_t>(fs::file_size(cached, ec));
+    const auto out = fs::temp_directory_path() / "oflm-hf-cache-out" / "model.gguf";
+    fs::remove_all(out.parent_path(), ec);
+    setenv("HF_HOME", home.c_str(), 1);
+    unsetenv("HF_HUB_CACHE");
+    const std::string url =
+        "https://huggingface.co/org/Widget/resolve/main/widget.gguf?download=true";
+    // the HF-cache miss path first (a repo the cache does not hold)
+    TEST_REQUIRE(!download_utils::download_from_hf_cache(
+        "https://huggingface.co/other/Missing/resolve/main/x.gguf", out.string(), 0));
+    // the hit: without a size guard
+    TEST_REQUIRE(download_utils::download_from_hf_cache(url, out.string(), 0));
+    TEST_REQUIRE(fs::is_regular_file(out, ec));
+    TEST_REQUIRE(static_cast<std::uint64_t>(fs::file_size(out, ec)) == expected);
+    // the hit, with the correct size
+    TEST_REQUIRE(download_utils::download_from_hf_cache(url, out.string(), expected));
+    // a wrong size must NOT reuse (falls back to a real download)
+    TEST_REQUIRE(!download_utils::download_from_hf_cache(url, out.string(), expected + 1));
+    // percent-encoded filename resolves in the cache too
+    TEST_REQUIRE(download_utils::download_from_hf_cache(
+        "https://huggingface.co/org/Widget/resolve/main/widget.gguf", out.string(), expected));
+    unsetenv("HF_HOME");
+    fs::remove_all(home, ec);
+    fs::remove_all(out.parent_path(), ec);
+}
+
 }  // namespace
 
 int main() {
@@ -311,6 +354,7 @@ int main() {
     RunTest(test_malformed_tables_throw, "malformed tables throw");
     RunTest(test_remove_deletes_tree_and_links, "remove deletes tree and links");
     RunTest(test_remove_refuses_unknown_and_escape, "remove refuses unknown and escape");
+    RunTest(test_hf_cache_reuse, "hf cache reuse skips the download");
     std::cout << "All downloader pinning tests passed\n";
     return 0;
 }

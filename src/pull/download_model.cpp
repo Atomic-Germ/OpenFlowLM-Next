@@ -6,6 +6,7 @@
 /// \note This class for curl download
 #include "download_model.hpp"
 #include <fstream>
+#include <cstring>
 #include <iostream>
 #include <filesystem>
 #include <iomanip>
@@ -309,7 +310,113 @@ bool request_hash_matches(const DownloadRequest& request,
     return actual == request.expected_hash;
 }
 
+/// Decode a percent-encoded filename back to the plain path it names on disk.
+std::string percent_decode_filename(std::string_view s) {
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            const int hi = hex(s[i + 1]), lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
+/// Locate a file already on disk in the user's Hugging Face cache. The HF cache
+/// (HF_HUB_CACHE / HF_HOME/hub, else ~/.cache/huggingface/hub) stores a repo's
+/// files under models--<org>--<name>/snapshots/<rev>/<file>, which is where
+/// huggingface_hub / llama.cpp / ollama put every model they fetch. Taking the
+/// file from there means `oflm pull` never re-downloads a model the user has
+/// already fetched with any other tool.
+///
+/// Accepts a resolve URL of the form
+///   https://huggingface.co/<repo_id>/resolve/<rev>/<file>[?download=true]
+/// Returns the cached path, or "" when the file is not cached.
+std::string hf_cache_snapshot_file(const std::string& url) {
+    constexpr const char* kHost = "huggingface.co/";
+    const size_t host = url.find(kHost);
+    if (host == std::string::npos) return "";
+    size_t pos = host + std::strlen(kHost);
+    const size_t rp = url.find("/resolve/", pos);
+    if (rp == std::string::npos) return "";
+    std::string repo_id = url.substr(pos, rp - pos);
+    const size_t fe = url.find('/', rp + 9);               // strlen("/resolve/") == 9
+    if (fe == std::string::npos) return "";
+    std::string filename = url.substr(fe + 1);
+    const size_t q = filename.find('?');
+    if (q != std::string::npos) filename = filename.substr(0, q);
+    filename = percent_decode_filename(filename);
+    if (repo_id.empty() || filename.empty()) return "";
+
+    std::string dirname = "models--";
+    for (char c : repo_id) dirname += (c == '/') ? "--" : std::string(1, c);
+
+    std::vector<std::string> roots;
+    if (const char* e = std::getenv("HF_HUB_CACHE")) roots.emplace_back(e);
+    if (const char* e = std::getenv("HF_HOME")) roots.push_back(std::string(e) + "/hub");
+    const char* home = std::getenv("HOME");
+    if (!home) home = std::getenv("USERPROFILE");
+    if (home) roots.push_back(std::string(home) + "/.cache/huggingface/hub");
+
+    std::error_code ec;
+    for (const std::string& root : roots) {
+        const std::filesystem::path snap(root + "/" + dirname + "/snapshots");
+        if (!std::filesystem::is_directory(snap, ec)) continue;
+        std::vector<std::filesystem::path> candidates;
+        const std::filesystem::path refs(root + "/" + dirname + "/refs");
+        if (std::filesystem::is_directory(refs, ec)) {
+            for (const auto& ref : std::filesystem::directory_iterator(refs)) {
+                std::ifstream in(ref.path());
+                std::string rev;
+                std::getline(in, rev);
+                if (!rev.empty()) candidates.push_back(snap / rev / filename);
+            }
+        }
+        if (candidates.empty())
+            for (const auto& d : std::filesystem::directory_iterator(snap))
+                if (d.is_directory(ec)) candidates.push_back(d.path() / filename);
+        for (const auto& f : candidates)
+            if (std::filesystem::is_regular_file(f, ec)) return f.string();
+    }
+    return "";
+}
+
 }  // namespace
+
+/// Copy a cached HF file into `local_path` (atomically) when its size matches
+/// `expected_size`. Returns true only when a fresh, correct copy was made, so a
+/// caller can skip the network download. The size guard rejects a truncated
+/// cache entry; the HF cache only ever holds hash-verified content, so a
+/// matching-size cached file is trusted to be the real file.
+bool download_from_hf_cache(const std::string& url, const std::string& local_path,
+                            uint64_t expected_size) {
+    const std::string cached = hf_cache_snapshot_file(url);
+    if (cached.empty()) return false;
+    std::error_code ec;
+    if (expected_size &&
+        std::filesystem::file_size(cached, ec) != expected_size) return false;
+    const std::filesystem::path dest(local_path);
+    std::filesystem::create_directories(dest.parent_path(), ec);
+    if (ec) return false;
+    const std::filesystem::path part(local_path + ".part");
+    std::filesystem::copy_file(cached, part, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) { std::filesystem::remove(part, ec); return false; }
+    if (!promote_atomically(part, dest)) { std::filesystem::remove(part, ec); return false; }
+    header_print("OFLM", "Using cached file from the local HF cache: " << local_path);
+    return true;
+}
 
 bool download_file_atomic(const DownloadRequest& request,
                           std::function<void(double)> progress_cb) {
@@ -453,7 +560,12 @@ bool download_multiple_files(const nlohmann::json downloads,
         };
 
         bool ok;
-        if (file.contains("expected_size") && file.contains("hash_algorithm")) {
+        // A model the user already fetched with huggingface_hub / llama.cpp /
+        // ollama is on disk in their HF cache: use it instead of the network.
+        uint64_t cache_size = file.contains("expected_size") ? file["expected_size"].get<uint64_t>() : 0;
+        if (download_from_hf_cache(url, local_path, cache_size)) {
+            ok = true;
+        } else if (file.contains("expected_size") && file.contains("hash_algorithm")) {
             DownloadRequest request{
                 url,
                 local_path,

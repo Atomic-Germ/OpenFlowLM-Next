@@ -1880,6 +1880,7 @@ def main():
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
     gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
     else:
@@ -1892,6 +1893,11 @@ def main():
         # disk, so a failed parse there refuses the file outright.
         if local_dir:
             gguf_source = str(local_dir / gguf_name)
+        elif cache and (cache / gguf_name).is_file():
+            # The user already has this GGUF on disk in their HF cache: verify
+            # the local file (no network round trip) and let the install copy
+            # it from there below.
+            gguf_source = str(cache / gguf_name)
         elif modelscope:
             domain = ms_file_tree(repo)[0]
             gguf_source = f"https://{domain}/models/{repo}/resolve/master/{gguf_name}"
