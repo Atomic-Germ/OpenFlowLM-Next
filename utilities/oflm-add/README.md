@@ -24,6 +24,25 @@ oflm add Atomic-Germ/Qwen3.5-9B-Claude-4.8-Opus-NPU2 --tag qwen3.5-claude:9b
 
 The `--tag` argument must match the entry in OpenFlowLM's model registry (e.g., `qwen3.5-claude:9b`, `gptoss-distill:20b`). Run `oflm add --help` to see all options.
 
+### From a GGUF repo (llama.cpp-style)
+
+A repo carrying llama.cpp-style quantized weights installs like
+`llama-server -hf` runs it -- no conversion, no manual steps:
+
+```bash
+oflm add unsloth/Qwen3-4B-GGUF
+oflm add stratalab-org/embedding-gemma-300M-GGUF
+```
+
+The installer automates what those chaotic repos don't state:
+
+1. Picks the best compatible `*.gguf` (exact `Q4_1`/`Q4_0` pools first, then `Q4_K`/`Q6_K`, `Q8_0` last) and verifies its tensor types match the filename claim.
+2. Detects `details.family` from the repo name, else the GGUF's `general.architecture`, else `config.json` (`model_type`, then `architectures`) from the repo or its base-model chain. Unmapped shapes (MoE variants with different geometry, vision-language checkpoints) refuse with a `--family` hint instead of linking the wrong kernels.
+3. Climbs the README `base_model` chain (quant -> finetune -> base, cycles visited once) for the auxiliary files the GGUF repo omits (`config.json`, `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`); gated or vanished bases fall back to the GGUF's embedded tokenizer.
+4. Guesses the tag size from the GGUF's bytes and quant (or the config geometry) when the slug carries no size marker, and links the closest official kernels by family and size, so `oflm serve` works out of the box.
+
+`--family` and `--tag` always override the heuristics when you know better.
+
 ### From a ModelScope repo
 
 Hugging Face is the default hub; pass `--modelscope` for a bare repo id, or just paste a ModelScope URL and it is detected automatically:

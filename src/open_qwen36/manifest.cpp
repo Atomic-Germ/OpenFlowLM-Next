@@ -2,6 +2,7 @@
 /// \brief manifest.json parsing and the model check (see manifest.hpp).
 #include "open_qwen36/manifest.hpp"
 
+#include <cmath>
 #include <fstream>
 #include <initializer_list>
 #include <stdexcept>
@@ -65,15 +66,17 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
-        p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
+    if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "put" ||
+        p.op == "expert_down" || p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose" ||
+        p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
         if (p.up.empty() || p.gate.empty()) fail(where, "expert_stripes without up / gate");
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm")
+        need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
         need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
@@ -490,7 +493,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 fail(where, "layer type " + name + " gemm_block.attn_block: arg " + a + " is not a declared global");
     }
     const json& pack = need(j, "pack", where);
-    m.embed_tensor = get<std::string>(need(pack, "embed", where), "tensor", where + " pack.embed");
+    const json& embed = need(pack, "embed", where);
+    m.embed_tensor = get<std::string>(embed, "tensor", where + " pack.embed");
+    m.embed_scale = embed.value("scale", 1.0);
+    if (!(m.embed_scale > 0.0) || !std::isfinite(m.embed_scale))
+        fail(where, "pack.embed.scale must be finite and positive");
     m.norm_tensor = get<std::string>(need(pack, "norm", where), "tensor", where + " pack.norm");
     m.norm_bytes = get<size_t>(need(pack, "norm", where), "bytes", where + " pack.norm");
     for (const auto& o : need(need(pack, "lm_head", where), "ops", where + " pack.lm_head")) m.lmhead_ops.push_back(parse_op(o, where + " pack.lm_head"));
@@ -500,6 +507,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];
     }
+    if (j.contains("gguf")) m.gguf = std::make_unique<Manifest>(parse(j["gguf"], where + " gguf"));
     return m;
 }
 
@@ -512,6 +520,10 @@ std::vector<std::string> Manifest::files() const {
     std::vector<std::string> f;
     for (const auto& [k, v] : contexts) f.push_back(v);
     for (const auto& [k, v] : kernels) f.push_back(v.insts);
+    if (gguf) {
+        auto nested = gguf->files();
+        f.insert(f.end(), nested.begin(), nested.end());
+    }
     return f;
 }
 

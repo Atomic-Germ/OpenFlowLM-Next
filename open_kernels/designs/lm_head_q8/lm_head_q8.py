@@ -30,7 +30,12 @@ from aie.utils import config
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"          # gemv_tab.h + the activation prep entry point
 
-TILE_BYTES = 8704
+# GGUF-direct pool chunks (f32 scales, 9216 B) vs the q4nx ones (bf16, 8704 B);
+# see lm_head_q8.h. The entry point is lm_head_q8s32_group in the f32 build.
+SCALES_F32 = int(os.environ.get("LMHEAD_SCALES_F32", 0))
+TILE_BYTES = 9216 if SCALES_F32 else 8704
+KERNEL_SYM = "lm_head_q8s32_group" if SCALES_F32 else "lm_head_q8_group"
+EXTRA_FLAGS = ["-DLMHEAD_SCALES_F32=1", "-DLMHEAD_Q8_PREFIX=lm_head_q8s32"] if SCALES_F32 else []
 BAND_ROWS = 128
 ROW_SPLIT = 4           # 32-row quarters per 128-row band (lm_head_q8.h's kRowSplit)
 K = int(os.environ.get("LMHEAD_K", 2048))      # the hidden width; 2048 for the 27B, 4096 for Qwen3.5 dense
@@ -75,11 +80,11 @@ def lm_head_q8(w: In, x: In, y: Out, *, n: CompileTime[int],
     y_ty = np.ndarray[(n,), np.dtype[np.float32]]
 
     kernel = ExternalFunction(
-        "lm_head_q8_group",
+        KERNEL_SYM,
         source_file=str(HERE / "lm_head_q8.cc"),
         arg_types=[elem_ty, tab_ty, acc_ty, np.int32],
         include_dirs=_include_dirs(),
-        compile_flags=[f"-DLMHEAD_PER_CALL={per_call}", f"-DLMHEAD_K={K}"],
+        compile_flags=[f"-DLMHEAD_PER_CALL={per_call}", f"-DLMHEAD_K={K}"] + EXTRA_FLAGS,
     )
     # the prep TU is generated on demand (gemv_q4.ensure_prep_entry rewrites it only when the
     # text differs, so the K values already checked in stay byte-identical)
@@ -143,4 +148,5 @@ def lm_head_q8(w: In, x: In, y: Out, *, n: CompileTime[int],
 DESIGN = lm_head_q8
 _src = (b"".join((HERE / f).read_bytes() for f in ("lm_head_q8.h", "lm_head_q8.cc"))
         + (GEMV / "gemv_tab.h").read_bytes() + f"K={K}".encode())
-SPECIALIZE = {"n": N, "n_cores": N_CORES, "per_call": PER_CALL, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}
+SPECIALIZE = {"n": N, "n_cores": N_CORES, "per_call": PER_CALL,
+              "srchash": int(hashlib.sha1(_src + str(SCALES_F32).encode()).hexdigest()[:8], 16)}
