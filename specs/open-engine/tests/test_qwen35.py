@@ -753,6 +753,8 @@ def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, monkeypatch):
     assert gb["out_split"] is True
     assert gb["program"][1] == _run("gemm_n8192_k4096", "gout_w", "gemm_x_k4096", "gemm_y_n8192")
     assert "gemm_n8192_k4096" in m["kernels"]
+    # out_split alone stays manifest_version 1: every engine that reads out_split folds that step
+    assert m["manifest_version"] == 1
     # the sequential kernel still reads its q8 pack of the same tensor
     seq = [o for o in lin["pack"]["consts"] if o.get("tensor", "").endswith("ssm_out_proj.weight")]
     assert len(seq) == 1 and seq[0]["op"] == "q8_perm"

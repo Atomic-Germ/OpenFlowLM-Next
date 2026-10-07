@@ -163,6 +163,9 @@ def test_q8_projections_run_as_their_exact_q4_1_split():
     assert m["globals"]["gemm_y_n24576"] == 24576 * T * 4
     # the sequential program still streams q8
     assert [s["op"] for s in lin["program"]] == ["run", "moeroute2", "run"]
+    # an engine that reads only version 1 would ignore `split` and use the hi halves alone, so a
+    # manifest with a split step says version 2, which such an engine refuses by name
+    assert m["manifest_version"] == 2 and q4["manifest_version"] == 1
 
 
 def test_a_q4_1_spec_has_no_split_steps(m):

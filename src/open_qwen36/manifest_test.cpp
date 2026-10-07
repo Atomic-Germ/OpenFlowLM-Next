@@ -247,12 +247,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 2}"));
+    json j = json::parse(std::string("{\"manifest_version\": 3}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 2 is refused");
+        check(false, "manifest_version 3 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 2") != std::string::npos, std::string("manifest_version 2 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 3") != std::string::npos, std::string("manifest_version 3 is refused: ") + e.what());
     }
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
@@ -391,6 +391,12 @@ int main(int argc, char** argv) {
             // dx is attnpos-patched too, and would run the whole layer per token of the block
             refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
+            // the dense route runs its GEMMs through its own dispatch, which adds no split halves
+            refused_manifest(argv[2], "do not add split halves", "qwen3: a split step on the dense route is refused",
+                             [](json& j) {
+                                 j["manifest_version"] = 2;
+                                 j["layer_types"]["dense"]["gemm_block"]["program"][0]["split"] = true;
+                             });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
         }
@@ -622,6 +628,7 @@ int main(int argc, char** argv) {
             for (auto& o : lo) pack.push_back(o);
             gb["weights"]["gqkvz_w"] = {{"from", "pack"}, {"pack", pack}};
             gb["program"][0]["split"] = true;
+            j["manifest_version"] = 2;
         };
         {
             std::ifstream f(argv[5]);
@@ -642,7 +649,20 @@ int main(int argc, char** argv) {
         }
         refused_manifest(argv[5], "is not a hi / lo split", "a split step whose weight is not a split is refused",
                          [&](json& j) {
+                             j["manifest_version"] = 2;
                              j["layer_types"]["linear_attention"]["gemm_block"]["program"][0]["split"] = true;
+                         });
+        // an engine that reads only version 1 ignores `split` and would use the hi half alone, so
+        // the version is what makes such an engine refuse the set; out_split alone stays version 1
+        refused_manifest(argv[5], "needs version 2", "a split step in a version 1 manifest is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["manifest_version"] = 1;
+                         });
+        refused_manifest(argv[5], "end to end from 0", "a split whose lo halves overlap its hi halves is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gqkvz_w"]["pack"][2]["dst"] = 0;
                          });
         refused_manifest(argv[5], "without `split`", "a split weight read by a step that is not split is refused",
                          [&](json& j) {

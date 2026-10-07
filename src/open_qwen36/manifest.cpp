@@ -129,7 +129,11 @@ Manifest Manifest::load(const std::string& path) {
 Manifest Manifest::parse(const json& j, const std::string& where) {
     Manifest m;
     m.version = get<int>(j, "manifest_version", where);
-    if (m.version != 1) fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1)");
+    // 2 is 1 plus `split` route steps (OPEN-PREFILL-BATCH): an engine that reads only 1 would
+    // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
+    // a step is split, and an older engine refuses the set by name instead of misreading it.
+    if (m.version != 1 && m.version != 2)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 and 2)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -442,15 +446,37 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 }
                 return true;
             };
+            // `out_split` predates manifest_version 2 and every engine that reads it folds that step.
+            const Step* out_step = g.out_split ? &g.program.at(1) : nullptr;
             auto check_split = [&](const std::vector<Step>& prog, const std::map<std::string, GemmWeight>& ws,
                                    const char* what) {
                 for (const auto& s : prog) {
                     const GemmWeight& w = ws.at(s.args[0]);
                     bool any = false;
                     for (const auto& o : w.pack) any = any || !o.split.empty();
+                    if (s.split && g.kind == "dense")
+                        fail(gw, std::string(what) + " step " + s.kernel + " is split, and the dense route's "
+                                     "GEMMs do not add split halves");
+                    if (s.split && &s != out_step && m.version < 2)
+                        fail(gw, std::string(what) + " step " + s.kernel + " is split in a manifest_version " +
+                                     std::to_string(m.version) + " manifest; an engine that reads only 1 "
+                                     "would use its hi half alone, so a split step needs version 2");
                     if (s.split && !is_split(w))
                         fail(gw, std::string(what) + " step " + s.kernel + " is split, but its weight " + s.args[0] +
                                      " is not a hi / lo split (every op's hi half, then the same ops' lo halves)");
+                    if (s.split) {
+                        // the host adds rows N.. into rows 0.., so the lo halves must start exactly
+                        // where the hi halves end, and nothing may overlap or leave a gap
+                        uint64_t off = 0;
+                        for (const auto& o : w.pack) {
+                            if (o.dst != off)
+                                fail(gw, std::string(what) + " step " + s.kernel + ": split weight " + s.args[0] +
+                                             " op " + o.tensor + " (" + o.split + ") packs at dst " +
+                                             std::to_string(o.dst) + ", not " + std::to_string(off) +
+                                             " -- the halves must lie end to end from 0");
+                            off += o.nch * m.chunk_bytes;
+                        }
+                    }
                     if (!s.split && any)
                         fail(gw, std::string(what) + " step " + s.kernel + " reads the split weight " + s.args[0] +
                                      " without `split`");
