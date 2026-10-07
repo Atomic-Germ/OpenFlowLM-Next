@@ -201,4 +201,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Trace individual Q4 down blocks, local compensation and activation sums using original packed weights.</description>
     <location>.opencode/skill/open-down-block-trace/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-q4-product-trace</name>
+    <description>Capture nine Q4 products and local compensation to reproduce native FP32 cancellation errors on real down activations.</description>
+    <location>.opencode/skill/open-q4-product-trace/SKILL.md</location>
+  </skill>
 </available_skills>

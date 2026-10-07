@@ -79,3 +79,8 @@ the nine local products and compensation steps in block53/channel4872, and
 verify the integer activation dot representation before selecting a correction.
 
 Reproduction: [open-down-block-trace](../../../.opencode/skill/open-down-block-trace/SKILL.md).
+
+Follow-up: [nine-term product traces](qwen38-q4-product-trace.md) reproduce
+the error at term7 on all three channels. Products and operand decomposition
+are exact; native local compensated addition loses a representable difference.
+The next correction belongs in local product accumulation.

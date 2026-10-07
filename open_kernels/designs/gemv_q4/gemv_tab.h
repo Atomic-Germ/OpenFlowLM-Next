@@ -57,9 +57,24 @@ static inline void q4_two_sum(aie::accum<accfloat, 32> &sum,
 
 __attribute__((noinline)) inline void q4_product_add(
     aie::accum<accfloat, 32> &sum, aie::vector<float, 32> &low,
-    const aie::vector<bfloat16, 32> &a, const aie::vector<bfloat16, 32> &b) {
+    const aie::vector<bfloat16, 32> &a, const aie::vector<bfloat16, 32> &b
+#if GEMV_Q4_PRODUCT_TRACE
+    , float *trace = nullptr
+#endif
+    ) {
   // A BF16 product is exact in FP32 (for the normal model range).
   q4_two_sum(sum, low, aie::mul(a, b));
+#if GEMV_Q4_PRODUCT_TRACE
+  if (trace) {
+    aie::accum<accfloat,32> av,bv;
+    av.from_vector(a);bv.from_vector(b);
+    aie::store_v(trace,av.to_vector<float>());
+    aie::store_v(trace+32,bv.to_vector<float>());
+    aie::store_v(trace+64,aie::mul(a,b).template to_vector<float>());
+    aie::store_v(trace+96,sum.template to_vector<float>());
+    aie::store_v(trace+128,low);
+  }
+#endif
 }
 #endif
 

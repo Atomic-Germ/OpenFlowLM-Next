@@ -120,6 +120,9 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
 #if GEMV_Q4_BLOCK_TRACE
                                                    , float *trace = nullptr
 #endif
+#if GEMV_Q4_PRODUCT_TRACE
+                                                   , float *products = nullptr
+#endif
                                                    ) {
   event0();
 #ifdef GEMV_NULL
@@ -237,15 +240,22 @@ __attribute__((noinline)) inline void gemv_q4_tile(const uint8_t *__restrict til
     const auto rh = residual.template to_vector<bfloat16>();
     const auto rl = aie::sub(residual, rh).template to_vector<bfloat16>();
     const auto rt = aie::sub(aie::sub(residual, rh), rl).template to_vector<bfloat16>();
-    q4_product_add(acc, compensation, hi, ds);
-    q4_product_add(acc, compensation, lo, ds);
-    q4_product_add(acc, compensation, tail, ds);
-    q4_product_add(acc, compensation, rh, ds);
-    q4_product_add(acc, compensation, rl, ds);
-    q4_product_add(acc, compensation, rt, ds);
-    q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xsh[kb]));
-    q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xsl[kb]));
-    q4_product_add(acc, compensation, mperm, aie::broadcast<bfloat16, kRows>(xst[kb]));
+#if GEMV_Q4_PRODUCT_TRACE
+#define Q4_PRODUCT(A, B, I) q4_product_add(acc, compensation, A, B, \
+    (products && kt*8+kb==GEMV_Q4_PRODUCT_TRACE_BLOCK) ? products+(I)*160 : nullptr)
+#else
+#define Q4_PRODUCT(A, B, I) q4_product_add(acc, compensation, A, B)
+#endif
+    Q4_PRODUCT(hi, ds, 0);
+    Q4_PRODUCT(lo, ds, 1);
+    Q4_PRODUCT(tail, ds, 2);
+    Q4_PRODUCT(rh, ds, 3);
+    Q4_PRODUCT(rl, ds, 4);
+    Q4_PRODUCT(rt, ds, 5);
+    Q4_PRODUCT(mperm, (aie::broadcast<bfloat16, kRows>(xsh[kb])), 6);
+    Q4_PRODUCT(mperm, (aie::broadcast<bfloat16, kRows>(xsl[kb])), 7);
+    Q4_PRODUCT(mperm, (aie::broadcast<bfloat16, kRows>(xst[kb])), 8);
+#undef Q4_PRODUCT
 #if GEMV_Q4_BLOCK_CARRY
     // Keep both components of the block result through the global reduction.
     // Renormalize after every block rather than letting the low part grow.

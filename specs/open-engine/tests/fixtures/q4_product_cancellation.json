@@ -1,0 +1,39 @@
+{
+  "diagnostic_only": true,
+  "source": "2026-10-07 NPU Strix, real layer0 down trace; seventh local product",
+  "cases": [
+    {
+      "channel": 4872,
+      "block": 53,
+      "high_before": 0.0038717917632311583,
+      "low_before": 0.0,
+      "term": -0.00390625,
+      "device_high": -3.445800393819809e-05,
+      "device_low": 0.0,
+      "ieee_high": -3.4458236768841743e-05,
+      "error": 2.3283064365386963e-10
+    },
+    {
+      "channel": 392,
+      "block": 107,
+      "high_before": -0.0017625255277380347,
+      "low_before": -5.093170329928398e-11,
+      "term": 0.001953125,
+      "device_high": 0.00019059935584664345,
+      "device_low": -5.093170329928398e-11,
+      "ieee_high": 0.00019059947226196527,
+      "error": -1.1641532182693481e-10
+    },
+    {
+      "channel": 1769,
+      "block": 53,
+      "high_before": 0.0010458918986842036,
+      "low_before": 1.0186340659856796e-10,
+      "term": -0.001953125,
+      "device_high": -0.0009072329849004745,
+      "device_low": 1.0186340659856796e-10,
+      "ieee_high": -0.0009072331013157964,
+      "error": 1.1641532182693481e-10
+    }
+  ]
+}
