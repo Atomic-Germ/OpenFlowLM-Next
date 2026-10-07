@@ -93,7 +93,7 @@ what is open today.
   
 ---
 
-💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community](https://discord.gg/8RexzmW7))
+💬 Have **feedback/issues** or want **early access** to our new releases? [Open an issue](https://github.com/Atomic-Germ/OpenFlowLM/issues/new) or [Join our Discord community]([https://discord.gg/8RexzmW7](https://discord.gg/AcFAKvVV8c)))
 
 ---
 
