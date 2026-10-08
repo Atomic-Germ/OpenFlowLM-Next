@@ -33,8 +33,13 @@ sys.path.insert(0, str(HERE.parent.parent.parent / "npu_offload" / "gemm_rtp"))
 from gemm_pretiled import pretiled_array  # noqa: E402
 
 # the reference's own tile: 2mk + 2kn + 2mn bytes = 40 KB of the 64 KB L1 at bf16 in, f32 out
-M_TILE, K_TILE, N_TILE = 64, 64, 32
-N_COLS = 8
+M_TILE, K_TILE = 64, 64
+N_TILE = int(os.environ.get("AG_N_TILE", "32"))  # D4 (n=16): one cols=8 xclbin for s and pv alike
+if N_TILE not in (16, 32):
+    sys.exit(f"attn_gemm: AG_N_TILE={N_TILE} must be one of 16, 32")
+N_COLS = int(os.environ.get("AG_COLS", "8"))  # Path A: 4 for a 128-wide head dim (pv), 8 otherwise
+if N_COLS not in (2, 4, 8):
+    sys.exit(f"attn_gemm: AG_COLS={N_COLS} must be one of 2, 4, 8")
 
 M = int(os.environ.get("AG_M", 2048))
 K = int(os.environ.get("AG_K", 256))

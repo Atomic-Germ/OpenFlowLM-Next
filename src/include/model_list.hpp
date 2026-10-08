@@ -13,6 +13,7 @@
 #include <any>
 #include <unordered_set>
 #include <filesystem>
+#include <cstdlib>
 #include "utils/utils.hpp"
 
 /// \note This class is used to manage the model list.
@@ -39,6 +40,7 @@ class model_list {
             std::filesystem::path root_path = std::filesystem::path(exe_dir) / relative_model_path;
             this->model_root_path = root_path.string();
             config_file.close();
+            this->resolve_hf_owner();
 
             // Populate all_tags set
             for (const auto& [model_type, sizes] : this->config["models"].items()) {
@@ -124,9 +126,14 @@ class model_list {
             // check if size is specified
             if (new_tag.find(':') == std::string::npos) {
                 // get the first size in the subset
-                std::string model_type = new_tag;
-                std::string model_size = this->config["models"][model_type].begin().key();
-                new_tag = model_type + ":" + model_size;
+                // Indexing a const json with a missing key is undefined behaviour,
+                // and callers do reach here with tags that are not in the list --
+                // the "model-faker" sentinel among them (#135). Leave those as they are.
+                const nlohmann::json& models = this->config["models"];
+                auto it = models.find(new_tag);
+                if (it != models.end() && it->is_object() && !it->empty()) {
+                    new_tag = new_tag + ":" + it->begin().key();
+                }
             }
             return new_tag;
         }
@@ -229,6 +236,36 @@ class model_list {
         }
         
     private:
+        /// \brief fill in the Hugging Face account that hosts our own model repositories
+        /// \note Their `url` / `file_url` are written with `{hf_owner}`, so one place says
+        ///       where they are: the list's "hf_owner", or OFLM_HF_OWNER when it is set (to
+        ///       try another account without editing the list). A third-party repository
+        ///       names its own account and is left as written.
+        void resolve_hf_owner() {
+            static const std::string kSlot = "{hf_owner}";
+            const char* env = std::getenv("OFLM_HF_OWNER");
+            std::string owner = (env && *env) ? std::string(env) : this->config.value("hf_owner", std::string());
+            if (!this->config.contains("models")) return;
+            for (auto& [model_type, sizes] : this->config["models"].items()) {
+                for (auto& [size, model_info] : sizes.items()) {
+                    for (const char* key : {"url", "file_url"}) {
+                        if (!model_info.contains(key) || !model_info[key].is_string()) continue;
+                        std::string v = model_info[key].get<std::string>();
+                        size_t at = v.find(kSlot);
+                        if (at == std::string::npos) continue;
+                        if (owner.empty()) {
+                            std::cerr << "Model list " << this->list_path << ": " << model_type << ":" << size
+                                      << " uses {hf_owner}, but the list has no \"hf_owner\"" << std::endl;
+                            exit(1);
+                        }
+                        for (; at != std::string::npos; at = v.find(kSlot, at + owner.size()))
+                            v.replace(at, kSlot.size(), owner);
+                        model_info[key] = v;
+                    }
+                }
+            }
+        }
+
         std::string list_path;
         nlohmann::json config;
         std::string model_root_path;

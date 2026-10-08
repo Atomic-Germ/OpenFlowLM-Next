@@ -552,6 +552,48 @@ static void test_require_field() {
 }
 
 // ---------------------------------------------------------------------------
+// exception_body (#135): e.what() is logged, never sent. nlohmann quotes the
+// request's own bytes into a parse error, so the body must not carry it.
+// ---------------------------------------------------------------------------
+static void test_exception_body() {
+    using openai_compat::exception_body;
+    using openai_compat::status_for;
+    using json = openai_compat::json;
+    std::printf("\n-- exception_body --\n");
+
+    std::string parse_what;
+    try {
+        // An unterminated string: nlohmann quotes the token it was reading.
+        (void)nlohmann::json::parse(std::string("{\"a\": \"secret-request-bytes"));
+    } catch (const nlohmann::json::exception& e) {
+        parse_what = e.what();
+        const json body = exception_body(e);
+        ok(body.dump().find("secret-request-bytes") == std::string::npos,
+           "a parse error's quoted request bytes stay out of the body");
+    }
+    ok(parse_what.find("secret-request-bytes") != std::string::npos,
+       "...and nlohmann really does quote them in what(), which is why");
+
+    // The model list is json too: a bad max_prefill_len throws the same type a bad
+    // request field would. The type says nothing about whose fault it is.
+    try {
+        (void)nlohmann::json{{"max_prefill_len", "4096"}}["max_prefill_len"].get<int>();
+    } catch (const nlohmann::json::exception& e) {
+        eqi(status_for(exception_body(e)), 500, "a json::exception is not assumed to be the client's: 500");
+    }
+
+    const std::runtime_error engine_fault("/opt/models/weights.bin: read failed");
+    const json server = exception_body(engine_fault);
+    ok(server.dump().find("/opt/models") == std::string::npos, "an engine's text stays out too");
+    eqi(status_for(server), 500, "any other exception is a server fault: 500");
+    eq(server["error"]["message"].get<std::string>(), "Internal error", "with a fixed message");
+
+    const json templ = exception_body(request_error("chat template rejected the request: roles must alternate"));
+    eqi(status_for(templ), 400, "a request_error -- thrown where the fault is known -- is a 400");
+    ok(templ.dump().find("roles") == std::string::npos, "...still without the exception text");
+}
+
+// ---------------------------------------------------------------------------
 // images_request (SERVER-IMAGES-PARAMS, SERVER-IMAGES-SIZE): one field under two
 // names must never mean two things, and a refused control must say which it was.
 // ---------------------------------------------------------------------------
@@ -677,6 +719,7 @@ int main(int argc, char** argv) {
 
     test_finish_reason();
     test_status_for();
+    test_exception_body();
     test_model_error();
     test_preflight();
     test_resolve_task();

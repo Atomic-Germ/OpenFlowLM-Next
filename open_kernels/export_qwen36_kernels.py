@@ -41,6 +41,7 @@ xclbin and nowhere else (see src/open_qwen36/README.md).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -55,7 +56,6 @@ HERE = Path(__file__).resolve().parent                 # open_kernels/
 REPO = HERE.parent
 DESIGNS = HERE / "designs"
 XCLBINS = REPO / "src" / "xclbins"
-DEFAULT_MODEL = "Qwen3.6-35B-A3B-NPU2"
 sys.path.insert(0, str(HERE))
 from recipes.cache import build_key  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
@@ -63,7 +63,7 @@ from recipes.load import default_spec, load_spec, spec_from_model_dir  # noqa: E
 from recipes.manifest import dumps, manifest  # noqa: E402
 
 # knobs that must NOT leak in from the caller's shell
-CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
+CLEAR = ("LX_PART", "LX_STOP", "AX_PART", "UX_PART", "LMHEAD_N", "LMHEAD_CORES", "OPEN_KERNELS_SPEC")
 FILES = ("final.xclbin", "insts.bin")
 
 
@@ -140,7 +140,26 @@ def git_head(root: Path) -> str:
         return "unavailable"
 
 
-def build(name: str, sets: dict, spec_file: Path) -> Path:
+PROGRAM_MEMORY = 16384                                  # bytes per AIE2P core
+
+
+def fullest_core(bdir: Path) -> int | None:
+    """The largest .text among a finished build's core ELFs (aiecc keeps them in final.prj),
+    or None when they or Peano's llvm-size cannot be found."""
+    try:
+        from aie.utils.config import peano_install_dir
+        size = Path(peano_install_dir()) / "bin" / "llvm-size"
+        used = []
+        for elf in (bdir / "final.prj").glob("elfs_*/*.elf"):
+            r = subprocess.run([str(size), "-A", str(elf)], capture_output=True, text=True, timeout=30)
+            used += [int(l.split()[1]) for l in r.stdout.splitlines() if l.startswith(".text")]
+        return max(used) if used else None
+    except Exception:
+        return None
+
+
+def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
+    """Build one kernel set. Worker for the parallel build; returns (name, bdir)."""
     src, out, knobs = DESIGNS / sets[name]["design"], DESIGNS / sets[name]["build_dir"], sets[name]["env"]
     env = {k: v for k, v in os.environ.items() if k not in CLEAR}
     env.update(knobs)
@@ -149,10 +168,32 @@ def build(name: str, sets: dict, spec_file: Path) -> Path:
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
           f"{out.relative_to(HERE).as_posix()}", flush=True)
-    r = subprocess.run([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env, cwd=str(HERE))
-    if r.returncode != 0:
-        sys.exit(f"[{name}] build FAILED ({r.returncode})")
+    # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
+    # reports a core whose program does not fit only as an invalid ELF.
+    p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
+                         cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail, overflow = b"", False
+    for chunk in iter(lambda: p.stdout.read1(4096), b""):
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.flush()
+        tail = (tail + chunk)[-4096:]
+        overflow = overflow or b"Overflow of program memory" in tail
+    if p.wait() != 0:
+        if overflow:
+            raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
+                               "program memory. This is a bug in the kernels for this model, not in your setup; "
+                               "please report it with this log.")
+        raise RuntimeError(f"[{name}] build FAILED ({p.returncode})")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
+    used = fullest_core(out)
+    if used:
+        print(f"[{name}] program memory: fullest core {used} of {PROGRAM_MEMORY} B ({PROGRAM_MEMORY - used} B free)")
+    return name, out
+
+
+def build(name: str, sets: dict, spec_file: Path) -> Path:
+    """Sequential build of a single set (kept for callers that want it)."""
+    _, out = _build_one(name, sets, spec_file)
     return out
 
 
@@ -170,6 +211,11 @@ def main() -> int:
     ap.add_argument("--check", metavar="DIR",
                     help="a previous export (or a shipped xclbins/<model>/open_kernels dir) to compare "
                          "against; non-zero exit on any difference beyond the per-build UUID/timestamp stamps")
+    # Sequential by default: each build drives aiecc over the whole design, so
+    # running several at once needs several times the memory of one. Callers that
+    # know their machine (the Nix package build passes NIX_BUILD_CORES) opt in.
+    ap.add_argument("-j", "--jobs", type=int, default=1,
+                    help="kernel-set builds to run in parallel within this spec (default: 1)")
     a = ap.parse_args()
 
     # ---- the spec, its recipe, and the kernel sets that recipe names
@@ -180,14 +226,38 @@ def main() -> int:
     else:
         spec = default_spec()
     F = for_spec(spec)
-    F.recipe(spec)                                     # refuses a spec outside the validated points
+    try:
+        F.recipe(spec)                               # refuses a spec outside the validated points
+    except Exception as e:
+        from recipes.catalogue import OpRangeError
+        if isinstance(e, OpRangeError):
+            sys.exit(
+                f"{e}\n\nThis is a *catalogue* wall, not a correctness verdict: the recipe is\n"
+                f"dim-correct for the kernel template, it just has not been built and fixture-tested\n"
+                f"at that (family, K, ...). For an experimenter the path through is deliberate:\n"
+                f"\n"
+                f"  OPEN_KERNELS_UNVALIDATED=1 python {sys.argv[0]} ...\n"
+                f"\n"
+                f"to accept the off-grid point (you are saying you accept the build failing\n"
+                f"or producing an untested kernel), and the build's make compare fixture will\n"
+                f"tell you whether it matches. The point gets validated (and added to the\n"
+                f"catalogue) once its fixture passes."
+            )
+        raise
     sets = F.builds(spec)
     names = [n.strip() for n in a.only.split(",") if n.strip()] if a.only else list(sets)
     bad = [n for n in names if n not in sets]
     if bad:
         sys.exit(f"unknown set(s) {bad}; the recipe builds {list(sets)}")
     key = build_key(spec)
-    out_root = Path(a.out).resolve() if a.out else (XCLBINS / spec.extra.get("model", DEFAULT_MODEL) / "open_kernels")
+    if not a.out and not spec.extra.get("model"):
+        # It used to fall back to the 35B's name, so exporting a spec without one wrote
+        # over the flagship's shipped set. Say so instead of guessing a published name.
+        sys.exit(f"{a.spec or a.model_dir or 'the default spec'}: no extra.model, so there is "
+                 f"no export destination. It is the src/xclbins/<name> directory, and the name "
+                 f"`oflm add` links a converted model's kernels by. Add it to the spec, or "
+                 f"pass --out.")
+    out_root = Path(a.out).resolve() if a.out else (XCLBINS / spec.extra["model"] / "open_kernels")
     out_root.mkdir(parents=True, exist_ok=True)
     spec_file = out_root / "spec.json"
     spec_file.write_text(spec.to_json(), encoding="utf-8", newline="\n")
@@ -214,9 +284,22 @@ def main() -> int:
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
         gen.generate(F.recipe(spec))
+    # Build the requested sets in parallel, then copy outputs in deterministic order.
+    bdirs: dict[str, Path] = {}
+    if a.no_build:
+        for n in names:
+            bdirs[n] = DESIGNS / sets[n]["build_dir"]
+    else:
+        workers = max(1, min(a.jobs, len(names)))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_build_one, n, sets, spec_file) for n in names]
+            for future in concurrent.futures.as_completed(futures):
+                n, bdir = future.result()
+                bdirs[n] = bdir
+
     hashes: dict[str, str] = {}
     for n in names:
-        bdir = DESIGNS / sets[n]["build_dir"] if a.no_build else build(n, sets, spec_file)
+        bdir = bdirs[n]
         dst = out_root / n
         dst.mkdir(parents=True, exist_ok=True)
         for f in FILES:

@@ -67,6 +67,8 @@ cta_links:
 docs_nav:
   - label: Overview
     url: "/docs/"
+  - label: Install
+    url: "/docs/install/"
   - label: Install-Windows
     url: "/docs/install_win/"
   - label: Install-Linux
@@ -123,7 +125,7 @@ docs_nav:
         url: "/docs/models/whisper/"
       - label: EmbeddingGemma
         url: "/docs/models/embeddinggemma/"
-      - label: SmolVLA
+      - label: SmolVLA (planned)
         url: "/docs/models/smolvla/"
   - label: Benchmarks
     children:
@@ -151,5 +153,5 @@ docs_nav:
         url: "/docs/benchmarks/phi4_results/"
       - label: Nanbeige4.1
         url: "/docs/benchmarks/nanbeige4.1_results/"
-      - label: SmolVLA
-        url: "/docs/benchmarks/smolvla_results/"
+      - label: Embeddings
+        url: "/docs/benchmarks/embeddings_results/"

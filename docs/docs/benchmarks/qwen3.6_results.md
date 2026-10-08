@@ -10,10 +10,17 @@ nav_order: 10
 This section reports the performance of Qwen 3.6 on NPU with OpenFlowLM (OFLM).
 
 > **Note:** 
-> - Results are based on OpenFlowLM v0.9.45.  
+> - Results are based on OpenFlowLM v0.9.45.
 > - Under OFLM's default NPU power mode (Performance)    
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models.   
+
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
 
 ---
 
@@ -32,7 +39,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 96 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Qwen3.6-35B-A3B**    | NPU (OFLM)    | 17.48 | 17.16 | 16.59 | 15.6 | 13.76 | 11.19 | 
+| **Qwen3.6-35B-A3B**  | NPU (OFLM)    | 17.48 | 17.16 | 16.59 | 15.6 | 13.76 | 11.19 | 
 
 ---
 
@@ -40,7 +47,7 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 96 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Qwen3.6-35B-A3B**    | NPU (OFLM)    | 102.45 | 144.8 | 202.45 | 245.99 | 277.09 | 280.97 | 
+| **Qwen3.6-35B-A3B**  | NPU (OFLM)    | 102.45 | 144.8 | 202.45 | 245.99 | 277.09 | 280.97 | 
 
 ---
 
@@ -52,14 +59,14 @@ Prefill time-to-first-token (TTFT) for Qwen3.6-35B-A3B on NPU (OpenFlowLM) with 
 
 | Model        | HW  | 720p (1280×720) | 1080p (1920×1080) | 
 |--------------|-----------|----------------:|------------------:|
-| **Qwen3.6-35B-A3B**  | NPU (OFLM) |       11.3      |      17.8      |
+| **Qwen3.6-35B-A3B**  | NPU (OFLM)    | 11.3 | 17.8 | 
 
 
 **High Resolution Images:**
 
 | Model        | HW  | 2K (2560×1440) | 4K (3840×2160) |
 |--------------|-----------|---------------:|---------------:|
-| **Qwen3.6-35B-A3B**  | NPU (OFLM) |      28.5       |    59.2            |
+| **Qwen3.6-35B-A3B**  | NPU (OFLM)    | 28.5 | 59.2 | 
 
 
 > This test uses a short prompt: “Describe this image.”

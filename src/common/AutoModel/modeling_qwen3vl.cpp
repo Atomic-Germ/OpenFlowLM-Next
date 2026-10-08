@@ -61,7 +61,7 @@ std::string Qwen3VL::apply_chat_template(nlohmann::ordered_json& messages, nlohm
     if (!tools.empty())
         inputs.tools = tools;
     inputs.extra_context = this->extra_context;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Qwen3VL::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -303,11 +303,11 @@ std::string Qwen3VL::generate(chat_meta_info_t& meta_info, int length_limit, std
     return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
-std::string Qwen3VL::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Qwen3VL::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 // Non-stream
@@ -427,11 +427,11 @@ StreamResult Qwen3VL::parse_stream_content(const std::string content) {
 
 /************              Qwen3VL_Thinking            **************/
 
-std::string Qwen3VL_Thinking::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Qwen3VL_Thinking::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->generate(meta_info, length_limit, os);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 

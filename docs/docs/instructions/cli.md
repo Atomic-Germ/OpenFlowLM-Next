@@ -51,7 +51,7 @@ oflm run llama3.2:1b
 
 > `oflm` is short for OpenFlowLM. If the model isn't available locally, it will be downloaded automatically. This launches OpenFlowLM in CLI mode.
 
-> **Linux note:** `oflm validate` checks the kernel DRM device, while `oflm run` opens the NPU through XRT. If validation succeeds but `oflm run` fails with `No such device with index '0'`, confirm XRT can see the NPU:
+> **Linux note:** `oflm validate` checks the kernel DRM device and then opens the NPU through XRT, the way `oflm run` does. If it reports that the device runtime cannot open the NPU (`runtime_ok: false` with `--json`), confirm XRT can see the NPU:
 > ```shell
 > xrt-smi examine
 > ```
@@ -102,6 +102,20 @@ To make the change permanent, add the line above to your `~/.bashrc`, then reloa
 ```shell
 echo 'export OFLM_MODEL_PATH="/your/custom/path"' >> ~/.bashrc
 source ~/.bashrc
+```
+
+---
+
+### 🌍 Pull from ModelScope
+
+Every download command accepts `--modelscope` to fetch from ModelScope instead
+of HuggingFace:
+
+```shell
+oflm pull llama3.2:3b --modelscope
+oflm check llama3.2:3b --modelscope
+oflm run llama3.2:3b --modelscope
+oflm bench-embed bge-base:en-v1.5 --modelscope
 ```
 
 ---
@@ -195,7 +209,7 @@ oflm port
 
 ### ⚡ NPU Power Mode
 
-By default, **OFLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`powersaver`, `balanced`, or `turbo`) using the `--pmode` flag:
+By default, **OFLM runs in `performance` NPU power mode**. You can switch to other NPU power modes (`default`, `powersaver`, `balanced`, `performance`, or `turbo`) using the `--pmode` flag:
 
 For **CLI mode**:
 ```shell
@@ -227,8 +241,12 @@ For **Server mode**:
 oflm serve llama3.2:1b --ctx-len 8192
 ```
 
-> - Internally, OFLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.  
-> - If you enter a context length that is not a power of 2, OFLM automatically rounds it up to the nearest power of 2. For example: input `8000` → adjusted to `8192`.
+> - Internally, OFLM enforces a minimum context length of 512. If you specify a smaller value, it will automatically be adjusted up to 512.
+> - The value is otherwise used **as given**. It is *not* rounded to a power of 2, so `--ctx-len 8000` gives you 8000.
+> - The same 512 minimum applies to `--prefill-chunk-len`.
+> - A context longer than the model's `default_context_length` may not be
+>   supported by every architecture; check the model's card in
+>   [Models](/docs/models/) for its maximum.
 
 ---
 
@@ -255,7 +273,7 @@ oflm serve llama3.2:1b --host 127.0.0.1
 
 ⚠️ Note: --host applies only to the current session. It does not modify the default host configuration (default: `127.0.0.1`).
 
-> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. (`bench`, `list`, `version`, `port` and `validate` still accept it; see #68.)
+> ⚠️ **Changed:** `--host` is now refused by `run`, `pull`, `remove`, `check` and `bench-embed`, as `--port` and `--cors` already were. Those commands used to accept it and ignore it, so a script that passes `--host` to one of them now fails and must drop the flag. `bench`, `list`, `version`, `port` and `validate` refuse the serve-only options too; the one exception is `oflm port --port N`, which prints the port that value resolves to.
 
 ---
 
@@ -318,11 +336,11 @@ oflm serve llama3.2:1b --prefill-chunk-len 8192
 
 ### 🎙️ ASR (Automatic Speech Recognition)
 
-**Requirement:** The ASR model (e.g., `whisper-large-v3-turbo`) must run **with an LLM loaded concurrently**. Enabling `--asr 1` starts Whisper in the background **while** your chosen LLM loads.
+**Requirement:** The ASR model (e.g., `whisper-v3:turbo`) must run **with an LLM loaded concurrently**. Enabling `--asr 1` starts Whisper in the background **while** your chosen LLM loads.
 
 #### CLI mode
 ```shell
-oflm run gemma3:4b --asr 1  # Load Whisper (whisper-large-v3-turbo) in the background and load the LLM (gemma3:4b) concurrently.
+oflm run gemma3:4b --asr 1  # Load Whisper (whisper-v3:turbo) in the background and load the LLM (gemma3:4b) concurrently.
 ```
 
 #### Server mode
@@ -330,7 +348,32 @@ oflm run gemma3:4b --asr 1  # Load Whisper (whisper-large-v3-turbo) in the backg
 oflm serve gemma3:4b --asr 1  # Background-load Whisper and initialize the LLM (gemma3:4b) concurrently.
 ```
 
+Pick a different speech-to-text model with `--asrmodel` (default `whisper-v3:turbo`):
+
+```shell
+oflm serve gemma3:4b --asr 1 --asrmodel whisper-v3:turbo
+```
+
 > **Note:** ASR alone isn’t supported--an LLM must be present for end-to-end voice→text→LLM workflows.
+
+---
+
+### 🔢 Serving an Embedding Model
+
+`--embed 1` starts an encoder alongside the LLM for `/v1/embeddings`. Pick the
+encoder with `--embeddingmodel` (default `embed-gemma:300m`):
+
+```shell
+oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
+```
+
+> ⚠️ `--embed` (`embed-gemma:300m`) is **server-only**. `oflm run` it drops the
+> embedding and advices using `oflm serve -e 1`.
+>
+> The shipped encoders are `embed-gemma:300m` plus the BERT-family set
+> (`bge-base:en-v1.5`, `bge-small:en-v1.5`, `bge-large:en-v1.5`,
+> `all-minilm:l6-v2`, `nomic-embed-text:v1.5`, `gte-multilingual:base`) -- see
+> [EmbeddingGemma](/docs/models/embeddinggemma/).
 
 See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
 
@@ -365,9 +408,11 @@ Once inside the CLI, use the following commands. System commands always start wi
 
 ```text
 /?
+/help
 ```
 
 > Displays all available interactive system commands. Highly recommended for first-time users.
+> `/help` is an alias for `/?`.
 
 ---
 
@@ -388,6 +433,17 @@ Once inside the CLI, use the following commands. System commands always start wi
 ```
 
 > Unload the current model and load a new one. KV cache will be cleared.
+
+---
+
+### ⬇️ Pull a Model
+
+```text
+/pull [model_name]
+```
+
+> Download a model without leaving the session. `model_name` is a full tag,
+> e.g. `/pull llama3.2:3b`.
 
 ---
 
@@ -491,9 +547,9 @@ Example:
 * **No quotes** around the prompt
 * File must be plain text (readable in Notepad)
 
-👉 [Download a sample prompt (around 40k tokens)](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/assets/alice_in_wonderland.txt)  
+👉 Any long plain-text file works -- `Alice in Wonderland` from Project Gutenberg is a convenient ~150k-character stress prompt. Note that a model's supported context length is limited by its own `default_context_length` **and** by available DRAM.
 
-> ⚠️ **Caution:** a model’s supported context length is limited by available DRAM capacity. For example, with **32 GB** of DRAM, **LLaMA 3.1:8B** cannot run beyond a **32K** context length. For the full **128K** context, we recommend a larger memory system.
+> ⚠️ **Caution:** a model's supported context length is limited by available DRAM capacity. For example, with **32 GB** of DRAM, **LLaMA 3.1:8B** cannot run beyond a **32K** context length. Note that `llama3.1:8b` ships with a `default_context_length` of 16384, so raising it is an explicit opt-in.
 
 If DRAM is heavily used by other programs while running **OpenFlowLM**, you may encounter errors due to insufficient memory, such as:
 
@@ -540,6 +596,29 @@ Example:
 * Do **not** use quotes around the prompt  
 * Image must be in **.jpg** or **.png** format  
 
+#### Pre-resize the input image
+
+Vision models preprocess images, and time-to-first-token scales with the
+preprocessed resolution. `--img-pre-resize` (`-r`) picks a fixed height instead
+of using the original, trading detail for latency:
+
+| value | effect |
+|---|---|
+| `0` | use the original resolution |
+| `1` | height 480 |
+| `2` | height 720 |
+| `3` | height 1080 |
+| `4` … `8` | progressively larger heights, up to 4320 |
+
+```shell
+oflm run qwen3vl-it:4b -r 1
+```
+
+> ⚠️ Image understanding is served by the **closed** engine DLLs -- the open
+> kernels are text-only. Passing an image selects the closed path even for a
+> model whose text path runs open kernels. See the
+> [support-status matrix](/docs/models/).
+
 ---
 
 ### ⚙️ Set Variables
@@ -548,14 +627,33 @@ Example:
 /set
 ```
 
-> Customize decoding parameters like `top_k`, `top_p`, `temperature`, `context length (max)`, `generate limit`, etc.
+`/set` takes a key and a value. The keys are exactly these -- an unrecognised
+key prints `Invalid context:` and the list below:
 
-> ⚠️ **Note:** Providing invalid or extreme hyperparameter values may cause inference errors.
-> `generate limit` sets an upper limit on the number of tokens that can be generated for each response. Example:
+| key | sets |
+|---|---|
+| `topk` | top-k |
+| `topp` | top-p |
+| `minp` | min-p |
+| `temp` | temperature |
+| `rep-pen` | repetition penalty |
+| `freq-pen` | frequency penalty |
+| `pres-pen` | presence penalty |
+| `sys-msg` | the system message |
+| `ctx-len` | the max context length |
+| `gen-lim` | the upper limit on tokens generated per response |
+| `r-eff` | reasoning effort (`low`\|`medium`\|`high`, GPT-OSS only, default `medium`) |
+| `prefill-chunk-len` | accepted but currently a no-op |
+
+Note the spellings: `topk`, not `top_k`, and `temp`, not `temperature`. An
+invalid value for `ctx-len` aborts the process rather than being ignored.
 
 ```text
 /set gen-lim 128
+/set r-eff high
 ```
+
+> ⚠️ **Note:** Providing invalid or extreme hyperparameter values may cause inference errors.
 
 ---
 
@@ -574,6 +672,18 @@ Change the iteration times by `bench-iterations`:
 ```shell
 oflm bench llama3.2:1b --bench-iterations 4
 ```
+
+Drive the sweep from a JSON config instead of the defaults with `-i` (the
+configs live in `utilities/bench-configs/`):
+
+```shell
+oflm bench llama3.2:3b -i utilities/bench-configs/bench-1k.json
+```
+
+> ⚠️ The sweep runs context lengths from `1k` up to the config's `max_length`.
+> A stage longer than the model's `default_context_length` will not produce a
+> meaningful decode number, so keep `max_length` within what the model
+> supports.
 
 OFLM prints the results in your terminal and also saves them as a CSV file in the current folder for later reference.
 
@@ -652,9 +762,92 @@ You can also change the `default_context_length` setting.
 
 > ⚠️ **Note:** Be cautious! The system reserves DRAM space based on the context length you set.  
 > Setting a longer default context length may cause errors on systems with smaller DRAM.
-> Also, each model has its own context length limit (examples below).  
-> - **qwen3-tk:4b** → up to **256k** tokens  
-> - **gemma3:4b** → up to **128k** tokens
-> - **gemma3:1b** → up to **32k** tokens
-> - **llama3.x** → up to **128k** tokens
+> Also, each model has its own default context length. These are the shipped
+> values, not hard limits -- the model's own `config.json` is the real ceiling:
+>
+> | tag | `default_context_length` |
+> |---|---|
+> | `llama3.2:1b` | 131072 (128k) |
+> | `gemma3:4b`, `llama3.2:3b` | 65536 (64k) |
+> | `gemma3:1b`, `qwen3-tk:4b` | 32768 (32k) |
+> | `llama3.1:8b` | 16384 (16k) |
+
+`llama3.1:8b` ships with a deliberately small default; raise it with care.
+
+#### Where `model_list.json` lives
+
+| Platform | Path |
+|----------|------|
+| Windows (MSI install) | `C:\Program Files\oflm\model_list.json` |
+| Linux (packaged install) | `/opt/openflowlm/share/oflm/model_list.json` |
+| Relocatable bundle | `<dir of the oflm binary>/../share/oflm/model_list.json` |
+| User override | `~/.config/oflm/model_list.json` |
+
+The user override takes priority over the shipped copies. Set
+`OFLM_CONFIG_PATH` to point at one explicitly.
+
+#### Other environment variables
+
+| Variable | Effect |
+|---|---|
+| `OFLM_MODEL_PATH` | Where models are stored (default `~/.oflm/models` on Windows, `~/.config/oflm/models` on Linux) |
+| `OFLM_SERVE_PORT` | Default server port (default `52625`) |
+| `OFLM_CONFIG_PATH` | Explicit `model_list.json` to load |
+| `OFLM_MODELINFO_PATH` | Explicit `model_info.json` to load |
+| `OFLM_HF_OWNER` | Hugging Face account to pull OpenFlowLM's own models from, instead of `model_list.json`'s `hf_owner` |
+| `OFLM_XCLBIN_PATH` | Extra directory to search for xclbins |
+| `OFLM_OPEN_KERNELS_DIR` | Where the open engine looks for exported kernels |
+
+Every variable read through `getenv_oflm` also accepts its pre-rename `FLM_*`
+spelling and prints a one-line notice naming the new one -- so an install from
+before the `flm` -> `oflm` rename keeps working. `OFLM_OPEN_KERNELS_DIR` is the
+exception: the open engine reads it with plain `getenv`, so
+`FLM_OPEN_KERNELS_DIR` does nothing.
+
+### 📦 Add a Converted Model (`oflm add`)
+
+Register a pre-converted Q4NX model that is not in the shipped registry. This
+is the supported way to install a model you packed yourself with `q4nx-build`,
+or one published under a HuggingFace repo that is not yet in `model_list.json`:
+
+```shell
+oflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3
+```
+
+| flag | meaning |
+|---|---|
+| `--tag NAME` | local tag to register under (e.g. `mymodel:3b`) |
+| `--family NAME` | kernel family to link the xclbins from (required unless `--xclbin-dir` is given) |
+| `--config FILE` | a `model_list.json` entry to use verbatim instead of generating one |
+| `--models-root DIR` | install into this model store instead of the default |
+| `--xclbin-dir DIR` | take the xclbins from here instead of resolving by family |
+| `--xclbin-from REF` | source the family xclbins from another local model |
+| `--system-list` | also register the tag in the system `model_list.json` |
+| `--modelscope` | pull weights from ModelScope instead of HuggingFace |
+| `--open-kernels DIR` | point the tag at a locally exported open-kernel set |
+| `--no-xclbin` | register the weights without any xclbins |
+| `--no-verify` | skip the post-install verification pass |
+| `--force` | overwrite an existing installation |
+| `--dry-run` | print what would happen, change nothing |
+
+Every shape-identical model links to a **family** xclbin, so adding a new model
+of an existing shape needs no kernel work:
+
+```shell
+oflm add Someone/Nanbeige4.1-3B-finetune-OpenNPU2 --family nanbeige --tag nanbeige-ft:3b
+```
+
+### 🏷️ Print the Version
+
+```shell
+oflm version
+oflm version --json
+```
+
+`--json` prints `{ "version": "0.1.0" }`. The version is baked in at build time
+from `OFLM_VERSION` in `CMakePresets.json`.
+
+> ℹ️ Each registry entry carries an `oflm_min_version` -- the oldest `oflm`
+> that can load that model. The downloader compares it against the running
+> build and warns when the model is newer than the binary.
 

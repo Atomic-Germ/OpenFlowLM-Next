@@ -24,7 +24,7 @@ namespace open_qwen36 {
 /// One packing-plan op: which tensor lands at which byte offset in which
 /// chunk order (open_kernels/recipes/pack.py is the same interpreter in NumPy).
 struct PackOp {
-    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose
+    std::string op;                          ///< std_perm | std_fuse | q8_perm | expert_stripes | expert_down | put | conv_transpose | lmhead_q8 | transpose | transpose_banked
     std::string tensor, up, gate;            ///< tensor names; "{l}" stands for the layer index
     uint64_t dst = 0;
     uint64_t cap = 0;                        ///< put: the slot's capacity
@@ -39,6 +39,9 @@ struct PackOp {
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
     uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)
     uint64_t rows = 0, cols = 0, elem = 0;                              ///< transpose
+    std::string split;                                                  ///< std_perm of a q8 source: "hi" |
+                                                                        ///< "lo", one half of its exact q4_1
+                                                                        ///< split ("" = the whole tensor)
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -76,8 +79,10 @@ struct Step {
 /// a global x (bf16, tiled) and a global y (f32), both sized by the
 /// manifest's `globals` like every other global.
 struct GemmWeight {
-    std::string from;             ///< "pool" | "consts": which packed plan the ops index
+    std::string from;             ///< "pool" | "consts": which packed plan the ops index; "pack": its own
     std::vector<size_t> ops;      ///< indices into LayerType::pool / consts, in order, byte-contiguous
+    std::vector<PackOp> pack;     ///< from "pack": std_perm ops that pack this buffer alone -- the hi and
+                                  ///< lo halves of a projection the sequential kernel streams at q8
 };
 
 /// The token-batched expert kernel (OPEN-MOE-BATCH, open_kernels/designs/moe_batch):
@@ -99,6 +104,9 @@ struct AttnBlock {
     std::map<size_t, std::string> kernels_s, kernels_pv;   ///< window rows -> the stream for that width
     std::vector<std::string> args;                         ///< the a / b / c globals
     size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
+    /// A dense layer's host half before the products: "qknorm_rope" (q/k RMSNorm, then the
+    /// half-split rotation; no bias, no gate). Empty on a full-attention layer, whose is fixed.
+    std::string prep;
     bool present() const { return !kernels_s.empty(); }
 };
 
@@ -118,8 +126,17 @@ struct GemmBlockProgram {
     std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
     bool sandwich = false;
     std::string act = "silu";
+    // >1: the route's HOST norms split each row into `norm_groups` equal groups and
+    // RMS each group separately (K2's GroupRMSNorm(2)), the same split the `ln`
+    // design's LN_GROUPS bakes into the NPU kernel -- 1 is the plain whole-row
+    // RMSNorm every pre-2.2 manifest computed (also the default when the field
+    // is absent, so old kernel sets keep their behaviour byte for byte).
+    uint64_t norm_groups = 1;
     // linear: the fused qkv width, the value width, the DeltaNet geometry, the state layout
     uint64_t qkv_dim = 0, vw = 0, key_heads = 0, value_heads = 0, head_dim = 0, conv_kernel = 0;
+    // linear: the out projection's GEMM returns 2 x hidden rows, the hi and lo halves of a q8
+    // weight's exact q4_1 split, and the host adds them (OPEN-PREFILL-BATCH)
+    bool out_split = false;
     uint64_t state_s_off = 0, s_head_bytes = 0, s_rows = 0;
     // full: heads, kv heads, head dim, rotary dim (qw / kvw as above)
     uint64_t nh = 0, kvh = 0, hd = 0, rot = 0;
@@ -136,6 +153,12 @@ struct GemmBlockProgram {
     uint64_t shared_ff = 0;
     // linear and full: the routed experts batched over the block (absent: mx per token)
     MoeBatch moe_batch;
+    // linear and full, in place of all of the MoE fields above: a dense FFN (Qwen3.5) --
+    // up|gate then down over the block, silu on the host, ungated, added to the residual.
+    // `ff` is its width. Present => the layer type has no MoE block (has_dense_ffn()).
+    std::vector<Step> ffn_program;
+    std::map<std::string, GemmWeight> ffn_weights;
+    bool has_dense_ffn() const { return !ffn_program.empty(); }
     // full: the attention products on the NPU (absent: attention on the host)
     AttnBlock attn_block;
 };
@@ -155,6 +178,10 @@ struct KernelDesc {
     std::string insts;                       ///< relative path of insts.bin
     std::string patch;                       ///< "" | moeroute2 | attnpos
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
+    /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
+    /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
+    /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
+    uint64_t rb = 1;
 };
 
 /// A global sized max_ctx x row: the position record table(s).

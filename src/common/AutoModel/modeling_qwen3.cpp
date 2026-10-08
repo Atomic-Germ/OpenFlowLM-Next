@@ -60,7 +60,7 @@ std::string Qwen3::apply_chat_template(nlohmann::ordered_json& messages, nlohman
     inputs.extra_context["enable_thinking"] = this->enable_think;
     if (!tools.empty() && this->enable_tool)
         inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Qwen3::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -221,11 +221,11 @@ std::string Qwen3::generate(chat_meta_info_t& meta_info, int length_limit, std::
     return result;
 }
 
-std::string Qwen3::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Qwen3::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 static void qwen3_parse_tool_blocks(const std::string& response_text, NonStreamResult& result) {
@@ -359,7 +359,7 @@ std::string Qwen3_IT::apply_chat_template(nlohmann::ordered_json& messages, nloh
     inputs.extra_context = this->extra_context;
     if (!tools.empty())
         inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Qwen3_IT::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -392,11 +392,11 @@ std::string Qwen3_IT::generate(chat_meta_info_t& meta_info, int length_limit, st
     return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
-std::string Qwen3_IT::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Qwen3_IT::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 // Non-stream
@@ -515,7 +515,7 @@ std::string Qwen3_TK::apply_chat_template(nlohmann::ordered_json& messages, nloh
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
     inputs.tools = tools;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Qwen3_TK::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -657,11 +657,11 @@ std::string Qwen3_TK::generate(chat_meta_info_t& meta_info, int length_limit, st
     return result;
 }
 
-std::string Qwen3_TK::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Qwen3_TK::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->generate(meta_info, length_limit, os);
+    return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
 NonStreamResult Qwen3_TK::parse_nstream_content(const std::string response_text) {
@@ -742,7 +742,7 @@ std::string DeepSeek_r1_0528_8b::apply_chat_template(nlohmann::ordered_json& mes
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool DeepSeek_r1_0528_8b::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -862,11 +862,11 @@ std::string DeepSeek_r1_0528_8b::generate(chat_meta_info_t& meta_info, int lengt
     return result;
 }
 
-std::string DeepSeek_r1_0528_8b::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string DeepSeek_r1_0528_8b::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
 NonStreamResult DeepSeek_r1_0528_8b::parse_nstream_content(const std::string response_text) {

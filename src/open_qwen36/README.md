@@ -62,12 +62,20 @@ without a manifest needs one before the engine will take it:
 
 | set | design | knobs | what it is |
 |---|---|---|---|
-| `lx0` | `layer_x/lx.py` | `LX_PART=0` | linear-attention layer, dispatch 0 (norm → qkv/z → glue → DeltaNet → post → out → norm → router) |
-| `lx1` | `layer_x/lx.py` | `LX_PART=1` | its MoE block (same xclbin as `lx0`, second instruction stream) |
-| `ax0` | `layer_x/ax.py` | `AX_PART=0` | full-attention layer, dispatch 0 |
-| `ax1` | `layer_x/ax.py` | `AX_PART=1` | its MoE block |
+| `lx0` | `layer_x/ux.py` | `UX_PART=0` | linear-attention layer, dispatch 0 (norm → qkv/z → glue → DeltaNet → post → out → norm → router) |
+| `lx1` | `layer_x/ux.py` | `UX_PART=1` | its MoE block |
+| `ax0` | `layer_x/ux.py` | `UX_PART=2` | full-attention layer, dispatch 0 |
+| `ax1` | `layer_x/ux.py` | `UX_PART=3` | its MoE block |
 | `ln` | `ln/ln.py` | — | final RMSNorm |
 | `lm_head_q8` | `lm_head_q8/lm_head_q8.py` | `LMHEAD_N=248320 LMHEAD_CORES=8` | q8 lm_head, full vocab |
+
+The four layer sets are four instruction streams over ONE image, so the whole layer
+walk runs in one hardware context (OPEN-DECODE-ONE-CONTEXT). `OPEN_LAYER_ONE_CTX=0` at
+export builds the older two-context layout instead -- `lx0`/`lx1` from `layer_x/lx.py`
+(`LX_PART=0/1`), `ax0`/`ax1` from `layer_x/ax.py` (`AX_PART=0/1`), under the same set
+names -- and a spec with a q8 projection role always gets that layout (the merged main
+cores have no room for a second GEMV entry). Both layouts share every helper core and
+host sequence (`layer_x/xlayer.py`), so they compute the same bits.
 
 About 6 minutes for all six on a Ryzen AI 9 HX 370 (WSL; ~90 s per layer_x set). `--only lx0,lx1`
 rebuilds a subset, `--out DIR` redirects (a model directory's `open_kernels/`
@@ -454,6 +462,38 @@ is not a multiple of the 4 KB activation element, so its glue walks two unequal 
 its main core is already the largest of the four -- it stays on the re-quantizing fallback
 until the FFN tail moves off that core. `.claude/plans/q8m-hw-results.md`.
 
+**The 27B (2026-10-01).** Qwen3.8-27B is the family at hidden 5120, FFN 17408 and **48
+value heads**, and four things in the composition did not stretch that far. Each is now a
+recipe field that is off for every other size, so their kernels compile byte for byte as
+before:
+
+* the FFN down GEMV's 17408-wide activation table does not fit a main core, so it runs as
+  two GEMVs over K 8192 + 9216, each a strided slice of the same pool bands
+  (`qwen36moe.down_split`), into two act regions;
+* the norm helper cannot hold `[x0 x1 w a0 a1]` at 10 KB elements, so it streams the
+  residual half by half and normalizes it on the way back (`norm_split`, `ln_add2/3.cc`);
+  the final `ln` does the same;
+* 48 value heads need a 64-lane alpha / beta accumulator (`glue_ab_w.cc`), and three xn
+  halves walked per accumulator would be 14 side fills, so the glue walks them half-outer (11);
+* the 5120-wide xn / xm and 6144-wide og are three x elements in a 2-deep fifo, so they are
+  prepared and released one at a time.
+
+```
+python utilities/q4nx-build/convert.py -i Qwen3.8-27B-Q8_0.gguf -o %USERPROFILE%\.flm\models\Qwen3.8-27B-NPU2 -s Atomic-Germ/Qwen3.8-27B-NPU2
+python open_kernels/model/container_vs_hf.py --model-dir <that dir> --hf-shard model-00001-of-00018.safetensors   # ALL MATCH
+python open_kernels/export_qwen36_kernels.py --model-dir %USERPROFILE%\.flm\models\Qwen3.8-27B-NPU2
+python src\open_qwen36\chat.py "Explain what an NPU is in two sentences." --model %USERPROFILE%\.flm\models\Qwen3.8-27B-NPU2 --kernels src\xclbins\Qwen3.8-27B-NPU2\open_kernels
+```
+
+The slice and the engine pass as every other size does (OPEN-FAMILY-QWEN35's table). The
+container needed converting again: q4nx-build's GGUF path untiled llama.cpp's value heads
+assuming 2 per key head, which scrambles a 3-per-key-head model's DeltaNet while every kernel
+compare still passes (OPEN-CONVERT-QWEN35-VHEADS). The block prefill route builds at this
+width too (AG_M 1536 and five GEMM shapes, K 17408 among them) and takes a 300-token prompt in
+14.9 s against 115.9 s one token at a time (50 against 386 ms/token) with the same greedy
+output. Decode is 419-450 ms/token (2.2-2.4 tok/s) on a quiet box -- every token streams
+~17.5 GB of weights.
+
 ## q8 weights: run them at q8, or re-quantize them
 
 OFLM's newer converter stores the non-expert projections of the 35B-A3B fine-tunes --
@@ -537,14 +577,13 @@ on a memory-starved box, not the kernels.
 
 ## What is still not closed
 
-- **Batched prefill -- open on Granite, not yet on the other families.**
-  `OFLM_OPEN_GEMM_BLOCK=1` runs T prompt tokens per layer as 5 whole-array GEMM
-  dispatches plus T attention dispatches instead of T decode steps (1.95x TTFT
-  on a 1005-token prompt). It is read through `utils::getenv_oflm`, so the
-  pre-rename `FLM_OPEN_GEMM_BLOCK` still works and prints a one-line notice
-  naming the current variable. It needs a kernel set carrying a `gemm_block`
-  program, which today is Granite only; every other family still goes through
-  the decode step one token at a time. The route writes no M-RoPE position
+- **Batched prefill -- on by default wherever the kernel set carries it.**
+  A prompt of 64 tokens or more runs T tokens per layer as whole-array GEMM
+  dispatches instead of T decode steps, on every family whose recipe emits a
+  `gemm_block` program: the dense families, Qwen3.5 and the 35B.
+  `OFLM_OPEN_GEMM_BLOCK=0` turns it off (read through `utils::getenv_oflm`, so
+  the pre-rename `FLM_OPEN_GEMM_BLOCK` still works). A kernel set without the
+  program prefills one token at a time. The route writes no M-RoPE position
   records, so a prompt that has had an image stays on the sequential path.
 - **Long-context attention cost -- closed on the dense families and Qwen3.5,
   the 35B in progress** (2026-09-08, spec OPEN-ATTN-CONTEXT). The attention

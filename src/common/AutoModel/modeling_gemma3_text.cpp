@@ -57,7 +57,7 @@ std::string Gemma3_Text_Only::apply_chat_template(nlohmann::ordered_json& messag
     inputs.add_generation_prompt = true;
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
-    return this->chat_tmpl->apply(inputs);
+    return this->_shared_apply_template(inputs);
 }
 
 bool Gemma3_Text_Only::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -90,9 +90,9 @@ std::string Gemma3_Text_Only::generate(chat_meta_info_t& meta_info, int length_l
     return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
 
-std::string Gemma3_Text_Only::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os) {
-    if (!this->insert(meta_info, input)) {
+std::string Gemma3_Text_Only::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_input_t& input, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
+    if (!this->insert(meta_info, input, is_cancelled)) {
         return "";
     }
-    return this->_shared_generate(meta_info, length_limit, os);
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }

@@ -47,13 +47,17 @@ from bf16: LPIPS 0.0150 against fp32's 0.0129 noise floor (`utilities/dit-ref/`)
 
 ## Build, export, test
 
+make_test.py builds compact buffers and a plain-product reference, so it rejects streams with a
+`layout` (strided or gathered operands, SwiGLU epilogues such as r1024_sgl_in); those are checked
+by the chain tests in utilities/dit-chain/. The example below is a plain stream.
+
 ```
 . C:\dev\mlir-aie\iron_env.ps1
 python open_kernels\export_dit_kernels.py                  # klein 4B, 512 + 1024 -> src/xclbins/FLUX.2-klein-4B-NPU2/open_kernels/
-python open_kernels\designs\dit_gemm\make_test.py --kernels <set> --stream r1024_sgl_in --out <testdir>
-open_kernels\harness\out\run_kernel.exe <testdir>\run_r1024_sgl_in.cfg
-python open_kernels\designs\dit_gemm\compare.py <testdir> r1024_sgl_in
-python open_kernels\harness\bench.py <testdir>\run_r1024_sgl_in.cfg --driver open_kernels\harness\out\run_kernel.exe --warm 1
+python open_kernels\designs\dit_gemm\make_test.py --kernels <set> --stream txt_qkv --out <testdir>
+open_kernels\harness\out\run_kernel.exe <testdir>\run_txt_qkv.cfg
+python open_kernels\designs\dit_gemm\compare.py <testdir> txt_qkv
+python open_kernels\harness\bench.py <testdir>\run_txt_qkv.cfg --driver open_kernels\harness\out\run_kernel.exe --warm 1
 ```
 
 The exporter refuses the set unless every stream's `final.xclbin` is the same static

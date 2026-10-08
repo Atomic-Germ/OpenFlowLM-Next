@@ -46,7 +46,12 @@ def main() -> int:
     if a.kernels:
         kdir = Path(a.kernels).resolve()
         s = json.loads((kdir / "dit_fa.json").read_text())["streams"][a.stream]
+        if s.get("layout"):
+            raise SystemExit(f"stream {a.stream} has a strided layout {s['layout']}; this harness "
+                             "allocates compact Q/K/V/O buffers and cannot test it")
         xclbin, insts = kdir / "final.xclbin", kdir / f"insts_{a.stream}.bin"
+        if s.get("layout"):
+            ap.error(f"stream {a.stream!r} uses a runtime layout not supported by this test generator")
         L, heads, kvh = s["L"], s["heads"], s.get("kv_heads", s["heads"])
         causal, valid = bool(s.get("causal", 0)), s.get("valid_len", 0)
     else:

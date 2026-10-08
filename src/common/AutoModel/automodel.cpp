@@ -295,6 +295,15 @@ buffer<bf16> AutoModel::_chunked_insert(chat_meta_info_t& meta_info, std::vector
     return y;
 }
 
+std::string AutoModel::_shared_apply_template(const minja::chat_template_inputs& inputs,
+                                              const minja::chat_template_options& opts) const {
+    try {
+        return this->chat_tmpl->apply(inputs, opts);
+    } catch (const std::exception& e) {
+        throw request_error(std::string("chat template rejected the request: ") + e.what());
+    }
+}
+
 std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
     std::vector<int> sampled_tokens;
     std::string result;

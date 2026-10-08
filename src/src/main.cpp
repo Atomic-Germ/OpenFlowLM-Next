@@ -10,6 +10,7 @@
 #include "model_list.hpp"
 #include "model_downloader.hpp"
 #include "add_command.hpp"
+#include "pack_command.hpp"
 #include "update.hpp"
 #include "utils/utils.hpp"
 #include "program_args.hpp"
@@ -210,6 +211,30 @@ std::string identify_npu_arch() {
 
 #endif
 
+/// \brief Open the NPU the way `run` and `serve` do, through the device runtime.
+/// The driver-side checks in sanity_check_npu_stack() can all pass on a machine
+/// where this fails (#81): on Linux XRT finds an NPU only if it can load its
+/// userspace plugin, libxrt_driver_xdna.so.2, which is not part of XRT.
+/// \param why set to the runtime's own error text on failure
+static bool runtime_can_open_npu(std::string& why) {
+    try {
+        oflm_rt::device probe(0);
+#ifdef OFLM_USE_HRX
+        // hrx::device does not throw when initialisation fails; it records it.
+        if (!hrx::rt().ok) {
+            why = "HRX device initialisation failed";
+            return false;
+        }
+#endif
+        return true;
+    } catch (const std::exception& e) {
+        why = e.what();
+    } catch (...) {
+        why = "unknown error";
+    }
+    return false;
+}
+
 static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
     bool print_human = !quiet && !json_output;
 #ifndef _WIN32
@@ -221,6 +246,7 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
         {"all_fw_ok", true},
         {"enough_cols", true},
         {"memlock_ok", true},
+        {"runtime_ok", true},
         {"devices", nlohmann::json::array()},
         {"ready", true}
     };
@@ -400,7 +426,29 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
     }
     validation_json["memlock_ok"] = memlock_ok;
 
-    bool overall_ok = amd_device_found && kernel_ok && all_fw_ok && enough_cols && memlock_ok;
+    // Only asked once the kernel side has a device: without one the runtime
+    // fails for the reason already reported above.
+    bool runtime_ok = true;
+    if (amd_device_found) {
+        std::string why;
+        runtime_ok = runtime_can_open_npu(why);
+        if (!runtime_ok) {
+            validation_json["runtime_error"] = why;
+            if (print_human) {
+                header_print_r("ERROR", "The kernel driver sees the NPU, but the device runtime cannot open it: " << why);
+#ifndef OFLM_USE_HRX
+                header_print_r("ERROR", "This usually means XRT could not load its NPU plugin, libxrt_driver_xdna.so.2. "
+                                        "It is built from https://github.com/amd/xdna-driver, not from XRT; "
+                                        "`xrt-smi examine` lists 0 devices when it is missing.");
+#endif
+            }
+        } else if (print_human) {
+            header_print_g("Linux", "Device runtime: NPU opened");
+        }
+    }
+    validation_json["runtime_ok"] = runtime_ok;
+
+    bool overall_ok = amd_device_found && kernel_ok && all_fw_ok && enough_cols && memlock_ok && runtime_ok;
     validation_json["ready"] = overall_ok;
     if (json_output) {
         std::cout << validation_json.dump(4) << std::endl;
@@ -413,6 +461,7 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
         {"platform", "windows"},
         {"amd_device_found", true},
         {"npu_driver_ok", true},
+        {"runtime_ok", true},
         {"ready", true}
     };
     std::string npu_arch = identify_npu_arch();
@@ -451,10 +500,23 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
         header_print_g("Windows", "NPU dirver version: " << drv);
     }
 
+    std::string why;
+    const bool runtime_ok = runtime_can_open_npu(why);
+    validation_json["runtime_ok"] = runtime_ok;
+    if (!runtime_ok) {
+        validation_json["runtime_error"] = why;
+        validation_json["ready"] = false;
+        if (print_human) {
+            header_print_r("ERROR", "The driver is installed, but the device runtime cannot open the NPU: " << why);
+        }
+    } else if (print_human) {
+        header_print_g("Windows", "Device runtime: NPU opened");
+    }
+
     if (json_output) {
         std::cout << validation_json.dump(4) << std::endl;
     }
-    return true;
+    return runtime_ok;
 #endif
 }
 
@@ -478,6 +540,15 @@ int main(int argc, char* argv[]) {
     // truth for registry and kernel-link behavior.
     if (argc > 1 && std::string(argv[1]) == "add") {
         return add_command::run(argc - 2, argv + 2);
+    }
+
+    // `pack` is the same handoff, to the bundled Q4NX builder. It has a richer
+    // option set than the runtime commands -- a quantiser takes a hundred
+    // arguments and grows more -- so its arguments pass through untouched, and
+    // the builder beside oflm stays the single source of truth for what they
+    // mean. See pack_command.hpp for why this is a handoff and not a port.
+    if (argc > 1 && std::string(argv[1]) == "pack") {
+        return pack_command::run(argc - 2, argv + 2);
     }
     
     // Parse command line arguments using Boost Program Options

@@ -16,7 +16,9 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 OFLM = Path(os.environ.get("OFLM_EXE", REPO / "src" / "out" / "oflm.exe"))
-MODEL_ROOT = Path(os.environ.get("OFLM_MODEL_PATH", Path.home() / ".oflm")) / "models"
+# the runtime's defaults: %USERPROFILE%\.oflm on Windows, ~/.config/oflm elsewhere
+DEFAULT_ROOT = Path.home() / (".oflm" if os.name == "nt" else ".config/oflm")
+MODEL_ROOT = Path(os.environ.get("OFLM_MODEL_PATH", DEFAULT_ROOT)) / "models"
 
 
 def run_image(out: Path) -> bytes:

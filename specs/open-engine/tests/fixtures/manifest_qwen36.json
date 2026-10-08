@@ -278,7 +278,8 @@
    "context": "ax",
    "insts": "ax0/insts.bin",
    "patch": "attnpos",
-   "build": "ax0"
+   "build": "ax0",
+   "rb": 4
   },
   "ax1": {
    "context": "ax",

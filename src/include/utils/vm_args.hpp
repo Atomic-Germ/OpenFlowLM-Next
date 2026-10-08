@@ -9,6 +9,7 @@
 #include <boost/program_options.hpp>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <algorithm>
 #include <vector>
 #include "program_args.hpp"
@@ -202,9 +203,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // ignored reads as a flag that took effect. `oflm bench granite:3b
             // --max-batch 4` used to be accepted in silence.
             //
-            // This has to sit ABOVE the early exits below. `bench`, `list`,
-            // `version`, `port` and `validate` all return before the serve-only
-            // guards, so a check placed down there would never see them.
+            // This has to sit ABOVE the early exits below: `bench`, `list`,
+            // `version`, `port` and `validate` all return there, so a check
+            // placed after them would never see those commands.
             if (parsed_args.command != "bench-embed") {
                 for (const char* opt : {"max-batch", "prompt-name"}) {
                     if (!vm[opt].defaulted()) {
@@ -232,6 +233,35 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             }
             parsed_args.image_size_given = !vm["size"].defaulted();
 
+            // Serve-only options, refused by every other command. This used to
+            // sit below the early exits that follow, so `version`, `port`,
+            // `list`, `bench` and `validate` accepted these and ignored them
+            // (#68). `host` is one of them: it is read in exactly one place,
+            // create_lm_server().
+            //
+            // `port --port N` is the one exemption: that command exists to
+            // print the port a given --port would resolve to.
+            if (parsed_args.command != "serve") {
+                const std::pair<const char*, const char*> serve_only[] = {
+                    {"socket", "Max socket connections is only required for serve command!"},
+                    {"q-len", "Max npu queue length is only required for serve command!"},
+                    {"port", "The port number option is only supported with the serve command!"},
+                    {"cors", "The cors option is only supported with the serve command!"},
+                    {"host", "The host option is only supported with the serve command!"},
+                    {"imagegen", "--imagegen is only supported with the serve command!"},
+                    {"imagemodel", "--imagemodel is only supported with the serve command!"},
+                };
+                for (const auto& [opt, message] : serve_only) {
+                    if (parsed_args.command == "port" && std::string(opt) == "port") {
+                        continue;
+                    }
+                    if (!vm[opt].defaulted()) {
+                        std::cerr << "Error: " << message << " " << std::endl;
+                        return false;
+                    }
+                }
+            }
+
             if (parsed_args.command == "version") {
                 return true;
             }
@@ -244,55 +274,15 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             if (parsed_args.command == "bench") {
                 return true;
             }
-            // "bench-embed" is DELIBERATELY not here. This early exit skips the
-            // serve-only option guards below, so a command that takes it accepts
-            // --port and --cors silently. Exact equality above also means a
-            // prefix like "bench-embed" never matches "bench" by accident.
+            // "bench-embed" is DELIBERATELY not here: it needs the model-tag
+            // check further down. Exact equality above also means a prefix like
+            // "bench-embed" never matches "bench" by accident.
             if (parsed_args.command == "validate") {
                 return true;
             }
         } else {
             std::cerr << "Error: Command is required" << std::endl;
             return false;
-        }
-
-        if (parsed_args.command != "serve")
-        {
-            if (!vm["socket"].defaulted())
-            {
-                std::cerr << "Error: Max socket connections is only required for serve command! " << std::endl;
-                return false;
-            }
-            if (!vm["q-len"].defaulted())
-            {
-                std::cerr << "Error: Max npu queue length is only required for serve command! " << std::endl;
-                return false;
-            }
-            if (!vm["port"].defaulted())
-            {
-                std::cerr << "Error: The port number option is only supported with the serve command! " << std::endl;
-                return false;
-            }
-            if (!vm["cors"].defaulted())
-            {
-                std::cerr << "Error: The cors option is only supported with the serve command! " << std::endl;
-                return false;
-            }
-            for (const char* opt : {"imagegen", "imagemodel"}) {
-                if (!vm[opt].defaulted()) {
-                    std::cerr << "Error: --" << opt << " is only supported with the serve command!" << std::endl;
-                    return false;
-                }
-            }
-            // `host` belongs with them: it is documented "(for serve command)"
-            // and read in exactly one place, create_lm_server(). It was accepted
-            // and ignored everywhere else, which is the same defect as the four
-            // above and reads the same way to a user -- a flag that took effect.
-            if (!vm["host"].defaulted())
-            {
-                std::cerr << "Error: The host option is only supported with the serve command! " << std::endl;
-                return false;
-            }
         }
 
         // Handle all options
@@ -337,7 +327,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
 
         // Validate command-specific requirements
         if (parsed_args.command == "run" || parsed_args.command == "pull" || parsed_args.command == "remove" || parsed_args.command == "check") {
-            if (parsed_args.model_tag.empty()) {
+            // An omitted positional is never empty: model_tag is initialised to
+            // the "model-faker" sentinel, which `serve` uses on purpose (#67).
+            if (parsed_args.model_tag.empty() || parsed_args.model_tag == "model-faker") {
                 std::cerr << "Error: Model tag is required for command '" << parsed_args.command << "'" << std::endl;
                 return false;
             }

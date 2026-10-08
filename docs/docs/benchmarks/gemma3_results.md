@@ -15,6 +15,13 @@ This section reports the performance on NPU with OpenFlowLM (OFLM).
 > - Newer versions may deliver improved performance.
 > - Fine-tuned models show performance comparable to their base models. 
 
+> ℹ️ **This version predates the rename.** The numbers below were measured
+> on FastFlowLM, before the `flm` → `oflm` rename reset the version series to
+> `0.1.0`. No OpenFlowLM build has ever reported a `0.9.x` or `1.0.x` version.
+> Treat these as FastFlowLM-era measurements; re-run `oflm bench` on a `0.1.0`
+> build if you need numbers from this engine.
+
+
 ---
 
 ### **Test System 1:** 
@@ -32,8 +39,8 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |**64k** | **128k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|---------:|---------:|
-| **Gemma 3 1B**  | NPU (OFLM)    | 41.1	| 40.5	|	39.5	|	37.3	|	33.6	|	27.9|	OOC|	OOC|
-| **Gemma 3 4B**  | NPU (OFLM)    | 18.2	| 18.0	| 17.8	| 17.3	| 16.3	| 14.8 |	13.2 |	11.2 |
+| **Gemma 3 1B**  | NPU (OFLM)    | 41.1 | 40.5 | 39.5 | 37.3 | 33.6 | 27.9 | OOC | OOC | 
+| **Gemma 3 4B**  | NPU (OFLM)    | 18.2 | 18.0 | 17.8 | 17.3 | 16.3 | 14.8 | 13.2 | OOC | 
 
 > OOC: Out Of Context Length  
 > Each LLM has a maximum supported context window. For example, the gemma3:1b model supports up to 32k tokens.
@@ -44,8 +51,8 @@ AMD Ryzen™ AI 7 350 (Kraken Point) with 32 GB DRAM; performance is comparable 
 
 | **Model**        | **HW**       | **1k** | **2k** | **4k** | **8k** | **16k** | **32k** |
 |------------------|--------------------|--------:|--------:|--------:|--------:|---------:|---------:|
-| **Gemma 3 1B**   | NPU (OFLM)    | 1004 |	1321|	1546 |	1720 |	1785 |	1755|
-| **Gemma 3 4B**   | NPU (OFLM)    | 528 |	654 |	771 |	881 |	936 |	926|
+| **Gemma 3 1B**  | NPU (OFLM)    | 1004 | 1321 | 1546 | 1720 | 1785 | 1755 | 
+| **Gemma 3 4B**  | NPU (OFLM)    | 528 | 654 | 771 | 881 | 936 | 926 | 
 
 ---
 

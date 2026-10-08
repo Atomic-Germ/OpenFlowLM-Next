@@ -32,7 +32,7 @@ the offending key named.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
 - `manifest_version: 2` → refused by the parser.
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
-- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name.
+- `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name. A `linear` / `full` route carries exactly one FFN tail: the MoE block (`moe_kernel`, `shared_program`, requiring `layout.moe`) or a dense `ffn_program` of two steps (up|gate, down) whose buffers `ffn_weights` defines, with its width `ff`; both, or neither, is refused by name. A route weight is normally a run of the layer type's pool or consts ops; `from: "pack"` instead carries its own `std_perm` ops, which the engine packs into that buffer alone, and any other op there is refused. A `std_perm` may carry `split: "hi" | "lo"` (anything else, or on another op, is refused): one half of a q8 source's exact q4_1 split. A `linear` route with `out_split` runs its out projection over both halves stacked, 2 x hidden rows, and adds them.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
 - `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level oflm directory `oflm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/oflm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `oflm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
@@ -178,9 +178,28 @@ byte. `ATTN_FAST=1` builds an unlisted family on the path for exactly that
 measurement and is a probe variable (in the build key, OPEN-BUILD-CACHE).
 
 **Acceptance criteria (unit, `test_attn_geometry.py`):**
-- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B and Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
+- With `ATTN_FAST=1`, `dense.geometry` / `qwen36moe.attn` give: Qwen3-4B, Llama-3.1-8B, HunYuan 4 cores x 8 heads, RB 4; Gemma3-4B 4 x 2, RB 2; Gemma3-12B 4 x 4, RB 1; Phi4-mini 6 x 4, RB 4; Granite 5 x 8, RB 4; the 35B 4 x 4, RB 4 with the single-row kernel retired (RB 2 from 2026-09-22 until Track E the same day); Qwen3.5-9B 4 x 4, RB 1; Qwen3.5-0.8B 4 x 2, RB 1; LFM2-1.2B 4 x 8, RB 4. ACORES is the largest divisor of the HEAD COUNT that fits the columns, and a core's heads tile the og element they are written through (`kOGH = min(kNHL, kHPO)`, attn.h); RB x max(NHL, 8) is 8, 16 or 32.
 - Without it, an unlisted family gets VEXP 0, one core, RB 1, ml packed (the shipped kernel); a listed one gets its fast geometry.
 - `ATTN_FAST` is in `PROBE_VARS`; every family module exposes `probe_env`.
+- **Retiring the single-row kernel** (`attn.h ATTN_BLOCK_ONLY`, set only by
+  `designs/layer_x/ax.py`) is what lets head dim 256 WITH the output gate block at
+  all: the gate's exponential and reciprocal are on the attention core, and a plain
+  `ATTN_RB=2` overflows its 16 KB of program memory beside the single-row path. On
+  that path every row goes through `attn_stepb`, including the new position's: the
+  driver streams `RB*ceil((valid+1)/RB) - 1` cached rows, the kernel runs `pb[4] =
+  pb[0] / RB` full blocks off the fifo and peels the last one (`attn_stepb_new`,
+  whose final slot is the new row from core scratch), and the padding rows between
+  `pos` and the end of that block are masked with `-1e30` -- the same mechanism the
+  kernel already uses for padding LANES. A family joins by the same rule
+  `FAST_ATTENTION` uses, measurement not declaration: `BLOCK_ONLY_MEASURED` holds
+  `qwen36moe` only, and Qwen3.5 keeps RB 1 at the same head dim and gate until
+  someone runs the compare. `BLOCK` follows `RB`: an `ATTN_RB=1` probe on a measured
+  family gets the single-row kernel back.
+- The rows-per-call travels in the manifest beside the kernel (`kernels.ax0.rb`) and
+  `stream_patch::attn_apply` pads the streamed row count from it. It has to: the
+  kernel derives its own block count from the same position record, and a kernel
+  built one way against a driver patching the other way deadlocks on the `ain` fifo
+  rather than answering wrongly. Absent means 1.
 
 **Procedure (manual):** build the family with `ATTN_FAST=1` into a scratch
 directory; one decode step at positions 0 / 256 / 1024 / 2048 through
@@ -235,6 +254,58 @@ end, since it is the round that starts with the first one's answer in context.
 
 The 35B's `ax` kernels rebuilt at the default knobs after the split was
 plumbed into `ax.py` are byte-identical to the shipped set (`--check`).
+
+**Measured (2026-09-22, the 35B at RB 4):**
+`ax0` was the only decode dispatch that grew with the prompt, and the 35B was the one
+fast family with no row block: at head dim 256 with the output gate, the block kernel
+did not fit beside the single-row one in the attention core's 16 KB of program memory.
+Three changes make it fit at RB 4, all confined to the block-only path
+(`ATTN_BLOCK_ONLY`); every other family's attention translation units preprocess
+token-identical to the base (`utilities/attn_pp_identical.sh`: 38/38 at Gemma3-4B,
+Qwen3-4B, Qwen3.5-9B and the 35B's previous RB 1 flags).
+
+1. **The single-row kernel is retired on this path.** The new token's row joins the
+   last block and padding rows are masked; the manifest carries the block size as `rb`.
+2. **No soft-float.** The attention core's `__mulsf3` / `__divsf3` / `__muldi3` -- 2,112
+   bytes for norm_rope's RMS scale and 1/sqrt Newton steps and attn_fin's `1/l` --
+   became integer routines (`open_kernels/include/scalar_fp.h`) that give the IEEE
+   round-to-nearest-even result bit for bit on every operand those sites can see
+   (`utilities/scalar_fp_test.cpp`). Dumps are bit-identical to the same kernel with
+   the soft-float (max |diff| 0.0 over 105 dumps).
+3. **A cheaper block kernel (`ATTN_TREE`).** The score phase reduces all RB x NHL dot
+   products as one tree whose levels pair lanes exactly as `aie::reduce_add` does; the
+   PV loop writes four head-dim slices per block, so the compiler no longer serialises
+   every slice behind the last one's store; and the rescale factor's exponential rides
+   in row 0's padding lanes of the block's one `vexpN<32>`. Bit-identical to (2) and
+   deterministic over three runs.
+
+The tightest attention core is 14,208 bytes (2,176 free). `ax0` in the real walk,
+minimum of 20 over 3 alternated rounds, clean box, measured on the one-context layer
+image (PR #116, whose attention cores compile the same program as `ax.py`'s). The RB 1
+row is from an earlier session on `ax.py`'s own image, for scale:
+
+| position | 1 | 1024 | 2048 | 4000 |
+|---|---|---|---|---|
+| RB 1 (before) | 0.71 | 1.63 | 2.57 | 4.32 ms |
+| RB 2, block-only | 0.64 | 1.44 | 2.22 | 3.73 ms |
+| RB 4 + (2) and (3) | 0.63 | 1.03 | 1.41 | 2.15 ms |
+
+The step's sum of minima at 4000 goes 100.1 -> 84.2 ms against RB 2. An `ATTN_NULL`
+build (every fifo transfer kept, no arithmetic) puts `ax0` at 1.24 ms at 4000, so the
+walk is now ~0.9 ms of arithmetic on a ~1.24 ms stream, down from ~2.5; the stream is
+the floor. A deeper `ain` fifo (two whole blocks) was tried and rejected: no gain, and
+the 8-layer dumps became non-deterministic. An `aie::mmul` score phase fits and is
+correct but is slower: building its A tile from four 128-bit K loads is shuffle-bound.
+
+**Not bit-exact against RB 1.** Blocking reorders the sums. Greedy continuation after
+the 1122-token prompt (block prefill, so the prefill KV is identical) is identical for
+48 tokens, then flips at a 0.045-logit near-tie that every blocked variant hits at the same
+position with the same token; RB 4's 64-token
+continuation is 64/64 identical to RB 2's. Teacher-forced over 64 positions at RB 2:
+64/64 argmax, and positions with a masked padding row match unmasked ones in median corr
+(0.99929 / 0.99920), so the mask adds nothing. The corr spread elsewhere (min 0.984) is
+the routed experts flipping on near-ties, as recorded for this family's first
+fast-attention pass.
 
 **Measured (2026-09-12, the og split -- `attn_cores` on the head count):**
 
@@ -395,6 +466,14 @@ refused at load rather than falling back to 2048.
 - The `lmhead_q8` order at K = 2048 / 2560 / 4096 is the law above, and at K = 2048 it is byte for byte the shipped 27B one (`tests/test_pack_plan.py`); an `lmhead_q8` op without `in_dim` is refused by both the NumPy packer and the manifest parser, naming the field.
 - A `std_perm` without `nch` / `in_dim`, or a `transpose` without `rows` / `cols` / `elem`, is refused by the manifest parser naming the field.
 - `transpose` takes an optional `dst_rows`: the destination row is widened to that many values and the tail zeroed (`[16, hid] -> [hid, 32]` with columns 16..31 zero, the 16-head DeltaNet's alpha / beta). It appears in a plan ONLY when it differs from `rows`, so a 32-head family's plan, manifest and build key do not move; `dst_rows` narrower than `rows` is refused by both packers. Both produce the same bytes (`tests/test_qwen35.py`, `src/open_qwen36/pools_test.cpp`).
+- `transpose_banked` is the dedicated wide-head AB operation: `[heads, hidden]`
+  becomes `[ceil(heads/32), hidden, 32]`, with unused tail lanes zeroed. It
+  requires `tensor`, `rows`, `cols`, `elem`, and uses `dst` as a byte offset.
+  At 48 heads and hidden 5120, each bank is 327680 bytes (80 side tiles).
+  Python and C++ test every element, heads 31/32/47, padding and destination
+  bounds. Qwen3.5 plans select it only above 32 heads; existing plans retain
+  `transpose`. This packing capability does not validate a wide-head NPU
+  kernel. See `tests/test_qwen35_27b.py` and `plans/qwen35-27b-bringup.md`.
 - `model/q4nx.py` reads each q8 tensor the way the POOL holds it: as the container's own q8 when `native_q8(name)` (the projections the plan streams with `q8_perm`), else as the packer's q4_1. So a slice comparison measures the kernels whichever path a projection is on. `make_decode.py --requant` swings the whole run -- spec, plan, pools and reference -- onto the fallback for the A/B.
 - A `q8_perm` half-tile round-trips exactly: dequantizing the two half-tiles of a chunk gives the same values as dequantizing the chunk, value for value. The band law matches a brute-force placement against the dequantized source matrix, and a q8 projection occupies exactly twice the q4_1 bytes.
 - The NumPy and C++ packers produce the same `q8_perm` pool bytes (the same FNV-1a in `tests/test_quant_q8.py` and `src/open_qwen36/pools_test.cpp`), and a `q8_perm` without `nch` / `in_dim` is refused by the manifest parser naming the field.
@@ -507,6 +586,21 @@ fallback its three siblings no longer need. `.claude/plans/q8m-hw-results.md` §
 reduces over `lin_value_width` -- 4096 on the 9B and 4B, 2048 on the 2B and 0.8B -- not over
 `hidden`, so both K were already validated by the 35B pass and all four sizes compose with
 no `OPEN_KERNELS_UNVALIDATED`.
+
+**Result 2026-09-24 (the all-q8 35B stopped building; fixed).** #78's DeltaNet slice update
+(dnx.h pass 2) grew the MoE main core, and the q4_1 35B still fit, so nothing rebuilt a q8
+one: every all-q8 35B -- Ornith, its siblings and Atomic-Germ's own mirror -- failed `lx0`
+with `Overflow of program memory`, reported by a user. The core measured 16 608 B against
+16 384. The fix compiles only `gemv_q4_gup` (the routed experts' up | gate) at `-Oz`, only on
+an all-q8 MoE spec: 16 304 B. Per-TU `-Oz` elsewhere grows the linked core (`gemv_q4_gdown`
+with it: 16 448, over), and the pre-#78 per-row pass 2 fits (16 080) but runs `lx0` at 2.48
+ms a call against 2.02. The rebuilt Ornith set scores 0.999996 / 0.999998 / 0.999989 against
+the replica on the 8-layer / 3-token slice, argmax and top-5 identical, bit-identical to
+the per-row variant, and decodes a 40-layer step in 140.5 ms against 152.9 (per-row) and
+159.3 (the 2026-09-07 set), three interleaved rounds. q4_1 specs compile exactly as before.
+The mixed Qwen3.5 cores were not affected (9B 14 304 B, 0.8B 14 416 B). The exporter now
+prints each set's fullest core against 16 384 B, and names this failure in plain words
+when aiecc hits it; the all-q8 35B has 80 B left.
 
 ### OPEN-QUANT-Q4K: the packers read Q4_K containers
 **Applies to:** openflowlm-next (`open_kernels/model/q4nx.py`,
@@ -1093,8 +1187,9 @@ context grew underneath it, not because the family is slow.
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,
-`designs/lm_head_q8`, `recipes/pack.py`, `src/open_qwen36/pools.cpp`, `manifest.cpp`,
-`model/replica_qwen35.py`)
+`glue_ab_w.cc`, `designs/ln/ln.py`, `ln_add2.cc`, `ln_add3.cc`, `designs/lm_head_q8`,
+`recipes/pack.py`, `src/open_qwen36/pools.cpp`, `manifest.cpp`, `model/replica_qwen35.py`,
+`model/replica_prompt.py`, `model/container_vs_hf.py`)
 **Test category:** manual (needs the NPU and a Qwen3.5 container); the derivation, the
 composed layout and the pack ops are unit-tested in `tests/test_qwen35.py`,
 `tests/test_pack_plan.py` and `src/open_qwen36/{manifest_test,pools_test}.cpp`
@@ -1114,19 +1209,48 @@ their bf16 `[heads, hidden]` copies through `transpose` into the `[hidden, heads
 layout `glue_ab` reads. Images are refused as on the other VLM families.
 
 **Acceptance criteria (unit):**
-- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the nested `text_config` (`qwen3_5_text`) and OFLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
+- `ModelSpec.from_hf_config` on the 9B / 4B / 2B / 0.8B `config.json` (fixtures under `tests/fixtures/`, the models' own files) gives family `qwen35`, `num_experts 0`, `intermediate` 12288 / 9216 / 6144 / 3584, the MoE's layer pattern, 16/4 (or 8/2) heads and `lin_value_heads` 32 (or 16); the 27B's (`Atomic-Germ/Qwen3.8-27B-NPU2`) gives hidden 5120, 64 layers, `intermediate` 17408, 24/4 heads and `lin_value_heads` 48; the nested `text_config` (`qwen3_5_text`) and OFLM's flattened container config derive the same tower; `qwen3_5_moe` still derives to `qwen36moe`, and a config carrying `num_experts` is refused by name.
 - Swapping only the FFN moves nothing in the attention half: the 27B spec and a dense twin of it (an FFN narrow enough to keep 10 KB weight elements) give identical DeltaNet / attention / state / KV / lm_head constants, and `qwen35.layout` is `qwen36moe.layout(..., ffn="dense")`, not a copy.
 - The 9B layout: `PER_CALL 1` (a 12288-wide activation table leaves no room for two 10 KB weight elements beside the streams), `DN_ROWS 10 / DN_SLICES 13 / DN_PAD 130`, `S_ROWS 130`, `ELN 8192` (so the split `ln_y` / `ln_xn` norm entries), `E_A 2048` with 2 f32 heads per attention element and 4 og heads, `KV_ROW 4096`, `PTAB_ROW 2048`; the pool holds q4-sized `up | gate | down` first, at the same offsets for both layer types.
 - No `moe` block, no `rout_idx_off`, no router or shared-expert tensor anywhere in the manifest; each layer type's program is one `run`, with `attnpos` on the full-attention kernel only.
 - The manifest fixture parses in `manifest_test.cpp` (a linear-attention layer type with a one-step program and no `moe`); `ssm_out_proj` is a plain `std_perm` with no source-format field, and the two `transpose` ops carry the sizes `pools::apply` needs.
 - **One record per value head.** The glue core emits `(NT - VALUE_TILE0) * HEADS_PER_TILE` records and the host drains one per value head; the two are equal only at 32 value heads (4 value conv tiles), so a 16-head model has 2 value tiles against its 4 key tiles. The value head's key head is `h / (lin_value_heads / lin_key_heads)` -- 2 value heads per key head at 32, one at 16.
 - **The alpha / beta projection is padded to the accumulator's 32 lanes**, not narrowed: a W element stays 64 rows x 32 bf16 = 4 KB, `AB_ELEMS` is `hidden / 64` whatever the head count, and a 16-head model's `transpose` op carries `dst_rows` so columns 16..31 are zero. `dt_bias` sits at `lin_value_heads` floats inside `small`, not at a fixed 32.
-- **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048) / 64` weight tiles, which is 32 and 8 at HID 2560. The side channel's fills are `2 + 4 * ceil(hidden*2 / 4096)` and the recipe refuses a hidden width whose count exceeds `LIMITS["shim_fills"]`, naming the number.
+- **The projection is walked in 4 KB halves.** The glue core holds ONE element of the layer-entry norm output, so the alpha and beta projections are re-streamed per half with the accumulator reset passed in (`glue_ab_e.cc`); a half carries `min(2048, hidden - h*2048)` rows, one 4 KB weight tile per 64 of them, which is 32 and 8 tiles at HID 2560. Walked accumulator-outer, the side channel's fills are `2 + 4 * halves`; a width whose count would exceed `LIMITS["shim_fills"]` (three halves: 14) walks half-outer instead -- each half carried once, then both accumulators' tiles for it -- for `2 + 3 * halves` (11 at the 27B's 5120). The recipe refuses a width whose count still exceeds the budget (four halves: 14), naming the number. Every published size keeps its accumulator-outer walk.
+- **More than 32 value heads widen the alpha / beta accumulator** to the next multiple of 32 lanes rather than narrowing anything: at 48 heads the projection is packed `[hidden, 64]` (`transpose` with `dst_rows 64`, columns 48..63 zero), a 4 KB tile is 32 rows of it, and `glue_ab_w.cc` carries two 32-lane halves. 48 value heads over 16 key heads is 3 value heads per key head (`h / 3`), 6 value conv tiles against 4 key tiles, and one record per value head.
+- **A down GEMV whose table does not fit runs in K pieces.** When the dense FFN's `FF`-wide activation table leaves a main core over its L1 even at 5 KB weight elements (the 27B: FF 17408, 39 168 B of table), `qwen36moe.down_split` cuts the reduction into two pieces at an f32 element of `h` (1024 values) -- 8192 + 9216 at the 27B, both K's the GEMV already ran -- and each piece is an ordinary GEMV with its own table into its own act region (`out2`, `out2b`). The pool is not repacked: inside a band, pool chunk c covers k-tile c / 2, so a piece is a contiguous run of every band's chunks and a strided DMA tap reads it. The table is sized for the widest piece. Every published size runs one down GEMV and has no `out2b`.
+- **A norm helper that cannot hold its fused residual stage streams it.** `[x0 x1 w a0 a1]` plus one output must fit the norm core's 64 KB with its stack; past HID 4096 they do not (the 27B: 67 584 B). There (`norm_split`) the residual is added half by half (`ln_add2`), sent to DDR, and normalized on the way back through the layer-entry norm's `ln_nr` -- the same `fadd32` sum, so the same bits -- and the layer's closing residual adds both down pieces (`ln_add3`). The standalone final `ln` takes the same split past 4096. Every published size keeps the fused stages.
+- **An activation wider than the x fifo is deep is prepared element by element.** The main cores' x fifo is 2 deep; the 27B's xn / xm (5120) and og (6144) are three 4 KB elements, so they are prepared into the table and released one at a time (the GEMV reads only the table). Two elements or fewer are held as before.
+- **Shared WideDeltaNet AB primitive.** `recipes/wide_deltanet.py` describes
+  geometry, 32-lane banks/tails, xn chunks and value-to-key grouping without a
+  model-name branch. `designs/wide_deltanet/ab.py` uses a separate open dispatch
+  with two input DMA channels and reused 32-float accumulators. Both H=5120 and
+  H=2560, 48 heads, passed seven NPU dispatches against float64 math over the same
+  bf16 inputs on 2026-09-24 (max-relative error <1e-4 and cosine >0.99999).
+  The existing fixed-width `transpose_banked` opcode implements the new plan's
+  conceptual `transpose_banked32`; both Python and C++ check every active tail
+  1..32 and both hidden widths. No catalogue promotion or model export.
+  See [bring-up report](plans/wide-deltanet-bringup.md).
+- **WideDeltaNet A7 synthetic chain.** The separate AB dispatch now feeds
+  `designs/wide_deltanet/glue.py` through a byte copy into its side buffer.
+  The glue reuses the existing convolution, normalization and emission kernels
+  at 48 heads with two input DMA channels. `deltanet/dn_step.py` accepts a
+  compile-time head count (default32, `DN_HEADS=48` for this chain); its scalar
+  and vector arithmetic is unchanged. NPU comparisons at both H5120/H2560
+  pass the inherited whole-tensor metrics for two 8-token sequences each,
+  cold and warm state; conv state is bit-exact. Every record is compared and
+  all output canaries remain intact. The stricter optional head-local metric
+  exposes up to1.03e-3 relative error for near-zero first-token outputs; this
+  diagnostic is retained separately, not claimed to pass. See
+  [A7 report](plans/wide-deltanet-a7.md) for thresholds, resources and evidence.
+  Whole-layer integration, segmented FFN and full-model validation are pending.
 
 **Procedure (manual):** as OPEN-FAMILY-QWEN36MOE with `Qwen3.8-Distilled-9B-NPU2`,
 `out_q35`, an 8-layer slice (six linear, two full), 3 greedy tokens from `[248045]`;
 then the engine CLI, then `chat.py` (the Qwen template). The same procedure runs each
-published size: 4B (passed 2026-09-06), 9B, 2B and 0.8B. The new kernel points (K 12288
+published size: 4B (passed 2026-09-06), 9B, 2B and 0.8B, and the 27B (2026-10-01). A new
+container is also checked against its HF source with `model/container_vs_hf.py` before the
+chat step: a conversion bug passes every kernel compare (OPEN-CONVERT-QWEN35-VHEADS). The new kernel points (K 12288
 GEMVs, `lm_head_q8` at K 4096, a 16/4-head gated attention at HD 256, `deltanet
 heads=16`, an 8/2-head gated attention at HD 256) are built with
 `OPEN_KERNELS_UNVALIDATED=1` until this passes, then added to `recipes/catalogue.py`.
@@ -1255,6 +1379,98 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
+
+**Batched prefill (2026-09-23, #109):** the family carries the 35B's block prefill route with a
+dense FFN in place of the MoE block, and runs its q8 out projection there as an exact split
+into two q4_1 halves rather than re-quantising it -- 13.5-17x faster prefill at every size
+tested with the greedy output unchanged. See `OPEN-PREFILL-BATCH`.
+
+**Result 2026-10-01 (the 4B stopped building; fixed, #145).** On `main` every 4B export failed
+`lx` with `Overflow of program memory`: its eight main cores linked to 16 480 B of 16 384. The
+kernels had not grown -- the core's control program had. aiecc runs Peano's `opt` at
+`default<O2>` with fixed flags (an `--unroll-full-max-count` given to aiecc is accepted and
+never reaches it), and `opt` fully unrolls a loop whose trip count is small enough. The 4B's
+bands are 20 weight elements where the 9B's are 32, so its main core carried 40 call sites of
+`gemv_q4_gms` and 28 of `gemv_q4_gy` against the 9B's 8 and 12: a control program of 8 208 B
+against 5 568. #78's DeltaNet pass 2 grew the same core on 2026-09-24 and is the likely trigger
+(not bisected); the Qwen3.5 cores measured then were the mixed 9B and 0.8B. The 2B (16-element
+bands, mixed) still builds on `main`, 14 592 B.
+
+The fix keeps the band loops rolled at the widths `catalogue.ROLLED_BANDS` lists -- the 4B
+alone: `xcommon.band_range` gives each band's `scf.for` a
+`#llvm.loop_annotation<unroll = <disable = true>>`, which scf-to-cf moves onto the latch as
+`llvm.loop.unroll.disable`. The main cores drop to 12 496 B (2 and 3 call sites), leaving the
+glue core's 15 344 B the fullest; `ax` 13 872, `ln` 3 424, `lm_head_q8` 3 008. The MLIR handed
+to aiecc is byte-identical to `main`'s for the 9B (mixed), the 0.8B and the 35B, `lx` and `ax`
+alike; the 4B's differs by the 40 annotations alone. On the NPU the 4B's slice gives
+0.999999 / 0.999993 / 0.999986, argmax 228793 / 695 / 3966 and top-5 identical, residual corr
+>= 0.999989; the engine is bit-identical to the harness (0.000e+00 x 3, request 2 reproduced),
+and the chat prompt is answered coherently, `[eos]` @60 as on 2026-09-07. Speed was measured beside an
+unrelated CPU-bound job (90 % CPU): 223 ms/token, not comparable to the quiet-box 138.
+
+**Result 2026-10-01 (Qwen3.8-27B, HID 5120 / 64 layers / FFN 17408 / 48 value heads): PASS,
+on a reconverted container.** The fifth size needed four design changes, all gated on its
+geometry (the criteria above: the K-split down GEMV, the streamed norm helper, the half-outer
+64-lane glue walk, element-by-element preparation of 3-element activations). With them `lx`,
+`ax`, `ln` and `lm_head_q8` build (fullest cores: `lx` 15 584 B -- the glue core; its main
+cores 14 624 -- and `ax` 14 400 of 16 384), and the 9B (q4_1 and mixed), 0.8B and 35B rebuilt
+on the same sources give byte-identical `insts.bin` and stamps-only `final.xclbin` against
+`origin/main` (`--check`).
+
+| check | result |
+|---|---|
+| 8-layer slice, 3 tokens from `[248045]` | logits corr 0.999998 / 0.999997 / 0.999998, argmax + top-5 match, residual corr 0.999999 every layer |
+| the engine on the same slice | bit-identical (0.000e+00 over 248 320 logits at every position); request 2 reproduces request 1 |
+| a 23-token chat prompt, engine vs the reference (`model/replica_prompt.py`) at 8 / 12 / 20 / 32 / 48 layers | corr 0.999998 / 0.999998 / 0.999998 / 0.999998 / 0.999989, argmax + top-5 match at every depth |
+| all 64 layers, the NPU prompt, greedy, the reconverted container | *An NPU, or Neural Processing Unit, is a specialized hardware component designed to efficiently execute the mathematical operations required for artificial intelligence and machine learning tasks. Unlike general-purpose CPUs or GPUs, NPUs are optimized for low power consumption and high performance...* then `<\|im_end\|>` at token 68 |
+| speed (a 300-token prompt, a quiet box, power mode pinned) | prefill 386 ms/token one token at a time, **50 ms/token** on the block route (115.9 s -> 14.9 s, 7.8x); decode 419-450 ms/token (2.2-2.4 tok/s) |
+
+**The published container was wrong, and no kernel compare could see it.** Against
+`Atomic-Germ/Qwen3.8-27B-NPU2` the same kernels matched the reference at every depth and still
+answered in fragments: both read the same bytes. `model/container_vs_hf.py` against the
+original `Qwen/Qwen3.8-27B` safetensors found every value-head-indexed DeltaNet tensor
+permuted (qkv's value rows, z, out_proj's columns, alpha / beta, A, dt_bias, conv1d) and every
+other tensor right -- the converter's untile hard-coded the 9B's 2 value heads per key head.
+Fixed under OPEN-CONVERT-QWEN35-VHEADS; the reconverted container matches the source
+tensor for tensor. Points added to `recipes/catalogue.py`: `ln` 5120, `lm_head_q8` K 5120,
+`gemv_q4` K 5120, `deltanet heads=48`, the `attn` tuple `(256, 24, 4, 64, True, True, False)`.
+
+**The block prefill route (OPEN-PREFILL-BATCH step 7), #148.** All 37 route kernels build:
+the attention products at AG_M 1536 and five GEMM shapes, `gemm_n5120_k6144`,
+`gemm_n5120_k17408`, `gemm_n14336_k5120`, `gemm_n16384_k5120` and `gemm_n34816_k5120` (fullest
+core 4 784 B). Each GEMM passes the harness against fp64 at rel_fro 1.64-1.77e-3 (gate 5e-3),
+17-95 ms per 256-token dispatch. On a 300-token prompt (two blocks) over 4 layers with
+`--prefill-logits`, the route against the sequential path gives argmax 300/300 and top-5
+299/300 with corr >= 0.999993 at every position, and layer-major against `--block-major` is
+byte-identical at all 300. Over all 64 layers with `--max-tokens 8` the 8 greedy tokens are
+the same, and the last prompt position and every decode step have equal argmax and top-5
+(corr >= 0.999971). Not run for the 27B: `oflm-test --llm` through `oflm serve`, which cannot
+load it -- the 27B is not in `src/model_list.json`.
+### OPEN-CONVERT-QWEN35-VHEADS: a GGUF's tiled value heads come back in grouped order
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/models/qwen35.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_qwen35_vheads.py`
+
+llama.cpp's converter stores a Qwen3.5 / 3.8 gated DeltaNet's value heads tiled -- GGUF head
+`r * num_k + kh` is HF head `kh * grp + r`, `grp = num_v / num_k` -- and the engine reads HF's
+grouped order. When `num_v != num_k`, q4nx-build shall untile every value-indexed tensor with
+the GGUF's own head counts (`qwen35.ssm.group_count`, `time_step_rank`, `state_size`,
+`inner_size`): qkv's value rows and conv1d's value channels (both after the
+`2 * num_k * head_k` rows of q and k, which keep their order), z's rows, out_proj's columns,
+alpha / beta's rows, `ssm_a` and `ssm_dt.bias`. When `num_v == num_k` nothing is reordered.
+
+**Acceptance criteria:**
+- At 32 value heads over 16 (the 4B / 9B) and 48 over 16 (the 27B), rows, columns and per-head
+  vectors tiled by llama.cpp's rule come back in grouped order exactly.
+- qkv's untile leaves the first `2 * num_k * head_k` rows in place and restores the value rows.
+- The pre-fix rule (`grp` fixed at 2, the value rows taken as the second half) restores the 9B
+  and fails the 27B -- the scramble `Atomic-Germ/Qwen3.8-27B-NPU2` shipped with.
+
+**Verification (manual), whole containers:** `python open_kernels/model/container_vs_hf.py
+--model-dir <container> --hf-shard <the HF shard holding layers 0 and 3>` correlates every
+tensor of a linear and a full layer with its source after the converter's expected transform;
+`ALL MATCH` (each quantized projection >= 0.99) is the bar. Run on the reconverted 27B on
+2026-10-01: ALL MATCH; on the published one, 8 mismatches, all value-indexed.
 
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
@@ -2863,13 +3079,14 @@ on the slow path. LFM2 joined the fast one later the same day and the sweep is
 flat -- OPEN-ATTN-CONTEXT carries the numbers.
 - Until they do, `families.family_module("lfm2")` keeps raising and the geometry stays out of `catalogue.py`.
 ### OPEN-PREFILL-BATCH: the block prefill route
-**Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/{qwen36moe,dense,qwen35}.py`, `designs/gemm_q4_prefill/`, `designs/dense/dx_attn.py`, `designs/layer_x/mx.py`, `src/open_qwen36/{manifest,core,block_host,engine}.cpp`)
 **Test category:** manual (needs the NPU; `Qwen3.6-35B-A3B-NPU2` for the MoE kinds, a dense family's own kernel set for `dense`); the recipe emission, the manifest schema, the host stages and the GEMM operand helpers are unit-tested in `tests/test_prefill_batch.py`, `tests/test_gemma3.py`, `src/open_qwen36/manifest_test.cpp` and `src/open_qwen36/block_host_test.cpp`
 
 A kernel set may carry a block prefill route: per layer type a `gemm_block`
 naming, by kind, the GEMM dispatches that replace the layer's projections for
 T = 256 tokens at once -- `dense` (0167/#32): the five-step chain with T
-single-token attention dispatches, run through the kernel and buffer args its
+single-token attention dispatches (or, where the set declares the products' host
+half as `attn_block.prep`, the two attention products of `OPEN-PREFILL-ATTN`), run through the kernel and buffer args its
 own `attn_kernel` / `attn_args` name (default `dxB`, so every dense layer
 type shares one attention kernel and position table unless it says
 otherwise); a layer type with its own sliding window (Gemma 3's
@@ -2890,20 +3107,36 @@ the host wrote. The shared expert is not in that dispatch: it is the same
 weights for every token of the block, so the route runs it once as two more
 GEMMs (up|gate, contiguous and band-law in the pool, then down) with silu and
 the sigmoid gate on the host, folds it into the residual the dispatch is
-handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Hardware contexts are shared: ONE GEMM xclbin
+handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Qwen3.5
+(`qwen35.py`) is the same two kinds with a dense FFN in place of the MoE block,
+and its route is the 35B's with the tail swapped: an `ffn_program` of the same
+two GEMMs (up|gate, contiguous at the head of the pool, then down) with
+`silu(g) * u` on the host and no gate, added to the residual, and no `mx`, no
+router, no expert kernels. Its containers ship the DeltaNet out projection at
+q8, which the sequential kernel streams natively, and the GEMM reads q4_1 only.
+Re-quantising that projection costs what `OPEN-QUANT-Q8` measured -- the
+reason it is native -- so the route does not: every q8 code v = 16 hi + lo
+(hi = v >> 4, lo = v & 15) makes the weight the exact sum of two q4_1 readings,
+d = 16 scale, m = -128 scale, nibble hi + 8 and d = scale, m = 0, nibble lo,
+both scales exact in bf16. The two halves sit stacked in one buffer (a
+`from: "pack"` weight of two `std_perm` ops with `split` hi and lo), one GEMM
+of 2 x hidden rows runs them, and the host adds the halves (`out_split`). Hardware contexts are shared: ONE GEMM xclbin
 for the whole route -- the core program depends on neither N nor K, the band
 count K/256 reaching each core as a runtime parameter the instruction stream
 writes -- and one `mx` xclbin for both layer
-types. `OFLM_OPEN_GEMM_BLOCK=1` (read through `getenv_oflm`, so the pre-rename
-`FLM_` export still works) selects the route; off by default so every existing
-measurement is unaffected. With it on the engine takes the route whenever the
+types. The route is **on by default** (#109): the engine takes it whenever the
 set carries it and the prompt has at least the crossover length (64 tokens;
-`OFLM_OPEN_GEMM_BLOCK_MIN` overrides), never for a prompt that has had an image. Only the real tokens of a padded block touch the
+`OFLM_OPEN_GEMM_BLOCK_MIN` overrides), never for a prompt that has had an image.
+`OFLM_OPEN_GEMM_BLOCK=0` (read through `getenv_oflm`, so the pre-rename `FLM_`
+export still works) turns it off; any other value leaves it on. A set without
+the route, or a prompt the route does not take, prefills one token at a time --
+with the route on, never skipped. Only the real tokens of a padded block touch the
 state, write KV rows, run the MoE or advance the position, and the conv state,
 S and the KV rows leave the buffers as the sequential path would (bf16 where
 the kernels keep bf16). A projection streamed at q8 has no route -- the GEMM
 dequantises the q4_1 band law -- and such a manifest is the sequential one
-unchanged.
+unchanged; the one exception is the DeltaNet out projection (`linear_out`),
+which runs as its exact q4_1 split as above.
 
 On a MoE kernel set the blocks are run **layer-major**: every T-wide block of
 the prompt goes through layer l's projections and host stages before layer
@@ -2929,6 +3162,7 @@ block-major.
 - The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
 - The build key covers `designs/gemm_q4_prefill/*` (`test_prefill_batch.py`).
+- Qwen3.5's emission (`tests/test_qwen35.py`): at the 9B, `linear` runs `gemm_n12288_k4096` (qkv|z, pool ops 3-4) then `gemm_n4096_k4096` (out), `full` runs `gemm_n10240_k4096` (q, k, v, gate: pool ops 3-6) then `gemm_n4096_k4096` (o, op 7), and both carry `ffn_program` = `gemm_n24576_k4096` (up|gate, pool ops 0-1, contiguous, up first) then `gemm_n4096_k12288` (down, op 2) with `ff` 12288 and none of the MoE tail's keys; one `gemm` context, no `mx` / `mb` kernels or globals, and the attention products built at `AG_M` 1024 in their own directories. All four published sizes emit a route; `attn` or `linear` at q8, or a width the GEMM cannot tile, emits none and leaves the sequential manifest; `linear_out` at q8 emits `gout_w` as `from: "pack"` -- two `std_perm` ops of `ssm_out_proj`, 2048 chunks each at in_dim 4096, `split` hi at dst 0 and lo right after -- with `out_split` and the out step on `gemm_n8192_k4096`, while the sequential consts keep their `q8_perm`. The split reads back every q8 value exactly (the re-quantisation of the same chunks does not), and NumPy (`pack.split_q8_q4_1`) and C++ (`pools::split_q4_1_chunks`) produce the same bytes (`tests/test_qwen35.py`, `pools_test.cpp`). The 35B's manifest is byte-identical to its emission before the dense tail existed, apart from the build key. The parser takes the qwen35 fixture's route and a split out projection, and refuses both tails, neither tail, a third FFN step, an FFN step naming an undefined buffer, an FFN weight past the plan, a packed weight that is not `std_perm`, and a split that is not hi / lo (`manifest_test.cpp`).
 - The dense kind's recipe (`dense.py gemm_route`) emits one `gemm_block` per layer type present, sharing the five-step program, weight map and widths (`layout`/`geometry` don't vary by layer type) but each naming its own `attn_kernel` / `attn_args`: a family with one layer type gets the schema's defaults (`dxB` / `...,"ptab"`); Gemma 3's two get `dxB` / `ptab` for `dense` and a second kernel entry `dxB_local` / `ptab_local` -- the SAME `dx_attn/insts.bin` stream, patched with the family's sliding window -- for `dense_local`, plus `sandwich: true` and `act: "gelu_tanh"` on both (`manifest_test.cpp`'s qwen3 and gemma3 fixture blocks, `tests/test_gemma3.py`). A family combining sandwich norms with a non-gelu-tanh activation, or the reverse, gets no route (`tests/test_gemma3.py`) -- the host chain only implements the two pairings above. Nor does a family whose q/k/v carry a bias or whose position record is wider than one attention element (Qwen2, both): `dx_attn` has neither stream and refuses to build, so the manifest stays the sequential one (`tests/test_qwen2.py`). The parser refuses a dense route whose `attn_kernel` runs the same instruction stream as any sequential `program` step (`dx`, `dx_local`) -- `attnpos` alone does not make a kernel the attention-only dispatch, and the sequential stream would run the whole layer per token (`manifest_test.cpp`).
 - Layer-major is refused where it has no meaning: `layer_major_ok()` is false without a block
   route, with `OFLM_OPEN_LAYER_MAJOR=0`, and for any layer type whose kind is not `linear` or
@@ -2957,6 +3191,14 @@ block-major.
    the two must be **byte-identical** -- that is what says the schedule itself changed nothing.
    With the batched expert kernel they are not, and the gate is instead that both sit the same
    distance from the per-token run: equal max |diff| and equal argmax-flip count against it.
+7. Qwen3.5 (`Qwen3.8-Distilled-9B-NPU2`, and `Qwen3.5-0.8B-NPU2` for the smallest geometry):
+   `export_qwen36_kernels.py --model-dir <model>`, each new GEMM shape through the harness,
+   then steps 3 and 4 on a prompt of more than one block (`--layers 4 --prefill-logits`, then all
+   layers with `--max-tokens 8`: the same greedy continuation, since decode reads the DeltaNet
+   state and KV rows the route wrote), layer-major against `--block-major` byte-identical (no
+   experts, nothing may differ), and `oflm-test --llm` through `oflm serve` with no flag set.
+   With `OFLM_OPEN_GEMM_BLOCK=0`, and separately on a set with no route, a long prompt still
+   prefills (the sequential path) -- the fall-through that used to skip the prompt.
 
 **Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`OFLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `OFLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
 
@@ -3296,6 +3538,39 @@ Qwen3-4B's 1.66x is expected: past 1024 rows the sequential path's local layers 
 over a capped window, so the route has less to win there. Details:
 `.claude/plans/gemma3-block-prefill.md`.
 
+**Result 2026-09-23 (Qwen3.5, #109; the route on by default):** step 7 on
+`Qwen3.8-Distilled-9B-NPU2` (the published shape of the 9B, `linear_out` at q8) and
+`Qwen3.5-0.8B-NPU2`, natively on Windows. Every GEMM shape PASSes the harness at rel_fro
+1.65-1.72e-3 (gate 5e-3), `n24576_k4096` -- the widest N the GEMM has run -- included, 54 ms.
+The q8 out projection decided the design: packed as a re-quantised q4_1 copy, the 9B at full
+depth over 1000 positions scored mean logits corr 0.9957 against the sequential path and, at
+the twelve hardest positions (markdown table separators) against the fp64 replica, mean 0.890 /
+min 0.44 / top-5 2 of 12, where the sequential path scores 0.99998 / 0.99996 / 12 of 12 -- and
+a sequential run on an all-q4_1 set lands at 0.931 / 0.635, so the loss is the re-quantisation,
+not the route (with identical q4_1 weights the two agree to corr 1.00000 at one layer). With
+the exact split: one layer against the sequential path corr 1.00000, argmax 299/300; all 32
+layers, 1000 positions, mean corr 0.99997 / argmax 997 / top-5 976; against the fp64 replica
+at the twelve hard positions mean 0.99984, min 0.99885, argmax and top-5 12 of 12; the 16-token
+greedy continuation identical. Layer-major against `--block-major` is byte-identical at every
+position. Prefill, nothing else on the box: **9B 1000 tokens 141.9 s -> 10.5 s (13.5x), 2582
+tokens 375.9 s -> 26.6 s (14.1x); 0.8B 32.6 s -> 1.9 s and 92.7 s -> 5.6 s**; decode unchanged
+(171 -> 169 and 180 -> 179 ms/token at the 9B). Through `oflm serve` with no flag set:
+`oflm-test --llm` PASSes 5 of 5 on `qwen3.5:0.8b` (the suite lists `qwen3.5:9b` as non-chat
+and skips it; the 9B answered a 2002-token question coherently at 92 tok/s prefill), the 0.8B
+prefills that question at 588 tok/s against 26 without the route, and the 0.8B on a set with
+no route prefills it one token at a time and answers -- the fall-through. One serve run of the
+0.8B hit two `lx` ERT timeouts, the first on a 15-token prompt before that server had
+dispatched any route kernel, with NPU context errors (pci Event ID 3) in the System log at the
+same moments; four repeats of that request and a second full `oflm-test` on a fresh server did
+not reproduce it. Details: `specs/open-engine/plans/archive/qwen35-block-prefill.md`.
+Re-run 2026-09-25 after rebasing onto main at #114 (layer_x's head-by-head DeltaNet
+transfers and the decode submit-ahead), with both kernel sets rebuilt from that tree: the
+9B's 1000 positions score the same argmax 997 / top-5 976 / mean corr 0.99997 against the
+sequential path, the 16-token continuation is identical, prefill 127.7 s -> 9.75 s, decode
+154 ms/token both ways; the 0.8B prefills 1000 tokens in 28.7 s -> 1.94 s with an identical
+continuation, and `oflm-test --llm` on `qwen3.5:0.8b` through `oflm serve` with no flag set
+PASSes 5 of 5.
+
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`
@@ -3488,7 +3763,7 @@ the register pressure is ever solved. 14.21 ms still stands against an 11.55 ms
 DMA floor; the remaining ~2.3 ms is the scale application.
 
 ### OPEN-PREFILL-ATTN: the block attention's products on the NPU
-**Applies to:** openflowlm-next (`open_kernels/designs/attn_block/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,block_host,core}.cpp`)
+**Applies to:** openflowlm-next (`open_kernels/designs/attn_block/`, `open_kernels/recipes/{qwen36moe,dense}.py`, `src/open_qwen36/{manifest,block_host,core}.cpp`, `utilities/dense-decode-probe/attn_route_check.py`)
 **Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_prefill_attn.py` documents the procedure); the recipe emission and the manifest schema are unit-tested in `tests/test_prefill_attn.py` and `src/open_qwen36/manifest_test.cpp`
 
 The block route's full-attention layers run their attention as two bf16 GEMM
@@ -3502,18 +3777,37 @@ runtime loop bounds so one xclbin (`ag`) carries an instruction stream per
 (`kernels_s`, `kernels_pv`); a window wider than that is taken in chunks with
 the running max and sum merged across them. The host keeps the q / k norms,
 RoPE, the KV-cache write, the causal mask, the softmax and the output gate;
-1/sqrt(hd) is folded into Q before the bf16 rounding (exact: a power of two at
-every head dim here), and the denominator counts the bf16-rounded P the kernel
-multiplies. A set without `attn_block`, or `OFLM_OPEN_ATTN_BLOCK=0`, runs
-`host::attention_block` as before.
+1/sqrt(hd) is folded into Q before the bf16 rounding (exact at head dims 64
+and 256, a power of two; one more bf16 rounding at 128), and the denominator
+counts the bf16-rounded P the kernel multiplies. A set without `attn_block`, or
+`OFLM_OPEN_ATTN_BLOCK=0`, runs `host::attention_block` as before. A window that
+fits `l_max` is one chunk, and then every kv head's scores run before any
+head's values: per head the same arithmetic, so the same output bit for bit,
+but where the two products sit on different xclbins it switches hardware
+context twice a layer rather than twice a head.
+
+The `dense` route runs the same products in place of its T single-token `dxB`
+dispatches, for a layer type whose `attn_block` carries `prep`: what the
+products' host half has to compute for that family. The one value is
+`qknorm_rope` (the q / k RMSNorm, then the half-split rotation over the
+manifest's `rotary_dim`; no bias, no gate, no sliding window), declared by
+`recipes/dense.py` for the families in `BLOCK_ATTN_QKNORM_ROPE`, which a family
+joins by measurement against its `dxB` route. A dense `attn_block` without
+`prep` is not read, and the route keeps its `dxB` dispatches; a `prep` the
+engine does not know is refused. At head dim 128 the scores are built 8
+columns wide and the values 4, on contexts `ag_s` and `ag_pv`.
 
 **Acceptance criteria (unit):**
 - The 35B emission: the full-attention type carries `attn_block` = `m` 2048, `hd` 256, `l_max` 4096, args `ag_a, ag_b, ag_c`, streams `ag_s<L>` / `ag_pv<L>` for L = 256 .. 4096 by 256 on context `ag`; the builds pass `AG_M`, `AG_K`, `AG_N` (K = hd, N = L for the scores; K = L, N = hd for the values); the globals are sized for the widest window; the linear type carries none (`test_prefill_attn.py`).
 - The parser (`manifest_test.cpp`): `m`, `hd` and `l_max` positive multiples of 256, three args that are declared globals, every window a positive multiple of 256 within `l_max`, `kernels_s` reaching `l_max`, and `kernels_s` / `kernels_pv` covering the same windows; the fixture parses to 16 windows of each on the full type only.
+- The dense emission (`test_prefill_attn.py`): Qwen3-4B's dense type carries `attn_block` with `m` 1024 (4 query heads per kv head x 256), `hd` 128, `l_max` 4096 and `prep` `qknorm_rope`; Llama 3.1 (no q / k norm), HunYuan (the norm after the rotation) and Phi-4-mini (not yet measured) carry no `prep`.
+- The dense parser (`manifest_test.cpp`): the Qwen3-4B fixture's dense `attn_block` parses with `prep` `qknorm_rope`, `hd` 128 and 16 windows on contexts `ag_s` / `ag_pv`; a `prep` other than `qknorm_rope` is refused; HunYuan's `attn_block` without `prep` is not read.
 
-**Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`.
+**Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`. For a dense family: `utilities/dense-decode-probe/attn_route_check.py` on its whole model (19, 600 and 981 tokens, `--seq` on the short one) -- the products against its `dxB` route at the argmax of every compared position, the same greedy continuation, and logits corr >= 0.9998, the distance its `dxB` route already keeps from the sequential one; then `oflm-test --llm` as above.
 
 **Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.
+
+**Result 2026-10-04 (dense, Qwen3-8B-NPU2, the qwen3 set exported from `perf/dense-prefill`, quiet box):** against its `dxB` route, every compared position's argmax agrees and the 16-token greedy continuation is identical at 19, 600 and 981 tokens; worst logits corr 0.99991 / 0.99987 / 0.99989. The `dxB` route itself is 0.99989 from the sequential route at 36 layers (0.99998 at an 8-layer prefix), and the products 0.99987: the products sit as close to the sequential route as the route they replace. The 981-token prefill: **33.3 s -> 17.5 s** with the products in per-head order, where each of the 576 dispatches a block paid a hardware-context switch (~2.5 ms), **-> 13.1 s** with all the scores before all the values (byte-identical logits and tokens at 600 and 981 tokens), against 3.1 s for stock FLM 1.0.2 on the same box the day before. The dense route's host stages then read the GEMM outputs as token rows from kept scratch (byte-identical on the products, the `dxB` route and the T = 1 host decode route): **11.6 s**, now 7.4 s of projection GEMMs, 2.4 s of attention and 1.8 s of host stages. **Through `oflm serve` (2026-10-04, `OFLM_OPEN_KERNELS_DIR` on the qwen3 set, the block route on by default):** `oflm-test --llm` passes, 5 of 5 (both answers, both modes, the follow-up from the prompt cache). Plan: `plans/archive/dense-prefill-attn.md`.
 
 ### OPEN-REQUEST-ISOLATION: the same request on a reused engine gives the same tokens
 **Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `read_back`, `Core::reset`, `seek`, `route`, `arm_route_records`, `det_step`; `cli.cpp` `--repeat`, `--det-step`)
@@ -3666,3 +3960,80 @@ term is the lx <-> ax hardware context change, 22 per step. Queueing ahead acros
 that change (level 2) hung the array three times in three runs
 (`ERT_CMD_STATE_TIMEOUT`), so no host schedule hides it; one xclbin carrying both
 layer types does.
+
+### OPEN-DECODE-ONE-CONTEXT: the decode layer loop runs in one hardware context
+**Applies to:** openflowlm-next (`open_kernels/designs/layer_x/ux.py` + `xlayer.py`, `open_kernels/recipes/qwen36moe.py` `one_context()` / `merged_image()`)
+**Test category:** test (the recipe emission, `tests/test_one_context.py`) + manual (the hardware claim below)
+
+For the qwen36moe family (the 35B and the 27B), the export's four layer kernels
+`lx0`, `lx1`, `ax0` and `ax1` are, **by default**, four instruction streams over
+ONE image (`ux.py`), and the manifest points all four at one context, `layer`.
+The layer walk then changes hardware context zero times instead of 20; only `ln`
+and `lm` at the tail keep their own. The main cores run lx's program with the two
+numbers that differ between the layer types (GEMV band count, DeltaNet head
+count) read from RTP words, so a full-attention layer runs the DeltaNet loop zero
+times. Every kernel's arithmetic and every DDR byte are unchanged, so the gate is
+bit-exact. The engine needs nothing new: it opens the contexts the manifest names.
+
+- **Rollback:** `OPEN_LAYER_ONE_CTX=0` at export builds the two-context `lx` / `ax`
+  layout (`lx.py`, `ax.py`) under the same set names. The variable is export-only;
+  nothing reads it at run time (the engine follows the manifest). It is in the
+  build key, so the two layouts never share one.
+- **A spec with a q8 projection role keeps two contexts** (`merged_image()`): the
+  merged main cores have room for one GEMV entry only. (Aside, 2026-09-23: that q8
+  shape's two-context `lx0` already overflows its main cores by 224 B on main at
+  c23b1a57 -- Ornith-1.5, and Aquila-mini by the same spec -- so it has no
+  buildable layer set; this requirement does not change that.)
+- **Known constraint:** the merged main cores are at 16256 of 16384 B of program
+  memory (128 B free). Any main-core growth -- a new stage, a wider prep, another
+  kernel entry -- has to be paid for elsewhere first, or it breaks the default build.
+- **One copy of every shared fragment:** the glue / post / attention helper cores,
+  the norm helper, the fifos and both part-0 host sequences live in
+  `layer_x/xlayer.py` and are called by `lx.py`, `ax.py` and `ux.py` alike, so an
+  edit to either layer type reaches both layouts. Moving them there changed no
+  compiled byte (2026-09-23 result below).
+
+**Verification (manual):**
+1. Export (default, or `OPEN_LAYER_ONE_CTX=1`) into a copy of a reference set; every
+   core's `.text` must fit 16384 B (aiecc fails the build otherwise; the main
+   cores are the tight ones).
+2. Bit-exact against the two-context set (`OPEN_LAYER_ONE_CTX=0`) under the same
+   CLI: `open_qwen36_cli --model <35B> --kernels <set> --pmode performance --layers 4
+   --ids 248045,846,198,760,28758,8427,4821,303,411,20012,369,264,2526,1287,314,4471,34523,440,836
+   --max-tokens 1 --prefill-logits --dump-logits <prefix> --quiet`, and the same at
+   `--layers 8` (a linear layer after a full one on the same image), compared
+   position by position: **max |diff| 0.0**. Then `gap-table/ids_1122.txt` with
+   `--gemm-block --max-tokens 64 --dump-logits`: the same 64 token ids and
+   **max |diff| 0.0** at every one.
+3. `--bench-decode 20` at positions 1 and 1024, alternated against the
+   two-context set: the walk's `ax0` penalty against its one-layer figure goes to
+   noise.
+
+**Result 2026-09-22 (Qwen3.6-35B-A3B-NPU2, 40 layers, quiet box, `sets/k35int` =
+this image + the layer_x issue order + the divide->shift GEMV fix, against
+`sets/k35b3` = the same without this image, 2 alternated rounds, `--pmode
+performance`).** Main cores 16256 of 16384 B (128 free). Both gates max |diff| 0.0,
+64/64 tokens identical. Min / mean ms:
+
+| | `k35b3` pos 1 | `k35int` pos 1 | `k35b3` pos 1024 | `k35int` pos 1024 |
+|---|---|---|---|---|
+| step, sum of 82 dispatches | 74.3 / 96.5 | 65.7 / 70.7 | 83.4 / 97.3 | 74.9 / 80.8 |
+| real step, serial (min / median) | 85.2 / 94.5 | 69.1 / 70.3 | 94.1 / 96.5 | 78.7 / 83.0 |
+
+Detail: `.claude/plans/decode-gap-2026-09-22/integration.md` and `track-d.md`.
+
+**Result 2026-09-23: default on, after the xlayer refactor.** (1) The refactor moved no
+compiled byte: `export_qwen36_kernels.py --check` of every layer_x set built before and
+after it -- the 35B and the 27B each in both layouts plus `mx_linear` / `mx_full`, and the
+Qwen3.5 dense `lx` / `ax` for the 0.8B and the 9B spec -- reports every `insts.bin`
+byte-identical and every xclbin identical apart from build stamps (48 files), and the MLIR
+of every stream is identical too. (2) The 27B (`Qwen3.6-27B-A2.8B-open`, 30 layers, full
+attention at 2, 5, 8, ...) on its one-context set against its two-context set, same CLI:
+19 ids at `--layers 4` and `--layers 8`, and 1122 tokens + a 64-token `--gemm-block`
+continuation, **max |diff| 0.0** on every dumped position, 64/64 tokens identical.
+`oflm serve` on the one-context set, `oflm-test --llm`: **PASS 5/5**. `--bench-decode 20`,
+2 alternated rounds, real step wall min / median ms on the serial route: position 1
+two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; position
+1024 79.3-80.3 / 80.5-83.0 against 62.9-63.6 / 64.4 (the walk's `ax0` penalty, +0.95 ms
+a call on two contexts, goes to noise). Detail:
+`.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.

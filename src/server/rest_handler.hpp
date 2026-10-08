@@ -22,6 +22,7 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <mutex>
 #include "prompt_cache.hpp"
 
 using json = nlohmann::ordered_json;
@@ -138,6 +139,11 @@ private:
     ModelLoad ensure_model_loaded(const std::string& model_tag, bool model_field_present = false);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
+    /// current_model_tag is written by ensure_model_loaded() on the NPU-queued
+    /// routes and read by GET /api/ps, which is not queued. These two are the
+    /// only way either side touches it across threads (#135).
+    void set_current_model_tag(const std::string& tag);
+    std::string loaded_model_tag() const;
     /// The tag an image request names (or --imagemodel's, when it names none), resolved
     /// and checked BEFORE anything is unloaded. Empty json and *tag set, or the 400.
     json resolve_image_model(const json& request, std::string* tag);
@@ -167,6 +173,7 @@ private:
     model_list& supported_models;
     ModelDownloader& downloader;
     std::string current_model_tag;
+    mutable std::mutex current_model_tag_mutex;
     std::string default_model_tag;
     bool modelscope;
     bool asr;
