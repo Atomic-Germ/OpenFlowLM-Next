@@ -44,6 +44,12 @@ struct program_args_t {
     // specific commands
     int img_pre_resize = 3;
 
+    // for image command: `oflm image <tag> "<prompt>"`
+    std::string image_prompt = "";
+    std::string image_out = "";       // empty: oflm-<seed>.png in the current directory
+    int image_size = 1024;
+    std::string image_seed = "";      // empty: a random 64-bit seed, printed
+
     // for list command
     std::string list_filter = "all";
 
