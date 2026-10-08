@@ -247,12 +247,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 2}"));
+    json j = json::parse(std::string("{\"manifest_version\": 3}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 2 is refused");
+        check(false, "manifest_version 3 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 2") != std::string::npos, std::string("manifest_version 2 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 3") != std::string::npos, std::string("manifest_version 3 is refused: ") + e.what());
     }
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
@@ -391,6 +391,12 @@ int main(int argc, char** argv) {
             // dx is attnpos-patched too, and would run the whole layer per token of the block
             refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
+            // the dense route runs its GEMMs through its own dispatch, which adds no split halves
+            refused_manifest(argv[2], "do not add split halves", "qwen3: a split step on the dense route is refused",
+                             [](json& j) {
+                                 j["manifest_version"] = 2;
+                                 j["layer_types"]["dense"]["gemm_block"]["program"][0]["split"] = true;
+                             });
         } catch (const std::exception& e) {
             check(false, std::string("qwen3 fixture: ") + e.what());
         }
@@ -601,6 +607,73 @@ int main(int argc, char** argv) {
                          [&](json& j) {
                              split_out(j);
                              j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][0]["split"] = "mid";
+                         });
+        // Any route step can read a q8 weight as its exact split (OPEN-PREFILL-BATCH): `split` on the
+        // step, a hi-then-lo pack on its weight. qkv | z here, from the fixture's own pool ops.
+        auto split_qkvz = [](json& j) {
+            json& lt = j["layer_types"]["linear_attention"];
+            json& gb = lt["gemm_block"];
+            json hi = json::array(), lo = json::array();
+            uint64_t dst = 0;
+            for (const char* part : {"hi", "lo"})
+                for (const auto& idx : gb["weights"]["gqkvz_w"]["ops"]) {
+                    json o = lt["pack"]["pool"][idx.get<size_t>()];
+                    o["op"] = "std_perm";
+                    o["dst"] = dst;
+                    o["split"] = part;
+                    dst += o["nch"].get<uint64_t>() * 5120;
+                    (std::string(part) == "hi" ? hi : lo).push_back(o);
+                }
+            json pack = hi;
+            for (auto& o : lo) pack.push_back(o);
+            gb["weights"]["gqkvz_w"] = {{"from", "pack"}, {"pack", pack}};
+            gb["program"][0]["split"] = true;
+            j["manifest_version"] = 2;
+        };
+        {
+            std::ifstream f(argv[5]);
+            json j = json::parse(f);
+            split_out(j);
+            split_qkvz(j);
+            try {
+                Manifest q = Manifest::parse(j, "edited");
+                const auto& g = q.layer_types.at("linear_attention").gemm_block;
+                check(g.program[0].split && g.weights.at("gqkvz_w").pack.size() == 4,
+                      "a split qkv | z step (split on the step, hi then lo on the weight) parses");
+                check(g.program[1].split, "out_split marks the out step split, so one host path adds every split's halves");
+                check(!q.layer_types.at("full_attention").gemm_block.program[0].split,
+                      "a step without `split` is not split");
+            } catch (const std::exception& e) {
+                check(false, std::string("a split qkv | z step parses: ") + e.what());
+            }
+        }
+        refused_manifest(argv[5], "is not a hi / lo split", "a split step whose weight is not a split is refused",
+                         [&](json& j) {
+                             j["manifest_version"] = 2;
+                             j["layer_types"]["linear_attention"]["gemm_block"]["program"][0]["split"] = true;
+                         });
+        // an engine that reads only version 1 ignores `split` and would use the hi half alone, so
+        // the version is what makes such an engine refuse the set; out_split alone stays version 1
+        refused_manifest(argv[5], "needs version 2", "a split step in a version 1 manifest is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["manifest_version"] = 1;
+                         });
+        refused_manifest(argv[5], "end to end from 0", "a split whose lo halves overlap its hi halves is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gqkvz_w"]["pack"][2]["dst"] = 0;
+                         });
+        refused_manifest(argv[5], "without `split`", "a split weight read by a step that is not split is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             j["layer_types"]["linear_attention"]["gemm_block"]["program"][0].erase("split");
+                         });
+        refused_manifest(argv[5], "is not a hi / lo split", "a split whose lo half does not mirror its hi half is refused",
+                         [&](json& j) {
+                             split_qkvz(j);
+                             auto& pack = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gqkvz_w"]["pack"];
+                             pack[3]["nch"] = pack[3]["nch"].get<uint64_t>() / 2;
                          });
     }
     // ---- Phi-3: a 96-dim rotation, longrope's two tables, and hf_config_defaults -- the

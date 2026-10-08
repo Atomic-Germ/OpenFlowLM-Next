@@ -1046,12 +1046,39 @@ GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 col
 # up (the plan's B(3)); the design and the driver are ready for it.
 MB_NT = 8
 ATTN_LMAX = 4096      # the widest attention GEMM stream (rows of window); a longer window is chunked on the host
-# The projections the route streams out of the layer's own packed bytes, which the GEMM can
-# read only at q4_1. `linear_out` is not among them: at q8 the route packs it as the exact
-# sum of two q4_1 halves (a `from: pack` weight), which is what lets a Qwen3.5 container --
-# whose ssm_out_proj ships q8 -- have a route at all.
-GEMM_ROLES = ("attn", "linear", "shared")
-DENSE_GEMM_ROLES = ("attn", "linear", "ffn")    # ... and with a dense FFN (Qwen3.5)
+# The GEMM reads the q4_1 band law only. A projection the container stores at q8 runs as its
+# exact q4_1 split instead (gemm_weight): every q8 code is 16 hi + lo, so two q4_1 halves sum
+# to it exactly. That is how the published q8 containers -- the 35B's attention and DeltaNet,
+# Qwen3.5's ssm_out_proj -- get a route at all; re-quantising them to q4_1 flips 13% of the
+# 35B's next tokens (utilities/quant-compare/README.md). The shared expert has no q8 form in
+# this family (qwen36moe refuses it), so it is the one role that still means "no route".
+
+
+def gemm_weight(ops: list[dict], idxs: list[int]) -> dict:
+    """The route's weight buffer for pack ops `idxs` of a layer type's plan: the ops in place
+    when they are q4_1 (what is packed is already the band law the GEMM reads), or, when the
+    container stores them at q8, their exact q4_1 split -- every op's hi half, then every op's
+    lo half, stacked in one buffer (pools split_q4_1_chunks; one q4_1 chunk per q8 chunk, so
+    half the q8 op's half-tile count). The step that reads a split weight runs twice the rows
+    and carries `split`, and the host adds the halves. A weight mixing the two formats would
+    need a lo half for an op that has none, so it is refused rather than half-split."""
+    sel = [ops[i] for i in idxs]
+    q8 = [o["op"] == "q8_perm" for o in sel]
+    if not any(q8):
+        return {"from": "pool", "ops": list(idxs)}
+    if not all(q8):
+        names = ", ".join(f"{o['tensor']} ({o['op']})" for o in sel)
+        raise OpRangeError(f"gemm route: a weight that mixes q8 and q4_1 pack ops has no exact split: {names}")
+    pack, dst = [], 0
+    for part in ("hi", "lo"):
+        for o in sel:
+            op = {"op": "std_perm", "tensor": o["tensor"]}
+            if "chunk0" in o:
+                op["chunk0"] = o["chunk0"]
+            op.update(nch=o["nch"] // 2, in_dim=o["in_dim"], dst=dst, split=part)
+            pack.append(op)
+            dst += op["nch"] * CHUNK
+    return {"from": "pack", "pack": pack}
 
 
 def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
@@ -1073,7 +1100,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     the shared expert's two GEMMs without its sigmoid gate. `plan` is that family's pack plan's
     `layer_types`, since the op indices the weight buffers name are its own."""
     dense = ffn == "dense"
-    if any(spec.quant_of(r) == "q8" for r in (DENSE_GEMM_ROLES if dense else GEMM_ROLES)):
+    if not dense and spec.quant_of("shared") == "q8":
         return None
     L, T = layout(spec, ffn=ffn), GEMM_T
     hid, ff = spec.hidden, spec.intermediate if dense else spec.moe_intermediate
@@ -1086,7 +1113,12 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         shapes.add((N, K))
         return f"gemm_n{N}_k{K}"
 
-    def run(N: int, K: int, w: str) -> dict:
+    def run(N: int, K: int, w: str, weights: dict | None = None) -> dict:
+        """A GEMM step of N output rows. When its weight (looked up in `weights`) is a split,
+        the dispatch is twice the rows and the step says so."""
+        if weights is not None and weights[w]["from"] == "pack" and weights[w]["pack"][0].get("split"):
+            N2 = 2 * N
+            return {"op": "run", "kernel": ctx(N2, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N2}"], "split": True}
         return {"op": "run", "kernel": ctx(N, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
 
     # The routed experts stay on mx, one token at a time, until the token-batched expert
@@ -1131,11 +1163,11 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         # up and gate are the pool's first two ops, contiguous and both std_perm, so one GEMM
         # gives [up | gate] -- the layout the shared expert's up|gate GEMM already has
         pool = plan[lt]["pool"]
-        return {"ffn_program": [run(2 * ff, hid, "gffn_ug_w"), run(hid, ff, "gffn_down_w")],
-                "ffn_weights": {
-                    "gffn_ug_w": {"from": "pool", "ops": [_op_index(pool, "mlp.up_proj.weight"),
-                                                          _op_index(pool, "mlp.gate_proj.weight")]},
-                    "gffn_down_w": {"from": "pool", "ops": [_op_index(pool, "mlp.down_proj.weight")]}}}
+        w = {"gffn_ug_w": gemm_weight(pool, [_op_index(pool, "mlp.up_proj.weight"),
+                                             _op_index(pool, "mlp.gate_proj.weight")]),
+             "gffn_down_w": gemm_weight(pool, [_op_index(pool, "mlp.down_proj.weight")])}
+        return {"ffn_program": [run(2 * ff, hid, "gffn_ug_w", w), run(hid, ff, "gffn_down_w", w)],
+                "ffn_weights": w}
 
     def moe_of(lt: str, a_xm: int, a_rout: int, a_res: int) -> tuple[dict, dict, dict]:
         """The MoE tail's keys, in the three places the 35B's manifest has always had them."""
@@ -1174,12 +1206,14 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         else:
             gout = {"from": "consts", "ops": [out_i]}
         m0, m1, m2 = moe_of(LINEAR, L.A_XM, L.A_ROUT, L.A_RES)
+        w = {"gqkvz_w": gemm_weight(pool, [_op_index(pool, "linear_attn.qkv_proj.weight"),
+                                           _op_index(pool, "self_attn.gate_proj.weight")]),
+             "gout_w": gout}
         types[LINEAR] = {
             "kind": "linear", "t": T, "eps": spec.norm_eps,
-            "program": [run(nch + vw, hid, "gqkvz_w"), run(2 * hid if split else hid, vw, "gout_w")], **m0,
-            "weights": {"gqkvz_w": {"from": "pool", "ops": [_op_index(pool, "linear_attn.qkv_proj.weight"),
-                                                           _op_index(pool, "self_attn.gate_proj.weight")]},
-                        "gout_w": gout},
+            # the out projection keeps its own `out_split` flag (older engines read only that)
+            "program": [run(nch + vw, hid, "gqkvz_w", w), run(2 * hid if split else hid, vw, "gout_w")], **m0,
+            "weights": w,
             "qkv_dim": nch, "vw": vw, "key_heads": spec.lin_key_heads, "value_heads": spec.lin_value_heads,
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
             **({"out_split": True} if split else {}),
@@ -1191,14 +1225,15 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         qw, kvw = spec.attn_q_width, spec.attn_kv_width
         nq = q4_chunks(qw, hid)
         m0, m1, m2 = moe_of(FULL, L.AA_XM, L.AA_ROUT, L.AA_RES)
+        w = {"gqkvg_w": gemm_weight(pool, [_op_index(pool, "self_attn.q_proj.weight", 0),
+                                           _op_index(pool, "self_attn.k_proj.weight"),
+                                           _op_index(pool, "self_attn.v_proj.weight"),
+                                           _op_index(pool, "self_attn.q_proj.weight", nq)]),
+             "go_w": gemm_weight(pool, [_op_index(pool, "self_attn.o_proj.weight")])}
         types[FULL] = {
             "kind": "full", "t": T, "eps": spec.norm_eps,
-            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w"), run(hid, qw, "go_w")], **m0,
-            "weights": {"gqkvg_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight", 0),
-                                                           _op_index(pool, "self_attn.k_proj.weight"),
-                                                           _op_index(pool, "self_attn.v_proj.weight"),
-                                                           _op_index(pool, "self_attn.q_proj.weight", nq)]},
-                        "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]}},
+            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w", w), run(hid, qw, "go_w", w)], **m0,
+            "weights": w,
             "qw": qw, "kvw": kvw, "nh": spec.num_heads, "kvh": spec.num_kv_heads, "hd": spec.head_dim,
             "rot": spec.rotary_dim, "ff": ff, **m1, **m2, **(ffn_of(FULL) if dense else {}),
         }
