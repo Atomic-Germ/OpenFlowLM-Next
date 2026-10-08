@@ -86,6 +86,93 @@ schema into its first non-null member, adding `nullable: true` when `null` was l
 - A request whose tools include such a field succeeds through `oflm serve` and the
   model can call that tool (manual: `edge_cases.py` "nullable type array").
 
+## K2-Horizon
+
+K2's template opens every reply inside `<ifm|think>` (`<ifm|think_fast>` / `<ifm|think_faster>`
+at `reasoning_effort` medium / low) and writes tool calls as
+`<ifm|tool_calls><ifm|tool_call>NAME<ifm|arg_key>K</ifm|arg_key><ifm|arg_value>V</ifm|arg_value></ifm|tool_call></ifm|tool_calls>`
+(newlines between the tags), string values raw and everything else as JSON. The code lives in
+`src/include/AutoModel/k2_chat.hpp`, used by `src/common/AutoModel/modeling_k2.cpp`.
+
+### TOOLS-K2-TEMPLATE: the app renders K2's chat template as transformers does
+**Applies to:** openflowlm-next (`src/include/minja/minja.hpp`, `src/common/AutoModel/modeling_k2.cpp`)
+**Verification:** manual
+
+The vendored minja shall parse and render K2-Horizon's `chat_template.jinja` byte for byte
+as transformers' `apply_chat_template` does, for the request shapes the server sends. That
+took `is sameas`, the `replace` filter, `str.split()` with no separator, `dict()` from
+(key, value) pairs and `rejectattr('0', ...)` indexing a pair. K2 renders without minja's
+polyfills: its template handles tools, tool calls and tool results itself, and minja's
+tool-call probe (which sends no thinking field) would otherwise rewrite them.
+
+**Acceptance criteria:**
+- `python utilities/template-check/check.py <K2 model dir>` reports every default case
+  identical: a user turn; with a system message; multi-turn with empty and non-empty
+  reasoning; with tools; with tools and a system message; a tool call and its result; a
+  `$ref` / `$defs` parameter schema; `reasoning_effort: medium`; no generation prompt.
+
+**Verification (manual):** run the command above against the downloaded model directory
+(`config.json`, `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja` from
+`IFM/K2-Horizon-7B`); it builds `render.exe` with MSVC on first use (`--rebuild` after a minja
+edit) and exits 0 only when every case agrees.
+
+### TOOLS-K2-HISTORY: an OpenAI-style history renders
+**Applies to:** openflowlm-next (`src/include/AutoModel/k2_chat.hpp`)
+**Verification:** test
+**Test:** `src/test/k2_chat/test.cpp`
+
+K2's template raises on an assistant turn that has no thinking field, and on tool-call
+arguments given as a JSON string; the server strips `reasoning_content` from history and
+clients echo arguments back as strings. Before templating, every assistant message without
+a string `think` / `think_fast` / `think_faster` / `reasoning_content` / `reasoning` field
+shall get `reasoning_content: ""`, and every string `arguments` that parses to a JSON object
+shall be replaced by that object.
+
+**Acceptance criteria:**
+- `{"role": "assistant", "content": "hello"}` gains `reasoning_content: ""`; a message that
+  already has `reasoning_content: "kept"` keeps it; user messages are untouched.
+- `"arguments": "{\"city\": \"Paris\"}"` becomes `{"city": "Paris"}`; `"not json"` is left
+  as is (the template then rejects the request, as transformers does).
+
+### TOOLS-K2-REASONING: reasoning and content are split at the think close tag
+**Applies to:** openflowlm-next (`src/include/AutoModel/k2_chat.hpp`, `src/common/AutoModel/modeling_k2.cpp`)
+**Verification:** test
+**Test:** `src/test/k2_chat/test.cpp`
+
+Every reply starts as reasoning. Text up to the first `</ifm|think>`, `</ifm|think_fast>`
+or `</ifm|think_faster>` shall be reported as `reasoning_content` and the rest as `content`,
+neither carrying a tag, in streamed and non-streamed responses alike. A reply cut off
+before the close tag is all reasoning; whitespace-only reasoning is not reported.
+
+**Acceptance criteria:**
+- `"Let me think.\n</ifm|think>\n\nAn NPU is a chip."` → reasoning `Let me think.`,
+  content `An NPU is a chip.`.
+- `"quick</ifm|think_fast>Done."` → `quick` / `Done.`.
+- No close tag → all reasoning, empty content. `"\n</ifm|think>Answer"` → no reasoning.
+- Fed one, two, three or seven bytes at a time, the stream parser yields the same
+  reasoning, content and calls as the whole-text parse, and no event text holds a tag.
+
+### TOOLS-K2-CALLS: K2's tool-call block resolves to OpenAI tool calls
+**Applies to:** openflowlm-next (`src/include/AutoModel/k2_chat.hpp`, `src/common/AutoModel/modeling_k2.cpp`)
+**Verification:** test
+**Test:** `src/test/k2_chat/test.cpp`
+
+Each `<ifm|tool_call>` in the reply shall become one tool call: the name is the text before
+the first `<ifm|arg_key>`; each key / value pair becomes an argument. A value whose
+parameter the request's schema types as `string` (or a type array whose first non-null
+member is `string`) is kept as the raw text; any other value is parsed as JSON, falling back
+to the text. The template's `json` form (`<ifm|tool_call>{"name": ..., "arguments": ...}`)
+parses too. Content before the block stays content.
+
+**Acceptance criteria:**
+- `get_weather` with `city` Paris, `zip` 75001 (schema string), `days` 3, `tags`
+  `["a", "b"]` → `{"city": "Paris", "zip": "75001", "days": 3, "tags": ["a", "b"]}`;
+  a second call with no arguments → `{}`; both calls are returned, in order.
+- A tool missing from the schema with value `42` → the number 42.
+- The json form → its name and arguments.
+- `Checking.` before the block → content `Checking.` and one call.
+- A string value holding `<York>` survives streaming intact.
+
 ## All models
 
 ### TOOLS-REQUEST-PARAMS-RESET: request parameters do not leak between requests

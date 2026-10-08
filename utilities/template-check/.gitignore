@@ -1,0 +1,4 @@
+render.exe
+_template.jinja
+build.log
+*.obj

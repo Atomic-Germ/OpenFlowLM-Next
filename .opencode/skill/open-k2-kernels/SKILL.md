@@ -88,3 +88,16 @@ open_qwen36_cli --model <dir> --kernels src/xclbins/K2-Horizon-7B-NPU2/open_kern
 `oflm` serves it through the `k2` family (`modeling_k2.cpp`): a greedy request (the default)
 decodes by Uno and a sampled one by plain decode. CPU reference of the algorithm:
 `utilities/uno-ref/uno_ref.py`; it measures acceptance off the NPU.
+
+## Serving: the chat template and the reply parser
+
+- K2's `chat_template.jinja` needed minja additions (`is sameas`, `replace` filter, bare
+  `split()`, `dict()`, `rejectattr('0', ...)`). Check any template change or a new K2 size with
+  `python utilities/template-check/check.py <model dir>`; it diffs the app's minja against
+  transformers over ten request shapes and must report 10/10 (TOOLS-K2-TEMPLATE).
+- K2 renders with `apply_polyfills = false`: minja's capability probe sends assistant turns
+  without a thinking field, the template raises, and minja would then rewrite tool calls.
+- The server strips `reasoning_content` from history; `k2_chat::prepare_messages` puts back an
+  empty one (the template raises otherwise) and turns string tool-call arguments into objects.
+- Replies start inside `<ifm|think>`; `k2_chat::StreamParser` splits reasoning / content /
+  `<ifm|tool_call>` blocks for both response modes. Unit test: `src/test/k2_chat` (cmake, header only).

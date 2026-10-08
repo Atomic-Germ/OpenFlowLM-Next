@@ -1,6 +1,3 @@
-/// \file modeling_k2.cpp
-/// \brief IFM K2-Horizon (dense) family. See modeling_k2.hpp.
-
 #include "AutoModel/modeling_k2.hpp"
 
 /************              K2 family            **************/
@@ -29,8 +26,7 @@ void K2::load_model(std::string model_path, json model_info, int default_context
     this->setup_tokenizer(model_path);
     this->sampler.reset();
 
-    // K2-Horizon is a reasoning model; greedy is where Uno's speedup is lossless, and its own
-    // generation_config sets no sampling at all
+    // greedy is where Uno is lossless, and K2's generation_config sets no sampling at all
     sampler_config config;
     config.top_k = 1;
     config.top_p = 1.0;
@@ -51,11 +47,65 @@ void K2::setup_tokenizer(std::string model_path) {
 std::string K2::apply_chat_template(nlohmann::ordered_json& messages, nlohmann::ordered_json tools) {
     minja::chat_template_inputs inputs;
     inputs.add_generation_prompt = true;
-    inputs.messages = messages;
+    inputs.messages = k2_chat::prepare_messages(messages);
     inputs.extra_context = this->extra_context;
     if (!tools.empty())
         inputs.tools = tools;
-    return this->_shared_apply_template(inputs);
+    this->tool_types_ = k2_chat::param_types(tools);
+    minja::chat_template_options opts;
+    // minja's tool-call probe sends no thinking field, so it wrongly marks K2 for the polyfills
+    opts.apply_polyfills = false;
+    return this->_shared_apply_template(inputs, opts);
+}
+
+bool K2::configure_parameter(std::string parameter_name, const std::any& value) {
+    if (parameter_name == "reasoning_effort") {
+        const std::string* effort = std::any_cast<std::string>(&value);
+        if (!effort) return false;
+        if (*effort == "high" || *effort == "medium" || *effort == "low")
+            this->extra_context["reasoning_effort"] = *effort;
+        else
+            header_print("WARNING", "K2-Horizon reasoning_effort must be 'low', 'medium' or 'high'");
+        return true;
+    }
+    return AutoModel::configure_parameter(parameter_name, value);
+}
+
+StreamResult K2::stream_result(const k2_chat::Event& ev) {
+    StreamResult r;
+    switch (ev.kind) {
+    case k2_chat::Event::Wait: r.type = StreamEventType::WAITING; break;
+    case k2_chat::Event::Reasoning: r.type = StreamEventType::REASONING; r.content = ev.text; break;
+    case k2_chat::Event::Content: r.type = StreamEventType::CONTENT; r.content = ev.text; break;
+    case k2_chat::Event::Tool:
+        r.type = StreamEventType::TOOL_DONE;
+        r.tool_id = "call_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(++this->tool_seq_);
+        r.tool_name = ev.name;
+        r.tool_args_str = ev.args.dump();
+        break;
+    }
+    return r;
+}
+
+StreamResult K2::parse_stream_content(const std::string content) {
+    return this->stream_result(this->parser_.feed(content, false, this->tool_types_));
+}
+
+StreamResult K2::parse_stream_content_final(const std::string content) {
+    return this->stream_result(this->parser_.feed(content, true, this->tool_types_));
+}
+
+NonStreamResult K2::parse_nstream_content(const std::string response_text) {
+    const k2_chat::Response r = k2_chat::parse_response(response_text, this->tool_types_);
+    NonStreamResult result;
+    result.content = r.content;
+    result.reasoning_content = r.reasoning;
+    for (const auto& [name, args] : r.calls) result.tool_calls_list.emplace_back(name, args.dump());
+    if (!result.tool_calls_list.empty()) {
+        result.tool_name = result.tool_calls_list[0].first;
+        result.tool_args = result.tool_calls_list[0].second;
+    }
+    return result;
 }
 
 bool K2::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std::function<bool()> is_cancelled) {
@@ -94,6 +144,9 @@ bool K2::uno_applies() const {
 
 std::string K2::generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os,
                          std::function<bool()> is_cancelled) {
+    // the generation prompt always opens a think block, so every reply starts as reasoning
+    this->parser_.reset();
+    this->tool_seq_ = 0;
     return this->uno_applies() ? this->generate_uno(meta_info, length_limit, os, is_cancelled)
                                : this->_shared_generate(meta_info, length_limit, os, is_cancelled);
 }
@@ -106,9 +159,7 @@ std::string K2::generate_with_prompt(chat_meta_info_t& meta_info, lm_uniform_inp
     return this->generate(meta_info, length_limit, os, is_cancelled);
 }
 
-/// _shared_generate's contract (the emitted text, token_history, total_tokens, stop reasons,
-/// forward_on_eos), with tokens arriving a cycle at a time. A cycle that runs past the stop is
-/// cut back: the cache is left exactly where plain decode would have left it.
+// _shared_generate's contract a cycle at a time; a cycle past the stop is cut back to where plain decode would stop.
 std::string K2::generate_uno(chat_meta_info_t& meta_info, int length_limit, std::ostream& os,
                              std::function<bool()> is_cancelled) {
 #ifdef OFLM_USE_OPEN_QWEN36
