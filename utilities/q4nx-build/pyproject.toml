@@ -21,6 +21,7 @@ dependencies = [
     "transformers",
     "accelerate",
     "modelscope",
+    "ml-dtypes",
 ]
 
 [project.optional-dependencies]

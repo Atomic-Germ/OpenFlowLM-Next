@@ -95,6 +95,7 @@ std::vector<Step> parse_program(const json& j, const std::string& where) {
         if (st.op == "run") {
             st.args = get<std::vector<std::string>>(s, "args", where);
             if (st.args.empty() || st.args.size() > 8) fail(where, "run " + st.kernel + ": " + std::to_string(st.args.size()) + " buffer args (1..8)");
+            st.split = s.value("split", false);
         } else if (st.op == "moeroute2") {
             st.act_off = get<uint64_t>(s, "act_off", where);
         } else {
@@ -128,7 +129,11 @@ Manifest Manifest::load(const std::string& path) {
 Manifest Manifest::parse(const json& j, const std::string& where) {
     Manifest m;
     m.version = get<int>(j, "manifest_version", where);
-    if (m.version != 1) fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1)");
+    // 2 is 1 plus `split` route steps (OPEN-PREFILL-BATCH): an engine that reads only 1 would
+    // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
+    // a step is split, and an older engine refuses the set by name instead of misreading it.
+    if (m.version != 1 && m.version != 2)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 and 2)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -387,6 +392,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
                     g.s_rows = get<uint64_t>(gj, "s_rows", gw);
                     g.out_split = gj.value("out_split", false);
+                    // the flag predates per-step `split` and means the same thing for the out step
+                    if (g.out_split) g.program.at(1).split = true;
                     if (t.state_kind != "linear") fail(gw, "a linear route on a layer type whose state is not linear");
                     if (g.qkv_dim != 2 * g.key_heads * g.head_dim + g.value_heads * g.head_dim || g.vw != g.value_heads * g.head_dim)
                         fail(gw, "qkv_dim / vw disagree with the head counts");
@@ -424,6 +431,60 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             for (const auto& s : g.ffn_program)
                 if (!g.ffn_weights.count(s.args[0]))
                     fail(gw, "ffn step " + s.kernel + " reads weight buffer " + s.args[0] + ", which ffn_weights does not define");
+            // A split step reads [hi | lo] of a q8 projection's exact q4_1 split and the host adds
+            // the halves; any other step adds nothing. The two have to agree, or a step's output
+            // would be half a weight, or a weight's two halves stacked as if they were rows.
+            auto is_split = [](const GemmWeight& w) {
+                if (w.from != "pack" || w.pack.empty() || w.pack.size() % 2) return false;
+                const size_t n = w.pack.size() / 2;
+                for (size_t i = 0; i < n; ++i) {
+                    const PackOp& h = w.pack[i];
+                    const PackOp& l = w.pack[n + i];
+                    if (h.split != "hi" || l.split != "lo" || h.tensor != l.tensor || h.nch != l.nch ||
+                        h.in_dim != l.in_dim || h.chunk0 != l.chunk0)
+                        return false;
+                }
+                return true;
+            };
+            // `out_split` predates manifest_version 2 and every engine that reads it folds that step.
+            const Step* out_step = g.out_split ? &g.program.at(1) : nullptr;
+            auto check_split = [&](const std::vector<Step>& prog, const std::map<std::string, GemmWeight>& ws,
+                                   const char* what) {
+                for (const auto& s : prog) {
+                    const GemmWeight& w = ws.at(s.args[0]);
+                    bool any = false;
+                    for (const auto& o : w.pack) any = any || !o.split.empty();
+                    if (s.split && g.kind == "dense")
+                        fail(gw, std::string(what) + " step " + s.kernel + " is split, and the dense route's "
+                                     "GEMMs do not add split halves");
+                    if (s.split && &s != out_step && m.version < 2)
+                        fail(gw, std::string(what) + " step " + s.kernel + " is split in a manifest_version " +
+                                     std::to_string(m.version) + " manifest; an engine that reads only 1 "
+                                     "would use its hi half alone, so a split step needs version 2");
+                    if (s.split && !is_split(w))
+                        fail(gw, std::string(what) + " step " + s.kernel + " is split, but its weight " + s.args[0] +
+                                     " is not a hi / lo split (every op's hi half, then the same ops' lo halves)");
+                    if (s.split) {
+                        // the host adds rows N.. into rows 0.., so the lo halves must start exactly
+                        // where the hi halves end, and nothing may overlap or leave a gap
+                        uint64_t off = 0;
+                        for (const auto& o : w.pack) {
+                            if (o.dst != off)
+                                fail(gw, std::string(what) + " step " + s.kernel + ": split weight " + s.args[0] +
+                                             " op " + o.tensor + " (" + o.split + ") packs at dst " +
+                                             std::to_string(o.dst) + ", not " + std::to_string(off) +
+                                             " -- the halves must lie end to end from 0");
+                            off += o.nch * m.chunk_bytes;
+                        }
+                    }
+                    if (!s.split && any)
+                        fail(gw, std::string(what) + " step " + s.kernel + " reads the split weight " + s.args[0] +
+                                     " without `split`");
+                }
+            };
+            check_split(g.program, g.weights, "program");
+            check_split(g.shared_program, g.shared_weights, "shared");
+            check_split(g.ffn_program, g.ffn_weights, "ffn");
         }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));
