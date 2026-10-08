@@ -379,6 +379,25 @@ See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
 
 ---
 
+### 🖼️ Generate an Image
+
+`oflm image` turns a prompt into one image with FLUX.2 [klein] 4B. The text encoder, the 4 denoising steps and the VAE decoder all run on the NPU. The model is pulled on first use (about 9 GB).
+
+```shell
+oflm image flux2-klein:4b "a red fox in fresh snow" -o fox.png
+oflm image flux2-klein:4b "a lighthouse at dusk" --size 512 --seed 7 -o lighthouse.jpg
+```
+
+| Option | Default | |
+|---|---|---|
+| `-o`, `--out` | `oflm-<seed>.png` | `.png`, `.jpg` or `.jpeg`; any other extension is refused before loading |
+| `--size` | `1024` | `512` or `1024` (square) |
+| `--seed` | random | the same prompt, size and seed give the same image; the seed used is printed |
+
+The output reports the file, the seed and the time on the NPU, e.g. `14.1 s on the NPU (text 0.72, steps 11.95, vae 1.39)` at 1024² (5.5 s at 512²). `run` and `serve` refuse the image model: it is not a chat model.
+
+---
+
 ## 💻 Commands Inside CLI Mode
 
 Once inside the CLI, use the following commands. System commands always start with `/` (e.g., `/help`).

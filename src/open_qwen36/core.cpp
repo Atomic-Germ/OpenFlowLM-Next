@@ -2042,11 +2042,15 @@ std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, i
 }
 
 const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer) {
+    // A split step's weight is [hi | lo] of a q8 projection's exact q4_1 split (OPEN-PREFILL-BATCH):
+    // the dispatch returns 2N rows, and rows N.. are added into rows 0.. below, so every caller
+    // sees the projection's [N, T] whether its weight was split or not.
+    const size_t rows = s.split ? 2 * N : N;
     xrt::bo& xb = buffer(s.args[1], 0);
     xrt::bo& yb = buffer(s.args[2], 0);
-    if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
+    if (xb.size() < K * T * 2 || yb.size() < rows * T * 4)
         throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals are smaller than [" +
-                                 std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(N) + "]");
+                                 std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(rows) + "]");
     auto t0 = std::chrono::steady_clock::now();
     host::tile_x(x, T, K, xb.map<uint16_t*>());          // straight into the mapped buffer
     timing_.part1_ms += ms_since(t0);
@@ -2057,10 +2061,25 @@ const float* Core::gemm_run(const Step& s, const float* x, size_t T, size_t K, s
     timing_.part1_ms += ms_since(ts);
     timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
     ts = std::chrono::steady_clock::now();
-    read_back(yb, N * T * 4, 0);
+    read_back(yb, rows * T * 4, 0);
     timing_.sync_ms += ms_since(ts);
     timing_.part1_ms += ms_since(ts);
-    return yb.map<float*>();
+    const float* y = yb.map<const float*>();
+    if (!s.split) return y;
+    // The sum goes to host memory, never back into the mapped y: the next read_back's
+    // CLFLUSH writes a dirty line back over whatever the device wrote there since, so
+    // folding in place corrupts a later dispatch's output -- by how much depends on what
+    // got evicted in between, and the route stops being deterministic.
+    ts = std::chrono::steady_clock::now();
+    std::vector<float>& sum = split_y_[s.args[2]];       // one per y global, so it lives as long as y would
+    if (sum.size() < N * T) sum.resize(N * T);
+    const float* lo = y + N * T;
+    float* o = sum.data();
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(N * T); ++i) o[i] = y[i] + lo[i];
+    timing_.part1_ms += ms_since(ts);
+    timing_.gemm_tr_ms += ms_since(ts);
+    return o;
 }
 
 void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int layer,
@@ -2959,19 +2978,8 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
     if (last) st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
     timing_.state_ms += ms_since(ts);
     auto t1 = std::chrono::steady_clock::now();
-    if (gb.out_split) {
-        // a q8 out projection as its exact q4_1 split: rows [0, hid) are the hi half's
-        // output and [hid, 2 hid) the lo half's, and the projection is their sum
-        gemm(gb.program[1], og, T, vw, 2 * hid, l, gout_);
-        t1 = std::chrono::steady_clock::now();
-        const std::vector<float>& y = gout_;
-#pragma omp parallel for
-        for (long long tt = 0; tt < static_cast<long long>(T); ++tt) {
-            const size_t t = static_cast<size_t>(tt);
-            const float* a = y.data() + t * 2 * hid;
-            for (size_t c = 0; c < hid; ++c) res[t * hid + c] = xres[t * hid + c] + (a[c] + a[hid + c]);
-        }
-    } else {
+    {
+        // a q8 out projection is a split step (out_split marks it) and gemm() adds its halves
         gemm(gb.program[1], og, T, vw, hid, l, gout_);
         t1 = std::chrono::steady_clock::now();
         const std::vector<float>& out = gout_;

@@ -450,6 +450,26 @@ if(NOT OFLM_USE_HRX)
     endif()
 endif()
 
+# ———————————————————————————————————————————————
+# open_diffusion: FLUX.2 [klein] text-to-image, every op on the NPU (`oflm image`)
+# ———————————————————————————————————————————————
+#
+# The engine replays a precomputed schedule of XRT runs; the host only writes the
+# prompt's embedding rows and the noise and encodes the image, so unlike open_whisper it
+# needs no AVX or OpenMP flags. cli.cpp is EXCLUDED: it is open_diffusion/build.cmd's
+# standalone gate with its own main(), as open_whisper's cli.cpp is.
+if(NOT OFLM_USE_HRX)
+    set(OPEN_DIFFUSION_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp"
+    )
+    list(APPEND SOURCES ${OPEN_DIFFUSION_SOURCES})
+    # stb_image_write (vendored, public domain) encodes the PNG/JPEG; only engine.cpp
+    # includes it
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb")
+endif()
+
 # Exclude files that depend on missing libraries for Linux
 if(NOT WIN32)
     # list(FILTER SOURCES EXCLUDE REGEX ".*modeling_gemma3\\.cpp$")
@@ -581,6 +601,8 @@ if(NOT OFLM_USE_HRX)
     # #ifdef so an OFLM_USE_HRX build (which never adds OPEN_WHISPER_SOURCES
     # above) still compiles with only the closed adapter reachable.
     target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_WHISPER=1)
+    # `oflm image` (open_diffusion/); an HRX build answers "not implemented in this build"
+    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_DIFFUSION=1)
     target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
     # The vision tower runs on the host (open_qwen36/vision/vit.cpp): threads over OpenMP
     # where the compiler has it, a single thread otherwise (the pragmas are then ignored).
@@ -592,8 +614,15 @@ if(NOT OFLM_USE_HRX)
         # initialiser set a variable the runtime had already read past. Delay-loading
         # vcomp moves its load to the first call into it, which is after that. Worth
         # 20.5 -> 17.1 s on a 2582-token prefill; see the note above OmpWaitPolicy.
+        # The eight closed model DLLs below import vcomp themselves, so linking them at load
+        # time loaded vcomp first anyway and the workers spun regardless (#176); they are
+        # delay-loaded for that reason alone. A closed DLL added later that imports vcomp
+        # belongs on this list, and Core's WARNING names the symptom if it is left off.
         if(MSVC)
-            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL")
+            target_link_options(oflm PRIVATE "/DELAYLOAD:VCOMP140.DLL"
+                "/DELAYLOAD:qwen3_6_moe_npu.dll" "/DELAYLOAD:qwen3_5vl_npu.dll" "/DELAYLOAD:qwen3_5_omni_npu.dll"
+                "/DELAYLOAD:qwen3vl_npu.dll" "/DELAYLOAD:gemma_npu.dll" "/DELAYLOAD:gemma4e_npu.dll"
+                "/DELAYLOAD:gemma4_12b_npu.dll" "/DELAYLOAD:gpt_oss_npu.dll")
             target_link_libraries(oflm PRIVATE delayimp)
         endif()
     endif()
@@ -1423,6 +1452,39 @@ if(MSVC)
 endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# OPEN-DIFFUSION-TOKENS: `oflm image`'s prompt path against klein_pipeline.token_ids'
+# goldens. It needs the installed model's tokenizer.json and fails naming the path
+# without it; no device.
+if(NOT OFLM_USE_HRX)
+    add_executable(open_diffusion_tokens_test
+        open_diffusion/tokens_test.cpp open_diffusion/prompt.cpp common/tokenizer/tokenizer.cpp)
+    target_include_directories(open_diffusion_tokens_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion")
+    # tokenizer.hpp -> typedef.hpp -> buffer.hpp -> device_runtime.hpp: the XRT headers
+    # are needed to compile, though nothing opens a device
+    if(XRT_INCLUDE_DIRS)
+        target_include_directories(open_diffusion_tokens_test PRIVATE ${XRT_INCLUDE_DIRS})
+    elseif(XRT_INCLUDE_DIR)
+        target_include_directories(open_diffusion_tokens_test PRIVATE ${XRT_INCLUDE_DIR})
+    endif()
+    target_link_libraries(open_diffusion_tokens_test PRIVATE tokenizers_cpp)
+    target_compile_definitions(open_diffusion_tokens_test PRIVATE DISABLE_ABI_CHECK=1)
+    if(MSVC)
+        target_compile_options(open_diffusion_tokens_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+        target_compile_definitions(open_diffusion_tokens_test PRIVATE
+            _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
+        target_link_libraries(open_diffusion_tokens_test PRIVATE
+            ntdll ws2_32 Bcrypt userenv advapi32)
+    else()
+        target_compile_options(open_diffusion_tokens_test PRIVATE -mavx -mavx2)
+        target_link_libraries(open_diffusion_tokens_test PRIVATE Threads::Threads dl)
+    endif()
+    add_test(NAME open_diffusion_tokens
+             COMMAND open_diffusion_tokens_test
+                     "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
+    set_tests_properties(open_diffusion_tokens PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 
 # ————————————————————————————————————————————————————————————
 # PATH plumbing for the /opt/openflowlm prefix. The prefix keeps the runtime
