@@ -30,7 +30,7 @@ the offending key named.
 **Acceptance criteria:**
 - `Manifest::load` on the checked-in fixture (`tests/fixtures/manifest_qwen36.json`) yields 40 layers, two layer types with the 27B's buffer sizes and three-step programs, four contexts, six kernels with their patch kinds (`ax0` attnpos, `lx1`/`ax1` moeroute2), the tail `ln` → `lm`, and the MoE pool geometry `stripe 163840, up 655360, down_core 81920, pool_down 335544320, share 503316480 / 503971840 / 504627200`.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
-- `manifest_version: 3` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step.
+- `manifest_version: 4` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`).
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
 - `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name. A `linear` / `full` route carries exactly one FFN tail: the MoE block (`moe_kernel`, `shared_program`, requiring `layout.moe`) or a dense `ffn_program` of two steps (up|gate, down) whose buffers `ffn_weights` defines, with its width `ff`; both, or neither, is refused by name. A route weight is normally a run of the layer type's pool or consts ops; `from: "pack"` instead carries its own `std_perm` ops, which the engine packs into that buffer alone, and any other op there is refused. A `std_perm` may carry `split: "hi" | "lo"` (anything else, or on another op, is refused): one half of a q8 source's exact q4_1 split. A `linear` route with `out_split` runs its out projection over both halves stacked, 2 x hidden rows, and adds them.
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
@@ -477,6 +477,7 @@ refused at load rather than falling back to 2048.
 - `model/q4nx.py` reads each q8 tensor the way the POOL holds it: as the container's own q8 when `native_q8(name)` (the projections the plan streams with `q8_perm`), else as the packer's q4_1. So a slice comparison measures the kernels whichever path a projection is on. `make_decode.py --requant` swings the whole run -- spec, plan, pools and reference -- onto the fallback for the A/B.
 - A `q8_perm` half-tile round-trips exactly: dequantizing the two half-tiles of a chunk gives the same values as dequantizing the chunk, value for value. The band law matches a brute-force placement against the dequantized source matrix, and a q8 projection occupies exactly twice the q4_1 bytes.
 - The NumPy and C++ packers produce the same `q8_perm` pool bytes (the same FNV-1a in `tests/test_quant_q8.py` and `src/open_qwen36/pools_test.cpp`), and a `q8_perm` without `nch` / `in_dim` is refused by the manifest parser naming the field.
+- `bf16_gemm` (OPEN-PREFILL-BATCH's bf16 route) packs `nch` source chunks from `chunk0` as band-major 64 x 64 bf16 elements in mm.cc's A-block order, each weight rounded once: code x scale from a q8 source, or m + n x d from the q4 ops' reading when the op carries `via: q4_1` (as the sequential path reads a `std_perm` tensor, re-quantizing a q8 one). On the 12 shared q8 chunks as a [64, 1536] tensor, every element equals its source value rounded to bf16, from q8 and from the chunks' q4_1, and the NumPy and C++ packers agree byte for byte (`pools_test.cpp`, `tests/test_prefill_batch.py`); `via` is honoured, and the parser refuses it on any other op.
 
 ### OPEN-QUANT-Q8: q8 projections run at q8
 **Applies to:** openflowlm-next (`designs/gemv_q4/gemv_q8.h`, `designs/layer_x/`,
@@ -3124,7 +3125,13 @@ of 2 x hidden rows runs them, and the host adds the halves (`out_split`). Hardwa
 for the whole route -- the core program depends on neither N nor K, the band
 count K/256 reaching each core as a runtime parameter the instruction stream
 writes -- and one `mx` xclbin for both layer
-types. The route is **on by default** (#109): the engine takes it whenever the
+types. A MoE container whose projections are all q8 (the 35B as published) runs every
+route GEMM on bf16 instead -- each q8 projection at its real row count and the shared
+expert's two GEMMs too -- with every weight rounded to bf16 once at load (`bf16_gemm`), on
+one context `gemmb` (`gemm_q4_prefill` built with `GQP_FMT=bf16`, the matmul reading the
+weight element as stored). It pays neither the split's doubled rows nor a context switch per
+block; a container with only some roles at q8 keeps the split on the q4_1 context, and
+`OPEN_KERNELS_Q8_GEMM=split` forces the split everywhere. The route is **on by default** (#109): the engine takes it whenever the
 set carries it and the prompt has at least the crossover length (64 tokens;
 `OFLM_OPEN_GEMM_BLOCK_MIN` overrides), never for a prompt that has had an image.
 `OFLM_OPEN_GEMM_BLOCK=0` (read through `getenv_oflm`, so the pre-rename `FLM_`
@@ -3165,6 +3172,7 @@ block-major.
 
 **Acceptance criteria (unit):**
 - The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); one context `gemm` for every GEMM shape, plus `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes. A spec with `attn`, `linear` and `linear_out` at q8 (the published 35B container) emits the route with `gqkvz_w`, `gqkvg_w`, `go_w` and `gout_w` as hi-then-lo split packs of the same tensors the sequential kernels read as `q8_perm` (half the q8 op's half-tile count, the fused `q_proj`'s gate half keeping its chunk offset), the steps on `gemm_n24576_k2048`, `gemm_n18432_k2048` and `gemm_n4096_k4096` with `split: true` (the out step via `out_split`), and the shared expert's q4_1 weights unchanged; a weight mixing q8 and q4_1 ops is refused. A q4_1 spec emits no `split` anywhere, and its manifest is byte-identical to the one before splits existed apart from the build key.
+- An all-q8 MoE spec (`test_prefill_batch.py`): `linear` runs `gemmb_n12288_k2048` then `gemmb_n2048_k4096`, `full` `gemmb_n9216_k2048` then `gemmb_n2048_k4096`, both shared programs `gemmb_n1024_k2048` then `gemmb_n2048_k512`, every route weight a stack of `bf16_gemm` ops end to end from 0 (the projections without `via`, one source chunk per two `q8_perm` half-tiles; the shared expert `via: q4_1`), one context `gemmb`, no `split`, version 3. A spec with only `linear_out` at q8 keeps `out_split` and the `gemm` context; `OPEN_KERNELS_Q8_GEMM` other than `bf16` / `split` is refused, and `split` enters the build key.
 - The parser holds a route to its kind (`manifest_test.cpp`): 5 steps for dense, 2 for linear / full, every step a 3-argument run naming a declared weight buffer, weight ops inside the pack plan, `moe_kernel` declared with the moeroute2 patch, each refused by name otherwise.
 - The host stages equal `open_kernels/model/replica_block.py` on its random fixture (`block_host_test.cpp`): og and S within 1e-3 of the reference's scale, the conv state bit-exact in bf16, the KV rows within a bf16 ulp, rows before the block and past `t_real` untouched, the top-k ids exact; the tiler and the transpose equal the plain loops. The numpy reference equals its own one-token-at-a-time form with the state carried, and padding past `t_real` changes nothing.
 - The 35B's shared expert emits `shared_program` = `gemm_n1024_k2048` (up|gate) then `gemm_n2048_k512` (down) with `shared_ff` 512 on both MoE layer types, its weight buffers naming the contiguous pool ops; the parser refuses a MoE route without two such steps, or one whose shared step names a buffer `shared_weights` does not define (`manifest_test.cpp`).
@@ -3598,6 +3606,33 @@ prompt then disagreed with each other (median corr 0.996), more so the faster th
 The sum now goes to host memory, one vector per y global, and repeated runs are
 bit-identical. Any host stage that writes into a mapped output buffer the device will write
 again has the same hazard. Details: `specs/open-engine/plans/archive/q8-block-prefill.md`.
+
+**Result 2026-10-07 (the all-q8 route on one bf16 GEMM context):** at 1024 tokens the split's
+double-row GEMMs were 2832 ms of an 8354 ms prefill, more than the expert stage. In the
+harness (T = 256) the bf16 format runs each q8 projection at its real row count in
+0.43-0.44x the split's time: `n2048 k4096` 3.98 against 9.11 ms (`n4096`), `n12288 k2048`
+12.31 against 28.65, `n9216 k2048` 9.32 against 21.48, every arm rel_fro 1.63e-3 against
+fp64 and 5.9e-7 against the bf16-rounded weights. An on-core q8 dequant (8704-byte elements,
+codes in A-block order) was built and measured on the way and is not kept: 0.53-0.54x in the
+harness but 9.17 against bf16's 7.87 ms a call in the engine (`n12288 k2048`), and as a
+second context it cost the shared expert's q4_1 GEMM 0.68 -> 3.14 ms a call (+444 ms a
+prompt) in the switch every block. With the shared expert on bf16 too, one context remains.
+On the published 35B, alternated processes, `--repeat 4`, warm reps, the same binary on
+#172's set and this one: **1024 tokens 8846 -> 7479 ms (115.8 -> 136.9 tok/s)**, the GEMM
+column 3421 -> 2002 ms, every bf16 rep below every split rep; at **2582 tokens** the GEMM
+column goes 11.2-11.8 -> 6.2-6.9 s and the prefill 24.7 -> 23.4 s and 26.0 -> 19.8 s in two
+rounds (the expert stage, which this does not touch, moved 2.2 s between them). Against the
+sequential path over all 1024 positions the route is no worse than the split it replaces:
+27 argmax flips against 29, all near ties either way; worst corr 0.9649 against 0.9537;
+median 0.99941 against 0.99946; KL mean / max 0.00294 / 0.066 nats against 0.00308 / 0.226.
+The route's weights grow 1.49 -> 2.62 GiB (bf16 is 2 B a weight to the split's 1.25). The
+35B stores its shared expert at q8 too; the sequential path reads it re-quantized to q4_1,
+and the route reads it the same way (`via: q4_1`) so prefill and decode compute the same
+model. The first accuracy attempt met six NPU context errors (pci Event ID 3, `lx1` decode
+timeouts, #172's set included) and a block of zero logits; the rerun had none and is what is
+quoted. Through `oflm serve` with `OFLM_OPEN_KERNELS_DIR` at the set and no other flag,
+`oflm-test --llm` on `qwen3.6-moe:35b-a3b` PASSes 5 of 5, its 169- and 618-token turns on the
+route. Details: `specs/open-engine/plans/archive/q8-gemm.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
