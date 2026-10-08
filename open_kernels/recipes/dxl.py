@@ -6,10 +6,19 @@ that has dx can add dxl without a second copy of anything; what it adds is its o
 L-row activation scratch (`act`) and L-row residual (`xres`), laid out here.
 
 Every act region is L rows of the width dx keeps one of, row-major ([row][width]),
-so a row is where an attention core or the next projection expects it."""
+so a row is where an attention core or the next projection expects it.
+
+The main cores run a JOB TABLE: every pass over a set of bands (a tile of a projection,
+its LoRA slice, a LoRA A band) is one job, and the cores hold both passes' tables -- the
+verify pass (no LoRA) and the draft pass (OPEN-UNO-LORA: K2-Horizon-7B-Uno's adapter as
+q4_1 bands, q4nx/uno.py) -- so the two instruction streams share one xclbin. The draft pass
+computes z = x A^T as one extra band per core, drains it, and appends one 256-wide k-tile
+of s * B per band reading z; its seed row's z is read from a zero row, which is the mask."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+import numpy as np
 
 from .catalogue import OpRangeError
 from .dense import ELEM, geometry, layout as dense_layout, qkv_bias
@@ -22,6 +31,15 @@ XE = 2048           # bytes of one x element
 L1_BUDGET = 60 * 1024
 STACK = 0x1800
 CHUNK = 5120
+Z_ROW = 2048        # one row of z: 512 fp32, one x element
+LORA_K = 256        # the B tile's width
+JMAX = 32           # jobs a table holds
+# a job's fields, as the cores' table stores them (dxl_job.cc reads the same order)
+FIELDS = ("S", "BT", "CPS", "NDRAIN", "KS", "MODE", "OFF", "B0", "S0", "KT", "DMODE", "G0")
+NF = len(FIELDS)
+PREP_BF16, PREP_F32, PREP_Z = 0, 1, 2          # MODE: the slice's activation format
+OUT_COPY, OUT_ACT = 0, 1                       # DMODE: a band as is, or silu(gate) * up
+LORA_TENSORS = ("a_qkv", "a_o", "a_gu", "a_d", "b_q", "b_k", "b_v", "b_o", "b_g", "b_u", "b_d")
 
 
 def tab_bytes(k: int) -> int:
@@ -42,6 +60,11 @@ class DxlLayout:
     AD_XM: int
     AD_H: int
     AD_OUT2: int
+    AD_ZQKV: int
+    AD_ZO: int
+    AD_ZGU: int
+    AD_ZD: int
+    AD_ZERO: int     # one x element nothing writes: the seed row's z
     AD_JUNK: int
     AD_BYTES: int
     XN_ROW: int      # bytes per row of each region
@@ -55,12 +78,29 @@ class DxlLayout:
     # main-core tiling: bands per tile (resident accumulators)
     BT: int          # q / o / down tiles; k and v are one tile of KV_PC each
     BP: int          # up | gate band pairs per tile
+    YB: int          # accumulator bands before the gate bands
+    # the LoRA pool (per layer): tensor -> (offset, rows, cols)
+    LORA: dict = field(default_factory=dict)
+    LORA_BYTES: int = 0
 
 
 def _main_l1(L: int, bt: int, bp: int, kv_pc: int = 2) -> int:
     ye = L * BAND_ROWS * 4
     return (STACK + 2 * CHUNK + 2 * XE + L * tab_bytes(KS_BF16)
-            + (max(bt, bp, kv_pc) + bp) * ye + 2 * ye)
+            + (max(bt, bp, kv_pc) + bp) * ye + 2 * ye + 2 * JMAX * NF * 4)
+
+
+def _band_bytes(cols: int) -> int:
+    return 2 * (cols // 256) * CHUNK
+
+
+def lora_shapes(spec: ModelSpec, n_cores: int) -> dict[str, tuple[int, int]]:
+    G = geometry(spec)
+    hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
+    a = n_cores * BAND_ROWS
+    return {"a_qkv": (a, hid), "a_o": (a, qw), "a_gu": (a, hid), "a_d": (a, ff),
+            "b_q": (qw, LORA_K), "b_k": (kvw, LORA_K), "b_v": (kvw, LORA_K), "b_o": (hid, LORA_K),
+            "b_g": (ff, LORA_K), "b_u": (ff, LORA_K), "b_d": (hid, LORA_K)}
 
 
 def layout(spec: ModelSpec, L: int) -> DxlLayout:
@@ -78,16 +118,138 @@ def layout(spec: ModelSpec, L: int) -> DxlLayout:
               and _main_l1(L, b, 1, G.KV_PC) <= L1_BUDGET)
     bp = next(b for b in (6, 4, 3, 2, 1) if G.UP_PC % b == 0 and _main_l1(L, bt, b, G.KV_PC) <= L1_BUDGET)
     rows = {"xn": hid * 2, "q": qw * 4, "k": kvw * 4, "v": kvw * 4, "og": qw * 2, "out": hid * 4,
-            "res": hid * 4, "xm": hid * 2, "h": ff * 4, "out2": hid * 4}
+            "res": hid * 4, "xm": hid * 2, "h": ff * 4, "out2": hid * 4,
+            "zqkv": Z_ROW, "zo": Z_ROW, "zgu": Z_ROW, "zd": Z_ROW}
     a, off = {}, 0
     for name, row in rows.items():
         a[name] = off
         off += L * row
+    a["zero"] = off
+    off += XE
     a["junk"] = off
     off += D.ELN
+    lora, loff = {}, 0
+    for name, (r, c) in lora_shapes(spec, G.N_CORES).items():
+        lora[name] = (loff, r, c)
+        loff += (r // BAND_ROWS) * _band_bytes(c)
     return DxlLayout(
         L=L, AD_XN=a["xn"], AD_Q=a["q"], AD_K=a["k"], AD_V=a["v"], AD_OG=a["og"], AD_OUT=a["out"],
-        AD_RES=a["res"], AD_XM=a["xm"], AD_H=a["h"], AD_OUT2=a["out2"], AD_JUNK=a["junk"],
+        AD_RES=a["res"], AD_XM=a["xm"], AD_H=a["h"], AD_OUT2=a["out2"], AD_ZQKV=a["zqkv"], AD_ZO=a["zo"],
+        AD_ZGU=a["zgu"], AD_ZD=a["zd"], AD_ZERO=a["zero"], AD_JUNK=a["junk"],
         AD_BYTES=-(-off // ELEM) * ELEM,
         XN_ROW=rows["xn"], Q_ROW=rows["q"], KV_ROW_ACT=rows["k"], OG_ROW=rows["og"], HID_ROW=hid * 4,
-        XM_ROW=rows["xm"], H_ROW=rows["h"], XRES_FLOATS=L * hid, BT=bt, BP=bp)
+        XM_ROW=rows["xm"], H_ROW=rows["h"], XRES_FLOATS=L * hid, BT=bt, BP=bp, YB=max(bt, bp, G.KV_PC),
+        LORA=lora, LORA_BYTES=-(-loff // (1 << 20)) * (1 << 20))
+
+
+@dataclass(frozen=True)
+class Job:
+    """One pass of the main cores over `bt` bands. Core side: the table fields. DMA side:
+    where the weights (`wbuf` region at `woff`, core c's bands from c * wpc + t * bt), the
+    activation (`x`: ("act", off, row, K, KS, f32) or ("z", off)) and the drain (`y`:
+    (off, row) of act, or None) live."""
+    stage: str
+    core: dict
+    wbuf: str
+    woff: int
+    wpc: int
+    t: int
+    bb: int
+    x: tuple
+    y: tuple | None
+
+
+def jobs(spec: ModelSpec, L: int, draft: bool) -> list[Job]:
+    """The main cores' jobs for one layer, in the order they run them."""
+    G, D, X = geometry(spec), dense_layout(spec), layout(spec, L)
+    hid, ff, qw = spec.hidden, spec.intermediate, G.QW
+    out: list[Job] = []
+    lt = 1 if draft else 0                 # the LoRA k-tile every base band gains in a draft
+
+    def core(S, BT, KS, mode, ndrain=0, off=0, b0=0, s0=0, kt=0, dmode=OUT_COPY, g0=0):
+        return {"S": S, "BT": BT, "CPS": 2 * KS // 256, "NDRAIN": ndrain, "KS": KS, "MODE": mode, "OFF": off,
+                "B0": b0, "S0": s0, "KT": kt, "DMODE": dmode, "G0": g0}
+
+    def a_job(stage, name, xoff, xrow, K, KS, f32, zoff):
+        loff, _, c = X.LORA[name]
+        out.append(Job(stage, core(K // KS, 1, KS, PREP_F32 if f32 else PREP_BF16, 1, kt=K // 256), "lora",
+                       loff, 1, 0, _band_bytes(c), ("act", xoff, xrow, K, KS, f32), (zoff, Z_ROW)))
+
+    def proj(stage, pool_off, nb, bt, K, KS, f32, xoff, xrow, yoff, yrow, lora=None, b0=0, drain=True,
+             dmode=OUT_COPY, g0=0):
+        """nb bands per core in tiles of bt: the base slices, then (draft) the LoRA tile."""
+        for t in range(nb // bt):
+            kt = K // 256 + lt
+            dn = bt if drain else 0
+            base = core(K // KS, bt, KS, PREP_F32 if f32 else PREP_BF16, 0 if lora else dn, b0=b0, kt=kt,
+                        dmode=dmode, g0=g0)
+            y = (yoff, yrow) if (drain and not lora) else None
+            out.append(Job(stage, base, "pool", pool_off, nb, t, _band_bytes(K), ("act", xoff, xrow, K, KS, f32), y))
+            if lora:
+                name, zoff, zcol = lora
+                loff, _, c = X.LORA[name]
+                lj = core(1, bt, LORA_K, PREP_Z, dn, off=zcol, b0=b0, s0=K // 256, kt=kt, dmode=dmode, g0=g0)
+                out.append(Job(stage, lj, "lora", loff, nb, t, _band_bytes(c), ("z", zoff),
+                               (yoff, yrow) if drain else None))
+
+    BT, BP, YB = X.BT, X.BP, X.YB
+    # q | k | v
+    if draft:
+        a_job("qkv", "a_qkv", X.AD_XN, X.XN_ROW, hid, KS_BF16, False, X.AD_ZQKV)
+    proj("qkv", D.POOL_Q, G.Q_PC, BT, hid, KS_BF16, False, X.AD_XN, X.XN_ROW, X.AD_Q, X.Q_ROW,
+         ("b_q", X.AD_ZQKV, 0) if draft else None)
+    proj("qkv", D.POOL_K, G.KV_PC, G.KV_PC, hid, KS_BF16, False, X.AD_XN, X.XN_ROW, X.AD_K, X.KV_ROW_ACT,
+         ("b_k", X.AD_ZQKV, 0) if draft else None)
+    proj("qkv", D.POOL_V, G.KV_PC, G.KV_PC, hid, KS_BF16, False, X.AD_XN, X.XN_ROW, X.AD_V, X.KV_ROW_ACT,
+         ("b_v", X.AD_ZQKV, LORA_K) if draft else None)
+    # o
+    if draft:
+        a_job("o", "a_o", X.AD_OG, X.OG_ROW, qw, KS_BF16, False, X.AD_ZO)
+    proj("o", D.POOL_O, G.O_PC, BT, qw, KS_BF16, False, X.AD_OG, X.OG_ROW, X.AD_OUT, X.HID_ROW,
+         ("b_o", X.AD_ZO, 0) if draft else None)
+    # up | gate per tile of BP pairs: up into bands 0.., gate into YB.., then h = silu(gate) * up
+    if draft:
+        a_job("ug", "a_gu", X.AD_XM, X.XM_ROW, hid, KS_BF16, False, X.AD_ZGU)
+    for t in range(G.UP_PC // BP):
+        for which, pool_off, name, zcol in (("up", D.POOL_UP, "b_u", 0), ("gate", D.POOL_GATE, "b_g", 0)):
+            gate = which == "gate"
+            kt = hid // 256 + lt
+            base = core(hid // KS_BF16, BP, KS_BF16, PREP_BF16, BP if (gate and not draft) else 0,
+                        b0=YB if gate else 0, kt=kt, dmode=OUT_ACT, g0=YB)
+            out.append(Job("ug", base, "pool", pool_off, G.UP_PC, t, _band_bytes(hid),
+                           ("act", X.AD_XM, X.XM_ROW, hid, KS_BF16, False),
+                           (X.AD_H, X.H_ROW) if (gate and not draft) else None))
+            if draft:
+                loff, _, c = X.LORA[name]
+                lj = core(1, BP, LORA_K, PREP_Z, BP if gate else 0, off=zcol, b0=YB if gate else 0,
+                          s0=hid // 256, kt=kt, dmode=OUT_ACT, g0=YB)
+                out.append(Job("ug", lj, "lora", loff, G.UP_PC, t, _band_bytes(c), ("z", X.AD_ZGU),
+                               (X.AD_H, X.H_ROW) if gate else None))
+    # down
+    if draft:
+        a_job("down", "a_d", X.AD_H, X.H_ROW, ff, KS_F32, True, X.AD_ZD)
+    proj("down", D.POOL_DOWN, G.DOWN_PC, BT, ff, KS_F32, True, X.AD_H, X.H_ROW, X.AD_OUT2, X.HID_ROW,
+         ("b_d", X.AD_ZD, 0) if draft else None)
+    if len(out) > JMAX:
+        raise OpRangeError(f"dxl: {len(out)} jobs, the table holds {JMAX}")
+    return out
+
+
+def job_table(spec: ModelSpec, L: int) -> np.ndarray:
+    """int32 [2][1 + JMAX * NF]: per mode (0 verify, 1 draft) the job count, then each
+    job's FIELDS -- the table every main core holds."""
+    t = np.zeros((2, 1 + JMAX * NF), np.int32)
+    for mode, draft in ((0, False), (1, True)):
+        js = jobs(spec, L, draft)
+        t[mode, 0] = len(js)
+        for j, job in enumerate(js):
+            t[mode, 1 + j * NF:1 + (j + 1) * NF] = [job.core[f] for f in FIELDS]
+    return t
+
+
+def lora_pack_plan(spec: ModelSpec, L: int) -> list[dict]:
+    """The LoRA pool's pack ops: each uno.q4nx tensor as a std_perm band region."""
+    X = layout(spec, L)
+    return [{"op": "std_perm", "tensor": f"model.layers.{{l}}.uno.{name}.weight", "dst": off,
+             "nch": (r // 32) * (c // 256), "in_dim": c}
+            for name, (off, r, c) in X.LORA.items()]

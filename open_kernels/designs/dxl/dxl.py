@@ -32,7 +32,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernel import ExternalFunction
@@ -46,6 +46,7 @@ from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
 from recipes import dxl as DXR  # noqa: E402
+from recipes.dxl import JMAX, NF, Z_ROW, job_table, jobs  # noqa: E402
 
 SPEC = current_spec()
 QR = for_spec(SPEC)
@@ -53,6 +54,8 @@ R = QR.recipe(SPEC)
 L0, G = R.layout, R.geo                     # dx's layout: pool / consts / kv / ptab offsets
 NL_ROWS = int(os.environ.get("DXL_L", 4))
 X = DXR.layout(SPEC, NL_ROWS)
+DRAFT = os.environ.get("DXL_DRAFT") == "1"    # which instruction stream: the cores and tables are the same
+TABLE_INTS = -(-2 * (1 + JMAX * NF) // 16) * 16
 LR = X.L
 HID, FF, N_CORES = G.HID, G.FF, G.N_CORES
 QW, KVW = G.QW, G.KVW
@@ -62,7 +65,7 @@ BB_H, BB_Q, BB_F = 2 * (HID // 256) * CHUNK, 2 * (QW // 256) * CHUNK, 2 * (FF //
 KSB, KSF = DXR.KS_BF16, DXR.KS_F32
 YE = LR * 64                                # one band's [L][64] floats
 BT, BP = X.BT, X.BP
-YB = max(BT, BP, G.KV_PC)                   # accumulator bands; the gate bands follow at YB
+YB = X.YB                                   # accumulator bands; the gate bands follow at YB
 OS = ["-Os"]
 
 ATTN_FLAGS = [f"-DATTN_NH={G.NH}", f"-DATTN_KVH={G.KVH}", f"-DATTN_HD={G.HD}", f"-DATTN_ROT={G.ROT}", "-DATTN_GATE=0",
@@ -82,7 +85,7 @@ N_OG = NHL // OGH
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 if SPEC.norm_groups != 1:
     LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")
-GL_FLAGS = OS + [f"-DDXL_L={LR}"]
+GL_FLAGS = OS + [f"-DDXL_L={LR}", f"-DDXL_JMAX={JMAX}"]
 
 
 def bt(total, off, n):
@@ -93,17 +96,9 @@ def tap(total, off, sizes, strides):
     return TensorAccessPattern((1, total), off, sizes, strides)
 
 
-# The main cores' segments, in the order a layer runs them: (pool offset, bands per core,
-# bands per tile, K, slice, f32 input?). k and v are one tile of their KV_PC bands each.
-SEG_Q = (L0.POOL_Q, G.Q_PC, BT, HID, KSB, False, BB_H)
-SEG_K = (L0.POOL_K, G.KV_PC, G.KV_PC, HID, KSB, False, BB_H)
-SEG_V = (L0.POOL_V, G.KV_PC, G.KV_PC, HID, KSB, False, BB_H)
-SEG_O = (L0.POOL_O, G.O_PC, BT, QW, KSB, False, BB_Q)
-SEG_D = (L0.POOL_DOWN, G.DOWN_PC, BT, FF, KSF, True, BB_F)
-
-
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
-def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, srchash: CompileTime[int] = 0):
+def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora: In, *,
+        srchash: CompileTime[int] = 0):
     elem = np.ndarray[(CHUNK,), np.dtype[np.uint8]]
     x_ty = np.ndarray[(DXR.XE // 2,), np.dtype[bfloat16]]
     y_ty = np.ndarray[(YE,), np.dtype[np.float32]]
@@ -117,6 +112,16 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
     kv_ty = np.ndarray[(L0.KV_BYTES,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(X.AD_BYTES,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(L0.PTAB_BYTES,), np.dtype[np.uint8]]
+    lora_ty = np.ndarray[(X.LORA_BYTES,), np.dtype[np.uint8]]
+    # every core buffer a whole number of 64 B: the allocator packs them back to back, and a 512-bit
+    # access at an address only 32 B aligned reads the wrong bytes without a fault
+    table_ty = np.ndarray[(TABLE_INTS,), np.dtype[np.int32]]
+    rtp_ty = np.ndarray[(16,), np.dtype[np.int32]]
+    q4_ty = np.ndarray[(16,), np.dtype[np.int32]]
+    jp_ty = np.ndarray[(16,), np.dtype[np.int32]]
+    for ty in (elem, x_ty, y_ty, tab_ty, acc_ty, table_ty, rtp_ty, q4_ty, jp_ty):
+        shape, dt = ty.__args__
+        assert int(np.prod(shape[0] if isinstance(shape, tuple) else shape)) * np.dtype(dt.__args__[0]).itemsize % 64 == 0, ty
     pb_ty = np.ndarray[(8 if RB > 1 else 4,), np.dtype[np.int32]]
     bhd = np.ndarray[(G.HD,), np.dtype[bfloat16]]
     brow = np.ndarray[(KVW,), np.dtype[bfloat16]]
@@ -133,11 +138,12 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
     def ef(sym, src, args, flags=OS):
         return ExternalFunction(sym, source_file=str(src), arg_types=args, include_dirs=inc, compile_flags=flags)
 
-    f_gemv = ef("dxl_gemv_at", HERE / "dxl_gemv_at.cc", [elem, tab_ty, acc_ty, i32, i32, i32, i32, i32], GL_FLAGS)
-    f_prep = ef("dxl_prep", HERE / "dxl_prep.cc", [x_ty, tab_ty, i32, i32], GL_FLAGS)
-    f_prepf = ef("dxl_prep_f32", HERE / "dxl_prep_f32.cc", [x_ty, tab_ty, i32, i32], GL_FLAGS)
-    f_act = ef("dxl_act", HERE / "dxl_act.cc", [acc_ty, y_ty, i32, i32], GL_FLAGS)
-    f_out = ef("dxl_out", HERE / "dxl_out.cc", [acc_ty, y_ty, i32], GL_FLAGS)
+    f_njobs = ef("dxl_njobs", HERE / "dxl_njobs.cc", [table_ty, rtp_ty, q4_ty], GL_FLAGS)
+    f_job = ef("dxl_job", HERE / "dxl_job.cc", [table_ty, rtp_ty, i32, jp_ty], GL_FLAGS)
+    f_prep = ef("dxl_prep_job", HERE / "dxl_prep_job.cc", [x_ty, tab_ty, i32, jp_ty], GL_FLAGS)
+    f_gemv = ef("dxl_gemv_job", HERE / "dxl_gemv_job.cc",
+                [elem, tab_ty, acc_ty, jp_ty, i32, i32, i32], GL_FLAGS)
+    f_out = ef("dxl_out_job", HERE / "dxl_out_job.cc", [acc_ty, y_ty, jp_ty, i32], GL_FLAGS)
     f_nr = ef("ln_nr", LINL / "ln_nr.cc", [u8_ln] * 4, LN_FLAGS)
     f_lny = ef("ln_y", LN / "ln_y.cc", [u8_ln] * 5 + [i32], LN_FLAGS)
     f_lnx = ef("ln_xn", LN / "ln_xn.cc", [u8_ln] * 6, LN_FLAGS)
@@ -163,42 +169,33 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
     of_aout = ObjectFifo(brow, name="aout", depth=2)
     of_og = [ObjectFifo(og_ty, name=f"og{c}", depth=2) for c in range(ACORES)]
 
-    def slices(win, xin, tab, acc, fg, fp, b0, nb, K, KS):
-        """nb accumulator bands from b0 against K in KS-wide slices (the L tables rebuilt per slice)"""
-        cps, kt = 2 * KS // 256, K // 256
-        for s in range_(K // KS):
-            for j in range_(LR):
-                xe = xin.acquire(1)
-                fp(xe, tab, j, KS)
-                xin.release(1)
-            for b in range_(nb):
-                for c in range_(cps):
-                    we = win.acquire(1)
-                    fg(we, tab, acc, b0 + b, c, s, KS, kt)
-                    win.release(1)
+    tables = np.zeros(TABLE_INTS, np.int32)
+    tables[:2 * (1 + JMAX * NF)] = job_table(SPEC, LR).reshape(-1)
+    rtps = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(16, np.int32), use_write_rtp=True)
+            for c in range(N_CORES)]
+    barriers = [WorkerRuntimeBarrier() for _ in range(N_CORES)]
 
-    def drain(yout, acc, fo, nb):
-        for b in range_(nb):
-            ye = yout.acquire(1)
-            fo(acc, ye, b)
-            yout.release(1)
-
-    def main_body(win, xin, yout, tab, acc, fg, fp, fpf, fa, fo):
-        for (nb, bt_, K, KS, prep) in ((G.Q_PC, BT, HID, KSB, fp), (G.KV_PC, G.KV_PC, HID, KSB, fp),
-                                       (G.KV_PC, G.KV_PC, HID, KSB, fp), (G.O_PC, BT, QW, KSB, fp)):
-            for _ in range_(nb // bt_):
-                slices(win, xin, tab, acc, fg, prep, 0, bt_, K, KS)
-                drain(yout, acc, fo, bt_)
-        for _ in range_(G.UP_PC // BP):                          # up -> bands 0.., gate -> bands YB..
-            slices(win, xin, tab, acc, fg, fp, 0, BP, HID, KSB)
-            slices(win, xin, tab, acc, fg, fp, YB, BP, HID, KSB)
-            for b in range_(BP):
+    def main_body(win, xin, yout, tab, acc, table, rtp, nj, jp, barrier, fnj, fjob, fprep, fgemv, fout):
+        # the dispatch's mode is in rtp[0] before the barrier opens; nothing releases it, so the
+        # next dispatch waits for its own stream to write its mode
+        barrier.wait_for_value(1)
+        fnj(table, rtp, nj)
+        for j in range_(nj[0]):
+            fjob(table, rtp, j, jp)                       # jp = the job's row; jp[0..3] its loop counts
+            for s in range_(jp[0]):
+                for tok in range_(LR):
+                    xe = xin.acquire(1)
+                    fprep(xe, tab, tok, jp)
+                    xin.release(1)
+                for b in range_(jp[1]):
+                    for c in range_(jp[2]):
+                        we = win.acquire(1)
+                        fgemv(we, tab, acc, jp, b, c, s)
+                        win.release(1)
+            for b in range_(jp[3]):
                 ye = yout.acquire(1)
-                fa(acc, ye, b, YB)
+                fout(acc, ye, jp, b)
                 yout.release(1)
-        for _ in range_(G.DOWN_PC // BT):
-            slices(win, xin, tab, acc, fg, fpf, 0, BT, FF, KSF)
-            drain(yout, acc, fo, BT)
 
     def ln_body(ain, aout, f_nr, f_lny, f_lnx):
         for _ in range_(LR):                                     # entry norm, per row: [x0 x1 lnw] -> xn
@@ -296,7 +293,9 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
     for c in range(N_CORES):
         workers.append(Worker(main_body, fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(),
                                                   Buffer(tab_ty, name=f"tab{c}"), Buffer(acc_ty, name=f"acc{c}"),
-                                                  f_gemv, f_prep, f_prepf, f_act, f_out],
+                                                  Buffer(table_ty, name=f"jobs{c}", initial_value=tables),
+                                                  rtps[c], Buffer(q4_ty, name=f"nj{c}"), Buffer(jp_ty, name=f"jp{c}"),
+                                                  barriers[c], f_njobs, f_job, f_prep, f_gemv, f_out],
                               tile=Tile(c, 2), stack_size=0x1800))
 
     def abufs(c):
@@ -312,48 +311,79 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
         workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c].prod()] + abufs(c) + afns,
                               tile=Tile(2 + c, 3), stack_size=0x1800))
 
-    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p,
-                 aout_c, og_cs):
+    def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_lora, lni, lno, w_prods, x_prod, y_conss,
+                 ain_p, aout_c, og_cs):
         AB, XF = X.AD_BYTES, X.XRES_FLOATS
-        pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
+        for c in range(N_CORES):
+            rtps[c][0] = 1 if DRAFT else 0
+        for c in range(N_CORES):
+            barriers[c].set(1)
+        pw, py, px, pl = Pipeline(3), Pipeline(3), Pipeline(3), Pipeline(3)
+        stage = {}
+        for job in jobs(SPEC, LR, DRAFT):
+            stage.setdefault(job.stage, []).append(job)
 
-        def x_rows(off, row, K, KS, f32, tiles):
-            """the L rows' K-wide activation at act + off, slice-major, once per tile"""
-            xb = KS * (4 if f32 else 2)
-            for _ in range(tiles):
-                px.fill(x_prod, a_act, tap(AB, off, [1, K // KS, LR, xb], [0, xb, row, 1]))
-
-        def w_seg(pool_off, nb, bt_, K, KS, bb, tiles=None):
-            """core c's nb bands at pool_off, tile by tile: [slices, bands, rows of 2 KB]"""
-            sb = 2 * KS // 256 * CHUNK
-            for t in range(nb // bt_):
-                for c in range(N_CORES):
-                    b0 = pool_off + (c * nb + t * bt_) * bb
-                    pw.fill(w_prods[c], a_pool, tap(L0.POOL_BYTES, b0, [K // KS, bt_, sb // 2048, 2048],
-                                                    [sb, bb, 2048, 1]))
-
-        def y_seg(off, row, nb, bt_):
-            """each core's [tile][band][row][64] -> act[row][band*64 ..]"""
+        def w_fill(job):
+            """core c's job-tile bands: [slices, bands, rows of 2 KB] of the pool or the LoRA pool"""
+            k = job.core
+            sb = k["CPS"] * CHUNK
+            buf, size = (a_pool, L0.POOL_BYTES) if job.wbuf == "pool" else (a_lora, X.LORA_BYTES)
             for c in range(N_CORES):
-                py.drain(y_conss[c], a_act, tap(AB, off + c * nb * 256, [nb // bt_, bt_, LR, 256],
-                                                 [bt_ * 256, 256, row, 1]))
+                b0 = job.woff + (c * job.wpc + job.t * k["BT"]) * job.bb
+                pw.fill(w_prods[c], buf, tap(size, b0, [k["S"], k["BT"], sb // 2048, 2048], [sb, job.bb, 2048, 1]))
 
-        # 1. entry norm, per row: xn_j -> act
-        pl = Pipeline(3)                                         # the ln channels: a shim channel queues 4 BDs
+        def x_fill(job):
+            """the L rows' activation, slice-major; a LoRA tile's z rows, the seed row's from zero"""
+            if job.x[0] == "z":
+                px.fill(x_prod, a_act, bt(AB, X.AD_ZERO, DXR.XE))
+                px.fill(x_prod, a_act, bt(AB, job.x[1] + Z_ROW, (LR - 1) * Z_ROW))
+                return
+            _, off, row, K, KS, f32 = job.x
+            xb = KS * (4 if f32 else 2)
+            px.fill(x_prod, a_act, tap(AB, off, [1, K // KS, LR, xb], [0, xb, row, 1]))
+
+        def y_drain(job):
+            """each core's [band][row][64] -> act[row][band*64 ..]"""
+            if job.y is None:
+                return
+            off, row = job.y
+            k = job.core
+            for c in range(N_CORES):
+                py.drain(y_conss[c], a_act, tap(AB, off + (c * job.wpc + job.t * k["BT"]) * 256,
+                                                 [1, k["BT"], LR, 256], [0, 256, row, 1]))
+
+        def run_stage(name, early=()):
+            """a stage's jobs; the `early` ones had their weights and drains issued already.
+            Before the first z fill, the A band's z must be in DDR."""
+            zwait = True
+            for job in stage[name]:
+                if job not in early:
+                    y_drain(job)
+                if job.x[0] == "z" and zwait:
+                    py.finish()
+                    zwait = False
+                x_fill(job)
+                if job not in early:
+                    w_fill(job)
+
+        def early(name):
+            first = stage[name][0]
+            y_drain(first)
+            w_fill(first)
+            return [first]
+
+        # 1. entry norm, per row: xn_j -> act (the stage's first weights stream meanwhile)
         for j in range(LR):
             pl.fill(lni, c_xres, bt(XF, j * HID, HID))
             pl.fill(lni, a_consts, bt(L0.CD_BYTES, L0.CD_LNW, ELN))
             pl.drain(lno, a_act, bt(AB, X.AD_XN + j * X.XN_ROW, ELN))
-        # 2. q | k | v: weights and drains now, xn after the norm
-        y_seg(X.AD_Q, X.Q_ROW, G.Q_PC, BT)
-        y_seg(X.AD_K, X.KV_ROW_ACT, G.KV_PC, G.KV_PC)
-        y_seg(X.AD_V, X.KV_ROW_ACT, G.KV_PC, G.KV_PC)
+        e = early("qkv")
         pl.finish()
-        for (pool_off, nb, bt_, K, KS, f32, bb) in (SEG_Q, SEG_K, SEG_V):
-            x_rows(X.AD_XN, X.XN_ROW, K, KS, f32, nb // bt_)
-            w_seg(pool_off, nb, bt_, K, KS, bb)
+        # 2. q | k | v
+        run_stage("qkv", e)
         py.finish()                                              # q, k, v are in DDR
         # 3. attention, one row at a time: row j's KV row is in DDR before row j + 1's window
+        e = []
         for j in range(LR):
             pa_out, pa_in = Pipeline(3), Pipeline(3)
             pa_out.drain(aout_c, a_kv, bt(L0.KV_BYTES, (1 + j) * L0.KV_ROW, L0.KV_ROW))    # attnrows
@@ -365,39 +395,27 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
             pa_in.fill(ain_p, a_act, bt(AB, X.AD_K + j * X.KV_ROW_ACT, KVW * 4))
             pa_in.fill(ain_p, a_act, bt(AB, X.AD_V + j * X.KV_ROW_ACT, KVW * 4))
             pa_in.fill(ain_p, a_kv, bt(L0.KV_BYTES, 0, L0.KV_ROW))                          # attnrows window
-            if j == 0:                                           # o's weights stream under the attention
-                y_seg(X.AD_OUT, X.HID_ROW, G.O_PC, BT)
-                w_seg(*SEG_O[:5], SEG_O[6])
+            if j == 0:
+                e = early("o")                                   # o's first weights stream under the attention
             pa_out.finish()
             pa_in.finish()
         # 4. o against og
-        x_rows(X.AD_OG, X.OG_ROW, QW, KSB, False, G.O_PC // BT)
-        # 5. per row: res = x + out; xm = norm(res)
+        run_stage("o", e)
         py.finish()                                              # out is in DDR
+        # 5. per row: res = x + out; xm = norm(res)
         for j in range(LR):
             pl.fill(lni, c_xres, bt(XF, j * HID, HID))
             pl.fill(lni, a_consts, bt(L0.CD_BYTES, L0.CD_POSTLN, ELN))
             pl.fill(lni, a_act, bt(AB, X.AD_OUT + j * X.HID_ROW, HID * 4))
             pl.drain(lno, a_act, bt(AB, X.AD_RES + j * X.HID_ROW, HID * 4))
             pl.drain(lno, a_act, bt(AB, X.AD_XM + j * X.XM_ROW, ELN))
-        # 6. up | gate per tile of BP pairs, silu -> h
-        for c in range(N_CORES):
-            py.drain(y_conss[c], a_act, tap(AB, X.AD_H + c * G.UP_PC * 256, [G.UP_PC // BP, BP, LR, 256],
-                                             [BP * 256, 256, X.H_ROW, 1]))
+        e = early("ug")
         pl.finish()                                              # res, xm are in DDR
-        sb = 2 * KSB // 256 * CHUNK
-        for t in range(G.UP_PC // BP):
-            for pool_off in (L0.POOL_UP, L0.POOL_GATE):
-                x_rows(X.AD_XM, X.XM_ROW, HID, KSB, False, 1)
-                for c in range(N_CORES):
-                    b0 = pool_off + (c * G.UP_PC + t * BP) * BB_H
-                    pw.fill(w_prods[c], a_pool, tap(L0.POOL_BYTES, b0, [HID // KSB, BP, sb // 2048, 2048],
-                                                    [sb, BB_H, 2048, 1]))
+        # 6. up | gate, silu -> h
+        run_stage("ug", e)
         py.finish()                                              # h is in DDR
         # 7. down against h, then per row: xres = res + out2
-        y_seg(X.AD_OUT2, X.HID_ROW, G.DOWN_PC, BT)
-        x_rows(X.AD_H, X.H_ROW, FF, KSF, True, G.DOWN_PC // BT)
-        w_seg(*SEG_D[:5], SEG_D[6])
+        run_stage("down")
         py.finish()                                              # out2 is in DDR
         for j in range(LR):
             pl.fill(lni, a_act, bt(AB, X.AD_RES + j * X.HID_ROW, HID * 4))
@@ -409,7 +427,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, s
         pw.finish()
         px.finish()
 
-    rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
+    rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty, lora_ty,
                             of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
                             [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
@@ -426,5 +444,6 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + sorted(f.read_bytes() for f in (DESIGNS.parent / "recipes").glob("*.py"))
                 + [(LN / "ln.h").read_bytes(), (LN / "ln_y.cc").read_bytes(), (LN / "ln_xn.cc").read_bytes(),
                    (LINL / "ln_nr.cc").read_bytes(), (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(),
-                   (DESIGNS.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode(), str(LR).encode()])
+                   (DESIGNS.parent / "include" / "vecmath.h").read_bytes(), SPEC.spec_hash().encode(), str(LR).encode(),
+                   str(DRAFT).encode(), repr(GL_FLAGS).encode()])
 SPECIALIZE = {"srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

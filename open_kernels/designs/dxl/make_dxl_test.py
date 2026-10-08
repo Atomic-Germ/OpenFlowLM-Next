@@ -76,6 +76,7 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--compare", action="store_true")
     ap.add_argument("--head", action="store_true", help="the L-row head (lmhl) on the rows dx left after layer 0")
+    ap.add_argument("--lora", default=None, help="layer 0's LoRA pool (pack_lora.py), for a draft build")
     a = ap.parse_args()
     fx = Path(a.fixture).resolve()
     spec = load_spec(Path(a.spec))
@@ -112,11 +113,12 @@ def main() -> int:
            f"buf consts0 {L0.CD_BYTES} {(fx / 'consts_0.bin').as_posix()}",
            f"buf xresl {xres.nbytes} {(fx / 'xres_l.bin').as_posix()}",
            f"buf actl {X.AD_BYTES}", f"buf state0 {L0.KV_BYTES}",
+           f"buf lora0 {X.LORA_BYTES}" + (f" {Path(a.lora).resolve().as_posix()}" if a.lora else ""),
            f"attngeom {L0.KV_ROW} {L0.PTAB_ROW} 0", f"attnrows dxl 0 {a.l}"]
     for r in range(a.runs):
         if r:
             cfg.append(f"load xresl {(fx / 'xres_l.bin').as_posix()}")
-        cfg.append("run dxl pool0 xresl consts0 state0 actl ptab")
+        cfg.append("run dxl pool0 xresl consts0 state0 actl ptab lora0")
     cfg += [f"dump xresl {(fx / 'y_dxl_res.bin').as_posix()} {xres.nbytes}",
             f"dump actl {(fx / 'y_dxl_act.bin').as_posix()} {X.AD_BYTES}", ""]
     (fx / "run_dxl.cfg").write_text("\n".join(cfg), newline="\n")
