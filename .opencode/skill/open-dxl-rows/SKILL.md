@@ -94,4 +94,8 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
   - A pass costs 1.17-1.28x one decode step.
   - The draft layer is +14% over verify.
   - The head is DMA-bound on its 5 KB elements: 25 ms against `lm_head_q4`'s 12.8 ms in the
-    harness. Bigger elements need sliced tables; that is the obvious next speedup.
+    harness. `lmhl2.py` (10 KB elements, sliced tables, rows padded to 250880) is correct but
+    measured no faster: 27-38 ms against lmhl's 25-31 ms, so the recipe keeps `lmhl`.
+  - Uno over 6 prompts x 128 tokens: 3.47 tokens a cycle (CPU oracle 3.45), identical to
+    decode, median 1.55x; but the CPU sat at 100% (LM Studio's llama-server), decode ran at
+    ~320 ms/token instead of 105, and `timing` never got a quiet window in 2 hours.

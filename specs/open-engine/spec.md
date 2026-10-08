@@ -1350,6 +1350,12 @@ tokens` and both speeds.
 - Identical to plain decode.
 - 1.68x plain decode's speed in the same process.
 
+**Result 2026-10-08 (6 prompts x 128 tokens, NPU held, CPU at 100% from other work):** all six
+identical to plain decode; 3.05-3.88 tokens a cycle (mean 3.47; the CPU oracle predicted 3.45);
+1.35-1.73x on five prompts and 0.85x on one that hit a load spike. Plain decode ran at
+~320 ms/token against 105 on a quiet machine, so these ratios, not the absolute times, are the
+result.
+
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,
@@ -1637,6 +1643,25 @@ alpha / beta's rows, `ssm_a` and `ssm_dt.bias`. When `num_v == num_k` nothing is
 tensor of a linear and a full layer with its source after the converter's expected transform;
 `ALL MATCH` (each quantized projection >= 0.99) is the bar. Run on the reconverted 27B on
 2026-10-01: ALL MATCH; on the published one, 8 mismatches, all value-indexed.
+
+### OPEN-CONVERT-EOS-GENCONFIG: a container stops where the source's generate() stops
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/model_assets.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_generation_eos.py`
+
+The runtime ends generation only on the ids in `tokenizer_config.json`'s `eos_token_id`;
+transformers' `generate()` also stops on `generation_config.json`'s. K2-Horizon lists only
+`<|ifm|endoftext|>` (1) in its tokenizer config and adds `<|ifm|im_end|>` (250019) in its
+generation config, so a container without the merge printed `<|ifm|im_end|>` as text and
+stopped a token late. After copying the tokenizer config, q4nx-build shall append every
+`generation_config.json` eos id (an int or a list) from the first source that has the file and
+is not already listed, keeping the tokenizer's own ids first.
+
+**Acceptance criteria:**
+- tokenizer `[1]`, generation `[1, 250019]` → `[1, 250019]`.
+- tokenizer `1`, generation `7` → `[1, 7]`.
+- every generation id already listed → the file is left as it was.
+- no `generation_config.json`, or one without `eos_token_id` → unchanged.
 
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,

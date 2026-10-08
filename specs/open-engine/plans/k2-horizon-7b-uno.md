@@ -12,7 +12,9 @@ dense-first L-row pass.
 | 0a. CPU reference | **done** (`utilities/uno-ref`): 3.94 tokens per cycle at L = 8, 3.45 at L = 4, q4_1 base; a q4_1 LoRA loses nothing |
 | 2. L-row pass | **done** (`designs/dxl`, OPEN-DECODE-ROWS): the layer and the head with an NPU argmax are bit-identical to decode; `Core::step_rows`, `--rows-check` PASS; a pass costs 1.17-1.28x one step. |
 | 3. LoRA | **done** (OPEN-UNO-LORA): `uno.q4nx` (`q4nx-build --uno-adapter`), the draft stream sharing dxl's context; the draft layer matches fp64 at corr >= 0.999998. |
-| 4. Uno decode | **done** (OPEN-UNO-DECODE): `--uno` is identical to plain decode over 64 tokens, 1.68x its speed (measured on a shared NPU; the clean bench is queued); the `oflm` `k2` family uses it for greedy requests. |
+| 4. Uno decode | **done** (OPEN-UNO-DECODE): `--uno` is identical to plain decode (64 tokens, then 6 prompts x 128); the `oflm` `k2` family uses it for greedy requests. |
+| 5. Serving | **done**: minja renders K2's template as transformers does (TOOLS-K2-TEMPLATE, 10/10); reasoning and `<ifm|tool_call>` parsing (TOOLS-K2-REASONING / -CALLS); history fix-ups (TOOLS-K2-HISTORY); `<|ifm|im_end|>` stops generation (OPEN-CONVERT-EOS-GENCONFIG). `oflm serve`: greedy, sampled, streamed, multi-turn, tool call and tool result all correct. |
+| Speed (reported) | Uno identical to decode on 6 prompts x 128 tokens, 3.47 tokens a cycle, median 1.55x (range 0.85-1.73x), on a machine at 100% CPU where decode ran ~320 ms/token against 105 clean; `oflm serve` greedy 5.6 tok/s vs sampled 3.8 tok/s on the same machine. A clean absolute Uno number is still missing. |
 
 Findings that changed the design:
 - **The L-row pass can be bit-identical to decode, not just within the near-tie bar.** Per
@@ -232,6 +234,8 @@ New requirements:
 | `OPEN-DECODE-ROWS` | manual: an L-row pass agrees with L single steps |
 | `OPEN-UNO-LORA` | test: the adapter packing in `q4nx-build/tests` (scale folded into B, the A-row concatenation order, q/k rows not permuted); manual: on-NPU numerics |
 | `OPEN-UNO-DECODE` | test: the cycle's bookkeeping against a fake core with fixed logits (accept, correction, bonus, frontier), and rejection sampling with a fixed RNG against a reference; manual: lossless on hardware |
+| `TOOLS-K2-TEMPLATE` (specs/tool-calling) | manual: `utilities/template-check/check.py` against transformers |
+| `TOOLS-K2-HISTORY`, `TOOLS-K2-REASONING`, `TOOLS-K2-CALLS` (specs/tool-calling) | test: `src/test/k2_chat` |
 
 Modified: `OPEN-SPEC-DERIVE` (K2 accepts `layernorm_num_groups: 4`).
 
