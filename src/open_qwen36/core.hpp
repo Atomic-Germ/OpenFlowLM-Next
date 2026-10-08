@@ -442,6 +442,8 @@ private:
     /// its own selector (host_attn_on_ / OFLM_OPEN_HOST_ATTN), so the two
     /// routings stay independently switchable in one binary.
     bool host_attn_decode_on_ = false;
+    /// Manifest::host_attention_refusal(): empty when the host attention computes this model (OPEN-HOST-ATTN-GUARD).
+    std::string host_attn_refusal_;
     /// Stage 2.7 Gate A: the RUNTIME decode route selector. The 2.6 env stays
     /// as the constructor-time default (compat/debug: env on -> initial route
     /// Host); set_decode_route() overrides it any time -- including between

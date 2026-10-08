@@ -4037,3 +4037,36 @@ two-context 74.8-76.9 / 76.0-80.5 against one-context 58.1-60.0 / 59.3-61.8; pos
 1024 79.3-80.3 / 80.5-83.0 against 62.9-63.6 / 64.4 (the walk's `ax0` penalty, +0.95 ms
 a call on two contexts, goes to noise). Detail:
 `.claude/plans/decode-gap-2026-09-22/refactor-ux.md`.
+
+### OPEN-HOST-ATTN-GUARD: the host attention refuses every model it does not compute
+
+**Applies to:** `src/open_qwen36` (`manifest.cpp`, `core.cpp`)
+**Verification:** test (the predicate); manual (the routes)
+**Tests:** `src/open_qwen36/manifest_test.cpp`
+
+The dense route's host attention (`OFLM_OPEN_HOST_ATTN` for prefill, `OFLM_OPEN_HOST_ATTN_DECODE`
+and `--decode-route host` for decode) computes K2's attention: no q/k norm, no bias, no gate,
+no window, a full half-split rotation, scale 1/sqrt(head_dim). `Manifest::host_attention_refusal()`
+returns why it cannot compute a model, or "" when it can. It accepts `family == "k2"` with that
+geometry and refuses every other family by name. It is an allow-list: the variants (q/k norm
+before or after the rotation, a q/k/v bias, Granite's multiplier, Gemma 3's window, partial
+rotation) are family properties in the recipe, not manifest fields, so a family joins by
+measurement, as it does for FAST_ATTENTION. Origin: #171 (Qwen3-8B passed the old geometry-only
+guard and produced garbage with exit 0).
+
+- Setting either env var on a refused model fails when the engine loads, with the reason.
+- `set_decode_route("host")` fails the same way. `auto` never selects the host route for a
+  refused model, even with `OFLM_DECODE_AUTO_THRESHOLD` set, so a run cannot switch into a throw.
+- `host_attn_layer` keeps the check as a last line of defence.
+
+**Acceptance criteria (test):**
+- the qwen3, qwen36moe, qwen35, gemma3, hunyuan and phi3 fixtures are each refused, the message naming the family;
+- the qwen3_4b fixture with its family set to `k2` is accepted;
+- that fixture with `rotary_dim` halved is refused on geometry.
+
+**Verification (manual):** with a Qwen3-8B kernel set, `OFLM_OPEN_HOST_ATTN=1`,
+`OFLM_OPEN_HOST_ATTN_DECODE=1` and `--decode-route host` each fail at load with the reason;
+`--decode-route auto` with `OFLM_DECODE_AUTO_THRESHOLD=8` gives the same 24 tokens as the default
+route. With a K2 set, both env vars run and give the same 24 tokens as the default route.
+**Result 2026-10-08:** all of the above on Qwen3-8B (the dense-prefill kernel set) and
+K2-Horizon-3.7B (built from IFM's GGUF).

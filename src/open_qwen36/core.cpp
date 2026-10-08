@@ -314,6 +314,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     // Stage 2.5 Gate B: opt-in host attention for the dense block route.
     if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN")) host_attn_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
+    // OPEN-HOST-ATTN-GUARD: refuse at load, not on the first dispatch, and keep Auto off the host route
+    host_attn_refusal_ = man_.host_attention_refusal();
+    if ((host_attn_on_ || host_attn_decode_on_) && !host_attn_refusal_.empty())
+        throw std::runtime_error("open_qwen36: OFLM_OPEN_HOST_ATTN / OFLM_OPEN_HOST_ATTN_DECODE: " + host_attn_refusal_);
     if (host_attn_on_)
         log("gemm-block attention: HOST (OFLM_OPEN_HOST_ATTN=1; K2 dense shape only, "
             "no qk-norm/gate, geometry checked against the manifest)");
@@ -321,7 +326,6 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // the 2.5 gemm-block chain at T=1 (host attention forced for those calls
     // only) instead of the fused per-layer dx dispatch. Decode-only: the
     // gemm-block prefill route's own selector stays OFLM_OPEN_HOST_ATTN.
-    if (const char* env = std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) host_attn_decode_on_ = std::string(env) != "0";
     if (host_attn_decode_on_)
         log("decode route: HOST (OFLM_OPEN_HOST_ATTN_DECODE=1; the 2.5 gemm-block chain at T=1 "
             "with host attention; the NPU GEMMs run padded at the kernel set's compiled T)");
@@ -1918,7 +1922,10 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
 void Core::set_decode_route(const std::string& route) {
     const std::string prev = decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_));
     if (route == "npu") decode_route_ = DecodeRoute::Npu;
-    else if (route == "host") decode_route_ = DecodeRoute::Host;
+    else if (route == "host") {
+        if (!host_attn_refusal_.empty()) throw std::runtime_error("open_qwen36: set_decode_route: host route refused: " + host_attn_refusal_);
+        decode_route_ = DecodeRoute::Host;
+    }
     else if (route == "auto") decode_route_ = DecodeRoute::Auto;
     else throw std::runtime_error("open_qwen36: set_decode_route: unknown route '" + route + "' (npu | host | auto)");
     const std::string now = decode_route_at(static_cast<size_t>(pos_ < 0 ? 0 : pos_));
@@ -1929,7 +1936,7 @@ std::string Core::decode_route_at(size_t pos) const {
     switch (decode_route_) {
         case DecodeRoute::Host: return "host";
         case DecodeRoute::Npu: return "npu";
-        case DecodeRoute::Auto: return pos < decode_auto_threshold_ ? "npu" : "host";
+        case DecodeRoute::Auto: return pos < decode_auto_threshold_ || !host_attn_refusal_.empty() ? "npu" : "host";
     }
     return "npu";
 }
@@ -2208,6 +2215,7 @@ void Core::host_attn_layer(int l, const std::vector<float>& y_qkv3, size_t T, st
     // No qk-norm, no output gate: the K2 dense shape. The new cache rows are
     // written bf16, and the row the softmax sees IS the rounded one (the
     // kernel reads the bf16 cache, so the host path rounds identically here).
+    if (!host_attn_refusal_.empty()) throw std::runtime_error("open_qwen36: host attention: " + host_attn_refusal_);
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
     const size_t qw = gb.qw, kvw = gb.kvw;
