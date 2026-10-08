@@ -899,7 +899,8 @@ int main() {
         } catch (const std::exception& e) {
             check(false, std::string("transpose_banked: ") + e.what());
         }
-        std::filesystem::remove(path);
+        std::error_code ec;   // the mapping is still open, and Windows will not delete a mapped file
+        std::filesystem::remove(path, ec);
     }
 
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
