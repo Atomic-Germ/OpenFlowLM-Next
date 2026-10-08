@@ -3181,10 +3181,13 @@ block-major.
   spinning through every dispatch and is ~20 % slower at prefill with nothing to show for it.
   `Core`'s constructor checks whether vcomp was already in the process when the initialiser
   ran and prints a named WARNING if it was, so the flag cannot be dropped silently. The flag
-  is necessary and NOT sufficient: in `oflm.exe` eight implicitly linked closed model DLLs
-  import vcomp themselves, so the warning fires there and the variable has to come from the
-  environment (2026-09-21 result below). The criterion is that the warning is accurate, not
-  that it never fires.
+  alone is not sufficient: eight of the closed model DLLs `oflm.exe` links (`qwen3_6_moe_npu`,
+  `qwen3_5vl_npu`, `qwen3_5_omni_npu`, `qwen3vl_npu`, `gemma_npu`, `gemma4e_npu`,
+  `gemma4_12b_npu`, `gpt_oss_npu`) import vcomp themselves, so `oflm.exe` delay-loads them
+  too, and none of them loads vcomp before the initializer has run. With nothing set in the
+  environment, `oflm serve` / `oflm bench` log `host threads: N (OMP_WAIT_POLICY=PASSIVE)` and
+  no warning (#176; 2026-10-07 result below). The criterion is that the warning is accurate,
+  not that it never fires: a closed DLL added later that imports vcomp brings it back.
 
 **Procedure:**
 1. `python open_kernels/export_qwen36_kernels.py --model-dir ~/.flm/models/Qwen3.6-35B-A3B-NPU2` (WSL) builds `gemm_n12288_k2048`, `gemm_n2048_k4096`, `gemm_n9216_k2048`, `mx_linear` and `mx_full` beside the sequential set and writes the manifest with the route.
@@ -3578,26 +3581,18 @@ sequential path, the 16-token continuation is identical, prefill 127.7 s -> 9.75
 continuation, and `oflm-test --llm` on `qwen3.5:0.8b` through `oflm serve` with no flag set
 PASSes 5 of 5.
 
-**Result 2026-10-06 (q8 projections as their exact split, the published 35B container):**
-the recipe now emits the route for `Qwen3.6-35B-A3B-NPU2` as published, with `attn`, `linear`
-and `linear_out` at q8, instead of no route. On the 656-token prompt, logits at every
-position, the block route against token by token on the same kernel set gives median corr
-**0.99938**, 642 / 656 argmax agreeing and 12 of the 14 flips near ties (reference margin
-< 0.5). That is no wider than the q4_1 container's own route against its own token by token
-(0.99926, 23 flips), where re-quantising the q8 weights to q4_1 instead is 0.987 with 86 flips.
-On a 1000-token prompt, all 40 layers with `--max-tokens 8`, the greedy continuation is the
-same both ways. Prefill, alternated seq / block / seq / block with nothing else on the box:
-**92.7 / 92.8 s -> 9.0 / 8.6 s** (about 10.5x); decode unchanged (108-110 ms/token).
-Through `oflm serve` with `OFLM_OPEN_KERNELS_DIR` at the set and no other flag,
-`oflm-test --llm` on `qwen3.6-moe:35b-a3b` PASSes 5 of 5, and a 2613-token question
-prefills in 31.0 s and is answered correctly from its own text.
-The first hardware run found a bug the unit tests could not: `gemm_run()` added the lo half
-into the hi half **in the mapped y buffer**, and the next `read_back`'s CLFLUSH wrote those
-dirty lines back over what the device had written there since. Two block runs of the same
-prompt then disagreed with each other (median corr 0.996), more so the faster the array ran.
-The sum now goes to host memory, one vector per y global, and repeated runs are
-bit-identical. Any host stage that writes into a mapped output buffer the device will write
-again has the same hazard. Details: `specs/open-engine/plans/archive/q8-block-prefill.md`.
+**Result 2026-10-07 (`oflm.exe` applies the wait policy itself, #176):** the eight closed
+DLLs above were found with `dumpbin /dependents` over every DLL beside `oflm.exe`; no other
+imports vcomp. Delay-loading them links cleanly, since `oflm.exe` imports no data from them.
+With no `OMP_WAIT_POLICY` in the environment the warning is gone and `oflm bench` on the 35B
+(q4_1 set, alternated) prefills at 135.5 / 137.3 tok/s at 1k and 138.7 / 140.3 at 2k,
+against 137.1 / 139.5 and 140.8 / 141.0 with the variable set before launch, within ~1.5 %.
+As shipped before the change, the q8 35B prefilled at 84-94 tok/s and 109-118 with the
+variable set. The closed engines now run with PASSIVE as well: Qwen3-VL 4B (`qwen3vl_npu`),
+alternated against the binary without the change, prefills at 473.7 / 505.2 against
+508.7 / 493.6 tok/s at 1k, decode unchanged, so within run-to-run spread. A missing one of
+those DLLs now fails when its model is first used (delay-load exception 0xC06D007E) rather
+than before `main()`. Details: `specs/open-engine/plans/archive/oflm-omp-wait-policy.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
