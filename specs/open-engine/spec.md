@@ -1184,6 +1184,43 @@ Everything above that is the context term, and it is **not** Granite's: see
 OPEN-ATTN-CONTEXT below. Decode measured 5.92 tok/s over 63 tokens because the
 context grew underneath it, not because the family is slow.
 
+### OPEN-FAMILY-K2: K2-Horizon on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `designs/ln`, `designs/lin_layer/ln_nr.cc`, `src/open_qwen36/`, `utilities/q4nx-build`)
+**Verification:** test (the derivation, the norm groups and the converter's q/k order: `tests/test_k2.py`, `utilities/q4nx-build/tests/test_k2_arch.py`); manual (the hardware procedure below)
+
+An IFM K2-Horizon dense model (`model_type: k2_horizon`: GQA 32/8 at head_dim 128
+without q/k norms, gate or bias, split-half RoPE with the base under
+`rope_parameters.rope_theta`, silu FFN, an untied q4_1 head over 250624 rows) shall
+run on the open kernels from its `config.json` alone through the dense recipe. Its
+one feature no other family has is **GroupRMSNorm**: `layernorm_num_groups`
+contiguous groups, each normalised by its own RMS (mean over the group, eps inside
+the rsqrt), with a channel-wise weight over the whole width. The 3.7B (hidden 2560)
+has 2 groups and the 7B (hidden 4096) has 4. The `ln` kernels take any even group
+count whose groups are whole vectors and stay inside one fp32 half; per group the
+arithmetic is the 2-group path's, and a 1-group build is untouched.
+
+**The q/k row order is the GGUF's own.** llama.cpp ropes K2 NEOX-style and writes
+HF's split-half q/k rows, so `q4nx-build -f k2` must not apply Llama's
+un-interleave. A scrambled container is still fluent and does not crash, so the
+check is a likelihood, not a look: on the 7B a text's NLL is 2.44 in the file's
+order and 2.96 reordered (CPU, bf16), and an adapter trained on the HF order
+(K2-Horizon-7B-Uno) drafts nonsense on the scrambled base. Only a llama-arch K2
+GGUF (`-f llama`) is interleaved and keeps the reorder.
+
+**Acceptance criteria (unit):**
+- The 3.7B and 7B configs derive `family k2`, `norm_groups` 2 and 4, `real_vocab` 250620 and the checked-in specs; `layernorm_num_groups` 3, a q/k norm, a gate, a bias, a window, a non-silu FFN, a partial rotation or rope scaling are refused.
+- `ln` builds at `ln/build_<hidden>_<eps>_g<groups>` with `LN_GROUPS` in its env only when groups > 1; `hf_config_check` carries `layernorm_num_groups`.
+- A `k2-horizon` GGUF's q/k rows are kept; a llama-arch one is reordered (`_gguf_qk_interleaved`).
+
+**Procedure (manual):**
+1. `q4nx-build -i <K2-Horizon-7B-BF16.gguf> -o <dir>/K2-Horizon-7B-NPU2 -f k2 -t language -s <dir with IFM's config/tokenizer> --quant Q4_1`.
+2. `python open_kernels/export_qwen36_kernels.py --model-dir <dir>/K2-Horizon-7B-NPU2` (Windows, `iron_env.ps1`).
+3. `designs/ln`: `LN_N=4096 LN_GROUPS=4 python build_design.py designs/ln/ln.py ...`, `make_test.py` (each group scaled differently, so pooled statistics fail), `run_kernel run.cfg`, `compare.py`.
+4. `make_decode.py --model-dir <dir> --layers 4 --tokens 2 --out model/out_k2` (prompt id 0, `<|ifm|begin_of_text|>`), `run_kernel`, `compare_decode.py --tokens 2`.
+5. `open_qwen36_cli --model <dir> --kernels src/xclbins/K2-Horizon-7B-NPU2/open_kernels --ids <ids> --max-tokens 120` with the ids from the model's own chat template (transformers' `apply_chat_template`; `chat.py` would pick the Llama 3 template, because K2's tokenizer also has `<|start_header_id|>`), then decode the tokens.
+
+**Result 2026-10-08 (K2-Horizon-7B):** `ln` 4096 x 4 PASS on the NPU (xn cos 0.99999999, 5 of 4096 bf16 values one ulp off), with 2560 x 2 and 4096 x 1 re-run as regressions, both PASS. The 4-layer slice: logits corr 0.999999 / 0.999999, argmax 2125 / 1316 matching the fp64 replica, top-5 identical at position 1 and one tail slot swapped at position 0, residual corr >= 0.999999 in every layer (maxrel <= 3.1e-3). Through the engine: a coherent reasoning preamble over 120 tokens, **105 ms/token (9.56 tok/s)** at positions 20-83. `ln (4096, 4)` entered the catalogue with this run.
+
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,

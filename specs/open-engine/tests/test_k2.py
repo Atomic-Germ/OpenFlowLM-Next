@@ -141,6 +141,7 @@ def test_ln_groups_reaches_the_ln_build():
 def test_catalogue_groups_point():
     from recipes.catalogue import OpRangeError, require
     require("ln", width=2560, groups=2)             # E3's hardware-validated point
+    require("ln", width=4096, groups=4)             # the 7B's, validated 2026-10-08
     require("ln", width=2560)                        # groups defaults to 1 (the old call sites)
     with pytest.raises(OpRangeError):
         require("ln", width=2048, groups=2)          # the fused kernel has one reduction

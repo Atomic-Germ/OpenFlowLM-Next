@@ -212,8 +212,11 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  # GroupRMSNorm(2) -- E3, the physical NPU parity pass on the user's
                  # Krackan 2026-09-27 (x86-emu + compile + hardware, byte-identical to
                  # the emulator). A grouped width has to be WIDE: the fused kernel has a
-                 # single reduction (ln.py refuses N <= 2048 with groups).
-                 (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (5120, 1),
+                 # single reduction (ln.py refuses N <= 2048 with groups). (4096, 4) entered
+                 # with K2-Horizon-7B's GroupRMSNorm(4), 2026-10-08: designs/ln make_test PASS
+                 # on the NPU and the 4-layer dx slice at corr 0.999999 (OPEN-FAMILY-K2).
+                 (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (4096, 4),
+                 (5120, 1),
                  keys=("width", "groups"),
                  defaults={"groups": 1}),),),
     Template("router", "designs/router/router.h",
