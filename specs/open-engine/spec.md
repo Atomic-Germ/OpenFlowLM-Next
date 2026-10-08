@@ -4064,6 +4064,13 @@ logit correlation fails. Top-5 and residual correlation are diagnostics, not
 additional gates. MoE references that permit device-selected experts are marked
 `device-assisted` and printed as such; this is not independent routing validation.
 
+Optional `--runtime-prefix PREFIX` additionally requires a finite, correctly
+sized CLI `PREFIX_tN.bin` for every declared token N, byte-identical to the
+corresponding harness logits. Even one ULP or a different sign of zero fails.
+Runtime identity does not bypass the CPU-reference gates or imply coverage
+of runtime steps beyond the fixture's declared count. The prefix is resolved
+relative to the working directory (absolute paths are also accepted).
+
 These checks cover captured logits and residuals. State/cache isolation, source
 conversion correctness, serving and full-model hardware acceptance need their
 own evidence; passing this comparator alone does not establish those properties.

@@ -52,6 +52,19 @@ argmax; each layer residual must have
 A zero reference residual requires an exactly zero result. Top-5 and residual
 correlation remain explicitly diagnostic, not additional acceptance gates.
 
+To also check a standalone CLI run made with `--dump-logits PREFIX`, pass
+`--runtime-prefix PREFIX` to the comparator. It requires `PREFIX_t0.bin`,
+`PREFIX_t1.bin`, etc. for every token declared in the fixture, validates their
+size and finite values, and requires byte identity with the harness logits
+(including the sign of zero). CPU-reference gates still apply. Extra runtime
+steps beyond the fixture's declared count are not covered by this comparison.
+The prefix is a path relative to the working directory, or an absolute path:
+
+```bash
+python open_kernels/model/compare_decode.py --out path/to/fixture \
+  --runtime-prefix path/to/fixture/engine
+```
+
 Fixtures without `decode_reference.json` must be regenerated with
 `make_decode.py` **without `--cfg-only`**. A cfg-only rewrite checks that its
 dimensions, context capacity, seed, routing mode, spec/build identifiers and pinned references

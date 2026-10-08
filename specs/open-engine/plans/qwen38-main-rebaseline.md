@@ -3,7 +3,8 @@
 Updated 2026-10-08. This branch strengthens decode/source validation, adds an
 offline converter command for existing model metadata, and builds the current
 Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
-strict CPU-reference comparison. Runtime and kernel arithmetic are unchanged.
+strict CPU-reference comparison, as does the first token at all 64 layers.
+Runtime and kernel arithmetic are unchanged.
 
 ## Stage 1: complete decode comparison
 
@@ -96,8 +97,9 @@ Regenerated the independent CPU fixture with `make_decode.py --layers 8
 --tokens 3`. It includes six linear-attention and two full-attention layers,
 seed token 248045, context capacity 4096, 5120 residual values per layer and
 248320 logits per step. `decode_reference.json` pins all 27 reference captures
-and the model-derived spec/build keys. Layer computation uses the FP64 replica;
-the CPU LM head accumulates in FP32 and reference captures are stored as FP32.
+and the model-derived spec/build keys. The CPU replica mixes FP64 norm/state/
+attention math with FP32 projections and LM-head accumulation; reference
+captures are stored as FP32.
 Harness execution completed **30/30 dispatches**, and the strict comparator
 passed all three logits and all 24 layer residuals:
 
@@ -129,21 +131,74 @@ prompt coverage, serving and hybrid block-prefill parity remain unverified.
 No performance claim: the power-mode request failed, and CPU reference
 generation ran concurrently with the runtime checks.
 
+## Stage 4: runtime comparison and full-depth checks
+
+Added `compare_decode.py --runtime-prefix PREFIX` to require the CLI's
+`PREFIX_tN.bin` logits to match the harness for every declared fixture step.
+It rejects missing files, wrong sizes, partial float bytes, non-finite values,
+one-ULP differences and signed-zero differences. CPU-reference residual/logit
+gates still apply. A runtime run with more steps than the fixture does not
+extend the fixture's coverage.
+
+TDD: **18 new tests failed before implementation**, then all **69 comparator
+tests passed**. The complete open-engine suite passes **845 tests, 47 skipped**.
+The new option also passed on the retained eight-layer/three-token fixture.
+
+The full-depth first-token fixture (seed 248045) passed the same strict gates:
+**64/64 residual comparisons**, **248320 logits**, correlation
+**0.9999973866**, and argmax **8678 / 8678**. Worst residual normalized maximum
+error is **0.002713315**, layer 57, below **0.005**. Harness execution completed
+**66 dispatches**. Its logits and the second runtime request's first-token
+logits are byte-identical. All reference hashes, dimensions and finite-value
+checks passed; no threshold or kernel arithmetic changes were needed.
+
+The hardware capture ran while CPU reference generation continued, using the
+same `build_cfg` function after all input pools were written. Its configuration
+was verified byte-identical to `run_decode.cfg` published with the completed
+reference contract. The 82 export hashes and eight harness decode artifact
+hashes were checked before execution.
+
+On the same Ryzen AI 9 365 / Strix NPU, the full **64-layer** runtime generated
+8678, 198, 2 from seed 248045 and reproduced those IDs on a second request.
+Three reset replays of inputs 248045, 8678, 198 reported **0/3 differing runs**
+for observed buffers and recurrent-state hashes. These are repeatability
+checks against an NPU reference run, not CPU state validation.
+
+Two short text requests used the model's `chat_template.jinja` with thinking
+disabled and sequential NPU prefill:
+
+| Prompt | Prompt tokens | Answer before EOS | Repeated request |
+|---|---:|---|---|
+| Reply with only the result: 2 + 2 = ? | 25 | 4 | Identical |
+| Name the capital of France. Reply with only the city. | 24 | Paris | Identical |
+
+Both emitted `<|im_end|>` immediately after the answer. The diagnostic CLI
+generated eight tokens per request; tokens after the first EOS are excluded
+from the answer. Rendered prompts, exact input IDs, the template hash and raw
+logs are retained under `Models/qwen38-27b/production-full/`. This is limited
+chat smoke coverage, not serving or hybrid block-prefill validation.
+
+Full-precision metrics and the pinned reference metadata are in
+`Models/qwen38-27b/production-full/results.json`; the skill documents the run
+commands. Only the first full-depth token has an independent CPU comparison.
+Full-depth multi-token accuracy, independent state/head/FFN-partial checks,
+block-boundary prefill parity, serving and resource/timing acceptance remain
+open. The power-mode request still failed, so this is not a benchmark result.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 827 passed, 47 skipped |
+| `specs/open-engine/tests` | 845 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The Python suites were rerun for stage 2; source code is unchanged in stage 3.
-The C++ build/CTest was repeated for stage 3. Weights were not reconverted and
-full-model NPU inference was not performed. Hardware coverage is limited to
-the eight-layer slice above; skipped tests and successful compilation do not
-extend that coverage.
+The open-engine suite was rerun for stage 4; converter results are from stage 2
+and the C++ build/CTest from stage 3 (those sources are unchanged). Weights were
+not reconverted. Skipped tests and successful compilation do not extend the
+explicit hardware coverage above.
 
 Stage 1 reproduction:
 

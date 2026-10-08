@@ -1,11 +1,13 @@
 """Score a complete decode fixture against make_decode.py's pinned CPU reference.
 
-    python open_kernels/model/compare_decode.py [--tokens N] [--out DIR]
+    python open_kernels/model/compare_decode.py [--tokens N] [--out DIR] [--runtime-prefix PATH]
 
 All declared tokens and layers are required. Logits require correlation > 0.9999
 and equal argmax; every residual requires normalized max error < 0.005. Top-5
 and residual correlation are diagnostics. All captures must be finite and have
 exact manifest-derived dimensions. Reference hashes must match the fixture.
+With --runtime-prefix, also require every PREFIX_tN.bin runtime logit dump to
+match the corresponding harness capture byte for byte (including signed zero).
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ def correlation(got: np.ndarray, ref: np.ndarray) -> float:
     return float(np.corrcoef(got, ref)[0, 1])
 
 
-def compare(out: Path, tokens: int | None = None) -> bool:
+def compare(out: Path, tokens: int | None = None, runtime_prefix: Path | None = None) -> bool:
     meta = load_reference(out)
     if tokens is not None and tokens != meta['tokens']:
         raise ValueError(f'--tokens {tokens} differs from declared tokens {meta["tokens"]}; compare the complete run')
@@ -40,7 +42,14 @@ def compare(out: Path, tokens: int | None = None) -> bool:
         suffix = sfx(t)
         name = f'ref_logits{suffix}.bin'
         ref = read_capture(out / name, meta['vocab'], meta['references'][name])
-        ours = read_capture(out / f'y_logits{suffix}.bin', meta['vocab'])
+        harness_path = out / f'y_logits{suffix}.bin'
+        ours = read_capture(harness_path, meta['vocab'])
+        if runtime_prefix is not None:
+            runtime_path = Path(f'{runtime_prefix}_t{t}.bin')
+            read_capture(runtime_path, meta['vocab'])
+            if runtime_path.read_bytes() != harness_path.read_bytes():
+                raise ValueError(f'{runtime_path.name}: runtime logits differ from {harness_path.name}')
+            print(f'token {t}: runtime logits byte-identical')
         corr = correlation(ours, ref)
         print(f'token {t} (position {t}): logits corr {corr:.6f}  argmax ours {int(ours.argmax())} '
               f'ref {int(ref.argmax())}  top5 ours {np.argsort(-ours)[:5].tolist()} '
@@ -68,11 +77,13 @@ def main() -> int:
     ap.add_argument('--tokens', type=int, default=None,
                     help='must equal fixture token count; default checks all declared tokens')
     ap.add_argument('--out', default=str(HERE / 'out'))
+    ap.add_argument('--runtime-prefix', type=Path,
+                    help='also require CLI PREFIX_tN.bin logits to match the harness for every declared token')
     a = ap.parse_args()
     if a.tokens is not None and a.tokens <= 0:
         ap.error('--tokens must be positive')
     try:
-        ok = compare(Path(a.out), a.tokens)
+        ok = compare(Path(a.out), a.tokens, a.runtime_prefix)
     except (OSError, ValueError) as e:
         print(f'FAIL: {e}')
         return 1

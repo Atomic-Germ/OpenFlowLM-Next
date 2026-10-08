@@ -58,6 +58,61 @@ def test_complete_decode_passes(bundle):
     assert result.stdout.rstrip().endswith('PASS')
 
 
+@pytest.fixture
+def runtime_bundle(bundle):
+    prefix = bundle / 'runtime output'
+    for t in range(2):
+        suffix = '' if t == 0 else f'_t{t}'
+        Path(f'{prefix}_t{t}.bin').write_bytes((bundle / f'y_logits{suffix}.bin').read_bytes())
+    return bundle, prefix
+
+
+def test_runtime_logits_match_every_declared_step(runtime_bundle):
+    out, prefix = runtime_bundle
+    result = run(out, '--runtime-prefix', str(prefix))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count('runtime logits byte-identical') == 2
+    assert result.stdout.rstrip().endswith('PASS')
+
+
+@pytest.mark.parametrize('token', [0, 1])
+@pytest.mark.parametrize('damage', ['missing', 'short', 'long', 'partial', 'nan', 'inf',
+                                  'one-ulp', 'signed-zero'])
+def test_runtime_logits_require_complete_finite_byte_identity(runtime_bundle, token, damage):
+    out, prefix = runtime_bundle
+    path = Path(f'{prefix}_t{token}.bin')
+    values = np.fromfile(path, np.float32)
+    if damage == 'missing':
+        path.unlink()
+    elif damage == 'partial':
+        path.write_bytes(path.read_bytes() + b'x')
+    else:
+        if damage == 'short':
+            values = values[:-1]
+        elif damage == 'long':
+            values = np.append(values, np.float32(0))
+        elif damage == 'nan':
+            values[0] = np.nan
+        elif damage == 'inf':
+            values[0] = np.inf
+        elif damage == 'one-ulp':
+            values[0] = np.nextafter(values[0], np.float32(2))
+        else:
+            values[-1] = np.float32(-0.0)
+        values.tofile(path)
+    result = run(out, '--runtime-prefix', str(prefix))
+    rejected(result, path.name)
+    assert 'FAIL:' in result.stdout
+
+
+def test_runtime_identity_does_not_bypass_cpu_reference_gate(runtime_bundle):
+    out, prefix = runtime_bundle
+    put(out, 'y_res1_t1.bin', [-1, 2, -3, -4])
+    result = run(out, '--runtime-prefix', str(prefix))
+    rejected(result, 'layer 1')
+    assert 'token 1: FAIL' in result.stdout
+
+
 @pytest.mark.parametrize('name', ['y_logits.bin', 'ref_logits.bin', 'y_res1_t1.bin',
                                  'ref_res1_t1.bin'])
 def test_missing_capture_fails(bundle, name):

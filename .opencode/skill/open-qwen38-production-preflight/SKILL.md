@@ -1,13 +1,13 @@
 ---
 name: open-qwen38-production-preflight
-description: Normalize an existing dense Qwen3.5 Q4NX config, validate Qwen3.8-27B source tensors, build the complete 41-set production recipe on Linux, and verify an eight-layer NPU slice.
+description: Normalize an existing dense Qwen3.5 Q4NX config, validate Qwen3.8-27B source tensors, build the complete 41-set production recipe on Linux, and verify slice and full-depth NPU decode.
 ---
 
 # Qwen3.8-27B production preflight and Linux build
 
 Use the shared `qwen35` recipe. This workflow validates metadata, selected source
-weights, compilation and an eight-layer NPU slice; it does not establish
-full-model NPU accuracy.
+weights, compilation, an eight-layer NPU slice and the first token at full
+depth; it does not establish full-depth multi-token numerical acceptance.
 
 ## Existing model metadata
 
@@ -191,8 +191,9 @@ LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
 logit correlations 0.9999991073 / 0.9999988538 / 0.9999990533, argmax 220 at each
 step. All 24 residual comparisons passed; worst normalized maximum error
 0.001397009 (layer 4, step 0), below 0.005. Runtime logits were byte-identical
-to the harness, and `--twice` reproduced the token sequence. The CPU layer
-replica uses FP64, but CPU LM-head accumulation and saved captures use FP32.
+to the harness, and `--twice` reproduced the token sequence. The CPU replica
+mixes FP64 norm/state/attention math with FP32 projections and LM-head
+accumulation. Saved captures use FP32.
 
 `--twice` checks generated IDs and overwrites dumps with the second request.
 `--det-full` matched all observed buffers and recurrent-state hashes in three
@@ -201,10 +202,72 @@ a CPU state reference. Current KV rows are observed, not the unused cache.
 No throughput claim: the CLI could not set the power mode, and CPU reference
 generation ran concurrently with runtime validation.
 
-Next: full-depth inference and prompt checks, with sequential NPU and hybrid
-block-prefill results recorded separately. The slice does not close those
-gates or per-head/state numerical validation. Local stage-3 evidence is in
+Local stage-3 evidence is in
 `Models/qwen38-27b/production-slice/results.json` and `logs/`.
+
+## Full-depth first-token gate
+
+Use a separate fixture directory; do not overwrite the eight-layer reference.
+The full-depth fixture takes about 17 GB on disk. On this machine, allow about
+30 minutes for one CPU reference token and roughly 30 GB of additional memory
+for a resident 64-layer NPU run. These are planning estimates, not benchmarks.
+Keep NPU jobs serial and check available memory before starting.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/make_decode.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --layers 64 --tokens 1 --out Models/qwen38-27b/production-full
+HARNESS_TIMEOUT_MS=30000 LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+  open_kernels/harness/out/run_kernel Models/qwen38-27b/production-full/run_decode.cfg
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
+  /tmp/qwen38-main-status-runtime/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-kernels \
+  --ids 248045 --max-tokens 3 --layers 64 \
+  --dump-logits Models/qwen38-27b/production-full/engine --twice
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/compare_decode.py \
+  --out Models/qwen38-27b/production-full \
+  --runtime-prefix Models/qwen38-27b/production-full/engine
+```
+
+`--runtime-prefix` verifies every declared token's runtime dump against the
+harness byte for byte, alongside the unchanged CPU-reference gates. A one-token
+fixture covers only `engine_t0.bin`, even if the runtime generated more steps.
+It rejects missing/malformed/non-finite dumps, one-ULP changes and signed-zero
+differences. Its 18 regression cases bring the comparator suite to 69 tests.
+
+2026-10-08: the first token at all 64 layers passed, logit correlation
+0.9999973866, argmax 8678, worst residual maxrel 0.002713315 (layer 57).
+All 64 residual gates and 66 harness dispatches passed; runtime/harness logits
+were byte-identical. Full-depth runtime generated 8678, 198, 2 twice, and three
+reset replays matched all observed buffers and recurrent-state hashes.
+The full open-engine suite passed 845 tests with 47 skipped. Metrics/reference
+metadata are retained in `Models/qwen38-27b/production-full/results.json`.
+
+For reset replay, force the actual input sequence from the generation above:
+seed 248045 followed by the first two generated IDs (8678 and 198 in this run).
+
+```bash
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
+  /tmp/qwen38-main-status-runtime/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-kernels \
+  --ids 248045,8678,198 --layers 64 --det-step 3 --det-full
+```
+
+Short chat smoke checks can use `src/open_qwen36/chat.py` with the same `--model`,
+`--kernels`, `--layers 64`, `--exe /tmp/qwen38-main-status-runtime/open_qwen36_cli`
+and `--max-tokens 8 --twice`. Its no-thinking Qwen prompt matches this model's
+template with `enable_thinking=false` for these single user turns. Alternatively,
+render the model's `chat_template.jinja` with Jinja2, tokenize with
+`tokenizers.Tokenizer` and feed the comma-separated IDs through `--ids-file`.
+The local prompt JSON files retain the actual rendered strings, IDs and template
+hash. Text is evaluated up to the first `<|im_end|>`: the diagnostic CLI keeps
+generating up to `--max-tokens`, including past EOS.
+
+Do not count reset repeatability or a correct short answer as an independent
+multi-token CPU comparison. Keep full-depth multi-token, per-head/state,
+serving and hybrid block-prefill acceptance separate.
 
 Artifacts/logs for this run: `Models/qwen38-27b/production-kernels/`,
 `Models/qwen38-27b/production-input-sha256.txt`,
