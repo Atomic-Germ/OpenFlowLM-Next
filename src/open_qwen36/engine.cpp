@@ -324,6 +324,32 @@ buffer<bf16> Engine::get_v_cache(int layer_idx, int idx) {
 
 int Engine::get_current_context_length() { return core_->position(); }
 
+bool Engine::uno_ok() const { return core_ && core_->rows_l() && core_->has_draft(); }
+
+int Engine::uno_cycle(int seed, std::vector<int>& out) {
+    return guarded([&] {
+        const size_t L = core_->rows_l();
+        std::uniform_int_distribution<int> noise(1, static_cast<int>(core_->vocab()) - 1);   // [1, mask_token_id)
+        std::vector<int> draft(L), am(L), av(L);
+        const int p = core_->position();
+        draft[0] = seed;
+        for (size_t j = 1; j < L; ++j) draft[j] = noise(uno_rng_);
+        core_->step_rows(draft.data(), am.data(), false, true);    // am[0] = c, am[1..] the drafts
+        core_->seek(p + 1);
+        core_->step_rows(am.data(), av.data(), false, false);      // av[j] checks am[j + 1]
+        size_t k = 0;
+        while (k + 1 < L && am[k + 1] == av[k]) ++k;
+        for (size_t j = 0; j <= k; ++j) out.push_back(am[j]);
+        out.push_back(av[k]);
+        core_->seek(p + 2 + static_cast<int>(k));
+        return p;
+    });
+}
+
+void Engine::uno_seek(int pos) {
+    guarded([&] { core_->seek(pos); });
+}
+
 int Engine::checkpoint() {
     if (poisoned_) return 0;
     snapshot_ = core_->checkpoint();

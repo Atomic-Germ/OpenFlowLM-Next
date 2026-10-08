@@ -34,11 +34,12 @@ def head(a, fx: Path, spec, R) -> int:
     ln + lm_head_q4 run (y_logits_t<j>), and the NPU argmax equal to the host's."""
     from recipes.dense import lm_rows
     hid, vocab, L0 = spec.hidden, lm_rows(spec), R.layout
-    out_floats = a.l * vocab + 8 * a.l * 64
+    row = DXR.head_layout(spec, a.l).ROW_FLOATS if a.head2 else vocab    # lmhl2 pads its logits rows
+    out_floats = a.l * row + 8 * a.l * 64
     if a.compare:
         out = np.fromfile(fx / "y_lmhl.bin", np.float32)
-        lg = out[:a.l * vocab].reshape(a.l, vocab)
-        am = out[a.l * vocab:].view(np.int32).reshape(8, a.l * 64)
+        lg = out[:a.l * row].reshape(a.l, row)[:, :vocab]
+        am = out[a.l * row:].view(np.int32).reshape(8, a.l * 64)
         ok = True
         for j in range(a.l):
             ref = np.fromfile(tok_file(fx, "y_logits", j), np.float32)[:vocab]
@@ -77,6 +78,7 @@ def main() -> int:
     ap.add_argument("--compare", action="store_true")
     ap.add_argument("--head", action="store_true", help="the L-row head (lmhl) on the rows dx left after layer 0")
     ap.add_argument("--lora", default=None, help="layer 0's LoRA pool (pack_lora.py), for a draft build")
+    ap.add_argument("--head2", action="store_true", help="with --head: lmhl2's padded logits rows")
     a = ap.parse_args()
     fx = Path(a.fixture).resolve()
     spec = load_spec(Path(a.spec))
@@ -84,7 +86,7 @@ def main() -> int:
     X = DXR.layout(spec, a.l)
     hid = spec.hidden
 
-    if a.head:
+    if a.head or a.head2:
         return head(a, fx, spec, R)
     if a.compare:
         y = np.fromfile(fx / "y_dxl_res.bin", np.float32).reshape(a.l, hid)

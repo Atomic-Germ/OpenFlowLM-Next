@@ -36,6 +36,7 @@ typedef enum {
     lfm2_5_tk,
     phi4,
     nanbeige,
+    k2,
     error_whiper,
     error_embedding,
     error_image
@@ -71,6 +72,7 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"qwen2vl", SupportedModelFamily::qwen2vl},
         {"phi4", SupportedModelFamily::phi4},
         {"nanbeige", SupportedModelFamily::nanbeige},
+        {"k2", SupportedModelFamily::k2},             // IFM K2-Horizon; K2-Horizon-7B-Uno's draft pass when uno.q4nx is there
         {"whisper-v3", SupportedModelFamily::error_whiper},
         {"embed-gemma", SupportedModelFamily::error_embedding},
         {"flux2-klein", SupportedModelFamily::error_image}   // oflm image, not a chat engine

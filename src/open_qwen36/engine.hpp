@@ -15,6 +15,7 @@
 #pragma once
 
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,16 @@ public:
     static std::string find_kernels(const LM_Config& config, std::string* how = nullptr);
 
     const Core& core() const { return *core_; }
+    /// OPEN-UNO-DECODE: whether this kernel set and model have the draft pass (manifest
+    /// rows.lora_kernel, the model's uno.q4nx).
+    bool uno_ok() const;
+    /// One greedy Uno cycle from `seed`, the last emitted token, not yet in the cache: appends the
+    /// tokens it commits (the base model's greedy continuation, 2 to L + 1 of them) to `out` and
+    /// leaves the cache holding all of them but the last, at the position of that last. Returns
+    /// the seed's position: committed token i sits at that + 1 + i.
+    int uno_cycle(int seed, std::vector<int>& out);
+    /// Put the cache position at `pos`: the rows past it are dropped (a cycle cut short).
+    void uno_seek(int pos);
 
 private:
     CoreConfig cfg_;
@@ -73,6 +84,7 @@ private:
     bool has_snapshot_ = false;
     std::vector<bf16> logits_;
     bool poisoned_ = false;
+    std::mt19937 uno_rng_{0};                   ///< the draft rows' noise ids
     vision::VitConfig vcfg_;
     std::unique_ptr<vision::VitWeights> vit_;   ///< loaded on the first image (~0.85 GB, ~3 s)
     void ensure_vit();

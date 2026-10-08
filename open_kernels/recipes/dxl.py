@@ -253,3 +253,25 @@ def lora_pack_plan(spec: ModelSpec, L: int) -> list[dict]:
     return [{"op": "std_perm", "tensor": f"model.layers.{{l}}.uno.{name}.weight", "dst": off,
              "nch": (r // 32) * (c // 256), "in_dim": c}
             for name, (off, r, c) in X.LORA.items()]
+
+
+@dataclass(frozen=True)
+class HeadLayout:
+    """lmhl2's split: every core the same BPC bands of the (padded) head pool, in tiles of BT."""
+    CORES: int
+    BPC: int
+    BT: int
+    ROW_FLOATS: int     # logits row stride: every core's bands, the padding ones included
+    OUT_FLOATS: int     # L logits rows, then CORES argmax elements of L * 64
+
+
+def head_layout(spec: ModelSpec, L: int) -> HeadLayout:
+    from .dense import cores_for, lm_rows
+    n = cores_for(spec)
+    bands = lm_rows(spec) // BAND_ROWS
+    bpc = -(-bands // n)                    # the head pool is padded to n * bpc bands (dense.layout)
+    ye = L * BAND_ROWS * 4
+    fixed = 0x1000 + L * tab_bytes(KS_BF16) + 2 * 2 * CHUNK + 2 * XE + 2 * ye + 2 * 64
+    bt = max(b for b in range(1, bpc + 1) if bpc % b == 0 and fixed + b * ye <= L1_BUDGET)
+    row = n * bpc * BAND_ROWS
+    return HeadLayout(CORES=n, BPC=bpc, BT=bt, ROW_FLOATS=row, OUT_FLOATS=L * row + n * L * 64)
