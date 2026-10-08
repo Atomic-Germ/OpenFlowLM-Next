@@ -153,6 +153,7 @@ private:
     std::string ensure_image_engine_loaded(const std::string& tag);
     /// Take the image engine off the NPU before a chat model loads, unless it is resident.
     void release_image_engine_for_chat();
+    void unload_image_engine();
     void configure_chat_engine_parameters(const json& options, const json& request);
     json build_nstream_response(std::string response_text,
                                 stop_reason_t stop_reason = EOT_DETECTED);

@@ -1397,6 +1397,21 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# SERVER-IMAGES-EDITS: which part a multipart form names. Header-only Boost.Beast; no device.
+add_executable(multipart_test server/multipart_test.cpp server/multipart.cpp)
+target_include_directories(multipart_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/server")
+if(TARGET Boost::headers)
+    target_link_libraries(multipart_test PRIVATE Boost::headers)
+elseif(WIN32)
+    target_include_directories(multipart_test PRIVATE C:/dev/boost_1_88_0)
+endif()
+if(MSVC)
+    target_compile_options(multipart_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(multipart_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 BOOST_ALL_NO_LIB)
+endif()
+add_test(NAME multipart COMMAND multipart_test)
+
 # OPEN-VISION-IMAGE-READ: the reader's own PNG decoder, against fixtures whose
 # expected RGB24 was computed outside this code. Links NOTHING -- no ffmpeg, no
 # zlib, no device, no weights -- which is the point: it passes on a machine whose

@@ -13,13 +13,10 @@
 #include <vector>
 #include <map>
 #include <string_view>
-#include "server.hpp"
+#include <boost/beast/http.hpp>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
-namespace net = boost::asio;
-using tcp = net::ip::tcp;
-using json = nlohmann::ordered_json;
 
 // parts in multipart/form-data 
 struct MultipartPart {

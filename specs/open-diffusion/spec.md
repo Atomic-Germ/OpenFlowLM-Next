@@ -61,6 +61,35 @@ compare the process CPU time per image with the NPU wall time. The report prints
 **Measured 2026-09-29** (native engine, one context): 0.1-0.2 s of host CPU per image at
 512² and 0.14-0.34 s at 1024², against 3.7 s and 12.0 s of NPU time.
 
+### OPEN-DIFFUSION-NPU-SHARING: the engine runs at high NPU priority, and other processes wait between its stretches
+**Applies to:** `src/open_diffusion/engine.cpp` (`kPriority`), `oflm image`, `oflm serve`
+**Verification:** manual
+
+Decided by the maintainer in review of #137, knowing that it affects everyone sharing the NPU.
+
+The engine opens each hardware context at QoS priority 0x180 (amdxdna's "high"; normal is
+0x200). It configures each kernel set with register writes, which the firmware cannot save and
+restore when another context preempts it. So every stretch (a set's configure-only run and the
+ops after it, one `xrt::runlist`) starts from a reset, and the high priority keeps another
+process's context from preempting it mid-stretch. Other processes run between our stretches.
+
+The cost falls on whoever shares the NPU: while an image is being made, their work waits for the
+stretch in progress instead of preempting it. Nothing known avoids this at normal priority: all
+four variants tried there hung (below).
+
+**Acceptance criteria:**
+- With `utilities/reconfig-probe/contention_trial.ps1`'s six-xclbin-context contender running,
+  512² and 1024² images are byte-identical to uncontended ones and the contender keeps running.
+- The same trial at normal priority (0x200) is the counter-case: it hung, 8 of 8 trials,
+  usually taking the contender down too.
+
+**Verification (manual):** `contention_trial.ps1`, as OPEN-DIFFUSION-PERF's **Contention**
+records: 6 of 6 trials at high priority (24 images, 3 of them 1024²) passed, and images took
+~10-25% longer while the contender ran.
+
+Not measured: how long a contender's own dispatches wait. Not tested: a contender that itself
+runs at high or realtime priority (Windows Studio Effects may).
+
 ### OPEN-DIFFUSION-QUALITY: not broken, and within the predicted drift
 **Applies to:** the whole pipeline
 **Verification:** manual

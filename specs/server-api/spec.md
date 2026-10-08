@@ -352,7 +352,8 @@ ones. Non-square sizes need their own stream sets and are a separate item.
 ### SERVER-IMAGES-EDITS: one reference image is edited; a mask or a second image is named as not implemented
 **Applies to:** openflowlm-next (`src/server/server.cpp`, `src/server/multipart.cpp`, `src/server/rest_handler.cpp`)
 **Verification:** test
-**Test:** `specs/server-api/tests/test_images_api.py`
+**Test:** `specs/server-api/tests/test_images_api.py`; the multipart parser: `src/server/multipart_test.cpp`
+(CTest `multipart`, no device)
 
 klein edits by appending the reference's VAE latents to the joint sequence as tokens; the NPU
 encodes the reference first (OPEN-DIFFUSION-EDIT, `specs/open-diffusion/spec.md`).
@@ -376,7 +377,10 @@ cancellation. An HRX build answers 501.
 
 The multipart parser accepts a quoted boundary (`boundary="..."`, RFC 2046), fills each part's
 `content_type`, finds headers case-insensitively, and keeps repeated parts (`image[]`), which used
-to overwrite each other.
+to overwrite each other. A part's `name` and `filename` come from its own `Content-Disposition`
+line and nowhere else: a header is the line that starts with its name, and a quoted parameter
+value is read whole (`\"` and `\\` are its escapes). So neither another header nor text inside a
+quoted filename can name a part, which would otherwise let a part pass as `image` or `mask`.
 
 **Acceptance criteria:**
 - One 512x512 PNG with `size` omitted is edited: 200, `size` "512x512", one 512x512 PNG.
@@ -387,6 +391,11 @@ to overwrite each other.
 - A BMP as the image: a 400 with `param == "image"` naming "not PNG or JPEG".
 - A form with no image is a 400 with `param == "image"`.
 - A form with an image and `size: 768x768` is a 400 with `param == "size"`.
+- Multipart (`multipart_test`): a part whose `Content-Disposition` has no `name` is not named by
+  `name="mask"` on its `Content-Type` line; a header whose value mentions `content-disposition:`
+  is not that header; `filename="x; name=mask"; name="image"` is `image` with filename
+  `x; name=mask`; an escaped `\"` does not end a quoted filename; `C:\dir\fox.png` keeps its
+  backslashes.
 
 ### SERVER-IMAGES-NPU: an image request holds the NPU like chat, and always lets it go
 **Applies to:** openflowlm-next (`src/server/server.cpp`)
@@ -403,12 +412,38 @@ A client that disconnects during an `n` > 1 request stops it after the current i
   request is answered 200.
 - Chat, image, chat, image on one server are each answered 200.
 
+### SERVER-IMAGES-FAILURE: a failed image run does not leave the server unable to make images
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/open_diffusion/engine.cpp`)
+**Verification:** manual
+
+A request that fails once it has used the image engine (a run that errors or times out on the NPU,
+an allocation that fails in `select`) is answered 500 with the reason, and the engine is unloaded.
+Before `Engine::run` rethrows, it waits out every stretch it still had on the NPU, so no run is
+left executing against buffers that are about to be freed. The next image request loads the
+engine fresh, with a new hardware context, as a swap does (SERVER-IMAGES-RESIDENCY), with or
+without `--imagegen 1`. A refused request never gets this far and unloads nothing.
+
+No client request can make a run fail, so the procedure injects the failure.
+
+**Verification (manual):**
+1. Build `oflm` with a local, uncommitted change that makes the first `Engine::run` throw after
+   its 20th stretch is submitted, with stretches still in flight.
+2. `oflm serve llama3.2:1b`; send `{"prompt": "a red fox in fresh snow", "size": "512x512",
+   "seed": 1}` to `/v1/images/generations` three times.
+3. The first is a 500 naming the injected failure, and the log shows `unloading the image engine
+   after a failed request`. The second loads the engine again (`Loading image model`) and is a
+   200. The third is a 200 with the same `b64_json` as the second, and the same as an unpatched
+   server gives for that request.
+   (2026-10-08: the 500 came with 15 stretches in flight; the second request reloaded the engine
+   and took 17.0 s, the third 4.3 s; both images and the unpatched server's were the same bytes.
+   Not reproduced: the server's behaviour before this change, which was inferred from the code.)
+
 ### SERVER-IMAGES-RESIDENCY: swap by default, both resident with --imagegen 1
 **Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/include/utils/vm_args.hpp`)
 **Verification:** manual
 
-The image engine holds six hardware contexts, 7.5 GB of weights and 1.4 / 4.6 GiB of activations
-per resolution. By default an image request swaps the chat model off the NPU and loads the image
+The image engine holds one hardware context per configuration, 7.5 GB of weights and 1.4 / 4.6 GiB
+of activations per resolution. By default an image request swaps the chat model off the NPU and loads the image
 engine (5.2 s warm, the weights in the OS file cache), and a chat request swaps back; the log says
 so each time. The chat model's tag is kept, so a chat request that names it, or names nothing, is
 served by it again.

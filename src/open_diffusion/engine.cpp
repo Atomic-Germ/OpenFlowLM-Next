@@ -48,7 +48,7 @@ constexpr size_t kWindow = 32;
 // trials over four variants, utilities/reconfig-probe/contention_trial.ps1). At high
 // priority the other context runs only between our stretches, and each stretch starts
 // from a reset (6 of 6 trials, both sizes, the images byte-identical and the other
-// process unharmed).
+// process unharmed). OPEN-DIFFUSION-NPU-SHARING records this as the maintainer's decision.
 constexpr uint32_t kPriority = 0x180;
 
 std::vector<char> read_file(const fs::path& p) {
@@ -763,42 +763,50 @@ Timing Engine::run(bool profile) {
     int cur_set = -1;
     std::string cur_phase;
     auto t0 = clk::now(), tp = t0;
-    for (auto [opp, k] : Impl::op_order(r, m.cur_steps)) {
-        Impl::Op& op = *opp;
-        const std::string phase = k < 0 ? op.phase : "step" + std::to_string(k);
-        if (phase != cur_phase) {
-            drain();
-            auto now = clk::now();
-            if (!cur_phase.empty()) t.phases.emplace_back(cur_phase, secs(tp, now));
-            tp = now;
-            cur_phase = phase;
-            if (k >= 0) m.rebind(r, r.step_ops[k % 2], k);   // its last user has drained
+    try {
+        for (auto [opp, k] : Impl::op_order(r, m.cur_steps)) {
+            Impl::Op& op = *opp;
+            const std::string phase = k < 0 ? op.phase : "step" + std::to_string(k);
+            if (phase != cur_phase) {
+                drain();
+                auto now = clk::now();
+                if (!cur_phase.empty()) t.phases.emplace_back(cur_phase, secs(tp, now));
+                tp = now;
+                cur_phase = phase;
+                if (k >= 0) m.rebind(r, r.step_ops[k % 2], k);   // its last user has drained
+            }
+            auto ts = clk::now();
+            if (!open || op.set != cur_set) {
+                close();
+                open = Stretch{xrt::runlist(r.ctx), m.set_names[op.set] + "/" + op.stream};
+                int v = r.flip;
+                r.flip ^= 1;
+                auto& pool = r.cfg_runs[op.set][v];   // a deque: runs in a list keep their address
+                auto& free = cfg_free[op.set][v];
+                size_t i = pool.size();
+                if (free.empty()) pool.emplace_back(r.cfg_kernel[op.set][v]);
+                else i = free.back(), free.pop_back();
+                open->list.add(pool[i]);
+                open->set = op.set;
+                open->v = v;
+                open->cfg = i;
+                cur_set = op.set;
+            }
+            if (op.has_pre) open->list.add(op.pre);
+            open->list.add(op.run);
+            if (profile) {
+                drain();                              // the next op configures again
+                t.op_ms.push_back(1e3 * secs(ts, clk::now()));
+            }
         }
-        auto ts = clk::now();
-        if (!open || op.set != cur_set) {
-            close();
-            open = Stretch{xrt::runlist(r.ctx), m.set_names[op.set] + "/" + op.stream};
-            int v = r.flip;
-            r.flip ^= 1;
-            auto& pool = r.cfg_runs[op.set][v];   // a deque: runs in a list keep their address
-            auto& free = cfg_free[op.set][v];
-            size_t i = pool.size();
-            if (free.empty()) pool.emplace_back(r.cfg_kernel[op.set][v]);
-            else i = free.back(), free.pop_back();
-            open->list.add(pool[i]);
-            open->set = op.set;
-            open->v = v;
-            open->cfg = i;
-            cur_set = op.set;
+        drain();
+    } catch (...) {
+        // a failure must not leave runs executing: they could not be started again
+        for (auto& s : inflight) {
+            try { s.list.wait(); } catch (...) {}
         }
-        if (op.has_pre) open->list.add(op.pre);
-        open->list.add(op.run);
-        if (profile) {
-            drain();                              // the next op configures again
-            t.op_ms.push_back(1e3 * secs(ts, clk::now()));
-        }
+        throw;
     }
-    drain();
     auto end = clk::now();
     t.phases.emplace_back(cur_phase, secs(tp, end));
     t.total_s = secs(t0, end);

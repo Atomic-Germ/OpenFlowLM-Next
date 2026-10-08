@@ -2140,10 +2140,14 @@ void RestHandler::release_image_engine_for_chat() {
     if (this->image_engine && !this->image_resident) {
         header_print("OFLM", "swapping the image engine ('" + this->image_engine_tag + "') off the NPU "
                              "for the chat model (--imagegen 1 keeps both)");
-        this->image_engine.reset();
-        this->image_tokenizer.reset();
-        this->image_engine_tag.clear();
+        unload_image_engine();
     }
+}
+
+void RestHandler::unload_image_engine() {
+    this->image_engine.reset();
+    this->image_tokenizer.reset();
+    this->image_engine_tag.clear();
 }
 
 ///@brief Load the image engine for a tag unless it is loaded
@@ -2156,9 +2160,7 @@ std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
     if (this->image_engine) {
         header_print("OFLM", "request asked for image model '" + tag + "' while '" + this->image_engine_tag +
                              "' is loaded -- switching");
-        this->image_engine.reset();
-        this->image_tokenizer.reset();
-        this->image_engine_tag.clear();
+        unload_image_engine();
     }
     if (!this->image_resident && this->auto_chat_engine) {
         // current_model_tag stays: a chat request naming it (or naming nothing) reloads it
@@ -2202,8 +2204,7 @@ std::string RestHandler::ensure_image_engine_loaded(const std::string& tag) {
         }
     }
     catch (const std::exception& e) {
-        this->image_engine.reset();
-        this->image_tokenizer.reset();
+        unload_image_engine();
         return std::string("failed to load '") + tag + "': " + e.what();
     }
     this->image_engine_tag = tag;
@@ -2222,6 +2223,7 @@ void RestHandler::handle_openai_images_generations(const json& request,
                                                    std::function<void(const json&)> send_response,
                                                    StreamResponseCallback send_streaming_response,
                                                    std::shared_ptr<CancellationToken> cancellation_token) {
+    bool engine_used = false;
     try {
         // Everything is checked before the NPU is touched: a refused request unloads nothing.
         std::string tag;
@@ -2265,6 +2267,7 @@ void RestHandler::handle_openai_images_generations(const json& request,
             seed = (static_cast<uint64_t>(rd()) << 32) | rd();
         }
         open_diffusion::Engine& eng = *this->image_engine;
+        engine_used = true;
         eng.select(ir.size, ir.steps);
         const std::vector<int64_t> ids =
             open_diffusion::prompt_ids(*this->image_tokenizer, eng.prompt_template(), ir.prompt, eng.max_tokens());
@@ -2296,6 +2299,11 @@ void RestHandler::handle_openai_images_generations(const json& request,
                            {"size", size}});
     }
     catch (const std::exception& e) {
+        if (engine_used) {
+            // a failed run can leave its context unusable: the next request loads a fresh one
+            header_print("OFLM", "unloading the image engine after a failed request");
+            unload_image_engine();
+        }
         json error_response = {
             {"error", {
                 {"message", e.what()},
@@ -2321,6 +2329,7 @@ void RestHandler::handle_openai_images_edits(const json& fields, const std::vect
                                              StreamResponseCallback send_streaming_response) {
     // an edit's reference, well under the 256 MB body limit (a 64 MP PNG fits)
     constexpr size_t kMaxReferenceBytes = 32u << 20;
+    bool engine_used = false;
     try {
         size_t images = 0, masks = 0;
         const ImageUpload* ref = nullptr;
@@ -2396,6 +2405,7 @@ void RestHandler::handle_openai_images_edits(const json& fields, const std::vect
             seed = (static_cast<uint64_t>(rd()) << 32) | rd();
         }
         open_diffusion::Engine& eng = *this->image_engine;
+        engine_used = true;
         eng.select(ir.size, ir.steps, true);
         const std::vector<int64_t> ids =
             open_diffusion::prompt_ids(*this->image_tokenizer, eng.prompt_template(), ir.prompt, eng.max_tokens());
@@ -2428,6 +2438,11 @@ void RestHandler::handle_openai_images_edits(const json& fields, const std::vect
                            {"size", size}});
     }
     catch (const std::exception& e) {
+        if (engine_used) {
+            // a failed run can leave its context unusable: the next request loads a fresh one
+            header_print("OFLM", "unloading the image engine after a failed request");
+            unload_image_engine();
+        }
         send_response(json{{"error", {{"message", e.what()}, {"type", "server_error"}, {"code", 500}}}});
     }
 }
