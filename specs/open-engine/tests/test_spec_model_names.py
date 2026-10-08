@@ -27,6 +27,7 @@ EXPECTED = {
     "qwen35-9b": "Qwen3.5-9B-NPU2",
     "qwen35-27b": "Qwen3.8-27B-NPU2",
     "k2-horizon-3.7b": "K2-Horizon-3.7B-NPU2",
+    "k2-horizon-7b": "K2-Horizon-7B-NPU2",
     "qwen36-35b-a3b": "Qwen3.6-35B-A3B-NPU2",
     "hy-mt2-7b": "Hy-MT2-7B-NPU2",
     "lfm2-1.2b": "LFM2-1.2B-NPU2",

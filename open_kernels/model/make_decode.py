@@ -189,7 +189,8 @@ def main() -> int:
     tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen35": 248045, "qwen3": 151644,
                                                 "llama3": 128000, "gemma3": 2, "hunyuan": 127958,
                                                 "granite": 100264, "phi3": 200021,
-                                                "qwen2": 151644}[spec.family]     # <|im_start|>, as Qwen3
+                                                "qwen2": 151644,                  # <|im_start|>, as Qwen3
+                                                "k2": 0}[spec.family]             # <|ifm|begin_of_text|>, the template's bos
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:

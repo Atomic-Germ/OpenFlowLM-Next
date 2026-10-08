@@ -1,6 +1,6 @@
 # Traces: OPEN-SPEC-DERIVE, OPEN-FAMILY-K2 (Stage 1.8: sprint-REPORT §4 + the observer's
 # 2026-09-27-stage1.8-k2-plumbing brief)
-"""K2-Horizon-3.7B on the dense recipe: the `_k2_hf` derivation (the frozen config),
+"""K2-Horizon-3.7B (and, at the end, the 7B's GroupRMSNorm(4)) on the dense recipe: the `_k2_hf` derivation (the frozen config),
 the family routing (k2 -> dense, model_type k2_horizon), the norm_groups field (a spec
 field that must not move any shipped model's hash), the LN_GROUPS plumbing into the ln
 build and the catalogue's grouped point, the manifest's hf_config_check (the nested
@@ -109,7 +109,7 @@ def test_qwen3_spec_unaffected_by_the_field():
     ({"use_sliding_window": True, "sliding_window": 4096}, "a window is gemma3's"),
     ({"hidden_act": "gelu_tanh"}, "K2's FFN is silu"),
     ({"rope_head_dim": 64}, "a partial rotation is a different kernel"),
-    ({"layernorm_num_groups": 3}, "only 1 or 2 exist"),
+    ({"layernorm_num_groups": 3}, "only 1, 2 or 4 exist"),
     ({"rope_parameters": {"rope_theta": 1e7, "rope_type": "yarn"}}, "no rope scaling"),
     ({"rope_parameters": None}, "the nested layout is where the base lives"),
 ])
@@ -176,3 +176,25 @@ def test_dense_layout_derives():
     r3 = DR.recipe(ModelSpec.from_json(
         (Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs" / "qwen3-4b.json").read_text()), 4096)
     assert r3.layout.ELN == L.ELN            # the I/O contract did not move with the groups
+
+
+# IFM/K2-Horizon-7B config.json: the 3.7B's family at Qwen3-8B's widths, four norm groups.
+HF_K2_7B = {**HF_K2_3_7B, "hidden_size": 4096, "intermediate_size": 12288, "layernorm_num_groups": 4}
+SPEC_FILE_7B = SPEC_FILE.with_name("k2-horizon-7b.json")
+
+
+def test_7b_derives_four_groups_and_round_trips():
+    s = derive(HF_K2_7B)
+    assert s.hidden == 4096 and s.intermediate == 12288 and s.num_layers == 36
+    assert s.norm_groups == 4 and s.vocab == 250624 and s.real_vocab == K2_REAL_VOCAB
+    c = ModelSpec.from_json(SPEC_FILE_7B.read_text())
+    assert c.extra.pop("model") == "K2-Horizon-7B-NPU2"
+    assert c == s
+
+
+def test_7b_ln_build_and_host_norm_groups():
+    s = derive(HF_K2_7B)
+    b = DR.builds(s)
+    assert b["ln"]["build_dir"] == "ln/build_4096_1e-06_g4"
+    assert b["ln"]["env"] == {"LN_N": "4096", "LN_EPS": "1e-06", "LN_GROUPS": "4"}
+    assert DR.hf_config_check(s)["layernorm_num_groups"] == 4
