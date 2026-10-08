@@ -2,7 +2,8 @@
 
 Updated 2026-10-08. This branch strengthens decode/source validation, adds an
 offline converter command for existing model metadata, and builds the current
-Qwen3.8-27B production recipe. Runtime and kernel arithmetic are unchanged.
+Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
+strict CPU-reference comparison. Runtime and kernel arithmetic are unchanged.
 
 ## Stage 1: complete decode comparison
 
@@ -81,8 +82,52 @@ the sandbox after the restricted attempt failed at forkserver startup.
 Reproduction and source/weight hashes are recorded in
 [the production preflight skill](../../../.opencode/skill/open-qwen38-production-preflight/SKILL.md).
 The export's `toolchain.json` records binary hashes and build provenance.
-**No inference on the newly built kernels is claimed at this stage.** The next
-hardware gate is the eight-layer/three-token slice with pinned CPU references.
+Compilation was followed by the hardware validation below.
+
+## Stage 3: eight-layer NPU decode and reset validation
+
+Tested on AMD Ryzen AI 9 365 / Strix XDNA2, native Linux, with the production
+export above. The harness and standalone C++ CLI were rebuilt from this branch;
+CTest passed 3/3. Before execution, all 82 exported binary hashes were verified,
+including equality of the eight decode artifacts in the harness's build
+directories with their exported counterparts used by the runtime.
+
+Regenerated the independent CPU fixture with `make_decode.py --layers 8
+--tokens 3`. It includes six linear-attention and two full-attention layers,
+seed token 248045, context capacity 4096, 5120 residual values per layer and
+248320 logits per step. `decode_reference.json` pins all 27 reference captures
+and the model-derived spec/build keys. Layer computation uses the FP64 replica;
+the CPU LM head accumulates in FP32 and reference captures are stored as FP32.
+Harness execution completed **30/30 dispatches**, and the strict comparator
+passed all three logits and all 24 layer residuals:
+
+| Step | Full-logit correlation | Argmax, NPU / CPU | Harness / runtime logits |
+|---|---:|---|---|
+| 0 | 0.9999991073 | 220 / 220 | Byte-identical |
+| 1 | 0.9999988538 | 220 / 220 | Byte-identical |
+| 2 | 0.9999990533 | 220 / 220 | Byte-identical |
+
+Worst normalized residual maximum error: **0.001397009**, layer 4 at step 0,
+below the unchanged **0.005** bound. Every logit correlation exceeds **0.9999**;
+dimensions, finite values and reference hashes also pass. The CPU reference
+and runtime consume the same sequence: 248045, 220, 220.
+
+The CLI's `--twice` run reproduced all three generated token IDs. Its second
+request's logit dumps match the harness byte for byte. An additional
+`--det-step 3 --det-full` run replayed the three input IDs from reset three
+times: **0/3 replays differed** from the NPU reference run. Captured activation
+buffers, current KV rows, residual/norm buffers and logits match byte for byte;
+recurrent state is checked by hash. This tests repeatability, not independent
+numerical correctness of the recurrent state or unused KV rows.
+
+Reproduction commands are in the production preflight skill. Local captures,
+reference metadata, logs and full-precision metrics are retained under ignored
+`Models/qwen38-27b/production-slice/` (`results.json`, `logs/`).
+This stage changes documentation only; no arithmetic fix or threshold change
+was needed. Full 64-layer accuracy, per-head/state reference comparisons,
+prompt coverage, serving and hybrid block-prefill parity remain unverified.
+No performance claim: the power-mode request failed, and CPU reference
+generation ran concurrently with the runtime checks.
 
 ## Validation
 
@@ -94,10 +139,11 @@ hardware gate is the eight-layer/three-token slice with pinned CPU references.
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The Python suites were rerun for stage 2. The C++ build/CTest results are from
-the initial review; C++ code is unchanged. Weights were not reconverted and
-full-model NPU inference was not performed. Skipped tests and successful
-compilation do not constitute hardware validation.
+The Python suites were rerun for stage 2; source code is unchanged in stage 3.
+The C++ build/CTest was repeated for stage 3. Weights were not reconverted and
+full-model NPU inference was not performed. Hardware coverage is limited to
+the eight-layer slice above; skipped tests and successful compilation do not
+extend that coverage.
 
 Stage 1 reproduction:
 

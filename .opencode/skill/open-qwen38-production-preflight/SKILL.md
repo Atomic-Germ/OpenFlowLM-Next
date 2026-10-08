@@ -1,12 +1,13 @@
 ---
 name: open-qwen38-production-preflight
-description: Normalize an existing dense Qwen3.5 Q4NX config, validate Qwen3.8-27B source tensors, and build the complete 41-set production recipe on Linux.
+description: Normalize an existing dense Qwen3.5 Q4NX config, validate Qwen3.8-27B source tensors, build the complete 41-set production recipe on Linux, and verify an eight-layer NPU slice.
 ---
 
 # Qwen3.8-27B production preflight and Linux build
 
 Use the shared `qwen35` recipe. This workflow validates metadata, selected source
-weights and compilation; it does not establish full-model NPU accuracy.
+weights, compilation and an eight-layer NPU slice; it does not establish
+full-model NPU accuracy.
 
 ## Existing model metadata
 
@@ -107,13 +108,103 @@ The normalized config passes `check-open-model`; the original nested config is
 refused with `config.json lacks 'head_dim'`. See
 `Models/qwen38-27b/production-preflight.json` for the local audit summary.
 
-## Next hardware gate
+## Eight-layer hardware gate (Linux)
 
-Follow `open-qwen38-27b-kernels` for the slice and runtime commands. Regenerate
-reference fixtures with the current `make_decode.py`: comparison now requires
-`decode_reference.json` and enforces residual error as well as logits.
-Start with the eight-layer/three-token slice before full-depth inference.
-Record sequential NPU and hybrid block-prefill results separately.
+Regenerate reference fixtures with the current `make_decode.py`: comparison
+requires `decode_reference.json` and enforces residual error as well as logits.
+The fixture occupies about 3.2 GB. CPU generation takes several minutes and
+publishes the reference metadata only after all steps complete.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/make_decode.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --layers 8 --tokens 3 --out Models/qwen38-27b/production-slice
+```
+
+The generated harness config uses design **build directories**, whereas the
+runtime uses the export. Verify both against the export's hashes before testing:
+
+```bash
+ironvenv/bin/python - <<'PY'
+import hashlib, json
+from pathlib import Path
+root = Path('Models/qwen38-27b/production-kernels')
+manifest = json.loads((root / 'manifest.json').read_text())
+hashes = json.loads((root / 'toolchain.json').read_text())['sha256']
+for name, expected in hashes.items():
+    assert hashlib.sha256((root / name).read_bytes()).hexdigest() == expected, name
+for key in ('lx', 'ax', 'ln', 'lm_head_q8'):
+    build = Path('open_kernels/designs') / manifest['builds'][key]['build_dir']
+    for name in ('final.xclbin', 'insts.bin'):
+        assert hashlib.sha256((build / name).read_bytes()).hexdigest() == hashes[f'{key}/{name}'], (key, name)
+print('Export and harness artifacts verified')
+PY
+```
+
+Build the native harness and CLI. Set `QWEN_XRT_SDK` to the installed XRT SDK;
+on this machine it is the driver checkout below (the runtime remains in
+`/opt/xilinx/xrt/lib`). These commands rebuild host executables, not xclbins.
+
+```bash
+QWEN_XRT_SDK=/home/prihlop/sources/xdna-driver/xrt/build/Release/opt/xilinx/xrt
+cmake -S open_kernels/harness -B open_kernels/harness/out \
+  -DXRT_INCLUDE_DIR="$QWEN_XRT_SDK/include" -DXRT_LIB_DIR="$QWEN_XRT_SDK/lib"
+cmake --build open_kernels/harness/out -j4
+cmake -S src/open_qwen36 -B /tmp/qwen38-main-status-runtime \
+  -DXRT_INCLUDE_DIR="$QWEN_XRT_SDK/include" -DXRT_LIB_DIR="$QWEN_XRT_SDK/lib"
+cmake --build /tmp/qwen38-main-status-runtime -j4
+ctest --test-dir /tmp/qwen38-main-status-runtime --output-on-failure
+```
+
+Run NPU jobs serially. XRT device access requires execution outside this
+machine's sandbox. Do not rewrite references or loosen thresholds on failure.
+
+```bash
+HARNESS_TIMEOUT_MS=30000 LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+  open_kernels/harness/out/run_kernel Models/qwen38-27b/production-slice/run_decode.cfg
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/compare_decode.py \
+  --out Models/qwen38-27b/production-slice --tokens 3
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
+  /tmp/qwen38-main-status-runtime/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-kernels \
+  --ids 248045 --max-tokens 3 --layers 8 \
+  --dump-logits Models/qwen38-27b/production-slice/engine --twice
+ironvenv/bin/python - <<'PY'
+from pathlib import Path
+p = Path('Models/qwen38-27b/production-slice')
+for t in range(3):
+    suffix = '' if t == 0 else f'_t{t}'
+    got = (p / f'engine_t{t}.bin').read_bytes()
+    assert len(got) == 248320 * 4
+    assert got == (p / f'y_logits{suffix}.bin').read_bytes(), t
+print('All three runtime/harness logits are byte-identical')
+PY
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
+  /tmp/qwen38-main-status-runtime/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-kernels \
+  --ids 248045,220,220 --layers 8 --det-step 3 --det-full
+```
+
+2026-10-08 on Ryzen AI 9 365 / Strix XDNA2: 30 harness dispatches completed;
+logit correlations 0.9999991073 / 0.9999988538 / 0.9999990533, argmax 220 at each
+step. All 24 residual comparisons passed; worst normalized maximum error
+0.001397009 (layer 4, step 0), below 0.005. Runtime logits were byte-identical
+to the harness, and `--twice` reproduced the token sequence. The CPU layer
+replica uses FP64, but CPU LM-head accumulation and saved captures use FP32.
+
+`--twice` checks generated IDs and overwrites dumps with the second request.
+`--det-full` matched all observed buffers and recurrent-state hashes in three
+reset replays of the input sequence; it compares to an NPU reference run, not
+a CPU state reference. Current KV rows are observed, not the unused cache.
+No throughput claim: the CLI could not set the power mode, and CPU reference
+generation ran concurrently with runtime validation.
+
+Next: full-depth inference and prompt checks, with sequential NPU and hybrid
+block-prefill results recorded separately. The slice does not close those
+gates or per-head/state numerical validation. Local stage-3 evidence is in
+`Models/qwen38-27b/production-slice/results.json` and `logs/`.
 
 Artifacts/logs for this run: `Models/qwen38-27b/production-kernels/`,
 `Models/qwen38-27b/production-input-sha256.txt`,
