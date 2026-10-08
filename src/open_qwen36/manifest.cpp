@@ -207,6 +207,15 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (rk == m.kernels.end() || rk->second.patch != "attnrows")
             fail(rw, "kernel " + m.rows.kernel + " is not a kernel built with the attnrows patch table");
         if (!m.kernels.count(m.rows.head)) fail(rw, "head " + m.rows.head + " is not a kernel");
+        m.rows.lora_kernel = r.value("lora_kernel", "");
+        if (!m.rows.lora_kernel.empty()) {
+            auto lk = m.kernels.find(m.rows.lora_kernel);
+            if (lk == m.kernels.end() || lk->second.patch != "attnrows")
+                fail(rw, "lora_kernel " + m.rows.lora_kernel + " is not a kernel built with the attnrows patch table");
+            m.rows.lora_file = get<std::string>(r, "lora_file", rw);
+            m.rows.lora_pool_bytes = get<uint64_t>(r, "lora_pool_bytes", rw);
+            for (const auto& o : need(r, "lora_pack", rw)) m.rows.lora_pack.push_back(parse_op(o, rw + ".lora_pack"));
+        }
     }
     for (const auto& [name, v] : need(j, "layer_types", where).items()) {
         const std::string tw = where + " layer type " + name;

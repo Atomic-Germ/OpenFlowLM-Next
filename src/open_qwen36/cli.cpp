@@ -34,6 +34,7 @@
 /// pairs (correlation / argmax / top-5).
 #include <algorithm>
 #include <chrono>
+#include <random>
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
@@ -109,6 +110,7 @@ struct Args {
     std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
     int rows_check = 0;             // OPEN-DECODE-ROWS: N decode steps, then the same positions as L-row passes
+    int uno = 0;                    // OPEN-UNO-DECODE: N tokens by Uno's two-pass cycle, then by decode
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -200,6 +202,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
         else if (k == "--rows-check") a.rows_check = std::atoi(val().c_str());
+        else if (k == "--uno") a.uno = std::atoi(val().c_str());
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -256,6 +259,68 @@ int rows_check(Core& core, const Args& a, int n) {
                      passes, L, rows_ms / passes, per_step, (rows_ms / passes) / per_step);
     std::printf(bad ? "ROWS FAIL (%d rows)\n" : "ROWS PASS\n", bad);
     return bad;
+}
+
+/// OPEN-UNO-DECODE: greedy Uno, IFM's two-pass cycle (nano_vllm_uno two_pass_decoding.py) on the
+/// L-row pass. A cycle drafts from [seed, noise...] with the LoRA on every row but the seed's (row 0
+/// is then the base model's next token c, rows 1.. drafts d), verifies [c, d...] without it, and
+/// commits c, the drafts the verify agrees with, and the verify's next token. Then the same n
+/// tokens by plain decode from the same prompt, which the cycle must reproduce exactly.
+int uno(Core& core, const Args& a, int n) {
+    using clock = std::chrono::steady_clock;
+    const size_t L = core.rows_l();
+    if (!L || !core.has_draft()) { std::fprintf(stderr, "uno: this kernel set or model has no draft pass\n"); return 1; }
+    const size_t P = a.ids.size();
+    std::mt19937 rng(0);
+    std::uniform_int_distribution<int> noise(1, static_cast<int>(core.vocab()) - 1);   // [1, mask_token_id)
+    for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
+    std::vector<int> out, hist(L, 0), dr(L), vr(L), am(L), av(L);
+    int seed = a.ids[P - 1];
+    size_t cycles = 0;
+    const auto t0 = clock::now();
+    while (out.size() < static_cast<size_t>(n)) {
+        const int p = core.position();                  // the seed's own position
+        dr[0] = seed;
+        for (size_t j = 1; j < L; ++j) dr[j] = noise(rng);
+        core.step_rows(dr.data(), am.data(), false, true);
+        vr[0] = am[0];
+        for (size_t j = 1; j < L; ++j) vr[j] = am[j];
+        core.seek(p + 1);
+        core.step_rows(vr.data(), av.data(), false, false);
+        size_t k = 0;
+        while (k + 1 < L && vr[k + 1] == av[k]) ++k;    // draft k+1 checked by verify row k
+        ++hist[k];
+        ++cycles;
+        for (size_t j = 0; j <= k; ++j) out.push_back(vr[j]);
+        out.push_back(av[k]);
+        seed = av[k];
+        core.seek(p + 2 + static_cast<int>(k));
+    }
+    const double uno_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    out.resize(n);
+    std::string h;
+    for (size_t j = 0; j < L; ++j) h += (j ? " " : "") + std::to_string(hist[j]);
+    std::fprintf(stderr, "uno: %d tokens in %zu cycles (%.2f a cycle, accepted-draft histogram %s): %.1f ms/token "
+                         "(%.2f tok/s)\n", n, cycles, static_cast<double>(n) / cycles, h.c_str(), uno_ms / n,
+                 1000.0 * n / uno_ms);
+    for (int t : out) std::printf("token %d\n", t);
+    // plain decode from the same prompt
+    core.seek(0);
+    for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    std::vector<int> ar;
+    const auto t1 = clock::now();
+    for (int t = 0; t < n; ++t) {
+        ar.push_back(argmax(core.logits(), core.real_vocab()));
+        if (t + 1 < n) core.step(ar.back(), true);
+    }
+    const double ar_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+    size_t first = 0;
+    while (first < ar.size() && ar[first] == out[first]) ++first;
+    std::fprintf(stderr, "decode: %d tokens, %.1f ms/token (%.2f tok/s); uno is %.2fx\n", n, ar_ms / std::max(1, n - 1),
+                 1000.0 * (n - 1) / ar_ms, (ar_ms / std::max(1, n - 1)) / (uno_ms / n));
+    if (first == ar.size()) std::printf("UNO IDENTICAL to decode over %d tokens\n", n);
+    else std::printf("UNO DIFFERS from decode at token %zu (%d vs %d)\n", first, out[first], ar[first]);
+    return first == ar.size() ? 0 : 1;
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -488,6 +553,7 @@ int main(int argc, char** argv) {
             return bad ? 1 : 0;
         }
         if (a.rows_check) return rows_check(core, a, a.rows_check) ? 1 : 0;
+        if (a.uno) return uno(core, a, a.uno);
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;

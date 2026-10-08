@@ -281,6 +281,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (man_.rows.l) {
         wanted[man_.rows.kernel] = true;
         wanted[man_.rows.head] = true;
+        if (!man_.rows.lora_kernel.empty()) wanted[man_.rows.lora_kernel] = true;
     }
     for (const auto& [name, d] : man_.kernels)
         if (wanted.count(name)) load_kernel(name, d);
@@ -674,6 +675,22 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         globals_["rows_act"] = alloc(man_.rows.act_bytes);
         globals_["rows_hact"] = alloc(man_.rows.head_act_bytes);
         globals_["rows_out"] = alloc(man_.rows.head_out_floats * 4);
+        lora_.clear();
+        lora_none_ = alloc(4096);
+        const fs::path lf = fs::path(cfg_.model_dir) / man_.rows.lora_file;
+        if (!man_.rows.lora_kernel.empty() && fs::exists(lf)) {
+            Q4nxFile uno(lf.string());
+            for (int l = 0; l < nl_; ++l) {
+                xrt::bo b = xrt::ext::bo(*dev_, man_.rows.lora_pool_bytes);
+                std::memset(b.map<uint8_t*>(), 0, man_.rows.lora_pool_bytes);
+                for (const PackOp& o : man_.rows.lora_pack)
+                    pools::apply(o, uno, l, b.map<uint8_t*>(), man_.rows.lora_pool_bytes, man_.chunk_bytes);
+                b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+                lora_.push_back(std::move(b));
+            }
+            log("draft pass: " + man_.rows.lora_file + " packed, " + std::to_string(nl_) + " LoRA pools of " +
+                std::to_string(man_.rows.lora_pool_bytes >> 20) + " MB");
+        }
     }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
@@ -717,6 +734,7 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
     if (name == "consts") return consts_[layer];
     if (name == "act") return act_[layer];
     if (name == "state") return state_[layer];
+    if (name == "lora") return layer >= 0 && static_cast<size_t>(layer) < lora_.size() ? lora_[layer] : lora_none_;
     // the block route's per-layer weight buffers (load_weights)
     if (auto g = gemm_w_.find(name); g != gemm_w_.end()) {
         if (layer < 0 || static_cast<size_t>(layer) >= g->second.size() || !g->second[layer])
@@ -3356,10 +3374,12 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
     timing_.route_ms += ms_since(tp);
 }
 
-void Core::step_rows(const int* ids, int* argmax, bool want_logits) {
+void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) {
     const size_t L = man_.rows.l, hid = man_.hidden;
     if (!L) throw std::runtime_error("open_qwen36: this kernel set has no L-row pass (manifest `rows`)");
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_rows before load_weights");
+    if (draft && lora_.empty())
+        throw std::runtime_error("open_qwen36: a draft pass needs " + man_.rows.lora_file + " beside model.q4nx");
     if (static_cast<size_t>(pos_) + L > cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: rows " + std::to_string(pos_) + "+" + std::to_string(L) +
                                  " pass the context capacity " + std::to_string(cfg_.max_ctx));
@@ -3372,12 +3392,12 @@ void Core::step_rows(const int* ids, int* argmax, bool want_logits) {
         file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[j]), hid, x + j * hid);
     }
     xr.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hid * 4, 0);
-    Kern& k = kerns_.at(man_.rows.kernel);
+    Kern& k = kerns_.at(draft ? man_.rows.lora_kernel : man_.rows.kernel);
     stream_patch::attn_rows_apply(k.iw(), k.attn_rows, static_cast<uint64_t>(pos_), k.geom);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     // Every layer runs the same stream on its own buffers, so nothing is patched between them
     // and layer l + 1 queues behind layer l in the one context (the decode walk's level 1).
-    const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab"};
+    const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab", "lora"};
     Inflight prev;
     for (int l = 0; l < nl_; ++l) {
         Inflight f = start_run(k, args, l);

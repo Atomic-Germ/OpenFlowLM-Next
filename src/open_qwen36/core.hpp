@@ -259,7 +259,10 @@ public:
     /// rows' KV is written and the position does NOT move: the caller seeks to the prefix it
     /// keeps. Per row it is bit-identical to step(). 0 when the kernel set has no rows pass.
     size_t rows_l() const { return man_.rows.l; }
-    void step_rows(const int* ids, int* argmax, bool want_logits = false);
+    /// draft = true: the draft pass (OPEN-UNO-LORA), the rows the LoRA mask names (all but row 0)
+    /// through the LoRA from rows.lora_file; has_draft() says whether it was found.
+    void step_rows(const int* ids, int* argmax, bool want_logits = false, bool draft = false);
+    bool has_draft() const { return !lora_.empty(); }
     /// Row j's logits from the last step_rows(want_logits = true).
     const float* rows_logits(size_t j);
     double rows_ms() const { return rows_ms_; }
@@ -311,6 +314,8 @@ private:
     std::map<std::string, Kern> kerns_;
 
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
+    std::vector<xrt::bo> lora_;                 ///< per layer: the draft pass's LoRA pool (rows.lora_file), if any
+    xrt::bo lora_none_;                         ///< what the verify stream's unused LoRA argument binds to
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, gact, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;

@@ -194,6 +194,12 @@ struct RowsDesc {
     uint64_t head_act_bytes = 0;     ///< the head's normed rows (bf16 [L][hidden])
     uint64_t head_cores = 0;         ///< cores whose [value L | row L] argmax elements end the head's output
     uint64_t head_out_floats = 0;    ///< logits [L][vocab] then head_cores elements of L * 64
+    /// The draft pass (OPEN-UNO-LORA): `lora_kernel` is the same core programs' stream that adds
+    /// a LoRA from `lora_file` (beside model.q4nx), packed per layer by `lora_pack` into a
+    /// `lora_pool_bytes` buffer. Empty: no draft pass.
+    std::string lora_kernel, lora_file;
+    uint64_t lora_pool_bytes = 0;
+    std::vector<PackOp> lora_pack;
 };
 
 /// A global sized max_ctx x row: the position record table(s).

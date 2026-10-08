@@ -639,21 +639,28 @@ def rows_route(spec: ModelSpec) -> dict | None:
     argmax) and the manifest's `rows` section, for a family validated on it; None otherwise."""
     if spec.family not in ROWS_FAMILIES:
         return None
-    from .dxl import layout as dxl_layout
+    from .dxl import layout as dxl_layout, lora_pack_plan
     try:
         X = dxl_layout(spec, ROWS_L)
     except OpRangeError:
         return None
     n_head = 8
+    bd = f"dxl/build_{spec.family}_h{spec.hidden}_l{ROWS_L}"
+    # dxl_lora is the draft pass's stream for the same core programs: it runs in dxl's context
     return {
         "contexts": {"dxl": "dxl/final.xclbin", "lmhl": "lmhl/final.xclbin"},
         "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl"},
+                    "dxl_lora": {"context": "dxl", "insts": "dxl_lora/insts.bin", "patch": "attnrows",
+                                 "build": "dxl_lora"},
                     "lmhl": {"context": "lmhl", "insts": "lmhl/insts.bin", "build": "lmhl"}},
         "rows": {"l": ROWS_L, "kernel": "dxl", "head": "lmhl", "act_bytes": X.AD_BYTES,
                  "head_act_bytes": ROWS_L * spec.hidden * 2, "head_cores": n_head,
-                 "head_out_floats": ROWS_L * lm_rows(spec) + n_head * ROWS_L * 64},
-        "builds": {"dxl": {"design": "dxl/dxl.py", "build_dir": f"dxl/build_{spec.family}_h{spec.hidden}_l{ROWS_L}",
-                           "env": {"DXL_L": str(ROWS_L)}},
+                 "head_out_floats": ROWS_L * lm_rows(spec) + n_head * ROWS_L * 64,
+                 "lora_kernel": "dxl_lora", "lora_file": "uno.q4nx", "lora_pool_bytes": X.LORA_BYTES,
+                 "lora_pack": lora_pack_plan(spec, ROWS_L)},
+        "builds": {"dxl": {"design": "dxl/dxl.py", "build_dir": bd, "env": {"DXL_L": str(ROWS_L)}},
+                   "dxl_lora": {"design": "dxl/dxl.py", "build_dir": bd + "_draft",
+                                "env": {"DXL_L": str(ROWS_L), "DXL_DRAFT": "1"}},
                    "lmhl": {"design": "dxl/lmhl.py", "build_dir": f"dxl/build_lmhl_{lm_rows(spec)}_l{ROWS_L}",
                             "env": {"DXL_L": str(ROWS_L)}}},
     }
