@@ -45,6 +45,10 @@ def main() -> int:
     ok, n, cos, rel, rel_fro, bad = metrics(got, ref)
     print(f"{'PASS' if ok else 'FAIL'} overall n={n} rel_fro={rel_fro:.3e} (gate {REL_FRO_GATE:.0e}) "
           f"cos={cos:.9f} maxrel={rel:.3e} finite={np.isfinite(got).all()} nbad={len(bad)}")
+    ref2 = HERE / f"ref2_{tag}.bin"
+    if ref2.is_file():
+        _, _, cos2, rel2, fro2, _ = metrics(got, np.fromfile(ref2, np.float32).astype(np.float64))
+        print(f"vs the bf16-rounded weights: rel_fro={fro2:.3e} cos={cos2:.9f} maxrel={rel2:.3e}")
     if len(bad):
         print("first bad idx:", bad[:16])
         print("got:", got[bad[:8]])
