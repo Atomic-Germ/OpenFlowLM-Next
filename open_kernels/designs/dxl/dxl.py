@@ -357,11 +357,12 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
             Before the first z fill, the A band's z must be in DDR."""
             zwait = True
             for job in stage[name]:
-                if job not in early:
-                    y_drain(job)
+                # the wait comes before this job's own drain, which cannot finish without its z fill
                 if job.x[0] == "z" and zwait:
                     py.finish()
                     zwait = False
+                if job not in early:
+                    y_drain(job)
                 x_fill(job)
                 if job not in early:
                     w_fill(job)
