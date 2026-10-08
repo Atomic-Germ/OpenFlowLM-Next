@@ -46,4 +46,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate the synthetic 48-head AB, conv/record and recurrent-state chain for the WideDeltaNet A7 gate, including default32-head regression and known precision limits.</description>
     <location>.opencode/skill/open-wide-deltanet-chain/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-production-preflight</name>
+    <description>Normalize existing Qwen3.5-family metadata, compare Qwen3.8-27B source tensors, and build all 41 production kernel sets on Linux.</description>
+    <location>.opencode/skill/open-qwen38-production-preflight/SKILL.md</location>
+  </skill>
 </available_skills>

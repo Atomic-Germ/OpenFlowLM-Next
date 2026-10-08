@@ -4067,3 +4067,21 @@ additional gates. MoE references that permit device-selected experts are marked
 These checks cover captured logits and residuals. State/cache isolation, source
 conversion correctness, serving and full-model hardware acceptance need their
 own evidence; passing this comparator alone does not establish those properties.
+
+### OPEN-QWEN35-CONFIG-NORMALIZE: existing container metadata
+
+`q4nx-build --normalize-config -i DIR` provides an offline path to normalize
+an existing dense Qwen3.5 container's nested config through `inject_oflm_keys`,
+retaining canonical `model_type=qwen3_5`. Before writing it checks header bounds,
+tensor byte ranges/shapes, non-overlap, exact contiguous layer indices and
+input-norm widths. Conflicting nested/top-level values, unsupported model
+families and conversion options are refused. The original config is backed up,
+the replacement is atomic, and model weights are never opened for writing.
+A normalized config is a no-op; an earlier backup is never overwritten.
+Tests: `utilities/q4nx-build/tests/test_normalize_config.py`.
+
+`model/container_vs_hf.py` requires every requested layer in the selected source
+shard. Missing layers and non-finite comparisons fail; finite equal constant or
+scalar tensors can pass. Nonconstant tensors retain correlation > 0.99.
+Tests: `tests/test_container_vs_hf.py`. This source check covers only the selected
+layers and does not replace full-model numerical or hardware acceptance.

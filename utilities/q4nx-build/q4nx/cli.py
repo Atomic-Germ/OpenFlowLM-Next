@@ -533,6 +533,11 @@ def _parse_args(argv):
     )
     parser.add_argument("input_file", nargs="?", help="Input GGUF file (positional)")
     parser.add_argument(
+        "--normalize-config", action="store_true",
+        help="Normalize config.json in an existing dense Qwen3.5 Q4NX directory (-i DIR), "
+             "offline, after structural validation; backs up config and never rewrites weights.",
+    )
+    parser.add_argument(
         "-i", "--input", dest="input_flag", help="Input GGUF file, or an HF repo id"
     )
     parser.add_argument(
@@ -680,6 +685,19 @@ def main(argv=None) -> int:
     input_path = args.input_flag or args.input_file
     if not input_path:
         sys.exit("Error: Input file is required. Use -i <file> or provide as positional argument.")
+    if args.normalize_config:
+        defaults = vars(_parse_args([]))
+        other = [k for k, v in vars(args).items()
+                 if k not in ("normalize_config", "input_file", "input_flag") and v != defaults[k]]
+        if other:
+            sys.exit("--normalize-config cannot be combined with conversion options: " + ", ".join(other))
+        from q4nx.config_normalize import normalize_config
+        try:
+            changed = normalize_config(Path(input_path))
+        except (OSError, ValueError) as exc:
+            sys.exit(str(exc))
+        print("[INFO] config.json normalized (original backed up)" if changed else "[INFO] config.json already normalized")
+        return 0
 
     # What was ASKED for, before any resolution. A repo id is about to be
     # replaced by the local file it downloads to -- a path under the HF cache
