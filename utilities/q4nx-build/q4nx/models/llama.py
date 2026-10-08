@@ -31,6 +31,11 @@ class Llama(__Q4NX_Converter, model_arch=ModelArch.LLAMA):
         key carries the arch prefix, and a llama GGUF is always llama.*."""
         return self.gguf_reader.fields["llama.rope.dimension_count"].contents()
 
+    def _gguf_qk_interleaved(self) -> bool:
+        """Whether the GGUF's q/k rows are llama.cpp's interleaved rotary pairs, which
+        the kernels' split-half RoPE needs undone. Every llama-arch GGUF is."""
+        return True
+
     def convert(self, q4nx_path: str, weights_type: str = 'language'):
         self.q4nx_tensors = {}
         if self.gguf_reader is not None:
@@ -53,7 +58,7 @@ class Llama(__Q4NX_Converter, model_arch=ModelArch.LLAMA):
 
             unpacked = gguf_tensor.unpack(self.default_tensor_type)
 
-            if "q_proj" in self.forward_name_map[gguf_tensor.name] or "k_proj" in self.forward_name_map[gguf_tensor.name]:
+            if ("q_proj" in self.forward_name_map[gguf_tensor.name] or "k_proj" in self.forward_name_map[gguf_tensor.name])                     and self._gguf_qk_interleaved():
                 DH = self._rope_dim_count()
                 pp = DH // 2
                 d, m, qw = unpacked

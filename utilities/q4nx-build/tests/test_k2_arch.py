@@ -72,6 +72,26 @@ class TestK2ArchResolution(unittest.TestCase):
         self.assertIn("rope_freqs", cfg["name_map"])           # GGUF-only; the converter skips it
 
 
+class TestK2QkRowOrder(unittest.TestCase):
+    """A k2-horizon GGUF keeps HF's split-half q/k rows; only a llama-arch one is
+    interleaved and needs Llama's reorder (Traces: OPEN-FAMILY-K2)."""
+
+    def test_k2_horizon_gguf_rows_are_kept(self):
+        import q4nx.models as M
+        k2 = M.K2.__new__(M.K2)
+        k2.gguf_reader = FakeReader("k2-horizon")
+        self.assertFalse(k2._gguf_qk_interleaved())
+
+    def test_llama_arch_rows_are_reordered(self):
+        import q4nx.models as M
+        k2 = M.K2.__new__(M.K2)
+        k2.gguf_reader = FakeReader("llama")
+        self.assertTrue(k2._gguf_qk_interleaved())
+        llama = M.Llama.__new__(M.Llama)
+        llama.gguf_reader = FakeReader("k2-horizon")
+        self.assertTrue(llama._gguf_qk_interleaved())     # -f llama keeps llama's rule
+
+
 class TestK2ConverterClass(unittest.TestCase):
     def test_the_class_registers_and_the_rope_hook_reads_the_own_prefix(self):
         import q4nx.models as M                                    # registers every class
