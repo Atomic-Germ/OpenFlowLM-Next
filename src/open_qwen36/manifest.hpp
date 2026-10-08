@@ -42,6 +42,7 @@ struct PackOp {
     std::string split;                                                  ///< std_perm of a q8 source: "hi" |
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)
+    std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed

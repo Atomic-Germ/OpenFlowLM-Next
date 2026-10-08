@@ -247,12 +247,33 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 3}"));
+    json j = json::parse(std::string("{\"manifest_version\": 4}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 3 is refused");
+        check(false, "manifest_version 4 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 3") != std::string::npos, std::string("manifest_version 3 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 4") != std::string::npos, std::string("manifest_version 4 is refused: ") + e.what());
+    }
+    // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
+    auto bf16_weight = [](json& j, int version, bool mixed) {
+        j["manifest_version"] = version;
+        json op = {{"op", "bf16_gemm"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
+                   {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}};
+        json pack = json::array({op});
+        if (mixed) pack.push_back({{"op", "std_perm"}, {"tensor", op["tensor"]}, {"nch", 1024}, {"in_dim", 4096}, {"dst", 16777216}});
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"] = {{"from", "pack"}, {"pack", pack}};
+    };
+    refused_manifest(argv[1], "needs version 3", "a bf16_gemm weight in a version 2 manifest is refused at load",
+                     [&](json& j) { bf16_weight(j, 2, false); });
+    refused_manifest(argv[1], "mixes bf16_gemm and std_perm", "a weight mixing GEMM formats is refused at load",
+                     [&](json& j) { bf16_weight(j, 3, true); });
+    {
+        std::ifstream f(argv[1]);
+        json g = json::parse(f);
+        bf16_weight(g, 3, false);
+        bool ok = true;
+        try { Manifest::parse(g, "q8 gemm"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
+        check(ok, "a version 3 manifest with a bf16_gemm weight loads");
     }
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
@@ -596,7 +617,7 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a split out projection parses: ") + e.what());
             }
         }
-        refused_manifest(argv[5], "std_perm ops only", "qwen35: a packed weight that is not std_perm is refused",
+        refused_manifest(argv[5], "std_perm or bf16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);
                              json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];

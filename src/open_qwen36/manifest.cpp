@@ -57,6 +57,9 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.elem = j.value("elem", 0ull);
     p.dst_rows = j.value("dst_rows", 0ull);
     p.split = j.value("split", "");
+    p.via = j.value("via", "");
+    if (!p.via.empty() && (p.op != "bf16_gemm" || p.via != "q4_1"))
+        fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
         fail(where, p.op + " " + p.tensor + ": split must be hi or lo, on a std_perm");
     // The same fields pools::apply needs, checked here so a bad manifest is named
@@ -65,7 +68,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "put" || p.op == "expert_down" ||
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "put" || p.op == "expert_down" ||
         p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
@@ -73,7 +76,8 @@ PackOp parse_op(const json& j, const std::string& where) {
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm" || p.op == "q8_perm") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "bf16_gemm")
+        need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
         need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
@@ -132,8 +136,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // 2 is 1 plus `split` route steps (OPEN-PREFILL-BATCH): an engine that reads only 1 would
     // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
     // a step is split, and an older engine refuses the set by name instead of misreading it.
-    if (m.version != 1 && m.version != 2)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 and 2)");
+    // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
+    if (m.version < 1 || m.version > 3)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 3)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -236,9 +241,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         for (const auto& oj : need(wj, "pack", gw + "." + key + "." + name))
                             w.pack.push_back(parse_op(oj, gw + "." + key + "." + name));
                         if (w.pack.empty()) fail(gw, "weight " + name + " packs nothing");
+                        // one format per weight: the q4_1 band law, or one GEMM pool the kernel was built for
+                        const std::string& kind = w.pack.front().op;
                         for (const auto& o : w.pack)
-                            if (o.op != "std_perm")
-                                fail(gw, "weight " + name + ": a packed weight is std_perm ops only (the band law the GEMM reads)");
+                            if (o.op != "std_perm" && o.op != "bf16_gemm")
+                                fail(gw, "weight " + name + ": a packed weight is std_perm or bf16_gemm ops, not " + o.op);
+                        for (const auto& o : w.pack)
+                            if (o.op != kind)
+                                fail(gw, "weight " + name + " mixes " + kind + " and " + o.op + " ops; the GEMM reads one format");
                         into[name] = w;
                         continue;
                     }
@@ -491,7 +501,13 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         for (const auto& o : need(pk, "consts", tw)) t.consts.push_back(parse_op(o, tw + " pack.consts"));
         for (const auto* ws : {&t.gemm_block.weights, &t.gemm_block.shared_weights, &t.gemm_block.ffn_weights})
             for (const auto& [name, w] : *ws) {
-                if (w.from == "pack") continue;
+                if (w.from == "pack") {
+                    for (const auto& o : w.pack)
+                        if (o.op == "bf16_gemm" && m.version < 3)
+                            fail(tw, "gemm_block weight " + name + " packs " + o.op + " in a manifest_version " +
+                                         std::to_string(m.version) + " manifest; an engine that reads 2 cannot pack it, so it needs version 3");
+                    continue;
+                }
                 const size_t n = w.from == "pool" ? t.pool.size() : t.consts.size();
                 for (size_t idx : w.ops)
                     if (idx >= n) fail(tw, "gemm_block weight " + name + " names " + w.from + " op " + std::to_string(idx) + " of " + std::to_string(n));

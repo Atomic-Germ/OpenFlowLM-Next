@@ -485,7 +485,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
             if (from == "pack") {
                 size_t bytes = 0;
-                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + o.nch * man_.chunk_bytes);
+                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::op_bytes(o, man_.chunk_bytes));
                 xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
                 std::memset(w.map<uint8_t*>(), 0, padup(bytes));
                 for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, man_.chunk_bytes);

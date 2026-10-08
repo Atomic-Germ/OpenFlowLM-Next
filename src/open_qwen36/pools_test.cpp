@@ -824,6 +824,32 @@ int main() {
         check(gh == 0x011857df63d905ceull && gl == 0x1a95b8ae739769d2ull, "split_q4_1: byte-identical to the NumPy packer");
     }
 
+    // ---- bf16_gemm: the 12 shared chunks as a [64, 1536] tensor, from q8 and from their q4_1 (OPEN-PACK-PLAN)
+    {
+        const size_t R = 64, K = 1536, NCOL = K / 256;
+        std::vector<uint16_t> b8(R * K), b4(R * K);
+        open_qwen36::pools::bf16_gemm_pack(src.data(), true, R, K, b8.data());
+        open_qwen36::pools::bf16_gemm_pack(out.data(), false, R, K, b4.data());
+        bool ok8 = true, ok4 = true;
+        for (size_t row = 0; row < R; ++row)
+            for (size_t k = 0; k < K; ++k) {
+                const size_t c = (row / 32) * NCOL + k / 256;
+                const unsigned rl = static_cast<unsigned>(row % 32), b = static_cast<unsigned>((k % 256) / 32),
+                               i = static_cast<unsigned>(k % 32);
+                const size_t at = ((row / 64) * (K / 64) + k / 64) * 4096 + (((row % 64) / 4) * 8 + (k % 64) / 8) * 32 +
+                                  (row % 4) * 8 + k % 8;
+                ok8 = ok8 && b8[at] == open_qwen36::f32_to_bf16(q8_read(src.data() + c * 8704, rl, b, i));
+                ok4 = ok4 && b4[at] == open_qwen36::f32_to_bf16(q4_read(out.data() + c * 5120, rl, b, i));
+            }
+        check(ok8, "bf16_gemm: a q8 source lands as code * scale rounded to bf16 once, in A-block order");
+        check(ok4, "bf16_gemm: a q4_1 source lands as m + n * d rounded to bf16 once, in A-block order");
+        const uint64_t g8 = fnv1a(reinterpret_cast<const uint8_t*>(b8.data()), b8.size() * 2),
+                       g4 = fnv1a(reinterpret_cast<const uint8_t*>(b4.data()), b4.size() * 2);
+        std::printf("      bf16_gemm fnv1a q8 = 0x%016llx, q4_1 = 0x%016llx\n", static_cast<unsigned long long>(g8),
+                    static_cast<unsigned long long>(g4));
+        check(g8 == 0xa1e333116f424dafull && g4 == 0x7018cee99915f0b9ull, "bf16_gemm: byte-identical to the NumPy packer");
+    }
+
     // ---- transpose: [32, 64] of 2-byte values
     std::vector<uint8_t> t_src(32 * 64 * 2), t_dst(32 * 64 * 2);
     for (size_t i = 0; i < t_src.size(); ++i) t_src[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
