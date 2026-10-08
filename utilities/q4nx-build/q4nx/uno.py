@@ -6,8 +6,8 @@ m being 1 on the draft rows and 0 on the seed row. The engine computes it inside
 GEMV, so the tensors here are shaped for that GEMV, not as the adapter ships them:
 
 - `a_qkv`, `a_o`, `a_gu`, `a_d`: the A matrices of the projections that share an input,
-  stacked ([A_q; A_k; A_v], [A_o], [A_g; A_u], [A_d]) and zero-padded to n_cores x 64 rows,
-  so each core computes one 64-row band of z = x A^T.
+  stacked ([A_q; A_k] then A_v from row 256, [A_o], [A_g; A_u], [A_d]) and zero-padded to
+  n_cores x 64 rows, so each core computes one 64-row band of z = x A^T.
 - `b_q`, `b_k`, `b_v`, `b_o`, `b_g`, `b_u`, `b_d`: s * B, zero-padded to 256 columns -- one
   k-tile appended to every band of its projection. A projection's tile reads a 256-wide
   window of its z: q and k read [z_q | z_k] (b_q = [B_q | 0], b_k = [0 | B_k]), v reads
@@ -70,16 +70,23 @@ def derived(sd: dict, layer: int, scale: float, n_cores: int = 8) -> dict[str, n
     if 3 * r > rows or 2 * r > 256:
         raise ValueError(f"uno: rank {r} does not fit the padded layout ({rows} A rows, one 256-column B tile)")
 
-    def pad_rows(*ms):
-        x = np.concatenate(ms, 0)
-        return np.concatenate([x, np.zeros((rows - x.shape[0], x.shape[1]), np.float32)], 0)
+    def pad_rows(*ms, at=None):
+        """the matrices stacked from row 0, or each at its row in `at`, the rest zero"""
+        out = np.zeros((rows, ms[0].shape[1]), np.float32)
+        r0 = 0
+        for i, m in enumerate(ms):
+            r0 = at[i] if at else r0
+            out[r0:r0 + m.shape[0]] = m
+            r0 += m.shape[0]
+        return out
 
     def tile(b, lo):
         t = np.zeros((b.shape[0], 256), np.float32)
         t[:, lo:lo + r] = b
         return t
 
-    return {"a_qkv": pad_rows(A["q_proj"], A["k_proj"], A["v_proj"]), "a_o": pad_rows(A["o_proj"]),
+    # z_v starts the second 256-wide window, which is what v's tile reads, at any rank
+    return {"a_qkv": pad_rows(A["q_proj"], A["k_proj"], A["v_proj"], at=(0, r, 256)), "a_o": pad_rows(A["o_proj"]),
             "a_gu": pad_rows(A["gate_proj"], A["up_proj"]), "a_d": pad_rows(A["down_proj"]),
             "b_q": tile(B["q_proj"], 0), "b_k": tile(B["k_proj"], r), "b_v": tile(B["v_proj"], 0),
             "b_o": tile(B["o_proj"], 0), "b_g": tile(B["gate_proj"], 0), "b_u": tile(B["up_proj"], r),
