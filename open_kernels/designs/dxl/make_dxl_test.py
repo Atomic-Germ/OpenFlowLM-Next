@@ -29,6 +29,44 @@ def tok_file(fx: Path, stem: str, j: int) -> Path:
     return fx / (f"{stem}.bin" if j == 0 else f"{stem}_t{j}.bin")
 
 
+def head(a, fx: Path, spec, R) -> int:
+    """lmhl on the L rows dx left after layer 0: logits per row bit-identical to the fixture's
+    ln + lm_head_q4 run (y_logits_t<j>), and the NPU argmax equal to the host's."""
+    from recipes.dense import lm_rows
+    hid, vocab, L0 = spec.hidden, lm_rows(spec), R.layout
+    out_floats = a.l * vocab + 8 * a.l * 64
+    if a.compare:
+        out = np.fromfile(fx / "y_lmhl.bin", np.float32)
+        lg = out[:a.l * vocab].reshape(a.l, vocab)
+        am = out[a.l * vocab:].view(np.int32).reshape(8, a.l * 64)
+        ok = True
+        for j in range(a.l):
+            ref = np.fromfile(tok_file(fx, "y_logits", j), np.float32)[:vocab]
+            diff = int((ref.view(np.uint32) != lg[j].view(np.uint32)).sum())
+            host = int(np.argmax(ref[:spec.real_vocab]))
+            vals, rows = am[:, j], am[:, a.l + j]
+            npu = int(rows[int(np.argmax(vals))])          # np.argmax: the first core on a tie
+            good = diff == 0 and npu == host
+            ok &= good
+            print(f"row {j}: {'PASS' if good else 'FAIL'} logits vs ln+lm: {diff} of {vocab} differ; "
+                  f"argmax npu {npu} host {host}")
+        print("PASS" if ok else "FAIL")
+        return 0 if ok else 1
+    xres = np.concatenate([np.fromfile(tok_file(fx, "y_res0", j), np.float32)[:hid] for j in range(a.l)])
+    (fx / "xres_head.bin").write_bytes(xres.astype(np.float32).tobytes())
+    b = Path(a.build).resolve().as_posix()
+    cfg = ["device", f"xclbin lmhl {b}/final.xclbin", f"kernelx lmhl lmhl {b}/insts.bin",
+           f"buf lmpool {L0.LMHEAD_POOL_BYTES} {(fx / 'pools' / 'pool_lmhead.bin').as_posix()}",
+           f"buf xresh {xres.nbytes} {(fx / 'xres_head.bin').as_posix()}",
+           f"buf normw {hid * 2} {(fx / 'normw.bin').as_posix()}",
+           f"buf acth {a.l * hid * 2}", f"buf outh {out_floats * 4}"]
+    cfg += ["run lmhl lmpool xresh normw acth outh"] * a.runs
+    cfg += [f"dump outh {(fx / 'y_lmhl.bin').as_posix()} {out_floats * 4}", ""]
+    (fx / "run_lmhl.cfg").write_text("\n".join(cfg), newline="\n")
+    print(f"wrote {fx / 'run_lmhl.cfg'}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixture", required=True)
@@ -37,6 +75,7 @@ def main() -> int:
     ap.add_argument("--spec", default=str(HERE.parents[1] / "recipes" / "specs" / "k2-horizon-7b.json"))
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--compare", action="store_true")
+    ap.add_argument("--head", action="store_true", help="the L-row head (lmhl) on the rows dx left after layer 0")
     a = ap.parse_args()
     fx = Path(a.fixture).resolve()
     spec = load_spec(Path(a.spec))
@@ -44,6 +83,8 @@ def main() -> int:
     X = DXR.layout(spec, a.l)
     hid = spec.hidden
 
+    if a.head:
+        return head(a, fx, spec, R)
     if a.compare:
         y = np.fromfile(fx / "y_dxl_res.bin", np.float32).reshape(a.l, hid)
         ok = True
