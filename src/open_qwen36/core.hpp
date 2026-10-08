@@ -253,6 +253,17 @@ public:
     void set_block_logits_all(bool on) { block_logits_all_ = on; }
     const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
+    /// The L-row pass (OPEN-DECODE-ROWS, the manifest's `rows`): ids[j] at position() + j for
+    /// j < rows_l(), through every layer in one dxl dispatch each and the head in one lmhl;
+    /// argmax[j] is row j's greedy token (the first maximal logit, padding excluded). The L
+    /// rows' KV is written and the position does NOT move: the caller seeks to the prefix it
+    /// keeps. Per row it is bit-identical to step(). 0 when the kernel set has no rows pass.
+    size_t rows_l() const { return man_.rows.l; }
+    void step_rows(const int* ids, int* argmax, bool want_logits = false);
+    /// Row j's logits from the last step_rows(want_logits = true).
+    const float* rows_logits(size_t j);
+    double rows_ms() const { return rows_ms_; }
+
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
     void seek(int pos);
@@ -283,6 +294,7 @@ private:
         std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
         size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
+        std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
@@ -416,6 +428,7 @@ private:
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
+    double rows_ms_ = 0;
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the

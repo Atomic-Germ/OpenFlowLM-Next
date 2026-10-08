@@ -108,6 +108,7 @@ struct Args {
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
     std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
+    int rows_check = 0;             // OPEN-DECODE-ROWS: N decode steps, then the same positions as L-row passes
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -198,6 +199,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
+        else if (k == "--rows-check") a.rows_check = std::atoi(val().c_str());
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -208,6 +210,52 @@ Args parse(int argc, char** argv) {
         std::exit(2);
     }
     return a;
+}
+
+/// OPEN-DECODE-ROWS: greedy-decode n tokens after the prompt, keeping every step's logits, then
+/// put the same positions through the L-row pass and require each row's argmax and logits to be
+/// the step's, bit for bit. Returns the rows that differed.
+int rows_check(Core& core, const Args& a, int n) {
+    const size_t L = core.rows_l(), V = core.vocab();
+    if (!L) { std::fprintf(stderr, "rows-check: this kernel set has no L-row pass\n"); return 1; }
+    const size_t P = a.ids.size();
+    std::vector<int> seq(a.ids);
+    std::vector<std::vector<float>> lg;
+    for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    double step_ms = 0;
+    for (int t = 0; t < n; ++t) {
+        lg.emplace_back(core.logits().begin(), core.logits().end());
+        seq.push_back(argmax(core.logits(), core.real_vocab()));
+        if (t + 1 == n) break;
+        core.step(seq.back(), true);
+        step_ms += core.last_timing().total_ms;
+    }
+    int bad = 0;
+    double rows_ms = 0;
+    size_t passes = 0;
+    for (size_t p0 = P - 1; p0 + L <= P - 1 + lg.size(); p0 += L) {
+        core.seek(static_cast<int>(p0));
+        std::vector<int> am(L);
+        core.step_rows(&seq[p0], am.data(), true);
+        rows_ms += core.rows_ms();
+        ++passes;
+        for (size_t j = 0; j < L; ++j) {
+            const std::vector<float>& ref = lg[p0 + j - (P - 1)];
+            const float* got = core.rows_logits(j);
+            size_t diff = 0;
+            for (size_t v = 0; v < V; ++v) diff += std::memcmp(&ref[v], &got[v], 4) != 0;
+            const bool ok = diff == 0 && am[j] == seq[p0 + j + 1];
+            bad += !ok;
+            std::printf("rows @%zu row %zu: %s argmax %d step %d, %zu of %zu logits differ\n", p0, j,
+                        ok ? "PASS" : "FAIL", am[j], seq[p0 + j + 1], diff, V);
+        }
+    }
+    const double per_step = step_ms / std::max(1, n - 1);
+    if (passes)
+        std::fprintf(stderr, "rows-check: %zu passes of %zu rows, %.1f ms a pass; decode %.1f ms a step (%.2fx)\n",
+                     passes, L, rows_ms / passes, per_step, (rows_ms / passes) / per_step);
+    std::printf(bad ? "ROWS FAIL (%d rows)\n" : "ROWS PASS\n", bad);
+    return bad;
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -439,6 +487,7 @@ int main(int argc, char** argv) {
             std::printf(bad ? "NONDETERMINISTIC\n" : "DONE\n");
             return bad ? 1 : 0;
         }
+        if (a.rows_check) return rows_check(core, a, a.rows_check) ? 1 : 0;
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;

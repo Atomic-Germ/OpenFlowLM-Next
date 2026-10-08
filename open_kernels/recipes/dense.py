@@ -620,7 +620,43 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+    rr = rows_route(spec)
+    if rr:
+        out["contexts"].update(rr["contexts"])
+        out["kernels"].update(rr["kernels"])
+        out["rows"] = rr["rows"]
     return out
+
+
+# The families whose L-row pass (designs/dxl: OPEN-DECODE-ROWS) has run on hardware, and its
+# width. Every other dense family's kernel set is unchanged.
+ROWS_FAMILIES = ("k2",)
+ROWS_L = 4
+
+
+def rows_route(spec: ModelSpec) -> dict | None:
+    """The L-row pass's kernels (dxl: L positions through a layer; lmhl: their norm, head and
+    argmax) and the manifest's `rows` section, for a family validated on it; None otherwise."""
+    if spec.family not in ROWS_FAMILIES:
+        return None
+    from .dxl import layout as dxl_layout
+    try:
+        X = dxl_layout(spec, ROWS_L)
+    except OpRangeError:
+        return None
+    n_head = 8
+    return {
+        "contexts": {"dxl": "dxl/final.xclbin", "lmhl": "lmhl/final.xclbin"},
+        "kernels": {"dxl": {"context": "dxl", "insts": "dxl/insts.bin", "patch": "attnrows", "build": "dxl"},
+                    "lmhl": {"context": "lmhl", "insts": "lmhl/insts.bin", "build": "lmhl"}},
+        "rows": {"l": ROWS_L, "kernel": "dxl", "head": "lmhl", "act_bytes": X.AD_BYTES,
+                 "head_act_bytes": ROWS_L * spec.hidden * 2, "head_cores": n_head,
+                 "head_out_floats": ROWS_L * lm_rows(spec) + n_head * ROWS_L * 64},
+        "builds": {"dxl": {"design": "dxl/dxl.py", "build_dir": f"dxl/build_{spec.family}_h{spec.hidden}_l{ROWS_L}",
+                           "env": {"DXL_L": str(ROWS_L)}},
+                   "lmhl": {"design": "dxl/lmhl.py", "build_dir": f"dxl/build_lmhl_{lm_rows(spec)}_l{ROWS_L}",
+                            "env": {"DXL_L": str(ROWS_L)}}},
+    }
 
 
 def builds(spec: ModelSpec) -> dict[str, dict]:
@@ -644,6 +680,9 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
+    rr = rows_route(spec)
+    if rr:
+        b.update(rr["builds"])
     return b
 
 

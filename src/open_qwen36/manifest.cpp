@@ -185,11 +185,28 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (d.rb > 1 && d.patch != "attnpos")
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
-        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
+        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
+            d.patch != "attnrows")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
         m.kernels[k] = d;
+    }
+    if (j.contains("rows")) {
+        const json& r = j["rows"];
+        const std::string rw = where + " rows";
+        m.rows.l = get<uint64_t>(r, "l", rw);
+        m.rows.kernel = get<std::string>(r, "kernel", rw);
+        m.rows.head = get<std::string>(r, "head", rw);
+        m.rows.act_bytes = get<uint64_t>(r, "act_bytes", rw);
+        m.rows.head_act_bytes = get<uint64_t>(r, "head_act_bytes", rw);
+        m.rows.head_cores = get<uint64_t>(r, "head_cores", rw);
+        m.rows.head_out_floats = get<uint64_t>(r, "head_out_floats", rw);
+        if (m.rows.l == 0 || m.rows.l % 4) fail(rw, "l " + std::to_string(m.rows.l) + " is not a multiple of 4");
+        auto rk = m.kernels.find(m.rows.kernel);
+        if (rk == m.kernels.end() || rk->second.patch != "attnrows")
+            fail(rw, "kernel " + m.rows.kernel + " is not a kernel built with the attnrows patch table");
+        if (!m.kernels.count(m.rows.head)) fail(rw, "head " + m.rows.head + " is not a kernel");
     }
     for (const auto& [name, v] : need(j, "layer_types", where).items()) {
         const std::string tw = where + " layer type " + name;

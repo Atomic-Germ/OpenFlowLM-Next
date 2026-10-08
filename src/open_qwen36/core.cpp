@@ -278,6 +278,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_pv) wanted[k] = true;
     }
     for (const auto& s : man_.tail) wanted[s.kernel] = true;
+    if (man_.rows.l) {
+        wanted[man_.rows.kernel] = true;
+        wanted[man_.rows.head] = true;
+    }
     for (const auto& [name, d] : man_.kernels)
         if (wanted.count(name)) load_kernel(name, d);
     logits_host_.assign(man_.vocab, 0.f);
@@ -446,6 +450,11 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
         k.attn = stream_patch::attn_table(k.words, name, man_.attn);
+        k.geom = man_.attn;
+        k.geom.window = d.window;
+        k.geom.rb = d.rb;
+    } else if (d.patch == "attnrows") {
+        k.attn_rows = stream_patch::attn_rows_table(k.words, name, static_cast<uint32_t>(man_.rows.l), man_.attn);
         k.geom = man_.attn;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
@@ -659,6 +668,12 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
         pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
+    }
+    if (man_.rows.l) {
+        globals_["rows_xres"] = alloc(man_.rows.l * man_.hidden * 4);
+        globals_["rows_act"] = alloc(man_.rows.act_bytes);
+        globals_["rows_hact"] = alloc(man_.rows.head_act_bytes);
+        globals_["rows_out"] = alloc(man_.rows.head_out_floats * 4);
     }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
@@ -3339,6 +3354,55 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         done += n;
     }
     timing_.route_ms += ms_since(tp);
+}
+
+void Core::step_rows(const int* ids, int* argmax, bool want_logits) {
+    const size_t L = man_.rows.l, hid = man_.hidden;
+    if (!L) throw std::runtime_error("open_qwen36: this kernel set has no L-row pass (manifest `rows`)");
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_rows before load_weights");
+    if (static_cast<size_t>(pos_) + L > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: rows " + std::to_string(pos_) + "+" + std::to_string(L) +
+                                 " pass the context capacity " + std::to_string(cfg_.max_ctx));
+    const auto t0 = std::chrono::steady_clock::now();
+    xrt::bo& xr = buffer("rows_xres", 0);
+    float* x = xr.map<float*>();
+    for (size_t j = 0; j < L; ++j) {
+        if (ids[j] < 0 || static_cast<size_t>(ids[j]) >= man_.vocab)
+            throw std::runtime_error("open_qwen36: step_rows token id out of range");
+        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[j]), hid, x + j * hid);
+    }
+    xr.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hid * 4, 0);
+    Kern& k = kerns_.at(man_.rows.kernel);
+    stream_patch::attn_rows_apply(k.iw(), k.attn_rows, static_cast<uint64_t>(pos_), k.geom);
+    k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    // Every layer runs the same stream on its own buffers, so nothing is patched between them
+    // and layer l + 1 queues behind layer l in the one context (the decode walk's level 1).
+    const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab"};
+    Inflight prev;
+    for (int l = 0; l < nl_; ++l) {
+        Inflight f = start_run(k, args, l);
+        if (prev.active()) wait_run(prev);
+        prev = std::move(f);
+    }
+    if (prev.active()) wait_run(prev);
+    run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_hact", "rows_out"}, 0);
+    xrt::bo& out = buffer("rows_out", 0);
+    const size_t lb = L * man_.vocab * 4, cores = man_.rows.head_cores, el = L * 64;
+    read_back(out, cores * el * 4, lb);
+    const int32_t* am = reinterpret_cast<const int32_t*>(out.map<uint8_t*>() + lb);
+    for (size_t j = 0; j < L; ++j) {
+        int32_t best = INT32_MIN, tok = -1;
+        for (size_t c = 0; c < cores; ++c)                   // a core's rows precede the next's: first on a tie
+            if (am[c * el + j] > best) { best = am[c * el + j]; tok = am[c * el + L + j]; }
+        argmax[j] = tok;
+    }
+    if (want_logits) read_back(out, lb, 0);
+    rows_ms_ = ms_since(t0);
+}
+
+const float* Core::rows_logits(size_t j) {
+    if (j >= man_.rows.l) throw std::runtime_error("open_qwen36: rows_logits row out of range");
+    return buffer("rows_out", 0).map<float*>() + j * man_.vocab;
 }
 
 void Core::seek(int pos) {

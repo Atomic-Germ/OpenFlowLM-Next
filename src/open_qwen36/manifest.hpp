@@ -176,12 +176,24 @@ struct LayerType {
 struct KernelDesc {
     std::string context;                     ///< name in Manifest::contexts
     std::string insts;                       ///< relative path of insts.bin
-    std::string patch;                       ///< "" | moeroute2 | attnpos
+    std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
     /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
     /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
     /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
     uint64_t rb = 1;
+};
+
+/// The L-row pass (designs/dxl, OPEN-DECODE-ROWS): `kernel` takes L positions through one
+/// dense layer against the layer's own pool / consts / state / ptab and an L-row residual and
+/// scratch; `head` runs their final norm, the head and a per-row argmax. l == 0: none.
+struct RowsDesc {
+    uint64_t l = 0;
+    std::string kernel, head;
+    uint64_t act_bytes = 0;          ///< the L-row scratch
+    uint64_t head_act_bytes = 0;     ///< the head's normed rows (bf16 [L][hidden])
+    uint64_t head_cores = 0;         ///< cores whose [value L | row L] argmax elements end the head's output
+    uint64_t head_out_floats = 0;    ///< logits [L][vocab] then head_cores elements of L * 64
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -218,6 +230,7 @@ struct Manifest {
     std::map<std::string, KernelDesc> kernels;
     std::map<std::string, LayerType> layer_types;
     std::vector<Step> tail;
+    RowsDesc rows;
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;
