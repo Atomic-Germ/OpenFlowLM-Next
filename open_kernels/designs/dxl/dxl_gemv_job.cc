@@ -1,5 +1,3 @@
-// Chunk c of band b of the current job's (jp) slice s into accumulator band B0 + b, at the band's
-// k-tile S0 + s.
 #include "dxl_job.h"
 
 extern "C" {

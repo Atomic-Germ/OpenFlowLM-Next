@@ -1,5 +1,4 @@
-// Element i (1024 bf16) of token j's K-wide activation into the whole-K table j: blocks
-// [32 i, 32 i + 32) of a table gemv_q4_tab_bytes(K) long (the head's K = hidden fits whole).
+// The head's K = hidden fits whole, so its per-token tables are not K-sliced.
 #include "dxl_gemv.h"
 
 extern "C" {

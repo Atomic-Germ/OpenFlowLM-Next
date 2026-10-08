@@ -1,14 +1,4 @@
-r"""One layer of the L-row pass against L decode steps, on a make_decode fixture.
-
-    python model/make_decode.py --model-dir <K2 dir> --layers 1 --tokens 4 --out model/out_k2l
-    run_kernel model/out_k2l/run_decode.cfg            # dx, one token at a time -> y_res0_t<j>.bin
-    python designs/dxl/make_dxl_test.py --fixture model/out_k2l --build designs/dxl/build_k2_l4 --l 4
-    run_kernel model/out_k2l/run_dxl.cfg               # dxl, the L rows in one dispatch
-    python designs/dxl/make_dxl_test.py --fixture model/out_k2l --l 4 --compare
-
-Rows j = 0 .. L-1 at positions pos0 + j (pos0 = 0: the fixture's tokens). Row j must equal
-dx's layer output for token j bit for bit, and match the fp64 replica's ref_res0_t<j>.
-"""
+r"""One layer of the L-row pass against L decode steps on a make_decode fixture: row j must equal dx's token j bit for bit."""
 from __future__ import annotations
 
 import argparse
@@ -30,8 +20,7 @@ def tok_file(fx: Path, stem: str, j: int) -> Path:
 
 
 def head(a, fx: Path, spec, R) -> int:
-    """lmhl on the L rows dx left after layer 0: logits per row bit-identical to the fixture's
-    ln + lm_head_q4 run (y_logits_t<j>), and the NPU argmax equal to the host's."""
+    """lmhl on layer 0's L rows: logits bit-identical to the fixture's ln + lm_head_q4 run, argmax equal to the host's."""
     from recipes.dense import lm_rows
     hid, vocab, L0 = spec.hidden, lm_rows(spec), R.layout
     row = DXR.head_layout(spec, a.l).ROW_FLOATS if a.head2 else vocab    # lmhl2 pads its logits rows

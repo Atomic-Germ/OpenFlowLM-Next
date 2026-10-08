@@ -1,5 +1,4 @@
-// The running argmax over the next head band (the core's cnt[0]-th, from band0): float bits as an
-// order-preserving int, strict > so the first maximal row wins; rows at or past real_vocab never win.
+// Strict > on order-preserving int bits, so the first maximal row wins as in the host argmax.
 #include "dxl_gemv.h"
 
 extern "C" {

@@ -1,21 +1,5 @@
 #pragma once
-//===- dxl_gemv.h ------------------------------------------*- C++ -*-===//
-//
-// The L-row GEMV of the dense L-row pass (dxl): DXL_L tokens against one weight
-// chunk, the chunk loaded once and its integer products shared four tokens per
-// mmul (gemm_q4.h's tile4 dataflow).
-//
-// Per token it is gemv_q4_tile's arithmetic in gemv_q4_tile's order -- the same
-// integer products, the same hi/lo split, the same four MACs in the same order
-// (gemm_q4_tile4 swaps the last two) -- so every row is bit-identical to the
-// one-token decode GEMV and the L-row pass reproduces decode's logits.
-//
-// The tables are K-sliced: DXL_L tables of one KS-wide slice each
-// (gemv_q4_tab_bytes(KS) bytes apart), rebuilt per slice. Activation
-// quantisation is per 32-block, so a slice table is byte-for-byte the slice of
-// the whole-K table. The band accumulators stay resident across slices
-// ([band][token][64] floats): `first` is the band's global k-tile 0, `last` its
-// final k-tile, after which y is in row order.
+// MACs in gemv_q4_tile's order, not gemm_q4_tile4's (it swaps the last two), so each row is bit-identical to decode.
 
 #define GEMV_PER_CALL 1
 #include "../gemv_q4/gemv_q4.h"
@@ -148,9 +132,7 @@ __attribute__((noinline)) inline void dxl_tile4(const uint8_t *__restrict tile,
 #endif
 }
 
-// Chunk c of a band's slice s (pool order within the band: part = c % 2, k-tile c / 2),
-// for all kL tokens. y is the band's [kL][64] accumulator; kt_total counts the band's
-// k-tiles over every slice it will see (more than K/256 when LoRA k-tiles follow).
+// kt_total counts every k-tile the band will see, LoRA tiles included, so it can exceed K/256.
 static inline void dxl_gemv_chunk(const uint8_t *__restrict tile, const uint8_t *__restrict tab,
                                   float *__restrict y, unsigned c, unsigned s, unsigned KS,
                                   unsigned kt_total) {

@@ -253,14 +253,9 @@ public:
     void set_block_logits_all(bool on) { block_logits_all_ = on; }
     const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
-    /// The L-row pass (OPEN-DECODE-ROWS, the manifest's `rows`): ids[j] at position() + j for
-    /// j < rows_l(), through every layer in one dxl dispatch each and the head in one lmhl;
-    /// argmax[j] is row j's greedy token (the first maximal logit, padding excluded). The L
-    /// rows' KV is written and the position does NOT move: the caller seeks to the prefix it
-    /// keeps. Per row it is bit-identical to step(). 0 when the kernel set has no rows pass.
+    // OPEN-DECODE-ROWS: step_rows writes the L rows' KV but does not move the position; the caller seeks.
     size_t rows_l() const { return man_.rows.l; }
-    /// draft = true: the draft pass (OPEN-UNO-LORA), the rows the LoRA mask names (all but row 0)
-    /// through the LoRA from rows.lora_file; has_draft() says whether it was found.
+    // draft: the OPEN-UNO-LORA pass, the LoRA on every row but row 0.
     void step_rows(const int* ids, int* argmax, bool want_logits = false, bool draft = false);
     bool has_draft() const { return !lora_.empty(); }
     /// Row j's logits from the last step_rows(want_logits = true).

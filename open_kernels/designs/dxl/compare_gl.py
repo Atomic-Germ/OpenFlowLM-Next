@@ -1,5 +1,4 @@
-"""Score gl's y.bin against ref.bin per token; with --against-gemv, also against the
-one-token gemv_q4 outputs y_gemv_tok<j>.bin (must be bit-identical)."""
+"""Score gl's y.bin against ref.bin per token; --against-gemv also requires bit-identity with y_gemv_tok<j>.bin."""
 import argparse
 import sys
 from pathlib import Path

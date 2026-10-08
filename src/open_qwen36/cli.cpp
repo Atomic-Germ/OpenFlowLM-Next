@@ -215,9 +215,7 @@ Args parse(int argc, char** argv) {
     return a;
 }
 
-/// OPEN-DECODE-ROWS: greedy-decode n tokens after the prompt, keeping every step's logits, then
-/// put the same positions through the L-row pass and require each row's argmax and logits to be
-/// the step's, bit for bit. Returns the rows that differed.
+// OPEN-DECODE-ROWS
 int rows_check(Core& core, const Args& a, int n) {
     const size_t L = core.rows_l(), V = core.vocab();
     if (!L) { std::fprintf(stderr, "rows-check: this kernel set has no L-row pass\n"); return 1; }
@@ -261,11 +259,7 @@ int rows_check(Core& core, const Args& a, int n) {
     return bad;
 }
 
-/// OPEN-UNO-DECODE: greedy Uno, IFM's two-pass cycle (nano_vllm_uno two_pass_decoding.py) on the
-/// L-row pass. A cycle drafts from [seed, noise...] with the LoRA on every row but the seed's (row 0
-/// is then the base model's next token c, rows 1.. drafts d), verifies [c, d...] without it, and
-/// commits c, the drafts the verify agrees with, and the verify's next token. Then the same n
-/// tokens by plain decode from the same prompt, which the cycle must reproduce exactly.
+// OPEN-UNO-DECODE: IFM's two-pass cycle (nano_vllm_uno two_pass_decoding.py), then plain decode it must reproduce.
 int uno(Core& core, const Args& a, int n) {
     using clock = std::chrono::steady_clock;
     const size_t L = core.rows_l();

@@ -299,10 +299,7 @@ struct AttnRowPatch {
     uint32_t row;
 };
 
-/// `attnrows`'s table for an L-row stream built for the placeholder positions 1 .. rows (row j
-/// at 1 + j): per row, in stream order, the KV window fill (arg 3 at offset 0; its length in
-/// the BD write before it), the new row's drain (arg 3 at (1 + j) * kv_row) and the position
-/// record (arg 5 at (1 + j) * ptab_row).
+// Built for placeholder positions 1 .. rows (row j at 1 + j); a KV window fill's length is in the BD write before it.
 inline std::vector<AttnRowPatch> attn_rows_table(const std::vector<uint32_t>& w, const std::string& kn,
                                                  uint32_t rows, const AttnGeometry& g = AttnGeometry{}) {
     std::vector<AttnRowPatch> t;

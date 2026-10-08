@@ -3395,8 +3395,7 @@ void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) 
     Kern& k = kerns_.at(draft ? man_.rows.lora_kernel : man_.rows.kernel);
     stream_patch::attn_rows_apply(k.iw(), k.attn_rows, static_cast<uint64_t>(pos_), k.geom);
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    // Every layer runs the same stream on its own buffers, so nothing is patched between them
-    // and layer l + 1 queues behind layer l in the one context (the decode walk's level 1).
+    // One stream on per-layer buffers: nothing is patched between layers, so layer l + 1 can queue behind l.
     const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab", "lora"};
     Inflight prev;
     for (int l = 0; l < nl_; ++l) {

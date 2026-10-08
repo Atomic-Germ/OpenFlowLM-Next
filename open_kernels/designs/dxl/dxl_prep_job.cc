@@ -1,5 +1,4 @@
-// Token tok's slice of the current job (jp) into slice table tok: bf16, fp32, or fp32 at OFF
-// floats into a z row.
+// F_MODE 0 bf16, 1 fp32, 2 the LoRA's fp32 z row at F_OFF floats.
 #include "dxl_job.h"
 
 extern "C" {

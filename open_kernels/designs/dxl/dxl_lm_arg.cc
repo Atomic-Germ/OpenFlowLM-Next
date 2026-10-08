@@ -1,6 +1,4 @@
-// The L rows' running argmax over one head band ([L][64] logits): float bits mapped to an
-// order-preserving int, strict > so the first maximal row wins (the host argmax's rule); rows
-// at or past real_vocab are padding and never win. best = [value L | row L] as int32.
+// Strict > on order-preserving int bits, so the first maximal row wins as in the host argmax.
 #include "dxl_gemv.h"
 
 extern "C" {

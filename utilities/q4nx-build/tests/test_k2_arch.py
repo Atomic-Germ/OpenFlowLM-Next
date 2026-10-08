@@ -73,8 +73,7 @@ class TestK2ArchResolution(unittest.TestCase):
 
 
 class TestK2QkRowOrder(unittest.TestCase):
-    """A k2-horizon GGUF keeps HF's split-half q/k rows; only a llama-arch one is
-    interleaved and needs Llama's reorder (Traces: OPEN-FAMILY-K2)."""
+    """A k2-horizon GGUF keeps HF's split-half q/k rows; only a llama-arch one needs Llama's reorder (Traces: OPEN-FAMILY-K2)."""
 
     def test_k2_horizon_gguf_rows_are_kept(self):
         import q4nx.models as M

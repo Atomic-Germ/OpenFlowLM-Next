@@ -1,12 +1,4 @@
-r"""Test vectors for gl (the L-row GEMV): random pool-order q4_1 weights, L random
-activations, the fp64 reference per token from the same bytes.
-
-    python make_gl_test.py --n 6144 --k 4096 --l 4 [--f32] [--runs 3] [--build build_gl]
-
-Writes w.bin, x.bin, ref.bin and run.cfg here (paths relative to this directory), and
-x_tok<j>.bin (bf16) per token so the one-token gemv_q4 design can be run on each for the
-bit-identity check (compare_gl.py --against-gemv).
-"""
+r"""Test vectors for gl: python make_gl_test.py --n 6144 --k 4096 --l 4 [--f32] [--runs 3] [--build build_gl]"""
 from __future__ import annotations
 
 import argparse

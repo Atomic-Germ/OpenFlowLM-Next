@@ -1,24 +1,4 @@
-"""K2-Horizon-7B-Uno's diffusion LoRA as the q4_1 tensors the open engine's L-row pass reads
-(`uno.q4nx`, beside the base model's `model.q4nx`; OPEN-UNO-LORA).
-
-The adapter is y += s * (m * (x A^T)) B^T on q, k, v, o, gate, up and down (s = alpha / r),
-m being 1 on the draft rows and 0 on the seed row. The engine computes it inside the L-row
-GEMV, so the tensors here are shaped for that GEMV, not as the adapter ships them:
-
-- `a_qkv`, `a_o`, `a_gu`, `a_d`: the A matrices of the projections that share an input,
-  stacked ([A_q; A_k] then A_v from row 256, [A_o], [A_g; A_u], [A_d]) and zero-padded to
-  n_cores x 64 rows, so each core computes one 64-row band of z = x A^T.
-- `b_q`, `b_k`, `b_v`, `b_o`, `b_g`, `b_u`, `b_d`: s * B, zero-padded to 256 columns -- one
-  k-tile appended to every band of its projection. A projection's tile reads a 256-wide
-  window of its z: q and k read [z_q | z_k] (b_q = [B_q | 0], b_k = [0 | B_k]), v reads
-  [z_v | 0], gate and up read [z_g | z_u] (b_g = [B_g | 0], b_u = [0 | B_u]), o and down
-  their own [z | 0].
-
-Every tensor is quantized to Q4_1 by the converter's own path (GGUFTensor.unpack) and
-packed by its _pack_q4nx, so the engine packs them with the std_perm op the base uses.
-
-    python -m q4nx.uno --adapter <K2-Horizon-7B-Uno dir> --config <base config.json> --out <model dir>
-"""
+"""K2-Horizon-7B-Uno's diffusion LoRA as the q4_1 tensors (uno.q4nx) the open engine's L-row pass reads (OPEN-UNO-LORA)."""
 from __future__ import annotations
 
 import argparse

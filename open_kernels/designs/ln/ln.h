@@ -10,10 +10,7 @@
 //            three output elements would not fit the norm core's memory together (Llama 3 8B:
 //            8 KB elements); y half i is x_i + a_i, xn needs the whole y for its statistics.
 //
-// LN_GROUPS=G > 1 selects K2's GroupRMSNorm(G): G independent RMS reductions over
-// contiguous spans (group g = [g*kGrp, (g+1)*kGrp), mean over kGrp elements each; K2 3.7B
-// G=2, 7B G=4), the affine weight stays channel-wise over the whole width. Default 1 keeps
-// the single-reduction arithmetic bit-identical to the unpatched kernels.
+// LN_GROUPS=G: K2's GroupRMSNorm, an RMS per contiguous group but a channel-wise weight; 1 is bit-identical to ungrouped.
 #pragma once
 #include "vecmath.h"
 

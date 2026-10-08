@@ -378,8 +378,7 @@ struct Host {
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             std::printf("attnpos %s pos %zu (%.3f ms)\n", kn.c_str(), pos, ms);
         } else if (cmd == "attnrows") {
-            // attnrows <kernel> <pos0> <rows>: an L-row stream's query rows at positions
-            // pos0 .. pos0 + rows - 1 (designs/dxl, built for the placeholders 1 .. rows).
+            // attnrows <kernel> <pos0> <rows>: a dxl stream built for positions 1 .. rows, moved to pos0 .. pos0 + rows - 1.
             auto kn = need(it, "attnrows kernel");
             size_t pos0 = num(need(it, "attnrows pos0"), "attnrows pos0");
             uint32_t rows = static_cast<uint32_t>(num(need(it, "attnrows rows"), "attnrows rows"));

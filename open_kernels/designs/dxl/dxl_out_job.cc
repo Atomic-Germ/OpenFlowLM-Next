@@ -1,5 +1,4 @@
-// Band b of the current job (jp) into the y element: accumulator band B0 + b as is, or h = silu(band G0 + b) *
-// band b (the up | gate pair; dense_act's arithmetic per token).
+// The silu branch is dense_act's arithmetic per token, so each row's h stays bit-identical to decode.
 #include "dxl_job.h"
 #include "vecmath.h"
 

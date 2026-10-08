@@ -1,5 +1,3 @@
-// Job j of this dispatch's mode (rtp[0]) into jp, the row every other job kernel reads: its
-// first four fields are the loop counts [slices, bands, chunks per band per slice, bands drained].
 #include "dxl_job.h"
 
 extern "C" {

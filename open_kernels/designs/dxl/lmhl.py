@@ -1,20 +1,4 @@
-r"""lmhl: the L-row pass's tail in one dispatch -- the final norm of each row, the q4_1 head
-for all L rows in one pass over its weights, and each row's argmax on the NPU.
-
-    for each row: xn = norm(xres) (ln core) -> L-row head GEMV per band -> logits[row][..]
-    and a running first-max per row (main cores) -> one [value | row] element per core
-
-The head's bands split over the cores as lm_head_q4's do (lm_head_q8's uneven split) and
-stream from the same head pool. K = hidden fits whole, so every token keeps a whole-K
-table and a band is one pass of its chunks. Per token the logits are lm_head_q4's bit
-for bit (the GEMV of dxl_gemv.h), so the argmax is the one the host would take from
-them: the first maximal row, padding rows (>= real_vocab) excluded.
-
-out = logits f32[L][VOCAB] | argmax int32[N_CORES][L*64] ([value L | row L] per core:
-the host picks, per row, the largest value over the cores, the first core on a tie).
-
-Build: OPEN_KERNELS_SPEC=<spec> DXL_L=4 python build_design.py designs/dxl/lmhl.py designs/dxl/build_lmhl_<tag>
-"""
+r"""lmhl: the L-row pass's final norm, q4_1 head and per-row argmax in one dispatch, logits bit for bit lm_head_q4's."""
 
 from __future__ import annotations
 

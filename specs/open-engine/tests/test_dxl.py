@@ -1,8 +1,5 @@
 # Traces: OPEN-DECODE-ROWS, OPEN-UNO-LORA (canonical spec: specs/open-engine/spec.md)
-"""The L-row pass's recipe (open_kernels/recipes/dxl.py): the act layout, the main cores'
-job tables and the LoRA pool. A table that disagrees with its stream hangs the array, and
-one that runs the right count over the wrong k-tiles computes garbage quietly; both are
-fixed by these facts."""
+"""recipes/dxl.py's tables: one that disagrees with its stream hangs the array, one over the wrong k-tiles quietly computes garbage."""
 from __future__ import annotations
 
 from pathlib import Path

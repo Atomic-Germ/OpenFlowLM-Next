@@ -1,19 +1,4 @@
-"""The dense L-row pass (designs/dxl/dxl.py): L consecutive positions through one dense
-layer in one dispatch, the weights streamed once for all L.
-
-It reads the SAME per-layer buffers as dx (pool, consts, kv, ptab), so a kernel set
-that has dx can add dxl without a second copy of anything; what it adds is its own
-L-row activation scratch (`act`) and L-row residual (`xres`), laid out here.
-
-Every act region is L rows of the width dx keeps one of, row-major ([row][width]),
-so a row is where an attention core or the next projection expects it.
-
-The main cores run a JOB TABLE: every pass over a set of bands (a tile of a projection,
-its LoRA slice, a LoRA A band) is one job, and the cores hold both passes' tables -- the
-verify pass (no LoRA) and the draft pass (OPEN-UNO-LORA: K2-Horizon-7B-Uno's adapter as
-q4_1 bands, q4nx/uno.py) -- so the two instruction streams share one xclbin. The draft pass
-computes z = x A^T as one extra band per core, drains it, and appends one 256-wide k-tile
-of s * B per band reading z; its seed row's z is read from a zero row, which is the mask."""
+"""The dense L-row pass's layout: dx's per-layer buffers reused, and both passes' job tables so verify and draft share an xclbin."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -144,10 +129,7 @@ def layout(spec: ModelSpec, L: int) -> DxlLayout:
 
 @dataclass(frozen=True)
 class Job:
-    """One pass of the main cores over `bt` bands. Core side: the table fields. DMA side:
-    where the weights (`wbuf` region at `woff`, core c's bands from c * wpc + t * bt), the
-    activation (`x`: ("act", off, row, K, KS, f32) or ("z", off)) and the drain (`y`:
-    (off, row) of act, or None) live."""
+    """One pass of the main cores over `bt` bands: `core` is its table row, the rest place its DMA."""
     stage: str
     core: dict
     wbuf: str
@@ -236,8 +218,7 @@ def jobs(spec: ModelSpec, L: int, draft: bool) -> list[Job]:
 
 
 def job_table(spec: ModelSpec, L: int) -> np.ndarray:
-    """int32 [2][1 + JMAX * NF]: per mode (0 verify, 1 draft) the job count, then each
-    job's FIELDS -- the table every main core holds."""
+    """int32 [2][1 + JMAX * NF]: per mode (0 verify, 1 draft) the job count, then each job's FIELDS."""
     t = np.zeros((2, 1 + JMAX * NF), np.int32)
     for mode, draft in ((0, False), (1, True)):
         js = jobs(spec, L, draft)

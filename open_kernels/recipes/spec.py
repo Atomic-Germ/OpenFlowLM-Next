@@ -82,8 +82,7 @@ class ModelSpec:
     moe_intermediate: int = 0
     shared_expert_intermediate: int = 0   # 0 = no shared expert
     norm_eps: float = 1e-6
-    # K2's GroupRMSNorm: one RMS per contiguous hidden/`norm_groups` span (K2 3.7B: 2 halves of
-    # 1280; 7B: 4 quarters of 1024). 1 is every other family's single RMS over the whole width. NOT a family property:
+    # K2's GroupRMSNorm: one RMS per contiguous hidden/`norm_groups` span; 1 is every other family's single RMS. NOT a family property:
     # it is the norm's own arithmetic, so it lives on the spec like norm_eps -- but it serialises
     # and hashes exactly as the pre-field specs did while it is 1 (to_dict below), the same way
     # canonical_quant keeps a no-q8 model hashing as the bare string.

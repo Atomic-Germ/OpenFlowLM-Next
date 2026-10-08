@@ -1,17 +1,4 @@
-"""CPU reference for K2-Horizon-7B-Uno: the two-pass cycle of github.com/ifm-ai/uno
-(nano_vllm_uno/engine/two_pass_decoding.py) over K2-Horizon-7B, offline only.
-
-Measures what the NPU port will reproduce: tokens per cycle (two L-row forwards), the
-accepted-length distribution, and that greedy Uno == greedy AR. Weights come from the
-BF16 GGUF (its q/k rows already in HF's split-half order), so the base is the
-container's source; --base q4_1 round-trips every projection and the head through gguf's
-own Q4_1 quantizer, which is what the container holds.
-
-    python uno_ref.py --gguf K2-Horizon-7B-BF16.gguf --adapter uno/adapter_model.safetensors \
-        --tokenizer base --prompts prompts.jsonl --L 8 --max-new 128 --out out.json
-
-Never run it while timing the NPU: it saturates the CPU.
-"""
+"""CPU reference for K2-Horizon-7B-Uno's two-pass cycle (ifm-ai/uno); never run it while timing the NPU, it saturates the CPU."""
 from __future__ import annotations
 
 import argparse
@@ -120,8 +107,7 @@ class K2:
 
     @torch.inference_mode()
     def forward(self, ids, pos0: int, lora_rows=None) -> torch.Tensor:
-        """Rows `ids` at positions pos0.. (causal over the cache and each other); writes KV
-        for every row; returns fp32 logits [T, VOCAB]. lora_rows: a 0/1 list, or None."""
+        """Rows `ids` at pos0.., causal over the cache and each other; writes every row's KV, returns fp32 logits [T, VOCAB]."""
         T = len(ids)
         mask = None if lora_rows is None or not any(lora_rows) else \
             torch.tensor(lora_rows, dtype=torch.bfloat16)

@@ -1,18 +1,4 @@
-r"""gl: the L-row GEMV of the dense L-row pass on its own, Y[L, N] = X[L, K] @ W[N, K]^T,
-from the pool-order q4_1 bands dx streams (row split 2).
-
-Each of N_CORES main cores owns a contiguous run of bands, processed in tiles of BT
-bands whose [L][64] accumulators stay resident in L1 (one y fifo element per band,
-acquired BT at a time); K is walked in KS-wide slices, and per slice the core
-re-quantises the L tokens' slice tables, then streams every band of the tile's
-slice. The weight stream is one 4-d fill per tile: [slices, bands, rows, 2 KB].
-The activation is broadcast once per tile: [slices, tokens, KS values].
-
-Env: GL_N, GL_K, GL_L (tokens, multiple of 4), GL_CORES, GL_BT (bands per tile),
-GL_KS (slice width), GL_F32 (1: X is fp32), GL_NULL (1: no arithmetic).
-Build:  python build_design.py designs/dxl/gl.py designs/dxl/build_gl_<tag>
-Test:   python designs/dxl/make_gl_test.py ...  (see there)
-"""
+r"""gl: the L-row GEMV alone, Y[L, N] = X[L, K] @ W[N, K]^T over dx's pool-order q4_1 bands, sized by the GL_* env."""
 
 from __future__ import annotations
 

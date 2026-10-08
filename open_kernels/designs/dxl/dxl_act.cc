@@ -1,5 +1,4 @@
-// h = silu(g) * u for band b of all DXL_L tokens into the y element; u is accumulator band b,
-// g is band g0 + b (the core's [band][L][64] accumulators). dense_act's arithmetic per token.
+// dense_act's arithmetic per token, so each row's h stays bit-identical to decode.
 #include "dxl_gemv.h"
 #include "vecmath.h"
 

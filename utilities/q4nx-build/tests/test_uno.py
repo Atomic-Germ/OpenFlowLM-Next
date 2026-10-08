@@ -1,8 +1,4 @@
-"""K2-Horizon-7B-Uno's adapter shaped for the L-row GEMV (q4nx/uno.py; Traces: OPEN-UNO-LORA).
-
-A wrong placement does not crash: the draft pass would simply draft worse, and greedy Uno
-would still match plain decode -- slower. So the layout is asserted here, on a synthetic
-adapter small enough to check by hand."""
+"""q4nx/uno.py's layout (Traces: OPEN-UNO-LORA): a misplaced tensor only drafts worse, and greedy Uno still matches decode."""
 import sys
 import unittest
 from pathlib import Path

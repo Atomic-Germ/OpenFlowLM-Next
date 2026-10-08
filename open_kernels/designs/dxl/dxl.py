@@ -1,25 +1,4 @@
-r"""dxl: L consecutive positions through one dense layer in ONE dispatch, the weights
-streamed once for all L (the verify / draft pass of speculative decoding).
-
-    for each row: ln -> L-row gemv q | k | v -> attention, one row at a time (row j's KV
-    reaches DDR before row j+1 reads its window) -> L-row gemv o -> for each row: ln
-    (+residual) -> L-row gemv up | gate, silu(gate) * up -> L-row gemv down -> for each
-    row: +residual
-
-dx's fabric and buffers: 8 main cores (Tile(c, 2)), the ln core (Tile(0, 3)), the
-attention cores (Tile(2 + c, 3)), and the same per-layer pool, consts, kv and ptab, so
-a kernel set gains dxl without a second copy of any weight. Its own buffers are the
-L-row residual `xres` f32[L][HID] and the L-row scratch `act` (recipes/dxl.py).
-
-Per row the arithmetic is dx's -- the same ln and attention kernels, a GEMV that is
-bit-identical per token to gemv_q4_tile (dxl_gemv.h), the same silu -- so the L rows'
-logits are the ones L decode steps would give.
-
-The attention patch sites are built for the placeholder positions 1 .. L (row j at
-1 + j); the driver's `attnrows` patch moves them to pos0 + j.
-
-Build: OPEN_KERNELS_SPEC=<spec> DXL_L=4 python build_design.py designs/dxl/dxl.py designs/dxl/build_<tag>
-"""
+r"""dxl: L consecutive positions through one dense layer in one dispatch, the weights streamed once for all L."""
 
 from __future__ import annotations
 
@@ -113,8 +92,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     act_ty = np.ndarray[(X.AD_BYTES,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(L0.PTAB_BYTES,), np.dtype[np.uint8]]
     lora_ty = np.ndarray[(X.LORA_BYTES,), np.dtype[np.uint8]]
-    # every core buffer a whole number of 64 B: the allocator packs them back to back, and a 512-bit
-    # access at an address only 32 B aligned reads the wrong bytes without a fault
+    # every core buffer a multiple of 64 B: they pack back to back, and a 32 B-aligned 512-bit access silently misreads
     table_ty = np.ndarray[(TABLE_INTS,), np.dtype[np.int32]]
     rtp_ty = np.ndarray[(16,), np.dtype[np.int32]]
     q4_ty = np.ndarray[(16,), np.dtype[np.int32]]
@@ -176,8 +154,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     barriers = [WorkerRuntimeBarrier() for _ in range(N_CORES)]
 
     def main_body(win, xin, yout, tab, acc, table, rtp, nj, jp, barrier, fnj, fjob, fprep, fgemv, fout):
-        # the dispatch's mode is in rtp[0] before the barrier opens; nothing releases it, so the
-        # next dispatch waits for its own stream to write its mode
+        # rtp[0] holds the mode before the barrier opens; nothing releases it, so each dispatch waits for its own stream
         barrier.wait_for_value(1)
         fnj(table, rtp, nj)
         for j in range_(nj[0]):
@@ -353,8 +330,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                                                  [1, k["BT"], LR, 256], [0, 256, row, 1]))
 
         def run_stage(name, early=()):
-            """a stage's jobs; the `early` ones had their weights and drains issued already.
-            Before the first z fill, the A band's z must be in DDR."""
+            """`early` jobs had weights and drains issued already; the A band's z must be in DDR before the first z fill."""
             zwait = True
             for job in stage[name]:
                 # the wait comes before this job's own drain, which cannot finish without its z fill

@@ -1,6 +1,5 @@
 #pragma once
-// The main cores' job table (recipes/dxl.py job_table): per mode (rtp[0]: 0 verify, 1 draft)
-// the job count, then each job's fields in FIELDS order.
+// Must match recipes/dxl.py job_table: per mode (rtp[0]: 0 verify, 1 draft) a job count, then FIELDS-order rows.
 #include "dxl_gemv.h"
 
 #ifndef DXL_JMAX

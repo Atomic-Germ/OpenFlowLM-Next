@@ -628,15 +628,13 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     return out
 
 
-# The families whose L-row pass (designs/dxl: OPEN-DECODE-ROWS) has run on hardware, and its
-# width. Every other dense family's kernel set is unchanged.
+# Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
 ROWS_FAMILIES = ("k2",)
 ROWS_L = 4
 
 
 def rows_route(spec: ModelSpec) -> dict | None:
-    """The L-row pass's kernels (dxl: L positions through a layer; lmhl: their norm, head and
-    argmax) and the manifest's `rows` section, for a family validated on it; None otherwise."""
+    """The L-row pass's kernels (dxl, lmhl) and the manifest's `rows` section for a ROWS_FAMILIES spec, else None."""
     if spec.family not in ROWS_FAMILIES:
         return None
     from .dxl import layout as dxl_layout, lora_pack_plan

@@ -3,9 +3,7 @@
 // Elements are 4 KB: x as two fp32[1024] halves; w, xn as bf16[2048].
 // Same arithmetic as designs/ln/ln.cc (bit-identical xn for add == 0).
 //
-// LN_GROUPS=G > 1 selects K2's GroupRMSNorm(G): one RMS reduction per contiguous group
-// (mean over kGrp elements, eps inside rsqrt), channel-wise weight over the whole
-// width. Default 1 keeps the single-reduction arithmetic bit-identical.
+// LN_GROUPS=G: K2's GroupRMSNorm, an RMS per contiguous group (eps inside rsqrt) but a channel-wise weight; 1 is bit-identical.
 #include "vecmath.h"
 
 // LN_N: the width (designs/ln/ln.py and the whole-layer designs pass it from the ModelSpec);

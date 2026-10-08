@@ -1,18 +1,4 @@
-r"""lmhl2: the L-row pass's tail with lm_head_q4's 10 KB weight stream -- the final norm of each
-row, the q4_1 head for all L rows in one pass over its weights, and each row's argmax.
-
-lmhl kept a whole-K table per token, which leaves room for 5 KB weight elements only, and the
-head ran DMA-bound at about twice lm_head_q4's time. Here the head runs like dxl's
-projections: tiles of BT bands with resident [L][64] accumulators, K in 1024-wide slices whose
-L tables are rebuilt per tile, and 10 KB elements (the two 32-row halves of a k-tile). Every
-core takes the same number of bands: the head pool is padded to a whole number of bands per
-core, and the padding bands' rows (past real_vocab) neither win the argmax nor land inside a
-row of logits (the logits rows are ROW_FLOATS apart, not VOCAB).
-
-out = logits f32[L][ROW_FLOATS] | argmax int32[N_CORES][L*64] ([value L | row L] per core).
-
-Build: OPEN_KERNELS_SPEC=<spec> DXL_L=4 python build_design.py designs/dxl/lmhl2.py designs/dxl/build_lmhl2_<tag>
-"""
+r"""lmhl2: lmhl with 10 KB weight elements; lmhl's whole-K tables left room for 5 KB only, DMA-bound at ~2x lm_head_q4."""
 
 from __future__ import annotations
 

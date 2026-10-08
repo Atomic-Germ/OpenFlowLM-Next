@@ -1,5 +1,4 @@
-// One 10 KB weight element = the two 32-row halves of k-tile e of a band's slice s, into accumulator
-// band b ([band][L][64]); dxl_gemv_chunk per half.
+// A 10 KB weight element holds both 32-row halves of k-tile e, hence two chunks.
 #include "dxl_gemv.h"
 
 extern "C" {

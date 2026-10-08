@@ -1,10 +1,4 @@
-"""The draft pass of one K2 layer in fp64 (OPEN-UNO-LORA's reference): the L rows causal over
-each other, LoRA on every row the mask names, z = x A^T and y += B z computed from the same
-padded uno.q4nx tensors the L-row GEMV reads, so only the arithmetic differs from the NPU.
-
-    python designs/dxl/draft_ref.py --fixture model/out_k2l --model <K2 dir> --l 4 --pack    # lora_L0.bin
-    python designs/dxl/draft_ref.py --fixture model/out_k2l --model <K2 dir> --l 4 --compare
-"""
+"""fp64 draft pass of one K2 layer (OPEN-UNO-LORA) from the padded uno.q4nx tensors the NPU reads, so only arithmetic differs."""
 from __future__ import annotations
 
 import argparse

@@ -65,13 +65,9 @@ public:
     static std::string find_kernels(const LM_Config& config, std::string* how = nullptr);
 
     const Core& core() const { return *core_; }
-    /// OPEN-UNO-DECODE: whether this kernel set and model have the draft pass (manifest
-    /// rows.lora_kernel, the model's uno.q4nx).
+    // OPEN-UNO-DECODE: needs both the kernel set's rows.lora_kernel and the model's uno.q4nx.
     bool uno_ok() const;
-    /// One greedy Uno cycle from `seed`, the last emitted token, not yet in the cache: appends the
-    /// tokens it commits (the base model's greedy continuation, 2 to L + 1 of them) to `out` and
-    /// leaves the cache holding all of them but the last, at the position of that last. Returns
-    /// the seed's position: committed token i sits at that + 1 + i.
+    // Leaves the cache holding every committed token but the last; committed token i sits at the return + 1 + i.
     int uno_cycle(int seed, std::vector<int>& out);
     /// Put the cache position at `pos`: the rows past it are dropped (a cycle cut short).
     void uno_seek(int pos);

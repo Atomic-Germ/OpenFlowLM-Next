@@ -184,9 +184,7 @@ struct KernelDesc {
     uint64_t rb = 1;
 };
 
-/// The L-row pass (designs/dxl, OPEN-DECODE-ROWS): `kernel` takes L positions through one
-/// dense layer against the layer's own pool / consts / state / ptab and an L-row residual and
-/// scratch; `head` runs their final norm, the head and a per-row argmax. l == 0: none.
+// OPEN-DECODE-ROWS: `kernel` reuses each layer's pool / consts / state / ptab; l == 0 means no rows pass.
 struct RowsDesc {
     uint64_t l = 0;
     std::string kernel, head;
@@ -194,9 +192,7 @@ struct RowsDesc {
     uint64_t head_act_bytes = 0;     ///< the head's normed rows (bf16 [L][hidden])
     uint64_t head_cores = 0;         ///< cores whose [value L | row L] argmax elements end the head's output
     uint64_t head_out_floats = 0;    ///< logits [L][vocab] then head_cores elements of L * 64
-    /// The draft pass (OPEN-UNO-LORA): `lora_kernel` is the same core programs' stream that adds
-    /// a LoRA from `lora_file` (beside model.q4nx), packed per layer by `lora_pack` into a
-    /// `lora_pool_bytes` buffer. Empty: no draft pass.
+    // OPEN-UNO-LORA: `lora_kernel` is another stream for the same core programs; empty means no draft pass.
     std::string lora_kernel, lora_file;
     uint64_t lora_pool_bytes = 0;
     std::vector<PackOp> lora_pack;
