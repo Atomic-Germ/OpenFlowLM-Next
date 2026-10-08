@@ -291,4 +291,71 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
     }
 }
 
+/// One patch of an L-row stream (designs/dxl): attn_table's kinds, for query row `row`.
+struct AttnRowPatch {
+    size_t word;
+    uint8_t kind;
+    uint32_t flags;
+    uint32_t row;
+};
+
+/// `attnrows`'s table for an L-row stream built for the placeholder positions 1 .. rows (row j
+/// at 1 + j): per row, in stream order, the KV window fill (arg 3 at offset 0; its length in
+/// the BD write before it), the new row's drain (arg 3 at (1 + j) * kv_row) and the position
+/// record (arg 5 at (1 + j) * ptab_row).
+inline std::vector<AttnRowPatch> attn_rows_table(const std::vector<uint32_t>& w, const std::string& kn,
+                                                 uint32_t rows, const AttnGeometry& g = AttnGeometry{}) {
+    std::vector<AttnRowPatch> t;
+    size_t bd_write = 0;
+    bool have_bd = false;
+    uint32_t windows = 0;
+    for (size_t i = 4; i < w.size(); i += op_len(w[i])) {
+        if (w[i] == 1) { bd_write = i; have_bd = true; }
+        if (w[i] != 0x81 || i + 11 >= w.size()) continue;
+        uint32_t reg = w[i + 6], arg = w[i + 8];
+        uint64_t off = w[i + 10] & 0x7fffffffu;
+        uint32_t flags = w[i + 10] & 0x80000000u;
+        if (arg == 3 && off == 0) {
+            if (!have_bd || bd_write + 2 >= w.size() || w[bd_write + 2] + 4 != reg)
+                throw std::runtime_error("attnrows: " + kn + ": no BD write before a KV window fill");
+            t.push_back({bd_write + 4, 0, 0, windows});
+            t.push_back({i + 10, 3, flags, windows});
+            ++windows;
+        } else if (arg == 3) {
+            if (off % g.kv_row || off / g.kv_row < 1 || off / g.kv_row > rows)
+                throw std::runtime_error("attnrows: " + kn + ": unexpected kv transfer at offset " + std::to_string(off));
+            t.push_back({i + 10, 1, flags, static_cast<uint32_t>(off / g.kv_row - 1)});
+        } else if (arg == 5) {
+            if (off % g.ptab_row || off / g.ptab_row < 1 || off / g.ptab_row > rows)
+                throw std::runtime_error("attnrows: " + kn + ": unexpected record fill at offset " + std::to_string(off));
+            t.push_back({i + 10, 2, flags, static_cast<uint32_t>(off / g.ptab_row - 1)});
+        }
+    }
+    for (uint32_t r = 0; r < rows; ++r)
+        for (uint8_t kind = 0; kind < 4; ++kind) {
+            size_t n = 0;
+            for (const auto& p : t) n += (p.kind == kind && p.row == r);
+            if (n != 1)
+                throw std::runtime_error("attnrows: " + kn + ": row " + std::to_string(r) + " has " + std::to_string(n) +
+                                         " patches of kind " + std::to_string(kind) + ", expected 1");
+        }
+    return t;
+}
+
+/// Row j of an L-row stream at cache position pos0 + j, each by attn_apply's rule.
+inline void attn_rows_apply(uint32_t* iw, const std::vector<AttnRowPatch>& table, uint64_t pos0,
+                            const AttnGeometry& g = AttnGeometry{}) {
+    for (const auto& p : table) {
+        const uint64_t pos = pos0 + p.row;
+        uint64_t start, nf;
+        attn_window(pos, g.window, &start, &nf);
+        if (g.rb > 1) nf = g.rb * ((pos - start) / g.rb + 1) - 1;
+        uint64_t v = p.kind == 0   ? nf * g.kv_row / 4
+                     : p.kind == 1 ? pos * g.kv_row
+                     : p.kind == 2 ? pos * g.ptab_row
+                                   : start * g.kv_row;
+        iw[p.word] = static_cast<uint32_t>(v) | p.flags;
+    }
+}
+
 }  // namespace stream_patch
