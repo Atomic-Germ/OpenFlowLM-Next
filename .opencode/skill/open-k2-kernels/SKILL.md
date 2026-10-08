@@ -74,7 +74,17 @@ open_qwen36_cli --model C:/models/k2-7b/K2-Horizon-7B-NPU2 --kernels src/xclbins
 argmax matching, residual corr >= 0.999999; **105 ms/token (9.56 tok/s)** at
 positions 20-83, coherent text.
 
-## K2-Horizon-7B-Uno
+## K2-Horizon-7B-Uno (lossless speculative decoding)
 
-The Uno adapter (a diffusion-drafter LoRA over the 7B) is planned in
-`specs/open-engine/plans/k2-horizon-7b-uno.md`. CPU reference: `utilities/uno-ref/uno_ref.py`.
+The Uno adapter (IFM/K2-Horizon-7B-Uno, a diffusion-drafter LoRA over the 7B) runs on the
+L-row pass: see the `open-dxl-rows` skill.
+
+```bash
+# the base container and the adapter in one go (writes uno.q4nx beside model.q4nx)
+python convert.py -i C:/models/k2-7b/K2-Horizon-7B-BF16.gguf -o C:/models/k2-7b/K2-Horizon-7B-Uno-NPU2     -f k2 -t language -s C:/models/k2-7b/base --quant Q4_1 --uno-adapter IFM/K2-Horizon-7B-Uno
+open_qwen36_cli --model <dir> --kernels src/xclbins/K2-Horizon-7B-NPU2/open_kernels --ids <ids> --uno 64
+```
+
+`oflm` serves it through the `k2` family (`modeling_k2.cpp`): a greedy request (the default)
+decodes by Uno and a sampled one by plain decode. CPU reference of the algorithm:
+`utilities/uno-ref/uno_ref.py`; it measures acceptance off the NPU.

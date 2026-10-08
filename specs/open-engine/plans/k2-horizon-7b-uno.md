@@ -4,6 +4,30 @@
 the speed). Defaults taken on the four decisions: near-tie bar, greedy first, one container,
 dense-first L-row pass.
 
+## Progress
+
+| Phase | State |
+|---|---|
+| 1. K2-Horizon-7B AR | **done**: GroupRMSNorm(4), `OPEN-FAMILY-K2`, 9.56 tok/s on the NPU. A converter bug was found and fixed on the way: `-f k2` scrambled the q/k rows. |
+| 0a. CPU reference | **done** (`utilities/uno-ref`): 3.94 tokens per cycle at L = 8, 3.45 at L = 4, q4_1 base; a q4_1 LoRA loses nothing |
+| 2. L-row pass | **done** (`designs/dxl`, OPEN-DECODE-ROWS): the layer and the head with an NPU argmax are bit-identical to decode; `Core::step_rows`, `--rows-check` PASS; a pass costs 1.17-1.28x one step. |
+| 3. LoRA | **done** (OPEN-UNO-LORA): `uno.q4nx` (`q4nx-build --uno-adapter`), the draft stream sharing dxl's context; the draft layer matches fp64 at corr >= 0.999998. |
+| 4. Uno decode | **done** (OPEN-UNO-DECODE): `--uno` is identical to plain decode over 64 tokens, 1.68x its speed (measured on a shared NPU; the clean bench is queued); the `oflm` `k2` family uses it for greedy requests. |
+
+Findings that changed the design:
+- **The L-row pass can be bit-identical to decode, not just within the near-tie bar.** Per
+  token, the L-row GEMV does gemv_q4_tile's arithmetic in the same order; the norms, the
+  attention (one query row at a time) and silu are dx's own kernels. Measured: 0 of 4096
+  values differ on a real layer. So Uno's output equals the NPU's own AR output exactly.
+- **L = 4 is the working point.** The GEMV costs ~1.1x at L = 4 and ~1.9x at L = 8: at L = 8
+  each chunk takes two tile4 passes on 8 cores. Acceptance beyond three drafts is rare
+  (3.45 tokens per cycle at L = 4 against 4.04 at L = 8).
+- **The LoRA is stored at q4_1, as base-pool bands**, and runs through the same GEMV:
+  - A is 8 extra bands per projection group, one per core (zero-padded to 512 rows).
+  - B is one extra k-tile slice per band, zero-padded from 128 to 256 columns.
+  - The seed row's mask is a DMA: token 0 of the B slice's x stream is read from a zero row.
+  - Overhead: ~12 MB per layer (~10%), on the draft pass only.
+
 ## What Uno is
 
 `IFM/K2-Horizon-7B-Uno` is not a model. It is a PEFT LoRA adapter over `IFM/K2-Horizon-7B`:

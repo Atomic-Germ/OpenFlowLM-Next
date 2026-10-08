@@ -1221,6 +1221,135 @@ GGUF (`-f llama`) is interleaved and keeps the reorder.
 
 **Result 2026-10-08 (K2-Horizon-7B):** `ln` 4096 x 4 PASS on the NPU (xn cos 0.99999999, 5 of 4096 bf16 values one ulp off), with 2560 x 2 and 4096 x 1 re-run as regressions, both PASS. The 4-layer slice: logits corr 0.999999 / 0.999999, argmax 2125 / 1316 matching the fp64 replica, top-5 identical at position 1 and one tail slot swapped at position 0, residual corr >= 0.999999 in every layer (maxrel <= 3.1e-3). Through the engine: a coherent reasoning preamble over 120 tokens, **105 ms/token (9.56 tok/s)** at positions 20-83. `ln (4096, 4)` entered the catalogue with this run.
 
+### OPEN-DECODE-ROWS: L positions through a dense model in one pass, bit-identical to L steps
+**Applies to:** openflowlm-next (`open_kernels/designs/dxl`, `open_kernels/recipes/dxl.py`, `recipes/dense.py` `rows_route`, `harness/stream_patch.hpp`, `src/open_qwen36/core.cpp` `step_rows`)
+**Verification:** test (the layout and job tables: `tests/test_dxl.py`); manual (the hardware procedure below)
+
+For a family in `ROWS_FAMILIES` (K2 today), the kernel set shall ship an L-row pass (L = 4).
+`dxl` takes L consecutive positions through one dense layer in one dispatch, and `lmhl` takes
+their final norm, the head and each row's argmax in another. The weights are streamed once for
+the L rows.
+
+Row j, at position pos0 + j, shall be bit-identical to the decode step at that position:
+- The same bf16 logits, every one of them, and so the same argmax.
+- The GEMV does gemv_q4_tile's arithmetic per token in its order (`dxl_gemv.h`).
+- The norms, the attention and silu are dx's own kernels.
+- The attention takes the queries one row at a time, and row j's KV row reaches DDR before row
+  j + 1 reads its window.
+
+Other properties:
+- The pass writes the L rows' KV and leaves the position alone, so the caller seeks to the
+  prefix it keeps.
+- It reads dx's per-layer pool, consts, kv and ptab. It adds only its own L-row residual,
+  scratch and head buffers, so it costs no second copy of any weight.
+
+The main cores run a job table. The table for this dispatch's mode (`rtp[0]`) is written by its
+stream behind a runtime barrier, so the verify and draft streams (OPEN-UNO-LORA) share one
+xclbin and one hardware context.
+
+**Every main-core buffer is a whole number of 64 B, and the build asserts it.** The allocator
+places buffers back to back. A 512-bit access at an address that is only 32 B aligned reads
+the wrong bytes without faulting. A 3,080 B table did exactly that, and `designs/dxl/glj.py`
+is the probe that isolated it.
+
+The attention sites are compiled for the placeholder positions 1 .. L. `attnrows` (harness
+and engine) moves row j's window length, KV drain and record to pos0 + j.
+
+**Acceptance criteria (unit):**
+- The act regions do not overlap.
+- The main cores fit 60 KB at L = 4 and L = 8.
+- The verify table covers every band of every projection exactly once.
+- Each draft base tile is followed by its LoRA k-tile at S0 = K / 256, and the band drains
+  only after that tile.
+- The LoRA pack plan is contiguous whole chunks.
+- Only K2 ships the route.
+
+**Procedure (manual):**
+1. `python designs/dxl/make_dxl_test.py --fixture model/out_k2l --build <dxl build> --l 4`, then
+   `run_kernel`, then `--compare`. Every row must equal dx's layer output for the same token:
+   0 of 4096 values differ.
+2. The same with `--head` for `lmhl`: 0 of 250624 logits differ from `ln` + `lm_head_q4`, and
+   the NPU argmax equals the host's.
+3. `open_qwen36_cli ... --rows-check 17`: N decode steps, then the same positions as L-row
+   passes. It prints `ROWS PASS`.
+
+**Result 2026-10-08 (K2-Horizon-7B, L = 4):**
+- Layer 0 bit-identical on all four rows.
+- The head bit-identical, the argmax matching.
+- `--rows-check` over 16 rows: every row's 250624 logits equal the decode step's.
+- A pass costs 1.17-1.28x one decode step.
+- The main cores are at 8,304 of 16,384 B of program memory.
+
+### OPEN-UNO-LORA: K2-Horizon-7B-Uno's diffusion LoRA as q4_1 bands
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/uno.py`, `--uno-adapter`, `open_kernels/recipes/dxl.py`, `designs/dxl`, `src/open_qwen36/core.cpp`)
+**Verification:** test (`utilities/q4nx-build/tests/test_uno.py`, `tests/test_dxl.py`); manual (the draft layer below)
+
+The draft pass shall compute IFM's conditional LoRA `y += s * (m * (x A^T)) B^T` on q, k, v,
+o, gate, up and down:
+- s = lora_alpha / r: 64 for this adapter, not rsLoRA.
+- m is 0 on the seed row and 1 on the rest.
+- Embedding, norms and head get no LoRA.
+
+It is computed inside the L-row GEMV, from `uno.q4nx` beside `model.q4nx`:
+- `q4nx-build --uno-adapter <dir or repo>`, or `python -m q4nx.uno`, writes it, quantized to
+  q4_1 by the converter's own path.
+- The A matrices sharing an input are stacked and zero-padded to one 64-row band per core:
+  [A_q; A_k] with A_v from row 256, [A_o], [A_g; A_u], [A_d].
+- Each z = x A^T is drained to act.
+- s * B is zero-padded to one 256-column k-tile, appended to every band of its projection,
+  reading a 256-wide window of z: q and k read [z_q | z_k], v reads [z_v | 0], gate and up read
+  [z_g | z_u].
+- The seed row's mask is a DMA: its z is read from a zero row nobody writes.
+
+The LoRA at q4_1 costs no acceptance: the CPU reference (`utilities/uno-ref`) measures 3.98
+tokens per cycle against 3.94 at bf16. The draft's precision moves only the speed, never the
+output.
+
+**Acceptance criteria (unit):**
+- A's rows are where each window reads them, at any rank up to 128.
+- B is s * B in its window and zero elsewhere.
+- The padded tensors reproduce s * B (A x).
+- A rank that does not fit is refused.
+
+**Procedure (manual):**
+1. `python designs/dxl/draft_ref.py --fixture model/out_k2l --model <dir with uno.q4nx> --pack`.
+2. `make_dxl_test.py --build <draft build> --lora model/out_k2l/lora_L0.bin`, then `run_kernel`.
+3. `draft_ref.py --compare`: the fp64 draft layer from the same padded tensors.
+
+**Result 2026-10-08:**
+- The seed row is bit-identical to dx.
+- Rows 1-3 match at corr >= 0.999998, where the LoRA moves them by 41-49%.
+- The draft layer is 6.7 ms against the verify stream's 5.9 ms in the harness.
+
+### OPEN-UNO-DECODE: greedy Uno on the NPU, the same tokens as greedy decode
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `cli.cpp` `--uno`, `common/AutoModel/modeling_k2.cpp`)
+**Verification:** manual (an implementation error changes the output, and the procedure compares it token for token)
+
+A K2 model directory that has `uno.q4nx`, with a kernel set that has `dxl_lora`, shall decode
+greedy requests by IFM's two-pass cycle:
+1. **Draft.** `[seed, noise_1 .. noise_{L-1}]`, the noise uniform in [1, vocab), with the LoRA
+   on every row but the seed's. Row 0's argmax is the base model's next token c; rows 1.. are
+   drafts.
+2. **Verify.** `[c, drafts]` at the next position, without the LoRA.
+3. **Commit.** c, the drafts the verify agrees with in order, then the verify's next token: 2 to
+   L + 1 tokens a cycle.
+
+Because the L-row pass is bit-identical to decode, the output is exactly plain greedy decode's.
+
+In the app, the K2 adapter runs the cycle when the request is greedy (top_k 1, no penalty that
+reorders the logits). A cycle cut short by EOS or a length limit is sought back to where plain
+decode would have left the cache. A sampled request decodes as usual.
+
+**Procedure (manual):** `open_qwen36_cli --model <dir> --kernels <set> --ids <chat ids> --uno N`
+runs N tokens by the cycle, then by plain decode. It prints `UNO IDENTICAL to decode over N
+tokens` and both speeds.
+
+**Result 2026-10-08 (K2-Horizon-7B-Uno, NPU shared with another session's job):**
+- 64 tokens in 17 cycles: 3.76 tokens a cycle; accepted drafts 0/1/2/3 occurred 2/6/2/7
+  times.
+- Identical to plain decode.
+- 1.68x plain decode's speed in the same process.
+
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,

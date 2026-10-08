@@ -93,6 +93,14 @@ def derived(sd: dict, layer: int, scale: float, n_cores: int = 8) -> dict[str, n
             "b_d": tile(B["down_proj"], 0)}
 
 
+def fetch_adapter(src: str) -> Path:
+    """A local adapter dir as is; an HF repo id downloaded (only the adapter's two files)."""
+    if Path(src).is_dir():
+        return Path(src)
+    from huggingface_hub import snapshot_download
+    return Path(snapshot_download(repo_id=src, allow_patterns=["adapter_config.json", "adapter_model.safetensors"]))
+
+
 def build(adapter_dir: Path, config: Path, out_dir: Path, q4nx_config: Path) -> Path:
     acfg = json.loads((adapter_dir / "adapter_config.json").read_text())
     if acfg.get("use_rslora"):
@@ -121,7 +129,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, help="the model dir to write uno.q4nx into")
     ap.add_argument("--q4nx-config", default=str(Path(__file__).resolve().parents[1] / "configs" / "k2.json"))
     a = ap.parse_args(argv)
-    build(Path(a.adapter), Path(a.config), Path(a.out), Path(a.q4nx_config))
+    build(fetch_adapter(a.adapter), Path(a.config), Path(a.out), Path(a.q4nx_config))
     return 0
 
 

@@ -682,6 +682,12 @@ def _parse_args(argv):
         help="With --open-diffusion: keep the per-weight packed files here and reuse them "
              "on the next build (default: a temporary directory)",
     )
+    parser.add_argument(
+        "--uno-adapter", dest="uno_adapter", default=None, metavar="DIR|ORG/NAME",
+        help="A K2-Horizon-Uno diffusion LoRA (a PEFT adapter dir or HF repo, e.g. IFM/K2-Horizon-7B-Uno): "
+             "after the base converts, write it as uno.q4nx beside model.q4nx for the open engine's "
+             "draft pass (q4nx/uno.py)",
+    )
     return parser.parse_args(argv)
 
 
@@ -975,6 +981,12 @@ def main(argv=None) -> int:
 
     if getattr(args, "build_spec", False):
         _build_spec(output_folder)
+
+    if getattr(args, "uno_adapter", None):
+        from q4nx.uno import build as build_uno, fetch_adapter
+
+        build_uno(fetch_adapter(args.uno_adapter), Path(output_folder) / "config.json", Path(output_folder),
+                  Path(__file__).resolve().parents[1] / "configs" / "k2.json")
 
     print(f"[INFO] Conversion complete! Output saved to {output_folder}")
     return 0
