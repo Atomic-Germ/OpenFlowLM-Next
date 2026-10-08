@@ -3,6 +3,7 @@
 ///        model whose config.json disagrees with it is refused with the key named.
 ///        No XRT, no hardware: `manifest_test <fixtures/manifest_qwen36.json>`.
 // Traces: OPEN-MANIFEST (canonical spec: specs/open-engine/spec.md)
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
@@ -275,6 +276,55 @@ int main(int argc, char** argv) {
         try { Manifest::parse(g, "q8 gemm"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
         check(ok, "a version 3 manifest with a bf16_gemm weight loads");
     }
+    // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
+    auto with_lean = [](json& j) {
+        j["kernels"]["gemm_lean"] = {{"context", "gemm"}, {"insts", "gemm_lean/insts.bin"}};
+        j["globals"]["gemm_y_lean"] = 4096;
+        for (const char* lt : {"linear_attention", "full_attention"}) {
+            json v = j["layer_types"][lt]["gemm_block"];
+            v["program"][0]["kernel"] = "gemm_lean";
+            v["program"][0]["args"][2] = "gemm_y_lean";
+            j["layer_types"][lt]["gemm_block_variants"]["lean"] = v;
+        }
+    };
+    {
+        std::ifstream f(argv[1]);
+        json g = json::parse(f);
+        with_lean(g);
+        Manifest both = Manifest::parse(g, "lean");
+        const auto& files = both.files();
+        check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
+                  std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
+              "a lean variant parses, and the set's files include its streams");
+        Manifest fast = both;
+        const bool fast_found = fast.select_prefill_route("");
+        check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
+                  fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
+                  fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
+                  !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
+              "fast keeps gemm_block and drops the variant and the globals only it names");
+        Manifest lean = both;
+        const bool lean_found = lean.select_prefill_route("lean");
+        check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
+                  lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
+                  lean.globals.count("gemm_y_lean") && !lean.globals.count("gemm_y_n12288") &&
+                  !lean.globals.count("gemm_y_n9216") && lean.globals.count("gemm_x_k2048"),
+              "lean takes the variant on every layer type and drops the globals only gemm_block named");
+        Manifest one = Manifest::load(argv[1]);
+        const auto before = one.layer_types.at("linear_attention").gemm_block.program[0].kernel;
+        check(!one.select_prefill_route("lean") && one.layer_types.at("linear_attention").gemm_block.program[0].kernel == before,
+              "lean on a set with one route changes nothing");
+    }
+    refused_manifest(argv[1], "carry different gemm_block_variants", "a variant on only some layer types is refused",
+                     [&](json& j) { with_lean(j); j["layer_types"]["full_attention"].erase("gemm_block_variants"); });
+    refused_manifest(argv[1], "route at t 128", "a variant at another t is refused", [&](json& j) {
+        with_lean(j);
+        j["layer_types"]["linear_attention"]["gemm_block_variants"]["lean"]["t"] = 128;
+    });
+    refused_manifest(argv[1], "unknown kernel gemm_nope", "a variant naming an unknown kernel is refused", [&](json& j) {
+        with_lean(j);
+        j["layer_types"]["linear_attention"]["gemm_block_variants"]["lean"]["program"][1]["kernel"] = "gemm_nope";
+    });
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
     refused_manifest(argv[1], "op 99", "a route weight past the pack plan is refused at load", [](json& j) {

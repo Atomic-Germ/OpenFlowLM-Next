@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <initializer_list>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -120,6 +121,12 @@ void check_step(const Manifest& m, const Step& s, const std::string& where, cons
                         (it->second.patch.empty() ? std::string("none") : it->second.patch) + "'");
 }
 
+std::vector<const GemmBlockProgram*> routes(const LayerType& t) {
+    std::vector<const GemmBlockProgram*> r{&t.gemm_block};
+    for (const auto& [n, g] : t.gemm_block_variants) r.push_back(&g);
+    return r;
+}
+
 }  // namespace
 
 Manifest Manifest::load(const std::string& path) {
@@ -217,10 +224,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         for (const auto& s : t.program) check_step(m, s, tw, "program");
         // the block prefill route, independent of the sequential `program`
         // above (manifest.hpp's GemmBlockProgram): a per-kind fixed step list
-        if (v.contains("gemm_block")) {
-            const json& gj = v["gemm_block"];
-            const std::string gw = tw + " gemm_block";
-            GemmBlockProgram& g = t.gemm_block;
+        auto parse_gemm_block = [&](const json& gj, const std::string& gw, GemmBlockProgram& g) {
             g.t = get<uint64_t>(gj, "t", gw);
             if (g.t == 0) fail(gw, "t must be > 0 when gemm_block is present");
             g.kind = gj.value("kind", "dense");
@@ -495,11 +499,27 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             check_split(g.program, g.weights, "program");
             check_split(g.shared_program, g.shared_weights, "shared");
             check_split(g.ffn_program, g.ffn_weights, "ffn");
+        };
+        if (v.contains("gemm_block")) parse_gemm_block(v["gemm_block"], tw + " gemm_block", t.gemm_block);
+        // OPEN-PREFILL-MODE: whole routes the engine may load in place of gemm_block
+        if (v.contains("gemm_block_variants")) {
+            if (!t.gemm_block.t) fail(tw, "gemm_block_variants without a gemm_block");
+            for (const auto& [vname, vj] : v["gemm_block_variants"].items()) {
+                const std::string vw = tw + " gemm_block_variants." + vname;
+                GemmBlockProgram g;
+                parse_gemm_block(vj, vw, g);
+                // the host stages and every buffer around the GEMMs are sized for gemm_block's
+                if (g.t != t.gemm_block.t || g.kind != t.gemm_block.kind)
+                    fail(vw, "is a " + g.kind + " route at t " + std::to_string(g.t) + ", gemm_block a " +
+                                 t.gemm_block.kind + " route at t " + std::to_string(t.gemm_block.t));
+                t.gemm_block_variants[vname] = std::move(g);
+            }
         }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));
         for (const auto& o : need(pk, "consts", tw)) t.consts.push_back(parse_op(o, tw + " pack.consts"));
-        for (const auto* ws : {&t.gemm_block.weights, &t.gemm_block.shared_weights, &t.gemm_block.ffn_weights})
+        for (const GemmBlockProgram* g : routes(t))
+        for (const auto* ws : {&g->weights, &g->shared_weights, &g->ffn_weights})
             for (const auto& [name, w] : *ws) {
                 if (w.from == "pack") {
                     for (const auto& o : w.pack)
@@ -516,12 +536,26 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     }
     for (const auto& l : m.layers)
         if (!m.layer_types.count(l)) fail(where, "layers names unknown layer type " + l);
+    // a variant replaces the route on every layer or on none
+    auto variant_names = [](const LayerType& x) {
+        std::vector<std::string> n;
+        for (const auto& [k, g] : x.gemm_block_variants) n.push_back(k);
+        return n;
+    };
+    const LayerType* first = nullptr;
+    for (const auto& [name, t] : m.layer_types) {
+        if (!t.gemm_block.t) continue;
+        if (!first) { first = &t; continue; }
+        if (variant_names(t) != variant_names(*first))
+            fail(where, "layer types " + first->name + " and " + name + " carry different gemm_block_variants");
+    }
     // A dense route's attn_kernel must be the attention-only dx_attn stream. attnpos alone
     // does not say so -- the sequential dx is attnpos-patched too and takes the same six
     // arguments -- so refuse any attn_kernel whose instruction stream a sequential program
     // runs: it would execute the whole layer once per token of the block.
-    for (const auto& [name, t] : m.layer_types) {
-        const GemmBlockProgram& g = t.gemm_block;
+    for (const auto& [name, t] : m.layer_types)
+    for (const GemmBlockProgram* gp : routes(t)) {
+        const GemmBlockProgram& g = *gp;
         if (!g.t || g.kind != "dense") continue;
         const std::string& ai = m.kernels.at(g.attn_kernel).insts;
         for (const auto& [on, ot] : m.layer_types)
@@ -558,11 +592,12 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         }
     }
     // the globals come after the layer types, so the batched expert kernel's x / h / y are checked here
-    for (const auto& [name, t] : m.layer_types) {
-        for (size_t i = 1; i < t.gemm_block.moe_batch.args.size(); ++i)
-            if (!m.globals.count(t.gemm_block.moe_batch.args[i]))
-                fail(where, "layer type " + name + " gemm_block.moe_batch: arg " + t.gemm_block.moe_batch.args[i] + " is not a declared global");
-        for (const auto& a : t.gemm_block.attn_block.args)
+    for (const auto& [name, t] : m.layer_types)
+    for (const GemmBlockProgram* g : routes(t)) {
+        for (size_t i = 1; i < g->moe_batch.args.size(); ++i)
+            if (!m.globals.count(g->moe_batch.args[i]))
+                fail(where, "layer type " + name + " gemm_block.moe_batch: arg " + g->moe_batch.args[i] + " is not a declared global");
+        for (const auto& a : g->attn_block.args)
             if (!m.globals.count(a))
                 fail(where, "layer type " + name + " gemm_block.attn_block: arg " + a + " is not a declared global");
     }
@@ -583,6 +618,36 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
 const LayerType& Manifest::layer_type(size_t layer) const {
     if (layer >= layers.size()) throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " beyond the manifest");
     return layer_types.at(layers[layer]);
+}
+
+bool Manifest::select_prefill_route(const std::string& name) {
+    std::set<std::string> dropped, kept;
+    auto names_of = [](const GemmBlockProgram& g, std::set<std::string>& into) {
+        for (const auto* p : {&g.program, &g.shared_program, &g.ffn_program})
+            for (const auto& s : *p) into.insert(s.args.begin(), s.args.end());
+        for (const auto* a : {&g.moe_args, &g.moe_batch.args, &g.attn_block.args, &g.attn_args})
+            into.insert(a->begin(), a->end());
+    };
+    bool found = false;
+    for (auto& [n, t] : layer_types) {
+        auto it = name.empty() ? t.gemm_block_variants.end() : t.gemm_block_variants.find(name);
+        if (it != t.gemm_block_variants.end()) {
+            names_of(t.gemm_block, dropped);
+            t.gemm_block = std::move(it->second);
+            t.gemm_block_variants.erase(it);
+            found = true;
+        }
+        for (const auto& [vn, g] : t.gemm_block_variants) names_of(g, dropped);
+        t.gemm_block_variants.clear();
+    }
+    for (const auto& [n, t] : layer_types) {
+        names_of(t.gemm_block, kept);
+        for (const auto& s : t.program) kept.insert(s.args.begin(), s.args.end());
+    }
+    for (const auto& s : tail) kept.insert(s.args.begin(), s.args.end());
+    for (const auto& g : dropped)
+        if (!kept.count(g)) globals.erase(g);
+    return found;
 }
 
 std::vector<std::string> Manifest::files() const {

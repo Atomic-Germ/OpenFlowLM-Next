@@ -79,6 +79,7 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
+    if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) cfg_.prefill_mode = pm;   // oflm --prefill-mode
     // Say which set won. Three rules can pick one, and every one of them yields
     // valid output -- so a set chosen against the user's intent looks exactly
     // like the right one. An A/B that silently ran identical kernels twice, and

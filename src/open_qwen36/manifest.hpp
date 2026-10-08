@@ -173,6 +173,7 @@ struct LayerType {
     uint64_t state_bytes = 0, state_row = 0;
     std::vector<Step> program;
     GemmBlockProgram gemm_block;
+    std::map<std::string, GemmBlockProgram> gemm_block_variants;   ///< OPEN-PREFILL-MODE: routes loadable in its place
     std::vector<PackOp> pool, consts;
 };
 
@@ -240,6 +241,9 @@ struct Manifest {
     /// refused as lacking otherwise.
     void check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
+    /// OPEN-PREFILL-MODE: gemm_block becomes variant `name` ("" keeps it), and the other routes and the
+    /// globals only they name are dropped. False when no layer type has a variant `name`.
+    bool select_prefill_route(const std::string& name);
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
 };
