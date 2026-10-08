@@ -29,6 +29,14 @@ float silu(float x) { return x / (1.0f + std::exp(-x)); }
 float sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 float softplus(float x) { return x > 0 ? x + std::log1p(std::exp(-x)) : std::log1p(std::exp(x)); }
 
+// bf16r over eight floats: f32_to_bf16's integer rounding, so the same bits
+inline __m256 bf16r8(const float* p) {
+    const __m256i u = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    const __m256i odd = _mm256_and_si256(_mm256_srli_epi32(u, 16), _mm256_set1_epi32(1));
+    const __m256i r = _mm256_add_epi32(u, _mm256_add_epi32(odd, _mm256_set1_epi32(0x7FFF)));
+    return _mm256_castsi256_ps(_mm256_and_si256(r, _mm256_set1_epi32(static_cast<int>(0xFFFF0000u))));
+}
+
 // x[d] / sqrt(mean(x^2) + eps) * w[d]
 void rms_vec(const float* x, size_t d, const float* w, double eps, float* out) {
     double ss = 0;
@@ -198,8 +206,13 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
                     const float* __restrict v = carry.data() + (static_cast<size_t>(s) + pre) * nch;
                     for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * v[j];
                 } else {
+                    // MSVC leaves the scalar bf16r loop unvectorized; mul then add keeps today's rounding
                     const float* __restrict v = qkv + static_cast<size_t>(s) * nch;
-                    for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
+                    size_t j = 0;
+                    for (; j + 8 <= nch; j += 8)
+                        _mm256_storeu_ps(c.data() + j, _mm256_add_ps(_mm256_loadu_ps(c.data() + j),
+                                                                     _mm256_mul_ps(_mm256_loadu_ps(cw + j), bf16r8(v + j))));
+                    for (; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
                 }
             }
             for (size_t j = 0; j < nch; ++j) c[j] = silu(c[j]);
@@ -213,17 +226,34 @@ void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const 
                     for (size_t j = 0; j < dim; ++j) dst[j] = src[j] * r;
                 }
             std::copy(c.begin() + 2 * key_w, c.end(), V.begin() + t * vw);
-            std::fill(al.begin(), al.end(), 0.f);
-            std::fill(be.begin(), be.end(), 0.f);
+            // sixteen lanes held in registers across all of hid, each summed over i in the same order as before
             const float* x = xn + t * g.hid;
-            for (size_t i = 0; i < g.hid; ++i) {
-                const float xi = x[i];
-                const float* wa = Wa + i * g.lanes;
-                const float* wb = Wb + i * g.lanes;
-                for (size_t h = 0; h < g.lanes; ++h) {
-                    al[h] += xi * wa[h];
-                    be[h] += xi * wb[h];
+            const size_t lanes = g.lanes, hid = g.hid;
+            size_t h0 = 0;
+            for (; h0 + 16 <= lanes; h0 += 16) {
+                __m256 a0 = _mm256_setzero_ps(), a1 = a0, b0 = a0, b1 = a0;
+                for (size_t i = 0; i < hid; ++i) {
+                    const __m256 xb = _mm256_set1_ps(x[i]);
+                    const float* wa = Wa + i * lanes + h0;
+                    const float* wb = Wb + i * lanes + h0;
+                    a0 = _mm256_add_ps(a0, _mm256_mul_ps(xb, _mm256_loadu_ps(wa)));
+                    a1 = _mm256_add_ps(a1, _mm256_mul_ps(xb, _mm256_loadu_ps(wa + 8)));
+                    b0 = _mm256_add_ps(b0, _mm256_mul_ps(xb, _mm256_loadu_ps(wb)));
+                    b1 = _mm256_add_ps(b1, _mm256_mul_ps(xb, _mm256_loadu_ps(wb + 8)));
                 }
+                _mm256_storeu_ps(al.data() + h0, a0);
+                _mm256_storeu_ps(al.data() + h0 + 8, a1);
+                _mm256_storeu_ps(be.data() + h0, b0);
+                _mm256_storeu_ps(be.data() + h0 + 8, b1);
+            }
+            for (; h0 < lanes; ++h0) {
+                float a = 0.f, b = 0.f;
+                for (size_t i = 0; i < hid; ++i) {
+                    a += x[i] * Wa[i * lanes + h0];
+                    b += x[i] * Wb[i * lanes + h0];
+                }
+                al[h0] = a;
+                be[h0] = b;
             }
             for (size_t h = 0; h < g.value_heads; ++h) {
                 decay[t * g.value_heads + h] = std::exp(A[h] * softplus(al[h] + dtb[h]));
