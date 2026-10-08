@@ -21,6 +21,17 @@ from .load import spec_from_model_dir
 from .spec import ModelSpec, hf_model_types
 
 MANIFEST_VERSION = 1
+# 1 plus `split` route steps (OPEN-PREFILL-BATCH). An engine that reads only 1 ignores `split` and
+# would read a split weight's hi half alone, so a manifest with a split step says 2 and that engine
+# refuses it by name. `out_split` alone stays 1: every engine that reads it folds that step.
+SPLIT_MANIFEST_VERSION = 2
+
+
+def has_split_step(layer_types: dict) -> bool:
+    return any(st.get("split")
+               for lt in layer_types.values()
+               for key in ("program", "shared_program", "ffn_program")
+               for st in (lt.get("gemm_block") or {}).get(key, []))
 
 
 def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> dict:
@@ -51,6 +62,8 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
     for lt, d in plan.pop("layer_types").items():
         m["layer_types"][lt]["pack"] = d
     m["pack"] = plan          # pool_bytes, chunk_bytes, lm_head {pool_bytes, ops}, embed, norm
+    if has_split_step(m["layer_types"]):
+        m["manifest_version"] = SPLIT_MANIFEST_VERSION
     return m
 
 
