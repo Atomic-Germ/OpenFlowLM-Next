@@ -52,17 +52,7 @@ def probe_env() -> dict[str, str]:
     e = dict(_attn_probe_env())
     if one_context():
         e["OPEN_LAYER_ONE_CTX"] = "1"
-    if q8_gemm_format() != "bf16":
-        e["OPEN_KERNELS_Q8_GEMM"] = q8_gemm_format()
     return e
-
-
-def q8_gemm_format() -> str:
-    """bf16: an all-q8 MoE route runs on the bf16 GEMM (bf16_route); split forces #172's exact q4_1 split, for A/B."""
-    f = os.environ.get("OPEN_KERNELS_Q8_GEMM", "bf16")
-    if f not in ("bf16", "split"):
-        raise OpRangeError(f"OPEN_KERNELS_Q8_GEMM={f!r}: bf16 or split")
-    return f
 
 # ---- the q4_1 / q8 pool chunk formats (gemv_q4.h, lm_head_q8.h): format constants, not model ones
 CHUNK = 5120                 # q4_1: 32 rows x 256 K (8192 values) + bf16 d, m per 32-block
@@ -1078,7 +1068,7 @@ def gemm_format_of(weight: dict) -> str:
 
 def bf16_route(spec: ModelSpec, dense: bool) -> bool:
     """Every projection q8 on a MoE route: all its GEMMs, the shared expert's too, read bf16 on one context."""
-    if dense or q8_gemm_format() == "split":
+    if dense:
         return False
     roles = (["attn"] if spec.has_full else []) + (["linear", "linear_out"] if spec.has_linear else [])
     return bool(roles) and all(spec.quant_of(r) == "q8" for r in roles)
@@ -1135,7 +1125,7 @@ def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
     return hits[0]
 
 
-def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> dict | None:
+def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_split: bool = False) -> dict | None:
     """Per layer type the `gemm_block` the driver reads, plus the contexts / kernels / globals /
     builds the route adds. None when a projection is streamed at q8: the GEMM dequantises the
     q4_1 band law only, and the sequential path is then exactly what it was.
@@ -1143,7 +1133,8 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     `ffn="dense"` is Qwen3.5 (recipes/qwen35.py): the same linear / full halves, and in place of
     the router, the shared expert and the routed experts an `ffn_program` -- up|gate then down,
     the shared expert's two GEMMs without its sigmoid gate. `plan` is that family's pack plan's
-    `layer_types`, since the op indices the weight buffers name are its own."""
+    `layer_types`, since the op indices the weight buffers name are its own. `q8_split` builds an
+    all-q8 route as the exact q4_1 split, which the bf16 route carries as `variants.lean` (OPEN-PREFILL-MODE)."""
     dense = ffn == "dense"
     if not dense and spec.quant_of("shared") == "q8":
         return None
@@ -1151,7 +1142,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     hid, ff = spec.hidden, spec.intermediate if dense else spec.moe_intermediate
     plan = plan if plan is not None else pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int, str]] = set()
-    bf16 = bf16_route(spec, dense)
+    bf16 = bf16_route(spec, dense) and not q8_split
 
     def weight(ops: list[dict], idxs: list[int]) -> dict:
         return bf16_weight([ops[i] for i in idxs]) if bf16 else gemm_weight(ops, idxs)
@@ -1351,6 +1342,14 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
                                "build_dir": f"gemm_q4_prefill/build_{'' if q4 else fmt + '_'}n{N}_k{K}_t{T}",
                                "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T),
                                        **({} if q4 else {"GQP_FMT": fmt})}}
+    if bf16:
+        # 1.1 GiB lighter on the 35B and ~20% slower; the engine loads one of the two
+        lean = gemm_route(spec, ffn, plan, q8_split=True)
+        out["variants"] = {"lean": lean["layer_types"]}
+        for k in ("contexts", "kernels", "builds"):
+            out[k].update(lean[k])
+        for k, v in lean["globals"].items():
+            out["globals"][k] = max(out["globals"].get(k, 0), v)
     return out
 
 
@@ -1416,6 +1415,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        for name, types in r.get("variants", {}).items():
+            for lt, gb in types.items():
+                out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
     return out
 
 

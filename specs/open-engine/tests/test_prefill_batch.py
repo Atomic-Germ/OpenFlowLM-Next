@@ -1,4 +1,4 @@
-# Traces: OPEN-PREFILL-BATCH, OPEN-BUILD-CACHE (canonical spec: specs/open-engine/spec.md)
+# Traces: OPEN-PREFILL-BATCH, OPEN-PREFILL-MODE, OPEN-BUILD-CACHE (canonical spec: specs/open-engine/spec.md)
 """The block prefill route on the 35B: what the qwen36moe recipe writes into the
 manifest for it (per layer type a `gemm_block` naming shape-keyed GEMM contexts,
 the weight buffers they read and the act offsets the host stages need), and
@@ -123,17 +123,17 @@ def _split_halves(w):
 ALL_Q8 = {"attn": "q8", "linear": "q8", "linear_out": "q8"}
 
 
-def test_q8_projections_run_as_their_exact_q4_1_split(monkeypatch):
-    """Under OPEN_KERNELS_Q8_GEMM=split, every q8 projection is packed as two q4_1 halves whose
-    readings sum to it exactly, hi then lo stacked in one buffer: one GEMM of twice the rows,
+def test_the_lean_route_runs_q8_projections_as_their_exact_q4_1_split():
+    """OPEN-PREFILL-MODE: an all-q8 set's `lean` variant packs every q8 projection as two q4_1 halves
+    whose readings sum to it exactly, hi then lo stacked in one buffer: one GEMM of twice the rows,
     the halves added on the host (OPEN-PREFILL-BATCH). Re-quantising instead flips 13% of next
     tokens (utilities/quant-compare/README.md)."""
-    monkeypatch.setenv("OPEN_KERNELS_Q8_GEMM", "split")
     spec = dataclasses.replace(default_spec(), quant=ALL_Q8)
     m = manifest(spec)
     q4 = manifest(default_spec())
     lin, full = m["layer_types"][LINEAR], m["layer_types"][FULL]
-    glin, gfull = lin["gemm_block"], full["gemm_block"]
+    glin, gfull = lin["gemm_block_variants"]["lean"], full["gemm_block_variants"]["lean"]
+    assert set(lin["gemm_block_variants"]) == set(full["gemm_block_variants"]) == {"lean"}
 
     # qkv | z: one GEMM over [hi | lo], twice the 12288 rows, marked split
     assert glin["program"][0] == {**_run("gemm_n24576_k2048", "gqkvz_w", "gemm_x_k2048", "gemm_y_n24576"),
@@ -161,14 +161,20 @@ def test_q8_projections_run_as_their_exact_q4_1_split(monkeypatch):
 
     # the shared expert and the routed experts are q4_1 either way, and keep their weights
     for lt in (LINEAR, FULL):
-        assert m["layer_types"][lt]["gemm_block"]["shared_weights"] ==             q4["layer_types"][lt]["gemm_block"]["shared_weights"]
+        assert m["layer_types"][lt]["gemm_block_variants"]["lean"]["shared_weights"] ==             q4["layer_types"][lt]["gemm_block"]["shared_weights"]
     assert {"gemm_n24576_k2048", "gemm_n18432_k2048", "gemm_n4096_k4096", "mx_linear", "mx_full"} <= set(m["kernels"])
+    for gb in (glin, gfull):
+        for st in gb["program"] + gb["shared_program"]:
+            assert m["kernels"][st["kernel"]]["context"] == "gemm"
     assert m["globals"]["gemm_y_n24576"] == 24576 * T * 4
     # the sequential program still streams q8
     assert [s["op"] for s in lin["program"]] == ["run", "moeroute2", "run"]
-    # an engine that reads only version 1 would ignore `split` and use the hi halves alone, so a
-    # manifest with a split step says version 2, which such an engine refuses by name
-    assert m["manifest_version"] == 2 and q4["manifest_version"] == 1
+    # the default route's own host stages and buffers, so the engine can load either
+    for lt in (LINEAR, FULL):
+        gb, lean = m["layer_types"][lt]["gemm_block"], m["layer_types"][lt]["gemm_block_variants"]["lean"]
+        assert (lean["kind"], lean["t"]) == (gb["kind"], gb["t"])
+        assert lean["moe_batch"] == gb["moe_batch"] and lean.get("attn_block") == gb.get("attn_block")
+    assert "gemm_block_variants" not in q4["layer_types"][LINEAR]
 
 
 def _bf16_stack(w):
@@ -204,7 +210,11 @@ def test_an_all_q8_moe_route_runs_every_gemm_on_one_bf16_context():
     seq = {o["tensor"]: o for o in m["layer_types"][LINEAR]["pack"]["pool"] if "tensor" in o}
     for o in lin["weights"]["gqkvz_w"]["pack"]:
         assert seq[o["tensor"]]["op"] == "q8_perm" and seq[o["tensor"]]["nch"] == 2 * o["nch"]
-    assert [k for k in m["contexts"] if k.startswith("gemm")] == ["gemmb"]
+    for gb in (lin, full):
+        for st in gb["program"] + gb["shared_program"]:
+            assert m["kernels"][st["kernel"]]["context"] == "gemmb"
+    # gemm is the lean variant's (OPEN-PREFILL-MODE); the engine creates only the loaded route's
+    assert sorted(k for k in m["contexts"] if k.startswith("gemm")) == ["gemm", "gemmb"]
     for k in m["kernels"]:
         if k.startswith("gemmb_"):
             assert m["kernels"][k]["context"] == "gemmb" and m["builds"][k]["env"]["GQP_FMT"] == "bf16"
@@ -217,16 +227,6 @@ def test_a_mixed_container_keeps_the_q4_1_split():
     lin = m["layer_types"][LINEAR]["gemm_block"]
     assert lin["out_split"] is True and lin["program"][1]["kernel"] == "gemm_n4096_k4096"
     assert "gemmb" not in m["contexts"] and m["manifest_version"] <= 2
-
-
-def test_the_q8_gemm_switch_enters_the_build_key(monkeypatch):
-    monkeypatch.delenv("OPEN_KERNELS_Q8_GEMM", raising=False)
-    assert "OPEN_KERNELS_Q8_GEMM" not in Q36.probe_env()
-    monkeypatch.setenv("OPEN_KERNELS_Q8_GEMM", "split")
-    assert Q36.probe_env()["OPEN_KERNELS_Q8_GEMM"] == "split"
-    monkeypatch.setenv("OPEN_KERNELS_Q8_GEMM", "q4")
-    with pytest.raises(Q36.OpRangeError, match="bf16 or split"):
-        Q36.q8_gemm_format()
 
 
 def test_bf16_gemm_packs_byte_identical_to_pools_test():

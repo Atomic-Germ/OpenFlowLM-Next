@@ -30,19 +30,25 @@ GEMM_POOL_MANIFEST_VERSION = 3
 GEMM_POOL_OPS = ("bf16_gemm",)
 
 
+def routes(layer_types: dict) -> list[dict]:
+    """Every layer type's gemm_block and its variants (OPEN-PREFILL-MODE)."""
+    return [g for lt in layer_types.values()
+            for g in [lt.get("gemm_block") or {}, *(lt.get("gemm_block_variants") or {}).values()]]
+
+
 def has_gemm_pool_op(layer_types: dict) -> bool:
     return any(op.get("op") in GEMM_POOL_OPS
-               for lt in layer_types.values()
+               for g in routes(layer_types)
                for key in ("weights", "shared_weights", "ffn_weights")
-               for w in ((lt.get("gemm_block") or {}).get(key) or {}).values()
+               for w in (g.get(key) or {}).values()
                for op in w.get("pack", []))
 
 
 def has_split_step(layer_types: dict) -> bool:
     return any(st.get("split")
-               for lt in layer_types.values()
+               for g in routes(layer_types)
                for key in ("program", "shared_program", "ffn_program")
-               for st in (lt.get("gemm_block") or {}).get(key, []))
+               for st in g.get(key, []))
 
 
 def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> dict:
