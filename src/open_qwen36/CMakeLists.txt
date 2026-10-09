@@ -54,7 +54,15 @@ endif()
 add_executable(block_host_test block_host_test.cpp block_host.cpp)
 target_include_directories(block_host_test PRIVATE ${_inc})
 
-foreach(t open_qwen36_cli manifest_test vit_test block_host_test)
+# spec_test (no XRT): the speculative decode's drafter, accept rule and spec_availability, against a fake engine
+add_executable(spec_test spec_test.cpp)
+target_include_directories(spec_test PRIVATE ${_inc})
+
+# verify_slots_test (no XRT): the verify pass's slot bookkeeping and stream patches, against a fake
+add_executable(verify_slots_test verify_slots_test.cpp)
+target_include_directories(verify_slots_test PRIVATE ${_inc})
+
+foreach(t open_qwen36_cli manifest_test vit_test block_host_test spec_test verify_slots_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -62,9 +70,11 @@ foreach(t open_qwen36_cli manifest_test vit_test block_host_test)
 endforeach()
 
 enable_testing()
+add_test(NAME OPEN-DECODE-SPECULATIVE COMMAND spec_test)
 add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
+add_test(NAME OPEN-DECODE-SPECULATIVE-VERIFY COMMAND verify_slots_test)
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"

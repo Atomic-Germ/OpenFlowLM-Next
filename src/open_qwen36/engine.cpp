@@ -69,7 +69,21 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     return {};
 }
 
-Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(dev) {
+spec::Availability Engine::spec_preflight(const std::string& model_path, const nlohmann::json& entry) {
+    LM_Config cfg;
+    cfg.model_path = model_path;
+    cfg.model_name = fs::path(model_path).filename().string();
+    try {
+        cfg.exec_path = utils::find_xclbin_root_for(cfg.model_name);
+    } catch (const std::exception&) {
+    }
+    const std::string dir = find_kernels(cfg);
+    if (dir.empty()) return spec::spec_availability(entry, nullptr);
+    const Manifest m = Manifest::load((fs::path(dir) / "manifest.json").string());
+    return spec::spec_availability(entry, &m);
+}
+
+Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L, const nlohmann::json& entry) : dev_(dev) {
     cfg_.model_dir = config.model_path;
     std::string how;
     cfg_.kernel_dir = find_kernels(config, &how);
@@ -87,6 +101,29 @@ Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(
         std::fprintf(stderr, "open_qwen36: kernels %s (%s)\n", cfg_.kernel_dir.c_str(), how.c_str());
     core_ = std::make_unique<Core>(cfg_, dev_);
     logits_.assign(core_->vocab(), bf16(0.f));
+    // OPEN-DECODE-SPECULATIVE is opt-in, and the app asks only for greedy requests
+    std::string method;
+    if (utils::getenv_oflm("OFLM_OPEN_SPEC") == "1") {
+        const spec::Availability av = spec::spec_availability(entry, &core_->manifest());
+        if (av.status == spec::Availability::kError)
+            throw std::runtime_error("open_qwen36: speculative decode for " + config.model_name + ": " + av.reason);
+        if (av.ok()) {
+            method = av.method;
+            drafter_ = spec::make_drafter(method);
+            spec_on_ = true;
+        } else {
+            std::fprintf(stderr, "open_qwen36: speculative decode is not available for %s: %s; decoding normally\n",
+                         config.model_name.c_str(), av.reason.c_str());
+        }
+    }
+    spec_fast_ = core_->verify_width() > 0 && utils::getenv_oflm("OFLM_OPEN_SPEC_REF") != "1";
+    spec_width_ = spec_fast_ ? core_->verify_width() : 4;
+    const std::string w = utils::getenv_oflm("OFLM_OPEN_SPEC_WIDTH");
+    if (!w.empty()) spec_width_ = std::max<size_t>(2, std::strtoul(w.c_str(), nullptr, 10));
+    if (spec_fast_) spec_width_ = std::min(spec_width_, core_->verify_width());
+    if (spec_on_)
+        std::fprintf(stderr, "open_qwen36: speculative greedy decode on (width %zu, method %s, %s)\n", spec_width_,
+                     method.c_str(), spec_fast_ ? "the kernel set's verify pass" : "reference verify");
 }
 
 Engine::~Engine() = default;
@@ -98,8 +135,9 @@ void Engine::load_open_weights() {
     core_->reset();
 }
 
-buffer<bf16> Engine::logits_view() {
-    const std::vector<float>& lg = core_->logits();
+buffer<bf16> Engine::logits_view() { return logits_view_of(core_->logits()); }
+
+buffer<bf16> Engine::logits_view_of(const std::vector<float>& lg) {
     const size_t real = core_->real_vocab(), vocab = core_->vocab();
     for (size_t i = 0; i < real; ++i) logits_[i] = bf16(lg[i]);
     // lm_head rows past the tokenizer's vocab are padding with undefined content
@@ -121,10 +159,54 @@ void Engine::ensure_alive() {
     core_->reset();
     has_snapshot_ = false;
     poisoned_ = false;
+    fed_.clear();
 }
 
 buffer<bf16> Engine::forward(int id) {
-    return guarded([&] { core_->step(id, true); return logits_view(); });
+    return guarded([&] {
+        core_->step(id, true);
+        fed_.push_back(id);
+        return logits_view();
+    });
+}
+
+std::vector<int> Engine::forward_speculative(int last, int max_emit, const std::function<int(buffer<bf16>&)>& pick,
+                                             const std::function<bool(int)>& stop) {
+    // decline where the verifiers' assumptions fail: M-RoPE, history off the position, no room for a full pass
+    if (!spec_on_ || max_emit < 1 || core_->mrope_active() || fed_.size() != static_cast<size_t>(core_->position()) ||
+        static_cast<size_t>(core_->position()) + spec_width_ + 1 >= core_->max_ctx())
+        return {};
+    return guarded([&] {
+        std::vector<int> ids{last};
+        for (int d : drafter_->propose(fed_, last, std::min(spec_width_ - 1, static_cast<size_t>(max_emit - 1))))
+            ids.push_back(d);
+        std::vector<int> out;
+        if (ids.size() == 1) {
+            // no draft: exactly forward() + pick
+            core_->step(last, true);
+            buffer<bf16> y = logits_view();
+            out.push_back(pick(y));
+        } else if (spec_fast_) {
+            spec::CoreVerify<Core> cv(*core_);
+            spec::run_pass(cv, ids, static_cast<size_t>(max_emit),
+                           [&](size_t i) {
+                               buffer<bf16> y = logits_view_of(cv.logits(i));
+                               return pick(y);
+                           },
+                           stop, out);
+        } else {
+            spec::ReferenceVerify<Core> ref(*core_);
+            spec::run_pass(ref, ids, static_cast<size_t>(max_emit),
+                           [&](size_t i) {
+                               buffer<bf16> y = logits_view_of(ref.logits(i));
+                               return pick(y);
+                           },
+                           stop, out);
+        }
+        drafter_->observe(ids.data(), out.size());
+        fed_.insert(fed_.end(), ids.begin(), ids.begin() + static_cast<long>(out.size()));
+        return out;
+    });
 }
 
 void Engine::ensure_vit() {
@@ -143,6 +225,12 @@ void Engine::ensure_vit() {
 }
 
 buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
+    buffer<bf16> y = prefill_impl(ids, payload);
+    fed_.insert(fed_.end(), ids.begin(), ids.end());
+    return y;
+}
+
+buffer<bf16> Engine::prefill_impl(std::vector<int>& ids, void* payload) {
     if (ids.empty()) return logits_view();
     if (payload == nullptr) {
         // Decode-as-prefill: exact for this architecture, one step per token, the
@@ -306,6 +394,7 @@ void Engine::clear_context() {
     ensure_alive();
     core_->reset();
     has_snapshot_ = false;
+    fed_.clear();
 }
 
 buffer<bf16> Engine::get_k_cache(int layer_idx, int idx) {
@@ -328,6 +417,7 @@ int Engine::checkpoint() {
     if (poisoned_) return 0;
     snapshot_ = core_->checkpoint();
     has_snapshot_ = true;
+    fed_snap_ = fed_;
     return snapshot_.pos;
 }
 
@@ -335,9 +425,11 @@ int Engine::restore() {
     ensure_alive();
     if (!has_snapshot_) {
         core_->reset();
+        fed_.clear();
         return 0;
     }
     core_->restore(snapshot_);
+    fed_ = fed_snap_;
     return snapshot_.pos;
 }
 

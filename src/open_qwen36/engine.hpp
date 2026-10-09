@@ -23,6 +23,7 @@
 #include "device_runtime.hpp"
 #include "lm_config.hpp"
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/spec.hpp"
 #include "open_qwen36/vision/vit.hpp"
 
 namespace open_qwen36 {
@@ -31,7 +32,8 @@ class Engine : public causal_lm {
 public:
     /// Opens the device contexts and instruction streams; weights follow with
     /// load_weights(). `MAX_L` sizes the KV cache (the context capacity).
-    Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L);
+    /// `entry` is the model's registry entry: its `speculative` field picks the drafter.
+    Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L, const nlohmann::json& entry = nlohmann::json::object());
     ~Engine() override;
 
     buffer<bf16> forward(int ids) override;
@@ -48,6 +50,9 @@ public:
     int get_current_context_length() override;
     int checkpoint() override;
     int restore() override;
+    /// Declines (empty) when OFLM_OPEN_SPEC is off or not available for this model, after an image (M-RoPE), or near the KV capacity.
+    std::vector<int> forward_speculative(int last, int max_emit, const std::function<int(buffer<bf16>&)>& pick,
+                                         const std::function<bool(int)>& stop) override;
 
     /// Where this model's open kernels are: OFLM_OPEN_KERNELS_DIR, else
     /// <model>/open_kernels, else <root>/xclbins/<model name>/open_kernels over
@@ -62,6 +67,8 @@ public:
     /// The caller logs it: a silently-chosen set produces perfectly valid
     /// output from kernels the user did not mean to run (#35).
     static std::string find_kernels(const LM_Config& config, std::string* how = nullptr);
+    /// `oflm run|serve --spec` asks this before anything loads: reads the kernel manifest, no weights.
+    static spec::Availability spec_preflight(const std::string& model_path, const nlohmann::json& entry);
 
     const Core& core() const { return *core_; }
 
@@ -78,7 +85,17 @@ private:
     void ensure_vit();
     template <class Payload> buffer<bf16> prefill_images(std::vector<int>& ids, const Payload& p);
 
+    buffer<bf16> prefill_impl(std::vector<int>& ids, void* payload);
     buffer<bf16> logits_view();
+    buffer<bf16> logits_view_of(const std::vector<float>& lg);
+
+    // ---- OPEN-DECODE-SPECULATIVE
+    bool spec_on_ = false;           ///< OFLM_OPEN_SPEC=1 and the registry entry's method is available
+    bool spec_fast_ = false;         ///< the kernel set's verify pass, not the reference verifier
+    size_t spec_width_ = 4;          ///< positions per verify pass (OFLM_OPEN_SPEC_WIDTH, >= 2)
+    std::vector<int> fed_;           ///< every token the core has consumed, position i at index i
+    std::vector<int> fed_snap_;      ///< fed_ at checkpoint()
+    std::unique_ptr<spec::Drafter> drafter_;
     /// A kernel that timed out or aborted leaves the hardware context dead:
     /// every later submission fails. Mark the engine and rebuild it (contexts
     /// + weights, ~90 s) before the next request instead of failing forever.

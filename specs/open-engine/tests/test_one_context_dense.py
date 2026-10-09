@@ -35,7 +35,9 @@ def _one_context(m: dict) -> None:
     assert "lx" not in m["contexts"] and "ax" not in m["contexts"]
     assert m["contexts"]["layer"] == "lx/final.xclbin"
     assert m["kernels"]["lx"]["context"] == m["kernels"]["ax"]["context"] == "layer"
-    assert m["kernels"]["ax"]["patch"] == "attnpos" and "patch" not in m["kernels"]["lx"]
+    assert m["kernels"]["ax"]["patch"] == "attnpos"
+    # lx is patched only to address the verify image's state slots (OPEN-DECODE-SPECULATIVE-VERIFY)
+    assert m["kernels"]["lx"].get("patch") == ("stateslot" if "verify" in m else None)
     # one image, one kernel signature: the linear stream takes ptab and never touches it
     assert m["layer_types"][LINEAR]["program"] == [{"op": "run", "kernel": "lx", "args": ARGS6}]
     assert m["layer_types"][FULL]["program"] == [{"op": "run", "kernel": "ax", "args": ARGS6}]

@@ -172,7 +172,8 @@ def test_no_shipped_models_hash_moved():
     what would catch a `short_conv` change that moved the hash. minicpm5-2b arrived from
     main in #85 and is pinned at the value it hashes to here, which is the point: the
     eleven that predate this branch did not move, so `qkv_bias` is a kernel knob and not
-    a ModelSpec field."""
+    a ModelSpec field. bonsai2-27b joined with Bonsai 2's speculative decode, at the hash
+    its exported kernel set's manifest carries."""
     import pathlib
 
     from recipes.load import load_spec
@@ -189,6 +190,7 @@ def test_no_shipped_models_hash_moved():
         "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
         "lfm2-1.2b.json": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
         "minicpm5-2b.json": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
+        "bonsai2-27b.json": "sha256:2560477ec77e37594661f099a7b672bf8c3533a348d6630b353ab21893bb7c17",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

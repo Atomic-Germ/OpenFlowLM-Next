@@ -10,6 +10,8 @@
 #include "tensor_2d.hpp"
 #include "utils/utils.hpp"
 #include "buffer.hpp"
+#include <functional>
+#include <vector>
 
 /// \brief causal_lm class
 class causal_lm {
@@ -61,4 +63,11 @@ public:
     virtual int checkpoint() = 0;
 
     virtual int restore() = 0;
+
+    /// Empty = declined; otherwise `last` and every returned token but the last have been fed, as plain decode would.
+    virtual std::vector<int> forward_speculative(int last, int max_emit, const std::function<int(buffer<bf16>&)>& pick,
+                                                 const std::function<bool(int)>& stop) {
+        (void)last; (void)max_emit; (void)pick; (void)stop;
+        return {};
+    }
 };

@@ -39,6 +39,21 @@ python ..\..\open_kernels\model\replica_block.py --fixture out\blockfix >nul
 set "WHICH=block_host_test"
 out\block_host_test.exe out\blockfix
 if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] spec_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" /I "..\..\open_kernels\harness" spec_test.cpp /Fe:out\spec_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=spec_test"
+out\spec_test.exe
+if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] verify_slots_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
+   verify_slots_test.cpp /Fe:out\verify_slots_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=verify_slots_test"
+out\verify_slots_test.exe
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^

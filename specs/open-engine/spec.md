@@ -4259,3 +4259,229 @@ against PR #161 176 / 176 / 176 -> 162 / 162 / 162, step min 171.7-172.0 -> 158.
 tok/s). Timer stamps: the down projection's second piece (preps + GEMV) 259 -> 238 us a layer, with no
 wait for its x elements. Splitting the first piece's preps over the main cores (A1(b)) and moving the
 second piece's table to the prep core were built, byte-identical, and timing-neutral; not kept.
+
+### OPEN-DECODE-SPECULATIVE-VERIFY: a verify pass of two positions, bit-identical to two decode steps
+**Applies to:** openflowlm-next (`open_kernels/designs/verify/vux.py` and `gemv_t2x2.h`, `open_kernels/recipes/qwen35.py` `verify_image()`, `open_kernels/harness/stream_patch.hpp` `stateslot` / `attnposv`, `src/open_qwen36/core.cpp` `verify()` / `accept()`, `src/open_qwen36/verify_slots.hpp`)
+**Verification:** test (the slot and position bookkeeping and the two stream patches against a fake, `src/open_qwen36/verify_slots_test.cpp`, ctest `OPEN-DECODE-SPECULATIVE-VERIFY`, run by `build.cmd`; the recipe's emission, `tests/test_verify_image.py`) + manual (bit-identity on the NPU, below)
+
+Speculative decode needs a pass that runs the last committed token and a drafted one through the
+model at once and returns both positions' logits. For an all-t2 merged-image spec (Ternary Bonsai 2
+27B, `verify_image()`), the export adds a **verify image**: three more instruction streams `vlx`,
+`vax`, `vlm` over one more xclbin, in their own hardware context `verify`, sharing the decode
+image's weight pools, consts, KV caches and DeltaNet state buffers. `Core::verify(ids, n, argmax)`
+runs n positions from the current position and returns each position's greedy argmax (cli.cpp's tie
+rule: the first maximum over the real vocabulary) and its logits (`verify_logits(j)`); `accept(m)`
+keeps the first m. `verify_width()` is 2 (0 when the kernel set has no verify image, or when
+`OFLM_OPEN_VERIFY=0`). n = 1 is a decode step.
+
+- **Every position's logits are bit for bit what `step()` computes at that position.** Each weight
+  chunk is streamed once for both positions: the 2-token tile (`gemv_t2x2.h`) puts the two tokens in
+  rows 0 and 1 of the 1-wide tile's mmul, whose int32 sums are exact, and then runs the 1-wide
+  float epilogue per token in the same order. The activation preps, SwiGLU, DeltaNet, glue, post,
+  norms and attention are the decode image's own kernels from the same generated sources and flags,
+  run once per position in position order.
+- **Width 2.** Two tables of 20,736 B fit a main core's data memory only with the x fifo one element
+  deep and DeltaNet's scratch inside the first table; three do not fit without cutting K into slices.
+- **No copies on rollback.** A linear layer's state buffer holds width + 1 slots (`verify.slot_bytes`
+  each). Position j reads its conv rows and S from the j-th slot of the pass's map and writes the
+  (j+1)-th; the committed slot is never written. `accept(m)` makes slot map[m] the committed one; the
+  decode stream `lx` and the verify stream `vlx` address the state through slots (`stateslot`: every
+  DDR patch on the state argument is re-pointed by an instruction patch). An attention layer writes
+  KV rows pos .. pos + n - 1 and position j attends rows [0, pos + j] (`attnposv`: one window length,
+  row drain and record per position); rows past the accepted position are dead and are overwritten.
+- **Buffers.** Every layer's act holds width copies of `verify.act_bytes` (position j at j x
+  act_bytes); the verify image's xres, logits and the tail's scratch are their own globals (`vxres`,
+  `vlogits`, `vlmact`). `checkpoint()` / `restore()` / `reset()` and the block prefill route read and
+  write the committed slot.
+
+**Acceptance criteria (test):**
+- After any sequence of 1- or 2-position passes, accepts of 1..n and plain steps, the committed slot
+  holds the state after exactly `position()` tokens, and no pass writes the committed slot.
+- `accept` with no pass pending, after a step, or with m > n is refused.
+- `slot_table` decodes every state transfer's slot; `slot_apply` re-points slot s to perm[s] and keeps
+  the offset inside the slot; a transfer past the last slot is refused.
+- `attnv_table` finds one window length, window offset, row drain and record per position;
+  `attnv_apply(pos)` gives position j the values `attn_apply(pos + j)` would.
+- The recipe emits the verify block (width 2, a 4 KB-aligned slot no smaller than the state, one
+  position's act), the three streams in context `verify`, `stateslot` on `lx` and `vlx`, `attnposv`
+  on `vax`; `OPEN_LAYER_VERIFY=0` (in the build key) or a spec without the in-layer ternary head
+  emits none of it and leaves `lx` unpatched.
+
+**Verification (manual):**
+1. Export with the verify image (`verify_image()` true); every core of `vlx`, `vax`, `vlm` fits
+   16384 B of program memory and the three images' core ELFs are identical.
+2. `open_qwen36_cli --model <Bonsai lmhead container> --kernels <set> --ids-file short.ids
+   --verify-check 40` and `--ids-file prompt512.ids --gemm-block --verify-check 40`: 40 greedy
+   positions by `step()` from a checkpoint, then the same positions by verify passes whose draft is
+   right on two passes of three and wrong on the third, with a plain step every fourth pass. Every
+   compared logit row must be byte-identical (memcmp over the whole vocabulary) and every argmax the
+   reference token: the run prints `VERIFY CHECK PASS`.
+3. The decode step unchanged: the normal token gates (33/33 short.ids, 129/129 prompt512
+   `--gemm-block`) on the verify-capable set, and an A/B of the 1-token step against the same set
+   without it in one clean window (within 1%).
+4. Cost: `--bench-verify N` under the timing lock gives the verify pass (n = 2) and the step (n = 1).
+
+**Result 2026-10-08 (`open_kernels_v6`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`).** The 2-token
+tile alone (`designs/gemv_t2` probe, `t2x2`): y byte-identical per token to the 1-wide tile on the
+gate, og and down shapes at 1, 2 and 8 cores. `--verify-check 40`: PASS on short.ids and on prompt512
+`--gemm-block`, every logit row memcmp-identical. Tokens 33/33 and 129/129. The step is unchanged by
+the verify image (2026-10-07, `open_kernels_v1`: step minimum 155.7 / 155.8 / 155.7 -> 155.9 / 155.7 /
+155.6 ms, clean A/B, 3 rounds). Cost at ctx ~512 (`--bench-verify 10`, clean, min): a 2-position
+pass 190.4-190.8 ms against a step of 158.2-159.9 ms. History: `plans/archive/bonsai2-speculative.md`.
+
+### OPEN-DECODE-SPECULATIVE: speculative greedy decode, opt-in and declared per model, with the same output
+**Applies to:** openflowlm-next (`src/open_qwen36/spec.hpp`, `cli.cpp`, `engine.cpp`; `src/include/causal_lm.hpp` `forward_speculative`; `src/common/AutoModel/automodel.cpp` `_spec_*`, `speculative_unavailable` and the decode loops of `_shared_generate` and `modeling_qwen3_5vl.cpp`; `src/src/main.cpp` and `src/include/utils/vm_args.hpp` `--spec`)
+**Verification:** test (the drafter, the accept rule and `spec_availability`, `src/open_qwen36/spec_test.cpp`) + manual (the hardware gate, the speed, and the `--spec` refusal and log line, below)
+**Tests:** `src/open_qwen36/spec_test.cpp` (built and run by `src/open_qwen36/build.cmd`; `ctest -R OPEN-DECODE-SPECULATIVE`)
+
+A greedy request may decode speculatively: each pass feeds the last token plus a draft of up
+to `width - 1` tokens through one verify pass and keeps the draft for as long as it matches
+the greedy choice, plus the one token the pass picks after it. **The output is the same with
+it on and off**, token for token: a wrong draft token only shortens the pass.
+
+- **Opt-in.** Off by default. `open_qwen36_cli --spec` (`--spec-method M`, default `lookup`;
+  `--spec-width N`, default the kernel set's verify width, else 4; `--spec-ref` forces the
+  reference verifier; `--spec-log` prints one line per pass). In the app, `OFLM_OPEN_SPEC=1` or
+  `oflm serve|run --spec` (which sets the variable); `OFLM_OPEN_SPEC_WIDTH` overrides the width
+  (>= 2), `OFLM_OPEN_SPEC_REF=1` forces the reference verifier.
+- **Declared per model.** Speculative decode runs only for a model whose registry entry declares
+  a method (`"speculative": {"method": "lookup"}`, written by `oflm add`,
+  OPEN-REGISTRY-SPECULATIVE) that this build knows and whose kernel set can serve it: `lookup`
+  needs the verify program. `spec::spec_availability(entry, manifest)` decides, and gives one of
+  three answers: available; unavailable, with the reason (the entry declares no method, no open
+  kernel set was found, the set has no verify program); or an error for a method this build does
+  not know, naming the ones it does. Without the flag or the variable the field is not read.
+  - `oflm run|serve <model> --spec` checks the model it names before the NPU is touched (the
+    registry entry and the kernel manifest; no weights) and refuses to start unless it is
+    available: `[ERROR] --spec: speculative decode is not available for <tag>: <reason>`, exit 1.
+    A model `oflm serve` loads later for a request follows the variable's rule.
+  - `OFLM_OPEN_SPEC=1` (it may be set for every model): an unavailable model logs
+    `open_qwen36: speculative decode is not available for <model>: <reason>; decoding normally`
+    once when the engine loads, and decodes as it would without the variable. An unknown method
+    refuses the load (`open_qwen36: speculative decode for <model>: unknown speculative method
+    ...`).
+  - `open_qwen36_cli --spec` has no registry; it checks `--spec-method` against the kernel set
+    the same way and exits 2 before loading weights when it is not available.
+- **Greedy requests only.** The app speculates only while the request's sampler is
+  deterministic: `top_k` 1 or `temperature` 0. Anything that samples decodes as before. A
+  speculative pass calls the request's own sampler on each verified position's logits, in
+  order, only as far as plain decode would have, so the tokens -- and the sampler's penalty
+  history -- are what plain decode produces. (The app's greedy pick is an argmax over
+  bf16-rounded logits, not the CLI's f32 argmax; this is why the engine hands logits, not an
+  argmax, to the app.)
+- **The drafter** sits behind `spec::Drafter`: `propose` up to k tokens to follow the token the
+  pass will feed, given every token the engine has fed, and `observe` the tokens a pass kept;
+  `make_drafter(method)` builds the declared one. Method `lookup`, the only one so far, is
+  prompt lookup over every token the engine has fed (prompt and output): the longest suffix of
+  length 4 down to 2 that occurred earlier, its most recent earlier occurrence, and the tokens
+  that followed it, cut at the end of the history. No suffix of length >= 2 recurs: no draft,
+  and the pass is a plain step. There is no draft model and no MTP head.
+- **Nothing is fed that plain decode would not have fed.** A pass ends after EOS and at the
+  request's remaining length (and the context limit), so the engine's context after a request
+  equals plain decode's; tokens a pass produced are handed out before a cancel is honoured.
+- **Declines** (plain decode for the rest of the request): an image in the request (M-RoPE
+  positions), the history out of step with the position, or the KV window too full for a
+  pass. Engines other than the open one never speculate (`causal_lm`'s default declines).
+- **The verifier.** When the kernel set carries a verify program (`Core::verify_width() > 0`,
+  OPEN-DECODE-SPECULATIVE-VERIFY) a pass is one `Core::verify` of up to that many positions,
+  its per-position logits (`verify_logits`) feed the picks, and `accept(m)` keeps the first m.
+  The reference verifier (`OFLM_OPEN_SPEC_REF=1`, `--spec-ref`, or a verify image switched off
+  with `OFLM_OPEN_VERIFY=0`) gives the same semantics on `step()` + `checkpoint()` /
+  `restore()`: the positions run one step at a time with logits, the recurrent state
+  snapshotted first, and a partial accept restores it and replays the kept positions. Exact,
+  and slower than plain decode -- it exists so the loop is correct before the fast path and
+  checkable after it. A pass with no draft is a plain `step()` either way.
+
+**Acceptance criteria** (`spec_test.cpp`, against a fake engine with a recurrent state and
+per-position attention rows):
+- `[5,6,7,8,9,5,6]` drafts `[7,8,9]` (k 3); `[5,6,1,5,6,2,5,6]` drafts `[2,5,6]` (most recent);
+  `[1,5,6,7,2,5,6,8,1,5,6]` drafts `[7,2,5]` (longest suffix beats a more recent shorter one);
+  `[4,9,4]` drafts nothing (a 1-token match); `[3,4,3,4]` drafts `[3,4]` (cut at the end);
+  incremental pushes, `sync()` and a rebuild give the same drafts on a 3000-token sequence.
+- Speculative greedy == plain greedy on 72 requests (widths 2-4, the reference verifier and a
+  native verify/accept), and the engine's position and recurrent state after the request
+  equal plain decode's.
+- A stop token -- including one accepted in the middle of a pass -- and a length cap
+  (N = 1..40) end the pass exactly there, with plain decode's state.
+- A native verify costs one step per position run.
+- `spec_availability`: `{"speculative": {"method": "lookup"}}` with a manifest whose verify
+  width is 2 -> available, method `lookup`; no `speculative` field, or `null` -> unavailable,
+  "the registry entry declares no speculative method"; `{"method": "dflash2"}` -> error
+  "unknown speculative method "dflash2" (this build knows: lookup)"; a `speculative` without a
+  `method` -> error naming `lookup`; `lookup` with a manifest without a verify program ->
+  unavailable, "the kernel set has no verify program, which method "lookup" needs"; no kernel
+  set -> unavailable.
+- `make_drafter("lookup")` proposes `[7,8,9]` from fed `[5,6,7,8,9,5]` and next `6`;
+  `make_drafter` of a method this build lacks builds nothing.
+
+**Verification (manual):**
+1. **CLI gate.** `open_qwen36_cli --model <container> --kernels <set> --ids-file <ids> --max-tokens N
+   [--gemm-block]`, once plain and once with `--spec`: the `token <id>` lines identical. Cases:
+   `short.ids` (33 tokens, no `--gemm-block`), `prompt512.ids` (129, `--gemm-block`), and one
+   prompt per class of the prompt-lookup set (`utilities/spec_lookup_sim.py`'s `chat_1`,
+   `code_1`, `doc_4`, `reason_1`, as tokenized there; 128 tokens, `--gemm-block`). The run's
+   `spec:` line gives passes, drafted passes and tokens per pass.
+2. **Serve gate.** `oflm serve <tag> --port 52626` on a scratch `OFLM_MODEL_PATH` (a copy of the
+   container registered with `oflm add`), the same four prompts as chat completions with
+   `temperature 0`, `max_tokens 128`, `think` as the class has it: once plain, once with
+   `OFLM_OPEN_SPEC=1`, once with `--spec`. The message content (and reasoning) identical; the
+   server log prints `speculative decode: T tokens in P passes` per greedy request. A
+   `temperature 0.7` request with it on prints no such line.
+3. **Speed.** The same pairs under the timing lock, alternated, three rounds: decode tok/s
+   per class from the CLI's `decode` line and the server's `usage.decoding_speed_tps`.
+4. **The declaration.** (a) Register the container with `oflm add`: its entry carries
+   `"speculative": {"method": "lookup"}`, and gates 1 and 2 run through that entry. (b)
+   `oflm serve <tag> --spec` for an installed model whose entry has no `speculative` field:
+   it exits 1 before any weight loads, printing `--spec: speculative decode is not available
+   for <tag>: the registry entry declares no speculative method`; `oflm run <tag> --spec` the
+   same. (c) That model with `OFLM_OPEN_SPEC=1` and no flag, on the open engine: the server log
+   has the `speculative decode is not available for <model>: ...; decoding normally` line once
+   at load, a greedy request answers, and no `speculative decode: T tokens` line follows. (d)
+   `open_qwen36_cli --spec-method mtp` exits 2 naming `lookup`; `--spec` against a kernel set
+   without a verify program exits 2 naming the missing verify program.
+
+**Result 2026-10-08 (the same container, `open_kernels_v6`).** Both gates PASS: identical tokens on
+all six CLI cases (`short` and `prompt512` also equal their reference lists), identical content on
+all four serve prompts through the variable and two through `--spec`, and a `temperature 0.7`
+request does not speculate. Speed, three rounds under the timing lock, all CLEAN, 256 generated
+tokens, median decode tok/s off -> on:
+
+- CLI: code 5.85 -> 9.19 (1.57x), doc 5.91 -> 7.03 (1.19x), reasoning 6.41 -> 6.96 (1.09x),
+  chat 6.34 -> 6.46 (1.02x).
+- `oflm serve`: code 5.81 -> 8.74 (1.50x), doc 5.85 -> 6.54 (1.12x), reasoning 6.36 -> 6.66
+  (1.05x), chat 6.34 -> 6.55 (1.03x).
+
+Chat sits near breakeven: its drafts are accepted about one time in three, and a rejected draft
+costs the pass's extra ~32 ms, and an accepted one saves a step less that, ~125 ms. History:
+`plans/archive/bonsai2-speculative.md`.
+
+### OPEN-REGISTRY-SPECULATIVE: `oflm add` declares a model's speculative method from its kernel set
+**Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `speculative_field`, `choose_open_kernels`, `--speculative`)
+**Verification:** test
+**Tests:** `utilities/oflm-add/tests/test_speculative.py`
+
+Speculative decode (OPEN-DECODE-SPECULATIVE) has two declarations with two owners. The kernel
+manifest says what the kernels can do: its `verify` block (OPEN-DECODE-SPECULATIVE-VERIFY), and
+later a draft program for a drafter that runs on the NPU. The model's registry entry says which
+drafter the model uses:
+
+```json
+"speculative": {"method": "lookup"}
+```
+
+`oflm add` shall choose the model's open kernel set before it writes the entry, and write
+`{"method": "lookup"}` when that set's manifest has a verify program, and no field otherwise.
+`--speculative <method|none>` overrides the default: `none` writes no field, and a method is
+written only when the kernel set has what it needs (`lookup`: a verify program); otherwise the
+command is refused, naming what is missing, before the registry is written. Re-adding a model
+rewrites its entry, this field included. Later methods -- an MTP head inside the container
+(`{"method": "mtp"}`), a draft checkpoint trained for the target (`{"method": "dflash2", "draft":
+"<tag>"}`), a separate draft model -- are further values here, each with what it needs from the
+manifest.
+
+**Acceptance criteria:**
+- A kernel set with a verify program and no flag: the entry has `"speculative": {"method": "lookup"}`.
+- The same set with `--speculative none`: the entry has no `speculative` field.
+- A kernel set without a verify program and `--speculative lookup`: refused, the message naming
+  the missing verify program, and no registry written.
+- A kernel set without a verify program and no flag: no `speculative` field.

@@ -188,10 +188,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         // kernel never takes, and the core waits on its fifo forever
         if (d.rb_win != 1 && d.rb_win != 2 && d.rb_win != 4)
             fail(where, "kernel " + k + ": rb_win " + std::to_string(d.rb_win) + " is not 1, 2 or 4");
-        if (d.rb_win > 1 && d.patch != "attnpos")
+        if (d.rb_win > 1 && d.patch != "attnpos" && d.patch != "attnposv")
             fail(where, "kernel " + k + ": rb_win " + std::to_string(d.rb_win) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
-        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
+        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
+            d.patch != "stateslot" && d.patch != "attnposv")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
@@ -472,6 +473,31 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         } else {
             fail(where, "global " + k + " is neither a size nor {per_row}");
         }
+    }
+    if (j.contains("verify")) {
+        const json& v = j["verify"];
+        const std::string vw = where + " verify";
+        VerifyProgram& vp = m.verify;
+        vp.width = get<size_t>(v, "width", vw);
+        vp.slot_bytes = get<uint64_t>(v, "slot_bytes", vw);
+        vp.act_bytes = get<uint64_t>(v, "act_bytes", vw);
+        vp.xres = get<std::string>(v, "xres", vw);
+        vp.logits = get<std::string>(v, "logits", vw);
+        if (vp.width < 2) fail(vw, "width " + std::to_string(vp.width) + " (a verify pass is at least two positions)");
+        for (const auto& [lt, prog] : need(v, "programs", vw).items()) {
+            if (!m.layer_types.count(lt)) fail(vw, "programs names unknown layer type " + lt);
+            vp.programs[lt] = parse_program(prog, vw + " " + lt);
+            for (const auto& s : vp.programs[lt]) check_step(m, s, vw, lt.c_str());
+            const LayerType& t = m.layer_types.at(lt);
+            if (t.state_kind == "linear" && t.state_bytes > vp.slot_bytes)
+                fail(vw, "slot_bytes " + std::to_string(vp.slot_bytes) + " is smaller than " + lt + "'s state");
+        }
+        for (const auto& [lt, t] : m.layer_types)
+            if (!vp.programs.count(lt)) fail(vw, "no verify program for layer type " + lt);
+        vp.tail = parse_program(need(v, "tail", vw), vw + " tail");
+        for (const auto& s : vp.tail) check_step(m, s, vw, "tail");
+        for (const auto& g : {vp.xres, vp.logits})
+            if (!m.globals.count(g)) fail(vw, g + " is not a declared global");
     }
     // the globals come after the layer types, so the batched expert kernel's x / h / y are checked here
     for (const auto& [name, t] : m.layer_types) {

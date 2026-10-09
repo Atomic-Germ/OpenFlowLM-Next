@@ -1,0 +1,5 @@
+build_*/
+__pycache__/
+# generated at build time by vux.py (from gen_kernels.files): never checked in
+*.cc
+xh_signs.h

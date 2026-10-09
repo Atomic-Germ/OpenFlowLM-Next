@@ -96,6 +96,15 @@ python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/<Model>
 `--open-kernels DIR` uses a set you name outright and skips the search. `--no-xclbin`
 still skips both links.
 
+### Speculative decode is declared per model
+
+When the open kernel set it links has a verify program (a `verify` block in its
+`manifest.json`), `oflm-add` writes `"speculative": {"method": "lookup"}` into the
+model's registry entry: speculative decode drafting by prompt lookup. `oflm run --spec`
+and `oflm serve --spec` start only for a model whose entry declares a method its kernels
+can serve. `--speculative none` leaves the field out, and `--speculative lookup` against a
+kernel set without a verify program is refused.
+
 ## What This Project Is (and Isn't)
 
 This repo contains **only** `oflm-add`, a minimal, dependency-free Python tool for installing pre-converted Q4NX models into OpenFlowLM. It does **not** include:

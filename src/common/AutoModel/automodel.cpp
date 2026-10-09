@@ -46,13 +46,28 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     if (!use_open)
         return nullptr;
     header_print("OFLM", family_label + " on the open kernels (" + kernels + ")");
-    auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
+    auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L, this->model_entry_);
     eng->load_open_weights();
     return eng;
 #else
     (void)env_var;
     (void)family_label;
     return nullptr;
+#endif
+}
+
+std::string AutoModel::speculative_unavailable(const std::string& model_path, const nlohmann::json& entry) {
+#ifdef OFLM_USE_OPEN_QWEN36
+    try {
+        const open_qwen36::spec::Availability a = open_qwen36::Engine::spec_preflight(model_path, entry);
+        return a.ok() ? std::string() : a.reason;
+    } catch (const std::exception& e) {
+        return std::string("its kernel manifest could not be read: ") + e.what();
+    }
+#else
+    (void)model_path;
+    (void)entry;
+    return "this build has no open engine";
 #endif
 }
 
@@ -161,6 +176,7 @@ void AutoModel::_shared_load_model(std::string model_path, json model_info, int 
     }
 
     this->model_path = model_path;
+    this->model_entry_ = model_info;
     header_print("OFLM", "Loading model: " << this->model_path);
     this->lm_config = std::make_unique<LM_Config>();
     this->lm_config->from_pretrained(this->model_path);
@@ -304,6 +320,52 @@ std::string AutoModel::_shared_apply_template(const minja::chat_template_inputs&
     }
 }
 
+bool AutoModel::_spec_eligible() {
+    if (!this->spec_pending_.empty()) return true;
+    static const bool on = utils::getenv_oflm("OFLM_OPEN_SPEC") == "1";
+    if (!on || this->spec_declined_ || this->sampler == nullptr) return false;
+    // greedy only: the pick must depend on the logits alone (penalties see the same calls in order)
+    return this->sampler->top_k == 1 || this->sampler->temperature == 0.0f;
+}
+
+int AutoModel::_spec_next(int last, int max_emit) {
+    if (!this->spec_pending_.empty()) {
+        const int t = this->spec_pending_.front();
+        this->spec_pending_.pop_front();
+        return t;
+    }
+    std::vector<int> toks;
+    if (max_emit > 1) {
+        toks = this->lm_engine->forward_speculative(
+            last, max_emit, [this](buffer<bf16>& y) { return this->sampler->sample(y); },
+            [this](int t) { return this->is_eos(t); });
+    }
+    if (toks.empty()) {
+        if (max_emit > 1) this->spec_declined_ = true;   // the engine has no speculative path here
+        buffer<bf16> y = this->lm_engine->forward(last);
+        return this->sampler->sample(y);
+    }
+    ++this->spec_calls_;
+    this->spec_tokens_ += toks.size();
+    this->spec_pending_.assign(toks.begin() + 1, toks.end());
+    return toks.front();
+}
+
+void AutoModel::_spec_begin() {
+    this->spec_pending_.clear();
+    this->spec_declined_ = false;
+    this->spec_calls_ = 0;
+    this->spec_tokens_ = 0;
+}
+
+void AutoModel::_spec_end() {
+    if (this->spec_calls_ == 0) return;
+    std::ostringstream ss;
+    ss << "speculative decode: " << this->spec_tokens_ << " tokens in " << this->spec_calls_ << " passes ("
+       << std::fixed << std::setprecision(2) << double(this->spec_tokens_) / double(this->spec_calls_) << " tokens/pass)";
+    header_print("OFLM", ss.str());
+}
+
 std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_limit, std::ostream& os, std::function<bool()> is_cancelled) {
     std::vector<int> sampled_tokens;
     std::string result;
@@ -334,23 +396,34 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
         reason = MAX_LENGTH_REACHED;
         return result;
     }
+    this->_spec_begin();
     while (this->total_tokens < this->MAX_L){
-        if (is_cancelled()) {
+        // queued tokens are already fed to the engine: hand them out before honouring a cancel
+        if (this->spec_pending_.empty() && is_cancelled()) {
             reason = CANCEL_DETECTED;
-            // reset stream content 
+            // reset stream content
             buffer_.clear();
             current_mode_ = StreamEventType::CONTENT;
             tool_name_.clear();
             is_in_tool_block_ = false;
             break;
         }
-        this->profiler_list[DECODING_TIME].start();
-        buffer<bf16> y = this->lm_engine->forward(last_sampled_token);
-        this->profiler_list[DECODING_TIME].stop(1);
+        int sampled_token;
+        if (this->_spec_eligible()) {
+            int max_emit = static_cast<int>(this->MAX_L - this->total_tokens);
+            if (length_limit > 0) max_emit = std::min(max_emit, length_limit - meta_info.generated_tokens);
+            this->profiler_list[DECODING_TIME].start();
+            sampled_token = this->_spec_next(last_sampled_token, max_emit);
+            this->profiler_list[DECODING_TIME].stop(1);
+        } else {
+            this->profiler_list[DECODING_TIME].start();
+            buffer<bf16> y = this->lm_engine->forward(last_sampled_token);
+            this->profiler_list[DECODING_TIME].stop(1);
 
-        this->profiler_list[SAMPLING_TIME].start();
-        int sampled_token = this->sampler->sample(y);
-        this->profiler_list[SAMPLING_TIME].stop(1);
+            this->profiler_list[SAMPLING_TIME].start();
+            sampled_token = this->sampler->sample(y);
+            this->profiler_list[SAMPLING_TIME].stop(1);
+        }
         this->total_tokens++;
         last_sampled_token = sampled_token;
 
@@ -375,6 +448,7 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
             break;
         }
     }
+    this->_spec_end();
     meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
     meta_info.stop_reason = reason;
     if (this->total_tokens >= this->MAX_L){

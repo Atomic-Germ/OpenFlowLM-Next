@@ -45,6 +45,7 @@
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
 #include "stream_patch.hpp"
+#include "open_qwen36/verify_slots.hpp"
 
 namespace open_qwen36 {
 
@@ -257,6 +258,14 @@ public:
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
 
+    /// 0 = the kernel set has no verify program, or OFLM_OPEN_VERIFY=0 (OPEN-DECODE-SPECULATIVE-VERIFY).
+    size_t verify_width() const { return vw_; }
+    /// Each position's logits are bit for bit a step()'s; n = 1 is a decode step.
+    void verify(const int* ids, size_t n, int* argmax_out);
+    /// Later KV rows are dead: attention reads only rows below pos_.
+    void accept(size_t m);
+    const std::vector<float>& verify_logits(size_t i) const { return vlogits_.at(i); }
+
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
@@ -273,6 +282,8 @@ private:
         std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
         size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
+        std::vector<stream_patch::SlotPatch> slot;      ///< stateslot: the state transfers, by slot
+        std::vector<stream_patch::AttnPatchV> attnv;    ///< attnposv: per position of a verify pass
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
@@ -403,6 +414,18 @@ private:
 
     std::vector<float> logits_host_;
     StepTiming timing_;
+    // ---- the verify pass (OPEN-DECODE-SPECULATIVE-VERIFY)
+    size_t vw_ = 0;                            ///< positions per verify pass; 0 = none
+    int verify_from_ = 0;                      ///< bring-up (OFLM_OPEN_VERIFY_FROM=L): the walk skips layers < L
+    int verify_stop_ = -1;                     ///< bring-up (OFLM_OPEN_VERIFY_STOP=L): the verify walk stops before layer L
+    uint64_t slot_bytes_ = 0;                  ///< one linear-state slot (manifest verify.slot_bytes)
+    VerifySlots vs_;
+    bool slots_dirty_ = true;                  ///< the decode stream still points at another slot
+    std::vector<std::vector<float>> vlogits_;
+    /// The committed linear state's byte offset in every linear layer's state buffer.
+    size_t lin_off() const { return static_cast<size_t>(vs_.cur) * slot_bytes_; }
+    /// Patches either the verify streams or the decode stream, never both, per verify_kernels.
+    void apply_slots(const unsigned* perm, bool verify_kernels);
     /// det_step: every router record route() read this step (probs, idx, weights), per layer
     /// in walk order. Off (and empty) outside det_step.
     bool route_log_on_ = false;
