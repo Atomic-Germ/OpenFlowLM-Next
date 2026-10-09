@@ -746,6 +746,7 @@ KERNEL_SOURCES = [
     "designs/lm_head_q4/*.py",
     # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
+    "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
     "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
 KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
