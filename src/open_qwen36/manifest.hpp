@@ -239,6 +239,9 @@ struct Manifest {
     /// refused as lacking otherwise.
     void check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
+    /// Why the host attention (OPEN-HOST-ATTN-GUARD) cannot compute this model, or "" when it can.
+    /// It implements K2's attention only; any other family is refused by name.
+    std::string host_attention_refusal() const;
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
 };

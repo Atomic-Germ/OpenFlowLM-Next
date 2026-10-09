@@ -576,6 +576,22 @@ std::vector<std::string> Manifest::files() const {
     return f;
 }
 
+std::string Manifest::host_attention_refusal() const {
+    if (family != "k2")
+        return "host attention implements K2's attention (no q/k norm, no bias, no gate, no window, "
+               "full rotation) and nothing else; this kernel set is family '" + family + "'";
+    auto num = [&](const char* key) -> size_t {
+        return hf_config_check.contains(key) ? hf_config_check[key].get<size_t>() : 0;
+    };
+    const size_t nh = num("num_attention_heads"), kvh = num("num_key_value_heads"), hd = num("head_dim");
+    if (!nh || !kvh || !hd || nh % kvh || rotary_dim > hd || rope_inv_freq.size() != rotary_dim / 2 ||
+        rotary_dim != hd)
+        return "host attention needs K2's geometry (full rotary over head_dim, whole GQA groups); "
+               "this manifest has heads " + std::to_string(nh) + "/" + std::to_string(kvh) + ", head_dim " +
+               std::to_string(hd) + ", rotary_dim " + std::to_string(rotary_dim);
+    return "";
+}
+
 void Manifest::check_model(const json& config, const std::string& where) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
     auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };
