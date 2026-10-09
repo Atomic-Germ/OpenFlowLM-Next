@@ -22,7 +22,7 @@ This plan makes those pieces family-neutral, with K2's output and kernels unchan
 - Then G2 and G3, which are engine changes and need a build.
 - G4 last. It touches the `dxl` and `lmhl` designs that #184's speed work (`k2-uno-speed.md` Phase 3) is changing, so it rebases onto whatever that phase lands.
 
-## Not in this plan (the Granite issue and PR)
+## Not in this plan (the Granite issue #189 and its PR)
 
 - `ROWS_FAMILIES += granite`, and Granite's AutoModel opting into Uno (G3).
 - Converting the Granite adapter with `--uno-noise-high 100256`, the first special id; it was trained on `[1, 100256)`.
