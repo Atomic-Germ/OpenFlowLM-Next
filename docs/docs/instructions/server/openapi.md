@@ -55,6 +55,8 @@ The OpenAI-compatible endpoints:
 | `POST` | `/v1/completions` |
 | `POST` | `/v1/audio/transcriptions` |
 | `POST` | `/v1/embeddings` |
+| `POST` | `/v1/images/generations` (FLUX.2 [klein] 4B on the NPU) |
+| `POST` | `/v1/images/edits` (one reference image, PNG or JPEG, centre-cropped to a square; `mask` is not implemented) |
 | `GET` | `/v1/version` |
 
 OFLM also serves an **Ollama-compatible** surface, so existing Ollama clients
@@ -486,3 +488,38 @@ gc.collect()
 ```
 
 ---
+
+---
+
+## 🎨 Example: Generate an Image
+
+`flux2-klein:4b` makes images with every op on the NPU: about 5.5 s at 512x512 and 14 s at
+1024x1024. It is pulled on the first request. By default an image request swaps the chat model
+off the NPU and a chat request swaps it back (about 5 s each way); start the server with
+`--imagegen 1` to keep both loaded.
+
+```
+oflm serve llama3.2:1b --imagegen 1
+```
+
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
+result = client.images.generate(
+    model="flux2-klein:4b",
+    prompt="a red fox in fresh snow",
+    size="1024x1024",            # or "512x512"; "auto" is 1024x1024
+    n=1,
+    extra_body={"seed": 1},      # optional: the same seed gives the same image
+)
+with open("fox.png", "wb") as f:
+    f.write(base64.b64decode(result.data[0].b64_json))
+```
+
+- `output_format`: `png` (default) or `jpeg`; `output_compression` sets the JPEG quality.
+- Extras, under either spelling: `seed` (`-1` = random), `steps` / `num_inference_steps`
+  (1-50, default 4). `cfg_scale` / `guidance_scale` and `negative_prompt` are accepted and
+  ignored: klein has no CFG. `sampler` / `sampler_name` accepts the Euler family only.
+- Each returned image carries its `seed`, so a random one can be made again.

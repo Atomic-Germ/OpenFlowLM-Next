@@ -9,21 +9,76 @@
 
 #include "multipart.hpp"
 
-///@brief multipart/form-data request parser
-///@return parts of multipart/form-data
-std::map<std::string, MultipartPart> parse_multipart(const http::request<http::string_body>& req) {
-    std::map<std::string, MultipartPart> parts;
+#include <cctype>
 
-    // 1. Extract the boundary from the Content-Type header
-    std::string content_type_header = std::string(req[http::field::content_type]);
-    std::string boundary;
-    size_t boundary_pos = content_type_header.find("boundary=");
-    if (boundary_pos != std::string::npos) {
-        boundary = "--" + content_type_header.substr(boundary_pos + 9);
+namespace {
+
+std::string lower(std::string_view s) {
+    std::string out(s);
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+std::string_view trim(std::string_view s) {
+    size_t a = s.find_first_not_of(" \t");
+    if (a == std::string_view::npos) return {};
+    return s.substr(a, s.find_last_not_of(" \t") - a + 1);
+}
+
+// A quoted value is read whole, so `filename="x; name=y"` can't name the part.
+std::string header_param(std::string_view v, std::string_view key) {
+    size_t i = v.find(';');                     // past the value itself (form-data, ...)
+    while (i != std::string_view::npos) {
+        ++i;
+        size_t eq = v.find_first_of("=;", i);
+        if (eq == std::string_view::npos) return {};
+        if (v[eq] == ';') { i = eq; continue; }   // a parameter with no value
+        const std::string k = lower(trim(v.substr(i, eq - i)));
+        size_t j = v.find_first_not_of(" \t", eq + 1);
+        std::string val;
+        if (j != std::string_view::npos && v[j] == '"') {
+            for (++j; j < v.size() && v[j] != '"'; ++j) {
+                // only \" and \\ escape: a lone backslash stays, as in a Windows path
+                if (v[j] == '\\' && j + 1 < v.size() && (v[j + 1] == '"' || v[j + 1] == '\\')) ++j;
+                val += v[j];
+            }
+            i = v.find(';', j);
+        } else {
+            i = j == std::string_view::npos ? j : v.find(';', j);
+            if (j != std::string_view::npos) val = std::string(trim(v.substr(j, i == std::string_view::npos ? i : i - j)));
+        }
+        if (k == key) return val;
     }
-    else {
+    return {};
+}
+
+// Only the line naming the header, so another header's text can't answer for it.
+std::string_view header_value(std::string_view headers, std::string_view name) {
+    for (size_t pos = 0;;) {
+        size_t eol = headers.find("\r\n", pos);
+        std::string_view line = headers.substr(pos, eol == std::string_view::npos ? eol : eol - pos);
+        size_t colon = line.find(':');
+        if (colon != std::string_view::npos && lower(line.substr(0, colon)) == name) return line.substr(colon + 1);
+        if (eol == std::string_view::npos) return {};
+        pos = eol + 2;
+    }
+}
+
+}  // namespace
+
+///@brief multipart/form-data request parser
+///@return parts of multipart/form-data, by name, in the order they came
+std::multimap<std::string, MultipartPart> parse_multipart(const http::request<http::string_body>& req) {
+    std::multimap<std::string, MultipartPart> parts;
+
+    // 1. Extract the boundary from the Content-Type header. RFC 2046 allows it quoted
+    //    (boundary="..."), and other parameters may follow it.
+    std::string content_type_header = std::string(req[http::field::content_type]);
+    std::string boundary = header_param(content_type_header, "boundary");
+    if (boundary.empty()) {
         throw std::runtime_error("Invalid multipart/form-data: boundary not found.");
     }
+    boundary = "--" + boundary;
 
     std::string_view body = req.body();
     size_t start_pos = 0;
@@ -41,7 +96,7 @@ std::map<std::string, MultipartPart> parse_multipart(const http::request<http::s
             break;
         }
 
-        std::string_view part_data = body.substr(start_pos, end_pos - start_pos - 2); // 减去 \r\n
+        std::string_view part_data = body.substr(start_pos, end_pos - start_pos - 2); // minus the \r\n
 
         // 3. Parse each part
         size_t headers_end_pos = part_data.find("\r\n\r\n");
@@ -53,26 +108,16 @@ std::map<std::string, MultipartPart> parse_multipart(const http::request<http::s
         MultipartPart part;
         part.content = std::string(part_data.substr(headers_end_pos + 4));
 
-        // Parse the headers (Content-Disposition)
-        size_t cd_pos = headers_sv.find("Content-Disposition: form-data;");
-        if (cd_pos != std::string_view::npos) {
-            size_t name_pos = headers_sv.find("name=\"", cd_pos);
-            if (name_pos != std::string_view::npos) {
-                name_pos += 6;
-                size_t name_end_pos = headers_sv.find("\"", name_pos);
-                part.name = std::string(headers_sv.substr(name_pos, name_end_pos - name_pos));
-            }
-
-            size_t filename_pos = headers_sv.find("filename=\"", cd_pos);
-            if (filename_pos != std::string_view::npos) {
-                filename_pos += 10;
-                size_t filename_end_pos = headers_sv.find("\"", filename_pos);
-                part.filename = std::string(headers_sv.substr(filename_pos, filename_end_pos - filename_pos));
-            }
+        // Header names are case-insensitive (RFC 7578 section 4.8)
+        if (std::string_view cd = header_value(headers_sv, "content-disposition"); !cd.empty()) {
+            part.name = header_param(cd, "name");
+            part.filename = header_param(cd, "filename");
         }
+        part.content_type = std::string(trim(header_value(headers_sv, "content-type")));
 
         if (!part.name.empty()) {
-            parts[part.name] = std::move(part);
+            std::string name = part.name;
+            parts.emplace(std::move(name), std::move(part));
         }
     }
 

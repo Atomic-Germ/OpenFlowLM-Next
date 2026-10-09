@@ -458,16 +458,21 @@ endif()
 # prompt's embedding rows and the noise and encodes the image, so unlike open_whisper it
 # needs no AVX or OpenMP flags. cli.cpp is EXCLUDED: it is open_diffusion/build.cmd's
 # standalone gate with its own main(), as open_whisper's cli.cpp is.
+#
+# Every build has the interface (engine.hpp), so `oflm image` and `oflm serve` need no
+# flag of their own. The engine drives XRT directly; an HRX build compiles
+# engine_unavailable.cpp in its place, whose open_diffusion::available() is false.
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp")
+# an edit's reference image: decode, orient, crop, resize (host code, every build)
+list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/reference.cpp")
 if(NOT OFLM_USE_HRX)
-    set(OPEN_DIFFUSION_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/prompt.cpp"
-    )
-    list(APPEND SOURCES ${OPEN_DIFFUSION_SOURCES})
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp")
     # stb_image_write (vendored, public domain) encodes the PNG/JPEG; only engine.cpp
     # includes it
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine.cpp" PROPERTIES
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb")
+else()
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion/engine_unavailable.cpp")
 endif()
 
 # Exclude files that depend on missing libraries for Linux
@@ -601,8 +606,6 @@ if(NOT OFLM_USE_HRX)
     # #ifdef so an OFLM_USE_HRX build (which never adds OPEN_WHISPER_SOURCES
     # above) still compiles with only the closed adapter reachable.
     target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_WHISPER=1)
-    # `oflm image` (open_diffusion/); an HRX build answers "not implemented in this build"
-    target_compile_definitions(oflm PUBLIC OFLM_USE_OPEN_DIFFUSION=1)
     target_include_directories(oflm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../open_kernels/harness")
     # The vision tower runs on the host (open_qwen36/vision/vit.cpp): threads over OpenMP
     # where the compiler has it, a single thread otherwise (the pragmas are then ignored).
@@ -1401,6 +1404,21 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# SERVER-IMAGES-EDITS: which part a multipart form names. Header-only Boost.Beast; no device.
+add_executable(multipart_test server/multipart_test.cpp server/multipart.cpp)
+target_include_directories(multipart_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/server")
+if(TARGET Boost::headers)
+    target_link_libraries(multipart_test PRIVATE Boost::headers)
+elseif(WIN32)
+    target_include_directories(multipart_test PRIVATE C:/dev/boost_1_88_0)
+endif()
+if(MSVC)
+    target_compile_options(multipart_test PRIVATE /EHsc /Zc:__cplusplus /bigobj)
+    target_compile_definitions(multipart_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 BOOST_ALL_NO_LIB)
+endif()
+add_test(NAME multipart COMMAND multipart_test)
+
 # OPEN-VISION-IMAGE-READ: the reader's own PNG decoder, against fixtures whose
 # expected RGB24 was computed outside this code. Links NOTHING -- no ffmpeg, no
 # zlib, no device, no weights -- which is the point: it passes on a machine whose
@@ -1484,6 +1502,18 @@ if(NOT OFLM_USE_HRX)
              COMMAND open_diffusion_tokens_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../specs/open-diffusion/tests/token_goldens.json")
     set_tests_properties(open_diffusion_tokens PROPERTIES SKIP_RETURN_CODE 77)
+
+    # OPEN-DIFFUSION-STEPS: schedule.hpp's sigmas / timestep features / dts against the
+    # installed model's own tf_<R>.bin and dt_<R>.bin. Header-only; no device, no XRT.
+    add_executable(open_diffusion_schedule_test open_diffusion/schedule_test.cpp)
+    target_include_directories(open_diffusion_schedule_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/open_diffusion")
+    if(MSVC)
+        target_compile_options(open_diffusion_schedule_test PRIVATE /EHsc /Zc:__cplusplus)
+        target_compile_definitions(open_diffusion_schedule_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME open_diffusion_schedule COMMAND open_diffusion_schedule_test)
+    set_tests_properties(open_diffusion_schedule PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # ————————————————————————————————————————————————————————————

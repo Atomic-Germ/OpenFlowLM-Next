@@ -5,8 +5,9 @@
 // Every case's prompt through oflm's own prompt path (prompt_ids over the main build's
 // Tokenizer and the model's bundle.json template) must give exactly the ids
 // klein_pipeline.token_ids gave (utilities/dit-chain/klein_tokens.py --goldens). A wrong id
-// is silent: the image just drifts. MODEL_DIR defaults to the installed model; the test
-// fails, naming the path, when it is absent -- a skipped check reads as a passed one.
+// is silent: the image just drifts. MODEL_DIR defaults to the installed model; without it
+// the test skips (CTest SKIP, 77), naming the path: the model is a gigabyte install, not a CI
+// fixture, and ctest reports a skip as a skip, never as a pass.
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>

@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 LKP, TQ = 64, 32
-TAU = 8.0                      # fa_dit.cc TAU (log2 units)
+TAU = 32.0                     # fa_dit.cc FA_TAU (log2 units)
 LOWEST = -3.3895313892515355e38
 EXP_FIX = (1.4406570, -0.671875, 0.2275390625)   # fa_dit.cc FA_EXP_C0..C2
 FULL = frozenset({"qk_bfp", "s_bf16", "pv_bfp", "o_bf16", "fin_bf16", "exp_hw", "lazy"})
