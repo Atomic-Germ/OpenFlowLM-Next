@@ -2,6 +2,7 @@ build
 build_*/
 build-*/
 npu-cache
+oflm-data
 .vscode
 .codegraph/
 *.egg-info/

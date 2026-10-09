@@ -207,3 +207,49 @@ xrt-smi examine
 Use `oflm validate --json` to see each check as a field (`kernel_ok`,
 `amd_device_found`, `all_fw_ok`, `enough_cols`, `memlock_ok`, 
 `runtime_ok`, and the aggregate `ready`).
+
+---
+### Run with Docker Compose
+
+On a Linux host with Docker Compose and the AMD XDNA driver, first build the
+Ubuntu DEB (including the kernel exports), then start the API:
+
+```bash
+./build_in_docker.sh
+docker compose up -d --build
+curl --fail http://127.0.0.1:52625/api/version
+```
+
+The Dockerfile has separate `builder` and `runtime` targets. The build script
+uses `builder`; Compose uses `runtime`, which installs the existing DEB and its
+runtime dependencies into Ubuntu 26.04. No source checkout or compiler is mounted
+in the running container. Keep exactly one `openflowlm*.deb` in `build/packages`
+when building the runtime image; move older packages elsewhere. A package built
+on another distribution may have incompatible dependencies. Kernel compilation
+stays in the device-enabled build container because it needs the NPU.
+
+Download a supported model and inspect the running service:
+
+```bash
+docker compose run --rm oflm pull llama3.2:1b
+docker compose exec oflm /opt/openflowlm/bin/oflm list
+docker compose logs -f oflm
+docker compose down
+```
+
+The API listens at `http://127.0.0.1:52625` (OpenAI-compatible base URL:
+`http://127.0.0.1:52625/v1`). The healthcheck checks `/api/version`; it does not
+validate model inference. Models persist in the `./oflm-data` Docker volume mount and
+the NPU cache in `./npu-cache`.
+
+Optional environment variables, also accepted in a Compose `.env` file:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OFLM_BIND_ADDRESS` | `127.0.0.1` | Host interface for the API (`0.0.0.0` exposes it to the network) |
+| `OFLM_PORT` | `52625` | Published host port |
+| `OFLM_NPU_DEVICE` | `/dev/accel/accel0` | Host NPU device passed into the container |
+
+After rebuilding the DEB, run `docker compose up -d --build` to update the
+runtime image and recreate the service. For the build environment alone, use
+`docker build --target builder -t openflowlm-build:ubuntu26 .`.

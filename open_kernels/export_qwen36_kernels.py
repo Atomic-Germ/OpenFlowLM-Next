@@ -183,7 +183,11 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
             raise RuntimeError(f"[{name}] build FAILED: a core's program is larger than its {PROGRAM_MEMORY} B of "
                                "program memory. This is a bug in the kernels for this model, not in your setup; "
                                "please report it with this log.")
-        raise RuntimeError(f"[{name}] build FAILED ({p.returncode})")
+        # Repeat the final compiler output in the exception: the outer exporter
+        # continues with other models, and parallel workers can interleave logs.
+        detail = tail.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"[{name}] build FAILED ({p.returncode})\n"
+                           f"Last build output:\n{detail or '(no output)'}")
     print(f"[{name}] built in {time.time() - t0:.0f}s", flush=True)
     used = fullest_core(out)
     if used:
