@@ -94,7 +94,8 @@ def mixed(R) -> bool:
 Q8_FILES = ("gemv_q8_gy.cc", "gemv_q8_gms.cc")
 FOLD_FILES = ("gemv_q4_gyms.cc",)
 XH_FILES = ("xh_signs.h",)            # a rotated-basis (Hadamard) model only
-T2_FILES = ("gemv_t2_gy.cc", "gemv_t2_gms.cc", "dense_wht_f32.cc")   # an all-t2 spec only (OPEN-QUANT-T2)
+T2_FILES = ("gemv_t2_gy.cc", "gemv_t2_gms.cc", "dense_hblk.cc",
+            "dense_hout.cc")   # an all-t2 spec only (OPEN-QUANT-T2)
 
 
 def is_t2(R) -> bool:
@@ -103,7 +104,7 @@ def is_t2(R) -> bool:
 
 def t2_files(R) -> dict[str, str]:
     """The t2 twins of gemv_q4_gy / gemv_q4_gms (same signatures, so xcommon calls them the
-    same way) and the per-128 preps (gemv_t2.h) with the Hadamard in front (wht.h)."""
+    same way) and the per-128 preps, the Hadamard in integers straight into the table (wht_int.h)."""
     C, F = R.common, R.ffn
     hdr = f'''#define GEMV_PER_CALL {C.PER_CALL}
 #define GEMV_T2_CHUNK {C.TILE}
@@ -126,11 +127,9 @@ void gemv_t2_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, flo
 }}
 }}
 ''',
-        "dense_prep.cc": '''// Element i of a bf16 activation of K values (2048 per 4 KB element) into the per-128 t2
-// table: groups [16 i, min(16 i + 16, K/128)) -- each 1024 block through H/32 first
-// (OPEN-HADAMARD), the attention output (K == XH_OG_K) sign-flipped before that.
-#include "gemv_t2.h"
+        "dense_prep.cc": '''// OPEN-HADAMARD: the attention output (K == XH_OG_K) is sign-flipped before the transform.
 #include "wht.h"
+#include "wht_int.h"
 #include "xh_signs.h"
 
 extern "C" {
@@ -139,42 +138,46 @@ void dense_prep(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int3
   const unsigned ng = (g0 + 16u <= total) ? 16u : total - g0;
   if ((unsigned)K == XH_OG_K)
     xh_signs_bf16(e, xh_og_bits + 64u * (unsigned)i, ng * 128u);
-  xh_wht_bf16(e);
+  xh_int_wht<bfloat16>(e, tab, (unsigned)K, g0);
   if (ng > 8u)
-    xh_wht_bf16(e + 1024);
-  gemv_t2_prep_groups(e, tab, (unsigned)K, g0, ng);
+    xh_int_wht<bfloat16>(e + 1024, tab, (unsigned)K, g0 + 8u);
 }
 }
 ''',
-        "dense_prep_f32.cc": '''// Element i of an fp32 activation of K values (1024 per 4 KB element; the fifo types it as bf16)
-// into the per-128 t2 table: groups [8 i, 8 i + 8) -- the block through H/32 in fp32, rounded
-// to bf16 in the element's first half, then the table. K < 0: the activation arrives through
-// H/32 already, as bf16 (dux.py HPREP: the row-4 prep core ran the same xh_wht_f32), 2048 values
-// per element, so element i is the table of groups [16 i, min(16 i + 16, -K / 128)) alone.
-#include "gemv_t2.h"
-#include "wht.h"
+        "dense_prep_f32.cc": '''// The fifo types the fp32 element as bf16; K == 0: element i is 4 KB of the prep core's table (dux.py HPREP).
+#include "wht_int.h"
 
 extern "C" {
 void dense_prep_f32(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {
-  if (K < 0) {
-    const unsigned k = (unsigned)(-K), tk = k / 128, h0 = 16u * (unsigned)i;
-    gemv_t2_prep_groups(e, tab, k, h0, (h0 + 16u <= tk) ? 16u : tk - h0);
+  if (K == 0) {
+    const uint8_t *__restrict src = (const uint8_t *)e;
+    uint8_t *__restrict dst = tab + 4096u * (unsigned)i;
+#pragma clang loop unroll(disable)
+    for (unsigned k = 0; k < 4096; k += 64) aie::store_v(dst + k, aie::load_v<64>(src + k));
     return;
   }
-  const unsigned total = (unsigned)K / 128, g0 = 8u * (unsigned)i;
-  const unsigned ng = (g0 + 8u <= total) ? 8u : total - g0;
-  xh_wht_f32((const float *)e, e);
-  gemv_t2_prep_groups(e, tab, (unsigned)K, g0, ng);
+  xh_int_wht<float>((float *)e, tab, (unsigned)K, 8u * (unsigned)i);
 }
 }
 ''',
-        "dense_wht_f32.cc": '''// The row-4 prep core's kernel (dux.py HPREP): one 1024 block of an fp32 activation through
-// H/32 (OPEN-HADAMARD) into bf16 -- xh_wht_f32, the routine dense_prep_f32 runs on the main cores.
-#include "wht.h"
+        "dense_hblk.cc": '''// The prep core (dux.py HPREP) builds the down projection's second piece's table off the critical path.
+#include "wht_int.h"
 
 extern "C" {
-void dense_wht_f32(const float *__restrict e, bfloat16 *__restrict o) {
-  xh_wht_f32(e, o);
+void dense_hblk(float *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t b) {
+  xh_int_wht<float>(e, tab, (unsigned)K, 8u * (unsigned)b);
+}
+}
+''',
+        "dense_hout.cc": '''// 4 KB element g of the prep core's table (dux.py HPREP) out to the main cores.
+#include <aie_api/aie.hpp>
+#include <stdint.h>
+
+extern "C" {
+void dense_hout(const uint8_t *__restrict tab, uint8_t *__restrict o, int32_t g) {
+  const uint8_t *__restrict src = tab + 4096u * (unsigned)g;
+#pragma clang loop unroll(disable)
+  for (unsigned k = 0; k < 4096; k += 64) aie::store_v(o + k, aie::load_v<64>(src + k));
 }
 }
 ''',
@@ -386,7 +389,7 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
 # with no extra kernel call, element or transfer (the lx main core had 480 B to spend). Read it
 # with --dump-act; utilities/lx_stamps.py decodes it. Events, in order, per layer (62 at most):
 #   prep (xn, og, xm: 3 elements each): element 0 also G (the last GEMV exit); then T at entry,
-#     T after the FWHT (before the per-128 table)
+#     T after the element's first block (wht_int.h)
 #   [linear] each DeltaNet head: T at the record copy, T at the delta step
 #   each down piece's first h element: G, T
 # then slot 62 = the band's end time, slot 63 = the event count.
@@ -437,14 +440,14 @@ def stamp_files(fs: dict[str, str]) -> dict[str, str]:
         "  }\n}")
     assert fs["dense_act.cc"].endswith("}\n}\n")
     fs["dense_act.cc"] = fs["dense_act.cc"][:-4] + "  lxs_g = LXS_NOW();\n}\n}\n"
-    prep_call = "  gemv_t2_prep_groups(e, tab, (unsigned)K, g0, ng);\n"
+    prep_call = "  if (ng > 8u)\n    xh_int_wht<bfloat16>(e + 1024, tab, (unsigned)K, g0 + 8u);\n"
     sub("dense_prep.cc", "  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n",
         "  if (i == 0) lxs_mark(lxs_g);\n  lxs_t();\n"
         "  const unsigned total = (unsigned)K / 128, g0 = 16u * (unsigned)i;\n")
     sub("dense_prep.cc", prep_call, "  lxs_t();\n" + prep_call)
-    sub("dense_prep_f32.cc", "  xh_wht_f32((const float *)e, e);\n",
-        "  if (i == 0) { lxs_mark(lxs_g); lxs_t(); }\n  xh_wht_f32((const float *)e, e);\n")
-    sub("dense_prep_f32.cc", "  if (K < 0) {\n", "  if (K < 0) {\n    if (i == 0) { lxs_mark(lxs_g); lxs_t(); }\n")
+    f32_call = "  xh_int_wht<float>((float *)e, tab, (unsigned)K, 8u * (unsigned)i);\n"
+    sub("dense_prep_f32.cc", f32_call, "  if (i == 0) { lxs_mark(lxs_g); lxs_t(); }\n" + f32_call)
+    sub("dense_prep_f32.cc", "  if (K == 0) {\n", "  if (K == 0) {\n    if (i == 0) { lxs_mark(lxs_g); lxs_t(); }\n")
     sub("dnx_delta.cc", "  dnx_delta_head(ds);\n", "  lxs_t();\n  dnx_delta_head(ds);\n")
     sub("dnx_vcopy.cc", "float *__restrict ds) {\n", "float *__restrict ds) {\n  lxs_t();\n")
     return fs

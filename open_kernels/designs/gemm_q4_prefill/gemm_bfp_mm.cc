@@ -47,7 +47,49 @@ void gqp_zero_c(float *__restrict c) {
 }
 #endif
 
-#ifndef GQP_ZERO_ONLY
+#if !defined(GQP_ZERO_ONLY) && defined(GQP_IDQ)
+// GQP_IDQ: a call is one scale group, so a row block's exponents are fixed over k and A needs no stream.
+void gqp_mm_bfp(const int8_t *__restrict pA, const bfp16ebs8 *__restrict pB, float *__restrict pC) {
+  const int *__restrict pE = reinterpret_cast<const int *>(pA + MM_M * GQP_KC);
+  AIE_LOOP_MIN_ITERATION_COUNT(4)
+  for (unsigned z = 0; z < ROW_B; z += 2) {
+    float *__restrict pC1 = pC + (z * COL_B) * 64;
+    float *__restrict pC2 = pC + ((z + 1) * COL_B) * 64;
+    const int e0l = pE[2 * z], e0h = pE[2 * z + 1], e1l = pE[2 * z + 2], e1h = pE[2 * z + 3];
+    for (unsigned j = 0; j < COL_B; j += 2) {
+      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> sb(pB);
+      sb.seek(j * K_B);
+      const v64int8 *__restrict pA0 = reinterpret_cast<const v64int8 *>(pA + z * K_B * 64);
+      const v64int8 *__restrict pA1 = pA0 + K_B;
+      v64accfloat c00 = aie::accum<accfloat, 64>(aie::load_v<64>(pC1));
+      v64accfloat c01 = aie::accum<accfloat, 64>(aie::load_v<64>(pC1 + 64));
+      v64accfloat c10 = aie::accum<accfloat, 64>(aie::load_v<64>(pC2));
+      v64accfloat c11 = aie::accum<accfloat, 64>(aie::load_v<64>(pC2 + 64));
+      AIE_LOOP_RANGE(K_B, K_B)
+      AIE_LOOP_UNROLL(2)
+      for (unsigned i = 0; i < K_B; ++i) {
+        v64bfp16ebs8 A0, A1;
+        A0.mantissa = *pA0++;
+        A1.mantissa = *pA1++;
+        A0 = ::insert(::insert(A0, 0, e0l), 1, e0h);
+        A1 = ::insert(::insert(A1, 0, e1l), 1, e1h);
+        const v64bfp16ebs8 B0 = sb.pop();
+        const v64bfp16ebs8 B1 = sb.pop();
+        c00 = mac_8x8_8x8T(A0, B0, c00);
+        c01 = mac_8x8_8x8T(A0, B1, c01);
+        c10 = mac_8x8_8x8T(A1, B0, c10);
+        c11 = mac_8x8_8x8T(A1, B1, c11);
+      }
+      aie::store_v(pC1, aie::accum<accfloat, 64>(c00).template to_vector<float>());
+      aie::store_v(pC1 + 64, aie::accum<accfloat, 64>(c01).template to_vector<float>());
+      aie::store_v(pC2, aie::accum<accfloat, 64>(c10).template to_vector<float>());
+      aie::store_v(pC2 + 64, aie::accum<accfloat, 64>(c11).template to_vector<float>());
+      pC1 += 128;
+      pC2 += 128;
+    }
+  }
+}
+#elif !defined(GQP_ZERO_ONLY)
 void gqp_mm_bfp(const bfp16ebs8 *__restrict pA, const bfp16ebs8 *__restrict pB, float *__restrict pC) {
   AIE_PREPARE_FOR_PIPELINING
   AIE_LOOP_MIN_ITERATION_COUNT(4)

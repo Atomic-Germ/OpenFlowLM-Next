@@ -672,7 +672,7 @@ passing by construction.
 
 ### OPEN-HADAMARD: a rotated-basis model's projection inputs go through the Walsh-Hadamard
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `designs/gemv_q4/wht.h`,
-`designs/layer_x/gen_kernels.py`, `designs/layer_x/dux.py`, `src/open_qwen36/block_host.cpp`, `core.cpp`,
+`designs/gemv_q4/wht_int.h`, `designs/fwht_int/`, `designs/layer_x/gen_kernels.py`, `designs/layer_x/dux.py`, `src/open_qwen36/block_host.cpp`, `core.cpp`,
 `manifest.cpp`)
 **Verification:** test (the spec field, the generated sign table, the build-directory suffix) and
 manual (the transform on the NPU)
@@ -682,11 +682,17 @@ PrismML's Ternary Bonsai 2 stores every projection after a blockwise Walsh-Hadam
 the engine shall take each projection input through `H(x)/32` per 1024-value block before its
 GEMV. The 6144-wide attention output (DeltaNet and full attention alike) shall be multiplied by the
 model's ±1 signs first; every other sign is folded into weights by the converter
-(OPEN-CONVERT-PRISM-TERNARY). The decode path does it in the main cores' preps (`dense_prep`,
-`dense_prep_f32`: fp32 in a 4 KB scratch block, written back as bf16), except the down projection's
-second K piece on the merged t2 image (`dux.py` HPREP, OPEN-DECODE-ONE-CONTEXT-DENSE): a row-4 prep
-core takes that piece's f32 input through the same `xh_wht_f32` while the main cores run the first
-piece, and the main cores build only its per-128 table from the bf16 it writes back. The block
+(OPEN-CONVERT-PRISM-TERNARY). The t2 decode path does it in the main cores' preps (`dense_prep`,
+`dense_prep_f32`) in integers, straight into the per-128 t2 table the GEMV reads (`wht_int.h`):
+each 1024 block is rounded to int16 at one exponent for the block, `H1024 = H32 ⊗ H32` runs as two
+exact int16 × ±1 mmul passes with the intermediate rounded back to int16 at one shift for the block,
+and each 128-group is rounded to int16 at its own shift, its sum taken before that rounding. This is
+not bit-exact against an fp32 transform; it shall stay within 2^-10.8 relative RMS of fp64
+`H x / 32` (the fp32 path's bf16 write-back costs ~2^-9.8). The down projection's second K piece on
+the merged t2 image (`dux.py` HPREP, OPEN-DECODE-ONE-CONTEXT-DENSE) runs the same transform on a
+row-4 prep core, which builds that piece's whole per-128 table for the main cores to copy in. The
+rotated lm head's prep (the merged image's tail, and `designs/lm_head_t2`) runs it too. Only a q4_1
+spec's preps keep wht.h's fp32 transform. The block
 prefill route does it on the host in `Core::gemm_run` (`host::hadamard_tile_x`: the transform and the GEMM's
 activation tiling in one pass, bit-identical to `host::hadamard_rows` followed by `tile_x`). The container's
 `prism_hadamard {block_size, og_signs}` becomes `ModelSpec.hadamard {block, og_signs}`, which is
@@ -723,6 +729,24 @@ byte-identical (68 files), before the token gates.
 moving piece 1's transform (`open_kernels_m3`) and a split of piece 0's blocks over the main cores
 (`open_kernels_m3b2`, not kept) each gave 68 of 68 logits files byte-identical to `open_kernels_a35`.
 
+**Verification (manual), the integer transform:**
+1. Probe (`designs/fwht_int`): `make_test.py` writes a bf16 and an fp32 activation of 8192 values,
+   each block a different kind of input (gaussian, outliers, all zero, tiny, huge, one-hot, every
+   value at the int16 edge), and the tables `fwht_ref.py` models for the integer and the fp32 path.
+   Build `fwht_int.py` for every `FWHT_KIND` at `FWHT_REPS` 1 and 33 and run `probe.py`: every table
+   must equal the model's bit for bit, and the integer path's error against fp64 `H x / 32` must be
+   within the bound above.
+2. Tokens: 33/33 on short.ids and 129/129 on prompt512.ids with `--gemm-block` (OPEN-DECODE-ONE-CONTEXT-DENSE
+   step 2), and the logits against the previous kernel set (`--dump-logits`, every file) with the
+   same top-1: the arithmetic changed, so the logits move.
+3. The 40-token check against PrismML's llama.cpp, above.
+**Result 2026-10-06 (`open_kernels_fwht2`, container `Ternary-Bonsai-2-27B-NPU2-lmhead`):** every
+probe table bit-exact against the model, both paths (integer error at the 2026-10-05 probe: 5.3e-5
+bf16 and 6.7e-5 fp32 relative RMS, against 1.7e-3 for the fp32 path). 33/33 and 129/129; logits against `open_kernels_r2`
+Pearson r min 0.99753, top-1 the same in 164/164 files. The 40-token check holds. Main cores at 15024
+of 16384 B. Decode step minimum 155.8 -> 154.4 ms (same-window A/B, 3 rounds). History:
+`plans/archive/bonsai2-round3.md`.
+
 ### OPEN-QUANT-T2: ternary projections stream as 2-bit codes
 **Applies to:** openflowlm-next (`open_kernels/designs/gemv_q4/gemv_t2.h`, `recipes/qwen36moe.py`,
 `recipes/qwen35.py`, `recipes/catalogue.py`, `designs/layer_x/xcommon.py`, `gen_kernels.py`,
@@ -755,8 +779,9 @@ run as t2 whatever format the layers stream: `t2_perm` packs `lm_head.weight` in
 band order into UNPADDED 2176 B chunks (the op's `chunk_bytes`; the layer pools keep 2560 when it is
 absent), 337,715,200 B for the 27B -- exactly PrismML's own PQ2_0 bytes. `designs/lm_head_t2` is
 lm_head_q4's dataflow (8 cores, one shim stream each, bands split evenly) over gemv_t2.h's tile,
-with a prep that takes `hn` through `H/32` per 1024 block in place (wht.h) before the per-128
-table. The s5120 signs are in the final norm's gain, so the prep applies no signs. Every other spec
+with a prep that takes `hn` through `H/32` per 1024 block straight into the per-128 table
+(wht_int.h's integer transform, OPEN-HADAMARD). The s5120 signs are in the final norm's gain, so
+the prep applies no signs. Every other spec
 keeps the q8 head (`lmhead_q8`, `lm_head_q8`).
 
 **Acceptance criteria:**
@@ -792,10 +817,12 @@ keeps the q8 head (`lmhead_q8`, `lm_head_q8`).
   steps, 3 rounds, clean box): decode 292-296 -> 274-275 ms/token (3.40 -> 3.64 tok/s); per-kernel
   minimum lx 4.01 -> 3.66 ms, ax 4.31 -> 3.99 ms; prefill unchanged (15.5 s).
 - The rotated head, standalone: `designs/lm_head_t2/make_test.py` (random ternary weights at the
-  full 248320 x 5120, fp64 reference of the bf16-rounded rotated input), the harness's
+  full 248320 x 5120, fp64 reference of the rotated input as the prep's table holds it), the harness's
   `run_kernel.exe` on `run.cfg` and on `run_null.cfg` (an `LMHEAD_NULL=1` build: DMA only).
   **Result 2026-10-03:** PASS, cosine 1.000000000, maxrel 1.2e-5, same argmax; 6.44 ms against a
   6.39 ms DMA-only floor (52 GB/s) -- the head is at its streaming floor.
+  **Result 2026-10-06 (integer prep, `--n 16384`: the full size needs ~10 GB of host RAM for the
+  test vectors):** PASS, cosine 0.999999998, maxrel 4.0e-5, same argmax.
 - The rotated head, whole model: the re-converted container with its own export, 33/33 on the
   20-token short prompt and 129/129 on the 512-token prompt with `--gemm-block`, against the q8
   head's reference tokens. **Result 2026-10-03:** both identical. In one clean A/B window (3
@@ -837,15 +864,26 @@ For an all-`t2` spec the block route's GEMM (`gemm_q4_prefill`) shall:
   keeps the largest biased exponent E, each value's int8 mantissa is its 8-bit significand shifted
   right by E - e + 1 and rounded to nearest even, and a block with a value outside [-128, 127] takes
   E + 1 and is rounded again. That is what `to_v64bfp16ebs8` does under `conv_even`, so y is the bf16
-  path's to the bit. A and B are stored pair-interleaved ([block pair][k block][block % 2]) so the
-  2 x 2 loop reads them through two FIFO streams.
+  path's to the bit. B is stored pair-interleaved ([block pair][k block][block % 2]) and read through
+  a FIFO stream, and
+- **build the weight's bfp16 blocks with integer operations** (`GQP_IDQ=1`): a call is one 128-k scale
+  group, so a row has one scale s and each weight is -s, 0 or +s. Per row the dequant takes the
+  exponent byte and int8 mantissa m that the conversion above gives s (its significand shifted right
+  by one, rounded to nearest even; a significand of 255 rounds to 128 and becomes 64 at exponent + 1),
+  and each block's mantissas are (code - 1) x m, an exact int8 multiply. It writes them as planes --
+  one 64-byte mantissa vector per (8 x 8) block, then one exponent byte per row -- with plain stores,
+  and the matmul loads each A block's mantissas and joins the row block's exponent words, so neither
+  side converts and neither goes through a FIFO store. The bytes differ from the conversion's only where they hold
+  the same numbers (a block row of all-zero weights keeps its exponent; a significand-255 row with no
+  +s in the block stores -64 at exponent + 1, not -128 at exponent), and the mac multiplies the
+  mantissas exactly, so y is unchanged to the bit.
 Every other spec builds the GEMM exactly as before, with the same env and the same build directories
 (checked 2026-10-03: a q4_1 n4096 k2560 build from the edited design and one from the previous source,
 same toolchain, have byte-identical insts.bin and xclbins that differ only in the build stamps).
 
 **Acceptance criteria:**
 - A t2 spec's GEMM builds carry `GQP_BFP16=1, GQP_WFMT=t2, GQP_KT=128, GQP_YT=1, GQP_T2_STRIDE=2176,
-  GQP_XBFP=1` and `_t2kyx` build directories, its `gemm_block`s carry `y_tn: true`, `x_tile_k: 128`
+  GQP_XBFP=1, GQP_IDQ=1` and `_t2kyxi` build directories, its `gemm_block`s carry `y_tn: true`, `x_tile_k: 128`
   and `x_bfp: true`, and its `gemm_x_k{K}` globals hold K x T x 9 / 8 bytes. A q4_1 spec's GEMM
   builds carry exactly `GQP_N, GQP_K, GQP_T`, with no `y_tn` and the default 64-k tiles.
 - A t2 route's GEMM weights are `from: pack` runs of `t2_perm` ops at their `chunk_bytes` stride
@@ -877,6 +915,13 @@ same toolchain, have byte-identical insts.bin and xclbins that differ only in th
   overflow re-round included); the production GEMM's 1,310,720 identity outputs equal the host
   model's values; the XBFP build's y equals the production build's on n5120 k6144, all 1,310,720
   values, at 1.81 against 2.07 ms a dispatch (npu lock, 3 interleaved rounds).
+  **Result 2026-10-05 (GQP_IDQ, `xbfp_probe.py` variants `xbfp` / `idq`, data `rand` and `adv`):**
+  the integer-dequant build's y equals the production XBFP build's on all 1,310,720 values, both on
+  random ternary weights and on weights built to hit the byte-level special cases (30 % of scales
+  with significand 255, negative and zero scales, all-zero and no-+1 block rows); 1.799 -> 1.478 ms a
+  dispatch (timing lock, 4 interleaved rounds). The whole model (`open_kernels_intdq` against
+  `open_kernels_r2`): 129/129 and 33/33, all 130 logits dumps of the 512-token run byte-identical,
+  512-token prefill 4.83-4.86 -> 4.27-4.51 s, decode unchanged. History: `plans/archive/bonsai2-round3.md`.
 - The whole model: `open_qwen36_cli --gemm-block` on `prompt512.ids`, 129 greedy tokens, against
   the native-bf16 route's tokens, and an interleaved A/B of the prefill time.
   **Result 2026-10-03:** 129/129 tokens with the bfp16 GEMM on q4_1 weights and with the full t2 form,
@@ -4150,12 +4195,12 @@ reads or writes are unchanged, so the gate is token-identical.
 - **The down projection's second K piece goes through H/32 on a prep core** (`dux.py` HPREP, t2
   only; OPEN-HADAMARD): core (7,4), otherwise empty, fed by one fill and drained by one drain on shim
   (7,0)'s free channels -- 15 fills and 14 drains of 16 each. Piece 1's f32 h goes to it right behind
-  piece 0's x fill; it writes each 1024 block through `xh_wht_f32` as bf16 into a region of act that
-  is dead by the FFN (the qkv bands, or q | gate); the main cores' x fill for piece 1 reads five bf16
-  elements from there and runs the per-128 table alone (`dense_prep_f32` with K < 0). The prep core's
-  round trip lands inside piece 0's ~210 us GEMV, so piece 1's nine transforms (~21 us a layer) leave
-  the critical path. Same arithmetic, so the logits are byte-identical. `DUX_HPREP=0` at export
-  builds without it.
+  piece 0's x fill; it runs the main cores' integer transform (`dense_hblk`, OPEN-HADAMARD) on each
+  1024 block into its own copy of the piece's per-128 table and writes the whole table (five 4 KB
+  elements, `dense_hout`) into a region of act that is dead by the FFN (the qkv bands, or q | gate);
+  the main cores' x fill for piece 1 copies those elements into place (`dense_prep_f32` with K == 0).
+  The round trip lands inside piece 0's GEMV, so piece 1's transforms leave the critical path. Same
+  arithmetic as on the main cores, so the same table. `DUX_HPREP=0` at export builds without it.
 - **Fewer transfers where the stream is the limit** (the stream issues a DMA transfer every ~0.7 us,
   measured from the per-core stagger of the timer stamps): one fill reads a DeltaNet head's S for both
   passes (the BD's repeat dimension) and pass 2 updates a row just before copying it out, which put a
@@ -4164,10 +4209,9 @@ reads or writes are unchanged, so the gate is token-identical.
 - **With the tail on the image, two padding x elements a layer** (one after the xn, one after
   DeltaNet) keep the x fifo's count even through the body and through the 0/1-trip `rest` loop; with
   the odd counts the objectfifo transform made the main core 448 B larger.
-- **Known constraint:** the glue core (2,4) is the fullest core, at 15584 of 16384 B. The merged
-  main cores are at 13760 with the data-word counts and the prep core's K < 0 path (27B Bonsai,
-  2176 B t2 chunks); before the counts they were at 15280 with the tail, the row-by-row pass 2 and the
-  prep rewrite (15248 before those; 15360 at the earlier 2560 B chunks). The prep core is at 2320.
+- **Known constraint:** the glue core (2,4) is the fullest, at 15584 of 16384 B. The merged main cores
+  are at 15024 with the integer transform and piece 1's table from the prep core (27B Bonsai, 2176 B
+  t2 chunks); the prep core is at 4688.
 - With OPEN-QUANT-T2's unpadded 2176 B chunks the DeltaNet S is read through the same strided tap
   as `xcommon.dn_sequence` (4 rows a slice at a 2048 B stride), in dux.py's own head-major loop.
 

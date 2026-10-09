@@ -455,12 +455,86 @@ __attribute__((noinline)) inline void gqd_t2_ky_bfp(const uint8_t *__restrict ba
   }
 }
 
+#ifdef GQD_IDQ
+// GQP_IDQ: some bytes differ from to_v64bfp16ebs8's but encode the same values, so y is bit-identical (OPEN-GEMM-T2).
+static constexpr unsigned GQD_IDQ_EXP = 64 * GQD_KC;   // exponent plane, after one 64 B mantissa vector per block
+
+static inline void gqd_idq_rows(const int16_t *__restrict sp, int8_t *__restrict ex,
+                                aie::vector<int8_t, 64> (&mv)[4]) {
+  const aie::vector<int16_t, 32> b = aie::load_v<32>(sp);
+  const aie::vector<int16_t, 32> e = aie::bit_and((int16_t)0xFF, aie::logical_downshift(b, 7));
+  const aie::vector<int16_t, 32> m7 = aie::bit_and((int16_t)0x7F, b);
+  // round half to even of (128 + m7) / 2: up exactly when m7's low two bits are 11
+  const aie::vector<int16_t, 32> up = aie::bit_and((int16_t)1, aie::bit_and(m7, aie::downshift(m7, 1)));
+  const aie::vector<int16_t, 32> mag0 = aie::add((int16_t)64, aie::downshift(aie::add(m7, up), 1));
+  const auto bump = aie::eq(mag0, (int16_t)128);                  // significand 255
+  const auto zero = aie::eq(e, (int16_t)0);                       // s = 0 or subnormal: mantissa 0
+  aie::vector<int16_t, 32> mag = aie::select(mag0, aie::broadcast<int16_t, 32>(64), bump);
+  mag = aie::select(mag, aie::zeros<int16_t, 32>(), zero);
+  const auto neg = aie::lt(b, (int16_t)0);
+  const aie::vector<int16_t, 32> m = aie::select(mag, aie::neg(mag), neg);
+  const aie::vector<int16_t, 32> E =
+      aie::select(aie::select(e, aie::add(e, (int16_t)1), bump), aie::zeros<int16_t, 32>(), zero);
+  const aie::vector<int8_t, 32> m8 = aie::filter_even(aie::vector_cast<int8_t>(m), 1);
+  const aie::vector<int8_t, 32> E8 = aie::filter_even(aie::vector_cast<int8_t>(E), 1);
+  aie::store_v(ex, E8);
+  const auto l1 = aie::interleave_zip(m8, m8, 1);                // rows 0..15 x2 | 16..31 x2
+  const auto a = aie::interleave_zip(l1.first, l1.first, 1);     // rows 0..7 x4 | 8..15 x4
+  const auto c = aie::interleave_zip(l1.second, l1.second, 1);   // rows 16..23 x4 | 24..31 x4
+  const auto a0 = aie::interleave_zip(a.first, a.first, 1);
+  const auto a1 = aie::interleave_zip(a.second, a.second, 1);
+  const auto c0 = aie::interleave_zip(c.first, c.first, 1);
+  const auto c1 = aie::interleave_zip(c.second, c.second, 1);
+  mv[0] = aie::concat(a0.first, a0.second);
+  mv[1] = aie::concat(a1.first, a1.second);
+  mv[2] = aie::concat(c0.first, c0.second);
+  mv[3] = aie::concat(c1.first, c1.second);
+}
+
+__attribute__((noinline)) inline void gqd_t2_ky_int(const uint8_t *__restrict band, unsigned ky,
+                                                    int8_t *__restrict scratch) {
+  const unsigned g = ky * GQD_KC / 128;
+  AIE_LOOP_RANGE(2, 2)
+  for (unsigned c = 0; c < 2; ++c) {
+    const uint8_t *__restrict chunk = band + c * GQD_T2_BODY;
+    aie::vector<int8_t, 64> mv[4];
+    gqd_idq_rows(reinterpret_cast<const int16_t *>(chunk) + g * 32, scratch + GQD_IDQ_EXP + c * 32, mv);
+    // Plain stores, not an output stream: its push / flush chain bounds the loop at ~8 cycles a block.
+    const aie::vector<uint8_t, 64> *__restrict cp =
+        reinterpret_cast<const aie::vector<uint8_t, 64> *>(chunk + 128 + ky * GQD_T2_COLA * 64);
+    aie::vector<int8_t, 64> *__restrict d0 =
+        reinterpret_cast<aie::vector<int8_t, 64> *>(scratch + c * 4 * GQD_T2_COLA * 64);
+    aie::vector<int8_t, 64> *__restrict d1 = d0 + GQD_T2_COLA;
+    aie::vector<int8_t, 64> *__restrict d2 = d1 + GQD_T2_COLA;
+    aie::vector<int8_t, 64> *__restrict d3 = d2 + GQD_T2_COLA;
+    // (code << 2j) * m - (m << 2j), shifted down 2j, is (code - 1) * m exactly; the bias is per chunk.
+    const aie::accum<acc32, 64> b0 = aie::mul(aie::broadcast<int8_t, 64>(-1), mv[0]);
+    const aie::accum<acc32, 64> b1 = aie::mul(aie::broadcast<int8_t, 64>(-4), mv[1]);
+    const aie::accum<acc32, 64> b2 = aie::mul(aie::broadcast<int8_t, 64>(-16), mv[2]);
+    const aie::accum<acc32, 64> b3 = aie::mul(aie::broadcast<int8_t, 64>(-64), mv[3]);
+    AIE_PREPARE_FOR_POSTPIPELINING
+    AIE_LOOP_RANGE(GQD_T2_COLA, GQD_T2_COLA)
+    for (unsigned kb8 = 0; kb8 < GQD_T2_COLA; ++kb8) {
+      const aie::vector<uint8_t, 64> u = aie::transpose(*cp++, 8, 8);
+      *d0++ = aie::mac(b0, aie::bit_and((uint8_t)0x03, u), mv[0]).template to_vector<int8_t>(0);
+      *d1++ = aie::mac(b1, aie::bit_and((uint8_t)0x0C, u), mv[1]).template to_vector<int8_t>(2);
+      *d2++ = aie::mac(b2, aie::bit_and((uint8_t)0x30, u), mv[2]).template to_vector<int8_t>(4);
+      *d3++ = aie::mac(b3, aie::bit_and((uint8_t)0xC0, u), mv[3]).template to_vector<int8_t>(6);
+    }
+  }
+}
+#endif
+
 __attribute__((noinline)) inline void gqd_dequant_ky_bfp(const uint8_t *__restrict band, unsigned ky,
                                                          uint8_t *__restrict nib_scr, bfp16ebs8 *__restrict scratch) {
   event0();
   (void)nib_scr;
 #if !defined(GQD_NULL_GATHER) && !defined(GQD_NULL_DEQUANT)
+#ifdef GQD_IDQ
+  gqd_t2_ky_int(band, ky, reinterpret_cast<int8_t *>(scratch));
+#else
   gqd_t2_ky_bfp(band, ky, scratch);
+#endif
 #endif
   event1();
 }

@@ -163,23 +163,16 @@ if RT_COUNTS:
     KH = {"hk": list(X.DOWN_SPLIT), "hn": [k * 4 // ELEM for k in X.DOWN_SPLIT],
           "hg": [X.n_groups(k) for k in X.DOWN_SPLIT]}
 
-# The down projection's second K piece through H/32 on a row-4 prep core (OPEN-HADAMARD). The main
-# cores spend ~2.4 us a 1024 block on the Hadamard, and piece 1's nine blocks (~22 us a layer) sat on
-# the critical path although nothing needs them before piece 0's h preps and GEMV (~250 us) are done.
-# So piece 1's f32 h goes to the prep core as soon as the up | gate bands land; it writes each block
-# through xh_wht_f32 -- the routine the main cores ran -- as bf16 into a region of act that is dead
-# by the FFN (the qkv bands, or q | gate), and the cores' x fill for piece 1 reads that instead: five
-# bf16 elements whose prep is the per-128 table alone (dense_prep_f32 with K < 0). The same
-# arithmetic on the same values, so the same bytes. Endpoints: one fill and one drain on shim (7, 0),
-# both channels free; the core (7, 4) is otherwise empty. DUX_HPREP=0 at export builds without it.
+# Down piece 1: integer transform + whole table on prep core (7, 4); main cores copy it in.
 HPREP = RT_COUNTS and os.environ.get("DUX_HPREP", "1") != "0"
 HPREP_TILE = Tile(7, 4)
 if HPREP:
     H1_K = X.DOWN_SPLIT[1]
     H1_BLOCKS = H1_K // 1024
-    H1_X = -(-H1_K * 2 // ELEM)                   # bf16 x elements the cores read for piece 1 (5 at the 27B)
+    H1_X = -(-H1_K * 2 // ELEM)                   # table elements the cores read for piece 1
     assert H1_K % 1024 == 0 and H1_X * ELEM <= A_Z - A_QKV and H1_X * ELEM <= AA_KVN - AA_QG, (H1_K, H1_X)
-    KH["hk"][1] = -H1_K                           # dense_prep_f32: K < 0 = already through H/32, bf16
+    assert 2 * H1_K + H1_K // 16 <= H1_X * ELEM <= X.TAB_BYTES, (H1_K, H1_X, X.TAB_BYTES)   # gemv_t2_tab_bytes
+    KH["hk"][1] = 0                               # dense_prep_f32: K == 0 = copy the prep core's table
     KH["hn"][1] = H1_X
 
 # ---- the linear layer's helpers (lx.py)
@@ -554,20 +547,27 @@ def dux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         f32_1k = np.ndarray[(1024,), np.dtype[np.float32]]
         b16_1k = np.ndarray[(1024,), np.dtype[bfloat16]]
         of_hpi = ObjectFifo(f32_1k, name="hpi", depth=2)
-        of_hpo = ObjectFifo(b16_1k, name="hpo", depth=2)
-        f_hwht = ExternalFunction("dense_wht_f32", source_file=str(HERE / "dense_wht_f32.cc"),
-                                  arg_types=[f32_1k, b16_1k], include_dirs=inc, compile_flags=X.OZ)
+        u8_tab = np.ndarray[(H1_X * ELEM,), np.dtype[np.uint8]]
+        of_hpo = ObjectFifo(u8_4k, name="hpo", depth=2)
+        f_hblk = ExternalFunction("dense_hblk", source_file=str(HERE / "dense_hblk.cc"),
+                                  arg_types=[f32_1k, u8_tab, np.int32, np.int32], include_dirs=inc,
+                                  compile_flags=X.OZ)
+        f_hout = ExternalFunction("dense_hout", source_file=str(HERE / "dense_hout.cc"),
+                                  arg_types=[u8_tab, u8_4k, np.int32], include_dirs=inc, compile_flags=X.OZ)
 
-        def hprep_body(hin, hout, fw):
-            for _ in range_(H1_BLOCKS):
+        def hprep_body(hin, hout, htab, fb, fo):
+            for b in range_(H1_BLOCKS):
                 e = hin.acquire(1)
-                o = hout.acquire(1)
-                fw(e, o)
-                hout.release(1)
+                fb(e, htab, H1_K, b)
                 hin.release(1)
+            for g in range_(H1_X):
+                o = hout.acquire(1)
+                fo(htab, o, g)
+                hout.release(1)
 
-        workers.append(Worker(hprep_body, fn_args=[of_hpi.cons(), of_hpo.prod(), f_hwht], tile=HPREP_TILE,
-                              stack_size=0x800))
+        workers.append(Worker(hprep_body, fn_args=[of_hpi.cons(), of_hpo.prod(), Buffer(u8_tab, name="hptab"),
+                                                   f_hblk, f_hout],
+                              tile=HPREP_TILE, stack_size=0x800))
     workers.append(Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), Buffer(nw_ty, name="nwb"), post_fn, post_copy],
                           tile=Tile(1, 3), stack_size=0x1800))
     workers.append(Worker(glue_body,
@@ -857,8 +857,8 @@ _src = b"".join(sorted(f.read_bytes() for f in HERE.glob("*.cc")) + sorted(f.rea
                 + sorted(f.read_bytes() for f in POST.glob("*.cc")) + sorted(f.read_bytes() for f in ATTN.glob("*.cc"))
                 + sorted(f.read_bytes() for f in ATTN.glob("*.h")) + sorted(f.read_bytes() for f in X.RT.glob("*.cc"))
                 + [(X.LN / "ln.cc").read_bytes(), (X.LN / "ln.h").read_bytes(), (X.LINL / "ln_nr.cc").read_bytes(),
-                   (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(), (GEMV / "wht.h").read_bytes(),
+                   (GEMV / "gemv_q4.h").read_bytes(), (GEMV / "gemv_tab.h").read_bytes(), (GEMV / "wht.h").read_bytes(), (GEMV / "wht_int.h").read_bytes(),
                    (GEMV / "gemv_t2.h").read_bytes(), (HERE.parent.parent / "include" / "vecmath.h").read_bytes(),
                    (HERE.parent.parent / "include" / "scalar_fp.h").read_bytes(),
-                   SPEC.spec_hash().encode(), b"window_first=%d" % WINDOW_FIRST, b"tail=%d" % TAIL, b"hprep=%d" % HPREP])
+                   SPEC.spec_hash().encode(), b"window_first=%d" % WINDOW_FIRST, b"tail=%d" % TAIL, b"hprep=%d" % HPREP, b"hptab=1"])
 SPECIALIZE = {"part": PART, "srchash": int(hashlib.sha1(_src).hexdigest()[:8], 16)}

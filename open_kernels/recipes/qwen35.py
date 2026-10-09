@@ -500,7 +500,8 @@ KERNEL_SOURCES_Q8 = ["designs/gemv_q4/gemv_q8.h"]
 # a rotated ternary head (head_t2) compiles these; listed only for such a spec (recipes/cache.py),
 # so no other kernel set's build key moves
 KERNEL_SOURCES_T2_HEAD = ["designs/lm_head_t2/*.py", "designs/lm_head_t2/*.cc",
-                          "designs/gemv_q4/gemv_t2.h", "designs/gemv_q4/wht.h"]
+                          "designs/gemv_q4/gemv_t2.h", "designs/gemv_q4/wht.h",
+                          "designs/gemv_q4/wht_int.h"]     # the t2 layers' preps (same specs only)
 # every projection this family runs goes through `gemv_q4_gy` or `gemv_q4_gms`, both of
 # which have q8 twins, so every role it has can be streamed at q8 (OPEN-QUANT-Q8)
 Q8_ROLES = frozenset({"attn", "linear", "linear_out", "ffn"})

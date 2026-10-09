@@ -1302,10 +1302,11 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
             # q4_1 route copies its own), 128 k per matmul call, and writes y token-major
             # -- and (GQP_XBFP) both operands reach the matmul as bfp16 blocks: the activation from
             # the host at 9 B per 8 values, the weight from the dequant, so the core converts nothing
+            # -- and (GQP_IDQ) the dequant builds those blocks in integers, as planes the matmul loads directly
             env.update(GQP_BFP16="1", GQP_WFMT="t2", GQP_KT="128", GQP_YT="1", GQP_T2_STRIDE=str(T2_CHUNK),
-                       GQP_XBFP="1")
+                       GQP_XBFP="1", GQP_IDQ="1")
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
-                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2kyx" if bfp else ""),
+                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}" + ("_t2kyxi" if bfp else ""),
                                "env": env}
     return out
 
