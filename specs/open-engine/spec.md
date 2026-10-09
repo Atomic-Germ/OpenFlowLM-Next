@@ -1344,17 +1344,26 @@ decode would have left the cache. A sampled request decodes as usual.
 runs N tokens by the cycle, then by plain decode. It prints `UNO IDENTICAL to decode over N
 tokens` and both speeds.
 
-**Result 2026-10-08 (K2-Horizon-7B-Uno, NPU shared with another session's job):**
-- 64 tokens in 17 cycles: 3.76 tokens a cycle; accepted drafts 0/1/2/3 occurred 2/6/2/7
-  times.
-- Identical to plain decode.
-- 1.68x plain decode's speed in the same process.
+**Result 2026-10-09 (K2-Horizon-7B-Uno, 6 prompts x 128 tokens, quiet machine under the shared
+lock's `timing` gate):**
 
-**Result 2026-10-08 (6 prompts x 128 tokens, NPU held, CPU at 100% from other work):** all six
-identical to plain decode; 3.05-3.88 tokens a cycle (mean 3.47; the CPU oracle predicted 3.45);
-1.35-1.73x on five prompts and 0.85x on one that hit a load spike. Plain decode ran at
-~320 ms/token against 105 on a quiet machine, so these ratios, not the absolute times, are the
-result.
+| prompt | tokens a cycle | Uno | plain decode | speedup |
+|---|---|---|---|---|
+| chat | 3.56 | 94.6 ms/token (10.58 tok/s) | 106.7 ms/token (9.37 tok/s) | 1.13x |
+| chat2 | 3.05 | 109.4 (9.14) | 107.1 (9.34) | 0.98x |
+| code | 3.46 | 96.8 (10.34) | 107.3 (9.32) | 1.11x |
+| code2 | 3.12 | 107.1 (9.34) | 107.2 (9.33) | 1.00x |
+| math | 3.88 | 86.2 (11.60) | 107.2 (9.33) | 1.24x |
+| reason | 3.76 | 89.6 (11.16) | 107.3 (9.32) | 1.20x |
+
+- All six identical to plain decode.
+- Mean 3.47 tokens a cycle (the CPU oracle predicted 3.45); geometric-mean speedup 1.11x.
+- A cycle costs 3.12-3.16 decode steps (~335 ms) on every prompt. Its parts measured
+  separately (two L-row passes at 1.17-1.28x a step, the draft layer +14%) add to ~2.6, so
+  ~0.5 step a cycle is unaccounted for.
+- Earlier runs on a busy machine (1.68x over 64 tokens; 1.35-1.73x over these prompts with the
+  CPU at 100%) overstated the gain: contention slowed plain decode, with more dispatches per
+  token, about 3x, and Uno less.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,

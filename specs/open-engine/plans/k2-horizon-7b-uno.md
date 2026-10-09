@@ -14,7 +14,7 @@ dense-first L-row pass.
 | 3. LoRA | **done** (OPEN-UNO-LORA): `uno.q4nx` (`q4nx-build --uno-adapter`), the draft stream sharing dxl's context; the draft layer matches fp64 at corr >= 0.999998. |
 | 4. Uno decode | **done** (OPEN-UNO-DECODE): `--uno` is identical to plain decode (64 tokens, then 6 prompts x 128); the `oflm` `k2` family uses it for greedy requests. |
 | 5. Serving | **done**: minja renders K2's template as transformers does (TOOLS-K2-TEMPLATE, 10/10); reasoning and `<ifm|tool_call>` parsing (TOOLS-K2-REASONING / -CALLS); history fix-ups (TOOLS-K2-HISTORY); `<|ifm|im_end|>` stops generation (OPEN-CONVERT-EOS-GENCONFIG). `oflm serve`: greedy, sampled, streamed, multi-turn, tool call and tool result all correct. |
-| Speed (reported) | Uno identical to decode on 6 prompts x 128 tokens, 3.47 tokens a cycle, median 1.55x (range 0.85-1.73x), on a machine at 100% CPU where decode ran ~320 ms/token against 105 clean; `oflm serve` greedy 5.6 tok/s vs sampled 3.8 tok/s on the same machine. A clean absolute Uno number is still missing. |
+| Speed (reported) | Quiet machine, 6 prompts x 128 tokens: Uno 9.1-11.6 tok/s against plain decode's 9.3, **1.11x** (0.98-1.24x), identical output, 3.47 tokens a cycle. A cycle costs 3.13 decode steps, ~0.5 more than its measured parts; the contended runs' 1.55x was an artefact of CPU load. Below the plan's ~1.35-1.75x estimate: that estimate assumed a cycle of ~2.3-2.6 steps. |
 
 Findings that changed the design:
 - **The L-row pass can be bit-identical to decode, not just within the near-tie bar.** Per

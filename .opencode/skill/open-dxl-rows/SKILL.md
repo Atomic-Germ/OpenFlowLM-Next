@@ -96,6 +96,9 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
   - The head is DMA-bound on its 5 KB elements: 25 ms against `lm_head_q4`'s 12.8 ms in the
     harness. `lmhl2.py` (10 KB elements, sliced tables, rows padded to 250880) is correct but
     measured no faster: 27-38 ms against lmhl's 25-31 ms, so the recipe keeps `lmhl`.
-  - Uno over 6 prompts x 128 tokens: 3.47 tokens a cycle (CPU oracle 3.45), identical to
-    decode, median 1.55x; but the CPU sat at 100% (LM Studio's llama-server), decode ran at
-    ~320 ms/token instead of 105, and `timing` never got a quiet window in 2 hours.
+  - Uno over 6 prompts x 128 tokens, quiet machine (2026-10-09): 3.47 tokens a cycle (CPU
+    oracle 3.45), identical to decode, **1.11x** (0.98-1.24x; 9.1-11.6 tok/s against 9.3).
+    A cycle costs 3.13 decode steps against ~2.6 for its measured parts: that gap is the next
+    thing to find.
+  - **Never quote a ratio from a busy machine.** With the CPU at 100% the same bench showed
+    1.55x: contention slowed plain decode (more dispatches per token) ~3x and Uno less.
