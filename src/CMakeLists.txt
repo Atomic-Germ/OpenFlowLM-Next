@@ -1401,6 +1401,16 @@ endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# PULL-STALE, PULL-RECORD, PULL-FORCE: which files `oflm pull` fetches. No network, no device.
+add_executable(pull_plan_test pull/pull_plan_test.cpp pull/install_record.cpp)
+target_include_directories(pull_plan_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/pull" "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(MSVC)
+    target_compile_options(pull_plan_test PRIVATE /EHsc /Zc:__cplusplus)
+    target_compile_definitions(pull_plan_test PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+add_test(NAME pull_plan COMMAND pull_plan_test)
+
 # OPEN-VISION-IMAGE-READ: the reader's own PNG decoder, against fixtures whose
 # expected RGB24 was computed outside this code. Links NOTHING -- no ffmpeg, no
 # zlib, no device, no weights -- which is the point: it passes on a machine whose

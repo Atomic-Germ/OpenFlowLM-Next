@@ -9,6 +9,7 @@
 #include "model_list.hpp"
 #include "lm_config.hpp"
 #include "download_model.hpp"
+#include "install_record.hpp"
 #include "nlohmann/json.hpp"
 #include <filesystem>
 #include <vector>
@@ -58,8 +59,10 @@ private:
     // Get the full path for a model file
     std::string get_model_file_path(const std::string& model_path, const std::string& filename);
     
-    // Build download URLs for model files
-    std::pair<nlohmann::json, float> build_download_list(const std::string& model_tag, bool modelscope=0);
+    // Build download URLs for the files a pull plan fetches, in plan order
+    std::pair<nlohmann::json, float> build_download_list(
+        const std::string& model_tag, const std::vector<std::pair<pull::RegistryFile, pull::Fetch>>& plan,
+        bool modelscope = false);
 
     // bool check_model_compatibility(const std::string& model_tag);
     ModelStatus check_model_compatibility(const std::string& model_tag, bool sub_process_mode=0);
