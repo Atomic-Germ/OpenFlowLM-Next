@@ -178,22 +178,38 @@ cmake --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b
 
 Also you can build fast and simple with Docker.
 
-Simply run(linux-package preset is used by default):
+Simply run(linux-package-deb preset is used by default):
 
 ```bash
 ./build_in_docker.sh
 ```
 
-Or specify a workflow preset(for deb package in this example):
+Or specify a workflow preset(for tar.gz package in this example):
 
 ```bash
-./build_in_docker.sh linux-package-deb
+./build_in_docker.sh linux-package
 ```
 
 The script builds `openflowlm-build:ubuntu26`, passes `/dev/accel/accel0` into the container, enables XRT memory locking, and persists the build and NPU cache directories.
+
+The container toolchain lives in `/opt/ironvenv` (`OFLM_VENV_DIR`), outside
+the repository mounted at `/code`. This prevents a host `ironvenv` from hiding
+the image's tested Python, mlir-aie and Peano environment. Rebuild the builder
+image after changing the Dockerfile; the build script does this automatically.
 
 The host must have the AMD XDNA driver installed and expose:
 
 ```text
 /dev/accel/accel0
+```
+
+#### Run with Docker Compose
+
+On a Linux host with Docker Compose and the AMD XDNA driver, first build the
+Ubuntu DEB (including the kernel exports), then start the API:
+
+```bash
+./build_in_docker.sh
+docker compose up -d --build
+curl --fail http://127.0.0.1:52625/api/version
 ```
