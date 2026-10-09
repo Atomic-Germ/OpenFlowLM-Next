@@ -1296,15 +1296,22 @@ sizes the shared window to pos0 + L rows.
 | dxl, one row at a time (before) | 3.75 | 6.60 | 9.55 | 12.5 |
 | dxl, a core group per row | 3.63 | 4.38 | 5.08 | 5.95 |
 
-### OPEN-UNO-LORA: K2-Horizon-7B-Uno's diffusion LoRA as q4_1 bands
+### OPEN-UNO-LORA: A Uno diffusion LoRA as q4_1 bands
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/uno.py`, `--uno-adapter`, `open_kernels/recipes/dxl.py`, `designs/dxl`, `src/open_qwen36/core.cpp`)
 **Verification:** test (`utilities/q4nx-build/tests/test_uno.py`, `tests/test_dxl.py`); manual (the draft layer below)
 
-The draft pass shall compute IFM's conditional LoRA `y += s * (m * (x A^T)) B^T` on q, k, v,
-o, gate, up and down:
-- s = lora_alpha / r: 64 for this adapter, not rsLoRA.
+The draft pass shall compute a Uno adapter's conditional LoRA `y += f * s * (m * (x A^T)) B^T`
+(IFM's K2-Horizon-7B-Uno first) on q, k, v, o, gate, up and down:
+- s = lora_alpha / r: 64 for K2's adapter, not rsLoRA.
+- f is the factor the base's builder folded into that projection's weights, 1 when nothing was
+  folded. Granite folds `attention_multiplier * sqrt(head_dim)` into q and `residual_multiplier`
+  into o and down. The pre-fold values are read from `config.json`'s `q4nx_folded_multipliers`.
+  Without f, the update would be off by f against the folded W.
 - m is 0 on the seed row and 1 on the rest.
 - Embedding, norms and head get no LoRA.
+
+`--uno-noise-high N` records the noise ids the adapter was trained on, `[1, N)`, as
+`uno.q4nx` metadata (`uno_noise_high`). The folds are recorded too (`uno_folds`).
 
 It is computed inside the L-row GEMV, from `uno.q4nx` beside `model.q4nx`:
 - `q4nx-build --uno-adapter <dir or repo>`, or `python -m q4nx.uno`, writes it, quantized to
@@ -1326,6 +1333,9 @@ output.
 - B is s * B in its window and zero elsewhere.
 - The padded tensors reproduce s * B (A x).
 - A rank that does not fit is refused.
+- A projection whose base was folded by f has f * s * B in its window. For Granite 4.2 3B,
+  q is x0.125 and nothing else. A base with no recorded folds gets exactly the unfolded tensors.
+- `uno_noise_high` is recorded only when given, and an empty range is refused.
 
 **Procedure (manual):**
 1. `python designs/dxl/draft_ref.py --fixture model/out_k2l --model <dir with uno.q4nx> --pack`.
