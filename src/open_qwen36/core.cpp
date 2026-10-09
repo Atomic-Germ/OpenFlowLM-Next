@@ -2347,8 +2347,9 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     const size_t qw = gb.qw, kvw = gb.kvw, hd = ab.hd;
     // The geometry the products were built for, against what this layer's projection produces;
     // attention_npu checks m against the group size times T.
-    if (ab.prep != "qknorm_rope" || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || man_.rotary_dim > hd ||
-        hc.qn.size() != hd || hc.kn.size() != hd)
+    const bool normed = ab.prep == "qknorm_rope";
+    if ((!normed && ab.prep != "rope") || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || man_.rotary_dim > hd ||
+        (normed && (hc.qn.size() != hd || hc.kn.size() != hd)))
         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": the dense attention products were built for "
                                  "head dim " + std::to_string(hd) + ", which this layer's q / k / v widths do not divide into");
     // y [n_qkv3, T] straight into the [T, width] parts attention_prep reads
@@ -2371,7 +2372,8 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     g.pos0 = pos0; g.eps = gb.eps;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
-    host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
+    host::attention_prep(g, q, k, v, normed ? hc.qn.data() : nullptr, normed ? hc.kn.data() : nullptr,
+                         man_.rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
     timing_.mid_ms += ms_since(tt);
     og.assign(T * qw, 0.f);
     // attention_npu books its dispatches as part0 and its host stages as part1, the full layers'
