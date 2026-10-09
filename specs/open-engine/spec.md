@@ -1234,8 +1234,11 @@ Row j, at position pos0 + j, shall be bit-identical to the decode step at that p
 - The same bf16 logits, every one of them, and so the same argmax.
 - The GEMV does gemv_q4_tile's arithmetic per token in its order (`dxl_gemv.h`).
 - The norms, the attention and silu are dx's own kernels.
-- The attention takes the queries one row at a time, and row j's KV row reaches DDR before row
-  j + 1 reads its window.
+- Each row has its own group of attention cores, all fed by one stream: every row's prologue,
+  then one window of pos0 + L cache rows. Group j walks the first rows exactly as decode at
+  pos0 + j would (the same blocks and singles), skips the rest, and adds its own row last. The L
+  new KV rows reach the cache, joined into one drain, before that window fill is issued.
+- A pass's attention therefore costs about one decode step's, not L of them.
 
 Other properties:
 - The pass writes the L rows' KV and leaves the position alone, so the caller seeks to the
@@ -1253,7 +1256,8 @@ the wrong bytes without faulting. A 3,080 B table did exactly that, and `designs
 is the probe that isolated it.
 
 The attention sites are compiled for the placeholder positions 1 .. L. `attnrows` (harness
-and engine) moves row j's window length, KV drain and record to pos0 + j.
+and engine) moves row j's position record to pos0 + j and the joined KV drain to pos0, and
+sizes the shared window to pos0 + L rows.
 
 **Acceptance criteria (unit):**
 - The act regions do not overlap.
@@ -1270,15 +1274,27 @@ and engine) moves row j's window length, KV drain and record to pos0 + j.
    0 of 4096 values differ.
 2. The same with `--head` for `lmhl`: 0 of 250624 logits differ from `ln` + `lm_head_q4`, and
    the NPU argmax equals the host's.
-3. `open_qwen36_cli ... --rows-check 17`: N decode steps, then the same positions as L-row
+3. `python designs/dxl/dxl_at_test.py --pos0 P --build <dxl build>`, then `run_kernel` on the
+   cfg it writes, then `--compare`: P + L decode steps fill the cache, then the L rows at P on
+   that cache, 0 of 4096 values differ on every row. Run P = 1, 5, 8 (block boundaries) and one
+   deep window (1022).
+4. `open_qwen36_cli ... --rows-check 17`: N decode steps, then the same positions as L-row
    passes. It prints `ROWS PASS`.
 
 **Result 2026-10-08 (K2-Horizon-7B, L = 4):**
 - Layer 0 bit-identical on all four rows.
 - The head bit-identical, the argmax matching.
 - `--rows-check` over 16 rows: every row's 250624 logits equal the decode step's.
-- A pass costs 1.17-1.28x one decode step.
 - The main cores are at 8,304 of 16,384 B of program memory.
+
+**Result 2026-10-09 (row-parallel attention):** layer 0 bit-identical at pos0 0, 1, 5, 8 and
+1022. One layer in the harness, quiet machine:
+
+| position | 0 | 1024 | 2048 | 3072 |
+|---|---|---|---|---|
+| dx (decode) | 2.63 ms | 3.34 | 4.07 | 4.85 |
+| dxl, one row at a time (before) | 3.75 | 6.60 | 9.55 | 12.5 |
+| dxl, a core group per row | 3.63 | 4.38 | 5.08 | 5.95 |
 
 ### OPEN-UNO-LORA: K2-Horizon-7B-Uno's diffusion LoRA as q4_1 bands
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/uno.py`, `--uno-adapter`, `open_kernels/recipes/dxl.py`, `designs/dxl`, `src/open_qwen36/core.cpp`)

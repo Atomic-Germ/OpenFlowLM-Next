@@ -22,10 +22,23 @@ decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DEC
     sets the barrier. The core waits on it at the top and **never releases it**: a release
     adds 1, and the next dispatch would start on the old mode.
 - **ln core:** the L rows' norms in turn.
-- **Attention cores:** dx's kernels, one query row at a time. Row j's KV drain finishes
-  before row j + 1's window fill is issued.
+- **Attention cores:** a group of ACORES (4) per row, so 16 at L = 4. Group 0 sits on dx's
+  tiles (2..5, 3); the rest take rows 4 and 5. Every group runs dx's kernels unchanged.
+  - One broadcast `ain` stream carries every row's prologue (meta, ptab, q, k, v), then one
+    window of pos0 + L cache rows. Group j skips the other prologues, walks the window to
+    pos0 + j with the pb counts meta gives that position, skips the rest (`dxl_attn_skip`:
+    pb[6] = pb[0] + L - j - pb[1], which also covers position 0's dummy row), then adds its own
+    row with `attn_step_new`. Bit-identical to decode by construction.
+  - Each group's core 0 packs its new K|V row (`dxl_kvpack`) into a memtile join (Tile(1, 1)).
+    One drain writes all L rows, and it finishes before the window fill is issued.
+  - Each group's four og elements join in a memtile (Tile(2 + g, 1)) into one 8 KB row: one
+    drain per row. Shim output channels stay at 14 of 16.
+  - Why: the attention walk is ~56% arithmetic (an `ATTN_NULL=1` build), so sharing one
+    window on 4 cores would still pay 4x. With a group per row, a pass's attention slope is
+    decode's (0.75 ms per 1k positions a layer, against 2.9 before).
 - **Patching:** the attention sites are compiled at positions 1 .. L. `attnrows`
-  (`harness/stream_patch.hpp`, the engine's `step_rows`) moves row j to pos0 + j.
+  (`harness/stream_patch.hpp`, the engine's `step_rows`) moves row j's record to pos0 + j, the
+  joined KV drain to pos0, and sizes the window to pos0 + L.
 - **Buffers:** the same per-layer pool / consts / kv / ptab as dx, plus an L-row xres and act.
   `lora` is arg 6 (verify binds a dummy BO there).
 
@@ -48,6 +61,10 @@ decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DEC
    the very fill it is blocking (the dispatch times out, state 8).
 5. **Heredocs.** In this shell, `\\n` inside a heredoc reaches Python as a real newline. Write
    patch scripts with the file tool.
+6. **Constant skip loops hang `llc`.** Three back-to-back `range_(13)` acquire/release loops
+   ahead of the real work (row-3's group) ran `llc` 9+ minutes without finishing. A count
+   through memory (`dxl_attn_count` into pb[7]) compiles in seconds. Watch for one core's `llc`
+   running long in `final.prj`.
 
 ## Build (Windows, iron_env.ps1)
 
@@ -71,6 +88,8 @@ python open_kernels\model\make_decode.py --model-dir <dir> --layers 1 --tokens 4
 run_kernel model\out_k2l\run_decode.cfg                          # dx, the reference rows
 python designs\dxl\make_dxl_test.py --fixture model\out_k2l --build <dxl build> --l 4; run_kernel ...\run_dxl.cfg
 python designs\dxl\make_dxl_test.py --fixture model\out_k2l --l 4 --compare        # 0 of 4096 differ
+python designs\dxl\dxl_at_test.py --pos0 5 --build <dxl build>; run_kernel model\out_k2l\run_dxl_at5.cfg; dxl_at_test.py --pos0 5 --compare
+                                                                  # rows at a later position on decode's cache: 1, 5, 8, 1022
 python designs\dxl\make_dxl_test.py ... --head                    # lmhl: 0 of 250624, argmax == host
 python designs\dxl\draft_ref.py --fixture model\out_k2l --model <dir> --l 4 --pack  # draft: LoRA pool for layer 0
 python designs\dxl\make_dxl_test.py ... --build <draft build> --lora model\out_k2l\lora_L0.bin; run_kernel; draft_ref.py --compare
@@ -80,8 +99,8 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
 
 ## Timing
 
-- **Harness numbers run about 2x the engine's.** Compare ratios there; take absolutes from
-  `--rows-check` / `--uno`.
+- **The harness and the engine agree** on a quiet machine (one dx layer 2.6 ms × 36 ≈ the
+  engine's 107 ms step). The "2x" once noted here was a busy machine.
 - **Other sessions share this NPU.** Run timed work under their lock:
 
   ```
@@ -90,9 +109,9 @@ open_qwen36_cli ... --uno 64                                      # UNO IDENTICA
 
   Use `npu` instead of `timing` for correctness runs. `timing` waits until CPU is under 25% and
   no NPU/GPU rival is running (LM Studio counts).
-- **Measured 2026-10-08 (K2-7B, L = 4):**
-  - A pass costs 1.17-1.28x one decode step.
-  - The draft layer is +14% over verify.
+- **Measured 2026-10-08/09 (K2-7B, L = 4):**
+  - A verify pass costs 1.39x a decode step at short context (quiet; the 1.17-1.28x first noted
+    came from a busy machine). The draft pass ~1.7x.
   - The head is DMA-bound on its 5 KB elements: 25 ms against `lm_head_q4`'s 12.8 ms in the
     harness. `lmhl2.py` (10 KB elements, sliced tables, rows padded to 250880) is correct but
     measured no faster: 27-38 ms against lmhl's 25-31 ms, so the recipe keeps `lmhl`.
