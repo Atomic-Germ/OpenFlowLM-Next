@@ -321,7 +321,7 @@ ctest --preset linux-default --test-name-pattern <pattern>
 
 Build fast and simple with Docker.
 
-Simply run(linux-package preset is used by default):
+Simply run(linux-package-deb preset is used by default):
 
 ```bash
 ./build_in_docker.sh
@@ -335,15 +335,9 @@ Or name a workflow preset:
 
 The script builds the `openflowlm-build:ubuntu26` image, passes
 `/dev/accel/accel0` into the container, enables XRT memory locking, and
-persists the NPU cache directory (`./npu-cache`). To produce a `.deb`, run the
-`linux-package-deb` package preset inside the container:
+persists the NPU cache directory (`./npu-cache`).
 
-```bash
-docker run --rm -it --device=/dev/accel/accel0 --cap-add=IPC_LOCK \
-  --ulimit memlock=-1:-1 -v "$PWD:/code" openflowlm-build:ubuntu26 \
-  cmake --preset linux-package-deb && cmake --build --preset linux-package-deb \
-  && cpack --preset linux-package-deb
-```
+Build artifacts will be placed to `build/packeges` directory.
 
 The host must have the AMD XDNA driver installed and expose:
 
