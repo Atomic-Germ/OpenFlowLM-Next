@@ -681,10 +681,18 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         globals_["rows_hact"] = alloc(man_.rows.head_act_bytes);
         globals_["rows_out"] = alloc(man_.rows.head_out_floats * 4);
         lora_.clear();
+        noise_high_ = 0;
         lora_none_ = alloc(4096);
         const fs::path lf = fs::path(cfg_.model_dir) / man_.rows.lora_file;
         if (!man_.rows.lora_kernel.empty() && fs::exists(lf)) {
             Q4nxFile uno(lf.string());
+            if (const std::string nh = uno.metadata("uno_noise_high"); !nh.empty()) {
+                const unsigned long long v = std::stoull(nh);
+                if (v < 2 || v > man_.vocab)
+                    throw std::runtime_error("draft pass: " + man_.rows.lora_file + "'s uno_noise_high " + nh +
+                                             " is outside [2, vocab " + std::to_string(man_.vocab) + "]");
+                noise_high_ = static_cast<size_t>(v);
+            }
             for (int l = 0; l < nl_; ++l) {
                 xrt::bo b = xrt::ext::bo(*dev_, man_.rows.lora_pool_bytes);
                 std::memset(b.map<uint8_t*>(), 0, man_.rows.lora_pool_bytes);
@@ -694,7 +702,8 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 lora_.push_back(std::move(b));
             }
             log("draft pass: " + man_.rows.lora_file + " packed, " + std::to_string(nl_) + " LoRA pools of " +
-                std::to_string(man_.rows.lora_pool_bytes >> 20) + " MB");
+                std::to_string(man_.rows.lora_pool_bytes >> 20) + " MB, noise ids [1, " +
+                std::to_string(uno_noise_bound()) + ")");
         }
     }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch

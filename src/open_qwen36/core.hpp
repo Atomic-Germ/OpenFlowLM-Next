@@ -258,6 +258,8 @@ public:
     // draft: the OPEN-UNO-LORA pass, the LoRA on every row but row 0.
     void step_rows(const int* ids, int* argmax, bool want_logits = false, bool draft = false);
     bool has_draft() const { return !lora_.empty(); }
+    /// The draft rows' noise ids are [1, uno_noise_bound()): the adapter's uno_noise_high, else the vocab.
+    size_t uno_noise_bound() const { return noise_high_ ? noise_high_ : man_.vocab; }
     /// Row j's logits from the last step_rows(want_logits = true).
     const float* rows_logits(size_t j);
     double rows_ms() const { return rows_ms_; }
@@ -311,6 +313,7 @@ private:
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
     std::vector<xrt::bo> lora_;                 ///< per layer: the draft pass's LoRA pool (rows.lora_file), if any
     xrt::bo lora_none_;                         ///< what the verify stream's unused LoRA argument binds to
+    size_t noise_high_ = 0;                     ///< the LoRA's uno_noise_high; 0 = the whole vocab
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, gact, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;

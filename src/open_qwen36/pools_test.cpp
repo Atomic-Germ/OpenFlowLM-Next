@@ -155,13 +155,13 @@ struct Tensor {
                                   ///< right for I8 and half the byte count for BF16
 };
 
-std::string write_container(const std::string& stem, const std::vector<Tensor>& ts) {
-    std::string hdr = "{";
+std::string write_container(const std::string& stem, const std::vector<Tensor>& ts, const std::string& meta = "") {
+    std::string hdr = meta.empty() ? "{" : "{\"__metadata__\":" + meta;
     size_t off = 0;
     for (size_t i = 0; i < ts.size(); ++i) {
         const size_t n = ts[i].data->size();
         const size_t cols = ts[i].cols ? ts[i].cols : ts[i].ch;
-        hdr += (i ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"" + ts[i].dtype +
+        hdr += (i || !meta.empty() ? "," : "") + std::string("\"") + ts[i].name + "\":{\"dtype\":\"" + ts[i].dtype +
                "\",\"shape\":[" + std::to_string(n / ts[i].ch) + "," + std::to_string(cols) +
                "],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + n) + "]}";
         off += n;
@@ -196,6 +196,21 @@ open_qwen36::PackOp std_perm_op(const char* tensor, uint64_t dst) {
     op.nch = NCH;
     op.in_dim = IN_DIM;
     return op;
+}
+
+// Traces: OPEN-UNO-LORA (uno.q4nx records its adapter's noise range in __metadata__)
+void metadata_tests() {
+    const std::vector<uint8_t> q4 = lcg_bytes(0x5EEDu, NCH * Q4_CH);
+    const std::string path = write_container("open_qwen36_meta_test", {{Q4_NAME, Q4_CH, &q4}},
+                                             "{\"uno_noise_high\":\"100256\",\"uno_scale\":\"64.0\"}");
+    {
+        open_qwen36::Q4nxFile f(path);
+        check(f.metadata("uno_noise_high") == "100256" && f.metadata("uno_scale") == "64.0",
+              "__metadata__: the header's strings are kept (uno_noise_high)");
+        check(f.metadata("absent").empty() && f.tensor_count() == 1 && f.has(Q4_NAME),
+              "__metadata__: a missing key reads empty, and the metadata is not a tensor");
+    }
+    std::filesystem::remove(path);
 }
 
 void mixed_container_tests() {
@@ -904,6 +919,7 @@ int main() {
 
     // ---- a container mixing q8 and q4_1 tensors, packed through pools::apply
     mixed_container_tests();
+    metadata_tests();
     q4k_container_tests();
     ptab_scale_tests();
     ptab_switch_tests();

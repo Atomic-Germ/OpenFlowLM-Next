@@ -329,7 +329,7 @@ bool Engine::uno_ok() const { return core_ && core_->rows_l() && core_->has_draf
 int Engine::uno_cycle(int seed, std::vector<int>& out) {
     return guarded([&] {
         const size_t L = core_->rows_l();
-        std::uniform_int_distribution<int> noise(1, static_cast<int>(core_->vocab()) - 1);   // [1, mask_token_id)
+        std::uniform_int_distribution<int> noise(1, static_cast<int>(core_->uno_noise_bound()) - 1);   // the adapter's [1, N)
         std::vector<int> draft(L), am(L), av(L);
         const int p = core_->position();
         draft[0] = seed;

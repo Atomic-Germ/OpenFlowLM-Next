@@ -266,7 +266,7 @@ int uno(Core& core, const Args& a, int n) {
     if (!L || !core.has_draft()) { std::fprintf(stderr, "uno: this kernel set or model has no draft pass\n"); return 1; }
     const size_t P = a.ids.size();
     std::mt19937 rng(0);
-    std::uniform_int_distribution<int> noise(1, static_cast<int>(core.vocab()) - 1);   // [1, mask_token_id)
+    std::uniform_int_distribution<int> noise(1, static_cast<int>(core.uno_noise_bound()) - 1);   // the adapter's [1, N)
     for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
     std::vector<int> out, hist(L, 0), dr(L), vr(L), am(L), av(L);
     int seed = a.ids[P - 1];
