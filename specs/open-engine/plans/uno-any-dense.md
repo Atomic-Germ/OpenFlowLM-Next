@@ -2,6 +2,13 @@
 
 **Status:** in progress, 2026-10-09. Branch `feat/uno-any-dense`, stacked on PR #184 (`feat/k2-horizon-7b`) and merged into
 it by PR.
+- **Done:** G1, G2, G3 and G5.
+  - K2 on the NPU: the CLI's six prompts give exactly #184's tokens a cycle, identical to decode.
+  - `oflm serve`: greedy requests decode by Uno (see OPEN-UNO-DECODE's 2026-10-09 result).
+- **Waiting:** G4, until #184's speed Phase 3 lands (the user's call).
+- **Found on the way:**
+  - The app's greedy argmaxes bf16-rounded logits while Uno's head argmaxes f32, so served Uno and served plain decode can split at a bf16 tie. This is recorded as a known gap under OPEN-UNO-DECODE; the fix belongs to #184.
+  - `pools_test` aborted on Windows since #121 (fixed here).
 
 #184 brought IFM's K2-Horizon-7B-Uno to the NPU. Several pieces of it assume K2 where nothing about Uno requires that.
 This plan makes those pieces family-neutral, with K2's output and kernels unchanged. Bringing up a second adapter
