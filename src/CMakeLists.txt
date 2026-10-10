@@ -291,6 +291,18 @@ file(GLOB SOURCES "src/*.cpp" "runner/*.cpp" "common/*.cpp" "common/*/*.cpp" "se
 list(FILTER SOURCES EXCLUDE REGEX "_test\\.cpp$")
 file(GLOB HEADERS "include/*.hpp" "runner/*.hpp" "common/*.hpp" "common/*/*.hpp" "server/*.hpp" "pull/*.hpp")
 
+# flow-viz (specs/viz): `oflm viz` writes its page from these, compiled in so nothing is looked up at run time
+file(GLOB VIZ_EXPLAIN CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/viz/explain/*.md")
+add_custom_command(
+    OUTPUT "${CMAKE_BINARY_DIR}/viz_assets.cpp"
+    COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/viz_assets.cpp
+            -DPAGE=${CMAKE_CURRENT_SOURCE_DIR}/viz/viz.html -DFONTS=${CMAKE_CURRENT_SOURCE_DIR}/viz/fonts.css
+            -DEXPLAIN_DIR=${CMAKE_CURRENT_SOURCE_DIR}/viz/explain -P ${CMAKE_CURRENT_SOURCE_DIR}/viz/embed.cmake
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/viz/viz.html" "${CMAKE_CURRENT_SOURCE_DIR}/viz/fonts.css"
+            "${CMAKE_CURRENT_SOURCE_DIR}/viz/embed.cmake" ${VIZ_EXPLAIN}
+    COMMENT "Embedding the flow-viz page")
+list(APPEND SOURCES "${CMAKE_BINARY_DIR}/viz_assets.cpp")
+
 list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/engine.cpp")
 if(NOT OFLM_USE_HRX)
     list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/open_embedding/npu_matmul.cpp")
@@ -1403,6 +1415,13 @@ if(MSVC)
 endif()
 add_test(NAME openai_compat
          COMMAND openai_compat_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# VIZ-PAGE-FILL: the flow-viz page's slot fill; header-only, no device.
+add_executable(viz_render_test src/viz_render_test.cpp)
+if(MSVC)
+    target_compile_options(viz_render_test PRIVATE /EHsc /Zc:__cplusplus)
+endif()
+add_test(NAME viz_render COMMAND viz_render_test)
 
 # SERVER-IMAGES-EDITS: which part a multipart form names. Header-only Boost.Beast; no device.
 add_executable(multipart_test server/multipart_test.cpp server/multipart.cpp)

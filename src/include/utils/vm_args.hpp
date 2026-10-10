@@ -31,6 +31,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "  bench <model_tag>   - Benchmark a chat model over context lengths" << std::endl;
     std::cout << "  bench-embed <tag>   - Benchmark an embedding model over batch sizes" << std::endl;
     std::cout << "  image <tag> \"text\"  - Generate an image from a prompt" << std::endl;
+    std::cout << "  viz [<tag>]         - Open an animated view of how the model runs on the NPU" << std::endl;
     std::cout << "  list                - List all available models" << std::endl;
     std::cout << "  version             - Show version information" << std::endl;
     std::cout << "  help                - Show this help message" << std::endl;
@@ -63,6 +64,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm bench-embed nomic-embed-text:v1.5 --max-batch 32 --prompt-name document" << std::endl;
     std::cout << "\toflm image flux2-klein:4b \"a red fox in fresh snow\" -o fox.png" << std::endl;
     std::cout << "\toflm image flux2-klein:4b \"a lighthouse at dusk\" --size 512 --seed 7" << std::endl;
+    std::cout << "\toflm viz qwen3.6-moe:35b-a3b" << std::endl;
     std::cout << "\toflm list" << std::endl;
     std::cout << "\toflm list --quiet" << std::endl;
     std::cout << "\toflm list --filter installed" << std::endl;

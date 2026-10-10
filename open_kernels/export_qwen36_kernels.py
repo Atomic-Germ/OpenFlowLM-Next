@@ -352,6 +352,12 @@ def main() -> int:
     tj.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     print(f"-> {out_root}  (manifest.json + toolchain.json: mlir-aie {info['mlir_aie_version']}, "
           f"Peano {info['peano_version']})")
+    # A picture the parser cannot draw must not block shipping the kernels (VIZ-TOPOLOGY).
+    try:
+        from viz.export import write_viz
+        print(f"-> {write_viz(out_root, DESIGNS, bdirs)}  (oflm viz)")
+    except Exception as e:
+        print(f"[viz] no viz.json for this set: {e}")
 
     if a.check:
         ref = Path(a.check)
