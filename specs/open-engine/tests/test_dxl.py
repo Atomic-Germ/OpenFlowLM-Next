@@ -137,10 +137,11 @@ def test_l_must_be_a_multiple_of_four():
         DXR.layout(K2_7B, 6)
 
 
-def test_only_k2_ships_the_rows_route():
+def test_only_k2_and_granite_ship_the_rows_route():
     assert DR.rows_route(K2_7B)["rows"]["lora_kernel"] == "dxl_lora"
     assert DR.rows_route(K2_37B)["rows"]["head_act_bytes"] == 4 * 2560 * 2 + 1024
+    g = DR.rows_route(GRANITE)
+    assert g["rows"]["head_out_floats"] == 4 * 100352 + 8 * 4 * 64 and g["rows"]["lora_pool_bytes"] > 0
     assert DR.rows_route(load_spec(SPECS / "qwen3-4b.json")) is None
-    assert DR.rows_route(GRANITE) is None
     heads = {DR.rows_route(s)["builds"]["lmhl"]["build_dir"] for s in (K2_7B, K2_37B)}
     assert len(heads) == 2                 # one vocab, two widths: two head builds

@@ -635,7 +635,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 
 
 # Only families whose L-row pass (OPEN-DECODE-ROWS) has run on hardware get one.
-ROWS_FAMILIES = ("k2",)
+ROWS_FAMILIES = ("k2", "granite")
 ROWS_L = 4
 
 
