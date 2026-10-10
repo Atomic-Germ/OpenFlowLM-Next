@@ -368,3 +368,51 @@ Evidence: `production-multitoken/results.json` and `logs/*20261010*` under the
 model directory. `prepare-20261010.log` is the cancelled slow baseline;
 `prepare-contiguous-20261010.log` is the completed reference generation.
 Independent state/head/FFN-partial checks, block-prefill and serving remain open.
+
+## FFN down-partial checks without a full resident model
+
+The current dense recipe retains both down outputs in each `y_actL_tN.bin`:
+`A_OUT2` / `A_OUT2B` for linear layers and `AA_OUT2` / `AA_OUT2B` for attention
+layers. The two K ranges are [0,8192) and [8192,17408). The captured `h` is FP32.
+Use recipe offsets after verifying manifest compatibility; do not interpret an
+old act buffer with a different layout.
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/ffn_partials.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-kernels \
+  --out Models/qwen38-27b/production-multitoken --layers 0,3 \
+  > Models/qwen38-27b/production-multitoken/ffn-partials-slice.json
+```
+
+Pass a comma-separated list of all covered indices to check more layers. The
+checker only materializes one layer's down matrix at a time. It verifies every
+fixture position for the selected layers, exact capture sizes, finite consumed
+values and export/fixture identity. JSON contains capture hashes and per-stage
+metrics. Both partials, their sum and the residual must independently satisfy
+maxrel < 0.005, including when errors cancel in the sum.
+
+The FP64 reference is conditioned on captured NPU `h` and pre-FFN residual.
+This checks down arithmetic/packing and closure only. Up/gate/norm, attention
+head and recurrent-state correctness need separate references. Checking saved
+captures does not rerun the updated runtime on hardware. No xclbins or libraries
+need rebuilding to use this checker.
+
+2026-10-10: checking all 64 layers and three retained positions found one
+failing boundary: layer 60, position 2, partial 1 maxrel 0.0073258458. The
+partial-0 maximum is 0.0043589308; sum 0.0049578935; closure 0.0022406553.
+Reproduce the input-rounding diagnosis (expected nonzero exit, not acceptance):
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/ffn_partials.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-kernels \
+  --out Models/qwen38-27b/production-multitoken --layers 60 --diagnose-bf16
+```
+
+`gemv_q4_prep_f32_rt` rounds the FP32 activation to BF16. The rounded-input
+diagnostic reduces the failing partial's error to 0.0000918061. The primary
+comparison deliberately retains FP32 `h`, the 0.005 bound and FAIL status.
+Do not mark the two-piece FFN gate complete from the diagnostic PASS or the
+passing residual/logit gates. Next work is an isolated precision reproduction
+and a kernel correction validated against the unchanged primary reference.

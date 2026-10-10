@@ -4234,3 +4234,30 @@ shard. Missing layers and non-finite comparisons fail; finite equal constant or
 scalar tensors can pass. Nonconstant tensors retain correlation > 0.99.
 Tests: `tests/test_container_vs_hf.py`. This source check covers only the selected
 layers and does not replace full-model numerical or hardware acceptance.
+
+
+### OPEN-FFN-PARTIAL-COMPARE: two-piece down projection
+
+For the Qwen3.5 dense recipe with two down pieces, `model/ffn_partials.py`
+checks every requested layer and every declared fixture token. It requires a
+compatible hash-verified export with the fixture's spec/build identities and
+uses that recipe's linear/full-attention act offsets. Captures must have exact
+sizes; all consumed values must be finite. Layer requests cannot be empty,
+duplicated or outside fixture coverage.
+
+Each partial is independently computed in FP64 from the captured `h` and the
+container's decoded down weight. Require normalized maximum error < 0.005 for
+each partial, their sum, and the final residual against captured pre-FFN
+residual plus both reference partials. Normalize by each reference vector's
+own maximum absolute value; a zero reference requires exact zero output.
+Independent partial checks must reject errors that cancel in the sum.
+
+Only one layer's down matrix needs to be resident. JSON results include the
+requested coverage, bound, per-boundary metrics and capture hashes; failures
+return nonzero. This is a conditioned stage comparison, not an independent
+reference for up/gate/norm, attention or recurrent state. Historical captures
+do not establish hardware behavior of a newly built runtime.
+
+The optional `--diagnose-bf16` reports a second comparison from BF16-rounded
+`h`. It is diagnostic only: acceptance and exit status must still depend on
+the original captured FP32 input, even when the rounded-input comparison passes.

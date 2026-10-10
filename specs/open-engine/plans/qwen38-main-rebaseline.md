@@ -4,7 +4,8 @@ Updated 2026-10-10. This branch strengthens decode/source validation, adds an
 offline converter command for existing model metadata, and builds the current
 Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
 strict CPU-reference comparison, as do three tokens at all 64 layers.
-Runtime and kernel arithmetic are unchanged.
+Validation changes leave runtime and kernel arithmetic unchanged. The new
+partial-level FFN diagnostic finds one failing case, detailed in stage 5c1.
 
 ## Stage 1: complete decode comparison
 
@@ -266,18 +267,70 @@ Stage 5b is complete for these three positions. Independent state/head/FFN-parti
 checks remain open, as do block-prefill, serving and final resource acceptance.
 The power-mode request still failed; no NPU throughput claim is made.
 
+## Stage 5c1: strict FFN down-partial diagnostics
+
+The current merge includes prefill `fast`/`lean` route selection and manifest
+v3 support for BF16 GEMM packing. The Qwen3.8 dense export remains manifest v1;
+its complete manifest is still compatible apart from source build identity,
+and all 82 recorded binary hashes pass. The sequential layer designs and
+Qwen3.5 recipe have no changes in this update. The current C++ CLI builds and
+CTest passes 3/3. No new NPU run or kernel rebuild was performed in this stage.
+
+Added `model/ffn_partials.py`, which loads one down matrix at a time and checks
+both K pieces [0,8192) and [8192,17408), their sum and the closing residual.
+The independent FP64 dot products use captured NPU `h` and pre-FFN residual;
+this isolates down arithmetic/packing and closure, not up/gate/norm accuracy.
+The comparator requires exact capture sizes, finite consumed values, valid
+layer coverage and fixture/export identity. It records capture hashes and
+fails if any boundary exceeds its strict normalized max-error bound of 0.005.
+This adds a partial-level diagnostic gate; the existing full-layer residual
+and logit bounds are unchanged.
+
+TDD: tests first failed to import the absent checker, then 29 cases passed.
+A further failing regression established that a rounded-input diagnostic cannot
+turn the original comparison into PASS; **30 checker tests now pass**. Coverage
+includes cancelling partial errors, zero references, exact threshold rejection,
+non-finite/incorrect-size captures and missing later tokens.
+
+Analyzed retained stage-5b captures for **64 layers × 3 positions** (192 cases)
+without loading the full model on the NPU. The weight SHA256 still matches the
+stage-5b model. These are historical NPU captures analyzed with the new checker,
+not hardware measurements of the rebuilt runtime.
+
+| Boundary | Worst normalized maximum error | Layer / position | Result |
+|---|---:|---|---|
+| Partial 0 | 0.004358931 | 49 / 2 | PASS, 192/192 |
+| Partial 1 | 0.007325846 | 60 / 2 | **FAIL, 191/192 pass** |
+| Sum | 0.004957893 | 60 / 2 | PASS, 192/192 |
+| Closing residual | 0.002240655 | 59 / 2 | PASS, 192/192 |
+
+The failing second partial at layer 60 / position 2 is largely explained by
+input rounding: `gemv_q4_prep_f32_rt` converts `h` to BF16 before table
+preparation. The optional `--diagnose-bf16` reduces that case's error to
+**0.0000918061** against the rounded input. It never changes acceptance:
+the original FP32-input comparison still fails and the CLI returns nonzero.
+The remaining diagnostic error includes table/GEMV arithmetic; this experiment
+does not establish a corrected kernel.
+
+Evidence is retained in `production-multitoken/ffn-partials.json` and
+`ffn-layer60-diagnostic.json` under the ignored model directory. Checker
+implementation and diagnosis are complete; **FFN numerical acceptance remains
+open**, alongside independent up/gate/norm, state and per-head comparisons.
+Next, reproduce the failing partial in isolation and evaluate preserving more
+FP32 input precision within the kernel's memory/program limits.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 870 passed, 47 skipped |
+| `specs/open-engine/tests` | 904 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 5b; C++ build/CTest results are from
-stage 5 preparation (the relevant C++ sources are unchanged).
+The open-engine suite and C++ build/CTest were rerun for stage 5c1 after the
+current merge. Hardware results retain their explicitly stated earlier scope.
 Weights were not reconverted. Skipped tests and successful compilation do not
 extend the explicit hardware coverage above.
 
