@@ -615,6 +615,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // LM_Config cannot carry it across the OFLM_DLL boundary, so the open engine reads it from the environment
+    if (!parsed_args.prefill_mode.empty()) {
+#ifdef _WIN32
+        _putenv_s("OFLM_OPEN_PREFILL_MODE", parsed_args.prefill_mode.c_str());
+#else
+        setenv("OFLM_OPEN_PREFILL_MODE", parsed_args.prefill_mode.c_str(), 1);
+#endif
+    }
+
     // Handle special case for serve command - use default tag if none provided
     if (parsed_args.command == "serve" && parsed_args.model_tag.empty()) {
         parsed_args.model_tag = "model-faker"; // Use default tag

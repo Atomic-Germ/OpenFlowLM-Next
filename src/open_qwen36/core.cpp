@@ -178,6 +178,14 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         std::string(std::getenv("OMP_WAIT_POLICY") ? std::getenv("OMP_WAIT_POLICY") : "unset") + ")");
     // ---- the kernel set's manifest, and the model it must agree with
     man_ = Manifest::load((fs::path(cfg_.kernel_dir) / "manifest.json").string());
+    // OPEN-PREFILL-MODE: swapped in before the kernel list and the packing, so the other route costs nothing
+    if (cfg_.prefill_mode != "fast" && cfg_.prefill_mode != "lean")
+        throw std::runtime_error("open_qwen36: prefill mode '" + cfg_.prefill_mode + "' is not fast or lean");
+    bool has_lean = false;
+    for (const auto& [name, t] : man_.layer_types) has_lean = has_lean || t.gemm_block_variants.count("lean");
+    man_.select_prefill_route(cfg_.prefill_mode == "lean" ? "lean" : "");
+    if (has_lean) prefill_route_ = cfg_.prefill_mode;
+    else if (cfg_.prefill_mode == "lean") log("this kernel set has one prefill route; lean changes nothing");
     fs::path md(cfg_.model_dir);
     std::ifstream cf(md / "config.json");
     if (!cf) throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
@@ -297,7 +305,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     for (int l = 1; l < nl_; ++l)
         if (types_[l]->gemm_block.t != gemm_block_t_) { gemm_block_t_ = 0; break; }
     log("block prefill route: T = " + std::to_string(gemm_block_t_) +
-        (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
+        (gemm_block_t_ ? (prefill_route_.empty() ? "" : " (" + prefill_route_ + ")")
+                       : " (no gemm_block program in this kernel set, or its layer types disagree)"));
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
@@ -485,7 +494,7 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
             if (from == "pack") {
                 size_t bytes = 0;
-                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + o.nch * man_.chunk_bytes);
+                for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::op_bytes(o, man_.chunk_bytes));
                 xrt::bo w = xrt::ext::bo(*dev_, padup(bytes));
                 std::memset(w.map<uint8_t*>(), 0, padup(bytes));
                 for (const PackOp& o : gw.pack) pools::apply(o, *file_, l, w.map<uint8_t*>(), bytes, man_.chunk_bytes);
