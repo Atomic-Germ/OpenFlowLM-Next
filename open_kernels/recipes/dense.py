@@ -106,6 +106,8 @@ QKNORM_POST_ROPE = ("hunyuan",)
 # FAST_ATTENTION does. The manifest says so as attn_block.prep, which the engine refuses to
 # guess: a dense attn_block without it is left to the dxB route.
 BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
+# OPEN-PREFILL-GEMM8: the 8-bit route's block (designs/dit_gemm streams are built per M)
+DIT_T = 1024
 # families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
@@ -562,6 +564,56 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
                                "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}",
                                "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}}
+    dit = dit_route(spec, out, plans)
+    if dit:
+        # the 8-bit route is the default (`fast`); this one stays as `lean`, without its weight copy
+        out["variants"] = {"lean": out["layer_types"]}
+        out["layer_types"] = dit["layer_types"]
+        for k in ("contexts", "kernels", "builds"):
+            out[k].update(dit[k])
+        out["globals"].update(dit["globals"])
+    return out
+
+
+def dit_route(spec: ModelSpec, q4: dict, plans: dict) -> dict | None:
+    """The q4_1 route's projections on dit_gemm at DIT_T (OPEN-PREFILL-GEMM8), or None where it cannot run."""
+    hid, ff = spec.hidden, spec.intermediate
+    out: dict = {"layer_types": {}, "contexts": {}, "kernels": {}, "builds": {}, "globals": {}}
+    for lt, gb in q4["layer_types"].items():
+        if not gb.get("attn_block", {}).get("prep"):
+            return None
+        qw, kvw = gb["qw"], gb["kvw"]
+        shapes = [(qw + 2 * kvw, hid), (hid, qw), (ff, hid), (ff, hid), (hid, ff)]
+        if any(K % 512 or N % 1024 for N, K in shapes):
+            return None
+        pool = plans[lt]["pool"]
+        program, weights = [], {}
+        for st, (N, K) in zip(gb["program"], shapes):
+            name = f"dit_n{N}_k{K}"
+            wname = "g8" + st["args"][0][1:]
+            ops, n0 = [], 0
+            for i in gb["weights"][st["args"][0]]["ops"]:
+                src = pool[i]
+                rows = src["nch"] // (src["in_dim"] // 256) * 32
+                if rows % 128 or src["in_dim"] != K:
+                    return None
+                op = {"op": "bfp16_dit", "tensor": src["tensor"], "dst": n0 * K * 9 // 8,
+                      "nch": src["nch"], "in_dim": K}
+                if src.get("chunk0"):
+                    op["chunk0"] = src["chunk0"]
+                ops.append(op)
+                n0 += rows
+            if n0 != N:
+                return None
+            weights[wname] = {"from": "pack", "pack": ops}
+            program.append({"op": "run", "kernel": name, "args": [wname, "g8_a", "g8_c"]})
+            out["contexts"].setdefault("dit", f"{name}/final.xclbin")
+            out["kernels"][name] = {"context": "dit", "insts": f"{name}/insts.bin", "build": name}
+            out["builds"][name] = {"design": "dit_gemm/dit_gemm.py", "build_dir": f"dit_gemm/build_m{DIT_T}_n{N}_k{K}",
+                                   "env": {"DG_M": str(DIT_T), "DG_K": str(K), "DG_N": str(N), "DG_LAYOUT": "{}"}}
+            out["globals"]["g8_a"] = max(out["globals"].get("g8_a", 0), DIT_T * K * 2)   # bf16 [T, K] row-major
+            out["globals"]["g8_c"] = max(out["globals"].get("g8_c", 0), DIT_T * N * 2)   # bf16 [T, N] row-major
+        out["layer_types"][lt] = {**gb, "t": DIT_T, "gemm": "dit", "program": program, "weights": weights}
     return out
 
 
@@ -620,6 +672,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        for name, types in r.get("variants", {}).items():
+            for lt, gb in types.items():
+                out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
     return out
 
 

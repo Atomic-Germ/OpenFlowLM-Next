@@ -79,6 +79,8 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
 void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst);
 /// q8 (code * scale) or q4_1 (m + n * d) chunks, 32-row blocks major -> the bf16 GEMM pool (twin: recipes/pack.py)
 void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint16_t* dst);
+/// q4_1 chunks of a [rows, cols] projection -> dit_gemm's bfp16ebs8 B for its transpose (twin: pack.py pack_b)
+void bfp16_dit_pack(const uint8_t* src, size_t rows, size_t cols, uint8_t* dst);
 /// Bytes `op` writes at its dst: `nch` chunks of the pool's format, or of the GEMM pool it builds.
 uint64_t op_bytes(const PackOp& op, size_t chunk_bytes);
 /// `nch` Q4_K chunks (4736 B each) -> `nch` q4_1 chunks (5120 B each), in the SAME chunk

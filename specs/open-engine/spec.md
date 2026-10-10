@@ -30,7 +30,7 @@ the offending key named.
 **Acceptance criteria:**
 - `Manifest::load` on the checked-in fixture (`tests/fixtures/manifest_qwen36.json`) yields 40 layers, two layer types with the 27B's buffer sizes and three-step programs, four contexts, six kernels with their patch kinds (`ax0` attnpos, `lx1`/`ax1` moeroute2), the tail `ln` → `lm`, and the MoE pool geometry `stripe 163840, up 655360, down_core 81920, pool_down 335544320, share 503316480 / 503971840 / 504627200`.
 - A config with `hidden_size: 2560` → error naming `hidden_size`; `model_type: llama` → error naming `model_type`; a missing `num_experts` → error `lacks 'num_experts'`; a 24-layer config → error naming `num_hidden_layers`; `full_attention_interval: 5` → error naming `layer_types`; `full_attention_interval: 4` without `layer_types` → accepted.
-- `manifest_version: 4` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`).
+- `manifest_version: 5` → refused by the parser. Version 2 is version 1 plus split route steps (OPEN-PREFILL-BATCH): the recipe writes 2 exactly when a `gemm_block` step carries `split: true`, so an engine that reads only 1 refuses such a set by name instead of ignoring `split` and reading each split weight's hi half alone. A split step in a version 1 manifest is refused; `out_split` alone stays version 1, since every engine that reads it folds that step. Version 3 is version 2 plus the `bf16_gemm` pack op (OPEN-PACK-PLAN): the recipe writes 3 exactly when a route weight packs it, a `bf16_gemm` weight in an older manifest is refused, and so is a weight that mixes `std_perm` and `bf16_gemm` ops (`manifest_test.cpp`). Version 4 is version 3 plus the `bfp16_dit` pack op (OPEN-PREFILL-GEMM8), the same way: the recipe writes 4 exactly when a route weight packs it, and a `bfp16_dit` weight in an older manifest is refused (`manifest_test.cpp`).
 - An optional `hf_config_defaults` object names what an absent `config.json` key means: `check_model` compares the expected value against it instead of refusing for the missing key, and still refuses when the default disagrees (the phi3 fixture: a config without `head_dim` accepted, one without `partial_rotary_factor` refused against a 96-dim kernel set, one without `rope_scaling` refused against a longrope one). A key with no default stays a hard requirement.
 - `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH). For the `dense` kind, `attn_kernel` / `attn_args` name which attention kernel and buffer args drive the route's T single-token dispatches (default `dxB` / `pool, xres, consts, state, act, ptab`, so a manifest predating the fields still parses), letting a layer type with its own sliding window (Gemma 3's `dense_local`) name its own kernel and position table instead of sharing the whole model's one; `sandwich` and `act` (default `false` / `silu`) select the residual/norm chain and FFN activation the host stages compute. A manifest naming an `attn_kernel` that is not declared, or that is not built with the `attnpos` patch table, is refused by name. A `linear` / `full` route carries exactly one FFN tail: the MoE block (`moe_kernel`, `shared_program`, requiring `layout.moe`) or a dense `ffn_program` of two steps (up|gate, down) whose buffers `ffn_weights` defines, with its width `ff`; both, or neither, is refused by name. A route weight is normally a run of the layer type's pool or consts ops; `from: "pack"` instead carries its own `std_perm` ops, which the engine packs into that buffer alone, and any other op there is refused. A `std_perm` may carry `split: "hi" | "lo"` (anything else, or on another op, is refused): one half of a q8 source's exact q4_1 split. A `linear` route with `out_split` runs its out projection over both halves stacked, 2 x hidden rows, and adds them.
 - A layer type may carry `gemm_block_variants`, a map of whole routes the engine may load in place of `gemm_block` (OPEN-PREFILL-MODE). Each variant is parsed and refused exactly as `gemm_block` is; a variant without a `gemm_block`, one whose `t` or `kind` differs from it, and a set whose layer types carry different variant names are refused by name. `files()` names every variant's streams, so a set missing one is not a kernel set. An engine that predates the field ignores it and runs `gemm_block` (`manifest_test.cpp`).
@@ -3663,7 +3663,9 @@ route. Details: `specs/open-engine/plans/archive/q8-gemm.md`.
 A kernel set may carry more than one block prefill route (OPEN-PREFILL-BATCH):
 `gemm_block` per layer type, and named alternatives in `gemm_block_variants`. The
 all-q8 35B set carries its bf16 route as `gemm_block` and the q4_1 split route as
-`lean`. The user picks one when the model loads: `oflm run|serve|bench <model>
+`lean`; a dense set with an 8-bit route (OPEN-PREFILL-GEMM8) carries that route as
+`gemm_block` and its q4_1 route as `lean`. A variant runs at `gemm_block`'s t, except that a
+dense 8-bit route and its variant each size their own buffers and may differ. The user picks one when the model loads: `oflm run|serve|bench <model>
 --prefill-mode fast|lean`, which sets `OFLM_OPEN_PREFILL_MODE` for the open
 engine (`LM_Config` keeps its layout across the OFLM_DLL boundary, so the
 environment carries it); `open_qwen36_cli --prefill-mode` for A/B runs. `fast`,
@@ -3697,6 +3699,70 @@ interleaved runs of each mode: `fast` median 7078 ms (144.7 tok/s), `lean` 8799 
 of 5; the route line reads `(lean)` or `(fast)`, and the turns of 169-953 tokens took the
 route. The set is 13 MB on disk, against 11 MB with one route. Details:
 `specs/open-engine/plans/archive/prefill-mode.md`.
+
+### OPEN-PREFILL-GEMM8: the dense block route's projections on 8-bit GEMMs
+**Applies to:** openflowlm-next (`open_kernels/recipes/{dense,pack,manifest}.py`, `open_kernels/designs/dit_gemm/`, `src/open_qwen36/{pools,manifest,core}.cpp`)
+**Test category:** test (the pack op, the recipe emission and the manifest schema: `tests/test_prefill_gemm8.py`, `src/open_qwen36/pools_test.cpp`, `src/open_qwen36/manifest_test.cpp`) + manual (accuracy and speed on the NPU, below)
+
+The dense route's five projection GEMMs multiply bf16 by bf16, which on this NPU runs on
+the vector unit rather than the matrix unit. `dit_gemm` (`designs/dit_gemm`, built for the
+FLUX image route) feeds the matrix unit bf16 activations against bfp16ebs8 weights (an 8-bit
+mantissa sharing one exponent per 8 values). A dense set whose five shapes fit it (K a
+multiple of 512, N of 1024) and whose attention runs as NPU products (`attn_block.prep`,
+OPEN-PREFILL-ATTN) carries a second route on it:
+
+- `gemm_block` with `gemm: "dit"` at t = 1024: the same five steps (qkv3, o, gate, up, down),
+  each a `dit_gemm` stream `dit_n<N>_k<K>` built at M = 1024, all on one `dit` context
+  (the streams' xclbins differ only in build stamps). Args are (weight, x, y) like the q4
+  route's; the engine passes them to the kernel as (x, weight, y). x and y are the globals
+  `g8_a` / `g8_c`, bf16 rows [1024, K] and [1024, N]. The q4_1 route is the `lean` variant
+  (OPEN-PREFILL-MODE), so `fast` (the default) runs this one.
+- Each weight is `from: "pack"`, one `bfp16_dit` op per projection tensor at
+  dst = (its first output row) x K x 9 / 8: the tensor's q4_1 chunks read as the q4 ops read
+  them (Q4_0, Q4_K and q8 sources through the same transcodes), each value m + n x d in f32,
+  packed as `dit_gemm`'s B for W^T by `pack.pack_b`'s rules (round to nearest, the kernel's
+  64 x 128 tile order). Tiles are output-column major, so a fused weight is its tensors' ops
+  end to end. The copy is made at load, only when the route is chosen; it takes the place of
+  the q4 route's per-layer weight buffers, while the q4_1 pools the decode path reads stay.
+- A `bfp16_dit` op needs manifest_version 4. The route needs `attn_block.prep` and t a
+  multiple of 256, and every step's weight packed by `bfp16_dit`; the parser refuses it
+  otherwise. Its block is wider than the dxB scratch and the host attention's, so
+  `OFLM_OPEN_ATTN_BLOCK=0`, `OFLM_OPEN_HOST_ATTN` and `OFLM_OPEN_HOST_ATTN_DECODE` on this
+  route are refused at load, naming `--prefill-mode lean`.
+- The attention products stay at their 256-row build and run in sub-blocks
+  (OPEN-PREFILL-ATTN): every sub-block's scores, then every sub-block's values, so a layer
+  switches hardware context as often as one 256-token block did.
+
+**Acceptance criteria (unit):**
+- Qwen3-8B's emission (`test_prefill_gemm8.py`): `gemm_block` is `gemm: "dit"` at t 1024 with steps `dit_n6144_k4096`, `dit_n4096_k4096`, `dit_n12288_k4096` twice, `dit_n4096_k12288`, args (`g8<w>`, `g8_a`, `g8_c`); the qkv weight is three `bfp16_dit` ops (q_proj at 0, k_proj at 4096 x 4096 x 9 / 8, v_proj at 5120 x 4096 x 9 / 8); every `dit_*` kernel is on context `dit`, built with `DG_M` 1024 and an empty layout; `g8_a` and `g8_c` are 1024 x 12288 x 2 bytes; the `lean` variant is the q4_1 route at t 256 with the same `attn_block`; manifest_version 4. Qwen3-4B (o_proj 2560 wide), Llama 3.1 and K2 (no products prep) carry no `dit` route, no `dit` kernels and a version below 4.
+- The pack op (`pools_test.cpp`, `test_prefill_gemm8.py`): 24 shared chunks at q4_1 as a [128, 1536] projection pack to fnv1a `0xf9c5bb308b534125` in both languages, and every value decodes within one mantissa step of its q4_1 reading at W^T's place; three ops at their dst offsets write exactly `pack_b` of the concatenated projection.
+- The parser (`manifest_test.cpp`): a `dit` route at t 1024 beside a q4 `lean` at 256 parses, and each mode keeps its own route and globals; a `dit` route without the products' prep, or with a step reading the q4 pool, is refused; a q4 variant at another t than a q4 route is still refused; a `bfp16_dit` weight in a version 3 manifest is refused, in version 4 it loads.
+
+**Verification (manual):** on Qwen3-8B-NPU2 with this set,
+1. The accuracy gate: teacher-forced NLL over 2048 tokens of natural text
+   (`--prefill-logits`), `fast` within 0.5 % relative of `lean`. KL from `lean`, top-1
+   agreement and the worst sampled logits correlation are reported, not gated: the 8-bit
+   route moves single distributions more than the bf16 one does, which correlation alone
+   would fail.
+2. The sub-block order changes no byte: logits and tokens at 700 and 2000 tokens are
+   byte-identical between all-scores-then-all-values and one sub-block at a time.
+3. Prefill at 981 and 2000 tokens under each mode, and peak private bytes.
+4. `oflm-test --llm` through `oflm serve` on the set, under each mode.
+
+**Result 2026-10-10 (Qwen3-8B-NPU2, HX PRO 370).** 1: over 2048 tokens of this repo's
+docs, NLL 2.1226 (`lean`) against 2.1224 (`fast`), -0.008 %; KL 1.6e-3, top-1 agreement
+0.983, worst sampled corr 0.9972. 2: byte-identical at 700 and 2000 tokens, and `lean`
+byte-identical before and after. 3: under the timing lock, clean before and after, two
+runs each: 981 tokens in 11.10-11.15 s (`lean`) against **4.72-4.73 s** (`fast`), 2.35x. Two
+earlier series, flagged noisy at their end by another session's build, agree within 5 % and add
+2000 tokens: 24.8-27.2 s against 10.5-11.6 s. Of `fast`'s 4.7 s at 981 tokens, the five GEMMs'
+dispatches are 1.0-1.3 s, the attention 2.0 s and the host stages ~1.4 s. Peak private bytes
+9.8 GiB (`lean`) against 13.3 GiB (`fast`): the bfp16 copy takes the place of the q4 route's
+weight buffers, so the difference is 3.5 GiB, not the copy's 7.8. Load about 6 s longer under
+`fast`. 4: `oflm serve qwen3:8b` with `OFLM_OPEN_KERNELS_DIR` on the set, `oflm-test --llm`
+PASS 5 of 5 under each mode; the route line reads `T = 1024 (fast)` or `T = 256 (lean)`, and
+the follow-up turns (up to 1461 tokens) took the route. Plan:
+`plans/archive/prefill-gemm8.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
@@ -3921,7 +3987,11 @@ manifest's `rotary_dim`; no bias, no gate, no sliding window), declared by
 `recipes/dense.py` for the families in `BLOCK_ATTN_QKNORM_ROPE`, which a family
 joins by measurement against its `dxB` route. A dense `attn_block` without
 `prep` is not read, and the route keeps its `dxB` dispatches; a `prep` the
-engine does not know is refused. At head dim 128 the scores are built 8
+engine does not know is refused. A dense block wider than the products' rows
+(`m` / the group size, 256 tokens; the 8-bit route's 1024, OPEN-PREFILL-GEMM8)
+writes the whole block's K / V rows first, then runs the products a sub-block
+at a time against the cache up to that sub-block's last token; sub-blocks past
+the block's real tokens are skipped. At head dim 128 the scores are built 8
 columns wide and the values 4, on contexts `ag_s` and `ag_pv`.
 
 **Acceptance criteria (unit):**

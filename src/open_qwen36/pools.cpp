@@ -286,7 +286,49 @@ void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint1
     }
 }
 
+namespace {
+// 8 values sharing their largest exponent, 8-bit two's-complement mantissas, rounded as pack.py's encoder
+void bfp16_encode8(const float* x, uint8_t* out) {
+    uint32_t b[8];
+    int e[8], mx = 0;
+    for (int i = 0; i < 8; ++i) {
+        std::memcpy(&b[i], &x[i], 4);
+        e[i] = static_cast<int>((b[i] >> 23) & 0xFF);
+        mx = std::max(mx, e[i]);
+    }
+    out[0] = static_cast<uint8_t>(mx);
+    for (int i = 0; i < 8; ++i) {
+        const int64_t mant = static_cast<int64_t>(b[i] & 0x7FFFFF) | (e[i] ? (int64_t{1} << 23) : 0);
+        const int64_t s = (b[i] >> 31) ? -mant : mant;
+        const int sh = 17 + std::min(mx - e[i], 31);
+        const int64_t v = std::clamp<int64_t>((s + (int64_t{1} << (sh - 1))) >> sh, -128, 127);
+        out[1 + i] = static_cast<uint8_t>(static_cast<int8_t>(v));
+    }
+}
+}  // namespace
+
+void bfp16_dit_pack(const uint8_t* src, size_t rows, size_t cols, uint8_t* dst) {
+    if (rows % 128 || cols % 256) fail("bfp16_dit: [" + std::to_string(rows) + ", " + std::to_string(cols) +
+                                       "] is not 128-row tiles of 256-wide chunks");
+    const size_t ncol = cols / 256, nkt = cols / 64;
+    // tile (n tile, k tile) of 128 x 64, then [n-block 16][k-block 8][n 8], a block being 8 k of one row
+#pragma omp parallel for
+    for (long long nt = 0; nt < static_cast<long long>(rows / 128); ++nt)
+        for (size_t kt = 0; kt < nkt; ++kt) {
+            uint8_t* tile = dst + (static_cast<size_t>(nt) * nkt + kt) * 9216;
+            float v[8];
+            for (size_t nb = 0; nb < 16; ++nb)
+                for (size_t kb = 0; kb < 8; ++kb)
+                    for (size_t ni = 0; ni < 8; ++ni) {
+                        const size_t n = static_cast<size_t>(nt) * 128 + nb * 8 + ni, k0 = kt * 64 + kb * 8;
+                        for (size_t i = 0; i < 8; ++i) v[i] = q4_1_value(src, ncol, n, k0 + i);
+                        bfp16_encode8(v, tile + ((nb * 8 + kb) * 8 + ni) * 9);
+                    }
+        }
+}
+
 uint64_t op_bytes(const PackOp& op, size_t chunk_bytes) {
+    if (op.op == "bfp16_dit") return op.nch * 9216;      // a 32 x 256 chunk's 8192 values at 9 bits
     return op.op == "bf16_gemm" ? op.nch * 2 * 8192 : op.nch * chunk_bytes;
 }
 
@@ -482,6 +524,17 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
             std::vector<uint8_t> tmp;
             bf16_gemm_pack(q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp), false, rows, op.in_dim, out);
         }
+    } else if (op.op == "bfp16_dit") {
+        // `nch` SOURCE chunks from `chunk0`, as the q4 ops read them (OPEN-PREFILL-GEMM8)
+        const std::string name = with_layer(op.tensor, layer);
+        if (op.nch == 0 || op.in_dim == 0 || op.in_dim % 256) fail("bfp16_dit " + name + " without nch / in_dim");
+        const size_t ncol = op.in_dim / 256;
+        if (op.nch % ncol || (op.nch / ncol) % 4)
+            fail("bfp16_dit " + name + ": " + std::to_string(op.nch) + " chunks is not whole 128-row tiles of a " +
+                 std::to_string(op.in_dim) + "-wide tensor");
+        bounds(op, op_bytes(op, ch), dst_bytes);
+        std::vector<uint8_t> tmp;
+        bfp16_dit_pack(q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp), op.nch / ncol * 32, op.in_dim, dst + op.dst);
     } else if (op.op == "q8_perm") {
         // The projection stays at q8: `nch` counts POOL half-tiles (5120 B each, twice the
         // q4_1 bytes of the same tensor) and `chunk0` is a SOURCE file-chunk offset, as it

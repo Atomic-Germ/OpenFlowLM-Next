@@ -334,6 +334,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (host_attn_decode_on_)
         log("decode route: HOST (OFLM_OPEN_HOST_ATTN_DECODE=1; the 2.5 gemm-block chain at T=1 "
             "with host attention; the NPU GEMMs run padded at the kernel set's compiled T)");
+    // OPEN-PREFILL-GEMM8: the 8-bit route's blocks are wider than the dxB scratch, so its attention is the products
+    if (gemm_block_t_ && types_[0]->gemm_block.gemm == "dit" && (!attn_block_on_ || host_attn_on_ || host_attn_decode_on_))
+        throw std::runtime_error("open_qwen36: the 8-bit prefill route runs its attention as NPU products; "
+                                 "OFLM_OPEN_ATTN_BLOCK=0, OFLM_OPEN_HOST_ATTN and OFLM_OPEN_HOST_ATTN_DECODE need --prefill-mode lean");
     // Stage 2.7 Gate A: the runtime decode route selector. The env above only
     // picks the INITIAL route (compat/debug); set_decode_route() overrides it
     // at any moment, which is what the one-process mid-stream switch needs.
@@ -2387,7 +2391,9 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     // columns; on this route the GEMM column is the five projections and the attention column
     // (route_ms, below) holds all of the attention, so the stage line compares with the dxB loop's
     const double p0 = timing_.part0_ms, p1 = timing_.part1_ms;
-    attention_npu(l, g, Q, nullptr, st.map<uint16_t*>(), row / 2, og.data());
+    // the products cover ab.m rows, a group of query heads over `sub` tokens; the 8-bit route's wider block runs several
+    const size_t sub = ab.m / (g.nh / g.kvh);
+    attention_npu(l, g, Q, nullptr, st.map<uint16_t*>(), row / 2, og.data(), sub);
     timing_.part0_ms = p0;
     timing_.part1_ms = p1;
     tt = std::chrono::steady_clock::now();
@@ -2445,9 +2451,40 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T, siz
         timing_.gemm_tr_ms += ms_since(tt);
         return static_cast<size_t>(gb.t);
     };
+    // dit_gemm (OPEN-PREFILL-GEMM8): x [T, K] as bf16 rows in, bf16 [gb.t, N] rows back, args (x, weight, y)
+    auto dit_dispatch = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N) -> const uint16_t* {
+        const Step& s = gb.program[idx];
+        auto tt = std::chrono::steady_clock::now();
+        xrt::bo& ab = buffer(s.args[1], 0);
+        xrt::bo& cb = buffer(s.args[2], 0);
+        if (T > gb.t || ab.size() < gb.t * K * 2 || cb.size() < gb.t * N * 2)
+            throw std::runtime_error("open_qwen36: dit gemm " + s.kernel + ": T " + std::to_string(T) + " or its buffers do not fit");
+        uint16_t* a = ab.map<uint16_t*>();
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(T * K); ++i) a[i] = f32_to_bf16(x[static_cast<size_t>(i)]);
+        if (T < gb.t) std::memset(a + T * K, 0, (gb.t - T) * K * 2);
+        ab.sync(XCL_BO_SYNC_BO_TO_DEVICE, gb.t * K * 2, 0);
+        timing_.gemm_tile_ms += ms_since(tt);
+        timing_.part0_ms += run(kerns_.at(s.kernel), {s.args[1], s.args[0], s.args[2]}, l);
+        tt = std::chrono::steady_clock::now();
+        read_back(cb, gb.t * N * 2, 0);
+        timing_.gemm_tr_ms += ms_since(tt);
+        return cb.map<const uint16_t*>();
+    };
+    const bool dit = gb.gemm == "dit";
     // The output as the kernel wrote it, [N, T]: the fused input projection, whose three parts
     // the attention paths split by row range.
     auto run_gemm = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N, std::vector<float>& y_out) {
+        if (dit) {
+            const uint16_t* c = dit_dispatch(idx, x, K, N);
+            auto tt = std::chrono::steady_clock::now();
+            y_out.resize(N * T);
+#pragma omp parallel for
+            for (long long n = 0; n < static_cast<long long>(N); ++n)
+                for (size_t t = 0; t < T; ++t) y_out[static_cast<size_t>(n) * T + t] = bf16_to_f32(c[t * N + static_cast<size_t>(n)]);
+            timing_.gemm_tr_ms += ms_since(tt);
+            return;
+        }
         const size_t Tk = gemm_dispatch(idx, x, K, N);
         auto tt = std::chrono::steady_clock::now();
         const float* y = buffer(gb.program[idx].args[2], 0).map<float*>();
@@ -2463,6 +2500,15 @@ void Core::step_gemm_block_layer(int l, std::vector<double>& xres, size_t T, siz
     // The output as token rows, [T, N] (rows past T are padding): everything after the attention
     // reads a token's row at a time, which over [N, T] is a T-float stride per element.
     auto run_gemm_rows = [&](size_t idx, const std::vector<float>& x, size_t K, size_t N, std::vector<float>& out) {
+        if (dit) {
+            const uint16_t* c = dit_dispatch(idx, x, K, N);
+            auto tt = std::chrono::steady_clock::now();
+            float* o = BlockScratch::fit(out, gb.t * N);
+#pragma omp parallel for
+            for (long long i = 0; i < static_cast<long long>(gb.t * N); ++i) o[i] = bf16_to_f32(c[static_cast<size_t>(i)]);
+            timing_.gemm_tr_ms += ms_since(tt);
+            return;
+        }
         const size_t Tk = gemm_dispatch(idx, x, K, N);
         auto tt = std::chrono::steady_clock::now();
         host::transpose(buffer(gb.program[idx].args[2], 0).map<float*>(), N, Tk, BlockScratch::fit(out, Tk * N));
@@ -3011,109 +3057,135 @@ void Core::block_layer_linear(int l, float* xres, size_t T, size_t t_real, size_
 }
 
 void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
-                         size_t kv_row_elems, float* og) {
+                         size_t kv_row_elems, float* og, size_t sub) {
     const AttnBlock& ab = types_[l]->gemm_block.attn_block;
-    const size_t T = g.T, hd = g.hd, grp = g.nh / g.kvh, M = grp * T, qw = g.nh * hd, kvw = g.kvh * hd;
+    const size_t S = sub ? sub : g.T, hd = g.hd, grp = g.nh / g.kvh, M = grp * S, qw = g.nh * hd, kvw = g.kvh * hd;
     if (M != ab.m || hd != ab.hd)
         throw std::runtime_error("open_qwen36: attn_block was built for " + std::to_string(ab.m) + " rows of head dim " +
                                  std::to_string(ab.hd) + ", this layer has " + std::to_string(M) + " of " + std::to_string(hd));
+    if (g.T % S) throw std::runtime_error("open_qwen36: a block of " + std::to_string(g.T) + " is not whole " +
+                                          std::to_string(S) + "-token sub-blocks of the attention products");
+    const size_t nsb = (g.t_real + S - 1) / S;              // the sub-blocks holding real tokens
     const size_t rows = g.pos0 + g.t_real;                  // the window: every cached row and the block's own
+    // a window past the widest stream takes the chunked loop below, one sub-block at a time
+    if (nsb > 1 && rows > ab.l_max) {
+        for (size_t t0 = 0; t0 < g.t_real; t0 += S) {
+            host::AttnGeom gs = g;
+            gs.T = S; gs.t_real = std::min(S, g.t_real - t0); gs.pos0 = g.pos0 + t0;
+            attention_npu(l, gs, Q + t0 * qw, gate ? gate + t0 * qw : nullptr, kv, kv_row_elems, og + t0 * qw);
+        }
+        return;
+    }
     xrt::bo& ba = buffer(ab.args[0], 0);
     xrt::bo& bb = buffer(ab.args[1], 0);
     xrt::bo& bc = buffer(ab.args[2], 0);
     if (ba.size() < M * ab.l_max * 2 || bb.size() < ab.l_max * hd * 2 || bc.size() < M * ab.l_max * 4)
         throw std::runtime_error("open_qwen36: the attn_block globals are smaller than the widest window");
-    // row r of a product is query head r / T of the group at token r % T
-    size_t* pos = BlockScratch::fit(bs_.pos, M);
-    for (size_t r = 0; r < M; ++r) pos[r] = g.pos0 + r % T;
+    // row r of sub-block sb's products is query head r / S of the group at token sb * S + r % S
+    size_t* pos = BlockScratch::fit(bs_.pos, nsb * M);
+    for (size_t sb = 0; sb < nsb; ++sb)
+        for (size_t r = 0; r < M; ++r) pos[sb * M + r] = g.pos0 + sb * S + r % S;
     uint16_t* qb = BlockScratch::fit(bs_.qb, M * hd);
     float* acc = BlockScratch::fit(bs_.acc, M * hd);
-    std::fill(og, og + T * qw, 0.f);
-    // The kv group's queries as the scores' A operand: row hl * T + t is query head hl of the group
-    auto group_queries = [&](size_t gh) {
+    std::fill(og, og + g.T * qw, 0.f);
+    // The kv group's queries as the scores' A operand: row hl * S + t is query head hl of the group
+    auto group_queries = [&](size_t sb, size_t gh) {
         for (size_t hl = 0; hl < grp; ++hl)
-            for (size_t t = 0; t < T; ++t) {
-                const float* src = Q + t * qw + (gh * grp + hl) * hd;
-                uint16_t* dst = qb + (hl * T + t) * hd;
+            for (size_t t = 0; t < S; ++t) {
+                const float* src = Q + (sb * S + t) * qw + (gh * grp + hl) * hd;
+                uint16_t* dst = qb + (hl * S + t) * hd;
                 for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
             }
     };
     // og for the group's real tokens: the merged sum over the denominator, gated when the layer is
-    auto group_out = [&](size_t gh, const float* lsum_g) {
+    auto group_out = [&](size_t sb, size_t gh, const float* lsum_g) {
+        const size_t t_real = std::min(S, g.t_real - sb * S);
         for (size_t hl = 0; hl < grp; ++hl)
-            for (size_t t = 0; t < g.t_real; ++t) {
-                const size_t r = hl * T + t, h = gh * grp + hl;
+            for (size_t t = 0; t < t_real; ++t) {
+                const size_t r = hl * S + t, h = gh * grp + hl, row = sb * S + t;
                 const float inv = 1.0f / lsum_g[r];
-                float* out = og + t * qw + h * hd;
+                float* out = og + row * qw + h * hd;
                 if (!gate) {
                     for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv;
                     continue;
                 }
-                const float* gt = gate + t * qw + h * hd;
+                const float* gt = gate + row * qw + h * hd;
                 for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv / (1.0f + std::exp(-gt[j]));
             }
     };
-    // A window that fits the widest stream is one chunk: every group's scores, then every group's
-    // values. Per group this is the chunked loop below with one chunk, so the output is the same
-    // bit for bit; only the dispatch order differs. It matters where the two products sit on
-    // different xclbins (a dense head dim of 128: scores 8 columns wide, values 4), which the
+    // A window that fits the widest stream is one chunk: every sub-block's and group's scores, then
+    // every one's values. Per group this is the chunked loop below with one chunk, so the output is
+    // the same bit for bit; only the dispatch order differs. It matters where the two products sit
+    // on different xclbins (a dense head dim of 128: scores 8 columns wide, values 4), which the
     // per-group order switches between twice a group.
     if (rows <= ab.l_max) {
-        const size_t L = (rows + 255) / 256 * 256;
-        float* m_all = BlockScratch::fit(bs_.m, g.kvh * M);
-        float* l_all = BlockScratch::fit(bs_.lsum, g.kvh * M);
-        uint16_t* p_all = BlockScratch::fit(bs_.p_all, g.kvh * M * L);
-        for (size_t gh = 0; gh < g.kvh; ++gh) {
-            auto th = std::chrono::steady_clock::now();
-            group_queries(gh);
-            std::fill(m_all + gh * M, m_all + (gh + 1) * M, -std::numeric_limits<float>::infinity());
-            std::fill(l_all + gh * M, l_all + (gh + 1) * M, 0.f);
-            std::memcpy(ba.map<uint16_t*>(), qb, M * hd * 2);
-            host::tile_rows_as_bt(kv + gh * hd, kv_row_elems, rows, L, hd, bb.map<uint16_t*>());
-            ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
-            bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hd * L * 2, 0);
-            timing_.mid_ms += ms_since(th);
-            timing_.part1_ms += ms_since(th);
-            timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
-            th = std::chrono::steady_clock::now();
-            read_back(bc, M * L * 4, 0);
-            timing_.sync_ms += ms_since(th);
-            timing_.part1_ms += ms_since(th);
-            th = std::chrono::steady_clock::now();
-            // acc only takes a rescale from an earlier chunk, and there is none
-            host::softmax_chunk(M, L, hd, 0, bc.map<float*>(), pos, m_all + gh * M, l_all + gh * M, acc,
-                                p_all + gh * M * L);
-            timing_.mid_ms += ms_since(th);
-            timing_.part1_ms += ms_since(th);
+        std::vector<size_t> Ls(nsb), win(nsb), poff(nsb);
+        size_t ptot = 0;
+        for (size_t sb = 0; sb < nsb; ++sb) {
+            win[sb] = g.pos0 + sb * S + std::min(S, g.t_real - sb * S);   // up to the sub-block's last real token
+            Ls[sb] = (win[sb] + 255) / 256 * 256;
+            poff[sb] = ptot;
+            ptot += g.kvh * M * Ls[sb];
         }
-        for (size_t gh = 0; gh < g.kvh; ++gh) {
-            auto th = std::chrono::steady_clock::now();
-            std::memcpy(ba.map<uint16_t*>(), p_all + gh * M * L, M * L * 2);
-            host::tile_rows_as_b(kv + kvw + gh * hd, kv_row_elems, rows, L, hd, bb.map<uint16_t*>());
-            ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
-            bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
-            timing_.mid_ms += ms_since(th);
-            timing_.part1_ms += ms_since(th);
-            timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
-            th = std::chrono::steady_clock::now();
-            read_back(bc, M * hd * 4, 0);
-            timing_.sync_ms += ms_since(th);
-            timing_.part1_ms += ms_since(th);
-            th = std::chrono::steady_clock::now();
-            std::fill(acc, acc + M * hd, 0.f);
-            const float* c = bc.map<float*>();
-            for (size_t i = 0; i < M * hd; ++i) acc[i] += c[i];
-            group_out(gh, l_all + gh * M);
-            timing_.mid_ms += ms_since(th);
-            timing_.part1_ms += ms_since(th);
-        }
+        float* m_all = BlockScratch::fit(bs_.m, nsb * g.kvh * M);
+        float* l_all = BlockScratch::fit(bs_.lsum, nsb * g.kvh * M);
+        uint16_t* p_all = BlockScratch::fit(bs_.p_all, ptot);
+        for (size_t sb = 0; sb < nsb; ++sb)
+            for (size_t gh = 0; gh < g.kvh; ++gh) {
+                const size_t L = Ls[sb], i = sb * g.kvh + gh;
+                auto th = std::chrono::steady_clock::now();
+                group_queries(sb, gh);
+                std::fill(m_all + i * M, m_all + (i + 1) * M, -std::numeric_limits<float>::infinity());
+                std::fill(l_all + i * M, l_all + (i + 1) * M, 0.f);
+                std::memcpy(ba.map<uint16_t*>(), qb, M * hd * 2);
+                host::tile_rows_as_bt(kv + gh * hd, kv_row_elems, win[sb], L, hd, bb.map<uint16_t*>());
+                ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
+                bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hd * L * 2, 0);
+                timing_.mid_ms += ms_since(th);
+                timing_.part1_ms += ms_since(th);
+                timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
+                th = std::chrono::steady_clock::now();
+                read_back(bc, M * L * 4, 0);
+                timing_.sync_ms += ms_since(th);
+                timing_.part1_ms += ms_since(th);
+                th = std::chrono::steady_clock::now();
+                // acc only takes a rescale from an earlier chunk, and there is none
+                host::softmax_chunk(M, L, hd, 0, bc.map<float*>(), pos + sb * M, m_all + i * M, l_all + i * M, acc,
+                                    p_all + poff[sb] + gh * M * L);
+                timing_.mid_ms += ms_since(th);
+                timing_.part1_ms += ms_since(th);
+            }
+        for (size_t sb = 0; sb < nsb; ++sb)
+            for (size_t gh = 0; gh < g.kvh; ++gh) {
+                const size_t L = Ls[sb], i = sb * g.kvh + gh;
+                auto th = std::chrono::steady_clock::now();
+                std::memcpy(ba.map<uint16_t*>(), p_all + poff[sb] + gh * M * L, M * L * 2);
+                host::tile_rows_as_b(kv + kvw + gh * hd, kv_row_elems, win[sb], L, hd, bb.map<uint16_t*>());
+                ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
+                bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
+                timing_.mid_ms += ms_since(th);
+                timing_.part1_ms += ms_since(th);
+                timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
+                th = std::chrono::steady_clock::now();
+                read_back(bc, M * hd * 4, 0);
+                timing_.sync_ms += ms_since(th);
+                timing_.part1_ms += ms_since(th);
+                th = std::chrono::steady_clock::now();
+                std::fill(acc, acc + M * hd, 0.f);
+                const float* c = bc.map<float*>();
+                for (size_t k = 0; k < M * hd; ++k) acc[k] += c[k];
+                group_out(sb, gh, l_all + i * M);
+                timing_.mid_ms += ms_since(th);
+                timing_.part1_ms += ms_since(th);
+            }
         return;
     }
+    // one sub-block from here (nsb == 1, the chunked case above sends wider blocks back one at a time)
     float* m = BlockScratch::fit(bs_.m, M);
     float* lsum = BlockScratch::fit(bs_.lsum, M);
     for (size_t gh = 0; gh < g.kvh; ++gh) {
         auto th = std::chrono::steady_clock::now();
-        group_queries(gh);
+        group_queries(0, gh);
         std::fill(m, m + M, -std::numeric_limits<float>::infinity());
         std::fill(lsum, lsum + M, 0.f);
         std::fill(acc, acc + M * hd, 0.f);
@@ -3154,7 +3226,7 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             timing_.part1_ms += ms_since(th);
         }
         th = std::chrono::steady_clock::now();
-        group_out(gh, lsum);
+        group_out(0, gh, lsum);
         timing_.mid_ms += ms_since(th);
         timing_.part1_ms += ms_since(th);
     }

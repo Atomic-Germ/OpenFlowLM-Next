@@ -129,6 +129,8 @@ struct GemmBlockProgram {
     std::vector<std::string> attn_args = {"pool", "xres", "consts", "state", "act", "ptab"};
     bool sandwich = false;
     std::string act = "silu";
+    // dense: "q4" (gemm_q4_prefill) or "dit" (dit_gemm: bf16 rows in and out, kernel args x, weight, y)
+    std::string gemm = "q4";
     // >1: the route's HOST norms split each row into `norm_groups` equal groups and
     // RMS each group separately (K2's GroupRMSNorm(2)), the same split the `ln`
     // design's LN_GROUPS bakes into the NPU kernel -- 1 is the plain whole-row
