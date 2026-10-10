@@ -1469,6 +1469,22 @@ the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, 
    and tokens a cycle within 5% of the CPU reference (the adapter's training repo, `uno_generate` at L = 4 on a
    q4_1 fake-quantized base, the same prompts).
 
+**Result 2026-10-10 (q4_1, L = 4, six prompts x 128 tokens, quiet machine under the shared lock's `timing` gate):**
+
+| prompt | tokens a cycle (CPU reference) | Uno | plain decode | speedup |
+|---|---|---|---|---|
+| chat | 2.42 (2.56) | 14.77 tok/s | 20.16 tok/s | 0.73x |
+| chat2 | 2.61 (2.78) | 16.05 | 20.06 | 0.80x |
+| code | 3.20 (3.28) | 19.60 | 19.72 | 0.99x |
+| code2 | 3.20 (3.37) | 19.62 | 20.24 | 0.97x |
+| math | 3.76 (3.77) | 22.99 | 20.04 | 1.15x |
+| reason | 3.46 (3.46) | 21.15 | 20.13 | 1.05x |
+
+- All six identical to decode; `--rows-check 17` prints `ROWS PASS`.
+- Mean 3.04 tokens a cycle against the CPU reference's 3.15 (3.4% under); geometric-mean speedup 0.94x.
+- A cycle costs 3.2-3.3 decode steps. K2's adapter commits 3.47 tokens a cycle and gains 1.11x; this one commits
+  fewer at four rows, so the cycle does not pay yet.
+
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,

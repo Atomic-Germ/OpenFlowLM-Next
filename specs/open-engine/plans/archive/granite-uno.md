@@ -1,8 +1,15 @@
 # Plan: Granite 4.2 3B's Uno drafter on the NPU (#189)
 
-**Status:** in progress, 2026-10-10. Branch `feat/granite-uno`, stacked on PR #184 (`feat/k2-horizon-7b`), which
-now carries every family-neutral piece (folds, noise range, shared generate, any width that is a multiple of 512, the
-app's greedy pick).
+**Status:** done, 2026-10-10. Branch `feat/granite-uno`, stacked on PR #184 (`feat/k2-horizon-7b`). Results are in
+the spec (OPEN-FAMILY-GRANITE-UNO, 2026-10-10).
+- R1 and R3 done: `ROWS PASS`, all six prompts identical to decode, 3.04 tokens a cycle against the CPU reference's
+  3.15, and 0.94x on a quiet machine.
+- R2 decided against for now: at 0.94x, Uno would slow Granite's served greedy requests. The opt-in is K2's one line,
+  for when a pass costs less or L = 8 runs.
+- Found on the way, fixed here:
+  - q4nx-build never folded a GGUF Granite's config.json (#21).
+  - Granite's `dxl` overran row 2's 32 south ports (`KV_ONE`).
+- Fixed on #184: `ag_*` builds that no family without a prep could use, and Granite's could not tile.
 
 The adapter is `Cyronius/granite-4.2-3b-uno`: a PEFT LoRA, r 128, alpha 8192 (s = 64), on q, k, v, o, gate, up and
 down of all 40 layers, trained on noise ids `[1, 100256)`. CPU/GPU reference over 60 prompts at L = 4: 1.586 tokens a
