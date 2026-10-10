@@ -1,11 +1,12 @@
 # Qwen3.8-27B validation report
 
-Updated 2026-10-10. This branch strengthens decode/source validation, adds an
+Updated 2026-10-11. This branch strengthens decode/source validation, adds an
 offline converter command for existing model metadata, and builds the current
 Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
 strict CPU-reference comparison, as do three tokens at all 64 layers.
-Validation changes leave runtime and kernel arithmetic unchanged. The new
-partial-level FFN diagnostic finds one failing case, detailed in stage 5c1.
+The split FFN now prepares its integer activation table directly from FP32.
+Stage 5c2 validates this correction with isolated layer replays; full corrected
+model propagation is still a separate acceptance gate.
 
 ## Stage 1: complete decode comparison
 
@@ -316,21 +317,86 @@ Evidence is retained in `production-multitoken/ffn-partials.json` and
 `ffn-layer60-diagnostic.json` under the ignored model directory. Checker
 implementation and diagnosis are complete; **FFN numerical acceptance remains
 open**, alongside independent up/gate/norm, state and per-head comparisons.
-Next, reproduce the failing partial in isolation and evaluate preserving more
-FP32 input precision within the kernel's memory/program limits.
+This finding is reproduced and corrected in the isolated experiments below.
+Full-model propagation and the other independent stage checks remain open.
+
+## Stage 5c2: direct FP32 table preparation and isolated replay
+
+The verified production kernel reproduced the layer-60 failure in a standalone
+three-position replay: maxrel **0.0073258458** for the second partial, with the
+captured FFN input and pre-FFN residual unchanged. Only that layer's pool,
+constants and state were resident. The repeated positions carried state forward
+from zero and received the retained previous layer's output at each position.
+
+Added `gemv_q4_prep_f32_direct_blocks` for split dense FFNs. It quantizes the
+original FP32 input directly to INT16 using per-32-value power-of-two scales,
+ties-to-even rounding and endpoint saturation. Offset-correction sums also use
+the original FP32 values. The existing 2.25*K table ABI, partition, packing and
+buffer sizes are unchanged. Single-piece dense, BF16 and non-dense preparation
+retain their existing paths; the generator regression verifies this scope.
+
+With the corrected `lx`, the failing partial's error is **0.0000988872**.
+All four boundaries pass at all three positions of layer 60, and the FFN input
+and pre-FFN residual are byte-identical to the original capture. This is a
+kernel correction against the unchanged FP32 reference, not the rounded-input
+diagnostic used in stage 5c1.
+
+A single-core hardware probe verifies 32 blocks spanning zero, both signs,
+endpoint saturation, cancellation and scales from 2^-100 to 2^100. Shifts and
+INT16 values match CPU rounding exactly. For block sums, the BF16 hi/lo ABI
+requires an absolute floor at the minimum normal value when the low part is
+subnormal; the 0.005 FFN gate is unchanged.
+
+Experimental `lx` and `ax` were built from the same model-derived spec. Every
+generated translation unit was checked against that recipe before the accepted
+build. An earlier experimental build used a stale PER_CALL=2 source instead of
+1 and produced non-finite pre-FFN values; that build is excluded from acceptance.
+The accepted builds use the regenerated sources. Maximum core program sizes:
+**lx 15584 bytes**, **ax 14400 bytes**, below 16384. No extra activation-table
+storage was introduced.
+
+`utilities/qwen35_layer_replay.py` prepares and scores linear or full-attention
+replays, carries recurrent state/KV across positions, pins inputs and binary
+hashes, and rejects changed configuration before scoring. The sweep utility
+runs one layer at a time. The kernel fix was preceded by the failing hardware
+replay; source-generator, route-scope and replay-integrity regressions were
+also tested red before implementation.
+
+The corrected kernels then passed **64 isolated layers × 3 positions**, with
+**192 NPU dispatches**. All captured FFN inputs and pre-FFN residuals remain
+byte-identical. Every boundary passes the unchanged 0.005 gate:
+
+| Boundary | Worst normalized maximum error | Layer / position |
+|---|---:|---|
+| Partial 0 | 0.0003117401 | 54 / 1 |
+| Partial 1 | 0.0001995445 | 48 / 1 |
+| Sum | 0.0003320237 | 54 / 1 |
+| Closing residual | 0.0000744078 | 62 / 1 |
+
+The full open-engine suite passes **914 tests, 47 skipped**, including ten
+replay/generator/sweep regressions. Empty/interrupted sweeps cannot retain a
+successful summary. This completes the isolated split-down correction, not
+end-to-end propagation through all corrected layers.
+
+Reproduction is documented in the new
+[FP32 down replay skill](../../../.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md).
+Artifacts and logs are retained under ignored `Models/qwen38-27b/ffn-replay/`.
+The production export remains intact; corrected full-model logits, independent
+up/gate/norm, state/head accuracy, prefill and serving acceptance remain open.
 
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 904 passed, 47 skipped |
+| `specs/open-engine/tests` | 914 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite and C++ build/CTest were rerun for stage 5c1 after the
-current merge. Hardware results retain their explicitly stated earlier scope.
+The open-engine suite was rerun for stage 5c2. C++ build/CTest results are from
+stage 5c1; host runtime code has not changed in this correction. Hardware results
+retain their explicitly stated full-model or isolated-replay scope.
 Weights were not reconverted. Skipped tests and successful compilation do not
 extend the explicit hardware coverage above.
 

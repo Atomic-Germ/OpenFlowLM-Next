@@ -182,3 +182,11 @@ rechecking old captures after a source update is not a new hardware run.
 `--diagnose-bf16` additionally projects a BF16-rounded copy of `h` to isolate
 input-rounding error. Those diagnostic metrics never replace the original
 FP32-input comparison or turn its failure into success.
+
+The split dense kernel's FP32 down input now has a direct INT16 table-preparation
+entry. To reproduce the failing case without loading the whole model, use
+`utilities/qwen35_layer_replay.py`; `utilities/gemv-fp32-prep/sweep.py` runs
+layers serially with experimental lx/ax builds. Both retain the independent
+FP64 comparison from captured FP32 `h`. Build and replay commands, including
+mandatory regeneration of kernel translation units, are documented in
+[the FP32 down replay skill](../../.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md).

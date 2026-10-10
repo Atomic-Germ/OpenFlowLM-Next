@@ -216,6 +216,11 @@ void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32
 }
 ''',
     }
+    if F.DOWN_SPLIT:
+        # Preserve FP32 down inputs in the split path validated by the partial
+        # gate; do not change unvalidated single-piece model arithmetic.
+        out["dense_prep_f32.cc"] = out["dense_prep_f32.cc"].replace(
+            "gemv_q4_prep_f32_blocks(", "gemv_q4_prep_f32_direct_blocks(")
     if mixed(R):
         # The mixed-format core cannot hold both q4_1 entries beside the q8 body, so the
         # pair becomes one folded entry with a runtime destination. Nothing else moves.
