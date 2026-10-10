@@ -1348,23 +1348,31 @@ output.
 - The draft layer is 6.7 ms against the verify stream's 5.9 ms in the harness.
 
 ### OPEN-UNO-DECODE: greedy Uno on the NPU, the same tokens as greedy decode
-**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `cli.cpp` `--uno`, `common/AutoModel/modeling_k2.cpp`)
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `cli.cpp` `--uno`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `common/AutoModel/modeling_k2.cpp`)
 **Verification:** manual (an implementation error changes the output, and the procedure compares it token for token)
 
-A K2 model directory that has `uno.q4nx`, with a kernel set that has `dxl_lora`, shall decode
-greedy requests by IFM's two-pass cycle:
-1. **Draft.** `[seed, noise_1 .. noise_{L-1}]`, the noise uniform in [1, vocab), with the LoRA
-   on every row but the seed's. Row 0's argmax is the base model's next token c; rows 1.. are
-   drafts.
+A model directory of a family that opts in (K2), with `uno.q4nx` and a kernel set that has
+`dxl_lora`, shall decode greedy requests by IFM's two-pass cycle:
+1. **Draft.** `[seed, noise_1 .. noise_{L-1}]`, with the LoRA on every row but the seed's.
+   - The noise is uniform in [1, N): N is the adapter's `uno_noise_high` (OPEN-UNO-LORA), else the vocab.
+   - Row 0's argmax is the base model's next token c; rows 1.. are drafts.
 2. **Verify.** `[c, drafts]` at the next position, without the LoRA.
 3. **Commit.** c, the drafts the verify agrees with in order, then the verify's next token: 2 to
    L + 1 tokens a cycle.
 
 Because the L-row pass is bit-identical to decode, the output is exactly plain greedy decode's.
 
-In the app, the K2 adapter runs the cycle when the request is greedy (top_k 1, no penalty that
-reorders the logits). A cycle cut short by EOS or a length limit is sought back to where plain
-decode would have left the cache. A sampled request decodes as usual.
+In the app, AutoModel's shared Uno generate runs the cycle for a family that opts in (K2 does)
+when the request is greedy: top_k 1, and no penalty that reorders the logits. A cycle cut short
+by EOS or a length limit is sought back to where plain decode would have left the cache. A
+sampled request decodes as usual.
+
+**Known gap: the app's greedy rounds logits to bf16 first.**
+- The app's plain greedy argmaxes the engine's logits after `Engine::forward` rounds them to bf16, with the lowest id winning a tie.
+- Uno's head (`lmhl`) and the CLI's decode argmax f32.
+- Where two candidates round to the same bf16 value, served Uno and served plain decode pick different tokens. Uno's pick is the f32 argmax.
+- Seen 2026-10-09: K2-7B, a math prompt, token 128. ' =' scored 25.494 and ':' scored 25.439; both are 25.5 in bf16.
+- The CLI procedure compares against f32 argmax and stays identical there.
 
 **Procedure (manual):** `open_qwen36_cli --model <dir> --kernels <set> --ids <chat ids> --uno N`
 runs N tokens by the cycle, then by plain decode. It prints `UNO IDENTICAL to decode over N
@@ -1390,6 +1398,15 @@ lock's `timing` gate):**
 - Earlier runs on a busy machine (1.68x over 64 tokens; 1.35-1.73x over these prompts with the
   CPU at 100%) overstated the gain: contention slowed plain decode, with more dispatches per
   token, about 3x, and Uno less.
+
+**Result 2026-10-09, after the noise range and the shared generate (`feat/uno-any-dense`):**
+- **CLI:** the same six prompts give exactly the tokens a cycle above (3.56, 3.05, 3.46, 3.12, 3.88, 3.76), all identical to decode.
+- **Served by `oflm serve`:**
+  - A greedy request decodes by Uno: 10.65 against 7.69 tok/s for a forced plain decode on a busy machine.
+  - A reply cut at 37 tokens is identical to plain decode's.
+  - Streamed matches non-streamed, apart from one trailing newline.
+  - Sampled requests decode as usual.
+  - The 160-token reply splits at the bf16 tie above.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,

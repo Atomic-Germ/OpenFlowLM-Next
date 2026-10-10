@@ -14,9 +14,6 @@ private:
     int tool_seq_ = 0;
 
     void setup_tokenizer(std::string model_path);
-    bool uno_applies() const;
-    std::string generate_uno(chat_meta_info_t& meta_info, int length_limit, std::ostream& os,
-                             std::function<bool()> is_cancelled);
     StreamResult stream_result(const k2_chat::Event& ev);
 
 public:
