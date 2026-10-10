@@ -58,6 +58,11 @@ for _k, _v in QR.probe_env().items():
     if _k not in ("ATTN_RB", "ATTN_FAST"):
         ATTN_FLAGS.append(f"-D{_k}={_v}")
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+# Every DDR-bound stream leaves the compute rows through row 2's south ports, 4 a column. A group's core 0 drains
+# its own KV row; where og, KV, y and ln outflows overrun them (Granite's 5 cores a group: 33), group 0's core 0
+# packs all L rows from the prologues it otherwise skips.
+SOUTH_PORTS = 4 * 8
+KV_ONE = LR * ACORES + LR + N_CORES + 1 > SOUTH_PORTS
 OGH = min(NHL, G.HPO)
 N_OG = NHL // OGH
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
@@ -145,6 +150,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
     f_skip = ef("dxl_attn_skip", HERE / "dxl_attn_skip.cc", [pb_ty, i32], OS)
     f_kvpack = ef("dxl_kvpack", HERE / "dxl_kvpack.cc", [brow, brow, kvrow_ty], OS + [f"-DDXL_KVW={KVW}"])
+    f_kvrow = (ef("dxl_kvpack_row", HERE / "dxl_kvpack_row.cc", [brow, brow, kvrows_ty, pb_ty, i32],
+                  OS + [f"-DDXL_KVW={KVW}"]) if KV_ONE else None)
     f_count = ef("dxl_attn_count", HERE / "dxl_attn_count.cc", [pb_ty, i32], OS)
 
     of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
@@ -155,8 +162,9 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))
     # row g's group writes its new KV row at slot g, so one drain puts all L rows in the cache
     of_kv = ObjectFifo(kvrows_ty, name="kvj", depth=1)
-    kv_parts = of_kv.prod().join([g * 2 * KVW for g in range(LR)], tile=Tile(1, 1), obj_types=[kvrow_ty] * LR,
-                                 names=[f"kv{g}" for g in range(LR)], depths=[1] * LR)
+    kv_parts = None if KV_ONE else of_kv.prod().join([g * 2 * KVW for g in range(LR)], tile=Tile(1, 1),
+                                                     obj_types=[kvrow_ty] * LR, names=[f"kv{g}" for g in range(LR)],
+                                                     depths=[1] * LR)
     of_og = [ObjectFifo(ogrow_ty, name=f"ogj{g}", depth=1) for g in range(LR)]
     og_parts = [of_og[g].prod().join([c * OGH * G.HD for c in range(ACORES)], tile=Tile(2 + g, 1),
                                      obj_types=[og_ty] * ACORES, names=[f"og{g}_{c}" for c in range(ACORES)],
@@ -222,37 +230,58 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     assert N_OG == 1 and LR <= 6, "dxl joins one og element per core, and one og drain per row on shims 2.."
 
     def _attn(g, ain, kvout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
-              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, f_skip, f_kvpack, f_count, h0):
+              f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, f_skip, f_kvpack, f_count, h0,
+              kvall=None):
         def skip_prologues(rows):
             f_count(pb, rows * PRO)
             for _ in range_(pb[7]):
                 ain.acquire(1)
                 ain.release(1)
 
+        def meta(qn, kn, cs, pb):
+            e = ain.acquire(1 + NPTAB)
+            if NPTAB > 1:
+                f_meta(e[0], e[1], e[1 + CSE], qn, kn, cs, pb)
+            else:
+                f_meta(e[0], e[1], qn, kn, cs, pb)
+            ain.release(1 + NPTAB)
+
+        def kv_rows(kn, cs, kout, vout):
+            for h in range_(G.K_AIN_ELEMS):
+                e = ain.acquire(1)
+                f_k(e, kn, cs, tmp, kout, h)
+                ain.release(1)
+            for h in range_(G.K_AIN_ELEMS):
+                e = ain.acquire(1)
+                f_v(e, vout, h)
+                ain.release(1)
+
         skip_prologues(g)                                        # every row's prologue streams past every group
-        e = ain.acquire(1 + NPTAB)
-        if NPTAB > 1:
-            f_meta(e[0], e[1], e[1 + CSE], qn, kn, cs, pb)
-        else:
-            f_meta(e[0], e[1], qn, kn, cs, pb)
-        ain.release(1 + NPTAB)
+        meta(qn, kn, cs, pb)
         for h in range_(G.Q_AIN_ELEMS):
             e = ain.acquire(1)
             f_q(e, qn, cs, qs, h)
             ain.release(1)
-        for h in range_(G.K_AIN_ELEMS):
-            e = ain.acquire(1)
-            f_k(e, kn, cs, tmp, kout, h)
-            ain.release(1)
-        for h in range_(G.K_AIN_ELEMS):
-            e = ain.acquire(1)
-            f_v(e, vout, h)
-            ain.release(1)
-        if kvout is not None:
+        kv_rows(kn, cs, kout, vout)
+        if kvall is not None:                                    # KV_ONE: group 0's core 0 packs every row
+            qn2, kn2, cs2, pb2, kout2, vout2, cnt, f_kvrow = kvall
             o = kvout.acquire(1)
-            f_kvpack(kout, vout, o)
+            f_kvrow(kout, vout, o, cnt, 1)
+            for _ in range_(LR - 1):
+                meta(qn2, kn2, cs2, pb2)
+                f_count(pb2, G.Q_AIN_ELEMS)
+                for _ in range_(pb2[7]):
+                    ain.acquire(1)
+                    ain.release(1)
+                kv_rows(kn2, cs2, kout2, vout2)
+                f_kvrow(kout2, vout2, o, cnt, 0)
             kvout.release(1)
-        skip_prologues(LR - 1 - g)
+        else:
+            if kvout is not None:
+                o = kvout.acquire(1)
+                f_kvpack(kout, vout, o)
+                kvout.release(1)
+            skip_prologues(LR - 1 - g)
         f_skip(pb, LR - g)
         f_init(oacc, ml)
         if RB > 1:
@@ -281,16 +310,21 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, f_skip, f_kvpack, f_count]
     afns = [f for f in afns if f is not None]
 
+    def kv_core(g, c):
+        return (g == 0 and c == 0) if KV_ONE else c == 0
+
     def make_attn_body(g, c):
         h0 = c * NHL
+        packs_all = KV_ONE and kv_core(g, c)
 
         def body(ain, *rest):
-            kvout = rest[0] if c == 0 else None
-            rest = rest[1:] if c == 0 else rest
-            ogout, bufs, fns = rest[0], rest[1:11], list(rest[11:])
+            kvout = rest[0] if kv_core(g, c) else None
+            rest = rest[1:] if kv_core(g, c) else rest
+            ogout, bufs = rest[0], rest[1:11]
+            fns = list(rest[11:len(rest) - (8 if packs_all else 0)])
             if RB <= 1:
                 fns.insert(8, None)
-            _attn(g, ain, kvout, ogout, *bufs, *fns, h0)
+            _attn(g, ain, kvout, ogout, *bufs, *fns, h0, kvall=tuple(rest[-8:]) if packs_all else None)
         return body
 
     workers = [Worker(ln_body, fn_args=[of_lni.cons(), of_lno.prod(), f_nr, f_lny, f_lnx],
@@ -317,8 +351,12 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     att_tiles += [spare[(g - 1) * ACORES:g * ACORES] for g in range(1, LR)]
     for g in range(LR):
         for c in range(ACORES):
-            outs = ([kv_parts[g].prod()] if c == 0 else []) + [og_parts[g][c].prod()]
-            workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + outs + abufs(g, c) + afns,
+            kv = [] if not kv_core(g, c) else [of_kv.prod() if KV_ONE else kv_parts[g].prod()]
+            outs = kv + [og_parts[g][c].prod()]
+            kvall = ([Buffer(bhd, name="qn_kv"), Buffer(bhd, name="kn_kv"), Buffer(fcs, name="cs_kv"),
+                      Buffer(pb_ty, name="pb_kv"), Buffer(brow, name="kout_kv"), Buffer(brow, name="vout_kv"),
+                      Buffer(pb_ty, name="cnt_kv"), f_kvrow] if (KV_ONE and kv_core(g, c)) else [])
+            workers.append(Worker(make_attn_body(g, c), fn_args=[of_ain.cons()] + outs + abufs(g, c) + afns + kvall,
                                   tile=att_tiles[g][c], stack_size=0x1800))
 
     def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, a_lora, lni, lno, w_prods, x_prod, y_conss,

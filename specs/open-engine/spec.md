@@ -1239,6 +1239,10 @@ Row j, at position pos0 + j, shall be bit-identical to the decode step at that p
   pos0 + j would (the same blocks and singles), skips the rest, and adds its own row last. The L
   new KV rows reach the cache, joined into one drain, before that window fill is issued.
 - A pass's attention therefore costs about one decode step's, not L of them.
+- Every stream to DDR leaves the compute rows through row 2's south ports, four a column, 32 in
+  all. Each group's core 0 drains its own new KV row, unless the og, KV, y and norm outflows would
+  exceed 32 (Granite's 5 cores a group make 33). Then group 0's core 0 packs every row's KV from
+  the prologues it would otherwise skip, and one stream carries all L.
 
 Other properties:
 - The pass writes the L rows' KV and leaves the position alone, so the caller seeks to the

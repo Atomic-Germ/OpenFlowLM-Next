@@ -66,6 +66,11 @@ decode step at its position. Spec: OPEN-DECODE-ROWS, OPEN-UNO-LORA, OPEN-UNO-DEC
    through memory (`dxl_attn_count` into pb[7]) compiles in seconds. Watch for one core's `llc`
    running long in `final.prj`.
 
+7. **South ports.** Every stream to DDR crosses from row 2 to the memtiles through row 2's south
+   ports, 4 a column, 32 in all. og (L x ACORES), KV (L), y (8) and the norm (1) are 29 for K2 and
+   33 for Granite's 5 cores a group, which aiecc reports only as "Unable to find a legal routing".
+   `dxl.py` KV_ONE then has group 0's core 0 pack all L KV rows (one stream).
+
 ## Build (Windows, iron_env.ps1)
 
 ```powershell
