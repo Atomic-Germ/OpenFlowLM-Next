@@ -101,3 +101,24 @@ decodes by Uno and a sampled one by plain decode. CPU reference of the algorithm
   empty one (the template raises otherwise) and turns string tool-call arguments into objects.
 - Replies start inside `<ifm|think>`; `k2_chat::StreamParser` splits reasoning / content /
   `<ifm|tool_call>` blocks for both response modes. Unit test: `src/test/k2_chat` (cmake, header only).
+
+## Prefill
+
+- **Routes.** A prompt under 64 tokens (`OFLM_OPEN_GEMM_BLOCK_MIN`) prefills token by token.
+  From 64 tokens up, the block route runs the projections as T = 256 GEMMs.
+  - Its attention is the NPU products (`ag_s` / `ag_pv`, OPEN-PREFILL-ATTN) at `attn_block.prep`
+    `rope`: K2 has no q/k norm, so the host half is the rotation alone (`BLOCK_ATTN_ROPE`).
+  - `OFLM_OPEN_ATTN_BLOCK=0` falls back to one `dxB` dispatch a token.
+  - The startup line `block attention on the NPU: on` says which route is running.
+- **Q goes in as a bf16 hi / lo pair** (two scores dispatches a kv head). With one bf16 Q, the
+  unbounded scores put the products at 0.9955 from the sequential route at 28 tokens, where
+  `dxB` is 0.9986.
+- **Measured 2026-10-09 (7B), `open_qwen36_cli --gemm-block`:** 256 / 512 / 999 / 2000 tokens
+  in 3.6 / 6.0 / 13.8 / 27.3 s, against 4.4-5.0 / 13.1 / 30.9-39.2 / 98-147 s on `dxB`.
+  - The `dxB` route's per-token dispatches slow badly on a busy CPU.
+- **Check** a K2 set or engine change with `utilities/dense-decode-probe/attn_route_check.py
+  --tokens 19,64,600,981 --seq` (PASS at 64 / 600 / 981).
+- **Trap: never write into a device buffer's host map** (`bc.map()`) without syncing it to the
+  device. On this driver a FROM_DEVICE sync is a CLFLUSH loop: it writes the dirty lines back
+  over the next dispatch's output. The symptom was that every kv group after the first saw the
+  previous group's scores.

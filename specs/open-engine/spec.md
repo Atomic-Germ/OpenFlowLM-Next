@@ -4004,26 +4004,56 @@ context twice a layer rather than twice a head.
 
 The `dense` route runs the same products in place of its T single-token `dxB`
 dispatches, for a layer type whose `attn_block` carries `prep`: what the
-products' host half has to compute for that family. The one value is
+products' host half has to compute for that family. There are two values:
 `qknorm_rope` (the q / k RMSNorm, then the half-split rotation over the
 manifest's `rotary_dim`; no bias, no gate, no sliding window), declared by
-`recipes/dense.py` for the families in `BLOCK_ATTN_QKNORM_ROPE`, which a family
-joins by measurement against its `dxB` route. A dense `attn_block` without
-`prep` is not read, and the route keeps its `dxB` dispatches; a `prep` the
-engine does not know is refused. At head dim 128 the scores are built 8
-columns wide and the values 4, on contexts `ag_s` and `ag_pv`.
+`recipes/dense.py` for the families in `BLOCK_ATTN_QKNORM_ROPE`, and `rope`
+(the same rotation with no q / k norm), for the families in `BLOCK_ATTN_ROPE`.
+A family joins either list by measurement against its `dxB` route. A dense
+`attn_block` without `prep` is not read, and the route keeps its `dxB`
+dispatches; a `prep` the engine does not know is refused. At head dim 128 the
+scores are built 8 columns wide and the values 4, on contexts `ag_s` and `ag_pv`.
+
+At `rope` the scores take Q as a bf16 hi / lo pair: a second scores dispatch per
+kv head over the same K^T, summed on the host. Without the norm the scores are
+unbounded, and one bf16 rounding of Q puts the products further from the
+sequential route than the `dxB` route is. The decode kernel avoids the same
+error by splitting q (`attn.h`, `attn_q_impl`). P stays a single bf16.
 
 **Acceptance criteria (unit):**
 - The 35B emission: the full-attention type carries `attn_block` = `m` 2048, `hd` 256, `l_max` 4096, args `ag_a, ag_b, ag_c`, streams `ag_s<L>` / `ag_pv<L>` for L = 256 .. 4096 by 256 on context `ag`; the builds pass `AG_M`, `AG_K`, `AG_N` (K = hd, N = L for the scores; K = L, N = hd for the values); the globals are sized for the widest window; the linear type carries none (`test_prefill_attn.py`).
 - The parser (`manifest_test.cpp`): `m`, `hd` and `l_max` positive multiples of 256, three args that are declared globals, every window a positive multiple of 256 within `l_max`, `kernels_s` reaching `l_max`, and `kernels_s` / `kernels_pv` covering the same windows; the fixture parses to 16 windows of each on the full type only.
-- The dense emission (`test_prefill_attn.py`): Qwen3-4B's dense type carries `attn_block` with `m` 1024 (4 query heads per kv head x 256), `hd` 128, `l_max` 4096 and `prep` `qknorm_rope`; Llama 3.1 (no q / k norm), HunYuan (the norm after the rotation) and Phi-4-mini (not yet measured) carry no `prep`.
-- The dense parser (`manifest_test.cpp`): the Qwen3-4B fixture's dense `attn_block` parses with `prep` `qknorm_rope`, `hd` 128 and 16 windows on contexts `ag_s` / `ag_pv`; a `prep` other than `qknorm_rope` is refused; HunYuan's `attn_block` without `prep` is not read.
+- The dense emission (`test_prefill_attn.py`): Qwen3-4B's dense type carries `attn_block` with `m` 1024 (4 query heads per kv head x 256), `hd` 128, `l_max` 4096 and `prep` `qknorm_rope`; K2-Horizon 7B and 3.7B carry `m` 1024, `hd` 128 and `prep` `rope`; Llama 3.1 (no q / k norm, not yet measured), HunYuan (the norm after the rotation) and Phi-4-mini (not yet measured) carry no `prep`.
+- The dense parser (`manifest_test.cpp`): the Qwen3-4B fixture's dense `attn_block` parses with `prep` `qknorm_rope`, `hd` 128 and 16 windows on contexts `ag_s` / `ag_pv`; the same fixture with `prep` `rope` parses; a `prep` other than `qknorm_rope` or `rope` is refused; HunYuan's `attn_block` without `prep` is not read.
 
 **Procedure:** as `tests/test_prefill_attn.py` documents -- the harness run at L = 2048 (`make_test.py --L 2048`, the two builds, `compare.py s2048` / `pv2048`, gate rel_fro <= 5e-3) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 on a prefix with a full-attention layer, with and without `OFLM_OPEN_ATTN_BLOCK=0`, then `oflm-test --llm` through `oflm serve` with `OFLM_OPEN_GEMM_BLOCK=1`. For a dense family: `utilities/dense-decode-probe/attn_route_check.py` on its whole model (19, 600 and 981 tokens, `--seq` on the short one) -- the products against its `dxB` route at the argmax of every compared position, the same greedy continuation, and logits corr >= 0.9998, the distance its `dxB` route already keeps from the sequential one; then `oflm-test --llm` as above.
 
 **Result 2026-09-12 (harness, Qwen3.6-35B-A3B shapes):** both products PASS at L = 2048 -- rel_fro 1.1e-7 (scores) and 6.9e-7 (values) against fp64, 0.95 ms per 2.15 GFLOP dispatch (2.2 TFLOPS), the two shapes' `final.xclbin` 72 bytes apart (the UUID). Forty dispatches a block, about 40 ms, for the products `host::attention_block` spent about 2.5 s on at 2582 tokens. **Full model, 2026-09-12 (Qwen3.6-35B-A3B-NPU2, the set with the 32 attention streams, 40 layers, clean box):** the 8-layer prefix on the 19-token prompt agrees with the host attention on argmax 19/19 and top-5 19/19, corr >= 0.99999 per position (max |diff| 4e-2: bf16 products and a bf16 P, not bit-exact by design). The 1020-token prompt: **21.8 s either way** (21 ms/token; the host stage 1.44 -> 1.47 s per block on the NPU path against 1.37 -> 2.13 s on the host -- attention is only a fifth of that stage at this length), the same 8-token greedy continuation. The 2582-token prompt: **66.0 s -> 54.6 s (26 -> 21 ms/token)**, the same 8-token continuation, the host stage flat at 1.23-1.37 s per block where the host attention grew it from 1.37 to 3.81 s; the GEMM column grows 1.33 -> 1.48 s with the attention dispatches and their context switches. The route is now flat per token with length; what remains per block is the per-token MoE dispatches (~2.0 s), the projection GEMMs (~1.45 s) and the host DeltaNet (~1.0 s of the host stage). Logs: `.claude/plans/decode-run/logs/long{1020,2582}_attn{0,1}.log`, `gate_attn_v5.log`. **Through `oflm serve` (2026-09-13, `OFLM_OPEN_GEMM_BLOCK=1`):** `oflm-test --llm` passes (both answers coherent, the follow-up from the prompt cache); the two long prompts prefill in 20.5 s at 972 tokens (from 21.8) and 59.0 s at 2582 (from 71.2), client-side time to first token. **Both engines re-measured paired on a quiet box, 2026-09-13**, the same script and the same two prompts back to back (`.claude/plans/decode-run/logs/serve_closed.log`, `paired_open.log`): open 19.3 s and 56.0 s (19.9 and 21.7 ms/token), decode 8.0 tok/s; stock FLM 1.0.2's closed kernels 11.9 s and 18.5 s (12.2 and 7.2 ms/token), decode 15.4 tok/s -- **1.6x behind at 972 tokens, 3.0x at 2582, 1.9x at decode**. The closed engine is faster than the 2026-09-11 figures recorded elsewhere in this spec (14.3 s, 21.9 s, 12 tok/s), so those were taken under load and every ratio computed against them flatters the open path; use the paired numbers.
 
 **Result 2026-10-04 (dense, Qwen3-8B-NPU2, the qwen3 set exported from `perf/dense-prefill`, quiet box):** against its `dxB` route, every compared position's argmax agrees and the 16-token greedy continuation is identical at 19, 600 and 981 tokens; worst logits corr 0.99991 / 0.99987 / 0.99989. The `dxB` route itself is 0.99989 from the sequential route at 36 layers (0.99998 at an 8-layer prefix), and the products 0.99987: the products sit as close to the sequential route as the route they replace. The 981-token prefill: **33.3 s -> 17.5 s** with the products in per-head order, where each of the 576 dispatches a block paid a hardware-context switch (~2.5 ms), **-> 13.1 s** with all the scores before all the values (byte-identical logits and tokens at 600 and 981 tokens), against 3.1 s for stock FLM 1.0.2 on the same box the day before. The dense route's host stages then read the GEMM outputs as token rows from kept scratch (byte-identical on the products, the `dxB` route and the T = 1 host decode route): **11.6 s**, now 7.4 s of projection GEMMs, 2.4 s of attention and 1.8 s of host stages. **Through `oflm serve` (2026-10-04, `OFLM_OPEN_KERNELS_DIR` on the qwen3 set, the block route on by default):** `oflm-test --llm` passes, 5 of 5 (both answers, both modes, the follow-up from the prompt cache). Plan: `plans/archive/dense-prefill-attn.md`.
+
+**Result 2026-10-09 (dense, K2-Horizon-7B-NPU2, `prep` `rope`, Q split):** `attn_route_check.py --tokens 19,64,600,981 --seq` (prompts of 28, 64, 600 and 981 tokens).
+- **64, 600 and 981 tokens PASS.** Argmax agrees at every compared position, the 16-token continuation is the same, and worst corr against `dxB` is 0.99988 / 0.99995 / 0.99994.
+- **28 tokens:** argmax 28/28 and the same continuation, but corr 0.99958 against `dxB`, under the 0.9998 bar.
+  - At this length `dxB` is itself 0.99861 from the sequential route, and the products 0.99831. At 64 tokens both are 0.99979.
+  - The app sends no prompt under 64 tokens (`OFLM_OPEN_GEMM_BLOCK_MIN`) down the block route.
+- **Without the split** the products were 0.99555 / 0.99953 from the sequential route at 28 / 64 tokens, and both lengths failed the bar.
+- **Splitting P as well** measured no better (0.99893 / 0.99968, with one argmax flip at 64) and costs another values dispatch per head.
+- **Prefill** (`open_qwen36_cli --gemm-block`, the lock's `timing` gate):
+
+  | prompt | products (CLEAN) | `dxB`, two runs |
+  |---|---|---|
+  | 256 | 3.6 s | 4.4-5.0 s |
+  | 512 | 6.0 s | 13.1 s |
+  | 999 | 13.8 s | 30.9-39.2 s |
+  | 2000 | 27.3 s | 97.7-147 s |
+
+  - Both `dxB` runs were flagged NOISY by a build late in the run. Its per-token dispatches suffer most from a busy CPU.
+  - Each prompt length gives the same first token on both routes.
+- **Through `oflm serve`:** `oflm-test --llm` passes, 5 of 5. Greedy (Uno), sampled, streamed, multi-turn and tool-call requests are unchanged.
+  - Time to first token at 849 tokens: 18.2 s, against 36.2 s with `OFLM_OPEN_ATTN_BLOCK=0`.
+  - At 2781 tokens: 57.7 s against 171.2 s.
+  - Same output text; a build in another session overlapped part of this run.
 
 ### OPEN-REQUEST-ISOLATION: the same request on a reused engine gives the same tokens
 **Applies to:** openflowlm-next (`src/open_qwen36/core.cpp`: `read_back`, `Core::reset`, `seek`, `route`, `arm_route_records`, `det_step`; `cli.cpp` `--repeat`, `--det-step`)

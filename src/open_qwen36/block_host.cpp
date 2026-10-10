@@ -380,12 +380,16 @@ void attention_prep(const AttnGeom& g, const float* q, const float* k, const flo
         const size_t t = static_cast<size_t>(tt), p = g.pos0 + t;
         for (size_t h = 0; h < g.nh; ++h) {
             float* dst = Q + t * qw + h * g.hd;
-            rms_vec(q + t * qw + h * g.hd, g.hd, qn, g.eps, dst);
+            const float* src = q + t * qw + h * g.hd;
+            if (qn) rms_vec(src, g.hd, qn, g.eps, dst);
+            else std::copy(src, src + g.hd, dst);
             rope(dst, half, inv_freq, static_cast<double>(p));
             for (size_t j = 0; j < g.hd; ++j) dst[j] *= scale;
         }
         for (size_t h = 0; h < g.kvh; ++h) {
-            rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
+            const float* src = k + t * kvw + h * g.hd;
+            if (kn) rms_vec(src, g.hd, kn, g.eps, kh.data() + h * g.hd);
+            else std::copy(src, src + g.hd, kh.data() + h * g.hd);
             rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p));
         }
         for (size_t j = 0; j < kvw; ++j) {

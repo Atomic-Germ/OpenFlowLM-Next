@@ -285,7 +285,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 a.args = get<std::vector<std::string>>(aj, "args", aw);
                 if (dense_ab) {
                     a.prep = get<std::string>(aj, "prep", aw);
-                    if (a.prep != "qknorm_rope") fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope)");
+                    if (a.prep != "qknorm_rope" && a.prep != "rope")
+                        fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope, rope)");
                 }
                 // the products tile K^T by (64, 32) and V by (64, 32): a dense head dim of 64 or
                 // 128 is a narrower product, the full layers' 256 the widest

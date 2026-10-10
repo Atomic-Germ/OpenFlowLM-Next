@@ -53,7 +53,11 @@ def test_a_dense_family_says_which_attention_the_host_half_computes():
     ab = manifest(load_spec(specs / "qwen3-4b.json"))["layer_types"]["dense"]["gemm_block"]["attn_block"]
     # 32 query heads over 8 kv heads x 256 tokens = 1024 rows, head dim 128
     assert (ab["m"], ab["hd"], ab["l_max"], ab["prep"]) == (1024, 128, LMAX, "qknorm_rope")
-    # no q/k norm (Llama), the norm after the rotation (HunYuan), a family not yet measured (Phi-3)
+    # K2 has no q/k norm: the rotation alone
+    for name in ("k2-horizon-7b.json", "k2-horizon-3.7b.json"):
+        ab = manifest(load_spec(specs / name))["layer_types"]["dense"]["gemm_block"]["attn_block"]
+        assert (ab["m"], ab["hd"], ab["prep"]) == (1024, 128, "rope"), name
+    # no q/k norm but not yet measured (Llama), the norm after the rotation (HunYuan), not yet measured (Phi-3)
     for name in ("llama31-8b.json", "hy-mt2-7b.json", "phi4-mini-4b.json"):
         gb = manifest(load_spec(specs / name))["layer_types"]["dense"]["gemm_block"]
         assert "prep" not in gb.get("attn_block", {}), name

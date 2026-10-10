@@ -75,6 +75,7 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
 /// normed and roped with 1/sqrt(hd) folded in (a power of two at every head dim here, so the
 /// bf16 the kernel sees rounds exactly as the unscaled value would); the block's k / v normed,
 /// roped and written to the cache rows [pos0, pos0 + t_real) in bf16. Rows of Q past t_real are zero.
+/// A null qn / kn skips that norm (a family with no q/k norm, prep "rope").
 void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
                     const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q);
 

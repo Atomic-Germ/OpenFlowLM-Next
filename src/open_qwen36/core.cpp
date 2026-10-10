@@ -385,11 +385,16 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gemm_block_t_ && any_moe)
         log(std::string("token-batched expert kernel: ") +
             (any_batch ? (moe_batch_on_ ? "on" : "off (OFLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
-    bool any_attn = false;
-    for (const auto& t : types_) any_attn = any_attn || t->gemm_block.attn_block.present();
+    bool any_attn = false, any_dense = false;
+    for (const auto& t : types_) {
+        any_attn = any_attn || t->gemm_block.attn_block.present();
+        any_dense = any_dense || t->gemm_block.kind == "dense";
+    }
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
-            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
+            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)")
+                      : any_dense ? "not in this kernel set (one dxB dispatch a token)"
+                                  : "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
         log(std::string("prefill schedule: ") +
             (layer_major_ok() ? (any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
@@ -2361,8 +2366,9 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     const size_t qw = gb.qw, kvw = gb.kvw, hd = ab.hd;
     // The geometry the products were built for, against what this layer's projection produces;
     // attention_npu checks m against the group size times T.
-    if (ab.prep != "qknorm_rope" || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || man_.rotary_dim > hd ||
-        hc.qn.size() != hd || hc.kn.size() != hd)
+    const bool qknorm = ab.prep == "qknorm_rope";
+    if ((!qknorm && ab.prep != "rope") || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || man_.rotary_dim > hd ||
+        (qknorm && (hc.qn.size() != hd || hc.kn.size() != hd)))
         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": the dense attention products were built for "
                                  "head dim " + std::to_string(hd) + ", which this layer's q / k / v widths do not divide into");
     // y [n_qkv3, T] straight into the [T, width] parts attention_prep reads
@@ -2385,7 +2391,8 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     g.pos0 = pos0; g.eps = gb.eps;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
-    host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
+    host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
+                         man_.rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
     timing_.mid_ms += ms_since(tt);
     og.assign(T * qw, 0.f);
     // attention_npu books its dispatches as part0 and its host stages as part1, the full layers'
@@ -3043,6 +3050,8 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
     size_t* pos = BlockScratch::fit(bs_.pos, M);
     for (size_t r = 0; r < M; ++r) pos[r] = g.pos0 + r % T;
     uint16_t* qb = BlockScratch::fit(bs_.qb, M * hd);
+    // no q/k norm leaves the scores unbounded, so Q goes in as a bf16 hi/lo pair, as attn.h's decode does
+    uint16_t* ql = ab.prep == "rope" ? BlockScratch::fit(bs_.qlo, M * hd) : nullptr;
     float* acc = BlockScratch::fit(bs_.acc, M * hd);
     std::fill(og, og + T * qw, 0.f);
     // The kv group's queries as the scores' A operand: row hl * T + t is query head hl of the group
@@ -3052,7 +3061,29 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
                 const float* src = Q + t * qw + (gh * grp + hl) * hd;
                 uint16_t* dst = qb + (hl * T + t) * hd;
                 for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
+                if (ql) {
+                    uint16_t* lo = ql + (hl * T + t) * hd;
+                    for (size_t j = 0; j < hd; ++j) lo[j] = f32_to_bf16(src[j] - bf16_to_f32(dst[j]));
+                }
             }
+    };
+    // The scores the softmax reads, after the lo half's pass over the same K^T where Q is split
+    auto with_lo = [&](size_t L) -> const float* {
+        if (!ql) return bc.map<float*>();
+        const auto th = std::chrono::steady_clock::now();
+        float* sh = BlockScratch::fit(bs_.s_hi, M * L);
+        std::memcpy(sh, bc.map<float*>(), M * L * 4);
+        std::memcpy(ba.map<uint16_t*>(), ql, M * hd * 2);
+        ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
+        const double r = run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
+        read_back(bc, M * L * 4, 0);
+        // summed on the host side: a write into bc's map leaves dirty lines the next read_back flushes over the device's output
+        const float* c = bc.map<float*>();
+        for (size_t i = 0; i < M * L; ++i) sh[i] += c[i];
+        timing_.part0_ms += r;
+        timing_.mid_ms += ms_since(th) - r;
+        timing_.part1_ms += ms_since(th) - r;
+        return sh;
     };
     // og for the group's real tokens: the merged sum over the denominator, gated when the layer is
     auto group_out = [&](size_t gh, const float* lsum_g) {
@@ -3095,10 +3126,10 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             read_back(bc, M * L * 4, 0);
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
+            const float* s = with_lo(L);
             th = std::chrono::steady_clock::now();
             // acc only takes a rescale from an earlier chunk, and there is none
-            host::softmax_chunk(M, L, hd, 0, bc.map<float*>(), pos, m_all + gh * M, l_all + gh * M, acc,
-                                p_all + gh * M * L);
+            host::softmax_chunk(M, L, hd, 0, s, pos, m_all + gh * M, l_all + gh * M, acc, p_all + gh * M * L);
             timing_.mid_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
         }
@@ -3151,8 +3182,9 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             read_back(bc, M * L * 4, 0);   // the whole M x L score matrix
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
+            const float* s = with_lo(L);
             th = std::chrono::steady_clock::now();
-            host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos, m, lsum, acc, ba.map<uint16_t*>());
+            host::softmax_chunk(M, L, hd, c0, s, pos, m, lsum, acc, ba.map<uint16_t*>());
             host::tile_rows_as_b(kv + c0 * kv_row_elems + kvw + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
             ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);

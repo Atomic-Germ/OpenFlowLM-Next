@@ -378,6 +378,13 @@ int main(int argc, char** argv) {
                   "qwen3: the dense route's attention products, declared qknorm_rope");
             refused_manifest(argv[2], "is not one this engine computes", "qwen3: an attn_block prep the engine does not compute is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "qknorm_post_rope"; });
+            {
+                std::ifstream rf(argv[2]);
+                json rj = json::parse(rf);
+                rj["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "rope";
+                const Manifest r = Manifest::parse(rj, "edited");
+                check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "k2 shape: prep rope (no q/k norm) parses");
+            }
             // a single-layer-type, non-sandwich family gets the schema's defaults, unchanged
             // from before attn_kernel / attn_args / sandwich / act existed (backward compat)
             check(dg.attn_kernel == "dxB" && dg.attn_args.back() == "ptab" && !dg.sandwich && dg.act == "silu",

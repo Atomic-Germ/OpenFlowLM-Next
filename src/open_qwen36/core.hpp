@@ -412,6 +412,8 @@ private:
         std::vector<uint16_t> qb;       ///< attention_npu: one KV group's queries as bf16
         std::vector<float> m, lsum, acc;///< attention_npu: the merged softmax's running state
         std::vector<uint16_t> p_all;    ///< attention_npu, one chunk: every kv group's P between the two passes
+        std::vector<uint16_t> qlo;      ///< attention_npu at prep rope: Q's bf16 remainder
+        std::vector<float> s_hi;        ///< attention_npu at prep rope: the scores summed over both halves
         /// the dense route's token rows: o / gate / up / down outputs, silu(gate) * up, the residual
         std::vector<float> d_o, d_gate, d_up, d_down, d_h;
         std::vector<double> d_res, d_row;
