@@ -1353,8 +1353,6 @@ def assemble_model_assets_hf(
         config = {}
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
-    if model_arch is ModelArch.GRANITE:
-        apply_granite_fold_to_config(config, reader)
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
@@ -1428,6 +1426,8 @@ def assemble_model_assets(
 
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
+    if model_arch is ModelArch.GRANITE:
+        apply_granite_fold_to_config(config, reader)
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     # The FFN in model.q4nx is NARROWER than the source model's, so the config
     # that ships beside it has to say so. Left at the source width, the kernel

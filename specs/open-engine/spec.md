@@ -1225,7 +1225,7 @@ GGUF (`-f llama`) is interleaved and keeps the reorder.
 **Applies to:** openflowlm-next (`open_kernels/designs/dxl`, `open_kernels/recipes/dxl.py`, `recipes/dense.py` `rows_route`, `harness/stream_patch.hpp`, `src/open_qwen36/core.cpp` `step_rows`)
 **Verification:** test (the layout and job tables: `tests/test_dxl.py`); manual (the hardware procedure below)
 
-For a family in `ROWS_FAMILIES` (K2 today), the kernel set shall ship an L-row pass (L = 4)
+For a family in `ROWS_FAMILIES` (K2 and Granite), the kernel set shall ship an L-row pass (L = 4)
 at any hidden, q width and intermediate that are multiples of 512. `dxl` takes L consecutive
 positions through one dense layer in one dispatch, and `lmhl` takes their final norm, the head
 and each row's argmax in another. The weights are streamed once for the L rows.
@@ -1239,6 +1239,10 @@ Row j, at position pos0 + j, shall be bit-identical to the decode step at that p
   pos0 + j would (the same blocks and singles), skips the rest, and adds its own row last. The L
   new KV rows reach the cache, joined into one drain, before that window fill is issued.
 - A pass's attention therefore costs about one decode step's, not L of them.
+- Every stream to DDR leaves the compute rows through row 2's south ports, four a column, 32 in
+  all. Each group's core 0 drains its own new KV row, unless the og, KV, y and norm outflows would
+  exceed 32 (Granite's 5 cores a group make 33). Then group 0's core 0 packs every row's KV from
+  the prologues it would otherwise skip, and one stream carries all L.
 
 Other properties:
 - The pass writes the L rows' KV and leaves the position alone, so the caller seeks to the
@@ -1285,7 +1289,7 @@ sizes the shared window to pos0 + L rows.
 - A width off the 512 grid is refused.
 - K2-7B's job tables and rows route are byte-identical to the 1024-only recipe's.
 - The head's act holds every row's whole x elements.
-- Only K2 ships the route.
+- Only K2 and Granite ship the route.
 
 **Procedure (manual):**
 1. `python designs/dxl/make_dxl_test.py --fixture model/out_k2l --build <dxl build> --l 4`, then
@@ -1444,6 +1448,42 @@ lock's `timing` gate):**
   and 3.76 tokens a cycle (mean 3.43).
 - **Served by `oflm serve`:** the 160-token train reply is identical to plain decode's, the 37-token
   cut and the streamed reply match too, and a sampled request decodes as before.
+
+### OPEN-FAMILY-GRANITE-UNO: Granite 4.2 3B's Uno drafter
+**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py` `ROWS_FAMILIES`, `src/common/AutoModel/modeling_granite.cpp`, `utilities/q4nx-build` `--uno-adapter`)
+**Verification:** manual (the procedure below compares every token with greedy decode)
+
+Granite 4.2 3B with its Uno adapter (`Cyronius/granite-4.2-3b-uno`: r 128, alpha 8192, all seven projections of
+the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, identical to greedy decode:
+- The kernel set ships `dxl`, `dxl_lora` and `lmhl` at hidden 2560 (OPEN-DECODE-ROWS).
+- `uno.q4nx` carries s·B with q's fold of 0.125 (OPEN-UNO-LORA) and `uno_noise_high` 100256.
+- Granite's AutoModel does not opt in yet. At L = 4 the adapter commits about 3 tokens a cycle, which does not pay
+  for the cycle's two passes (the result below), so served requests keep plain decode. It opts in with one line, as
+  K2's does, once a pass costs less or L = 8 runs.
+
+**Procedure (manual):**
+1. `q4nx-build -i granite-4.2-3b-bf16.gguf -s <granite-4.2-3b dir> -f granite -t language --quant Q4_1
+   --uno-adapter <adapter> --uno-noise-high 100256`, then `export_qwen36_kernels.py --model-dir <out>`.
+2. `open_qwen36_cli ... --rows-check 17` prints `ROWS PASS`.
+3. `utilities/uno-bench` over `utilities/uno-ref/prompts.jsonl` at 128 tokens: every prompt identical to decode,
+   and tokens a cycle within 5% of the CPU reference (the adapter's training repo, `uno_generate` at L = 4 on a
+   q4_1 fake-quantized base, the same prompts).
+
+**Result 2026-10-10 (q4_1, L = 4, six prompts x 128 tokens, quiet machine under the shared lock's `timing` gate):**
+
+| prompt | tokens a cycle (CPU reference) | Uno | plain decode | speedup |
+|---|---|---|---|---|
+| chat | 2.42 (2.56) | 14.77 tok/s | 20.16 tok/s | 0.73x |
+| chat2 | 2.61 (2.78) | 16.05 | 20.06 | 0.80x |
+| code | 3.20 (3.28) | 19.60 | 19.72 | 0.99x |
+| code2 | 3.20 (3.37) | 19.62 | 20.24 | 0.97x |
+| math | 3.76 (3.77) | 22.99 | 20.04 | 1.15x |
+| reason | 3.46 (3.46) | 21.15 | 20.13 | 1.05x |
+
+- All six identical to decode; `--rows-check 17` prints `ROWS PASS`.
+- Mean 3.04 tokens a cycle against the CPU reference's 3.15 (3.4% under); geometric-mean speedup 0.94x.
+- A cycle costs 3.2-3.3 decode steps. K2's adapter commits 3.47 tokens a cycle and gains 1.11x; this one commits
+  fewer at four rows, so the cycle does not pay yet.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
