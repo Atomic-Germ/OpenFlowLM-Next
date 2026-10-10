@@ -106,6 +106,8 @@ QKNORM_POST_ROPE = ("hunyuan",)
 # FAST_ATTENTION does. The manifest says so as attn_block.prep, which the engine refuses to
 # guess: a dense attn_block without it is left to the dxB route.
 BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
+# ... or the rotation alone, for a family with no q/k norm, no bias and no gate (`prep` "rope")
+BLOCK_ATTN_ROPE = ("k2",)
 # families whose q/k/v projections carry a per-channel bias. Like the post-RoPE norm this
 # is a family property, not a spec field: every Qwen2 has it, and spec_hash() covers every
 # field, so a field would move every shipped model's hash.
@@ -430,6 +432,8 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
         if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
                 and not spec.attn_gate):
             attn_block["prep"] = "qknorm_rope"
+        elif (spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate and not qkv_bias(spec)):
+            attn_block["prep"] = "rope"
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 

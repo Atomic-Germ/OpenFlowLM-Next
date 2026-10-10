@@ -73,7 +73,8 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
 /// The host half of the block attention when its products run on the NPU (OPEN-PREFILL-ATTN):
 /// what attention_block does before its products and nothing after. Q [T, nh*hd] fp32 out,
 /// normed and roped with 1/sqrt(hd) folded in (a power of two at every head dim here, so the
-/// bf16 the kernel sees rounds exactly as the unscaled value would); the block's k / v normed,
+/// bf16 the kernel sees rounds exactly as the unscaled value would; qn / kn null means no q/k norm,
+/// the rotation alone); the block's k / v normed,
 /// roped and written to the cache rows [pos0, pos0 + t_real) in bf16. Rows of Q past t_real are zero.
 void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
                     const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q);

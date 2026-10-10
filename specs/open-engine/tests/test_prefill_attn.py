@@ -44,8 +44,8 @@ def test_the_route_names_the_attention_gemm_streams():
 
 def test_a_dense_family_says_which_attention_the_host_half_computes():
     """The dense route gets the products' streams, but only a family whose attention is the q/k
-    norm then the half-split rotation (no bias, no gate) declares it as `prep`; the engine runs
-    the products for a declared family only and leaves the rest on the dxB route."""
+    norm then the half-split rotation, or the rotation alone (no bias, no gate), declares it as
+    `prep`; the engine runs the products for a declared family only and leaves the rest on the dxB route."""
     from recipes.load import load_spec
     from recipes.manifest import manifest
 
@@ -53,7 +53,10 @@ def test_a_dense_family_says_which_attention_the_host_half_computes():
     ab = manifest(load_spec(specs / "qwen3-4b.json"))["layer_types"]["dense"]["gemm_block"]["attn_block"]
     # 32 query heads over 8 kv heads x 256 tokens = 1024 rows, head dim 128
     assert (ab["m"], ab["hd"], ab["l_max"], ab["prep"]) == (1024, 128, LMAX, "qknorm_rope")
-    # no q/k norm (Llama), the norm after the rotation (HunYuan), a family not yet measured (Phi-3)
+    # K2's attention is the rotation alone: no q/k norm, no bias, no gate
+    k2 = manifest(load_spec(specs / "k2-horizon-3.7b.json"))["layer_types"]["dense"]["gemm_block"]["attn_block"]
+    assert (k2["hd"], k2["prep"]) == (128, "rope")
+    # no q/k norm and not yet measured (Llama), the norm after the rotation (HunYuan), likewise Phi-3
     for name in ("llama31-8b.json", "hy-mt2-7b.json", "phi4-mini-4b.json"):
         gb = manifest(load_spec(specs / name))["layer_types"]["dense"]["gemm_block"]
         assert "prep" not in gb.get("attn_block", {}), name

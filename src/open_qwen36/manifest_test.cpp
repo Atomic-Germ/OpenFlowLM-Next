@@ -460,7 +460,18 @@ int main(int argc, char** argv) {
             refused(d, bad, "intermediate_size", "qwen3: an 8B config is refused by name");
             // attnpos alone does not make a kernel the attention-only dispatch: the sequential
             // dx is attnpos-patched too, and would run the whole layer per token of the block
-            refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
+            {
+        std::ifstream rf(argv[2]);
+        json rj = json::parse(rf);
+        rj["layer_types"]["dense"]["gemm_block"]["attn_block"]["prep"] = "rope";
+        try {
+            Manifest r = Manifest::parse(rj, "rope");
+            check(r.layer_types.at("dense").gemm_block.attn_block.prep == "rope", "a dense attn_block prep \"rope\" (the rotation alone) parses");
+        } catch (const std::exception& e) {
+            check(false, std::string("a dense attn_block prep \"rope\" parses: ") + e.what());
+        }
+    }
+    refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
                              [](json& j) { j["layer_types"]["dense"]["gemm_block"]["attn_kernel"] = "dx"; });
             // the dense route runs its GEMMs through its own dispatch, which adds no split halves
             refused_manifest(argv[2], "do not add split halves", "qwen3: a split step on the dense route is refused",
