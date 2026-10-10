@@ -4132,6 +4132,12 @@ These checks cover captured logits and residuals. State/cache isolation, source
 conversion correctness, serving and full-model hardware acceptance need their
 own evidence; passing this comparator alone does not establish those properties.
 
+The CPU Q4 decoder materializes contiguous chunk-major arrays without changing
+the band-layout mapping or FP32 arithmetic. Scalar decode tests pin exact value
+bits for empty, single/multiple and strided input chunks; the benchmark utility
+also compares real tensors against the retained legacy indexing implementation.
+Reference-preparation speed is separate from NPU inference performance.
+
 ### OPEN-QWEN35-CONFIG-NORMALIZE: existing container metadata
 
 `q4nx-build --normalize-config -i DIR` provides an offline path to normalize

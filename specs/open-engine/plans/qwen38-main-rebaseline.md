@@ -1,9 +1,9 @@
 # Qwen3.8-27B validation report
 
-Updated 2026-10-09. This branch strengthens decode/source validation, adds an
+Updated 2026-10-10. This branch strengthens decode/source validation, adds an
 offline converter command for existing model metadata, and builds the current
 Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
-strict CPU-reference comparison, as does the first token at all 64 layers.
+strict CPU-reference comparison, as do three tokens at all 64 layers.
 Runtime and kernel arithmetic are unchanged.
 
 ## Stage 1: complete decode comparison
@@ -180,9 +180,9 @@ chat smoke coverage, not serving or hybrid block-prefill validation.
 
 Full-precision metrics and the pinned reference metadata are in
 `Models/qwen38-27b/production-full/results.json`; the skill documents the run
-commands. Only the first full-depth token has an independent CPU comparison.
-Full-depth multi-token accuracy, independent state/head/FFN-partial checks,
-block-boundary prefill parity, serving and resource/timing acceptance remain
+commands. At stage 4, only the first full-depth token had an independent CPU
+comparison; stage 5b below extends it to three. Independent state/head/FFN-partial
+checks, block-boundary prefill parity, serving and resource/timing acceptance remain
 open. The power-mode request still failed, so this is not a benchmark result.
 
 ## Stage 5 preparation: upstream compatibility and explicit kernel selection
@@ -214,25 +214,70 @@ The updated native runtime builds and CTest passes 3/3. The block-host fixture
 passes, including upstream's scalar/AVX2 checks. These CPU tests do not validate
 the full hybrid route on the NPU.
 
-The 64-layer/three-token run was attempted but exhausted available memory:
+On 2026-10-09, the 64-layer/three-token run exhausted available memory:
 runtime loading reached 50 layers after 704 seconds, with available RAM briefly
-around 260 MiB. It produced no completed decode result. The CPU fixture is also
-incomplete and has no acceptance metadata. Hardware work is paused at the user's
-request until memory is available; **stage 5 numerical acceptance remains open**.
-The successful stage 3/4 measurements above are historical results, not reruns
-on the updated runtime. No additional full-model PASS is claimed.
+around 260 MiB. It produced no completed decode result. The CPU fixture was also
+incomplete and had no acceptance metadata. Hardware work was paused at the
+user's request. This memory block was resolved on 2026-10-10, as recorded below.
+
+## Stage 5b: full-depth three-token numerical comparison
+
+Resumed on 2026-10-10 with about 62 GiB available RAM. CPU preparation and NPU
+jobs ran serially, using the hash-verified production export explicitly via
+`--kernel-dir`. Weights and packing were unchanged; retained input pools were
+reused. No kernels or libraries were rebuilt for this stage.
+
+CPU preparation exposed tensor-wide strides in Q4 dequantization's advanced
+indexing. Contiguous gathers preserve the physical band mapping and FP32
+multiply/add while avoiding those strides. TDD: four failing layout cases and
+four passing cases before the change, then **8/8 passed**, covering empty,
+single/multiple and strided input chunks against a scalar decoder. The complete
+open-engine suite passes **870 tests, 47 skipped**.
+
+`utilities/benchmark-q4-decode.py` compares the retained legacy decoder with the
+new decoder on a real tensor. For layer 0's FFN up projection (10880 chunks),
+outputs were byte-identical; dequantization took 7.94 s versus 0.236 s, about
+33.6x faster in this single measurement. This is CPU reference preparation, not
+NPU or end-to-end inference performance. All 65 first-token reference captures
+(64 residuals and logits) also match the earlier full-depth reference bytewise.
+
+The completed fixture pins **195 reference captures** for 64 layers, three
+steps, 5120 residual values and 248320 logits, with seed 248045. The harness
+completed **198 dispatches**. Strict comparison passed all **192 residuals**
+and all three full-logit arrays:
+
+| Step | Logit correlation | Argmax, NPU / CPU | Harness / runtime logits |
+|---|---:|---|---|
+| 0 | 0.9999973866 | 8678 / 8678 | Byte-identical |
+| 1 | 0.9999920389 | 198 / 198 | Byte-identical |
+| 2 | 0.9999972735 | 2 / 2 | Byte-identical |
+
+Worst residual normalized maximum error: **0.004046247**, layer 63 at step 1,
+below the unchanged **0.005** bound. Every correlation exceeds **0.9999**;
+reference hashes, finite values, dimensions and argmax checks pass. The current
+runtime reproduced the generated IDs on a second request, whose three logit
+dumps pass `--runtime-prefix`. Three reset replays of inputs 248045, 8678, 198
+reported **0/3 differing runs** for observed buffers and recurrent-state hashes.
+This confirms repeatability against an NPU run, not independent state accuracy.
+
+Full-precision metrics, reference metadata and dated logs are retained under
+ignored `Models/qwen38-27b/production-multitoken/{results.json,logs/}`.
+Stage 5b is complete for these three positions. Independent state/head/FFN-partial
+checks remain open, as do block-prefill, serving and final resource acceptance.
+The power-mode request still failed; no NPU throughput claim is made.
 
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 862 passed, 47 skipped |
+| `specs/open-engine/tests` | 870 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite and C++ build/CTest were rerun for stage 5 preparation.
+The open-engine suite was rerun for stage 5b; C++ build/CTest results are from
+stage 5 preparation (the relevant C++ sources are unchanged).
 Weights were not reconverted. Skipped tests and successful compilation do not
 extend the explicit hardware coverage above.
 

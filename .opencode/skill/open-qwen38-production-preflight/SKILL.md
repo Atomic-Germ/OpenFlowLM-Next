@@ -6,8 +6,8 @@ description: Normalize an existing dense Qwen3.5 Q4NX config, validate Qwen3.8-2
 # Qwen3.8-27B production preflight and Linux build
 
 Use the shared `qwen35` recipe. This workflow validates metadata, selected source
-weights, compilation, an eight-layer NPU slice and the first token at full
-depth; it does not establish full-depth multi-token numerical acceptance.
+weights, compilation, an eight-layer NPU slice and three tokens at full depth.
+Independent state/head/FFN-partial, serving and prefill acceptance remain open.
 
 ## Existing model metadata
 
@@ -215,8 +215,10 @@ Local stage-3 evidence is in
 
 Use a separate fixture directory; do not overwrite the eight-layer reference.
 The full-depth fixture takes about 17 GB on disk. On this machine, allow about
-30 minutes for one CPU reference token and roughly 30 GB of additional memory
-for a resident 64-layer NPU run. These are planning estimates, not benchmarks.
+30 GB of additional memory for a resident 64-layer NPU run. This is a planning
+estimate, not a benchmark. The old CPU decoder took roughly 30 minutes per
+reference token; contiguous Q4 gathers added on 2026-10-10 remove its main
+dequantization bottleneck.
 Keep NPU jobs serial and check available memory before starting.
 
 ```bash
@@ -285,7 +287,7 @@ strict `--check` rejects those copies. Do not silently use them for a reference
 run. `production-kernels-upstream/` is an unverified `--no-build` snapshot,
 marked `VALIDATION_FAILED.txt`; it is not a new validated build.
 
-Use the existing `production-kernels/` explicitly for the pending 64-layer,
+Use the existing `production-kernels/` explicitly for the 64-layer,
 three-token compatibility run:
 
 ```bash
@@ -304,10 +306,65 @@ reference contract; regenerate it, not `--cfg-only`.
 The attempt ran out of available RAM while loading 50/64 layers; no new
 full-depth numerical result was produced. Wait for roughly 35–40 GiB available
 before attempting the resident NPU run, and finish CPU preparation first when
-memory is constrained. The user explicitly paused hardware work until memory
-is freed. Logs are under `production-multitoken/logs/`; old stage-3/4 results
-must not be reported as reruns on the updated runtime.
+memory is constrained. The user paused hardware work until memory was freed;
+the 2026-10-10 continuation below completed this run. Logs are under
+`production-multitoken/logs/`; old stage-3/4 results must not be reported as
+reruns on the updated runtime.
 
 Artifacts/logs for this run: `Models/qwen38-27b/production-kernels/`,
 `Models/qwen38-27b/production-input-sha256.txt`,
 `/tmp/qwen38-production-model-build.log`, `/tmp/qwen38-production-source-compare.log`.
+
+## 2026-10-10: full-depth three-token gate completed
+
+Resumed with about 62 GiB available; finish CPU reference generation before
+starting NPU jobs. The preparation command above completed with 195 pinned
+captures and 198 dispatches. Use the same verified export for the runtime.
+No new kernel/library build was required.
+
+Q4 preparation now uses contiguous gathers with unchanged FP32 values. Check
+real-tensor byte identity and CPU dequantization timing with:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python utilities/benchmark-q4-decode.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2
+```
+
+Layer 0 FFN up projection: 10880 chunks, byte-identical, 7.94 s legacy versus
+0.236 s contiguous in one measurement (33.6x). This does not measure NPU
+inference. All 65 first-token reference captures match `production-full/`
+bytewise. The scalar-layout regression suite passes 8 tests; the complete
+open-engine suite passes 870 tests with 47 skipped.
+
+After the CPU preparation above completes:
+
+```bash
+HARNESS_TIMEOUT_MS=30000 LD_LIBRARY_PATH=/opt/xilinx/xrt/lib \
+  open_kernels/harness/out/run_kernel Models/qwen38-27b/production-multitoken/run_decode.cfg
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
+  /tmp/qwen38-main-status-runtime/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-kernels \
+  --ids 248045 --max-tokens 3 --layers 64 \
+  --dump-logits Models/qwen38-27b/production-multitoken/engine --twice
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/compare_decode.py \
+  --out Models/qwen38-27b/production-multitoken --tokens 3 \
+  --runtime-prefix Models/qwen38-27b/production-multitoken/engine
+LD_LIBRARY_PATH=/opt/xilinx/xrt/lib OMP_NUM_THREADS=4 OMP_WAIT_POLICY=PASSIVE \
+  /tmp/qwen38-main-status-runtime/open_qwen36_cli \
+  --model Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernels Models/qwen38-27b/production-kernels \
+  --ids 248045,8678,198 --layers 64 --det-step 3 --det-full
+```
+
+Results: all 192 residuals pass (worst maxrel 0.004046247 at layer 63 / step 1),
+logit correlations 0.9999973866 / 0.9999920389 / 0.9999972735, equal argmax
+8678 / 198 / 2 and byte-identical runtime/harness logits at all three steps.
+Repeated request reproduced IDs; reset replay reported 0/3 differing runs.
+Reset replay still compares with another NPU run, not independent CPU state.
+The power-mode request failed, so this is not an NPU benchmark.
+
+Evidence: `production-multitoken/results.json` and `logs/*20261010*` under the
+model directory. `prepare-20261010.log` is the cancelled slow baseline;
+`prepare-contiguous-20261010.log` is the completed reference generation.
+Independent state/head/FFN-partial checks, block-prefill and serving remain open.

@@ -37,6 +37,19 @@ runs; `--cfg-only` rewrites just the program.
 
 ### Decode acceptance
 
+CPU Q4 reference preparation gathers values and coefficients into contiguous
+chunk-major arrays. The indices, FP32 multiplication/addition and output values
+are unchanged; this avoids tensor-wide strides during dequantization. The
+scalar-layout tests check bit identity, including strided input chunks. To
+compare the retained legacy implementation against a real model tensor:
+
+```bash
+OPENBLAS_NUM_THREADS=1 python utilities/benchmark-q4-decode.py --model-dir MODEL_DIR
+```
+
+The utility fails on any differing output byte and reports dequantization time
+only. Its timings do not measure NPU inference or end-to-end model throughput.
+
 Pass `make_decode.py --kernel-dir DIR` to target a retained runtime export
 instead of mutable design build directories. The export must have the same
 manifest as the current model/recipe except for its source build key; all
