@@ -1225,10 +1225,10 @@ GGUF (`-f llama`) is interleaved and keeps the reorder.
 **Applies to:** openflowlm-next (`open_kernels/designs/dxl`, `open_kernels/recipes/dxl.py`, `recipes/dense.py` `rows_route`, `harness/stream_patch.hpp`, `src/open_qwen36/core.cpp` `step_rows`)
 **Verification:** test (the layout and job tables: `tests/test_dxl.py`); manual (the hardware procedure below)
 
-For a family in `ROWS_FAMILIES` (K2 today), the kernel set shall ship an L-row pass (L = 4).
-`dxl` takes L consecutive positions through one dense layer in one dispatch, and `lmhl` takes
-their final norm, the head and each row's argmax in another. The weights are streamed once for
-the L rows.
+For a family in `ROWS_FAMILIES` (K2 today), the kernel set shall ship an L-row pass (L = 4)
+at any hidden, q width and intermediate that are multiples of 512. `dxl` takes L consecutive
+positions through one dense layer in one dispatch, and `lmhl` takes their final norm, the head
+and each row's argmax in another. The weights are streamed once for the L rows.
 
 Row j, at position pos0 + j, shall be bit-identical to the decode step at that position:
 - The same bf16 logits, every one of them, and so the same argmax.
@@ -1250,6 +1250,20 @@ The main cores run a job table. The table for this dispatch's mode (`rtp[0]`) is
 stream behind a runtime barrier, so the verify and draft streams (OPEN-UNO-LORA) share one
 xclbin and one hardware context.
 
+**Widths.** A job walks K in slices, one 2 KB x element per token per slice:
+- bf16 inputs in 1024-wide slices where the width is a multiple of 1024, else 512-wide. A 512
+  slice still fills a whole element; the other half is over-read from what follows in act and
+  never prepped.
+- The fp32 down input in 512-wide slices.
+- Each of q, o and down takes its own tile: the largest divisor of its bands a core, up to 8,
+  whose resident accumulators fit. Granite 4.2 3B's 5 bands a core make tiles of 5, not 1.
+  up | gate pairs take up to 6. At 4096 (K2-7B) and 2560 (K2-3.7B, Granite 4.2 3B) both tables
+  hold 13 and 30 jobs.
+
+`lmhl` preps each row's hidden in 1024-wide x elements. A last partial element (2560 = 2 x 1024
++ 512) is read whole, the head's act is padded so the last row's stays in the buffer, and only
+its real blocks are prepped. `lmhl2` refuses a hidden that is not whole 1024 slices.
+
 **Every main-core buffer is a whole number of 64 B, and the build asserts it.** The allocator
 places buffers back to back. A 512-bit access at an address that is only 32 B aligned reads
 the wrong bytes without faulting. A 3,080 B table did exactly that, and `designs/dxl/glj.py`
@@ -1266,6 +1280,11 @@ sizes the shared window to pos0 + L rows.
 - Each draft base tile is followed by its LoRA k-tile at S0 = K / 256, and the band drains
   only after that tile.
 - The LoRA pack plan is contiguous whole chunks.
+- At hidden 2560 (K2-3.7B, Granite 4.2 3B) the layout fits at L = 4 and 8, both tables hold 13 and
+  30 jobs, and every x element, half slices included, reads inside act.
+- A width off the 512 grid is refused.
+- K2-7B's job tables and rows route are byte-identical to the 1024-only recipe's.
+- The head's act holds every row's whole x elements.
 - Only K2 ships the route.
 
 **Procedure (manual):**

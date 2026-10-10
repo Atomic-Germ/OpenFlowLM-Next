@@ -41,9 +41,8 @@ QW, KVW = G.QW, G.KVW
 ELN, E_A = L0.ELN, L0.E_A
 CHUNK = DXR.CHUNK
 BB_H, BB_Q, BB_F = 2 * (HID // 256) * CHUNK, 2 * (QW // 256) * CHUNK, 2 * (FF // 256) * CHUNK
-KSB, KSF = DXR.KS_BF16, DXR.KS_F32
 YE = LR * 64                                # one band's [L][64] floats
-BT, BP = X.BT, X.BP
+BP = X.BP
 YB = X.YB                                   # accumulator bands; the gate bands follow at YB
 OS = ["-Os"]
 
@@ -85,7 +84,7 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
     elem = np.ndarray[(CHUNK,), np.dtype[np.uint8]]
     x_ty = np.ndarray[(DXR.XE // 2,), np.dtype[bfloat16]]
     y_ty = np.ndarray[(YE,), np.dtype[np.float32]]
-    tab_ty = np.ndarray[(LR * DXR.tab_bytes(KSB),), np.dtype[np.uint8]]
+    tab_ty = np.ndarray[(LR * DXR.tab_bytes(X.TAB_K),), np.dtype[np.uint8]]
     acc_ty = np.ndarray[((YB + BP) * YE,), np.dtype[np.float32]]
     u8_ln = np.ndarray[(ELN,), np.dtype[np.uint8]]
     u8_a = np.ndarray[(E_A,), np.dtype[np.uint8]]
@@ -351,7 +350,8 @@ def dxl(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, lora
                 return
             _, off, row, K, KS, f32 = job.x
             xb = KS * (4 if f32 else 2)
-            px.fill(x_prod, a_act, tap(AB, off, [1, K // KS, LR, xb], [0, xb, row, 1]))
+            # a half slice (KS_BF16_HALF) still fills a whole element; prep never reads the over-read half
+            px.fill(x_prod, a_act, tap(AB, off, [1, K // KS, LR, DXR.XE], [0, xb, row, 1]))
 
         def y_drain(job):
             """each core's [band][row][64] -> act[row][band*64 ..]"""

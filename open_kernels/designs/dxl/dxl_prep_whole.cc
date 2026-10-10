@@ -3,7 +3,7 @@
 
 extern "C" {
 void dxl_prep_whole(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t j, int32_t i, int32_t k) {
-  const unsigned K = (unsigned)k;
-  gemv_q4_prep_blocks(e, tab + (unsigned)j * gemv_q4_tab_bytes(K), K, 32u * (unsigned)i, 32u);
+  const unsigned K = (unsigned)k, b0 = 32u * (unsigned)i, nb = K / 32 - b0 < 32u ? K / 32 - b0 : 32u;
+  gemv_q4_prep_blocks(e, tab + (unsigned)j * gemv_q4_tab_bytes(K), K, b0, nb);   // a last partial element: its real blocks
 }
 }

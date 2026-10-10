@@ -34,6 +34,7 @@ H = DXR.head_layout(SPEC, LR)
 HID, N_CORES, CHUNK, KS = G.HID, H.CORES, DXR.CHUNK, DXR.KS_BF16
 BPC, BT, ROW = H.BPC, H.BT, H.ROW_FLOATS
 S, KT = HID // KS, HID // 256
+assert HID % KS == 0, f"lmhl2: hidden {HID} is not whole {KS}-wide slices; lmhl covers it"
 EPS = 2 * KS // 256 // 2                    # 10 KB elements per band per slice
 BB = 2 * KT * CHUNK
 SB = 2 * (KS // 256) * CHUNK                # a band's slice bytes

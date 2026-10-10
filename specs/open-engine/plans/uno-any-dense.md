@@ -1,11 +1,14 @@
 # Plan: Uno for any dense family, not just K2
 
-**Status:** in progress, 2026-10-09. Branch `feat/uno-any-dense`, stacked on PR #184 (`feat/k2-horizon-7b`) and merged into
-it by PR.
-- **Done:** G1, G2, G3 and G5.
-  - K2 on the NPU: the CLI's six prompts give exactly #184's tokens a cycle, identical to decode.
-  - `oflm serve`: greedy requests decode by Uno (see OPEN-UNO-DECODE's 2026-10-09 result).
-- **Next:** G6, then G4. #184's speed Phases 3-7 wait on review and a settings design (#188), so `dxl`, `lmhl`, `designs/dxl` and `rows_route` are this branch's (agreed with #184's owner).
+**Status:** in progress, 2026-10-10. Branch `feat/uno-any-dense`, pushed onto PR #184's branch (`feat/k2-horizon-7b`),
+agreed with #184's owner.
+- **Done:** G1, G2, G3, G5, G6 and G4.
+  - K2-7B on the NPU: the CLI's six prompts identical to decode with the app's pick (G6).
+  - K2-3.7B (hidden 2560) on the NPU: `--rows-check 17` passes from a 20- and a 158-token prompt (G4).
+  - `dxl`, `lmhl` and `rows_route` are this branch's while #184's speed Phases 3-7 wait on review and a settings
+    design (#188).
+- **Left for the Granite PR (#189):** the 2560-wide draft pass on a real adapter. No K2-3.7B Uno adapter exists, so
+  the half slices' LoRA jobs have run only in the unit tables.
 - **Found on the way:** `pools_test` aborted on Windows since #121; main fixed it in #181, which #184 picks up when it merges main.
 
 #184 brought IFM's K2-Horizon-7B-Uno to the NPU. Several pieces of it assume K2 where nothing about Uno requires that.

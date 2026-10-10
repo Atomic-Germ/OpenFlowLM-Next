@@ -25,6 +25,7 @@ from ironutil import Pipeline, include_dirs  # noqa: E402
 from recipes.load import current_spec  # noqa: E402
 from recipes.families import for_spec  # noqa: E402
 from recipes.dense import lm_rows  # noqa: E402
+from recipes import dxl as DXR  # noqa: E402
 
 SPEC = current_spec()
 R = for_spec(SPEC).recipe(SPEC)
@@ -38,6 +39,9 @@ BANDS = VOCAB // 64
 BB = 2 * (HID // 256) * CHUNK
 CPB = 2 * HID // 256                        # chunks per band
 XE = 2048                                   # one x element: 1024 bf16
+NE = -(-HID // 1024)                        # x elements a row; a last partial one is padded by over-reading
+assert HID % 256 == 0, f"lmhl: hidden {HID} is not whole 256-wide k-tiles"
+ACT_BYTES = DXR.head_act_bytes(SPEC, LR)
 YE = LR * 64
 ELN = L0.ELN
 TABB = 2 * HID + HID // 4
@@ -76,7 +80,7 @@ def lmhl(pool: In, xres: In, normw: In, act: InOut, out: Out, *, srchash: Compil
     pool_ty = np.ndarray[(L0.LMHEAD_POOL_BYTES,), np.dtype[np.uint8]]
     xres_ty = np.ndarray[(LR * HID,), np.dtype[np.float32]]
     normw_ty = np.ndarray[(HID,), np.dtype[bfloat16]]
-    act_ty = np.ndarray[(LR * HID * 2,), np.dtype[np.uint8]]
+    act_ty = np.ndarray[(ACT_BYTES,), np.dtype[np.uint8]]
     out_ty = np.ndarray[(OUT_FLOATS,), np.dtype[np.float32]]
     i32 = np.int32
 
@@ -102,7 +106,7 @@ def lmhl(pool: In, xres: In, normw: In, act: InOut, out: Out, *, srchash: Compil
         def body(win, xin, yout, tab, best, fg, fp, fi, fa, fo):
             fi(best)
             for j in range_(LR):
-                for i in range_(HID // 1024):
+                for i in range_(NE):
                     xe = xin.acquire(1)
                     fp(xe, tab, j, i, HID)
                     xin.release(1)
@@ -146,9 +150,12 @@ def lmhl(pool: In, xres: In, normw: In, act: InOut, out: Out, *, srchash: Compil
         for j in range(LR):
             pl.fill(lni, c_xres, bt(LR * HID, j * HID, HID))
             pl.fill(lni, c_normw, bt(HID, 0, HID))
-            pl.drain(lno, a_act, bt(LR * HID * 2, j * HID * 2, ELN))
+            pl.drain(lno, a_act, bt(ACT_BYTES, j * HID * 2, ELN))
         pl.finish()
-        px.fill(x_prod, a_act, bt(LR * HID * 2, 0, LR * HID * 2))
+        if HID % 1024:
+            px.fill(x_prod, a_act, tap(ACT_BYTES, 0, [1, LR, NE, XE], [0, HID * 2, XE, 1]))
+        else:
+            px.fill(x_prod, a_act, bt(ACT_BYTES, 0, LR * HID * 2))
         px.finish()
         pw.finish()
         py.finish()
