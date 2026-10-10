@@ -4261,3 +4261,24 @@ do not establish hardware behavior of a newly built runtime.
 The optional `--diagnose-bf16` reports a second comparison from BF16-rounded
 `h`. It is diagnostic only: acceptance and exit status must still depend on
 the original captured FP32 input, even when the rounded-input comparison passes.
+
+
+### OPEN-DENSE-FP32-PREP: dense down activation table
+
+The split dense FFN's FP32 `h` must reach the integer GEMV without an intermediate
+BF16 rounding. `dense_prep_f32` uses `gemv_q4_prep_f32_direct_blocks`: choose a
+power-of-two scale per 32 values from the FP32 maximum exponent, then round
+the original values directly to INT16 (ties to even, endpoint saturation).
+Compute the offset-correction block sum from the original FP32 values and
+store it in the existing BF16 hi/lo representation. Table size remains 2.25*K;
+the two-piece partition, packing, DMA and output layouts do not change.
+
+BF16-input preparation, single-piece dense and non-dense FP32 entries keep
+their existing routes.
+The generator must select the direct entry, so regenerating translation units
+cannot silently restore BF16 rounding. Validate table conversion on hardware
+and replay the failing layer from pinned captured inputs before full-model
+acceptance. Replays carry per-layer state/KV across positions, require exact
+input `h`/pre-FFN residual identity and enforce the original partial gates.
+A layer-at-a-time sweep is conditioned on saved previous-layer outputs; it does
+not replace propagation through the whole corrected model.

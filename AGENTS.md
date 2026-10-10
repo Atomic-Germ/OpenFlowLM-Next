@@ -51,4 +51,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Normalize existing Qwen3.5-family metadata, compare Qwen3.8-27B source tensors, and build all 41 production kernel sets on Linux.</description>
     <location>.opencode/skill/open-qwen38-production-preflight/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen35-fp32-down-replay</name>
+    <description>Build and validate direct FP32 input preparation for split dense FFN, replay isolated Qwen3.8 layers and run an all-layer precision sweep without full-model residency.</description>
+    <location>.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md</location>
+  </skill>
 </available_skills>
