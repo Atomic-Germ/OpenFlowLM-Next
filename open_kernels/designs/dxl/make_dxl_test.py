@@ -15,12 +15,20 @@ from recipes.families import for_spec  # noqa: E402
 from recipes.load import load_spec  # noqa: E402
 
 
+def greedy_view(x: np.ndarray) -> np.ndarray:
+    """The logits as the app's greedy compares them: rounded to bf16 (nearest even), subnormals to zero."""
+    u = x.astype(np.float32).view(np.uint32).astype(np.uint64)
+    r = ((u + 0x7FFF + ((u >> 16) & 1)) & 0xFFFF0000).astype(np.uint32)
+    r[(u & 0x7F800000) == 0] = 0
+    return r.view(np.float32)
+
+
 def tok_file(fx: Path, stem: str, j: int) -> Path:
     return fx / (f"{stem}.bin" if j == 0 else f"{stem}_t{j}.bin")
 
 
 def head(a, fx: Path, spec, R) -> int:
-    """lmhl on layer 0's L rows: logits bit-identical to the fixture's ln + lm_head_q4 run, argmax equal to the host's."""
+    """lmhl on layer 0's L rows: logits bit-identical to the fixture's ln + lm_head_q4 run, argmax the app's greedy pick."""
     from recipes.dense import lm_rows
     hid, vocab, L0 = spec.hidden, lm_rows(spec), R.layout
     row = DXR.head_layout(spec, a.l).ROW_FLOATS if a.head2 else vocab    # lmhl2 pads its logits rows
@@ -33,7 +41,7 @@ def head(a, fx: Path, spec, R) -> int:
         for j in range(a.l):
             ref = np.fromfile(tok_file(fx, "y_logits", j), np.float32)[:vocab]
             diff = int((ref.view(np.uint32) != lg[j].view(np.uint32)).sum())
-            host = int(np.argmax(ref[:spec.real_vocab]))
+            host = int(np.argmax(greedy_view(ref[:spec.real_vocab])))
             vals, rows = am[:, j], am[:, a.l + j]
             npu = int(rows[int(np.argmax(vals))])          # np.argmax: the first core on a tie
             good = diff == 0 and npu == host

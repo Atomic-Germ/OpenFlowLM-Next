@@ -5,10 +5,8 @@ it by PR.
 - **Done:** G1, G2, G3 and G5.
   - K2 on the NPU: the CLI's six prompts give exactly #184's tokens a cycle, identical to decode.
   - `oflm serve`: greedy requests decode by Uno (see OPEN-UNO-DECODE's 2026-10-09 result).
-- **Waiting:** G4, until #184's speed Phase 3 lands (the user's call).
-- **Found on the way:**
-  - The app's greedy argmaxes bf16-rounded logits while Uno's head argmaxes f32, so served Uno and served plain decode can split at a bf16 tie. This is recorded as a known gap under OPEN-UNO-DECODE; the fix belongs to #184.
-  - `pools_test` aborted on Windows since #121 (fixed here).
+- **Next:** G6, then G4. #184's speed Phases 3-7 wait on review and a settings design (#188), so `dxl`, `lmhl`, `designs/dxl` and `rows_route` are this branch's (agreed with #184's owner).
+- **Found on the way:** `pools_test` aborted on Windows since #121; main fixed it in #181, which #184 picks up when it merges main.
 
 #184 brought IFM's K2-Horizon-7B-Uno to the NPU. Several pieces of it assume K2 where nothing about Uno requires that.
 This plan makes those pieces family-neutral, with K2's output and kernels unchanged. Bringing up a second adapter
@@ -22,12 +20,13 @@ This plan makes those pieces family-neutral, with K2's output and kernels unchan
 | G2 | **The draft's noise range is the adapter's.** `--uno-noise-high N` records the exclusive upper bound of the noise ids an adapter was trained with in `uno.q4nx`'s metadata. `Q4nxFile` keeps the metadata, and `uno_cycle` and the CLI draw from `[1, N)`. Absent, it is today's `[1, vocab - 1]`. | OPEN-UNO-LORA, OPEN-UNO-DECODE (modified) | test: `test_uno.py` (the metadata); manual: K2 `--uno 128` unchanged and identical |
 | G3 | **One Uno generate for every family.** `uno_applies` / `generate_uno` move from `modeling_k2.cpp` to the AutoModel base, and a family opts in with one override. K2 behaves exactly as before. | OPEN-UNO-DECODE (modified) | manual: `oflm serve` K2 greedy, sampled and tool-call requests as in #184 |
 | G4 | **The L-row pass at any hidden width that is a multiple of 512,** not only 1024: `recipes/dxl.py` slices, job tables past 4 bands a core, and `lmhl` covering every column. Today `lmhl` silently drops the columns past the last whole 1024; it must refuse what it can't cover. K2's tables stay byte-identical. | OPEN-DECODE-ROWS (modified) | test: `tests/test_dxl.py` (a 2560-wide config; K2 tables unchanged); manual: K2 `--rows-check 17` PASS |
+| G6 | **Uno's greedy picks what the app's greedy picks.** The app argmaxes logits rounded to bf16, lowest id on a tie (`Engine::forward` is `buffer<bf16>`); `lmhl`'s verify argmax compared f32, so served Uno and served decode split where two logits share a bf16 value (K2, the train prompt, token 128: 25.494 vs 25.439). `lmhl` rounds each logit to bf16 and keeps the lowest id on a tie, within a chunk and across chunks; so does the CPU oracle, and the CLI's check compares bf16 argmax. | OPEN-UNO-DECODE (the known gap closed) | manual: the K2 serve check's 160-token train reply identical; `--uno` UNO IDENTICAL on the six prompts |
 | G5 | **A Uno bench.** `utilities/uno-bench` runs `open_qwen36_cli --uno N` over a prompt file under the NPU lock's timing gate and tabulates tokens a cycle, Uno vs decode tok/s and the speedup. | none (tooling) | — |
 
 **Order:**
 - G1 and G5 first; they are pure Python.
 - Then G2 and G3, which are engine changes and need a build.
-- G4 last. It touches the `dxl` and `lmhl` designs that #184's speed work (`k2-uno-speed.md` Phase 3) is changing, so it rebases onto whatever that phase lands.
+- G6, then G4; both are in `lmhl`.
 
 ## Not in this plan (the Granite issue #189 and its PR)
 
@@ -39,5 +38,5 @@ This plan makes those pieces family-neutral, with K2's output and kernels unchan
 ## Spec impact
 
 - **OPEN-UNO-LORA (modified):** no longer K2-only. s·B carries the projection's base fold, and the noise range is adapter metadata.
-- **OPEN-UNO-DECODE (modified):** noise is drawn from the adapter's range. One generate serves every family that opts in.
+- **OPEN-UNO-DECODE (modified):** noise is drawn from the adapter's range. One generate serves every family that opts in. The verify argmax is the app's: bf16, lowest id on a tie.
 - **OPEN-DECODE-ROWS (modified):** hidden widths that are multiples of 512; `lmhl` refuses a width it does not cover.

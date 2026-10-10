@@ -1,4 +1,4 @@
-// Strict > on order-preserving int bits, so the first maximal row wins as in the host argmax.
+// Strict > on greedy_key, so the first maximal row wins as in the app's greedy.
 #include "dxl_gemv.h"
 
 extern "C" {
@@ -11,7 +11,7 @@ void dxl_lm_arg(const float *__restrict y, int32_t *__restrict best, int32_t ban
     int32_t bv = best[t], bi = best[kL + t];
     for (int32_t r = 0; r < valid; ++r) {
       const int32_t v = yi[t * kBandFloats + r];
-      const int32_t s = v < 0 ? v ^ 0x7fffffff : v;
+      const int32_t s = greedy_key(v);
       if (s > bv) {
         bv = s;
         bi = row0 + r;

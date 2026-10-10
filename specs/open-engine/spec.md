@@ -1273,7 +1273,7 @@ sizes the shared window to pos0 + L rows.
    `run_kernel`, then `--compare`. Every row must equal dx's layer output for the same token:
    0 of 4096 values differ.
 2. The same with `--head` for `lmhl`: 0 of 250624 logits differ from `ln` + `lm_head_q4`, and
-   the NPU argmax equals the host's.
+   the NPU argmax is the app's greedy pick (OPEN-UNO-DECODE).
 3. `python designs/dxl/dxl_at_test.py --pos0 P --build <dxl build>`, then `run_kernel` on the
    cfg it writes, then `--compare`: P + L decode steps fill the cache, then the L rows at P on
    that cache, 0 of 4096 values differ on every row. Run P = 1, 5, 8 (block boundaries) and one
@@ -1367,16 +1367,20 @@ when the request is greedy: top_k 1, and no penalty that reorders the logits. A 
 by EOS or a length limit is sought back to where plain decode would have left the cache. A
 sampled request decodes as usual.
 
-**Known gap: the app's greedy rounds logits to bf16 first.**
-- The app's plain greedy argmaxes the engine's logits after `Engine::forward` rounds them to bf16, with the lowest id winning a tie.
-- Uno's head (`lmhl`) and the CLI's decode argmax f32.
-- Where two candidates round to the same bf16 value, served Uno and served plain decode pick different tokens. Uno's pick is the f32 argmax.
-- Seen 2026-10-09: K2-7B, a math prompt, token 128. ' =' scored 25.494 and ':' scored 25.439; both are 25.5 in bf16.
-- The CLI procedure compares against f32 argmax and stays identical there.
+**Every argmax is the app's greedy pick.** The app's plain greedy argmaxes the logits after
+`Engine::forward` rounds them to bf16 (nearest even, subnormals to zero), the lowest id winning a
+tie. So:
+- `lmhl` compares each logit rounded the same way (`greedy_key`), keeping the first row on a tie
+  within a core, and the engine keeps the first core on a tie across cores.
+- The CLI's `--uno` and `--rows-check` decode references use the same pick (`argmax_bf16`), and so
+  does the CPU oracle (`utilities/uno-ref`).
+- An f32 argmax splits from it wherever the top two share a bf16 value, which is common: logits
+  near 25 are 0.125 apart in bf16. K2-7B's six prompts split at tokens 6, 18, 28 and 124 on four
+  of them; the train prompt at token 128 (' =' 25.494 against ':' 25.439, both 25.5).
 
 **Procedure (manual):** `open_qwen36_cli --model <dir> --kernels <set> --ids <chat ids> --uno N`
-runs N tokens by the cycle, then by plain decode. It prints `UNO IDENTICAL to decode over N
-tokens` and both speeds.
+runs N tokens by the cycle, then by plain decode with the app's pick. It prints `UNO IDENTICAL
+to decode over N tokens` and both speeds.
 
 **Result 2026-10-09 (K2-Horizon-7B-Uno, 6 prompts x 128 tokens, quiet machine under the shared
 lock's `timing` gate):**

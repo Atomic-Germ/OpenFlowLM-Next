@@ -11,6 +11,13 @@ static constexpr unsigned kL = DXL_L;
 static_assert(kL % 4 == 0, "DXL_L must be a multiple of 4 (tokens ride the mmul's four rows)");
 static constexpr unsigned kBandFloats = kRows * 2;      // 64: one band's accumulator per token
 
+// The app's greedy compares logits rounded to bf16 (nearest even, subnormals to zero); this is that order as an int.
+static inline int32_t greedy_key(int32_t v) {
+  const uint32_t u = (uint32_t)v;
+  const int32_t s = (int32_t)((u & 0x7f800000u) ? (u + 0x7fffu + ((u >> 16) & 1u)) & 0xffff0000u : 0u);
+  return s < 0 ? s ^ 0x7fffffff : s;
+}
+
 __attribute__((noinline)) inline void dxl_tile4(const uint8_t *__restrict tile,
                                                 const uint8_t *__restrict tab0, unsigned tabStride,
                                                 unsigned K, unsigned kt, bool first, bool last,

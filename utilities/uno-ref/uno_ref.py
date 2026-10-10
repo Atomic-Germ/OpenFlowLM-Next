@@ -134,6 +134,12 @@ class K2:
         return (group_rms(res, self.W["norm"]) @ self.W["head"].T).float()
 
 
+def greedy(lg: torch.Tensor) -> torch.Tensor:
+    """The app's greedy pick: logits rounded to bf16 (subnormals to zero), the lowest id on a tie."""
+    lg = torch.where(lg.abs() < torch.finfo(torch.float32).tiny, torch.zeros_like(lg), lg)
+    return lg.to(torch.bfloat16).float().argmax(-1)
+
+
 def prefill(m: K2, ids, chunk=256) -> None:
     for i in range(0, len(ids) - 1, chunk):
         m.forward(ids[i:min(i + chunk, len(ids) - 1)], i)
@@ -145,7 +151,7 @@ def ar_generate(m: K2, prompt, max_new):
     prefill(m, seq)
     out = []
     while len(out) < max_new:
-        tok = int(m.forward([seq[-1]], len(seq) - 1)[0].argmax())
+        tok = int(greedy(m.forward([seq[-1]], len(seq) - 1)[0]))
         seq.append(tok)
         out.append(tok)
         if tok in EOS:
@@ -162,10 +168,10 @@ def uno_generate(m: K2, prompt, max_new, L, rng):
         n = len(seq)
         noise = rng.integers(1, VOCAB, L - 1).tolist()      # uniform ids in [1, mask_token_id)
         la = m.forward([seq[-1]] + noise, n - 1, [0] + [1] * (L - 1))
-        c = int(la[0].argmax())
-        drafts = la[1:].argmax(-1).tolist()
+        c = int(greedy(la[0]))
+        drafts = greedy(la[1:]).tolist()
         lb = m.forward([c] + drafts, n)
-        a = lb.argmax(-1).tolist()
+        a = greedy(lb).tolist()
         k = 0
         while k < L - 1 and drafts[k] == a[k]:
             k += 1

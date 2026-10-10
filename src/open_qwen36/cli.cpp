@@ -34,6 +34,8 @@
 /// pairs (correlation / argmax / top-5).
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <random>
 #include <thread>
 #include <cstdio>
@@ -66,6 +68,17 @@ int argmax(const std::vector<float>& v, size_t n) {
     int best = 0;
     for (size_t i = 1; i < n; ++i)
         if (v[i] > v[best]) best = static_cast<int>(i);
+    return best;
+}
+
+// The app's greedy (Engine::logits_view, Sampler::sample_greedy): bf16-rounded logits, subnormals to zero, lowest id on a tie.
+int argmax_bf16(const std::vector<float>& v, size_t n) {
+    int best = 0;
+    float bv = -std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < n; ++i) {
+        const float x = std::fpclassify(v[i]) == FP_SUBNORMAL ? 0.0f : open_qwen36::bf16_to_f32(open_qwen36::f32_to_bf16(v[i]));
+        if (x > bv) { bv = x; best = static_cast<int>(i); }
+    }
     return best;
 }
 
@@ -226,7 +239,7 @@ int rows_check(Core& core, const Args& a, int n) {
     double step_ms = 0;
     for (int t = 0; t < n; ++t) {
         lg.emplace_back(core.logits().begin(), core.logits().end());
-        seq.push_back(argmax(core.logits(), core.real_vocab()));
+        seq.push_back(argmax_bf16(core.logits(), core.real_vocab()));
         if (t + 1 == n) break;
         core.step(seq.back(), true);
         step_ms += core.last_timing().total_ms;
@@ -304,7 +317,7 @@ int uno(Core& core, const Args& a, int n) {
     std::vector<int> ar;
     const auto t1 = clock::now();
     for (int t = 0; t < n; ++t) {
-        ar.push_back(argmax(core.logits(), core.real_vocab()));
+        ar.push_back(argmax_bf16(core.logits(), core.real_vocab()));
         if (t + 1 < n) core.step(ar.back(), true);
     }
     const double ar_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
