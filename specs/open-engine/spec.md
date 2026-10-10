@@ -4099,6 +4099,15 @@ only a complete, finite, correctly sized reference publishes new metadata.
 A cfg-only rewrite verifies the existing metadata and hashes without updating
 reference provenance. This record does not hash all model weights or xclbins.
 
+`make_decode.py --kernel-dir DIR` selects an explicit kernel export. Its full
+manifest must match the current recipe/model except for `build_key`; its
+toolchain spec/build identifiers must agree with that manifest, and hashes
+must cover and verify all required binaries. Generated harness paths point
+inside the export (escaping symlinks are refused). References retain the
+selected export's build key, including on cfg-only checks. Source build-key
+drift alone is permitted for compatibility validation, never hidden by
+rewriting either the export or existing reference metadata.
+
 The comparator requires every declared token and layer. `--tokens`, if given,
 must equal the declaration; omitting it checks the complete run. Both device
 and reference captures must have exactly the expected byte count and finite

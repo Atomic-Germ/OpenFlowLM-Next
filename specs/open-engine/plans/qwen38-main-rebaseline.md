@@ -1,6 +1,6 @@
 # Qwen3.8-27B validation report
 
-Updated 2026-10-08. This branch strengthens decode/source validation, adds an
+Updated 2026-10-09. This branch strengthens decode/source validation, adds an
 offline converter command for existing model metadata, and builds the current
 Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
 strict CPU-reference comparison, as does the first token at all 64 layers.
@@ -185,20 +185,56 @@ Full-depth multi-token accuracy, independent state/head/FFN-partial checks,
 block-boundary prefill parity, serving and resource/timing acceptance remain
 open. The power-mode request still failed, so this is not a benchmark result.
 
+## Stage 5 preparation: upstream compatibility and explicit kernel selection
+
+The branch already contains upstream `c2ef0e8` through merge `9ace4fb`.
+Relevant changes are exact Q8 splits in the block-prefill route (#172),
+Windows OpenMP wait-policy initialization (#177), and AVX2 host DeltaNet
+prefill loops (#179). They affect the shared runtime/prefill infrastructure;
+they do not replace the decode comparator or config normalization. FLUX image
+support is separate from this text-model validation.
+
+For this Qwen3.8 container, the newly derived manifest equals the retained
+production export apart from `build_key`; it still uses manifest version 1.
+The source key changed from `7424a5e3...` to `04c6a214...`. All 82 retained
+export hashes pass. Working build-directory xclbins differ from that export
+(the inspected decode headers report XRT 2.21.75 versus 2.26.0); their instruction
+streams match. The exporter's strict equivalence check rejected the working
+build copies. They were not substituted for the validated export.
+
+Added `make_decode.py --kernel-dir DIR` to use an explicit compatible export.
+It checks the full manifest except its source build key, verifies matching
+toolchain identifiers and all required binary hashes, and confines binary paths
+to that directory. Both the generated harness paths and reference build identity
+refer to the selected export. It never rewrites old provenance to claim a new
+source build. TDD began with 14 failing tests; 15 export-selection tests now
+pass, plus generator integration coverage for cfg-only and historical keys.
+
+The updated native runtime builds and CTest passes 3/3. The block-host fixture
+passes, including upstream's scalar/AVX2 checks. These CPU tests do not validate
+the full hybrid route on the NPU.
+
+The 64-layer/three-token run was attempted but exhausted available memory:
+runtime loading reached 50 layers after 704 seconds, with available RAM briefly
+around 260 MiB. It produced no completed decode result. The CPU fixture is also
+incomplete and has no acceptance metadata. Hardware work is paused at the user's
+request until memory is available; **stage 5 numerical acceptance remains open**.
+The successful stage 3/4 measurements above are historical results, not reruns
+on the updated runtime. No additional full-model PASS is claimed.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 845 passed, 47 skipped |
+| `specs/open-engine/tests` | 862 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 4; converter results are from stage 2
-and the C++ build/CTest from stage 3 (those sources are unchanged). Weights were
-not reconverted. Skipped tests and successful compilation do not extend the
-explicit hardware coverage above.
+The open-engine suite and C++ build/CTest were rerun for stage 5 preparation.
+Weights were not reconverted. Skipped tests and successful compilation do not
+extend the explicit hardware coverage above.
 
 Stage 1 reproduction:
 

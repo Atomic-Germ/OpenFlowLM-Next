@@ -48,6 +48,7 @@ from recipes.manifest import manifest  # noqa: E402
 from recipes.spec import FULL  # noqa: E402
 from q4nx import Q4NX, f32_to_bf16  # noqa: E402
 from decode_reference import FILENAME, check_reference, save_reference  # noqa: E402
+from decode_bundle import bundle_path, load_bundle  # noqa: E402
 
 DEFAULT_MODEL_DIR = os.environ.get(
     "OFLM_MODEL_DIR", str(Path.home() / ".oflm" / "models" / "Qwen3.6-35B-A3B-NPU2"))   # OFLM's default model store
@@ -69,7 +70,8 @@ def npu_routing(out: Path, layer, t):
     return np.fromfile(p, np.float32)[256:264].view(np.int32).astype(np.int64)
 
 
-def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx: int) -> str:
+def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx: int,
+              kernel_dir: Path | None = None) -> str:
     """The manifest's programs as harness directives."""
     d = DESIGNS.as_posix()
     o = out.as_posix()
@@ -86,10 +88,12 @@ def build_cfg(m: dict, nl: int, tokens: int, out: Path, pool_dir: Path, max_ctx:
         if kn not in used:
             continue
         bdir = f"{d}/{m['builds'][kd['build']]['build_dir']}"
+        xclbin = f'{bdir}/final.xclbin' if kernel_dir is None else str(bundle_path(kernel_dir, m['contexts'][kd['context']]))
+        insts = f'{bdir}/insts.bin' if kernel_dir is None else str(bundle_path(kernel_dir, kd['insts']))
         if kd["context"] not in ctx_done:
-            cfg.append(f"xclbin {kd['context']} {bdir}/final.xclbin")
+            cfg.append(f"xclbin {kd['context']} {xclbin}")
             ctx_done.add(kd["context"])
-        cfg.append(f"kernelx {kn} {kd['context']} {bdir}/insts.bin")
+        cfg.append(f"kernelx {kn} {kd['context']} {insts}")
     hid = lay["hidden"]
     for name, size in m["globals"].items():
         if isinstance(size, dict):
@@ -144,6 +148,7 @@ def main() -> int:
     ap.add_argument("--token", type=int, default=None, help="the first token id (default: the model's bos, else 248045)")
     ap.add_argument("--out", default=str(HERE / "out"))
     ap.add_argument("--pool-dir", default=None, help="where the big pools live (default <out>/pools)")
+    ap.add_argument("--kernel-dir", type=Path, help="use a compatible exported manifest and hash-verified binaries")
     ap.add_argument("--max-ctx", type=int, default=4096)
     ap.add_argument("--reuse-pools", action="store_true", help="keep pool files that already exist")
     ap.add_argument("--cfg-only", action="store_true", help="only rewrite the .cfg")
@@ -171,6 +176,12 @@ def main() -> int:
     md = Path(a.model_dir)
     spec = spec_from_model_dir(md)
     m = manifest(spec, a.max_ctx)
+    if a.kernel_dir is not None:
+        try:
+            m = load_bundle(a.kernel_dir, m)
+        except (OSError, ValueError) as e:
+            ap.error(str(e))
+        print(f'kernel export: {a.kernel_dir.resolve()} (build {m["build_key"]})')
     lay = m["layout"]
     plan = {"pool_bytes": m["pack"]["pool_bytes"], "chunk_bytes": m["pack"]["chunk_bytes"],
             "layer_types": {lt: d["pack"] for lt, d in m["layer_types"].items()},
@@ -275,7 +286,7 @@ def main() -> int:
             tok = int(logits[:spec.real_vocab].argmax())
             print(f"  token {t} (position {t}): reference argmax {tok}", flush=True)
 
-    cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx)
+    cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx, kernel_dir=a.kernel_dir)
     (out / "run_decode.cfg").write_text(cfg, newline="\n")
     if not a.cfg_only:
         save_reference(out, m, nl, a.tokens, tok0, routing)

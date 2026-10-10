@@ -283,7 +283,7 @@ def test_make_decode_publishes_contract_only_after_complete_reference(tmp_path, 
                   embed={}, norm=dict(tensor='norm')),
         globals=dict(xres=16, zero=16, normw=8, logits=20), tail=[],
         contexts=dict(dx='dx/final.xclbin'),
-        kernels=dict(dx=dict(context='dx', build='dx')),
+        kernels=dict(dx=dict(context='dx', build='dx', insts='dx/insts.bin')),
         builds=dict(dx=dict(build_dir='test')),
         layer_types=dict(dense=dict(pack=dict(pool=[], consts=[]),
                                    buffers=dict(consts=4, act=4, state=dict(kind='kv', row=4)),
@@ -317,6 +317,31 @@ def test_make_decode_publishes_contract_only_after_complete_reference(tmp_path, 
     monkeypatch.setattr(sys, 'argv', argv + ['--cfg-only'])
     assert make.main() == 0
     assert (out / 'decode_reference.json').read_bytes() == pinned
+
+    # An explicitly selected compatible export pins its own historical build,
+    # not the current source key, and cfg-only must not relabel old references.
+    export = tmp_path / 'kernels'
+    (export / 'dx').mkdir(parents=True)
+    exported = dict(manifest, build_key='historical-export-build')
+    (export / 'manifest.json').write_text(json.dumps(exported))
+    hashes = {}
+    for name in ('final.xclbin', 'insts.bin'):
+        data = name.encode()
+        (export / 'dx' / name).write_bytes(data)
+        hashes[f'dx/{name}'] = hashlib.sha256(data).hexdigest()
+    (export / 'toolchain.json').write_text(json.dumps(dict(
+        build_key=exported['build_key'], spec_hash=exported['spec_hash'], sha256=hashes)))
+    exported_argv = argv + ['--kernel-dir', str(export)]
+    monkeypatch.setattr(sys, 'argv', exported_argv + ['--cfg-only'])
+    with pytest.raises(ValueError, match='build_key'):
+        make.main()
+    assert (out / 'decode_reference.json').read_bytes() == pinned
+    monkeypatch.setattr(sys, 'argv', exported_argv)
+    assert make.main() == 0
+    assert load_reference(out)['build_key'] == 'historical-export-build'
+    assert f'xclbin dx {export}/dx/final.xclbin' in (out / 'run_decode.cfg').read_text()
+    monkeypatch.setattr(sys, 'argv', exported_argv + ['--cfg-only'])
+    assert make.main() == 0
 
     def interrupted(*args, **kwargs):
         assert not (out / 'decode_reference.json').exists()

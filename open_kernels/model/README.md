@@ -37,6 +37,15 @@ runs; `--cfg-only` rewrites just the program.
 
 ### Decode acceptance
 
+Pass `make_decode.py --kernel-dir DIR` to target a retained runtime export
+instead of mutable design build directories. The export must have the same
+manifest as the current model/recipe except for its source build key; all
+required binaries must match `toolchain.json`. The generated harness config
+uses that export's paths, and reference metadata retains its original build
+key. This validates an existing compatible export, not a fresh source build.
+Use the same option for `--cfg-only`; existing reference provenance is checked
+and cannot be relabelled as a different build.
+
 After completing the CPU reference, `make_decode.py` also writes
 `decode_reference.json`. It records the manifest-derived hidden/logit sizes,
 layer and token counts, context capacity, spec/build identifiers, seed token, routing mode and

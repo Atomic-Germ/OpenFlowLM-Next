@@ -77,6 +77,12 @@ python open_kernels/export_qwen36_kernels.py \
 Use `--model-dir`: the tokenizer has 248077 real IDs while the padded output
 has 248320 lanes. A shape-only checked-in spec has different metadata/hash.
 Keep the exported manifest and toolchain hashes together with the binaries.
+For compatibility checks after a recipe update, use `make_decode.py
+--kernel-dir <export>`: it verifies full manifest compatibility except the
+source build key, checks all required binary hashes, and keeps that export's
+original build identity. It does not rebuild or relabel binaries. `--cfg-only`
+must select the same export as reference generation. A different layout,
+packing plan, geometry or context capacity is rejected.
 Check config compatibility through the real C++ runtime parser without XRT:
 
 ```bash
@@ -268,6 +274,39 @@ generating up to `--max-tokens`, including past EOS.
 Do not count reset repeatability or a correct short answer as an independent
 multi-token CPU comparison. Keep full-depth multi-token, per-head/state,
 serving and hybrid block-prefill acceptance separate.
+
+## 2026-10-09 continuation: explicit export, memory gate
+
+Upstream `c2ef0e8` is merged. Native runtime build, CTest 3/3 and the block-host
+fixture pass. The model-derived manifest remains equal to the retained
+production export except its source build key. All 82 export hashes pass;
+working-directory xclbins now have different XRT headers, so the exporter's
+strict `--check` rejects those copies. Do not silently use them for a reference
+run. `production-kernels-upstream/` is an unverified `--no-build` snapshot,
+marked `VALIDATION_FAILED.txt`; it is not a new validated build.
+
+Use the existing `production-kernels/` explicitly for the pending 64-layer,
+three-token compatibility run:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python -u open_kernels/model/make_decode.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-kernels \
+  --layers 64 --tokens 3 --out Models/qwen38-27b/production-multitoken \
+  --pool-dir Models/qwen38-27b/production-full/pools --reuse-pools
+```
+
+Pool reuse here is justified by the unchanged container and packing plan;
+`--reuse-pools` alone checks sizes, not content provenance. Do not generalize
+it to changed weights or packing. The interrupted directory has no completed
+reference contract; regenerate it, not `--cfg-only`.
+
+The attempt ran out of available RAM while loading 50/64 layers; no new
+full-depth numerical result was produced. Wait for roughly 35–40 GiB available
+before attempting the resident NPU run, and finish CPU preparation first when
+memory is constrained. The user explicitly paused hardware work until memory
+is freed. Logs are under `production-multitoken/logs/`; old stage-3/4 results
+must not be reported as reruns on the updated runtime.
 
 Artifacts/logs for this run: `Models/qwen38-27b/production-kernels/`,
 `Models/qwen38-27b/production-input-sha256.txt`,
