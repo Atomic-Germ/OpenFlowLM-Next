@@ -1,6 +1,6 @@
 # K2-Horizon-7B-Uno: making the cycle pay
 
-Status: **approved, in progress** (2026-10-09; no stopgap: #184 stays draft until this lands). Follows `k2-horizon-7b-uno.md`.
+Status: Phase 2 **done**; Phases 3-7 **proposed** (2026-10-09, for review). Follows `k2-horizon-7b-uno.md`.
 
 ## Where it stands (quiet machine, shared lock's `timing` gate)
 
@@ -63,30 +63,97 @@ The pass grows 2.9 ms per 1k positions against decode's 0.74 (3.95x). Per row an
 
 All identical to plain decode. Verify pass at short context: 145.9 ms, 1.34x a step.
 
-### 3. Base pass cost
-Target verify ≤ 1.15x and draft ≤ 1.3x a step at short context: cycle ~245 ms, ~1.4-1.5x. Candidates, in the order Phase 1 will likely rank them:
-- The head: `lmhl` at 2x `lm_head_q4`. 10 KB elements (`lmhl2`) did not help, so the cost is elsewhere in it.
-- The serial per-row stages (ln, attention, silu), each one row at a time between GEMVs.
-- The draft's LoRA: z = A·x must reach DDR before B's k-tile. That is a dependency bubble per projection group, ×4 groups × 36 layers.
-- Per-layer `start_run` / `wait_run` keeps only one layer queued ahead (`core.cpp:3401`); queueing all 36 is free to try.
+**Longer outputs (512 tokens, 2026-10-09):** math 4.10 tokens a cycle, 1.52x (12.60 vs 8.28 tok/s); reason 3.88, 1.50x; code 3.82, 1.32x. 41-60% of cycles accept all three drafts, so L = 4 caps acceptance on real output lengths.
 
-### 4. Acceptance on real outputs, then rows
-- With `utilities/uno-ref`, measure tokens a cycle on long reasoning generations (512-2048 tokens; math, code, chat) at L = 4 and L = 8.
-- Also try reusing the previous cycle's unaccepted drafts as the noise inputs. They were drafted in parallel from noise, so they are as good a guess as noise, possibly better.
-- If L = 8 gains ≥ 25% tokens a cycle on that set: an 8-row GEMV that dequantizes each chunk once for all 8 rows (today L = 8 re-runs the whole tile4 pass) is the next kernel.
-- Tree verification only after rows are cheap.
+**Profile of what is left (one layer at position 0, ms):** dx 2.54; dxl 3.62. With the activation-table rebuild nulled 3.24; norms nulled 3.55; GEMV arithmetic nulled 2.96; everything nulled 2.59.
+- The data-movement floor is decode's whole layer.
+- The excess is the 8 main cores' arithmetic. Bit-identity makes the 4-token GEMV run decode's float epilogue (hi / lo split, four fp32 MACs) once per token per 32-wide block, so that work scales with L where the weight work does not.
+- The same wall blocks L = 8.
 
-## Expected outcome
+## Two modes, chosen by the user (Phases 3-7)
 
-| after | short context | 2k context |
+Exact and fast both ship. They pull the pass different ways, so one dxl layout cannot serve both:
+- **exact** keeps every row bit-identical to decode, so Uno's output is plain NPU decode's, token for token. That makes it the reference mode.
+- **fast** drops decode's per-row arithmetic for a GEMV that multiplies a weight chunk against every row at once. Rows get cheap, which is what L = 8 needs. The cost is an output that can differ from plain decode wherever the top two logits are within rounding of each other.
+
+| mode | rows (L) | output | expected (short / 512-token outputs) |
+|---|---|---|---|
+| exact | 4 | identical to plain decode | ~1.4x / ~1.7x (after Phase 5) |
+| fast | 4 | greedy over its own verify logits; differs from plain decode only at near-ties | ~1.5x / ~1.8x |
+| fast | 8 | the same | ~1.6-2x / ~2-2.4x, if L = 8's acceptance holds on long outputs |
+| off | | plain decode | 1x |
+
+Every figure above is a projection from today's cost model, not a measurement. Phase 7 replaces them.
+
+### 3. The switch (first: everything after ships behind it)
+Same shape as OPEN-PREFILL-MODE (#181), so the two read alike:
+- **Kernel set:** `rows` keeps the exact pass; `rows_variants` carries named alternatives (`fast4`, `fast8`), each a complete set of `kernel` / `lora_kernel` / `head` / `l`.
+- **Load time:**
+  - `oflm run|serve|bench <model> --uno exact|fast|off` and `--uno-block 4|8`. The block size only applies to fast, and asking for exact at 8 is refused at parse.
+  - These set `OFLM_OPEN_UNO_MODE` / `OFLM_OPEN_UNO_BLOCK`; `open_qwen36_cli --uno-mode` does the same for A/B runs.
+  - The choice is made before the kernel list, so only the chosen variant's xclbins load.
+  - A set without the asked-for variant logs that it is falling back to `exact` and runs exact.
+- **Per request:** `"uno": false` in a chat request decodes that request plainly. No reload is needed, and it gives a client a reproducible answer whatever mode the server runs.
+- **Core:** `uno_cycle` and the CLI loop become L-generic (today they assume `rows_l()` but were only run at 4).
+- Cost: ~2 days. If #181 merges first, this reuses its `select_*` shape and flag parsing rather than copying them.
+
+### 4. Prototype the two GEMVs in `gl` before building either pass
+`designs/dxl/gl.py` runs the L-row GEMV alone; both candidates get measured there first, at L = 4 and 8.
+- **Exact, 2 rows a core:** gemv_q4_tile's arithmetic stays (bit-identity), but each core carries 2 of the 4 rows, on 16 cores fed by one broadcast weight stream per column.
+  - The integer mmul costs the same either way; only the per-row float epilogue halves. So this is worth Phase 5 only if the epilogue is most of a chunk's time.
+- **Fast:** candidates, chosen by speed and by logits corr against fp64:
+  - (a) Dequantize each 32 × 32 block to bf16 once, then bf16 mmul across the rows.
+  - (b) The same with the activation as a bf16 hi/lo pair (two mmuls) for accuracy.
+  - (c) Keep the int16 × uint8 mmul but scale the activation once per 256-wide k-tile, so the float epilogue runs per k-tile instead of per 32-block. q4_1's per-32 weight scales still need a per-block multiply, so this only helps if that multiply can ride the mmul.
+  - Bar: corr ≥ 0.99999 per row against the fp64 replica on a real layer, and the arithmetic at L = 8 under the data-movement floor.
+- Cost: 2-3 days. No spec impact.
+
+### 5. Exact mode: 16 GEMV cores (if Phase 4 says it pays)
+- **Tiles:**
+  - The main cores move to rows 2 and 3, two per column: rows 0-1 and rows 2-3 on one broadcast weight stream.
+  - Attention shrinks to groups of 2 cores (16 heads each); 32 tiles do not hold 16 GEMV, 16 attention and the ln core.
+  - Each column's two y elements join in a memtile, so the shim output channels stay at 14 of 16.
+- **Trade:** short context gets cheaper (the pass ~1.34x → ~1.1x a step). A group of 2 cores pays ~1.5-2x decode's attention arithmetic, so the gain shrinks with context, but the pass is still nowhere near the old 4x.
+- **Also here (both modes):**
+  - Merge the q / k / v jobs and the gate / up pairs so each slice's activation tables are built once per stage, not once per tile. That is 288 rebuilds a layer down to ~144, about 0.15 ms.
+  - Overlap the draft's LoRA A band with the stage before it where the input allows.
+- OPEN-DECODE-ROWS keeps its bar; the layout text changes.
+
+### 6. Fast mode: fast4 and fast8
+- **GEMV:** Phase 4's fast GEMV, 8 main cores.
+- **Attention:** fast8 has 8 row groups of 2 cores (16 cores). fast4 keeps 4 groups of 4.
+  - The attention kernels are dx's, unchanged, so attention stays decode's arithmetic in both.
+- **Head:** `lmhl` at 8 rows on the fast GEMV.
+- **Draft:** the LoRA's A / B bands through the same fast GEMV. `uno.q4nx` is unchanged, since the adapter does not depend on L.
+- **New OPEN-DECODE-ROWS-FAST:**
+  - Rows within corr ≥ 0.99999 of decode's logits.
+  - Argmax equal to decode's except where decode's top two are within 0.05 logits.
+- **Modified OPEN-UNO-DECODE:**
+  - fast output equals greedy over the fast verify logits; its own exactness check is a fast L-row pass at the same positions.
+  - Against plain decode, the first divergence must be a near-tie.
+- Cost: 1.5-2 weeks.
+
+### 7. Defaults, by measurement
+- The six short prompts, the three 512-token outputs and the 1k / 2k prompts, in every mode, on a quiet machine. The figures replace the projections above.
+- Then the default `--uno`. I would expect `fast` with the block size that measures best, and `exact` named as the reproducible option, but this is your call with the numbers in hand.
+- The skill and the spec record the table.
+
+## Spec impact (Phases 3-7)
+| ID | | Verification |
 |---|---|---|
-| today | 1.11x | 0.70x |
-| 2 | ~1.15x | ~1.2x |
-| 2 + 3 | ~1.45x | ~1.45x |
-| 2 + 3 + 4 (if L = 8 pays) | ~1.6-1.9x | ~1.6-1.9x |
+| OPEN-UNO-MODE | new: the switch, the per-request opt-out, the fallback | test: manifest variant selection, flag parsing; manual: each mode loads and decodes |
+| OPEN-DECODE-ROWS-FAST | new: fast rows' tolerance | manual: harness layer vs fp64 and dx; whole-model rows check against the tolerance |
+| OPEN-DECODE-ROWS | modified: the exact variant's layout (Phase 5) | unchanged bar |
+| OPEN-UNO-DECODE | modified: what each mode guarantees | manual: the Phase 7 runs |
+| OPEN-UNO-LORA | modified: the draft through the fast GEMV | manual: draft layer vs fp64 |
 
-Projections are arithmetic on the cost model above, not measurements.
+## Cost and order
+3 → 4 → 6 → 5 → 7, about four weeks. Fast before exact's rework: it has the higher ceiling, and its numbers decide whether Phase 5 is worth a week.
+
+**Recommendation on #184:** take it out of draft and land it as it is now. That is K2, serving, and Uno exact at 1.19-1.52x with no regression at any context. Phases 3-7 then go in a PR stacked on it. #184 is already large, and four weeks of kernel work on top would make it unreviewable.
 
 ## Not in this plan
 - **Retraining or distilling the LoRA.** IFM ships no K2 training recipe.
-- **Fusing draft and verify into one forward.** Draft rows appended to a verify pass are only usable when every draft is accepted (~30% of cycles at L = 4). With rows past 4 costing ~linearly, the arithmetic loses: an 8-row pass at ~2.2 steps gives ~3.4 steps a cycle in expectation, against 3.1 today.
+- **Fusing draft and verify into one forward.** Draft rows appended to a verify pass are only usable when every draft is accepted. Even at 41-60% fully accepted, an extra 4-8 rows a pass loses to the second pass at today's row cost. Revisit after fast8 if rows get cheap enough.
+- **Tree verification.** After fast8, if rows are cheap.
+- **Reusing unaccepted drafts as the noise inputs.** A CPU-oracle experiment (`utilities/uno-ref`) can be run at any time; it is not on the critical path.
