@@ -38,6 +38,7 @@
 #include "benchmarking.hpp"
 #include "benchmark_embed.hpp"
 #include "image_command.hpp"
+#include "viz_command.hpp"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -549,6 +550,11 @@ int main(int argc, char* argv[]) {
     // mean. See pack_command.hpp for why this is a handoff and not a port.
     if (argc > 1 && std::string(argv[1]) == "pack") {
         return pack_command::run(argc - 2, argv + 2);
+    }
+
+    // `viz` writes a page and opens a browser: no NPU, and options the runtime parser does not know.
+    if (argc > 1 && std::string(argv[1]) == "viz") {
+        return viz_command::run(argc - 2, argv + 2);
     }
     
     // Parse command line arguments using Boost Program Options
