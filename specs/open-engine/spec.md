@@ -3172,6 +3172,23 @@ full-attention layers pulling the whole KV window back for every block.
 block-at-a-time loop; a `dense` layer type has no layer-major form and stays
 block-major.
 
+Inside a layer-major layer the steps run **stage-major**: each GEMM step goes over
+every block of the prompt before the next step starts, and the next block's
+dispatch overlaps the host's work on this one (`gemm_phase`). The host stages
+block b + 1's input while block b runs, then starts block b + 1 before it
+post-processes block b, so the transposes, DeltaNet, the residual / norm /
+router and the shared expert's host steps run while the NPU works. Only one
+dispatch is ever outstanding: a second run of the same kernel queued behind the
+first gave different bits from run to run, and the overlap doesn't need it.
+Even blocks use each step's `gemm_x_k*` / `gemm_y_n*` globals and odd blocks a
+`#1` twin of them, so neither side touches a buffer the other is using. A
+full-attention layer runs every block's attention products after every block's
+projection, in one visit to the attention context per layer instead of two
+context changes per block. DeltaNet still runs block by block in position order,
+and each block's attention window is explicit, so every block's arithmetic is
+unchanged and the output is **byte-identical** to the block-at-a-time
+layer-major order. `OFLM_OPEN_STAGE_MAJOR=0` keeps that order, for the A/B.
+
 **Acceptance criteria (unit):**
 - The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); one context `gemm` for every GEMM shape, plus `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes. A spec with `attn`, `linear` and `linear_out` at q8 (the published 35B container) emits, as its `lean` variant (OPEN-PREFILL-MODE), the route with `gqkvz_w`, `gqkvg_w`, `go_w` and `gout_w` as hi-then-lo split packs of the same tensors the sequential kernels read as `q8_perm` (half the q8 op's half-tile count, the fused `q_proj`'s gate half keeping its chunk offset), the steps on `gemm_n24576_k2048`, `gemm_n18432_k2048` and `gemm_n4096_k4096` with `split: true` (the out step via `out_split`), and the shared expert's q4_1 weights unchanged; a weight mixing q8 and q4_1 ops is refused. A q4_1 spec emits no `split` anywhere, and its manifest is byte-identical to the one before splits existed apart from the build key.
 - An all-q8 MoE spec (`test_prefill_batch.py`): `linear` runs `gemmb_n12288_k2048` then `gemmb_n2048_k4096`, `full` `gemmb_n9216_k2048` then `gemmb_n2048_k4096`, both shared programs `gemmb_n1024_k2048` then `gemmb_n2048_k512`, every route weight a stack of `bf16_gemm` ops end to end from 0 (the projections without `via`, one source chunk per two `q8_perm` half-tiles; the shared expert `via: q4_1`), every `gemm_block` step on context `gemmb`, no `split`, version 3; its `lean` variant is the split route above, on context `gemm`, with the same kind, t, `moe_batch` and `attn_block`. A spec with only `linear_out` at q8 keeps `out_split` and the `gemm` context, and carries no variant.
@@ -3211,6 +3228,12 @@ block-major.
    the two must be **byte-identical** -- that is what says the schedule itself changed nothing.
    With the batched expert kernel they are not, and the gate is instead that both sit the same
    distance from the per-token run: equal max |diff| and equal argmax-flip count against it.
+6b. Stage-major against block-at-a-time layer-major, same binary and same kernels: a multi-block
+   prompt with `--prefill-logits --dump-logits`, once with `OFLM_OPEN_STAGE_MAJOR=0`, and twice
+   without it. All three must be **byte-identical** at every position, with the batched expert
+   kernel on: on the 35B's all-q8 set in both prefill modes (the bf16 route and `lean`'s split),
+   on its q4_1 set, and on a Qwen3.5-family set (dense FFN). Prefill time at 1000 tokens,
+   alternated both ways.
 7. Qwen3.5 (`Qwen3.8-Distilled-9B-NPU2`, and `Qwen3.5-0.8B-NPU2` for the smallest geometry):
    `export_qwen36_kernels.py --model-dir <model>`, each new GEMM shape through the harness,
    then steps 3 and 4 on a prompt of more than one block (`--layers 4 --prefill-logits`, then all
@@ -3423,14 +3446,45 @@ blocks' `q|k|v|gate`, then all the attention, then all the `o` GEMMs — two
 switches a layer instead of twenty-two). Causality needs no new mask, since
 `ag_s` is dispatched with the window length `(b + 1) * 256` and so reads
 exactly blocks 0..b whatever later KV rows are already written; the cost is
-~23 MB of scratch to hold each block's attention output until its `o` GEMM. Not
-done.
+~23 MB of scratch to hold each block's attention output until its `o` GEMM. Done
+by the stage-major schedule (OPEN-PREFILL-BATCH, 2026-10-09 result below).
 
 Also from the re-taken log: dispatch logging itself costs ~1.2 s at this speed
 (19.46 and 20.37 s on two repeats against 18.27 best-of-three without it), so a
 logged run is no longer a timing run; and **host compute is now the larger half
 of the prefill** — 11.46 s of the 19.46 is dispatch and the other 8.0 s is CPU,
 3.13 s of it DeltaNet, with nothing overlapping.
+
+**Result 2026-10-09 (stage-major schedule):** the layer-major order with
+`OFLM_OPEN_STAGE_MAJOR=0`, against the default, same binary and same kernel set,
+HX PRO 370, alternated, run under the shared NPU lock (a run another NPU or CPU
+user overlapped was discarded and repeated). Logits byte-identical at all 656
+positions, twice over, on the 35B's bf16 and `lean` routes and its q4_1 set, and
+on the Qwen3.8-27B (dense FFN).
+
+| Prefill, 1000 tokens (CLI, median of 3 pairs) | old order | stage-major |
+|---|---|---|
+| 35B all-q8, bf16 route | 7.48 s | 5.89 s |
+| 35B all-q8, `lean` | 8.50 s | 6.90 s |
+| 35B q4_1 | 7.38 s | 5.77 s |
+| Qwen3.8-27B (2 pairs, mean) | 30.5 s | 26.2 s |
+
+| `oflm bench`, tok/s (bf16 mean of 2 rounds; q4_1 and lean 1 round) | 1k | 2k | 4k | 8k |
+|---|---|---|---|---|
+| bf16, old | 130 | 127 | 132 | 135 |
+| bf16, stage-major | 166 | 155 | 171 | 168 |
+| q4_1, old | 141 | 141 | 140 | 138 |
+| q4_1, stage-major | 184 | 193 | 196 | 180 |
+| lean, old | 116 | 111 | 115 | 116 |
+| lean, stage-major | 148 | 156 | 163 | 154 |
+
+Decode is untouched. The gain is the GEMM column: the host's wait on the NPU fell
+from about 2.1-2.4 s to 0.7-0.9 s at 1000 tokens on the bf16 route. Spread is
+wide: one bf16 stage-major run took 8.4 s with 3.2 s of GEMM wait where its
+neighbours took 5.4 and 5.9 s, and the old order's expert pass swung 3.1-4.0 s
+between runs. The expert stage is not touched here. Peak private memory (CLI,
+bf16 route): +0.07 GiB at 1000 tokens and +0.47 GiB at 8000, from the per-prompt
+scratch and the `#1` twins.
 
 **Result 2026-09-21 (step 5, and the wait policy the SERVER cannot apply):**
 `oflm-test --llm` passes 5 of 5 on `qwen3.6-moe:35b-a3b` through this tree's
