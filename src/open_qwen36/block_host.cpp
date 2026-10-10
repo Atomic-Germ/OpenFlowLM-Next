@@ -329,10 +329,11 @@ void deltanet_rollback(const DeltaGeom& g, const DeltaTape& tape, size_t k, cons
                        uint16_t* conv_state, float* S) {
     const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
     const size_t pre = g.taps - 1;
-    if (!g.key_heads || g.value_heads % g.key_heads || g.s_rows < dim || k > tape.t_real ||
-        tape.conv_state0.size() != pre * nch || tape.S0.size() != g.value_heads * g.s_rows * dim ||
-        tape.key.size() < tape.t_real * key_w || tape.val.size() < tape.t_real * vw ||
-        tape.decay.size() < tape.t_real * g.value_heads || tape.beta.size() < tape.t_real * g.value_heads)
+    if (!g.key_heads || g.value_heads % g.key_heads || g.s_rows < dim || g.t_real != tape.t_real ||
+        k > tape.t_real || tape.conv_state0.size() != pre * nch ||
+        tape.S0.size() != g.value_heads * g.s_rows * dim || tape.key.size() != tape.t_real * key_w ||
+        tape.val.size() != tape.t_real * vw || tape.decay.size() != tape.t_real * g.value_heads ||
+        tape.beta.size() != tape.t_real * g.value_heads)
         throw std::runtime_error("open_qwen36: deltanet_rollback: the tape does not match the geometry");
     const size_t grp = g.value_heads / g.key_heads;
 
