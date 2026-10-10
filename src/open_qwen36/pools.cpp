@@ -246,6 +246,50 @@ void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst) {
     }
 }
 
+namespace {
+// row r, column k of a tensor's chunks (32-row blocks major, then 256-k tiles), as the q8 / q4_1 GEMMs read it
+float q8_value(const uint8_t* src, size_t ncol, size_t r, size_t k) {
+    const uint8_t* c = src + ((r / 32) * ncol + k / 256) * Q8_CHUNK;
+    const unsigned rl = static_cast<unsigned>(r % 32), kin = static_cast<unsigned>(k % 256);
+    uint16_t s;
+    std::memcpy(&s, c + 2 * ((kin / 32) * 32 + rl), 2);
+    return static_cast<float>(static_cast<int8_t>(c[512 + code_index(rl, kin / 32, kin % 32)])) * bf16_to_f32(s);
+}
+float q4_1_value(const uint8_t* src, size_t ncol, size_t r, size_t k) {
+    const uint8_t* c = src + ((r / 32) * ncol + k / 256) * Q4_CHUNK;
+    const unsigned rl = static_cast<unsigned>(r % 32), kin = static_cast<unsigned>(k % 256);
+    uint16_t d, m;
+    std::memcpy(&d, c + 2 * ((kin / 32) * 32 + rl), 2);
+    std::memcpy(&m, c + 512 + 2 * ((kin / 32) * 32 + rl), 2);
+    const unsigned p = (rl / 16) * 4096 + kin * 16 + rl % 16;
+    const unsigned n = (c[1024 + (p >> 1)] >> (4 * (p & 1))) & 15u;
+    return bf16_to_f32(m) + static_cast<float>(n) * bf16_to_f32(d);
+}
+}  // namespace
+
+void bf16_gemm_pack(const uint8_t* src, bool q8, size_t rows, size_t cols, uint16_t* dst) {
+    const size_t ncol = cols / 256, nkt = cols / 64;
+#pragma omp parallel for
+    for (long long bb = 0; bb < static_cast<long long>(rows / 64); ++bb) {
+        const size_t b = static_cast<size_t>(bb);
+        for (size_t kt = 0; kt < nkt; ++kt) {
+            uint16_t* e = dst + (b * nkt + kt) * 4096;
+            for (size_t z = 0; z < 16; ++z)
+                for (size_t i = 0; i < 8; ++i)
+                    for (size_t r = 0; r < 4; ++r)
+                        for (size_t kk = 0; kk < 8; ++kk) {
+                            const size_t row = 64 * b + 4 * z + r, k = 64 * kt + 8 * i + kk;
+                            e[(z * 8 + i) * 32 + r * 8 + kk] =
+                                f32_to_bf16(q8 ? q8_value(src, ncol, row, k) : q4_1_value(src, ncol, row, k));
+                        }
+        }
+    }
+}
+
+uint64_t op_bytes(const PackOp& op, size_t chunk_bytes) {
+    return op.op == "bf16_gemm" ? op.nch * 2 * 8192 : op.nch * chunk_bytes;
+}
+
 void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
     for (size_t c = 0; c < nch; ++c) {
         const uint8_t* s = src + c * Q8_CHUNK;
@@ -420,6 +464,23 @@ void apply(const PackOp& op, const Q4nxFile& m, int layer, uint8_t* dst, size_t 
             const uint8_t* hi = 2 * kt + 1 < ncol128 ? src + supertile_index(rb, 2 * kt + 1, ncol128, rg) * Q4_HALF
                                                      : zero.data();
             fuse_chunk(lo, hi, dst + op.dst + c * ch);
+        }
+    } else if (op.op == "bf16_gemm") {
+        // `nch` SOURCE chunks from `chunk0`: q8 read exactly unless `via` q4_1 asks for the q4 ops' reading
+        const std::string name = with_layer(op.tensor, layer);
+        if (op.nch == 0 || op.in_dim == 0 || op.in_dim % 256) fail("bf16_gemm " + name + " without nch / in_dim");
+        const size_t ncol = op.in_dim / 256;
+        if (op.nch % ncol || (op.nch / ncol) % 2)
+            fail("bf16_gemm " + name + ": " + std::to_string(op.nch) + " chunks is not whole 64-row bands of a " +
+                 std::to_string(op.in_dim) + "-wide tensor");
+        bounds(op, op_bytes(op, ch), dst_bytes);
+        const size_t rows = op.nch / ncol * 32;
+        uint16_t* out = reinterpret_cast<uint16_t*>(dst + op.dst);
+        if (m.chunk_bytes(name) == Q8_CHUNK && op.via != "q4_1") {
+            bf16_gemm_pack(raw(m, name, (op.chunk0 + op.nch) * Q8_CHUNK) + op.chunk0 * Q8_CHUNK, true, rows, op.in_dim, out);
+        } else {
+            std::vector<uint8_t> tmp;
+            bf16_gemm_pack(q4_source(m, name, op.chunk0, op.nch, Q4_CHUNK, tmp), false, rows, op.in_dim, out);
         }
     } else if (op.op == "q8_perm") {
         // The projection stays at q8: `nch` counts POOL half-tiles (5120 B each, twice the

@@ -28,6 +28,7 @@ sys.path.insert(0, str(HERE.parent.parent))                       # open_kernels
 sys.path.insert(0, str(HERE.parents[2] / "npu_offload" / "gemm_rtp"))  # -> npue.tile_b
 from q4_1_pack import pack_q4_1_pool, pool_reference, random_q4_1_blocks  # noqa: E402
 from npue import tile_b  # noqa: E402
+from recipes.pack import bf16_of_q8, pack_bf16_gemm  # noqa: E402
 
 SHAPES = {  # name: (N_WEIGHT, K)
     "qkv": (2560, 2560),
@@ -46,6 +47,7 @@ def main() -> int:
     ap.add_argument("--tile-n", type=int, default=TILE_N, help="must match GQP_TILE_N the design was built with")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--runs", type=int, default=3, help="`run` lines in the cfg (timing)")
+    ap.add_argument("--fmt", default="q4_1", choices=["q4_1", "bf16"], help="must match GQP_FMT")
     a = ap.parse_args()
 
     if a.shape in SHAPES:
@@ -61,12 +63,20 @@ def main() -> int:
         print(f"REFUSE: shape {a.shape} ({n_weight},{k}) does not tile (256-row blocks / 256-K bands)")
         return 1
 
-    tag = f"{a.shape}_t{T}"
+    pre = "" if a.fmt == "q4_1" else f"{a.fmt}_"
+    tag = f"{pre}{a.shape}_t{T}"
     rng = np.random.default_rng(a.seed)
 
-    print(f"packing q4_1 weight [{n_weight},{k}] ...")
-    blocks = random_q4_1_blocks(n_weight, k, rng)
-    w = pack_q4_1_pool(blocks, rs=2)
+    print(f"packing {a.fmt} weight [{n_weight},{k}] ...")
+    if a.fmt == "q4_1":
+        blocks = random_q4_1_blocks(n_weight, k, rng)
+        w = pack_q4_1_pool(blocks, rs=2)
+    else:
+        codes = rng.integers(-127, 128, size=(n_weight, k), dtype=np.int8)
+        scales = (rng.uniform(0.5, 2.0, size=(n_weight, k // 32)) * 2.0 ** -9).astype(bfloat16)
+        wbits = bf16_of_q8(codes, scales.view(np.uint16))
+        wq = wbits.view(bfloat16)
+        w = pack_bf16_gemm(wbits).view(np.uint8)
     nbytes = len(w)
 
     print(f"drawing {T} distinct token activations, K={k} ...")
@@ -77,17 +87,24 @@ def main() -> int:
     x_tk = np.stack(xs)  # [T, K] token-major, bf16
 
     print("computing fp64 reference per token from the SAME pool bytes ...")
-    refs = np.stack([pool_reference(w, xs[t].astype(np.float32), n_weight, k, rs=2) for t in range(T)])  # [T, N_WEIGHT] f32
-    # Device Y is [N_WEIGHT, T] row-major (weight-row-major, matching the
-    # kernel's own C tap order) -- transpose the per-token stack to match.
-    ref_dev = refs.T.astype(np.float32).copy()  # [N_WEIGHT, T]
+    if a.fmt == "q4_1":
+        refs = np.stack([pool_reference(w, xs[t].astype(np.float32), n_weight, k, rs=2) for t in range(T)])  # [T, N_WEIGHT] f32
+        # Device Y is [N_WEIGHT, T] row-major (weight-row-major, matching the
+        # kernel's own C tap order) -- transpose the per-token stack to match.
+        ref_dev = refs.T.astype(np.float32).copy()  # [N_WEIGHT, T]
+    else:
+        x64 = x_tk.astype(np.float64).T                                       # [K, T]
+        w64 = codes.astype(np.float64) * np.repeat(scales.astype(np.float64), 32, axis=1)
+        ref_dev = (w64 @ x64).astype(np.float32)
+        # the same product over the bf16-rounded weights the cores multiply: isolates layout from rounding
+        (HERE / f"ref2_{tag}.bin").write_bytes((wq.astype(np.float64) @ x64).astype(np.float32).tobytes())
 
     print("pre-tiling activation X^T[K,T] via tile_b ('k,n' order, s=8,t=8) ...")
     x_kt = np.ascontiguousarray(x_tk.T)  # [K, T] -- what the design's B role logically is
     x_tiled = tile_b(x_kt.view(np.uint16), K_TILE, tile_n, MAC_S, MAC_T, order="k,n")
     x_tiled_bf16 = x_tiled.view(bfloat16)
 
-    (HERE / f"w_{a.shape}.bin").write_bytes(w.tobytes())  # weight shared across T for a given (shape, seed)
+    (HERE / f"w_{pre}{a.shape}.bin").write_bytes(w.tobytes())  # weight shared across T for a given (shape, seed)
     (HERE / f"x_{tag}.bin").write_bytes(x_tiled_bf16.tobytes())
     (HERE / f"ref_{tag}.bin").write_bytes(ref_dev.tobytes())
 
@@ -95,7 +112,7 @@ def main() -> int:
     cfg = ["device",
            f"xclbin G build_{build}/final.xclbin",
            f"kernelx k G build_{build}/insts.bin",
-           f"buf w {nbytes} w_{a.shape}.bin",
+           f"buf w {nbytes} w_{pre}{a.shape}.bin",
            f"buf x {x_tiled_bf16.nbytes} x_{tag}.bin",
            f"buf y {ref_dev.nbytes}"]
     cfg += ["run k w x y"] * a.runs
@@ -104,7 +121,7 @@ def main() -> int:
 
     print(f"{tag}: N_WEIGHT={n_weight} K={k} T={T} w={nbytes} B x={x_tiled_bf16.nbytes} B "
           f"ref={ref_dev.nbytes} B absmax={np.abs(ref_dev).max():.4g}")
-    print(f"build: GQP_N={n_weight} GQP_K={k} GQP_T={T} "
+    print(f"build: GQP_FMT={a.fmt} GQP_N={n_weight} GQP_K={k} GQP_T={T} "
           f"python ../../build_design.py gemm_q4_prefill.py build_{build}")
     print(f"run:   ..\\..\\harness\\out\\run_kernel.exe run_{tag}.cfg && python compare.py {tag}")
     return 0

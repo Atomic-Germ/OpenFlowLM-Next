@@ -13,13 +13,10 @@
 #include <vector>
 #include <map>
 #include <string_view>
-#include "server.hpp"
+#include <boost/beast/http.hpp>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
-namespace net = boost::asio;
-using tcp = net::ip::tcp;
-using json = nlohmann::ordered_json;
 
 // parts in multipart/form-data 
 struct MultipartPart {
@@ -29,4 +26,6 @@ struct MultipartPart {
     std::string content;
 };
 
-std::map<std::string, MultipartPart> parse_multipart(const http::request<http::string_body>& req);
+// Parts by name, in the order they came. A multimap because a field may repeat:
+// /v1/images/edits takes several `image[]` parts, which a map let overwrite each other.
+std::multimap<std::string, MultipartPart> parse_multipart(const http::request<http::string_body>& req);

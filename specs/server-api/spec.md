@@ -248,3 +248,225 @@ embedding model loaded shall refuse an embeddings request rather than answer 200
   loaded model and the response names it. `"input": []` stays a 200 with an empty `data`.
 - A server started without an embedding model answers `/v1/embeddings` with 400
   `model_not_found`, not 200.
+
+## The Images API
+
+`POST /v1/images/generations` and `POST /v1/images/edits` are OpenAI's Images API over the open
+diffusion engine (`src/open_diffusion`, FLUX.2 [klein] 4B with every op on the NPU; its own
+requirements are in `specs/open-diffusion/spec.md`). The handlers are `rest_handler.cpp`'s
+`handle_openai_images_*`. The request rules are one pure function, `openai_compat::images_request()`,
+unit-tested in `src/server/openai_compat_test.cpp`. The plan these came from is
+`archive/images-api.md`.
+
+There is no `/v1/images/variations` (OpenAI no longer documents it), no `url` response format,
+no `partial_images` streaming (a preview costs a full VAE decode per step: +35% time), no
+A1111 `/sdapi` shim and no ComfyUI `/prompt`.
+
+The integration tests are `specs/server-api/tests/test_images_api.py`: `oflm serve <chat model>`
+with `flux2-klein:4b` installed, and the NPU.
+
+### SERVER-IMAGES-GENERATIONS: a request gets images of the size and format it asked for
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/server/server.cpp`, `src/include/model_list.hpp`)
+**Verification:** test
+**Test:** `specs/server-api/tests/test_images_api.py`
+
+`/v1/images/generations` answers `{created, data: [{b64_json, seed}], model, output_format, size}`.
+`data` holds `n` images (1-10), made one after another with seeds `seed`, `seed + 1`, ...; each
+item's `seed` says which, so a random-seed image can be made again. `output_format` is `png`
+(the default) or `jpeg` (quality from `output_compression`, default 90). `webp` is refused as not
+implemented: it needs `libwebp`. The response's `model` is the resolved tag.
+
+The `model` field follows SERVER-MODEL-IDENTITY: it is resolved before anything is unloaded, a tag
+the build does not have, an explicit `""` and a tag that makes no images are each a 400
+`model_not_found`, and the llama3.2:1b fallback never applies. An omitted `model` is `--imagemodel`'s
+(default `flux2-klein:4b`). `/v1/models` lists the image model; `/api/tags`, which chat clients
+read, does not.
+
+**Acceptance criteria:**
+- `{"model": "flux2-klein:4b", "prompt": ..., "size": "512x512", "seed": 1}` returns 200, one
+  `data` item whose `b64_json` decodes to a 512x512 PNG, an integer `created`, and
+  `model == "flux2-klein:4b"`.
+- `output_format: "jpeg"` gives a 512x512 JPEG.
+- `n: 2, seed: 41` gives two different images with `seed` 41 and 42, and the second is byte for
+  byte what `seed: 42` alone gives.
+- The same request twice gives the same `b64_json`.
+- `output_format: "webp"` is a 400 with `param == "output_format"` and `code == "not_implemented"`.
+- `"model": "oflm-test-no-such-model:0b"`, `"model": ""` and a chat model's tag are 400
+  `model_not_found`.
+- `/v1/models` lists `flux2-klein:4b` and `/api/tags` does not.
+
+### SERVER-IMAGES-PARAMS: one field under two names means one thing, and a refused control names itself
+**Applies to:** openflowlm-next (`src/server/openai_compat.hpp`, `src/server/rest_handler.cpp`)
+**Verification:** test
+**Test:** `src/server/openai_compat_test.cpp` (`test_images_request`, the `openai_compat` CTest);
+`specs/server-api/tests/test_images_api.py` (on the wire)
+
+Clients written for vLLM-Omni send diffusers' names and clients written for Lemonade or A1111 send
+A1111's, for the same controls. Each pair is one field: `steps` = `num_inference_steps`,
+`cfg_scale` = `guidance_scale`, `sampler` = `sampler_name`. Both spellings in one request are
+accepted when they agree and refused (400, `param` naming the second) when they do not: neither
+silently wins.
+
+- `steps`: 1-50, default the model's own (4 for klein, which is distilled for it).
+- `seed`: a non-negative integer up to 2^64-1; `-1` (A1111's) and omitted mean a random seed.
+- `cfg_scale` / `guidance_scale` (a number) and `negative_prompt` (a string) are accepted and
+  ignored, with one log line: klein is guidance-distilled and has no CFG, and A1111 clients always
+  send `cfg_scale: 7, negative_prompt: ""`.
+- `sampler` / `sampler_name`: `euler`, `Euler`, `Euler a`, `flowmatch_euler` and
+  `FlowMatchEulerDiscreteScheduler` are the model's flow-match Euler; any other name is a 400 that
+  lists those.
+- `response_format` must be `b64_json` (`url` is a 400 naming it); `stream: true` and
+  `partial_images` > 0 are 400s naming them.
+- Types are checked: a wrong one is a 400 with `param` naming the field. A float is not an
+  integer, even `2.0`. `null` is the same as leaving the field out.
+- Fields this server does not know (`quality`, `style`, `background`, `user`, ...) are ignored.
+
+**Acceptance criteria:**
+- `steps: 8, num_inference_steps: 8` is accepted; `steps: 8, num_inference_steps: 4` is a 400
+  with `param == "num_inference_steps"`. The same holds for `cfg_scale`/`guidance_scale` (4 and
+  4.0 agree) and `sampler`/`sampler_name`.
+- `cfg_scale: 7, negative_prompt: ""` is accepted, and on the wire an image made with
+  `guidance_scale: 3.5, negative_prompt: "blurry", sampler: "euler"` is byte for byte the plain
+  request's.
+- `sampler_name: "DPM++ 2M Karras"` is a 400 whose message lists `Euler a`.
+- `steps: 2` runs and gives a different image from the default's.
+- `n` 0, 11 or 2.0; `steps` 0 or 51; `seed` -2 or 1.5; `stream: true`; `partial_images: 1`;
+  `response_format: "url"`; `prompt: 5`: each is a 400 naming its field.
+- `seed: 18446744073709551615` is accepted; `seed: -1` is a random seed.
+
+### SERVER-IMAGES-SIZE: only the engine's resolutions run
+**Applies to:** openflowlm-next (`src/server/openai_compat.hpp`)
+**Verification:** test
+**Test:** `src/server/openai_compat_test.cpp`, `specs/server-api/tests/test_images_api.py`
+
+`size` is `"WxH"` or `"auto"`. The sizes that run are the model's `image_sizes` in
+`model_list.json`, which for klein are 512x512 and 1024x1024 (OPEN-DIFFUSION-RESOLUTIONS); `auto`
+and an omitted size are the largest, 1024x1024. Any other size is a 400 that names the supported
+ones. Non-square sizes need their own stream sets and are a separate item.
+
+**Acceptance criteria:**
+- `"512x512"` gives a 512x512 image and `"auto"` a 1024x1024 one.
+- `"768x768"` and `"1024x512"` are 400s with `param == "size"` whose message contains
+  `512x512, 1024x1024`; `"big"`, `"1024"` and the number `1024` are 400s with `param == "size"`.
+
+### SERVER-IMAGES-EDITS: one reference image is edited; a mask or a second image is named as not implemented
+**Applies to:** openflowlm-next (`src/server/server.cpp`, `src/server/multipart.cpp`, `src/server/rest_handler.cpp`)
+**Verification:** test
+**Test:** `specs/server-api/tests/test_images_api.py`; the multipart parser: `src/server/multipart_test.cpp`
+(CTest `multipart`, no device)
+
+klein edits by appending the reference's VAE latents to the joint sequence as tokens; the NPU
+encodes the reference first (OPEN-DIFFUSION-EDIT, `specs/open-diffusion/spec.md`).
+`/v1/images/edits` parses its multipart form and checks it, before the NPU is touched:
+- one or more non-empty `image` / `image[]` files (at most 16), at most one `mask`;
+- then the generations' model and control rules, with the model's `image_edit_sizes` for
+  `size`.
+
+The request is refused, naming the field:
+- a `mask` is a 400 naming inpainting as not implemented;
+- a second image is a 400 naming multiple references as not implemented;
+- a model without `image_edit_sizes` is a 400 on `model`;
+- an image over 32 MB is a 400;
+- a reference that can't be prepared is a 400 on `image` with OPEN-DIFFUSION-REFERENCE's
+  reason (not PNG or JPEG, too small, too elongated, over 64 MP, undecodable).
+
+`size: auto` (OpenAI's edit default) follows the reference: the largest of the edit sizes
+not above its shorter side, else the smallest. The response is the generations' shape:
+b64_json images and their seeds, `n` of them from consecutive seeds, with the same
+cancellation. An HRX build answers 501.
+
+The multipart parser accepts a quoted boundary (`boundary="..."`, RFC 2046), fills each part's
+`content_type`, finds headers case-insensitively, and keeps repeated parts (`image[]`), which used
+to overwrite each other. A part's `name` and `filename` come from its own `Content-Disposition`
+line and nowhere else: a header is the line that starts with its name, and a quoted parameter
+value is read whole (`\"` and `\\` are its escapes). So neither another header nor text inside a
+quoted filename can name a part, which would otherwise let a part pass as `image` or `mask`.
+
+**Acceptance criteria:**
+- One 512x512 PNG with `size` omitted is edited: 200, `size` "512x512", one 512x512 PNG.
+- The same edit request twice (same seed) returns the same bytes.
+- Two `image[]` parts, a `model` and a `prompt`, sent with a quoted boundary: a 400 with
+  `param == "image"`, its message saying "not implemented".
+- An image and a `mask`: a 400 with `param == "mask"`, naming inpainting.
+- A BMP as the image: a 400 with `param == "image"` naming "not PNG or JPEG".
+- A form with no image is a 400 with `param == "image"`.
+- A form with an image and `size: 768x768` is a 400 with `param == "size"`.
+- Multipart (`multipart_test`): a part whose `Content-Disposition` has no `name` is not named by
+  `name="mask"` on its `Content-Type` line; a header whose value mentions `content-disposition:`
+  is not that header; `filename="x; name=mask"; name="image"` is `image` with filename
+  `x; name=mask`; an escaped `\"` does not end a quoted filename; `C:\dir\fox.png` keeps its
+  backslashes.
+
+### SERVER-IMAGES-NPU: an image request holds the NPU like chat, and always lets it go
+**Applies to:** openflowlm-next (`src/server/server.cpp`)
+**Verification:** test
+**Test:** `specs/server-api/tests/test_images_api.py`
+
+Both image paths are in `requires_npu_access()`: one request at a time on the NPU, queued behind
+chat, embeddings and transcription. Every path through the handlers calls `send_response` exactly
+once, which is what releases the lock (SERVER-ERROR-STATUS describes what a missed release does).
+A client that disconnects during an `n` > 1 request stops it after the current image.
+
+**Acceptance criteria:**
+- After each of a refused size, an unknown model, `n: 0` and a request with no prompt, an image
+  request is answered 200.
+- Chat, image, chat, image on one server are each answered 200.
+
+### SERVER-IMAGES-FAILURE: a failed image run does not leave the server unable to make images
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/open_diffusion/engine.cpp`)
+**Verification:** manual
+
+A request that fails once it has used the image engine (a run that errors or times out on the NPU,
+an allocation that fails in `select`) is answered 500 with the reason, and the engine is unloaded.
+Before `Engine::run` rethrows, it waits out every stretch it still had on the NPU, so no run is
+left executing against buffers that are about to be freed. The next image request loads the
+engine fresh, with a new hardware context, as a swap does (SERVER-IMAGES-RESIDENCY), with or
+without `--imagegen 1`. A refused request never gets this far and unloads nothing.
+
+No client request can make a run fail, so the procedure injects the failure.
+
+**Verification (manual):**
+1. Build `oflm` with a local, uncommitted change that makes the first `Engine::run` throw after
+   its 20th stretch is submitted, with stretches still in flight.
+2. `oflm serve llama3.2:1b`; send `{"prompt": "a red fox in fresh snow", "size": "512x512",
+   "seed": 1}` to `/v1/images/generations` three times.
+3. The first is a 500 naming the injected failure, and the log shows `unloading the image engine
+   after a failed request`. The second loads the engine again (`Loading image model`) and is a
+   200. The third is a 200 with the same `b64_json` as the second, and the same as an unpatched
+   server gives for that request.
+   (2026-10-08: the 500 came with 15 stretches in flight; the second request reloaded the engine
+   and took 17.0 s, the third 4.3 s; both images and the unpatched server's were the same bytes.
+   Not reproduced: the server's behaviour before this change, which was inferred from the code.)
+
+### SERVER-IMAGES-RESIDENCY: swap by default, both resident with --imagegen 1
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/include/utils/vm_args.hpp`)
+**Verification:** manual
+
+The image engine holds one hardware context per configuration, 7.5 GB of weights and 1.4 / 4.6 GiB
+of activations per resolution. By default an image request swaps the chat model off the NPU and loads the image
+engine (5.2 s warm, the weights in the OS file cache), and a chat request swaps back; the log says
+so each time. The chat model's tag is kept, so a chat request that names it, or names nothing, is
+served by it again.
+
+`oflm serve <tag> --imagegen 1 [--imagemodel <tag>]` loads the image engine at startup beside the
+chat model, allocates every configuration (each resolution and each edit size), and never
+swaps. With klein's four (512, 1024, 512e512, 1024e1024) that is 12.8 GiB of activations
+(1.33 + 4.22 + 1.70 + 5.58) beside the 7.5 GB of weights. It still shares the NPU lock: resident
+saves the load, not the queue. A startup that cannot load it exits naming why. `--imagemodel`
+alone sets the model a request naming none gets; a tag that is not an image model stops the
+server at startup. Both flags are refused by every other command.
+
+The engine opens its kernel sets on the server's device handle (`npu_device_inst`), as the chat,
+embedding and Whisper engines do.
+
+**Verification (manual):**
+1. `oflm serve llama3.2:1b`; send chat, image, chat, image (`test_chat_and_images_alternate`).
+   All four succeed, and the log shows `swapping the chat model ... off the NPU`, then
+   `swapping the image engine ... off the NPU` and `reloading 'llama3.2:1b'`, at each switch.
+   (2026-09-28: 3 swaps each way over the whole test file; image engine load 5.2 s.)
+2. `oflm serve llama3.2:1b --imagegen 1`: the log shows one `Loading image model` line at startup
+   and none after the same four requests. (2026-09-28: loaded in 8.7 s with both resolutions
+   allocated; llama3.2:1b and the image engine fit the NPU together.)
+3. `oflm serve llama3.2:1b --imagegen 1 --imagemodel llama3.2:3b` exits with `--imagemodel: model
+   'llama3.2:3b' is not an image model`; `oflm run llama3.2:1b --imagegen 1` is refused.
+4. Not measured: resident beside `--asr 1` and `--embed 1` as well.

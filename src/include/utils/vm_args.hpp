@@ -55,6 +55,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --cors 0" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --asr 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --imagegen 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
     std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
@@ -93,6 +94,12 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("embeddingmodel", po::value<std::string>(&parsed_args.embedding_model)->default_value(""),
              "Which embedding model to serve with --embed 1 "
              "(default: embed-gemma:300m)")
+            ("imagegen", po::value<bool>(&parsed_args.image_resident)->default_value(0),
+             "Load the image engine at startup and keep it beside the chat model "
+             "(for serve command; default: an image request swaps them)")
+            ("imagemodel", po::value<std::string>(&parsed_args.image_model)->default_value(""),
+             "The image model a request naming none gets, and --imagegen 1 loads "
+             "(for serve command; default: flux2-klein:4b)")
             ("host", po::value<std::string>(&parsed_args.host)->default_value("127.0.0.1"), 
              "Set the server address (for serve command)")
             ("port,p", po::value<int>(&parsed_args.port)->default_value(-1), 
@@ -111,6 +118,9 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Set context length")
             ("prefill-chunk-len,pcl", po::value<int>(&parsed_args.prefill_chunk_len)->default_value(-1),
              "Set prefill chunk length")
+            ("prefill-mode", po::value<std::string>(&parsed_args.prefill_mode)->default_value(""),
+             "fast (default) or lean: lean uses less memory and processes prompts more slowly, "
+             "on the models whose kernels ship both (Qwen3.6-35B q8: 1.1 GiB less, ~20% slower prefill)")
             ("img-pre-resize,r", po::value<int>(&parsed_args.img_pre_resize)->default_value(2),
              "Pre-resize the image, 0: original size, 1: height = 480, 2: height = 720, 3: height = 1080, 4: height = 1440, 5: height = 2160, 6: height = 2880, 7: height = 3240, 8: height = 4320")
             ("socket,s", po::value<size_t>(&parsed_args.max_socket_connections)->default_value(10),
@@ -137,7 +147,11 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("size", po::value<int>(&parsed_args.image_size)->default_value(1024),
              "Image width and height in pixels (for image command)")
             ("seed", po::value<std::string>(&parsed_args.image_seed)->default_value(""),
-             "Noise seed, for a reproducible image (for image command; default random)");
+             "Noise seed, for a reproducible image (for image command; default random)")
+            ("image", po::value<std::string>(&parsed_args.image_ref)->default_value(""),
+             "Reference image to edit, .png or .jpg: the prompt says what to change (for "
+             "image command; the size then defaults to the largest one not above the "
+             "reference's shorter side)");
 
         // Define positional arguments
         po::positional_options_description pos_desc;
@@ -195,6 +209,18 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // This has to sit ABOVE the early exits below: `bench`, `list`,
             // `version`, `port` and `validate` all return there, so a check
             // placed after them would never see those commands.
+            // The open engine picks its prefill route when an LLM loads, and only these commands load one.
+            if (!vm["prefill-mode"].defaulted()) {
+                if (parsed_args.command != "run" && parsed_args.command != "serve" && parsed_args.command != "bench") {
+                    std::cerr << "Error: --prefill-mode is only supported with the run, serve and bench commands!" << std::endl;
+                    return false;
+                }
+                if (parsed_args.prefill_mode != "fast" && parsed_args.prefill_mode != "lean") {
+                    std::cerr << "Error: --prefill-mode is fast or lean, not '" << parsed_args.prefill_mode << "'" << std::endl;
+                    return false;
+                }
+            }
+
             if (parsed_args.command != "bench-embed") {
                 for (const char* opt : {"max-batch", "prompt-name"}) {
                     if (!vm[opt].defaulted()) {
@@ -207,7 +233,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             // The same for image: its options, and the prompt positional, which any
             // other command would otherwise take and drop.
             if (parsed_args.command != "image") {
-                for (const char* opt : {"out", "size", "seed"}) {
+                for (const char* opt : {"out", "size", "seed", "image"}) {
                     if (!vm[opt].defaulted()) {
                         std::cerr << "Error: --" << opt << " is only supported with"
                                      " the image command!" << std::endl;
@@ -220,6 +246,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     return false;
                 }
             }
+            parsed_args.image_size_given = !vm["size"].defaulted();
 
             // Serve-only options, refused by every other command. This used to
             // sit below the early exits that follow, so `version`, `port`,
@@ -236,6 +263,8 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     {"port", "The port number option is only supported with the serve command!"},
                     {"cors", "The cors option is only supported with the serve command!"},
                     {"host", "The host option is only supported with the serve command!"},
+                    {"imagegen", "--imagegen is only supported with the serve command!"},
+                    {"imagemodel", "--imagemodel is only supported with the serve command!"},
                 };
                 for (const auto& [opt, message] : serve_only) {
                     if (parsed_args.command == "port" && std::string(opt) == "port") {

@@ -16,6 +16,11 @@ against the exact fp32 decode (LPIPS, PSNR):
               normalized input over calibration prompts (--calib, default 0-3): minimizes
               the mean squared score error on data like it
 Prompts outside the calibration set are reported separately.
+
+--encoder asks the same of the encoder's mid-block attention (Phase 8 edits): its inputs
+are the edit study's prepared references (capture_edit_goldens.py, klein_edit_<size>_s4),
+the score is decode(mean with the factored attention) against decode(exact mean), both
+decoded exactly, plus the latent mean's rel_fro.
 """
 
 from __future__ import annotations
@@ -45,16 +50,25 @@ def main() -> int:
     ap.add_argument("--ranks", default="128,192,256")
     ap.add_argument("--calib", default="0,1,2,3")
     ap.add_argument("--out", default=r"C:\dev\ditref-out")
+    ap.add_argument("--encoder", action="store_true")
     a = ap.parse_args()
     import lpips
     from diffusers import AutoencoderKLFlux2
     import diffusers.models.attention_processor as dap
 
-    out = Path(a.out) / f"klein_{a.size}_s4"
-    lats = [torch.load(f) for f in sorted((out / "latents").glob("*.pt"))]
     vae = AutoencoderKLFlux2.from_pretrained(kqs.MODEL, subfolder="vae",
                                              torch_dtype=torch.float32).eval()
-    attn = next(m for m in vae.decoder.modules() if isinstance(m, dap.Attention))
+    if a.encoder:
+        from PIL import Image
+        refs = sorted((Path(a.out) / f"klein_edit_{a.size}_s4").glob("ref_*.png"),
+                      key=lambda f: int(f.stem.split("_")[1]))
+        lats = [torch.from_numpy(np.asarray(Image.open(f).convert("RGB"), np.float32) / 127.5 - 1)
+                .permute(2, 0, 1)[None] for f in refs]
+    else:
+        out = Path(a.out) / f"klein_{a.size}_s4"
+        lats = [torch.load(f) for f in sorted((out / "latents").glob("*.pt"))]
+    coder = vae.encoder if a.encoder else vae.decoder
+    attn = next(m for m in coder.modules() if isinstance(m, dap.Attention))
     Wq, bq = attn.to_q.weight.double(), attn.to_q.bias.double()
     Wk = attn.to_k.weight.double()
     Ma = torch.cat([Wq.T @ Wk, (bq @ Wk)[None]], 0)             # [513, 512]
@@ -83,8 +97,13 @@ def main() -> int:
 
     attn.set_processor(Proc())
 
+    means = {}
+
     def decode(lt):
         with torch.inference_mode():
+            if a.encoder:                       # lt is an image: encode, keep the mean
+                lt = vae.encode(lt).latent_dist.mode()
+                means.setdefault("exact" if state["mode"] == "exact" else "test", []).append(lt)
             y = vae.decode(lt.float(), return_dict=False)[0]
         return (y / 2 + 0.5).clamp(0, 1)
 
@@ -107,15 +126,20 @@ def main() -> int:
         for name, (U, V) in facts.items():
             state.update(mode="lowrank", U=U, V=V)
             lp, ps = [], []
+            means["test"] = []
             for i, lt in enumerate(lats):
                 img = decode(lt)
                 with torch.no_grad():
                     lp.append(float(loss(ref[i] * 2 - 1, img * 2 - 1)))
                 ps.append(10 * np.log10(1 / max(float(((ref[i] - img) ** 2).mean()), 1e-12)))
             held = [lp[i] for i in range(len(lats)) if i not in calib]
+            rel = ""
+            if a.encoder:
+                rf = [float((t - e).norm() / e.norm()) for t, e in zip(means["test"], means["exact"])]
+                rel = f"  latent rel_fro mean {np.mean(rf):.2e} max {np.max(rf):.2e}"
             print(f"{name}-{r:3d}: LPIPS mean {np.mean(lp):.4f} max {np.max(lp):.4f}"
                   f"  held-out mean {np.mean(held) if held else float('nan'):.4f}"
-                  f"  PSNR {np.mean(ps):.2f} dB", flush=True)
+                  f"  PSNR {np.mean(ps):.2f} dB{rel}", flush=True)
     return 0
 
 

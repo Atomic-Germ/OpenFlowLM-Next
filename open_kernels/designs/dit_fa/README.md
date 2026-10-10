@@ -23,6 +23,28 @@ Random N(0,1) Q/K/V, median of 11 warm runs. The text encoder's mode (32/8 heads
 causal, valid_len 77) passes at the same error. The current build is ~0.76 s of attention
 per 1024² denoising step (25 blocks); the plan's gate was 6 TFLOPS.
 
+**The time depends on the data** (2026-09-30). The lazy rescale fires whenever a row's
+chunk max passes its reference max by more than TAU, so a wider score spread means more
+rescales, at roughly 1 ms per 1% of (tile, chunk) pairs. `TAU` (`DF_TAU`, `FA_TAU`) went
+from 8 to 32, which removes that cost on wide spreads. Medians of 20 runs,
+`make_test.py --qk-scale`:
+
+| qk-scale | TAU 8 | TAU 32 |
+|---:|---:|---:|
+| 1 | 30.8 ms | 31.3 ms |
+| 2 | 37.7 ms | 31.2 ms |
+| 3 | 38.2 ms | 31.8 ms |
+
+rel_fro against fp64 is the same for both: 2.6e-2 at scale 1, 4.2e-2 at scale 3.
+`compare.py`'s 3e-2 gate fits scale-1 data only.
+
+**klein's real scores rarely rescale:** 0.07-0.96% of pairs at TAU 8 and ≤ 0.08% at
+TAU 32, over 6 attention ops of a 1024² image
+(`utilities/dit-chain/attn_rescales.py`). So for klein, TAU 32 saves under ~0.5 ms per
+call. On the same op, real inputs ran 0.9-1.5 ms slower than N(0, σ) inputs of the same
+std. That doesn't explain why the engine's `attn_sgl` measures ~36.7 ms against 32-33 ms
+in the probes (`specs/open-diffusion/archive/phase7-speed.md`).
+
 A hardware-context change between dit_gemm and dit_fa costs 2.2-2.5 ms each way
 (`xclbin` x2 in one run_kernel cfg, alternating dispatches vs solo).
 

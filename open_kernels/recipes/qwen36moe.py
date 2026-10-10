@@ -1046,12 +1046,47 @@ GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 col
 # up (the plan's B(3)); the design and the driver are ready for it.
 MB_NT = 8
 ATTN_LMAX = 4096      # the widest attention GEMM stream (rows of window); a longer window is chunked on the host
-# The GEMM reads the q4_1 band law only. A projection the container stores at q8 runs as its
-# exact q4_1 split instead (gemm_weight): every q8 code is 16 hi + lo, so two q4_1 halves sum
+# The q4_1 GEMM reads the band law; an all-q8 MoE route runs every GEMM on bf16 instead (bf16_route), and
+# a q8 projection elsewhere runs as its exact q4_1 split (gemm_weight): every q8 code is 16 hi + lo, so two q4_1 halves sum
 # to it exactly. That is how the published q8 containers -- the 35B's attention and DeltaNet,
 # Qwen3.5's ssm_out_proj -- get a route at all; re-quantising them to q4_1 flips 13% of the
 # 35B's next tokens (utilities/quant-compare/README.md). The shared expert has no q8 form in
 # this family (qwen36moe refuses it), so it is the one role that still means "no route".
+
+
+# the pack op, context and kernel-name prefix of the bf16 GEMM, and its bytes per source chunk (32 x 256 values)
+GEMM_FORMATS = {"bf16": ("bf16_gemm", "gemmb", "gemmb_", 2 * CHUNK_VALUES)}
+
+
+def gemm_format_of(weight: dict) -> str:
+    """q4_1 for a weight packed in the band law, else the GEMM format its pack ops build."""
+    if weight["from"] != "pack":
+        return "q4_1"
+    op = weight["pack"][0]["op"]
+    return next((f for f, v in GEMM_FORMATS.items() if v[0] == op), "q4_1")
+
+
+def bf16_route(spec: ModelSpec, dense: bool) -> bool:
+    """Every projection q8 on a MoE route: all its GEMMs, the shared expert's too, read bf16 on one context."""
+    if dense:
+        return False
+    roles = (["attn"] if spec.has_full else []) + (["linear", "linear_out"] if spec.has_linear else [])
+    return bool(roles) and all(spec.quant_of(r) == "q8" for r in roles)
+
+
+def bf16_weight(ops: list[dict]) -> dict:
+    """Pack ops `ops` (q8_perm or std_perm, in order, stacked along the rows) as one bf16 GEMM weight."""
+    pack, dst = [], 0
+    for o in ops:
+        op = {"op": "bf16_gemm", "tensor": o["tensor"]}
+        if "chunk0" in o:
+            op["chunk0"] = o["chunk0"]
+        op.update(nch=o["nch"] // 2 if o["op"] == "q8_perm" else o["nch"], in_dim=o["in_dim"], dst=dst)
+        if o["op"] == "std_perm":
+            op["via"] = "q4_1"     # as the sequential path reads it: a q8 source re-quantized, like every q4 op
+        pack.append(op)
+        dst += op["nch"] * GEMM_FORMATS["bf16"][3]
+    return {"from": "pack", "pack": pack}
 
 
 def gemm_weight(ops: list[dict], idxs: list[int]) -> dict:
@@ -1090,7 +1125,7 @@ def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
     return hits[0]
 
 
-def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> dict | None:
+def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_split: bool = False) -> dict | None:
     """Per layer type the `gemm_block` the driver reads, plus the contexts / kernels / globals /
     builds the route adds. None when a projection is streamed at q8: the GEMM dequantises the
     q4_1 band law only, and the sequential path is then exactly what it was.
@@ -1098,24 +1133,32 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
     `ffn="dense"` is Qwen3.5 (recipes/qwen35.py): the same linear / full halves, and in place of
     the router, the shared expert and the routed experts an `ffn_program` -- up|gate then down,
     the shared expert's two GEMMs without its sigmoid gate. `plan` is that family's pack plan's
-    `layer_types`, since the op indices the weight buffers name are its own."""
+    `layer_types`, since the op indices the weight buffers name are its own. `q8_split` builds an
+    all-q8 route as the exact q4_1 split, which the bf16 route carries as `variants.lean` (OPEN-PREFILL-MODE)."""
     dense = ffn == "dense"
     if not dense and spec.quant_of("shared") == "q8":
         return None
     L, T = layout(spec, ffn=ffn), GEMM_T
     hid, ff = spec.hidden, spec.intermediate if dense else spec.moe_intermediate
     plan = plan if plan is not None else pack_plan(spec)["layer_types"]
-    shapes: set[tuple[int, int]] = set()
+    shapes: set[tuple[int, int, str]] = set()
+    bf16 = bf16_route(spec, dense) and not q8_split
 
-    def ctx(N: int, K: int) -> str:
+    def weight(ops: list[dict], idxs: list[int]) -> dict:
+        return bf16_weight([ops[i] for i in idxs]) if bf16 else gemm_weight(ops, idxs)
+
+    def ctx(N: int, K: int, fmt: str = "q4_1") -> str:
         if N % 256 or K % 256:
             raise OpRangeError(f"gemm route: [{N}, {K}] is not a multiple of 256 in both dims")
-        shapes.add((N, K))
-        return f"gemm_n{N}_k{K}"
+        shapes.add((N, K, fmt))
+        return f"{GEMM_FORMATS[fmt][2] if fmt != 'q4_1' else 'gemm_'}n{N}_k{K}"
 
     def run(N: int, K: int, w: str, weights: dict | None = None) -> dict:
         """A GEMM step of N output rows. When its weight (looked up in `weights`) is a split,
-        the dispatch is twice the rows and the step says so."""
+        the dispatch is twice the rows and the step says so; a q8 / bf16 GEMM weight runs on its own kernel."""
+        if weights is not None and gemm_format_of(weights[w]) != "q4_1":
+            return {"op": "run", "kernel": ctx(N, K, gemm_format_of(weights[w])),
+                    "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
         if weights is not None and weights[w]["from"] == "pack" and weights[w]["pack"][0].get("split"):
             N2 = 2 * N
             return {"op": "run", "kernel": ctx(N2, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N2}"], "split": True}
@@ -1180,20 +1223,21 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
 
     def shared_of(lt: str) -> dict:
         pool = plan[lt]["pool"]
-        return {"shared_program": [run(2 * sff, hid, "gshare_w"), run(hid, sff, "gsdown_w")],
-                "shared_ff": sff,
-                "shared_weights": {
-                    "gshare_w": {"from": "pool", "ops": [_op_index(pool, "share_up_exps_proj.weight"),
-                                                         _op_index(pool, "share_gate_exps_proj.weight")]},
-                    "gsdown_w": {"from": "pool", "ops": [_op_index(pool, "share_down_exps_proj.weight")]}}}
+        sw = {"gshare_w": weight(pool, [_op_index(pool, "share_up_exps_proj.weight"),
+                                        _op_index(pool, "share_gate_exps_proj.weight")]),
+              "gsdown_w": weight(pool, [_op_index(pool, "share_down_exps_proj.weight")])}
+        return {"shared_program": [run(2 * sff, hid, "gshare_w", sw), run(hid, sff, "gsdown_w", sw)],
+                "shared_ff": sff, "shared_weights": sw}
 
     types: dict[str, dict] = {}
     if spec.has_linear:
         pool, consts = plan[LINEAR]["pool"], plan[LINEAR]["consts"]
         nch, vw = spec.lin_qkv_dim, spec.lin_value_width
         out_i = _op_index(consts, "linear_attn.ssm_out_proj.weight")
-        split = spec.quant_of("linear_out") == "q8"
-        if split:
+        split = spec.quant_of("linear_out") == "q8" and not bf16
+        if bf16:
+            gout = bf16_weight([consts[out_i]])
+        elif split:
             # The sequential kernel streams this projection at q8 and the GEMM reads q4_1 only.
             # Re-quantising it costs what OPEN-QUANT-Q8 measured (the reason q8 is native), so
             # the route packs the q8 weight as the exact sum of two q4_1 ones (hi and lo codes,
@@ -1206,13 +1250,14 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         else:
             gout = {"from": "consts", "ops": [out_i]}
         m0, m1, m2 = moe_of(LINEAR, L.A_XM, L.A_ROUT, L.A_RES)
-        w = {"gqkvz_w": gemm_weight(pool, [_op_index(pool, "linear_attn.qkv_proj.weight"),
+        w = {"gqkvz_w": weight(pool, [_op_index(pool, "linear_attn.qkv_proj.weight"),
                                            _op_index(pool, "self_attn.gate_proj.weight")]),
              "gout_w": gout}
         types[LINEAR] = {
             "kind": "linear", "t": T, "eps": spec.norm_eps,
             # the out projection keeps its own `out_split` flag (older engines read only that)
-            "program": [run(nch + vw, hid, "gqkvz_w", w), run(2 * hid if split else hid, vw, "gout_w")], **m0,
+            "program": [run(nch + vw, hid, "gqkvz_w", w),
+                        run(2 * hid, vw, "gout_w") if split else run(hid, vw, "gout_w", w)], **m0,
             "weights": w,
             "qkv_dim": nch, "vw": vw, "key_heads": spec.lin_key_heads, "value_heads": spec.lin_value_heads,
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff, **m1,
@@ -1225,11 +1270,11 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         qw, kvw = spec.attn_q_width, spec.attn_kv_width
         nq = q4_chunks(qw, hid)
         m0, m1, m2 = moe_of(FULL, L.AA_XM, L.AA_ROUT, L.AA_RES)
-        w = {"gqkvg_w": gemm_weight(pool, [_op_index(pool, "self_attn.q_proj.weight", 0),
+        w = {"gqkvg_w": weight(pool, [_op_index(pool, "self_attn.q_proj.weight", 0),
                                            _op_index(pool, "self_attn.k_proj.weight"),
                                            _op_index(pool, "self_attn.v_proj.weight"),
                                            _op_index(pool, "self_attn.q_proj.weight", nq)]),
-             "go_w": gemm_weight(pool, [_op_index(pool, "self_attn.o_proj.weight")])}
+             "go_w": weight(pool, [_op_index(pool, "self_attn.o_proj.weight")])}
         types[FULL] = {
             "kind": "full", "t": T, "eps": spec.norm_eps,
             "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w", w), run(hid, qw, "go_w", w)], **m0,
@@ -1284,16 +1329,27 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None) -> d
         out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2
         out["globals"]["ag_b"] = ATTN_LMAX * hd * 2
         out["globals"]["ag_c"] = ag_m * ATTN_LMAX * 4
-    for N, K in sorted(shapes):
-        name, ctx = f"gemm_n{N}_k{K}", "gemm"
+    for N, K, fmt in sorted(shapes):
+        q4 = fmt == "q4_1"
+        name = f"{'gemm_' if q4 else GEMM_FORMATS[fmt][2]}n{N}_k{K}"
+        ctx = "gemm" if q4 else GEMM_FORMATS[fmt][1]
         if ctx not in out["contexts"]:
             out["contexts"][ctx] = f"{name}/final.xclbin"
         out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}
         out["globals"][f"gemm_x_k{K}"] = K * T * 2
-        out["globals"][f"gemm_y_n{N}"] = N * T * 4
+        out["globals"][f"gemm_y_n{N}"] = max(out["globals"].get(f"gemm_y_n{N}", 0), N * T * 4)
         out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
-                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}",
-                               "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}}
+                               "build_dir": f"gemm_q4_prefill/build_{'' if q4 else fmt + '_'}n{N}_k{K}_t{T}",
+                               "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T),
+                                       **({} if q4 else {"GQP_FMT": fmt})}}
+    if bf16:
+        # 1.1 GiB lighter on the 35B and ~20% slower; the engine loads one of the two
+        lean = gemm_route(spec, ffn, plan, q8_split=True)
+        out["variants"] = {"lean": lean["layer_types"]}
+        for k in ("contexts", "kernels", "builds"):
+            out[k].update(lean[k])
+        for k, v in lean["globals"].items():
+            out["globals"][k] = max(out["globals"].get(k, 0), v)
     return out
 
 
@@ -1359,6 +1415,9 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        for name, types in r.get("variants", {}).items():
+            for lt, gb in types.items():
+                out["layer_types"][lt].setdefault("gemm_block_variants", {})[name] = gb
     return out
 
 

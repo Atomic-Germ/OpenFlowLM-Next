@@ -8,12 +8,16 @@ exists: how fast can this NPU run the large-M GEMMs a DiT denoise step is made o
 entirely with Peano. It is mlir-aie's asymmetric-tile-buffering dataflow (a 128x128 C tile
 per core, a quarter of A per call) driving mlir-aie's stock bf16 x bfp16 microkernel
 (`atb/mm_atb_stock.cc`) in place of config1's chess-tuned one. At 15.6 ms for
-4096x3072x9216 it moves ~556 MB, ~36 GB/s -- near the ~45 GB/s shim roof, so the next gains
-are in bytes (bfp16 activations, fusion), not the kernel.
+4096x3072x9216 it moves ~556 MB, ~36 GB/s -- near the ~45 GB/s shim roof. **But bytes are
+not its limit** (2026-09-30, `bfp16a/`): with A pre-converted to bfp16 (0.56x A's bytes, no
+in-core conversion), `sgl_in` and `sgl_out` ran only 1.8% and 0.5% faster. The limit is
+the microkernel's C round trip: every 64 of K, each C block is reloaded from bf16 and
+stored again, which costs about as much as the MACs.
 
 | script | measures |
 |---|---|
 | `dit_gemm_bench.py` | `npu_offload/gemm_rtp/gemm_pretiled.py`, the GEMM Whisper, block attention and the BERT embedders ship, on every datapath it has: bf16, bf16 with bf16 C, bfp16-emulated, int8, plus wider-tile variants |
+| `bfp16a/probe.py` | dit_gemm against a variant fed bfp16 A (timing only, random data): what pre-converted activations would buy |
 | `bfp_gemm_bench.py` | mlir-aie's bf16 x bfp16 designs, copied here: `wam/` (symmetric whole-array, 64x64x64), `atb/` (asymmetric tile buffering, 128x64x128, upstream kernel) and `atbs` (the same dataflow with the stock kernel) |
 
 Both scripts need a shell where `C:\dev\mlir-aie\iron_env.ps1` has been dot-sourced.
