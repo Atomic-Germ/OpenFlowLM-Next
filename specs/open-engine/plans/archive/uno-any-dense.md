@@ -1,7 +1,7 @@
 # Plan: Uno for any dense family, not just K2
 
-**Status:** in progress, 2026-10-10. Branch `feat/uno-any-dense`, pushed onto PR #184's branch (`feat/k2-horizon-7b`),
-agreed with #184's owner.
+**Status:** done, 2026-10-10. Pushed onto PR #184's branch (`feat/k2-horizon-7b`), agreed with #184's owner. Results
+are in the spec (OPEN-DECODE-ROWS and OPEN-UNO-DECODE, 2026-10-10).
 - **Done:** G1, G2, G3, G5, G6 and G4.
   - K2-7B on the NPU: the CLI's six prompts identical to decode with the app's pick (G6).
   - K2-3.7B (hidden 2560) on the NPU: `--rows-check 17` passes from a 20- and a 158-token prompt (G4).

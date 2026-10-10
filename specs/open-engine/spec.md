@@ -1315,6 +1315,13 @@ sizes the shared window to pos0 + L rows.
 | dxl, one row at a time (before) | 3.75 | 6.60 | 9.55 | 12.5 |
 | dxl, a core group per row | 3.63 | 4.38 | 5.08 | 5.95 |
 
+**Result 2026-10-10 (any multiple of 512):**
+- K2-3.7B (hidden 2560, q width 4096): 512-wide slices on q, k, v, up and gate, 1024 on o, and
+  `lmhl`'s partial last element. `--rows-check 17` from a 20-token prompt (positions 19-34) and
+  a 158-token one (157-172): 32 rows, 0 of 250624 logits differ on every one.
+- K2-7B on `dxl`, `dxl_lora` and `lmhl` rebuilt from the same sources: `ROWS PASS`, its job
+  tables byte-identical.
+
 ### OPEN-UNO-LORA: A Uno diffusion LoRA as q4_1 bands
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/uno.py`, `--uno-adapter`, `open_kernels/recipes/dxl.py`, `designs/dxl`, `src/open_qwen36/core.cpp`)
 **Verification:** test (`utilities/q4nx-build/tests/test_uno.py`, `tests/test_dxl.py`); manual (the draft layer below)
@@ -1430,6 +1437,13 @@ lock's `timing` gate):**
   - Streamed matches non-streamed, apart from one trailing newline.
   - Sampled requests decode as usual.
   - The 160-token reply splits at the bf16 tie above.
+
+**Result 2026-10-10 (every argmax the app's pick):**
+- **CLI:** the tie prefix differs from decode at token 0 on #184's `lmhl` (427 against 27) and
+  is identical on this one. The six prompts x 128 are all identical: 3.46, 3.12, 3.37, 3.05, 4.00
+  and 3.76 tokens a cycle (mean 3.43).
+- **Served by `oflm serve`:** the 160-token train reply is identical to plain decode's, the 37-token
+  cut and the streamed reply match too, and a sampled request decodes as before.
 
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
