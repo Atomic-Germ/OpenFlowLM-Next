@@ -609,9 +609,9 @@ private:
     /// per kv head, the group's queries against the window's K rows for the scores, the row
     /// softmax on the host, then against the V rows. Q [T, nh*hd] as attention_prep leaves it,
     /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated by
-    /// sigmoid(gate) -- or ungated when gate is null (a dense layer).
+    /// sigmoid(gate) -- or ungated when gate is null (a dense layer). `sub` (0 = g.T): tokens per product row block.
     void attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
-                       size_t kv_row_elems, float* og);
+                       size_t kv_row_elems, float* og, size_t sub = 0);
 };
 
 }  // namespace open_qwen36

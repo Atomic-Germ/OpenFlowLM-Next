@@ -69,7 +69,7 @@ PackOp parse_op(const json& j, const std::string& where) {
         for (const auto& [name, v] : fs)
             if (v == 0) fail(where, p.op + " " + (p.tensor.empty() ? p.up : p.tensor) + " without " + name);
     };
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "put" || p.op == "expert_down" ||
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_dit" || p.op == "put" || p.op == "expert_down" ||
         p.op == "conv_transpose" || p.op == "lmhead_q8" || p.op == "transpose" || p.op == "transpose_banked") {
         if (p.tensor.empty()) fail(where, p.op + " without a tensor");
     } else if (p.op == "expert_stripes") {
@@ -77,7 +77,7 @@ PackOp parse_op(const json& j, const std::string& where) {
     } else {
         fail(where, "unknown pack op '" + p.op + "'");
     }
-    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "bf16_gemm")
+    if (p.op == "std_perm" || p.op == "q8_perm" || p.op == "bf16_gemm" || p.op == "bfp16_dit")
         need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
@@ -144,8 +144,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
     // ignore `split` and use the hi half of each such weight, so the recipe writes 2 exactly when
     // a step is split, and an older engine refuses the set by name instead of misreading it.
     // 3 adds the bf16_gemm pack op, which an engine that reads 2 cannot pack.
-    if (m.version < 1 || m.version > 3)
-        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 3)");
+    // 4 adds bfp16_dit (OPEN-PREFILL-GEMM8), likewise.
+    if (m.version < 1 || m.version > 4)
+        fail(where, "manifest_version " + std::to_string(m.version) + " (this engine reads 1 to 4)");
     m.family = get<std::string>(j, "family", where);
     m.spec_hash = j.value("spec_hash", "");
     m.build_key = j.value("build_key", "");
@@ -248,8 +249,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                         // one format per weight: the q4_1 band law, or one GEMM pool the kernel was built for
                         const std::string& kind = w.pack.front().op;
                         for (const auto& o : w.pack)
-                            if (o.op != "std_perm" && o.op != "bf16_gemm")
-                                fail(gw, "weight " + name + ": a packed weight is std_perm or bf16_gemm ops, not " + o.op);
+                            if (o.op != "std_perm" && o.op != "bf16_gemm" && o.op != "bfp16_dit")
+                                fail(gw, "weight " + name + ": a packed weight is std_perm, bf16_gemm or bfp16_dit ops, not " + o.op);
                         for (const auto& o : w.pack)
                             if (o.op != kind)
                                 fail(gw, "weight " + name + " mixes " + kind + " and " + o.op + " ops; the GEMM reads one format");
@@ -319,6 +320,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 g.attn_args = gj.value("attn_args", std::vector<std::string>{"pool", "xres", "consts", "state", "act", "ptab"});
                 g.sandwich = gj.value("sandwich", false);
                 g.act = gj.value("act", std::string("silu"));
+                g.gemm = gj.value("gemm", std::string("q4"));
+                if (g.gemm != "q4" && g.gemm != "dit") fail(gw, "gemm must be q4 or dit, is " + g.gemm);
                 if (g.attn_args.size() != 6) fail(gw, "attn_args wants exactly 6 buffer names, has " + std::to_string(g.attn_args.size()));
                 auto ak = m.kernels.find(g.attn_kernel);
                 if (ak == m.kernels.end()) fail(gw, "gemm_block present but this manifest declares no " + g.attn_kernel + " kernel");
@@ -328,6 +331,16 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 if (g.weights.empty())
                     g.weights = {{"gqkv3_w", {"pool", {0, 1, 2}}}, {"go_w", {"pool", {3}}}, {"gup_w", {"pool", {4}}},
                                  {"ggate_w", {"pool", {5}}}, {"gdown_w", {"pool", {6}}}};
+                if (g.gemm == "dit") {
+                    // the products are built for 256-row blocks; the engine runs t / 256 of them a block
+                    if (!g.attn_block.present() || g.attn_block.prep.empty() || g.t % 256)
+                        fail(gw, "a dit route needs the attention products (attn_block with prep) and t a multiple of 256");
+                    for (const auto& s : g.program) {
+                        auto w = g.weights.find(s.args[0]);
+                        if (w == g.weights.end() || w->second.from != "pack" || w->second.pack.front().op != "bfp16_dit")
+                            fail(gw, "dit step " + s.kernel + ": its weight " + s.args[0] + " is not packed by bfp16_dit");
+                    }
+                }
             } else if (g.kind == "linear" || g.kind == "full") {
                 if (g.program.size() != 2)
                     fail(gw, "a " + g.kind + " route has exactly 2 steps (the fused input projection, the output projection), has " +
@@ -508,8 +521,9 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 const std::string vw = tw + " gemm_block_variants." + vname;
                 GemmBlockProgram g;
                 parse_gemm_block(vj, vw, g);
-                // the host stages and every buffer around the GEMMs are sized for gemm_block's
-                if (g.t != t.gemm_block.t || g.kind != t.gemm_block.kind)
+                // the buffers around the GEMMs are sized for gemm_block's, except a dense dit route's own
+                const bool dit = g.kind == "dense" && (g.gemm == "dit" || t.gemm_block.gemm == "dit");
+                if ((g.t != t.gemm_block.t && !dit) || g.kind != t.gemm_block.kind)
                     fail(vw, "is a " + g.kind + " route at t " + std::to_string(g.t) + ", gemm_block a " +
                                  t.gemm_block.kind + " route at t " + std::to_string(t.gemm_block.t));
                 t.gemm_block_variants[vname] = std::move(g);
@@ -522,10 +536,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         for (const auto* ws : {&g->weights, &g->shared_weights, &g->ffn_weights})
             for (const auto& [name, w] : *ws) {
                 if (w.from == "pack") {
-                    for (const auto& o : w.pack)
+                    for (const auto& o : w.pack) {
                         if (o.op == "bf16_gemm" && m.version < 3)
                             fail(tw, "gemm_block weight " + name + " packs " + o.op + " in a manifest_version " +
                                          std::to_string(m.version) + " manifest; an engine that reads 2 cannot pack it, so it needs version 3");
+                        if (o.op == "bfp16_dit" && m.version < 4)
+                            fail(tw, "gemm_block weight " + name + " packs " + o.op + " in a manifest_version " +
+                                         std::to_string(m.version) + " manifest; an engine that reads 3 cannot pack it, so it needs version 4");
+                    }
                     continue;
                 }
                 const size_t n = w.from == "pool" ? t.pool.size() : t.consts.size();
