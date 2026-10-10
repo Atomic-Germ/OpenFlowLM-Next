@@ -34,6 +34,9 @@
 /// pairs (correlation / argmax / top-5).
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
+#include <random>
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
@@ -65,6 +68,17 @@ int argmax(const std::vector<float>& v, size_t n) {
     int best = 0;
     for (size_t i = 1; i < n; ++i)
         if (v[i] > v[best]) best = static_cast<int>(i);
+    return best;
+}
+
+// The app's greedy (Engine::logits_view, Sampler::sample_greedy): bf16-rounded logits, subnormals to zero, lowest id on a tie.
+int argmax_bf16(const std::vector<float>& v, size_t n) {
+    int best = 0;
+    float bv = -std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < n; ++i) {
+        const float x = std::fpclassify(v[i]) == FP_SUBNORMAL ? 0.0f : open_qwen36::bf16_to_f32(open_qwen36::f32_to_bf16(v[i]));
+        if (x > bv) { bv = x; best = static_cast<int>(i); }
+    }
     return best;
 }
 
@@ -108,6 +122,8 @@ struct Args {
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
     std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
+    int rows_check = 0;             // OPEN-DECODE-ROWS: N decode steps, then the same positions as L-row passes
+    int uno = 0;                    // OPEN-UNO-DECODE: N tokens by Uno's two-pass cycle, then by decode
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -200,6 +216,8 @@ Args parse(int argc, char** argv) {
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
+        else if (k == "--rows-check") a.rows_check = std::atoi(val().c_str());
+        else if (k == "--uno") a.uno = std::atoi(val().c_str());
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -210,6 +228,108 @@ Args parse(int argc, char** argv) {
         std::exit(2);
     }
     return a;
+}
+
+// OPEN-DECODE-ROWS
+int rows_check(Core& core, const Args& a, int n) {
+    const size_t L = core.rows_l(), V = core.vocab();
+    if (!L) { std::fprintf(stderr, "rows-check: this kernel set has no L-row pass\n"); return 1; }
+    const size_t P = a.ids.size();
+    std::vector<int> seq(a.ids);
+    std::vector<std::vector<float>> lg;
+    for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    double step_ms = 0;
+    for (int t = 0; t < n; ++t) {
+        lg.emplace_back(core.logits().begin(), core.logits().end());
+        seq.push_back(argmax_bf16(core.logits(), core.real_vocab()));
+        if (t + 1 == n) break;
+        core.step(seq.back(), true);
+        step_ms += core.last_timing().total_ms;
+    }
+    int bad = 0;
+    double rows_ms = 0;
+    size_t passes = 0;
+    for (size_t p0 = P - 1; p0 + L <= P - 1 + lg.size(); p0 += L) {
+        core.seek(static_cast<int>(p0));
+        std::vector<int> am(L);
+        core.step_rows(&seq[p0], am.data(), true);
+        rows_ms += core.rows_ms();
+        ++passes;
+        for (size_t j = 0; j < L; ++j) {
+            const std::vector<float>& ref = lg[p0 + j - (P - 1)];
+            const float* got = core.rows_logits(j);
+            size_t diff = 0;
+            for (size_t v = 0; v < V; ++v) diff += std::memcmp(&ref[v], &got[v], 4) != 0;
+            const bool ok = diff == 0 && am[j] == seq[p0 + j + 1];
+            bad += !ok;
+            std::printf("rows @%zu row %zu: %s argmax %d step %d, %zu of %zu logits differ\n", p0, j,
+                        ok ? "PASS" : "FAIL", am[j], seq[p0 + j + 1], diff, V);
+        }
+    }
+    const double per_step = step_ms / std::max(1, n - 1);
+    if (passes)
+        std::fprintf(stderr, "rows-check: %zu passes of %zu rows, %.1f ms a pass; decode %.1f ms a step (%.2fx)\n",
+                     passes, L, rows_ms / passes, per_step, (rows_ms / passes) / per_step);
+    std::printf(bad ? "ROWS FAIL (%d rows)\n" : "ROWS PASS\n", bad);
+    return bad;
+}
+
+// OPEN-UNO-DECODE: IFM's two-pass cycle (nano_vllm_uno two_pass_decoding.py), then plain decode it must reproduce.
+int uno(Core& core, const Args& a, int n) {
+    using clock = std::chrono::steady_clock;
+    const size_t L = core.rows_l();
+    if (!L || !core.has_draft()) { std::fprintf(stderr, "uno: this kernel set or model has no draft pass\n"); return 1; }
+    const size_t P = a.ids.size();
+    std::mt19937 rng(0);
+    std::uniform_int_distribution<int> noise(1, static_cast<int>(core.uno_noise_bound()) - 1);   // the adapter's [1, N)
+    for (size_t i = 0; i + 1 < P; ++i) core.step(a.ids[i], false);
+    std::vector<int> out, hist(L, 0), dr(L), vr(L), am(L), av(L);
+    int seed = a.ids[P - 1];
+    size_t cycles = 0;
+    const auto t0 = clock::now();
+    while (out.size() < static_cast<size_t>(n)) {
+        const int p = core.position();                  // the seed's own position
+        dr[0] = seed;
+        for (size_t j = 1; j < L; ++j) dr[j] = noise(rng);
+        core.step_rows(dr.data(), am.data(), false, true);
+        vr[0] = am[0];
+        for (size_t j = 1; j < L; ++j) vr[j] = am[j];
+        core.seek(p + 1);
+        core.step_rows(vr.data(), av.data(), false, false);
+        size_t k = 0;
+        while (k + 1 < L && vr[k + 1] == av[k]) ++k;    // draft k+1 checked by verify row k
+        ++hist[k];
+        ++cycles;
+        for (size_t j = 0; j <= k; ++j) out.push_back(vr[j]);
+        out.push_back(av[k]);
+        seed = av[k];
+        core.seek(p + 2 + static_cast<int>(k));
+    }
+    const double uno_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    out.resize(n);
+    std::string h;
+    for (size_t j = 0; j < L; ++j) h += (j ? " " : "") + std::to_string(hist[j]);
+    std::fprintf(stderr, "uno: %d tokens in %zu cycles (%.2f a cycle, accepted-draft histogram %s): %.1f ms/token "
+                         "(%.2f tok/s)\n", n, cycles, static_cast<double>(n) / cycles, h.c_str(), uno_ms / n,
+                 1000.0 * n / uno_ms);
+    for (int t : out) std::printf("token %d\n", t);
+    // plain decode from the same prompt
+    core.seek(0);
+    for (size_t i = 0; i < P; ++i) core.step(a.ids[i], i + 1 == P);
+    std::vector<int> ar;
+    const auto t1 = clock::now();
+    for (int t = 0; t < n; ++t) {
+        ar.push_back(argmax_bf16(core.logits(), core.real_vocab()));
+        if (t + 1 < n) core.step(ar.back(), true);
+    }
+    const double ar_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+    size_t first = 0;
+    while (first < ar.size() && ar[first] == out[first]) ++first;
+    std::fprintf(stderr, "decode: %d tokens, %.1f ms/token (%.2f tok/s); uno is %.2fx\n", n, ar_ms / std::max(1, n - 1),
+                 1000.0 * (n - 1) / ar_ms, (ar_ms / std::max(1, n - 1)) / (uno_ms / n));
+    if (first == ar.size()) std::printf("UNO IDENTICAL to decode over %d tokens\n", n);
+    else std::printf("UNO DIFFERS from decode at token %zu (%d vs %d)\n", first, out[first], ar[first]);
+    return first == ar.size() ? 0 : 1;
 }
 
 /// Prefill + greedy decode; returns the produced ids.
@@ -441,6 +561,8 @@ int main(int argc, char** argv) {
             std::printf(bad ? "NONDETERMINISTIC\n" : "DONE\n");
             return bad ? 1 : 0;
         }
+        if (a.rows_check) return rows_check(core, a, a.rows_check) ? 1 : 0;
+        if (a.uno) return uno(core, a, a.uno);
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);
         int reps = a.twice ? 2 : a.repeat;

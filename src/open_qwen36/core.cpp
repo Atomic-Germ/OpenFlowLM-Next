@@ -286,6 +286,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_pv) wanted[k] = true;
     }
     for (const auto& s : man_.tail) wanted[s.kernel] = true;
+    if (man_.rows.l) {
+        wanted[man_.rows.kernel] = true;
+        wanted[man_.rows.head] = true;
+        if (!man_.rows.lora_kernel.empty()) wanted[man_.rows.lora_kernel] = true;
+    }
     for (const auto& [name, d] : man_.kernels)
         if (wanted.count(name)) load_kernel(name, d);
     logits_host_.assign(man_.vocab, 0.f);
@@ -389,11 +394,16 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gemm_block_t_ && any_moe)
         log(std::string("token-batched expert kernel: ") +
             (any_batch ? (moe_batch_on_ ? "on" : "off (OFLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
-    bool any_attn = false;
-    for (const auto& t : types_) any_attn = any_attn || t->gemm_block.attn_block.present();
+    bool any_attn = false, any_dense = false;
+    for (const auto& t : types_) {
+        any_attn = any_attn || t->gemm_block.attn_block.present();
+        any_dense = any_dense || t->gemm_block.kind == "dense";
+    }
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
-            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
+            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)")
+                      : any_dense ? "not in this kernel set (one dxB dispatch a token)"
+                                  : "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
         log(std::string("prefill schedule: ") +
             (layer_major_ok() ? (any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
@@ -455,6 +465,11 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
         k.attn = stream_patch::attn_table(k.words, name, man_.attn);
+        k.geom = man_.attn;
+        k.geom.window = d.window;
+        k.geom.rb = d.rb;
+    } else if (d.patch == "attnrows") {
+        k.attn_rows = stream_patch::attn_rows_table(k.words, name, static_cast<uint32_t>(man_.rows.l), man_.attn);
         k.geom = man_.attn;
         k.geom.window = d.window;
         k.geom.rb = d.rb;
@@ -669,6 +684,37 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
         pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
     }
+    if (man_.rows.l) {
+        globals_["rows_xres"] = alloc(man_.rows.l * man_.hidden * 4);
+        globals_["rows_act"] = alloc(man_.rows.act_bytes);
+        globals_["rows_hact"] = alloc(man_.rows.head_act_bytes);
+        globals_["rows_out"] = alloc(man_.rows.head_out_floats * 4);
+        lora_.clear();
+        noise_high_ = 0;
+        lora_none_ = alloc(4096);
+        const fs::path lf = fs::path(cfg_.model_dir) / man_.rows.lora_file;
+        if (!man_.rows.lora_kernel.empty() && fs::exists(lf)) {
+            Q4nxFile uno(lf.string());
+            if (const std::string nh = uno.metadata("uno_noise_high"); !nh.empty()) {
+                const unsigned long long v = std::stoull(nh);
+                if (v < 2 || v > man_.vocab)
+                    throw std::runtime_error("draft pass: " + man_.rows.lora_file + "'s uno_noise_high " + nh +
+                                             " is outside [2, vocab " + std::to_string(man_.vocab) + "]");
+                noise_high_ = static_cast<size_t>(v);
+            }
+            for (int l = 0; l < nl_; ++l) {
+                xrt::bo b = xrt::ext::bo(*dev_, man_.rows.lora_pool_bytes);
+                std::memset(b.map<uint8_t*>(), 0, man_.rows.lora_pool_bytes);
+                for (const PackOp& o : man_.rows.lora_pack)
+                    pools::apply(o, uno, l, b.map<uint8_t*>(), man_.rows.lora_pool_bytes, man_.chunk_bytes);
+                b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+                lora_.push_back(std::move(b));
+            }
+            log("draft pass: " + man_.rows.lora_file + " packed, " + std::to_string(nl_) + " LoRA pools of " +
+                std::to_string(man_.rows.lora_pool_bytes >> 20) + " MB, noise ids [1, " +
+                std::to_string(uno_noise_bound()) + ")");
+        }
+    }
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
     weights_loaded_ = true;
@@ -711,6 +757,7 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
     if (name == "consts") return consts_[layer];
     if (name == "act") return act_[layer];
     if (name == "state") return state_[layer];
+    if (name == "lora") return layer >= 0 && static_cast<size_t>(layer) < lora_.size() ? lora_[layer] : lora_none_;
     // the block route's per-layer weight buffers (load_weights)
     if (auto g = gemm_w_.find(name); g != gemm_w_.end()) {
         if (layer < 0 || static_cast<size_t>(layer) >= g->second.size() || !g->second[layer])
@@ -2356,8 +2403,9 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     const size_t qw = gb.qw, kvw = gb.kvw, hd = ab.hd;
     // The geometry the products were built for, against what this layer's projection produces;
     // attention_npu checks m against the group size times T.
-    if (ab.prep != "qknorm_rope" || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || man_.rotary_dim > hd ||
-        hc.qn.size() != hd || hc.kn.size() != hd)
+    const bool qknorm = ab.prep == "qknorm_rope";
+    if ((!qknorm && ab.prep != "rope") || qw % hd || kvw % hd || (qw / hd) % (kvw / hd) || man_.rotary_dim > hd ||
+        (qknorm && (hc.qn.size() != hd || hc.kn.size() != hd)))
         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": the dense attention products were built for "
                                  "head dim " + std::to_string(hd) + ", which this layer's q / k / v widths do not divide into");
     // y [n_qkv3, T] straight into the [T, width] parts attention_prep reads
@@ -2380,7 +2428,8 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     g.pos0 = pos0; g.eps = gb.eps;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
-    host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
+    host::attention_prep(g, q, k, v, qknorm ? hc.qn.data() : nullptr, qknorm ? hc.kn.data() : nullptr,
+                         man_.rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
     timing_.mid_ms += ms_since(tt);
     og.assign(T * qw, 0.f);
     // attention_npu books its dispatches as part0 and its host stages as part1, the full layers'
@@ -3027,6 +3076,8 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
     size_t* pos = BlockScratch::fit(bs_.pos, M);
     for (size_t r = 0; r < M; ++r) pos[r] = g.pos0 + r % T;
     uint16_t* qb = BlockScratch::fit(bs_.qb, M * hd);
+    // no q/k norm leaves the scores unbounded, so Q goes in as a bf16 hi/lo pair, as attn.h's decode does
+    uint16_t* ql = ab.prep == "rope" ? BlockScratch::fit(bs_.qlo, M * hd) : nullptr;
     float* acc = BlockScratch::fit(bs_.acc, M * hd);
     std::fill(og, og + T * qw, 0.f);
     // The kv group's queries as the scores' A operand: row hl * T + t is query head hl of the group
@@ -3036,7 +3087,29 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
                 const float* src = Q + t * qw + (gh * grp + hl) * hd;
                 uint16_t* dst = qb + (hl * T + t) * hd;
                 for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
+                if (ql) {
+                    uint16_t* lo = ql + (hl * T + t) * hd;
+                    for (size_t j = 0; j < hd; ++j) lo[j] = f32_to_bf16(src[j] - bf16_to_f32(dst[j]));
+                }
             }
+    };
+    // The scores the softmax reads, after the lo half's pass over the same K^T where Q is split
+    auto with_lo = [&](size_t L) -> const float* {
+        if (!ql) return bc.map<float*>();
+        const auto th = std::chrono::steady_clock::now();
+        float* sh = BlockScratch::fit(bs_.s_hi, M * L);
+        std::memcpy(sh, bc.map<float*>(), M * L * 4);
+        std::memcpy(ba.map<uint16_t*>(), ql, M * hd * 2);
+        ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
+        const double r = run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
+        read_back(bc, M * L * 4, 0);
+        // summed on the host side: a write into bc's map leaves dirty lines the next read_back flushes over the device's output
+        const float* c = bc.map<float*>();
+        for (size_t i = 0; i < M * L; ++i) sh[i] += c[i];
+        timing_.part0_ms += r;
+        timing_.mid_ms += ms_since(th) - r;
+        timing_.part1_ms += ms_since(th) - r;
+        return sh;
     };
     // og for the group's real tokens: the merged sum over the denominator, gated when the layer is
     auto group_out = [&](size_t gh, const float* lsum_g) {
@@ -3079,10 +3152,10 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             read_back(bc, M * L * 4, 0);
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
+            const float* s = with_lo(L);
             th = std::chrono::steady_clock::now();
             // acc only takes a rescale from an earlier chunk, and there is none
-            host::softmax_chunk(M, L, hd, 0, bc.map<float*>(), pos, m_all + gh * M, l_all + gh * M, acc,
-                                p_all + gh * M * L);
+            host::softmax_chunk(M, L, hd, 0, s, pos, m_all + gh * M, l_all + gh * M, acc, p_all + gh * M * L);
             timing_.mid_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
         }
@@ -3135,8 +3208,9 @@ void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const f
             read_back(bc, M * L * 4, 0);   // the whole M x L score matrix
             timing_.sync_ms += ms_since(th);
             timing_.part1_ms += ms_since(th);
+            const float* s = with_lo(L);
             th = std::chrono::steady_clock::now();
-            host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos, m, lsum, acc, ba.map<uint16_t*>());
+            host::softmax_chunk(M, L, hd, c0, s, pos, m, lsum, acc, ba.map<uint16_t*>());
             host::tile_rows_as_b(kv + c0 * kv_row_elems + kvw + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
             ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
             bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
@@ -3356,6 +3430,56 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
         done += n;
     }
     timing_.route_ms += ms_since(tp);
+}
+
+void Core::step_rows(const int* ids, int* argmax, bool want_logits, bool draft) {
+    const size_t L = man_.rows.l, hid = man_.hidden;
+    if (!L) throw std::runtime_error("open_qwen36: this kernel set has no L-row pass (manifest `rows`)");
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: step_rows before load_weights");
+    if (draft && lora_.empty())
+        throw std::runtime_error("open_qwen36: a draft pass needs " + man_.rows.lora_file + " beside model.q4nx");
+    if (static_cast<size_t>(pos_) + L > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: rows " + std::to_string(pos_) + "+" + std::to_string(L) +
+                                 " pass the context capacity " + std::to_string(cfg_.max_ctx));
+    const auto t0 = std::chrono::steady_clock::now();
+    xrt::bo& xr = buffer("rows_xres", 0);
+    float* x = xr.map<float*>();
+    for (size_t j = 0; j < L; ++j) {
+        if (ids[j] < 0 || static_cast<size_t>(ids[j]) >= man_.vocab)
+            throw std::runtime_error("open_qwen36: step_rows token id out of range");
+        file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[j]), hid, x + j * hid);
+    }
+    xr.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hid * 4, 0);
+    Kern& k = kerns_.at(draft ? man_.rows.lora_kernel : man_.rows.kernel);
+    stream_patch::attn_rows_apply(k.iw(), k.attn_rows, static_cast<uint64_t>(pos_), k.geom);
+    k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    // One stream on per-layer buffers: nothing is patched between layers, so layer l + 1 can queue behind l.
+    const std::vector<std::string> args = {"pool", "rows_xres", "consts", "state", "rows_act", "ptab", "lora"};
+    Inflight prev;
+    for (int l = 0; l < nl_; ++l) {
+        Inflight f = start_run(k, args, l);
+        if (prev.active()) wait_run(prev);
+        prev = std::move(f);
+    }
+    if (prev.active()) wait_run(prev);
+    run(kerns_.at(man_.rows.head), {"lmpool", "rows_xres", "normw", "rows_hact", "rows_out"}, 0);
+    xrt::bo& out = buffer("rows_out", 0);
+    const size_t lb = L * man_.vocab * 4, cores = man_.rows.head_cores, el = L * 64;
+    read_back(out, cores * el * 4, lb);
+    const int32_t* am = reinterpret_cast<const int32_t*>(out.map<uint8_t*>() + lb);
+    for (size_t j = 0; j < L; ++j) {
+        int32_t best = INT32_MIN, tok = -1;
+        for (size_t c = 0; c < cores; ++c)                   // a core's rows precede the next's: first on a tie
+            if (am[c * el + j] > best) { best = am[c * el + j]; tok = am[c * el + L + j]; }
+        argmax[j] = tok;
+    }
+    if (want_logits) read_back(out, lb, 0);
+    rows_ms_ = ms_since(t0);
+}
+
+const float* Core::rows_logits(size_t j) {
+    if (j >= man_.rows.l) throw std::runtime_error("open_qwen36: rows_logits row out of range");
+    return buffer("rows_out", 0).map<float*>() + j * man_.vocab;
 }
 
 void Core::seek(int pos) {

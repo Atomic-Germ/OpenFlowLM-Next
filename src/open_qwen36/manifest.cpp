@@ -202,11 +202,37 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (d.rb > 1 && d.patch != "attnpos")
             fail(where, "kernel " + k + ": rb " + std::to_string(d.rb) + " needs the attnpos patch table");
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
-        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
+        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch" &&
+            d.patch != "attnrows")
             fail(where, "kernel " + k + ": unknown patch " + d.patch);
         if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
             fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
         m.kernels[k] = d;
+    }
+    if (j.contains("rows")) {
+        const json& r = j["rows"];
+        const std::string rw = where + " rows";
+        m.rows.l = get<uint64_t>(r, "l", rw);
+        m.rows.kernel = get<std::string>(r, "kernel", rw);
+        m.rows.head = get<std::string>(r, "head", rw);
+        m.rows.act_bytes = get<uint64_t>(r, "act_bytes", rw);
+        m.rows.head_act_bytes = get<uint64_t>(r, "head_act_bytes", rw);
+        m.rows.head_cores = get<uint64_t>(r, "head_cores", rw);
+        m.rows.head_out_floats = get<uint64_t>(r, "head_out_floats", rw);
+        if (m.rows.l == 0 || m.rows.l % 4) fail(rw, "l " + std::to_string(m.rows.l) + " is not a multiple of 4");
+        auto rk = m.kernels.find(m.rows.kernel);
+        if (rk == m.kernels.end() || rk->second.patch != "attnrows")
+            fail(rw, "kernel " + m.rows.kernel + " is not a kernel built with the attnrows patch table");
+        if (!m.kernels.count(m.rows.head)) fail(rw, "head " + m.rows.head + " is not a kernel");
+        m.rows.lora_kernel = r.value("lora_kernel", "");
+        if (!m.rows.lora_kernel.empty()) {
+            auto lk = m.kernels.find(m.rows.lora_kernel);
+            if (lk == m.kernels.end() || lk->second.patch != "attnrows")
+                fail(rw, "lora_kernel " + m.rows.lora_kernel + " is not a kernel built with the attnrows patch table");
+            m.rows.lora_file = get<std::string>(r, "lora_file", rw);
+            m.rows.lora_pool_bytes = get<uint64_t>(r, "lora_pool_bytes", rw);
+            for (const auto& o : need(r, "lora_pack", rw)) m.rows.lora_pack.push_back(parse_op(o, rw + ".lora_pack"));
+        }
     }
     for (const auto& [name, v] : need(j, "layer_types", where).items()) {
         const std::string tw = where + " layer type " + name;
@@ -278,7 +304,8 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 a.args = get<std::vector<std::string>>(aj, "args", aw);
                 if (dense_ab) {
                     a.prep = get<std::string>(aj, "prep", aw);
-                    if (a.prep != "qknorm_rope") fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope)");
+                    if (a.prep != "qknorm_rope" && a.prep != "rope")
+                        fail(aw, "prep " + a.prep + " is not one this engine computes (qknorm_rope, rope)");
                 }
                 // the products tile K^T by (64, 32) and V by (64, 32): a dense head dim of 64 or
                 // 128 is a narrower product, the full layers' 256 the widest

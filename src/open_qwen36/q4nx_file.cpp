@@ -53,7 +53,12 @@ Q4nxFile::Q4nxFile(const std::string& path) : path_(path) {
     if (!hdr.is_object()) throw std::runtime_error("q4nx: header of " + path + " is not JSON");
     data_base_ = 8 + static_cast<size_t>(n);
     for (auto it = hdr.begin(); it != hdr.end(); ++it) {
-        if (it.key() == "__metadata__") continue;
+        if (it.key() == "__metadata__") {
+            if (it.value().is_object())
+                for (auto m = it.value().begin(); m != it.value().end(); ++m)
+                    if (m.value().is_string()) metadata_[m.key()] = m.value().get<std::string>();
+            continue;
+        }
         const auto& v = it.value();
         TensorMeta t;
         t.dtype = v.value("dtype", "");
@@ -72,6 +77,11 @@ size_t Q4nxFile::chunk_bytes(const std::string& name) const {
     const TensorMeta& t = meta(name);
     if (t.dtype != "I8" || t.shape.empty()) return 0;
     return t.shape.back();
+}
+
+std::string Q4nxFile::metadata(const std::string& key) const {
+    const auto it = metadata_.find(key);
+    return it == metadata_.end() ? std::string() : it->second;
 }
 
 Q4nxFile::~Q4nxFile() {

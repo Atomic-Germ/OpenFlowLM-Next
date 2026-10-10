@@ -69,6 +69,8 @@ public:
     /// How many tensors the header lists, so a loader can say when a container holds more
     /// than it read rather than silently ignoring the rest.
     size_t tensor_count() const { return tensors_.size(); }
+    /// A string from the header's `__metadata__`, "" when absent (uno.q4nx records its adapter's there).
+    std::string metadata(const std::string& key) const;
 
 private:
     std::string path_;
@@ -77,6 +79,7 @@ private:
     size_t data_base_ = 0;
     static constexpr size_t chunk_bytes_ = 5120;   ///< the pool's q4_1 chunk (a constant, not a guess)
     std::unordered_map<std::string, TensorMeta> tensors_;
+    std::unordered_map<std::string, std::string> metadata_;
 #ifdef _WIN32
     void* file_ = nullptr;
     void* mapping_ = nullptr;

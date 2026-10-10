@@ -682,6 +682,17 @@ def _parse_args(argv):
         help="With --open-diffusion: keep the per-weight packed files here and reuse them "
              "on the next build (default: a temporary directory)",
     )
+    parser.add_argument(
+        "--uno-adapter", dest="uno_adapter", default=None, metavar="DIR|ORG/NAME",
+        help="A Uno diffusion LoRA (a PEFT adapter dir or HF repo, e.g. IFM/K2-Horizon-7B-Uno): "
+             "after the base converts, write it as uno.q4nx beside model.q4nx for the open engine's "
+             "draft pass (q4nx/uno.py)",
+    )
+    parser.add_argument(
+        "--uno-noise-high", dest="uno_noise_high", type=int, default=None, metavar="N",
+        help="With --uno-adapter: the adapter's draft noise ids are [1, N), e.g. the first special id "
+             "for an adapter trained without special tokens (default: the engine's [1, vocab - 1])",
+    )
     return parser.parse_args(argv)
 
 
@@ -975,6 +986,12 @@ def main(argv=None) -> int:
 
     if getattr(args, "build_spec", False):
         _build_spec(output_folder)
+
+    if getattr(args, "uno_adapter", None):
+        from q4nx.uno import build as build_uno, fetch_adapter
+
+        build_uno(fetch_adapter(args.uno_adapter), Path(output_folder) / "config.json", Path(output_folder),
+                  Path(__file__).resolve().parents[1] / "configs" / "k2.json", args.uno_noise_high)
 
     print(f"[INFO] Conversion complete! Output saved to {output_folder}")
     return 0

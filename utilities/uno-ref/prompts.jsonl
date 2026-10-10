@@ -1,0 +1,6 @@
+{"name": "chat", "messages": [{"role": "user", "content": "Explain what an NPU is in two sentences."}]}
+{"name": "chat2", "messages": [{"role": "user", "content": "Give me three tips for sleeping better."}]}
+{"name": "code", "messages": [{"role": "user", "content": "Write a Python function that returns the n-th Fibonacci number iteratively, with a docstring."}]}
+{"name": "code2", "messages": [{"role": "user", "content": "Write a C function that reverses a null-terminated string in place."}]}
+{"name": "math", "messages": [{"role": "user", "content": "A train travels 120 km in 1.5 hours. What is its average speed in km/h? Show your steps."}]}
+{"name": "reason", "messages": [{"role": "user", "content": "If all bloops are razzies and all razzies are lazzies, are all bloops lazzies? Explain briefly."}]}

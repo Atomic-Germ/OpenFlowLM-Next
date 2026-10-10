@@ -254,6 +254,17 @@ public:
     void set_block_logits_all(bool on) { block_logits_all_ = on; }
     const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
+    // OPEN-DECODE-ROWS: step_rows writes the L rows' KV but does not move the position; the caller seeks.
+    size_t rows_l() const { return man_.rows.l; }
+    // draft: the OPEN-UNO-LORA pass, the LoRA on every row but row 0.
+    void step_rows(const int* ids, int* argmax, bool want_logits = false, bool draft = false);
+    bool has_draft() const { return !lora_.empty(); }
+    /// The draft rows' noise ids are [1, uno_noise_bound()): the adapter's uno_noise_high, else the vocab.
+    size_t uno_noise_bound() const { return noise_high_ ? noise_high_ : man_.vocab; }
+    /// Row j's logits from the last step_rows(want_logits = true).
+    const float* rows_logits(size_t j);
+    double rows_ms() const { return rows_ms_; }
+
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
     void seek(int pos);
@@ -284,6 +295,7 @@ private:
         std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
         size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
+        std::vector<stream_patch::AttnRowPatch> attn_rows;   ///< attnrows: the L-row pass's sites
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         uint32_t* iw() { return instr->map<uint32_t*>(); }
     };
@@ -300,6 +312,9 @@ private:
     std::map<std::string, Kern> kerns_;
 
     std::vector<xrt::bo> pools_, consts_, act_, state_;   ///< per layer
+    std::vector<xrt::bo> lora_;                 ///< per layer: the draft pass's LoRA pool (rows.lora_file), if any
+    xrt::bo lora_none_;                         ///< what the verify stream's unused LoRA argument binds to
+    size_t noise_high_ = 0;                     ///< the LoRA's uno_noise_high; 0 = the whole vocab
     std::map<std::string, xrt::bo> globals_;              ///< the manifest's globals (xres, ptab, lmpool, gact, ...)
     bool weights_loaded_ = false;
     int pos_ = 0;
@@ -403,6 +418,8 @@ private:
         std::vector<uint16_t> qb;       ///< attention_npu: one KV group's queries as bf16
         std::vector<float> m, lsum, acc;///< attention_npu: the merged softmax's running state
         std::vector<uint16_t> p_all;    ///< attention_npu, one chunk: every kv group's P between the two passes
+        std::vector<uint16_t> qlo;      ///< attention_npu at prep rope: Q's bf16 remainder
+        std::vector<float> s_hi;        ///< attention_npu at prep rope: the scores summed over both halves
         /// the dense route's token rows: o / gate / up / down outputs, silu(gate) * up, the residual
         std::vector<float> d_o, d_gate, d_up, d_down, d_h;
         std::vector<double> d_res, d_row;
@@ -419,6 +436,7 @@ private:
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
+    double rows_ms_ = 0;
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the

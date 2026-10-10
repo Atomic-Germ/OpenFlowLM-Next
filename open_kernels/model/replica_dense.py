@@ -25,9 +25,10 @@ import numpy as np
 from q4nx import CHUNK_Q4, dq_chunks_q4_1, q4_1_chunks_of
 
 
-def rms(x, eps=1e-6):
+def rms(x, eps=1e-6, groups=1):
     x = np.asarray(x, dtype=np.float64)
-    return x / np.sqrt((x ** 2).mean(-1, keepdims=True) + eps)
+    g = x.reshape(*x.shape[:-1], groups, x.shape[-1] // groups)   # K2's GroupRMSNorm: one RMS per contiguous group
+    return (g / np.sqrt((g ** 2).mean(-1, keepdims=True) + eps)).reshape(x.shape)
 
 
 def silu(x):
@@ -77,8 +78,9 @@ def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
     hid, nh, kvh, hd, ff = spec.hidden, spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.intermediate
     local = spec.layer_types[layer] == DENSE_LOCAL
     eps, inv, rsc = spec.norm_eps, spec.rope_inv_freq(local=local, ctx=pos + 1), spec.rope_scale()
+    ng = spec.norm_groups
     act = gelu_tanh if spec.activation == "gelu_tanh" else silu
-    x = (rms(x_res, eps) * m.bf16(pre + "input_layernorm.weight")).astype(np.float32)
+    x = (rms(x_res, eps, ng) * m.bf16(pre + "input_layernorm.weight")).astype(np.float32)
     Wq = m.matmul_w(pre + "self_attn.q_proj.weight", nh * hd, hid)
     Wk = m.matmul_w(pre + "self_attn.k_proj.weight", kvh * hd, hid)
     Wv = m.matmul_w(pre + "self_attn.v_proj.weight", kvh * hd, hid)
@@ -117,15 +119,15 @@ def dense_decode(m, spec, layer, x_res, K, V, pos, max_ctx=4096):
     Wg = m.matmul_w(pre + "mlp.gate_proj.weight", ff, hid)
     Wd = m.matmul_w(pre + "mlp.down_proj.weight", hid, ff)
     if spec.sandwich_norms:
-        t = (rms(out, eps) * m.bf16(pre + "post_attention_layernorm.weight")).astype(np.float32)
+        t = (rms(out, eps, ng) * m.bf16(pre + "post_attention_layernorm.weight")).astype(np.float32)
         res = x_res + t
-        xm = (rms(res, eps) * m.bf16(pre + "pre_feedforward_layernorm.weight")).astype(np.float32)
+        xm = (rms(res, eps, ng) * m.bf16(pre + "pre_feedforward_layernorm.weight")).astype(np.float32)
         h = act(xm @ Wg.T) * (xm @ Wup.T)
         out2 = h.astype(np.float32) @ Wd.T
-        t2 = (rms(out2, eps) * m.bf16(pre + "post_feedforward_layernorm.weight")).astype(np.float32)
+        t2 = (rms(out2, eps, ng) * m.bf16(pre + "post_feedforward_layernorm.weight")).astype(np.float32)
         return res + t2, K, V
     res = x_res + out
-    xm = (rms(res, eps) * m.bf16(pre + "post_attention_layernorm.weight")).astype(np.float32)
+    xm = (rms(res, eps, ng) * m.bf16(pre + "post_attention_layernorm.weight")).astype(np.float32)
     h = act(xm @ Wg.T) * (xm @ Wup.T)
     return res + h.astype(np.float32) @ Wd.T, K, V
 
@@ -152,5 +154,5 @@ def lmhead_q4_logits(m, hn, spec, block=2048):
 
 
 def final_logits(m, spec, x_res):
-    hn = (rms(x_res, spec.norm_eps) * m.bf16("model.norm.weight")).astype(np.float32)
+    hn = (rms(x_res, spec.norm_eps, spec.norm_groups) * m.bf16("model.norm.weight")).astype(np.float32)
     return hn, lmhead_q4_logits(m, hn, spec)

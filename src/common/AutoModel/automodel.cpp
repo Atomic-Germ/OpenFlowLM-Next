@@ -385,6 +385,96 @@ std::string AutoModel::_shared_generate(chat_meta_info_t& meta_info, int length_
     return result;
 }
 
+bool AutoModel::_uno_applies() const {
+#ifdef OFLM_USE_OPEN_QWEN36
+    auto* eng = dynamic_cast<open_qwen36::Engine*>(this->lm_engine.get());
+    if (!eng || !eng->uno_ok() || !this->sampler) return false;
+    const Sampler& s = *this->sampler;
+    const bool penalties = s.repeat_last_n != 0 && (s.rep_penalty != 1.0f || s.freq_penalty != 0.0f || s.pre_penalty != 0.0f);
+    return s.top_k == 1 && !penalties;
+#else
+    return false;
+#endif
+}
+
+// _shared_generate's contract a cycle at a time; a cycle past the stop is cut back to where plain decode would stop.
+std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int length_limit, std::ostream& os,
+                                            std::function<bool()> is_cancelled) {
+#ifdef OFLM_USE_OPEN_QWEN36
+    auto* eng = dynamic_cast<open_qwen36::Engine*>(this->lm_engine.get());
+    std::string result;
+    assert(this->last_token != -1);
+    stop_reason_t reason = EOT_DETECTED;
+    int seed = this->last_token;
+    this->token_history.push_back(seed);
+    if (this->is_normal_token(seed)) {
+        std::string token_str = this->tokenizer->run_time_decoder(seed);
+        result += token_str;
+        os << token_str << std::flush;
+    }
+    if (this->is_eos(seed)) return result;
+    this->profiler_list[DECODING_TIME].reset();
+    this->profiler_list[TKOEN_DECODE_TIME].reset();
+    std::vector<int> committed;
+    bool done = false;
+    // a cycle writes up to L + 1 positions past the seed; stop cycling short of the capacity
+    while (!done && this->total_tokens + 8 < this->MAX_L) {
+        if (is_cancelled()) {
+            reason = CANCEL_DETECTED;
+            buffer_.clear();
+            current_mode_ = StreamEventType::CONTENT;
+            tool_name_.clear();
+            is_in_tool_block_ = false;
+            break;
+        }
+        committed.clear();
+        this->profiler_list[DECODING_TIME].start();
+        const int p = eng->uno_cycle(seed, committed);
+        this->profiler_list[DECODING_TIME].stop(static_cast<int>(committed.size()));
+        for (size_t i = 0; i < committed.size(); ++i) {
+            const int t = committed[i];
+            this->total_tokens++;
+            this->profiler_list[TKOEN_DECODE_TIME].start();
+            if (this->is_normal_token(t)) {
+                std::string token_str = this->tokenizer->run_time_decoder(t);
+                os << token_str << std::flush;
+                result += token_str;
+            }
+            this->profiler_list[TKOEN_DECODE_TIME].stop(1);
+            this->token_history.push_back(t);
+            meta_info.generated_tokens++;
+            const bool last = i + 1 == committed.size();
+            if (this->is_eos(t)) {
+                // token i sits at p + 1 + i; all but the cycle's last are already cached
+                if (this->forward_on_eos) {
+                    if (last) this->lm_engine->forward(t);
+                    else eng->uno_seek(p + 2 + static_cast<int>(i));
+                } else {
+                    eng->uno_seek(p + 1 + static_cast<int>(i));
+                }
+                done = true;
+                break;
+            }
+            if ((length_limit > 0) && (meta_info.generated_tokens >= length_limit)) {
+                reason = MAX_LENGTH_REACHED;
+                eng->uno_seek(p + 1 + static_cast<int>(i));     // as plain decode: the last emitted token uncached
+                done = true;
+                break;
+            }
+            if (last) seed = t;
+        }
+    }
+    meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
+    meta_info.stop_reason = reason;
+    if (!done && reason != CANCEL_DETECTED) header_print("WARNING", "Max length reached, stopping generation...");
+    std::cout << std::endl;
+    header_print("OFLM", "Model RAW Output: \n" + result);
+    return result;
+#else
+    return this->_shared_generate(meta_info, length_limit, os, is_cancelled);
+#endif
+}
+
 StreamResult AutoModel::_shared_think_tool_calling_pasrsed(const std::string content) {
     const std::string MARKER_THINK_START = "<think>";
     const std::string MARKER_THINK_END = "</think>";

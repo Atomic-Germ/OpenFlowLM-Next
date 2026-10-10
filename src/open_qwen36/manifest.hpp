@@ -108,7 +108,8 @@ struct AttnBlock {
     std::vector<std::string> args;                         ///< the a / b / c globals
     size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
     /// A dense layer's host half before the products: "qknorm_rope" (q/k RMSNorm, then the
-    /// half-split rotation; no bias, no gate). Empty on a full-attention layer, whose is fixed.
+    /// half-split rotation; no bias, no gate) or "rope" (the rotation alone). Empty on a
+    /// full-attention layer, whose is fixed.
     std::string prep;
     bool present() const { return !kernels_s.empty(); }
 };
@@ -180,12 +181,26 @@ struct LayerType {
 struct KernelDesc {
     std::string context;                     ///< name in Manifest::contexts
     std::string insts;                       ///< relative path of insts.bin
-    std::string patch;                       ///< "" | moeroute2 | attnpos
+    std::string patch;                       ///< "" | moeroute2 | attnpos | attnrows
     uint64_t window = 0;                     ///< attnpos: the sliding window (rows; 0 = every cached row)
     /// attnpos: cached rows this kernel takes per call when it walks them in whole blocks
     /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
     /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
     uint64_t rb = 1;
+};
+
+// OPEN-DECODE-ROWS: `kernel` reuses each layer's pool / consts / state / ptab; l == 0 means no rows pass.
+struct RowsDesc {
+    uint64_t l = 0;
+    std::string kernel, head;
+    uint64_t act_bytes = 0;          ///< the L-row scratch
+    uint64_t head_act_bytes = 0;     ///< the head's normed rows (bf16 [L][hidden])
+    uint64_t head_cores = 0;         ///< cores whose [value L | row L] argmax elements end the head's output
+    uint64_t head_out_floats = 0;    ///< logits [L][vocab] then head_cores elements of L * 64
+    // OPEN-UNO-LORA: `lora_kernel` is another stream for the same core programs; empty means no draft pass.
+    std::string lora_kernel, lora_file;
+    uint64_t lora_pool_bytes = 0;
+    std::vector<PackOp> lora_pack;
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -222,6 +237,7 @@ struct Manifest {
     std::map<std::string, KernelDesc> kernels;
     std::map<std::string, LayerType> layer_types;
     std::vector<Step> tail;
+    RowsDesc rows;
     std::map<std::string, uint64_t> globals;          ///< fixed-size global buffers (bytes)
     std::map<std::string, RowGlobal> per_row_globals; ///< globals sized max_ctx x row (the ptab(s))
     std::string embed_tensor, norm_tensor;

@@ -44,9 +44,9 @@ def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take
     width nobody has built. The ln set became (width, groups) combinations on 2026-09-27,
     when K2's GroupRMSNorm(2) entered it at (2560, 2) -- E3, the physical NPU parity pass."""
     spec = dataclasses.replace(default_spec(), hidden=6144)
+    # the refusal, not the set: spelling the set out fails on every new validated point
     with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(6144, 1\) is outside "
-                                          r"the validated combinations \{\(1024, 1\), \(2048, 1\), \(2560, 1\), "
-                                          r"\(2560, 2\), \(3072, 1\), \(3840, 1\), \(4096, 1\), \(5120, 1\)\}"):
+                                          r"the validated combinations \{\(1024, 1\), "):
         Q.recipe(spec)
 
 
