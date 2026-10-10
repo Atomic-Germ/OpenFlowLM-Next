@@ -425,15 +425,17 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     ag_args = ["ag_a", "ag_b", "ag_c"]
     check_buffer_args("attn_block", ag_args)
     attn_block = None
-    if set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
+    prep = None
+    if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
+            and not spec.attn_gate):
+        prep = "qknorm_rope"
+    elif spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate:
+        prep = "rope"
+    # without a prep the engine never reads it, and its products need not even tile (Granite's 5 row blocks)
+    if prep and set(spec.layer_types) == {DENSE} and ag_m % 256 == 0 and spec.head_dim % 64 == 0:
         attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
                       "kernels_s": {str(Lw): f"ag_s{Lw}" for Lw in ag_tiers},
-                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}}
-        if (spec.family in BLOCK_ATTN_QKNORM_ROPE and spec.qk_norm and spec.family not in QKNORM_POST_ROPE
-                and not spec.attn_gate):
-            attn_block["prep"] = "qknorm_rope"
-        elif spec.family in BLOCK_ATTN_ROPE and not spec.qk_norm and not spec.attn_gate:
-            attn_block["prep"] = "rope"
+                      "kernels_pv": {str(Lw): f"ag_pv{Lw}" for Lw in ag_tiers}, "prep": prep}
     plans = pack_plan(spec)["layer_types"]
     shapes: set[tuple[int, int]] = set()
 

@@ -450,10 +450,17 @@ int main(int argc, char** argv) {
             check(h.hidden == 4096 && h.kv_row == 4096 && h.rotary_dim == 128, "hunyuan: layout");
             // the head is padded to whole 64-row bands (128192); the ids stop at the tokenizer's count
             check(h.vocab == 128192 && h.real_vocab == 128166 && h.lmhead_ops[0].nch == 64096, "hunyuan: padded head, real vocab");
-            // its norm follows the rotation, which the products' host half does not do: the
-            // recipe emits the streams but declares no prep, so the route keeps its dxB dispatches
-            check(!h.layer_types.at("dense").gemm_block.attn_block.present(),
-                  "hunyuan: an attn_block without a prep is left to the dxB route");
+            // its norm follows the rotation, which the products' host half does not do: no prep, so no products
+            check(!h.layer_types.at("dense").gemm_block.attn_block.present(), "hunyuan: no prep, no attn_block");
+            {   // an older kernel set still carries one without a prep: it is not read, the route keeps dxB
+                std::ifstream qf(argv[2]), hf(argv[4]);
+                json qj = json::parse(qf), hj = json::parse(hf);
+                json ab = qj["layer_types"]["dense"]["gemm_block"]["attn_block"];
+                ab.erase("prep");
+                hj["layer_types"]["dense"]["gemm_block"]["attn_block"] = ab;
+                check(!Manifest::parse(hj, "older set").layer_types.at("dense").gemm_block.attn_block.present(),
+                      "hunyuan: an older set's attn_block without a prep is left to the dxB route");
+            }
             check(h.layer_types.at("dense").consts.size() == 4, "hunyuan: ln, post-ln and the two qk norms");
             json ok = matching_config(h);
             check(ok["vocab_size"] == 128167, "hunyuan: config.json is checked against the model's own vocab_size");
