@@ -347,6 +347,7 @@ private:
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
+    bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count
     /// Put omp_threads_ in force for the CALLING thread: omp_set_num_threads sets a
@@ -415,6 +416,11 @@ private:
         }
     };
     BlockScratch bs_;
+    /// A stage-major layer's rows that outlive one step, for every block of the prompt.
+    struct StageScratch {
+        std::vector<float> xn, og, h, q, gate;
+    };
+    StageScratch ss_;
     bool block_logits_all_ = false;
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
@@ -592,6 +598,18 @@ private:
     /// first position, which is pos_ on the block-major route and pos_ + row0 on the
     /// layer-major one; the cached rows below it are pulled off the device on `first` only.
     void block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t pos0, size_t row0, bool first);
+    /// One GEMM step over B blocks: block b + 1 runs on the NPU while post(b, [N, T] y) runs on the host.
+    void gemm_phase(int l, const Step& s, size_t B, size_t T, size_t K, size_t N,
+                    const std::function<const float*(size_t)>& prep,
+                    const std::function<void(size_t, const float*)>& post);
+    /// block_layer_linear / block_layer_full over all B blocks, same arithmetic per block, steps reordered.
+    void layer_linear_staged(int l, float* xres, size_t B, size_t T, size_t N);
+    void layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, size_t pos0);
+    /// Block b's residual, post-norm and router after the out / o GEMM, into moe_ at row b * T.
+    void staged_tail(int l, size_t b, size_t T, size_t N, const float* y, const float* xres);
+    /// ffn_block's two GEMMs as two phases over the layer's rows; a dense FFN writes the output into xres.
+    void ffn_staged(int l, const std::vector<Step>& prog, size_t ff, float* xres, size_t B, size_t T, size_t N,
+                    const std::vector<float>* gate_w);
     /// The routed experts for whatever the layer's attention half staged in moe_: the
     /// token-batched kernel over rows [0, t_real) of `rows`, or mx one token at a time.
     /// `xres` (rows * hidden) is overwritten with the layer's output.

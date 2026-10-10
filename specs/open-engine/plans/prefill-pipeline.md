@@ -1,6 +1,6 @@
 # Prefill pipeline: keep the NPU busy while the host works
 
-2026-10-07. Status: **plan, for review.** Builds on #172 (q8 split) and #177 (OMP wait policy).
+2026-10-07. Status: **stage 1 done 2026-10-09 (PR for `feat/prefill-stage-major`); stages 2-4 not started.** Builds on #172 (q8 split), #177 (OMP wait policy) and #181 (bf16 route).
 
 ## Why
 
@@ -96,6 +96,15 @@ What it needs:
   breakdown, that's roughly 8.35 s → 6-6.5 s at 1000 tokens (about 155-165 tok/s), less
   whatever the CPU's power draw takes back.
 - If it gains less than 10%, stop and find out why before going on.
+
+**Stage 1 result (2026-10-09).** Gate passed; numbers are in OPEN-PREFILL-BATCH's 2026-10-09 result.
+
+- Logits byte-identical to the block-at-a-time order at 656 positions, twice, on the bf16 and `lean` routes, the q4_1 set and the Qwen3.8-27B (dense FFN).
+- 1000-token prefill, median of three pairs: bf16 7.48 -> 5.89 s, `lean` 8.50 -> 6.90 s, q4_1 7.38 -> 5.77 s (about 19-22% less); the 27B 30.5 -> 26.2 s (14%). Through `oflm bench` 1k-8k: bf16 130-135 -> 155-171 tok/s, q4_1 138-141 -> 180-196, `lean` 111-116 -> 148-163.
+- **Deviation from the plan: one run outstanding, not two.** The plan allowed one run queued beyond the one being waited on. A second run of the same kernel queued behind the first gave different bits from run to run, so `gemm_phase` stages block b + 1 and starts it before post-processing block b, with exactly one dispatch in flight. That was enough: the host's GEMM wait fell from about 2.2 s to 0.8 s at 1000 tokens.
+- The open question on a busy CPU slowing the NPU is only partly answered. One bf16 run took 8.4 s with 3.2 s of GEMM wait, against 5.4 and 5.9 s for its neighbours, and the old order's expert pass swung 3.1-4.0 s between runs. Not attributed to anything yet.
+- Memory: +0.07 GiB at 1000 tokens, +0.47 GiB at 8000.
+- Left for stage 2: the expert pass is now the largest NPU-adjacent stretch of the prefill (about 3 s of 5.9 at 1000 tokens).
 
 ### 2. Overlap inside the expert pass
 
