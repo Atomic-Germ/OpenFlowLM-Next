@@ -17,7 +17,7 @@ def test_choose_gguf_prefers_q4_1_and_refuses_multipart():
         "model-Q4_1.gguf",
     ])
 
-    assert chosen == "model-Q4_1.gguf"
+    assert chosen[0] == "model-Q4_1.gguf"
     assert "multi-part GGUF" in refused["model-Q4_1-00001-of-00002.gguf"]
 
 
@@ -99,9 +99,78 @@ def test_choose_gguf_prefers_q4_k_m_over_q8_0_and_names_impostors():
         "M-Q4_K_M.gguf",
         "M-IQ2_M.gguf",
     ])
-    assert chosen == "M-Q4_K_M.gguf"
+    assert chosen[0] == "M-Q4_K_M.gguf"
     # The impostor names its full suffix: it must never read as Q4_0.
     assert refused["M-Q4_0_4_4.gguf"].startswith("quant Q4_0_4_4 not supported")
+
+
+def test_choose_gguf_returns_every_usable_file_not_just_the_first():
+    """The caller verifies and may have to advance past the top pick.
+
+    Q4_K_M verifies clean for nothing: its blocks are a Q4_K/Q6_K mixture, so
+    the filename claim is wrong and it is refused. A repo shipping Q4_K_M next
+    to a Q6_K and a Q8_0 used to install NONE of them, because the single pick
+    was made here and one refusal ended the attempt.
+    """
+    chosen, _ = oflm_add.choose_gguf_file([
+        "M-Q4_K_M.gguf", "M-Q6_K.gguf", "M-Q8_0.gguf",
+    ])
+    assert chosen == ["M-Q4_K_M.gguf", "M-Q6_K.gguf", "M-Q8_0.gguf"]
+
+
+def test_projector_is_never_a_candidate():
+    """mmproj parses as a normal quant and must not become the model.
+
+    It has no trunk and no lm_head. Latent while the real weight files outrank
+    it by preference; live the moment every weight file fails verification.
+    """
+    chosen, refused = oflm_add.choose_gguf_file([
+        "M.mmproj-Q8_0.gguf", "M.mmproj-f16.gguf", "M-Q8_0.gguf",
+    ])
+    assert chosen == ["M-Q8_0.gguf"]
+    assert "mmproj" not in chosen[0]
+    assert "projector" in refused["M.mmproj-Q8_0.gguf"]
+
+
+def test_explicit_quant_selector_forces_that_file():
+    chosen, _ = oflm_add.choose_gguf_file(
+        ["M-Q4_K_M.gguf", "M-Q6_K.gguf", "M-Q8_0.gguf"], "Q6_K")
+    assert chosen[0] == "M-Q6_K.gguf"
+
+
+def test_unknown_quant_selector_still_ranks_the_rest():
+    """A mistyped quant gets the automatic answer, not nothing."""
+    chosen, _ = oflm_add.choose_gguf_file(
+        ["M-Q6_K.gguf", "M-Q8_0.gguf"], "Q5_K_M")
+    assert chosen[0] == "M-Q6_K.gguf"
+
+
+def test_split_repo_quant_only_splits_a_real_quant():
+    """The ':' of a URL's port, a drive letter and a path are not quant tokens."""
+    assert oflm_add.split_repo_quant("Org/Name:Q6_K") == ("Org/Name", "Q6_K")
+    assert oflm_add.split_repo_quant("Org/Name") == ("Org/Name", "")
+    assert oflm_add.split_repo_quant("https://huggingface.co/Org/Name") == (
+        "https://huggingface.co/Org/Name", "")
+    assert oflm_add.split_repo_quant("https://huggingface.co:443/Org/Name") == (
+        "https://huggingface.co:443/Org/Name", "")
+    assert oflm_add.split_repo_quant("C:/models/x") == ("C:/models/x", "")
+    assert oflm_add.split_repo_quant("/home/me/models/x") == ("/home/me/models/x", "")
+    assert oflm_add.split_repo_quant("Org/Name:blah") == ("Org/Name:blah", "")
+    # a real quant on a URL, the way llama.cpp takes it
+    assert oflm_add.split_repo_quant("https://huggingface.co/Org/Name:Q8_0") == (
+        "https://huggingface.co/Org/Name", "Q8_0")
+    assert oflm_add.split_repo_quant("Org/Name:q6_k") == ("Org/Name", "Q6_K")
+
+
+def test_explicit_family_is_case_normalized():
+    """The GGUF-capable gate compares against lower-case names, exactly.
+
+    `--family LLAMA3` used to fail a gate that `llama3` passes, which silently
+    downgraded the install to safetensors instead of refusing it.
+    """
+    assert oflm_add.derive_family({}, "x", "LLAMA3") == "llama3"
+    assert oflm_add.derive_family({}, "x", "Qwen3.5") == "qwen3.5"
+    assert oflm_add.derive_family({}, "x", " llama3 ") == "llama3"
 
 
 def test_stock_repo_names_derive_known_families():

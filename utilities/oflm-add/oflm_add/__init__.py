@@ -121,27 +121,104 @@ def gguf_quant_of(name):
     unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
     return gguf_quant_family(gguf_quant_suffix(name))
 
-def choose_gguf_file(names):
-    """Pick the best compatible *.gguf from a repo's root file names.
-    Returns (chosen, refused) -- refused maps every other gguf to why."""
+
+# A :QUANT selector appended to the repo, in the style llama.cpp accepts for a
+# weight URL. Quant tokens are ALNUM/underscore and start with I?Q, which is
+# what keeps "Org/Name" and "https://host/Org/Name" from being split on the
+# wrong colon.
+_QUANT_SELECTOR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def split_repo_quant(raw):
+    """Split a trailing ':QUANT' selector off a repo argument.
+
+    Returns (repo, quant) where quant is uppercased or ''. 'mradermacher/Qwen3.5-
+    9B-Kimi-k3-Distilled-GGUF:Q6_K' -> (repo, 'Q6_K'). An argument with no
+    selector, or one whose tail cannot be a quant (a URL's scheme colon, a
+    Windows drive letter, a path), comes back untouched with ''.
+
+    A selector that matches nothing in the repo is NOT an error here: the caller
+    falls back to the automatic choice and says so, rather than refusing an
+    install the user can still get.
+    """
+    # A quant token is ALNUM/underscore and carries a digit, so neither a URL's
+    # port ("host:443/Org/Name" -> the tail holds a '/'), a Windows drive
+    # letter, nor a path segment can be mistaken for one. That lets a URL
+    # selector work too, the way llama.cpp takes ":Q4_K_M" on a weight URL.
+    if "://" in raw:
+        head, sep, tail = raw.rpartition(":")
+        if not sep or "/" in tail or not _QUANT_SELECTOR_RE.match(tail):
+            return raw, ""
+        if not re.search(r"\d", tail):
+            return raw, ""
+        return head, tail.upper()
+    head, sep, tail = raw.rpartition(":")
+    if not sep or not head:
+        return raw, ""
+    tail = tail.strip()
+    # A quant token always carries a digit (Q4_1, Q6_K, IQ4_XS); a bare letter
+    # tail is far more likely to be a drive letter or a port than a quant.
+    if not _QUANT_SELECTOR_RE.match(tail) or not re.search(r"\d", tail):
+        return raw, ""
+    return head, tail.upper()
+
+
+def is_projector_name(name):
+    """True for the vision-projector half of a repo's GGUFs.
+
+    'Model.mmproj-Q8_0.gguf' is a CLIP tower, not the language model: it has no
+    trunk, no lm_head and no tokenizer, and installing it AS the model produces
+    a container that cannot load. Such files are still packable (the vision
+    path wants them), they just must never be the automatic pick.
+    """
+    return "mmproj" in name.lower()
+
+def choose_gguf_file(names, wanted=None):
+    """Rank a repo's *.gguf root files, best first.
+
+    Returns (candidates, refused): `candidates` is the preference-ordered list
+    of files worth verifying, `refused` maps every file NOT in it to why.
+
+    A LIST, not a single pick. Verification needs the file on disk (or a ranged
+    read of it), and only verification knows whether the tensors match the name:
+    a Q4_K_M file's blocks are a Q4_K/Q6_K mixture, so it verifies clean for
+    neither. Deciding here and reporting there is what made one bad top pick
+    throw away the run of good files behind it -- a repo offering Q4_K_M, Q6_K
+    and Q8_0 installed none of them.
+
+    `wanted` is an explicit ':QUANT' selector. Matching files sort ahead of the
+    rest rather than excluding them, so a mistyped quant still gets the
+    automatic answer instead of nothing.
+    """
     refused = {}
     cands = []
+    projectors = []
     for n in names:
         if not n.endswith(".gguf"):
             continue
         if re.search(r"-\d+-of-\d+\.gguf$", n):
             refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
             continue
+        if is_projector_name(n):
+            # Kept out of the ranking entirely. It parses as a normal quant and
+            # would otherwise be a candidate whenever every weight file in the
+            # repo fails verification -- installing a CLIP tower AS the model.
+            projectors.append(n)
+            continue
         suffix = gguf_quant_suffix(n)
         q = gguf_quant_family(suffix)
         if q not in GGUF_QUANT_PREFERENCE:
             refused[n] = f"quant {suffix or 'unmarked'} not supported by the open kernels (have "                          f"{'/'.join(GGUF_QUANT_PREFERENCE)}); convert with q4nx-build"
             continue
-        cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
+        exact = 1 if (wanted and (suffix or "").upper() == wanted) else 0
+        cands.append((0 if exact else 1, GGUF_QUANT_PREFERENCE.index(q), n))
     cands.sort()
-    if not cands:
-        return None, refused
-    return cands[0][1], refused
+    if projectors:
+        # Reported, not refused: they are usable for the vision path.
+        for n in projectors:
+            refused[n] = ("vision projector (mmproj), not the language model; "
+                          "installed separately by the vision path")
+    return [n for _, _, n in cands], refused
 
 
 def root_file_names(tree):
@@ -519,7 +596,12 @@ def resolve_official(system_registry, dir_name, family, size):
 
 def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
     if explicit:
-        return explicit
+        # Lower-cased: every family this program compares against (FAMILY_ALIASES,
+        # GGUF_CAPABLE_FAMILIES, the registry's own values) is lower case, and
+        # the comparison is exact. `--family LLAMA3` therefore failed the
+        # GGUF-capable gate that `llama3` passes, and `--family QWEN35` was
+        # rejected the same way -- a silently worse install, not a refusal.
+        return explicit.strip().lower()
     if base_entry:
         fam = base_entry.get("details", {}).get("family")
         if fam:
@@ -1851,7 +1933,9 @@ def main():
     # Hugging Face is the default hub; --modelscope opts in explicitly and a
     # modelscope.ai/.cn URL implies it on its own.
     modelscope = args.modelscope
-    repo_arg = args.repo
+    repo_arg, wanted_quant = split_repo_quant(args.repo)
+    if wanted_quant:
+        log(f"[INFO] requested quant :{wanted_quant}")
     local_dir = Path(repo_arg) if os.path.isdir(repo_arg) else None
     if local_dir:
         repo, dir_name = repo_arg, local_dir.name
@@ -1879,37 +1963,60 @@ def main():
             gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    gguf_candidates, gguf_refused = choose_gguf_file(gguf_names, wanted_quant)
+    if wanted_quant and not any(
+            (gguf_quant_suffix(n) or "").upper() == wanted_quant for n in gguf_candidates):
+        # Not an error: fall back to the automatic pick and say so, rather than
+        # refusing an install the user can still get.
+        log(f"[WARN] no .{wanted_quant}.gguf in this repo; choosing automatically instead")
+    gguf_name = None
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
     else:
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
-    gguf_mode = gguf_name is not None and not have_q4nx
+    gguf_mode = bool(gguf_candidates) and not have_q4nx
     if gguf_mode:
         # The tensors must be what the name claims, in types the NPU packers
         # ingest. Remote metadata is best-effort (Range); a local file is on
         # disk, so a failed parse there refuses the file outright.
-        if local_dir:
-            gguf_source = str(local_dir / gguf_name)
-        elif cache and (cache / gguf_name).is_file():
-            # The user already has this GGUF on disk in their HF cache: verify
-            # the local file (no network round trip) and let the install copy
-            # it from there below.
-            gguf_source = str(cache / gguf_name)
-        elif modelscope:
-            domain = ms_file_tree(repo)[0]
-            gguf_source = f"https://{domain}/models/{repo}/resolve/master/{gguf_name}"
+        #
+        # Walk the candidates in preference order and take the first that
+        # verifies. Stopping at the first refusal is what made a repo offering
+        # Q4_K_M + Q6_K + Q8_0 install none of them: the Q4_K_M is refused
+        # CORRECTLY (its blocks are a Q4_K/Q6_K mixture) and used to end the
+        # whole attempt instead of advancing to Q6_K.
+        def _source_for(name):
+            if local_dir:
+                return str(local_dir / name)
+            if cache and (cache / name).is_file():
+                # The user already has this GGUF on disk in their HF cache:
+                # verify the local file (no network round trip) and let the
+                # install copy it from there below.
+                return str(cache / name)
+            if modelscope:
+                domain = ms_file_tree(repo)[0]
+                return f"https://{domain}/models/{repo}/resolve/master/{name}"
+            return f"https://huggingface.co/{repo}/resolve/main/{name}"
+
+        for cand in gguf_candidates:
+            gguf_source = _source_for(cand)
+            ok, note = verify_gguf_choice(gguf_source, cand, gguf_quant_of(cand))
+            if ok:
+                log(f"[INFO] {cand}: {note}")
+                gguf_name = cand
+                break
+            log(f"[WARN] refusing {cand}: {note}")
+            gguf_refused[cand] = note
         else:
-            gguf_source = f"https://huggingface.co/{repo}/resolve/main/{gguf_name}"
-        ok, note = verify_gguf_choice(gguf_source, gguf_name, gguf_quant_of(gguf_name))
-        if ok:
-            log(f"[INFO] {gguf_name}: {note}")
-        else:
-            log(f"[WARN] refusing {gguf_name}: {note}")
-            gguf_refused[gguf_name] = note
-            gguf_name, gguf_mode = None, False
+            gguf_mode = False
+    if not gguf_mode:
+        gguf_name = None
+        # The loop leaves gguf_source pointing at the last file it REFUSED; it
+        # must not survive into the family lookup below, which would derive a
+        # family from a file we just declined to install.
+        gguf_source = None
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)
