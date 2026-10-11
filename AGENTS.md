@@ -56,4 +56,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate direct FP32 input preparation for split dense FFN, replay isolated Qwen3.8 layers and run an all-layer precision sweep without full-model residency.</description>
     <location>.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-fp32-production</name>
+    <description>Build the complete corrected Qwen3.8 export and verify full-depth decode propagation, runtime identity and split-down partials.</description>
+    <location>.opencode/skill/open-qwen38-fp32-production/SKILL.md</location>
+  </skill>
 </available_skills>
