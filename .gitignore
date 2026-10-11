@@ -95,3 +95,4 @@ src/xclbins/*/open_kernels*/
 result
 result-*
 bin/
+.env
