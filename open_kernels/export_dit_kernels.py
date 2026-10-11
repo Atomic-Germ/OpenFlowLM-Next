@@ -506,9 +506,12 @@ def main() -> int:
     ap.add_argument("--family", default="FLUX.2-klein-4B-NPU2", choices=sorted(FAMILIES))
     ap.add_argument("--resolutions", default="512,1024",
                     help="square output sizes; (R/16)^2 image tokens must be a multiple of 512")
-    ap.add_argument("--edits", default="",
+    ap.add_argument("--edits", default=None,
                     help="resolutions that also get an edit configuration (R x R from an "
-                         "R x R reference), e.g. 512")
+                         "R x R reference), e.g. 512. Default: klein_pipeline.EDIT_SIZES -- "
+                         "every size the model repo advertises -- because a set built "
+                         "without an edit ELF cannot serve the model it is named for. Pass "
+                         "'' for text-to-image only.")
     ap.add_argument("--out", default=None, help="default src/xclbins/<family>/open_kernels")
     ap.add_argument("--force", action="store_true", help="rebuild streams even if kept")
     ap.add_argument("--no-fa", action="store_true", help="skip the dit_fa (attention) set")
@@ -527,7 +530,12 @@ def main() -> int:
     args = ap.parse_args()
 
     resolutions = [int(r) for r in args.resolutions.split(",")]
-    edits = [int(r) for r in args.edits.split(",") if r]
+    # klein_pipeline.EDIT_SIZES by default: the model repo
+    # (q4nx-build --open-diffusion) emits a schedule and the VAE encoder weights
+    # per edit size, so a set built without them is one the shipped model cannot
+    # use. An explicit --edits '' is the text-to-image-only escape hatch.
+    edits = ([int(r) for r in args.edits.split(",") if r] if args.edits is not None
+             else [R for R in klein_pipeline.EDIT_SIZES if str(R) in args.resolutions.split(",")])
     bad = [why for R in edits if (why := klein_pipeline.check_edit(R, R))]
     if bad or not set(edits) <= set(resolutions):
         raise SystemExit(f"--edits {args.edits}: {bad or 'each must be one of --resolutions'}")

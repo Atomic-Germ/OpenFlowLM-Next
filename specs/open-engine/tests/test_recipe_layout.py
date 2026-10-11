@@ -43,7 +43,16 @@ ATTN_27B = dict(NH=16, KVH=2, HD=256, ROT=64, Q_PC=8, KV_PC=1, O_PC=4, QW=4096, 
 
 @pytest.fixture(scope="module")
 def R():
-    return Q.recipe(default_spec())
+    """The 35B's recipe at the q4_1 constant set the designs were written against.
+
+    `qwen36-35b-a3b.json` now records the q8 roles its container holds, and a q8 role
+    doubles that projection's pool region -- so these hand-written constants are the
+    q4_1 ones, taken verbatim from designs/layer_x. The q8 layout is pinned in
+    test_quant_q8.test_a_q8_role_doubles_its_pool_region_and_the_27b_stays_at_512_MB.
+    """
+    import dataclasses
+
+    return Q.recipe(dataclasses.replace(default_spec(), quant="q4_1"))
 
 
 def test_layout_matches_the_hand_written_constants(R):

@@ -18,9 +18,17 @@ from recipes.spec import FULL, LINEAR
 T = 256
 
 
+def q4():
+    """The 35B at all-q4_1: `qwen36-35b-a3b.json` records the q8 roles its container
+    holds, and a q8 role doubles that projection's rows in the prefill route's GEMM
+    (`gemmb_n...`), which is what the tests below are NOT about. The q8 route is
+    covered at the end of this file."""
+    return dataclasses.replace(default_spec(), quant="q4_1")
+
+
 @pytest.fixture(scope="module")
 def m():
-    return manifest(default_spec())
+    return manifest(q4())
 
 
 def _run(kernel, w, x, y):
@@ -70,7 +78,7 @@ def test_the_35b_attention_layer_type_carries_the_route(m):
     assert gb["moe_kernel"] == "mx_full" and m["kernels"]["mx_full"]["patch"] == "moeroute2"
     assert m["kernels"]["mx_full"]["context"] == "mx", "both MoE streams share one xclbin"
     assert m["builds"]["mx_full"]["env"] == {"MX_KIND": "full"}
-    L = Q36.layout(default_spec())
+    L = Q36.layout(q4())
     assert (gb["a_xm"], gb["a_rout"], gb["a_res"]) == (L.AA_XM, L.AA_ROUT, L.AA_RES)
     w = gb["weights"]
     assert w["gqkvg_w"] == {"from": "pool", "ops": [5, 6, 7, 8]} and w["go_w"] == {"from": "pool", "ops": [9]}
@@ -130,7 +138,7 @@ def test_the_lean_route_runs_q8_projections_as_their_exact_q4_1_split():
     tokens (utilities/quant-compare/README.md)."""
     spec = dataclasses.replace(default_spec(), quant=ALL_Q8)
     m = manifest(spec)
-    q4 = manifest(default_spec())
+    q4 = manifest(dataclasses.replace(default_spec(), quant="q4_1"))
     lin, full = m["layer_types"][LINEAR], m["layer_types"][FULL]
     glin, gfull = lin["gemm_block_variants"]["lean"], full["gemm_block_variants"]["lean"]
     assert set(lin["gemm_block_variants"]) == set(full["gemm_block_variants"]) == {"lean"}
@@ -276,7 +284,7 @@ def test_a_q4_1_spec_has_no_split_steps(m):
 def test_a_weight_mixing_q8_and_q4_1_ops_has_no_route():
     """A split covers a whole GEMM weight or none of it: a weight whose ops mix q8 and q4_1
     would need a lo half for an op that has none, so the recipe refuses the route instead."""
-    spec = default_spec()
+    spec = dataclasses.replace(default_spec(), quant="q4_1")
     plan = Q36.pack_plan(spec)["layer_types"]
     pool = plan[LINEAR]["pool"]
     i = Q36._op_index(pool, "linear_attn.qkv_proj.weight")

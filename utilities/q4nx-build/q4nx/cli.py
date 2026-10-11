@@ -96,7 +96,17 @@ def _build_spec(output_folder: str) -> None:
     except Exception as e:
         print(f"[WARN] --build-spec: could not import recipes from {root}: {e}")
         return
-    spec = spec_from_model_dir(Path(output_folder))
+    try:
+        spec = spec_from_model_dir(Path(output_folder))
+    except Exception as e:
+        # The pack itself succeeded; --build-spec is the step that turns the packed
+        # directory into a ModelSpec, and a container the recipes refuse to read
+        # (an UNFOLDED Granite, an unknown chunk size, a model_type with no
+        # recipe) is a diagnostic, not a crash: print the reason, do not write a
+        # spec.json, and let the rest of the pack stand.
+        print(f"[WARN] --build-spec: no spec could be derived from {output_folder}:")
+        print(f"       {type(e).__name__}: {e}")
+        return
     out = Path(output_folder) / "spec.json"
     out.write_text(spec.to_json(), encoding="utf-8")
     print(f"[INFO] --build-spec: wrote {out}")
@@ -466,6 +476,13 @@ Reconstructed from the parsed arguments rather than read from sys.argv,
         cmd += ["--quant", str(args.quant)]
     if getattr(args, "pad_to_fit", False):
         cmd.append("--pad-to-fit")
+    # `-t` and `--build-spec` both change what lands in the output directory -- the
+    # weights type decides which containers are converted, and --build-spec is what
+    # writes spec.json -- so both belong on the recorded recipe. Leaving -t out is
+    # how a vision pack's card loses its vision pass; leaving --build-spec out is
+    # how re-running the card produces a directory with no spec in it.
+    if getattr(args, "weights_type", None):
+        cmd += ["-t", str(args.weights_type)]
     if prune_meta.get("kept"):
         cmd += ["--prune-ffn", str(args.prune_ffn)]
         # The staged copy when there is one, so the command reproduces from the
@@ -476,6 +493,8 @@ Reconstructed from the parsed arguments rather than read from sys.argv,
                                  or "<path to the imatrix GGUF>")]
     if getattr(args, "deploy_tag", None):
         cmd += ["--deploy", str(args.deploy_tag)]
+    if getattr(args, "build_spec", False):
+        cmd.append("--build-spec")
     return " ".join(cmd)
 
 

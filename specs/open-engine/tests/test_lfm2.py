@@ -172,7 +172,17 @@ def test_no_shipped_models_hash_moved():
     what would catch a `short_conv` change that moved the hash. minicpm5-2b arrived from
     main in #85 and is pinned at the value it hashes to here, which is the point: the
     eleven that predate this branch did not move, so `qkv_bias` is a kernel knob and not
-    a ModelSpec field."""
+    a ModelSpec field.
+
+    FOUR moved, later and on purpose, when the specs were corrected against the
+    containers they name -- see `test_quant_q8.Q8_CHECKED_IN` and the `real_vocab`
+    test beside it. `phi4-mini-4b` and `qwen35-27b` had left `real_vocab` at
+    `vocab_size` instead of the tokenizer's id count; `qwen35-9b` and
+    `qwen36-35b-a3b` recorded `quant: "q4_1"` for containers that store q8. All four
+    had drifted out of sync with their installed kernel sets. Their new hashes match
+    what `spec_from_model_dir` derives from the container, which is what `oflm add`
+    links on.
+"""
     import pathlib
 
     from recipes.load import load_spec
@@ -182,15 +192,20 @@ def test_no_shipped_models_hash_moved():
         "granite42-3b.json": "sha256:695134de825eb93e39a7b31008bb5791d2e27c8744c0980c2ed8edbe083b5656",
         "hy-mt2-7b.json": "sha256:857e09843a229d259ec52d5174560e429af3597b446142eab140977a571cd1d7",
         "llama31-8b.json": "sha256:e4baa37e429635bc133b50b9bdac750abb02e6ce58c0d10efcb06bc2bd29a4bb",
-        "phi4-mini-4b.json": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
+        "phi4-mini-4b.json": "sha256:ea66b519258cc5b06f4a10e4dae28075c3d023caf8965ba19cc49520cd764a05",
         "qwen25-3b.json": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
         "qwen3-4b.json": "sha256:602fa1836b218cfd17b8a11628cde954587cd53ad3345a04ef1d998d23951dfd",
-        "qwen35-9b.json": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
-        "qwen36-35b-a3b.json": "sha256:32e980528551df6ae76741cce159c2e79a7a7daa6b0d01d78f665a1164b9f780",
+        "qwen35-9b.json": "sha256:f3be1f5aaf4b4957e3118037d0874c16e0970c07678c950937014f8c839fecc0",
+        "qwen36-35b-a3b.json": "sha256:640d27a72d491651d9dc4f9c2908e0b6cc458d1e7fd9e0bbce27d59e243e97dc",
         "lfm2-1.2b.json": "sha256:fd500fa0be3851a42ecd72a97346ef21f5df2c63866d0f6196a4bf3ed6aeabb8",
+        # LFM2.5-1.2B-Thinking is the same shape with a two-id-wider tokenizer. The
+        # kernels are byte-identical to lfm2-1.2b's (real_vocab reaches no build dir),
+        # so its set is a second copy of the same kernels that exists only so
+        # `oflm add` links THIS container by its own hash.
+        "lfm2.5-1.2b-thinking.json": "sha256:8f7fdaea404c25ecafaae13f91f749fa954b1eaa7e07574140f76a7902903628",
         "minicpm5-2b.json": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
         "k2-horizon-3.7b.json": "sha256:18952d15a05780550c7d469b728fd6c686b6cb4c23635257e82c842aecd8e50a",
-        "qwen35-27b.json": "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458",
+        "qwen35-27b.json": "sha256:ff08e8129933d27b3edad6830486bf757285805118972ffffb3d86ed92640ab0",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

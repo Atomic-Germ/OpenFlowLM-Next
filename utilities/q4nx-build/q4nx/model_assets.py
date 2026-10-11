@@ -654,6 +654,11 @@ _OFLM_FAMILY_OF_MODEL_TYPE = {
     "gemma3": "gemma3", "gemma3_text": "gemma3", "gemma3_text_only": "gemma3",
     "gemma4_text": "gemma4", "gemma4": "gemma4",
     "hunyuan_v1_dense": "hunyuan", "granite": "granite",
+    "k2_horizon": "k2",
+    # The 3.6 name for the qwen36moe architecture, and the one `qwen3_6_moe` is
+    # aliased to in recipes/spec.py's HF_FAMILIES.
+    "qwen3_6_moe": "qwen3.6-moe", "qwen3_6_moe_text": "qwen3.6-moe",
+    "nanbeige": "nanbeige",
     "phi3": "phi3", "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss",
 }
 
@@ -928,12 +933,39 @@ meta.get("prune_ffn_retained"), meta.get("mtp_dropped") or 0)
     (output_dir / "README.md").write_text(generate_readme(readme_text, meta), encoding="utf-8")
 
 
+# llama.cpp architecture string -> the HF `model_type` the OFLM runtime and
+# `open_kernels/recipes/spec.py` dispatch on. `generate_config_from_gguf` used to
+# copy `general.architecture` straight through, and the recipes read
+# `HF_FAMILIES`, not `GGUF_FAMILIES` -- so a pack with no source repo shipped a
+# config whose model_type no recipe claims.
+GGUF_ARCH_TO_MODEL_TYPE: Dict[str, str] = {
+    "qwen35moe": "qwen3_5_moe",
+    "qwen3next": "qwen3_5_moe",
+    "qwen35": "qwen3_5",
+    "qwen3": "qwen3",
+    "qwen3vl": "qwen3_vl",
+    "qwen2": "qwen2",
+    "qwen2vl": "qwen2_5_vl",
+    "llama": "llama",
+    "gemma3": "gemma3",
+    "granite": "granite",
+    "hunyuan-dense": "hunyuan_v1_dense",
+    "phi3": "phi3",
+    "lfm2": "lfm2",
+    "k2": "k2_horizon",
+    "gpt-oss": "gpt_oss",
+}
+
+
 def generate_config_from_gguf(reader) -> dict:
     """Best-effort HF-style config.json built from GGUF metadata (no-source fallback)."""
     cfg: dict = {}
     arch = _gguf_field(reader, "general.architecture")
     if arch:
-        cfg["model_type"] = str(arch)
+        arch = str(arch)
+        # The runtime's model_type, not llama.cpp's arch string: an un-mapped
+        # architecture would ship a config no engine and no recipe can read.
+        cfg["model_type"] = GGUF_ARCH_TO_MODEL_TYPE.get(arch.lower(), arch)
     mappings = [
         (".embedding_length", "hidden_size"),
         (".feed_forward_length", "intermediate_size"),
@@ -954,9 +986,13 @@ def generate_config_from_gguf(reader) -> dict:
     general_vocab = _gguf_field(reader, "general.vocab_size")
     if "vocab_size" not in cfg and general_vocab is not None:
         cfg["vocab_size"] = general_vocab
-    if "head_dim" in cfg and "num_attention_heads" in cfg and "hidden_size" in cfg:
-        if cfg["head_dim"] * cfg["num_attention_heads"] == cfg["hidden_size"]:
-            cfg.pop("head_dim", None)
+    # `head_dim` stays even when heads * head_dim == hidden_size. That is the HF
+    # convention for a *plain* model, but every open recipe here reads
+    # `head_dim` outright (spec.py's `_need`), and the alternative -- deriving it
+    # from an arch's own metadata -- is not available at run time.
+    rope_theta = _gguf_field(reader, f"{arch}.rope.freq_base") if arch else None
+    if rope_theta is not None:
+        cfg["rope_theta"] = float(rope_theta)
     for key in list(cfg.keys()):
         if isinstance(cfg[key], bool):
             continue
@@ -1056,6 +1092,50 @@ def _tokenizer_id_lookup(tokenizer_path: Path) -> Dict[str, int]:
     return lookup
 
 
+def synthesize_hf_tokenizer_config(output_dir: Path) -> Optional[Path]:
+    """Write the tokenizer_config.json an HF source repo did not ship.
+
+    `oflm add` refuses a directory without one (REQUIRED_FILES), and the
+    no-source GGUF path has had a writer for it since the start
+    (`generate_tokenizer_config`) while the HF path had none -- so an HF pack
+    whose source omits tokenizer_config.json produced a directory that could
+    not be installed at all.
+
+    Only the ids the runtime reads are written: bos / eos / pad, taken from the
+    source config.json where they are usually right, and each token string
+    resolved against tokenizer.json where they are not. Nothing is invented: a
+    field that cannot be resolved is left out, and `ensure_hf_tokenizer_ids`
+    runs afterwards to normalize eos_token_id to the list the sampler wants.
+    """
+    config_path = output_dir / "config.json"
+    if not config_path.is_file() or not (output_dir / "tokenizer.json").is_file():
+        return None
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception:
+        return None
+    cfg: dict = {"model_type": config.get("model_type")} if config.get("model_type") else {}
+    lookup = _tokenizer_id_lookup(output_dir / "tokenizer.json")
+    for token_key, id_key in [("bos_token", "bos_token_id"),
+                              ("eos_token", "eos_token_id"),
+                              ("pad_token", "pad_token_id")]:
+        text = config.get(token_key)
+        if isinstance(text, str) and text in lookup:
+            cfg[id_key] = lookup[text]
+            cfg[token_key] = text
+        elif config.get(id_key) is not None:
+            cfg[id_key] = config[id_key]
+    if not any(k in cfg for k in ("bos_token_id", "eos_token_id", "pad_token_id")):
+        return None
+    path = output_dir / "tokenizer_config.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    print(f"[INFO] Source shipped no tokenizer_config.json; wrote {path.name} "
+          f"from config.json + tokenizer.json")
+    return path
+
+
 def ensure_hf_tokenizer_ids(output_dir: Path) -> None:
     """Backfill EOS/BOS/PAD token ids into a copied HF tokenizer_config.json.
 
@@ -1064,10 +1144,16 @@ def ensure_hf_tokenizer_ids(output_dir: Path) -> None:
     null (the end-of-turn token lives in ``eos_token``), which silently disables
     end-of-generation. Resolve each token string against the tokenizer and
     normalize ``eos_token_id`` to a list so converted models actually stop.
+
+    A source that ships no tokenizer_config.json at all gets one synthesized
+    first (`synthesize_hf_tokenizer_config`); there is nothing to backfill
+    otherwise, and `oflm add` refuses the directory without the file.
     """
     path = output_dir / "tokenizer_config.json"
     if not path.exists():
-        return
+        path = synthesize_hf_tokenizer_config(output_dir)
+        if path is None:
+            return
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     lookup = _tokenizer_id_lookup(output_dir / "tokenizer.json")
@@ -1202,16 +1288,25 @@ def inject_oflm_keys(config: dict, q4nx_config: dict, output_dir: Path, oflm_ver
         and "intermediate_size" not in config
     ):
         config["intermediate_size"] = config["moe_intermediate_size"]
-    # Engine memory-layout offsets (lm_config.hpp JSON_GETs addr_* with default 0).
-    # Architecture-level, declared in the arch config. Darwin worked without them
-    # on some OFLM builds; still inject when present so MHA layouts are correct.
+    # Memory-layout offsets declared in the arch config (qwen35moe.json). Nothing in
+    # THIS tree reads them -- `lm_config.hpp` has no JSON_GET for an addr_* key --
+    # but `LM_Config` carries the whole config.json across the DLL boundary, so the
+    # closed qwen3_6_moe engine may still want them. They stay written, and the note
+    # that used to sit here claiming lm_config.hpp reads them was wrong.
     for key in ("addr_qk", "addr_kv", "addr_kk", "addr_l_begin_mha", "addr_l_end_mha"):
         if key in q4nx_config:
             config.setdefault(key, q4nx_config[key])
     # Token ids: prefer text_config / generation defaults used by Darwin.
     if config.get("bos_token_id") is None and config.get("pad_token_id") is not None:
         config["bos_token_id"] = config["pad_token_id"]
-    if config.get("eos_token_id") is None:
+    # 248044 is Qwen3.5/3.6's end-of-text id, and this key is read straight out of
+    # config.json by the open engines (open_embedding/engine.cpp) as well as by the
+    # closed ones' tokenizer_config.json. Writing it for every family meant a
+    # defaulted Llama or Gemma carry a Qwen token id it has never heard of. Only
+    # the family it is correct for gets it; the others leave the key absent, which
+    # is what an absent source config means anyway.
+    if config.get("eos_token_id") is None and config.get("model_type") in (
+            "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6_moe", "qwen3_6_moe_text"):
         config["eos_token_id"] = 248044
     # Darwin/Ornith engines need caching enabled at runtime.
     if config.get("model_type") in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6_moe", "qwen3_6_moe_text"):
@@ -1322,8 +1417,10 @@ def assemble_model_assets_hf(
         config = {}
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
-    if model_arch is ModelArch.GRANITE:
-        apply_granite_fold_to_config(config, reader)
+    # No Granite fold here: models/granite.py refuses an HF safetensors source, so a
+    # Granite pack never reaches this path -- it goes through assemble_model_assets,
+    # which has the GGUF reader the fold needs. (An earlier version called it here
+    # with a `reader` that does not exist in this scope.)
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     vision_model_type = QWEN35_VISION_MODEL_TYPES.get(model_arch)
     if vision_model_type:
@@ -1396,6 +1493,13 @@ def assemble_model_assets(
 
     if model_arch in QWEN35_VISION_ARCHS:
         _ensure_qwen35_vision_weight(q4nx_config, output_dir, [source_model, *candidates])
+    # Granite's four multipliers are folded into the weights by models/granite.py, so
+    # the config that ships beside them has to say so -- `spec.py` refuses a Granite
+    # container that does not state `attention_multiplier == head_dim ** -0.5`, and
+    # refuses one that omits the key outright. Granite is GGUF-only, so THIS is the
+    # path every Granite pack takes; the HF entry point below never sees one.
+    if model_arch is ModelArch.GRANITE:
+        apply_granite_fold_to_config(config, reader)
     inject_oflm_keys(config, q4nx_config, output_dir, oflm_version)
     # The FFN in model.q4nx is NARROWER than the source model's, so the config
     # that ships beside it has to say so. Left at the source width, the kernel

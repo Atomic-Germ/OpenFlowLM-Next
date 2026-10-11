@@ -227,8 +227,19 @@ def test_the_gguf_tensor_types_derive_the_same_map():
 
 
 # ------------------------------------------------------------------ the spec surface
+def all_q4_1():
+    """The default spec with every role at q4_1.
+
+    `qwen36-35b-a3b.json` now records the q8 roles its container holds, so it is
+    no longer the all-q4_1 reference these tests were written against -- and
+    building the reference explicitly is what keeps them testing the
+    canonicalisation rather than one fixture's value.
+    """
+    return dataclasses.replace(default_spec(), quant="q4_1")
+
+
 def test_an_all_q4_1_map_is_the_string_q4_1_and_moves_no_hash():
-    ref = default_spec()
+    ref = all_q4_1()
     same = dataclasses.replace(ref, quant={r: "q4_1" for r in QUANT_ROLES})
     assert same.to_dict()["quant"] == "q4_1"
     assert same.spec_hash() == ref.spec_hash()
@@ -236,7 +247,7 @@ def test_an_all_q4_1_map_is_the_string_q4_1_and_moves_no_hash():
 
 
 def test_a_q8_role_changes_the_spec_hash_and_survives_a_round_trip():
-    ref = default_spec()
+    ref = all_q4_1()
     q8 = dataclasses.replace(ref, quant={"attn": "q8"})
     assert q8.spec_hash() != ref.spec_hash()
     assert q8.to_dict()["quant"] == {"attn": "q8"}
@@ -246,11 +257,46 @@ def test_a_q8_role_changes_the_spec_hash_and_survives_a_round_trip():
     assert ref.q8_roles == frozenset()
 
 
-def test_every_checked_in_spec_still_reads_as_all_q4_1():
+# The specs whose containers really do store a q8 role. This set is the honest
+# version of "every checked-in spec is all-q4_1": that test used to pass for all
+# thirteen files because the two families whose containers ARE part-q8 had never
+# been updated when OPEN-QUANT-Q8 landed -- which is exactly how a shipped
+# container ends up deriving a spec_hash no installed kernel set carries.
+Q8_CHECKED_IN = {
+    # ssm_out_proj is 8704-byte q8 in Qwen3.5-9B-NPU2
+    "qwen35-9b.json": {"linear_out"},
+    # 251 of the 35B's 733 quantized tensors: attention, linear and out projections
+    "qwen36-35b-a3b.json": {"attn", "linear", "linear_out"},
+}
+
+
+def test_every_checked_in_spec_reads_as_its_container_holds():
+    """Nothing may sit at the q8 default in the FILES while the containers those
+    files name hold something else -- in either direction."""
     for p in sorted(SPECS.glob("*.json")):
+        want = Q8_CHECKED_IN.get(p.name, frozenset())
         s = load_spec(p)
-        assert s.quant == "q4_1" and s.q8_roles == frozenset(), p.name
-        assert json.loads(p.read_text(encoding="utf-8"))["quant"] == "q4_1"
+        assert s.q8_roles == want, (
+            f"{p.name} has q8 roles {sorted(s.q8_roles)}; expected {sorted(want)}. "
+            f"Check it against the container it names in extra.model.")
+        got = json.loads(p.read_text(encoding="utf-8"))["quant"]
+        if not want:
+            assert got == "q4_1", p.name
+        else:
+            assert set(got) == want, p.name
+
+
+def test_a_checked_in_spec_real_vocab_is_never_the_padded_default():
+    """`real_vocab` is the tokenizer's id count; `vocab` is the padded lm_head row
+    count. Two shipped specs had simply left real_vocab at vocab's value, which
+    moved their spec_hash and unlinked them from their own kernel set: Phi-4-mini
+    (200064 -> 200029) and the 27B (248320 -> 248077).
+    """
+    real = {"phi4-mini-4b.json": 200029, "qwen35-27b.json": 248077}
+    for name, want in real.items():
+        s = load_spec(SPECS / name)
+        assert s.real_vocab == want, f"{name}: real_vocab {s.real_vocab} != {want}"
+        assert s.vocab != s.real_vocab, f"{name}: vocab and real_vocab are both {s.vocab}"
 
 
 def test_the_shipped_27b_manifest_is_byte_identical():
@@ -266,7 +312,7 @@ def test_the_shipped_27b_manifest_is_byte_identical():
 
 # ------------------------------------------------------------------ layout consequences
 def test_a_q8_role_doubles_its_pool_region_and_the_27b_stays_at_512_MB():
-    ref = default_spec()
+    ref = all_q4_1()
     L0 = Q.layout(ref)
     assert L0.POOL_BYTES == 512 * (1 << 20)
     q8 = dataclasses.replace(ref, quant={"attn": "q8", "linear": "q8", "linear_out": "q8"})
@@ -303,7 +349,7 @@ def test_a_quant_the_gemv_cannot_read_is_still_refused():
 
 def test_the_build_dir_names_only_gain_a_hash_when_a_role_is_q8(monkeypatch):
     monkeypatch.setenv("OPEN_LAYER_ONE_CTX", "0")         # lx/ax on both sides (a q8 spec never merges)
-    ref = default_spec()
+    ref = all_q4_1()
     assert Q.builds(ref)["lx0"]["build_dir"] == "layer_x/build_lx0"
     q8 = dataclasses.replace(ref, quant={"attn": "q8"})
     d = Q.builds(q8)["lx0"]["build_dir"]
@@ -315,7 +361,7 @@ def test_the_build_key_takes_a_role_map_and_does_not_move_for_an_all_q4_1_spec()
     """`build_key` hashed `spec.quant` as a string. A derived map is a dict, so every q8
     container raised `AttributeError: 'dict' object has no attribute 'encode'` before the
     canonical form went in -- and an all-q4_1 spec must still hash the bare string."""
-    ref = default_spec()
+    ref = all_q4_1()
     k = build_key(ref)
     assert build_key(dataclasses.replace(ref, quant={r: "q4_1" for r in QUANT_ROLES})) == k
     q8 = dataclasses.replace(ref, quant={"attn": "q8"})
@@ -324,7 +370,7 @@ def test_the_build_key_takes_a_role_map_and_does_not_move_for_an_all_q4_1_spec()
 
 
 def test_gemv_q8_h_enters_the_build_key_only_for_a_q8_spec():
-    ref = default_spec()
+    ref = all_q4_1()
     names = {f.name for f in source_files(ref)}
     assert "gemv_q8.h" not in names
     q8 = dataclasses.replace(ref, quant={"attn": "q8"})
@@ -361,7 +407,9 @@ def test_the_dense_recipes_take_the_same_switch(unvalidated):
 
 
 def test_the_qwen35_recipe_takes_the_same_switch(unvalidated):
-    ref = load_spec(SPECS / "qwen35-9b.json")
+    # the 9B's checked-in spec IS the q8 one now, so build the q4_1 reference
+    # explicitly -- otherwise this compares the spec against itself.
+    ref = dataclasses.replace(load_spec(SPECS / "qwen35-9b.json"), quant="q4_1")
     q8 = dataclasses.replace(ref, quant={"linear_out": "q8"})
     L0, L1 = Q35.layout(ref), Q35.layout(q8)
     assert L1.C_BYTES - L1.C_WOUT == 2 * (L0.C_BYTES - L0.C_WOUT)

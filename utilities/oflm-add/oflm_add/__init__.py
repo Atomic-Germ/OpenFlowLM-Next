@@ -47,7 +47,12 @@ import urllib.request
 from pathlib import Path
 
 REQUIRED_FILES = ["config.json", "model.q4nx", "tokenizer.json", "tokenizer_config.json"]
-OPTIONAL_FILES = ["chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4nx"]
+OPTIONAL_FILES = ["chat_template.jinja", "vision_weight.q4nx", "audio_weight.q4nx",
+                  # --build-spec's output. oflm add re-derives it from the packed
+                  # config.json + model.q4nx header when it is missing, so it is
+                  # optional here -- but it has to be recognised, or a pack that
+                  # shipped it drops it on the floor.
+                  "spec.json"]
 ALL_FILES = REQUIRED_FILES + OPTIONAL_FILES
 
 SYSTEM_LIST_CANDIDATES = [
@@ -86,6 +91,14 @@ FAMILY_ALIASES = [
     # defaults and chat-template probe are the wrong ones -- and the closed
     # llama_npu refuses hidden_size 2560 outright.
     ("granite", "granite"),
+    # K2 and Hunyuan are open-kernel families with no closed engine and no
+    # model_list.json bucket, so `details.family` names the recipe that serves
+    # them rather than an AutoModel. Without these two lines `derive_family`
+    # exits before the open-kernel link is even attempted.
+    ("k2-horizon", "k2"),
+    ("k2", "k2"),
+    ("hunyuan", "hunyuan"),
+    ("hy-mt2", "hunyuan"),
     ("crow", "qwen3.5"),
     ("huihui", "qwen3.5"),
     ("qwythos", "qwen3.5"),
@@ -729,37 +742,183 @@ def model_spec_hash(model_dir):
                 pass
 
 
-def kernel_set_spec_hash(kernel_dir):
-    """The manifest's spec_hash for a kernel set directory, or None."""
-    try:
-        return load_json(Path(kernel_dir) / "manifest.json").get("spec_hash")
-    except Exception:
-        return None
+def model_capability(model_dir):
+    """(capability dict, note) for an installed model directory; (None, why) on failure.
 
-
-def find_open_kernels(spec_hash, roots, dir_name):
-    """The installed open kernel set whose manifest matches `spec_hash`.
-
-    Roots are xclbins directories (<root>/<model>/open_kernels). A set sitting
-    under this model's own name wins; otherwise the first match in root order.
-    Returns (Path, source model name) or (None, None).
+    The capability is what the kernels are built for -- the family, the shape, the
+    per-role weight format and the tokenizer's id count -- not the model's
+    identity. Derived the way the recipes do it: `spec_from_model_dir` reads
+    config.json, the tokenizer's real vocab, and the per-role weight format off
+    the model.q4nx safetensors HEADER (no weight byte is read).
     """
-    if not spec_hash:
-        return None, None
-    matches = []
+    root = open_kernels_checkout()
+    if root is None:
+        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.load import spec_from_model_dir
+        spec = spec_from_model_dir(Path(model_dir))
+        cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
+        cap = {
+            "family": spec.family,
+            "quant": spec.canonical_quant(),
+            # the tokenizer's id count: the engine masks every logit above a set's
+            # real_vocab to -inf, so this is the one identity-ish field the hash
+            # was carrying that `hf_config_check` does not (it reads config.json).
+            "real_vocab": spec.real_vocab,
+            "spec_hash": spec.spec_hash(),
+            "config": cfg,
+            "spec": spec.to_dict(),
+        }
+        return cap, f"spec from {root}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
+
+
+def _set_capability(kernel_dir):
+    """(quant, real_vocab) a kernel set was built for, or (None, None) if it does not say.
+
+    `export_qwen36_kernels.py` writes `spec.json` beside the manifest; the
+    manifest's `layout` block carries real_vocab for sets that predate it.
+    """
+    spec, manifest = {}, {}
+    for name, target in (("spec.json", spec), ("manifest.json", manifest)):
+        f = Path(kernel_dir) / name
+        if f.is_file():
+            try:
+                target.update(load_json(f))
+            except Exception:
+                pass
+    quant = spec.get("quant", manifest.get("quant"))
+    real_vocab = spec.get("real_vocab")
+    if real_vocab is None:
+        real_vocab = (manifest.get("layout") or {}).get("real_vocab")
+    return quant, real_vocab
+
+
+def passes_hf_config_check(manifest, cap) -> tuple:
+    """Does this set's own declared compatibility cover the container's config?
+
+    Mirrors `open_qwen36::Manifest::check_model` (src/open_qwen36/manifest.cpp):
+    `model_type` may name a list the set serves, `layer_types` falls back to
+    `full_attention_interval` when the config omits it, and an absent key means
+    the manifest's `hf_config_defaults` when it names one. The engine runs this
+    exact comparison at load and fails closed -- running it here too only chooses
+    between candidate sets, it never admits one the engine would refuse.
+    """
+    check = manifest.get("hf_config_check")
+    if not isinstance(check, dict) or not check:
+        return True, "the set declares no hf_config_check (an older manifest)"
+    defaults = manifest.get("hf_config_defaults") or {}
+    cfg = cap["config"]
+    for key, want in check.items():
+        if key == "model_type":
+            if key not in cfg:
+                return False, f"config.json lacks {key!r}"
+            accepted = want if isinstance(want, list) else [want]
+            if cfg[key] not in accepted:
+                return False, (f"config.json model_type {cfg[key]!r} is not one this kernel "
+                               f"set serves ({accepted!r})")
+        elif key == "layer_types":
+            if "layer_types" in cfg:
+                got = cfg["layer_types"]
+            elif {"full_attention_interval", "num_hidden_layers"} <= set(cfg):
+                iv, n = cfg["full_attention_interval"], cfg["num_hidden_layers"]
+                if not isinstance(iv, int) or iv <= 0:
+                    return False, "config.json full_attention_interval must be positive"
+                got = ["full_attention" if (l + 1) % iv == 0 else "linear_attention"
+                       for l in range(n)]
+            else:
+                return False, "config.json lacks layer_types"
+            if got != want:
+                return False, "config.json layer_types differ from the kernel set's"
+        else:
+            present = key in cfg
+            if not present and key not in defaults:
+                return False, f"config.json lacks {key!r}"
+            got = cfg[key] if present else defaults[key]
+            if got != want:
+                return False, (f"config.json {key} = {got!r}, the kernel set was built "
+                               f"for {want!r}")
+    return True, ""
+
+
+def find_open_kernels(cap, roots, dir_name):
+    """The installed kernel set this container can run: (dir, source name, why).
+
+    Matching is on what the kernels are built for -- the family, the shape keys the
+    set's own `hf_config_check` declares, and the per-role weight format -- not on
+    the whole ModelSpec. An exact `spec_hash` still WINS when it applies, so
+    nothing changes for a model whose set is its own; it just no longer GATES.
+    A finetune of a family + shape that has a shipped set runs on that set, which
+    is the whole point of q4nx-build + oflm-add (ROCm/FastFlowLM#690: the user
+    should be able to convert a model and run it, without AMD or a dev in the
+    loop, and without rebuilding anything).
+
+    Everything the identity hash carried beyond capability is re-checked rather
+    than dropped:
+      * the shape -- by `hf_config_check`, which the engine also runs at load;
+      * the weight format -- by `quant`, since a q4_1 set reading a q8 container
+        still runs but silently re-quantises it, and a q8 set refuses a q4_1 one;
+      * the tokenizer's width -- by `real_vocab`, in the one direction that
+        matters (see the note in `rank_kernel_sets`).
+
+    Roots are xclbins directories (<root>/<model>/open_kernels). A set under the
+    model's own directory name wins ties.
+    """
+    if not cap:
+        return None, None, "no capability derived"
+    ranked = []
     for root in roots:
         if not root or not Path(root).is_dir():
             continue
-        for model in sorted(Path(root).iterdir()):
+        try:
+            models = sorted(Path(root).iterdir())
+        except OSError:
+            continue
+        for model in models:
             k = model / "open_kernels"
             if not (k / "manifest.json").is_file():
                 continue
-            if kernel_set_spec_hash(k) == spec_hash:
-                matches.append((k, model.name))
-    for k, name in matches:
-        if name == dir_name:
-            return k, name
-    return matches[0] if matches else (None, None)
+            try:
+                manifest = load_json(k / "manifest.json")
+            except Exception:
+                continue
+            if manifest.get("family") != cap["family"]:
+                continue
+            ok, why_not = passes_hf_config_check(manifest, cap)
+            if not ok:
+                continue
+            quant, real_vocab = _set_capability(k)
+            # A set whose tokenizer count is BELOW this model's would mask that
+            # model's high tokens to -inf and make them unsampleable -- a hard
+            # incompatibility, the same class as a wrong shape, not a preference.
+            # Wider is harmless: rows above the model's own vocabulary are padding.
+            if real_vocab is not None and real_vocab < cap["real_vocab"]:
+                continue
+            # (best first) identity, then weight format, then the exact tokenizer,
+            # then the model's own directory name
+            score = (
+                manifest.get("spec_hash") != cap["spec_hash"],
+                (quant is not None and quant != cap["quant"]),
+                real_vocab != cap["real_vocab"],
+                model.name != dir_name,
+            )
+            ranked.append((score, str(k), model.name, quant, real_vocab))
+    if not ranked:
+        return None, None, None
+    ranked.sort(key=lambda r: r[0])
+    score, k, name, quant, real_vocab = ranked[0]
+    return Path(k), name, (quant, real_vocab)
 
 
 def _make_dir_link(link, target):
@@ -821,22 +980,57 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
 
-    spec_hash, note = model_spec_hash(model_dir)
-    if not spec_hash:
+    cap, note = model_capability(model_dir)
+    if not cap:
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
         return False
-    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
+    kernel_dir, source, got = find_open_kernels(cap, roots, dir_name)
     if kernel_dir:
-        log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
-            f"this model's ({spec_hash[:19]})")
+        _report_match(source, cap, got, quiet=quiet)
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
-    checkout = open_kernels_checkout()
-    script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
-    log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
-        "the closed kernels stay in charge. Build one with:")
-    log(f'           python "{script}" --model-dir "{model_dir}"')
+    if not quiet:
+        spec = cap["spec"]
+        log(f"[INFO] No installed open kernel set serves family {cap['family']!r} at "
+            f"hidden {spec.get('hidden')}, {spec.get('num_layers')} layers, weights "
+            f"{cap['quant']}.")
+        log("[INFO] Kernel sets ship with the release; this build has none for this family "
+            "and shape.")
+        log("[INFO] If a set exists elsewhere, point at it either as a directory holding a "
+            "manifest.json:")
+        log(f'           oflm add {dir_name} --open-kernels <that directory>')
+        log("[INFO] or as a root of them:")
+        log("           OFLM_OPEN_KERNELS_DIR=<xclbins root> oflm run <this model's tag>")
     return False
+
+
+def _report_match(source, cap, got, quiet=False):
+    """Say which set was chosen and exactly how it relates to this container.
+
+    The point of the capability match is that a converted finetune runs on the
+    kernels its family and shape already have -- so the message has to be honest
+    about the two ways the set can be a near-miss, because both are the user's
+    business:
+      * the set's `real_vocab` is BELOW the tokenizer's count, so tokens in
+        between would be masked to -inf and become unsampleable -- that is a
+        refusal, not a warning;
+      * the weight format differs, which runs but re-quantises on the way into
+        the pool, so quality drops for those projections.
+    """
+    if quiet:
+        return
+    quant, real_vocab = got if got else (None, None)
+    log(f"[INFO] open kernels from '{source}': same family "
+        f"({cap['family']}) and shape, and its hf_config_check covers this model's "
+        f"config.json.")
+    if real_vocab is not None and real_vocab != cap["real_vocab"]:
+            log(f"[INFO]   its tokenizer count is {real_vocab} against this model's "
+                f"{cap['real_vocab']} -- wider is harmless, the rows above are padding.")
+    if quant is not None and quant != cap["quant"]:
+        log(f"[WARN] this model's weights are {cap['quant']} and the set was built for "
+            f"{quant}; the projections will be re-quantised on the way into the pool.")
+    elif quant is not None and quant != "q4_1":
+        log(f"[INFO]   weight format {quant}: streamed at q8, as this container stores it.")
 
 
 # ---------------------------------------------------------------------- main
@@ -977,11 +1171,16 @@ def main():
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
-            sh, note = model_spec_hash(local_dir)
+            cap, note = model_capability(local_dir)
             roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
-            found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
-            print(f"spec hash      : {sh or '(' + note + ')'}")
-            print(f"open kernels   : {found or '(none installed)'}")
+            found, source, _ = (find_open_kernels(cap, roots, dir_name) if cap
+                                else (None, None, None))
+            if cap:
+                print(f"family / shape : {cap['family']}, weights {cap['quant']}, "
+                      f"tokenizer {cap['real_vocab']} ids")
+            print(f"spec hash      : {cap['spec_hash'] if cap else '(' + note + ')'}")
+            print(f"open kernels   : {found or '(none installed)'}"
+                  + (f"  <- from {source}" if found else ""))
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")
         return

@@ -40,7 +40,13 @@ FULL_TENSORS = {
 
 
 class FakeContainer:
-    """raw(name) -> random bytes of the tensor's size, deterministic per name."""
+    """raw(name) -> random bytes of the tensor's size, deterministic per name.
+
+    `chunk_bytes_of` says 5120 for everything, so it is an all-q4_1 container. The
+    default spec records the q8 roles its own container holds, so a q8 plan paired
+    with this fake is refused by `pack.q8_perm` -- correctly, and loudly; these
+    tests are the q4_1 agreement, and the q8 one is test_quant_q8's.
+    """
 
     def __init__(self, layers: dict[int, str], lm_head_chunks: int = 64):
         self.sizes = {"lm_head.weight": lm_head_chunks * 8704, "model.norm.weight": 4096}
@@ -63,7 +69,13 @@ def m():
 
 @pytest.fixture(scope="module")
 def plan():
-    return Q.pack_plan(default_spec())
+    import dataclasses
+
+    from recipes.load import default_spec
+
+    # all-q4_1: what this fake container holds (the shipped 35B is part-q8, and its
+    # q8 agreement is what test_quant_q8.test_the_pack_plan_uses_q8_perm_* pins)
+    return Q.pack_plan(dataclasses.replace(default_spec(), quant="q4_1"))
 
 
 @pytest.mark.parametrize("layer,kind", [(0, LINEAR), (1, FULL)])

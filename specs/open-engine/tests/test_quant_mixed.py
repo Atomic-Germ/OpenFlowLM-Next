@@ -124,20 +124,45 @@ def test_an_all_q8_spec_needs_no_fold(unvalidated):
     assert set(PAIR) <= set(fs)
 
 
-def test_the_checked_in_specs_generate_exactly_the_translation_units_they_did(unvalidated):
-    """Every spec in recipes/specs/ is all-q4_1, so none of them may gain or lose a TU."""
-    for name, which, fam in (("qwen36-35b-a3b", "layer_x", None), ("qwen35-9b", "layer_x", Q35),
-                             ("qwen3-4b", "dense", DN), ("llama31-8b", "dense", DN),
-                             ("gemma3-4b", "dense", DN), ("hy-mt2-7b", "dense", DN)):
+# The all-q4_1 checked-in specs this file's design scopes cover (dense, and the
+# qwen35 layer_x). Two of them -- qwen36-35b-a3b and qwen35-9b -- hold q8 roles now
+# and get their own test below; the rest are each family's own business and are
+# pinned against their containers by test_quant_q8.Q8_CHECKED_IN.
+ALL_Q4_1_CHECKED_IN = (("qwen3-4b", "dense", DN), ("llama31-8b", "dense", DN),
+                       ("gemma3-4b", "dense", DN), ("hy-mt2-7b", "dense", DN),
+                       ("qwen35-27b", "layer_x", Q35))
+
+
+def test_the_checked_in_all_q4_1_specs_generate_exactly_the_units_they_did(unvalidated):
+    """An all-q4_1 spec may not gain or lose a TU -- the mixed core folds the q4_1 GEMV
+    pair, and a fold appearing here means a role quietly moved to q8."""
+    for name, which, fam in ALL_Q4_1_CHECKED_IN:
         gk = _gen(which)
         spec = load_spec(SPECS / f"{name}.json")
-        assert not spec.q8_roles, name
-        R = (fam or __import__("recipes.qwen36moe", fromlist=["x"])).recipe(spec)
+        assert spec.quant == "q4_1" and not spec.q8_roles, name
+        R = fam.recipe(spec)
         assert not gk.mixed(R), name
         fs = gk.files(R)
         assert FOLD not in fs, name
         assert "gemv_q4_gy.cc" in fs, name
         assert not [n for n in fs if n.startswith("gemv_q8")], name
+
+
+def test_the_q8_checked_in_specs_do_not_silently_fold(unvalidated):
+    """...and the two that ARE q8 must say so, or the kernel set their export builds is
+    the q4_1 one while the container holds q8 -- which is exactly the drift that had
+    these files wrong. `pools.cpp`'s `q8_perm` refuses a non-q8 source, so a q8 spec
+    paired with the wrong container fails loudly; the other direction only degrades."""
+    for name, which, fam in (("qwen36-35b-a3b", "layer_x", None), ("qwen35-9b", "layer_x", Q35)):
+        gk = _gen(which)
+        spec = load_spec(SPECS / f"{name}.json")
+        assert spec.q8_roles, name
+        R = (fam or __import__("recipes.qwen36moe", fromlist=["x"])).recipe(spec)
+        fs = gk.files(R)
+        # the linear core carries the q8 body, so it is mixed -- and its fold is
+        # deliberate, checked against the hardware fact in qwen36moe.mixed_check
+        assert gk.mixed(R), name
+        assert [n for n in fs if n.startswith("gemv_q8")], name
 
 
 # ---- the dense designs take the same switch

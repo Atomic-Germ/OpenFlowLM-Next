@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Q4NX" }]
 dependencies = [
     "numpy",
-    "torch",
+    "torch==2.14.1+rocm7.2",
     "einops",
     "matplotlib",
     "safetensors",

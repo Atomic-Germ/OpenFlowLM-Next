@@ -33,7 +33,25 @@ LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV)   # dense_local: a 
 QUANT_ROLES = ("attn", "linear", "linear_out", "shared", "ffn", "experts")
 QUANT_FORMATS = ("q4_1", "q8", "mxfp4")
 DEFAULT_QUANT = "q4_1"
-CHUNK_FORMAT = {5120: "q4_1", 8704: "q8"}
+# The byte counts that name a POOL format, because that is what this map decides:
+# 5120 is q4_1 and 8704 is q8, and `quant_of(role) == "q8"` is what picks the
+# `q8_perm` op over `std_perm`.
+#
+# 4736 is Q4_K and is deliberately NOT one of them. It derives as q4_1, the same
+# way a signed q4_0 chunk does: `recipes/pack.py` transcodes it into 5120-byte
+# q4_1 chunks on the way into the pool (`q4k_to_q4_1`), so the pool bytes -- and
+# therefore the manifest, the chunk index law and the kernels -- are exactly a
+# q4_1 container's. The container-side format is read off the file
+# (`Q4NX.chunk_bytes_of`), never off the spec.
+#
+# Before this, 4736 was missing from the table entirely and the deriver REFUSED
+# the tensor (`--quant Q4_K` packs write it), so those containers could never
+# derive a spec and `oflm add` could never find kernels for them. Naming it a
+# different format instead would split spec_hash for two containers whose kernel
+# sets are byte-identical -- and, since `quant_hash` is "" whenever nothing is at
+# q8, build into the SAME directory while hashing differently, so a Q4_K build
+# would silently replace the stock set for its shape.
+CHUNK_FORMAT = {5120: "q4_1", 8704: "q8", 4736: "q4_1"}
 # 2560 is deliberately NOT in that table: GPT-OSS ships both its q4_1 projections and its
 # MXFP4 experts at that size, so the byte count alone does not name the format and only the
 # dtype separates them. A caller that has the dtypes gets the right answer; one that does
@@ -1453,11 +1471,25 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
 # config check read is identical to the VLM's, so it derives through the same builder --
 # exactly as `gemma3_text` and `qwen3_5_text` do for their towers.
 HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
-               "qwen3_next": _qwen36moe_hf, "qwen3_5": _qwen35_hf,
+               "qwen3_next": _qwen36moe_hf,
+               # qwen3_6_moe is the 3.6 name for the same architecture (this
+               # engine is src/open_qwen36, whose image payload struct is literally
+               # qwen3_6_moe_image_payload_t) and q4nx-build already tolerates it
+               # in three model_type branches. Without the aliases a container that
+               # states its own model_type refuses to derive at all -- the packer
+               # writes a config the recipe layer rejects.
+               "qwen3_6_moe": _qwen36moe_hf, "qwen3_6_moe_text": _qwen36moe_hf,
+               "qwen3_5": _qwen35_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
-               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
+               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf,
+               # Gemma3-1B-NPU2 declares this and q4nx-build's family map
+               # (`_OFLM_FAMILY_OF_MODEL_TYPE`) already answers for it; without it a
+               # packed Gemma3-1B derives as "model_type 'gemma3_text_only' has no
+               # recipe". Same text tower, same builder as gemma3_text.
+               "gemma3_text_only": _gemma3_hf,
+               "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,

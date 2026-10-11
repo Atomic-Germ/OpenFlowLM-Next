@@ -62,6 +62,11 @@ private:
         std::string file;
         size_t offset = 0;
         std::vector<size_t> shape;
+        /// Safetensors element type the bytes at `offset` are stored in. The
+        /// reader widens BF16 to f32; anything it cannot widen is refused by
+        /// name rather than read as f32, which used to silently consume 2x the
+        /// bytes and land in the next tensor's region.
+        std::string dtype = "F32";
     };
 
     float embed_scale_ = 1.0f;

@@ -24,10 +24,11 @@ void Granite::load_model(std::string model_path, json model_info, int default_co
         throw std::runtime_error("OFLM_GRANITE_ENGINE=closed: not implemented -- Granite has no closed engine "
                                  "(llama_npu refuses hidden_size 2560); build the open kernels instead");
     if (kernels.empty())
-        throw std::runtime_error("no open kernels were found for " + this->lm_config->model_name +
-                                 ". Granite runs on the open kernels only: build them with "
-                                 "open_kernels/export_qwen36_kernels.py --model-dir <model dir>, or point "
-                                 "OFLM_OPEN_KERNELS_DIR at a built set.");
+        throw std::runtime_error(
+            "no open kernel set is installed for " + this->lm_config->model_name +
+            ". Granite runs on the open kernels only, and this build ships no set for this "
+            "family and shape -- kernel sets are built for a release, not by the user. If you "
+            "have a set from elsewhere, point at it with OFLM_OPEN_KERNELS_DIR.");
     header_print("OFLM", "Granite on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();

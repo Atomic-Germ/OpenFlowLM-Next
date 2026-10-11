@@ -69,7 +69,7 @@
         "full_attention"
     ],
     "vocab": 248320,
-    "real_vocab": 248320,
+    "real_vocab": 248077,
     "num_heads": 24,
     "num_kv_heads": 4,
     "head_dim": 256,

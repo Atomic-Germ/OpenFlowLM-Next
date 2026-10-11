@@ -46,10 +46,14 @@ def flavour(value):
 
 
 def _manifest(spec=None):
+    import dataclasses
+
     from recipes.load import default_spec
     from recipes.manifest import manifest
 
-    return manifest(spec or default_spec())
+    # all-q4_1 by default: the checked-in 35B spec records the q8 roles its container
+    # holds, and `test_a_q8_spec_stays_on_two_contexts` below is about that one.
+    return manifest(spec or dataclasses.replace(default_spec(), quant="q4_1"))
 
 
 def _assert_two_contexts(m):
@@ -115,11 +119,12 @@ def test_the_merged_image_carries_the_same_attention_row_block():
 def test_a_q8_spec_stays_on_two_contexts():
     """ux.py refuses a q8 projection role (two GEMV entries do not fit the main core), so a
     q8 model of the family (the Ornith / Aquila fine-tunes) keeps the lx/ax layout by default
-    instead of failing its export."""
+    instead of failing its export. The shipped 35B container is one now that its spec says
+    what its weights are, so this is the checked-in default rather than a variation."""
     from recipes.load import default_spec
 
-    q8 = dataclasses.replace(default_spec(), quant={"attn": "q8"})
-    assert q8.q8_roles
+    q8 = default_spec()
+    assert q8.q8_roles == frozenset({"attn", "linear", "linear_out"})
     with flavour(UNSET):
         _assert_two_contexts(_manifest(q8))
 

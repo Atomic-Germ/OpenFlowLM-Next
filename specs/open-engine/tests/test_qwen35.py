@@ -34,7 +34,22 @@ def cfg(name: str) -> dict:
 
 @pytest.fixture(scope="module")
 def spec9():
+    """The 9B's checked-in spec, which now records `linear_out: q8` because that is
+    what its container stores.
+
+    The tests below about the *q4_1* route build `spec9_q4_1`: with the spec
+    corrected, the out projection takes the validated q8 route (its exact q4_1
+    split -- see test_a_q8_out_projection_runs_as_its_exact_q4_1_split), which is
+    not what these are asserting.
+    """
     return load_spec(SPEC_9B)
+
+
+@pytest.fixture(scope="module")
+def spec9_q4_1():
+    import dataclasses
+
+    return dataclasses.replace(load_spec(SPEC_9B), quant="q4_1")
 
 
 @pytest.fixture(scope="module")
@@ -101,11 +116,16 @@ def test_a_qwen35_config_without_a_dense_ffn_is_refused():
         ModelSpec.from_hf_config(moe_ish)
 
 
-def test_the_checked_in_spec_is_the_9b_config(spec9):
+def test_the_checked_in_spec_is_the_9b_config(spec9, spec9_q4_1):
+    """Every hyperparameter comes from the model's config.json -- and `quant` comes
+    from the CONTAINER, the one thing a config cannot say (its chunk sizes do). The
+    9B stores ssm_out_proj at q8, so the file that names it says so; a derivation
+    from config alone can only ever produce the q4_1 default."""
     d = ModelSpec.from_hf_config(cfg("9b"), real_vocab=spec9.real_vocab).to_dict()
-    got = spec9.to_dict()
+    got = spec9_q4_1.to_dict()
     d.pop("extra"), got.pop("extra")
-    assert d == got
+    assert d == got                                        # nothing hand-tuned but quant
+    assert spec9.q8_roles == frozenset({"linear_out"}) and spec9.quant_of("linear_out") == "q8"
 
 
 # ---------------------------------------------------------- composed layout
@@ -217,8 +237,11 @@ def test_one_instruction_stream_per_layer_type(spec9, monkeypatch):
     assert [s["kernel"] for s in p["tail"]] == ["ln", "lm"]
     assert p["contexts"]["lm"] == "lm_head_q8/final.xclbin"        # the q8 head, as the MoE family
     b = Q35.builds(spec9)
-    assert b["lx"]["build_dir"] == "layer_x/build_qwen35_lx_h4096"
-    assert b["ax"]["build_dir"] == "layer_x/build_qwen35_ax_h4096"
+    # a q8 role is a different kernel set, and the build directory says so
+    # (quant_hash); the all-q4_1 one keeps the bare name
+    core = "layer_x/build_qwen35_lx_h4096"
+    assert b["lx"]["build_dir"].startswith(core) and b["lx"]["build_dir"] != core
+    assert b["ax"]["build_dir"].startswith("layer_x/build_qwen35_ax_h4096")
     assert b["lm_head_q8"]["env"]["LMHEAD_K"] == "4096" and b["ln"]["env"]["LN_N"] == "4096"
 
 
@@ -229,11 +252,15 @@ def test_the_pack_plan_names_the_containers_tensors(spec9, monkeypatch):
     ops = {o["tensor"]: o for o in lin["pool"] + lin["consts"] if "tensor" in o}
     assert all(t.startswith("model.layers.{l}.") for t in ops), sorted(ops)
     # the three tensors the MoE container does not have in this form. ssm_out_proj is q8
-    # here and q4_1 in the 35B's container, and the plan is the SAME op either way: the
-    # packers re-quantise a q8 source transparently (OPEN-PACK-PLAN).
+    # HERE and q4_1 in the 35B's container, and the two take different ops: q8_perm
+    # streams it at q8, std_perm re-quantises it to q4_1 on the way into the pool
+    # (OPEN-QUANT-Q8). Both hold the same 32 x 256 tile, so the plan's offsets and
+    # raster do not move -- only which op reads the source.
     out = ops["model.layers.{l}.linear_attn.ssm_out_proj.weight"]
-    assert out["op"] == "std_perm" and "chunk_bytes" not in out and out["in_dim"] == 4096
-    assert out["nch"] == Q36.q4_chunks(4096, 4096) and out["dst"] == Q35.layout(spec9).C_WOUT
+    assert out["op"] == "q8_perm" and "chunk_bytes" not in out and out["in_dim"] == 4096
+    # 16-row half-tiles, so twice the q4_1 chunk count, and the pool region doubles
+    assert out["nch"] == 2 * Q36.q4_chunks(4096, 4096)
+    assert out["dst"] == Q35.layout(spec9).C_WOUT
     for kind in ("alpha", "beta"):
         t = ops[f"model.layers.{{l}}.linear_attn.ssm_{kind}_proj.bf16.weight"]
         assert t["op"] == "transpose" and t["rows"] == 32 and t["cols"] == 4096 and t["elem"] == 2
@@ -625,11 +652,11 @@ def _run(kernel, w, x, y):
     return {"op": "run", "kernel": kernel, "args": [w, x, y]}
 
 
-def test_the_9b_carries_the_35b_route_with_a_dense_ffn(spec9, monkeypatch):
+def test_the_9b_carries_the_35b_route_with_a_dense_ffn(spec9_q4_1, monkeypatch):
     """The linear / full halves are the 35B's; the MoE block is replaced by up|gate then
     down over the block -- the shared expert's two GEMMs without its sigmoid gate."""
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
-    m = manifest(spec9)
+    m = manifest(spec9_q4_1)
     lin = m["layer_types"][LINEAR]
     full = m["layer_types"][FULL]
     lg, fg = lin["gemm_block"], full["gemm_block"]
@@ -659,9 +686,9 @@ def test_the_9b_carries_the_35b_route_with_a_dense_ffn(spec9, monkeypatch):
     assert fg["weights"] == {"gqkvg_w": {"from": "pool", "ops": [3, 4, 5, 6]}, "go_w": {"from": "pool", "ops": [7]}}
 
 
-def test_the_9b_route_is_one_gemm_context_and_no_expert_kernels(spec9, monkeypatch):
+def test_the_9b_route_is_one_gemm_context_and_no_expert_kernels(spec9_q4_1, monkeypatch):
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
-    m = manifest(spec9)
+    m = manifest(spec9_q4_1)
     assert sorted(m["contexts"]) == ["ag", "ax", "gemm", "lm", "ln", "lx"]
     gemms = sorted(k for k in m["kernels"] if k.startswith("gemm_"))
     assert gemms == ["gemm_n10240_k4096", "gemm_n12288_k4096", "gemm_n24576_k4096", "gemm_n4096_k12288",
@@ -674,7 +701,7 @@ def test_the_9b_route_is_one_gemm_context_and_no_expert_kernels(spec9, monkeypat
     # directory (the 35B's 8 x 256 builds keep theirs)
     ab = m["layer_types"][FULL]["gemm_block"]["attn_block"]
     assert ab["m"] == 1024 and ab["hd"] == 256
-    b = Q35.builds(spec9)
+    b = Q35.builds(spec9_q4_1)
     assert b["ag_s256"]["env"]["AG_M"] == "1024" and b["ag_s256"]["build_dir"] == "attn_block/build_s256_m1024"
     assert b["gemm_n24576_k4096"]["env"] == {"GQP_N": "24576", "GQP_K": "4096", "GQP_T": str(T)}
 
@@ -734,7 +761,7 @@ def test_the_build_key_covers_the_route_sources(spec9):
         assert any(f.endswith(must) for f in files), must
 
 
-def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, monkeypatch):
+def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, spec9_q4_1, monkeypatch):
     """The published 9B containers store ssm_out_proj at q8 and the sequential kernel streams
     it at q8 (the spec derived from such a model says linear_out=q8), because re-quantising it
     costs real quality (OPEN-QUANT-Q8). The GEMM reads q4_1 only, so the route packs the q8
@@ -743,6 +770,8 @@ def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, monkeypatch):
     import dataclasses
 
     monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
+    # spec9 records the container's q8 already; spell it out so the point of the
+    # test does not depend on it
     s = dataclasses.replace(spec9, quant={"linear_out": "q8"})
     m = manifest(s)
     lin = m["layer_types"][LINEAR]
@@ -759,7 +788,7 @@ def test_a_q8_out_projection_runs_as_its_exact_q4_1_split(spec9, monkeypatch):
     seq = [o for o in lin["pack"]["consts"] if o.get("tensor", "").endswith("ssm_out_proj.weight")]
     assert len(seq) == 1 and seq[0]["op"] == "q8_perm"
     # every other weight, and the q4_1 spec's route, are unchanged
-    q4 = manifest(spec9)["layer_types"][LINEAR]["gemm_block"]
+    q4 = manifest(spec9_q4_1)["layer_types"][LINEAR]["gemm_block"]
     assert {k: v for k, v in gb["weights"].items() if k != "gout_w"} ==         {k: v for k, v in q4["weights"].items() if k != "gout_w"}
     assert "out_split" not in q4 and q4["program"][1]["kernel"] == "gemm_n4096_k4096"
 

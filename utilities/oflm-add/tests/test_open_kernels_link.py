@@ -1,9 +1,11 @@
 # Traces: OPEN-ADD-KERNEL-LINK (canonical spec: specs/open-engine/spec.md)
 #
-# oflm-add picks the open kernel set by ModelSpec, not by model name: the set
-# whose manifest.json carries the same spec_hash the model derives. Two fake
-# kernel dirs (one matching, one not) and a synthetic model directory
-# (config.json + a model.q4nx safetensors header) pin that choice down.
+# oflm-add picks the open kernel set by CAPABILITY, not by model identity: the
+# family, the shape keys the set's own `hf_config_check` declares, and the
+# per-role weight format. The identity hash still wins when it applies -- it just
+# no longer gates. This is the point of q4nx-build + oflm-add together: a user
+# converts a finetune and it runs on the kernels its family and shape already
+# have, with no toolchain and no rebuild (ROCm/FastFlowLM#690).
 import json
 import struct
 import sys
@@ -41,11 +43,20 @@ Q4NX_HEADER = {
 
 OTHER_HASH = "sha256:" + "de" * 32
 
+# What the recipes' hf_config_check emits for CONFIG -- the set's own declaration
+# of what it can serve, which `find_open_kernels` re-runs at link time and
+# `open_qwen36::Manifest::check_model` runs fail-closed at load.
+HF_CHECK = {
+    "head_dim": 64, "hidden_size": 256, "intermediate_size": 512,
+    "num_attention_heads": 4, "num_hidden_layers": 2, "num_key_value_heads": 2,
+    "vocab_size": 1024,
+}
 
-def write_model(root, name="Synth-4B-NPU2"):
+
+def write_model(root, name="Synth-4B-NPU2", config=None):
     d = root / "models" / name
     d.mkdir(parents=True)
-    (d / "config.json").write_text(json.dumps(CONFIG), encoding="utf-8")
+    (d / "config.json").write_text(json.dumps(config or CONFIG), encoding="utf-8")
     blob = json.dumps(Q4NX_HEADER).encode()
     with open(d / "model.q4nx", "wb") as f:
         f.write(struct.pack("<Q", len(blob)))
@@ -53,13 +64,17 @@ def write_model(root, name="Synth-4B-NPU2"):
     return d
 
 
-def write_kernel_set(xclbins, model_name, spec_hash):
+def write_kernel_set(xclbins, model_name, spec_hash, family="qwen3", quant="q4_1",
+                     real_vocab=1024, hf_check=None, declares_check=True):
+    """A fake kernel set: a manifest plus the spec.json the exporter writes beside it."""
     d = xclbins / model_name / "open_kernels"
     d.mkdir(parents=True)
-    (d / "manifest.json").write_text(
-        json.dumps({"manifest_version": 1, "family": "qwen3", "spec_hash": spec_hash}),
-        encoding="utf-8",
-    )
+    man = {"manifest_version": 1, "family": family, "spec_hash": spec_hash}
+    if declares_check:
+        man["hf_config_check"] = hf_check if hf_check is not None else HF_CHECK
+    (d / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    (d / "spec.json").write_text(json.dumps(
+        {"family": family, "quant": quant, "real_vocab": real_vocab}), encoding="utf-8")
     return d
 
 
@@ -68,84 +83,141 @@ def model_dir(tmp_path):
     return write_model(tmp_path)
 
 
-def test_spec_hash_derives_from_the_model_directory(model_dir):
-    """The spec comes off config.json + the container header, like the recipes."""
-    spec_hash, note = oflm_add.model_spec_hash(model_dir)
-    assert spec_hash, note
-    assert spec_hash.startswith("sha256:")
-    # Stable: the same directory derives the same hash.
-    assert oflm_add.model_spec_hash(model_dir)[0] == spec_hash
+def capability(model_dir):
+    cap, note = oflm_add.model_capability(model_dir)
+    assert cap, note
+    return cap
 
 
-def test_matching_spec_hash_wins_over_a_same_family_set(tmp_path, model_dir):
-    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
+# ------------------------------------------------------------------ derivation
+def test_the_capability_comes_off_the_model_directory(model_dir):
+    """Family, shape-relevant keys, weight format and tokenizer count -- the things
+    the kernels are actually built for, none of them the weight bytes."""
+    cap = capability(model_dir)
+    assert cap["family"] == "qwen3"
+    assert cap["quant"] == "q4_1"
+    assert cap["real_vocab"] == 1024
+    assert cap["spec_hash"] != OTHER_HASH
+    # Stable: the same directory derives the same capability.
+    assert capability(model_dir) == cap
+
+
+# ------------------------------------------------------- the finetune case
+def test_a_finetune_of_a_shipped_shape_runs_on_its_kernels(tmp_path, model_dir):
+    """THE regression this fixes. The set was built for a different tokenizer
+    (real_vocab 2000, a finetune that added special tokens) -- a different
+    spec_hash, the same family and shape and weight format. It links."""
     xclbins = tmp_path / "xclbins"
-    write_kernel_set(xclbins, "AAA-Wrong-Shape-NPU2", OTHER_HASH)
-    right = write_kernel_set(xclbins, "ZZZ-Same-Shape-NPU2", spec_hash)
+    shipped = write_kernel_set(xclbins, "Qwen3-4B-NPU2", OTHER_HASH, real_vocab=2000)
+    cap = capability(model_dir)
+    found, source, _ = oflm_add.find_open_kernels(cap, [xclbins], model_dir.name)
+    assert found == shipped
+    assert source == "Qwen3-4B-NPU2"
 
-    found, source = oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name)
-    assert found == right
-    assert source == "ZZZ-Same-Shape-NPU2"
 
-
-def test_the_models_own_directory_wins_when_several_match(tmp_path, model_dir):
-    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
+def test_an_exact_hash_still_wins_over_a_near_match(tmp_path, model_dir):
+    """The identity hash did not stop matching -- it stopped gating."""
+    cap = capability(model_dir)
     xclbins = tmp_path / "xclbins"
-    write_kernel_set(xclbins, "AAA-Same-Shape-NPU2", spec_hash)
-    mine = write_kernel_set(xclbins, model_dir.name, spec_hash)
+    near = write_kernel_set(xclbins, "AAA-Near-NPU2", OTHER_HASH)
+    exact = write_kernel_set(xclbins, "ZZZ-Exact-NPU2", cap["spec_hash"])
+    found, source, _ = oflm_add.find_open_kernels(cap, [xclbins], model_dir.name)
+    assert found == exact and source == "ZZZ-Exact-NPU2"
 
-    found, source = oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name)
-    assert found == mine
-    assert source == model_dir.name
+
+def test_the_models_own_directory_wins_a_tie(tmp_path, model_dir):
+    cap = capability(model_dir)
+    xclbins = tmp_path / "xclbins"
+    write_kernel_set(xclbins, "AAA-Other-NPU2", OTHER_HASH)
+    mine = write_kernel_set(xclbins, model_dir.name, OTHER_HASH)
+    found, source, _ = oflm_add.find_open_kernels(cap, [xclbins], model_dir.name)
+    assert found == mine and source == model_dir.name
+
+
+# ------------------------------------------------------- what still refuses
+def test_a_different_family_does_not_link(tmp_path, model_dir):
+    xclbins = tmp_path / "xclbins"
+    write_kernel_set(xclbins, "Llama-NPU2", OTHER_HASH, family="llama3")
+    cap = capability(model_dir)
+    assert oflm_add.find_open_kernels(cap, [xclbins], model_dir.name) == (None, None, None)
+
+
+def test_a_different_shape_does_not_link(tmp_path, model_dir):
+    """hf_config_check is the set's own declaration; a shape it does not cover is
+    refused exactly as the engine would refuse it at load."""
+    xclbins = tmp_path / "xclbins"
+    wrong = dict(HF_CHECK, hidden_size=9999)
+    write_kernel_set(xclbins, "Wrong-Shape-NPU2", OTHER_HASH, hf_check=wrong)
+    cap = capability(model_dir)
+    assert oflm_add.find_open_kernels(cap, [xclbins], model_dir.name) == (None, None, None)
+
+
+def test_a_different_weight_format_ranks_last(tmp_path, model_dir):
+    """A q4_1 set under a q8 container still runs, but re-quantises every q8
+    projection on the way into the pool -- silently, which is the 35B bug. The
+    q8 set must win when both are installed."""
+    xclbins = tmp_path / "xclbins"
+    same = write_kernel_set(xclbins, "AAA-Q4-NPU2", OTHER_HASH, quant="q4_1")
+    other = write_kernel_set(xclbins, "ZZZ-Q8-NPU2", OTHER_HASH, quant={"attn": "q8"})
+    cap = capability(model_dir)
+    assert cap["quant"] == "q4_1"
+    # the set built for THIS container's format wins; the other stays a candidate
+    # the engine will run (re-quantising), which _report_match warns about
+    found, _, _ = oflm_add.find_open_kernels(cap, [xclbins], model_dir.name)
+    assert found == same
+
+
+def test_a_tokenizer_count_below_the_models_is_not_selected(tmp_path, model_dir):
+    """The one identity-ish field that is a hard check: `logits_view()` masks
+    every logit above a set's real_vocab to -inf, so a narrower set would make
+    this model's high tokens unsampleable. Wider is harmless."""
+    xclbins = tmp_path / "xclbins"
+    narrow = write_kernel_set(xclbins, "Narrow-NPU2", OTHER_HASH, real_vocab=512)
+    cap = capability(model_dir)
+    assert cap["real_vocab"] == 1024
+    found, _, _ = oflm_add.find_open_kernels(cap, [xclbins], model_dir.name)
+    assert found != narrow
 
 
 def test_no_match_selects_nothing(tmp_path, model_dir):
-    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
-    xclbins = tmp_path / "xclbins"
-    write_kernel_set(xclbins, "Wrong-NPU2", OTHER_HASH)
-
-    assert oflm_add.find_open_kernels(spec_hash, [xclbins], model_dir.name) == (None, None)
-
-
-def test_setup_links_the_match_where_find_kernels_looks(tmp_path, model_dir, capsys):
-    spec_hash, _ = oflm_add.model_spec_hash(model_dir)
-    xclbins = tmp_path / "xclbins"
-    write_kernel_set(xclbins, "Wrong-NPU2", OTHER_HASH)
-    right = write_kernel_set(xclbins, "Right-NPU2", spec_hash)
-
-    linked = oflm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins])
-    if not linked:  # Windows without developer mode: no symlink and no junction
-        pytest.skip("this account cannot create a directory link")
-    # Engine::find_kernels checks <model dir>/open_kernels before the xclbins root.
-    assert (model_dir / "open_kernels").resolve() == right.resolve()
-    assert (model_dir / "open_kernels" / "manifest.json").is_file()
-    assert "Right-NPU2" in capsys.readouterr().err
-
-
-def test_no_match_prints_the_export_command(tmp_path, model_dir, capsys):
     xclbins = tmp_path / "xclbins"
     xclbins.mkdir()
-    assert oflm_add.setup_open_kernels(model_dir, model_dir.name, [xclbins]) is False
-    err = capsys.readouterr().err
-    assert "export_qwen36_kernels.py" in err
-    assert f'--model-dir "{model_dir}"' in err
-    assert not (model_dir / "open_kernels").exists()
+    cap = capability(model_dir)
+    assert oflm_add.find_open_kernels(cap, [xclbins], model_dir.name) == (None, None, None)
 
 
-def test_override_takes_the_directory_as_given(tmp_path, model_dir):
-    xclbins = tmp_path / "xclbins"
-    other = write_kernel_set(xclbins, "Unrelated-NPU2", OTHER_HASH)
+# ------------------------------------------------------- the load-time rule
+def test_layer_types_falls_back_to_the_interval():
+    """What `check_model` does: a config that omits layer_types but names
+    full_attention_interval is checked against the expanded list."""
+    cfg = {"hidden_size": 256, "num_hidden_layers": 3, "full_attention_interval": 2,
+           "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 64,
+           "intermediate_size": 512, "vocab_size": 1024}
+    cap = {"config": cfg}
+    man = {"hf_config_check": {"layer_types": [
+        "linear_attention", "full_attention", "linear_attention"]}}
+    ok, _ = oflm_add.passes_hf_config_check(man, cap)
+    assert ok
+    man = {"hf_config_check": {"layer_types": ["linear_attention"] * 3}}
+    ok, why = oflm_add.passes_hf_config_check(man, cap)
+    assert not ok and "layer_types" in why
 
-    linked = oflm_add.setup_open_kernels(
-        model_dir, model_dir.name, [xclbins], override=other
-    )
-    if not linked:
-        pytest.skip("this account cannot create a directory link")
-    assert (model_dir / "open_kernels").resolve() == other.resolve()
+
+def test_a_missing_key_is_refused_unless_the_manifest_names_a_default():
+    cap = {"config": {"hidden_size": 256}}
+    man = {"hf_config_check": {"hidden_size": 256, "partial_rotary_factor": 1.0}}
+    ok, why = oflm_add.passes_hf_config_check(man, cap)
+    assert not ok and "partial_rotary_factor" in why
+    man["hf_config_defaults"] = {"partial_rotary_factor": 1.0}
+    ok, _ = oflm_add.passes_hf_config_check(man, cap)
+    assert ok
 
 
-def test_override_without_a_manifest_is_refused(tmp_path, model_dir):
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    with pytest.raises(SystemExit):
-        oflm_add.setup_open_kernels(model_dir, model_dir.name, [], override=empty)
+def test_model_type_may_name_a_list():
+    cap = {"config": {"model_type": "gemma3_text"}}
+    ok, _ = oflm_add.passes_hf_config_check(
+        {"hf_config_check": {"model_type": ["gemma3", "gemma3_text"]}}, cap)
+    assert ok
+    ok, why = oflm_add.passes_hf_config_check(
+        {"hf_config_check": {"model_type": ["gemma3"]}}, cap)
+    assert not ok and "gemma3_text" in why

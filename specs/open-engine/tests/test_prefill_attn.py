@@ -36,7 +36,10 @@ def test_the_route_names_the_attention_gemm_streams():
             name = f"ag_{tag}{L}"
             assert m["kernels"][name] == {"context": "ag", "insts": f"{name}/insts.bin", "build": name}
             b = m["builds"][name]
-            assert b["design"] == "attn_block/attn_gemm.py" and b["build_dir"] == f"attn_block/build_{tag}{L}"
+            base = f"attn_block/build_{tag}{L}"
+            assert b["design"] == "attn_block/attn_gemm.py"
+            # a q8 role in the spec adds quant_hash's suffix to the build dir
+            assert b["build_dir"] == base or b["build_dir"].startswith(base + "_q")
             assert b["env"] == {"AG_M": "2048", "AG_K": str(K), "AG_N": str(N)}
     # a: Q or P rows [2048, K] bf16, b: the tiled K^T or V [K, N] bf16, c: [2048, N] f32, all for the widest
     assert (m["globals"]["ag_a"], m["globals"]["ag_b"], m["globals"]["ag_c"]) == (2048 * LMAX * 2, LMAX * 256 * 2, 2048 * LMAX * 4)

@@ -64,14 +64,16 @@
   "moe_intermediate": 0,
   "shared_expert_intermediate": 0,
   "norm_eps": 1e-06,
-  "quant": "q4_1",
+  "quant": {
+   "linear_out": "q8"
+  },
   "extra": {
    "model_type": "qwen3_5",
    "source": "hf_config",
    "model": "Qwen3.5-9B-NPU2"
   }
  },
- "spec_hash": "sha256:4105149d2111c0c7e208e1a6c6f8273064394bfb2b5f010fa0fe5c0dfbc6711c",
+ "spec_hash": "sha256:f3be1f5aaf4b4957e3118037d0874c16e0970c07678c950937014f8c839fecc0",
  "build_key": "sha256:fixture",
  "max_ctx_default": 4096,
  "hf_config_check": {
@@ -404,6 +406,11 @@
    "insts": "gemm_n4096_k12288/insts.bin",
    "build": "gemm_n4096_k12288"
   },
+  "gemm_n8192_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n8192_k4096/insts.bin",
+   "build": "gemm_n8192_k4096"
+  },
   "gemm_n10240_k4096": {
    "context": "gemm",
    "insts": "gemm_n10240_k4096/insts.bin",
@@ -423,7 +430,7 @@
  "layer_types": {
   "linear_attention": {
    "buffers": {
-    "consts": 11100160,
+    "consts": 21585920,
     "act": 253952,
     "state": {
      "kind": "linear",
@@ -459,11 +466,11 @@
      },
      {
       "op": "run",
-      "kernel": "gemm_n4096_k4096",
+      "kernel": "gemm_n8192_k4096",
       "args": [
        "gout_w",
        "gemm_x_k4096",
-       "gemm_y_n4096"
+       "gemm_y_n8192"
       ]
      }
     ],
@@ -476,9 +483,24 @@
       ]
      },
      "gout_w": {
-      "from": "consts",
-      "ops": [
-       8
+      "from": "pack",
+      "pack": [
+       {
+        "op": "std_perm",
+        "tensor": "model.layers.{l}.linear_attn.ssm_out_proj.weight",
+        "nch": 2048,
+        "in_dim": 4096,
+        "dst": 0,
+        "split": "hi"
+       },
+       {
+        "op": "std_perm",
+        "tensor": "model.layers.{l}.linear_attn.ssm_out_proj.weight",
+        "nch": 2048,
+        "in_dim": 4096,
+        "dst": 10485760,
+        "split": "lo"
+       }
       ]
      }
     },
@@ -489,6 +511,7 @@
     "head_dim": 128,
     "conv_kernel": 4,
     "ff": 12288,
+    "out_split": true,
     "state_s_off": 49152,
     "s_head_bytes": 66560,
     "s_rows": 130,
@@ -622,10 +645,10 @@
       "cap": 8192
      },
      {
-      "op": "std_perm",
+      "op": "q8_perm",
       "tensor": "model.layers.{l}.linear_attn.ssm_out_proj.weight",
       "dst": 614400,
-      "nch": 2048,
+      "nch": 4096,
       "in_dim": 4096
      }
     ]
@@ -947,6 +970,7 @@
   "gemm_x_k4096": 2097152,
   "gemm_y_n4096": 4194304,
   "gemm_x_k12288": 6291456,
+  "gemm_y_n8192": 8388608,
   "gemm_y_n10240": 10485760,
   "gemm_y_n12288": 12582912,
   "gemm_y_n24576": 25165824
@@ -954,14 +978,14 @@
  "builds": {
   "lx": {
    "design": "layer_x/lx.py",
-   "build_dir": "layer_x/build_qwen35_lx_h4096",
+   "build_dir": "layer_x/build_qwen35_lx_h4096_q3fc90104",
    "env": {
     "LX_PART": "0"
    }
   },
   "ax": {
    "design": "layer_x/ax.py",
-   "build_dir": "layer_x/build_qwen35_ax_h4096",
+   "build_dir": "layer_x/build_qwen35_ax_h4096_q3fc90104",
    "env": {
     "AX_PART": "0"
    }
@@ -985,7 +1009,7 @@
   },
   "ag_s256": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s256_m1024",
+   "build_dir": "attn_block/build_s256_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -994,7 +1018,7 @@
   },
   "ag_pv256": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv256_m1024",
+   "build_dir": "attn_block/build_pv256_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1003,7 +1027,7 @@
   },
   "ag_s512": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s512_m1024",
+   "build_dir": "attn_block/build_s512_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1012,7 +1036,7 @@
   },
   "ag_pv512": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv512_m1024",
+   "build_dir": "attn_block/build_pv512_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "512",
@@ -1021,7 +1045,7 @@
   },
   "ag_s768": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s768_m1024",
+   "build_dir": "attn_block/build_s768_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1030,7 +1054,7 @@
   },
   "ag_pv768": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv768_m1024",
+   "build_dir": "attn_block/build_pv768_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "768",
@@ -1039,7 +1063,7 @@
   },
   "ag_s1024": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s1024_m1024",
+   "build_dir": "attn_block/build_s1024_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1048,7 +1072,7 @@
   },
   "ag_pv1024": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv1024_m1024",
+   "build_dir": "attn_block/build_pv1024_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "1024",
@@ -1057,7 +1081,7 @@
   },
   "ag_s1280": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s1280_m1024",
+   "build_dir": "attn_block/build_s1280_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1066,7 +1090,7 @@
   },
   "ag_pv1280": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv1280_m1024",
+   "build_dir": "attn_block/build_pv1280_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "1280",
@@ -1075,7 +1099,7 @@
   },
   "ag_s1536": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s1536_m1024",
+   "build_dir": "attn_block/build_s1536_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1084,7 +1108,7 @@
   },
   "ag_pv1536": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv1536_m1024",
+   "build_dir": "attn_block/build_pv1536_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "1536",
@@ -1093,7 +1117,7 @@
   },
   "ag_s1792": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s1792_m1024",
+   "build_dir": "attn_block/build_s1792_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1102,7 +1126,7 @@
   },
   "ag_pv1792": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv1792_m1024",
+   "build_dir": "attn_block/build_pv1792_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "1792",
@@ -1111,7 +1135,7 @@
   },
   "ag_s2048": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s2048_m1024",
+   "build_dir": "attn_block/build_s2048_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1120,7 +1144,7 @@
   },
   "ag_pv2048": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv2048_m1024",
+   "build_dir": "attn_block/build_pv2048_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "2048",
@@ -1129,7 +1153,7 @@
   },
   "ag_s2304": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s2304_m1024",
+   "build_dir": "attn_block/build_s2304_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1138,7 +1162,7 @@
   },
   "ag_pv2304": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv2304_m1024",
+   "build_dir": "attn_block/build_pv2304_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "2304",
@@ -1147,7 +1171,7 @@
   },
   "ag_s2560": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s2560_m1024",
+   "build_dir": "attn_block/build_s2560_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1156,7 +1180,7 @@
   },
   "ag_pv2560": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv2560_m1024",
+   "build_dir": "attn_block/build_pv2560_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "2560",
@@ -1165,7 +1189,7 @@
   },
   "ag_s2816": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s2816_m1024",
+   "build_dir": "attn_block/build_s2816_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1174,7 +1198,7 @@
   },
   "ag_pv2816": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv2816_m1024",
+   "build_dir": "attn_block/build_pv2816_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "2816",
@@ -1183,7 +1207,7 @@
   },
   "ag_s3072": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s3072_m1024",
+   "build_dir": "attn_block/build_s3072_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1192,7 +1216,7 @@
   },
   "ag_pv3072": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv3072_m1024",
+   "build_dir": "attn_block/build_pv3072_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "3072",
@@ -1201,7 +1225,7 @@
   },
   "ag_s3328": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s3328_m1024",
+   "build_dir": "attn_block/build_s3328_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1210,7 +1234,7 @@
   },
   "ag_pv3328": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv3328_m1024",
+   "build_dir": "attn_block/build_pv3328_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "3328",
@@ -1219,7 +1243,7 @@
   },
   "ag_s3584": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s3584_m1024",
+   "build_dir": "attn_block/build_s3584_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1228,7 +1252,7 @@
   },
   "ag_pv3584": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv3584_m1024",
+   "build_dir": "attn_block/build_pv3584_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "3584",
@@ -1237,7 +1261,7 @@
   },
   "ag_s3840": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s3840_m1024",
+   "build_dir": "attn_block/build_s3840_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1246,7 +1270,7 @@
   },
   "ag_pv3840": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv3840_m1024",
+   "build_dir": "attn_block/build_pv3840_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "3840",
@@ -1255,7 +1279,7 @@
   },
   "ag_s4096": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_s4096_m1024",
+   "build_dir": "attn_block/build_s4096_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "256",
@@ -1264,7 +1288,7 @@
   },
   "ag_pv4096": {
    "design": "attn_block/attn_gemm.py",
-   "build_dir": "attn_block/build_pv4096_m1024",
+   "build_dir": "attn_block/build_pv4096_m1024_q3fc90104",
    "env": {
     "AG_M": "1024",
     "AG_K": "4096",
@@ -1286,6 +1310,15 @@
    "env": {
     "GQP_N": "4096",
     "GQP_K": "12288",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n8192_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n8192_k4096_t256",
+   "env": {
+    "GQP_N": "8192",
+    "GQP_K": "4096",
     "GQP_T": "256"
    }
   },

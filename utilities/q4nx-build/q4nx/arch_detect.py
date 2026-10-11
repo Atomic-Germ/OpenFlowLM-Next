@@ -545,6 +545,13 @@ ARCH_TO_FAMILY: Dict[ModelArch, str] = {
     ModelArch.PHI4: "phi4",
     ModelArch.GPT_OSS: "gpt-oss",
     ModelArch.NANBEIGE: "nanbeige",
+    # granite / k2 / hunyuan are open-kernel families: `model_list.json` has no
+    # bucket for them, so they can only ever reach the minimal-entry branch in
+    # deploy.py. Naming them here is what keeps that branch from writing
+    # details.family = "" and losing the per-family GGUF quant preference.
+    ModelArch.GRANITE: "granite",
+    ModelArch.K2: "k2",
+    ModelArch.HUNYUAN_DENSE: "hunyuan",
 }
 
 

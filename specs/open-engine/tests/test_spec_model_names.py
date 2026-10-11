@@ -30,6 +30,7 @@ EXPECTED = {
     "qwen36-35b-a3b": "Qwen3.6-35B-A3B-NPU2",
     "hy-mt2-7b": "Hy-MT2-7B-NPU2",
     "lfm2-1.2b": "LFM2-1.2B-NPU2",
+    "lfm2.5-1.2b-thinking": "LFM2.5-1.2B-Thinking-NPU2",
     "minicpm5-2b": "MiniCPM5-2B-NPU2",
     "phi4-mini-4b": "Phi4-mini-Instruct-NPU2",
     "llama31-8b": "Llama-3.1-8B-NPU2",

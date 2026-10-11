@@ -536,6 +536,26 @@ void Engine::Impl::init(const std::string& model_dir, const std::string& kernels
     // every schedule of a bundle is made with one step count (export_bundle.py)
     const json& resolutions = m.bundle.at("resolutions");
     if (resolutions.empty()) throw std::runtime_error("the bundle has no resolutions");
+    // Every configuration the MODEL advertises must have an ELF in the KERNEL SET.
+    // A model repo's schedules and a kernel set's ELFs are written by two different
+    // tools (q4nx-build --open-diffusion and export_dit_kernels.py), so a set built
+    // for text-to-image only could otherwise load an edit model fine and fail at the
+    // point the user asked for it -- open_res()'s "no ELF for 512e512". Naming the
+    // half sets here, at load, is the difference.
+    if (m.bundle.contains("edits")) {
+        // read_manifest() has already proved `elf` is a non-empty object of files
+        // that exist, so the only thing left to check is that it covers whatever
+        // the model says it can do.
+        const json& elfs = m.manifest.at("elf");
+        for (auto it = m.bundle.at("edits").begin(); it != m.bundle.at("edits").end(); ++it) {
+            if (!elfs.contains(it.key()))
+                throw std::runtime_error(
+                    "kernel set " + kernels_dir + " has no ELF for the edit configuration " +
+                    it.key() + " this model's bundle advertises, so it was built from other "
+                    "kernel code. Point OFLM_DIFFUSION_KERNELS_DIR at a set built for this "
+                    "model, or place one in this directory.");
+        }
+    }
     m.bundle_steps = read_json(m.dir / resolutions.begin().value().get<std::string>()).at("steps").get<int>();
     m.dev = device ? *device : xrt::device(0u);
 

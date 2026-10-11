@@ -40,7 +40,7 @@
    "dense"
   ],
   "vocab": 200064,
-  "real_vocab": 200064,
+  "real_vocab": 200029,
   "num_heads": 24,
   "num_kv_heads": 8,
   "head_dim": 128,
@@ -278,7 +278,7 @@
    "model": "Phi4-mini-Instruct-NPU2"
   }
  },
- "spec_hash": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
+ "spec_hash": "sha256:ea66b519258cc5b06f4a10e4dae28075c3d023caf8965ba19cc49520cd764a05",
  "build_key": "sha256:fixture",
  "max_ctx_default": 4096,
  "hf_config_check": {
@@ -409,7 +409,7 @@
  "layout": {
   "hidden": 3072,
   "vocab": 200064,
-  "real_vocab": 200064,
+  "real_vocab": 200029,
   "chunk_bytes": 5120,
   "pool_bytes": 62914560,
   "lmhead_pool_bytes": 384827392,

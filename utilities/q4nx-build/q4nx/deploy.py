@@ -58,6 +58,10 @@ MODEL_FILES = [
     "chat_template.jinja",
     "vision_weight.q4nx",
     "audio_weight.q4nx",
+    # --build-spec writes this beside the container; oflm add re-derives the spec
+    # when it is absent, but shipping it means the deployed model says which
+    # kernel set it was built against.
+    "spec.json",
 ]
 
 _INSTALL_PREFIX_CANDIDATES = [
