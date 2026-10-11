@@ -61,4 +61,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build the complete corrected Qwen3.8 export and verify full-depth decode propagation, runtime identity and split-down partials.</description>
     <location>.opencode/skill/open-qwen38-fp32-production/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen35-fp32-front-replay</name>
+    <description>Build and validate isolated FP32 norm-to-up/gate/SiLU with separate NPU projection captures and a BF16 control.</description>
+    <location>.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md</location>
+  </skill>
 </available_skills>

@@ -220,3 +220,10 @@ It also does not establish attention/state accuracy or full-model acceptance.
 The checker requires compatible export/fixture identities, exact capture sizes,
 finite inputs, and every position for the selected distinct covered layers.
 JSON includes scope, metrics and capture hashes; failures return nonzero.
+
+An isolated hardware experiment at `utilities/ffn-front-replay/` runs FP32
+RMSNorm and captures up, gate and h separately. Its BF16-preparation control
+reproduces the layer-11 error; direct FP32 preparation passes the local gates.
+See the [FP32 front replay skill](../../.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md)
+for build, pinned-input replay and scoring commands. This experiment does not
+modify production layer layouts or establish corrected full-model propagation.
