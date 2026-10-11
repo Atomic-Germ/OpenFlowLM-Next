@@ -8,6 +8,8 @@ The split FFN now prepares its integer activation table directly from FP32.
 The correction passes isolated replay and all propagated FFN down checks.
 Full corrected-model acceptance remains **FAIL**: seven second-token residuals
 exceed 0.005, despite passing logits, runtime identity and reset checks.
+Independent FFN-front validation additionally finds one local activation failure
+at layer 11 / position 0, explained largely by BF16 norm-input rounding.
 
 ## Stage 1: complete decode comparison
 
@@ -444,17 +446,66 @@ Next: localize the full-chain error with independent up/gate/norm and
 attention/state checks, then rerun the unchanged acceptance gates. Prefill,
 serving and final resource acceptance remain open.
 
+## Stage 5c4: independent FFN front validation
+
+Added `open_kernels/model/ffn_front.py`. It reads the captured FP32 pre-FFN
+residual, BF16 normalized input and FP32 combined activation `h`, and computes
+RMSNorm plus `SiLU(Wgate @ norm) * (Wup @ norm)` in FP64 from the same stored
+weights. The primary reference does not round norm to BF16. Every boundary
+keeps the strict maxrel <0.005 bound. Export/fixture identity, complete requested
+coverage, exact buffer sizes and finite inputs are enforced; JSON pins capture
+hashes and a failed numerical check exits nonzero.
+
+A separate comparison uses the captured normalized input. BF16-rounded norm
+and activation references, plus the predicted activation change from rounding,
+are diagnostics: none can turn a failed primary check into PASS. Raw up/gate
+projections are not retained in these kernels, so this validates their combined
+activation only, not each projection independently or attention/state accuracy.
+
+All 64 layers × 3 positions were checked from the corrected full-chain captures;
+no new hardware run or kernel build was performed:
+
+| Boundary | Passing cases | Worst maxrel | Layer / position |
+|---|---:|---:|---|
+| Post-attention norm | 192/192 | 0.0036529193 | 63 / 1 |
+| Norm → combined up/gate activation | **191/192** | **0.0071636206** | 11 / 0 |
+| Combined activation from captured BF16 norm | 192/192 | 0.0016461914 | 36 / 0 |
+
+At the failing layer 11 / position 0, the captured-input comparison has error
+0.0003658505. Using an ideally BF16-rounded norm gives error 0.0003203473;
+the predicted activation error due to that rounding alone is 0.0074496288.
+The captured norm differs numerically from the ideal BF16 norm in three values.
+This isolates a local precision loss dominated by norm-input quantization; it
+does not establish that this is the cause of the seven position-1 full-chain
+residual failures. All seven of those layer/position pairs pass the new local
+front gates, so accumulated error and attention/state still need investigation.
+
+TDD: missing checker → failing tests → implementation; an additional failing
+diagnostic test enforces that the rounded reference cannot mask the failure.
+All **40 new tests pass**; full open-engine suite: **954 passed, 47 skipped**.
+Coverage includes both layer layouts, mixed BF16/FP32 offsets, non-finite/shape
+errors, zero references, the strict threshold, missing positions, stale export
+identity and CLI failure status. No production arithmetic or threshold changed.
+
+Evidence: `production-fp32-multitoken/ffn-front.json`,
+`ffn-front-layer11.json` and `logs/ffn-front-*` under ignored model artifacts.
+Next: reproduce layer 11 with an isolated kernel and evaluate preserving FP32
+norm input through up/gate preparation, then rerun local and full-chain gates.
+The complete corrected export remains unaccepted. Separate up/gate captures,
+independent state/head checks, prefill and serving are still open.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 914 passed, 47 skipped |
+| `specs/open-engine/tests` | 954 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite and native C++ build/CTest were rerun for stage 5c3.
+The open-engine suite was rerun for stage 5c4; native C++ build/CTest are from
+stage 5c3, with no host code change in this stage.
 Hardware results retain their explicitly stated full-model or isolated-replay
 scope; the latest full-chain residual gate fails as recorded above.
 Weights were not reconverted. Skipped tests and successful compilation do not

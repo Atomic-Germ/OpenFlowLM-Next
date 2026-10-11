@@ -128,3 +128,30 @@ Evidence: `production-fp32-multitoken/{results,build-audit,input-sha256,ffn-part
 and `logs/`. Open-engine suite: 914 passed / 47 skipped; CTest 3/3.
 No performance claim: power-mode request failed and CPU partial scoring ran
 concurrently with runtime validation. Prefill and serving remain unvalidated.
+
+## Localizing the FFN front from retained captures
+
+No new NPU run or full residency is required for this checker:
+
+```bash
+OPENBLAS_NUM_THREADS=1 ironvenv/bin/python open_kernels/model/ffn_front.py \
+  --model-dir Models/qwen38-27b/Qwen3.8-27B-NPU2 \
+  --kernel-dir Models/qwen38-27b/production-fp32-kernels \
+  --out Models/qwen38-27b/production-fp32-multitoken \
+  --layers "$(seq -s, 0 63)" \
+  > Models/qwen38-27b/production-fp32-multitoken/ffn-front.json
+```
+
+The current run intentionally exits 1: layer 11 / position 0 combined activation
+maxrel 0.0071636206 exceeds 0.005. Norm passes all 192 cases (worst 0.0036529193).
+Combined activation from captured BF16 norm also passes all 192 (worst
+0.0016461914), but cannot override the primary unrounded-input gate.
+
+With `--layers 11`, position 0's BF16-rounded-norm diagnostic falls to
+0.0003203473; ideal rounding alone predicts 0.0074496288 activation error.
+This identifies local norm-input rounding loss, not the root cause of all seven
+full-chain residual failures. Separate up/gate outputs are not captured, so
+combined-activation PASS is not independent proof of each GEMV. Next inspect
+FP32 norm-to-up/gate preparation with isolated replay and unchanged acceptance
+bounds. Captured `A_XM` / `AA_XM` is BF16; `RES` and `H` are FP32. Do not read
+all three as FP32. The checker retains scope and hashes in its JSON output.
