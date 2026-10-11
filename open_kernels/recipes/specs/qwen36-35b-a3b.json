@@ -33,7 +33,7 @@
   "moe_intermediate": 512,
   "shared_expert_intermediate": 512,
   "norm_eps": 1e-06,
-  "quant": "q4_1",
+  "quant": {"attn": "q8", "linear": "q8", "linear_out": "q8"},
   "extra": {
     "model": "Qwen3.6-35B-A3B-NPU2",
     "model_type": "qwen3_5_moe",

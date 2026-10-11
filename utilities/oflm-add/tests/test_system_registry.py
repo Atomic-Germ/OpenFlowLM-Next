@@ -80,6 +80,9 @@ def test_the_refusal_names_the_paths_it_tried(monkeypatch, tmp_path):
     assert "--system-list" in msg
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="the junction fallback is Windows-only: there is nothing to "
+                           "assert on Linux, where os.symlink needs no privilege")
 def test_the_xclbin_link_falls_back_to_a_junction(monkeypatch, tmp_path):
     """Windows only grants the symlink privilege to admins and developer mode.
     link_open_kernels already handles that; the xclbins link did not."""

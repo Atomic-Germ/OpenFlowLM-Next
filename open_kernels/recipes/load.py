@@ -44,12 +44,29 @@ def current_spec() -> ModelSpec:
 
 
 def tokenizer_vocab(tokenizer_json: Path) -> int | None:
-    """The tokenizer's id count: max id over model.vocab and added_tokens, + 1."""
+    """The tokenizer's id count: max id over model.vocab and added_tokens, + 1.
+
+    `model.vocab` is a {token: id} dict for BPE/WordPiece tokenizers and a
+    [[token, score], ...] list for Unigram ones. A GGUF with no source repo
+    writes exactly that Unigram shape (model_converter._extract_tokenizer_json
+    is a faithful port of llama.cpp's tokenizer), and `.values()` on the list
+    raised AttributeError straight out of `oflm pack --build-spec` and
+    `oflm add`.
+    """
     try:
         t = json.loads(tokenizer_json.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    ids = list(t.get("model", {}).get("vocab", {}).values()) + [a["id"] for a in t.get("added_tokens", [])]
+    vocab = t.get("model", {}).get("vocab")
+    if isinstance(vocab, dict):
+        ids = list(vocab.values())
+    elif isinstance(vocab, list):
+        # Unigram: [token, score] pairs, or plain token strings.
+        ids = [e[0] if isinstance(e, (list, tuple)) else e for e in vocab]
+    else:
+        ids = []
+    ids += [a.get("id") for a in t.get("added_tokens", []) if isinstance(a, dict)]
+    ids = [i for i in ids if isinstance(i, int)]
     return max(ids) + 1 if ids else None
 
 

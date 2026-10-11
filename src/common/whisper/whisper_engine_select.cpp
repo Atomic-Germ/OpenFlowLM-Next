@@ -129,10 +129,10 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
         const std::string kdir = find_open_kernels(model_path, config, &how);
         if (kdir.empty()) {
             throw std::runtime_error(
-                "OFLM_WHISPER_ENGINE=open: no Whisper kernel set found (build one with "
-                "open_kernels/export_whisper_kernels.py, which writes xclbins/" + config.model_name +
-                "/open_kernels; or set OFLM_WHISPER_KERNELS_DIR; or place one at " + model_path +
-                "/open_kernels)");
+                "OFLM_WHISPER_ENGINE=open: no Whisper kernel set found. Kernel sets are built "
+                "for a release, not by the user; this build has no Whisper set. If a set "
+                "exists elsewhere, set OFLM_WHISPER_KERNELS_DIR, or place one at " +
+                model_path + "/open_kernels");
         }
         header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open), kernels " << kdir << " (" << how << ")");
         return make_open_engine(model_path, kdir, config);

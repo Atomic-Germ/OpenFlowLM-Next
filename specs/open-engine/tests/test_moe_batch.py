@@ -108,7 +108,10 @@ def test_the_route_names_the_token_batched_expert_streams():
         assert m["kernels"][f"mb_s{s}"] == {"context": "mb", "insts": f"mb_s{s}/insts.bin", "patch": "moebatch",
                                             "build": f"mb_s{s}"}
         b = m["builds"][f"mb_s{s}"]
-        assert b["design"] == "moe_batch/moe_batch.py" and b["build_dir"] == f"moe_batch/build_s{s}"
+        # the default 35B spec is part-q8, and a q8 role adds quant_hash's suffix
+        base = f"moe_batch/build_s{s}"
+        assert b["design"] == "moe_batch/moe_batch.py"
+        assert b["build_dir"] == base or b["build_dir"].startswith(base + "_q")
         assert b["env"]["MB_SLOTS"] == str(s) and b["env"]["MB_EXPERTS"] == "256"
         assert b["env"]["MB_NT"] == str(mb["nt"])
         assert int(b["env"]["MB_POOL_DOWN"]) == m["layout"]["moe"]["pool_down"]

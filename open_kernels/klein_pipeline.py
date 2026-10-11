@@ -67,6 +67,17 @@ TAPS = (9, 18, 27)
 CTX_LD = 8192                                # CTX row stride: 3 taps x 2560 + one element's spill
 PAD_ID = 151643                              # <|endoftext|>
 
+# The sizes a shipped model repo carries -- and therefore the ones a kernel set must
+# be able to serve. ONE source of truth, because there are two writers of it:
+# `q4nx-build --open-diffusion` (q4nx/open_diffusion.py) emits a schedule and the VAE
+# encoder weights per edit size, and `export_dit_kernels.py` builds the ELFs. When each
+# had its own list, a bare export produced a set with no ELF for the edit
+# configurations the model advertised, and `oflm image --image` failed at the
+# resolution it was asked for rather than at load. Adding a size here, and only
+# here, moves both.
+SIZES = (512, 1024)
+EDIT_SIZES = (512, 1024)                     # every size also as R x R from an R x R reference
+
 # The modulation GEMM's output, per step row: diffusers' chunk orders are double
 # (shift, scale, gate) x (msa, mlp), single (shift, scale, gate), norm_out (scale, shift).
 MOD_SRC = {"img": ("double_stream_modulation_img.linear.weight",

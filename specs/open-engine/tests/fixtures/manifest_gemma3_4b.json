@@ -82,7 +82,8 @@
  "hf_config_check": {
   "model_type": [
    "gemma3",
-   "gemma3_text"
+   "gemma3_text",
+   "gemma3_text_only"
   ],
   "hidden_size": 2560,
   "num_hidden_layers": 34,

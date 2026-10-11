@@ -26,9 +26,37 @@ from .open_embedding import sha256_file
 MODEL_INFO_ARTIFACT = "model_info_entry.json"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# The configurations the shipped kernel set is built for (export_dit_kernels.py --resolutions
-# 512,1024 --edits 512,1024): the model's schedules and layout hash must name the same ones.
-RESOLUTIONS, EDITS = [512, 1024], [512, 1024]
+# The configurations a shipped model repo carries -- and therefore the ones a kernel
+# set must be able to serve. There are TWO writers of that list: this builder, which
+# emits a schedule and the VAE encoder weights per edit size, and
+# `export_dit_kernels.py`, which builds the ELFs. They read it from one place,
+# open_kernels/klein_pipeline.py's SIZES / EDIT_SIZES, so a bare pack and a bare
+# export agree. The exporter used to default to no edits while this builder always
+# emitted them, so a default kernel set had no ELF for the edit configurations the
+# model advertised, and `oflm image --image` failed at the resolution it was asked
+# for rather than at load.
+DEFAULT_RESOLUTIONS, DEFAULT_EDITS = [512, 1024], [512, 1024]
+
+
+def klein_sizes():
+    """(resolutions, edits) from open_kernels/klein_pipeline.py, the shared constant.
+
+    A plain import with open_kernels on the path, the way the kernel exporters
+    and `oflm add`'s spec derivation do it. The fallback is a checkout without
+    klein_pipeline's numpy / ml_dtypes, where --open-diffusion cannot run anyway.
+    """
+    try:
+        root = REPO_ROOT / "open_kernels"
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        import klein_pipeline
+
+        return list(klein_pipeline.SIZES), list(klein_pipeline.EDIT_SIZES)
+    except Exception as e:
+        print(f"[WARN] could not read open_kernels/klein_pipeline.py ({e}); "
+              f"using resolutions {DEFAULT_RESOLUTIONS}, edits {DEFAULT_EDITS}")
+        return DEFAULT_RESOLUTIONS, DEFAULT_EDITS
+
 
 # The only geometry the kernel sets are built for (open_kernels/export_dit_kernels.py).
 TRANSFORMER = {"_class_name": "Flux2Transformer2DModel", "attention_head_dim": 128,
@@ -109,9 +137,13 @@ def build_open_diffusion_repo(source: str, output_dir: str, npu_assets: Optional
     sys.path.insert(0, str(REPO_ROOT / "utilities" / "dit-chain"))
     import export_bundle  # noqa: E402
 
+    # One list, read from open_kernels/klein_pipeline.py and shared with
+    # export_dit_kernels.py: the sizes this model advertises and the ones a
+    # kernel set is built for cannot drift apart.
+    resolutions, edits = klein_sizes()
     out = Path(output_dir)
-    files = export_bundle.build(src, out.resolve(), RESOLUTIONS, jobs,
-                                Path(pack_cache) if pack_cache else None, EDITS)
+    files = export_bundle.build(src, out.resolve(), resolutions, jobs,
+                                Path(pack_cache) if pack_cache else None, edits)
     layout = json.loads((out / "config.json").read_text(encoding="utf-8"))["layout"]
     (out / "README.md").write_text(README.replace("{layout}", layout), encoding="utf-8")
     files = sorted(files + ["README.md"])

@@ -40,8 +40,13 @@ def strip(s: ModelSpec) -> dict:
 
 
 def test_hf_config_gives_the_checked_in_27b_spec():
+    """...and the checked-in spec additionally records the q8 roles its container
+    holds, which a config.json alone cannot know."""
+    import dataclasses
+
     s = ModelSpec.from_hf_config(HF_QWEN36, real_vocab=248070)
-    assert strip(s) == strip(default_spec())
+    assert strip(s) == strip(dataclasses.replace(default_spec(), quant="q4_1"))
+    assert default_spec().q8_roles == frozenset({"attn", "linear", "linear_out"})
     assert s.layer_types[3] == FULL and s.layer_types[0] == LINEAR and s.layer_types.count(FULL) == 10
     assert s.rotary_dim == 64 and s.lin_qkv_dim == 8192 and s.attn_q_width == 4096
 
@@ -54,7 +59,8 @@ def test_the_text_only_moe_model_type_derives_the_same_spec():
     s = ModelSpec.from_hf_config(dict(HF_QWEN36, model_type="qwen3_5_moe_text"), real_vocab=248070)
     ref = ModelSpec.from_hf_config(HF_QWEN36, real_vocab=248070)
     assert strip(s) == strip(ref) and s.family == "qwen36moe"
-    assert hf_model_types("qwen36moe") == ["qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"]
+    assert hf_model_types("qwen36moe") == [
+        "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6_moe", "qwen3_6_moe_text", "qwen3_next"]
 
 
 def test_hf_layer_types_list_wins_over_the_interval():
@@ -64,8 +70,10 @@ def test_hf_layer_types_list_wins_over_the_interval():
 
 
 def test_gguf_metadata_gives_the_same_hyperparameters():
+    import dataclasses
+
     s = ModelSpec.from_gguf_metadata(GGUF_QWEN36)
-    ref = strip(default_spec())
+    ref = strip(dataclasses.replace(default_spec(), quant="q4_1"))
     got = strip(s)
     assert got.pop("real_vocab") == 248320      # GGUF metadata has no tokenizer-side count
     ref.pop("real_vocab")

@@ -37,7 +37,7 @@
     "dense"
   ],
   "vocab": 200064,
-  "real_vocab": 200064,
+  "real_vocab": 200029,
   "num_heads": 24,
   "num_kv_heads": 8,
   "head_dim": 128,

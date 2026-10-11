@@ -47,6 +47,17 @@ static float bf16_to_f32(uint16_t h) {
     return f;
 }
 
+// Bytes per element for a safetensors dtype; 0 for one this engine cannot read.
+// Everything is widened to f32 at load, so a dtype with no entry here is refused
+// by name rather than read as f32 -- the old reader did exactly that, and a BF16
+// body read as f32 consumes twice the bytes and lands in the next tensor.
+static size_t dtype_size(const std::string& dtype) {
+    if (dtype == "F32") return 4;
+    if (dtype == "BF16" || dtype == "F16") return 2;
+    if (dtype == "F64") return 8;
+    return 0;
+}
+
 // Projection tensors that the NPU backend can serve (2-D, [N,K] fp32).
 // Only the five large per-layer projections; k/v and contrastive head stay on CPU
 // to preserve numerical fidelity for the final E8 threshold.
@@ -214,9 +225,18 @@ std::string Engine::resolve_path(const std::string& p) const {
 // Minimal safetensors header parser.
 // Layout: [u64 header_len][header JSON][tensor data...].
 // Header entries: {"name": {"dtype":"F32","shape":[...],"data_offsets":[s,e]}}.
-// data_offsets are relative to the start of the data section.
+// data_offsets are relative to the start of the data section. The dtype is
+// carried too: this reader refuses a tensor stored in anything it cannot widen
+// to f32, instead of consuming 2x (BF16) or 4x (F64) the bytes and landing in
+// whatever tensor follows.
+struct SafetensorEntry {
+    size_t offset = 0;
+    std::vector<size_t> shape;
+    std::string dtype = "F32";
+};
+
 static bool safetensors_index(const std::string& path,
-                              std::map<std::string, std::pair<size_t, std::vector<size_t>>>& out) {
+                              std::map<std::string, SafetensorEntry>& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     uint64_t hdr_len = 0;
@@ -235,7 +255,10 @@ static bool safetensors_index(const std::string& path,
         if (!meta.is_object() || !meta.contains("data_offsets") || !meta.contains("shape")) continue;
         auto offs = meta["data_offsets"].get<std::vector<size_t>>();
         if (offs.size() != 2) continue;
-        out[it.key()] = {base + offs[0], meta["shape"].get<std::vector<size_t>>()};
+        auto& e = out[it.key()];
+        e.offset = base + offs[0];
+        e.shape = meta["shape"].get<std::vector<size_t>>();
+        e.dtype = meta.value("dtype", "F32");
     }
     return true;
 }
@@ -262,17 +285,18 @@ bool Engine::ensure_manifest() {
             std::string file;
             size_t offset;
             std::vector<size_t> shape;
+            std::string dtype;
         };
         std::map<std::string, Found> tensors;
 
-        std::map<std::string, std::pair<size_t, std::vector<size_t>>> body;
+        std::map<std::string, SafetensorEntry> body;
         if (!safetensors_index((dir / "model.safetensors").string(), body)) {
             std::fprintf(stderr, "open_embedding: cannot read model.safetensors in %s\n",
                          model_dir_.c_str());
             return false;
         }
         for (const auto& [name, info] : body)
-            tensors[name] = Found{"model.safetensors", info.first, info.second};
+            tensors[name] = Found{"model.safetensors", info.offset, info.shape, info.dtype};
 
         // Dense heads ship in one of several layouts; probe in a fixed order so
         // generation is deterministic.
@@ -285,12 +309,12 @@ bool Engine::ensure_manifest() {
             };
             bool found = false;
             for (const auto& cand : candidates) {
-                std::map<std::string, std::pair<size_t, std::vector<size_t>>> head_tensors;
+                std::map<std::string, SafetensorEntry> head_tensors;
                 if (!fs::exists(cand)) continue;
                 if (!safetensors_index(cand.string(), head_tensors)) continue;
                 const std::string rel = fs::relative(cand, dir).generic_string();
                 for (const auto& [name, info] : head_tensors)
-                    tensors[h + "." + name] = Found{rel, info.first, info.second};
+                    tensors[h + "." + name] = Found{rel, info.offset, info.shape, info.dtype};
                 found = true;
                 break;
             }
@@ -306,7 +330,8 @@ bool Engine::ensure_manifest() {
         out["tokenizer"] = "tokenizer.json";
         auto& jt = out["tensors"] = json::object();
         for (const auto& [name, info] : tensors)
-            jt[name] = {{"file", info.file}, {"offset", info.offset}, {"shape", info.shape}};
+            jt[name] = {{"file", info.file}, {"offset", info.offset}, {"shape", info.shape},
+                        {"dtype", info.dtype}};
 
         manifest_ = std::move(out);
         std::ofstream(mpath) << manifest_.dump(1) << "\n";
@@ -347,6 +372,7 @@ bool Engine::load_weights() {
         t.file   = resolve_path(meta.at("file").get<std::string>());
         t.offset = meta.at("offset").get<size_t>();
         t.shape  = meta.at("shape").get<std::vector<size_t>>();
+        t.dtype  = meta.value("dtype", "F32");
         tensors_[it.key()] = t;
     }
     head_mid_ = tensors_.at("2_Dense.linear.weight").shape.at(0);
@@ -354,6 +380,12 @@ bool Engine::load_weights() {
     for (auto& [name, t] : tensors_) {
         size_t n = 1;
         for (size_t s : t.shape) n *= s;
+        const size_t dsz = dtype_size(t.dtype);
+        if (dsz == 0) {
+            std::fprintf(stderr, "open_embedding: unsupported dtype %s for %s\n",
+                         t.dtype.c_str(), name.c_str());
+            return false;
+        }
         buf.resize(n);
         std::ifstream f(t.file, std::ios::binary);
         if (!f) {
@@ -361,9 +393,20 @@ bool Engine::load_weights() {
             return false;
         }
         f.seekg(static_cast<std::streamoff>(t.offset));
-        f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n * sizeof(float)));
+        if (t.dtype == "BF16") {
+            std::vector<uint16_t> raw(n);
+            f.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(n * 2));
+            if (!f) {
+                std::fprintf(stderr, "open_embedding: short read on %s\n", name.c_str());
+                return false;
+            }
+            for (size_t i = 0; i < n; ++i) buf[i] = bf16_to_f32(raw[i]);
+            w_[name] = buf;
+            continue;
+        }
+        f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n * dsz));
         if (!f || n == 0) {
-            std::fprintf(stderr, "open_embedding: short read on %s\n", t.file.c_str());
+            std::fprintf(stderr, "open_embedding: short read on %s\n", name.c_str());
             return false;
         }
         w_[name] = buf;

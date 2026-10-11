@@ -50,11 +50,16 @@ def sha256_file(path: Path) -> str:
 
 
 def safetensors_index(path: Path) -> Dict[str, dict]:
-    """Parse a safetensors header into {name: {"offset": abs, "shape": [...]}}.
+    """Parse a safetensors header into {name: {"offset": abs, "shape": [...], "dtype": str}}.
 
     Layout: [u64 header_len][header JSON][tensor data]. `data_offsets` in the
     header are relative to the start of the data section, so the absolute offset
     is `8 + header_len + data_offsets[0]`.
+
+    The dtype is recorded because the engine needs it: it widens BF16 to f32 and
+    refuses a dtype it cannot widen. An earlier manifest carried only offset and
+    shape, and the engine read every tensor as f32 unconditionally -- fine for the
+    one shipped fp32 body, and silently 2x wrong for anything else.
     """
     with path.open("rb") as stream:
         header_len = struct.unpack("<Q", stream.read(8))[0]
@@ -65,7 +70,8 @@ def safetensors_index(path: Path) -> Dict[str, dict]:
         if name == "__metadata__":
             continue
         start, _end = meta["data_offsets"]
-        out[name] = {"offset": base + start, "shape": list(meta["shape"])}
+        out[name] = {"offset": base + start, "shape": list(meta["shape"]),
+                     "dtype": str(meta.get("dtype", "F32"))}
     return out
 
 
@@ -147,7 +153,8 @@ def build_open_embedding_repo(
 
     tensors: Dict[str, dict] = {}
     for name, meta in safetensors_index(out / BODY_FILE).items():
-        tensors[name] = {"file": BODY_FILE, "offset": meta["offset"], "shape": meta["shape"]}
+        tensors[name] = {"file": BODY_FILE, "offset": meta["offset"],
+                         "shape": meta["shape"], "dtype": meta["dtype"]}
     for head, head_path in head_files.items():
         rel = head_path.relative_to(out).as_posix()
         for name, meta in safetensors_index(head_path).items():
@@ -155,6 +162,7 @@ def build_open_embedding_repo(
                 "file": rel,
                 "offset": meta["offset"],
                 "shape": meta["shape"],
+                "dtype": meta["dtype"],
             }
 
     missing = [h for h in HEADS if f"{h}.linear.weight" not in tensors]
