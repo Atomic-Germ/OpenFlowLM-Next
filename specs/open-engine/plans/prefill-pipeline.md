@@ -1,6 +1,6 @@
 # Prefill pipeline: keep the NPU busy while the host works
 
-2026-10-07. Status: **stage 1 done 2026-10-09 (PR for `feat/prefill-stage-major`); stages 2-4 not started.** Builds on #172 (q8 split), #177 (OMP wait policy) and #181 (bf16 route).
+2026-10-07. Status: **stage 1 done 2026-10-09 (#191); stage 2 done 2026-10-10 (stacked on #191); stages 3-4 not started.** Builds on #172 (q8 split), #177 (OMP wait policy) and #181 (bf16 route).
 
 ## Why
 
@@ -116,6 +116,19 @@ buffer, or must wait.
 
 **Gate:** byte-identical logits; prefill time alternated. About 0.3 s of prep, patch and read
 is in play at 1000 tokens.
+
+**Stage 2 result (2026-10-10).** Logits byte-identical (bf16, `lean`, q4_1). Prefill, pipelined against sequential expert pass, same binary, alternated under the timing lock:
+
+| | sequential | pipelined |
+|---|---|---|
+| bf16, 1000 tokens (4 pairs, mean) | 5570 ms | 5442 ms (-2.3 %) |
+| q4_1, 1000 tokens (3 pairs, mean) | 5611 ms | 5734 ms (+2.2 %, a tie) |
+| bf16, 8000 tokens (2 pairs, mean) | 47.4 s | 44.5 s (-6.1 %) |
+
+- **Smaller than the estimate, as the profile said.** At 1000 tokens only about 0.4 s of host work (gather 0.18 s, scatter 0.2 s) sits next to a 3.7 s NPU stage, and 4 of a layer's 5 passes can hide it. The expert stage at 8000 tokens fell 11.6 % (20.0 -> 17.7 s); at 1000 it is within noise.
+- **One run in flight, as in stage 1.** Pass i + 1 is gathered into a second `mb_x` while pass i runs and pass i is scattered out of its own `mb_y` while pass i + 1 runs; a stream is patched only after the pass before it is done, so the plan's "two copies of the instruction buffer" was not needed.
+- **The gap between passes is not the lost clock.** A pass repeated immediately after itself takes 18.9 ms against 19.7 ms for the first, so the 19.7 ms against 12.4 ms in `--bench` is not recovered by pipelining. That is where the expert stage's remaining time is, and it is not host work.
+- Memory: the twins cost 24 MB (`mb_x` 8 MB, `mb_y` 16 MB).
 
 ### 3. GEMM efficiency
 
