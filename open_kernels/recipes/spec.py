@@ -297,6 +297,56 @@ def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
     return d[key]
 
 
+# The scaling keys a llama3-style rope block carries, whichever config shape it
+# arrived in. `rope_scaling` nests them under "rope_type"; `rope_parameters`
+# (the newer transformers form) puts them beside "rope_type" at the top level.
+_LLAMA3_SCALING_KEYS = ("factor", "low_freq_factor", "high_freq_factor",
+                        "original_max_position_embeddings")
+
+
+def _rope_params(cfg: Mapping[str, Any], who: str) -> tuple[float, Mapping[str, Any] | None]:
+    """The rope theta and scaling block from a config.json, in either shape.
+
+    Older checkpoints carry `rope_theta` plus a `rope_scaling` dict; a config
+    re-saved by a recent transformers carries a single `rope_parameters` dict
+    holding `rope_theta`, `rope_type` and the scaling keys side by side, with
+    no top-level `rope_theta` at all. Reading only the first form made every
+    such finetune fail spec derivation with "config.json lacks 'rope_theta'" --
+    for llama3, qwen3, qwen2, phi3, gemma3, granite, hunyuan and more.
+
+    Returns (theta, scaling) where `scaling` is None when the config asks for
+    plain rope. Raises SpecError only when neither shape supplies a theta.
+    """
+    block = cfg.get("rope_parameters")
+    if isinstance(block, Mapping) and block:
+        theta = block.get("rope_theta", cfg.get("rope_theta"))
+        if theta is None:
+            raise SpecError(f"{who}: config.json's rope_parameters lacks 'rope_theta'")
+        scaling = {"rope_type": block.get("rope_type"),
+                   **{k: block[k] for k in _LLAMA3_SCALING_KEYS if k in block}}
+        # rope_type default/none means plain rope: there is no scaling to apply,
+        # and reporting one would trip every builder's "rope_scaling is not
+        # supported" refusal (granite) or "type 'default' is not supported"
+        # (gemma3) on a config that asks for nothing.
+        if scaling.get("rope_type") in ("default", "none") or len(scaling) == 1:
+            return float(theta), None
+        return float(theta), scaling
+    theta = cfg.get("rope_theta")
+    if theta is None:
+        raise SpecError(f"{who}: config.json lacks 'rope_theta' (top level or rope_parameters)")
+    return float(theta), cfg.get("rope_scaling")
+
+
+def _llama3_scaling(block: Mapping[str, Any], who: str) -> dict | None:
+    """Normalize a llama3 scaling block from either shape, refusing other types."""
+    if not block:
+        return None
+    kind = block.get("rope_type", block.get("type"))
+    if kind != "llama3":
+        raise SpecError(f"{who}: rope_scaling type {kind!r} is not supported (llama3 only)")
+    return {k: block[k] for k in _LLAMA3_SCALING_KEYS if k in block}
+
+
 def _yarn_inv_freq(inv: list[float], rot: int, theta: float, sc: Mapping[str, Any]) -> list[float]:
     """YaRN's inverse frequencies (HF's _compute_yarn_parameters). Each rotary pair is either
     left alone -- it completes few enough turns inside the original context that the model has
@@ -487,6 +537,7 @@ def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     vocab = _need(cfg, "vocab_size")
     if cfg.get("use_sliding_window"):
         raise SpecError("qwen3: use_sliding_window is not supported by the dense recipe")
+    _theta, _sc = _rope_params(cfg, "qwen3")
     return ModelSpec(
         family="qwen3",
         hidden=_need(cfg, "hidden_size"),
@@ -498,7 +549,7 @@ def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(cfg, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_theta=_theta,
         qk_norm=True,
         attn_gate=False,
         intermediate=_need(cfg, "intermediate_size"),
@@ -550,6 +601,7 @@ def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
                         f"a multiple of num_attention_heads {heads}")
     else:
         hd = hidden // heads
+    _theta, _sc = _rope_params(cfg, "qwen2")
     vocab = _need(cfg, "vocab_size")
     return ModelSpec(
         family="qwen2",
@@ -562,7 +614,7 @@ def _qwen2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(cfg, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_theta=_theta,
         qk_norm=False,
         attn_gate=False,
         intermediate=_need(cfg, "intermediate_size"),
@@ -634,6 +686,7 @@ def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     if cfg.get("conv_bias"):
         raise SpecError("lfm2: conv_bias is set; the short-conv block this recipe implements "
                         "has no bias (no LFM2 container ships one)")
+    _theta, _sc = _rope_params(cfg, "lfm2")
     vocab = _need(cfg, "vocab_size")
     return ModelSpec(
         family="lfm2",
@@ -646,7 +699,7 @@ def _lfm2_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(cfg, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_theta=_theta,
         qk_norm=True,
         attn_gate=False,
         conv_kernel=int(cfg.get("conv_L_cache", 3)),
@@ -768,7 +821,8 @@ def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     vocab = _need(cfg, "vocab_size")
     if cfg.get("hidden_act", "silu") != "silu":
         raise SpecError(f"phi3: hidden_act {cfg.get('hidden_act')!r} is not silu (the dense kernel's FFN)")
-    sc = cfg.get("rope_scaling")
+    _theta, _sc = _rope_params(cfg, "phi3")
+    sc = _sc
     scaling = None
     raw_scaling = None            # the container's own rope_scaling sub-object, verbatim
     if sc:
@@ -797,7 +851,7 @@ def _phi3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(cfg, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=rot,
-        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_theta=_theta,
         rope_scaling=scaling,
         qk_norm=False,
         attn_gate=False,
@@ -863,12 +917,8 @@ def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     heads = _need(cfg, "num_attention_heads")
     hd = cfg.get("head_dim") or _need(cfg, "hidden_size") // heads
     vocab = _need(cfg, "vocab_size")
-    sc = cfg.get("rope_scaling")
-    scaling = None
-    if sc:
-        if sc.get("rope_type", sc.get("type")) != "llama3":
-            raise SpecError(f"llama: rope_scaling type {sc.get('rope_type', sc.get('type'))!r} is not supported (llama3 only)")
-        scaling = {k: sc[k] for k in ("factor", "low_freq_factor", "high_freq_factor", "original_max_position_embeddings")}
+    _theta, _sc = _rope_params(cfg, "llama")
+    scaling = _llama3_scaling(_sc, "llama")
     return ModelSpec(
         family="llama3",
         hidden=_need(cfg, "hidden_size"),
@@ -880,7 +930,7 @@ def _llama3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(cfg, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_theta=_theta,
         rope_scaling=scaling,
         qk_norm=False,
         attn_gate=False,
@@ -1021,8 +1071,8 @@ def _hunyuan_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         raise SpecError("hunyuan: the MoE variants are not supported by the dense recipe")
     if cfg.get("attention_bias") or cfg.get("mlp_bias"):
         raise SpecError("hunyuan: attention_bias / mlp_bias are not supported (the GEMVs have no bias)")
-    theta = float(_need(cfg, "rope_theta"))
-    sc = cfg.get("rope_scaling")
+    _theta, sc = _rope_params(cfg, "hunyuan")
+    theta = _theta          # the NTK fold below refines it in place
     if sc:
         kind = sc.get("rope_type", sc.get("type"))
         if kind != "dynamic":
@@ -1032,7 +1082,7 @@ def _hunyuan_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         for k in ("mscale", "mscale_all_dim"):
             if float(sc.get(k, 1.0)) != 1.0:
                 raise SpecError(f"hunyuan: rope_scaling {k} {sc[k]} is not 1 (attn.h has no logit rescale)")
-        theta = _ntk_alpha_base(theta, float(sc.get("alpha", 1000.0)), hd)
+        theta = _ntk_alpha_base(_theta, float(sc.get("alpha", 1000.0)), hd)
     return ModelSpec(
         family="hunyuan",
         hidden=_need(cfg, "hidden_size"),
@@ -1125,7 +1175,8 @@ def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     qps = tc.get("query_pre_attn_scalar", hd)
     if abs(float(qps) - hd) > 1e-6:
         raise SpecError(f"gemma3: query_pre_attn_scalar {qps} != head_dim {hd} (attn.h scales by 1/sqrt(HD))")
-    sc = tc.get("rope_scaling")
+    _theta, _sc = _rope_params(tc, "gemma3")
+    sc = _sc
     scaling = None
     if sc:
         if sc.get("rope_type", sc.get("type")) != "linear":
@@ -1142,7 +1193,7 @@ def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(tc, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(tc, "rope_theta")),
+        rope_theta=_theta,
         rope_scaling=scaling,
         rope_local_theta=float(tc.get("rope_local_base_freq", 10000.0)),
         sliding_window=int(_need(tc, "sliding_window")),
@@ -1268,7 +1319,8 @@ def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     heads = _need(cfg, "num_attention_heads")
     hd = cfg.get("head_dim") or _need(cfg, "hidden_size") // heads
     vocab = _need(cfg, "vocab_size")
-    if cfg.get("rope_scaling"):
+    _theta, _sc = _rope_params(cfg, "granite")
+    if _sc:
         raise SpecError("granite: rope_scaling is not supported (only the unscaled RoPE is validated)")
     if cfg.get("tie_word_embeddings"):
         raise SpecError("granite: tied embeddings are not supported (the head must be its own q4 tensor)")
@@ -1288,7 +1340,7 @@ def _granite_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(cfg, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(cfg, "rope_theta")),
+        rope_theta=_theta,
         rope_scaling=None,
         qk_norm=False,
         attn_gate=False,
@@ -1375,7 +1427,8 @@ def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     qps = tc.get("query_pre_attn_scalar", hd)
     if abs(float(qps) - hd) > 1e-6:
         raise SpecError(f"gemma3: query_pre_attn_scalar {qps} != head_dim {hd} (attn.h scales by 1/sqrt(HD))")
-    sc = tc.get("rope_scaling")
+    _theta, _sc = _rope_params(tc, "gemma3")
+    sc = _sc
     scaling = None
     if sc:
         if sc.get("rope_type", sc.get("type")) != "linear":
@@ -1392,7 +1445,7 @@ def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
         num_kv_heads=_need(tc, "num_key_value_heads"),
         head_dim=hd,
         rotary_dim=hd,
-        rope_theta=float(_need(tc, "rope_theta")),
+        rope_theta=_theta,
         rope_scaling=scaling,
         rope_local_theta=float(tc.get("rope_local_base_freq", 10000.0)),
         sliding_window=int(_need(tc, "sliding_window")),

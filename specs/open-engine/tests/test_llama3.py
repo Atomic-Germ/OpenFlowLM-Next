@@ -97,6 +97,32 @@ def test_unsupported_scaling_is_refused():
         ModelSpec.from_hf_config(dict(HF_LLAMA31_8B, rope_scaling={"rope_type": "yarn", "factor": 2}))
 
 
+def test_rope_parameters_config_derives_the_same_spec():
+    """A config re-saved by a recent transformers carries `rope_parameters`,
+    with no top-level `rope_theta` at all.
+
+    Reading only the classic shape failed every such finetune with "config.json
+    lacks 'rope_theta'" -- oflm-add hit this on mradermacher/Llama-3.1-8B-Aleph-
+    GGUF and downgraded the install to closed kernels.
+    """
+    rp = dict(HF_LLAMA31_8B["rope_scaling"])
+    modern = {k: v for k, v in HF_LLAMA31_8B.items()
+              if k not in ("rope_theta", "rope_scaling")}
+    modern["rope_parameters"] = {"rope_type": "llama3", "rope_theta": HF_LLAMA31_8B["rope_theta"], **rp}
+    assert "rope_theta" not in modern and "rope_scaling" not in modern
+
+    assert ModelSpec.from_hf_config(modern) == ModelSpec.from_hf_config(HF_LLAMA31_8B)
+
+
+def test_rope_parameters_default_type_asks_for_no_scaling():
+    """`rope_type: default` means plain rope. Reporting a scaling block for it
+    would trip every builder's "rope_scaling is not supported" refusal."""
+    plain = {k: v for k, v in HF_LLAMA31_8B.items()
+             if k not in ("rope_theta", "rope_scaling")}
+    plain["rope_parameters"] = {"rope_type": "default", "rope_theta": HF_LLAMA31_8B["rope_theta"]}
+    assert ModelSpec.from_hf_config(plain).rope_scaling is None
+
+
 def test_tied_embeddings_are_accepted_and_the_head_is_still_its_own_tensor():
     """Llama 3.2 ties the head to the embedding table; the containers we pack from
     materialise `lm_head.weight` anyway, so the derivation accepts the flag and the
