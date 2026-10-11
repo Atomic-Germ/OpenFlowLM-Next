@@ -352,6 +352,7 @@ class Ffn:
     # (`down_split`): each piece is a whole number of h's f32 elements and runs as its own
     # GEMV into its own act region. Empty -- one GEMV over FF -- for every size that fits.
     DOWN_SPLIT: tuple = ()
+    XM_F32: bool = False  # split dense FFN preserves the post-attention norm input
 
 
 @dataclass(frozen=True)
@@ -607,12 +608,13 @@ def _common_dense(spec: ModelSpec) -> Common:
 def ffn_geometry(spec: ModelSpec) -> Ffn:
     n = LIMITS["n_cols"]
     hid, ff = spec.hidden, spec.intermediate
+    fp32 = bool(down_split(spec)) and norm_split(spec)
     return Ffn(
         FF=ff, UP_PC=ff // BAND_ROWS // n, DOWN_PC=hid // BAND_ROWS // n,
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=FFN_MS_FLOATS,
-        XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * 2, ELEM) // ELEM,
+        XN_ELEMS=roundup(hid * 2, ELEM) // ELEM, XM_ELEMS=roundup(hid * (4 if fp32 else 2), ELEM) // ELEM,
         H_ELEMS=roundup(ff * 4, ELEM) // ELEM,
-        DOWN_SPLIT=down_split(spec),
+        DOWN_SPLIT=down_split(spec), XM_F32=fp32,
     )
 
 

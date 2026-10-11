@@ -205,7 +205,8 @@ OPENBLAS_NUM_THREADS=1 python open_kernels/model/ffn_front.py \
   --model-dir MODEL_DIR --kernel-dir KERNEL_DIR --out FIXTURE_DIR --layers 0,3
 ```
 
-This reads the captured FP32 pre-FFN residual, BF16 `xm` and FP32 `h`. Its
+This reads the captured FP32 pre-FFN residual and `h`, and decodes `xm` using
+the manifest's norm dtype (BF16 by default, FP32 for the split dense route). Its
 primary FP64 reference recomputes RMSNorm from the residual and stored effective
 norm weights, then computes `SiLU(Wgate @ norm) * (Wup @ norm)` without a BF16
 rounding step. Norm and combined activation each require maxrel <0.005.
@@ -227,3 +228,11 @@ reproduces the layer-11 error; direct FP32 preparation passes the local gates.
 See the [FP32 front replay skill](../../.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md)
 for build, pinned-input replay and scoring commands. This experiment does not
 modify production layer layouts or establish corrected full-model propagation.
+
+For the integrated split dense route, `manifest.layout.ffn_norm_dtype` is
+`float32`: norm scratch grows from three to five 4-KiB elements at hidden 5120.
+The front checker selects the capture dtype from this field; older compatible
+recipes without it use BF16. The new recipe deliberately refuses old BF16
+exports/act buffers. Build a complete new export and regenerate the fixture;
+model weights and their packing are unchanged. Reproduction and ABI details are
+in the [FP32 norm integration skill](../../.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md).

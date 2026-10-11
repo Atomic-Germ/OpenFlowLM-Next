@@ -69,7 +69,8 @@ def main():
     inputs=[]
     for t in range(meta['tokens']):
         p=a.fixture/f'y_act{a.layer}{sfx(t)}.bin'
-        r=read_front(p,L,h,ff,spec.layer_types[a.layer]=='full_attention')
+        r=read_front(p,L,h,ff,spec.layer_types[a.layer]=='full_attention',
+                     norm_dtype=m['layout'].get('ffn_norm_dtype','bfloat16'))
         inputs.append((p,r['res']))
     cfg=['device',f'xclbin P {b}/final.xclbin',f'kernelx front P {b}/insts.bin',
          f'buf pool {L.POOL_BYTES} {pool}',f'buf rn {h*6}',f'buf norm {h*4}',f'buf out {ff*12}']

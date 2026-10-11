@@ -66,4 +66,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate isolated FP32 norm-to-up/gate/SiLU with separate NPU projection captures and a BF16 control.</description>
     <location>.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-fp32-norm-integration</name>
+    <description>Build and validate full lx/ax FP32 norm-to-up/gate integration, widened scratch ABI and full-depth decode regression.</description>
+    <location>.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md</location>
+  </skill>
 </available_skills>
