@@ -1,4 +1,4 @@
-# Traces: OPEN-PREFILL-BATCH, OPEN-BUILD-CACHE (canonical spec: specs/open-engine/spec.md)
+# Traces: OPEN-PREFILL-BATCH, OPEN-PREFILL-MODE, OPEN-BUILD-CACHE (canonical spec: specs/open-engine/spec.md)
 """The block prefill route on the 35B: what the qwen36moe recipe writes into the
 manifest for it (per layer type a `gemm_block` naming shape-keyed GEMM contexts,
 the weight buffers they read and the act offsets the host stages need), and
@@ -103,17 +103,188 @@ def test_the_gemm_route_is_one_context_and_a_stream_per_shape(m):
             assert s["kernel"] in m["kernels"] and m["kernels"][s["kernel"]]["context"] in m["contexts"]
 
 
-def test_a_q8_role_emits_no_route():
-    """The GEMM dequantises the q4_1 pool law; a projection the kernel set streams at q8
-    (the 35B fine-tunes' attention / linear roles) has no route, and its manifest is
-    exactly the sequential one."""
-    q8 = dataclasses.replace(default_spec(), quant={"attn": "q8", "linear": "q8", "linear_out": "q8"})
-    m = manifest(q8)
+def _split_halves(w):
+    """A split weight's pack ops as (hi ops, lo ops), checked to be one mirrored pair."""
+    assert w["from"] == "pack" and len(w["pack"]) % 2 == 0, w
+    n = len(w["pack"]) // 2
+    hi, lo = w["pack"][:n], w["pack"][n:]
+    assert all(o["op"] == "std_perm" and o["split"] == "hi" for o in hi)
+    assert all(o["op"] == "std_perm" and o["split"] == "lo" for o in lo)
+    for h, l in zip(hi, lo):
+        assert {k: v for k, v in h.items() if k not in ("dst", "split")} ==             {k: v for k, v in l.items() if k not in ("dst", "split")}
+    # stacked with no gaps: every hi op, then every lo op, in order
+    off = 0
+    for o in hi + lo:
+        assert o["dst"] == off, (o, off)
+        off += o["nch"] * Q36.CHUNK
+    return hi, lo
+
+
+ALL_Q8 = {"attn": "q8", "linear": "q8", "linear_out": "q8"}
+
+
+def test_the_lean_route_runs_q8_projections_as_their_exact_q4_1_split():
+    """OPEN-PREFILL-MODE: an all-q8 set's `lean` variant packs every q8 projection as two q4_1 halves
+    whose readings sum to it exactly, hi then lo stacked in one buffer: one GEMM of twice the rows,
+    the halves added on the host (OPEN-PREFILL-BATCH). Re-quantising instead flips 13% of next
+    tokens (utilities/quant-compare/README.md)."""
+    spec = dataclasses.replace(default_spec(), quant=ALL_Q8)
+    m = manifest(spec)
+    q4 = manifest(default_spec())
+    lin, full = m["layer_types"][LINEAR], m["layer_types"][FULL]
+    glin, gfull = lin["gemm_block_variants"]["lean"], full["gemm_block_variants"]["lean"]
+    assert set(lin["gemm_block_variants"]) == set(full["gemm_block_variants"]) == {"lean"}
+
+    # qkv | z: one GEMM over [hi | lo], twice the 12288 rows, marked split
+    assert glin["program"][0] == {**_run("gemm_n24576_k2048", "gqkvz_w", "gemm_x_k2048", "gemm_y_n24576"),
+                                  "split": True}
+    hi, _ = _split_halves(glin["weights"]["gqkvz_w"])
+    assert [o["tensor"].split(".")[-2] for o in hi] == ["qkv_proj", "gate_proj"]
+    # each half reads the q8 tensor the sequential kernel streams, one q4_1 chunk per q8 chunk
+    seq = {o["tensor"]: o for o in lin["pack"]["pool"] if "tensor" in o}
+    for o in hi:
+        assert seq[o["tensor"]]["op"] == "q8_perm" and seq[o["tensor"]]["nch"] == 2 * o["nch"]
+    # the out projection is the split it already was
+    assert glin["out_split"] is True
+    assert glin["program"][1]["kernel"] == "gemm_n4096_k4096"
+    _split_halves(glin["weights"]["gout_w"])
+
+    # q | k | v | gate and o, the same way; the fused q_proj's gate half keeps its chunk offset
+    assert gfull["program"][0] == {**_run("gemm_n18432_k2048", "gqkvg_w", "gemm_x_k2048", "gemm_y_n18432"),
+                                   "split": True}
+    assert gfull["program"][1] == {**_run("gemm_n4096_k4096", "go_w", "gemm_x_k4096", "gemm_y_n4096"),
+                                   "split": True}
+    hi, _ = _split_halves(gfull["weights"]["gqkvg_w"])
+    assert [o["tensor"].split(".")[-2] for o in hi] == ["q_proj", "k_proj", "v_proj", "q_proj"]
+    assert hi[0].get("chunk0", 0) == 0 and hi[3]["chunk0"] == hi[0]["nch"]
+    _split_halves(gfull["weights"]["go_w"])
+
+    # the shared expert and the routed experts are q4_1 either way, and keep their weights
     for lt in (LINEAR, FULL):
-        assert "gemm_block" not in m["layer_types"][lt]
-    assert not [k for k in m["contexts"] if k.startswith("gemm") or k.startswith("mx_")]
-    assert not [k for k in m["globals"] if k.startswith("gemm_")]
-    assert not [k for k in m["builds"] if k.startswith("gemm_") or k.startswith("mx_")]
+        assert m["layer_types"][lt]["gemm_block_variants"]["lean"]["shared_weights"] ==             q4["layer_types"][lt]["gemm_block"]["shared_weights"]
+    assert {"gemm_n24576_k2048", "gemm_n18432_k2048", "gemm_n4096_k4096", "mx_linear", "mx_full"} <= set(m["kernels"])
+    for gb in (glin, gfull):
+        for st in gb["program"] + gb["shared_program"]:
+            assert m["kernels"][st["kernel"]]["context"] == "gemm"
+    assert m["globals"]["gemm_y_n24576"] == 24576 * T * 4
+    # the sequential program still streams q8
+    assert [s["op"] for s in lin["program"]] == ["run", "moeroute2", "run"]
+    # the default route's own host stages and buffers, so the engine can load either
+    for lt in (LINEAR, FULL):
+        gb, lean = m["layer_types"][lt]["gemm_block"], m["layer_types"][lt]["gemm_block_variants"]["lean"]
+        assert (lean["kind"], lean["t"]) == (gb["kind"], gb["t"])
+        assert lean["moe_batch"] == gb["moe_batch"] and lean.get("attn_block") == gb.get("attn_block")
+    assert "gemm_block_variants" not in q4["layer_types"][LINEAR]
+
+
+def _bf16_stack(w):
+    """A bf16 GEMM weight's ops, checked to lie end to end from 0 (bf16 x 32 x 256 per source chunk)."""
+    assert w["from"] == "pack"
+    off = 0
+    for o in w["pack"]:
+        assert o["op"] == "bf16_gemm" and o["dst"] == off, (o, off)
+        off += o["nch"] * 2 * 8192
+    return [(o["tensor"].split(".")[-2], o.get("via")) for o in w["pack"]]
+
+
+def test_an_all_q8_moe_route_runs_every_gemm_on_one_bf16_context():
+    """OPEN-PREFILL-BATCH: an all-q8 MoE route reads bf16 on one context, each projection at its own row count."""
+    m = manifest(dataclasses.replace(default_spec(), quant=ALL_Q8))
+    lin, full = m["layer_types"][LINEAR]["gemm_block"], m["layer_types"][FULL]["gemm_block"]
+    assert [s["kernel"] for s in lin["program"]] == ["gemmb_n12288_k2048", "gemmb_n2048_k4096"]
+    assert [s["kernel"] for s in full["program"]] == ["gemmb_n9216_k2048", "gemmb_n2048_k4096"]
+    for gb in (lin, full):
+        assert [s["kernel"] for s in gb["shared_program"]] == ["gemmb_n1024_k2048", "gemmb_n2048_k512"]
+        assert not [s for s in gb["program"] + gb["shared_program"] if "split" in s] and "out_split" not in gb
+        # the shared expert is read as the sequential path reads it (a q8 source re-quantized, like every q4 op)
+        assert _bf16_stack(gb["shared_weights"]["gshare_w"]) == [("share_up_exps_proj", "q4_1"),
+                                                                       ("share_gate_exps_proj", "q4_1")]
+        assert _bf16_stack(gb["shared_weights"]["gsdown_w"]) == [("share_down_exps_proj", "q4_1")]
+    # the projections are read exactly, one q8 source chunk per two of the sequential pool's half-tiles
+    assert _bf16_stack(lin["weights"]["gqkvz_w"]) == [("qkv_proj", None), ("gate_proj", None)]
+    assert _bf16_stack(lin["weights"]["gout_w"]) == [("ssm_out_proj", None)]
+    assert _bf16_stack(full["weights"]["gqkvg_w"]) == [("q_proj", None), ("k_proj", None),
+                                                            ("v_proj", None), ("q_proj", None)]
+    q = full["weights"]["gqkvg_w"]["pack"]
+    assert q[0].get("chunk0", 0) == 0 and q[3]["chunk0"] == q[0]["nch"]
+    seq = {o["tensor"]: o for o in m["layer_types"][LINEAR]["pack"]["pool"] if "tensor" in o}
+    for o in lin["weights"]["gqkvz_w"]["pack"]:
+        assert seq[o["tensor"]]["op"] == "q8_perm" and seq[o["tensor"]]["nch"] == 2 * o["nch"]
+    for gb in (lin, full):
+        for st in gb["program"] + gb["shared_program"]:
+            assert m["kernels"][st["kernel"]]["context"] == "gemmb"
+    # gemm is the lean variant's (OPEN-PREFILL-MODE); the engine creates only the loaded route's
+    assert sorted(k for k in m["contexts"] if k.startswith("gemm")) == ["gemm", "gemmb"]
+    for k in m["kernels"]:
+        if k.startswith("gemmb_"):
+            assert m["kernels"][k]["context"] == "gemmb" and m["builds"][k]["env"]["GQP_FMT"] == "bf16"
+    assert m["manifest_version"] == 3
+
+
+def test_a_mixed_container_keeps_the_q4_1_split():
+    """Only some roles at q8: the route stays on the q4_1 context and the q8 role runs as its exact split."""
+    m = manifest(dataclasses.replace(default_spec(), quant={"linear_out": "q8"}))
+    lin = m["layer_types"][LINEAR]["gemm_block"]
+    assert lin["out_split"] is True and lin["program"][1]["kernel"] == "gemm_n4096_k4096"
+    assert "gemmb" not in m["contexts"] and m["manifest_version"] <= 2
+
+
+def test_bf16_gemm_packs_byte_identical_to_pools_test():
+    """OPEN-PACK-PLAN: the shared q8 chunks, exact and via q4_1, hash as pools_test.cpp's bf16_gemm_pack does."""
+    from recipes import pack
+    from test_pack_plan import _fnv1a
+    from test_qwen35 import _shared_q8_vector
+    src = _shared_q8_vector(12)
+    b8 = pack.pack_bf16_gemm(pack.bf16_of_q8(*pack.q8_codes_scales(src, 64, 1536)))
+    b4 = pack.pack_bf16_gemm(pack.bf16_of_q4_1(pack.requant_q4_1(src), 64, 1536))
+    assert _fnv1a(b8.tobytes()) == 0xA1E333116F424DAF
+    assert _fnv1a(b4.tobytes()) == 0x7018CEE99915F0B9
+
+
+def test_bf16_gemm_via_q4_1_reads_a_q8_source_as_the_q4_ops_do():
+    import numpy as np
+    from recipes import pack
+    from test_qwen35 import _shared_q8_vector
+    src = _shared_q8_vector(12)
+
+    class M:
+        def raw(self, name):
+            return src.tobytes()
+
+        def chunk_bytes_of(self, name):
+            return pack.Q8
+
+    op = {"op": "bf16_gemm", "tensor": "t", "nch": 12, "in_dim": 1536, "dst": 0}
+    exact, via = np.zeros(64 * 1536 * 2, np.uint8), np.zeros(64 * 1536 * 2, np.uint8)
+    pack.apply_op(op, M(), 0, exact)
+    pack.apply_op({**op, "via": "q4_1"}, M(), 0, via)
+    assert via.tobytes() == pack.pack_bf16_gemm(pack.bf16_of_q4_1(pack.requant_q4_1(src), 64, 1536)).tobytes()
+    assert exact.tobytes() == pack.pack_bf16_gemm(pack.bf16_of_q8(*pack.q8_codes_scales(src, 64, 1536))).tobytes()
+    assert exact.tobytes() != via.tobytes()
+
+
+def test_a_q4_1_spec_has_no_split_steps(m):
+    for lt in (LINEAR, FULL):
+        gb = m["layer_types"][lt]["gemm_block"]
+        for prog in ("program", "shared_program"):
+            assert not [s for s in gb[prog] if "split" in s], (lt, prog)
+        assert "out_split" not in gb
+        for w in gb["weights"].values():
+            assert w["from"] != "pack"
+
+
+def test_a_weight_mixing_q8_and_q4_1_ops_has_no_route():
+    """A split covers a whole GEMM weight or none of it: a weight whose ops mix q8 and q4_1
+    would need a lo half for an op that has none, so the recipe refuses the route instead."""
+    spec = default_spec()
+    plan = Q36.pack_plan(spec)["layer_types"]
+    pool = plan[LINEAR]["pool"]
+    i = Q36._op_index(pool, "linear_attn.qkv_proj.weight")
+    j = Q36._op_index(pool, "self_attn.gate_proj.weight")
+    mixed = [dict(o) for o in pool]
+    mixed[i] = {**mixed[i], "op": "q8_perm", "nch": 2 * mixed[i]["nch"]}
+    with pytest.raises(Q36.OpRangeError, match="mixes q8 and q4_1"):
+        Q36.gemm_weight(mixed, [i, j])
 
 
 def test_the_sequential_program_is_untouched(m):

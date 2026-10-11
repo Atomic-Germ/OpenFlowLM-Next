@@ -37,7 +37,8 @@ typedef enum {
     phi4,
     nanbeige,
     error_whiper,
-    error_embedding
+    error_embedding,
+    error_image
 } SupportedModelFamily;
 
 /// The family name -> engine-selector map. Two callers need it: get_auto_model()'s
@@ -71,7 +72,8 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"phi4", SupportedModelFamily::phi4},
         {"nanbeige", SupportedModelFamily::nanbeige},
         {"whisper-v3", SupportedModelFamily::error_whiper},
-        {"embed-gemma", SupportedModelFamily::error_embedding}
+        {"embed-gemma", SupportedModelFamily::error_embedding},
+        {"flux2-klein", SupportedModelFamily::error_image}   // oflm image, not a chat engine
     };
     return modelFamilyMap;
 }
@@ -91,5 +93,6 @@ inline bool is_chat_model(const std::string& model_tag, model_list& available_mo
     const auto it = m.find(model_info["details"]["family"].get<std::string>());
     if (it == m.end()) return false;            // a family this build has no engine for
     return it->second != SupportedModelFamily::error_whiper &&
-           it->second != SupportedModelFamily::error_embedding;
+           it->second != SupportedModelFamily::error_embedding &&
+           it->second != SupportedModelFamily::error_image;
 }

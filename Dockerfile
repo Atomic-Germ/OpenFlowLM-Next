@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ubuntu:26.04
+FROM ubuntu:26.04 AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     patchelf \
     rpm \
     dpkg-dev \
+    file \
     fakeroot \
     uuid-dev \
     libboost-all-dev \
@@ -53,9 +54,11 @@ WORKDIR /code
 
 COPY ironvenv-requirements.txt /code/ironvenv-requirements.txt
 
-RUN python3 -m venv --system-site-packages /code/ironvenv \
- && /code/ironvenv/bin/python -m pip install --upgrade pip setuptools wheel \
- && /code/ironvenv/bin/python -m pip install -r /code/ironvenv-requirements.txt
+# /code is bind-mounted at build time. Keep the image's toolchain outside it
+# so a host venv cannot hide or replace the environment validated below.
+RUN python3 -m venv --system-site-packages /opt/ironvenv \
+ && /opt/ironvenv/bin/python -m pip install --upgrade pip setuptools wheel \
+ && /opt/ironvenv/bin/python -m pip install -r /code/ironvenv-requirements.txt
 
 # OpenFlowLM hard-codes /opt/xilinx/xrt in export-kernels.py, while Ubuntu
 # packages XRT under /usr. Provide the layout expected by the project.
@@ -70,9 +73,10 @@ RUN mkdir -p /opt/xilinx/xrt/lib \
     && ln -sfn /usr/lib/python3/dist-packages \
       /opt/xilinx/xrt/python
 
-ENV VIRTUAL_ENV=/code/ironvenv
+ENV VIRTUAL_ENV=/opt/ironvenv
+ENV OFLM_VENV_DIR=/opt/ironvenv
 ENV XILINX_XRT=/opt/xilinx/xrt
-ENV PATH="/code/ironvenv/bin:/opt/xilinx/xrt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ENV PATH="/opt/ironvenv/bin:/opt/xilinx/xrt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ENV LD_LIBRARY_PATH="/opt/xilinx/xrt/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
 ENV PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
 ENV PYTHONPATH="/opt/xilinx/xrt/python"
@@ -82,6 +86,8 @@ ENV NPU_CACHE_HOME=/root/.npu/cache
 # missing component if Ubuntu changes a package layout later.
 RUN set -eux; \
     command -v cmake; \
+    command -v file; \
+    command -v dpkg-shlibdeps; \
     command -v ninja; \
     command -v cargo; \
     command -v clang; \
@@ -89,10 +95,10 @@ RUN set -eux; \
     command -v aiebu-asm; \
     test -f /usr/include/xrt/xrt_bo.h; \
     pkg-config --modversion xrt; \
-    /code/ironvenv/bin/python -c "import aie; import aie.iron; print('mlir-aie OK')"; \
-    /code/ironvenv/bin/python -c "import pyxrt; print('pyxrt OK')"; \
-    test -n "$(find /code/ironvenv/lib -type d -path '*/site-packages/llvm-aie/bin' -print -quit)"; \
-    test -n "$(find /code/ironvenv/lib -type f -path '*/site-packages/llvm-aie/bin/clang' -print -quit)"
+    /opt/ironvenv/bin/python -c "import aie; import aie.iron; print('mlir-aie OK')"; \
+    /opt/ironvenv/bin/python -c "import pyxrt; print('pyxrt OK')"; \
+    test -n "$(find /opt/ironvenv/lib -type d -path '*/site-packages/llvm-aie/bin' -print -quit)"; \
+    test -n "$(find /opt/ironvenv/lib -type f -path '*/site-packages/llvm-aie/bin/clang' -print -quit)"
 
 # Full kernel export includes open_npue/BERT sets which require a real NPU.
 # Run the workflow only after starting the container with /dev/accel/accel0.
@@ -112,3 +118,26 @@ RUN set -eux; \
 
 WORKDIR /code
 CMD ["bash"]
+
+# Package with ./build_in_docker.sh linux-package-deb before building this
+# target. Kernel export requires the host NPU and cannot run in docker build.
+FROM ubuntu:26.04 AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install the DEB so its generated Depends selects the matching runtime ABI.
+# Bind mounting keeps the package archive out of the final image layers.
+RUN --mount=type=bind,source=build/packages,target=/packages \
+    set -eu; \
+    set -- /packages/openflowlm*.deb; \
+    test "$#" -eq 1 && test -f "$1"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl python3 libxrt2 libxrt-npu2 "$1"; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV OFLM_MODEL_PATH=/root/.config/oflm
+ENV NPU_CACHE_HOME=/root/.npu/cache
+WORKDIR /opt/openflowlm
+EXPOSE 52625
+ENTRYPOINT ["/opt/openflowlm/bin/oflm"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "52625"]

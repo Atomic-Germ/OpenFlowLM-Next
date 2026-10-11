@@ -43,6 +43,7 @@ struct PackOp {
     std::string split;                                                  ///< std_perm of a q8 source: "hi" |
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)
+    std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -55,6 +56,8 @@ struct Step {
     std::string kernel;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
+    bool split = false;                      ///< run, block route: the weight is a q8 projection's exact q4_1
+                                             ///< split, [hi | lo]; the GEMM runs twice the rows and the halves add
 };
 
 /// The block prefill route (OPEN-PREFILL-BATCH): T tokens through a layer's
@@ -171,6 +174,7 @@ struct LayerType {
     uint64_t state_bytes = 0, state_row = 0;
     std::vector<Step> program;
     GemmBlockProgram gemm_block;
+    std::map<std::string, GemmBlockProgram> gemm_block_variants;   ///< OPEN-PREFILL-MODE: routes loadable in its place
     std::vector<PackOp> pool, consts;
 };
 
@@ -243,6 +247,9 @@ struct Manifest {
     /// refused as lacking otherwise.
     void check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
+    /// OPEN-PREFILL-MODE: gemm_block becomes variant `name` ("" keeps it), and the other routes and the
+    /// globals only they name are dropped. False when no layer type has a variant `name`.
+    bool select_prefill_route(const std::string& name);
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
 };

@@ -122,6 +122,7 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
             break;
         case SupportedModelFamily::error_whiper:
         case SupportedModelFamily::error_embedding:
+        case SupportedModelFamily::error_image:
         default:
             // The SECOND substitution path, and the one the tag guard above does not
             // cover: `embed-gemma:300m` and `whisper-v3:turbo` ARE in model_list.json,
