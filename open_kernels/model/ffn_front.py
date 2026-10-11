@@ -66,7 +66,9 @@ def compare_front(res, norm, up, gate, xm, h, eps):
                                         **metric(xm, rounded)))
 
 
-def read_front(path, offsets, hidden, intermediate, full):
+def read_front(path, offsets, hidden, intermediate, full, norm_dtype="bfloat16"):
+    if norm_dtype not in ("bfloat16", "float32"):
+        raise ValueError("unsupported norm dtype")
     data = path.read_bytes()
     prefix = 'AA_' if full else 'A_'
     if len(data) != getattr(offsets, prefix + 'BYTES'):
@@ -83,7 +85,7 @@ def read_front(path, offsets, hidden, intermediate, full):
             raise ValueError(f'{path.name}: non-finite {name}')
         return a
 
-    return dict(res=region('RES', hidden, np.float32), xm=region('XM', hidden, np.uint16),
+    return dict(res=region('RES', hidden, np.float32), xm=region('XM', hidden, np.float32 if norm_dtype == 'float32' else np.uint16),
                 h=region('H', intermediate, np.float32))
 
 
@@ -110,7 +112,8 @@ def check(model_dir, kernel_dir, out, layers):
         gate = model.matmul_w(pre + 'mlp.gate_proj.weight', spec.intermediate, spec.hidden).astype(np.float64)
         for token in range(meta['tokens']):
             path = out / f'y_act{layer}{sfx(token)}.bin'
-            r = read_front(path, offsets, spec.hidden, spec.intermediate, spec.layer_types[layer] == FULL)
+            r = read_front(path, offsets, spec.hidden, spec.intermediate, spec.layer_types[layer] == FULL,
+                           norm_dtype=selected.get('layout', {}).get('ffn_norm_dtype', 'bfloat16'))
             result = compare_front(r['res'], norm, up, gate, r['xm'], r['h'], spec.norm_eps)
             results.append(dict(layer=layer, token=token, **result))
             hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()

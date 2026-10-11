@@ -544,20 +544,74 @@ buffer/manifest ABI explicitly, verify complete lx/ax program memory, then run
 local and full-chain regression. The seven full-chain residual failures and
 independent state/head, prefill and serving gates remain open.
 
+## Stage 5c5b: integrated FP32 norm-to-up/gate
+
+The split dense lx/ax path now streams the post-attention norm as two FP32
+halves through `ln_nr32` and uses direct FP32 table preparation for up/gate.
+Layer-entry attention norm and unsplit dense recipes retain BF16. The existing
+FP32 down preparation is reused; model weights and packing are unchanged.
+
+Norm scratch grows from three to five 4-KiB elements at hidden 5120. Both act
+buffers grow by 8192 bytes; the manifest declares `ffn_norm_dtype: float32`.
+The capture reader follows this field and compatibility checks reject old
+layouts. The native manifest/config checker accepts the new complete export.
+Old exports and captures remain intact and must not be relabelled.
+
+TDD: six new tests failed before implementation and pass after it, covering
+scratch boundaries, unchanged unsplit recipes, explicit ABI compatibility and
+FP32 capture decoding. Full suite: **969 passed, 47 skipped**; CTest **3/3**.
+
+A complete export contains **41 sets / 82 verified hashes**. Build key:
+`sha256:b707550f6c1d82a71a12998672e41e248ae70d4171757bfb5d1714432be3b3ae`.
+Every retained core fits the 16384-byte program budget: lx maximum **15584**,
+ax **14400**. All 195 freshly generated CPU reference hashes match the previous
+reference; model and all 65 reused pool hashes were verified. The fixture was
+bound to the completed export before hardware execution.
+
+The NPU completed **198 dispatches, 64 layers × 3 positions**. All **192
+residuals pass** the unchanged 0.005 bound; worst **0.0044951978** at L61/T1.
+All three logits pass, with correlations **0.9999986446 / 0.9999957289 /
+0.9999973938** and matching argmax **8678 / 198 / 2**. The seven residual
+failures recorded before norm integration no longer occur on this fixture.
+Runtime logits match harness captures byte for byte at every position, and a
+second request reproduces the first. Full-buffer reset replay reports **0/3**
+differing runs, including recurrent-state hashes; this measures repeatability
+against an NPU reference.
+
+The new propagated captures pass all **192 independent down checks**. Worst
+normalized errors are partial0 **0.0003103112**, partial1 **0.0003736917**,
+sum **0.0003362342**, closing residual **0.0000686012**. These local gates
+use captured FP32 h and do not replace the full-chain comparison.
+
+The independent FP64 front checker also passes **192/192**: worst norm
+maxrel **0.0000172679**, combined activation **0.0009100331**. The diagnostic
+activation conditioned on captured norm is at most **0.0009182833**. L11/T0's
+primary combined activation error is now **0.0001456326**, below the same
+0.005 bound. This uses newly propagated inputs; individual up/gate captures
+remain limited to the earlier isolated probe.
+
+Reproduction and ABI details are in the new
+[FP32 norm integration skill](../../../.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md).
+Artifacts are under ignored `Models/qwen38-27b/production-fp32-front-kernels/`
+and `production-fp32-front-multitoken/`, including build/input audits, source
+diff, reference hashes, numerical results and logs. This three-position result
+does not establish independent recurrent-state/head accuracy, block-prefill
+parity, serving isolation or final resource acceptance.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 963 passed, 47 skipped |
+| `specs/open-engine/tests` | 969 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 5c5a; native C++ build/CTest are from
-stage 5c3, with no host code change in this stage.
+The open-engine suite and CTest were rerun for stage 5c5b. The native C++ build
+is from stage 5c3; host runtime code is unchanged.
 Hardware results retain their explicitly stated full-model or isolated-replay
-scope; the latest full-chain residual gate fails as recorded above.
+scope; the latest full-chain residual gate passes for the three tested positions.
 Weights were not reconverted. Skipped tests and successful compilation do not
 extend the explicit hardware coverage above.
 

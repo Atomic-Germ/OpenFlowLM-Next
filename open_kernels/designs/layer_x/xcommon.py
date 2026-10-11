@@ -382,16 +382,17 @@ def ffn_body(win, xin, yout, B, K):
     """up | gate per 64-row band into `ms`, act(gate) * up out through y, then the down
     GEMV against h (assembled in DDR from the cores' bands, read back as f32 elements)."""
     tab, ms = B["tab"], B["ms"]
+    prep = K["prepf"] if FFN.XM_F32 else K["prep"]
     held = FFN.XM_ELEMS <= X_DEPTH             # else streamed: the bands read only the table
     if not held:
-        prep_stream(xin, K["prep"], tab, HID, FFN.XM_ELEMS)
+        prep_stream(xin, prep, tab, HID, FFN.XM_ELEMS)
     elif FFN.XM_ELEMS == 1:
         me = xin.acquire(FFN.XM_ELEMS)
-        K["prep"](me, tab, HID, 0)
+        prep(me, tab, HID, 0)
     else:
         me = xin.acquire(FFN.XM_ELEMS)
         for i in range(FFN.XM_ELEMS):
-            K["prep"](me[i], tab, HID, i)
+            prep(me[i], tab, HID, i)
     if "ffn" in Q8:
         gms, pb_h, ng_h = K["gms8"], role_per_band("ffn", HID), role_groups("ffn", HID)
     elif MIXED:
@@ -648,6 +649,10 @@ def ln_kernels(inc, t):
             "ln_add2": ExternalFunction("ln_add2", source_file=str(LN / "ln_add2.cc"), arg_types=[u] * 3,
                                         include_dirs=inc, compile_flags=LN_FLAGS),
         }
+        if FFN.XM_F32:
+            k["ln_nr32"] = ExternalFunction("ln_nr32", source_file=str(LN / "ln_nr32.cc"),
+                                            arg_types=[u] * 4 + [np.int32], include_dirs=inc,
+                                            compile_flags=LN_FLAGS)
         if DOWN_SPLIT:
             k["ln_add3"] = ExternalFunction("ln_add3", source_file=str(LN / "ln_add3.cc"), arg_types=[u] * 4,
                                             include_dirs=inc, compile_flags=LN_FLAGS)
@@ -697,7 +702,7 @@ def ln_body(ain, aout, f_nr, f_lny, f_lnx):
         ain.release(5)
 
 
-def _split_stages(ain, aout, f_nr, f_add2):
+def _split_stages(ain, aout, f_nr, f_add2, f_nr32=None):
     """Stages 1 and 2 of the split norm helper (recipes/qwen36moe.py norm_split):
 
       1. layer-entry norm                 [x0 x1 lnw] -> [xn]
@@ -716,9 +721,15 @@ def _split_stages(ain, aout, f_nr, f_add2):
         aout.release(1)
         ain.release(2)
     e = ain.acquire(3)
-    o = aout.acquire(1)
-    f_nr(e[0], e[1], e[2], o)
-    aout.release(1)
+    if f_nr32 is not None:
+        for i in range(2):
+            o = aout.acquire(1)
+            f_nr32(e[0], e[1], e[2], o, i)
+            aout.release(1)
+    else:
+        o = aout.acquire(1)
+        f_nr(e[0], e[1], e[2], o)
+        aout.release(1)
     ain.release(3)
 
 
@@ -733,10 +744,10 @@ def ln_split_body(ain, aout, f_nr, f_add2):
         ain.release(2)
 
 
-def ln_split_body3(ain, aout, f_nr, f_add2, f_add3):
+def ln_split_body3(ain, aout, f_nr, f_add2, f_add3, f_nr32=None):
     """... 3. xres_i = res_i + (out2_i + out2b_i), the two down pieces' outputs
     (recipes/qwen36moe.py down_split)   [res_i out2_i out2b_i] -> [xres_i]"""
-    _split_stages(ain, aout, f_nr, f_add2)
+    _split_stages(ain, aout, f_nr, f_add2, f_nr32)
     for _ in range(2):
         e = ain.acquire(3)
         o = aout.acquire(1)
@@ -750,7 +761,8 @@ def ln_dense_worker(of_lni, of_lno, L):
     if not LN_SPLIT:
         return ln_body, [of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_y"], L["ln_xn"]]
     if DOWN_SPLIT:
-        return ln_split_body3, [of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_add2"], L["ln_add3"]]
+        return ln_split_body3, ([of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_add2"], L["ln_add3"]]
+                               + ([L["ln_nr32"]] if FFN.XM_F32 else []))
     return ln_split_body, [of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_add2"]]
 
 
@@ -767,7 +779,7 @@ def ln_split_residual_norm(lni, lno, c_xres, a_act, a_consts, A_BYTES, C_BYTES, 
     p.finish()                                       # res is in DDR
     p.fill(lni, a_act, bt(A_BYTES, A_RES, HID * 4))
     p.fill(lni, a_consts, bt(C_BYTES, C_POSTLN, ELN))
-    p.drain(lno, a_act, bt(A_BYTES, A_XM, ELN))
+    p.drain(lno, a_act, bt(A_BYTES, A_XM, ELN * (2 if FFN.XM_F32 else 1)))
     p.finish()                                       # xm is in DDR
 
 
