@@ -95,7 +95,17 @@ if [ ! -x "$REPO/ironvenv/bin/python" ]; then
   fi
 fi
 VENV_PY="$REPO/ironvenv/bin/python"
-PEANO_DIR="$REPO/ironvenv/lib/python3.13/site-packages/llvm-aie/bin"
+# Derive site-packages from the interpreter that is actually there rather than
+# assuming 3.13: an existing 3.12 ironvenv is a supported layout (and the one
+# this repo ships), and a hard-coded 3.13 path left it valid here yet sent the
+# tool checks at the end of this block hunting a Peano that was never on PATH.
+PEANO_DIR="$("$VENV_PY" -c 'import sysconfig, os; print(os.path.join(sysconfig.get_paths()["purelib"], "llvm-aie", "bin"))')"
+if [ ! -d "$PEANO_DIR" ]; then
+  echo "FATAL: Peano (llvm-aie) not found at $PEANO_DIR" >&2
+  echo "  Recreate the venv, or install it with:" >&2
+  echo "    uv pip install --python $VENV_PY -r $REPO/ironvenv-requirements.txt" >&2
+  exit 1
+fi
 export PATH="$PEANO_DIR:/opt/xilinx/xrt/bin:$PATH"
 for tool in clang xclbinutil aiebu-asm; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool not on PATH (Peano/XRT)" >&2; exit 1; }

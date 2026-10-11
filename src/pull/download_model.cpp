@@ -344,6 +344,13 @@ std::string percent_decode_filename(std::string_view s) {
 /// Accepts a resolve URL of the form
 ///   https://huggingface.co/<repo_id>/resolve/<rev>/<file>[?download=true]
 /// Returns the cached path, or "" when the file is not cached.
+///
+/// \note Only the revision named by the URL is resolved. When <rev> is a commit
+///       hash it is used directly; otherwise it is a ref (branch/tag) that
+///       must be dereferenced through the cache's refs/<rev> file. Arbitrary
+///       snapshots are never scanned -- a same-named file from some other
+///       revision is a different file, and silently accepting it would defeat
+///       the pinning the manifest asks for.
 std::string hf_cache_snapshot_file(const std::string& url) {
     constexpr const char* kHost = "huggingface.co/";
     const size_t host = url.find(kHost);
@@ -352,13 +359,15 @@ std::string hf_cache_snapshot_file(const std::string& url) {
     const size_t rp = url.find("/resolve/", pos);
     if (rp == std::string::npos) return "";
     std::string repo_id = url.substr(pos, rp - pos);
-    const size_t fe = url.find('/', rp + 9);               // strlen("/resolve/") == 9
+    const size_t re = rp + 9;                             // strlen("/resolve/") == 9
+    const size_t fe = url.find('/', re);
     if (fe == std::string::npos) return "";
+    std::string rev = url.substr(re, fe - re);
     std::string filename = url.substr(fe + 1);
     const size_t q = filename.find('?');
     if (q != std::string::npos) filename = filename.substr(0, q);
     filename = percent_decode_filename(filename);
-    if (repo_id.empty() || filename.empty()) return "";
+    if (repo_id.empty() || rev.empty() || filename.empty()) return "";
 
     std::string dirname = "models--";
     for (char c : repo_id) dirname += (c == '/') ? "--" : std::string(1, c);
@@ -370,38 +379,54 @@ std::string hf_cache_snapshot_file(const std::string& url) {
     if (!home) home = std::getenv("USERPROFILE");
     if (home) roots.push_back(std::string(home) + "/.cache/huggingface/hub");
 
+    // A HF commit id is 40 hex chars (or 64 for git sha256 repos); anything
+    // else in the revision position is a ref name needing dereference.
+    const auto is_commit = [](const std::string& s) {
+        if (s.size() != 40 && s.size() != 64) return false;
+        for (char c : s)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                return false;
+        return true;
+    };
+
     std::error_code ec;
     for (const std::string& root : roots) {
-        const std::filesystem::path snap(root + "/" + dirname + "/snapshots");
-        if (!std::filesystem::is_directory(snap, ec)) continue;
-        std::vector<std::filesystem::path> candidates;
-        const std::filesystem::path refs(root + "/" + dirname + "/refs");
-        if (std::filesystem::is_directory(refs, ec)) {
-            for (const auto& ref : std::filesystem::directory_iterator(refs)) {
-                std::ifstream in(ref.path());
-                std::string rev;
-                std::getline(in, rev);
-                if (!rev.empty()) candidates.push_back(snap / rev / filename);
-            }
+        const std::filesystem::path base(root + "/" + dirname);
+        if (!std::filesystem::is_directory(base, ec)) continue;
+        std::string commit = rev;
+        if (!is_commit(rev)) {
+            // Dereference the ref to the commit it points at right now. If the
+            // ref is not cached we cannot tell which snapshot the URL means, so
+            // report a miss rather than guessing.
+            std::ifstream in((base / "refs" / rev).string());
+            if (!in) continue;
+            std::string line;
+            std::getline(in, line);
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+            if (line.empty()) continue;
+            commit = line;
         }
-        if (candidates.empty())
-            for (const auto& d : std::filesystem::directory_iterator(snap))
-                if (d.is_directory(ec)) candidates.push_back(d.path() / filename);
-        for (const auto& f : candidates)
-            if (std::filesystem::is_regular_file(f, ec)) return f.string();
+        const std::filesystem::path cached = base / "snapshots" / commit / filename;
+        if (std::filesystem::is_regular_file(cached, ec)) return cached.string();
     }
     return "";
 }
 
 }  // namespace
 
-/// Copy a cached HF file into `local_path` (atomically) when its size matches
-/// `expected_size`. Returns true only when a fresh, correct copy was made, so a
-/// caller can skip the network download. The size guard rejects a truncated
-/// cache entry; the HF cache only ever holds hash-verified content, so a
-/// matching-size cached file is trusted to be the real file.
+/// Copy a cached HF file into `local_path` (atomically) when it is the exact
+/// revision the URL names and its content hashes to `expected_hash`.
+/// Returns true only when a fresh, correct copy was made, so a caller can skip
+/// the network download.
+///
+/// \note Size alone is not proof of identity: two revisions can ship a
+///       same-named, same-sized file. The hash is the only real check, so a
+///       caller that knows the expected hash (every pinned manifest entry does)
+///       must pass it -- otherwise a cached hit is only taken when the file's
+///       name already carries the commit id.
 bool download_from_hf_cache(const std::string& url, const std::string& local_path,
-                            uint64_t expected_size) {
+                            uint64_t expected_size, HashAlgorithm hash_algorithm,
+                            const std::string& expected_hash) {
     const std::string cached = hf_cache_snapshot_file(url);
     if (cached.empty()) return false;
     std::error_code ec;
@@ -413,6 +438,13 @@ bool download_from_hf_cache(const std::string& url, const std::string& local_pat
     const std::filesystem::path part(local_path + ".part");
     std::filesystem::copy_file(cached, part, std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) { std::filesystem::remove(part, ec); return false; }
+    // Verify the staged copy before it is promoted into place, so a bad cache
+    // hit can never overwrite a good destination.
+    if (!expected_hash.empty() && !request_hash_matches(DownloadRequest{
+            "", local_path, expected_size, hash_algorithm, expected_hash}, part)) {
+        std::filesystem::remove(part, ec);
+        return false;
+    }
     if (!promote_atomically(part, dest)) { std::filesystem::remove(part, ec); return false; }
     header_print("OFLM", "Using cached file from the local HF cache: " << local_path);
     return true;
@@ -562,17 +594,22 @@ bool download_multiple_files(const nlohmann::json downloads,
         bool ok;
         // A model the user already fetched with huggingface_hub / llama.cpp /
         // ollama is on disk in their HF cache: use it instead of the network.
+        // Pinned entries carry their hash, so the cache hit is verified against
+        // it before it is promoted -- an unpinned entry still takes the legacy
+        // size-only advisory path below.
+        const bool pinned = file.contains("expected_size") && file.contains("hash_algorithm");
+        const HashAlgorithm alg = file.value("hash_algorithm", std::string()) == "sha256"
+            ? HashAlgorithm::Sha256 : HashAlgorithm::GitBlobSha1;
         uint64_t cache_size = file.contains("expected_size") ? file["expected_size"].get<uint64_t>() : 0;
-        if (download_from_hf_cache(url, local_path, cache_size)) {
+        if (download_from_hf_cache(url, local_path, cache_size, alg,
+                                   pinned ? file.value("oid", std::string()) : std::string())) {
             ok = true;
-        } else if (file.contains("expected_size") && file.contains("hash_algorithm")) {
+        } else if (pinned) {
             DownloadRequest request{
                 url,
                 local_path,
                 file["expected_size"].get<std::uint64_t>(),
-                file.value("hash_algorithm", std::string()) == "sha256"
-                    ? HashAlgorithm::Sha256
-                    : HashAlgorithm::GitBlobSha1,
+                alg,
                 file.value("oid", std::string())};
             ok = download_with_retry(request, file_progress);
         } else {

@@ -22,15 +22,15 @@ load or pack a model — without opening the NPU or decoding any tensor payload:
 
 ```sh
 # human-readable report
-python3 utilities/gguf-inspect/gguf-inspect path/to/file.gguf
+python3 utilities/gguf-utils/gguf-inspect/gguf-inspect path/to/file.gguf
 # or via the shim
-./utilities/gguf-inspect/gguf-inspect path/to/file.gguf
+./utilities/gguf-utils/gguf-inspect/gguf-inspect path/to/file.gguf
 
 # machine-readable (also usable as an input to install planning)
-python3 utilities/gguf-inspect/gguf-inspect path/to/file.gguf --json
+python3 utilities/gguf-utils/gguf-inspect/gguf-inspect path/to/file.gguf --json
 
 # focus on sections
-python3 utilities/gguf-inspect/gguf-inspect path/to/file.gguf --only blocks rope tokenizer exec tags
+python3 utilities/gguf-utils/gguf-inspect/gguf-inspect path/to/file.gguf --only blocks rope tokenizer exec tags
 ```
 
 ## How it works
@@ -44,8 +44,12 @@ is never opened.
 ## Tests
 
 ```sh
-python3 utilities/gguf-inspect/tests/test_inspect.py
+python3 utilities/gguf-utils/gguf-inspect/tests/test_inspect.py
 ```
 
 The baseline pins both pilot HF snapshots so the exit-gate facts cannot silently
-drift.
+drift. Those snapshots are not in the repository: each is resolved from the local
+Hugging Face cache (`HF_HUB_CACHE` / `HF_HOME/hub` / `~/.cache/huggingface/hub`)
+at its pinned revision, and can be pointed elsewhere with `GGUF_TEST_QWEN`,
+`GGUF_TEST_MMPROJ` and `GGUF_TEST_LLAMA`. Tests whose model is unavailable skip,
+so the suite is green on CI where no model is cached.

@@ -3,7 +3,11 @@
 # model_backend.hpp reaches causal_lm.hpp through the device runtime.
 # Ported from the FastFlowLM fork's test/model_backend/CMakeLists.txt (MIT).
 cmake_minimum_required(VERSION 3.22)
-project(model_backend_tests LANGUAGES CXX)
+# Wired into the root build (src/test/CMakeLists.txt adds this directory) as
+# well as configured standalone; only the standalone case declares a project.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(model_backend_tests LANGUAGES CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

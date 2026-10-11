@@ -16,42 +16,65 @@ import textwrap
 from . import inspect as _inspect
 from . import __version__
 
+# --only names a SECTION of the report; the serialized report names it
+# differently (the "tags" section is serialized as "candidate_tag", "exec" as
+# "execution"). Without this mapping, `--only tags` looks up a key that does
+# not exist and silently emits {}.
+_SECTION_KEYS = {
+    "tags": "candidate_tag",
+    "blocks": "blocks",
+    "rope": "rope",
+    "tokenizer": "tokenizer",
+    "exec": "execution",
+}
+_ALL_SECTIONS = frozenset(_SECTION_KEYS.values())
 
-def _human(rep) -> str:
+
+def _section_keys(only):
+    """Map requested --only sections onto the report's own dict keys."""
+    return [k for k in (_SECTION_KEYS.get(s, s) for s in only) if k]
+
+
+def _human(rep, sel=None) -> str:
+    sel = _ALL_SECTIONS if sel is None else set(sel)
     b = rep.blocks
-    lines = [
+    head = [
         f"path:            {rep.path}",
         f"gguf version:    {rep.version}",
         f"endian:          {rep.endian}",
         f"architecture:    {rep.architecture}",
     ]
     if rep.snapshot:
-        lines.append(f"HF snapshot:     {rep.snapshot}")
+        head.append(f"HF snapshot:     {rep.snapshot}")
     if rep.general:
-        lines.append(f"general:         {rep.general}")
-    if b.block_count:
-        lines.append(
-            f"blocks:          {b.block_count} total, {b.trunk_layers} trunk"
-            f"{(' + ' + str(b.nextn_predict_layers) + ' NextN (MTP) layers, ' if b.has_mtp else ' ')}"
-            + (b.mtp_note + "" if b.has_mtp else "no MTP/NextN layers")
-        )
-    if rep.projector.is_clip:
-        lines.append(
-            f"projector:       clip base_model={rep.projector.base_model or 'n/a'}"
-        )
-    if rep.rope.tensor_names:
+        head.append(f"general:         {rep.general}")
+    # The header lines describe the file, so they stay whatever was asked for;
+    # each section is emitted only when it was requested.
+    lines = list(head)
+    if "blocks" in sel:
+        if b.block_count:
+            lines.append(
+                f"blocks:          {b.block_count} total, {b.trunk_layers} trunk"
+                f"{(' + ' + str(b.nextn_predict_layers) + ' NextN (MTP) layers, ' if b.has_mtp else ' ')}"
+                + (b.mtp_note + "" if b.has_mtp else "no MTP/NextN layers")
+            )
+        if rep.projector.is_clip:
+            lines.append(
+                f"projector:       clip base_model={rep.projector.base_model or 'n/a'}"
+            )
+    if "rope" in sel and rep.rope.tensor_names:
         prefix = "carried in tensors: " if rep.rope.carried else ""
         lines.append(f"rope factors:    {prefix}{rep.rope.tensor_names}")
     t = rep.tokenizer
-    if t.model or t.pre:
+    if "tokenizer" in sel and (t.model or t.pre):
         lines.append(
             f"tokenizer:       model={t.model or 'n/a'} pre={t.pre or 'n/a'} "
             f"BOS={t.bos} EOS={t.eos} PAD={t.pad} chat={t.has_chat_template}"
         )
-    if rep.candidate_tag:
+    if "candidate_tag" in sel and rep.candidate_tag:
         lines.append(f"candidate tag:   {rep.candidate_tag}")
     e = rep.execution
-    if e.file_type is not None or e.dtype_counts:
+    if "execution" in sel and (e.file_type is not None or e.dtype_counts):
         lines.append(
             f"execution:       file_type={e.file_type} quant_version={e.quantization_version} "
             f"dtype_counts={e.dtype_counts} unknown_dtypes={e.unknown_dtypes}"
@@ -95,16 +118,14 @@ def main(argv=None) -> int:
     if args.json:
         data = rep.to_dict()
         if args.only:
-            keys = {"tags": "candidate_tag", "blocks": "blocks", "rope": "rope",
-                    "tokenizer": "tokenizer", "exec": "execution"}
-            data = {k: data.get(k) for k in args.only if k in data}
+            keys = _section_keys(args.only)
+            data = {k: data.get(k) for k in keys}
         print(json.dumps(data, indent=2, default=str))
         return 0
 
-    if args.only:
-        print(json.dumps(rep.to_dict(), indent=2, default=str))
-        return 0
-    print(_human(rep))
+    # Human output honours --only too: it printed the whole report before,
+    # making the flag a no-op outside --json.
+    print(_human(rep, _section_keys(args.only) if args.only else None))
     return 0
 
 

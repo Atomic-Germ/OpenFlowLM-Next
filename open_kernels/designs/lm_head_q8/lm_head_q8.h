@@ -87,8 +87,11 @@ static constexpr unsigned kPerCall = LMHEAD_PER_CALL;
 // accum-roundtrip float convert mis-schedules inside this kernel's kb loop.
 static inline aie::vector<bfloat16, kRows> load_scale(const float *__restrict p) {
   const aie::vector<uint32_t, kRows> w = aie::load_v<kRows>((const uint32_t *)p);
-  const aie::vector<uint32_t, kRows> r =
-      aie::add(w, aie::add(aie::bit_and((uint32_t)0x10000, w), (uint32_t)0x7FFF));
+  // The round-to-nearest-even bit is the retained BF16 LSB, i.e. bit 16 of the
+  // f32 word, taken as 0/1. Masking with 0x10000 and adding that would bias the
+  // sum by 65536 instead of 1, so downshift first and then mask.
+  const aie::vector<uint32_t, kRows> lsb = aie::bit_and((uint32_t)1, aie::downshift(w, 16));
+  const aie::vector<uint32_t, kRows> r = aie::add(w, aie::add((uint32_t)0x7FFF, lsb));
   return aie::pack(aie::downshift(r, 16)).template cast_to<bfloat16>();
 }
 #else

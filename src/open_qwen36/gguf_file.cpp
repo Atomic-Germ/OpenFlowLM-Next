@@ -184,8 +184,26 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
             if (nb && t.offset + nb > map_size_) fail("tensor " + name + " runs past EOF in " + path);
             tensors_.emplace(name, std::move(t));
         }
+        // Alignment is not stored in the header for either version: GGUF v2 and
+        // v3 both take it from the optional `general.alignment` metadata key and
+        // default to 32. (Only v1 carried a trailing alignment word.) Validate
+        // it before dividing, and fail loudly on a nonsensical value.
         uint64_t align = 32;
-        if (version == 2) align = rd_u32(q);       // v3 removed it; fixed at 32
+        {
+            auto it = meta_.find("general.alignment");
+            if (it != meta_.end()) {
+                uint64_t v = 0;
+                try {
+                    v = std::stoull(it->second);
+                } catch (const std::logic_error&) {
+                    fail(path + ": general.alignment is not a number (" + it->second + ")");
+                }
+                align = v;
+            }
+        }
+        if (align == 0 || (align & (align - 1)) != 0)
+            fail(path + ": general.alignment must be a non-zero power of two (got " +
+                 std::to_string(align) + ")");
         data_base_ = static_cast<size_t>(q - map_);
         data_base_ += static_cast<size_t>((align - data_base_ % align) % align);
     } catch (...) {

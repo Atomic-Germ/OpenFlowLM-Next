@@ -73,11 +73,18 @@ def _locate_reader() -> Any:
     cached = _locate_reader.cache
     if cached is not None:
         return cached
-    root = Path(__file__).resolve().parent.parent.parent.parent
-    candidates = [
-        root / "third_party" / "Guanaco" / "llama.cpp" / "gguf-py",
-        Path("/tmp/opencode/guanaco-llama-clean/gguf-py"),
-    ]
+    # This file is utilities/gguf-utils/gguf-inspect/gguf_inspect/reader.py,
+    # so five parents up is the REPOSITORY root. Four stopped at utilities/, which
+    # made the first candidate utilities/third_party/... -- a path that exists in
+    # no checkout, so every inspection raised before the GGUF was even opened.
+    # Search upward for the first ancestor that actually carries third_party/,
+    # which keeps this correct for both the nested and the flat layout.
+    here = Path(__file__).resolve().parent
+    roots = list(here.parents)[:6]
+    candidates = []
+    for r in roots:
+        candidates.append(r / "third_party" / "Guanaco" / "llama.cpp" / "gguf-py")
+    candidates.append(Path("/tmp/opencode/guanaco-llama-clean/gguf-py"))
     loaded = None
     for cand in candidates:
         if cand.is_dir():

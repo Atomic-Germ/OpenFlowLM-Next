@@ -102,7 +102,11 @@ def _kv(data: dict, prefix: str) -> dict:
 def inspect(path: str, source: str = "", snapshot: str = "") -> GGUFReport:
     gf: GgufFile = open_gguf(path)
     rep = GGUFReport(path=gf.path, version=gf.version or 0, endian=gf.endian)
-    rep.source = source or _hf_snapshot(path)
+    # `source` is the repository id and `snapshot` is the commit hash; they are
+    # different facts. Defaulting `source` to the snapshot made the two
+    # indistinguishable in the JSON report, so leave it empty unless the caller
+    # actually supplied a repo id.
+    rep.source = source or ""
     rep.snapshot = snapshot or _hf_snapshot(path)
 
     arch = gf.get_field("general.architecture")
@@ -200,6 +204,14 @@ def _inspect_tokenizer(gf: GgufFile, rep: GGUFReport) -> None:
     rep.tokenizer = tok
 
 
+# Tensor types the open runtime can actually consume, mirroring the check in
+# src/open_qwen36/pools.cpp's std_perm_gguf: Q4_0/Q4_1 are packed, and
+# Q8_0/Q4_K/Q6_K are dequantized and requantized. Every other type -- notably
+# Q2_K, Q3_K and Q5_K -- is refused by the runtime, so calling those "supported"
+# let install planning accept files that could never load.
+_RUNTIME_TYPES = frozenset({"Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q6_K"})
+
+
 def _inspect_execution(gf: GgufFile, rep: GGUFReport) -> None:
     counts: Counter = Counter(t.dtype for t in gf.tensors)
     total = sum(t.n_bytes for t in gf.tensors)
@@ -207,8 +219,7 @@ def _inspect_execution(gf: GgufFile, rep: GGUFReport) -> None:
     qv = gf.get_field("general.quantization_version")
     unknown = []
     for dtype, _ in counts.items():
-        if dtype not in ("Q4_1", "Q8_0", "Q6_K", "Q4_K", "Q5_K", "Q3_K",
-                         "Q2_K", "F16", "F32", "BF16", "I8"):
+        if dtype not in _RUNTIME_TYPES:
             unknown.append(dtype)
     rep.execution = ExecutionOptions(
         file_type=_to_int(ft),
@@ -223,13 +234,22 @@ def _derive_candidate_tag(rep: GGUFReport) -> tuple[str, str]:
     arch = rep.architecture
     size_label = rep.general.get("size_label") or rep.general.get(arch + ".size_label", "")
     base = (rep.general.get("basename") or arch or "model")
-    size = ""
+    # Keep the unit the label supplied. Stripping it and appending a literal
+    # "B" turned a "300M" (million-parameter) label into the tag "name:300B",
+    # i.e. 300 bytes. B is only the default when the label carries no unit.
+    digits, unit = "", ""
     if size_label:
-        size = re.sub(r"[^0-9.]", "", str(size_label))
-    if not size:
+        m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)\s*$", str(size_label))
+        if m:
+            digits, unit = m.group(1), m.group(2)
+        else:
+            digits = re.sub(r"[^0-9.]", "", str(size_label))
+    if not digits:
         return "", "no size_label"
+    if not unit:
+        unit = "B"
     name = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
-    tag = f"{name}:{size}B"
+    tag = f"{name}:{digits}{unit}"
     return tag, f"general.basename={base}, size_label={size_label}"
 
 

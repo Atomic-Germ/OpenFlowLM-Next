@@ -2,7 +2,11 @@
 # runs on Linux CI. The XRT headers are still needed because
 # npu_platform.hpp reaches oflm_rt through the device runtime.
 cmake_minimum_required(VERSION 3.22)
-project(npu_platform_tests LANGUAGES CXX)
+# Wired into the root build (src/test/CMakeLists.txt adds this directory) as
+# well as configured standalone; only the standalone case declares a project.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(npu_platform_tests LANGUAGES CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

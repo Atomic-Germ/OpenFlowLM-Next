@@ -305,7 +305,9 @@ void test_hf_cache_reuse() {
     namespace fs = std::filesystem;
     // download_from_hf_cache: a synthetic HF cache under HF_HOME, and the
     // resolve URL for the same repo/file, must be copied (no network) rather
-    // than re-downloaded -- and a size mismatch must not reuse.
+    // than re-downloaded -- and a size mismatch must not reuse. Only the
+    // revision the URL names may be reused, and a pinned entry's hash must
+    // verify before the cached copy is promoted.
     std::error_code ec;
     const std::string home = (fs::temp_directory_path() / "oflm-hf-cache-test").string();
     fs::remove_all(home, ec);
@@ -317,27 +319,79 @@ void test_hf_cache_reuse() {
         std::ofstream of(cached.string());
         of << "fake gguf bytes 0123456789";
     }
+    // A second snapshot of the same file name, belonging to a *different*
+    // revision. Nothing may be reused from it.
+    const std::string other_rev = "fedcba9876543210fedcba9876543210fedcba98";
+    const auto other =
+        fs::path(home) / "hub" / "models--org--Widget" / "snapshots" / other_rev / "widget.gguf";
+    fs::create_directories(other.parent_path(), ec);
+    {
+        std::ofstream of(other.string());
+        of << "other revision bytes";
+    }
+    // The URL names the branch "main", so the cache must dereference it.
+    {
+        fs::create_directories((fs::path(home) / "hub" / "models--org--Widget" / "refs").string(), ec);
+        std::ofstream of((fs::path(home) / "hub" / "models--org--Widget" / "refs" / "main").string());
+        of << rev << "\n";
+    }
     const std::uint64_t expected = static_cast<std::uint64_t>(fs::file_size(cached, ec));
     const auto out = fs::temp_directory_path() / "oflm-hf-cache-out" / "model.gguf";
     fs::remove_all(out.parent_path(), ec);
     setenv("HF_HOME", home.c_str(), 1);
     unsetenv("HF_HUB_CACHE");
+    using download_utils::HashAlgorithm;
     const std::string url =
         "https://huggingface.co/org/Widget/resolve/main/widget.gguf?download=true";
     // the HF-cache miss path first (a repo the cache does not hold)
     TEST_REQUIRE(!download_utils::download_from_hf_cache(
-        "https://huggingface.co/other/Missing/resolve/main/x.gguf", out.string(), 0));
+        "https://huggingface.co/other/Missing/resolve/main/x.gguf", out.string(), 0,
+        HashAlgorithm::Sha256, ""));
     // the hit: without a size guard
-    TEST_REQUIRE(download_utils::download_from_hf_cache(url, out.string(), 0));
+    TEST_REQUIRE(download_utils::download_from_hf_cache(
+        url, out.string(), 0, HashAlgorithm::Sha256, ""));
     TEST_REQUIRE(fs::is_regular_file(out, ec));
     TEST_REQUIRE(static_cast<std::uint64_t>(fs::file_size(out, ec)) == expected);
     // the hit, with the correct size
-    TEST_REQUIRE(download_utils::download_from_hf_cache(url, out.string(), expected));
+    TEST_REQUIRE(download_utils::download_from_hf_cache(
+        url, out.string(), expected, HashAlgorithm::Sha256, ""));
     // a wrong size must NOT reuse (falls back to a real download)
-    TEST_REQUIRE(!download_utils::download_from_hf_cache(url, out.string(), expected + 1));
+    TEST_REQUIRE(!download_utils::download_from_hf_cache(
+        url, out.string(), expected + 1, HashAlgorithm::Sha256, ""));
+    // a pinned entry whose hash does not verify must NOT reuse, and must not
+    // leave the wrong bytes promoted in its place
+    TEST_REQUIRE(!download_utils::download_from_hf_cache(
+        url, out.string(), expected, HashAlgorithm::Sha256,
+        "0000000000000000000000000000000000000000000000000000000000000000"));
     // percent-encoded filename resolves in the cache too
     TEST_REQUIRE(download_utils::download_from_hf_cache(
-        "https://huggingface.co/org/Widget/resolve/main/widget.gguf", out.string(), expected));
+        "https://huggingface.co/org/Widget/resolve/main/widget.gguf", out.string(), expected,
+        HashAlgorithm::Sha256, ""));
+
+    // A revision named by the URL is honoured even when other snapshots exist.
+    const std::string rev_url =
+        "https://huggingface.co/org/Widget/resolve/" + rev + "/widget.gguf";
+    TEST_REQUIRE(download_utils::download_from_hf_cache(
+        rev_url, out.string(), expected, HashAlgorithm::Sha256, ""));
+    // A pinned URL naming a revision the cache does not hold must miss, even
+    // though a same-named file exists under a different revision.
+    const std::string absent_rev = "aaaabbbbccccddddeeeeffff0000111122223333";
+    TEST_REQUIRE(!download_utils::download_from_hf_cache(
+        "https://huggingface.co/org/Widget/resolve/" + absent_rev + "/widget.gguf",
+        out.string(), 0, HashAlgorithm::Sha256, ""));
+    // An uncached ref is a miss, not a licence to guess a snapshot.
+    TEST_REQUIRE(!download_utils::download_from_hf_cache(
+        "https://huggingface.co/org/Widget/resolve/some-branch/widget.gguf",
+        out.string(), 0, HashAlgorithm::Sha256, ""));
+    // A ref that resolves to other_rev must take other_rev's bytes (size 20).
+    {
+        std::ofstream of((fs::path(home) / "hub" / "models--org--Widget" / "refs" / "next").string());
+        of << other_rev << "\n";
+    }
+    TEST_REQUIRE(download_utils::download_from_hf_cache(
+        "https://huggingface.co/org/Widget/resolve/next/widget.gguf",
+        out.string(), 20, HashAlgorithm::Sha256, ""));
+    TEST_REQUIRE(static_cast<std::uint64_t>(fs::file_size(out, ec)) == 20);
     unsetenv("HF_HOME");
     fs::remove_all(home, ec);
     fs::remove_all(out.parent_path(), ec);

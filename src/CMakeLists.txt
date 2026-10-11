@@ -1425,6 +1425,14 @@ endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
 
+# src/test holds two kinds of tests. The per-model NPU ones need a device and
+# the prebuilt engine libraries, so they are built standalone and are NOT added
+# here. The host-only ones (device registry, npu_platform helpers, downloader
+# pinning) need neither, and were standalone projects that nothing added -- so
+# they never built and never ran anywhere, CI included. src/test/CMakeLists.txt
+# adds exactly those three.
+add_subdirectory(test)
+
 # ————————————————————————————————————————————————————————————
 # PATH plumbing for the /opt/openflowlm prefix. The prefix keeps the runtime
 # self-contained, but /opt/openflowlm/bin is not on a default PATH, and an
