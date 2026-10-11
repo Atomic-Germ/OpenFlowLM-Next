@@ -3234,6 +3234,10 @@ layer-major order. `OFLM_OPEN_STAGE_MAJOR=0` keeps that order, for the A/B.
    kernel on: on the 35B's all-q8 set in both prefill modes (the bf16 route and `lean`'s split),
    on its q4_1 set, and on a Qwen3.5-family set (dense FFN). Prefill time at 1000 tokens,
    alternated both ways.
+6c. The pipelined expert pass against the sequential one (`OPEN-MOE-BATCH`), same binary: the 6b run
+   with `OFLM_OPEN_MOE_OVERLAP=0` once and without it twice, all **byte-identical** at every position
+   and identical to the 6b dumps, on the all-q8 set in both prefill modes and on the q4_1 set. Prefill
+   time at 1000 and 8000 tokens, alternated both ways.
 7. Qwen3.5 (`Qwen3.8-Distilled-9B-NPU2`, and `Qwen3.5-0.8B-NPU2` for the smallest geometry):
    `export_qwen36_kernels.py --model-dir <model>`, each new GEMM shape through the harness,
    then steps 3 and 4 on a prompt of more than one block (`--layers 4 --prefill-logits`, then all
@@ -3780,6 +3784,37 @@ it streams a real expert's weights and the result is discarded, so the rungs
 decide how much of a dispatch is wasted; the shared
 expert stays outside it (`OPEN-PREFILL-BATCH`). A set without `moe_batch`,
 or `OFLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
+
+The passes of one layer are **pipelined** when the stage-major schedule is on
+(`OPEN-PREFILL-BATCH`): every pass is planned up front, pass i + 1 is gathered
+into a second `mb_x` (`mb_x#1`, as odd passes use) while pass i runs, and pass i
+is scattered out of its own `mb_y` (`mb_y#1` for odd passes) while pass i + 1
+runs. One dispatch is ever in flight, so a stream is never patched while a run
+on it is outstanding, and passes are scattered in pass order, which the
+per-token sums rely on. The arithmetic is unchanged and the output is
+**byte-identical** to the sequential pass loop. `OFLM_OPEN_MOE_OVERLAP=0`
+keeps that loop, for the A/B.
+
+**Result 2026-10-10 (pipelined passes):** logits byte-identical to the sequential
+loop's at all 656 positions on the all-q8 set in both prefill modes and on the
+q4_1 set. Same binary, stage-major on in both, `OFLM_OPEN_MOE_OVERLAP` 0 against 1,
+alternated, under the shared timing lock (a run another NPU or CPU user overlapped
+was discarded and repeated). The host work available to hide is small: at 1000
+tokens a layer takes 5 passes (4 of 256 slots, one of ~86), the gather totals
+about 0.18 s and the scatter 0.2 s of a 3.7 s expert stage, and only 4 of the 5
+passes can hide either. A pass repeated immediately after itself costs 18.9 ms
+against 19.7 ms for the first, so removing the gaps between passes does not
+recover the 12.4 ms the pass costs under `--bench`.
+
+| Prefill, CLI | sequential | pipelined | change |
+|---|---|---|---|
+| bf16, 1000 tokens (4 pairs, mean) | 5570 ms | 5442 ms | -2.3 % (3 of 4 pairs) |
+| q4_1, 1000 tokens (3 pairs, mean) | 5611 ms | 5734 ms | +2.2 %, a tie (median 5636 against 5582) |
+| bf16, 8000 tokens (2 pairs, mean) | 47.4 s | 44.5 s | -6.1 % (both pairs) |
+| bf16, 8000 tokens, expert stage only | 20.0 s | 17.7 s | -11.6 % |
+
+The gain grows with the prompt and is within noise at 1000 tokens. It costs the
+`#1` twins of `mb_x` and `mb_y` (24 MB for the 35B).
 
 **Acceptance criteria (unit):**
 - The up / gate band tap is sizes [8, 10240] strides [20480, 1] at `(8 e + 2 (b // 2)) STRIPE + (b % 2) BAND`, the down band tap two elements at `POOL_DOWN + e 655360 + (b // 2) 40960 + (b % 2) BAND`, derived from `stripe_transpose`, `std_perm` and `down_perm` themselves (`test_moe_batch.py`).

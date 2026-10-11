@@ -348,6 +348,7 @@ private:
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
     bool stage_major_on_ = true; ///< each GEMM step over every block, overlapping the host (OFLM_OPEN_STAGE_MAJOR=0 off)
+    bool moe_overlap_on_ = true; ///< the expert pass's gather and scatter under its dispatches (OFLM_OPEN_MOE_OVERLAP=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     int omp_threads_ = 0;        ///< OFLM_OPEN_OMP_THREADS, or 0 for the runtime's own count
     /// Put omp_threads_ in force for the CALLING thread: omp_set_num_threads sets a

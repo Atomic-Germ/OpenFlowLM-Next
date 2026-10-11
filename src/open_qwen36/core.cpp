@@ -15,6 +15,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 #include <omp.h>
@@ -312,6 +313,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_LAYER_MAJOR")) layer_major_on_ = std::string(env) != "0";
     if (const char* env = std::getenv("OFLM_OPEN_STAGE_MAJOR")) stage_major_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_MOE_OVERLAP")) moe_overlap_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     // Stage 2.5 Gate A: per-dxB-dispatch phase CSV (layer,pos,patch,prep,submit,wait,read).
     // Measurement only; off (and free) unless the env names a file.
@@ -667,10 +669,18 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             globals_[name] = alloc(bytes);
         }
     }
-    // a "#1" twin per GEMM x / y, so the host fills or reads one while the NPU uses the other
-    if (stage_major_on_)
+    // a "#1" twin per GEMM x / y and per expert-pass x / y, so the host fills or reads one while the NPU uses the other
+    if (stage_major_on_) {
+        std::set<std::string> moe_xy;
+        for (const auto& [tn, lt] : man_.layer_types)
+            if (lt.gemm_block.moe_batch.present()) {
+                moe_xy.insert(lt.gemm_block.moe_batch.args[1]);
+                moe_xy.insert(lt.gemm_block.moe_batch.args[3]);
+            }
         for (const auto& [name, bytes] : man_.globals)
-            if (name.rfind("gemm_x_k", 0) == 0 || name.rfind("gemm_y_n", 0) == 0) globals_[name + "#1"] = alloc(bytes);
+            if (name.rfind("gemm_x_k", 0) == 0 || name.rfind("gemm_y_n", 0) == 0 || moe_xy.count(name))
+                globals_[name + "#1"] = alloc(bytes);
+    }
     for (const auto& [name, rg] : man_.per_row_globals) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
         pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
@@ -3554,36 +3564,42 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
     std::vector<std::pair<uint32_t, size_t>> visits;             // (expert, first token of its NT)
     for (size_t e = 0; e < E; ++e)
         for (size_t off = 0; off < owed[e].size(); off += NT) visits.push_back({static_cast<uint32_t>(e), off});
-    xrt::bo& xb = buffer(mb.args[1], 0);
-    xrt::bo& yb = buffer(mb.args[3], 0);
-    std::vector<std::vector<std::pair<size_t, float>>> per_token(t_real);   // (slot * NT + column, weight)
-    static const bool log_passes = std::getenv("OFLM_OPEN_MOE_BATCH_LOG") != nullptr;
-    for (size_t done = 0; done < visits.size();) {
-        const size_t left = visits.size() - done;
-        size_t slots = 0;
+    struct Pass {
+        size_t done = 0, n = 0, slots = 0;
         const std::string* kname = nullptr;
+        std::vector<uint32_t> ex;
+        std::vector<std::vector<std::pair<size_t, float>>> per_token;   // (slot * NT + column, weight)
+    };
+    std::vector<Pass> passes;
+    for (size_t done = 0; done < visits.size();) {
+        Pass p;
+        p.done = done;
+        const size_t left = visits.size() - done;
         for (const auto& [s, k] : mb.kernels) {   // ascending: the shortest stream that holds them, else the longest
-            slots = s;
-            kname = &k;
+            p.slots = s;
+            p.kname = &k;
             if (s >= left) break;
         }
-        const size_t n = std::min(left, slots);
-        auto t0 = std::chrono::steady_clock::now();
-        uint16_t* xh = xb.map<uint16_t*>();
-        std::vector<uint32_t> ex(slots, 0);   // unused slots stream expert 0: a valid read, ignored
-        for (auto& v : per_token) v.clear();
-        for (size_t i = 0; i < n; ++i) {
+        p.n = std::min(left, p.slots);
+        p.ex.assign(p.slots, 0);   // unused slots stream expert 0: a valid read, ignored
+        p.per_token.resize(t_real);
+        for (size_t i = 0; i < p.n; ++i) {
             const auto& [e, off] = visits[done + i];
-            ex[i] = e;
+            p.ex[i] = e;
             for (size_t j = 0; j < std::min(NT, owed[e].size() - off); ++j)
-                per_token[owed[e][off + j].first].push_back({i * NT + j, owed[e][off + j].second});
+                p.per_token[owed[e][off + j].first].push_back({i * NT + j, owed[e][off + j].second});
         }
-        // x[slot] as the kernel's A tiles: [hid / 8][NT tokens][8 k] bf16, which is already the
-        // kernel's [k-block][NG sub-tiles][8 tokens][8 k] -- the sub-tile axis is the high bits
-        // of the token index (designs/moe_batch/layout.py)
+        done += p.n;
+        passes.push_back(std::move(p));
+    }
+    timing_.moe_prep_ms += ms_since(tp);
+    // x[slot] as the kernel's A tiles: [hid / 8][NT tokens][8 k] bf16, which is already the
+    // kernel's [k-block][NG sub-tiles][8 tokens][8 k] -- the sub-tile axis is the high bits
+    // of the token index (designs/moe_batch/layout.py)
+    auto gather = [&](const Pass& p, uint16_t* xh) {
 #pragma omp parallel for
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            const auto& [e, off] = visits[done + i];
+        for (long long i = 0; i < static_cast<long long>(p.n); ++i) {
+            const auto& [e, off] = visits[p.done + i];
             uint16_t* xs = xh + i * hid * NT;
             // A visit with fewer than NT tokens owed leaves the rest of its columns holding
             // the previous pass's activations. They are deliberately not cleared: the mmul's
@@ -3595,39 +3611,17 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
                     for (size_t kl = 0; kl < 8; ++kl) xs[(kb * NT + j) * 8 + kl] = f32_to_bf16(row[kb * 8 + kl]);
             }
         }
-        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, n * hid * NT * 2, 0);
-        timing_.moe_prep_ms += ms_since(t0);
-        auto t1 = std::chrono::steady_clock::now();
-        Kern& mk = kerns_.at(*kname);
-        stream_patch::moe2_apply(mk.iw(), mk.moe2, ex.data(), man_.moe);
-        mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-        timing_.moe_patch_ms += ms_since(t1);
-        const double run_ms = run(mk, mb.args, l);
-        timing_.moe_run_ms += run_ms;
-        // Why the same dispatch costs 17.4 ms here and 12.4 ms under `--bench`: run it a
-        // SECOND time, same stream, same buffers, no host work in between. If the repeat is
-        // the bench's figure then what the first one pays for is the host work before it; if
-        // both are 17.4 the hardware really is in a different state during a prefill.
-        if (moe_redispatch_) {
-            const double again = run(mk, mb.args, l);
-            std::fprintf(stderr, "open_qwen36: layer %d moe redispatch: %.3f then %.3f ms\n", l, run_ms, again);
-        }
-
-        if (log_passes)
-            std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, n, visits.size(),
-                         kname->c_str(), run_ms);
-        auto t2 = std::chrono::steady_clock::now();
-        read_back(yb, n * hid * NT * 4, 0);
-        const float* yh = yb.map<float*>();
-        // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][NG mmul
-        // sub-tiles][8 tokens][8]; row 64 band + 16 g + 2 jj + p, token 8 sub + tt. A column
-        // belongs to exactly one token, so the un-interleave is the scatter -- read the tiles
-        // straight into the token's row rather than staging 20 MB a layer and reading it back.
-        const size_t NG = NT / 8;                      // mmul sub-tiles a slot holds
+    };
+    // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][NG mmul
+    // sub-tiles][8 tokens][8]; row 64 band + 16 g + 2 jj + p, token 8 sub + tt. A column
+    // belongs to exactly one token, so the un-interleave is the scatter -- read the tiles
+    // straight into the token's row rather than staging 20 MB a layer and reading it back.
+    const size_t NG = NT / 8;                      // mmul sub-tiles a slot holds
+    auto scatter = [&](const Pass& p, const float* yh) {
 #pragma omp parallel for
         for (long long t = 0; t < static_cast<long long>(t_real); ++t) {
             float* o = out + t * hid;
-            for (const auto& [col, wt] : per_token[t]) {
+            for (const auto& [col, wt] : p.per_token[t]) {
                 const size_t tt = col % NT;
                 const float* base = yh + (col / NT) * hid * NT + (tt / 8) * 64 + (tt % 8) * 8;
                 for (size_t band = 0; band < hid / 64; ++band)
@@ -3642,8 +3636,87 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
                     }
             }
         }
+    };
+    auto patch = [&](const Pass& p) -> Kern& {
+        auto t1 = std::chrono::steady_clock::now();
+        Kern& mk = kerns_.at(*p.kname);
+        stream_patch::moe2_apply(mk.iw(), mk.moe2, p.ex.data(), man_.moe);
+        mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        timing_.moe_patch_ms += ms_since(t1);
+        return mk;
+    };
+    static const bool log_passes = std::getenv("OFLM_OPEN_MOE_BATCH_LOG") != nullptr;
+    const bool overlap = stage_major_on_ && moe_overlap_on_ && globals_.count(mb.args[1] + "#1") && globals_.count(mb.args[3] + "#1");
+    if (!overlap) {
+        xrt::bo& xb = buffer(mb.args[1], 0);
+        xrt::bo& yb = buffer(mb.args[3], 0);
+        for (const Pass& p : passes) {
+            auto t0 = std::chrono::steady_clock::now();
+            gather(p, xb.map<uint16_t*>());
+            xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, p.n * hid * NT * 2, 0);
+            timing_.moe_prep_ms += ms_since(t0);
+            Kern& mk = patch(p);
+            const double run_ms = run(mk, mb.args, l);
+            timing_.moe_run_ms += run_ms;
+            // Why the same dispatch costs 17.4 ms here and 12.4 ms under `--bench`: run it a
+            // SECOND time, same stream, same buffers, no host work in between. If the repeat is
+            // the bench's figure then what the first one pays for is the host work before it; if
+            // both are 17.4 the hardware really is in a different state during a prefill.
+            if (moe_redispatch_) {
+                const double again = run(mk, mb.args, l);
+                std::fprintf(stderr, "open_qwen36: layer %d moe redispatch: %.3f then %.3f ms\n", l, run_ms, again);
+            }
+            if (log_passes)
+                std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, p.n,
+                             visits.size(), p.kname->c_str(), run_ms);
+            auto t2 = std::chrono::steady_clock::now();
+            read_back(yb, p.n * hid * NT * 4, 0);
+            scatter(p, yb.map<float*>());
+            timing_.moe_read_ms += ms_since(t2);
+        }
+        timing_.route_ms += ms_since(tp);
+        return;
+    }
+    // gather pass i + 1 under pass i, scatter pass i under pass i + 1; one run in flight, so a stream is never patched while running
+    auto name_of = [&](const std::string& g, size_t i) { return (i & 1) ? g + "#1" : g; };
+    auto bo_of = [&](size_t gi, size_t i) -> xrt::bo& { return buffer(name_of(mb.args[gi], i), 0); };
+    auto stage = [&](size_t i) {
+        const Pass& p = passes[i];
+        auto t0 = std::chrono::steady_clock::now();
+        bo_of(1, i).sync(XCL_BO_SYNC_BO_TO_DEVICE, p.n * hid * NT * 2, 0);
+        timing_.moe_prep_ms += ms_since(t0);
+        Kern& mk = patch(p);
+        std::vector<std::string> args = mb.args;
+        args[1] = name_of(args[1], i);
+        args[3] = name_of(args[3], i);
+        return start_run(mk, args, l);
+    };
+    auto t0 = std::chrono::steady_clock::now();
+    gather(passes[0], bo_of(1, 0).map<uint16_t*>());
+    timing_.moe_prep_ms += ms_since(t0);
+    Inflight cur = stage(0);
+    for (size_t i = 0; i < passes.size(); ++i) {
+        const Pass& p = passes[i];
+        if (i + 1 < passes.size()) {
+            auto tg = std::chrono::steady_clock::now();
+            gather(passes[i + 1], bo_of(1, i + 1).map<uint16_t*>());
+            timing_.moe_prep_ms += ms_since(tg);
+        }
+        const double submit = cur.submit_ms;
+        const auto [elapsed, blocked] = wait_run(cur);
+        timing_.moe_run_ms += submit + blocked;   // blocked, not elapsed: the gather ran under the dispatch
+        if (dispatch_log_) dispatch_stats_[*p.kname].add(submit + elapsed);
+        if (log_passes)
+            std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, p.n,
+                         visits.size(), p.kname->c_str(), submit + elapsed);
+        auto t2 = std::chrono::steady_clock::now();
+        xrt::bo& yb = bo_of(3, i);
+        read_back(yb, p.n * hid * NT * 4, 0);
         timing_.moe_read_ms += ms_since(t2);
-        done += n;
+        if (i + 1 < passes.size()) cur = stage(i + 1);
+        auto t3 = std::chrono::steady_clock::now();
+        scatter(p, yb.map<float*>());
+        timing_.moe_read_ms += ms_since(t3);
     }
     timing_.route_ms += ms_since(tp);
 }
