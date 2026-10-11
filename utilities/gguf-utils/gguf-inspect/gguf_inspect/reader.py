@@ -73,37 +73,51 @@ def _locate_reader() -> Any:
     cached = _locate_reader.cache
     if cached is not None:
         return cached
-    # This file is utilities/gguf-utils/gguf-inspect/gguf_inspect/reader.py,
-    # so five parents up is the REPOSITORY root. Four stopped at utilities/, which
-    # made the first candidate utilities/third_party/... -- a path that exists in
-    # no checkout, so every inspection raised before the GGUF was even opened.
-    # Search upward for the first ancestor that actually carries third_party/,
-    # which keeps this correct for both the nested and the flat layout.
+
+    def _usable(mod) -> bool:
+        return getattr(mod, "GGUFReader", None) is not None
+
+    # 1. Already importable -- a plain `pip install gguf` (or
+    #    `pip install git+https://github.com/ggml-org/llama.cpp`, which is how CI
+    #    gets it, since the submodule is not checked out there). This is the
+    #    cheapest path and needs no path munging.
+    try:
+        import gguf as _installed  # type: ignore
+        if _usable(_installed):
+            _locate_reader.cache = _installed
+            return _installed
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. Vendored in-tree. This file is
+    # utilities/gguf-utils/gguf-inspect/gguf_inspect/reader.py, so five parents
+    # up is the REPOSITORY root. Four stopped at utilities/, which made the first
+    # candidate utilities/third_party/... -- a path that exists in no checkout,
+    # so every inspection raised before the GGUF was even opened. Search upward
+    # for the ancestors that could carry third_party/, covering both the nested
+    # and the flat layout.
     here = Path(__file__).resolve().parent
-    roots = list(here.parents)[:6]
-    candidates = []
-    for r in roots:
-        candidates.append(r / "third_party" / "Guanaco" / "llama.cpp" / "gguf-py")
+    candidates = [
+        r / "third_party" / "Guanaco" / "llama.cpp" / "gguf-py"
+        for r in list(here.parents)[:6]
+    ]
     candidates.append(Path("/tmp/opencode/guanaco-llama-clean/gguf-py"))
-    loaded = None
     for cand in candidates:
-        if cand.is_dir():
-            sys.path.insert(0, str(cand))
-            try:
-                import gguf  # type: ignore
-                if getattr(gguf, "GGUFReader", None) is None:
-                    continue
-                loaded = gguf
-                break
-            except Exception:  # noqa: BLE001
-                continue
-    if loaded is None:
-        raise GgufReaderError(
-            "could not locate the vendored GGUF reader under "
-            "third_party/Guanaco/llama.cpp/gguf-py"
-        )
-    _locate_reader.cache = loaded
-    return loaded
+        if not cand.is_dir():
+            continue
+        sys.path.insert(0, str(cand))
+        try:
+            import gguf  # type: ignore
+            if _usable(gguf):
+                _locate_reader.cache = gguf
+                return gguf
+        except Exception:  # noqa: BLE001
+            continue
+    raise GgufReaderError(
+        "could not locate the GGUF reader: neither an importable `gguf` "
+        "(pip install git+https://github.com/ggml-org/llama.cpp) nor "
+        "third_party/Guanaco/llama.cpp/gguf-py"
+    )
 
 
 _locate_reader.cache: Any = None

@@ -35,10 +35,17 @@ python3 utilities/gguf-utils/gguf-inspect/gguf-inspect path/to/file.gguf --only 
 
 ## How it works
 
-It reads the pinned GGUF python reader vendored under
-`third_party/Guanaco/llama.cpp/gguf-py`. The reader is located relative to this
-file, so the tool never depends on a `../llama.cpp` checkout being present. Only
-the header and tensor inventory are read; payloads are never touched and the NPU
+It needs the GGUF python reader, and takes the first one it finds:
+
+1. an importable `gguf` — install it with
+   `pip install git+https://github.com/ggml-org/llama.cpp` (this is what CI
+   does; note that this pulls in transformers/tokenizers/protobuf and will
+   downgrade them, so prefer a dedicated venv over the project's `ironvenv`);
+2. a copy vendored at `third_party/Guanaco/llama.cpp/gguf-py`, searched for by
+   walking up from this file, so the tool works in either the nested or the flat
+   layout and never depends on a `../llama.cpp` checkout being present.
+
+Only the header and tensor inventory are read; payloads are never touched and the NPU
 is never opened.
 
 ## Tests
@@ -53,3 +60,8 @@ Hugging Face cache (`HF_HUB_CACHE` / `HF_HOME/hub` / `~/.cache/huggingface/hub`)
 at its pinned revision, and can be pointed elsewhere with `GGUF_TEST_QWEN`,
 `GGUF_TEST_MMPROJ` and `GGUF_TEST_LLAMA`. Tests whose model is unavailable skip,
 so the suite is green on CI where no model is cached.
+
+The suite also runs a `PureLogicTests` group that needs no model at all: it writes
+a minimal synthetic GGUF and checks the dtype allowlist, the candidate-tag
+derivation and the source/snapshot split. Those run everywhere, CI included, and
+are what keeps the metadata logic covered without a multi-gigabyte download.
