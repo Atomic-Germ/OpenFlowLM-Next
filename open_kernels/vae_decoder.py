@@ -72,6 +72,11 @@ def attention_weights(sd: dict, prefix: str, rank: int = RANK) -> np.ndarray:
     Wv, bv, Wo, bo = g("to_v.weight"), g("to_v.bias"), g("to_out.0.weight"), g("to_out.0.bias")
     Ma = np.concatenate([Wq.T @ Wk, (bq @ Wk)[None]], 0)          # [513, 512]
     P, s, Qt = np.linalg.svd(Ma, full_matrices=False)
+    # Each singular pair's sign is LAPACK's choice and changes between numpy builds; the
+    # product doesn't, but bfp16's int8 mantissa is not sign-symmetric (-128 exists, +128
+    # does not), so a flip moves pixels. Fix it: each k' column's largest entry positive.
+    sign = np.sign(Qt[np.arange(len(s)), np.abs(Qt).argmax(1)])
+    P, Qt = P * sign, Qt * sign[:, None]
     U = P[:, :rank] * np.sqrt(s[:rank]) * 0.5                       # q' = [x, 1] U
     V = Qt[:rank].T * np.sqrt(s[:rank])                             # k' = x V
     B = np.zeros((QIN_W, QKV_N))

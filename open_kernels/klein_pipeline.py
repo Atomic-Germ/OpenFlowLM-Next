@@ -18,14 +18,27 @@ patches one runtime parameter and reads the RGBA back):
               9/18/27) are written by a second res+RMSNorm pass (te_tap<k>) whose residual
               output goes to CTX [512, 8192] at column 2560 k instead of XT -- the 512 zero
               padding columns land in the next tap's slot (overwritten) or past 7680
+    encode    an edit only: vae_encoder.plan(R), the reference in e_IN -> REFLAT, its packed
+              and normalised tokens [T, 128]
     step s    x_emb (latents -> X image rows), ctx_emb (CTX -> X text rows), the first
               LayerNorm+modulate, 5 double blocks, 20 single blocks (the last one's residual
               op applies norm_out), proj_out -> V, euler LAT += dt_s V
     vae       vae_decoder.plan(R), reading LAT
 
+An edit (plan(R, edit=True), configuration "<R>e<R>"; specs/open-diffusion/plans/edits.md)
+is klein's [text | generated | reference] sequence: the reference's T tokens follow the
+generated ones in X, run through every block as image rows with the generated tokens'
+modulation (the double blocks' "img" part is 2T rows), and are never read back -- proj_out
+and euler touch the generated rows only. Each step's x_emb writes the reference rows from
+REFLAT again: the blocks overwrite them, so the result can't be kept from the last step.
+dit_ew's qk op rotates an image token k >= T as reference token k - T (t = 10). Streams
+whose shape depends on the sequence are named r<config>_ (r512e512_attn_sgl); the rest
+are the resolution's.
+
 Host inputs per image: XT (the 512 prompt tokens' embedding rows), LAT (the seeded noise),
-te_attn's valid_len. Per resolution: TF (the steps' sinusoidal timestep features) and DT
-(the Euler dt's). Everything else is written once at load.
+te_attn's valid_len; an edit's e_IN (the reference as bf16 2 (x / 255) - 1, channels 0-2).
+Per resolution: TF (the steps' sinusoidal timestep features) and DT (the Euler dt's).
+Everything else is written once at load.
 """
 
 from __future__ import annotations
@@ -99,6 +112,32 @@ def check_resolution(R: int) -> str | None:
     if image_tokens(R) % 512:
         return f"{R}: (R/16)^2 = {image_tokens(R)} image tokens is not a multiple of 512"
     return None
+
+
+def check_edit(R: int, R_ref: int) -> str | None:
+    """None if an edit of an R x R output from one R_ref x R_ref reference is supported: the
+    reference is the output's size (dit_ew's qk op takes reference tokens as the image
+    tokens past grid_w^2, on the same grid) and R is a supported resolution."""
+    if R != R_ref:
+        return (f"{R} from a {R_ref} reference: edits need the reference at the output's size "
+                f"(R x R from R x R)")
+    return check_resolution(R)
+
+
+def config_key(R: int, edit: bool = False) -> str:
+    """A configuration's name (its ELF, its streams' prefix): "512", or "512e512" for an
+    edit of a 512 x 512 output from a 512 x 512 reference."""
+    return f"{R}e{R}" if edit else str(R)
+
+
+def parse_config(key: str) -> tuple[int, bool]:
+    """config_key's inverse: (R, edit)."""
+    if "e" in key:
+        r, ref = key.split("e")
+        why = check_edit(int(r), int(ref))
+        assert why is None, why
+        return int(r), True
+    return int(key), False
 
 
 # ---------------------------------------------------------------------------- host setup
@@ -340,6 +379,13 @@ class Plan:
     ops: list[dict] = field(default_factory=list)
     params: dict[str, tuple[int, int]] = field(default_factory=dict)
     vae: object = None                                          # vae_decoder.Plan
+    edit: bool = False
+    enc: object = None                                          # vae_encoder.Plan (edits)
+    enc_buffers: dict[str, str] = field(default_factory=dict)   # encoder buffer -> ours
+
+    @property
+    def key(self) -> str:
+        return config_key(self.R, self.edit)
 
 
 def vae_buffer(name: str) -> str:
@@ -347,7 +393,29 @@ def vae_buffer(name: str) -> str:
     return "LAT" if name == "LAT" else f"v_{name}"
 
 
-def plan(R: int, steps: int = STEPS) -> Plan:
+def encoder_buffers(vp, ep) -> dict[str, str]:
+    """The pipeline's name for each vae_encoder buffer: REF is REFLAT; a buffer the same
+    shape as a decoder buffer is that buffer (the encoder runs before the steps and the
+    decoder after them, each writing every buffer before reading it, borders aside, which
+    both keep zero) -- that includes the attention's QIN with its constant ones column;
+    the rest are e_<name>."""
+    out, used = {}, set()
+    for n, b in ep.buffers.items():
+        if n == "REF":
+            out[n] = "REFLAT"
+            continue
+        if n not in ("IN", "ZERO"):
+            twin = next((d for d, db in vp.buffers.items()
+                         if d != "LAT" and d not in used and db == b), None)
+            if twin is not None:
+                used.add(twin)
+                out[n] = vae_buffer(twin)
+                continue
+        out[n] = f"e_{n}"
+    return out
+
+
+def plan(R: int, steps: int = STEPS, edit: bool = False) -> Plan:
     why = check_resolution(R)
     assert why is None, why
     import sys
@@ -355,9 +423,11 @@ def plan(R: int, steps: int = STEPS) -> Plan:
     import vae_decoder as vd
 
     T_img = image_tokens(R)
-    T = T_img + L_TXT
+    T_ref = T_img if edit else 0
+    T = T_img + T_ref + L_TXT
     Tp = 24 * euler_elems(T_img)
-    pl = Plan(R, steps)
+    pl = Plan(R, steps, edit=edit)
+    key = pl.key
     B = pl.buffers
     for n, nb in {
         "XT": L_TXT * TE_PAD, "ZT": L_TXT * TE_PAD, "QT": L_TXT * (TE_Q + 2 * TE_KV),
@@ -372,6 +442,14 @@ def plan(R: int, steps: int = STEPS) -> Plan:
     for n, b in vp.buffers.items():
         B[vae_buffer(n)] = b.nelems * 2
     B["LAT"] = max(B["LAT"], (Tp * LAT_CH + 512) * 2)
+    if edit:
+        import vae_encoder as ve
+        pl.enc = ep = ve.plan(R)
+        pl.enc_buffers = encoder_buffers(vp, ep)
+        for n, b in ep.buffers.items():
+            mine = pl.enc_buffers[n]
+            B[mine] = max(B.get(mine, 0), b.nelems * 2)
+        B["REFLAT"] = max(B["REFLAT"], (T_ref * LAT_CH + 512) * 2)   # x_emb's K = 512 reads
     pl.params, B["PARAMS"] = param_table()
 
     ops = pl.ops
@@ -433,18 +511,33 @@ def plan(R: int, steps: int = STEPS) -> Plan:
         if l + 1 < TE_LAYERS:
             ew("te_res_rms", XT, AT, par(f"te{l + 1}_in"), ZT, XT, f"te{l} residual + next norm")
 
+    # -- an edit's reference: the VAE encoder
+    if edit:
+        phase[0] = "encode"
+        for o in pl.enc.ops:
+            args = []
+            for kind, k in o["args"]:
+                args.append(whole(pl.enc_buffers[k]) if kind == "buf" else (f"venc_{kind}", k))
+            op(o["set"], o["stream"], args, o["what"])
+
     # -- denoising steps
-    parts = {"txt": (0, L_TXT), "img": (L_TXT, T_img)}
+    parts = {"txt": (0, L_TXT), "img": (L_TXT, T_img + T_ref)}
 
     def gs(part, name):
-        return f"{'txt' if part == 'txt' else f'r{R}_img'}_{name}"
+        return f"{'txt' if part == 'txt' else f'r{key}_img'}_{name}"
+
+    def es(part, name):                     # dit_ew streams: the text part's are per R
+        return f"r{R if part == 'txt' else key}_{name}_{part}"
 
     for s in range(steps):
         phase[0] = f"step{s}"
         gemm(f"r{R}_x_emb", whole("LAT"), "x_emb", rows("X", H, L_TXT, T_img))
+        if edit:
+            gemm(f"r{R}_x_emb", whole("REFLAT"), "x_emb", rows("X", H, L_TXT + T_img, T_ref),
+                 "x_emb (reference)")
         gemm("ctx_emb", whole("CTX"), "ctx_emb", rows("X", H, 0, L_TXT))
         for part, (r0, n) in parts.items():
-            ew(f"r{R}_ln_{part}", rows("X", H, r0, n), None, mod(s, f"ln_{part}"),
+            ew(es(part, "ln"), rows("X", H, r0, n), None, mod(s, f"ln_{part}"),
                rows("Zn", H, r0, n), None, f"ln {part}")
         for b in range(N_DBL):
             last = b == N_DBL - 1
@@ -453,13 +546,13 @@ def plan(R: int, steps: int = STEPS) -> Plan:
                      rows("QKV", 3 * H, r0, n))
             for part, (r0, n) in parts.items():
                 q = rows("QKV", 3 * H, r0, n)
-                ew(f"r{R}_qk_{part}", q, q, par(f"qk_dbl{b}_{part}"), q, q, f"dbl{b} qk {part}")
-            op("fa", f"r{R}_attn_dbl", [whole("QKV")] * 3 + [whole("O")], f"dbl{b} attention")
+                ew(es(part, "qk"), q, q, par(f"qk_dbl{b}_{part}"), q, q, f"dbl{b} qk {part}")
+            op("fa", f"r{key}_attn_dbl", [whole("QKV")] * 3 + [whole("O")], f"dbl{b} attention")
             for part, (r0, n) in parts.items():
                 gemm(gs(part, "out"), rows("O", H, r0, n), f"dbl{b}.{part}_out", rows("AO", H, r0, n))
             for part, (r0, n) in parts.items():
                 x = rows("X", H, r0, n)
-                ew(f"r{R}_res_{part}", x, rows("AO", H, r0, n), mod(s, f"res1_{part}"),
+                ew(es(part, "res"), x, rows("AO", H, r0, n), mod(s, f"res1_{part}"),
                    rows("Zn", H, r0, n), x, f"dbl{b} res1 {part}")
             for part, (r0, n) in parts.items():
                 gemm(gs(part, "ffin"), rows("Zn", H, r0, n), f"dbl{b}.{part}_ffin",
@@ -469,16 +562,16 @@ def plan(R: int, steps: int = STEPS) -> Plan:
                      rows("AO", H, r0, n))
             for part, (r0, n) in parts.items():
                 x = rows("X", H, r0, n)
-                ew(f"r{R}_res_{part}", x, rows("AO", H, r0, n),
+                ew(es(part, "res"), x, rows("AO", H, r0, n),
                    mod(s, f"res2l_{part}" if last else f"res2_{part}"), rows("Zn", H, r0, n), x,
                    f"dbl{b} res2 {part}")
         for j in range(N_SGL):
-            gemm(f"r{R}_sgl_in", whole("Zn"), f"sgl{j}.in", whole("FU"))
-            ew(f"r{R}_qk_sgl", whole("FU"), whole("FU"), par(f"qk_sgl{j}"), whole("FU"),
+            gemm(f"r{key}_sgl_in", whole("Zn"), f"sgl{j}.in", whole("FU"))
+            ew(f"r{key}_qk_sgl", whole("FU"), whole("FU"), par(f"qk_sgl{j}"), whole("FU"),
                whole("FU"), f"sgl{j} qk")
-            op("fa", f"r{R}_attn_sgl", [whole("FU")] * 4, f"sgl{j} attention")
-            gemm(f"r{R}_sgl_out", whole("FU"), f"sgl{j}.out", whole("AO"))
-            ew(f"r{R}_res_all", whole("X"), whole("AO"),
+            op("fa", f"r{key}_attn_sgl", [whole("FU")] * 4, f"sgl{j} attention")
+            gemm(f"r{key}_sgl_out", whole("FU"), f"sgl{j}.out", whole("AO"))
+            ew(f"r{key}_res_all", whole("X"), whole("AO"),
                mod(s, "sgl_last" if j == N_SGL - 1 else "sgl"), whole("Zn"), whole("X"),
                f"sgl{j} res" + (" + norm_out" if j == N_SGL - 1 else ""))
         gemm(f"r{R}_proj_out", rows("Zn", H, L_TXT, T_img), "proj_out", rows("V", 1024, 0, T_img))
@@ -531,13 +624,13 @@ def ew_streams(resolutions: list[int]) -> dict[str, dict]:
 
 if __name__ == "__main__":
     import sys
-    for R in [int(r) for r in (sys.argv[1:] or ["512", "1024"])]:
-        pl = plan(R)
+    for key in sys.argv[1:] or ["512", "1024", "512e512", "1024e1024"]:
+        pl = plan(*parse_config(key)[:1], edit=parse_config(key)[1])
         by = {}
         for o in pl.ops:
             by.setdefault(o["phase"], []).append(o)
         gb = sum(pl.buffers.values()) / 2 ** 30
-        print(f"{R}: {len(pl.ops)} dispatches, activations {gb:.2f} GiB")
+        print(f"{key}: {len(pl.ops)} dispatches, activations {gb:.2f} GiB")
         for ph, ops in by.items():
             sw = sum(1 for a, b in zip(ops, ops[1:]) if a["set"] != b["set"])
             print(f"   {ph:6s} {len(ops):4d} dispatches, {sw:3d} kernel-set switches")

@@ -194,7 +194,9 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
                // shares handle_embeddings with /v1/embeddings. Left off this list they
                // ran beside a queued request on the shared engine (#135).
                path == "/v1/completions" ||
-               path == "/api/embeddings";
+               path == "/api/embeddings" ||
+               path == "/v1/images/generations" ||
+               path == "/v1/images/edits";
     }
     return false;
 }
@@ -1098,7 +1100,7 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
             std::function<void(const json&, bool)> send_streaming_response,
             std::shared_ptr<HttpSession> session,
             std::shared_ptr<CancellationToken> cancellation_token) {
-                std::map<std::string, MultipartPart> parts = parse_multipart(req);
+                std::multimap<std::string, MultipartPart> parts = parse_multipart(req);
                 json request_json = json::object();
                 // Only the parts that are actually there. `parts["file"]` would
                 // default-construct an empty one, which then reads as a present
@@ -1109,6 +1111,52 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
                     if (it != parts.end()) request_json[field] = it->second.content;
                 }
                 rest_handler->handle_openai_audio_transcriptions(request_json, send_response, send_streaming_response, cancellation_token);
+        });
+
+    // SERVER-IMAGES-*: the OpenAI Images API over the open diffusion engine
+    server->register_handler("POST", "/v1/images/generations",
+        [rest_handler](const http::request<http::string_body>& req,
+            std::function<void(const json&)> send_response,
+            std::function<void(const json&, bool)> send_streaming_response,
+            std::shared_ptr<HttpSession> session,
+            std::shared_ptr<CancellationToken> cancellation_token) {
+                json request_json;
+                if (!req.body().empty()) {
+                    request_json = json::parse(req.body());
+                }
+                rest_handler->handle_openai_images_generations(request_json, send_response, send_streaming_response, cancellation_token);
+        });
+
+    server->register_handler("POST", "/v1/images/edits",
+        [rest_handler](const http::request<http::string_body>& req,
+            std::function<void(const json&)> send_response,
+            std::function<void(const json&, bool)> send_streaming_response,
+            std::shared_ptr<HttpSession> session,
+            std::shared_ptr<CancellationToken> cancellation_token) {
+                std::multimap<std::string, MultipartPart> parts;
+                try {
+                    parts = parse_multipart(req);
+                }
+                catch (const std::exception& e) {
+                    send_response(openai_compat::invalid_param("", std::string("the body must be "
+                        "multipart/form-data: ") + e.what()));
+                    return;
+                }
+                // the file parts are the images and the mask; every other part is a text field
+                std::vector<std::pair<std::string, std::string>> fields;
+                std::vector<ImageUpload> uploads;
+                for (auto& [name, part] : parts) {   // moved out: the bodies can be hundreds of MB
+                    if (name == "image" || name == "image[]" || name == "mask") {
+                        const size_t bytes = part.content.size();
+                        uploads.push_back(ImageUpload{name, std::move(part.filename), std::move(part.content_type),
+                                                      bytes, std::move(part.content)});
+                    } else {
+                        fields.emplace_back(name, std::move(part.content));
+                    }
+                }
+                rest_handler->handle_openai_images_edits(openai_compat::images_form_json(fields), uploads,
+                                                         cancellation_token, send_response,
+                                                         send_streaming_response);
         });
 
     server->register_handler("POST", "/v1/completions",
