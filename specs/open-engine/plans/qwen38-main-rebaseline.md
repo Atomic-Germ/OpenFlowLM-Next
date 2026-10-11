@@ -10,6 +10,8 @@ Full corrected-model acceptance remains **FAIL**: seven second-token residuals
 exceed 0.005, despite passing logits, runtime identity and reset checks.
 Independent FFN-front validation additionally finds one local activation failure
 at layer 11 / position 0, explained largely by BF16 norm-input rounding.
+An isolated FP32 norm-to-up/gate probe now fixes that local error; production
+integration and corrected full-chain acceptance are still pending.
 
 ## Stage 1: complete decode comparison
 
@@ -494,17 +496,65 @@ norm input through up/gate preparation, then rerun local and full-chain gates.
 The complete corrected export remains unaccepted. Separate up/gate captures,
 independent state/head checks, prefill and serving are still open.
 
+## Stage 5c5a: isolated FP32 norm-to-up/gate correction
+
+Added an experimental two-core design in `utilities/ffn-front-replay/`. It uses
+the existing FP32 RMSNorm helper (`ln_nr32`), the real production Q4 pools and
+the existing GEMV/SiLU arithmetic. A control build uses legacy BF16-rounded
+input preparation; the candidate uses direct FP32-to-INT16 preparation. It
+captures **up, gate and h separately**, allowing independent projection gates.
+The production layer layout, kernel export and arithmetic were not changed.
+
+Both builds ran all three retained pre-FFN residual inputs for layer 11 on the
+NPU. The input and FP32 norm buffers match bytewise between the builds. The
+control h also matches the original full-layer capture bytewise at all three
+positions, reproducing the primary T0 FAIL **0.0071636206**. The corrected T0
+error is **0.0001517240**, with the same unrounded FP64 reference and 0.005 bound.
+
+| Corrected boundary | Worst maxrel across 3 positions |
+|---|---:|
+| Norm | 0.0000063849 |
+| Up projection | 0.0000937135 |
+| Gate projection | 0.0000796810 |
+| Combined activation h | 0.0001517240 |
+
+All independent gates pass in the corrected probe. Program .text is 6304 bytes
+on the GEMV core and 2944 on the norm helper, both below 16384. Those small
+probe cores do not establish that the full lx/ax images will fit after integration.
+The experiment streams one layer's weights and needs no resident full NPU model.
+
+The preparation/scoring tool pins the kernel, run configuration, model, pool,
+source capture and input hashes; it rejects missing hash coverage or changed
+inputs. Output sizes and finite values are checked. It invalidates a stale score
+before validation and reports nonzero for a failed numerical gate. Model hashing
+streams the weight file. Output bands contain up[64], gate[64], h[64], not three
+contiguous whole vectors.
+
+TDD: **9 new tests**, including projection errors hidden by the product, mixed
+band decoding, non-finite outputs, missing/changed input hashes and stale-score
+invalidation. The hardware control fails and corrected probe passes. Full suite:
+**963 passed, 47 skipped**. No new full-model hardware result is claimed.
+
+Reproduction is in the new
+[FP32 front replay skill](../../../.opencode/skill/open-qwen35-fp32-front-replay/SKILL.md).
+Evidence: ignored `Models/qwen38-27b/ffn-front-replay/` with `results.json`,
+build/hardware logs, hashes, core sizes and separate FAIL/PASS score files.
+Next is production integration: widen the norm-to-up/gate stream, handle the
+buffer/manifest ABI explicitly, verify complete lx/ax program memory, then run
+local and full-chain regression. The seven full-chain residual failures and
+independent state/head, prefill and serving gates remain open.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 954 passed, 47 skipped |
+| `specs/open-engine/tests` | 963 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 5c4; native C++ build/CTest are from
+The open-engine suite was rerun for stage 5c5a; native C++ build/CTest are from
 stage 5c3, with no host code change in this stage.
 Hardware results retain their explicitly stated full-model or isolated-replay
 scope; the latest full-chain residual gate fails as recorded above.
