@@ -197,3 +197,26 @@ propagated captures at all layers. The
 [corrected production decode skill](../../.opencode/skill/open-qwen38-fp32-production/SKILL.md)
 documents export provenance, memory requirements, runtime identity and all-layer
 partial checks. Isolated replay alone does not establish full-model propagation.
+
+### Qwen3.5 norm and combined up/gate validation
+
+```bash
+OPENBLAS_NUM_THREADS=1 python open_kernels/model/ffn_front.py \
+  --model-dir MODEL_DIR --kernel-dir KERNEL_DIR --out FIXTURE_DIR --layers 0,3
+```
+
+This reads the captured FP32 pre-FFN residual, BF16 `xm` and FP32 `h`. Its
+primary FP64 reference recomputes RMSNorm from the residual and stored effective
+norm weights, then computes `SiLU(Wgate @ norm) * (Wup @ norm)` without a BF16
+rounding step. Norm and combined activation each require maxrel <0.005.
+A separate comparison conditions the combined activation on captured `xm` to
+help distinguish norm/input rounding from subsequent projection/SiLU error;
+its success cannot override the primary gate. BF16-rounded norm/activation
+comparisons and the predicted rounding effect are diagnostic only. Each matrix pair is released before loading the next layer.
+
+The kernels do not retain separate up/gate outputs, so this does not independently
+validate those two projections: compensating errors can hide in their product.
+It also does not establish attention/state accuracy or full-model acceptance.
+The checker requires compatible export/fixture identities, exact capture sizes,
+finite inputs, and every position for the selected distinct covered layers.
+JSON includes scope, metrics and capture hashes; failures return nonzero.
