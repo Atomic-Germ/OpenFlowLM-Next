@@ -5,8 +5,9 @@ offline converter command for existing model metadata, and builds the current
 Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
 strict CPU-reference comparison, as do three tokens at all 64 layers.
 The split FFN now prepares its integer activation table directly from FP32.
-Stage 5c2 validates this correction with isolated layer replays; full corrected
-model propagation is still a separate acceptance gate.
+The correction passes isolated replay and all propagated FFN down checks.
+Full corrected-model acceptance remains **FAIL**: seven second-token residuals
+exceed 0.005, despite passing logits, runtime identity and reset checks.
 
 ## Stage 1: complete decode comparison
 
@@ -384,6 +385,65 @@ Artifacts and logs are retained under ignored `Models/qwen38-27b/ffn-replay/`.
 The production export remains intact; corrected full-model logits, independent
 up/gate/norm, state/head accuracy, prefill and serving acceptance remain open.
 
+## Stage 5c3: complete corrected export and propagation regression
+
+A clean build from `c718cbe` produced all **41 kernel sets / 82 verified binary
+hashes** in `Models/qwen38-27b/production-fp32-kernels`. The source build key is
+`sha256:e9cf679f2870b23c689ab09ab3820713a6345d6dfe62defadabaf63a5d069e39`;
+the model-derived spec and weight packing are unchanged. Every retained core
+fits program memory: maxima lx 15584, ax 14400, ln 3424, LM head 2432,
+attention products 1984 and GEMM 4784 bytes (<16384). Old build folders with
+unwritable container-owned project files were preserved before rebuilding.
+The prior verified export was preserved. No model reconversion was needed.
+
+The CPU fixture was regenerated against the new export. All 195 reference
+capture hashes match the existing CPU reference; its build identity is new.
+The unchanged model hash and 65 reused pool hashes are recorded. Native harness
+and runtime were rebuilt, CTest passed 3/3, the config/manifest parser passed,
+and the open-engine suite passed **914 tests, 47 skipped**.
+
+On the NPU, the complete 64-layer / three-position chain executed 198 dispatches.
+These are propagated corrected outputs, not isolated historical layer inputs.
+The strict comparator correctly reports **FAIL** without changing its bounds:
+
+| Position | Logit correlation | Argmax NPU / CPU | Residual failures |
+|---|---:|---|---|
+| 0 | 0.9999977820 | 8678 / 8678 | None |
+| 1 | 0.9999932894 | 198 / 198 | Layers 55, 56, 57, 58, 59, 61, 63 |
+| 2 | 0.9999972692 | 2 / 2 | None |
+
+All 192 residuals were checked; 185 pass. Worst maxrel is **0.0083300389**
+at layer 63 / position 1 against the unchanged **0.005** bound. Passing logits
+and equal generated tokens do not override those residual failures.
+
+The independent FP64 down checker passes all **192** propagated layer/position
+pairs at all four boundaries. Worst maxrel:
+
+| Boundary | Error | Layer / position |
+|---|---:|---|
+| Partial 0 | 0.0002570118 | 45 / 1 |
+| Partial 1 | 0.0002904925 | 43 / 1 |
+| Sum | 0.0002560792 | 41 / 2 |
+| Closing residual | 0.0001103267 | 63 / 1 |
+
+This establishes local down-projection accuracy from captured FP32 `h`, including
+where the full residual fails. It does not establish up/gate/norm or
+attention/state accuracy, nor identify which of those causes the accumulated
+error. Further independent checks must localize it before another correction.
+Runtime/harness logits are byte-identical at all three positions. A second
+request reproduced IDs, and full-buffer reset replay reported 0/3 differing runs.
+These repeatability checks do not prove independent CPU state accuracy.
+
+The new export is marked `VALIDATION_FAILED.txt` and is **not promoted** as
+numerically accepted. Evidence lives in
+`Models/qwen38-27b/production-fp32-multitoken/`: `results.json`,
+`build-audit.json`, `input-sha256.json`, `ffn-partials.json` and `logs/`.
+The new [corrected production decode skill](../../../.opencode/skill/open-qwen38-fp32-production/SKILL.md)
+documents reproduction. The power-mode request failed; no throughput claim.
+Next: localize the full-chain error with independent up/gate/norm and
+attention/state checks, then rerun the unchanged acceptance gates. Prefill,
+serving and final resource acceptance remain open.
+
 ## Validation
 
 | Check | Result |
@@ -394,9 +454,9 @@ up/gate/norm, state/head accuracy, prefill and serving acceptance remain open.
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 5c2. C++ build/CTest results are from
-stage 5c1; host runtime code has not changed in this correction. Hardware results
-retain their explicitly stated full-model or isolated-replay scope.
+The open-engine suite and native C++ build/CTest were rerun for stage 5c3.
+Hardware results retain their explicitly stated full-model or isolated-replay
+scope; the latest full-chain residual gate fails as recorded above.
 Weights were not reconverted. Skipped tests and successful compilation do not
 extend the explicit hardware coverage above.
 

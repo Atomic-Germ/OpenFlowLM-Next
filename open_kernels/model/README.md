@@ -190,3 +190,10 @@ layers serially with experimental lx/ax builds. Both retain the independent
 FP64 comparison from captured FP32 `h`. Build and replay commands, including
 mandatory regeneration of kernel translation units, are documented in
 [the FP32 down replay skill](../../.opencode/skill/open-qwen35-fp32-down-replay/SKILL.md).
+
+For full-model propagation after this correction, build a separate complete
+export, regenerate the CPU fixture with `--kernel-dir`, and score the new
+propagated captures at all layers. The
+[corrected production decode skill](../../.opencode/skill/open-qwen38-fp32-production/SKILL.md)
+documents export provenance, memory requirements, runtime identity and all-layer
+partial checks. Isolated replay alone does not establish full-model propagation.
