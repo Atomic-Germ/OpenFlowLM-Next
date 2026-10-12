@@ -1,6 +1,6 @@
 # Qwen3.8-27B validation report
 
-Updated 2026-10-12. This branch adds strict decode/source validation, FP32
+Updated 2026-10-13. This branch adds strict decode/source validation, FP32
 split-FFN input preparation, and integrated paired-BF16 KV with FP32 gated
 attention/output-projection preparation. The new complete export passes all
 **1152 independent attention-head checks** at 64 layers × three positions;
@@ -873,3 +873,58 @@ Worst normalized norm/front errors are **0.0000164919 / 0.0005658096**.
 Down partial0/partial1/sum/closing-residual maxima are **0.0002353918 /
 0.0001898039 / 0.0001780994 / 0.0000365645**. These conditional local gates do
 not establish independent projection or recurrent-state correctness.
+
+## Stage 5c8: attention entry, projection and sublayer gates
+
+Added `open_kernels/model/attention_projections.py`. The checker covers all
+16 full-attention layers × three positions using retained incoming residuals.
+It recomputes FP64 entry RMSNorm and Q/gate/K/V projections without substituting
+captured BF16 norm. Captured-norm and ideal-rounded-norm comparisons remain
+separate diagnostics. Output projection and residual addition are checked
+against captured gated attention. A separate sublayer reference recomputes
+unrounded projections, Q/K norm, RoPE, causal KV history, softmax, gating and
+output projection across every position.
+
+All primary normalized maximum errors must be <0.005; zero references require
+exact zero. The checker rejects non-finite/malformed captures, stale export
+identity, incomplete requested coverage, and the unsplit norm path whose closing
+operation overwrites the entry capture. It records 96 capture/input hashes and
+112 effective-weight hashes. These are conditional checks on incoming residuals;
+they do not validate independent model state or source-tensor conversion.
+
+Results on the unchanged paired-attention export:
+
+| Boundary | Passing cases | Worst normalized max error |
+|---|---:|---:|
+| Entry norm/Q/gate/K/V (all required per case) | 48/48 | Q 0.0045171202 |
+| Output projection from captured gated attention | 48/48 | 0.0002811151 |
+| Residual addition from captured output | 48/48 | 0.0000000726 |
+| Full attention branch output from unrounded entry reference | **38/48** | **0.0236300737** |
+| Post-attention residual from that sublayer reference | 48/48 | 0.0023039741 |
+
+The ten branch-output failures are L11/T1, L15/T1, L23/T1, L23/T2, L27/T1,
+L35/T1, L39/T1, L47/T1, L55/T0 and L59/T0. Worst is L23/T1: absolute error
+0.0191318717 on reference output magnitude 0.8096407976. Scoring only the
+larger residual would hide these failures. The checker returns **exit 1**.
+
+Entry norm/Q/gate/K/V maxima are 0.0030703652 / 0.0045171202 / 0.0026948500 /
+0.0036089342 / 0.0029681746. With captured norm, Q/gate/K/V errors fall to
+0.0002698095 / 0.0003015196 / 0.0003423122 / 0.0004635156. Together with the
+passing head and output-projection gates, this identifies entry precision and
+its amplification through attention as the next controlled experiment. It does
+**not** prove that BF16 norm alone causes the three full-chain failures.
+
+TDD: initial import failure; the composed gate then added two failing regressions
+before implementation. **33 new tests** cover independent references,
+cancellation hidden by rounded inputs, causal input history, separate output/
+addition gates, capture integrity, provenance, coverage and CLI failure status.
+Full suite: **1082 passed, 47 skipped**. No kernel, weight, reference or threshold
+was changed; no new hardware dispatch/full-model residency was needed. The
+41-set/82-hash export audit still passes. Full-chain comparison still returns
+exit 1 with the same three residual failures and matching logit argmax.
+
+Evidence: `Models/qwen38-27b/attention-projections/` contains results, test logs,
+export audit and the repeated full-chain comparison. The export's failure marker
+remains in place. Next: an isolated FP32-entry-norm versus BF16-control replay
+on matching inputs/history, then integration only if the local gates improve.
+Resident runtime/reset, DeltaNet state, LM head, prefill and serving remain open.

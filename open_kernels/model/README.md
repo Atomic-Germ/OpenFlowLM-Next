@@ -304,3 +304,32 @@ and pass the new cfg to the harness. It reloads a shared layer-weight BO before
 each dispatch and retains all states/capture ordering. The original fixture and
 CPU reference are unchanged. This checks sequential propagation with streamed
 weights; resident runtime identity/reset and performance require separate runs.
+
+### Full-attention projections and sublayer
+
+```bash
+OPENBLAS_NUM_THREADS=1 python open_kernels/model/attention_projections.py \
+  --model-dir MODEL_DIR --kernel-dir KERNEL_DIR --out FIXTURE_DIR
+```
+
+This checker covers every full-attention layer and fixture position by default;
+`--layers 3,7` explicitly restricts coverage. It requires the split norm route,
+which retains the entry `AA_XN` capture. The unsplit closing norm overwrites that
+region and is rejected. The fixture must match the hash-verified export.
+
+FP64 RMSNorm and Q/gate/K/V projections use the captured incoming residual and
+effective model weights, without substituting rounded norm values. Captured-norm
+and ideal-BF16-norm projection comparisons are separate diagnostics. Output
+projection and residual addition are checked against captured gated attention.
+A separate sublayer gate recomputes unrounded projections, causal KV history,
+Q/K norm, RoPE, attention, gating and output projection from all incoming
+residual captures. This catches errors hidden by conditioning each operation
+on its device-produced input.
+
+Every primary normalized maximum error must remain below 0.005; zero references
+require exact zero. Missing/non-finite captures and invalid coverage fail. JSON
+records every position, input/capture hashes and effective-weight hashes;
+numerical failures return exit 1. This does not validate independent whole-model
+state, source-tensor conversion, linear attention, or LM-head accuracy. Passing
+local gates cannot override a failed full-chain residual gate. No new NPU run
+or full-model residency is required.
