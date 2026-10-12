@@ -23,67 +23,63 @@ static constexpr unsigned kChunk = 2176;
 static constexpr unsigned kRec = 1216;
 static constexpr unsigned kHdr = 64;
 
-__attribute__((noinline)) static void t2n_tile(const uint8_t *__restrict chunk, const uint8_t *__restrict rec0,
-                                               const uint8_t *__restrict rec1, bool first, float *__restrict yq) {
+// One 32-row chunk against both token quads: the masked code block feeds four products, so each
+// code load and mask serves eight tokens. yh = this half's [quad 2][field 4][tok 4][p 8] floats, read
+// and written in place so that only the four mmul accumulators stay live.
+__attribute__((noinline)) static void t2n_half(const uint8_t *__restrict chunk, const uint8_t *__restrict tb,
+                                               float *__restrict yh) {
   aie::set_rounding(aie::rounding_mode::conv_even);
-  aie::accum<accfloat, 32> acc0, acc1, acc2, acc3;
-  if (first) {
-    acc0 = aie::zeros<accfloat, 32>();
-    acc1 = aie::zeros<accfloat, 32>();
-    acc2 = aie::zeros<accfloat, 32>();
-    acc3 = aie::zeros<accfloat, 32>();
-  } else {
-    acc0.from_vector(aie::load_v<32>(yq));
-    acc1.from_vector(aie::load_v<32>(yq + 32));
-    acc2.from_vector(aie::load_v<32>(yq + 64));
-    acc3.from_vector(aie::load_v<32>(yq + 96));
-  }
 #pragma clang loop unroll(disable)
   for (unsigned g = 0; g < 2; ++g) {
-    const uint8_t *__restrict rec = g ? rec1 : rec0;
-    const int16_t *__restrict xi = (const int16_t *)rec;
-    const aie::vector<int32_t, 32> os = aie::load_v<32>((const int32_t *)(rec + 1024));
-    const int sh = *(const int32_t *)(rec + 1152);
+    const uint8_t *__restrict rec0 = tb + (g * 2) * kRec, *__restrict rec1 = tb + (g * 2 + 1) * kRec;
+    const int16_t *__restrict x0 = (const int16_t *)rec0, *__restrict x1 = (const int16_t *)rec1;
     const int16_t *__restrict sc = (const int16_t *)chunk + g * 32;
     const uint8_t *__restrict code = chunk + 128 + g * 1024;
-    aie::vector<int32_t, 32> cv[4];
+    const aie::vector<int32_t, 32> os0 = aie::load_v<32>((const int32_t *)(rec0 + 1024));
+    const aie::vector<int32_t, 32> os1 = aie::load_v<32>((const int32_t *)(rec1 + 1024));
+    const int sh0 = *(const int32_t *)(rec0 + 1152), sh1 = *(const int32_t *)(rec1 + 1152);
 #pragma clang loop unroll(full)
     for (unsigned jp = 0; jp < 2; ++jp) {
       const uint8_t me = jp == 0 ? (uint8_t)0x03 : (uint8_t)0x30;
       const uint8_t mo = jp == 0 ? (uint8_t)0x0C : (uint8_t)0xC0;
-      aie::mmul<4, 8, 8, int16_t, uint8_t> Ce, Co;
+      aie::mmul<4, 8, 8, int16_t, uint8_t> Ce0, Co0, Ce1, Co1;
 #pragma clang loop unroll(full)
       for (unsigned o = 0; o < 16; ++o) {
-        const aie::vector<int16_t, 32> A = aie::load_v<32>(xi + o * 32);
         const aie::vector<uint8_t, 64> q = aie::load_v<64>(code + o * 64);
+        const aie::vector<uint8_t, 64> e = aie::bit_and(me, q), od = aie::bit_and(mo, q);
+        const aie::vector<int16_t, 32> A0 = aie::load_v<32>(x0 + o * 32), A1 = aie::load_v<32>(x1 + o * 32);
         if (o == 0) {
-          Ce.mul(A, aie::bit_and(me, q));
-          Co.mul(A, aie::bit_and(mo, q));
+          Ce0.mul(A0, e);
+          Co0.mul(A0, od);
+          Ce1.mul(A1, e);
+          Co1.mul(A1, od);
         } else {
-          Ce.mac(A, aie::bit_and(me, q));
-          Co.mac(A, aie::bit_and(mo, q));
+          Ce0.mac(A0, e);
+          Co0.mac(A0, od);
+          Ce1.mac(A1, e);
+          Co1.mac(A1, od);
         }
       }
-      cv[2 * jp] = Ce.template to_vector<int32_t>(4 * jp);          // fields 0 / 2: >> 0 / >> 4
-      cv[2 * jp + 1] = Co.template to_vector<int32_t>(4 * jp + 2);  // fields 1 / 3: >> 2 / >> 6
-    }
+      // fields 2jp / 2jp+1 sit at bits 4jp / 4jp+2
+      const aie::vector<int32_t, 32> c[4] = {Ce0.template to_vector<int32_t>(4 * jp), Co0.template to_vector<int32_t>(4 * jp + 2),
+                                             Ce1.template to_vector<int32_t>(4 * jp), Co1.template to_vector<int32_t>(4 * jp + 2)};
 #pragma clang loop unroll(full)
-    for (unsigned j = 0; j < 4; ++j) {
-      aie::accum<accfloat, 32> part;
-      part.from_vector(aie::to_float<float>(aie::sub(cv[j], os), sh));
-      const aie::vector<bfloat16, 32> hi = part.template to_vector<bfloat16>();
-      const aie::vector<bfloat16, 32> lo = aie::sub(part, hi).template to_vector<bfloat16>();
-      const aie::vector<bfloat16, 32> sw =
-          aie::load_v<8>(sc + 8 * j).template grow_replicate<32>().template cast_to<bfloat16>();
-      aie::accum<accfloat, 32> &a = j == 0 ? acc0 : j == 1 ? acc1 : j == 2 ? acc2 : acc3;
-      a = aie::mac(a, hi, sw);
-      a = aie::mac(a, lo, sw);
+      for (unsigned i = 0; i < 4; ++i) {
+        const unsigned qd = i >> 1, j = 2 * jp + (i & 1);
+        float *yp = yh + qd * 128 + j * 32;
+        aie::accum<accfloat, 32> part, acc;
+        part.from_vector(aie::to_float<float>(aie::sub(c[i], qd ? os1 : os0), qd ? sh1 : sh0));
+        const aie::vector<bfloat16, 32> hi = part.template to_vector<bfloat16>();
+        const aie::vector<bfloat16, 32> lo = aie::sub(part, hi).template to_vector<bfloat16>();
+        const aie::vector<bfloat16, 32> sw =
+            aie::load_v<8>(sc + 8 * j).template grow_replicate<32>().template cast_to<bfloat16>();
+        acc.from_vector(aie::load_v<32>(yp));
+        acc = aie::mac(acc, hi, sw);
+        acc = aie::mac(acc, lo, sw);
+        aie::store_v(yp, acc.template to_vector<float>());
+      }
     }
   }
-  aie::store_v(yq, acc0.template to_vector<float>());
-  aie::store_v(yq + 32, acc1.template to_vector<float>());
-  aie::store_v(yq + 64, acc2.template to_vector<float>());
-  aie::store_v(yq + 96, acc3.template to_vector<float>());
 }
 
 extern "C" {
@@ -95,12 +91,12 @@ void gemv_t2n_kt(const uint8_t *__restrict w, const int32_t *__restrict tab, flo
     for (unsigned i = 0; i < 512; i += 32)
       aie::store_v(y + i, aie::zeros<float, 32>());
 #else
+  if (kt == 0)
+    for (unsigned i = 0; i < 512; i += 32)
+      aie::store_v(y + i, aie::zeros<float, 32>());
   const uint8_t *__restrict tb = (const uint8_t *)tab + kHdr + (unsigned)kt * 4u * kRec;
-#pragma clang loop unroll(disable)
-  for (unsigned hq = 0; hq < 4; ++hq) {
-    const unsigned half = hq >> 1, quad = hq & 1;
-    t2n_tile(w + half * kChunk, tb + quad * kRec, tb + (2 + quad) * kRec, kt == 0, y + hq * 128);
-  }
+  for (unsigned half = 0; half < 2; ++half)
+    t2n_half(w + half * kChunk, tb, y + half * 256);
 #endif
   event1();
 }

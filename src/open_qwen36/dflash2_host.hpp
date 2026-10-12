@@ -68,7 +68,17 @@ struct GemvItem {
 struct GemvPlan {
     size_t n = 0, k = 0, tab_bytes = 0, n_tabs = 0, y_floats = 0;
     std::vector<GemvItem> items;
+    size_t slices = 0;
+    std::vector<int> band_y;     ///< [band][slice]: where that band's partial sits in y (index_bands() fills it)
+    void index_bands();
 };
+
+/// out[i] = silu(g[i]) * u[i] over n floats (n a multiple of 8), AVX2 exp (relative error ~1e-7 against std::exp).
+void silu_mul(const float* g, const float* u, size_t n, float* out);
+
+/// x [8][K] -> out [8][K]: H(x) / 32 per 1024-wide block of every row, the op order of
+/// block_host's hadamard_rows (so bit-identical to it), eight tokens at a time in the lanes.
+void hadamard8(const float* x, size_t K, float* out);
 
 /// xr [8][K] (already through H/32 per 1024 block) -> records [K/256][2 group][2 quad][kRec].
 void build_records(const float* xr, size_t K, uint8_t* rec);

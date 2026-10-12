@@ -36,10 +36,12 @@ def _lm_head_t2_make_test():
 pack_head = _lm_head_t2_make_test().pack_head      # the same band order and chunk as the lm head pool
 
 
-def reference(codes, s, x):
-    sc = np.repeat(s.astype(np.float32).astype(bfloat16).astype(np.float64), QK, axis=1)
-    w = codes.astype(np.float64) * sc - sc
-    return x @ w.T
+def reference(codes, s, x, rows=8192):
+    out = np.empty((x.shape[0], codes.shape[0]))
+    for r0 in range(0, codes.shape[0], rows):
+        sc = np.repeat(s[r0:r0 + rows].astype(np.float32).astype(bfloat16).astype(np.float64), QK, axis=1)
+        out[:, r0:r0 + rows] = x @ (codes[r0:r0 + rows].astype(np.float64) * sc - sc).T
+    return out
 
 
 def main() -> int:
