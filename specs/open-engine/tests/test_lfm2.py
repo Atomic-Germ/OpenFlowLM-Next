@@ -194,9 +194,19 @@ def test_no_shipped_models_hash_moved():
         "qwen3-8b.json": "sha256:04374f23aede126f34237de4e298a9d385dd36eb6041723032de14884648bab5",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
-    assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"
+    # Every spec on disk is accounted for in the GENERATED ledger. This used to
+    # be `== set(frozen)`, which meant a newly added size failed until someone
+    # hand-registered it -- the same volunteer chore the matrix removes.
+    import json
+
+    ledger = json.loads(
+        (specs.parent / "spec_hashes.json").read_text(encoding="utf-8"))
+    assert set(ledger) == {p.name for p in specs.glob("*.json")}, (
+        "a spec is missing from spec_hashes.json; run recipes/gen_specs.py")
+    # The frozen ones keep their hashes: that is the regression guard.
     for name, want in frozen.items():
-        assert load_spec(specs / name).spec_hash() == want, name
+        assert name in ledger, f"{name} vanished from the spec set"
+        assert ledger[name] == want, name
 
 
 def test_the_conv_geometry_rides_on_fields_that_already_exist():
