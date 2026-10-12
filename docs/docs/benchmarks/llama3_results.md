@@ -13,7 +13,10 @@ This section reports the performance of LLaMA 3.x on NPU with OpenFlowLM (OFLM).
 > - Results are based on OpenFlowLM v0.9.30.
 > - Under OFLM's default NPU power mode (Performance)   
 > - Newer versions may deliver improved performance.
-> - Fine-tuned models show performance comparable to their base models.   
+> - Fine-tuned models show performance comparable to their base models --
+>   and need no kernel work to run. A model set is keyed by **shape**, not by
+>   fine-tune name, so any fine-tune of a listed architecture links to the same
+>   family kernel set: convert with `q4nx-build`, install with `oflm add`.   
 
 > ℹ️ **This version predates the rename.** The numbers below were measured
 > on FastFlowLM, before the `flm` → `oflm` rename reset the version series to

@@ -63,6 +63,11 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
         "family": spec.family,
         "spec": spec.to_dict(),
         "spec_hash": spec.spec_hash(),
+        # The match key oflm-add binds on: spec_hash minus real_vocab, which sizes
+        # nothing (dense.py's lm_rows rounds `vocab` to a band). A fine-tune whose
+        # tokenizer.json reports a different id count still reaches the kernels its
+        # shape calls for. spec_hash is kept alongside for identity and diagnostics.
+        "kernel_hash": spec.kernel_hash(),
         "build_key": key if key is not None else build_key(spec),
         "max_ctx_default": max_ctx,
         "hf_config_check": check,
@@ -113,7 +118,8 @@ def main(argv=None) -> int:
     s = dumps(manifest(spec, a.max_ctx))
     if a.out:
         Path(a.out).write_text(s, encoding="utf-8", newline="\n")
-        print(f"wrote {a.out} ({spec.family}, {spec.num_layers} layers, {spec.spec_hash()[:19]})")
+        print(f"wrote {a.out} ({spec.family}, {spec.num_layers} layers, "
+              f"kernel_hash {spec.kernel_hash()[:19]}, spec_hash {spec.spec_hash()[:19]})")
     else:
         sys.stdout.write(s)
     return 0

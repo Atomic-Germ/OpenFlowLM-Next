@@ -12,8 +12,10 @@ builds and 14 NPU dispatches on Strix, XRT2.26.0, 2026-09-24.
 ## Build and run
 
 Use `ironvenv` from `ironvenv-requirements.txt` (mlir-aie1.4.2 and pinned Peano).
-Python3.14 uses `ironvenv/lib/python3.14/site-packages/llvm-aie/bin`; do not assume
-the older Python3.12 path in historical notes. Do not install
+The llvm-aie tools live under the venv's version dir —
+`ironvenv/lib/python3.12/site-packages/llvm-aie/bin` is what AGENTS.md records, but
+`ironvenv` is not always built at that version (this checkout's is python3.11), so
+check `ls ironvenv/lib` rather than assuming either. Do not install
 `eudsl-python-extras` alongside this wheel: it shadows `aie`.
 
 ```bash

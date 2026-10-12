@@ -77,12 +77,14 @@
   }
  },
  "spec_hash": "sha256:3496169f71a4b2d6679065fb35888493ccf695084625797ce8f200e6f0d84681",
+ "kernel_hash": "sha256:61ad4b3a488206aa294f3bc0570c239021d1e18e5c9b7046fc755c0df18e8036",
  "build_key": "sha256:fixture",
  "max_ctx_default": 4096,
  "hf_config_check": {
   "model_type": [
    "gemma3",
-   "gemma3_text"
+   "gemma3_text",
+   "gemma3_text_only"
   ],
   "hidden_size": 2560,
   "num_hidden_layers": 34,
@@ -1270,12 +1272,14 @@
    }
   },
   "spec_hash": "sha256:d8ac4d2769f7314520fc6ec29b608847d2da02f13cc1d91bef460dfd2870a21a",
+  "kernel_hash": "sha256:4bdf8f242b97c1ff58d44086a097a1db1452eacbf771bc9b06f97829be932a16",
   "build_key": "sha256:fixture",
   "max_ctx_default": 4096,
   "hf_config_check": {
    "model_type": [
     "gemma3",
-    "gemma3_text"
+    "gemma3_text",
+    "gemma3_text_only"
    ],
    "hidden_size": 2560,
    "num_hidden_layers": 34,

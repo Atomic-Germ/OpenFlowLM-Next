@@ -26,7 +26,8 @@ Sources:
   Spec: `specs/server-api/spec.md` SERVER-IMAGES-*; tests
   `specs/server-api/tests/test_images_api.py` (needs `oflm serve <chat model>`).
 - The kernels have their own skills: `dit-gemm`, `dit-fa`, `dit-ew`, `dit-conv`.
-- Spec: `specs/open-diffusion/spec.md`. Design: `.claude/plans/image-diffusion-phase6-engine.md`.
+- Spec: `specs/open-diffusion/spec.md`. The design plan `.claude/plans/image-diffusion-phase6-engine.md`
+  was gitignored (the whole `.claude/` tree) and is unavailable.
 
 ## Run it
 

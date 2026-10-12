@@ -111,7 +111,18 @@ Benchmark them with `oflm bench-embed`; see
 
 ## 📝 Adding your own model
 
-For a model of a shape that already has open kernels, you do not need to write
-any code -- see [`oflm add`](/docs/instructions/cli/#-add-a-converted-model-oflm-add).
-For a genuinely new architecture, see
+**Any fine-tune, derivative or re-quant of a model listed above already works,
+with no code.** Its shape is what matters, not its name — `oflm add` matches the
+model's geometry against the installed kernel sets, so a model we have never seen
+links to the same family kernel set as its base.
+
+```bash
+oflm pack -i Your-Org/Your-FineTune-NPU2   # convert (--dry-run to preview)
+oflm add   Your-Org/Your-FineTune-NPU2      # install + link the kernel set
+```
+
+Only a genuinely **new shape** needs kernel work. If your architecture is not
+listed above, that is a gap to close rather than a model to exclude — see
 [`src/create_new_model.md`](https://github.com/Atomic-Germ/OpenFlowLM/blob/main/src/create_new_model.md).
+
+Full command reference: [`oflm add`](/docs/instructions/cli/#-add-a-converted-model-oflm add).

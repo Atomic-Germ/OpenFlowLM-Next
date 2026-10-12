@@ -9,11 +9,11 @@ The kernels are **built, not checked in** (`.gitignore`:
 `src/xclbins/Qwen3.6-35B-A3B-NPU2/open_kernels/`). Source:
 `open_kernels/designs/{layer_x,ln,lm_head_q8}`. Reference docs:
 
-1. `../../../src/open_qwen36/README.md` — the engine, the build table, the
+1. `src/open_qwen36/README.md` — the engine, the build table, the
    reproducibility result.
-2. `../../../open_kernels/harness/README.md` — testing one design on the NPU
+2. `open_kernels/harness/README.md` — testing one design on the NPU
    (`run_kernel`, `make_test.py` / `compare.py`, fixtures).
-3. `../../../open_kernels/PROVENANCE.md` — where the designs come from, licences,
+3. `open_kernels/PROVENANCE.md` — where the designs come from, licences,
    what is generated vs. tracked.
 
 **Native Windows now works too, and is simpler:** `open-granite-kernels`'s

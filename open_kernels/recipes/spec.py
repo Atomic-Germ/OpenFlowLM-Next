@@ -264,9 +264,44 @@ class ModelSpec:
         return cls.from_dict(json.loads(s))
 
     def spec_hash(self) -> str:
-        """Stable hash of the hyperparameters (not of `extra`)."""
+        """Stable hash of the hyperparameters (not of `extra`).
+
+        Identity: this model, these exact hyperparameters. It moves if a
+        container's tokenizer says the true vocabulary is 248070 rather than the
+        padded 248320.
+        """
         d = self.to_dict()
         d.pop("extra", None)
+        return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
+    def kernel_hash(self) -> str:
+        """The build key: "will kernels built from this spec fit this model".
+
+        `spec_hash` is identity; this is compatibility. Two models run on the
+        same kernels exactly when every quantity the BUILD reads is equal, and
+        that is what this covers -- the geometry (`hidden`, `num_layers`,
+        `layer_types`, head and expert counts, `head_dim`, `rotary_dim`, the rope
+        and norm parameters), and `quant`, the per-role weight format.
+
+        What it deliberately leaves out:
+
+        * `real_vocab` -- the tokenizer's true id count. `lm_rows` (dense.py) rounds
+          `vocab` to a 64-row band and sizes the head and the logits buffer from
+          THAT, while `real_vocab` only bounds which ids have logits. It sizes
+          nothing, so it cannot make one model's kernels differ from another's.
+        * `vocab` -- **included**, because it does size the head. A padded vocab
+          gives a different `lm_rows` and so a genuinely different head. Do not
+          "fix" a padded-vocab mismatch by dropping this field; that would bind a
+          model to a head of the wrong size.
+        * `extra` -- informational (model name, source). Never build-relevant.
+
+        This is what makes a custom fine-tune findable without being known: its
+        name and its tokenizer's id count are irrelevant, and only the shape has
+        to agree.
+        """
+        d = self.to_dict()
+        d.pop("extra", None)
+        d.pop("real_vocab", None)
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
     # ---- sources
@@ -1457,7 +1492,15 @@ HF_FAMILIES = {"qwen3_5_moe": _qwen36moe_hf, "qwen3_5_moe_text": _qwen36moe_hf,
                "qwen3_5_text": _qwen35_hf, "qwen3": _qwen3_hf, "qwen3_vl": _qwen3vl_hf,
                "qwen3_vl_text": _qwen3vl_hf, "qwen2": _qwen2_hf, "llama": _llama3_hf,
                "qwen2_5_vl": _qwen25vl_hf, "qwen2_5_vl_text": _qwen25vl_hf,
-               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf, "hunyuan_v1_dense": _hunyuan_hf,
+               "gemma3_text": _gemma3_hf, "gemma3": _gemma3_hf,
+               # `gemma3_text_only` is the text-only Gemma3 variant transformers
+               # writes into a config (architectures: Gemma3ForCausalLM). It is the
+               # same decoder as `gemma3_text` -- a text-only model, not a different
+               # architecture -- so it derives identically. It is what our own
+               # Gemma3-1B-NPU2 container ships, and without this alias a supported
+               # model refused spec derivation for a naming difference alone.
+               "gemma3_text_only": _gemma3_hf,
+               "hunyuan_v1_dense": _hunyuan_hf,
                "granite": _granite_hf, "phi3": _phi3_hf, "lfm2": _lfm2_hf,
                "gpt_oss": _gptoss_hf, "k2_horizon": _k2_hf}
 GGUF_FAMILIES = {"qwen35moe": _qwen36moe_gguf, "qwen3next": _qwen36moe_gguf, "qwen35": _qwen35_gguf, "qwen3": _qwen3_gguf, "llama": _llama3_gguf,

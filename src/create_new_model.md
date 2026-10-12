@@ -1,20 +1,77 @@
 # Adding a New Model to OpenFlowLM
 
-> **Read this first.** There are now **two** ways to add a model, and you almost
-> certainly want the first one:
+## Part I — a model whose shape already has open kernels (no code)
+
+**This is the path for ~all real requests.** Someone publishes a fine-tune, a
+derivative, a re-quant, a renamed release, or their own trained model of an
+architecture we already support. You write **nothing**. Not a `CMakeLists.txt`
+edit, not a `model_list.json` entry, not an `AutoModel` subclass.
+
+```bash
+oflm pack -i Someone/Their-Model-NPU2     # GGUF, safetensors, or an HF repo id
+oflm add  Someone/Their-Model-NPU2        # verify, bind kernels, register
+```
+
+Neither of those is a thin wrapper. `oflm pack` works out **what the model is**
+— fingerprinting a GGUF's tensor names when its metadata is absent or wrong, and
+following the model card's `base_model` chain to find the right skeleton assets.
+`oflm add` does what `oflm pull` cannot: it handles a model **nobody has
+registered**, checking the weights against what their filename claims, deriving the
+tag/family/size, and binding kernels **by shape rather than by name**.
+
+Why the kernel binding works: `oflm add` derives the model's `ModelSpec` from the
+files the model actually shipped, hashes it, and links any installed kernel set
+whose `manifest.json` carries that hash. **Matching is by geometry, not by name**
+— the model name is never consulted. Kernel sets are per-*family*, so one built
+for `Qwen3.5-9B-NPU2` serves every model of that shape, forever, whether or not
+anyone here has heard of it.
+
+If you already have a llama.cpp-style GGUF, the conversion step may be skippable
+entirely — `oflm add` installs a compatible `.gguf` directly as `model.gguf`.
+
+Useful flags while you are in there:
+
+- `oflm pack --dry-run` — resolve and print the build plan without converting.
+- `oflm pack --build-spec` — after packing, derive the `ModelSpec` the way
+  `oflm add` sees it and print the export command. Use this for a model with no
+  checked-in `recipes/specs/*.json`.
+- `oflm add --open-kernels DIR` — override the kernel set explicitly.
+- `oflm add --tag <family>:<size>` — when the auto-derived tag is wrong.
+
+### When it does *not* match
+
+`oflm add` says so and tells you the hash. Work through it in this order:
+
+1. **Is it actually the same shape?** Compare the derived spec against a shipped
+   one in `open_kernels/recipes/specs/`. A genuine geometry difference is a real
+   gap — see "Part II" below, and note that a new *shape* still usually means a new
+   recipe and designs, not a new closed engine.
+2. **Does it differ only in `real_vocab`?** This is a known defect, not your
+   model's fault. `spec_hash()` covers every field including the tokenizer's id
+   count, but `real_vocab` sizes nothing. A shape-identical fine-tune whose
+   `tokenizer.json` reports a different id count silently fails to match and falls
+   back to closed kernels. See the `real_vocab` section of the root
+   [`AGENTS.md`](../AGENTS.md). **Do not work around it by adding the model's name
+   to a table.**
+3. **Is there no open recipe for the family at all?** `recipes/families.py::NOT_IMPLEMENTED`
+   names each gap and why. That is a kernel gap to close, not a model to exclude.
+
+Never respond to a mismatch by typing a model name into a table. Every such table
+is a wall between a user's fine-tune and the kernels that already fit it.
+
+---
+
+## Part II — Legacy: adding a *closed-engine* model
+
+> **Everything below describes the closed-engine path: an `AutoModel` wrapper
+> linked against a prebuilt proprietary shared library (`lib<model>_npu.so`). It is
+> what the open-kernel work is replacing, and we do not maintain closed kernels.**
 >
-> 1. **A model whose shape already has open kernels** — no code at all. Pack the
->    weights with [`utilities/q4nx-build`](../utilities/q4nx-build) and register
->    it with [`oflm add`](../docs/docs/instructions/cli.md#-add-a-converted-model-oflm-add).
->    Because every shape-identical model links to a shared **family** xclbin, a
->    fine-tune or derivative of an existing architecture needs no kernel work and
->    no `CMakeLists.txt` edit. This is the supported path.
-> 2. **A genuinely new architecture** — the steps below. This is the closed-engine
->    path: it writes an `AutoModel` wrapper and links a **prebuilt** engine shared
->    library. It is what the open-kernel work is *replacing*.
+> Read it only when you are adding a **new engine** for a family that genuinely has
+> no open design yet. Do not use it to add a model — that is Part I, and it is two
+> commands.
 >
-> The worked example below is `Gemma4-12B`, which is a closed-engine model today.
-> Follow it only when you are adding a new engine, not when you are adding a model.
+> The worked example is `Gemma4-12B`, a closed-engine model.
 
 This document lists every step required to bring a new model online in OpenFlowLM,
 from the prebuilt NPU engine down to a standalone test harness.

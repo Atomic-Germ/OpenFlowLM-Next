@@ -49,7 +49,7 @@ wider record, only the `BNEWQKVB`/`NPTAB` paths in `dx_attn.py` change.
 
 ## Verify
 
-- `ninja -C build` must end `kernel export ok: 12 open_kernels spec(s) + BERT
+- `ninja -C build` must end `kernel export ok: 23 open_kernels spec(s) + BERT
   design sets`.
 - `ctest` in `build/`: oflm_smoke, openai_compat, OPEN-VISION-IMAGE-READ,
   bench_embed.

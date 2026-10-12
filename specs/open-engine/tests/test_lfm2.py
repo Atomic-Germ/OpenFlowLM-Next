@@ -192,6 +192,20 @@ def test_no_shipped_models_hash_moved():
         "k2-horizon-3.7b.json": "sha256:18952d15a05780550c7d469b728fd6c686b6cb4c23635257e82c842aecd8e50a",
         "qwen35-27b.json": "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458",
         "qwen3-8b.json": "sha256:04374f23aede126f34237de4e298a9d385dd36eb6041723032de14884648bab5",
+        # The sizes the registry listed but no spec covered: qwen35 at 0.8b/2b/4b,
+        # qwen3 at 0.6b/1.7b, llama3.2 at 1b/3b, lfm2 at 2.6b. Derived from each
+        # model's OWN published config.json, not from its name in model_list.json.
+        # qwen35-4b's hash equals Qwen3.8-Distilled-4B's -- they are the same SHAPE,
+        # which is the point: the spec is keyed by geometry, so no fine-tune needs
+        # a spec of its own.
+        "qwen35-0.8b.json": "sha256:a15b84935025553bbb65fd30815799933441ca16702d11214fa32275e743d9b4",
+        "qwen35-2b.json": "sha256:3facaadad277ef72a97b3bfc595507b34a7bf1bcd9b5a7fd5fb840bbc64d7902",
+        "qwen35-4b.json": "sha256:1e2d1580e8b0804581c0ed54e000fccf0aecb2be82fe29f6f8a1c6e760bc6b58",
+        "qwen3-0.6b.json": "sha256:5d56a494a2801314be998bb9d713e239b74cafa24aeb581c4a8cebb6e84cef96",
+        "qwen3-1.7b.json": "sha256:b6f3b56210d57ec088aa458919691989dff21be1b9afd2056a8be60dc3bb8f91",
+        "llama32-1b.json": "sha256:131a7093af07c5af73222e02979def3fcf66e28ef05a77ba7d35a61240fbf96b",
+        "llama32-3b.json": "sha256:557fcf71747d606e5bc23aaf26ea287f46d06fe58c70ace11d465ae7b9c5c427",
+        "lfm2-2.6b.json": "sha256:c121f01ee33e1c0a2c452ea23e93e87112367945914b2b9f3cb8ca01a39eff61",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

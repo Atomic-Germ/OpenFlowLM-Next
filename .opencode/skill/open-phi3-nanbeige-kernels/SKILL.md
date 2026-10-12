@@ -8,14 +8,15 @@ description: Build, verify and serve the open XDNA2 kernel sets for Phi-4-mini (
 Both are `open_kernels/recipes/dense.py` families, exported and verified exactly like
 Granite (`open-granite-kernels`), with three things that are new. Spec:
 `specs/open-engine/spec.md` OPEN-FAMILY-PHI3 and the Nanbeige paragraph of
-OPEN-FAMILY-LLAMA3; hardware log `.claude/plans/b-hw-results.md` (gitignored).
+OPEN-FAMILY-LLAMA3. (The hardware log lived at `.claude/plans/b-hw-results.md`; the
+whole `.claude/` tree is gitignored and not present, so the log is unavailable here.)
 
-## Export (WSL, serial)
+## Export (from the repo root, serial)
 
 ```bash
-source ~/ironenv142/bin/activate
-export PATH=~/xrt-tools/bin:$PATH LD_LIBRARY_PATH=~/xrt-tools/lib     # both, or xclbinutil dies late
-cd /mnt/c/code/openflowlm-next
+source ironvenv/bin/activate          # the repo's venv; older notes said ~/ironenv142
+export XILINX_XRT=/opt/xilinx/xrt    # xclbinutil/aiebu-asm live here, not ~/xrt-tools
+export PATH="$XILINX_XRT/bin:$PATH" LD_LIBRARY_PATH="$XILINX_XRT/lib:${LD_LIBRARY_PATH:-}"  # both, or xclbinutil dies late
 python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Phi4-mini-Instruct-NPU2
 python open_kernels/export_qwen36_kernels.py --model-dir ~/.oflm/models/Nanbeige4.1-3B-NPU2
 ```
@@ -28,8 +29,9 @@ Sets: `dense/build_phi3_h3072` + `ln/build_3072_1e-05` + `lm_head_q4/build_20006
 
 **Peano can die on `unable to rename temporary ... final.prj/ln_y.o: No such file or
 directory`.** That is the /mnt/c mount, not the code: the same `ln_y.cc` compiles for every
-other family, and a retry passes. Loop the export (`.claude/plans/build_b4.sh` does) rather
-than reading it as a kernel error.
+other family, and a retry passes. Loop the export rather than reading it as a kernel
+error. (A `build_b4.sh` loop script used to live at `.claude/plans/build_b4.sh`; `.claude/`
+is gitignored, so it is not in the tree — re-export in a `for` loop over the two models.)
 
 ## What is new in the kernels
 
@@ -58,7 +60,9 @@ than reading it as a kernel error.
 
 ## Verify
 
-The OPEN-FAMILY-QWEN3 procedure; `.claude/plans/validate_b.ps1` runs it end to end:
+The OPEN-FAMILY-QWEN3 procedure. An end-to-end driver used to live at
+`.claude/plans/validate_b.ps1` (gone: `.claude/` is gitignored and absent); the
+per-model arguments it took were:
 
 ```powershell
 .\validate_b.ps1 -Name Phi4-mini-Instruct-NPU2 -Tag ph -Token 200021 -Registry phi4-mini-it:4b

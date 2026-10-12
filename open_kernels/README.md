@@ -25,6 +25,37 @@
 > the open engine 2.8x the closed one) and `tasks/0181-fa-iron-port/TASK.md`
 > (the IRON port built here, verified byte-identical to that kernel).
 
+---
+
+# Where to start in this directory
+
+**Read this before the vendored log below.** Everything under the appendix divider
+is phlegm's status log, kept verbatim for its measured results and trap catalogue.
+Its paths (`C:/code/phlegm`, `~/ironenv142`, `C:/caps`) are phlegm's and do not
+exist in this tree. Do not copy a command out of it expecting it to run.
+
+| You want to… | Read |
+|---|---|
+| **Add a model** | Not this directory. `q4nx-build` + `oflm-add` — see the root [`AGENTS.md`](../AGENTS.md). A shape-identical fine-tune needs no kernel work at all. |
+| Build and run a design here | [`harness/README.md`](harness/README.md) — `run_kernel`, synthetic fixtures, the 1.4.2 pin |
+| Build the kernel sets the engine loads | [`export_qwen36_kernels.py`](export_qwen36_kernels.py) |
+| Build the Whisper set | [`export_whisper_kernels.py`](export_whisper_kernels.py) — encoder GEMMs + bidirectional FlashAttention |
+| Understand how a model becomes kernels | [`recipes/`](recipes/) — a `ModelSpec` plus the family recipe turns it into layouts, kernel TUs and `manifest.json` |
+| Learn the traps | The appendix below, and the per-design `README.md` files |
+
+Every model dimension the whole-layer designs (`designs/layer_x`) and the engine
+use comes from `recipes/`. If you are about to hard-code a model dimension in a
+design, you are about to break every other model.
+
+The catalog of what each kernel template has been **validated at** is
+[`recipes/catalogue.py`](recipes/catalogue.py). Families whose spec derives but
+whose kernels do not exist are named in `recipes/families.py::NOT_IMPLEMENTED`,
+with the reason for each gap.
+
+---
+
+# --- APPENDIX: VENDORED LOG (phlegm) ---
+
 # open-kernels — our own NPU kernels (IRON / mlir-aie), driven by phlegm
 
 Phase 0a of `.claude/plans/open-kernels-feasibility.md` (2026-09-01): prove we

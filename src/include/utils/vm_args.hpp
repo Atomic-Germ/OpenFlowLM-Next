@@ -25,6 +25,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "  run <model_tag>     - Run the model interactively" << std::endl;
     std::cout << "  serve <model_tag>   - Start the  server" << std::endl;
     std::cout << "  pull <model_tag>    - Download model files if not present" << std::endl;
+    std::cout << "  pack <input>        - Build a Q4NX model from a GGUF file or HF repo id" << std::endl;
     std::cout << "  add <repo>          - Install and register a converted Q4NX model" << std::endl;
     std::cout << "  remove <model_tag>  - Remove a model" << std::endl;
     std::cout << "  check <model_tag>   - Check a model" << std::endl;
@@ -45,6 +46,8 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --pmode balanced" << std::endl;
     std::cout << "\toflm pull llama3.2:1b --force" << std::endl;
     std::cout << "\toflm pull llama3.2:1b --modelscope 1" << std::endl;
+    std::cout << "\toflm pack -i Someone/Their-Model-NPU2" << std::endl;
+    std::cout << "\toflm add Someone/Their-Model-NPU2" << std::endl;
     std::cout << "\toflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3" << std::endl;
     std::cout << "\toflm check llama3.2:1b" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --ctx-len 8192" << std::endl;

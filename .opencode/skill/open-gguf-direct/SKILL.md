@@ -130,44 +130,52 @@ exact, and the engine's `layer_major_ok()` correctly reports the route absent
 bring the route back for GGUF, add `SCALES_F32` twins of those GEMMs (their
 GQD scale loads and chunk size) -- a perf job, not a correctness gate.
 
-## Toward deprecating q4nx
+## Both containers ship; neither is "the future"
 
-The pieces to drop the q4nx container for a family, in order:
+GGUF-direct is merged and wired into the current tree — it is not a plan.
 
-1. **Export the family with the f32 twins.** `recipes/dense.py builds()` already
-   emits `dx_f32` / `lm_head_q4_f32` beside the q4nx pair, and the nested
-   `gguf` manifest. `utilities/build-all.sh` or
-   `python open_kernels/export_qwen36_kernels.py --spec <spec> --out src/xclbins/<Model>-NPU2/open_kernels`
-   produces a set that serves BOTH layouts.
-2. **Point the catalogue at a GGUF source repo.** A `model_list.json` entry can
-   name a llama.cpp-style repo (e.g. a `mradermacher/*-i1-GGUF`); `oflm add`
-   installs the best compatible file as `model.gguf` and links the family
-   `*-NPU2` kernel set by the same `details.family`/size. It refuses to install
-   unless the linked kernels carry a `"gguf"` manifest section
-   (`manifest_supports_gguf`), which step 1 guarantees.
-3. **The embedding path is already there**: `embed-gemma:300m` ships as a GGUF
-   (`embeddinggemma-300M-Q8_0.gguf`) and the open embedding engine loads it.
+- **The engine loads either container.** `WeightFile` is the seam: `Q4nxFile`
+  and `GgufFile` implement the same reads, and `model.q4nx` wins only when both
+  files are present in one model dir.
+- **One kernel set serves both layouts.** `recipes/dense.py builds()` emits the
+  `dx_f32` / `lm_head_q4_f32` twins beside the q4nx pair and writes the nested
+  `"gguf"` manifest section, so a normal `utilities/build-all.sh` export already
+  produces a set the installer accepts for either container.
+- **`oflm-add` accepts GGUF repos today, gated by two checks**
+  (`oflm_add/__init__.py`, the GGUF-direct install path): the family must be in
+  `GGUF_CAPABLE_FAMILIES` — currently `qwen3`, `llama3`, `gemma3`, `granite`,
+  `hunyuan` (plus `EMBEDDING_FAMILIES` = `embed-gemma`, which loads GGUF through
+  the bf16 matmul kernels and needs no f32-scale set) — and the linked kernels
+  must carry the `"gguf"` manifest section (`manifest_supports_gguf`). Failing
+  either, the installer says so and installs the safetensors weights instead.
+- **q4nx-build is still the path for what GGUF-direct refuses**: K-quants the
+  pack ops do not handle (Q5_K/IQ/...), MoE (`qwen36moe`) and the engines that
+  still read safetensors (gemma3 / embedding). Those installs stay `*-NPU2`.
 
-Once a family's catalogue entry is a GGUF repo, `model.q4nx` is dead weight for
-that family. q4nx stays only for K-quants the pack ops refuse (Q5_K/IQ/etc.),
-which still go through `q4nx-build`.
+So adding a family's GGUF support is a matter of adding the family to
+`GGUF_CAPABLE_FAMILIES` once its f32 twins export — not a migration.
 
 ## Build + verify (this machine)
 
 **`utilities/build-all.sh` does all of it**: toolchain venv check -> export
 every spec (all 6 build, both layouts, ~10 min total) -> `cmake --preset
-linux-default` build of flm -> `cmake --install` into a prefix (default
-`/opt/fastflowlm` if writable, else `./install`). Logs per spec in
-`build-logs/`. Flags: `--prefix`, `--specs a,b`, `--skip-kernels`,
-`--skip-app`, `--harness` (adds FLM_BUILD_OPEN_KERNELS_HARNESS=ON),
-`--force`. Verified end-to-end 2026-09-07: 6/6 specs export, install tree
-runs (`install/bin/flm --version` -> FLM v1.0.4 with open_kernels sets
-present for every dense family).
+linux-default` build of `oflm` -> `cmake --install` into a prefix. The presets
+set `CMAKE_INSTALL_PREFIX=/opt/openflowlm` and `CMAKE_XCLBIN_PREFIX=
+/opt/openflowlm/share/oflm`; the binary installs to `<prefix>/bin/oflm`, with
+`/usr/bin/oflm` symlinked by the `OFLM_INSTALL_PATH_PLUMBING` install step.
+`build-all.sh` defaults `PREFIX` to `/opt/openflowlm`, matching the preset. Logs per
+spec in `build-logs/`. Flags: `--prefix`, `--specs a,b`, `--skip-kernels`,
+`--skip-app`, `--harness` (adds `OFLM_BUILD_OPEN_KERNELS_HARNESS=ON`, the name
+`src/CMakeLists.txt` actually declares), `--force`. Verified end-to-end 2026-09-07: 6/6 specs export, install tree
+runs (`bin/oflm --version` with open_kernels sets present for every dense
+family).
 
 ```
 uv venv --python 3.13 ironvenv && source ironvenv/bin/activate
 pip install -r ironvenv-requirements.txt          # mlir_aie 1.4.2 + llvm-aie wheel
-export PATH="$PWD/ironvenv/lib/python3.13/site-packages/llvm-aie/bin:/opt/xilinx/xrt/bin:$PATH"
+# the venv's lib dir carries the Python minor version: check `ls ironvenv/lib` (this
+# checkout's is python3.11; AGENTS.md records python3.12)
+export PATH="$PWD/ironvenv/lib/python3.11/site-packages/llvm-aie/bin:/opt/xilinx/xrt/bin:$PATH"
 # xclbinutil + aiebu-asm live in /opt/xilinx/xrt/bin (no ~/xrt-tools here)
 
 python open_kernels/gguf_pool.py                              # pool-law self-tests (bit-exact)
@@ -233,7 +241,7 @@ families: `dx_attn.py` streams the q/k/v bias and the 1024-byte split position
 records (`ATTN_QKV_BIAS` / `ATTN_PTAB_SPLIT`), and `lfm2.py` re-exports
 `band_bytes`/`chunk_bytes` from the dense recipe. The f32-scale (`*_f32`)
 GGUF twins export in the same build, so a Qwen2.5-3B or LFM2 container shipped
-as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
+as `model.gguf` (see `.opencode/skill/open-dense-kernels/SKILL.md`) has its full kernel set.
 
 ## Gotchas learned here
 
@@ -267,6 +275,6 @@ as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
   expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors), the
   singular/plural `model.layer(s)` name mismatch, q8 f32 numerics bug above.
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
-- End-to-end `flm serve` with a real GGUF (needs a dense-family GGUF matching
+- End-to-end `oflm serve` with a real GGUF (needs a dense-family GGUF matching
   a shipped spec's vocab exactly; none in the HF cache qualifies today —
   Peach is llama-arch with vocab 64000 vs the llama31-8b spec's 128256).

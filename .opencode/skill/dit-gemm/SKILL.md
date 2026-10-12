@@ -95,4 +95,5 @@ returns the device buffer, 1.125 bytes per value. klein 4B's block linears come 
 ~4.2 GB.
 
 Fuse q/k/v (and the single block's q|k|v|mlp-in) by concatenating along N *before*
-packing. The model converter mode (`q4nx-build --open-diffusion`) is not built yet.
+packing. The model converter mode (`q4nx-build --open-diffusion`) exists: `q4nx/open_diffusion.py`
+(`build_open_diffusion_repo`), wired into `q4nx/cli.py` under the `--open-diffusion` flag.

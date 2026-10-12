@@ -173,7 +173,11 @@ cmake --build --preset linux-debug
 
 ### 3. Build Specific Kernel Specs
 
-Export only specific kernel families.
+**This is for a developer's iteration only. A release builds every spec** — a
+distribution must contain a kernel set for every `open_kernels/recipes/specs/*.json`,
+so that any model whose shape has a recipe finds its kernels already installed.
+If one spec fails to build, the export target fails; that is intended, and a
+build that skipped one is not releasable.
 
 ```bash
 # Build only Qwen3.5 9B kernel
@@ -183,20 +187,24 @@ cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen35-9b
 cmake -B build --preset linux-default -DOFLM_KERNEL_SPECS=qwen3-4b:ax0
 ```
 
-**Available specs** -- the twelve `open_kernels/recipes/specs/*.json`, all built by
-default:
-- `qwen3-4b` -- Qwen3 dense 4B
-- `qwen35-9b` -- Qwen3.5 dense 9B
-- `qwen36-35b-a3b` -- Qwen3.6-MoE 35B-A3B
-- `gemma3-4b` -- Gemma3 dense 4B
-- `gemma3-12b` -- Gemma3 dense 12B
-- `llama31-8b` -- Llama 3.1 8B
-- `hy-mt2-7b` -- Hy-MT2-7B
-- `granite42-3b` -- IBM Granite 4.2 3B
-- `qwen25-3b` -- Qwen2.5 3B (q/k/v bias attention, split position records)
-- `lfm2-1.2b` -- LFM2-1.2B hybrid (SSM short-convolution layers)
-- `phi4-mini-4b` -- Phi-4-mini
-- `minicpm5-2b` -- MiniCPM5 2B
+**Available specs** -- every `open_kernels/recipes/specs/*.json`, all built by
+default. Each is a **shape**, so a spec serves every model of that geometry --
+including fine-tunes, which need no spec of their own. Count them with
+`ls open_kernels/recipes/specs/*.json | wc -l` rather than trusting a number here:
+
+| family | sizes with open kernels |
+|---|---|
+| `qwen3` (dense, GQA + q/k norm) | 0.6b, 1.7b, 4b, 8b |
+| `qwen35` (3 linear : 1 full, output gate) | 0.8b, 2b, 4b, 9b, 27b |
+| `qwen36moe` (MoE, 3 linear : 1 full) | 35b-a3b |
+| `gemma3` | 4b, 12b |
+| `llama3` | 1b, 3b (Llama 3.2), 8b (3.1) |
+| `lfm2` (hybrid, short-conv layers) | 1.2b, 2.6b |
+| `qwen2`, `granite`, `hunyuan`, `k2`, `phi3` | 3b, 3b, 7b, 3.7b, 4b |
+
+Not yet buildable, and why: **Gemma3-1B** (hidden 1152 is not a multiple of the
+256 q4 k-tile), `qwen4_exp` (no recipe at all), and the Gemma 4 / GPT-OSS families
+(no open design). Those are kernel gaps to close, not models to exclude.
 
 ### 4. Build Open NPUE Kernels Only
 

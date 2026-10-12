@@ -822,10 +822,25 @@ before the `flm` -> `oflm` rename keeps working. `OFLM_OPEN_KERNELS_DIR` is the
 exception: the open engine reads it with plain `getenv`, so
 `FLM_OPEN_KERNELS_DIR` does nothing.
 
+### 📦 Build a Model from Weights (`oflm pack`)
+
+Build a Q4NX container from a GGUF file or a HuggingFace repo. `oflm pack` hands
+off to the builder bundled beside the binary, so its arguments are the builder's
+own — run `oflm pack --help` for the full set.
+
+```shell
+oflm pack -i Someone/Their-Model-NPU2              # a GGUF, or an HF repo id
+oflm pack -i Someone/Their-Model-GGUF --dry-run    # print the plan, convert nothing
+```
+
+You rarely need to name the output: it is derived from the model card's
+`base_model` chain, which is also how the tokenizer, config and (for a
+vision-language model) vision assets are found.
+
 ### 📦 Add a Converted Model (`oflm add`)
 
 Register a pre-converted Q4NX model that is not in the shipped registry. This
-is the supported way to install a model you packed yourself with `q4nx-build`,
+is the supported way to install a model you packed yourself with `oflm pack`,
 or one published under a HuggingFace repo that is not yet in `model_list.json`:
 
 ```shell
@@ -848,12 +863,40 @@ oflm add Atomic-Germ/Model-3B-OpenNPU2 --family qwen3
 | `--force` | overwrite an existing installation |
 | `--dry-run` | print what would happen, change nothing |
 
-Every shape-identical model links to a **family** xclbin, so adding a new model
-of an existing shape needs no kernel work:
+### 🧬 Adding a fine-tune or your own model
+
+**Any model whose shape is already supported works, and needs no code, no
+registry entry and no new kernels.** Kernel sets are keyed by *shape*, not by
+fine-tune name, so `oflm add` derives the geometry from the files your model
+actually shipped and binds the matching family kernel set. A fine-tune we have
+never seen is the normal case, not an edge case:
 
 ```shell
-oflm add Someone/Nanbeige4.1-3B-finetune-OpenNPU2 --family nanbeige --tag nanbeige-ft:3b
+oflm pack -i Someone/Nanbeige4.1-3B-finetune-OpenNPU2   # identify + build (--dry-run to preview)
+oflm add  Someone/Nanbeige4.1-3B-finetune-OpenNPU2      # verify, bind kernels, register
+oflm run nanbeige-ft:3b
 ```
+
+These are not a converter and an installer. `oflm pack` identifies a GGUF by
+fingerprinting its tensor names when the metadata is absent or wrong, and follows
+the model card's `base_model` chain to find the right skeleton assets. `oflm add`
+does what `oflm pull` cannot: it takes a model **nobody has registered**, checks
+the weights against what their filename claims, derives the tag, family and size,
+and binds kernels by shape.
+
+If you already have a llama.cpp-style GGUF, you may be able to skip the conversion
+step entirely — `oflm add` will install it directly as `model.gguf` where the
+kernels support it (currently the `qwen3`, `llama3`, `gemma3`, `granite` and
+`hunyuan` families; quants `Q4_1`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`):
+
+```shell
+oflm add mradermacher/Nanbeige4.1-3B-finetune-GGUF
+```
+
+Pass `--family` and `--tag` only when the auto-derived values are wrong for your
+model. If `oflm add` reports that no kernel set matches, it prints the shape hash
+it derived -- that means the shape genuinely has no open kernels yet, and it is a
+gap to report, not a model to exclude.
 
 ### 🏷️ Print the Version
 

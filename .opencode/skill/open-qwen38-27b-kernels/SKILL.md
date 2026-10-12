@@ -29,7 +29,7 @@ as every head-indexed DeltaNet tensor near 0 and everything else ~0.997.
 = HF head `kh*grp + r`). `q4nx-build`'s GGUF path untiled with `grp = 2` and took qkv's value
 rows as "the second half" -- right for 32 heads over 16, wrong for 48 over 16. Fixed in
 `q4nx/models/qwen35.py` (`v_untile`, `untile_qkv`, head counts from the GGUF's `qwen35.ssm.*`
-keys); `tests/test_qwen35_vheads.py` pins it. The HF-safetensors path never reorders (HF is
+keys); `utilities/q4nx-build/tests/test_qwen35_vheads.py` pins it. The HF-safetensors path never reorders (HF is
 already grouped).
 
 ## Convert

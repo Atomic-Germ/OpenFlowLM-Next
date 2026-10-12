@@ -1242,16 +1242,23 @@ def open_kernels_checkout():
     return None
 
 
-def model_spec_hash(model_dir):
-    """(spec_hash, note) for an installed model directory; (None, why) on failure.
+def model_kernel_hash(model_dir):
+    """(kernel_hash, spec_hash, note) for an installed model directory;
+    ((None, None, why)) on failure.
 
     Derived the way the recipes do it -- recipes.load.spec_from_model_dir reads
     config.json, the tokenizer's real vocab, and the per-role weight format off
     the model.q4nx safetensors header (no weight byte is read).
+
+    `kernel_hash` is the binding key: it drops `real_vocab`, which sizes nothing
+    (`lm_rows` rounds `vocab` to a band) but was in `spec_hash`, so a fine-tune
+    whose tokenizer.json reports a different id count used to fail to match and
+    silently fall back to closed kernels. `spec_hash` is returned alongside for
+    identity and for the diagnostic message.
     """
     root = open_kernels_checkout()
     if root is None:
-        return None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
+        return None, None, "no open_kernels/recipes checkout found (set OPEN_KERNELS_DIR)"
     added = str(root)
     inserted = added not in sys.path
     if inserted:
@@ -1259,9 +1266,9 @@ def model_spec_hash(model_dir):
     try:
         from recipes.load import spec_from_model_dir
         spec = spec_from_model_dir(Path(model_dir))
-        return spec.spec_hash(), f"spec from {root}"
+        return spec.kernel_hash(), spec.spec_hash(), f"spec from {root}"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, None, f"{type(e).__name__}: {e}"
     finally:
         if inserted:
             try:
@@ -1270,22 +1277,62 @@ def model_spec_hash(model_dir):
                 pass
 
 
-def kernel_set_spec_hash(kernel_dir):
-    """The manifest's spec_hash for a kernel set directory, or None."""
+def kernel_set_hash(kernel_dir):
+    """(kernel_hash, spec_hash) for a kernel set directory; (None, None) on failure.
+
+    `kernel_hash` is read from the manifest when present, and otherwise COMPUTED
+    from the `spec` dict the manifest has always carried. Deriving it means an
+    already-installed set binds a shape-identical fine-tune immediately, with no
+    re-export: a set is not stale just because it predates the key, because the
+    key is a pure function of a field set the manifest already records.
+    """
     try:
-        return load_json(Path(kernel_dir) / "manifest.json").get("spec_hash")
+        m = load_json(Path(kernel_dir) / "manifest.json")
     except Exception:
-        return None
+        return None, None
+    sh = m.get("spec_hash")
+    kh = m.get("kernel_hash")
+    if not kh:
+        spec = m.get("spec")
+        if isinstance(spec, dict):
+            try:
+                root = open_kernels_checkout()
+                if root:
+                    added = str(root)
+                    inserted = added not in sys.path
+                    if inserted:
+                        sys.path.insert(0, added)
+                    try:
+                        from recipes.spec import ModelSpec
+                        kh = ModelSpec.from_dict(spec).kernel_hash()
+                    except Exception:
+                        kh = None
+                    finally:
+                        if inserted:
+                            try:
+                                sys.path.remove(added)
+                            except ValueError:
+                                pass
+            except Exception:
+                kh = None
+    return kh, sh
 
 
-def find_open_kernels(spec_hash, roots, dir_name):
-    """The installed open kernel set whose manifest matches `spec_hash`.
+def find_open_kernels(kernel_hash, roots, dir_name, spec_hash=None):
+    """The installed open kernel set whose manifest matches this model's shape.
 
     Roots are xclbins directories (<root>/<model>/open_kernels). A set sitting
     under this model's own name wins; otherwise the first match in root order.
     Returns (Path, source model name) or (None, None).
+
+    Two independent keys, because a manifest may carry either or both:
+      * `kernel_hash` -- the shape. Shape-identical models match regardless of
+        their tokenizer's id count. This is the one that matters.
+      * `spec_hash` -- identity. A manifest predating kernel_hash carries only
+        this, so comparing it is the only way to bind an already-installed set at
+        all; it binds a byte-identical spec and nothing looser.
     """
-    if not spec_hash:
+    if not kernel_hash and not spec_hash:
         return None, None
     matches = []
     for root in roots:
@@ -1295,7 +1342,10 @@ def find_open_kernels(spec_hash, roots, dir_name):
             k = model / "open_kernels"
             if not (k / "manifest.json").is_file():
                 continue
-            if kernel_set_spec_hash(k) == spec_hash:
+            kh, sh = kernel_set_hash(k)
+            # kernel_hash is the shape key, derived from the manifest's own spec when
+            # the manifest predates it. spec_hash stays as the exact-identity path.
+            if (kh and kh == kernel_hash) or (spec_hash and sh == spec_hash):
                 matches.append((k, model.name))
     for k, name in matches:
         if name == dir_name:
@@ -1362,22 +1412,73 @@ def setup_open_kernels(model_dir, dir_name, roots, override=None, force=False, q
         log(f"[INFO] open kernels: {kernel_dir} (--open-kernels)")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
 
-    spec_hash, note = model_spec_hash(model_dir)
-    if not spec_hash:
+    kernel_hash, spec_hash, note = model_kernel_hash(model_dir)
+    if not kernel_hash:
         if not quiet:
             log(f"[INFO] No open-kernel spec for this model ({note}); closed kernels only.")
         return False
-    kernel_dir, source = find_open_kernels(spec_hash, roots, dir_name)
+    kernel_dir, source = find_open_kernels(kernel_hash, roots, dir_name, spec_hash=spec_hash)
     if kernel_dir:
-        log(f"[INFO] open kernels from '{source}': its manifest spec_hash matches "
-            f"this model's ({spec_hash[:19]})")
+        log(f"[INFO] open kernels from '{source}': its manifest matches this "
+            f"model's shape ({kernel_hash[:19]})")
         return link_open_kernels(model_dir, kernel_dir, force=force, quiet=quiet)
     checkout = open_kernels_checkout()
     script = (checkout / "export_qwen36_kernels.py") if checkout else Path("open_kernels/export_qwen36_kernels.py")
-    log(f"[INFO] No installed open kernel set has spec_hash {spec_hash[:19]}; "
-        "the closed kernels stay in charge. Build one with:")
+    log(f"[INFO] No installed open kernel set matches this model's shape "
+        f"({kernel_hash[:19]}). The key is the geometry and the per-role weight "
+        f"format -- not the model's name, source, or tokenizer id count -- so an "
+        f"ordinary fine-tune of a supported shape is already covered by whatever "
+        f"is installed.")
+    # Two genuinely different situations, and the user needs to know which:
+    # the family cannot be built at all, or it builds fine and this particular
+    # geometry simply was never built or shipped.
+    why = _why_no_set(model_dir)
+    if why:
+        log(f"[INFO] Why: {why}")
+    log(f"[INFO] Either way this is a gap to close by building a shape that does "
+        f"not exist yet -- never by an entry, a special case, or a name lookup:")
     log(f'           python "{script}" --model-dir "{model_dir}"')
+    log(f"[INFO] The closed kernels stay in charge until then.")
     return False
+
+
+def _why_no_set(model_dir):
+    """One line naming the cause: an unknown family, or a geometry not built yet."""
+    root = open_kernels_checkout()
+    if root is None:
+        return None
+    added = str(root)
+    inserted = added not in sys.path
+    if inserted:
+        sys.path.insert(0, added)
+    try:
+        from recipes.load import spec_from_model_dir
+        from recipes.families import for_spec, NOT_IMPLEMENTED
+        try:
+            spec = spec_from_model_dir(Path(model_dir))
+        except Exception as e:
+            return (f"this model's family has no recipe, so no kernels can be built "
+                    f"for it at all ({e}). That is a kernel gap to close -- add a "
+                    f"builder in q4nx-build/q4nx/models/ and a recipe. It has nothing "
+                    f"to do with this model's size, prune, or name.")
+        if spec.family in NOT_IMPLEMENTED:
+            return (f"the open kernels have no recipe for family {spec.family!r} yet "
+                    f"-- {NOT_IMPLEMENTED[spec.family]}")
+        try:
+            for_spec(spec).recipe(spec)
+        except Exception as e:
+            return (f"the {spec.family!r} recipe refuses this geometry ({e})")
+        return (f"the {spec.family!r} recipe builds this shape fine, so the "
+                f"kernels simply were never built or shipped -- a packaging gap, "
+                f"not a model problem.")
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(added)
+            except ValueError:
+                pass
 
 
 # ---------------------------------------------------------------------- main
@@ -2080,10 +2181,11 @@ def main():
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
         elif local_dir:
-            sh, note = model_spec_hash(local_dir)
+            kh, sh, note = model_kernel_hash(local_dir)
             roots = [user_xclbin_dir(args.xclbin_dir), find_system_xclbin_root()]
-            found, _ = find_open_kernels(sh, roots, dir_name) if sh else (None, None)
-            print(f"spec hash      : {sh or '(' + note + ')'}")
+            found, _ = find_open_kernels(kh, roots, dir_name, spec_hash=sh) if kh else (None, None)
+            print(f"kernel hash    : {kh or '(' + note + ')'}")
+            print(f"spec hash      : {sh or '-'}")
             print(f"open kernels   : {found or '(none installed)'}")
         print(f"models dir     : {target}")
         print(f"registry       : {user_list}")

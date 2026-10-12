@@ -12,20 +12,20 @@
 #      (open_kernels/recipes/specs/*.json), building BOTH the q4nx kernel sets
 #      and the GGUF-direct f32-scale twins into src/xclbins/<Model>/open_kernels.
 #      A spec that fails does not stop the rest; a summary is printed at the end.
-#   3. Configures + builds flm with the src/ linux-default preset (open engines
+#   3. Configures + builds oflm with the src/ linux-default preset (open engines
 #      compiled in; the closed engine .so under src/lib/<runtime> install as-is).
-#   4. cmake --install into --prefix (default /opt/fastflowlm; sudo is used for
+#   4. cmake --install into --prefix (default /opt/openflowlm; sudo is used for
 #      the install step itself when the prefix needs root — the toolchain steps
-#      stay unprivileged). The install tree matches the real one: bin/flm,
-#      lib64/*.so, share/flm/{model_list.json,xclbins/...}.
+#      stay unprivileged). The install tree matches the real one: bin/oflm,
+#      lib64/*.so, share/oflm/{model_list.json,xclbins/...}.
 #
 # Root is requested at most twice, and only interactively: once if a past
 # sudo'd build left root-owned artifacts under the repo (step 0 heals them),
 # and once for the install. Never run this whole script under sudo — the venv
 # toolchain ends up root-owned and breaks.
 #
-# After it finishes, point flm at the install tree, e.g.:
-#   PATH="$PWD/install/bin:$PATH" FLM_SHARE="$PWD/install/share/flm" flm run ...
+# After it finishes, point oflm at the install tree, e.g.:
+#   PATH="$PWD/install/bin:$PATH" OFLM_XCLBIN_PATH="$PWD/install/share/oflm/xclbins" oflm run ...
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -144,18 +144,24 @@ fi
 if [ "$SKIP_APP" -eq 0 ]; then
   echo "-- cmake configure (src linux-default)"
   extra=()
-  [ "$HARNESS" -eq 1 ] && extra+=(-DFLM_BUILD_OPEN_KERNELS_HARNESS=ON)
+  # src/CMakeLists.txt declares OFLM_BUILD_OPEN_KERNELS_HARNESS; the old FLM_ name
+  # was silently ignored, so --harness did nothing.
+  [ "$HARNESS" -eq 1 ] && extra+=(-DOFLM_BUILD_OPEN_KERNELS_HARNESS=ON)
   cmake --preset linux-default "${extra[@]}" --log-level=WARNING -S "$SRC" || exit 1
   echo "-- cmake build (jobs=$JOBS)"
   cmake --build "$SRC/build" --parallel "$JOBS" || exit 1
 fi
 
 # ---- 4. install --------------------------------------------------------------
-# Default to the real system install (/opt/fastflowlm); only fall back to a
-# local staging tree if sudo is refused (running the WHOLE script under sudo
-# breaks the venv toolchain, so root is requested for this step only).
+# Default to the real system install. src/CMakePresets.json puts CMAKE_INSTALL_PREFIX
+# at /opt/openflowlm and CMAKE_XCLBIN_PREFIX at /opt/openflowlm/share/oflm -- matching
+# what the engine looks for ($OFLM_XCLBIN_PATH, utils.cpp:218). This script used to
+# default to the pre-rename /opt/fastflowlm, which put the xclbins where the engine
+# did not look. Only fall back to a local staging tree if sudo is refused (running
+# the WHOLE script under sudo breaks the venv toolchain, so root is requested for
+# this step only).
 if [ -z "$PREFIX" ]; then
-  PREFIX=/opt/fastflowlm
+  PREFIX=/opt/openflowlm
 fi
 if [ "$SKIP_APP" -eq 0 ]; then
   echo "-- cmake --install -> $PREFIX"
@@ -186,9 +192,9 @@ echo "== done"
 [ ${#failed_specs[@]} -gt 0 ] && echo "   kernels FAIL: ${failed_specs[*]} (logs in $LOGDIR/)"
 if [ "$SKIP_APP" -eq 0 ]; then
   echo "   install tree:"
-  du -sh "$PREFIX/bin/flm" "$PREFIX"/lib*/*.so 2>/dev/null | head -3 | sed 's/^/     /'
-  ls "$PREFIX/share/flm/xclbins" 2>/dev/null | sed 's/^/     xclbins\//' | head -12
-  for d in "$PREFIX/share/flm/xclbins"/*/open_kernels; do
+  du -sh "$PREFIX/bin/oflm" "$PREFIX"/lib*/*.so 2>/dev/null | head -3 | sed 's/^/     /'
+  ls "$PREFIX/share/oflm/xclbins" 2>/dev/null | sed 's/^/     xclbins\//' | head -12
+  for d in "$PREFIX/share/oflm/xclbins"/*/open_kernels; do
     [ -d "$d" ] && echo "     xclbins/$(basename "$(dirname "$d")")/open_kernels: $(ls "$d" | head -1 | xargs -I{} echo {}) ... (manifest: $(test -f "$d/manifest.json" && echo yes || echo MISSING))"
   done
 fi

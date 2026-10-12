@@ -75,16 +75,15 @@ def _build_spec(output_folder: str) -> None:
     """Derive the model's open-kernels ModelSpec and write spec.json.
 
     Mirrors oflm-add's fallback: spec_from_model_dir() reads the packed
-    config.json + the container's own quant map, the spec_hash tells it which
-    kernel set would drive the model, and for families with a recipe module
-    the export command is printed; for a NOT_IMPLEMENTED family (gptoss), its
-    gap message is -- never suggest kernels that cannot exist.
+    config.json + the container's own quant map, the kernel_hash tells it which
+    kernel set would drive the model (shape only -- real_vocab is excluded, so a
+    fine-tune with a different tokenizer id count still matches its base), and for
+    families with a recipe module the export command is printed; for a
+    NOT_IMPLEMENTED family (gptoss), its gap message is -- never suggest kernels
+    that cannot exist.
     """
     checkout = os.environ.get("OPEN_KERNELS_DIR")
-    candidates = [Path(checkout)] if checkout else []
-    candidates += [p / "open_kernels" for p in Path(__file__).resolve().parents]
-    candidates.append(Path.cwd() / "open_kernels")
-    root = next((c for c in candidates if (c / "recipes" / "spec.py").is_file()), None)
+    root = _open_kernels_root()
     if root is None:
         print("[WARN] --build-spec: no open_kernels checkout found "
               "(set OPEN_KERNELS_DIR); spec not written.")
@@ -128,7 +127,10 @@ def _build_spec(output_folder: str) -> None:
             print(f"[INFO] --build-spec: staged {target} for the next in-tree kernel export")
     except Exception as e:
         print(f"[WARN] --build-spec: could not stage the spec in-tree ({e})")
-    print(f"[INFO] spec_hash {spec.spec_hash()[:19]} family {spec.family} quant {spec.quant}")
+    print(f"[INFO] kernel_hash {spec.kernel_hash()[:19]}  <- what oflm-add binds on "
+          f"(shape only; real_vocab excluded)")
+    print(f"[INFO] spec_hash   {spec.spec_hash()[:19]}  <- identity, moves with real_vocab")
+    print(f"[INFO] family {spec.family} quant {spec.quant}")
     if spec.family in NOT_IMPLEMENTED:
         print(f"[INFO] --build-spec: the open kernels have no recipe for family "
               f"{spec.family!r} yet: {NOT_IMPLEMENTED[spec.family]}")
@@ -160,8 +162,21 @@ def _support_audit(repo_root: Optional[Path], spec, model_dir_name: str) -> None
     except Exception:
         pass
     checks.append((f"recipes/specs entry for family {fam!r}", has_specs_entry))
-    checks.append((f"staged kernel set src/xclbins/{model_dir_name}",
-                   (repo / "src" / "xclbins" / model_dir_name).is_dir()))
+    # Whether an INSTALLED kernel set will bind this model, by shape. Never by
+    # name: sets are per-family and matched on the geometry, so "is there a
+    # directory named after this model" is the wrong question and reports a fine
+    # model as unsupported. This is the same match oflm-add does.
+    checks.append(("an installed kernel set matches this model's shape",
+                   _shape_kernel_set_installed(repo, spec)))
+    # Whether a set would BUILD for this shape, which is a separate question: the
+    # recipe may exist and be unbuilt (a packaging gap), or refuse (no kernels).
+    try:
+        F = for_spec(spec)
+        F.recipe(spec)
+        builds = "yes"
+    except Exception as e:
+        builds = f"no -- {e}"
+    checks.append((f"this shape has a buildable recipe", builds))
 
     # Tighten the engine-entry gap: a new family almost never needs a new
     # ENGINE, almost always a model_families.hpp alias. The strongest public
@@ -204,12 +219,6 @@ def _support_audit(repo_root: Optional[Path], spec, model_dir_name: str) -> None
               f"contract of {tags} (registered engines); model_families.hpp "
               f"likely wants e.g. {{'{fam}': SupportedModelFamily::{tags[0]}}} "
               f"instead of a new engine class")
-    ml = repo / "src" / "model_list.json"
-    try:
-        listed = model_dir_name.lower().replace("-npu2", "") in ml.read_text().lower()
-    except Exception:
-        listed = False
-    checks.append(("model_list.json entry for this model", listed))
     hpp = repo / "src" / "include" / "AutoModel" / "model_families.hpp"
     try:
         checks.append(("engine family registered in model_families.hpp",
@@ -223,7 +232,71 @@ def _support_audit(repo_root: Optional[Path], spec, model_dir_name: str) -> None
         checks.append(("oflm-add FAMILY_ALIASES entry", False))
     print(f"[INFO] Support audit for {model_dir_name} (family {fam}):")
     for label, ok in checks:
-        print(f"         [{'ok' if ok else 'MISSING'}] {label}")
+        mark = ok if isinstance(ok, bool) else ("ok" if str(ok) == "yes" else "MISSING")
+        print(f"         [{mark}] {label}" + ("" if mark == "ok" else f"  ({ok})"))
+    print(f"       Note: this model does NOT need its own model_list.json entry, its own")
+    print(f"       xclbins directory, or anything keyed to its name. Those exist only for")
+    print(f"       models whose SHAPE has no kernel set. The kernel step happens once per")
+    print(f"       family, on a machine with an NPU and the kernel toolchain -- see")
+    print(f"       docs/BUILD.md -- and never on the machine that downloads the weights.")
+
+
+def _open_kernels_root():
+    """The open_kernels checkout beside this package, if there is one."""
+    candidates = []
+    env = os.environ.get("OPEN_KERNELS_DIR")
+    if env:
+        candidates.append(Path(env))
+    candidates += [p / "open_kernels" for p in Path(__file__).resolve().parents]
+    candidates.append(Path.cwd() / "open_kernels")
+    return next((c for c in candidates if (c / "recipes" / "spec.py").is_file()), None)
+
+
+def _shape_kernel_set_installed(repo_root, spec) -> bool:
+    """True when some kernel set under src/xclbins binds this spec BY SHAPE.
+
+    The same match `oflm add` performs: the set's manifest records the geometry it
+    was built for, so a family set serves every model of that shape. `kernel_hash`
+    is derived from the manifest's own `spec` when it predates the key, so sets
+    installed by an older build still count.
+    """
+    xclbins = Path(repo_root) / "src" / "xclbins"
+    if not xclbins.is_dir():
+        return False
+    try:
+        kh = spec.kernel_hash()
+        sh = spec.spec_hash()
+    except Exception:
+        return False
+    for mf in xclbins.glob("*/open_kernels/manifest.json"):
+        try:
+            m = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if m.get("kernel_hash") == kh or m.get("spec_hash") == sh:
+            return True
+        # A manifest written before kernel_hash still carries the full spec dict,
+        # from which the shape key is a pure function.
+        embedded = m.get("spec")
+        if isinstance(embedded, dict):
+            try:
+                root = _open_kernels_root()
+                if root is None:
+                    return False
+                added = str(root)
+                inserted = added not in sys.path
+                if inserted:
+                    sys.path.insert(0, added)
+                try:
+                    from recipes.spec import ModelSpec
+                    if ModelSpec.from_dict(embedded).kernel_hash() == kh:
+                        return True
+                finally:
+                    if inserted:
+                        sys.path.remove(added)
+            except Exception:
+                pass
+    return False
 
 
 def _report_speculative(model) -> None:

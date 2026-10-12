@@ -72,6 +72,7 @@
   }
  },
  "spec_hash": "sha256:857e09843a229d259ec52d5174560e429af3597b446142eab140977a571cd1d7",
+ "kernel_hash": "sha256:96485aee63e250b829170265990ca4a10bef63e90928960e1d851c7f6270813b",
  "build_key": "sha256:fixture",
  "max_ctx_default": 4096,
  "hf_config_check": {
@@ -1279,6 +1280,7 @@
    }
   },
   "spec_hash": "sha256:e1f8c95a16ec8cd3089ea3ccd792080e80720eabe6e99291f4fe22fc939cef1b",
+  "kernel_hash": "sha256:3e65f18e27d1e9399203c3922594c29b71ef42f924ba90b75975aca77ea40ebf",
   "build_key": "sha256:fixture",
   "max_ctx_default": 4096,
   "hf_config_check": {

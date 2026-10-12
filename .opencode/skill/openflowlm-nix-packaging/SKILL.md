@@ -17,7 +17,7 @@ Read `NIX.md` first — it is the user-facing doc and must stay true to the code
 
 | Step | Wall time (12 cores) | Notes |
 |---|---|---|
-| `nix build .#openflowlm-open-kernels` | ~10 min | all 12 specs, mlir-aie 1.4.3 + Peano 22.0.0 |
+| `nix build .#openflowlm-open-kernels` | ~10 min | all 23 specs, mlir-aie 1.4.3 + Peano 22.0.0 |
 | `nix build .#oflm` | ~15 min | includes the kernels above; `doCheck` runs 4 ctest tests |
 
 ## Setting up Nix without root
@@ -133,7 +133,7 @@ PATH, so without it a system install at `/opt/openflowlm` wins over the Nix
 store and you silently test the RPM's kernels. `oflm-add` prints the link it
 made — check it points into `/nix/store`.
 
-To test one spec instead of all twelve, call the derivation with a skip list:
+To test one spec instead of all 23, call the derivation with a skip list:
 
 ```bash
 nix build --impure --expr '(import <nixpkgs-with-overlay> {}).callPackage ./nix/open-kernels.nix {

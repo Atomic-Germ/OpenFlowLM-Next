@@ -2,6 +2,27 @@
 
 Public version.
 
+> **Scope of this file.** It covers the **Windows** build and deployment of the
+> `oflm` executable only. It does not cover adding a model, building the open NPU
+> kernels, or packaging — see [`../AGENTS.md`](../AGENTS.md) for how a model gets
+> kernels (which is `q4nx-build` + `oflm-add`, not anything in this file),
+> [`../docs/BUILD.md`](../docs/BUILD.md) for the full build including kernel
+> exports, and [`../README.md`](../README.md) for the current build and install
+> story.
+>
+> **Building.** The supported build is the repo-root preset workflow, not the
+> `cmake -B build -S .` below — that form predates it and does not configure the
+> kernel exports:
+>
+> ```bash
+> cmake --preset linux-default        # or fedora-default, linux-portable, windows-default
+> cmake --build --preset linux-default
+> cmake --install --preset linux-default
+> ```
+>
+> The install lands in `/opt/openflowlm` and puts `/usr/bin/oflm` on `PATH`.
+> Full instructions: [`../docs/BUILD.md`](../docs/BUILD.md).
+
 ## Installation & Deployment
 
 ### Prerequisites

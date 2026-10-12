@@ -23,7 +23,7 @@
   # mlir-aie 1.4.3 / Peano 20260923 toolchain pinned in open-kernels-env.nix
   # (qwen25-3b: no bias stream in dx_attn; the other two: an aiecc
   # "aie.objectfifo.pool op segment 0 has no filler" placement error). Both are
-  # recipe problems that have since been fixed upstream, and all 13 specs build
+  # recipe problems that have since been fixed upstream, and all 23 specs build
   # today -- re-add a name here if a future recipe regresses.
   skipSpecs ? "",
 }:

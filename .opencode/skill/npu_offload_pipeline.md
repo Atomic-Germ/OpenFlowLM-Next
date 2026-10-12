@@ -1,5 +1,33 @@
 # NPU Offload Pipeline Skill
 
+> **⚠️ Largely stale — read before trusting any path in here.**
+>
+> This playbook predates the recipe system. It is written against a
+> `docs/ExampleNPU/` tree that **no longer exists** in this repository, and it
+> models the project as *"enumerate a model's GEMMs, then write a new IRON design
+> for each."*
+>
+> **That is now the wrong answer for most requests.** Under the current model,
+> a design set is keyed by **GEMM geometry**, not by model or fine-tune name, and a
+> shape that already has kernels needs **zero** new design work:
+>
+> ```bash
+> q4nx-build -i Someone/Their-Model-NPU2
+> oflm-add   Someone/Their-Model-NPU2
+> ```
+>
+> Reach for this document only when you are adding a kernel for a **genuinely new
+> shape** — a GEMM geometry no installed set covers. Before you do, check
+> `open_kernels/recipes/catalogue.py`, which records the points every template has
+> actually been validated at. If your geometry is a new *value* for a parametric
+> template (`attn` takes HD/NH/KVH as compile-time macros), you still write no
+> design; you run the new point, compare it, and the validated set grows.
+>
+> Current entry points that supersede most of what follows:
+> `open_kernels/harness/README.md` (build and run a design from this tree),
+> `open_kernels/recipes/` (how a `ModelSpec` becomes layouts and kernel TUs),
+> and the root [`AGENTS.md`](../../../AGENTS.md).
+
 **Purpose**: Reusable workflow for offloading dense GEMM operations from transformer models to AMD NPU2 via mlir-aie/iron, with validated CPU reference comparison.
 
 ---

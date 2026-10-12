@@ -7,9 +7,37 @@
 
 ## OpenFlowLM -- open NPU kernels for Ryzen™ AI
 
-A community fork of [FastFlowLM](https://github.com/ROCm/FastFlowLM) that
-replaces the closed NPU kernels with open ones, built from source in this
-repository.
+Open NPU kernels for Ryzen AI, built from source in this repository, out of the
+[FastFlowLM](https://github.com/ROCm/FastFlowLM) codebase.
+
+**The point: a fine-tune nobody has ever heard of runs with zero new code.**
+Resolve it, verify it, bind its kernels. You do not write kernels for it, and you
+do not add its name to a list.
+
+```bash
+oflm pack -i Someone/Their-Model-NPU2    # work out what it is; build the container
+oflm add  Someone/Their-Model-NPU2       # verify it, bind kernels, register it
+```
+
+Both are commands on the `oflm` binary itself, each handing off to the builder or
+installer bundled beside it. Three tools carry this project, and they do
+considerably more than their names suggest:
+
+- **`oflm pack`** (the builder) is not just a converter. It identifies a GGUF by
+  fingerprinting its actual tensor names when the metadata is absent or wrong,
+  follows the model card's `base_model` chain to find the right skeleton assets, and
+  has a converter per architecture. It is what makes an arbitrary model buildable.
+- **`oflm add`** is not just an installer — `oflm pull` is that. It handles models
+  nobody has registered: it picks between the converted and GGUF paths, checks the
+  weights against what their filename claims, derives the tag/family/size, and
+  binds kernels **by shape rather than by name**.
+- **[`oflm-test`](utilities/oflm-test)** is the acceptance gate: `--llm`,
+  `--vision`, `--embed`, `--tools`.
+
+Kernel sets are per-*family* and matched by *geometry*, so every fine-tune and
+derivative of a supported architecture works today, including ones we have never
+seen. Work is under way to collapse the two commands into one: a llama.cpp-style
+GGUF can now be installed directly, with no conversion step.
 
 📦 **The only out-of-box, NPU-first runtime built exclusively for Ryzen™ AI.**  
 🤝 **A familiar single-command CLI -- deeply optimized for NPUs.**  
@@ -27,20 +55,28 @@ required.
 ## What is different from upstream
 
 - **Open kernels.** `open_kernels/` holds the AIE designs the engine
-  dispatches -- source, not pre-compiled binaries. Ten model families run on a
-  shared recipe that works each model's shape out of its own `config.json`:
-  Qwen3.6-MoE, Qwen3.5, Qwen3, Qwen2.5, Llama 3, Gemma 3, Phi-3/4, LFM2,
-  HunYuan and Granite.
+  dispatches -- source, not pre-compiled binaries. Families run on a shared
+  recipe that works each model's shape out of its own `config.json` or GGUF
+  metadata: Qwen3.6-MoE, Qwen3.5/3.8, Qwen3, Qwen2.5, Llama 3, Gemma 3, Phi-3/4,
+  LFM2, HunYuan, Granite and K2.
+- **Fine-tunes are first-class.** A model of a supported shape needs no new code,
+  no registry entry and no new kernels. `oflm pack` builds it; `oflm add`
+  matches its shape to an installed family kernel set.
 - **A second embedding backend.** Six encoder models beyond the one upstream
   ships, through [`src/open_npue/`](src/open_npue/).
 - **GGUF and Q4_K containers**, so models are not confined to one weight format.
-- **Built from source.** Use CMake presets for building; see
-  [docs/BUILD.md](docs/BUILD.md).
+- **Built from source.** Use CMake presets; see [docs/BUILD.md](docs/BUILD.md).
 
-Not every model runs on open kernels. Vision, audio and the Gemma 4, GPT-OSS
-and Whisper families have no open design yet and dispatch to the closed engine
-binaries. See [the support-status matrix](docs/docs/models/index.md) for exactly
-what is open today.
+Not every *shape* has open kernels yet. Vision, audio and the Gemma 4, GPT-OSS
+and Whisper families have no open design and fall back to the closed engine
+binaries, which are legacy and being replaced. If your fine-tune's architecture is
+unsupported, that is a **kernel gap to close**, not a model to exclude -- and it is
+still two commands once it exists. See
+[the support-status matrix](docs/docs/models/index.md) for what is open today.
+
+Adding a model? Read [`src/create_new_model.md`](src/create_new_model.md). Adding
+a kernel? Read [`AGENTS.md`](AGENTS.md) first -- it is the shortest accurate
+description of how this project works.
 
 ---
 
@@ -56,7 +92,7 @@ what is open today.
 2. **Build it** -- [docs/BUILD.md](docs/BUILD.md). The build system handles
     both the executable and kernel exports via CMake presets.
 
-3. **Run it:**
+3. **Run a model:**
 
    ```powershell
    oflm run llama3.2:1b
@@ -68,16 +104,27 @@ what is open today.
    oflm serve
    ```
 
+4. **Run your own model.** Convert it, then install it:
+
+   ```bash
+   oflm pack -i Someone/Their-Model-NPU2
+   oflm add  Someone/Their-Model-NPU2
+   oflm run their-model:9b
+   ```
+
+   `--dry-run` on `oflm pack` prints the plan without converting anything.
+
 🐧 [Linux getting-started guide](./docs/linux-getting-started.md)
 
 ---
 
 ## Highlights
 
+- **Any fine-tune of a supported shape, no code** -- convert and install
 - **Runs on the NPU** -- not the GPU, and not as CPU fallback
 - **Open kernel path** -- the designs are here, built via CMake presets
 - **Long context** -- up to 256k tokens on models that support it
-- **Familiar CLI** -- `run`, `serve`, `list`, `bench`
+- **Familiar CLI** -- `run`, `serve`, `list`, `bench`, `add`
 
 ---
 

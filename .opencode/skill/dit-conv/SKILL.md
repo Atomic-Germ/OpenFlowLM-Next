@@ -14,7 +14,9 @@ Sources:
 Exporter: `open_kernels/export_dit_kernels.py` builds `conv/`, `conv1/` and `vew/`, and
 adds the VAE's attention streams to the gemm and fa sets. `--no-vae` skips all of it.
 
-Design note: `.claude/plans/image-diffusion-phase5-vae.md`.
+Design note: `.claude/plans/image-diffusion-phase5-vae.md` — that plan file was
+gitignored (the whole `.claude/` tree) and is unavailable; `open_kernels/vae_decoder.py`
+plus the notes below are the surviving record.
 
 ## What was learned getting here (don't re-derive it)
 
