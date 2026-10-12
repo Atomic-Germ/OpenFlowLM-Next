@@ -323,6 +323,36 @@ FAMILY_ALIASES = [
 # whose shapes an engine here serves are mapped; anything else (moe variants
 # with different geometry, one-off merges) must say --family explicitly rather
 # than link the wrong kernels.
+def gguf_arch_families() -> dict[str, str]:
+    """`general.architecture` -> runtime details.family, from the RECIPES.
+
+    This used to be a hand-kept dict, which is the whole problem in miniature:
+    it listed eight architectures and had never heard of qwen35, so
+    `oflm add ornith-ai/Ornith-1.5-9B-GGUF` refused with "could not determine
+    details.family" for a model whose header says `qwen35` plainly. The recipes
+    already carry this mapping -- `recipes.spec.GGUF_FAMILIES` keys every
+    architecture to the builder that implements it, and each builder knows its
+    family -- so it is read from there and adding an arch is not a second edit.
+
+    The literal below is only a fallback for when the recipes are not importable.
+    """
+    try:
+        from pathlib import Path as _Path
+        import sys as _sys
+        for cand in (_Path(__file__).resolve().parents[3] / "open_kernels",
+                     _Path("/opt/openflowlm/share/oflm/open_kernels")):
+            if cand.is_dir():
+                _sys.path.insert(0, str(cand))
+                break
+        from recipes.spec import GGUF_FAMILIES as _GF, _FAMILY_OF as _FO
+        derived = {arch: _FO[builder] for arch, builder in _GF.items()}
+        # The recipes win where they speak; the literal fills the gaps (the
+        # embedding tower has no per-arch builder, it rides the bf16 kernels).
+        return {**GGUF_ARCH_FAMILIES, **derived}
+    except Exception:                                           # noqa: BLE001
+        return dict(GGUF_ARCH_FAMILIES)
+
+
 GGUF_ARCH_FAMILIES = {
     "gemma-embedding": "embed-gemma",
     "qwen3": "qwen3",
@@ -1331,6 +1361,58 @@ def open_kernels_checkout():
     return None
 
 
+def gguf_direct_kernels(sys_xcl: Path, xclbin_source: str | None, spec_hash: str | None):
+    """The installed kernel set that can actually run THIS model, or (None, why).
+
+    Two checks, both about the shape rather than the name:
+
+    1. the set has a "gguf" section -- the f32-scale twin kernels are built;
+    2. its manifest's spec_hash equals this model's.
+
+    (2) is the one that matters. `resolve_official` matches a custom repo to an
+    official model by family and NEAREST SIZE, which is right for the closed
+    kernels and wrong for these: a custom Qwen3.5-4B tune resolves to the 9B set
+    and gets kernels built for a different geometry, producing a model that
+    loads and answers with nonsense. A geometry has to match; a name does not.
+    """
+    if not xclbin_source or not sys_xcl:
+        return None, "no installed kernel set matched this model"
+    kdir = sys_xcl / xclbin_source
+    if not manifest_supports_gguf(kdir / "open_kernels" / "manifest.json"):
+        return None, (f"{xclbin_source} has no GGUF-direct build "
+                      "(its open_kernels manifest has no 'gguf' section)")
+    have = kernel_set_spec_hash(kdir)
+    if spec_hash and have and have != spec_hash:
+        return None, (f"{xclbin_source} is built for a different model shape "
+                      f"(manifest {have[:19]}, this model {spec_hash[:19]})")
+    return kdir, None
+
+
+def gguf_spec_hash(gguf_source: str | None):
+    """`spec_hash` for the GGUF we are about to install, or (None, why).
+
+    From the file's own metadata (`general.architecture` and the geometry keys),
+    which is what a custom tune actually carries -- its repo name says nothing.
+    A pruned or re-templated fine-tune derives fine; that is the point.
+    """
+    if not gguf_source:
+        return None, "no GGUF selected"
+    inv = read_gguf_inventory(gguf_source)
+    if inv is None:
+        return None, "could not read the GGUF metadata"
+    kv, _tensors = inv
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _root = _Path(__file__).resolve().parents[3] / "open_kernels"
+        if str(_root) not in _sys.path:
+            _sys.path.insert(0, str(_root))
+        from recipes.spec import ModelSpec as _MS
+        return _MS.from_gguf_metadata(kv).spec_hash(), None
+    except Exception as exc:                                    # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def model_spec_hash(model_dir):
     """(spec_hash, note) for an installed model directory; (None, why) on failure.
 
@@ -1711,7 +1793,7 @@ def family_from_gguf_arch(gguf_source):
     arch = inv[0].get("general.architecture") if inv else None
     if not arch:
         return None
-    return GGUF_ARCH_FAMILIES.get(str(arch).strip().lower())
+    return gguf_arch_families().get(str(arch).strip().lower())
 
 
 def family_from_config_dict(cfg):
@@ -2134,10 +2216,15 @@ def main():
     # build-all.sh). Otherwise fall back to the normal safetensors install.
     gguf_skip = None
     if gguf_mode:
+        # What the GGUF itself is, so the kernel set can be matched to the SHAPE
+        # rather than to the family name or a nearest size.
+        want_hash, why_nohash = gguf_spec_hash(gguf_source)
+        if want_hash:
+            log(f"[INFO] this GGUF is spec {want_hash[:19]} (from its own metadata)")
+        else:
+            log(f"[INFO] no spec hash for the GGUF ({why_nohash}); "
+                "matching kernels by name only")
         if family in EMBEDDING_FAMILIES:
-            # Embedding GGUF uses the existing bf16 matmul kernels (the engine
-            # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
-            # open_kernels manifest. Just confirm the family is recognized.
             pass
         else:
             # The CAPABILITY test is the linked kernel set's manifest, not a
@@ -2148,23 +2235,47 @@ def main():
             # (qwen3.5 among them) while the kernels beside it already could
             # load the file. Gate on the artifact, so gaining a twin is enough.
             if args.open_kernels:
-                mj = Path(args.open_kernels) / "manifest.json"
+                kdir = Path(args.open_kernels)
+                have = kernel_set_spec_hash(kdir)
+                why = None
+                if not manifest_supports_gguf(kdir / "manifest.json"):
+                    why = f"{args.open_kernels} has no 'gguf' manifest section"
+                elif want_hash and have and have != want_hash:
+                    why = (f"{args.open_kernels} is built for a different shape "
+                           f"(manifest {have[:19]}, this model {want_hash[:19]})")
+                if why:
+                    kdir = None
             else:
                 sys_xcl = find_system_xclbin_root()
-                mj = (sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
-                      if xclbin_source and sys_xcl else Path())
-            if not manifest_supports_gguf(mj):
-                hint = ""
-                if family not in GGUF_CAPABLE_FAMILIES:
-                    # Advisory only. Stale here is harmless -- it is a hint about
-                    # where twins exist today, never a gate.
-                    hint = (f" (families with a GGUF-direct build today: "
-                            + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
-                            + "; nothing ships one for this family yet)")
-                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
-                             "have no GGUF-direct build (their open_kernels manifest has no 'gguf' "
-                             "section); rebuild them with utilities/build-all.sh -- "
-                             "installing the safetensors weights instead" + hint)
+                # Find the kernel set by SHAPE. `resolve_official` matched a
+                # custom repo by family and nearest size, which cannot work for
+                # a tune whose name says nothing: the registry spells this
+                # family "qwen3.5" while the GGUF header derives "qwen35", so
+                # the two never met and the model got no kernels at all. The
+                # spec_hash is the same key the open kernels already publish.
+                kdir, found = find_open_kernels(
+                    want_hash, [sys_xcl] if sys_xcl else [], dir_name)
+                if kdir is not None and manifest_supports_gguf(kdir / "manifest.json"):
+                    if found and found != xclbin_source:
+                        log(f"[INFO] kernels by shape: {found} "
+                            f"(spec {want_hash[:19]}); not {xclbin_source or 'any name match'}")
+                    xclbin_source = found
+                    why = None
+                else:
+                    why = ("no installed open kernel set has this model's spec "
+                           f"{want_hash[:19]}" if want_hash else
+                           "no installed kernel set matched this model")
+                    kdir = None
+                    if kdir is not None and not manifest_supports_gguf(kdir / "manifest.json"):
+                        why = (f"{found} has no GGUF-direct build "
+                               "(its open_kernels manifest has no 'gguf' section)")
+                        kdir = None
+            if not kdir:
+                gguf_skip = (
+                    f"{why or 'no GGUF-direct kernel set matched this model'}; "
+                    "build one for this shape (recipes/gen_specs.py + "
+                    "utilities/build-all.sh) or pass --open-kernels DIR"
+                    " -- installing the safetensors weights instead")
         if gguf_skip:
             gguf_refused[gguf_name] = gguf_skip
             log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
