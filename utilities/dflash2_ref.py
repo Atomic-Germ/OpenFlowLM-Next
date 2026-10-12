@@ -118,7 +118,7 @@ def rms(x, w, eps):
 def rope_neox(x, pos, base, n_rot=128):
     """NeoX pairs (i, i + n_rot/2); MROPE with sections [n_rot/2, 0, 0, 0] is the same rotation."""
     half = n_rot // 2
-    inv = base ** (-torch.arange(0, half, dtype=torch.float64) * 2.0 / n_rot)
+    inv = base ** (-torch.arange(0, half, dtype=torch.float64, device=x.device) * 2.0 / n_rot)
     ang = pos.to(torch.float64)[:, None] * inv[None, :]
     c, s = torch.cos(ang).float()[:, None, :], torch.sin(ang).float()[:, None, :]
     x1, x2 = x[..., :half], x[..., half:n_rot]
@@ -132,7 +132,8 @@ def f16_round(x):
 class Target:
     """Ternary Bonsai 2's borrowed pieces: the latent token embedding and the rotated lm head."""
 
-    def __init__(self, path):
+    def __init__(self, path, device="cpu"):
+        self.device = torch.device(device)
         g = Gguf(path)
         self.g = g
         bs = int(g.kv["prism.hadamard.block_size"])
@@ -140,8 +141,8 @@ class Target:
         vals = np.asarray(g.kv["prism.hadamard.sign_values"], np.float32)
         off = {w: sum(widths[:i]) for i, w in enumerate(widths)}
         self.n_embd = int(g.kv["qwen35.embedding_length"])
-        self.signs = torch.from_numpy(vals[off[self.n_embd]:off[self.n_embd] + self.n_embd].copy())
-        self.H = hadamard(bs)
+        self.signs = torch.from_numpy(vals[off[self.n_embd]:off[self.n_embd] + self.n_embd].copy()).to(self.device)
+        self.H = hadamard(bs).to(self.device)
         self.bs = bs
         self.emb_raw, self.emb_dims, _ = g.raw("token_embd.weight")
         self.head = None
@@ -152,17 +153,17 @@ class Target:
 
     def embed(self, ids):
         """h = s * (H z): the inverse transform applied right after the lookup."""
-        z = torch.from_numpy(pq2_rows(self.emb_raw, self.emb_dims, ids))
+        z = torch.from_numpy(pq2_rows(self.emb_raw, self.emb_dims, ids)).to(self.device)
         return self.wht(z) * self.signs
 
     def load_head(self):
         if self.head is None:
             b, dims, _ = self.g.raw("output.weight")
             n = int(dims[1])
-            self.head = torch.empty(n, self.n_embd)
+            self.head = torch.empty(n, self.n_embd, device=self.device)
             for r0 in range(0, n, 16384):
                 r = np.arange(r0, min(n, r0 + 16384))
-                self.head[r0:r0 + len(r)] = torch.from_numpy(pq2_rows(b, dims, r))
+                self.head[r0:r0 + len(r)] = torch.from_numpy(pq2_rows(b, dims, r)).to(self.device)
         return self.head
 
     def logits(self, x):
@@ -171,7 +172,8 @@ class Target:
 
 
 class Drafter:
-    def __init__(self, path):
+    def __init__(self, path, device="cpu"):
+        self.device = torch.device(device)
         g = Gguf(path)
         self.g = g
         kv = g.kv
@@ -189,7 +191,7 @@ class Drafter:
         self.mask_id = int(kv["tokenizer.ggml.mask_token_id"])
         self.n_swa = int(kv.get("dflash.attention.sliding_window", 0)) or None
         assert self.kernel == 2 and self.top_k == TOP_K
-        t = lambda n: torch.from_numpy(np.array(g.f32(n)))
+        t = lambda n: torch.from_numpy(np.array(g.f32(n))).to(self.device)
         self.fc = t("fc.weight")
         self.enc_norm = t("enc.output_norm.weight")
         self.out_norm = t("output_norm.weight")
@@ -224,14 +226,14 @@ class Drafter:
         ng = n // self.group
         c = dyn.view(B, 2, self.kernel, ng)[:, side]                       # [B, tap, g]
         w = c.repeat_interleave(self.group, dim=-1) + base[side][None]      # [B, tap, n]
-        prev = torch.cat([torch.zeros(1, n), x[:-1]], dim=0)
+        prev = torch.cat([torch.zeros(1, n, device=x.device), x[:-1]], dim=0)
         return w[:, 0] * x + w[:, 1] * prev
 
     def block(self, tgt, anchor, p0, n_draft, cache, cache_pos, f16_cache=True):
         """[anchor, MASK x n_draft] at positions p0.. -> (final-normed rows [B, n], logits [B, vocab])."""
         B = n_draft + 1
         x = tgt.embed([anchor] + [self.mask_id] * n_draft)
-        pos = torch.arange(p0, p0 + B)
+        pos = torch.arange(p0, p0 + B, device=self.device)
         rep = self.n_head // self.n_kv
         for il, ly in enumerate(self.L):
             h = rms(x, ly["attn_norm"], self.eps)
@@ -247,7 +249,7 @@ class Drafter:
             K = torch.cat([ck, k], 0)
             V = torch.cat([cv, v], 0)
             kp = torch.cat([cache_pos, pos])
-            allowed = torch.ones(B, len(kp), dtype=torch.bool)
+            allowed = torch.ones(B, len(kp), dtype=torch.bool, device=self.device)
             if self.n_swa:
                 allowed = (pos[:, None] - kp[None, :]) < self.n_swa
             Kr = K.repeat_interleave(rep, dim=1)                              # head h reads kv head h // rep
@@ -284,7 +286,7 @@ class Drafter:
     def draft(self, tgt, anchor, p0, n_draft, cache, cache_pos, f16_cache=True):
         hn, logits = self.block(tgt, anchor, p0, n_draft, cache, cache_pos, f16_cache)
         lat = self.lattice(anchor, hn, logits)
-        return walk(lat.numpy(), self.top_k), lat
+        return walk(lat.cpu().numpy(), self.top_k), lat.cpu()
 
 
 def walk(lat, top_k=TOP_K):
@@ -311,8 +313,8 @@ def margin(lat_row, pred, top_k=TOP_K):
 
 def gate(a):
     torch.set_num_threads(a.threads)
-    tgt = Target(a.target)
-    dr = Drafter(a.drafter)
+    tgt = Target(a.target, a.device)
+    dr = Drafter(a.drafter, a.device)
     k = int(a.key.rsplit("_k", 1)[1])
     nt = len(dr.taps) * tgt.n_embd
     report = {}
@@ -331,7 +333,7 @@ def gate(a):
             steps = steps[:a.max_steps]
         last = n0 + steps[-1]
         with torch.no_grad():
-            cache_all = dr.encode(torch.from_numpy(taps[:last]), torch.arange(last))
+            cache_all = dr.encode(torch.from_numpy(taps[:last]).to(dr.device), torch.arange(last, device=dr.device))
         res = dict(steps=0, same=0, first_tok_same=0, mism=[], cand_overlap=0.0, score_err=[])
         for s in steps:
             p0 = n0 + s
@@ -339,7 +341,7 @@ def gate(a):
             lo = max(0, p0 - dr.n_swa + 1) if dr.n_swa else 0
             cache = [(K[lo:p0], V[lo:p0]) for K, V in cache_all]
             with torch.no_grad():
-                d, lat = dr.draft(tgt, anchor, p0, k, cache, torch.arange(lo, p0))
+                d, lat = dr.draft(tgt, anchor, p0, k, cache, torch.arange(lo, p0, device=dr.device))
             ll = rows[s]["d"][a.key]
             res["steps"] += 1
             res["same"] += d == ll
@@ -396,6 +398,7 @@ def main():
     g.add_argument("--tie", type=float, default=0.1)
     g.add_argument("--taps-file-suffix", default=".taps")
     g.add_argument("--out")
+    g.add_argument("--device", default="cpu")
     a = ap.parse_args()
     if a.cmd == "gate":
         gate(a)

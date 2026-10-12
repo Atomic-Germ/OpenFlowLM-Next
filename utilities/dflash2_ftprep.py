@@ -89,7 +89,7 @@ def read_bin(p):
 def pack(a):
     """tfgen .bin -> index.json + ids.bin + feat.bin; feat g = hidden_norm(fc x) with --fc-gguf's fc, or raw taps."""
     torch.set_num_threads(a.threads)
-    files = sorted(Path(a.src).glob("*.bin"))
+    files = sorted(f for src in a.src.split(",") for f in Path(src).glob("*.bin"))
     if a.limit:
         files = files[:a.limit]
     out = Path(a.out)
