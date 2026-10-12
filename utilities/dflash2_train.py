@@ -228,7 +228,18 @@ class Data:
         self.feat_dim = self.idx["feat_dim"]
         self.feat = np.memmap(d / "feat.bin", np.float16, "r")
         self.lab = np.memmap(d / "lab.bin", np.int32, "r") if (d / "lab.bin").exists() and (d / "lab.bin").stat().st_size else None
+        self.top_k = self.idx.get("top_k", 0)
+        if self.top_k:
+            self.top_ids = np.memmap(d / "top_ids.bin", np.int32, "r").reshape(-1, self.top_k)
+            self.top_val = np.memmap(d / "top_val.bin", np.float16, "r").reshape(-1, self.top_k)
         self.seqs = self.idx["seqs"]
+
+    def top(self, i):
+        s = self.seqs[i]
+        if not self.top_k or "top_off" not in s:
+            return None
+        n = s["n_ids"] - s["n_prompt"]
+        return np.asarray(self.top_ids[s["top_off"]:s["top_off"] + n]), np.asarray(self.top_val[s["top_off"]:s["top_off"] + n])
 
     def get(self, i):
         """-> (meta, ids, features, A) with A[p - (n_prompt - 1)] the target's greedy token after position p."""
@@ -253,6 +264,10 @@ class MultiData:
     def get(self, k):
         j, i = self.index[k]
         return self.parts[j].get(i)
+
+    def top(self, k):
+        j, i = self.index[k]
+        return self.parts[j].top(i)
 
 
 def anchors_for(s, stride, rng):
@@ -286,7 +301,15 @@ def make_batch(dr, tgt, s, ids, f, anchors, device, mask_id, dtype, A=None):
     return g, ctx_pos, emb, a, labels, toks[:, 0].to(device), torch.from_numpy(valid).to(device)
 
 
-def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w, valid=None):
+def soft_targets(top, anchors, base, device):
+    """[A, 7, K] ids and renormalized probabilities of the target's top-K for each block row."""
+    ti, tv = top
+    ids = np.stack([ti[x - base:x - base + BLOCK - 1] for x in anchors]).astype(np.int64)
+    val = np.stack([tv[x - base:x - base + BLOCK - 1] for x in anchors]).astype(np.float32)
+    return torch.from_numpy(ids).to(device), torch.softmax(torch.from_numpy(val).to(device), -1)
+
+
+def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w, valid=None, soft=None, soft_w=0.0):
     A = hn.shape[0]
     if valid is None:
         valid = torch.ones(A, BLOCK - 1, dtype=torch.bool, device=hn.device)
@@ -294,6 +317,11 @@ def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w, valid=None):
     logits = (rows @ tgt.head.T.to(rows.dtype)).float()
     ce = F.cross_entropy(logits, labels.reshape(-1), reduction="none").view(A, BLOCK - 1)
     l_ce = (ce * wpos * valid).sum(1).mean()
+    if soft is not None and soft_w > 0:
+        sid, sp = soft
+        lq = torch.gather(torch.log_softmax(logits, -1).view(A, BLOCK - 1, -1), 2, sid)
+        sce = -(sp * lq).sum(-1)
+        l_ce = (1 - soft_w) * l_ce + soft_w * (sce * wpos * valid).sum(1).mean()
     stats = dict(ce=float(ce.detach().mean()), top1=float((logits.detach().argmax(-1) == labels.reshape(-1)).float().mean()))
     if lat_w <= 0:
         return l_ce, stats
@@ -442,9 +470,11 @@ def train(a):
         i, an = work[mb]
         s, ids, f, A = data.get(i)
         g, ctx_pos, emb, aa, labels, atok, valid = make_batch(dr, tgt, s, ids, f, an, device, cfg["mask_id"], dtype, A)
+        top = data.top(i)
+        soft = soft_targets(top, an, s["n_prompt"] - 1, device) if top is not None else None
         with torch.autocast(device.type, dtype=dtype, enabled=True):
             hn = dr(dr.features(g), ctx_pos, emb, aa)
-        loss, st = losses(dr, tgt, hn, labels, atok, wpos, a.lat_w, valid)
+        loss, st = losses(dr, tgt, hn, labels, atok, wpos, a.lat_w, valid, soft, a.soft_w)
         (loss / a.accum).backward()
         acc_stats.append(st)
         if (mb + 1) % a.accum:
@@ -492,6 +522,7 @@ def main():
     ap.add_argument("--clip", type=float, default=1.0)
     ap.add_argument("--pos-decay", type=float, default=0.85)
     ap.add_argument("--lat-w", type=float, default=1.0)
+    ap.add_argument("--soft-w", type=float, default=0.0, help="weight of the CE against the target's top-K distribution")
     ap.add_argument("--val-frac", type=float, default=0.03)
     ap.add_argument("--eval-every", type=int, default=200)
     ap.add_argument("--eval-anchors", type=int, default=3000)
