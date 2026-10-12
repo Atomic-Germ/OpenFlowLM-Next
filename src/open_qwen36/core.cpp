@@ -667,10 +667,15 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
             globals_[name] = alloc(bytes);
         }
     }
-    // a "#1" twin per GEMM x / y, so the host fills or reads one while the NPU uses the other
-    if (stage_major_on_)
-        for (const auto& [name, bytes] : man_.globals)
-            if (name.rfind("gemm_x_k", 0) == 0 || name.rfind("gemm_y_n", 0) == 0) globals_[name + "#1"] = alloc(bytes);
+    // a "#1" twin per staged GEMM step's x / y, so the host fills or reads one while the NPU uses the other
+    if (stage_major_on_ && layer_major_ok())
+        for (int l = 0; l < nl_; ++l) {
+            const GemmBlockProgram& gb = types_[l]->gemm_block;
+            for (const std::vector<Step>* prog : {&gb.program, &gb.shared_program, &gb.ffn_program})
+                for (const Step& s : *prog)
+                    for (const std::string& name : {s.args[1], s.args[2]})
+                        if (!globals_.count(name + "#1")) globals_[name + "#1"] = alloc(man_.globals.at(name));
+        }
     for (const auto& [name, rg] : man_.per_row_globals) {
         std::vector<uint8_t> pt(cfg_.max_ctx * rg.per_row);
         pools::build_ptab(man_, rg, cfg_.max_ctx, pt.data());
@@ -3469,7 +3474,7 @@ void Core::layer_full_staged(int l, float* xres, size_t B, size_t T, size_t N, s
     const HostConsts& hc = hc_[l];
     const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, nf = 2 * qw + 2 * kvw;
     const bool npu_attn = attn_block_on_ && gb.attn_block.present();
-    float* q_all = BlockScratch::fit(ss_.q, B * T * qw);
+    float* q_all = npu_attn ? BlockScratch::fit(ss_.q, B * T * qw) : nullptr;
     float* gate_all = BlockScratch::fit(ss_.gate, B * T * qw);
     float* og_all = BlockScratch::fit(ss_.og, B * T * qw);
     // the KV rows: [0, pos0) cached on the device, [pos0, pos0 + N) written here on the host
