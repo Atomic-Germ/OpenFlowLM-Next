@@ -671,6 +671,17 @@ def _parse_args(argv):
              "expects, f32 biases/norms, the decoder in bf16, and a tokenizer_config.json "
              "carrying the bos/eos ids the host reads.",
     )
+    parser.add_argument(
+        "--open-diffusion", dest="open_diffusion", action="store_true",
+        help="Build the open diffusion engine's model repo (FLUX.2 [klein] 4B): GEMM weights "
+             "packed for the dit_gemm kernel set (tied to it by a layout hash), the VAE's, "
+             "the 512/1024 schedules and the embedding table. Runs from a repo checkout.",
+    )
+    parser.add_argument(
+        "--pack-cache", dest="pack_cache", default=None, metavar="DIR",
+        help="With --open-diffusion: keep the per-weight packed files here and reuse them "
+             "on the next build (default: a temporary directory)",
+    )
     return parser.parse_args(argv)
 
 
@@ -720,6 +731,25 @@ def main(argv=None) -> int:
             print(f"  - {name}")
         print(f"[INFO] Registry metadata written to "
               f"{os.path.join(result['output_dir'], MODEL_INFO_ARTIFACT)}")
+        return 0
+
+    if args.open_diffusion:
+        from q4nx.open_diffusion import MODEL_INFO_ARTIFACT, build_open_diffusion_repo
+
+        output_folder = os.path.abspath(args.output_flag or ".")
+        result = build_open_diffusion_repo(input_path, output_folder, npu_assets=args.npu_assets,
+                                           pack_cache=args.pack_cache)
+        print(f"[INFO] Open diffusion repo built at {result['output_dir']}")
+        print(f"[INFO] Source: {result['source']}")
+        print(f"[INFO] Kernel layout: {result['layout']} (the kernel set must be built from "
+              f"the same open_kernels code: export_dit_kernels.py, then --install)")
+        for name in result["files"]:
+            print(f"  - {name}")
+        print(
+            f"[INFO] Registry metadata written to "
+            f"{os.path.join(result['output_dir'], MODEL_INFO_ARTIFACT)}; "
+            "merge it into src/model_info.json under the model tag."
+        )
         return 0
 
     if args.open_embedding or args.open_causal_lm:

@@ -153,6 +153,7 @@ Args parse(int argc, char** argv) {
     Args a;
     a.cfg.model_dir = std::getenv("OFLM_MODEL_DIR") ? std::getenv("OFLM_MODEL_DIR") : "";
     a.cfg.kernel_dir = std::getenv("OFLM_OPEN_KERNELS_DIR") ? std::getenv("OFLM_OPEN_KERNELS_DIR") : "";
+    if (const char* pm = std::getenv("OFLM_OPEN_PREFILL_MODE")) a.cfg.prefill_mode = pm;
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() -> std::string {
@@ -161,6 +162,7 @@ Args parse(int argc, char** argv) {
         };
         if (k == "--model") a.cfg.model_dir = val();
         else if (k == "--kernels") a.cfg.kernel_dir = val();
+        else if (k == "--prefill-mode") a.cfg.prefill_mode = val();
         else if (k == "--ids") a.ids = parse_ids(val());
         else if (k == "--ids-file") {
             std::ifstream f(val());
@@ -204,7 +206,7 @@ Args parse(int argc, char** argv) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE]\n");
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean]\n");
         std::exit(2);
     }
     return a;

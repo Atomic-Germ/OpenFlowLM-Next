@@ -2,6 +2,7 @@ build
 build_*/
 build-*/
 npu-cache
+oflm-data
 .vscode
 .codegraph/
 *.egg-info/
@@ -94,3 +95,8 @@ src/xclbins/*/open_kernels*/
 result
 result-*
 bin/
+.env
+
+# local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
+TestGGUF/
+*.gguf

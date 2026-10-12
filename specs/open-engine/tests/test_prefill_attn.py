@@ -42,6 +42,23 @@ def test_the_route_names_the_attention_gemm_streams():
     assert (m["globals"]["ag_a"], m["globals"]["ag_b"], m["globals"]["ag_c"]) == (2048 * LMAX * 2, LMAX * 256 * 2, 2048 * LMAX * 4)
 
 
+def test_a_dense_family_says_which_attention_the_host_half_computes():
+    """The dense route gets the products' streams, but only a family whose attention is the q/k
+    norm then the half-split rotation (no bias, no gate) declares it as `prep`; the engine runs
+    the products for a declared family only and leaves the rest on the dxB route."""
+    from recipes.load import load_spec
+    from recipes.manifest import manifest
+
+    specs = ROOT / "open_kernels" / "recipes" / "specs"
+    ab = manifest(load_spec(specs / "qwen3-4b.json"))["layer_types"]["dense"]["gemm_block"]["attn_block"]
+    # 32 query heads over 8 kv heads x 256 tokens = 1024 rows, head dim 128
+    assert (ab["m"], ab["hd"], ab["l_max"], ab["prep"]) == (1024, 128, LMAX, "qknorm_rope")
+    # no q/k norm (Llama), the norm after the rotation (HunYuan), a family not yet measured (Phi-3)
+    for name in ("llama31-8b.json", "hy-mt2-7b.json", "phi4-mini-4b.json"):
+        gb = manifest(load_spec(specs / name))["layer_types"]["dense"]["gemm_block"]
+        assert "prep" not in gb.get("attn_block", {}), name
+
+
 # ---- the kernel and the route: manual, on the NPU
 # Verification (designs/attn_block, WSL ironenv142 for the builds, run_kernel.exe on Windows):
 # 1. python make_test.py --L 2048; build build_s2048 (AG_K=256 AG_N=2048) and build_pv2048

@@ -334,6 +334,24 @@ oflm serve llama3.2:1b --prefill-chunk-len 8192
 
 ---
 
+### 🪶 Trade Prefill Speed for Memory
+
+Some models' kernels carry two ways to process a prompt. `--prefill-mode lean` loads the one that uses less memory and processes prompts more slowly; `fast` is the default. On Qwen3.6-35B, `lean` uses about 1.1 GiB less RAM and prefills about 20% slower (116 against 145 tokens/s on a 1024-token prompt). Models with only one way ignore the flag and say so in the log. The mode is picked when the model loads, so changing it means restarting.
+
+For **CLI mode**:
+
+```shell
+oflm run qwen3.6-moe:35b-a3b --prefill-mode lean
+```
+
+For **Server mode**:
+
+```shell
+oflm serve qwen3.6-moe:35b-a3b --prefill-mode lean
+```
+
+---
+
 ### 🎙️ ASR (Automatic Speech Recognition)
 
 **Requirement:** The ASR model (e.g., `whisper-v3:turbo`) must run **with an LLM loaded concurrently**. Enabling `--asr 1` starts Whisper in the background **while** your chosen LLM loads.
@@ -376,6 +394,25 @@ oflm serve llama3.2:1b --embed 1 --embeddingmodel bge-base:en-v1.5
 > [EmbeddingGemma](/docs/models/embeddinggemma/).
 
 See the ASR guide [here](https://openflowlm.com/docs/models/whisper/)
+
+---
+
+### 🖼️ Generate an Image
+
+`oflm image` turns a prompt into one image with FLUX.2 [klein] 4B. The text encoder, the 4 denoising steps and the VAE decoder all run on the NPU. The model is pulled on first use (about 9 GB).
+
+```shell
+oflm image flux2-klein:4b "a red fox in fresh snow" -o fox.png
+oflm image flux2-klein:4b "a lighthouse at dusk" --size 512 --seed 7 -o lighthouse.jpg
+```
+
+| Option | Default | |
+|---|---|---|
+| `-o`, `--out` | `oflm-<seed>.png` | `.png`, `.jpg` or `.jpeg`; any other extension is refused before loading |
+| `--size` | `1024` | `512` or `1024` (square) |
+| `--seed` | random | the same prompt, size and seed give the same image; the seed used is printed |
+
+The output reports the file, the seed and the time on the NPU, e.g. `14.1 s on the NPU (text 0.72, steps 11.95, vae 1.39)` at 1024² (5.5 s at 512²). `run` and `serve` refuse the image model: it is not a chat model.
 
 ---
 
@@ -775,6 +812,7 @@ The user override takes priority over the shipped copies. Set
 | `OFLM_SERVE_PORT` | Default server port (default `52625`) |
 | `OFLM_CONFIG_PATH` | Explicit `model_list.json` to load |
 | `OFLM_MODELINFO_PATH` | Explicit `model_info.json` to load |
+| `OFLM_HF_OWNER` | Hugging Face account to pull OpenFlowLM's own models from, instead of `model_list.json`'s `hf_owner` |
 | `OFLM_XCLBIN_PATH` | Extra directory to search for xclbins |
 | `OFLM_OPEN_KERNELS_DIR` | Where the open engine looks for exported kernels |
 
