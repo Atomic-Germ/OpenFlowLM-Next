@@ -59,6 +59,7 @@ struct AttnGeom {
     size_t T = 0, t_real = 0, nh = 0, kvh = 0, hd = 0, rot = 0;
     size_t pos0 = 0;        ///< the block's first position (and KV row)
     double eps = 1e-6;      ///< the q / k norms' eps
+    bool kv_pair = false;  ///< cache planes [K hi, K lo, V hi, V lo]
 };
 
 /// The full-attention layer's middle over a block. q / gate [T, nh*hd], k / v [T, kvh*hd]

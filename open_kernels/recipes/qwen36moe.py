@@ -353,6 +353,12 @@ class Linear:
     GLUE_HALF_OUTER: bool = False
 
 
+def paired_attention(spec: ModelSpec) -> bool:
+    """The validated wide dense Qwen attention geometry uses paired KV and FP32 OG."""
+    return (spec.family == "qwen35" and spec.hidden == 5120 and
+            (spec.num_heads, spec.num_kv_heads, spec.head_dim, spec.rotary_dim) == (24, 4, 256, 64))
+
+
 @dataclass(frozen=True)
 class Attn:
     """ax.py's geometry."""
@@ -371,6 +377,7 @@ class Attn:
     # the fast attention path (recipes/attnknobs.py); the defaults are the single-core
     # kernel every family compiled before it existed
     VEXP: int = 0; MLS: int = 0; ACORES: int = 1; NHL: int = 0; RB: int = 1
+    KV_PAIR: bool = False                # [K hi, K lo, V hi, V lo], with FP32 gated output
     BLOCK: int = 0                       # 1: attn.h ATTN_BLOCK_ONLY -- no single-row kernel is built,
                                          # and the driver pads the streamed row count to a whole
                                          # number of blocks (stream_patch::attn_apply, manifest `rb`)
@@ -857,8 +864,9 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
     e_a, kv_row = 0, 0
     if spec.has_full:
         qw, kvw, hd = spec.attn_q_width, spec.attn_kv_width, spec.head_dim
-        e_a, kv_row = kvw * 2, 4 * kvw
-        og_att = roundup(qw * 2, ELEM) // ELEM * ELEM
+        paired = paired_attention(spec)
+        e_a, kv_row = kvw * 2, (8 if paired else 4) * kvw
+        og_att = roundup(qw * (4 if paired else 2), ELEM) // ELEM * ELEM
         c = _Alloc()
         c.add("lnw", eln)
         c.add("postln", eln)
@@ -970,6 +978,11 @@ def attn(spec: ModelSpec) -> Attn | None:
     e_a = kvw * 2                                 # one cache-row half, attn.h's fifo element
     hpe, hpo = e_a // (hd * 4), e_a // (hd * 2)   # f32 heads per q/k/v/gate element; bf16 heads per og element
     A = attn_knobs(spec, spec.num_heads, hpo)
+    paired = paired_attention(spec)
+    if paired:
+        if not A.VEXP or A.RB != 1 or A.BLOCK or A.NHL != 4:
+            raise OpRangeError("paired Qwen attention requires VEXP=1, RB=1, NHL=4")
+        hpo = hpe  # FP32 output heads per EA-byte FIFO element
     return Attn(
         NH=spec.num_heads, KVH=spec.num_kv_heads, HD=hd, ROT=spec.rotary_dim,
         Q_PC=qw // BAND_ROWS // n, KV_PC=kvw // BAND_ROWS // n, O_PC=spec.hidden // BAND_ROWS // n,
@@ -978,7 +991,7 @@ def attn(spec: ModelSpec) -> Attn | None:
         E_A=e_a, HPE=hpe, HPO=hpo,
         Q_AIN_ELEMS=spec.num_heads // hpe, K_AIN_ELEMS=spec.num_kv_heads // hpe,
         OG_AOUT_ELEMS=spec.num_heads // hpo,
-        OG_ELEMS=roundup(qw * 2, ELEM) // ELEM,
+        OG_ELEMS=roundup(qw * (4 if paired else 2), ELEM) // ELEM, KV_PAIR=paired,
         VEXP=A.VEXP, MLS=A.MLS, ACORES=A.ACORES, NHL=A.NHL, RB=A.RB, BLOCK=A.BLOCK,
     )
 

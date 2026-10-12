@@ -22,6 +22,9 @@ from recipes.cache import build_key
 import xlayer as X
 
 S=current_spec();T=int(os.environ.get('REPLAY_TOKENS','3'));G=geometry(S,T);A=X.A
+if A.KV_PAIR:
+    raise ValueError("this standalone probe requires the earlier BF16 production ABI; "
+                     "validate the integrated paired ABI with model/attention_heads.py")
 MODE=int(os.environ.get('REPLAY_FP32','0'))
 if MODE not in (0,1):raise ValueError('REPLAY_FP32 must be 0 or 1')
 HERE=Path(__file__).resolve().parent

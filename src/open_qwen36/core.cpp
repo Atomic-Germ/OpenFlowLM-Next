@@ -446,7 +446,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     for (const auto& t : types_) any_attn = any_attn || t->gemm_block.attn_block.present();
     if (gemm_block_t_)
         log(std::string("block attention on the NPU: ") +
-            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
+            (w_->attn_kv_pair ? "not implemented for paired KV (attention on the host)" :
+             any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
     if (gemm_block_t_)
         log(std::string("prefill schedule: ") +
             (layer_major_ok() ? (any_moe ? "layer-major (the whole prompt through each layer, one MoE pass a layer)"
@@ -2461,7 +2462,7 @@ void Core::dense_attention_block(int l, const std::vector<float>& y_qkv3, size_t
     timing_.state_ms += ms_since(tt);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = qw / hd; g.kvh = kvw / hd; g.hd = hd; g.rot = w_->rotary_dim;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
     tt = std::chrono::steady_clock::now();
     float* Q = BlockScratch::fit(bs_.qrope, T * qw);
     host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), w_->rope_inv_freq.data(), st.map<uint16_t*>(), row / 2, Q);
@@ -3285,10 +3286,10 @@ void Core::block_layer_full(int l, float* xres, size_t T, size_t t_real, size_t 
     timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
-    g.pos0 = pos0; g.eps = gb.eps;
+    g.pos0 = pos0; g.eps = gb.eps; g.kv_pair = w_->attn_kv_pair;
     float* og = BlockScratch::fit(bs_.og, T * qw);
     auto t0 = std::chrono::steady_clock::now();
-    if (attn_block_on_ && gb.attn_block.present()) {
+    if (attn_block_on_ && gb.attn_block.present() && !g.kv_pair) {
         float* Q = BlockScratch::fit(bs_.qrope, T * qw);
         host::attention_prep(g, q, k, v, hc.qn.data(), hc.kn.data(), w_->rope_inv_freq.data(),
                              st.map<uint16_t*>(), row / 2, Q);
@@ -3500,8 +3501,10 @@ void Core::kv_row(int layer, int row, bool value, uint16_t* out) {
     if (row < 0 || static_cast<size_t>(row) >= cfg_.max_ctx) throw std::runtime_error("open_qwen36: KV row out of range");
     const size_t kv_row = types_[layer]->state_row;
     size_t off = static_cast<size_t>(row) * kv_row + (value ? kv_row / 2 : 0);
-    read_back(state_[layer], kv_row / 2, off);
-    std::memcpy(out, state_[layer].map<uint8_t*>() + off, kv_row / 2);
+    // The public API returns BF16; expose the high plane, not both planes as heads.
+    const size_t bytes = kv_row / (w_->attn_kv_pair ? 4 : 2);
+    read_back(state_[layer], bytes, off);
+    std::memcpy(out, state_[layer].map<uint8_t*>() + off, bytes);
 }
 
 void Core::read_act(int layer, size_t off, size_t n, uint8_t* dst) {

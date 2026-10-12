@@ -309,6 +309,7 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     `has_moe` goes false and nothing asks for the router record."""
     L = layout(spec, max_ctx)
     return {
+        **({"attn_kv_dtype": "bfloat16_pair", "attn_output_dtype": "float32"} if M.paired_attention(spec) else {}),
         **({"ffn_norm_dtype": "float32"} if ffn_geometry(spec).XM_F32 else {}),
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
         "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,

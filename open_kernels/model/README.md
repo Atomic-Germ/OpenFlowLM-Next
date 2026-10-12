@@ -247,7 +247,7 @@ OPENBLAS_NUM_THREADS=1 python open_kernels/model/attention_heads.py \
 
 The default covers every full-attention layer and every fixture position from
 zero. `--layers 3,7` restricts coverage explicitly. The checker reads retained
-FP32 Q/K/V/gate and BF16 gated outputs, loads effective Q/K norm weights, then
+FP32 Q/K/V/gate and manifest-declared BF16 or FP32 gated outputs, loads effective Q/K norm weights, then
 recomputes RMSNorm, partial RoPE, causal grouped-query attention and sigmoid
 in FP64. Reference KV history is rebuilt from the captured projections without
 BF16 rounding. No full-model residency or new NPU dispatch is needed.
@@ -279,6 +279,28 @@ BF16-pair cache with FP32 output. Its widened BF16 control reproduces the earlie
 FP32 replay exactly; the paired variant passes all 1152 retained head checks
 (worst absolute error 0.00092833). This result covers captured projections at
 three positions, not full-model propagation. The experimental cache row doubles
-to 8192 bytes; production cache and output-projection ABIs are unchanged.
+to 8192 bytes. The standalone probes require their matching earlier BF16
+production ABI and reject the integrated paired ABI.
 Build, provenance checks and L1/DMA constraints are documented in the
 [paired-KV replay skill](../../.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md).
+
+The Qwen3.8 production geometry now integrates this correction: paired KV rows,
+FP32 gated output, and direct FP32 preparation for `o_proj`. Its manifest declares
+`attn_kv_dtype: bfloat16_pair` and `attn_output_dtype: float32`. Rebuild the complete
+export and regenerate fixtures before checking this wider layout. Other shapes
+retain their existing ABI; model weights do not need repacking.
+
+Use `export_qwen36_kernels.py --build-root DIR` to keep compiler work separate
+from retained builds. `utilities/audit-kernel-export.py` checks current source
+identity, build/export binary hashes and linked program budgets. The
+[integration skill](../../.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md)
+contains build and full-depth validation commands. Block-prefill uses host
+attention for paired KV, with an explicit runtime diagnostic; its independent
+accuracy gate remains separate from sequential decode.
+
+For a limited-memory full-depth hardware check, run
+`utilities/stream-decode-weights.py --cfg FIXTURE_DIR/run_decode.cfg --out FIXTURE_DIR/run_streamed.cfg`
+and pass the new cfg to the harness. It reloads a shared layer-weight BO before
+each dispatch and retains all states/capture ordering. The original fixture and
+CPU reference are unchanged. This checks sequential propagation with streamed
+weights; resident runtime identity/reset and performance require separate runs.

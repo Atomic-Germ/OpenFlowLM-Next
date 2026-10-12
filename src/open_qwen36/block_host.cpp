@@ -326,8 +326,9 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
                      const float* qn, const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems,
                      float* og) {
     const size_t qw = g.nh * g.hd, kvw = g.kvh * g.hd, half = g.rot / 2, rows = g.pos0 + g.t_real;
-    if (g.nh % g.kvh || g.t_real > g.T || g.rot > g.hd || kv_row_elems < 2 * kvw)
+    if (g.nh % g.kvh || g.t_real > g.T || g.rot > g.hd || kv_row_elems != (g.kv_pair ? 4 : 2) * kvw)
         throw std::runtime_error("open_qwen36: attention_block: inconsistent geometry");
+    const size_t v_off = (g.kv_pair ? 2 : 1) * kvw;
     const size_t grp = g.nh / g.kvh, R = g.t_real;
     const float scale = 1.0f / std::sqrt(static_cast<float>(g.hd));
     std::fill(og, og + g.T * qw, 0.f);
@@ -338,7 +339,11 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
     for (size_t r = 0; r < g.pos0; ++r)
         for (size_t j = 0; j < kvw; ++j) {
             K[r * kvw + j] = bf16_to_f32(kv[r * kv_row_elems + j]);
-            V[r * kvw + j] = bf16_to_f32(kv[r * kv_row_elems + kvw + j]);
+            V[r * kvw + j] = bf16_to_f32(kv[r * kv_row_elems + v_off + j]);
+            if (g.kv_pair) {
+                K[r * kvw + j] += bf16_to_f32(kv[r * kv_row_elems + kvw + j]);
+                V[r * kvw + j] += bf16_to_f32(kv[r * kv_row_elems + v_off + kvw + j]);
+            }
         }
     for (size_t t = 0; t < R; ++t) {
         const size_t p = g.pos0 + t;
@@ -355,9 +360,17 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
         for (size_t j = 0; j < kvw; ++j) {
             const uint16_t kb = f32_to_bf16(kh[j]), vb = f32_to_bf16(v[t * kvw + j]);
             kv[p * kv_row_elems + j] = kb;
-            kv[p * kv_row_elems + kvw + j] = vb;
+            kv[p * kv_row_elems + v_off + j] = vb;
             K[p * kvw + j] = bf16_to_f32(kb);
             V[p * kvw + j] = bf16_to_f32(vb);
+            if (g.kv_pair) {
+                const uint16_t kl = f32_to_bf16(kh[j] - K[p * kvw + j]);
+                const uint16_t vl = f32_to_bf16(v[t * kvw + j] - V[p * kvw + j]);
+                kv[p * kv_row_elems + kvw + j] = kl;
+                kv[p * kv_row_elems + v_off + kvw + j] = vl;
+                K[p * kvw + j] += bf16_to_f32(kl);
+                V[p * kvw + j] += bf16_to_f32(vl);
+            }
         }
     }
 
@@ -397,6 +410,8 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
 
 void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
                     const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q) {
+    if (g.kv_pair)
+        throw std::runtime_error("open_qwen36: paired-KV NPU block attention is not implemented; use host attention");
     const size_t qw = g.nh * g.hd, kvw = g.kvh * g.hd, half = g.rot / 2, R = g.t_real;
     if (g.nh % g.kvh || g.t_real > g.T || g.rot > g.hd || kv_row_elems < 2 * kvw)
         throw std::runtime_error("open_qwen36: attention_prep: inconsistent geometry");

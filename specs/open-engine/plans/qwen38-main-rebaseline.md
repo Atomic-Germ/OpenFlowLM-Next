@@ -1,17 +1,17 @@
 # Qwen3.8-27B validation report
 
-Updated 2026-10-12. This branch adds strict decode/source validation and
-preserves FP32 inputs through the split FFN. The retained full-depth export
-passes all 192 residual checks at 64 layers × three positions, with matching
-logit argmax, runtime identity and reset replay. Independent production
-attention validation still finds 43 failing heads out of 1152.
+Updated 2026-10-12. This branch adds strict decode/source validation, FP32
+split-FFN input preparation, and integrated paired-BF16 KV with FP32 gated
+attention/output-projection preparation. The new complete export passes all
+**1152 independent attention-head checks** at 64 layers × three positions;
+worst absolute error is **0.0003238841**, below 0.02.
 
-An isolated FP32-output replay reduces those failures to 21; paired-BF16 K/V
-with FP32 output now passes all 1152 heads, worst absolute error 0.00092833.
-The widened BF16 control exactly reproduces the earlier FP32 replay. This
-validates the isolated correction on retained projections. Production attention
-integration and a new full-depth export/regression remain pending; it does not
-establish current merged-runtime acceptance or complete model support.
+Full-chain acceptance remains **FAIL**: **189/192 residuals pass**; layers
+59/61/63 at position 1 exceed 0.005 (worst **0.00580822**). Logit correlation and
+argmax pass at all three positions. The hardware run streams layer weights
+through one shared BO while retaining every layer state. Resident-runtime
+identity/reset for this export remains untested because available memory is
+below the full-load requirement. This is not complete model support.
 
 ## Stage 1: complete decode comparison
 
@@ -810,3 +810,66 @@ the same C++ check. The source directory and weight contents are preserved.
 between NPU GEMMs. Block prefill therefore uses a hybrid CPU/NPU execution
 route; it must be distinguished from sequential NPU execution when reporting
 coverage and performance. No performance measurements were made in this stage.
+
+## Stage 5c7c: integrated paired attention
+
+The wide Qwen3.5-family geometry now uses paired-BF16 K/V and FP32 gated
+attention output in complete `ax` layers. Cache rows are 8192 bytes in
+`[K_hi,K_lo,V_hi,V_lo]` order. Each output element carries two FP32 heads;
+`o_proj` consumes six 4-KiB elements directly through FP32 table preparation.
+This retains the existing FIFO/DMA topology and 6144-byte stack. The manifest
+explicitly declares the cache/output dtypes and validates global/per-layer KV
+row sizes. Other geometries retain their existing ABI. Weights and packing
+are unchanged.
+
+Host block attention preserves both cache planes across blocks. Paired-cache
+NPU block attention is not implemented: the runtime reports host attention
+for this prefill route. Public BF16 cache inspection keeps its original logical
+head count by returning the high plane; snapshots/reset retain all bytes.
+Independent block-prefill accuracy is not established by this change.
+
+Added `--build-root` for separate writable compiler projects, and an export
+audit checking recipe/source identity, all binary hashes and linked core
+program sizes. Earlier standalone replay generators reject the new ABI and
+require their matching source revision. Native manifest tests now reparse
+independent fixtures instead of copying the non-copyable GGUF ownership field.
+
+TDD covers geometry, FP32 capture precision, legacy shape compatibility,
+cross-block low-plane retention and isolated build workspaces. The completed
+host suite reports **1049 passed, 47 skipped**; native CTest reports **4/4 PASS**.
+The new complete export has **41 sets / 82 verified binary hashes**. Every core
+fits 16384 bytes: fullest `lx` is **15584**, fullest `ax` is **13760**.
+Build key: `sha256:fa34220099d565bfeb514765e3c72665f768a42ee17e9ba37dd7fa3402788405`.
+Artifacts: `Models/qwen38-27b/production-paired-attention/`, including
+`build-audit.json`, `input-sha256.json`, build logs and the matching decode fixture.
+
+Reproduction: [integration skill](../../../.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md).
+
+All **195 CPU reference hashes are unchanged**, and model/65 weight-pool hashes
+are verified. Available memory fell to approximately 28 GiB before resident
+execution. A TDD-tested cfg transformer therefore reuses one layer-weight BO,
+retaining all layer states and capture/dispatch ordering. Logical buffers fall
+from **16.618 to 2.960 GiB**; source and transformed cfg hashes are recorded.
+
+The streamed run completes **198 dispatches / 64 layers × three positions**.
+Independent production attention passes **1152/1152 heads**: worst absolute
+error **0.0003238841** (layer 51, position 2, head 6), minimum cosine
+**0.9999999988341115**. Logit correlations are **0.9999986691 / 0.9999964904 /
+0.9999982652**, with matching argmax **8678 / 198 / 2**.
+
+Full-chain acceptance remains **FAIL**, with **189/192 residual checks passing**.
+At position 1, layers 59/61/63 have normalized max errors **0.0055346809 /
+0.0051228118 / 0.0058082229**, exceeding the unchanged 0.005 bound. The export
+carries `VALIDATION_FAILED.txt`. Local attention success does not override the
+full-chain failures; this build must not be promoted as fully validated support.
+
+Resident-runtime identity, repeated requests and reset are not yet tested for
+this export. The streamed run is not evidence for those gates or for throughput.
+Next localize the remaining full-chain error, then rerun its acceptance gate;
+independent state/head/projection, block-prefill and serving remain separate.
+
+All **192 FFN front** and **192 split-down** checks pass on propagated captures.
+Worst normalized norm/front errors are **0.0000164919 / 0.0005658096**.
+Down partial0/partial1/sum/closing-residual maxima are **0.0002353918 /
+0.0001898039 / 0.0001780994 / 0.0000365645**. These conditional local gates do
+not establish independent projection or recurrent-state correctness.

@@ -71,6 +71,28 @@ int main(int argc, char** argv) {
         std::printf("FAIL  load: %s\n", e.what());
         return 1;
     }
+    // Cache and output precision are one ABI. Test the parser independently of XRT.
+    {
+        json j; std::ifstream(argv[1]) >> j;
+        j["layout"]["attn_kv_dtype"] = "bfloat16_pair";
+        j["layout"]["attn_output_dtype"] = "float32";
+        const size_t row = m.kv_row * 2;
+        j["layout"]["kv_row"] = row;
+        j["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row;
+        try {
+            auto pair = Manifest::parse(j, "paired cache");
+            check(pair.attn_kv_pair && pair.kv_row == row, "paired KV ABI accepted");
+        } catch (const std::exception& e) { check(false, e.what()); }
+        for (int bad = 0; bad < 4; ++bad) {
+            auto broken = j;
+            if (bad == 0) broken["layout"]["attn_output_dtype"] = "bfloat16";
+            if (bad == 1) broken["layout"]["attn_kv_dtype"] = "float16";
+            if (bad == 2) broken["layout"]["kv_row"] = row / 2;
+            if (bad == 3) broken["layer_types"]["full_attention"]["buffers"]["state"]["row"] = row / 2;
+            try { Manifest::parse(broken, "bad paired cache"); check(false, "bad paired ABI accepted"); }
+            catch (const std::runtime_error&) { check(true, "bad paired ABI refused"); }
+        }
+    }
     // ---- what the recipe wrote for the 27B
     // Only exercise the new pack-op schema; this synthetic manifest is not a
     // claim that a 48-head kernel has been built or validated.
@@ -296,14 +318,14 @@ int main(int argc, char** argv) {
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = both;
+        Manifest fast = Manifest::parse(g, "fast route");
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = both;
+        Manifest lean = Manifest::parse(g, "lean route");
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&

@@ -81,4 +81,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Build and validate isolated paired-BF16 K/V attention with FP32 output, an exact BF16 control and local memory checks.</description>
     <location>.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-paired-attention-integration</name>
+    <description>Build full Qwen3.8 layers with paired KV and FP32 attention output-to-projection, then validate the new cache/scratch ABI and full-depth decode.</description>
+    <location>.opencode/skill/open-qwen38-paired-attention-integration/SKILL.md</location>
+  </skill>
 </available_skills>

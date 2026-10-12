@@ -167,7 +167,7 @@ def _build_one(name: str, sets: dict, spec_file: Path) -> tuple[str, Path]:
     t0 = time.time()
     knob_str = " ".join(f"{k}={v}" for k, v in knobs.items())
     print(f"[{name}] {knob_str} python build_design.py {src.relative_to(HERE).as_posix()} "
-          f"{out.relative_to(HERE).as_posix()}", flush=True)
+          f"{os.path.relpath(out, HERE)}", flush=True)
     # Passed through as it comes, and watched for the one failure a user cannot act on: aiecc
     # reports a core whose program does not fit only as an invalid ELF.
     p = subprocess.Popen([sys.executable, str(HERE / "build_design.py"), str(src), str(out)], env=env,
@@ -208,6 +208,7 @@ def main() -> int:
     g.add_argument("--spec", help="a ModelSpec JSON (default: recipes/specs/qwen36-35b-a3b.json)")
     ap.add_argument("--out", default=None,
                     help="destination (default src/xclbins/<model name>/open_kernels)")
+    ap.add_argument("--build-root", type=Path, help="separate compiler workspace; default: recipe build directories")
     ap.add_argument("--only", default=None, help="comma-separated subset of the recipe's kernel sets")
     ap.add_argument("--no-build", action="store_true", help="copy/hash the existing build dirs without rebuilding")
     ap.add_argument("--force", action="store_true", help="rebuild even when <out>/manifest.json has this build key")
@@ -249,6 +250,8 @@ def main() -> int:
             )
         raise
     sets = F.builds(spec)
+    if a.build_root:
+        sets = {n: dict(v, build_dir=str(a.build_root.resolve() / n)) for n, v in sets.items()}
     names = [n.strip() for n in a.only.split(",") if n.strip()] if a.only else list(sets)
     bad = [n for n in names if n not in sets]
     if bad:

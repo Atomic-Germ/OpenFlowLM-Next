@@ -310,14 +310,14 @@ void Engine::clear_context() {
 }
 
 buffer<bf16> Engine::get_k_cache(int layer_idx, int idx) {
-    buffer<bf16> out(core_->manifest().kv_row / 4);   // one K row: bf16[kv heads x head dim]
+    buffer<bf16> out(core_->manifest().kv_row / (core_->manifest().attn_kv_pair ? 8 : 4));   // one K row: bf16[kv heads x head dim]
     if (!core_->is_attention_layer(layer_idx)) return out;
     core_->kv_row(layer_idx, idx, false, reinterpret_cast<uint16_t*>(out.data()));
     return out;
 }
 
 buffer<bf16> Engine::get_v_cache(int layer_idx, int idx) {
-    buffer<bf16> out(core_->manifest().kv_row / 4);
+    buffer<bf16> out(core_->manifest().kv_row / (core_->manifest().attn_kv_pair ? 8 : 4));
     if (!core_->is_attention_layer(layer_idx)) return out;
     core_->kv_row(layer_idx, idx, true, reinterpret_cast<uint16_t*>(out.data()));
     return out;
