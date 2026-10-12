@@ -1,0 +1,456 @@
+{
+  "model": "Granite-4.2-3B-NPU2",
+  "spec_hash": "sha256:695134de825eb93e39a7b31008bb5791d2e27c8744c0980c2ed8edbe083b5656",
+  "build_key": "sha256:c0397d4cf402dfe0e1f9943621f12ccddc043fd4e60a22b8fa87234cf0b58774",
+  "built": "2026-10-12T09:32:41-0700",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "unavailable",
+  "source_git_head": "32c862b9b58609f9fe7a4d274bacfb8278104d1c",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2560",
+        "LN_EPS": "1e-05"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "100352",
+        "LMHEAD_K": "2560",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "dx_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "GEMV_SCALES_F32": "1"
+      }
+    },
+    "lm_head_q4_f32": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "100352",
+        "LMHEAD_K": "2560",
+        "LMHEAD_CORES": "8",
+        "LMHEAD_SCALES_F32": "1"
+      }
+    },
+    "dx_attn": {
+      "design": "open_kernels/designs/dense/dx_attn.py",
+      "env": {}
+    },
+    "ag_s256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "256",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv256": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "256",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "512",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv512": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "512",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "768",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv768": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "768",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "1024",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1024": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1024",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "1280",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1280": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1280",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "1536",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1536": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1536",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "1792",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv1792": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "1792",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "2048",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2048": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2048",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "2304",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2304": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2304",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "2560",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2560": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2560",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "2816",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv2816": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "2816",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "3072",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3072": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3072",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "3328",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3328": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3328",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "3584",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3584": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3584",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "3840",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv3840": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "3840",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "ag_s4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "64",
+        "AG_N": "4096",
+        "AG_COLS": "8"
+      }
+    },
+    "ag_pv4096": {
+      "design": "open_kernels/designs/attn_block/attn_gemm.py",
+      "env": {
+        "AG_M": "1280",
+        "AG_K": "4096",
+        "AG_N": "64",
+        "AG_COLS": "2"
+      }
+    },
+    "gemm_n2560_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2560",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n2560_k8192": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2560",
+        "GQP_K": "8192",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n3584_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "3584",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n8192_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "8192",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "51d1a37a0a1bcce8980f628fd27dd7ca685997ec817395ef08b6e5c2e681008f",
+    "dx/insts.bin": "3a2a0024d76e12b914ecdf4c6cca3c9243ae8df7eca4a1f1c3a010ad96bc404e",
+    "ln/final.xclbin": "40801cf687d61413fb8852a9b7c203a21c6a2170f3cda4a3eec6788c04bce550",
+    "ln/insts.bin": "7f9fd0d6ebc95a4dde540944fff61649144b023e332dbf07c4e93a88b7e74d53",
+    "lm_head_q4/final.xclbin": "cc6465ab199f6ea4c9476cf5421a2675316128152df65ef9f380e0492ec156ad",
+    "lm_head_q4/insts.bin": "a9f6d1932de9784f566b567738ea5c734c6c099e5e59e8662791c825c9c1e48b",
+    "dx_f32/final.xclbin": "2dc668f1d6fbe5976a72a9f60ab05eb6849b1eb4bd686076fc08f72ac72cffe1",
+    "dx_f32/insts.bin": "32b3af56a01bda4949e988e6e8461697457b7bf180ed3a9583b6117ab19e0ac4",
+    "lm_head_q4_f32/final.xclbin": "ada09173f3842e4becf912835309171170429d21afe480798f3054a140e8ecde",
+    "lm_head_q4_f32/insts.bin": "e9a2bc612b9aeb19c3b4bbd0946d14b4af017f39ba77f52f37aa34fe12b45525",
+    "dx_attn/final.xclbin": "d9ff61f390e886496eff51a9f100d72cf4b638541489a7fa5668fbc1e3b8f761",
+    "dx_attn/insts.bin": "13fd795382cefadc3a265e8f52753cb0d26d4798ab4b732eed42da9be68b82ce",
+    "ag_s256/final.xclbin": "86d5e96aa43fbefa621ec24705c7ac84765527dece235878db7c01a5563bd593",
+    "ag_s256/insts.bin": "01f2312b6d2358e069cc6faa9b9f630b5daf134997df12467dd73ecb50c6d1cb",
+    "ag_pv256/final.xclbin": "d5379b1f17e0b8ff45c06b2dd38b62e4e1231e4ad3c97c3f878ee6771ad2288b",
+    "ag_pv256/insts.bin": "01f2312b6d2358e069cc6faa9b9f630b5daf134997df12467dd73ecb50c6d1cb",
+    "ag_s512/final.xclbin": "de2a58a8e9ad1a8b4c6fb51a6773ea4e45a40f832963fa1fae5e5ce21aabaa38",
+    "ag_s512/insts.bin": "b7938d1505ff1e27f5023c997d4545e6483329687669923c9366b80d2be307f2",
+    "ag_pv512/final.xclbin": "7e2168b9d47785814941aef4404bb2ec9a511128ae1e44aef3a2e2d3af87fe84",
+    "ag_pv512/insts.bin": "e1466c0eac3242d3e80b4a58114551ac374a006f2e203b7c515f77745adb70b0",
+    "ag_s768/final.xclbin": "530f1364656d649d7e37a4194370ba6f6cb2c5cdbc506782406011200c7cd44a",
+    "ag_s768/insts.bin": "d315e8f27e58aa1212b8efffd18cca7bc842a00055ba4afa71d6ba18a7c09150",
+    "ag_pv768/final.xclbin": "f62331c41bb04bd99e4cb9bdda6c600ecea5bfd5e659670597952a6329ac2395",
+    "ag_pv768/insts.bin": "f4c0b373bb8aea155e8de15c0a4919404e6072df7e99206605435bfaafd1157f",
+    "ag_s1024/final.xclbin": "e7ce67048b806617ae60247334f6c3d7c513cec06c1b6a9510820724279c0869",
+    "ag_s1024/insts.bin": "0c755946f8296e741bc6617cb22eaa93b169090341617049718f473641bf4121",
+    "ag_pv1024/final.xclbin": "1f0b211a025f33b616aa126b9abe43d78d7c16a24eba0017af684d23e6b66419",
+    "ag_pv1024/insts.bin": "ef070a858eb427b085810f8e34cc50b9907151027d48b2aa1f5d0890eaabd0eb",
+    "ag_s1280/final.xclbin": "7b0195f3330918ae83d2be4776ce91934e35a0b631977dd45b40b18212bd0c94",
+    "ag_s1280/insts.bin": "9aaf7dfb1b95cbf794eaff27aaa20bf2d58cdc7574b901c205aea5edb7fcdeee",
+    "ag_pv1280/final.xclbin": "5a7e51a258987c3ee5a21ebfb1e721a20cb30172c6d0d21100fc19d253491ccd",
+    "ag_pv1280/insts.bin": "e3f1a975c05cc53882c93d0abadb63bfb7f12b33a1209b189ebcf158f56041c5",
+    "ag_s1536/final.xclbin": "bd16b8a8a874e089f9be1dd7d8cbf754a3b610b3b867538c6fd9752be261467f",
+    "ag_s1536/insts.bin": "82b4ee526ae4cf76441ce274020c081b55528915d827c2dccad831b3f2c612a1",
+    "ag_pv1536/final.xclbin": "02a7eb682ecbb363e3a953ba5065a41b0db885a5a93bcf732759d6e54608b9a1",
+    "ag_pv1536/insts.bin": "821ffd97792493a7fe9e3e37b481be3a51f05e4d0c136113262902e95787bfe7",
+    "ag_s1792/final.xclbin": "3a124ba1c077e379fcd97880d4d87e95407cd3f7333025705e9aad5cc5b06147",
+    "ag_s1792/insts.bin": "39a93bdeb1c9f4cb601601cf46210627a3437e927b869a9473694d049a4f3846",
+    "ag_pv1792/final.xclbin": "dfc4a3fcc1b58c8634eb044504bb7beb0a8a9370aafa3a39f2237411aa9b93f3",
+    "ag_pv1792/insts.bin": "d454cd805b54f5960e2eb8775ec3f1b7bacea3116b12721692cf1c4fa822ca8b",
+    "ag_s2048/final.xclbin": "8c224956a5d668404a495c760b8f3307c2e0a5796b2d3e67cea37e2fb0d05eb6",
+    "ag_s2048/insts.bin": "ec8c4720994bc13b76b3ae9dd5cc25ccc87cb710d1a5bcc15f1ed571e3ebd62f",
+    "ag_pv2048/final.xclbin": "eea1ce2f1b9f27a80e8f9bfe00560f63417ac952856778ae6419860a2e70b88a",
+    "ag_pv2048/insts.bin": "efb788a0ad8450f9a7bbd09db9e29540bdfe8e78c98e92045ff1f8849661bbc6",
+    "ag_s2304/final.xclbin": "70eb402ab6ccc47c5eacf15f48a8c48aedbe0dfced2057c804de083f073d2f91",
+    "ag_s2304/insts.bin": "59ed0ee446562e58d566fd2a0593c78b0d1c8ea958b2e07a5d092e651f0a2c98",
+    "ag_pv2304/final.xclbin": "4be5ddcd4393ef10e07128158c3501ca443b7db6728b4e1eddd42c24f42b83ac",
+    "ag_pv2304/insts.bin": "b02953d6b51fb5715108bd41a30d9399007635d235640cd6309de4c897829d96",
+    "ag_s2560/final.xclbin": "3cb2df339ba61b8d6ceb2d61fe59fae46dff44b316a50f8d23567abf7e4eb596",
+    "ag_s2560/insts.bin": "81f863743aae2e43eb6524d76f600eccc44d96d87bf84b2a81163d1d63fdda1d",
+    "ag_pv2560/final.xclbin": "dc1cb1c659597e4c4e8bba295531ad4071dd9ab3ef8006b562ef48cbec7f48c4",
+    "ag_pv2560/insts.bin": "885443c392bf2e4a8fe0c9c1e4a39518212976244ada15b9d6cba332be40f032",
+    "ag_s2816/final.xclbin": "a559116a384e3ad9e532c04918cee63ff46ad74e0635a41442028a09f37d37ae",
+    "ag_s2816/insts.bin": "b4fdd9991f3cfb1377b881ae4b531b4d9e064ba6b86723514c3a3b725ab1a70f",
+    "ag_pv2816/final.xclbin": "be5f82aab31e641bb28706c2fb91c2c6f2d1f733aa81ac3b4e95bc4f21c80de0",
+    "ag_pv2816/insts.bin": "54b784f015e00f4501bc2fdc61db75fc5a83bb3276fe05e0ede172ead60c5065",
+    "ag_s3072/final.xclbin": "c1ba9eefea7ee8e31b0d59ed8eaf9282ea2dbb34c55b662358df60fae831cd4f",
+    "ag_s3072/insts.bin": "5cafe6351cae70270f9e6f6502a3bbd60bdab80fedf9f498998adad96e351631",
+    "ag_pv3072/final.xclbin": "ea877196f313fcf6110d6f87f74618372aa3a9e4371134c06fb010336d9c1781",
+    "ag_pv3072/insts.bin": "a7ca40f7812de959286d4f922513e2e89b74116f972c8b4d8cdac9d2081231bf",
+    "ag_s3328/final.xclbin": "d17f6b8bb69eac5f9083e608c9186e58a6ac803e3f50606ce6d13039abf1c788",
+    "ag_s3328/insts.bin": "d5816584eb56f921d14b75981aa4472f682fcf87060df54d7b95ba0d6162cf65",
+    "ag_pv3328/final.xclbin": "84ea7277e2924c501fdc2ff296c91353982cfe25c8f1ce6e2b53d85e9314b808",
+    "ag_pv3328/insts.bin": "3f3606f031397586f00e25cc651704f533f4597ab62bfc921b8b86937064ade2",
+    "ag_s3584/final.xclbin": "0071e2e821c224f4b94fff4788e357e8123f61d54cf1365f10d98e5e36a2acdf",
+    "ag_s3584/insts.bin": "e286642bb573751fc4fb763ae114d29a53328e8e46ddd134b7539df8dbe065bf",
+    "ag_pv3584/final.xclbin": "c41c151a65b056e153fd7ba802138b5b05e73fb0de7315536c00c6219d13b990",
+    "ag_pv3584/insts.bin": "36c542ba436de9644d0e3b413bd8e680c5096b30d911588dc922fe03f124e860",
+    "ag_s3840/final.xclbin": "836af928ebef8ca2daee9511ad85ede025e183f7d6f4ebd35ecd2de5bc65b255",
+    "ag_s3840/insts.bin": "a702add05e2240c6ad6dbbb202afd8929b9a2f14298b51ebd6a877ca420f3c77",
+    "ag_pv3840/final.xclbin": "44fc4dc3cf6660b105e9ddb6031816e54418456f21592bd88aaa500d0d97a63f",
+    "ag_pv3840/insts.bin": "a13552a15a3156cd1eeebc0844223f914f19cf67a2f33a681e5d492876622032",
+    "ag_s4096/final.xclbin": "108e092aa567ce9c5de4472c9e0bcf0a40a5326cd3e543ca5f5ee7088c9bd11f",
+    "ag_s4096/insts.bin": "20e5eb10431c9809514cdba41e7c2b6c415389cb7139c12620593c07a229f854",
+    "ag_pv4096/final.xclbin": "55101f0f04bb67b9a6e7b773d4c34deeb338fed4fd280415ddd6dc3efbb0287e",
+    "ag_pv4096/insts.bin": "507a81724076b430e52467cc671a4cfcebfdd92a8a53c59ed8d59f96986e8b9a",
+    "gemm_n2560_k2560/final.xclbin": "af1588ed9b429779227728966ec663edea34ebf1d1ca3141d0947943f40f902c",
+    "gemm_n2560_k2560/insts.bin": "f7511fb55d4bb04f5f352b308595291852c8b3eb373b22dfe1de92d96df674a2",
+    "gemm_n2560_k8192/final.xclbin": "8bbd5d881fdbeb4733b10ab7900ac8b25a7fc46ab79b9820e51468b2f1e1c052",
+    "gemm_n2560_k8192/insts.bin": "faa3370ebd8d9e5601ff6ad5418e80f837e7df94d296ede267e7f5b676492ec7",
+    "gemm_n3584_k2560/final.xclbin": "530c597474c2f4cc11ab99226151c58619229e89d58954acaf42eee4ed11ea31",
+    "gemm_n3584_k2560/insts.bin": "5730e447932bc07801f777aaba80548395806c136c9362ba9ac90ad34ef9076a",
+    "gemm_n8192_k2560/final.xclbin": "b242a3a6589384ee66391d1c87c9bd06485973e2a023d7007278aa1d8c35ca22",
+    "gemm_n8192_k2560/insts.bin": "dd015060e36104b4a5c77c98730576cc375b316f0947b844b61c1db7f55490a0"
+  }
+}

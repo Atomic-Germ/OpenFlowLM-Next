@@ -668,39 +668,57 @@ std::vector<std::string> Manifest::files() const {
     return f;
 }
 
-void Manifest::check_model(const json& config, const std::string& where) const {
+size_t Manifest::check_model(const json& config, const std::string& where) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
-    auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };
+    // Report every disagreement, then let the run proceed. This is a warning, not
+    // a gate: a kernel set whose geometry differs from config.json usually still
+    // computes (a different quant answers differently too, and plenty of models
+    // simply were not built to this recipe's expectations), and where it does not
+    // it crashes on hardware rather than producing a quiet wrong answer. Refusing
+    // here would only stop the experiments that find the real compatibilities.
+    size_t n_mismatch = 0;
+    auto disagree = [&](const std::string& what) {
+        ++n_mismatch;
+        std::fprintf(stderr,
+                     "open_qwen36: WARNING %s: this kernel set does not match the model's %s.\n"
+                     "           Running anyway; a real incompatibility will crash. If the output is\n"
+                     "           wrong rather than a crash, this line is why -- the weights were built\n"
+                     "           for a different geometry than config.json describes.\n",
+                     where.c_str(), what.c_str());
+    };
+    auto lacks = [&](const std::string& key) { disagree("config.json lacks '" + key + "'"); };
     for (const auto& [key, want] : hf_config_check.items()) {
         if (key == "model_type") {
-            if (!config.contains(key)) lacks(key);
+            if (!config.contains(key)) { lacks(key); continue; }
             bool ok = false;
             for (const auto& t : want) ok |= (config[key] == t);
-            if (!ok) fail(where, "config.json model_type " + config[key].dump() + " is not one this kernel set serves (" + want.dump() + ")");
+            if (!ok) disagree("model_type " + config[key].dump() + " is not one this kernel set was built for (" + want.dump() + ")");
         } else if (key == "layer_types") {
             std::vector<std::string> got;
             if (config.contains("layer_types")) {
                 got = config["layer_types"].get<std::vector<std::string>>();
             } else if (config.contains("full_attention_interval") && config.contains("num_hidden_layers")) {
                 int iv = config["full_attention_interval"].get<int>(), n = config["num_hidden_layers"].get<int>();
-                if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
+                if (iv <= 0) { disagree("config.json full_attention_interval must be positive"); continue; }
                 for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
             } else {
                 lacks("layer_types");
+                continue;
             }
             if (got != want.get<std::vector<std::string>>())
-                fail(where, "config.json layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
+                disagree("layer_types differ from the kernel set's (" + std::to_string(got.size()) + " layers)");
         } else {
             // an absent key means its default when the manifest names one (Phi-3's optional
             // fields); the comparison is the same either way, so the check stays two-way
             const bool present = config.contains(key);
-            if (!present && !hf_config_defaults.contains(key)) lacks(key);
+            if (!present && !hf_config_defaults.contains(key)) { lacks(key); continue; }
             const json& got = present ? config[key] : hf_config_defaults[key];
             if (got != want)
-                fail(where, "config.json " + key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
+                disagree(key + " = " + got.dump() + (present ? "" : " (absent: its default)") +
                                  ", the kernel set was built for " + want.dump());
         }
     }
+    return n_mismatch;
 }
 
 }  // namespace open_qwen36

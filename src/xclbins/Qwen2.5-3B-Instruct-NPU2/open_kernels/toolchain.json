@@ -1,0 +1,58 @@
+{
+  "model": "Qwen2.5-3B-Instruct-NPU2",
+  "spec_hash": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
+  "build_key": "sha256:94c8d9d6e3c563312c42e9f529954a73b7641a480eded033361675e30fa98947",
+  "built": "2026-10-12T09:23:17-0700",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "766aca40deaf57b2a12b14e1e15985b878e7faae",
+  "source_git_head": "46d10e38b126e03e9233891db67f61258d22254a",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2048",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "151936",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "4"
+      }
+    },
+    "dx_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "GEMV_SCALES_F32": "1"
+      }
+    },
+    "lm_head_q4_f32": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "151936",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "4",
+        "LMHEAD_SCALES_F32": "1"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "154c9e8d4d6e55c07107ce74cc17abbd55b49e93c092fc115f21211587ab6327",
+    "dx/insts.bin": "813a4b966db89728b7c5a2da70836190e83e2d41f7f59c2ae336c2dbb8ee4a9f",
+    "ln/final.xclbin": "c28ea3af0faf5d0f03ac1d10866308accdcb67c75badd8d02db99ccecac00ed5",
+    "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
+    "lm_head_q4/final.xclbin": "6ee544df6a58833c4215c190afff5b4b684104ba06eb4578174318176008f9b6",
+    "lm_head_q4/insts.bin": "d2aeca8dfbdc19fd95834616563cb0a0cbde24efa3f8c01fc6fb69921b2aa579",
+    "dx_f32/final.xclbin": "265733c77983ac014479df550a80d477785abcc60af2838ee2456d09eb12652d",
+    "dx_f32/insts.bin": "96d3ba40708ed82e44b772ba3598b1d236a614a0656900b554cdd1913437ffd5",
+    "lm_head_q4_f32/final.xclbin": "85f610967347b62c434128d58a9582738bcda8d874dfa28198b287c59dbdb1d4",
+    "lm_head_q4_f32/insts.bin": "236316843545d8bdeb63240248e8350fdcbb262800d6ca64025b9e7b6376aa70"
+  }
+}

@@ -121,9 +121,16 @@ def gguf_quant_of(name):
     unknown -- 'Q4_0_4_4' is NOT 'Q4_0')."""
     return gguf_quant_family(gguf_quant_suffix(name))
 
-def choose_gguf_file(names):
-    """Pick the best compatible *.gguf from a repo's root file names.
-    Returns (chosen, refused) -- refused maps every other gguf to why."""
+def gguf_candidates(names):
+    """Every compatible *.gguf in a repo's root names, best-quant first.
+    Returns (candidates, refused) -- refused maps the rest to why.
+
+    ALL viable candidates, not just the top one: the filename's quant is only a
+    claim, and the real check is the file's tensor header (verify_gguf_choice).
+    mradermacher's i1/IQ exports, for example, name a `-Q4_1.gguf` whose tensors
+    are actually mixed Q4_1/Q6_K -- it fails verification even though a perfectly
+    good `-Q6_K.gguf` sits in the same repo. The caller walks this list and takes
+    the first file whose contents verify."""
     refused = {}
     cands = []
     for n in names:
@@ -139,9 +146,14 @@ def choose_gguf_file(names):
             continue
         cands.append((GGUF_QUANT_PREFERENCE.index(q), n))
     cands.sort()
-    if not cands:
-        return None, refused
-    return cands[0][1], refused
+    return [n for _, n in cands], refused
+
+
+def choose_gguf_file(names):
+    """The single best compatible *.gguf by filename quant. Kept for the dry-run
+    and tests that do not verify contents; the installer uses gguf_candidates()."""
+    cands, refused = gguf_candidates(names)
+    return (cands[0] if cands else None), refused
 
 
 def root_file_names(tree):
@@ -1980,37 +1992,42 @@ def main():
             gguf_names = [n for n in root_file_names(tree) if n.endswith(".gguf")]
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
-    gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    gguf_cands, gguf_refused = gguf_candidates(gguf_names)
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
     else:
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
-    gguf_mode = gguf_name is not None and not have_q4nx
-    if gguf_mode:
-        # The tensors must be what the name claims, in types the NPU packers
-        # ingest. Remote metadata is best-effort (Range); a local file is on
-        # disk, so a failed parse there refuses the file outright.
+
+    def _gguf_url(name):
         if local_dir:
-            gguf_source = str(local_dir / gguf_name)
-        elif cache and (cache / gguf_name).is_file():
+            return str(local_dir / name)
+        if cache and (cache / name).is_file():
             # The user already has this GGUF on disk in their HF cache: verify
-            # the local file (no network round trip) and let the install copy
-            # it from there below.
-            gguf_source = str(cache / gguf_name)
-        elif modelscope:
+            # the local file (no network round trip) and let the install copy it.
+            return str(cache / name)
+        if modelscope:
             domain = ms_file_tree(repo)[0]
-            gguf_source = f"https://{domain}/models/{repo}/resolve/master/{gguf_name}"
-        else:
-            gguf_source = f"https://huggingface.co/{repo}/resolve/main/{gguf_name}"
-        ok, note = verify_gguf_choice(gguf_source, gguf_name, gguf_quant_of(gguf_name))
-        if ok:
-            log(f"[INFO] {gguf_name}: {note}")
-        else:
-            log(f"[WARN] refusing {gguf_name}: {note}")
-            gguf_refused[gguf_name] = note
-            gguf_name, gguf_mode = None, False
+            return f"https://{domain}/models/{repo}/resolve/master/{name}"
+        return f"https://huggingface.co/{repo}/resolve/main/{name}"
+
+    # Walk the candidates best-quant-first and take the first whose CONTENTS verify.
+    # A repo can ship several quants; the filename's claim is only a claim. The
+    # quant's real layout is whatever the tensor header says, so a `-Q4_1.gguf`
+    # holding mixed Q4_1/Q6_K tensors loses to a clean `-Q6_K.gguf` in the SAME
+    # repo rather than sinking the whole install.
+    gguf_name, gguf_source = None, None
+    if gguf_cands and not have_q4nx:
+        for cand in gguf_cands:
+            ok, note = verify_gguf_choice(_gguf_url(cand), cand, gguf_quant_of(cand))
+            if ok:
+                log(f"[INFO] {cand}: {note}")
+                gguf_name, gguf_source = cand, _gguf_url(cand)
+                break
+            log(f"[WARN] refusing {cand}: {note}")
+            gguf_refused[cand] = note
+    gguf_mode = gguf_name is not None
 
     system_list = Path(args.system_list) if args.system_list else find_system_model_list()
     system_registry = load_json(system_list)

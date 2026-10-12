@@ -1,0 +1,104 @@
+{
+  "model": "Gemma3-12B-NPU2",
+  "spec_hash": "sha256:df7005de2191d524c50ed90b8bb41f92ff222d2699a532652689a5fbdce21c46",
+  "build_key": "sha256:bb09c4e845510e357e8f94bba5e425780810f50b24fc3c8f5e18e131cb23ffb0",
+  "built": "2026-10-12T09:17:01-0700",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "unavailable",
+  "source_git_head": "46d10e38b126e03e9233891db67f61258d22254a",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "3840",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "262208",
+        "LMHEAD_K": "3840",
+        "LMHEAD_CORES": "4"
+      }
+    },
+    "dx_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "GEMV_SCALES_F32": "1"
+      }
+    },
+    "lm_head_q4_f32": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "262208",
+        "LMHEAD_K": "3840",
+        "LMHEAD_CORES": "4",
+        "LMHEAD_SCALES_F32": "1"
+      }
+    },
+    "dx_attn": {
+      "design": "open_kernels/designs/dense/dx_attn.py",
+      "env": {}
+    },
+    "gemm_n3840_k4096": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "3840",
+        "GQP_K": "4096",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n3840_k15360": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "3840",
+        "GQP_K": "15360",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n8192_k3840": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "8192",
+        "GQP_K": "3840",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n15360_k3840": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "15360",
+        "GQP_K": "3840",
+        "GQP_T": "256"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "559c3f2698fa4eb8ddc8015319efe78bfdea98a05952bcc28c3e36eac577be0d",
+    "dx/insts.bin": "859e16b0e5fbe3b9c45e6ab91d4f195900dbab5c21b1f0abb25b8049587bcf01",
+    "ln/final.xclbin": "c24ca3c05dbf319d399450cf47a4753fa6ce9e0adaa11dfef1db7d36e5be05db",
+    "ln/insts.bin": "c3a7425044c422c0b2f6429f9efe937e30a8572dd213e0546dd471dd293763c3",
+    "lm_head_q4/final.xclbin": "33e0d1f400d8f90cd04d4ea49b825a6ef840895bfdf40e61ebf23c80a8dbd2e6",
+    "lm_head_q4/insts.bin": "3b46ba0a039bbec6e0179d7e4be69108f72576f498efb3b1abd0031bcc6c486d",
+    "dx_f32/final.xclbin": "46bca5e8a359b2a72ac733747a72b52f39c75453c4cb6f87080fca2146e5b709",
+    "dx_f32/insts.bin": "9315d04c8a86995b493c09d6308c5e508d0e8677b4472a0f1401b7082f4d1ceb",
+    "lm_head_q4_f32/final.xclbin": "34980b590a1bba34b0f6f7760e63ac2bd13ff72ef3981ccce941c0c77fb5d9f1",
+    "lm_head_q4_f32/insts.bin": "72b0b95bc6c56983eacc2519f992b4d51353ef87817b48fc2806ab8bb98d575b",
+    "dx_attn/final.xclbin": "b34212e9dbe62b420556f319b0305148f65e1ee3accb535333824662c4ec32ce",
+    "dx_attn/insts.bin": "aa45adc4e8e7a6339cc498cf66a23c3001e4ba55d8f63f3bcf812933ecec6061",
+    "gemm_n3840_k4096/final.xclbin": "1b1fe13b17d410e3e43bd10dfe88b90fda7127424df272f6375e52d3d3ffd7d6",
+    "gemm_n3840_k4096/insts.bin": "53eee7ec527c04db88952d4f85e7bcf1a0baf32f0017c490792ab31064802e91",
+    "gemm_n3840_k15360/final.xclbin": "5bd6817820599b6887e408f9f156432bcbf81156fb70508e12556f1e80d9e5d0",
+    "gemm_n3840_k15360/insts.bin": "88e321b383ed327eed892cbc5b5e1fbeaaac5bf60028554deb5d6c07b3bc9bf7",
+    "gemm_n8192_k3840/final.xclbin": "46a242c490d549d5ace08d792b05fbd04edf142c1ae7465c43df7b0e37d0ef52",
+    "gemm_n8192_k3840/insts.bin": "735a6db2f0205472895b7fca8a813611d8399534220bee6ba8aa7341167769f8",
+    "gemm_n15360_k3840/final.xclbin": "7c7d29bd2ab366421ea1ccdde0a7ce4dee75611c0a5e05f55f44c945328da53c",
+    "gemm_n15360_k3840/insts.bin": "2d6b2fdbffaa6e19e172cbc5c23657772948c01c741c7b320f44ca1e6144411d"
+  }
+}

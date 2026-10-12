@@ -1,0 +1,2075 @@
+{
+ "manifest_version": 1,
+ "family": "k2",
+ "spec": {
+  "family": "k2",
+  "hidden": 2560,
+  "num_layers": 36,
+  "layer_types": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "vocab": 250624,
+  "real_vocab": 250620,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 128,
+  "rotary_dim": 128,
+  "rope_theta": 10000000.0,
+  "rope_scaling": null,
+  "rope_local_theta": 0.0,
+  "sliding_window": 0,
+  "qk_norm": false,
+  "attn_gate": false,
+  "lin_key_heads": 0,
+  "lin_value_heads": 0,
+  "lin_key_dim": 0,
+  "lin_value_dim": 0,
+  "conv_kernel": 0,
+  "intermediate": 10240,
+  "activation": "silu",
+  "sandwich_norms": false,
+  "num_experts": 0,
+  "experts_per_tok": 0,
+  "moe_intermediate": 0,
+  "shared_expert_intermediate": 0,
+  "norm_eps": 1e-06,
+  "norm_groups": 2,
+  "quant": "q4_1",
+  "extra": {
+   "model_type": "k2_horizon",
+   "source": "hf_config",
+   "model": "K2-Horizon-3.7B-NPU2"
+  }
+ },
+ "spec_hash": "sha256:18952d15a05780550c7d469b728fd6c686b6cb4c23635257e82c842aecd8e50a",
+ "kernel_hash": "sha256:71347be3c619e009a191243d10dd583ee745653ef363192f6f09d0c33da7f92c",
+ "build_key": "sha256:90343c0d4b64ad04af46214bc4bb30de6bcbf0edd35fe78c2f4685ae858ac010",
+ "max_ctx_default": 4096,
+ "hf_config_check": {
+  "model_type": [
+   "k2_horizon"
+  ],
+  "hidden_size": 2560,
+  "num_hidden_layers": 36,
+  "vocab_size": 250624,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "intermediate_size": 10240,
+  "head_dim": 128,
+  "rope_parameters": {
+   "rope_theta": 10000000.0,
+   "rope_type": "default"
+  },
+  "layernorm_num_groups": 2
+ },
+ "hf_config_defaults": {},
+ "layout": {
+  "hidden": 2560,
+  "vocab": 250624,
+  "real_vocab": 250620,
+  "chunk_bytes": 5120,
+  "pool_bytes": 66060288,
+  "lmhead_pool_bytes": 401604608,
+  "kv_row": 4096,
+  "ptab_row": 2048,
+  "rotary_dim": 128,
+  "rope_theta": 10000000.0,
+  "rope_inv_freq": [
+   1.0,
+   0.7773650302387758,
+   0.6042963902381329,
+   0.46975888167064916,
+   0.3651741272548377,
+   0.28387359647587546,
+   0.220673406908459,
+   0.1715437896342879,
+   0.1333521432163324,
+   0.1036632928437698,
+   0.08058421877614819,
+   0.06264335366568856,
+   0.04869675251658631,
+   0.0378551524925863,
+   0.029427271762092817,
+   0.022875732003183956,
+   0.01778279410038923,
+   0.013823722273578996,
+   0.010746078283213174,
+   0.008353625469578262,
+   0.006493816315762113,
+   0.005048065716667471,
+   0.003924189758484536,
+   0.0030505278902670254,
+   0.0023713737056616554,
+   0.0018434229924091106,
+   0.0014330125702369627,
+   0.0011139738599948025,
+   0.0008659643233600654,
+   0.0006731703824144982,
+   0.0005232991146814947,
+   0.00040679443210830474,
+   0.00031622776601683794,
+   0.00024582440689201976,
+   0.00019109529749704405,
+   0.0001485508017172775,
+   0.00011547819846894582,
+   8.976871324473142e-05,
+   6.978305848598664e-05,
+   5.424690937011326e-05,
+   4.216965034285822e-05,
+   3.2781211513934585e-05,
+   2.5482967479793464e-05,
+   1.9809567785503387e-05,
+   1.539926526059492e-05,
+   1.19708503049573e-05,
+   9.30572040929699e-06,
+   7.233941627366747e-06,
+   5.623413251903491e-06,
+   4.37144481261109e-06,
+   3.3982083289425593e-06,
+   2.6416483203860926e-06,
+   2.053525026457146e-06,
+   1.5963385442879422e-06,
+   1.2409377607517195e-06,
+   9.646616199111991e-07,
+   7.498942093324558e-07,
+   5.829415347136074e-07,
+   4.531583637600818e-07,
+   3.5226946514731013e-07,
+   2.7384196342643614e-07,
+   2.1287516617963726e-07,
+   1.6548170999431814e-07,
+   1.2863969449369746e-07
+  ]
+ },
+ "layers": [
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense"
+ ],
+ "contexts": {
+  "dx": "dx/final.xclbin",
+  "ln": "ln/final.xclbin",
+  "lm": "lm_head_q4/final.xclbin",
+  "dxa": "dx_attn/final.xclbin",
+  "ag_s": "ag_s256/final.xclbin",
+  "ag_pv": "ag_pv256/final.xclbin",
+  "gemm": "gemm_n2560_k4096/final.xclbin"
+ },
+ "kernels": {
+  "ln": {
+   "context": "ln",
+   "insts": "ln/insts.bin",
+   "build": "ln"
+  },
+  "lm": {
+   "context": "lm",
+   "insts": "lm_head_q4/insts.bin",
+   "build": "lm_head_q4"
+  },
+  "dx": {
+   "context": "dx",
+   "insts": "dx/insts.bin",
+   "patch": "attnpos",
+   "build": "dx",
+   "window": 0
+  },
+  "dxB": {
+   "context": "dxa",
+   "insts": "dx_attn/insts.bin",
+   "patch": "attnpos",
+   "build": "dx_attn",
+   "window": 0
+  },
+  "ag_s256": {
+   "context": "ag_s",
+   "insts": "ag_s256/insts.bin",
+   "build": "ag_s256"
+  },
+  "ag_pv256": {
+   "context": "ag_pv",
+   "insts": "ag_pv256/insts.bin",
+   "build": "ag_pv256"
+  },
+  "ag_s512": {
+   "context": "ag_s",
+   "insts": "ag_s512/insts.bin",
+   "build": "ag_s512"
+  },
+  "ag_pv512": {
+   "context": "ag_pv",
+   "insts": "ag_pv512/insts.bin",
+   "build": "ag_pv512"
+  },
+  "ag_s768": {
+   "context": "ag_s",
+   "insts": "ag_s768/insts.bin",
+   "build": "ag_s768"
+  },
+  "ag_pv768": {
+   "context": "ag_pv",
+   "insts": "ag_pv768/insts.bin",
+   "build": "ag_pv768"
+  },
+  "ag_s1024": {
+   "context": "ag_s",
+   "insts": "ag_s1024/insts.bin",
+   "build": "ag_s1024"
+  },
+  "ag_pv1024": {
+   "context": "ag_pv",
+   "insts": "ag_pv1024/insts.bin",
+   "build": "ag_pv1024"
+  },
+  "ag_s1280": {
+   "context": "ag_s",
+   "insts": "ag_s1280/insts.bin",
+   "build": "ag_s1280"
+  },
+  "ag_pv1280": {
+   "context": "ag_pv",
+   "insts": "ag_pv1280/insts.bin",
+   "build": "ag_pv1280"
+  },
+  "ag_s1536": {
+   "context": "ag_s",
+   "insts": "ag_s1536/insts.bin",
+   "build": "ag_s1536"
+  },
+  "ag_pv1536": {
+   "context": "ag_pv",
+   "insts": "ag_pv1536/insts.bin",
+   "build": "ag_pv1536"
+  },
+  "ag_s1792": {
+   "context": "ag_s",
+   "insts": "ag_s1792/insts.bin",
+   "build": "ag_s1792"
+  },
+  "ag_pv1792": {
+   "context": "ag_pv",
+   "insts": "ag_pv1792/insts.bin",
+   "build": "ag_pv1792"
+  },
+  "ag_s2048": {
+   "context": "ag_s",
+   "insts": "ag_s2048/insts.bin",
+   "build": "ag_s2048"
+  },
+  "ag_pv2048": {
+   "context": "ag_pv",
+   "insts": "ag_pv2048/insts.bin",
+   "build": "ag_pv2048"
+  },
+  "ag_s2304": {
+   "context": "ag_s",
+   "insts": "ag_s2304/insts.bin",
+   "build": "ag_s2304"
+  },
+  "ag_pv2304": {
+   "context": "ag_pv",
+   "insts": "ag_pv2304/insts.bin",
+   "build": "ag_pv2304"
+  },
+  "ag_s2560": {
+   "context": "ag_s",
+   "insts": "ag_s2560/insts.bin",
+   "build": "ag_s2560"
+  },
+  "ag_pv2560": {
+   "context": "ag_pv",
+   "insts": "ag_pv2560/insts.bin",
+   "build": "ag_pv2560"
+  },
+  "ag_s2816": {
+   "context": "ag_s",
+   "insts": "ag_s2816/insts.bin",
+   "build": "ag_s2816"
+  },
+  "ag_pv2816": {
+   "context": "ag_pv",
+   "insts": "ag_pv2816/insts.bin",
+   "build": "ag_pv2816"
+  },
+  "ag_s3072": {
+   "context": "ag_s",
+   "insts": "ag_s3072/insts.bin",
+   "build": "ag_s3072"
+  },
+  "ag_pv3072": {
+   "context": "ag_pv",
+   "insts": "ag_pv3072/insts.bin",
+   "build": "ag_pv3072"
+  },
+  "ag_s3328": {
+   "context": "ag_s",
+   "insts": "ag_s3328/insts.bin",
+   "build": "ag_s3328"
+  },
+  "ag_pv3328": {
+   "context": "ag_pv",
+   "insts": "ag_pv3328/insts.bin",
+   "build": "ag_pv3328"
+  },
+  "ag_s3584": {
+   "context": "ag_s",
+   "insts": "ag_s3584/insts.bin",
+   "build": "ag_s3584"
+  },
+  "ag_pv3584": {
+   "context": "ag_pv",
+   "insts": "ag_pv3584/insts.bin",
+   "build": "ag_pv3584"
+  },
+  "ag_s3840": {
+   "context": "ag_s",
+   "insts": "ag_s3840/insts.bin",
+   "build": "ag_s3840"
+  },
+  "ag_pv3840": {
+   "context": "ag_pv",
+   "insts": "ag_pv3840/insts.bin",
+   "build": "ag_pv3840"
+  },
+  "ag_s4096": {
+   "context": "ag_s",
+   "insts": "ag_s4096/insts.bin",
+   "build": "ag_s4096"
+  },
+  "ag_pv4096": {
+   "context": "ag_pv",
+   "insts": "ag_pv4096/insts.bin",
+   "build": "ag_pv4096"
+  },
+  "gemm_n2560_k4096": {
+   "context": "gemm",
+   "insts": "gemm_n2560_k4096/insts.bin",
+   "build": "gemm_n2560_k4096"
+  },
+  "gemm_n2560_k10240": {
+   "context": "gemm",
+   "insts": "gemm_n2560_k10240/insts.bin",
+   "build": "gemm_n2560_k10240"
+  },
+  "gemm_n6144_k2560": {
+   "context": "gemm",
+   "insts": "gemm_n6144_k2560/insts.bin",
+   "build": "gemm_n6144_k2560"
+  },
+  "gemm_n10240_k2560": {
+   "context": "gemm",
+   "insts": "gemm_n10240_k2560/insts.bin",
+   "build": "gemm_n10240_k2560"
+  }
+ },
+ "layer_types": {
+  "dense": {
+   "buffers": {
+    "consts": 12288,
+    "act": 147456,
+    "state": {
+     "kind": "kv",
+     "row": 4096
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "dx",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ]
+    }
+   ],
+   "gemm_block": {
+    "kind": "dense",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n6144_k2560",
+      "args": [
+       "gqkv3_w",
+       "gemm_x_k2560",
+       "gemm_y_n6144"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2560_k4096",
+      "args": [
+       "go_w",
+       "gemm_x_k4096",
+       "gemm_y_n2560"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k2560",
+      "args": [
+       "ggate_w",
+       "gemm_x_k2560",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n10240_k2560",
+      "args": [
+       "gup_w",
+       "gemm_x_k2560",
+       "gemm_y_n10240"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2560_k10240",
+      "args": [
+       "gdown_w",
+       "gemm_x_k10240",
+       "gemm_y_n2560"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkv3_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1,
+       2
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       3
+      ]
+     },
+     "ggate_w": {
+      "from": "pool",
+      "ops": [
+       5
+      ]
+     },
+     "gup_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     },
+     "gdown_w": {
+      "from": "pool",
+      "ops": [
+       6
+      ]
+     }
+    },
+    "qw": 4096,
+    "kvw": 1024,
+    "ff": 10240,
+    "ad_q": 8192,
+    "ad_kvn": 24576,
+    "ad_og": 32768,
+    "attn_kernel": "dxB",
+    "attn_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "sandwich": false,
+    "act": "silu",
+    "norm_groups": 2,
+    "attn_block": {
+     "m": 1024,
+     "hd": 128,
+     "l_max": 4096,
+     "args": [
+      "ag_a",
+      "ag_b",
+      "ag_c"
+     ],
+     "kernels_s": {
+      "256": "ag_s256",
+      "512": "ag_s512",
+      "768": "ag_s768",
+      "1024": "ag_s1024",
+      "1280": "ag_s1280",
+      "1536": "ag_s1536",
+      "1792": "ag_s1792",
+      "2048": "ag_s2048",
+      "2304": "ag_s2304",
+      "2560": "ag_s2560",
+      "2816": "ag_s2816",
+      "3072": "ag_s3072",
+      "3328": "ag_s3328",
+      "3584": "ag_s3584",
+      "3840": "ag_s3840",
+      "4096": "ag_s4096"
+     },
+     "kernels_pv": {
+      "256": "ag_pv256",
+      "512": "ag_pv512",
+      "768": "ag_pv768",
+      "1024": "ag_pv1024",
+      "1280": "ag_pv1280",
+      "1536": "ag_pv1536",
+      "1792": "ag_pv1792",
+      "2048": "ag_pv2048",
+      "2304": "ag_pv2304",
+      "2560": "ag_pv2560",
+      "2816": "ag_pv2816",
+      "3072": "ag_pv3072",
+      "3328": "ag_pv3328",
+      "3584": "ag_pv3584",
+      "3840": "ag_pv3840",
+      "4096": "ag_pv4096"
+     }
+    }
+   },
+   "pack": {
+    "pool": [
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+      "dst": 0,
+      "nch": 1280,
+      "in_dim": 2560
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+      "dst": 6553600,
+      "nch": 320,
+      "in_dim": 2560
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+      "dst": 8192000,
+      "nch": 320,
+      "in_dim": 2560
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+      "dst": 9830400,
+      "nch": 1280,
+      "in_dim": 4096
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.up_proj.weight",
+      "dst": 16384000,
+      "nch": 3200,
+      "in_dim": 2560
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+      "dst": 32768000,
+      "nch": 3200,
+      "in_dim": 2560
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.down_proj.weight",
+      "dst": 49152000,
+      "nch": 3200,
+      "in_dim": 10240
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 5120
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+      "dst": 5120,
+      "cap": 5120
+     }
+    ]
+   }
+  }
+ },
+ "tail": [
+  {
+   "op": "run",
+   "kernel": "ln",
+   "args": [
+    "xres",
+    "zero",
+    "normw",
+    "xresf",
+    "hn"
+   ]
+  },
+  {
+   "op": "run",
+   "kernel": "lm",
+   "args": [
+    "lmpool",
+    "hn",
+    "logits"
+   ]
+  }
+ ],
+ "globals": {
+  "xres": 10240,
+  "zero": 10240,
+  "normw": 5120,
+  "xresf": 10240,
+  "hn": 5120,
+  "logits": 1002496,
+  "lmpool": 401604608,
+  "ptab": {
+   "per_row": 2048,
+   "inv_freq": [
+    1.0,
+    0.7773650302387758,
+    0.6042963902381329,
+    0.46975888167064916,
+    0.3651741272548377,
+    0.28387359647587546,
+    0.220673406908459,
+    0.1715437896342879,
+    0.1333521432163324,
+    0.1036632928437698,
+    0.08058421877614819,
+    0.06264335366568856,
+    0.04869675251658631,
+    0.0378551524925863,
+    0.029427271762092817,
+    0.022875732003183956,
+    0.01778279410038923,
+    0.013823722273578996,
+    0.010746078283213174,
+    0.008353625469578262,
+    0.006493816315762113,
+    0.005048065716667471,
+    0.003924189758484536,
+    0.0030505278902670254,
+    0.0023713737056616554,
+    0.0018434229924091106,
+    0.0014330125702369627,
+    0.0011139738599948025,
+    0.0008659643233600654,
+    0.0006731703824144982,
+    0.0005232991146814947,
+    0.00040679443210830474,
+    0.00031622776601683794,
+    0.00024582440689201976,
+    0.00019109529749704405,
+    0.0001485508017172775,
+    0.00011547819846894582,
+    8.976871324473142e-05,
+    6.978305848598664e-05,
+    5.424690937011326e-05,
+    4.216965034285822e-05,
+    3.2781211513934585e-05,
+    2.5482967479793464e-05,
+    1.9809567785503387e-05,
+    1.539926526059492e-05,
+    1.19708503049573e-05,
+    9.30572040929699e-06,
+    7.233941627366747e-06,
+    5.623413251903491e-06,
+    4.37144481261109e-06,
+    3.3982083289425593e-06,
+    2.6416483203860926e-06,
+    2.053525026457146e-06,
+    1.5963385442879422e-06,
+    1.2409377607517195e-06,
+    9.646616199111991e-07,
+    7.498942093324558e-07,
+    5.829415347136074e-07,
+    4.531583637600818e-07,
+    3.5226946514731013e-07,
+    2.7384196342643614e-07,
+    2.1287516617963726e-07,
+    1.6548170999431814e-07,
+    1.2863969449369746e-07
+   ],
+   "window": 0
+  },
+  "gact": 37748736,
+  "ag_a": 8388608,
+  "ag_b": 1048576,
+  "ag_c": 16777216,
+  "gemm_x_k4096": 2097152,
+  "gemm_y_n2560": 2621440,
+  "gemm_x_k10240": 5242880,
+  "gemm_x_k2560": 1310720,
+  "gemm_y_n6144": 6291456,
+  "gemm_y_n10240": 10485760
+ },
+ "builds": {
+  "dx": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_k2_h2560",
+   "env": {}
+  },
+  "ln": {
+   "design": "ln/ln.py",
+   "build_dir": "ln/build_2560_1e-06_g2",
+   "env": {
+    "LN_N": "2560",
+    "LN_EPS": "1e-06",
+    "LN_GROUPS": "2"
+   }
+  },
+  "lm_head_q4": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_250624",
+   "env": {
+    "LMHEAD_N": "250624",
+    "LMHEAD_K": "2560",
+    "LMHEAD_CORES": "8"
+   }
+  },
+  "dx_f32": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_k2_h2560_f32",
+   "env": {
+    "GEMV_SCALES_F32": "1"
+   }
+  },
+  "lm_head_q4_f32": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_250624_f32",
+   "env": {
+    "LMHEAD_N": "250624",
+    "LMHEAD_K": "2560",
+    "LMHEAD_CORES": "8",
+    "LMHEAD_SCALES_F32": "1"
+   }
+  },
+  "dx_attn": {
+   "design": "dense/dx_attn.py",
+   "build_dir": "dense/build_dxa_k2_h2560",
+   "env": {}
+  },
+  "ag_s256": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s256",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "256",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv256": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv256",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s512": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s512",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "512",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv512": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv512",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "512",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s768": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s768",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "768",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv768": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv768",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "768",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s1024": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "1024",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1024": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1024",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s1280": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1280",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "1280",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1280": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1280",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1280",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s1536": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1536",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "1536",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1536": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1536",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1536",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s1792": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1792",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "1792",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1792": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1792",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1792",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s2048": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2048",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "2048",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2048": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2048",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2048",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s2304": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2304",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "2304",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2304": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2304",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2304",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s2560": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2560",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "2560",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2560": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2560",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2560",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s2816": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2816",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "2816",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2816": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2816",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2816",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s3072": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3072",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "3072",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3072": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3072",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3072",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s3328": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3328",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "3328",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3328": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3328",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3328",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s3584": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3584",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "3584",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3584": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3584",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3584",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s3840": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3840",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "3840",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3840": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3840",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3840",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "ag_s4096": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s4096",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "128",
+    "AG_N": "4096",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv4096": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv4096",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "4096",
+    "AG_N": "128",
+    "AG_COLS": "4"
+   }
+  },
+  "gemm_n2560_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2560_k4096_t256",
+   "env": {
+    "GQP_N": "2560",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n2560_k10240": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2560_k10240_t256",
+   "env": {
+    "GQP_N": "2560",
+    "GQP_K": "10240",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n6144_k2560": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n6144_k2560_t256",
+   "env": {
+    "GQP_N": "6144",
+    "GQP_K": "2560",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n10240_k2560": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n10240_k2560_t256",
+   "env": {
+    "GQP_N": "10240",
+    "GQP_K": "2560",
+    "GQP_T": "256"
+   }
+  }
+ },
+ "pack": {
+  "pool_bytes": 66060288,
+  "chunk_bytes": 5120,
+  "lm_head": {
+   "pool_bytes": 401604608,
+   "ops": [
+    {
+     "op": "std_perm",
+     "tensor": "lm_head.weight",
+     "dst": 0,
+     "nch": 78320,
+     "in_dim": 2560
+    }
+   ]
+  },
+  "embed": {
+   "tensor": "model.embed_tokens.weight",
+   "dim": 2560
+  },
+  "norm": {
+   "tensor": "model.norm.weight",
+   "bytes": 5120
+  }
+ },
+ "gguf": {
+  "manifest_version": 1,
+  "family": "k2",
+  "spec": {
+   "family": "k2",
+   "hidden": 2560,
+   "num_layers": 36,
+   "layer_types": [
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense"
+   ],
+   "vocab": 250624,
+   "real_vocab": 250620,
+   "num_heads": 32,
+   "num_kv_heads": 8,
+   "head_dim": 128,
+   "rotary_dim": 128,
+   "rope_theta": 10000000.0,
+   "rope_scaling": null,
+   "rope_local_theta": 0.0,
+   "sliding_window": 0,
+   "qk_norm": false,
+   "attn_gate": false,
+   "lin_key_heads": 0,
+   "lin_value_heads": 0,
+   "lin_key_dim": 0,
+   "lin_value_dim": 0,
+   "conv_kernel": 0,
+   "intermediate": 10240,
+   "activation": "silu",
+   "sandwich_norms": false,
+   "num_experts": 0,
+   "experts_per_tok": 0,
+   "moe_intermediate": 0,
+   "shared_expert_intermediate": 0,
+   "norm_eps": 1e-06,
+   "norm_groups": 2,
+   "quant": "q4_1_f32",
+   "extra": {
+    "model_type": "k2_horizon",
+    "source": "hf_config",
+    "model": "K2-Horizon-3.7B-NPU2"
+   }
+  },
+  "spec_hash": "sha256:daa62998c17aa327fe6dcf462711cc3e1ff36f06819a12088e3be1dfa08e20da",
+  "kernel_hash": "sha256:92229595d5d3edb913b0233d37cc6f91c775cc4a35d1de22307f174d5db098b1",
+  "build_key": "sha256:90343c0d4b64ad04af46214bc4bb30de6bcbf0edd35fe78c2f4685ae858ac010",
+  "max_ctx_default": 4096,
+  "hf_config_check": {
+   "model_type": [
+    "k2_horizon"
+   ],
+   "hidden_size": 2560,
+   "num_hidden_layers": 36,
+   "vocab_size": 250624,
+   "num_attention_heads": 32,
+   "num_key_value_heads": 8,
+   "intermediate_size": 10240,
+   "head_dim": 128,
+   "rope_parameters": {
+    "rope_theta": 10000000.0,
+    "rope_type": "default"
+   },
+   "layernorm_num_groups": 2
+  },
+  "hf_config_defaults": {},
+  "layout": {
+   "hidden": 2560,
+   "vocab": 250624,
+   "real_vocab": 250620,
+   "chunk_bytes": 6144,
+   "pool_bytes": 78643200,
+   "lmhead_pool_bytes": 482344960,
+   "kv_row": 4096,
+   "ptab_row": 2048,
+   "rotary_dim": 128,
+   "rope_theta": 10000000.0,
+   "rope_inv_freq": [
+    1.0,
+    0.7773650302387758,
+    0.6042963902381329,
+    0.46975888167064916,
+    0.3651741272548377,
+    0.28387359647587546,
+    0.220673406908459,
+    0.1715437896342879,
+    0.1333521432163324,
+    0.1036632928437698,
+    0.08058421877614819,
+    0.06264335366568856,
+    0.04869675251658631,
+    0.0378551524925863,
+    0.029427271762092817,
+    0.022875732003183956,
+    0.01778279410038923,
+    0.013823722273578996,
+    0.010746078283213174,
+    0.008353625469578262,
+    0.006493816315762113,
+    0.005048065716667471,
+    0.003924189758484536,
+    0.0030505278902670254,
+    0.0023713737056616554,
+    0.0018434229924091106,
+    0.0014330125702369627,
+    0.0011139738599948025,
+    0.0008659643233600654,
+    0.0006731703824144982,
+    0.0005232991146814947,
+    0.00040679443210830474,
+    0.00031622776601683794,
+    0.00024582440689201976,
+    0.00019109529749704405,
+    0.0001485508017172775,
+    0.00011547819846894582,
+    8.976871324473142e-05,
+    6.978305848598664e-05,
+    5.424690937011326e-05,
+    4.216965034285822e-05,
+    3.2781211513934585e-05,
+    2.5482967479793464e-05,
+    1.9809567785503387e-05,
+    1.539926526059492e-05,
+    1.19708503049573e-05,
+    9.30572040929699e-06,
+    7.233941627366747e-06,
+    5.623413251903491e-06,
+    4.37144481261109e-06,
+    3.3982083289425593e-06,
+    2.6416483203860926e-06,
+    2.053525026457146e-06,
+    1.5963385442879422e-06,
+    1.2409377607517195e-06,
+    9.646616199111991e-07,
+    7.498942093324558e-07,
+    5.829415347136074e-07,
+    4.531583637600818e-07,
+    3.5226946514731013e-07,
+    2.7384196342643614e-07,
+    2.1287516617963726e-07,
+    1.6548170999431814e-07,
+    1.2863969449369746e-07
+   ]
+  },
+  "layers": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "contexts": {
+   "dx": "dx_f32/final.xclbin",
+   "ln": "ln/final.xclbin",
+   "lm": "lm_head_q4_f32/final.xclbin"
+  },
+  "kernels": {
+   "ln": {
+    "context": "ln",
+    "insts": "ln/insts.bin",
+    "build": "ln"
+   },
+   "lm": {
+    "context": "lm",
+    "insts": "lm_head_q4_f32/insts.bin",
+    "build": "lm_head_q4_f32"
+   },
+   "dx": {
+    "context": "dx",
+    "insts": "dx_f32/insts.bin",
+    "patch": "attnpos",
+    "build": "dx_f32",
+    "window": 0
+   }
+  },
+  "layer_types": {
+   "dense": {
+    "buffers": {
+     "consts": 12288,
+     "act": 147456,
+     "state": {
+      "kind": "kv",
+      "row": 4096
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "dx",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act",
+       "ptab"
+      ]
+     }
+    ],
+    "pack": {
+     "pool": [
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+       "dst": 0,
+       "nch": 1280,
+       "in_dim": 2560
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+       "dst": 7864320,
+       "nch": 320,
+       "in_dim": 2560
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+       "dst": 9830400,
+       "nch": 320,
+       "in_dim": 2560
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+       "dst": 11796480,
+       "nch": 1280,
+       "in_dim": 4096
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.up_proj.weight",
+       "dst": 19660800,
+       "nch": 3200,
+       "in_dim": 2560
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+       "dst": 39321600,
+       "nch": 3200,
+       "in_dim": 2560
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.down_proj.weight",
+       "dst": 58982400,
+       "nch": 3200,
+       "in_dim": 10240
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 5120
+      },
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+       "dst": 5120,
+       "cap": 5120
+      }
+     ]
+    }
+   }
+  },
+  "tail": [
+   {
+    "op": "run",
+    "kernel": "ln",
+    "args": [
+     "xres",
+     "zero",
+     "normw",
+     "xresf",
+     "hn"
+    ]
+   },
+   {
+    "op": "run",
+    "kernel": "lm",
+    "args": [
+     "lmpool",
+     "hn",
+     "logits"
+    ]
+   }
+  ],
+  "globals": {
+   "xres": 10240,
+   "zero": 10240,
+   "normw": 5120,
+   "xresf": 10240,
+   "hn": 5120,
+   "logits": 1002496,
+   "lmpool": 482344960,
+   "ptab": {
+    "per_row": 2048,
+    "inv_freq": [
+     1.0,
+     0.7773650302387758,
+     0.6042963902381329,
+     0.46975888167064916,
+     0.3651741272548377,
+     0.28387359647587546,
+     0.220673406908459,
+     0.1715437896342879,
+     0.1333521432163324,
+     0.1036632928437698,
+     0.08058421877614819,
+     0.06264335366568856,
+     0.04869675251658631,
+     0.0378551524925863,
+     0.029427271762092817,
+     0.022875732003183956,
+     0.01778279410038923,
+     0.013823722273578996,
+     0.010746078283213174,
+     0.008353625469578262,
+     0.006493816315762113,
+     0.005048065716667471,
+     0.003924189758484536,
+     0.0030505278902670254,
+     0.0023713737056616554,
+     0.0018434229924091106,
+     0.0014330125702369627,
+     0.0011139738599948025,
+     0.0008659643233600654,
+     0.0006731703824144982,
+     0.0005232991146814947,
+     0.00040679443210830474,
+     0.00031622776601683794,
+     0.00024582440689201976,
+     0.00019109529749704405,
+     0.0001485508017172775,
+     0.00011547819846894582,
+     8.976871324473142e-05,
+     6.978305848598664e-05,
+     5.424690937011326e-05,
+     4.216965034285822e-05,
+     3.2781211513934585e-05,
+     2.5482967479793464e-05,
+     1.9809567785503387e-05,
+     1.539926526059492e-05,
+     1.19708503049573e-05,
+     9.30572040929699e-06,
+     7.233941627366747e-06,
+     5.623413251903491e-06,
+     4.37144481261109e-06,
+     3.3982083289425593e-06,
+     2.6416483203860926e-06,
+     2.053525026457146e-06,
+     1.5963385442879422e-06,
+     1.2409377607517195e-06,
+     9.646616199111991e-07,
+     7.498942093324558e-07,
+     5.829415347136074e-07,
+     4.531583637600818e-07,
+     3.5226946514731013e-07,
+     2.7384196342643614e-07,
+     2.1287516617963726e-07,
+     1.6548170999431814e-07,
+     1.2863969449369746e-07
+    ],
+    "window": 0
+   }
+  },
+  "builds": {
+   "dx": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_k2_h2560",
+    "env": {}
+   },
+   "ln": {
+    "design": "ln/ln.py",
+    "build_dir": "ln/build_2560_1e-06_g2",
+    "env": {
+     "LN_N": "2560",
+     "LN_EPS": "1e-06",
+     "LN_GROUPS": "2"
+    }
+   },
+   "lm_head_q4": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_250624",
+    "env": {
+     "LMHEAD_N": "250624",
+     "LMHEAD_K": "2560",
+     "LMHEAD_CORES": "8"
+    }
+   },
+   "dx_f32": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_k2_h2560_f32",
+    "env": {
+     "GEMV_SCALES_F32": "1"
+    }
+   },
+   "lm_head_q4_f32": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_250624_f32",
+    "env": {
+     "LMHEAD_N": "250624",
+     "LMHEAD_K": "2560",
+     "LMHEAD_CORES": "8",
+     "LMHEAD_SCALES_F32": "1"
+    }
+   },
+   "dx_attn": {
+    "design": "dense/dx_attn.py",
+    "build_dir": "dense/build_dxa_k2_h2560",
+    "env": {}
+   },
+   "ag_s256": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s256",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "256",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv256": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv256",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "256",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s512": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s512",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "512",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv512": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv512",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "512",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s768": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s768",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "768",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv768": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv768",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "768",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s1024": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1024",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "1024",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1024": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1024",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1024",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s1280": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1280",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "1280",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1280": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1280",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1280",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s1536": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1536",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "1536",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1536": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1536",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1536",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s1792": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1792",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "1792",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1792": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1792",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1792",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s2048": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2048",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "2048",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2048": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2048",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2048",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s2304": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2304",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "2304",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2304": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2304",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2304",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s2560": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2560",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "2560",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2560": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2560",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2560",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s2816": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2816",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "2816",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2816": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2816",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2816",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s3072": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3072",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "3072",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3072": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3072",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3072",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s3328": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3328",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "3328",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3328": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3328",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3328",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s3584": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3584",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "3584",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3584": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3584",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3584",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s3840": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3840",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "3840",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3840": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3840",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3840",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "ag_s4096": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s4096",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "128",
+     "AG_N": "4096",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv4096": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv4096",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "4096",
+     "AG_N": "128",
+     "AG_COLS": "4"
+    }
+   },
+   "gemm_n2560_k4096": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n2560_k4096_t256",
+    "env": {
+     "GQP_N": "2560",
+     "GQP_K": "4096",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n2560_k10240": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n2560_k10240_t256",
+    "env": {
+     "GQP_N": "2560",
+     "GQP_K": "10240",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n6144_k2560": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n6144_k2560_t256",
+    "env": {
+     "GQP_N": "6144",
+     "GQP_K": "2560",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n10240_k2560": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n10240_k2560_t256",
+    "env": {
+     "GQP_N": "10240",
+     "GQP_K": "2560",
+     "GQP_T": "256"
+    }
+   }
+  },
+  "pack": {
+   "pool_bytes": 78643200,
+   "chunk_bytes": 6144,
+   "lm_head": {
+    "pool_bytes": 482344960,
+    "ops": [
+     {
+      "op": "std_perm_gguf",
+      "tensor": "lm_head.weight",
+      "dst": 0,
+      "nch": 78320,
+      "in_dim": 2560
+     }
+    ]
+   },
+   "embed": {
+    "tensor": "model.embed_tokens.weight",
+    "dim": 2560
+   },
+   "norm": {
+    "tensor": "model.norm.weight",
+    "bytes": 5120
+   }
+  }
+ }
+}

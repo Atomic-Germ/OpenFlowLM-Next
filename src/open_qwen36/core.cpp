@@ -242,7 +242,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
-    w_->check_model(j, md.filename().string());
+    const size_t n_mismatch = w_->check_model(j, md.filename().string());
+    if (n_mismatch && cfg_.verbose)
+        std::fprintf(stderr, "open_qwen36: %zu key(s) of config.json differ from this kernel set; "
+                             "continuing (a real incompatibility crashes).\n", n_mismatch);
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);

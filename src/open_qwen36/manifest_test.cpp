@@ -25,15 +25,11 @@ void check(bool ok, const std::string& what) {
     failures += !ok;
 }
 
-/// Expects check_model to throw with `needle` in the message.
-void refused(const Manifest& m, const json& cfg, const std::string& needle, const std::string& what) {
-    try {
-        m.check_model(cfg, "test");
-        check(false, what + " (accepted)");
-    } catch (const std::runtime_error& e) {
-        std::string msg = e.what();
-        check(msg.find(needle) != std::string::npos, what + ": " + msg);
-    }
+/// check_model does not refuse: it reports each disagreement to stderr and
+/// returns how many, and the run continues (a real incompatibility crashes on the
+/// hardware). So a mismatch here is a NON-ZERO return, not a throw.
+size_t reported(const Manifest& m, const json& cfg) {
+    return m.check_model(cfg, "test");   // reaching here at all is the point: no throw
 }
 
 /// Expects Manifest::parse to throw with `needle` after `edit` breaks the manifest at `path`.
@@ -237,15 +233,17 @@ int main(int argc, char** argv) {
         check(false, std::string("full_attention_interval: ") + e.what());
     }
     json bad = ok; bad["hidden_size"] = 2560;
-    refused(m, bad, "hidden_size", "hidden_size 2560 is refused by name");
+    check(reported(m, bad) > 0, "hidden_size 2560 is reported against the kernel set");
     bad = ok; bad["model_type"] = "llama";
-    refused(m, bad, "model_type", "model_type llama is refused");
+    check(reported(m, bad) > 0, "model_type llama is reported");
     bad = ok; bad.erase("num_experts");
-    refused(m, bad, "lacks 'num_experts'", "a missing key is named");
+    check(reported(m, bad) > 0, "a missing key is reported");
     bad = interval; bad["full_attention_interval"] = 5;
-    refused(m, bad, "layer_types", "a different attention interval is refused");
+    check(reported(m, bad) > 0, "a different attention interval is reported");
     bad = ok; bad["num_hidden_layers"] = 24;
-    refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
+    check(reported(m, bad) > 0, "a 24-layer slice config is reported (the manifest is the 40-layer set)");
+    // And a config that agrees reports nothing at all.
+    check(reported(m, ok) == 0, "an agreeing config reports zero mismatches");
 
     // ---- a broken manifest
     json j = json::parse(std::string("{\"manifest_version\": 4}"));
@@ -291,19 +289,23 @@ int main(int argc, char** argv) {
         std::ifstream f(argv[1]);
         json g = json::parse(f);
         with_lean(g);
+        // Manifest owns a unique_ptr (the gguf twin), so it is non-copyable --
+        // these sub-cases re-parse rather than copy. (The copies at `fast`/`lean`
+        // never compiled; OPEN-MANIFEST was therefore not running at all.)
+        auto reparse = [](const json& src) { return Manifest::parse(src, "prefill-route"); };
         Manifest both = Manifest::parse(g, "lean");
         const auto& files = both.files();
         check(both.layer_types.at("linear_attention").gemm_block_variants.count("lean") &&
                   std::find(files.begin(), files.end(), "gemm_lean/insts.bin") != files.end(),
               "a lean variant parses, and the set's files include its streams");
-        Manifest fast = both;
+        Manifest fast = reparse(g);
         const bool fast_found = fast.select_prefill_route("");
         check(!fast_found && fast.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_n12288_k2048" &&
                   fast.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_n9216_k2048" &&
                   fast.layer_types.at("linear_attention").gemm_block_variants.empty() &&
                   !fast.globals.count("gemm_y_lean") && fast.globals.count("gemm_y_n12288"),
               "fast keeps gemm_block and drops the variant and the globals only it names");
-        Manifest lean = both;
+        Manifest lean = reparse(g);
         const bool lean_found = lean.select_prefill_route("lean");
         check(lean_found && lean.layer_types.at("linear_attention").gemm_block.program[0].kernel == "gemm_lean" &&
                   lean.layer_types.at("full_attention").gemm_block.program[0].kernel == "gemm_lean" &&
@@ -457,7 +459,7 @@ int main(int argc, char** argv) {
             d.check_model(ok, "qwen3");
             check(true, "qwen3: a matching config.json is accepted");
             json bad = ok; bad["intermediate_size"] = 12288;
-            refused(d, bad, "intermediate_size", "qwen3: an 8B config is refused by name");
+            check(reported(d, bad) > 0, "qwen3: an 8B config is reported");
             // attnpos alone does not make a kernel the attention-only dispatch: the sequential
             // dx is attnpos-patched too, and would run the whole layer per token of the block
             refused_manifest(argv[2], "not the attention-only", "qwen3: a route whose attn_kernel is the sequential dx is refused",
@@ -530,7 +532,7 @@ int main(int argc, char** argv) {
             h.check_model(ok, "hunyuan");
             check(true, "hunyuan: a matching config.json is accepted");
             json bad = ok; bad["vocab_size"] = 128192;
-            refused(h, bad, "vocab_size", "hunyuan: the padded count is refused as a config.json vocab_size");
+            check(reported(h, bad) > 0, "hunyuan: the padded count is reported as a config.json vocab_size");
         } catch (const std::exception& e) {
             check(false, std::string("hunyuan fixture: ") + e.what());
         }
@@ -603,7 +605,7 @@ int main(int argc, char** argv) {
             check(true, "qwen35: a matching config.json is accepted");
             json bad = ok;
             bad["intermediate_size"] = 9216;
-            refused(q, bad, "intermediate_size", "qwen35: the 4B's FFN width is refused by name");
+            check(reported(q, bad) > 0, "qwen35: the 4B's FFN width is reported");
         } catch (const std::exception& e) {
             check(false, std::string("qwen35 fixture: ") + e.what());
         }
@@ -768,19 +770,19 @@ int main(int argc, char** argv) {
             p.check_model(nohd, "phi3");
             check(true, "phi3: a config without head_dim is accepted through its default (hidden / heads)");
             json noprf = ok; noprf.erase("partial_rotary_factor");
-            refused(p, noprf, "partial_rotary_factor", "phi3: a config WITHOUT partial_rotary_factor (a full rotation) is refused against the 96-dim kernels");
+            check(reported(p, noprf) > 0, "phi3: a config WITHOUT partial_rotary_factor (a full rotation) is reported against the 96-dim kernels");
             json half = ok; half["partial_rotary_factor"] = 0.5;
-            refused(p, half, "partial_rotary_factor", "phi3: a different rotation is refused by name");
+            check(reported(p, half) > 0, "phi3: a different rotation is reported");
             json table = ok; table["rope_scaling"]["long_factor"][47] = 1.0;
-            refused(p, table, "rope_scaling", "phi3: a different longrope table is refused by name");
+            check(reported(p, table) > 0, "phi3: a different longrope table is reported");
             json plain = ok; plain.erase("rope_scaling");
-            refused(p, plain, "rope_scaling", "phi3: a plain-RoPE config is refused against a longrope kernel set");
+            check(reported(p, plain) > 0, "phi3: a plain-RoPE config is reported against a longrope kernel set");
             json theta = ok; theta["rope_theta"] = 500000.0;
-            refused(p, theta, "rope_theta", "phi3: a different theta is refused by name");
+            check(reported(p, theta) > 0, "phi3: a different theta is reported");
             json mp = ok; mp["max_position_embeddings"] = 65536;
-            refused(p, mp, "max_position_embeddings", "phi3: a different max_position_embeddings (it sets the attention scale) is refused");
+            check(reported(p, mp) > 0, "phi3: a different max_position_embeddings (it sets the attention scale) is reported");
             json noorig = ok; noorig.erase("original_max_position_embeddings");
-            refused(p, noorig, "original_max_position_embeddings", "phi3: dropping the original context (nowhere else to read it from) is refused");
+            check(reported(p, noorig) > 0, "phi3: dropping the original context (nowhere else to read it from) is reported");
         } catch (const std::exception& e) {
             check(false, std::string("phi3 fixture: ") + e.what());
         }

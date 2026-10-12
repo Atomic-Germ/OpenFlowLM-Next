@@ -1,0 +1,104 @@
+{
+  "model": "Gemma3-4B-NPU2",
+  "spec_hash": "sha256:3496169f71a4b2d6679065fb35888493ccf695084625797ce8f200e6f0d84681",
+  "build_key": "sha256:9bfd84b115b8c70a840e72b06add837be757b5d6550e94fc60fd837367e082e5",
+  "built": "2026-10-12T09:22:44-0700",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "unavailable",
+  "source_git_head": "46d10e38b126e03e9233891db67f61258d22254a",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2560",
+        "LN_EPS": "1e-06"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "262208",
+        "LMHEAD_K": "2560",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "dx_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "GEMV_SCALES_F32": "1"
+      }
+    },
+    "lm_head_q4_f32": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "262208",
+        "LMHEAD_K": "2560",
+        "LMHEAD_CORES": "8",
+        "LMHEAD_SCALES_F32": "1"
+      }
+    },
+    "dx_attn": {
+      "design": "open_kernels/designs/dense/dx_attn.py",
+      "env": {}
+    },
+    "gemm_n2560_k2048": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2560",
+        "GQP_K": "2048",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n2560_k10240": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "2560",
+        "GQP_K": "10240",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n4096_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "4096",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    },
+    "gemm_n10240_k2560": {
+      "design": "open_kernels/designs/gemm_q4_prefill/gemm_q4_prefill.py",
+      "env": {
+        "GQP_N": "10240",
+        "GQP_K": "2560",
+        "GQP_T": "256"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "e150d168528cf8d2881b7a7cbbce85b6ca3dfbfa5856108bb2a97d5e7c0092b8",
+    "dx/insts.bin": "b9a77e2b098cd802545d6fc0664657fa7cc198aba5bfae24142df82a2dffa7f6",
+    "ln/final.xclbin": "80b7a0f46f0ece7b6897b586b5b05b069ac361f3e51e0e146ff1cfc3dfb87326",
+    "ln/insts.bin": "7f9fd0d6ebc95a4dde540944fff61649144b023e332dbf07c4e93a88b7e74d53",
+    "lm_head_q4/final.xclbin": "33e0d1f400d8f90cd04d4ea49b825a6ef840895bfdf40e61ebf23c80a8dbd2e6",
+    "lm_head_q4/insts.bin": "3b46ba0a039bbec6e0179d7e4be69108f72576f498efb3b1abd0031bcc6c486d",
+    "dx_f32/final.xclbin": "e4a02e663bdf23026d54f18b387e8aeb8da2aeec357693dc1c0bb953cf4e14c9",
+    "dx_f32/insts.bin": "21f717db767a711f1cc8f5319fedf838e3cfefae954ce485875ebe6d84a6ce76",
+    "lm_head_q4_f32/final.xclbin": "34980b590a1bba34b0f6f7760e63ac2bd13ff72ef3981ccce941c0c77fb5d9f1",
+    "lm_head_q4_f32/insts.bin": "72b0b95bc6c56983eacc2519f992b4d51353ef87817b48fc2806ab8bb98d575b",
+    "dx_attn/final.xclbin": "b350821e1925e534c95fdad68e30734fac383a7a59e7d9c9001a6819466de0c9",
+    "dx_attn/insts.bin": "98a9b43ad2f4570a9799990db7af7111292cd9bdc6cf159c400432ff06593128",
+    "gemm_n2560_k2048/final.xclbin": "1a3d1a9e8e125943bc84de3f16b93edee599411027e931b0cc63bf60e0b118b3",
+    "gemm_n2560_k2048/insts.bin": "0e874e4a355d535455c9587f0760ca675448173cf36dfc685b768958fd2bf396",
+    "gemm_n2560_k10240/final.xclbin": "f3a9a602df514ffe81966e7ac2576c8bad45ecd51fe430c41e389eba1de0dd9b",
+    "gemm_n2560_k10240/insts.bin": "2ea7d7c9bf38dfd0639e5208eeab9e6b6a5fd52bfa8d7c6c7abc17a220b4e25b",
+    "gemm_n4096_k2560/final.xclbin": "da5d59bfda4febbb47d50a26199e87c4e5da8036be33be1036b616dcc4b47b17",
+    "gemm_n4096_k2560/insts.bin": "0c2f60a775ea0a124e45c17d9053d495c67ce69bd48699d38945c4c2c8c13eb9",
+    "gemm_n10240_k2560/final.xclbin": "06a5f5f037f39f15e3b0e4dbfc0a74f62bfe22d238d7747c5642a63d3f9801e2",
+    "gemm_n10240_k2560/insts.bin": "520822ef44717887843f4c8ada89b85b069326d1626c7522e26af06d19f310d0"
+  }
+}

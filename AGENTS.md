@@ -212,6 +212,62 @@ to a table.** If `kernel_hash` does not match, the *shape* genuinely differs. If
 does match and `oflm-add` still refused, that is a bug in `find_open_kernels` or in
 `spec_from_model_dir` — find it there, not in a table.
 
+## This project has no approver — including you
+
+**Nothing in this repository is gated on someone's sign-off, and no check in it
+is a rule handed down.** The owner does not review contributions, bless shapes, or
+gate releases, and a validation that reads like a manager asking for permission is
+a bug in the framing, not a policy to work around.
+
+The distinction worth keeping:
+
+- **A correctness check** asks *"can this produce a wrong answer?"* Even this is
+  **not a wall** — it is a loud warning, and the run proceeds. A kernel set whose
+  geometry differs from `config.json` usually still computes: a different quant
+  answers differently too, plenty of models were simply not built to a recipe's
+  expectations, and the weights may differ on purpose. Where it genuinely cannot
+  work it **crashes on the hardware**, which is the acceptable outcome — a crash is
+  a fact you can act on; a refusal is a gate. `Manifest::check_model` therefore
+  reports every disagreeing key to stderr and returns a count. It does not throw.
+- **A permission check** asks *"has someone approved this?"* That does not exist
+  here and must never be added. If the framing needs a boss to make sense of, it
+  is worded wrong.
+
+The hard wall that *is* correct is a **crash**: something that cannot compute must
+fail visibly rather than quietly. Every refusal in this repo that is not a crash
+should be re-examined with that in mind.
+
+**Never silently load a different model.** The model is always the one the tag
+names (`get_model_path` → `model_list.json` `name`); nothing substitutes one model
+for another. The one fallback that exists is *engine*, not model: with no open
+kernels for a shape, the **same** model runs on the closed engine
+(`_shared_select_open_engine`, `automodel.cpp:37`). That is announced on both
+paths now — `… on the open kernels (…)` or `… on the closed kernels (no open
+kernel set installed for this shape)`. Silent drop-to-closed is exactly the
+FastFlowLM debugging trap; don't reintroduce it. Granite has no closed engine, so
+it *crashes* instead of falling back — also correct.
+
+**With the walls down, the tests are the load-bearing part.** The app is usable;
+correctness now rests on the suites being green and actually running. A silently
+non-compiling test (the `manifest_test` copy-ctor bug, which meant `OPEN-MANIFEST`
+had not run for a long time) is a real correctness hole, so build and run the C++
+tests too, not just the Python ones.
+
+So, concretely:
+
+- **The catalogue is a record of measurements, not an approval queue.** A point
+  goes in after its hardware run because that is when the number became known, not
+  because anyone permitted it. Nobody has to be asked — the person who built and
+  measured it has already done the validating; writing it down is bookkeeping.
+  `OPEN_KERNELS_UNVALIDATED=1` is how you *get* the run before recording it.
+- **Anyone who ships a custom kernel is responsible for it.** Their build, their
+  model, their validation — we do not babysit them past that. `check_model` names
+  every key their `config.json` and our kernel set disagree on, loudly, and then
+  lets the run happen. If it crashes, they learn something real.
+- **Write refusals as facts about the world.** "hidden 1152 is not a multiple of
+  the 256 q4 k-tile" is a fact. "this shape has not been approved" is a fiction
+  with no author. If a message implies a gatekeeper, delete the gatekeeper.
+
 ## A fine-tune is NOT a new shape — never give it a spec, a file, or a name
 
 **A distilled, merged, or fine-tuned model that is architecturally identical to one
@@ -238,6 +294,43 @@ The asymmetry that caused this: **`qwen35-27b` exists but there is no qwen35 spe
 hidden 2560.** A family got built at some sizes and not others. That is a real gap
 and it is fixed by building the missing *shape* — once — never by special-casing the
 model that asked for it.
+
+## RESOLVED: qwen3.5 packs `ssm_out` at q8, shipped kernels are q4_1 — fixed in the converter
+
+**Was:** every qwen3.5 packer config defaulted `linear_out_proj` to `Q8_0`, so a
+model packed today derived `quant={'linear_out':'q8'}` and needed the
+`gemm_n8192_k4096` kernel that was never built (the shipped 9B/27B sets use
+`gemm_n4096_k4096`, q4_1). Consequence: packing a qwen3.5 model produced a
+container that would **not** bind to the shipped qwen3.5 kernels. Reproduced
+against the installed set; `oflm-add` reported it correctly as a packaging gap.
+
+**Fixed** in `utilities/q4nx-build/configs/qwen3.5_{0.8b,2b,4b,9b,27b}.json`:
+`linear_out_proj.default_tensor_type` is now `Q4_0`. This is free — the host
+requantizes an out projection to q4_1 for the kernel anyway (`pools.cpp:204-209`,
+"re-quantises a q8 source transparently"), so the q8 storage bought nothing and
+only demanded an unbuilt kernel. Verified: a freshly-packed Qwen3.5-4B now packs
+`ssm_out … Q4_0`, derives `quant: q4_1`, and its `kernel_hash` **exactly matches**
+the `qwen35-4b` spec.
+
+The lesson generalizes: **the converter's default quant and the shipped kernel
+set's quant must agree**, or a freshly-packed base model silently fails to bind
+the kernels built for it. `linear_out` is the one role where the container's
+stored quant legitimately differs from the kernel's — and it's now normalized.
+
+## Running the tests
+
+- **Python:** `cd specs/open-engine && pytest tests/` (the recipe/manifest/spec
+  suite), plus `utilities/oflm-add` and `utilities/q4nx-build`. All three must be
+  green before you claim anything.
+- **C++:** `manifest_test` (the `OPEN-MANIFEST` ctest) builds and runs against
+  the checked-in fixtures and needs no NPU. It now compiles and passes — it did
+  not, for a while: the test copied a `Manifest`, which owns a `unique_ptr` and is
+  non-copyable, so the target never built and the test never ran. If you add to it,
+  re-parse rather than copy. `check_model`'s expectations there are now
+  *reports a mismatch* (non-zero return), not *throws*.
+- **`oflm-test`** (`--llm`, `--vision`, `--embed`, `--tools`) is the end-to-end
+  acceptance gate against a running server and real weights. Nothing short of it
+  proves a model actually runs.
 
 ## Packing a model does NOT build or ship its kernels — and never will
 

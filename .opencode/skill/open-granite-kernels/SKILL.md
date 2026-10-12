@@ -142,8 +142,12 @@ same measurement.
 ## Rules
 
 - Never commit the xclbins; the distributed package ships them pre-built.
-- A catalogue point enters `catalogue.py` **after** its hardware run, never
-  before. `OPEN_KERNELS_UNVALIDATED=1` is how you get the run, not how you ship.
+- The catalogue is a **record of what was measured**, not an approval queue —
+  there is nobody to ask. A point goes in after its hardware run, because that is
+  when the number became known; before that there is nothing to record. Anyone can
+  add one, including you, and `OPEN_KERNELS_UNVALIDATED=1` exists so you can get
+  the run *before* recording it. If you built and measured a point, you have
+  already done the validating; writing it down is bookkeeping, not sign-off.
 - Do not assert a validated set's membership in a test. Three tests had to be
   edited when Granite's points landed, all because they spelled the set out —
   which fails on the one event that is never a regression.

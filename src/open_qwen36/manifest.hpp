@@ -242,10 +242,14 @@ struct Manifest {
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);
 
-    /// Throws naming the first key of config.json that disagrees with the manifest. A key
-    /// config.json lacks takes its hf_config_defaults value when there is one, and is
-    /// refused as lacking otherwise.
-    void check_model(const nlohmann::json& config, const std::string& where) const;
+    /// Reports every config.json key that disagrees with the manifest, to stderr,
+    /// and returns how many. It does NOT refuse: a set whose geometry differs
+    /// usually still runs, and where it cannot it crashes on the hardware. This is
+    /// a diagnostic, not a gate -- the experiments that discover real
+    /// compatibilities need the run, not a stop. A key config.json lacks takes its
+    /// hf_config_defaults value when there is one, and is reported as lacking
+    /// otherwise. Returns 0 when everything agrees.
+    size_t check_model(const nlohmann::json& config, const std::string& where) const;
     const LayerType& layer_type(size_t layer) const;
     /// OPEN-PREFILL-MODE: gemm_block becomes variant `name` ("" keeps it), and the other routes and the
     /// globals only they name are dropped. False when no layer type has a variant `name`.

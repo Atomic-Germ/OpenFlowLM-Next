@@ -1,0 +1,67 @@
+{
+  "model": "lfm2-2.6B-NPU2",
+  "spec_hash": "sha256:c121f01ee33e1c0a2c452ea23e93e87112367945914b2b9f3cb8ca01a39eff61",
+  "build_key": "sha256:d182b2e051ebb4226082db7484d93ce2f4421668f4db39942294658d77f50a7f",
+  "built": "2026-10-12T10:01:58-0700",
+  "mlir_aie_version": "1.4.2",
+  "peano_version": "21.0.0.2026080301+c9c5ecb7",
+  "mlir_aie_git_head": "unavailable",
+  "source_git_head": "32c862b9b58609f9fe7a4d274bacfb8278104d1c",
+  "sets": {
+    "dx": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {}
+    },
+    "ln": {
+      "design": "open_kernels/designs/ln/ln.py",
+      "env": {
+        "LN_N": "2048",
+        "LN_EPS": "1e-05"
+      }
+    },
+    "lm_head_q4": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "65536",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "8"
+      }
+    },
+    "dx_f32": {
+      "design": "open_kernels/designs/dense/dx.py",
+      "env": {
+        "GEMV_SCALES_F32": "1"
+      }
+    },
+    "lm_head_q4_f32": {
+      "design": "open_kernels/designs/lm_head_q4/lm_head_q4.py",
+      "env": {
+        "LMHEAD_N": "65536",
+        "LMHEAD_K": "2048",
+        "LMHEAD_CORES": "8",
+        "LMHEAD_SCALES_F32": "1"
+      }
+    },
+    "short_conv": {
+      "design": "open_kernels/designs/short_conv/cx.py",
+      "env": {
+        "SC_HID": "2048",
+        "SC_TAPS": "3"
+      }
+    }
+  },
+  "sha256": {
+    "dx/final.xclbin": "3acfca85e9dcac0c0a5a45f91f76c4855411bbeb5acfbe34c407928188019b1f",
+    "dx/insts.bin": "1534eb9c6868a62a4befd54ed5eb23998b79394d913940daec4d48ce8bc6e1b0",
+    "ln/final.xclbin": "4f125948b97e24a10626a1a2bf905cd0789452b9f6b5d4e22815acb63c8c24c7",
+    "ln/insts.bin": "2e9e5937219ab7488ed3ee28c17aff602e58a9c619f73083c1c0adc0bd8d08d5",
+    "lm_head_q4/final.xclbin": "8d5449d7aebea49dd2dbefbe3654ef52fbb4149e86a9ed25174db18c6de789b9",
+    "lm_head_q4/insts.bin": "547010eb7ef89cfcf7e22e7101632ee5b5af223682dbb017bd1d09765f755324",
+    "dx_f32/final.xclbin": "303aa1ac1547993824451a1c0d919498807d082fda1e121ce41b050a5022175e",
+    "dx_f32/insts.bin": "dca77910eb255b72e2c069e24ad879724bfa00e84d989995d111bea66be9740c",
+    "lm_head_q4_f32/final.xclbin": "ad300697750433f8e48fd72b1e7b3ab26bb1307d650c3c714c98de9b042acaa2",
+    "lm_head_q4_f32/insts.bin": "593540923b9f593bcd8900cf5e30a9c89fa579d24e4ae52d955b7e4ffc9392f7",
+    "short_conv/final.xclbin": "f405f91b4252c9e2c7cc1b0ead3200b4128dcf7972c524ff3161845ad635c350",
+    "short_conv/insts.bin": "4adbfcfa8ce20a447e7a329659b6d1ac468e02f335d1e326ea4621e4e1212de1"
+  }
+}

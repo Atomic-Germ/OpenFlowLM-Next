@@ -43,8 +43,16 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
     const bool use_open = !sel.empty() ? sel == "open" : !kernels.empty();
     if (use_open && kernels.empty())
         throw std::runtime_error(std::string(env_var) + "=open but no open kernels were found for " + this->lm_config->model_name);
-    if (!use_open)
+    if (!use_open) {
+        // No open kernels for this shape -> the closed engine runs the SAME model.
+        // Say so: which engine ran is the first thing you want when the numbers
+        // differ from expectation, and a silent drop to closed is how that gets
+        // misread as an open-kernel bug. (This is never a different MODEL; the
+        // model is always the one the tag names.)
+        if (kernels.empty())
+            header_print("OFLM", family_label + " on the closed kernels (no open kernel set installed for this shape)");
         return nullptr;
+    }
     header_print("OFLM", family_label + " on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
     eng->load_open_weights();

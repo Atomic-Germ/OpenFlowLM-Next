@@ -114,7 +114,7 @@
         "linear_out_proj": {
             "gguf_name": "blk.{bid}.ssm_out.weight",
             "q4nx_name": "model.layers.{bid}.linear_attn.ssm_out_proj.weight",
-            "default_tensor_type": "Q8_0"
+            "default_tensor_type": "Q4_0"
         },
         "linear_dt": {
             "gguf_name": "blk.{bid}.ssm_dt.bias",

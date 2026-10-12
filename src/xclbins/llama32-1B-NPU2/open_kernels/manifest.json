@@ -1,0 +1,1860 @@
+{
+ "manifest_version": 1,
+ "family": "llama3",
+ "spec": {
+  "family": "llama3",
+  "hidden": 2048,
+  "num_layers": 16,
+  "layer_types": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "vocab": 128256,
+  "real_vocab": 128256,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 64,
+  "rotary_dim": 64,
+  "rope_theta": 500000.0,
+  "rope_scaling": {
+   "factor": 32.0,
+   "low_freq_factor": 1.0,
+   "high_freq_factor": 4.0,
+   "original_max_position_embeddings": 8192
+  },
+  "rope_local_theta": 0.0,
+  "sliding_window": 0,
+  "qk_norm": false,
+  "attn_gate": false,
+  "lin_key_heads": 0,
+  "lin_value_heads": 0,
+  "lin_key_dim": 0,
+  "lin_value_dim": 0,
+  "conv_kernel": 0,
+  "intermediate": 8192,
+  "activation": "silu",
+  "sandwich_norms": false,
+  "num_experts": 0,
+  "experts_per_tok": 0,
+  "moe_intermediate": 0,
+  "shared_expert_intermediate": 0,
+  "norm_eps": 1e-05,
+  "quant": "q4_1",
+  "extra": {
+   "model_type": "llama",
+   "source": "hf_config",
+   "model": "llama32-1B-NPU2"
+  }
+ },
+ "spec_hash": "sha256:131a7093af07c5af73222e02979def3fcf66e28ef05a77ba7d35a61240fbf96b",
+ "kernel_hash": "sha256:8df6c5298743510afc237f1e1f3f39095cbab94f90346999017903da886dcef1",
+ "build_key": "sha256:545950519477bdef4e48121154b654915b0c516c8b6156be818d2ec673ac3bd4",
+ "max_ctx_default": 4096,
+ "hf_config_check": {
+  "model_type": [
+   "llama"
+  ],
+  "hidden_size": 2048,
+  "num_hidden_layers": 16,
+  "vocab_size": 128256,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "intermediate_size": 8192
+ },
+ "hf_config_defaults": {},
+ "layout": {
+  "hidden": 2048,
+  "vocab": 128256,
+  "real_vocab": 128256,
+  "chunk_bytes": 5120,
+  "pool_bytes": 38797312,
+  "lmhead_pool_bytes": 164626432,
+  "kv_row": 2048,
+  "ptab_row": 1024,
+  "rotary_dim": 64,
+  "rope_theta": 500000.0,
+  "rope_inv_freq": [
+   1.0,
+   0.6636012376960885,
+   0.44036660267178046,
+   0.2922278225730151,
+   0.19392274474868576,
+   0.12868737343265052,
+   0.08539710028576561,
+   0.05666962144529105,
+   0.03760603093086393,
+   0.024955408670558694,
+   0.016560440080994446,
+   0.010989528534539826,
+   0.007292664737217109,
+   0.004839421345719893,
+   0.003211445994752591,
+   0.001290547928209264,
+   0.00042955679655936815,
+   9.70828780262767e-05,
+   1.9461638184831125e-05,
+   1.291476718704739e-05,
+   8.570255489881478e-06,
+   5.687232150457046e-06,
+   3.7740542941082826e-06,
+   2.5044671007024935e-06,
+   1.6619674677953088e-06,
+   1.102883668639601e-06,
+   7.318749675440419e-07,
+   4.856731343010108e-07,
+   3.2229329303788936e-07,
+   2.1387422816109149e-07,
+   1.4192720251899592e-07,
+   9.41830672543491e-08
+  ]
+ },
+ "layers": [
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense",
+  "dense"
+ ],
+ "contexts": {
+  "dx": "dx/final.xclbin",
+  "ln": "ln/final.xclbin",
+  "lm": "lm_head_q4/final.xclbin",
+  "dxa": "dx_attn/final.xclbin",
+  "ag_s": "ag_s256/final.xclbin",
+  "ag_pv": "ag_pv256/final.xclbin",
+  "gemm": "gemm_n2048_k2048/final.xclbin"
+ },
+ "kernels": {
+  "ln": {
+   "context": "ln",
+   "insts": "ln/insts.bin",
+   "build": "ln"
+  },
+  "lm": {
+   "context": "lm",
+   "insts": "lm_head_q4/insts.bin",
+   "build": "lm_head_q4"
+  },
+  "dx": {
+   "context": "dx",
+   "insts": "dx/insts.bin",
+   "patch": "attnpos",
+   "build": "dx",
+   "window": 0
+  },
+  "dxB": {
+   "context": "dxa",
+   "insts": "dx_attn/insts.bin",
+   "patch": "attnpos",
+   "build": "dx_attn",
+   "window": 0
+  },
+  "ag_s256": {
+   "context": "ag_s",
+   "insts": "ag_s256/insts.bin",
+   "build": "ag_s256"
+  },
+  "ag_pv256": {
+   "context": "ag_pv",
+   "insts": "ag_pv256/insts.bin",
+   "build": "ag_pv256"
+  },
+  "ag_s512": {
+   "context": "ag_s",
+   "insts": "ag_s512/insts.bin",
+   "build": "ag_s512"
+  },
+  "ag_pv512": {
+   "context": "ag_pv",
+   "insts": "ag_pv512/insts.bin",
+   "build": "ag_pv512"
+  },
+  "ag_s768": {
+   "context": "ag_s",
+   "insts": "ag_s768/insts.bin",
+   "build": "ag_s768"
+  },
+  "ag_pv768": {
+   "context": "ag_pv",
+   "insts": "ag_pv768/insts.bin",
+   "build": "ag_pv768"
+  },
+  "ag_s1024": {
+   "context": "ag_s",
+   "insts": "ag_s1024/insts.bin",
+   "build": "ag_s1024"
+  },
+  "ag_pv1024": {
+   "context": "ag_pv",
+   "insts": "ag_pv1024/insts.bin",
+   "build": "ag_pv1024"
+  },
+  "ag_s1280": {
+   "context": "ag_s",
+   "insts": "ag_s1280/insts.bin",
+   "build": "ag_s1280"
+  },
+  "ag_pv1280": {
+   "context": "ag_pv",
+   "insts": "ag_pv1280/insts.bin",
+   "build": "ag_pv1280"
+  },
+  "ag_s1536": {
+   "context": "ag_s",
+   "insts": "ag_s1536/insts.bin",
+   "build": "ag_s1536"
+  },
+  "ag_pv1536": {
+   "context": "ag_pv",
+   "insts": "ag_pv1536/insts.bin",
+   "build": "ag_pv1536"
+  },
+  "ag_s1792": {
+   "context": "ag_s",
+   "insts": "ag_s1792/insts.bin",
+   "build": "ag_s1792"
+  },
+  "ag_pv1792": {
+   "context": "ag_pv",
+   "insts": "ag_pv1792/insts.bin",
+   "build": "ag_pv1792"
+  },
+  "ag_s2048": {
+   "context": "ag_s",
+   "insts": "ag_s2048/insts.bin",
+   "build": "ag_s2048"
+  },
+  "ag_pv2048": {
+   "context": "ag_pv",
+   "insts": "ag_pv2048/insts.bin",
+   "build": "ag_pv2048"
+  },
+  "ag_s2304": {
+   "context": "ag_s",
+   "insts": "ag_s2304/insts.bin",
+   "build": "ag_s2304"
+  },
+  "ag_pv2304": {
+   "context": "ag_pv",
+   "insts": "ag_pv2304/insts.bin",
+   "build": "ag_pv2304"
+  },
+  "ag_s2560": {
+   "context": "ag_s",
+   "insts": "ag_s2560/insts.bin",
+   "build": "ag_s2560"
+  },
+  "ag_pv2560": {
+   "context": "ag_pv",
+   "insts": "ag_pv2560/insts.bin",
+   "build": "ag_pv2560"
+  },
+  "ag_s2816": {
+   "context": "ag_s",
+   "insts": "ag_s2816/insts.bin",
+   "build": "ag_s2816"
+  },
+  "ag_pv2816": {
+   "context": "ag_pv",
+   "insts": "ag_pv2816/insts.bin",
+   "build": "ag_pv2816"
+  },
+  "ag_s3072": {
+   "context": "ag_s",
+   "insts": "ag_s3072/insts.bin",
+   "build": "ag_s3072"
+  },
+  "ag_pv3072": {
+   "context": "ag_pv",
+   "insts": "ag_pv3072/insts.bin",
+   "build": "ag_pv3072"
+  },
+  "ag_s3328": {
+   "context": "ag_s",
+   "insts": "ag_s3328/insts.bin",
+   "build": "ag_s3328"
+  },
+  "ag_pv3328": {
+   "context": "ag_pv",
+   "insts": "ag_pv3328/insts.bin",
+   "build": "ag_pv3328"
+  },
+  "ag_s3584": {
+   "context": "ag_s",
+   "insts": "ag_s3584/insts.bin",
+   "build": "ag_s3584"
+  },
+  "ag_pv3584": {
+   "context": "ag_pv",
+   "insts": "ag_pv3584/insts.bin",
+   "build": "ag_pv3584"
+  },
+  "ag_s3840": {
+   "context": "ag_s",
+   "insts": "ag_s3840/insts.bin",
+   "build": "ag_s3840"
+  },
+  "ag_pv3840": {
+   "context": "ag_pv",
+   "insts": "ag_pv3840/insts.bin",
+   "build": "ag_pv3840"
+  },
+  "ag_s4096": {
+   "context": "ag_s",
+   "insts": "ag_s4096/insts.bin",
+   "build": "ag_s4096"
+  },
+  "ag_pv4096": {
+   "context": "ag_pv",
+   "insts": "ag_pv4096/insts.bin",
+   "build": "ag_pv4096"
+  },
+  "gemm_n2048_k2048": {
+   "context": "gemm",
+   "insts": "gemm_n2048_k2048/insts.bin",
+   "build": "gemm_n2048_k2048"
+  },
+  "gemm_n2048_k8192": {
+   "context": "gemm",
+   "insts": "gemm_n2048_k8192/insts.bin",
+   "build": "gemm_n2048_k8192"
+  },
+  "gemm_n3072_k2048": {
+   "context": "gemm",
+   "insts": "gemm_n3072_k2048/insts.bin",
+   "build": "gemm_n3072_k2048"
+  },
+  "gemm_n8192_k2048": {
+   "context": "gemm",
+   "insts": "gemm_n8192_k2048/insts.bin",
+   "build": "gemm_n8192_k2048"
+  }
+ },
+ "layer_types": {
+  "dense": {
+   "buffers": {
+    "consts": 12288,
+    "act": 102400,
+    "state": {
+     "kind": "kv",
+     "row": 2048
+    }
+   },
+   "program": [
+    {
+     "op": "run",
+     "kernel": "dx",
+     "args": [
+      "pool",
+      "xres",
+      "consts",
+      "state",
+      "act",
+      "ptab"
+     ]
+    }
+   ],
+   "gemm_block": {
+    "kind": "dense",
+    "t": 256,
+    "eps": 1e-05,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n3072_k2048",
+      "args": [
+       "gqkv3_w",
+       "gemm_x_k2048",
+       "gemm_y_n3072"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2048_k2048",
+      "args": [
+       "go_w",
+       "gemm_x_k2048",
+       "gemm_y_n2048"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n8192_k2048",
+      "args": [
+       "ggate_w",
+       "gemm_x_k2048",
+       "gemm_y_n8192"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n8192_k2048",
+      "args": [
+       "gup_w",
+       "gemm_x_k2048",
+       "gemm_y_n8192"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2048_k8192",
+      "args": [
+       "gdown_w",
+       "gemm_x_k8192",
+       "gemm_y_n2048"
+      ]
+     }
+    ],
+    "weights": {
+     "gqkv3_w": {
+      "from": "pool",
+      "ops": [
+       0,
+       1,
+       2
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       3
+      ]
+     },
+     "ggate_w": {
+      "from": "pool",
+      "ops": [
+       5
+      ]
+     },
+     "gup_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     },
+     "gdown_w": {
+      "from": "pool",
+      "ops": [
+       6
+      ]
+     }
+    },
+    "qw": 2048,
+    "kvw": 512,
+    "ff": 8192,
+    "ad_q": 4096,
+    "ad_kvn": 12288,
+    "ad_og": 16384,
+    "attn_kernel": "dxB",
+    "attn_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "sandwich": false,
+    "act": "silu",
+    "norm_groups": 1,
+    "attn_block": {
+     "m": 1024,
+     "hd": 64,
+     "l_max": 4096,
+     "args": [
+      "ag_a",
+      "ag_b",
+      "ag_c"
+     ],
+     "kernels_s": {
+      "256": "ag_s256",
+      "512": "ag_s512",
+      "768": "ag_s768",
+      "1024": "ag_s1024",
+      "1280": "ag_s1280",
+      "1536": "ag_s1536",
+      "1792": "ag_s1792",
+      "2048": "ag_s2048",
+      "2304": "ag_s2304",
+      "2560": "ag_s2560",
+      "2816": "ag_s2816",
+      "3072": "ag_s3072",
+      "3328": "ag_s3328",
+      "3584": "ag_s3584",
+      "3840": "ag_s3840",
+      "4096": "ag_s4096"
+     },
+     "kernels_pv": {
+      "256": "ag_pv256",
+      "512": "ag_pv512",
+      "768": "ag_pv768",
+      "1024": "ag_pv1024",
+      "1280": "ag_pv1280",
+      "1536": "ag_pv1536",
+      "1792": "ag_pv1792",
+      "2048": "ag_pv2048",
+      "2304": "ag_pv2304",
+      "2560": "ag_pv2560",
+      "2816": "ag_pv2816",
+      "3072": "ag_pv3072",
+      "3328": "ag_pv3328",
+      "3584": "ag_pv3584",
+      "3840": "ag_pv3840",
+      "4096": "ag_pv4096"
+     }
+    }
+   },
+   "pack": {
+    "pool": [
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+      "dst": 0,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+      "dst": 2621440,
+      "nch": 128,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+      "dst": 3276800,
+      "nch": 128,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+      "dst": 3932160,
+      "nch": 512,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.up_proj.weight",
+      "dst": 6553600,
+      "nch": 2048,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+      "dst": 17039360,
+      "nch": 2048,
+      "in_dim": 2048
+     },
+     {
+      "op": "std_perm",
+      "tensor": "model.layers.{l}.mlp.down_proj.weight",
+      "dst": 27525120,
+      "nch": 2048,
+      "in_dim": 8192
+     }
+    ],
+    "consts": [
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.input_layernorm.weight",
+      "dst": 0,
+      "cap": 4096
+     },
+     {
+      "op": "put",
+      "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+      "dst": 4096,
+      "cap": 4096
+     }
+    ]
+   }
+  }
+ },
+ "tail": [
+  {
+   "op": "run",
+   "kernel": "ln",
+   "args": [
+    "xres",
+    "zero",
+    "normw",
+    "xresf",
+    "hn"
+   ]
+  },
+  {
+   "op": "run",
+   "kernel": "lm",
+   "args": [
+    "lmpool",
+    "hn",
+    "logits"
+   ]
+  }
+ ],
+ "globals": {
+  "xres": 8192,
+  "zero": 8192,
+  "normw": 4096,
+  "xresf": 8192,
+  "hn": 4096,
+  "logits": 513024,
+  "lmpool": 164626432,
+  "ptab": {
+   "per_row": 1024,
+   "inv_freq": [
+    1.0,
+    0.6636012376960885,
+    0.44036660267178046,
+    0.2922278225730151,
+    0.19392274474868576,
+    0.12868737343265052,
+    0.08539710028576561,
+    0.05666962144529105,
+    0.03760603093086393,
+    0.024955408670558694,
+    0.016560440080994446,
+    0.010989528534539826,
+    0.007292664737217109,
+    0.004839421345719893,
+    0.003211445994752591,
+    0.001290547928209264,
+    0.00042955679655936815,
+    9.70828780262767e-05,
+    1.9461638184831125e-05,
+    1.291476718704739e-05,
+    8.570255489881478e-06,
+    5.687232150457046e-06,
+    3.7740542941082826e-06,
+    2.5044671007024935e-06,
+    1.6619674677953088e-06,
+    1.102883668639601e-06,
+    7.318749675440419e-07,
+    4.856731343010108e-07,
+    3.2229329303788936e-07,
+    2.1387422816109149e-07,
+    1.4192720251899592e-07,
+    9.41830672543491e-08
+   ],
+   "window": 0
+  },
+  "gact": 26214400,
+  "ag_a": 8388608,
+  "ag_b": 524288,
+  "ag_c": 16777216,
+  "gemm_x_k2048": 1048576,
+  "gemm_y_n2048": 2097152,
+  "gemm_x_k8192": 4194304,
+  "gemm_y_n3072": 3145728,
+  "gemm_y_n8192": 8388608
+ },
+ "builds": {
+  "dx": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_llama3_h2048",
+   "env": {}
+  },
+  "ln": {
+   "design": "ln/ln.py",
+   "build_dir": "ln/build_2048_1e-05",
+   "env": {
+    "LN_N": "2048",
+    "LN_EPS": "1e-05"
+   }
+  },
+  "lm_head_q4": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_128256",
+   "env": {
+    "LMHEAD_N": "128256",
+    "LMHEAD_K": "2048",
+    "LMHEAD_CORES": "8"
+   }
+  },
+  "dx_f32": {
+   "design": "dense/dx.py",
+   "build_dir": "dense/build_llama3_h2048_f32",
+   "env": {
+    "GEMV_SCALES_F32": "1"
+   }
+  },
+  "lm_head_q4_f32": {
+   "design": "lm_head_q4/lm_head_q4.py",
+   "build_dir": "lm_head_q4/build_128256_f32",
+   "env": {
+    "LMHEAD_N": "128256",
+    "LMHEAD_K": "2048",
+    "LMHEAD_CORES": "8",
+    "LMHEAD_SCALES_F32": "1"
+   }
+  },
+  "dx_attn": {
+   "design": "dense/dx_attn.py",
+   "build_dir": "dense/build_dxa_llama3_h2048",
+   "env": {}
+  },
+  "ag_s256": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s256",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "256",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv256": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv256",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "256",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s512": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s512",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "512",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv512": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv512",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "512",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s768": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s768",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "768",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv768": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv768",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "768",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s1024": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "1024",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1024": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1024",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1024",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s1280": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1280",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "1280",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1280": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1280",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1280",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s1536": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1536",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "1536",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1536": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1536",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1536",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s1792": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s1792",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "1792",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv1792": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv1792",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "1792",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s2048": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2048",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "2048",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2048": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2048",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2048",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s2304": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2304",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "2304",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2304": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2304",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2304",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s2560": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2560",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "2560",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2560": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2560",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2560",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s2816": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s2816",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "2816",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv2816": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv2816",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "2816",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s3072": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3072",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "3072",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3072": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3072",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3072",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s3328": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3328",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "3328",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3328": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3328",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3328",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s3584": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3584",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "3584",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3584": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3584",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3584",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s3840": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s3840",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "3840",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv3840": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv3840",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "3840",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "ag_s4096": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_s4096",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "64",
+    "AG_N": "4096",
+    "AG_COLS": "8"
+   }
+  },
+  "ag_pv4096": {
+   "design": "attn_block/attn_gemm.py",
+   "build_dir": "attn_block/build_pv4096",
+   "env": {
+    "AG_M": "1024",
+    "AG_K": "4096",
+    "AG_N": "64",
+    "AG_COLS": "2"
+   }
+  },
+  "gemm_n2048_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2048_k2048_t256",
+   "env": {
+    "GQP_N": "2048",
+    "GQP_K": "2048",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n2048_k8192": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2048_k8192_t256",
+   "env": {
+    "GQP_N": "2048",
+    "GQP_K": "8192",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n3072_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n3072_k2048_t256",
+   "env": {
+    "GQP_N": "3072",
+    "GQP_K": "2048",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n8192_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n8192_k2048_t256",
+   "env": {
+    "GQP_N": "8192",
+    "GQP_K": "2048",
+    "GQP_T": "256"
+   }
+  }
+ },
+ "pack": {
+  "pool_bytes": 38797312,
+  "chunk_bytes": 5120,
+  "lm_head": {
+   "pool_bytes": 164626432,
+   "ops": [
+    {
+     "op": "std_perm",
+     "tensor": "lm_head.weight",
+     "dst": 0,
+     "nch": 32064,
+     "in_dim": 2048
+    }
+   ]
+  },
+  "embed": {
+   "tensor": "model.embed_tokens.weight",
+   "dim": 2048
+  },
+  "norm": {
+   "tensor": "model.norm.weight",
+   "bytes": 4096
+  }
+ },
+ "gguf": {
+  "manifest_version": 1,
+  "family": "llama3",
+  "spec": {
+   "family": "llama3",
+   "hidden": 2048,
+   "num_layers": 16,
+   "layer_types": [
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense",
+    "dense"
+   ],
+   "vocab": 128256,
+   "real_vocab": 128256,
+   "num_heads": 32,
+   "num_kv_heads": 8,
+   "head_dim": 64,
+   "rotary_dim": 64,
+   "rope_theta": 500000.0,
+   "rope_scaling": {
+    "factor": 32.0,
+    "low_freq_factor": 1.0,
+    "high_freq_factor": 4.0,
+    "original_max_position_embeddings": 8192
+   },
+   "rope_local_theta": 0.0,
+   "sliding_window": 0,
+   "qk_norm": false,
+   "attn_gate": false,
+   "lin_key_heads": 0,
+   "lin_value_heads": 0,
+   "lin_key_dim": 0,
+   "lin_value_dim": 0,
+   "conv_kernel": 0,
+   "intermediate": 8192,
+   "activation": "silu",
+   "sandwich_norms": false,
+   "num_experts": 0,
+   "experts_per_tok": 0,
+   "moe_intermediate": 0,
+   "shared_expert_intermediate": 0,
+   "norm_eps": 1e-05,
+   "quant": "q4_1_f32",
+   "extra": {
+    "model_type": "llama",
+    "source": "hf_config",
+    "model": "llama32-1B-NPU2"
+   }
+  },
+  "spec_hash": "sha256:989d00f8b45c797001e238fb2594fec6d53894b32cdf10fa3d3c526ffee8bdf3",
+  "kernel_hash": "sha256:1b5dcf6f1166aa14ecd94657108b977440a7914dd8152c078475c6e5a10cc9a5",
+  "build_key": "sha256:545950519477bdef4e48121154b654915b0c516c8b6156be818d2ec673ac3bd4",
+  "max_ctx_default": 4096,
+  "hf_config_check": {
+   "model_type": [
+    "llama"
+   ],
+   "hidden_size": 2048,
+   "num_hidden_layers": 16,
+   "vocab_size": 128256,
+   "num_attention_heads": 32,
+   "num_key_value_heads": 8,
+   "intermediate_size": 8192
+  },
+  "hf_config_defaults": {},
+  "layout": {
+   "hidden": 2048,
+   "vocab": 128256,
+   "real_vocab": 128256,
+   "chunk_bytes": 6144,
+   "pool_bytes": 46137344,
+   "lmhead_pool_bytes": 198180864,
+   "kv_row": 2048,
+   "ptab_row": 1024,
+   "rotary_dim": 64,
+   "rope_theta": 500000.0,
+   "rope_inv_freq": [
+    1.0,
+    0.6636012376960885,
+    0.44036660267178046,
+    0.2922278225730151,
+    0.19392274474868576,
+    0.12868737343265052,
+    0.08539710028576561,
+    0.05666962144529105,
+    0.03760603093086393,
+    0.024955408670558694,
+    0.016560440080994446,
+    0.010989528534539826,
+    0.007292664737217109,
+    0.004839421345719893,
+    0.003211445994752591,
+    0.001290547928209264,
+    0.00042955679655936815,
+    9.70828780262767e-05,
+    1.9461638184831125e-05,
+    1.291476718704739e-05,
+    8.570255489881478e-06,
+    5.687232150457046e-06,
+    3.7740542941082826e-06,
+    2.5044671007024935e-06,
+    1.6619674677953088e-06,
+    1.102883668639601e-06,
+    7.318749675440419e-07,
+    4.856731343010108e-07,
+    3.2229329303788936e-07,
+    2.1387422816109149e-07,
+    1.4192720251899592e-07,
+    9.41830672543491e-08
+   ]
+  },
+  "layers": [
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense",
+   "dense"
+  ],
+  "contexts": {
+   "dx": "dx_f32/final.xclbin",
+   "ln": "ln/final.xclbin",
+   "lm": "lm_head_q4_f32/final.xclbin"
+  },
+  "kernels": {
+   "ln": {
+    "context": "ln",
+    "insts": "ln/insts.bin",
+    "build": "ln"
+   },
+   "lm": {
+    "context": "lm",
+    "insts": "lm_head_q4_f32/insts.bin",
+    "build": "lm_head_q4_f32"
+   },
+   "dx": {
+    "context": "dx",
+    "insts": "dx_f32/insts.bin",
+    "patch": "attnpos",
+    "build": "dx_f32",
+    "window": 0
+   }
+  },
+  "layer_types": {
+   "dense": {
+    "buffers": {
+     "consts": 12288,
+     "act": 102400,
+     "state": {
+      "kind": "kv",
+      "row": 2048
+     }
+    },
+    "program": [
+     {
+      "op": "run",
+      "kernel": "dx",
+      "args": [
+       "pool",
+       "xres",
+       "consts",
+       "state",
+       "act",
+       "ptab"
+      ]
+     }
+    ],
+    "pack": {
+     "pool": [
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.q_proj.weight",
+       "dst": 0,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.k_proj.weight",
+       "dst": 3145728,
+       "nch": 128,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.v_proj.weight",
+       "dst": 3932160,
+       "nch": 128,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.self_attn.o_proj.weight",
+       "dst": 4718592,
+       "nch": 512,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.up_proj.weight",
+       "dst": 7864320,
+       "nch": 2048,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.gate_proj.weight",
+       "dst": 20447232,
+       "nch": 2048,
+       "in_dim": 2048
+      },
+      {
+       "op": "std_perm_gguf",
+       "tensor": "model.layers.{l}.mlp.down_proj.weight",
+       "dst": 33030144,
+       "nch": 2048,
+       "in_dim": 8192
+      }
+     ],
+     "consts": [
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.input_layernorm.weight",
+       "dst": 0,
+       "cap": 4096
+      },
+      {
+       "op": "put",
+       "tensor": "model.layers.{l}.post_attention_layernorm.weight",
+       "dst": 4096,
+       "cap": 4096
+      }
+     ]
+    }
+   }
+  },
+  "tail": [
+   {
+    "op": "run",
+    "kernel": "ln",
+    "args": [
+     "xres",
+     "zero",
+     "normw",
+     "xresf",
+     "hn"
+    ]
+   },
+   {
+    "op": "run",
+    "kernel": "lm",
+    "args": [
+     "lmpool",
+     "hn",
+     "logits"
+    ]
+   }
+  ],
+  "globals": {
+   "xres": 8192,
+   "zero": 8192,
+   "normw": 4096,
+   "xresf": 8192,
+   "hn": 4096,
+   "logits": 513024,
+   "lmpool": 198180864,
+   "ptab": {
+    "per_row": 1024,
+    "inv_freq": [
+     1.0,
+     0.6636012376960885,
+     0.44036660267178046,
+     0.2922278225730151,
+     0.19392274474868576,
+     0.12868737343265052,
+     0.08539710028576561,
+     0.05666962144529105,
+     0.03760603093086393,
+     0.024955408670558694,
+     0.016560440080994446,
+     0.010989528534539826,
+     0.007292664737217109,
+     0.004839421345719893,
+     0.003211445994752591,
+     0.001290547928209264,
+     0.00042955679655936815,
+     9.70828780262767e-05,
+     1.9461638184831125e-05,
+     1.291476718704739e-05,
+     8.570255489881478e-06,
+     5.687232150457046e-06,
+     3.7740542941082826e-06,
+     2.5044671007024935e-06,
+     1.6619674677953088e-06,
+     1.102883668639601e-06,
+     7.318749675440419e-07,
+     4.856731343010108e-07,
+     3.2229329303788936e-07,
+     2.1387422816109149e-07,
+     1.4192720251899592e-07,
+     9.41830672543491e-08
+    ],
+    "window": 0
+   }
+  },
+  "builds": {
+   "dx": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_llama3_h2048",
+    "env": {}
+   },
+   "ln": {
+    "design": "ln/ln.py",
+    "build_dir": "ln/build_2048_1e-05",
+    "env": {
+     "LN_N": "2048",
+     "LN_EPS": "1e-05"
+    }
+   },
+   "lm_head_q4": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_128256",
+    "env": {
+     "LMHEAD_N": "128256",
+     "LMHEAD_K": "2048",
+     "LMHEAD_CORES": "8"
+    }
+   },
+   "dx_f32": {
+    "design": "dense/dx.py",
+    "build_dir": "dense/build_llama3_h2048_f32",
+    "env": {
+     "GEMV_SCALES_F32": "1"
+    }
+   },
+   "lm_head_q4_f32": {
+    "design": "lm_head_q4/lm_head_q4.py",
+    "build_dir": "lm_head_q4/build_128256_f32",
+    "env": {
+     "LMHEAD_N": "128256",
+     "LMHEAD_K": "2048",
+     "LMHEAD_CORES": "8",
+     "LMHEAD_SCALES_F32": "1"
+    }
+   },
+   "dx_attn": {
+    "design": "dense/dx_attn.py",
+    "build_dir": "dense/build_dxa_llama3_h2048",
+    "env": {}
+   },
+   "ag_s256": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s256",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "256",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv256": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv256",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "256",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s512": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s512",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "512",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv512": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv512",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "512",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s768": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s768",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "768",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv768": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv768",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "768",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s1024": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1024",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "1024",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1024": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1024",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1024",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s1280": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1280",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "1280",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1280": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1280",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1280",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s1536": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1536",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "1536",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1536": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1536",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1536",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s1792": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s1792",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "1792",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv1792": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv1792",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "1792",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s2048": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2048",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "2048",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2048": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2048",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2048",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s2304": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2304",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "2304",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2304": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2304",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2304",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s2560": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2560",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "2560",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2560": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2560",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2560",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s2816": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s2816",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "2816",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv2816": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv2816",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "2816",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s3072": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3072",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "3072",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3072": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3072",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3072",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s3328": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3328",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "3328",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3328": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3328",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3328",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s3584": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3584",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "3584",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3584": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3584",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3584",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s3840": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s3840",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "3840",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv3840": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv3840",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "3840",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "ag_s4096": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_s4096",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "64",
+     "AG_N": "4096",
+     "AG_COLS": "8"
+    }
+   },
+   "ag_pv4096": {
+    "design": "attn_block/attn_gemm.py",
+    "build_dir": "attn_block/build_pv4096",
+    "env": {
+     "AG_M": "1024",
+     "AG_K": "4096",
+     "AG_N": "64",
+     "AG_COLS": "2"
+    }
+   },
+   "gemm_n2048_k2048": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n2048_k2048_t256",
+    "env": {
+     "GQP_N": "2048",
+     "GQP_K": "2048",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n2048_k8192": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n2048_k8192_t256",
+    "env": {
+     "GQP_N": "2048",
+     "GQP_K": "8192",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n3072_k2048": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n3072_k2048_t256",
+    "env": {
+     "GQP_N": "3072",
+     "GQP_K": "2048",
+     "GQP_T": "256"
+    }
+   },
+   "gemm_n8192_k2048": {
+    "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+    "build_dir": "gemm_q4_prefill/build_n8192_k2048_t256",
+    "env": {
+     "GQP_N": "8192",
+     "GQP_K": "2048",
+     "GQP_T": "256"
+    }
+   }
+  },
+  "pack": {
+   "pool_bytes": 46137344,
+   "chunk_bytes": 6144,
+   "lm_head": {
+    "pool_bytes": 198180864,
+    "ops": [
+     {
+      "op": "std_perm_gguf",
+      "tensor": "lm_head.weight",
+      "dst": 0,
+      "nch": 32064,
+      "in_dim": 2048
+     }
+    ]
+   },
+   "embed": {
+    "tensor": "model.embed_tokens.weight",
+    "dim": 2048
+   },
+   "norm": {
+    "tensor": "model.norm.weight",
+    "bytes": 4096
+   }
+  }
+ }
+}
