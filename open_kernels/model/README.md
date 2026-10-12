@@ -236,3 +236,31 @@ recipes without it use BF16. The new recipe deliberately refuses old BF16
 exports/act buffers. Build a complete new export and regenerate the fixture;
 model weights and their packing are unchanged. Reproduction and ABI details are
 in the [FP32 norm integration skill](../../.opencode/skill/open-qwen38-fp32-norm-integration/SKILL.md).
+
+
+### Per-head gated full-attention validation
+
+```bash
+OPENBLAS_NUM_THREADS=1 python open_kernels/model/attention_heads.py \
+  --model-dir MODEL_DIR --kernel-dir KERNEL_DIR --out FIXTURE_DIR
+```
+
+The default covers every full-attention layer and every fixture position from
+zero. `--layers 3,7` restricts coverage explicitly. The checker reads retained
+FP32 Q/K/V/gate and BF16 gated outputs, loads effective Q/K norm weights, then
+recomputes RMSNorm, partial RoPE, causal grouped-query attention and sigmoid
+in FP64. Reference KV history is rebuilt from the captured projections without
+BF16 rounding. No full-model residency or new NPU dispatch is needed.
+
+Every head must satisfy **absolute max error <0.02 and cosine >0.9999**.
+Normalized max error, ideal BF16 output-rounding error and error against the
+rounded reference are diagnostics; none can override a primary failure.
+Exact zero pairs pass; a zero/nonzero mismatch fails. Missing, malformed or
+non-finite captures, incompatible exports and invalid layer coverage fail.
+JSON records every head, capture hashes and hashes of the effective norm
+weights (little-endian float64). Numerical failure returns exit code 1.
+
+This checks the attention core conditioned on captured projections, including
+its accumulated KV effects on the gated output. It does not independently
+validate Q/K/V projection weights, exact KV-cache bytes, output projection,
+DeltaNet recurrent state or final LM head. Those require separate evidence.
