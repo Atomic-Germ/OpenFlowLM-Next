@@ -146,6 +146,7 @@ void Drafter::load_gemv(const std::string& op, const json& g) {
         }
         ++core;
     }
+    v.plan.index_bands();
     const std::string name = g.at("kernel");
     const json& kd = man_.at("kernels").at(name);
     auto insts = read_file(fs::path(kernel_dir_) / kd.at("insts").get<std::string>());
@@ -224,8 +225,7 @@ void Drafter::write_kv(int layer, long pos, const float* k, const float* v) {
 void Drafter::run_gemv(const std::string& op, xrt::bo& w, const float* x, float* out) {
     Gemv& g = gemv_.at(op);
     const auto t0 = std::chrono::steady_clock::now();
-    std::memcpy(g.xr.data(), x, kRows * g.plan.k * sizeof(float));
-    host::hadamard_rows(g.xr.data(), kRows, g.plan.k, 1024, nullptr);
+    hadamard8(x, g.plan.k, g.xr.data());
     build_records(g.xr.data(), g.plan.k, g.rec.data());
     build_tables(g.plan, g.rec.data(), g.tab.map<uint8_t*>());
     g.tab.sync(XCL_BO_SYNC_BO_TO_DEVICE, g.plan.n_tabs * g.plan.tab_bytes, 0);
@@ -242,11 +242,17 @@ void Drafter::run_gemv(const std::string& op, xrt::bo& w, const float* x, float*
     if (st != ERT_CMD_STATE_COMPLETED)
         throw std::runtime_error("dflash2: gemv " + op + " did not complete (ERT state " + std::to_string(static_cast<int>(st)) + ")");
     const double run_ms = ms_since(t1);
+    const auto t2 = std::chrono::steady_clock::now();
     g.y.sync(XCL_BO_SYNC_BO_FROM_DEVICE, g.plan.y_floats * 4, 0);
     _mm_mfence();
+    const auto t3 = std::chrono::steady_clock::now();
     reduce_y(g.plan, g.y.map<const float*>(), out);
+    const auto t4 = std::chrono::steady_clock::now();
     ++timing_.dispatches;
     timing_.gemv_ms += run_ms;
+    timing_.prep_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    timing_.sync_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
+    timing_.reduce_ms += std::chrono::duration<double, std::milli>(t4 - t3).count();
     timing_.host_ms += ms_since(t0) - run_ms;
     if (op == "head") timing_.head_ms += run_ms;
 }
@@ -333,8 +339,7 @@ std::vector<int> Drafter::draft(int anchor, size_t k, Lattice* lat_out) {
         run_gemv("conv", lw.at("conv_ffn"), h.data(), dyn.data());
         conv2(h.data(), R, H, dyn.data(), c.ffn_cb.data(), 0, cfg_.group, h.data());
         run_gemv("gu", lw.at("gu"), h.data(), gu.data());
-        for (size_t t = 0; t < R; ++t)
-            for (size_t j = 0; j < ff; ++j) a[t * ff + j] = silu(gu[t * 2 * ff + j]) * gu[t * 2 * ff + ff + j];
+        for (size_t t = 0; t < R; ++t) silu_mul(&gu[t * 2 * ff], &gu[t * 2 * ff + ff], ff, &a[t * ff]);
         run_gemv("down", lw.at("down"), a.data(), o.data());
         conv2(o.data(), R, H, dyn.data(), c.ffn_cb.data(), 1, cfg_.group, o.data());
         for (size_t i = 0; i < R * H; ++i) x[i] = o[i] + x2[i];

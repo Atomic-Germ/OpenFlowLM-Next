@@ -95,13 +95,10 @@ def gemv_t2n(w: In, tab: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
                       stack_size=0x1000) for c in range(n_cores)]
 
     def sequence(a_w, a_t, a_y, w_prods, t_prods, y_conss):
-        rounds = max(len(i) for i in p["items"])
-        for r in range(rounds):
-            tg = TaskGroup()
-            for c in range(n_cores):
-                if r >= len(p["items"][c]):
-                    continue
-                it = p["items"][c][r]
+        # one group: a core's items queue on its own streams in order, so no cross-core barrier between rounds
+        tg = TaskGroup()
+        for c in range(n_cores):
+            for it in p["items"][c]:
                 t_prods[c].fill(a_t, tap=TensorAccessPattern((p["n_tabs"] * tab_words,), it["tab"] * tab_words,
                                                              [tab_words // 512, 512], [512, 1]), group=tg)
                 w_prods[c].fill(a_w, tap=TensorAccessPattern((pool_bytes,), it["b0"] * band_bytes + it["kt0"] * 2 * CHUNK,
@@ -109,7 +106,7 @@ def gemv_t2n(w: In, tab: In, y: Out, *, n: CompileTime[int], k: CompileTime[int]
                                 group=tg)
                 y_conss[c].drain(a_y, tap=TensorAccessPattern((p["y_floats"],), it["y"], [it["nb"], Y_BAND], [Y_BAND, 1]),
                                  wait=True, group=tg)
-            tg.finish()
+        tg.finish()
 
     rt = Runtime(sequence, [w_ty, t_ty, y_ty, [f.prod() for f in of_w], [f.prod() for f in of_t],
                             [f.cons() for f in of_y]])

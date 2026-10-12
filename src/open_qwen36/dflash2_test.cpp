@@ -137,6 +137,7 @@ static void table_tests() {
         }
     p.n_tabs = static_cast<size_t>(tab);
     p.y_floats = static_cast<size_t>(y);
+    p.index_bands();
     std::mt19937 rng(7);
     std::normal_distribution<float> nd;
     std::vector<uint8_t> codes(N * K);
@@ -181,7 +182,52 @@ static void table_tests() {
     CHECK(worst < 1e-4, "tables + reduce against fp64: worst error %.3g of the row's magnitude", worst);
 }
 
+// block_host's hadamard_rows, the order the NPU preps and the block route use: stages h = 1.., then * 1/32
+static void hadamard_ref(float* x, size_t K) {
+    for (size_t b0 = 0; b0 + 1024 <= K; b0 += 1024) {
+        float* v = x + b0;
+        for (size_t h = 1; h < 1024; h <<= 1)
+            for (size_t i = 0; i < 1024; i += 2 * h)
+                for (size_t j = i; j < i + h; ++j) {
+                    const float a = v[j], c = v[j + h];
+                    v[j] = a + c;
+                    v[j + h] = a - c;
+                }
+        for (size_t j = 0; j < 1024; ++j) v[j] *= 1.0f / 32.0f;
+    }
+}
+
+static void hadamard_tests() {
+    const size_t K = 3072;
+    std::mt19937 rng(11);
+    std::normal_distribution<float> nd;
+    std::vector<float> x(kRows * K), want, got(kRows * K);
+    for (auto& v : x) v = nd(rng);
+    want = x;
+    for (size_t t = 0; t < kRows; ++t) hadamard_ref(&want[t * K], K);
+    hadamard8(x.data(), K, got.data());
+    CHECK(std::memcmp(want.data(), got.data(), want.size() * sizeof(float)) == 0, "hadamard8 is not bit-identical to the scalar transform");
+}
+
+static void silu_tests() {
+    const size_t n = 4096;
+    std::mt19937 rng(5);
+    std::normal_distribution<float> nd(0.f, 6.f);
+    std::vector<float> g(n), u(n), out(n);
+    for (size_t i = 0; i < n; ++i) { g[i] = nd(rng); u[i] = nd(rng); }
+    g[0] = -100.f; g[1] = 100.f; g[2] = 0.f;
+    silu_mul(g.data(), u.data(), n, out.data());
+    double worst = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const double want = static_cast<double>(g[i]) / (1.0 + std::exp(-static_cast<double>(g[i]))) * u[i];
+        worst = std::max(worst, std::fabs(out[i] - want) / (std::fabs(want) + 1e-6));
+    }
+    CHECK(worst < 1e-5, "silu_mul worst relative error %.3g", worst);
+}
+
 int main() {
+    silu_tests();
+    hadamard_tests();
     walk_tests();
     top16_tests();
     conv_tests();

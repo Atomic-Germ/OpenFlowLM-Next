@@ -652,8 +652,9 @@ int draft_gate(Core& core, const Args& a) {
             const auto d = dr.draft(g.empty() ? prompt.back() : g[0], 7);
             const auto& t = dr.last_pass();
             std::fprintf(stderr, "bench pass %d at context %ld: total %.2f ms, gemv %.2f (head %.2f), attention %.2f, "
-                                 "host around gemv %.2f, selector %.2f, %d dispatches\n",
-                         r, dr.cached(), t.total_ms, t.gemv_ms, t.head_ms, t.attn_ms, t.host_ms, t.select_ms, t.dispatches);
+                                 "host around gemv %.2f (tables %.2f, y read-back %.2f, sum %.2f), selector %.2f, %d dispatches\n",
+                         r, dr.cached(), t.total_ms, t.gemv_ms, t.head_ms, t.attn_ms, t.host_ms, t.prep_ms, t.sync_ms,
+                         t.reduce_ms, t.select_ms, t.dispatches);
             (void)d;
         }
     }
