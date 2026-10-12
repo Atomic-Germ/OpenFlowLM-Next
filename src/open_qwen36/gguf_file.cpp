@@ -271,6 +271,35 @@ std::string GgufFile::gguf_name(const std::string& name) {
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
         dot("mlp.down_proj", ".ffn_down");
+        // A q4nx container may hold a bf16 COPY of a tensor beside its quantized one, and
+        // spells the copy with a '.bf16' infix ('...ssm_alpha_proj.bf16.weight'). A GGUF
+        // has no such thing -- its per-tensor type is metadata on the tensor itself, and
+        // llama.cpp already stores ssm_alpha as its own tensor. Drop the infix rather than
+        // leaving '.bf16' glued into the name, which is what made the substitution below
+        // look like it had worked while resolving to a tensor that cannot exist.
+        if (const auto bp = n.find(".bf16"); bp != std::string::npos) n.erase(bp, 5);
+        // Qwen3.5's DeltaNet ("linear_attn") tensors. These are the ssm_* names, and
+        // they are the whole reason a GGUF of a hybrid model used to fail to load: the
+        // table above predates the arch, so every linear-attention layer asked for a
+        // tensor the file spells differently. Ported from the conversion side's own map
+        // (utilities/q4nx-build/configs/qwen3.5_9b.json name_map), which is the
+        // authority -- duplicating it here is the duplication to keep an eye on.
+        dot("self_attn.gate_proj", ".attn_gate");
+        dot("linear_attn.qkv_proj", ".attn_qkv");
+        dot("linear_attn.ssm_alpha_proj", ".ssm_alpha");
+        dot("linear_attn.ssm_beta_proj", ".ssm_beta");
+        dot("linear_attn.ssm_conv1d", ".ssm_conv1d");
+        dot("linear_attn.ssm_norm", ".ssm_norm");
+        dot("linear_attn.ssm_out_proj", ".ssm_out");
+        // ssm_a and ssm_dt.bias are the two that do not map by a suffix swap: the q4nx
+        // side spells them 'linear_attn.ssm_a' and 'linear_attn.ssm_dt.bias', so the
+        // linear_attn segment itself has to go. Match the whole tail including it.
+        // Anchored anywhere, not at the start: by here the name reads 'blk.N.linear_attn....'.
+        const std::string lp = ".linear_attn.";
+        if (const auto pos = n.find(lp); pos != std::string::npos) {
+            const std::string tail = n.substr(pos + lp.size());
+            if (tail == "ssm_a" || tail == "ssm_dt.bias") n = n.substr(0, pos) + "." + tail;
+        }
     }
     return n;
 }

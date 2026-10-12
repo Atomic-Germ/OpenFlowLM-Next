@@ -164,10 +164,20 @@ void Core::apply_thread_budget() const {
 nlohmann::json derive_config(const GgufFile& g) {
     const std::string arch = g.kv_str("general.architecture");
     auto u = [&](const std::string& k) { return g.kv_u64(arch + "." + k); };
+    auto u_or = [&](const std::string& k, uint64_t dflt) {
+        return g.kv_has(k) ? g.kv_u64(k) : dflt;
+    };
     nlohmann::json c;
     c["model_type"] = arch;
     c["hidden_size"] = u("embedding_length");
-    c["num_hidden_layers"] = u("block_count");
+    // block_count counts a trailing block the trunk does not run: a multi-token-prediction
+    // head, the NextN layer, dspark -- the name varies and the GGUF gives no way to tell
+    // them apart. What every one of them has in common is that `nextn_predict_layers`
+    // counts them, so the trunk is block_count minus that. This is the same rule the spec
+    // derivation applies to a GGUF's own metadata (_trunk_layers); applying it in only one
+    // of the two places is how the kernel set (built for the trunk) and the engine (built
+    // against block_count) end up disagreeing by exactly one layer.
+    c["num_hidden_layers"] = u("block_count") - u_or(arch + ".nextn_predict_layers", 0);
     if (g.kv_has(arch + ".vocab_size"))
         c["vocab_size"] = u("vocab_size");
     else
@@ -647,7 +657,11 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                     // projection, which its consts plan transposes -- so transpose it here too.
                     auto ab = [&](const std::string& stem, std::vector<float>& out) -> size_t {
                         const std::string copy = stem + ".bf16.weight";
-                        const bool t = std::any_of(lt.consts.begin(), lt.consts.end(), [&](const PackOp& op) {
+                        // The bf16 COPY beside the quantized tensor is a q4nx container
+                        // arrangement. A GGUF stores ssm_alpha once, already bf16, so the
+                        // copy does not exist there -- asking for it would send every
+                        // linear-attention layer looking for a tensor the file has not got.
+                        const bool t = !gguf_ && std::any_of(lt.consts.begin(), lt.consts.end(), [&](const PackOp& op) {
                             return op.op == "transpose" && op.tensor.size() >= copy.size() &&
                                    op.tensor.compare(op.tensor.size() - copy.size(), copy.size(), copy) == 0;
                         });
