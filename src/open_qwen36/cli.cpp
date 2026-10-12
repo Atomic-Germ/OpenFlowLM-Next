@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/dflash2.hpp"
 #include "open_qwen36/spec.hpp"
 
 using open_qwen36::Core;
@@ -118,6 +119,10 @@ struct Args {
     int verify_check = 0;           // --verify-check N: N greedy positions by step(), then by verify() passes, compared
     int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
     int verify_probe = 0;           // --verify-probe L (with OFLM_OPEN_VERIFY_STOP=L): act of layers < L, verify vs step
+    // OPEN-DRAFT-DFLASH2 gate: the drafter on dumped taps (tf3's <run>/<pid>.jsonl + <pid>.taps)
+    std::string draft_dir, draft_kernels, draft_run, draft_out;
+    std::vector<std::string> draft_pids;
+    int draft_stride = 2, draft_max_steps = 0, draft_bench = 0;
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -214,8 +219,25 @@ Args parse(int argc, char** argv) {
         // dispatch, so this makes the gap reproducible without the server.
         else if (k == "--gap-ms") a.gap_ms = std::atoi(val().c_str());
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
+        else if (k == "--draft") a.draft_dir = val();
+        else if (k == "--draft-kernels") a.draft_kernels = val();
+        else if (k == "--draft-run") a.draft_run = val();
+        else if (k == "--draft-out") a.draft_out = val();
+        else if (k == "--draft-stride") a.draft_stride = std::atoi(val().c_str());
+        else if (k == "--draft-max-steps") a.draft_max_steps = std::atoi(val().c_str());
+        else if (k == "--draft-bench") a.draft_bench = std::atoi(val().c_str());
+        else if (k == "--draft-pids") {
+            const std::string v = val();
+            for (size_t i0 = 0; i0 < v.size();) {
+                size_t j = v.find(',', i0);
+                if (j == std::string::npos) j = v.size();
+                if (j > i0) a.draft_pids.push_back(v.substr(i0, j - i0));
+                i0 = j + 1;
+            }
+        }
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
+    if (!a.draft_dir.empty() && a.ids.empty()) a.ids = {0};
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
@@ -580,6 +602,73 @@ std::vector<int> request(Core& core, const Args& a) {
     return out;
 }
 
+// OPEN-DRAFT-DFLASH2 gate: one 7-token walk per position on tf3's dumped taps; k = 3 and 7 are its prefixes
+int draft_gate(Core& core, const Args& a) {
+    namespace d2 = open_qwen36::dflash2;
+    using nlohmann::json;
+    d2::Drafter dr(a.draft_dir, a.draft_kernels, core, a.cfg.verbose);
+    dr.load_weights();
+    const size_t tw = dr.config().tap_width();
+    std::ofstream out(a.draft_out.empty() ? "drafts.jsonl" : a.draft_out);
+    std::vector<double> tot, gemv, head, attn, host, sel;
+    for (const std::string& pid : a.draft_pids) {
+        std::ifstream jf(a.draft_run + "/" + pid + ".jsonl");
+        if (!jf) throw std::runtime_error("no " + a.draft_run + "/" + pid + ".jsonl");
+        std::string line;
+        std::getline(jf, line);
+        const json hdr = json::parse(line);
+        std::vector<int> g;
+        while (std::getline(jf, line))
+            if (!line.empty()) g.push_back(json::parse(line).at("g").get<int>());
+        const std::vector<int> prompt = hdr.at("prompt_ids").get<std::vector<int>>();
+        const long n0 = hdr.at("prompt_n").get<long>() - 1;
+        std::ifstream tf(a.draft_run + "/" + pid + ".taps", std::ios::binary | std::ios::ate);
+        if (!tf) throw std::runtime_error("no " + a.draft_run + "/" + pid + ".taps");
+        std::vector<float> taps(static_cast<size_t>(tf.tellg()) / 4);
+        tf.seekg(0);
+        tf.read(reinterpret_cast<char*>(taps.data()), static_cast<std::streamsize>(taps.size() * 4));
+        const long n_taps = static_cast<long>(taps.size() / tw);
+        dr.reset();
+        int done = 0;
+        for (size_t s = 0; s < g.size(); s += static_cast<size_t>(std::max(1, a.draft_stride))) {
+            if (a.draft_max_steps && done >= a.draft_max_steps) break;
+            const long p0 = n0 + static_cast<long>(s);
+            if (p0 > n_taps) break;
+            if (dr.cached() < p0) dr.inject(&taps[static_cast<size_t>(dr.cached()) * tw], static_cast<size_t>(p0 - dr.cached()));
+            const int anchor = s == 0 ? prompt.back() : g[s - 1];
+            d2::Lattice lat;
+            const std::vector<int> d = dr.draft(anchor, 7, &lat);
+            const auto& t = dr.last_pass();
+            tot.push_back(t.total_ms); gemv.push_back(t.gemv_ms); head.push_back(t.head_ms);
+            attn.push_back(t.attn_ms); host.push_back(t.host_ms); sel.push_back(t.select_ms);
+            out << json{{"pid", pid}, {"s", s}, {"p0", p0}, {"d", d}, {"m", d2::walk_margins(lat)},
+                        {"c1", std::vector<int>(lat.cand.begin(), lat.cand.begin() + d2::kTopK)},
+                        {"ms", t.total_ms}}.dump() << "\n";
+            ++done;
+        }
+        out.flush();
+        std::fprintf(stderr, "dflash2 gate: %s %d drafts\n", pid.c_str(), done);
+        for (int r = 0; r < a.draft_bench; ++r) {
+            const auto d = dr.draft(g.empty() ? prompt.back() : g[0], 7);
+            const auto& t = dr.last_pass();
+            std::fprintf(stderr, "bench pass %d at context %ld: total %.2f ms, gemv %.2f (head %.2f), attention %.2f, "
+                                 "host around gemv %.2f, selector %.2f, %d dispatches\n",
+                         r, dr.cached(), t.total_ms, t.gemv_ms, t.head_ms, t.attn_ms, t.host_ms, t.select_ms, t.dispatches);
+            (void)d;
+        }
+    }
+    auto med = [](std::vector<double> v) {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    std::fprintf(stderr, "dflash2 gate: %zu drafts, median pass %.2f ms (gemv %.2f, head %.2f, attention %.2f, "
+                         "host around gemv %.2f, selector %.2f)\n",
+                 tot.size(), med(tot), med(gemv), med(head), med(attn), med(host), med(sel));
+    std::printf("DONE\n");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -605,6 +694,7 @@ int main(int argc, char** argv) {
         core.load_weights();
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        if (!a.draft_dir.empty()) return draft_gate(core, a);
         if (a.bench) {
             core.bench_dispatch(a.bench_layer, a.bench);
             std::printf("DONE\n");
