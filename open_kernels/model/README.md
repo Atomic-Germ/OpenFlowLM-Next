@@ -264,3 +264,12 @@ This checks the attention core conditioned on captured projections, including
 its accumulated KV effects on the gated output. It does not independently
 validate Q/K/V projection weights, exact KV-cache bytes, output projection,
 DeltaNet recurrent state or final LM head. Those require separate evidence.
+
+
+For low-memory hardware localization use `utilities/attention-replay/`. It
+reuses the production split attention functions, carries hardware KV across
+positions and captures scaled Q, K/V, softmax accumulators and sums. The BF16
+control reproduces the retained production outputs bytewise. Its FP32-output
+variant isolates the final conversion; it is not a production precision fix.
+Build, replay, pinned-input scoring and the remaining KV error are documented
+in the [attention replay skill](../../.opencode/skill/open-qwen38-attention-replay/SKILL.md).

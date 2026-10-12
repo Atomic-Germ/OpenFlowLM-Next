@@ -641,17 +641,69 @@ and an FP32 output experiment. Retained fixtures contain no recurrent-state
 snapshots; independent DeltaNet state validation still needs capture support.
 Individual projections, final LM head, prefill and serving remain separate.
 
+## Stage 5c7a: isolated attention output and KV precision
+
+Added `utilities/attention-replay/`, reusing the production split attention
+worker/functions with six cores and four heads per core. One dispatch runs all
+three positions with hardware KV history; each layer starts from zero KV.
+The control calls the production BF16 finish and promotes its result. The
+experimental finish preserves the same arithmetic through its FP32 output.
+Both retain scaled Q hi/lo pairs, BF16 K/V, O accumulators and padded softmax
+max/sum state. No projection pools or resident full model are loaded.
+
+The control reproduces all retained production outputs **byte for byte** across
+16 layers × 3 positions, including the same **43/1152** failing heads and worst
+absolute error **0.2226126094**. FP32 output reduces failures to **21/1152**:
+L51 (5), L59 (3), L63 (13), worst **0.1974321142** at L59/T2/H9. Every cosine
+passes, minimum **0.9999418362**. Inputs, KV and all debug buffers match bytewise
+between modes. Primary acceptance remains FAIL at the original absolute-error
+and cosine bounds, against the unrounded FP64 reference.
+
+| Conditional diagnostic | BF16 output | FP32 output |
+|---|---:|---:|
+| Softmax/PV from captured Q/K/V, worst absolute error | 0.0002344581 | 0.0002344581 |
+| Final output from captured Q/K/V | 23 FAIL, worst 0.1096219261 | 0 FAIL, worst 0.0003921240 |
+| Final output from captured KV and independently recomputed ideal Q | 23 FAIL, worst 0.1096586925 | 0 FAIL, worst 0.0003919703 |
+
+These diagnostics localize the remaining discrepancy primarily to KV
+representation at the observed boundaries. They do not replace the primary
+reference or validate a higher-precision KV implementation. An output-only
+change is insufficient and has not been integrated into production.
+
+The build wrapper pins mode, token count, geometry, source key and binaries
+only after successful compilation. Preparation/scoring verify exact input hash
+coverage, captured constants against model norms, dimensions and finite values;
+stale scores are removed before validation. The control must also reproduce
+production output bytes. Both numerical score commands return exit 1; both
+hardware runs return exit 0 with 16 dispatches each.
+
+Core .text maxima: control **15968**, FP32 **15680**, below 16384. The initial
+three-output-FIFO design exceeded the core's two output DMA channels; core 0
+now emits KV and debug on one shared FIFO. The new
+[attention replay skill](../../../.opencode/skill/open-qwen38-attention-replay/SKILL.md)
+documents the build and this constraint. Artifacts are under ignored
+`Models/qwen38-27b/attention-replay/`, including mode-specific build/audit/score
+JSON, captures, logs, `results.json` and `build-audit.json`.
+
+Added 11 host regressions for packing, debug decoding, causal KV history,
+mode/source identity, input hashes, stale scores and conditional diagnostics
+that cannot hide primary errors. Full suite: **1021 passed, 47 skipped**.
+Production kernel sources, ABI, weights and packing are unchanged. Next is an
+isolated higher-precision KV experiment before considering production fit and
+full-depth regression; independent DeltaNet state, LM head, prefill and serving
+remain separate acceptance work.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 1010 passed, 47 skipped |
+| `specs/open-engine/tests` | 1021 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 5c6; CTest is from stage 5c5b.
+The open-engine suite was rerun for stage 5c7a; CTest is from stage 5c5b.
 The native C++ build is from stage 5c3; host runtime code is unchanged.
 Hardware results retain their explicitly stated full-model or isolated-replay
 scope; the latest full-chain residual gate passes for the three tested positions.
