@@ -738,10 +738,24 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                  "; the GGUF-direct head tile is " + std::to_string(Q8_CHUNK_F32) +
                  " (f32 scales). A 8704 tile is the q4nx build's bf16 layout, which this op does not write.");
         const GgufFile& g = dynamic_cast<const GgufFile&>(m);
+        // A tied-embedding GGUF has no output.weight at all: llama.cpp drops it and the
+        // head IS the embedding. That is the common case, not an edge case -- most
+        // published GGUFs of these families tie them -- so fall back to the embedding
+        // rather than failing on a tensor name, which is what q4nx-build does offline
+        // (model_converter._has_lm_head, and each model's synthesize-from-embedding
+        // path). The weights are identical, so the pool tile is identical.
+        std::string src = name;
+        if (!g.has(src)) {
+            for (const char* alt : {"token_embd.weight", "model.embed_tokens.weight"}) {
+                if (g.has(alt)) { src = alt; break; }
+            }
+            if (src == name)
+                fail("lmhead_q8_gguf " + name + ": the GGUF has no " + name +
+                     " and no token_embd.weight / model.embed_tokens.weight to tie it to");
+        }
         const size_t nk = op.in_dim / 256, per_band = 4 * nk;
         if (!nk) fail("lmhead_q8_gguf " + name + ": in_dim " + std::to_string(op.in_dim) +
                       " is under one 256-wide k-tile");
-        const size_t nb = op.in_dim / 32;                  // 32-wide blocks per row
         const uint64_t out_dim = op.nch / nk * 32;
         std::vector<float> rowbuf(op.in_dim);
         for (size_t k = 0; k < op.nch; ++k) {
@@ -755,7 +769,7 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             uint8_t* codes = d + 1024;
             for (size_t row = 0; row < 32; ++row) {
                 if (row0 + row >= out_dim) break;
-                g.embed_row(name, row0 + row, op.in_dim, rowbuf.data());
+                g.embed_row(src, row0 + row, op.in_dim, rowbuf.data());
                 const bool hi = row >= 16;                  // second 4096 B row quarter
                 const size_t rl = row & 15;
                 for (size_t kb = 0; kb < 8; ++kb) {

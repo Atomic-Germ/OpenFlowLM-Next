@@ -224,12 +224,16 @@ def kernels(inc, t):
     i32 = np.int32
     nb = ELEM // 2 // 32                                            # bf16 blocks of 32 per 4 KB element
 
+    Q4_PFX = "gemv_q4"               # the unprefixed q4 entry-symbol prefix
+
     def ef(sym, args, flags=None):
         # A q4 GEMV entry takes the twin's symbol but NOT a twin file name: the TU is the
         # same source compiled with GEMV_Q4_SCALES_F32 and the prefixed GEMV_Q4_WRAP, so
         # `gemv_q4_gy.cc` yields both `gemv_q4_gy` and `gemv_q4s32_gy` and one file serves
         # both builds. The q8 entries are format-independent and keep their names.
-        name = f"{GSYM}{sym[8:]}" if (F32 and sym.startswith("gemv_q4")) else sym
+        # Sliced on the prefix LENGTH, not a literal 8: `gemv_q4_gy`[8:] is "gy", not
+        # "_gy", and the resulting symbol names a file that does not exist.
+        name = f"{GSYM}{sym[len(Q4_PFX):]}" if (F32 and sym.startswith(Q4_PFX)) else sym
         f = (OS if flags is None else flags) + GEMV_DEF
         return ExternalFunction(name, source_file=str(HERE / f"{name}.cc"), arg_types=args,
                                 include_dirs=inc, compile_flags=f)
