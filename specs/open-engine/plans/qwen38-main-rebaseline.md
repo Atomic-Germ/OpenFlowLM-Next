@@ -598,18 +598,61 @@ diff, reference hashes, numerical results and logs. This three-position result
 does not establish independent recurrent-state/head accuracy, block-prefill
 parity, serving isolation or final resource acceptance.
 
+## Stage 5c6: independent full-attention head comparison
+
+Added `open_kernels/model/attention_heads.py`. It reads retained Q/K/V/gate
+projections and gated BF16 head outputs, and independently computes Q/K
+RMSNorm, partial RoPE, causal GQA and sigmoid in FP64. Each layer starts its
+reference KV history at position zero. The default covers all full-attention
+layers and fixture positions; restricted layer selection is explicit.
+
+The enforced per-head gates are **absolute max error <0.02** and **cosine
+>0.9999**. Normalized error is diagnostic, not a substitute for the absolute
+bound. Ideal BF16 output-rounding error is also diagnostic and cannot turn a
+failed unrounded-reference comparison into success. The checker rejects bad
+coverage, stale export identities, malformed sizes and non-finite data, records
+capture/effective-norm hashes, and returns nonzero on a failed numerical gate.
+
+On the retained FP32-integrated run, **1109/1152 heads pass**, across 16 layers,
+24 heads and 3 positions. **43 fail** the absolute bound: layers 51 (5), 55 (1),
+59 (7), 63 (30); positions 0/1/2 account for 11/16/16 failures. All cosine gates
+pass (minimum **0.9999399829**). Worst absolute error **0.2226126094** is at
+L59/T2/H7. Its normalized error is only **0.00368121**, illustrating why the
+absolute gate must be enforced separately. Maximum normalized error over all
+heads is **0.0183480320**.
+
+Even ideally rounding the FP64 output to BF16 exceeds 0.02 in **24 cases**,
+with a maximum rounding error of **0.0696828407**. The remaining **19 failures**
+cannot be explained by output rounding alone. At the worst observed head the
+NPU also differs from the ideally rounded output by **0.25**. These diagnostics
+do not yet isolate QK normalization, KV quantization or softmax arithmetic.
+
+TDD: **41 new tests** cover scalar-reference agreement, head grouping/order,
+partial RoPE, causal history, independent absolute/cosine gates, output-rounding
+masking, zero/non-finite data, capture layout, coverage and CLI failure. Full
+suite: **1010 passed, 47 skipped**. No kernels were rebuilt or new NPU run made.
+Artifacts: `production-fp32-front-multitoken/attention-heads{,-summary}.json`
+and test logs. The export now carries a scoped `VALIDATION_FAILED.txt` marker.
+Previously passed full-chain logits/residual and FFN/runtime gates remain valid;
+this stricter local check identifies an additional, unresolved acceptance gap.
+
+Next: isolated attention replay with separate QK/KV/softmax/output boundaries
+and an FP32 output experiment. Retained fixtures contain no recurrent-state
+snapshots; independent DeltaNet state validation still needs capture support.
+Individual projections, final LM head, prefill and serving remain separate.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 969 passed, 47 skipped |
+| `specs/open-engine/tests` | 1010 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite and CTest were rerun for stage 5c5b. The native C++ build
-is from stage 5c3; host runtime code is unchanged.
+The open-engine suite was rerun for stage 5c6; CTest is from stage 5c5b.
+The native C++ build is from stage 5c3; host runtime code is unchanged.
 Hardware results retain their explicitly stated full-model or isolated-replay
 scope; the latest full-chain residual gate passes for the three tested positions.
 Weights were not reconverted. Skipped tests and successful compilation do not

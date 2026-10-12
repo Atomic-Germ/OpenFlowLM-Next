@@ -135,3 +135,18 @@ combined h **0.0009100331**, captured-norm activation diagnostic
 input. `ffn_front.json` retains every metric and capture hash. Separate full-layer
 up/gate outputs are still not captured; the isolated probe supplies the limited
 individual-projection evidence.
+
+## Additional attention acceptance check
+
+Run `open_kernels/model/attention_heads.py` with the same `--model-dir`,
+`--kernel-dir` and `--out` to score every retained full-attention head. This
+requires no new NPU run. The bound is **absolute** error <0.02 plus cosine
+>0.9999; normalized error and BF16-rounded references are diagnostic only.
+
+The recorded fixture passes 1109/1152 heads; 43 fail absolute error in layers
+51/55/59/63, worst 0.2226126094. All cosine gates pass. Ideal BF16 output
+rounding alone exceeds the bound in 24 cases. See `attention-heads.json` and
+`attention-heads-summary.json`; the export has a scoped `VALIDATION_FAILED.txt`
+marker. Earlier full-chain/FFN PASS results remain valid but do not close this
+local gate. Next isolate attention precision; do not loosen the threshold or
+replace its unrounded FP64 reference. Recurrent state still needs captures.
