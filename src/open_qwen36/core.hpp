@@ -260,11 +260,12 @@ public:
 
     /// 0 = the kernel set has no verify program, or OFLM_OPEN_VERIFY=0 (OPEN-DECODE-SPECULATIVE-VERIFY).
     size_t verify_width() const { return vw_; }
-    /// Each position's logits are bit for bit a step()'s; n = 1 is a decode step.
+    /// Each position's logits are bit for bit a step()'s; n = 1 is a decode step. argmax_out may be null.
     void verify(const int* ids, size_t n, int* argmax_out);
     /// Later KV rows are dead: attention reads only rows below pos_.
     void accept(size_t m);
-    const std::vector<float>& verify_logits(size_t i) const { return vlogits_.at(i); }
+    /// Copied from the device buffer on first use after each pass.
+    const std::vector<float>& verify_logits(size_t i) const;
 
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
@@ -421,7 +422,9 @@ private:
     uint64_t slot_bytes_ = 0;                  ///< one linear-state slot (manifest verify.slot_bytes)
     VerifySlots vs_;
     bool slots_dirty_ = true;                  ///< the decode stream still points at another slot
-    std::vector<std::vector<float>> vlogits_;
+    mutable std::vector<std::vector<float>> vlogits_;
+    mutable unsigned vready_ = 0;              ///< bit i: vlogits_[i] holds the last pass's row i
+    xrt::bo* vbo_ = nullptr;
     /// The committed linear state's byte offset in every linear layer's state buffer.
     size_t lin_off() const { return static_cast<size_t>(vs_.cur) * slot_bytes_; }
     /// Patches either the verify streams or the decode stream, never both, per verify_kernels.

@@ -352,13 +352,20 @@ inline std::vector<AttnPatchV> attnv_table(const std::vector<uint32_t>& w, const
             t.push_back({i + 10, 2, static_cast<uint8_t>(off / g.ptab_row - 1), flags});
         }
     }
+    // one window fill for the whole pass: every query walks the last one's window (blocks past its own are padding)
+    const bool shared = nwin == 1 && nq > 1;
+    if (shared)
+        for (auto& p : t)
+            if (p.kind == 0 || p.kind == 3) p.q = static_cast<uint8_t>(nq - 1);
     for (uint8_t kind = 0; kind < 4; ++kind)
         for (unsigned q = 0; q < nq; ++q) {
             size_t n = 0;
             for (const auto& p : t) n += (p.kind == kind && p.q == q);
-            if (n != 1)
+            // kind 1 twice: the new row's drain and its read-back for the query's own step
+            const bool ok = (kind == 0 || kind == 3) ? n == (shared && q + 1 < nq ? 0u : 1u) : kind == 1 ? (n == 1 || n == 2) : n == 1;
+            if (!ok)
                 throw std::runtime_error("attnposv: " + kn + ": " + std::to_string(n) + " patches of kind " +
-                                         std::to_string(kind) + " for position " + std::to_string(q) + ", expected 1");
+                                         std::to_string(kind) + " for position " + std::to_string(q));
         }
     return t;
 }
