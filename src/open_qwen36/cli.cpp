@@ -117,6 +117,7 @@ struct Args {
     std::string spec_method = "lookup";   // --spec-method M: this CLI has no registry entry to read the method from
     int verify_check = 0;           // --verify-check N: N greedy positions by step(), then by verify() passes, compared
     int bench_verify = 0;           // --bench-verify N: N verify passes and N steps after the prompt, timed
+    int verify_n = 0;               // --verify-n n: the bench's positions a pass (default: the kernel set's width)
     int verify_probe = 0;           // --verify-probe L (with OFLM_OPEN_VERIFY_STOP=L): act of layers < L, verify vs step
 };
 
@@ -198,6 +199,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--det-step") a.det_step = std::atoi(val().c_str());
         else if (k == "--verify-check") a.verify_check = std::atoi(val().c_str());
         else if (k == "--bench-verify") a.bench_verify = std::atoi(val().c_str());
+        else if (k == "--verify-n") a.verify_n = std::atoi(val().c_str());
         else if (k == "--verify-probe") a.verify_probe = std::atoi(val().c_str());
         else if (k == "--det-full") a.det_full = true;
         else if (k == "--bench-step") a.bench_step = std::atoi(val().c_str());
@@ -317,9 +319,13 @@ void verify_check(Core& core, const Args& a) {
                      p0 + i, i, nd, V, md);
         ++bad;
     };
+    // passes of 2 .. width positions in turn; every third one has a wrong draft at a rotating position, so accept()
+    // takes 1 .. W positions and the next pass starts from each state slot
+    const int VW = static_cast<int>(core.verify_width());
     int i = 0;
     for (int k = 0; i + 1 < n; ++k) {
-        if (k % 4 == 3) {                          // a plain step after an accept
+        const int W = 2 + (k / 4) % (VW - 1);
+        if (k % 4 == 3 || i + W > n) {             // a plain step after an accept, and the tail
             core.step(tokens[i], true);
             sms += core.last_timing().total_ms;
             ++ns;
@@ -327,31 +333,25 @@ void verify_check(Core& core, const Args& a) {
             ++i;
             continue;
         }
-        const bool right = k % 3 != 2;
-        const int draft = right ? tokens[i + 1] : (tokens[i + 1] + 1) % static_cast<int>(core.real_vocab());
-        const int ids[2] = {tokens[i], draft};
-        int am[2] = {-1, -1};
-        core.verify(ids, 2, am);
+        const int wrong = k % 3 == 2 ? 1 + (k / 3) % (W - 1) : W;
+        std::vector<int> ids(W), am(W, -1);
+        for (int j = 0; j < W; ++j)
+            ids[j] = j == wrong ? (tokens[i + j] + 1) % static_cast<int>(core.real_vocab()) : tokens[i + j];
+        core.verify(ids.data(), W, am.data());
         vms += core.last_timing().total_ms;
         ++nv;
         ++passes;
-        cmp(core.verify_logits(0), i, "verify[0]");
-        if (am[0] != tokens[i + 1]) {
-            std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i, am[0], tokens[i + 1]);
-            ++bad;
-        }
-        if (right) {
-            cmp(core.verify_logits(1), i + 1, "verify[1]");
-            if (am[1] != tokens[i + 2]) {
-                std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i + 1, am[1], tokens[i + 2]);
+        for (int j = 0; j < wrong; ++j) {
+            char what[32];
+            std::snprintf(what, sizeof what, "verify[%d]", j);
+            cmp(core.verify_logits(j), i + j, what);
+            if (am[j] != tokens[i + j + 1]) {
+                std::fprintf(stderr, "  ARGMAX position %d: verify %d, step %d\n", p0 + i + j, am[j], tokens[i + j + 1]);
                 ++bad;
             }
-            core.accept(2);
-            i += 2;
-        } else {
-            core.accept(1);
-            i += 1;
         }
+        core.accept(wrong);
+        i += wrong;
         if (core.position() != p0 + i) {
             std::fprintf(stderr, "  POSITION after accept: %d, want %d\n", core.position(), p0 + i);
             ++bad;
@@ -364,23 +364,24 @@ void verify_check(Core& core, const Args& a) {
     g_verify_bad = bad;
 }
 
-// both positions of each pass are accepted, so the position advances by two
+// every position of each pass is accepted, so the position advances by the width
 void bench_verify(Core& core, const Args& a) {
     const int n = a.bench_verify;
+    const size_t W = a.verify_n > 0 ? static_cast<size_t>(a.verify_n) : core.verify_width();
     int tok = argmax(core.logits(), core.real_vocab());
     std::vector<double> v2, v1;
+    std::vector<int> ids(W), am(W);
     for (int r = 0; r < n; ++r) {
-        const int ids[2] = {tok, tok};
-        int am[2];
-        core.verify(ids, 2, am);
+        std::fill(ids.begin(), ids.end(), tok);
+        core.verify(ids.data(), W, am.data());
         v2.push_back(core.last_timing().total_ms);
         {
             const auto& t = core.last_timing();
             std::fprintf(stderr, "  verify @%d: %.1f ms (layers blocked %.1f, tail %.1f, host read+argmax %.2f, embed %.2f, patch %.2f)\n",
                          core.position(), t.total_ms, t.part0_ms, t.part1_ms, t.route_ms, t.embed_ms, t.patch_ms);
         }
-        core.accept(2);
-        tok = am[1];
+        core.accept(W);
+        tok = am[W - 1];
     }
     for (int r = 0; r < n; ++r) {
         core.step(tok, true);
@@ -400,18 +401,18 @@ void bench_verify(Core& core, const Args& a) {
     // alternating, as a loop with draftless passes does: each switch of hardware context costs
     std::vector<double> a2, a1;
     for (int r = 0; r < n; ++r) {
-        const int ids[2] = {tok, tok};
-        int am[2];
-        core.verify(ids, 2, am);
+        std::fill(ids.begin(), ids.end(), tok);
+        core.verify(ids.data(), W, am.data());
         a2.push_back(core.last_timing().total_ms);
-        core.accept(2);
-        core.step(am[1], true);
+        core.accept(W);
+        core.step(am[W - 1], true);
         a1.push_back(core.last_timing().total_ms);
         tok = argmax(core.logits(), core.real_vocab());
     }
-    stat(v2, "verify2");
+    const std::string vn = "verify" + std::to_string(W);
+    stat(v2, vn.c_str());
     stat(v1, "step1");
-    stat(a2, "verify2-after-step");
+    stat(a2, (vn + "-after-step").c_str());
     stat(a1, "step1-after-verify");
     core.dump_step_trace("--bench-verify");
 }

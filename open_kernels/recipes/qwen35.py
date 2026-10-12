@@ -344,11 +344,11 @@ def tail_in_layer(spec: ModelSpec) -> bool:
 
 
 # ---- OPEN-DECODE-SPECULATIVE-VERIFY: the verify image (designs/verify/vux.py)
-VERIFY_W = 2                       # positions per verify pass: two tables per main core is what fits
+VERIFY_W = 4                       # positions per verify pass: the mmul's four A rows (designs/verify/gemv_t4.h)
 
 
 def verify_image(spec: ModelSpec) -> bool:
-    """vux.py is the two-position twin of the in-layer-head image with two down pieces; OPEN_LAYER_VERIFY=0 opts out."""
+    """vux.py is the 2 .. VERIFY_W-position twin of the in-layer-head image with two down pieces; OPEN_LAYER_VERIFY=0 opts out."""
     if os.environ.get("OPEN_LAYER_VERIFY") == "0" or not tail_in_layer(spec):
         return False
     R = recipe(spec)
@@ -439,6 +439,13 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                                  "rb_win": recipe(spec).attn.RB}
         out["kernels"]["vlm"] = {"context": "verify", "insts": "vlm/insts.bin", "build": "vlm"}
         w = vg["width"]
+        # narrower passes: their own streams on the same image (its cores read n from run-time words)
+        for n in range(2, w):
+            out["kernels"][f"vlx{n}"] = {"context": "verify", "insts": f"vlx{n}/insts.bin", "build": f"vlx{n}",
+                                         "patch": "stateslot"}
+            out["kernels"][f"vax{n}"] = {"context": "verify", "insts": f"vax{n}/insts.bin", "build": f"vax{n}",
+                                         "patch": "attnposv", "rb_win": recipe(spec).attn.RB, "nq": n}
+            out["kernels"][f"vlm{n}"] = {"context": "verify", "insts": f"vlm{n}/insts.bin", "build": f"vlm{n}"}
         out["globals"]["vxres"] = w * spec.hidden * 4
         out["globals"]["vlogits"] = w * spec.vocab * 4
         out["globals"]["vlmact"] = w * 64 * 1024
@@ -447,7 +454,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                          "programs": {LINEAR: [{"op": "run", "kernel": "vlx", "args": va}],
                                       FULL: [{"op": "run", "kernel": "vax", "args": va}]},
                          "tail": [{"op": "run", "kernel": "vlm",
-                                   "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}]}
+                                   "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}],
+                         "narrow": {str(n): {"programs": {LINEAR: [{"op": "run", "kernel": f"vlx{n}", "args": va}],
+                                                          FULL: [{"op": "run", "kernel": f"vax{n}", "args": va}]},
+                                             "tail": [{"op": "run", "kernel": f"vlm{n}",
+                                                       "args": ["lmpool", "vxres", "normw", "vlogits", "vlmact", "ptab"]}]}
+                                    for n in range(2, w)}}
     r = gemm_route(spec)
     if r:
         for k in ("contexts", "kernels", "globals"):
@@ -497,6 +509,10 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
                 b[name] = {"design": "verify/vux.py",
                            "build_dir": f"verify/build_{spec.family}_vux{part}_h{spec.hidden}{sfx}",
                            "env": {"VUX_PART": str(part)}}
+                for n in range(2, VERIFY_W):
+                    b[f"{name}{n}"] = {"design": "verify/vux.py",
+                                       "build_dir": f"verify/build_{spec.family}_vux{part}n{n}_h{spec.hidden}{sfx}",
+                                       "env": {"VUX_PART": str(part), "VUX_N": str(n)}}
         if tail_in_layer(spec):
             return {**b, **(gemm_route(spec) or {}).get("builds", {})}
     else:

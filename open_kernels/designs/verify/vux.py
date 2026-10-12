@@ -13,8 +13,10 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Program, Runtime, TaskGroup, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
+from aie.dialects.aie import use_lock
+from aie.dialects.aiex import LockAction
 from aie.iron.device import Tile
 from aie.iron.kernel import ExternalFunction
 from aie.helpers.taplib import TensorAccessPattern
@@ -39,9 +41,13 @@ from layout import (A_BYTES, A_H, A_O, A_OG, A_OUT, A_OUT2, A_OUT2B, A_QKV, A_RE
 import xcommon as X  # noqa: E402
 import gen_kernels as GK  # noqa: E402
 
-VW = int(os.environ.get("VUX_W", "2"))
-if VW != 2:
-    sys.exit("vux.py: the verify image is two positions wide (the main core holds two tables, no more)")
+VW = int(os.environ.get("VUX_W", "4"))
+if VW != 4:
+    sys.exit("vux.py: the verify image's main cores run four token rows (gemv_t4.h); VUX_W=4")
+N = int(os.environ.get("VUX_N", str(VW)))          # this stream's positions; every core program is VW's
+if not 2 <= N <= VW:
+    sys.exit(f"vux.py: VUX_N={N}, a verify pass is 2 .. {VW} positions")
+NO = 2 * ((N + 1) // 2)                            # o leaves two positions a y element
 
 D = R.linear
 A = R.attn
@@ -64,23 +70,32 @@ DN_HEADS_PC = X.DN_HEADS_PC
 assert len(X.DOWN_SPLIT) == 2 and X.PER_CALL == 1, (X.DOWN_SPLIT, X.PER_CALL)
 assert OG_ELEMS == XN_ELEMS == X.FFN.XM_ELEMS
 assert all(X.n_groups(k) == X.per_band(k) for k in (HID, OUT_K, *X.DOWN_SPLIT))
-KC = [VW * XN_ELEMS, X.n_groups(HID), X.n_groups(OUT_K), len(X.DOWN_SPLIT), VW]
 H1_K = X.DOWN_SPLIT[1]
 H1_BLOCKS = H1_K // 1024
 H1_X = -(-H1_K * 2 // ELEM)
 assert H1_K % 1024 == 0 and 2 * H1_K + H1_K // 16 <= H1_X * ELEM <= X.TAB_BYTES
-KH = {"hk": [X.DOWN_SPLIT[0], 0], "hn": [VW * X.DOWN_SPLIT[0] * 4 // ELEM, VW * H1_X],
-      "hg": [X.n_groups(k) for k in X.DOWN_SPLIT],
-      "dk": [2, 16, 64]}                    # vdn_body's halves, S elements per half, row pairs: run-time, so not unrolled
+# (slices, x elements a token a slice, chunks a band a slice): four tokens' tables at K > HID do not fit
+SL_OUT = (OUT_K // 2048, 1, X.per_band(2048))
+SL_DOWN = ((X.DOWN_SPLIT[0] // 2048, 2, X.per_band(2048)), (H1_K // 1024, 2, X.per_band(1024)))
+assert OUT_K % 2048 == 0 and X.DOWN_SPLIT[0] % 2048 == 0 and H1_X == 5 and H1_K == 9216
+# run-time trip counts: a constant one lets LLVM unroll the loop, which program memory cannot afford
+KC = [XN_ELEMS, X.n_groups(HID), 2, 16, 32, 3]
+KD = {"sns": [SL_OUT[0], SL_DOWN[0][0], SL_DOWN[1][0]], "sne": [SL_OUT[1], SL_DOWN[0][1], SL_DOWN[1][1]],
+      "sng": [SL_OUT[2], SL_DOWN[0][2], SL_DOWN[1][2]], "skind": [0, 1, 2], "sffn": [1, 0, 0]}
+assert OUT_PC == X.FFN.DOWN_PC
 HPREP_TILE = Tile(7, 4)
+MAIN_STACK = int(os.environ.get("VUX_STACK", "0x1400"), 16)
+ATTN_STACK = int(os.environ.get("VUX_ASTACK", "0x1000"), 16)
+GLUE_STACK = int(os.environ.get("VUX_GSTACK", "0x1000"), 16)
 
-# 15 = fully unrolled, which compiles smaller than a partial unroll for the two-token tile
-VX_OUNROLL = int(os.environ.get("VUX_OUNROLL", "15"))
-TAB = X.TAB_BYTES
 MSF = X.MS_FLOATS
-VDN_BLK, VDN_RS = 2 * 128 * 32 * 4, 1600       # vdn.h's half-head block and record slot
-VDN_BYTES = VDN_BLK + (VW + 1) * VDN_RS + 3 * 256 + VW * 512
-assert VDN_BYTES <= VW * TAB, (VDN_BYTES, VW * TAB)      # DeltaNet's block, records and sums inside the tables
+TAB4 = 4 * 2 * HID + 4 * (HID // 16)               # gemv_t4.h's table at K = HID, the widest unsliced GEMV
+YP = 4 * 2 * 2048 + 4 * (2048 // 16)               # a 2048-wide slice's table; the partial y follows it
+assert YP % 64 == 0 and YP + max(OUT_PC, X.FFN.DOWN_PC) * 4 * 256 <= TAB4
+VDN_BLK, VDN_RS = 2 * 128 * 32 * 4, 1664           # vdn.h's half-head block and record slot
+VDN_BYTES = VDN_BLK + VW * VDN_RS + 3 * 256 + VW * 512
+VDN_O = VDN_BYTES - VW * 512                        # vdn.h's O: every position's raw o
+assert VDN_BYTES <= TAB4, (VDN_BYTES, TAB4)        # DeltaNet's block, records and sums in the table region
 assert SPEC.lin_value_dim == 128 and S_HEAD_BYTES == 128 * 512
 
 # ---- the linear layer's helpers (lx.py)
@@ -128,6 +143,11 @@ from recipes import qwen35 as _Q35  # noqa: E402
 if not _Q35.tail_in_layer(SPEC) or LM_POOL != _Q35.lm_t2_pool_bytes(SPEC):
     sys.exit("vux.py: the verify image needs the merged image's in-layer ternary head")
 
+def bar_wait(bar):
+    # WorkerRuntimeBarrier.wait_for_value is acquire-equal and leaves the lock at 1, so later dispatches would not wait
+    use_lock(bar.worker_locks[-1], LockAction.AcquireGreaterEqual, value=1)
+
+
 # ---- buffer-argument shapes, one set for every part
 SLOT = -(-STATE_BYTES // 4096) * 4096
 CONSTS_T = max(C_BYTES, CA_BYTES)
@@ -148,50 +168,129 @@ def _sub(text: str, old: str, new: str) -> str:
 def gen_sources() -> dict[str, Path]:
     fs = GK.files(R)
     src = {
-        # both positions' activations arrive back to back, so element i belongs to position i / ne
-        "vx_prep.cc": _sub(fs["dense_prep.cc"],
-                           "void dense_prep(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {\n",
-                           "void vx_prep(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {\n"
-                           "  {\n    const unsigned ne = (2u * (unsigned)K + 4095u) / 4096u, t = (unsigned)i / ne;\n"
-                           f"    i -= (int32_t)(t * ne);\n    tab += {TAB}u * t;\n  }}\n"),
-        "vx_prepf.cc": _sub(fs["dense_prep_f32.cc"],
-                            "void dense_prep_f32(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {\n",
-                            "void vx_prepf(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {\n"
-                            f"  {{\n    const unsigned ne = K == 0 ? {H1_X}u : (unsigned)K * 4u / 4096u, t = (unsigned)i / ne;\n"
-                            f"    i -= (int32_t)(t * ne);\n    tab += {TAB}u * t;\n  }}\n"),
+        "vx_sprep4.cc": f"""// GENERATED by vux.py
+#include "wht.h"
+#include "vwht_int.h"
+#include "xh_signs.h"
+extern "C" {{
+// kind 0 og slice s (sign-flipped first), 1 h fp32, 2 the prep core's table, 3 an unsliced table of width s
+void vx_sprep4(bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t kind, int32_t s, int32_t i, int32_t j) {{
+  const unsigned u = (unsigned)j, last = {H1_K // 1024 - 1}u;
+  if (kind == 0 || kind == 3) {{                                       // kind 3: an unsliced K = s table, element i
+    unsigned K = (unsigned)s, g0 = 16u * (unsigned)i;
+    if (kind == 0) {{
+      xh_signs_bf16(e, xh_og_bits + 64u * (unsigned)s, 2048u);
+      K = 2048u;
+      g0 = 0;
+    }}
+    vxh_int_wht<bfloat16>(e, tab, K, g0, u);
+    if (g0 + 8u < K / 128)
+      vxh_int_wht<bfloat16>(e + 1024, tab, K, g0 + 8u, u);
+    return;
+  }}
+  if (kind == 1) {{
+    vxh_int_wht<float>((float *)e, tab, 2048u, 8u * (unsigned)i, u);
+    return;
+  }}
+  if (i == 0) {{
+    const uint8_t *__restrict src = (const uint8_t *)e + 2048u * ((unsigned)s & 1u);
+    uint8_t *__restrict dst = tab + 16u * u;
+#pragma clang loop unroll(disable)
+    for (unsigned o = 0; o < 128; ++o) aie::store_v((int16_t *)(dst + 64u * o), aie::load_v<8>((const int16_t *)(src + 16u * o)));
+  }}
+  if ((i == 0) == ((unsigned)s == last)) {{
+    const uint8_t *__restrict src = (const uint8_t *)e + 2048u;          // byte 2 K of the table: its scales
+    uint8_t *__restrict sb = tab + 8u * 1024u + 64u * u;                 // a 1024-wide slice: 8 groups a token
+    aie::store_v((int32_t *)sb, aie::load_v<8>((const int32_t *)src + 8u * (unsigned)s));
+    aie::store_v((bfloat16 *)(sb + 32), aie::load_v<8>((const bfloat16 *)(src + {4 * H1_K // 128}) + 8u * (unsigned)s));
+    aie::store_v((bfloat16 *)(sb + 48), aie::load_v<8>((const bfloat16 *)(src + {6 * H1_K // 128}) + 8u * (unsigned)s));
+  }}
+}}
+}}
+""",
         # dense_act's own text, so the SwiGLU cannot drift from the decode image's
-        "vx_act.cc": _sub(fs["dense_act.cc"],
-                          "void dense_act(const float *__restrict ms, float *__restrict h) {\n",
-                          "__attribute__((noinline)) static void vx_act1(const float *__restrict ms, float *__restrict h) {\n")
-                     + 'extern "C" {\nvoid vx_act(const float *__restrict ms, float *__restrict h0, float *__restrict h1) {\n'
-                       f"  vx_act1(ms, h0);\n  vx_act1(ms + {MSF}u, h1);\n}}\n}}\n",
-        "vx_gy.cc": f'''// GENERATED by vux.py
+        # dense_act's expression, fmul32(vsiluN<32>(g), u), over the four tokens' two vectors each in one loop
+        "vx_act4.cc": f"""// GENERATED by vux.py
+#include "vecmath.h"
+extern "C" {{
+void vx_act4(const float *__restrict ms, float *__restrict h) {{
+  aie::set_rounding(aie::rounding_mode::conv_even);
+#pragma clang loop unroll(disable)
+  for (unsigned v = 0; v < 8; ++v) {{
+    const float *__restrict m = ms + {MSF}u * (v >> 1) + 32u * (v & 1u);
+    aie::store_v(h + 32u * v, fmul32(vsiluN<32>(aie::load_v<32>(m + {R.ffn.MS_G})), aie::load_v<32>(m + {R.ffn.MS_U})));
+  }}
+}}
+}}
+""",
+        "vx_g4.cc": f"""// GENERATED by vux.py
 #define GEMV_PER_CALL {X.PER_CALL}
 #define GEMV_T2_CHUNK {X.TILE}
-#define GEMV_T2_OUNROLL {VX_OUNROLL}
-#define GEMV_X2_HOIST 1
-#include "gemv_t2x2.h"
+#include "gemv_t4.h"
 extern "C" {{
-void vx_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y0, float *__restrict y1,
-           int32_t group, int32_t per_band, int32_t rs) {{
-  gemv_t2x2_chunk_rt(t, tab, {TAB}u, (unsigned)group, (unsigned)per_band, y0, y1, (unsigned)rs);
+void vx_g4(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y, int32_t group, int32_t per_band) {{
+  const unsigned K = (kT2TileK * (unsigned)per_band) >> 1, kt = (unsigned)group >> 1, off = ((unsigned)group & 1u) * kT2Rows;
+  float *__restrict yb = y + off;
+  gemv_t4_tile(t, tab, K, kt, kt == 0, yb, yb + 64, yb + 128, yb + 192, 4);
 }}
 }}
-''',
-        "vx_gms.cc": f'''// GENERATED by vux.py
+""",
+        "vx_g4p.cc": f"""// GENERATED by vux.py
 #define GEMV_PER_CALL {X.PER_CALL}
 #define GEMV_T2_CHUNK {X.TILE}
-#define GEMV_T2_OUNROLL {VX_OUNROLL}
-#define GEMV_X2_HOIST 1
-#include "gemv_t2x2.h"
+#include "gemv_t4.h"
 extern "C" {{
-void vx_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
-            int32_t group, int32_t per_band, int32_t dst) {{
-  gemv_t2x2_chunk_rt(t, tab, {TAB}u, (unsigned)group, (unsigned)per_band, ms + dst, ms + {MSF} + dst, 2);
+void vx_g4p(const uint8_t *__restrict t, uint8_t *__restrict tab, int32_t b, int32_t group, int32_t per_band, int32_t s) {{
+  const unsigned K = (kT2TileK * (unsigned)per_band) >> 1, kt = (unsigned)group >> 1, off = ((unsigned)group & 1u) * kT2Rows;
+  float *__restrict y = (float *)(tab + {YP}u) + 256u * (unsigned)b + off;
+  gemv_t4_tile(t, tab, K, kt, s == 0 && kt == 0, y, y + 64, y + 128, y + 192, 4);
 }}
 }}
-''',
+""",
+        "vx_yout4.cc": f"""// GENERATED by vux.py
+#include <aie_api/aie.hpp>
+#include <stdint.h>
+extern "C" {{
+void vx_yout4(const uint8_t *__restrict tab, float *__restrict ye, int32_t sel, int32_t b) {{
+  const float *__restrict y = (const float *)(tab + (sel ? {VDN_O}u : {YP}u)) + 256u * (unsigned)b;
+#pragma clang loop unroll(disable)
+  for (unsigned k = 0; k < 256; k += 32) aie::store_v(ye + k, aie::load_v<32>(y + k));
+}}
+}}
+""",
+        "vx_gms4.cc": f"""// GENERATED by vux.py
+#define GEMV_PER_CALL {X.PER_CALL}
+#define GEMV_T2_CHUNK {X.TILE}
+#include "gemv_t4.h"
+extern "C" {{
+// u = 0: the up band (ms + {R.ffn.MS_U}), 1: the gate band (ms + {R.ffn.MS_G})
+void vx_gms4(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms, int32_t group,
+             int32_t per_band, int32_t u) {{
+  const unsigned K = (kT2TileK * (unsigned)per_band) >> 1, kt = (unsigned)group >> 1, off = ((unsigned)group & 1u) * kT2Rows;
+  float *__restrict y = ms + (u ? {R.ffn.MS_G}u : {R.ffn.MS_U}u) + off;
+  gemv_t4_tile(t, tab, K, kt, kt == 0, y, y + {MSF}, y + {2 * MSF}, y + {3 * MSF}, 4);
+}}
+}}
+""",
     }
+    # the integer FWHT writing gemv_t4.h's table: token j's octets at 16 j in each 64 B, its scales at 8 K + 8 NG j
+    wi = open(GEMV / "wht_int.h", encoding="utf-8").read().replace("\r\n", "\n").replace("xh_int_", "vxh_int_")
+    for old, new in (("unsigned K, unsigned g, int sc) {", "unsigned K, unsigned g, int sc, unsigned j) {"),
+                     ("int16_t *__restrict xi = (int16_t *)tab + 128 * g;", "int16_t *__restrict xi = (int16_t *)tab + 512 * g + 8 * j;"),
+                     ("int16_t *__restrict xo = xi + 128 * p;", "int16_t *__restrict xo = xi + 512 * p;"),
+                     ("aie::store_v(xo + 32 * i + 8 * q, v.template extract<8>(i));",
+                      "aie::store_v(xo + 128 * i + 32 * q, v.template extract<8>(i));"),
+                     ("aie::store_v((int32_t *)(tab + 2 * K) + g, shv.template extract<8>(0));",
+                      "aie::store_v((int32_t *)(tab + 8 * K + 8 * NG * j) + g, shv.template extract<8>(0));"),
+                     ("bfloat16 *__restrict xsh = (bfloat16 *)(tab + 2 * K + 4 * NG) + g;",
+                      "bfloat16 *__restrict xsh = (bfloat16 *)(tab + 8 * K + 8 * NG * j + 4 * NG) + g;"),
+                     ("unsigned K, unsigned g, int A) {", "unsigned K, unsigned g, int A, unsigned j) {"),
+                     ("vxh_int_pass_b(X, tab, K, g, A + 5 - s1);", "vxh_int_pass_b(X, tab, K, g, A + 5 - s1, j);"),
+                     ("uint8_t *__restrict tab, unsigned K, unsigned g) {", "uint8_t *__restrict tab, unsigned K, unsigned g, unsigned j) {"),
+                     ("vxh_int_rest(X, tab, K, g, vxh_int_q16(x, X, sizeof(T) == 2));",
+                      "vxh_int_rest(X, tab, K, g, vxh_int_q16(x, X, sizeof(T) == 2), j);")):
+        wi = _sub(wi, old, new)
+    src["vwht_int.h"] = "// GENERATED by vux.py from gemv_q4/wht_int.h: the four-token interleaved table\n" + wi
     # records leave as their k|q and v|decay|beta halves, so the glue core never holds a position's q / k across tiles
     ab = open(GLUE / "glue_ab_w.cc", encoding="utf-8").read().replace("\r\n", "\n")
     head, body = ab.split('extern "C" {\n', 1)
@@ -200,9 +299,10 @@ void vx_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *_
     body = _sub(body, "void glue_ab_w(", "__attribute__((noinline)) static void vx_ab1(")
     gpre = "// GENERATED by vux.py\n"
     src["vg_ab.cc"] = (gpre + head + body + 'extern "C" {\n'
-                       "void vg_ab(const bfloat16 *__restrict W, const bfloat16 *__restrict xn, float *__restrict acc, int tile, int h) {\n"
+                       "void vg_ab(const bfloat16 *__restrict W, const bfloat16 *__restrict xn, float *__restrict acc, int tile, int h,\n"
+                       "           int npos) {\n"
                        "  const int first = h == 0 ? 1 : 0;      // the host loop's: set for the first xn half only\n"
-                       f"  for (unsigned p = 0; p < {VW}u; ++p) vx_ab1(W, xn + 2048u * p, acc + {D.AB_LANES}u * p, tile, first);\n"
+                       f"  for (unsigned p = 0; p < (unsigned)npos; ++p) vx_ab1(W, xn + 2048u * p, acc + {D.AB_LANES}u * p, tile, first);\n"
                        "}\n}\n")
     src["vg_copy.cc"] = (gpre + '#include "dn_glue.h"\nextern "C" {\n'
                          "void vg_copy(const bfloat16 *__restrict s, bfloat16 *__restrict xn, int p) {\n"
@@ -210,8 +310,8 @@ void vx_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *_
                          "  for (unsigned j = 0; j < 2048u; j += kV) aie::store_v(d + j, aie::load_v<kV>(s + j));\n}\n}\n")
     src["vg_small.cc"] = (gpre + '#include "dn_glue.h"\nextern "C" {\n'
                           "void vg_small(const float *__restrict small, const float *__restrict a, const float *__restrict b,\n"
-                          "              float *__restrict decay, float *__restrict beta) {\n"
-                          f"  for (unsigned p = 0; p < {VW}u; ++p)\n"
+                          "              float *__restrict decay, float *__restrict beta, int npos) {\n"
+                          "  for (unsigned p = 0; p < (unsigned)npos; ++p)\n"
                           f"    glue_small(small, a + {D.AB_LANES}u * p, b + {D.AB_LANES}u * p, decay + kNHead * p, beta + kNHead * p);\n"
                           "}\n}\n")
     gh = open(GLUE / "dn_glue.h", encoding="utf-8").read().replace("\r\n", "\n")
@@ -266,10 +366,9 @@ void vx_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *_
                          "  }\n}\n}\n")
     vdn = {"vdn_rec": ("const float *__restrict e, uint8_t *__restrict tab, int32_t p", "e, tab, (unsigned)p"),
            "vdn_ld": ("const float *__restrict e, uint8_t *__restrict tab, int32_t ei", "e, tab, (unsigned)ei"),
-           "vdn_row": ("uint8_t *__restrict tab, float *__restrict y0, float *__restrict y1, int32_t p, int32_t r2, "
-                       "int32_t h", "tab, y0, y1, (unsigned)p, (unsigned)r2, (unsigned)h"),
-           "vdn_ofin": ("const uint8_t *__restrict tab, float *__restrict ye, int32_t p, int32_t h",
-                        "tab, ye, (unsigned)(2 * p + h)")}
+           "vdn_row": ("uint8_t *__restrict tab, float *__restrict y, int32_t p, int32_t r4, int32_t h, int32_t k",
+                       "tab, y + 128u * (unsigned)k, (unsigned)p, 2u * (unsigned)r4 + (unsigned)k, (unsigned)h"),
+}
     vdn_h = hashlib.sha1((HERE / "vdn.h").read_bytes()).hexdigest()[:12]     # IRON's object cache keys on the TU text
     for sym, (params, args) in vdn.items():
         src[f"{sym}.cc"] = (f'// GENERATED by vux.py (vdn.h {vdn_h})\n#include "vdn.h"\nextern "C" {{\n'
@@ -330,9 +429,33 @@ void vx_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *_
         'extern "C" {\nvoid vattn_fin(const float *__restrict oacc, const float *__restrict ml, const float *__restrict g0,\n'
         '               const float *__restrict g1, bfloat16 *__restrict og, int hp, int p) {\n'
         f'  attn_fin_impl(oacc + (unsigned)p * {OA}, ml + (unsigned)p * {ML}, g0, g1, og, hp);\n}}\n}}\n')
+    pc = open(POST / "post.cc", encoding="utf-8").read().replace("\r\n", "\n")
+    head, body = pc.split('extern "C" {\n', 1)
+    body = body.rstrip()
+    body = body[: body.rindex("}")].rstrip() + "\n"
+    body = _sub(body, "void post_fn(", "__attribute__((noinline)) static void vpost1(")
+    src["vpost.cc"] = (head + body + 'extern "C" {\n'
+                       "// DeltaNet's o arrives raw (vdn.h): scale it by 1 / sqrt(128) with dnx_ofin_half's ops, then post_fn\n"
+                       "void vpost_fn(float *__restrict o, const float *__restrict z, const bfloat16 *__restrict nw,\n"
+                       "              bfloat16 *__restrict og) {\n"
+                       "  aie::set_rounding(aie::rounding_mode::conv_even);\n"
+                       "  v32b ih, il;\n"
+                       "  split32(aie::broadcast<float, kV>(0.088388347648318f), ih, il);\n"
+                       "  const bfloat16 sh = ih[0], sl = il[0];\n"
+                       "#pragma clang loop unroll(disable)\n"
+                       "  for (unsigned j = 0; j < kHeads * kHD; j += kV) {\n"
+                       "    accf32 a = aie::zeros<accfloat, kV>();\n"
+                       "    a = mac_vs(a, aie::load_v<kV>(o + j), sh, sl);\n"
+                       "    aie::store_v(o + j, a.template to_vector<float>());\n"
+                       "  }\n"
+                       "  vpost1(o, z, nw, og);\n}\n}\n")
     # copied here because a worktree that never exported has none of them in layer_x
     for name in ("dense_hblk.cc", "dense_hout.cc", "xh_signs.h"):
         src[name] = fs[name]
+    deps = hashlib.sha1(b"".join(src[n].encode() for n in sorted(src) if n.endswith(".h"))
+                        + b"".join((HERE / n).read_bytes() for n in ("vdn.h", "gemv_t4.h"))
+                        + (GEMV / "gemv_t2.h").read_bytes() + (GLUE / "dn_glue.h").read_bytes()).hexdigest()[:12]
+    src = {n: (f"// headers {deps}\n" + t if n.endswith(".cc") else t) for n, t in src.items()}
     out = {}
     for name, text in src.items():
         p = HERE / name
@@ -354,6 +477,14 @@ def bt(total: int, off: int, n: int) -> TensorAccessPattern:
     return TensorAccessPattern((1, total), off, [1, 1, 1, n], [0, 0, 0, 1])
 
 
+def slices_w(total: int, off: int, band_stride: int, nbands: int, ns: int, nch: int) -> TensorAccessPattern:
+    return TensorAccessPattern((1, total), off, [ns, nbands, 2 * nch, X.TILE // 2], [nch * X.TILE, band_stride, X.TILE // 2, 1])
+
+
+def slices_x(off: int, ns: int, nb: int) -> TensorAccessPattern:
+    return TensorAccessPattern((1, ACT_T), off, [ns, N, nb // 2048, 2048], [nb, ACT1, 2048, 1])
+
+
 def y2(total: int, off: int, nbands: int, pstride: int) -> TensorAccessPattern:
     """Each band drains as [position 0 | position 1], position j landing at off + j * pstride."""
     return TensorAccessPattern((1, total), off, [1, nbands, VW, YB], [0, YB, pstride, 1])
@@ -373,9 +504,10 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     state_ty = np.ndarray[(STATE_T,), np.dtype[np.uint8]]
     act_ty = np.ndarray[(ACT_T,), np.dtype[np.uint8]]
     ptab_ty = np.ndarray[(PTAB_BYTES,), np.dtype[np.uint8]]
-    rtp_ty = np.ndarray[(4,), np.dtype[np.int32]]
-    tab2 = np.ndarray[(VW * TAB,), np.dtype[np.uint8]]
-    ms2 = np.ndarray[(VW * MSF,), np.dtype[np.float32]]
+    rtp_ty = np.ndarray[(8,), np.dtype[np.int32]]
+    tabv = np.ndarray[(TAB4,), np.dtype[np.uint8]]
+    y4_ty = np.ndarray[(4 * X.BAND_ROWS,), np.dtype[np.float32]]
+    ms4 = np.ndarray[(VW * MSF,), np.dtype[np.float32]]
     e_ty, x_ty, y_ty = t["elem"], t["x"], t["y"]
     i32 = np.int32
     nw_ty = np.ndarray[(SPEC.lin_value_dim,), np.dtype[bfloat16]]
@@ -402,20 +534,21 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         return ExternalFunction(sym, source_file=str(SRC[f"{sym}.cc"]), arg_types=args, include_dirs=inc,
                                 compile_flags=flags)
 
-    def dnf(sym, args):                    # the tables: no stage reads them while DeltaNet runs
+    def dnf(sym, args, flags=X.OS):        # the tables: no stage reads them while DeltaNet runs
         return ExternalFunction(sym, source_file=str(SRC[f"{sym}.cc"]), arg_types=args, include_dirs=inc,
-                                compile_flags=X.OS + [f"-DVDN_NPOS={VW}"])
+                                compile_flags=flags + [f"-DVDN_NPOS={VW}"])
 
     K = {
-        "gy": vf("vx_gy", [e_ty, tab2, y_ty, y_ty, i32, i32, i32], X.OS),
-        "gms": vf("vx_gms", [e_ty, tab2, ms2, i32, i32, i32], X.OS),
-        "act": vf("vx_act", [ms2, y_ty, y_ty], X.OS + ["-DVECMATH_COMPACT"]),
-        "prep": vf("vx_prep", [x_ty, tab2, i32, i32], X.OZ),
-        "prepf": vf("vx_prepf", [x_ty, tab2, i32, i32], X.OZ),
-        "vrec": dnf("vdn_rec", [e_ty, tab2, i32]),
-        "vld": dnf("vdn_ld", [e_ty, tab2, i32]),
-        "vrow": dnf("vdn_row", [tab2, y_ty, y_ty, i32, i32, i32]),
-        "vofin": dnf("vdn_ofin", [tab2, y_ty, i32, i32]),
+        "g4": vf("vx_g4", [e_ty, tabv, y4_ty, i32, i32], X.OS),
+        "g4p": vf("vx_g4p", [e_ty, tabv, i32, i32, i32, i32], X.OS),
+        "yout": vf("vx_yout4", [tabv, y4_ty, i32, i32], X.OZ),
+        "gms": vf("vx_gms4", [e_ty, tabv, ms4, i32, i32, i32], X.OS),
+        "act": vf("vx_act4", [ms4, y4_ty], X.OS + ["-DVECMATH_COMPACT"]),
+        "sprep": vf("vx_sprep4", [x_ty, tabv, i32, i32, i32, i32], X.OZ),
+        "vrec": dnf("vdn_rec", [e_ty, tabv, i32], X.OZ),
+        "vld": dnf("vdn_ld", [e_ty, tabv, i32], X.OZ),
+        "vrow": dnf("vdn_row", [tabv, y4_ty, i32, i32, i32, i32]),
+
     }
     KN = tuple(K)
     L = X.ln_kernels(inc, tl)
@@ -430,14 +563,14 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         return ExternalFunction(sym, source_file=str(SRC[src_name]), arg_types=args, include_dirs=inc, **GLUE_FLAGS)
 
     f_gcopy = gf("vg_copy", "vg_copy.cc", [u8_4k, xt_ty, i32])
-    f_gab = gf("vg_ab", "vg_ab.cc", [u8_4k, xt_ty, accn_ty, i32, i32])
-    f_gsmall = gf("vg_small", "vg_small.cc", [u8_4k, accn_ty, accn_ty, dbn_ty, dbn_ty])
+    f_gab = gf("vg_ab", "vg_ab.cc", [u8_4k, xt_ty, accn_ty, i32, i32, i32])
+    f_gsmall = gf("vg_small", "vg_small.cc", [u8_4k, accn_ty, accn_ty, dbn_ty, dbn_ty, i32])
     f_gconv = gf("vg_conv", "vg_conv.cc", [u8_2k, u8_2k, seq_ty, u8_4k, u8_4k, xt_ty, i32, i32, i32])
     f_grows = gf("vg_rows", "vg_rows.cc", [u8_2k, u8_2k, u8_2k, seq_ty])
     f_grow = gf("vg_row", "vg_row.cc", [seq_ty, u8_2k, i32, i32])
     f_gkq = gf("vg_kq", "vg_kq.cc", [xt_ty, u8_2k, i32, i32])
     f_gv = gf("vg_v", "vg_v.cc", [xt_ty, dbn_ty, dbn_ty, u8_2k, i32, i32, i32])
-    post_fn = ExternalFunction("post_fn", source_file=str(POST / "post.cc"), arg_types=[u8_4k, u8_4k, nw_ty, u8_2k],
+    post_fn = ExternalFunction("vpost_fn", source_file=str(SRC["vpost.cc"]), arg_types=[u8_4k, u8_4k, nw_ty, u8_2k],
                                include_dirs=inc)
     post_copy = ExternalFunction("post_copy_nw", source_file=str(POST / "post_copy.cc"), arg_types=[u8_4k, nw_ty],
                                  include_dirs=inc)
@@ -463,12 +596,12 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
     # ---- fifos: dux.py's, but x one deep (two tables fill the core) and y four deep (a band acquires two)
     of_w = [ObjectFifo(e_ty, name=f"w{c}", depth=2) for c in range(N_CORES)]
-    of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=4) for c in range(N_CORES)]
+    of_y = [ObjectFifo(y4_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
     of_x = ObjectFifo(x_ty, name="x", depth=1)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=X.LNI_DEPTH)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)
     of_side = ObjectFifo(u8_4k, name="side", depth=2)
-    of_gact = ObjectFifo(u8_2k, name="gact", depth=5)
+    of_gact = ObjectFifo(u8_2k, name="gact", depth=CONV_ROWS)
     of_gout = ObjectFifo(u8_2k, name="gout", depth=3)
     of_pin = ObjectFifo(u8_4k, name="pin", depth=2)
     of_pout = ObjectFifo(u8_2k, name="pout", depth=2)
@@ -479,94 +612,114 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                                  depths=[2] * (ACORES - 1), obj_types=[b512] * (ACORES - 1),
                                  names=[f"og{c}" for c in range(1, ACORES)])
 
-    rtp = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(4, dtype=np.int32), use_write_rtp=True)
+    rtp = [Buffer(rtp_ty, name=f"rtp{c}", initial_value=np.zeros(8, dtype=np.int32), use_write_rtp=True)
            for c in range(N_CORES)]
+    # the helper cores' run-time words: [positions, the last query's pb index (attention)]
+    hrtp = {k: Buffer(np.ndarray[(2,), np.dtype[np.int32]], name=f"hrtp_{k}", initial_value=np.zeros(2, dtype=np.int32),
+                      use_write_rtp=True) for k in ["norm", "post", "glue"] + [f"attn{c}" for c in range(ACORES)]}
+    # a core reads its words only after its barrier, which the stream sets after writing them, in the parts it works in
+    mbar = [WorkerRuntimeBarrier() for _ in range(N_CORES)]
+    hbar = {k: WorkerRuntimeBarrier() for k in hrtp}
 
     def count_bufs(c):
         i32n = lambda v: np.array(v, dtype=np.int32)
         return ([Buffer(np.ndarray[(len(KC),), np.dtype[np.int32]], name=f"kc{c}", initial_value=i32n(KC))]
                 + [Buffer(np.ndarray[(len(v),), np.dtype[np.int32]], name=f"{n}{c}", initial_value=i32n(v))
-                   for n, v in KH.items()])
+                   for n, v in KD.items()])
 
-    # ---- the main cores
-    def prep2(xin, prep, tab, kk, nx):
-        for i in range_(nx):
-            xe = xin.acquire(1)
-            prep(xe, tab, kk, i)
-            xin.release(1)
+    # ---- the main cores: four token rows a weight pass (gemv_t4.h)
+    def prepx(xin, prep, tab, kk, nx, npos):
+        for j in range_(npos):
+            for i in range_(nx):
+                xe = xin.acquire(1)
+                prep(xe, tab, 3, kk, i, j)
+                xin.release(1)
 
-    def gemv2(win, yout, tab, gy, nbands, ng):
+    def gemv4(win, yout, tab, g4, nbands, ng):
         for _ in range_(nbands):
-            ye = yout.acquire(2)
+            ye = yout.acquire(1)
             for g in range_(ng):
                 we = win.acquire(1)
-                gy(we, tab, ye[0], ye[1], g, ng, 2)
+                g4(we, tab, ye, g, ng)
                 win.release(1)
-            yout.release(2)
+            yout.release(1)
 
-    def vdn_body(win, yout, tab, Kc, nheads, npos, dk):
+    def sliced(win, xin, yout, tab, Kc, kind, ns, ne, ngs, nbands, npos):
+        for s in range_(ns):
+            for j in range_(npos):
+                for i in range_(ne):
+                    xe = xin.acquire(1)
+                    Kc["sprep"](xe, tab, kind, s, i, j)
+                    xin.release(1)
+            for b in range_(nbands):
+                for g in range_(ngs):
+                    we = win.acquire(1)
+                    Kc["g4p"](we, tab, b, g, ngs, s)
+                    win.release(1)
+        for b in range_(nbands):
+            ye = yout.acquire(1)
+            Kc["yout"](tab, ye, 0, b)
+            yout.release(1)
+
+    def vdn_body(win, yout, tab, Kc, nheads, npos, nhalf, kc):
         for _ in range_(nheads):
             for p in range_(npos):
                 e = win.acquire(1)
                 Kc["vrec"](e, tab, p)
                 win.release(1)
-            for h in range_(dk[0]):
-                for ei in range_(dk[1]):
+            for h in range_(kc[2]):
+                for ei in range_(kc[3]):
                     e = win.acquire(1)
                     Kc["vld"](e, tab, ei)
                     win.release(1)
                 for p in range_(npos):
-                    for r2 in range_(dk[2]):
-                        ye = yout.acquire(2)
-                        Kc["vrow"](tab, ye[0], ye[1], p, r2, h)
-                        yout.release(2)
-            for p in range_(npos):
-                for h in range_(dk[0]):
-                    ye = yout.acquire(1)
-                    Kc["vofin"](tab, ye, p, h)
-                    yout.release(1)
+                    for r4 in range_(kc[4]):
+                        ye = yout.acquire(1)
+                        for k in range_(kc[2]):
+                            Kc["vrow"](tab, ye, p, r4, h, k)
+                        yout.release(1)
+            for p2 in range_(nhalf):                              # two positions' o (both halves) a y set
+                ye = yout.acquire(1)
+                Kc["yout"](tab, ye, 1, p2)
+                yout.release(1)
 
-    def main_body(win, xin, yout, my_rtp, kc, hk, hn, hg, dk, tab, ms, *ks):
+    def main_body(win, xin, yout, my_rtp, bar, kc, sns, sne, sng, skind, sffn, tab, ms, *ks):
         Kc = dict(zip(KN, ks))
-        nx, ng_hid, ng_out, npieces = kc[0], kc[1], kc[2], kc[3]
-        prep2(xin, Kc["prep"], tab, HID, nx)
+        bar_wait(bar)
         nbands, nheads, npos = my_rtp[0], my_rtp[1], my_rtp[2]
-        gemv2(win, yout, tab, Kc["gy"], nbands, ng_hid)
+        prepx(xin, Kc["sprep"], tab, HID, kc[0], npos)
+        gemv4(win, yout, tab, Kc["g4"], nbands, kc[1])
 
         def layer_rest():
-            vdn_body(win, yout, tab, Kc, nheads, npos, dk)
-            prep2(xin, Kc["prep"], tab, OUT_K, nx)
-            gemv2(win, yout, tab, Kc["gy"], OUT_PC, ng_out)
-            # the dense FFN (xcommon.ffn_body, two positions)
-            prep2(xin, Kc["prep"], tab, HID, nx)
-            for _ in range_(X.FFN.UP_PC):
-                for g in range_(ng_hid):
-                    we = win.acquire(1)
-                    Kc["gms"](we, tab, ms, g, ng_hid, R.ffn.MS_U)
-                    win.release(1)
-                for g in range_(ng_hid):
-                    we = win.acquire(1)
-                    Kc["gms"](we, tab, ms, g, ng_hid, R.ffn.MS_G)
-                    win.release(1)
-                ye = yout.acquire(2)
-                Kc["act"](ms, ye[0], ye[1])
-                yout.release(2)
-            for pc in range_(npieces):
-                prep2(xin, Kc["prepf"], tab, hk[pc], hn[pc])
-                gemv2(win, yout, tab, Kc["gy"], X.FFN.DOWN_PC, hg[pc])
+            vdn_body(win, yout, tab, Kc, nheads, npos, my_rtp[4], kc)
+            for t in range_(kc[5]):                             # out | o, then the down projection's two K pieces
+                sliced(win, xin, yout, tab, Kc, skind[t], sns[t], sne[t], sng[t], OUT_PC, npos)
+                for _ in range_(sffn[t]):                       # after out: the FFN's xm and up / gate
+                    prepx(xin, Kc["sprep"], tab, HID, kc[0], npos)
+                    for _ in range_(X.FFN.UP_PC):
+                        for u in range_(kc[2]):
+                            for g in range_(kc[1]):
+                                we = win.acquire(1)
+                                Kc["gms"](we, tab, ms, g, kc[1], u)
+                                win.release(1)
+                        ye = yout.acquire(1)
+                        Kc["act"](ms, ye)
+                        yout.release(1)
 
         for _ in range_(my_rtp[3]):                            # 1 | 0: the tail stops after the head
             layer_rest()
 
     # ---- the norm helper: each of its three stages once per position
-    def vln_body(ain, aout, f_nr, f_add2, f_add3):
-        for _ in range_(VW):                                  # 1. entry norm  [x0 x1 lnw] -> [xn]
+    def vln_body(ain, aout, nrtp, bar, f_nr, f_add2, f_add3):
+        bar_wait(bar)
+        npos = nrtp[0]
+        for _ in range_(npos):                                  # 1. entry norm  [x0 x1 lnw] -> [xn]
             e = ain.acquire(3)
             o = aout.acquire(1)
             f_nr(e[0], e[1], e[2], o)
             aout.release(1)
             ain.release(3)
-        for _ in range_(VW):                                  # 2. res = x + out; xm = norm(res)
+        for _ in range_(npos):                                  # 2. res = x + out; xm = norm(res)
             for _ in range(2):
                 e = ain.acquire(2)
                 o = aout.acquire(1)
@@ -578,7 +731,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             f_nr(e[0], e[1], e[2], o)
             aout.release(1)
             ain.release(3)
-        for _ in range_(VW):                                  # 3. xres = res + (out2 + out2b)
+        for _ in range_(npos):                                  # 3. xres = res + (out2 + out2b)
             for _ in range(2):
                 e = ain.acquire(3)
                 o = aout.acquire(1)
@@ -587,10 +740,11 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                 ain.release(3)
 
     # ---- glue, post, attention, h prep: dux.py's bodies, once per position
-    def glue_body(sin, ain, oout, abt, gk, acc_a, acc_b, decay, beta, xt, seq, fcopy, fab, fsmall, fconv, frows, frow,
+    def glue_body(sin, ain, oout, abt, gk, grtp, bar, acc_a, acc_b, decay, beta, xt, seq, fcopy, fab, fsmall, fconv, frows, frow,
                   fkq, fv):
         """The state rows are copied out first: release() frees a fifo's oldest elements, so none can be held."""
-        npos = gk[0]
+        bar_wait(bar)
+        npos = grtp[0]
         for h in range_(len(AB_TILES)):                         # run-time loop: one copy of the body, not one per half
             for p in range_(npos):
                 e = sin.acquire(1)
@@ -599,10 +753,10 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             for acc in (acc_a, acc_b):
                 for tile in range_(abt[h]):
                     ww = sin.acquire(1)
-                    fab(ww, xt, acc, tile, h)
+                    fab(ww, xt, acc, tile, h, npos)
                     sin.release(1)
         sm = sin.acquire(1)
-        fsmall(sm, acc_a, acc_b, decay, beta)
+        fsmall(sm, acc_a, acc_b, decay, beta, npos)
         sin.release(1)
         for base, ntiles, nel in ((0, KEY_TILES, gk[1]), (KEY_TILES, VALUE_TILES, gk[2])):
             for tt in range_(ntiles):
@@ -629,13 +783,14 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                         frow(seq, o, p, k)
                         oout.release(1)
 
-    def post_body(ain, aout, nwb, f, fc):
+    def post_body(ain, aout, prtp, bar, nwb, f, fc):
+        bar_wait(bar)
         """Group-major: group g is DeltaNet round g, done for every position at once."""
         e = ain.acquire(1)
         fc(e, nwb)
         ain.release(1)
         for _ in range_(NG):
-            for _ in range_(VW):
+            for _ in range_(prtp[0]):
                 e = ain.acquire(2)
                 r = aout.acquire(1)
                 f(e[0], e[1], nwb, r)
@@ -645,9 +800,10 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     HPE = NH // A.Q_AIN_ELEMS                 # heads per q element
     assert NHL % HPE == 0
 
-    def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, an, fm, fq_, fk, fv, fi, fsn, ff, fsb, c):
+    def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, oacc, ml, pb, an, bar, fm, fq_, fk, fv, fi, fsn, ff, fsb, c):
         """One window walk serves every query: blocks past a query's position are all padding to it."""
         h0, e0, ne = c * NHL, c * NHL // HPE, NHL // HPE
+        bar_wait(bar)
         npos = an[0]
 
         def skip(k, w=1):
@@ -668,27 +824,23 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             skip(A.Q_AIN_ELEMS - e0 - ne)
         for p in range_(npos):
             if aout is not None:
-                for h in range_(A.K_AIN_ELEMS):
-                    e = ain.acquire(1)
-                    fk(e, kn, cs, tmp, kout, h, p)
-                    ain.release(1)
-                for h in range_(A.K_AIN_ELEMS):
-                    e = ain.acquire(1)
-                    fv(e, vout, h)
-                    ain.release(1)
                 o = aout.acquire(1)
-                for j in range_(KVW):
-                    o[j] = kout[j]
+                for h in range_(A.K_AIN_ELEMS):
+                    e = ain.acquire(1)
+                    fk(e, kn, cs, tmp, o, h, p)
+                    ain.release(1)
                 aout.release(1)
                 o = aout.acquire(1)
-                for j in range_(KVW):
-                    o[j] = vout[j]
+                for h in range_(A.K_AIN_ELEMS):
+                    e = ain.acquire(1)
+                    fv(e, o, h)
+                    ain.release(1)
                 aout.release(1)
             else:
                 skip(2 * A.K_AIN_ELEMS)
         for p in range_(npos):
             fi(oacc, ml, p)
-        for _ in range_(pb[(VW - 1) * 8 + 4]):                  # the last query's window covers every query's
+        for _ in range_(pb[an[1]]):                             # the last query's window covers every query's
             e = ain.acquire(2 * RB)
             for p in range_(npos):
                 fsb(*([e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb, h0, p]))
@@ -706,29 +858,32 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                 ain.release(2)
             skip((ACORES - 1 - c) * N_OG, 2)
 
-    def attn_body(ain, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, an, fm, fq_, fk, fv, fi, fsn, ff, fsb):
-        _attn(ain, aout, aout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, an, fm, fq_, fk, fv, fi, fsn, ff, fsb, 0)
+    def attn_body(ain, aout, qn, kn, cs, qs, tmp, oacc, ml, pb, an, bar, fm, fq_, fk, fv, fi, fsn, ff, fsb):
+        _attn(ain, aout, aout, qn, kn, cs, qs, tmp, oacc, ml, pb, an, bar, fm, fq_, fk, fv, fi, fsn, ff, fsb, 0)
 
     def make_attn_body(c):
-        def body(ain, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, an, fm, fq_, fk, fv, fi, fsn, ff, fsb):
-            _attn(ain, None, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, an, fm, fq_, fk, fv, fi, fsn, ff, fsb, c)
+        def body(ain, ogout, qn, kn, cs, qs, tmp, oacc, ml, pb, an, bar, fm, fq_, fk, fv, fi, fsn, ff, fsb):
+            _attn(ain, None, ogout, qn, kn, cs, qs, tmp, oacc, ml, pb, an, bar, fm, fq_, fk, fv, fi, fsn, ff, fsb, c)
         return body
 
     def abufs(c):
         s = "" if c == 0 else str(c)
+        # only core 0 makes the new rows; the other cores' tmp is never touched
+        tmp_ty = f256 if c == 0 else np.ndarray[(16,), np.dtype[np.float32]]
         return [Buffer(b256, name=f"qn{s}"), Buffer(b256, name=f"kn{s}"), Buffer(csv_ty, name=f"cs{s}"),
-                Buffer(qsv_ty, name=f"qs{s}"), Buffer(f256, name=f"tmp{s}"), Buffer(b512, name=f"kout{s}"),
-                Buffer(b512, name=f"vout{s}"), Buffer(oav_ty, name=f"oacc{s}"), Buffer(mlv_ty, name=f"ml{s}"),
+                Buffer(qsv_ty, name=f"qs{s}"), Buffer(tmp_ty, name=f"tmp{s}"), Buffer(oav_ty, name=f"oacc{s}"),
+                Buffer(mlv_ty, name=f"ml{s}"),
                 Buffer(pbv_ty, name=f"pb{s}"),
-                Buffer(np.ndarray[(2,), np.dtype[np.int32]], name=f"an{s}", initial_value=np.array([VW, 0], dtype=np.int32))]
+                hrtp[f"attn{c}"], hbar[f"attn{c}"]]
 
-    workers = [Worker(vln_body, fn_args=[of_lni.cons(), of_lno.prod(), L["ln_nr"], L["ln_add2"], L["ln_add3"]],
+    workers = [Worker(vln_body, fn_args=[of_lni.cons(), of_lno.prod(), hrtp["norm"], hbar["norm"], L["ln_nr"], L["ln_add2"],
+                                         L["ln_add3"]],
                       tile=Tile(0, 3), stack_size=0x1800)]
     for c in range(N_CORES):
         workers.append(Worker(main_body,
-                              fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), rtp[c], *count_bufs(c),
-                                       Buffer(tab2, name=f"tab{c}"), Buffer(ms2, name=f"ms{c}"), *[K[n] for n in KN]],
-                              tile=Tile(c, 2), stack_size=0x1800))
+                              fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), rtp[c], mbar[c], *count_bufs(c),
+                                       Buffer(tabv, name=f"tab{c}"), Buffer(ms4, name=f"ms{c}"), *[K[n] for n in KN]],
+                              tile=Tile(c, 2), stack_size=MAIN_STACK))
     f32_1k = np.ndarray[(1024,), np.dtype[np.float32]]
     of_hpi = ObjectFifo(f32_1k, name="hpi", depth=2)
     u8_tab = np.ndarray[(H1_X * ELEM,), np.dtype[np.uint8]]
@@ -750,35 +905,46 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
     workers.append(Worker(hprep_body, fn_args=[of_hpi.cons(), of_hpo.prod(), Buffer(u8_tab, name="hptab"),
                                                f_hblk, f_hout], tile=HPREP_TILE, stack_size=0x800))
-    workers.append(Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), Buffer(nw_ty, name="nwb"), post_fn, post_copy],
+    workers.append(Worker(post_body, fn_args=[of_pin.cons(), of_pout.prod(), hrtp["post"], hbar["post"],
+                                              Buffer(nw_ty, name="nwb"), post_fn, post_copy],
                           tile=Tile(1, 3), stack_size=0x1800))
     workers.append(Worker(glue_body,
                           fn_args=[of_side.cons(), of_gact.cons(), of_gout.prod(),
                                    Buffer(np.ndarray[(len(AB_TILES),), np.dtype[np.int32]], name="abt",
                                           initial_value=np.array(AB_TILES, dtype=np.int32)),
                                    Buffer(np.ndarray[(4,), np.dtype[np.int32]], name="gk",
-                                          initial_value=np.array([VW, 6, 4, CONV_ROWS], dtype=np.int32)),
+                                          initial_value=np.array([VW, 6, 4, CONV_ROWS], dtype=np.int32)), hrtp["glue"],
+                                   hbar["glue"],
                                    Buffer(accn_ty, name="acc_a"), Buffer(accn_ty, name="acc_b"),
                                    Buffer(dbn_ty, name="decay"), Buffer(dbn_ty, name="beta"),
                                    Buffer(xt_ty, name="xt"), Buffer(seq_ty, name="seq"),
                                    f_gcopy, f_gab, f_gsmall, f_gconv, f_grows, f_grow, f_gkq, f_gv],
-                          tile=GLUE_TILE, stack_size=0x1800))
+                          tile=GLUE_TILE, stack_size=GLUE_STACK))
     afns = [f_meta, f_q, f_k, f_v, f_init, f_stepn, f_fin, f_stepb]
     workers.append(Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,
-                          tile=Tile(2, 3), stack_size=0x1800))
+                          tile=Tile(2, 3), stack_size=ATTN_STACK))
     for c in range(1, ACORES):
         workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), og_subs[c - 1].prod()] + abufs(c) + afns,
-                              tile=Tile(2 + c, 3), stack_size=0x1800))
+                              tile=Tile(2 + c, 3), stack_size=ATTN_STACK))
 
     def set_rtp(nbands: int, nheads: int, rest: int = 1):
         for c in range(N_CORES):
             rtp[c][0] = nbands
             rtp[c][1] = nheads
-            rtp[c][2] = VW
+            rtp[c][2] = N
             rtp[c][3] = rest
+            rtp[c][4] = (N + 1) // 2
+        for k, b in hrtp.items():
+            b[0] = N
+            b[1] = (N - 1) * 8 + 4
+        for b in mbar:
+            b.set(1)
+        for k, b in hbar.items():
+            if k == "norm" or (part == 0 and k in ("post", "glue")) or (part == 1 and k.startswith("attn")):
+                b.set(1)
 
     def entry_norm(pl, lni, lno, c_xres, a_consts, a_act, lnw_off, xn_off):
-        for p in range(VW):
+        for p in range(N):
             pl.fill(lni, c_xres, bt(XRES_T, p * HID, HID))
             pl.fill(lni, a_consts, bt(CONSTS_T, lnw_off, ELN))
             pl.drain(lno, a_act, bt(ACT_T, p * ACT1 + xn_off, ELN))
@@ -786,7 +952,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     def residual_norm(lni, lno, c_xres, a_act, a_consts, a_out, a_res, a_xm, c_postln, after=None):
         """xcommon.ln_split_residual_norm once per position; after(p) once position p's xm is in DDR."""
         hh = HID // 2
-        for p in range(VW):
+        for p in range(N):
             o = p * ACT1
             pl = Pipeline(3)
             for i in range(2):
@@ -803,7 +969,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
     def close(lni, lno, c_xres, a_act, a_res, a_out2, a_out2b):
         """xcommon.ln_split_close once per position."""
-        for p in range(VW):
+        for p in range(N):
             o = p * ACT1
             pl = Pipeline(3)
             for i in range(2):
@@ -824,23 +990,26 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
                 pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_FFN_GATE + (c * X.FFN.UP_PC + j) * bb_h, bb_h))
         py.finish(*y_conss)                                   # h is in DDR, both positions
         k0, k1 = X.DOWN_SPLIT
-        for p in range(VW):
-            px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + a_h, k0 * 4))
+        (ns0, _, nc0), (ns1, _, nc1) = SL_DOWN
+        px.fill(x_prod, a_act, slices_x(a_h, ns0, 2 * ELEM))
         ph = Pipeline(3)
-        for p in range(VW):
+        for p in range(N):
             ph.fill(hpi, a_act, bt(ACT_T, p * ACT1 + a_h + k0 * 4, k1 * 4))
             ph.drain(hpo, a_act, bt(ACT_T, p * ACT1 + a_ht, H1_X * ELEM))
         for c in range(N_CORES):
-            pw.fill(w_prods[c], a_pool, X.piece_tap(POOL_FFN_DOWN + c * X.FFN.DOWN_PC * bb_f, bb_f,
-                                                    X.role_band_bytes("ffn", k0), X.FFN.DOWN_PC))
+            pw.fill(w_prods[c], a_pool, slices_w(POOL_BYTES, POOL_FFN_DOWN + c * X.FFN.DOWN_PC * bb_f, bb_f, X.FFN.DOWN_PC,
+                                                 ns0, nc0))
             py.drain(y_conss[c], a_act, y2(ACT_T, a_out2 + c * X.FFN.DOWN_PC * YB, X.FFN.DOWN_PC, ACT1))
-        ph.finish()                                           # both positions' piece-1 tables are in DDR
-        for p in range(VW):
-            px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + a_ht, H1_X * ELEM))
+        # weights first: px holds three tasks, and slice s + 1's x is taken only after slice s's weights
         for c in range(N_CORES):
-            pw.fill(w_prods[c], a_pool, X.piece_tap(POOL_FFN_DOWN + c * X.FFN.DOWN_PC * bb_f + X.role_band_bytes("ffn", k0),
-                                                    bb_f, X.role_band_bytes("ffn", k1), X.FFN.DOWN_PC))
+            pw.fill(w_prods[c], a_pool, slices_w(POOL_BYTES, POOL_FFN_DOWN + c * X.FFN.DOWN_PC * bb_f + X.role_band_bytes("ffn", k0),
+                                                 bb_f, X.FFN.DOWN_PC, ns1, nc1))
             py.drain(y_conss[c], a_act, y2(ACT_T, a_out2b + c * X.FFN.DOWN_PC * YB, X.FFN.DOWN_PC, ACT1))
+        ph.finish()                                           # every position's piece-1 table is in DDR
+        for s in range(ns1):                                  # each position's element s / 2, then element 4 (the last: 4, unread)
+            e = s // 2
+            px.fill(x_prod, a_act, TensorAccessPattern((1, ACT_T), a_ht + e * ELEM, [N, 2, 2, 2048],
+                                                       [ACT1, max(H1_X - 1 - e, 1) * ELEM, 2048, 1]))
 
     def dn_post(pw, py, a_state, a_act, a_consts, w_prods, y_conss, pin_p, pout_c, glue_wait):
         """Round h is head 8 h + c on core c for every position; post group h follows round h."""
@@ -849,7 +1018,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         pp.fill(pin_p, a_consts, bt(CONSTS_T, C_NW, ELEM))
 
         def post_group(g):
-            for p in range(VW):
+            for p in range(N):
                 o = p * ACT1
                 pp.drain(pout_c, a_act, bt(ACT_T, o + A_OG + g * G * 2, G * 2))
                 pp.fill(pin_p, a_act, bt(ACT_T, o + A_O + g * G * 4, G * 4))
@@ -858,15 +1027,15 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         def drains(hd):
             s_off = STATE_S_OFF + hd * S_HEAD_BYTES
             out = [TensorAccessPattern((1, STATE_T), (p + 1) * SLOT + s_off + h2 * 256, [1, 1, 128, 256], [0, 0, 512, 1])
-                   for h2 in range(2) for p in range(VW)]
+                   for h2 in range(2) for p in range(N)]
             return [(a_state, t) for t in out] + [
-                (a_act, TensorAccessPattern((1, ACT_T), A_O + hd * ohb, [1, 1, VW, ohb], [0, 0, ACT1, 1]))]
+                (a_act, TensorAccessPattern((1, ACT_T), A_O + hd * ohb, [1, 1, NO, ohb], [0, 0, ACT1, 1]))]
 
         for h in range(DN_HEADS_PC):
             glue_wait(h)
             for c in range(N_CORES):
                 hd = h * N_CORES + c
-                pw.fill(w_prods[c], a_act, TensorAccessPattern((1, ACT_T), A_VEC + hd * rec, [1, 1, VW, X.CALL_BYTES],
+                pw.fill(w_prods[c], a_act, TensorAccessPattern((1, ACT_T), A_VEC + hd * rec, [1, 1, N, X.CALL_BYTES],
                                                                [0, 0, ACT1, 1]))
                 # [half][quarter plane][rows 0..135][128 B]: 17 rows an element; rows past 127 are never used
                 pw.fill(w_prods[c], a_state, TensorAccessPattern((1, STATE_T), STATE_S_OFF + hd * S_HEAD_BYTES,
@@ -891,7 +1060,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, POOL_QKV + c * QKV_PC * BB_HID, QKV_PC * BB_HID))
-        for p in range(VW):                                   # position p's xn as soon as it is in DDR
+        for p in range(N):                                   # position p's xn as soon as it is in DDR
             pl.finish_oldest(lno)
             px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + A_XN, XN_ELEMS * ELEM))
         pl.finish()
@@ -904,7 +1073,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
             """Fill order must match vg_ab's half-outer loop."""
             off = 0
             for h, ntiles in enumerate(AB_TILES):
-                for p in range(VW):
+                for p in range(N):
                     ps.fill(side_p, a_act, bt(ACT_T, p * ACT1 + A_XN + h * ELEM, ELEM))
                 for reg in (SIDE_ALPHA, SIDE_BETA):
                     ps.fill(side_p, a_consts, bt(CONSTS_T, C_SIDE + reg + off, ntiles * ELEM))
@@ -915,17 +1084,17 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
         def conv_tile(pipe, tt):
             pipe.fill(gact_p, a_state, rows3(tt, 0))
-            pipe.fill(gact_p, a_act, TensorAccessPattern((1, ACT_T), A_QKV + tt * TILE * 4, [1, 1, VW, TILE * 4],
+            pipe.fill(gact_p, a_act, TensorAccessPattern((1, ACT_T), A_QKV + tt * TILE * 4, [1, 1, N, TILE * 4],
                                                          [0, 0, ACT1, 1]))
             if tt < KEY_TILES:                                # q (tiles 0, 1) at record + 512, k (2, 3) at + 0
                 off = A_VEC + 8 * (tt % 2) * G3 + (512 if tt < 2 else 0)
-                tap = TensorAccessPattern((1, ACT_T), off, [VW, 8, 3, 512], [ACT1, G3, D.RECORD_BYTES, 1])
+                tap = TensorAccessPattern((1, ACT_T), off, [N, 8, 3, 512], [ACT1, G3, D.RECORD_BYTES, 1])
             else:
                 off = A_VEC + 8 * (tt - KEY_TILES) * D.RECORD_BYTES + 1024
-                tap = TensorAccessPattern((1, ACT_T), off, [1, VW, 8, 1024], [0, ACT1, D.RECORD_BYTES, 1])
+                tap = TensorAccessPattern((1, ACT_T), off, [1, N, 8, 1024], [0, ACT1, D.RECORD_BYTES, 1])
             pipe.drain(gout_c, a_act, tap)
             rec = pipe._q(gout_c)[-1]
-            for p in range(VW):
+            for p in range(N):
                 pipe.drain(gout_c, a_state, rows3(tt, p + 1))
             return rec
 
@@ -948,10 +1117,9 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         dn_post(pw, py, a_state, a_act, a_consts, w_prods, y_conss, pin_p, pout_c, glue_wait)
         pipe.finish()
         ps.finish()
-        for p in range(VW):
-            px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + A_OG, OG_ELEMS * ELEM))
+        px.fill(x_prod, a_act, slices_x(A_OG, SL_OUT[0], ELEM))
         for c in range(N_CORES):
-            pw.fill(w_prods[c], a_consts, bt(CONSTS_T, C_WOUT + c * OUT_PC * BB_OUT, OUT_PC * BB_OUT))
+            pw.fill(w_prods[c], a_consts, slices_w(CONSTS_T, C_WOUT + c * OUT_PC * BB_OUT, BB_OUT, OUT_PC, SL_OUT[0], SL_OUT[2]))
             py.drain(y_conss[c], a_act, y2(ACT_T, A_OUT + c * OUT_PC * YB, OUT_PC, ACT1))
         py.finish()
         residual_norm(lni, lno, c_xres, a_act, a_consts, A_OUT, A_RES, A_XM, C_POSTLN,
@@ -984,7 +1152,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         pw, py, px = Pipeline(3), Pipeline(3), Pipeline(3)
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[0]))
-        for p in range(VW):                                   # position p's xn as soon as it is in DDR
+        for p in range(N):                                   # position p's xn as soon as it is in DDR
             pl.finish_oldest(lno)
             px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + AA_XN, XN_ELEMS * ELEM))
         pl.finish()
@@ -1010,39 +1178,35 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         for c in range(N_CORES):
             await_task(py, y_conss[c], last[c, 0])                  # q of every position is in DDR
-        for p in range(VW):
+        for p in range(N):
             o = p * ACT1
             pa_in.fill(ain_p, a_consts, bt(CONSTS_T, CA_META, A.E_A))
             pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, (1 + p) * PTAB_ROW, PTAB_ROW))     # the record (attnposv)
             pa_in.fill(ain_p, a_act, bt(ACT_T, o + AA_QG, QW * 4))
         for c in range(N_CORES):
             await_task(py, y_conss[c], last[c, 3])                  # k and v
-        for p in range(VW):
+        for p in range(N):                                   # a row's drain before the next k / v: aout holds one row
             o = p * ACT1
             pa_in.fill(ain_p, a_act, bt(ACT_T, o + AA_KVN, KVW * 4))
             pa_in.fill(ain_p, a_act, bt(ACT_T, o + AA_KVN + KVW * 4, KVW * 4))
-        for p in range(VW):
             pa_out.drain(aout_c, a_kv, bt(STATE_T, (1 + p) * KV_ROW, KV_ROW))   # the new rows (attnposv)
         pa_out.finish()                                             # ... are in the cache
         pa_in.fill(ain_p, a_kv, bt(STATE_T, 0, KV_ROW))             # the window, once (attnposv: the last query's)
         for c in range(N_CORES):
             await_task(py, y_conss[c], last[c, 1])                  # gate
         for c in range(N_CORES):
-            pw.fill(w_prods[c], a_pool, bt(POOL_BYTES, *w_regions(c)[4]))
+            pw.fill(w_prods[c], a_pool, slices_w(POOL_BYTES, POOL_O + c * O_PC * BB_O, BB_O, O_PC, SL_OUT[0], SL_OUT[2]))
             off, nb = y_regions(c)[4]
             py.drain(y_conss[c], a_act, y2(ACT_T, off, nb, ACT1))
-        for p in range(VW):
+        for p in range(N):                                   # og drains per position: the og fifos are two deep
             o = p * ACT1
             pa_in.fill(ain_p, a_kv, bt(STATE_T, (1 + p) * KV_ROW, KV_ROW))     # its own row, back (attnposv)
             pa_in.fill(ain_p, a_act, bt(ACT_T, o + AA_QG + QW * 4, QW * 4))
-        for p in range(VW):
-            o = p * ACT1
             pa_out.drain(aout_c, a_act, bt(ACT_T, o + AA_OG, OG_BYTES))
             pa_out.drain(ogj_c, a_act, bt(ACT_T, o + AA_OG + OG_BYTES, (ACORES - 1) * OG_BYTES))
         pa_out.finish()
         pa_in.finish()
-        for p in range(VW):
-            px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + AA_OG, OG_ELEMS * ELEM))
+        px.fill(x_prod, a_act, slices_x(AA_OG, SL_OUT[0], ELEM))
         py.finish()
         residual_norm(lni, lno, c_xres, a_act, a_consts, AA_OUT, AA_RES, AA_XM, CA_POSTLN,
                       lambda p: px.fill(x_prod, a_act, bt(ACT_T, p * ACT1 + AA_XM, XN_ELEMS * ELEM)))
@@ -1056,7 +1220,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
     def lm_sequence(a_pool, c_xres, a_norm, a_logits, a_act, lni, lno, w_prods, x_prod, y_conss):
         set_rtp(LM_BANDS_PC, 0, 0)
         pl = Pipeline(3)
-        for p in range(VW):                                  # hn_p = final_norm(xres_p): stage 1
+        for p in range(N):                                  # hn_p = final_norm(xres_p): stage 1
             pl.fill(lni, c_xres, bt(XRES_T, p * HID, HID))
             pl.fill(lni, a_norm, bt(ELN, 0, ELN))
             pl.drain(lno, a_act, bt(ACT_T, p * LM_ACT, ELN))
@@ -1065,13 +1229,13 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(LM_POOL, c * LM_BANDS_PC * LM_BAND_BYTES, LM_BANDS_PC * LM_BAND_BYTES))
             py.drain(y_conss[c], a_logits, y2(STATE_T, c * LM_BANDS_PC * YB, LM_BANDS_PC, lstride))
-        for p in range(VW):
+        for p in range(N):
             pl.finish_oldest(lno)
             px.fill(x_prod, a_act, bt(ACT_T, p * LM_ACT, XN_ELEMS * ELEM))
         pl.finish()
         # the norm helper's stages 2 and 3 on junk, once per position, so it is back on stage 1
         pj = Pipeline(3)
-        for n_in in (2, 2, 3) * VW + (3, 3) * VW:
+        for n_in in (2, 2, 3) * N + (3, 3) * N:
             for _ in range(n_in):
                 pj.fill(lni, a_act, bt(ACT_T, 0, ELN))
             pj.drain(lno, a_act, bt(ACT_T, LM_JUNK, ELN))
@@ -1104,7 +1268,7 @@ def vux(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *
 
 
 DESIGN = vux
-_src = b"".join([p.read_bytes() for p in sorted(SRC.values())] + [(HERE / "gemv_t2x2.h").read_bytes(),
+_src = b"".join([p.read_bytes() for p in sorted(SRC.values())] + [(HERE / "gemv_t4.h").read_bytes(),
                 (HERE / "vdn.h").read_bytes(),
                 (HERE / "vux.py").read_bytes()]
                 + sorted(f.read_bytes() for f in LX.glob("*.cc")) + sorted(f.read_bytes() for f in LX.glob("*.h"))
