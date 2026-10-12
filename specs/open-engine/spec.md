@@ -4228,3 +4228,7 @@ on `replica_block.py`'s fixture (T 6, t_real 5, 4 value heads, head_dim 8, taps 
 sequential conv state and S bit for bit at k = 1, 2, 4 and 5, k = 5 reproduces the taped block's
 own final state, and the five pre-existing `deltanet_block` checks are unchanged by the shared
 step. No kernel and no hardware is involved in any of it, which is the point of doing it first.
+
+**Result 2026-10-12 (the mismatched tape).** The throw criterion is now tested: a tape from a
+block of another `t_real`, and a tape with an oversized per-token array, both throw. Both
+replayed silently under the first version's at-least-this-big size checks.

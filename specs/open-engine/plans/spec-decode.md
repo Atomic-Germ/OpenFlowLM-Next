@@ -134,8 +134,10 @@ bf16 run on the host to check that acceptance holds.
 **Wiring (OPEN-SPEC-LOSSLESS, OPEN-SPEC-PACKAGING).** `prefill -> [draft -> verify ->
 accept/rollback -> feed back]`, one device, every wait passive (CPU spinning slows the NPU).
 Greedy acceptance at temperature 0; standard rejection sampling above it, so the output
-distribution is the target's. Exposed as `oflm serve ... --draft <drafter>`, and `oflm-add`
-links a model to its drafter.
+distribution is the target's. **Off by default**: it runs only with `OFLM_SPECULATIVE=1`, the
+same switch K2's Uno drafter uses (#184), because whether it pays depends on the model and the
+context length. The drafter is its own file next to the model, as the vision weights are, and
+is not loaded unless the switch is on. `oflm-add` links a model to its drafter.
 
 ## PRs
 
@@ -147,7 +149,8 @@ links a model to its drafter.
 | **4** | the drafter on the NPU | 3, for the taps |
 | **5** | wiring + `oflm serve` + `oflm-test --llm --tools` with speculation on: the first real speedup number | 3, 4 |
 
-None of PRs 1-5 depend on #161. Only the 2-bit expert work (PR 6) does.
+None of PRs 1-5 depend on #161. Only the 2-bit expert work (PR 6) does. PRs 1-4 add nothing a
+request can reach; PR 5 is the first that changes serving, and only with the switch on.
 
 ## Requirements
 
@@ -156,5 +159,5 @@ None of PRs 1-5 depend on #161. Only the 2-bit expert work (PR 6) does.
 | OPEN-SPEC-VERIFY | test + manual | in `spec.md`; unit part passing; hardware not run |
 | OPEN-SPEC-ONE-CONTEXT | test + manual | new, PR 2. The verify pass's (and the block prefill's) kernel sets in one ELF; bit-exact against the xclbin route |
 | OPEN-SPEC-DFLASH | manual | new, PR 4. Draft tokens match the HF reference given the same features |
-| OPEN-SPEC-LOSSLESS | test + manual | new, PR 5. Unit: the rejection sampler with a fixed seed gives the target distribution. Hardware: greedy output equal except near-ties |
+| OPEN-SPEC-LOSSLESS | test + manual | new, PR 5. Unit: the rejection sampler with a fixed seed gives the target distribution. Hardware: greedy output equal except near-ties; with `OFLM_SPECULATIVE` unset, plain decode and no drafter loaded |
 | OPEN-SPEC-PACKAGING | manual | new, PR 5. `oflm-add` links the drafter; serve finds it |

@@ -293,6 +293,21 @@ int main(int argc, char** argv) {
                       "deltanet_rollback: accepting the whole block is the block's own final state, bit for bit");
             }
         }
+
+        // the old checks let both through: they only required each array to be at least big enough
+        auto throws = [&](const host::DeltaGeom& gg, const host::DeltaTape& tt) {
+            auto cs = cs0;
+            auto St = S0;
+            try { host::deltanet_rollback(gg, tt, 1, qkv.data(), cs.data(), St.data()); } catch (const std::runtime_error&) { return true; }
+            return false;
+        };
+        host::DeltaGeom g_short = g;
+        g_short.t_real = t_real - 1;
+        check(throws(g_short, tape), "deltanet_rollback: a tape from a block of a different t_real throws");
+        host::DeltaTape tape_long = tape;
+        tape_long.decay.push_back(0.f);
+        check(throws(g, tape_long), "deltanet_rollback: a tape with an oversized per-token array throws");
+        check(!throws(g, tape), "deltanet_rollback: the matching tape does not throw");
     }
 
     // ---- the DeltaNet stage against the obvious scalar loops, bit for bit
