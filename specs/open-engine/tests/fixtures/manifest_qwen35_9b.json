@@ -1574,7 +1574,7 @@
    "real_vocab": 248070,
    "chunk_bytes": 6144,
    "pool_bytes": 157286400,
-   "lmhead_pool_bytes": 1083179008,
+   "lmhead_pool_bytes": 1147142144,
    "lmhead_chunk_bytes": 9216,
    "kv_row": 4096,
    "ptab_row": 2048,
@@ -2348,7 +2348,7 @@
    "xresf": 16384,
    "hn": 8192,
    "logits": 993280,
-   "lmpool": 1083179008,
+   "lmpool": 1145044992,
    "ptab": {
     "per_row": 2048,
     "inv_freq": [
@@ -2766,11 +2766,12 @@
    "pool_bytes": 157286400,
    "chunk_bytes": 6144,
    "lm_head": {
-    "pool_bytes": 1083179008,
+    "pool_bytes": 1145044992,
     "ops": [
      {
       "op": "lmhead_q8_gguf",
       "tensor": "lm_head.weight",
+      "nch": 124160,
       "chunk_bytes": 9216,
       "in_dim": 4096,
       "dst": 0

@@ -595,7 +595,13 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         build_weights(lt, l, "consts", c_host);
         build_weights(lt, l, "pack", nullptr);
         if (gemm_block_t_ && lt.gemm_block.t) {
-            if (lt.gemm_block.kind == "dense") {
+            // "full" is the dense FFN plus full attention (Qwen3.5's every-fourth layer), and its
+            // consts plan lays the two FFN norms out exactly as "dense" does -- input at
+            // byte 0, post right after it at hidden * 2 -- so it takes this branch whole.
+            // It was falling through to the MoE arm below, which then reported a GGUF as
+            // "not implemented for MoE models": a dense model refused as an MoE one. The
+            // kinds this arm does not serve are the MoE ones, which is what it should say.
+            if (lt.gemm_block.kind == "dense" || lt.gemm_block.kind == "full") {
                 // the dense route's host RMSNorm reads the two norm weights as bf16;
                 // dense.py's consts plan puts input_layernorm at byte 0 and
                 // post_attention_layernorm right after it (ELN = hidden * 2 each)
@@ -633,9 +639,19 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 const GemmBlockProgram& gb = lt.gemm_block;
                 HostConsts& h = hc_[l];
                 auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
-                if (!qf)
-                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
-                auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
+                // These small tensors are read by NAME, so nothing here needs the consts
+                // layout and nothing needs the container: WeightFile::f32 covers both kinds,
+                // and for a GGUF it dequantizes (the DeltaNet gates are Q6_K, the conv1d and
+                // the norms f32). Casting to Q4nxFile to read them is what made a dense model
+                // refuse as an MoE one.
+                //
+                // The MoE kinds still refuse, and mean it: their host stages are written
+                // against the container and have not been walked on this path. Say so on the
+                // MoE test rather than on "not a Q4nxFile", which described the symptom.
+                if (!qf && !gb.has_dense_ffn())
+                    throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for a MoE "
+                                             "layer (kind '" + lt.gemm_block.kind + "', layer " + std::to_string(l) + ")");
+                auto bf = [&](const char* suffix) { return file_->f32(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + what + " has " +
@@ -658,20 +674,28 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                     // A GGUF stores the one tensor, quantized (Q6_K on this model), and is read
                     // row-wise below rather than memcpy'd.
                     auto ab = [&](const std::string& stem, std::vector<float>& out) -> size_t {
+                        // Which spelling the plan uses is the plan's business, not ours: a
+                        // Qwen3.5 consts plan names the bf16 COPY (the container keeps an
+                        // unquantized duplicate beside the quantized tensor), while the 35B's
+                        // names the plain one. Guessing wrong either way fails by name, so ask
+                        // the plan which it has and read that. The tensor it resolves to is a
+                        // plan name; reading it goes through gguf_name, so a GGUF finds its
+                        // single quantized tensor regardless of the plan's spelling.
+                        auto planned = [&](const std::string& suffix) {
+                            for (const PackOp& op : lt.consts)
+                                if (op.tensor.size() >= suffix.size() &&
+                                    op.tensor.compare(op.tensor.size() - suffix.size(), suffix.size(), suffix) == 0)
+                                    return true;
+                            return false;
+                        };
                         const std::string copy = stem + ".bf16.weight";
-                        // The bf16 COPY beside the quantized tensor is a q4nx container
-                        // arrangement, and it is there because the container quantizes these:
-                        // the host needs them in full precision, so it keeps an unquantized
-                        // duplicate. A GGUF has no such duplicate -- llama.cpp stores the
-                        // tensor once, quantized, and dequantizes on the way in (below). So
-                        // asking for the copy would send every linear-attention layer looking
-                        // for a tensor the file has not got.
-                        const bool t = !gguf_ && std::any_of(lt.consts.begin(), lt.consts.end(), [&](const PackOp& op) {
-                            return op.op == "transpose" && op.tensor.size() >= copy.size() &&
-                                   op.tensor.compare(op.tensor.size() - copy.size(), copy.size(), copy) == 0;
-                        });
+                        const bool t = planned(copy);
                         const std::string name = const_tensor(lt, t ? copy : stem + ".weight", l);
                         const auto& shape = file_->meta(name).shape;
+                        // meta().shape is row-major, and both the container's copy and the
+                        // GGUF's own tensor are [lanes, hidden] -- hidden second. (The GGUF's
+                        // fastest dim is hidden, which is what embed_row wants; the two agree
+                        // because GGUF stores fastest-first and shape reports rows first.)
                         const size_t hid_dim = t ? 1 : 0;
                         if (shape.size() != 2 || shape[hid_dim] != w_->hidden)
                             throw std::runtime_error("open_qwen36: " + name + (t ? " is not [heads, hidden]" : " is not [hidden, lanes]"));

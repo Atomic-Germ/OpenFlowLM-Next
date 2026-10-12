@@ -811,9 +811,19 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
                  std::to_string(tinfo.dims.size() == 2 ? tinfo.dims[0] : 0) +
                  "], the plan packs [" + std::to_string(op.nch * 32 / nk) + ", " +
                  std::to_string(op.in_dim) + "]");
-        const uint64_t out_dim = tinfo.dims[1];
+        const uint64_t rows = tinfo.dims[1];
+        // The plan's chunk count is the head's size; the file only has to hold at least
+        // that many rows. llama.cpp pads vocab_size (248320 against a real 248070) and the
+        // pool buffer is shared with the embedding, so neither the file's row count nor
+        // the buffer's size says how big this head is -- only the plan does. Rows past the
+        // head's last band are padding and unreachable, so they are simply not packed.
+        if (op.nch == 0) fail("lmhead_q8_gguf " + name + " without nch");
+        const uint64_t out_dim = static_cast<uint64_t>(op.nch) / nk * 32;
+        if (rows < out_dim)
+            fail("lmhead_q8_gguf " + name + ": the GGUF holds " + std::to_string(rows) +
+                 " rows, the kernel set's head wants " + std::to_string(out_dim));
         std::vector<float> rowbuf(op.in_dim);
-        const size_t nch = out_dim / 32 * nk;
+        const size_t nch = op.nch;
         bounds(op, nch * CH8, dst_bytes);
         for (size_t k = 0; k < nch; ++k) {
             uint8_t* d = dst + op.dst + k * CH8;

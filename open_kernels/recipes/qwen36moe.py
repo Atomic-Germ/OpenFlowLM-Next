@@ -816,7 +816,11 @@ def layout(spec: ModelSpec, max_ctx: int = 4096, ffn: str = "moe") -> Layout:
 
     # ---- lm_head q8: 128-row bands of HID. The pool BO holds a whole number of bands per core
     # (the closed engine's size, 517 MB for the 27B); the design streams exactly `bands`.
-    band = 128 * hid // CHUNK_VALUES * Q8_CHUNK
+    # The head's chunk width follows the SOURCE, not the code width: the f32 twin stores
+    # f32 scales (9216 B) where the container's are bf16 (8704 B). A fixed Q8_CHUNK here
+    # sized the twin's head pool for 8704 B chunks, and the engine then tried to write
+    # 1144258560 B into a 1083179008 B pool.
+    band = 128 * hid // CHUNK_VALUES * q8_chunk_bytes(pool_quant(spec))
     bands = spec.vocab // 128
     kv.update(KV_ROW=kv_row, PTAB_ROW=PTAB_ROW, MAX_CTX=max_ctx, KV_BYTES=max_ctx * kv_row, PTAB_BYTES=max_ctx * PTAB_ROW,
               LMHEAD_POOL_BYTES=roundup(roundup(bands, n) * band, MB), LMHEAD_BAND_BYTES=band, LMHEAD_BANDS=bands,
@@ -961,7 +965,11 @@ def _layout_dense(spec: ModelSpec, max_ctx: int = 4096) -> Layout:
         # let the next one find out on hardware.
         raise OpRangeError(f"qwen36moe: a {ptab_row}-byte position record does not fit one "
                            f"{e_a}-byte attention element (see recipes/dense.py _ptab_check)")
-    band = 128 * hid // CHUNK_VALUES * Q8_CHUNK
+    # The head's chunk width follows the SOURCE, not the code width: the f32 twin stores
+    # f32 scales (9216 B) where the container's are bf16 (8704 B). A fixed Q8_CHUNK here
+    # sized the twin's head pool for 8704 B chunks, and the engine then tried to write
+    # 1144258560 B into a 1083179008 B pool.
+    band = 128 * hid // CHUNK_VALUES * q8_chunk_bytes(pool_quant(spec))
     bands = spec.vocab // 128
     kv.update(KV_ROW=kv_row, PTAB_ROW=ptab_row, MAX_CTX=max_ctx, KV_BYTES=max_ctx * kv_row,
               PTAB_BYTES=max_ctx * ptab_row,

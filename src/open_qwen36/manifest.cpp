@@ -82,11 +82,12 @@ PackOp parse_op(const json& j, const std::string& where) {
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm")
         need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "lmhead_q8_gguf")
-        // No nch: the chunk count comes from the tensor's own dims, the way lmhead_q8
-        // derives it from the file length. Requiring it here would put a number in the
-        // manifest that the engine then has to agree with the GGUF, and a disagreement
-        // is silent -- the pool would be filled to the wrong length.
-        need_all({{"in_dim", p.in_dim}, {"chunk_bytes", p.chunk_bytes}});
+        // nch is what sizes the head's pool tile. It cannot be inferred from the GGUF:
+        // llama.cpp pads vocab_size (248320 against a real 248070), and it cannot be
+        // inferred from the buffer either, which the embedding shares. So the plan says
+        // it, and the engine packs exactly that many chunks after checking the file holds
+        // at least that many rows -- one number, stated once, checked against the file.
+        need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"chunk_bytes", p.chunk_bytes}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
         need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});

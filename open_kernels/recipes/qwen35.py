@@ -44,6 +44,7 @@ from dataclasses import replace
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
+from .dense import lm_rows          # the head's row rule, one definition
 from .qwen36moe import (BAND_ROWS, ELEM, Recipe, ab_lanes, chunk_bytes, ffn_geometry,
                          mixed_check, per_call, proj_op, q4_chunks, q8_chunk_bytes,
                          quant_check, require_gemv, roundup)
@@ -159,6 +160,24 @@ def recipe(spec: ModelSpec, max_ctx: int = 4096) -> Recipe:
 
 
 # ---- the packing plan: tensor -> offset -> chunk order. `{l}` is the layer index.
+def lm_head_nch(spec: ModelSpec, hid: int) -> int:
+    """The head's chunk count: rows rounded to a 64-row band, then 32-row chunks over
+    each row's hid/256 k-tiles. Stated once because the pool's size, the global's size and
+    the pack op must agree -- three places that each recomputed it is how the f32 twin came
+    to ask for a 9216 B chunk in a pool sized for an 8704 B one."""
+    return lm_rows(spec) // 32 * (hid // 256)
+
+
+def lm_head_bytes(spec: ModelSpec, L: "Layout") -> int:
+    """The head pool's bytes. The f32 twin's band is a bigger chunk than the q4_1 layout it
+    was derived from, so the twin's pool is sized from its own chunks; carrying the base
+    number over left the engine writing 1144258560 B into a 1083179008 B pool."""
+    from .qwen36moe import q8_chunk_bytes
+    if spec.quant != "q4_1_f32":
+        return L.LMHEAD_POOL_BYTES
+    return roundup(lm_head_nch(spec, spec.hidden) * q8_chunk_bytes("q4_1_f32"), 1 << 20)
+
+
 def pack_plan(spec: ModelSpec) -> dict:
     L, F = layout(spec), ffn_geometry(spec)
     hid, ff = spec.hidden, spec.intermediate
@@ -175,12 +194,20 @@ def pack_plan(spec: ModelSpec) -> dict:
     # order, so it is a straight permutation (lmhead_q8); a GGUF ships it as a K-quant
     # matrix, which has to be dequantized and requantized into the same tile -- the head's
     # twin of std_perm_gguf, which can only write q4 tiles and so cannot feed a q8 head.
+    lm_nch = lm_head_nch(spec, hid)
     lmop = {"op": "lmhead_q8_gguf", "tensor": "lm_head.weight",
+            # nch: the head's chunk count, which is what sizes the pool tile. The engine
+            # must not infer it from the buffer or from the GGUF -- llama.cpp pads
+            # vocab_size, so the file's row count is not the head's, and the buffer holds
+            # more than the head (the embedding shares it). It states the count here and
+            # the engine packs exactly this many, refusing a file with fewer rows.
+            "nch": lm_nch,
             "chunk_bytes": ch8, "in_dim": hid, "dst": 0} if spec.quant == "q4_1_f32" \
         else {"op": "lmhead_q8", "tensor": "lm_head.weight",
               "chunk_bytes": ch8, "in_dim": hid, "dst": 0}
+    lmhead_bytes = lm_head_bytes(spec, L)
     plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": ch, "layer_types": {},
-                  "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES, "ops": [lmop]},
+                  "lm_head": {"pool_bytes": lmhead_bytes, "ops": [lmop]},
                   "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
                   "norm": {"tensor": "model.norm.weight", "bytes": hid * 2}}
     if spec.has_linear:
@@ -286,7 +313,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
         "globals": {"xres": spec.hidden * 4, "zero": spec.hidden * 4, "normw": spec.hidden * 2,
                     "xresf": spec.hidden * 4, "hn": spec.hidden * 2, "logits": spec.vocab * 4,
-                    "lmpool": L.LMHEAD_POOL_BYTES,
+                    "lmpool": lm_head_bytes(spec, L),
                     "ptab": {"per_row": L.PTAB_ROW, "inv_freq": spec.rope_inv_freq()}},
     }
     if spec.has_linear:
