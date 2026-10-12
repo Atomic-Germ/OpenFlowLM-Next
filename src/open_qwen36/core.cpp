@@ -342,7 +342,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (rows_l()) {
         wanted[man_.rows.kernel] = true;
         wanted[man_.rows.head] = true;
-        if (!man_.rows.lora_kernel.empty()) wanted[man_.rows.lora_kernel] = true;
+        if (cfg_.draft && !man_.rows.lora_kernel.empty()) wanted[man_.rows.lora_kernel] = true;
     }
     for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
@@ -749,7 +749,9 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         noise_high_ = 0;
         lora_none_ = alloc(4096);
         const fs::path lf = fs::path(cfg_.model_dir) / man_.rows.lora_file;
-        if (!man_.rows.lora_kernel.empty() && fs::exists(lf)) {
+        if (!man_.rows.lora_kernel.empty() && fs::exists(lf) && !cfg_.draft)
+            log("draft pass: " + man_.rows.lora_file + " is present but off; OFLM_SPECULATIVE=1 turns it on");
+        if (cfg_.draft && !man_.rows.lora_kernel.empty() && fs::exists(lf)) {
             Q4nxFile uno(lf.string());
             if (const std::string nh = uno.metadata("uno_noise_high"); !nh.empty()) {
                 const unsigned long long v = std::stoull(nh);

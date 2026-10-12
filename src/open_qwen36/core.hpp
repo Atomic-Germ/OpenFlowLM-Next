@@ -59,6 +59,7 @@ struct CoreConfig {
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
     std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    bool draft = false;      ///< pack the model's draft adapter (uno.q4nx) if it has one; off unless asked (OPEN-UNO-DECODE)
 };
 
 /// Everything a request needs to be resumed later (the app's checkpoint/restore).

@@ -217,7 +217,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
         else if (k == "--rows-check") a.rows_check = std::atoi(val().c_str());
-        else if (k == "--uno") a.uno = std::atoi(val().c_str());
+        else if (k == "--uno") { a.uno = std::atoi(val().c_str()); a.cfg.draft = true; }
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {

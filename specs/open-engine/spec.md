@@ -1376,11 +1376,17 @@ output.
 - The draft layer is 6.7 ms against the verify stream's 5.9 ms in the harness.
 
 ### OPEN-UNO-DECODE: greedy Uno on the NPU, the same tokens as greedy decode
-**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `cli.cpp` `--uno`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `common/AutoModel/modeling_k2.cpp`)
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp` `uno_cycle`, `core.cpp` the draft pack, `cli.cpp` `--uno`, `common/AutoModel/automodel.cpp` `_uno_applies` / `_shared_generate_uno`, `common/AutoModel/modeling_k2.cpp`)
 **Verification:** manual (an implementation error changes the output, and the procedure compares it token for token)
 
-A model directory of a family that opts in (K2), with `uno.q4nx` and a kernel set that has
-`dxl_lora`, shall decode greedy requests by IFM's two-pass cycle:
+**Off unless asked.** The draft adapter is packed, and Uno runs, only when `OFLM_SPECULATIVE=1`
+is set (the CLI's `--uno` asks for it itself). With it unset, a model directory that has
+`uno.q4nx` decodes by plain decode, packs no LoRA pools and loads no `dxl_lora`, and the load log
+says the adapter is present and how to turn it on. Whether speculation pays depends on the model
+and the context length, so it is the user's switch until per-model settings exist.
+
+With the switch on, a model directory of a family that opts in (K2), with `uno.q4nx` and a kernel
+set that has `dxl_lora`, shall decode greedy requests by IFM's two-pass cycle:
 1. **Draft.** `[seed, noise_1 .. noise_{L-1}]`, with the LoRA on every row but the seed's.
    - The noise is uniform in [1, N): N is the adapter's `uno_noise_high` (OPEN-UNO-LORA), else the vocab.
    - Row 0's argmax is the base model's next token c; rows 1.. are drafts.
@@ -1409,6 +1415,11 @@ tie. So:
 **Procedure (manual):** `open_qwen36_cli --model <dir> --kernels <set> --ids <chat ids> --uno N`
 runs N tokens by the cycle, then by plain decode with the app's pick. It prints `UNO IDENTICAL
 to decode over N tokens` and both speeds.
+
+**Procedure (manual, the switch):** `oflm serve` the K2 model with `OFLM_SPECULATIVE` unset: the
+load log says `uno.q4nx is present but off`, and a greedy request decodes plainly. Set it to 1
+and restart: the log says greedy requests decode by Uno, and the same request returns the same
+text.
 
 **Result 2026-10-09 (K2-Horizon-7B-Uno, 6 prompts x 128 tokens, quiet machine under the shared
 lock's `timing` gate):**
