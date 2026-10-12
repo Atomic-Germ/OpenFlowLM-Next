@@ -265,15 +265,21 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
         std::memcpy(dst, src, n);
         return;
     }
+    // The slot is an upper bound, not an exact size: the plan rounds these small tensors
+    // up (ssm_a is 32 values in a 128 B slot), and the container branch above already
+    // allows a short tensor -- `if (n > op.cap)` -- so demanding an exact match here made
+    // the two paths disagree about the same tensor. Zero the tail so a padded slot is
+    // deterministic rather than whatever was in the buffer.
+    std::memset(dst, 0, bytes);
     switch (g->tensor(name).type) {
         case GgufFile::Type::BF16: {
-            if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
+            if (n > bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
             std::memcpy(dst, src, n);
             break;
         }
         case GgufFile::Type::F16: {
-            if (n != bytes) fail(name + " is " + std::to_string(n) + " B of fp16, the slot holds " + std::to_string(bytes) + " B of bf16");
-            for (size_t i = 0; i < bytes / 2; ++i) {
+            if (n > bytes) fail(name + " is " + std::to_string(n) + " B of fp16, the slot holds " + std::to_string(bytes) + " B of bf16");
+            for (size_t i = 0; i < n / 2; ++i) {
                 uint16_t u;
                 std::memcpy(&u, src + 2 * i, 2);
                 const float v = fp16_to_f32(u);
@@ -283,8 +289,8 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
             break;
         }
         case GgufFile::Type::F32: {
-            if (n != 2 * bytes) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
-            for (size_t i = 0; i < bytes / 2; ++i) {
+            if (n > 2 * bytes) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
+            for (size_t i = 0; i < n / 4; ++i) {
                 float v;
                 std::memcpy(&v, src + 4 * i, 4);
                 const uint16_t b = f32_to_bf16(v);
@@ -295,6 +301,44 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
         default:
             fail(name + " is " + GgufFile::type_name(g->tensor(name).type) + "; a layernorm must be f32 / f16 / bf16");
     }
+}
+
+std::vector<uint16_t> bf16_values(const WeightFile& f, const std::string& name, size_t count) {
+    // `count` values as bf16, whatever the file stores them as. The container stores
+    // bf16 and the byte-exact read is the fast path; a GGUF stores whatever llama.cpp
+    // chose (f32 for the conv1d and the norms on Qwen3.5, Q6_K for the DeltaNet gates),
+    // so convert through the row reader. One place, so every op that wants bf16 gets the
+    // same answer instead of each re-deriving which types it will tolerate.
+    const size_t bytes = count * 2;
+    size_t n = 0;
+    const uint8_t* src = raw(f, name, 0, &n);
+    std::vector<uint16_t> out(count, 0);
+    const auto* g = dynamic_cast<const GgufFile*>(&f);
+    if (!g) {
+        if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
+        std::memcpy(out.data(), src, bytes);
+        return out;
+    }
+    const GgufFile::TensorInfo& ti = g->tensor(name);
+    if (ti.type == GgufFile::Type::BF16) {
+        if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
+        std::memcpy(out.data(), src, bytes);
+        return out;
+    }
+    const uint64_t total = ti.nvalues();
+    if (total < count) fail(name + " holds " + std::to_string(total) + " values, the plan wants " + std::to_string(count));
+    // Row-wise: the only reader that dispatches on every quant type, and a row is the
+    // fastest dim, which is the row-major walk below.
+    const uint64_t dim = ti.dims.empty() ? 1 : ti.dims[0];
+    if (dim && count % dim == 0) {
+        std::vector<float> row(dim);
+        for (size_t r = 0; r < count / dim; ++r) {
+            g->embed_row(name, r, dim, row.data());
+            for (uint64_t i = 0; i < dim; ++i) out[r * dim + i] = f32_to_bf16(row[i]);
+        }
+        return out;
+    }
+    fail(name + " is " + GgufFile::type_name(ti.type) + " with no row-major layout for " + std::to_string(count) + " values");
 }
 
 namespace {
@@ -847,6 +891,37 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (!rows || !cols) fail("transpose " + name + " without rows / cols");
         if (dr < rows) fail("transpose " + name + ": dst_rows " + std::to_string(dr) +
                             " is narrower than rows " + std::to_string(rows));
+        // A GGUF may hold this tensor quantized (Qwen3.5's ssm_alpha / ssm_beta are Q6_K)
+        // where the plan's elem is the bf16 size the destination wants. Dequantize row-wise
+        // and write bf16, rather than reading the quant bytes as if they were values --
+        // which is not a wrong answer so much as a wrong number of bytes, and the size
+        // check below is what turned it into a failure instead of garbage. The same
+        // dequantize-then-convert the std_perm op already does for the pool's K-quants.
+        if (const auto* g = dynamic_cast<const GgufFile*>(&m)) {
+            const GgufFile::TensorInfo& ti = g->tensor(name);
+            if (ti.type != GgufFile::Type::BF16 && ti.type != GgufFile::Type::F32 &&
+                ti.type != GgufFile::Type::F16) {
+                // This path emits bf16, whatever elem says. A plan asking for another width
+                // here is a plan whose destination we would be silently misfilling.
+                if (elem != 2) fail("transpose " + name + " is " + GgufFile::type_name(ti.type) +
+                                    " but the plan wants " + std::to_string(elem) +
+                                    "-byte values; only bf16 is written for a quantized source");
+                if (ti.dims.size() < 2 || ti.dims[0] != cols || ti.dims[1] != rows)
+                    fail(name + " is [" + std::to_string(ti.dims.size() ? ti.dims[1] : 0) + ", " +
+                         std::to_string(ti.dims.size() ? ti.dims[0] : 0) + "], the plan wants [" +
+                         std::to_string(rows) + ", " + std::to_string(cols) + "]");
+                std::vector<uint16_t> bf(rows * cols);
+                std::vector<float> row(cols);
+                for (uint64_t r = 0; r < rows; ++r) {
+                    g->embed_row(name, r, cols, row.data());
+                    for (uint64_t c = 0; c < cols; ++c) bf[r * cols + c] = f32_to_bf16(row[c]);
+                }
+                bounds(op, cols * dr * elem, dst_bytes);
+                transpose_bytes(reinterpret_cast<const uint8_t*>(bf.data()), rows, cols, elem, dr,
+                                dst + op.dst);
+                return;
+            }
+        }
         size_t n = 0;
         const uint8_t* src = raw(m, name, rows * cols * elem, &n);
         if (n != rows * cols * elem)
@@ -859,9 +934,12 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const std::string name = with_layer(op.tensor, layer);
         const uint64_t taps = op.taps, groups = op.groups, width = op.width;
         if (!taps || !groups || !width) fail("conv_transpose without taps / groups / width");
-        size_t n = 0;
-        const uint8_t* src = raw(m, name, taps * groups * width * 2, &n);
-        if (n != taps * groups * width * 2) fail(name + " is not bf16[" + std::to_string(taps) + ", " + std::to_string(groups * width) + "]");
+        // A GGUF stores this f32 (it is 4 taps of a wide conv); the blob wants bf16.
+        // bf16_values converts rather than assuming, so the plan's byte-exact read below
+        // stays the container path.
+        std::vector<uint16_t> bv = bf16_values(m, name, taps * groups * width);
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(bv.data());
+        size_t n = bv.size() * 2;
         bounds(op, n, dst_bytes);
         for (uint64_t g = 0; g < groups; ++g)
             for (uint64_t t = 0; t < taps; ++t)

@@ -265,7 +265,7 @@ std::string GgufFile::gguf_name(const std::string& name) {
         dot("self_attn.k_norm", ".attn_k_norm");
         dot("self_attn.post_attention_layernorm", ".post_attention_norm");   // gemma3
         dot("input_layernorm", ".attn_norm");
-        dot("post_attention_layernorm", ".ffn_norm");
+        dot("post_attention_layernorm", ".post_attention_norm");
         dot("pre_feedforward_layernorm", ".post_attention_norm");            // gemma3
         dot("post_feedforward_layernorm", ".post_ffw_norm");                 // gemma3
         dot("mlp.gate_proj", ".ffn_gate");
@@ -311,6 +311,15 @@ const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
         // tied embeddings: the GGUF has no output.weight; the (untied) rows
         // of token_embd serve as the lm head (same vocab x hidden shape)
         n = "token_embd.weight";
+        it = tensors_.find(n);
+    }
+    // The post-attention norm has two spellings in the wild and nothing in the manifest
+    // says which a given file uses: llama.cpp writes 'post_attention_norm' for the Qwen
+    // family and 'ffn_norm' for others. Rather than pick one and refuse the other family,
+    // take whichever the file actually has -- the file is the authority on its own
+    // vocabulary, and a name that is absent cannot be the name this file uses.
+    if (it == tensors_.end() && n.size() > 16 && n.compare(n.size() - 16, 16, "post_attention_n") == 0) {
+        n.replace(n.size() - 16, 16, "ffn_norm");
         it = tensors_.find(n);
     }
     if (it == tensors_.end()) fail("no tensor " + name + " in " + path_);

@@ -655,12 +655,17 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                     // The host reads alpha / beta as [hidden, lanes]. The 35B's container stores
                     // exactly that; Qwen3.5's stores a bf16 [heads, hidden] copy beside the q8
                     // projection, which its consts plan transposes -- so transpose it here too.
+                    // A GGUF stores the one tensor, quantized (Q6_K on this model), and is read
+                    // row-wise below rather than memcpy'd.
                     auto ab = [&](const std::string& stem, std::vector<float>& out) -> size_t {
                         const std::string copy = stem + ".bf16.weight";
                         // The bf16 COPY beside the quantized tensor is a q4nx container
-                        // arrangement. A GGUF stores ssm_alpha once, already bf16, so the
-                        // copy does not exist there -- asking for it would send every
-                        // linear-attention layer looking for a tensor the file has not got.
+                        // arrangement, and it is there because the container quantizes these:
+                        // the host needs them in full precision, so it keeps an unquantized
+                        // duplicate. A GGUF has no such duplicate -- llama.cpp stores the
+                        // tensor once, quantized, and dequantizes on the way in (below). So
+                        // asking for the copy would send every linear-attention layer looking
+                        // for a tensor the file has not got.
                         const bool t = !gguf_ && std::any_of(lt.consts.begin(), lt.consts.end(), [&](const PackOp& op) {
                             return op.op == "transpose" && op.tensor.size() >= copy.size() &&
                                    op.tensor.compare(op.tensor.size() - copy.size(), copy.size(), copy) == 0;
@@ -671,6 +676,24 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                         if (shape.size() != 2 || shape[hid_dim] != w_->hidden)
                             throw std::runtime_error("open_qwen36: " + name + (t ? " is not [heads, hidden]" : " is not [hidden, lanes]"));
                         const size_t lanes = shape[1 - hid_dim];
+                        if (gguf_) {
+                            // A GGUF need not store these bf16. This one is Q6_K, and
+                            // file_->bf16 would hand back the wrong number of bytes without
+                            // saying so -- the caller asked for a fixed size and got fewer.
+                            // Read row-wise instead, which goes through the type dispatch and
+                            // so is right for a quantized tensor and a bf16 one alike.
+                            //
+                            // Rows come out [lanes, hidden] (GGUF is fastest-dim-first, so a
+                            // [hidden, lanes] tensor is lanes rows of hidden) and the host
+                            // wants [hidden, lanes], hence the transpose -- the same one the
+                            // container branch below does.
+                            std::vector<float> rows(lanes * w_->hidden);
+                            for (size_t r = 0; r < lanes; ++r)
+                                file_->embed_row(name, r, w_->hidden, rows.data() + r * w_->hidden);
+                            out.assign(w_->hidden * lanes, 0.f);
+                            host::transpose(rows.data(), lanes, w_->hidden, out.data());
+                            return lanes;
+                        }
                         std::vector<float> w = file_->bf16(name);
                         if (t) {
                             out.assign(w_->hidden * lanes, 0.f);
