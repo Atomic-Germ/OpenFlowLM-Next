@@ -288,6 +288,65 @@ class Drafter:
         lat = self.lattice(anchor, hn, logits)
         return walk(lat.cpu().numpy(), self.top_k), lat.cpu()
 
+    def conv_b(self, x, dyn, base, side, nb):
+        """conv() over nb independent blocks stacked in the rows (each block's row 0 has no predecessor)."""
+        n = x.shape[1]
+        ng = n // self.group
+        c = dyn.view(-1, 2, self.kernel, ng)[:, side]
+        w = c.repeat_interleave(self.group, dim=-1) + base[side][None]
+        xb = x.view(nb, -1, n)
+        prev = torch.cat([torch.zeros(nb, 1, n, device=x.device), xb[:, :-1]], dim=1).reshape(-1, n)
+        return w[:, 0] * x + w[:, 1] * prev
+
+    def draft_many(self, tgt, anchors, p0s, caches, n_draft=7, f16_cache=True):
+        """draft() for several independent blocks at once, so each weight is read once for all of them.
+        caches[b] = (per-layer (K, V) rows of positions cache_pos[b]), as draft() takes."""
+        nb, B = len(anchors), n_draft + 1
+        ids = [t for a in anchors for t in [a] + [self.mask_id] * n_draft]
+        x = tgt.embed(ids)
+        pos = torch.cat([torch.arange(p, p + B) for p in p0s]).to(self.device)
+        rep = self.n_head // self.n_kv
+        for il, ly in enumerate(self.L):
+            h = rms(x, ly["attn_norm"], self.eps)
+            dyn = h @ ly["attn_cp"].T
+            h = self.conv_b(h, dyn, ly["attn_cb"], 0, nb)
+            R = nb * B
+            q = rms((h @ ly["wq"].T).view(R, self.n_head, self.hd), ly["q_norm"], self.eps)
+            k = rms((h @ ly["wk"].T).view(R, self.n_kv, self.hd), ly["k_norm"], self.eps)
+            v = (h @ ly["wv"].T).view(R, self.n_kv, self.hd)
+            q, k = rope_neox(q, pos, self.base), rope_neox(k, pos, self.base)
+            if f16_cache:
+                k, v = f16_round(k), f16_round(v)
+            outs = []
+            for b in range(nb):
+                sl = slice(b * B, (b + 1) * B)
+                (ck, cv), cpos = caches[b][0][il], caches[b][1]
+                K, V = torch.cat([ck, k[sl]], 0), torch.cat([cv, v[sl]], 0)
+                kp = torch.cat([cpos, pos[sl]])
+                allowed = torch.ones(B, len(kp), dtype=torch.bool, device=self.device)
+                if self.n_swa:
+                    allowed = (pos[sl][:, None] - kp[None, :]) < self.n_swa
+                s = torch.einsum("bhd,khd->hbk", q[sl], K.repeat_interleave(rep, dim=1)) / math.sqrt(self.hd)
+                s = s.masked_fill(~allowed[None], float("-inf"))
+                outs.append(torch.einsum("hbk,khd->bhd", torch.softmax(s, -1), V.repeat_interleave(rep, dim=1)).reshape(B, -1))
+            o = self.conv_b(torch.cat(outs) @ ly["wo"].T, dyn, ly["attn_cb"], 1, nb)
+            x2 = o + x
+            h2 = rms(x2, ly["ffn_norm"], self.eps)
+            dyn2 = h2 @ ly["ffn_cp"].T
+            h2 = self.conv_b(h2, dyn2, ly["ffn_cb"], 0, nb)
+            f = (torch.nn.functional.silu(h2 @ ly["gate"].T) * (h2 @ ly["up"].T)) @ ly["down"].T
+            x = self.conv_b(f, dyn2, ly["ffn_cb"], 1, nb) + x2
+        hn = rms(x, self.out_norm, self.eps)
+        keep = torch.tensor([b * B + t for b in range(nb) for t in range(1, B)])
+        logits = tgt.logits(hn[keep]).view(nb, n_draft, -1)
+        hn = hn.view(nb, B, -1)
+        out = []
+        for b in range(nb):
+            full = torch.cat([torch.zeros(1, logits.shape[-1], device=logits.device), logits[b]])
+            lat = self.lattice(anchors[b], hn[b], full)
+            out.append((walk(lat.cpu().numpy(), self.top_k), lat.cpu()))
+        return out
+
 
 def walk(lat, top_k=TOP_K):
     """common/speculative.cpp's greedy walk (beam 1, p_min 0); position 1 reads predecessor column 0."""
@@ -406,21 +465,25 @@ def drafts(a):
             last = n0 + steps[-1]
             with torch.no_grad():
                 cache_all = dr.encode(torch.from_numpy(taps[:last]).to(dr.device), torch.arange(last, device=dr.device))
-            for s in steps:
-                p0 = n0 + s
-                anchor = hdr["prompt_ids"][-1] if s == 0 else rows[s - 1]["g"]
-                lo = max(0, p0 - dr.n_swa + 1) if dr.n_swa else 0
-                cache = [(K[lo:p0], V[lo:p0]) for K, V in cache_all]
+            for c0 in range(0, len(steps), a.batch):
+                chunk = steps[c0:c0 + a.batch]
+                anchors, caches = [], []
+                for s in chunk:
+                    p0 = n0 + s
+                    anchors.append(hdr["prompt_ids"][-1] if s == 0 else rows[s - 1]["g"])
+                    lo = max(0, p0 - dr.n_swa + 1) if dr.n_swa else 0
+                    caches.append(([(K[lo:p0], V[lo:p0]) for K, V in cache_all], torch.arange(lo, p0, device=dr.device)))
                 with torch.no_grad():
-                    d, lat = dr.draft(tgt, anchor, p0, 7, cache, torch.arange(lo, p0, device=dr.device))
-                lat = lat.numpy()
-                m, pr = [], 0
-                for i in range(7):
-                    m.append(margin(lat[i], pr))
-                    pr = int(np.where(lat[i, :TOP_K].astype(int) == d[i])[0][0])
-                out.write(json.dumps({"pid": pid, "s": s, "p0": p0, "d": d, "m": m,
-                                      "c1": [int(c) for c in lat[0, :TOP_K]]}) + "\n")
-            out.flush()
+                    res = dr.draft_many(tgt, anchors, [n0 + s for s in chunk], caches)
+                for s, (d, lat) in zip(chunk, res):
+                    lat = lat.numpy()
+                    m, pr = [], 0
+                    for i in range(7):
+                        m.append(margin(lat[i], pr))
+                        pr = int(np.where(lat[i, :TOP_K].astype(int) == d[i])[0][0])
+                    out.write(json.dumps({"pid": pid, "s": s, "p0": n0 + s, "d": d, "m": m,
+                                          "c1": [int(c) for c in lat[0, :TOP_K]]}) + "\n")
+                out.flush()
             print(f"{pid}: {len(steps)} reference drafts", flush=True)
 
 
@@ -485,6 +548,7 @@ def main():
     d.add_argument("--max-steps", type=int, default=0)
     d.add_argument("--threads", type=int, default=8)
     d.add_argument("--device", default="cpu")
+    d.add_argument("--batch", type=int, default=16)
     d.add_argument("--out", required=True)
     c = sp.add_parser("compare")
     c.add_argument("--run", required=True)
