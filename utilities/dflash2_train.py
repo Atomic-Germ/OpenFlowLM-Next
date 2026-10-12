@@ -227,7 +227,7 @@ class Data:
         self.ids = np.memmap(d / "ids.bin", np.int32, "r")
         self.feat_dim = self.idx["feat_dim"]
         self.feat = np.memmap(d / "feat.bin", np.float16, "r")
-        self.lab = np.memmap(d / "lab.bin", np.int32, "r") if (d / "lab.bin").exists() else None
+        self.lab = np.memmap(d / "lab.bin", np.int32, "r") if (d / "lab.bin").exists() and (d / "lab.bin").stat().st_size else None
         self.seqs = self.idx["seqs"]
 
     def get(self, i):
@@ -240,6 +240,19 @@ class Data:
         else:
             A = ids[s["n_prompt"]:]
         return s, ids, f, A
+
+
+class MultiData:
+    def __init__(self, dirs):
+        self.parts = [Data(d) for d in dirs.split(",")]
+        self.feat_dim = self.parts[0].feat_dim
+        assert all(p.feat_dim == self.feat_dim for p in self.parts)
+        self.index = [(j, i) for j, p in enumerate(self.parts) for i in range(len(p.seqs))]
+        self.seqs = [self.parts[j].seqs[i] for j, i in self.index]
+
+    def get(self, k):
+        j, i = self.index[k]
+        return self.parts[j].get(i)
 
 
 def anchors_for(s, stride, rng):
@@ -379,7 +392,7 @@ def train(a):
     dtype = torch.bfloat16
     sd = load_state(a.init)
     cfg = sd["cfg"]
-    data = Data(a.data)
+    data = MultiData(a.data)
     tgt = Target(a.target, device)
     dr = Drafter(sd, cfg, quant=not a.no_quant, train_fc=data.feat_dim != cfg["n_embd"], device=device,
                  fp_kinds=tuple(a.fp.split(",")) if a.fp else ()).to(device)
@@ -414,7 +427,7 @@ def train(a):
         ep_items = []
         for i in trn:
             s = data.seqs[i]
-            an = anchors_for(s, a.stride, rng)
+            an = anchors_for(s, a.stride_tf if s.get("n_lab", 0) and a.stride_tf else a.stride, rng)
             for c in range(0, len(an), a.anchors):
                 ep_items.append((i, an[c:c + a.anchors]))
         rng.shuffle(ep_items)
@@ -446,7 +459,8 @@ def train(a):
         step += 1
         if step % a.log_every == 0:
             m = {k: float(np.mean([x[k] for x in acc_stats if k in x])) for k in acc_stats[0]}
-            rec = dict(step=step, lr=lr, gn=gn, **m, t=time.time() - t0)
+            rec = dict(step=step, lr=lr, gn=gn, **m, t=time.time() - t0,
+                       mem=torch.cuda.max_memory_allocated() / 1e9 if device.type == "cuda" else 0.0)
             print(json.dumps(rec), flush=True)
             log.write(json.dumps(rec) + "\n"); log.flush()
             acc_stats = []
@@ -470,6 +484,7 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--stride", type=int, default=2)
+    ap.add_argument("--stride-tf", type=int, default=0, help="anchor stride on teacher-forced text (0 = --stride)")
     ap.add_argument("--anchors", type=int, default=48)
     ap.add_argument("--accum", type=int, default=4)
     ap.add_argument("--lr", type=float, default=5e-5)
