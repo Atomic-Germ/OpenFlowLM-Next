@@ -1457,9 +1457,8 @@ Granite 4.2 3B with its Uno adapter (`Cyronius/granite-4.2-3b-uno`: r 128, alpha
 the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, identical to greedy decode:
 - The kernel set ships `dxl`, `dxl_lora` and `lmhl` at hidden 2560 (OPEN-DECODE-ROWS).
 - `uno.q4nx` carries s·B with q's fold of 0.125 (OPEN-UNO-LORA) and `uno_noise_high` 100256.
-- Granite's AutoModel does not opt in yet. At L = 4 the adapter commits about 3 tokens a cycle, which does not pay
-  for the cycle's two passes (the result below), so served requests keep plain decode. It opts in with one line, as
-  K2's does, once a pass costs less or L = 8 runs.
+- Granite's AutoModel opts in as K2's does. Its sampling defaults are unchanged, so Uno serves only requests that ask
+  for greedy (top_k 1, no penalty); at L = 4 those run at about 0.94x of plain decode (the result below).
 
 **Procedure (manual):**
 1. `q4nx-build -i granite-4.2-3b-bf16.gguf -s <granite-4.2-3b dir> -f granite -t language --quant Q4_1
@@ -1468,6 +1467,9 @@ the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, 
 3. `utilities/uno-bench` over `utilities/uno-ref/prompts.jsonl` at 128 tokens: every prompt identical to decode,
    and tokens a cycle within 5% of the CPU reference (the adapter's training repo, `uno_generate` at L = 4 on a
    q4_1 fake-quantized base, the same prompts).
+4. `oflm serve` with the model registered: a request with `top_k` 1 and `repetition_penalty` 1 equals one that
+   decodes plainly (the same plus `presence_penalty` 1e-6), also when cut by `max_tokens`; streamed equals
+   non-streamed; a sampled request replies.
 
 **Result 2026-10-10 (q4_1, L = 4, six prompts x 128 tokens, quiet machine under the shared lock's `timing` gate):**
 
