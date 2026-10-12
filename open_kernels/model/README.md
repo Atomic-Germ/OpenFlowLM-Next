@@ -273,3 +273,12 @@ control reproduces the retained production outputs bytewise. Its FP32-output
 variant isolates the final conversion; it is not a production precision fix.
 Build, replay, pinned-input scoring and the remaining KV error are documented
 in the [attention replay skill](../../.opencode/skill/open-qwen38-attention-replay/SKILL.md).
+
+`utilities/attention-kv-replay/` adds an isolated `[K_hi,K_lo,V_hi,V_lo]`
+BF16-pair cache with FP32 output. Its widened BF16 control reproduces the earlier
+FP32 replay exactly; the paired variant passes all 1152 retained head checks
+(worst absolute error 0.00092833). This result covers captured projections at
+three positions, not full-model propagation. The experimental cache row doubles
+to 8192 bytes; production cache and output-projection ABIs are unchanged.
+Build, provenance checks and L1/DMA constraints are documented in the
+[paired-KV replay skill](../../.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md).

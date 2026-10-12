@@ -76,4 +76,9 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <description>Replay production gated attention with captured Q/KV/softmax boundaries and compare BF16/FP32 outputs without full-model residency.</description>
     <location>.opencode/skill/open-qwen38-attention-replay/SKILL.md</location>
   </skill>
+  <skill>
+    <name>open-qwen38-paired-kv-replay</name>
+    <description>Build and validate isolated paired-BF16 K/V attention with FP32 output, an exact BF16 control and local memory checks.</description>
+    <location>.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md</location>
+  </skill>
 </available_skills>

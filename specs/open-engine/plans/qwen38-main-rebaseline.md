@@ -1,17 +1,17 @@
 # Qwen3.8-27B validation report
 
-Updated 2026-10-11. This branch strengthens decode/source validation, adds an
-offline converter command for existing model metadata, and builds the current
-Qwen3.8-27B production recipe. An eight-layer, three-token NPU slice passes the
-strict CPU-reference comparison, as do three tokens at all 64 layers.
-The split FFN now prepares its integer activation table directly from FP32.
-The correction passes isolated replay and all propagated FFN down checks.
-Full corrected-model acceptance remains **FAIL**: seven second-token residuals
-exceed 0.005, despite passing logits, runtime identity and reset checks.
-Independent FFN-front validation additionally finds one local activation failure
-at layer 11 / position 0, explained largely by BF16 norm-input rounding.
-An isolated FP32 norm-to-up/gate probe now fixes that local error; production
-integration and corrected full-chain acceptance are still pending.
+Updated 2026-10-12. This branch adds strict decode/source validation and
+preserves FP32 inputs through the split FFN. The retained full-depth export
+passes all 192 residual checks at 64 layers × three positions, with matching
+logit argmax, runtime identity and reset replay. Independent production
+attention validation still finds 43 failing heads out of 1152.
+
+An isolated FP32-output replay reduces those failures to 21; paired-BF16 K/V
+with FP32 output now passes all 1152 heads, worst absolute error 0.00092833.
+The widened BF16 control exactly reproduces the earlier FP32 replay. This
+validates the isolated correction on retained projections. Production attention
+integration and a new full-depth export/regression remain pending; it does not
+establish current merged-runtime acceptance or complete model support.
 
 ## Stage 1: complete decode comparison
 
@@ -693,22 +693,76 @@ isolated higher-precision KV experiment before considering production fit and
 full-depth regression; independent DeltaNet state, LM head, prefill and serving
 remain separate acceptance work.
 
+## Stage 5c7b: paired-BF16 K/V with FP32 output
+
+Added `utilities/attention-kv-replay/` with two modes sharing the same widened
+cache transport. The control zeroes low planes and uses production row
+arithmetic; the experiment retains K/V hi+lo through QK and PV. Both preserve
+FP32 gated outputs. An unchanged FP64 oracle recomputes QK norm/RoPE, causal
+GQA and sigmoid from retained projections at the original absolute-error and
+cosine bounds. No resident model or projection pools are loaded.
+
+| Check, 16 layers × 3 positions × 24 heads | BF16 KV control | Paired KV |
+|---|---:|---:|
+| Primary heads passing | 1131 /1152 | **1152 /1152** |
+| Worst absolute error (L59/T2/H9) | 0.1974321142 | **0.0009283289** |
+| Minimum cosine | 0.9999418362 | **0.9999999991** |
+| Worst K boundary error | 0.0613304117 | 0.0002521316 |
+| Worst V boundary error | 0.1993179321 | 0.0001831055 |
+| Maximum linked core program bytes | 15184 | 14992 |
+
+Control outputs/debug and reconstructed KV exactly reproduce the earlier FP32
+replay. Inputs, Q and high K/V planes are identical across modes. Conditional
+softmax/PV and output comparisons also pass, but primary acceptance is against
+the independent unrounded reference. Both hardware runs complete 16 dispatches;
+control scoring returns exit 1, paired scoring and the controlled comparison
+return exit 0. Scope remains three-position attention on captured projections.
+
+The cache row is `[K_hi,K_lo,V_hi,V_lo]`, **8192 bytes** rather than 4096.
+Four planes are acquired through the unchanged 2048-byte input FIFO element.
+With output FIFO depth 2, the initial design exceeded local memory:
+**68112 >65536 bytes**. Depth 1 saves 4096 bytes; the compiler's actual
+allocation ends at **64016**, including a 6144-byte stack. Both instrumented
+builds fit program memory. The four host data buffers total **816 KiB**.
+Production ax fit and performance have not been established.
+
+The current merged sources have build key `db351c64dc4e…`; the retained
+fixture/export remains `b707550f6c1d…`. The replay validates its current source,
+geometry and binary hashes separately from the fixture's original export.
+Both identities are recorded, and mismatches on either side fail. The old
+export is not relabeled. Attention source files are unchanged by the latest
+merge; the exact control replay additionally confirms the observed behavior.
+
+TDD: 10 layout/precision cases were introduced before the implementation;
+five additional provenance regressions failed before the identity handling
+was implemented. All 15 pass. Full open-engine suite: **1038 passed, 47 skipped**.
+Artifacts, hashes and failure/success logs are retained under ignored
+`Models/qwen38-27b/attention-kv-replay/`. The
+[paired-KV replay skill](../../../.opencode/skill/open-qwen38-paired-kv-replay/SKILL.md)
+documents reproduction, DMA/L1 constraints and resource inspection.
+
+Production attention/cache/output-projection ABIs, model weights and packing
+remain unchanged. Next assess the full ax and FP32 output-to-projection
+contract, integrate the correction, rebuild the complete export and rerun
+full-depth decode. Independent DeltaNet state/LM-head, prefill and serving
+remain separate acceptance work.
+
 ## Validation
 
 | Check | Result |
 |---|---|
-| `specs/open-engine/tests` | 1021 passed, 47 skipped |
+| `specs/open-engine/tests` | 1038 passed, 47 skipped |
 | `utilities/q4nx-build/tests` | 113 passed, 42 subtests passed |
 | Standalone C++ CLI build | Passed |
 | CTest | 3/3 passed |
 | Manifest generation from the checked-in spec and local container | Both derive `qwen35`, 64 layers, 41 kernel build sets, 64 AB lanes and down split 8192 + 9216 |
 
-The open-engine suite was rerun for stage 5c7a; CTest is from stage 5c5b.
-The native C++ build is from stage 5c3; host runtime code is unchanged.
-Hardware results retain their explicitly stated full-model or isolated-replay
-scope; the latest full-chain residual gate passes for the three tested positions.
-Weights were not reconverted. Skipped tests and successful compilation do not
-extend the explicit hardware coverage above.
+The open-engine suite was rerun for stage 5c7b on the merged tree. The converter
+and C++ build/CTest entries retain their earlier stage coverage; they were not
+rerun for this isolated experiment and do not validate the merged runtime.
+The latest full-model evidence belongs to the explicitly identified retained
+export. Stage 5c7b runs only isolated attention with current sources. Weights
+were not reconverted, and skipped tests extend neither scope.
 
 Stage 1 reproduction:
 
