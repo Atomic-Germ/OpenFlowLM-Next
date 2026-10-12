@@ -108,7 +108,8 @@ def pack(a):
     fi = open(out / "ids.bin", "wb")
     ff = open(out / "feat.bin", "wb")
     fl = open(out / "lab.bin", "wb")
-    seqs, ids_off, feat_off, lab_off, dim = [], 0, 0, 0, None
+    fti, ftv = open(out / "top_ids.bin", "wb"), open(out / "top_val.bin", "wb")
+    seqs, ids_off, feat_off, lab_off, top_off, dim, top_k = [], 0, 0, 0, 0, None, 0
     for n, p in enumerate(files):
         n_prompt, n_ids, first_pos, ids, taps = read_bin(p)
         if n_ids - n_prompt < 9:
@@ -135,14 +136,32 @@ def pack(a):
             fl.write(lab.tobytes())
             seq.update(lab_off=lab_off, n_lab=int(len(lab)))
             lab_off += len(lab)
+        topf = p.with_suffix(".top")
+        if topf.exists():   # the target's top-K logits after positions n_prompt-1 .. n_ids-2
+            raw = np.fromfile(topf, np.uint8)
+            k = int(raw[:4].view(np.int32)[0])
+            n = n_ids - n_prompt
+            ti = raw[4:4 + 4 * n * k].view(np.int32)
+            tv = raw[4 + 4 * n * k:4 + 6 * n * k].view(np.float16)
+            if top_k in (0, k) and len(tv) == n * k:
+                top_k = k
+                fti.write(ti.tobytes()); ftv.write(tv.tobytes())
+                seq.update(top_off=top_off)
+                top_off += n
+            else:
+                print("bad top file, hard labels only:", topf, flush=True)
         seqs.append(seq)
+        if a.delete_src:
+            for suf in (".bin", ".lab", ".top"):
+                if p.with_suffix(suf).exists():
+                    p.with_suffix(suf).unlink()
         ids_off += n_ids
         feat_off += f.size
         if n % 50 == 0:
             print(f"{n}/{len(files)} {p.stem} rows {f.shape[0]}", flush=True)
-    fi.close(); ff.close(); fl.close()
+    fi.close(); ff.close(); fl.close(); fti.close(); ftv.close()
     gen = sum(s["n_ids"] - s["n_prompt"] for s in seqs)
-    (out / "index.json").write_text(json.dumps(dict(feat_dim=dim, feat=a.feat, seqs=seqs)))
+    (out / "index.json").write_text(json.dumps(dict(feat_dim=dim, feat=a.feat, top_k=top_k, seqs=seqs)))
     print(f"packed {len(seqs)} sequences, {gen} generated tokens, {feat_off // max(1, dim)} feature rows, dim {dim}")
 
 
@@ -195,6 +214,7 @@ def main():
     p.add_argument("--src", required=True); p.add_argument("--out", required=True)
     p.add_argument("--feat", choices=["g", "taps"], default="g"); p.add_argument("--fc-gguf")
     p.add_argument("--prompts"); p.add_argument("--limit", type=int, default=0); p.add_argument("--threads", type=int, default=6)
+    p.add_argument("--delete-src", action="store_true")
     p = sp.add_parser("export")
     p.add_argument("--state", required=True); p.add_argument("--template", required=True); p.add_argument("--dst", required=True)
     a = ap.parse_args()
