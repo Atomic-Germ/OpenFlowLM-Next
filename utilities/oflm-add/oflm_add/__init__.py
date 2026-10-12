@@ -72,7 +72,14 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
 # installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+# Families whose kernel sets ship a GGUF-direct (f32-scale twin) build, as of
+# the last full `utilities/build-all.sh`. NOT a gate -- the gate is whether the
+# linked kernel set's manifest carries a "gguf" section. Kept only so a refusal
+# can say where twins do exist; a stale entry costs a stale hint and nothing
+# else. This used to BE the gate, and it was wrong in both directions: it
+# refused phi3, qwen2, k2 and lfm2, all of which have shipped twins for a while.
+GGUF_CAPABLE_FAMILIES = {"qwen3", "qwen2", "llama3", "gemma3", "granite",
+                         "hunyuan", "phi3", "k2", "lfm2"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -2132,11 +2139,14 @@ def main():
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
             # open_kernels manifest. Just confirm the family is recognized.
             pass
-        elif family not in GGUF_CAPABLE_FAMILIES:
-            gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
-                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
-                         + "); installing the safetensors weights instead")
         else:
+            # The CAPABILITY test is the linked kernel set's manifest, not a
+            # list of families: `gguf` in it means the *_f32 twin kernels are
+            # built and the engine can swap the pools at load. A hand-kept
+            # family list in front of this could only ever be wrong in one
+            # direction -- it refused every family nobody had remembered to add
+            # (qwen3.5 among them) while the kernels beside it already could
+            # load the file. Gate on the artifact, so gaining a twin is enough.
             if args.open_kernels:
                 mj = Path(args.open_kernels) / "manifest.json"
             else:
@@ -2144,10 +2154,17 @@ def main():
                 mj = (sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
                       if xclbin_source and sys_xcl else Path())
             if not manifest_supports_gguf(mj):
+                hint = ""
+                if family not in GGUF_CAPABLE_FAMILIES:
+                    # Advisory only. Stale here is harmless -- it is a hint about
+                    # where twins exist today, never a gate.
+                    hint = (f" (families with a GGUF-direct build today: "
+                            + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
+                            + "; nothing ships one for this family yet)")
                 gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
-                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
-                             "rebuild them with utilities/build-all.sh -- "
-                             "installing the safetensors weights instead")
+                             "have no GGUF-direct build (their open_kernels manifest has no 'gguf' "
+                             "section); rebuild them with utilities/build-all.sh -- "
+                             "installing the safetensors weights instead" + hint)
         if gguf_skip:
             gguf_refused[gguf_name] = gguf_skip
             log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
