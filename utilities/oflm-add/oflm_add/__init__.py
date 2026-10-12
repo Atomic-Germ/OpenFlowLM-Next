@@ -796,6 +796,52 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def flatten_text_config(target, gguf_mode):
+    """Hoist a multimodal config's `text_config` to the top level.
+
+    A GGUF of a text model usually comes from a `...ForConditionalGeneration` repo, whose
+    config.json keeps the language model under `text_config`. The app reads `vocab_size`
+    from the TOP level to size the Sampler (src/common/AutoModel/automodel.cpp:545), and a
+    nested-only key leaves it defaulting -- so the sampler is built for one vocabulary and
+    handed logits for another, and `sampler_topk_apply` walks off the end. The open engine
+    does not have this problem because it fills top-level keys itself from the GGUF's
+    metadata (derive_config), which is why the engine was entirely healthy and the crash
+    was past its boundary.
+
+    Hoisting is what the app expects, and what its own omni adapter already does by hand
+    (modeling_qwen3_5_omni.cpp:82 reaches into thinker_config.text_config for exactly
+    this). Only for a text model: a GGUF-direct install has no vision tower, so the
+    vision_config beside text_config describes weights that are not present. Existing
+    top-level keys win, so a config that already carries a value is never overwritten.
+    """
+    cfg_path = Path(target) / "config.json"
+    if not gguf_mode or not cfg_path.is_file():
+        return
+    try:
+        cfg = load_json(cfg_path)
+        inner = cfg.get("text_config")
+        if not isinstance(inner, dict):
+            return
+        hoisted = [k for k in inner if k not in cfg]
+        if not hoisted:
+            return
+        for k in hoisted:
+            cfg[k] = inner[k]
+        # The conditional-generation architectures and the vision config describe a
+        # multimodal model this one is not; leaving them invites a caller down the image
+        # path. Only the fields the text model actually carries are kept.
+        for k in ("architectures", "vision_config", "video_token_id", "image_token_id",
+                  "vision_start_token_id", "vision_end_token_id"):
+            cfg.pop(k, None)
+        if isinstance(cfg.get("model_type"), str):
+            cfg["model_type"] = cfg["model_type"].removesuffix("_text") or cfg["model_type"]
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        log(f"[INFO] config.json: hoisted {len(hoisted)} text_config keys to the top level "
+            "(the app reads vocab_size there to size the sampler)")
+    except (OSError, ValueError, TypeError) as ex:
+        log(f"[WARN] could not flatten text_config: {ex}")
+
+
 def reconcile_gguf_depth(target, kdir):
     """Set config.json's depth to what the kernels were built for.
 
@@ -2593,6 +2639,7 @@ def main():
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
     if gguf_mode:
+        flatten_text_config(target, gguf_mode)
         reconcile_gguf_depth(target, kdir)
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
     if missing:
