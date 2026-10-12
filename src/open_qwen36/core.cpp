@@ -2930,11 +2930,32 @@ void Core::apply_slots(const unsigned* perm, bool verify_kernels) {
 
 namespace {
 // first maximum wins a tie: cli.cpp argmax's rule
-int greedy(const std::vector<float>& v, size_t n) {
+int greedy(const float* v, size_t n) {
+    if (n == 0 || v[0] != v[0]) return 0;           // a NaN at 0 is never beaten under that rule
+#if defined(__AVX2__)
+    // the largest non-NaN value, then its first index: the same answer as the scalar walk
+    __m256 m = _mm256_set1_ps(v[0]);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) m = _mm256_max_ps(_mm256_loadu_ps(v + i), m);
+    float lanes[8];
+    _mm256_storeu_ps(lanes, m);
+    float best = lanes[0];
+    for (int k = 1; k < 8; ++k) best = lanes[k] > best ? lanes[k] : best;
+    for (; i < n; ++i) best = v[i] > best ? v[i] : best;
+    const __m256 b = _mm256_set1_ps(best);
+    for (i = 0; i + 8 <= n; i += 8) {
+        const int hit = _mm256_movemask_ps(_mm256_cmp_ps(_mm256_loadu_ps(v + i), b, _CMP_EQ_OQ));
+        if (hit) return static_cast<int>(i) + static_cast<int>(_tzcnt_u32(static_cast<unsigned>(hit)));
+    }
+    for (; i < n; ++i)
+        if (v[i] == best) return static_cast<int>(i);
+    return 0;
+#else
     int best = 0;
     for (size_t i = 1; i < n; ++i)
         if (v[i] > v[best]) best = static_cast<int>(i);
     return best;
+#endif
 }
 }  // namespace
 
@@ -2949,7 +2970,8 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
         step(ids[0], true);
         if (vlogits_.empty()) vlogits_.assign(1, std::vector<float>());
         vlogits_[0] = logits_host_;
-        argmax_out[0] = greedy(logits_host_, man_.real_vocab);
+        vready_ = 1;
+        if (argmax_out) argmax_out[0] = greedy(logits_host_.data(), man_.real_vocab);
         vs_.begin(pos0, 1);
         return;
     }
@@ -3012,15 +3034,28 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
     }
     auto tr = std::chrono::steady_clock::now();
     xrt::bo& lg = buffer(man_.verify.logits, 0);
-    read_back(lg, n * man_.vocab * 4, 0);
-    for (size_t j = 0; j < n; ++j) {
-        std::memcpy(vlogits_[j].data(), lg.map<uint8_t*>() + j * man_.vocab * 4, man_.vocab * 4);
-        argmax_out[j] = greedy(vlogits_[j], man_.real_vocab);
+    const size_t row = man_.vocab * 4;
+    // rows are read back one per thread and copied out only when verify_logits() asks for one
+#pragma omp parallel for num_threads(static_cast<int>(n)) if (n > 1)
+    for (int j = 0; j < static_cast<int>(n); ++j) {
+        read_back(lg, row, j * row);
+        if (argmax_out) argmax_out[j] = greedy(lg.map<const float*>() + j * man_.vocab, man_.real_vocab);
     }
+    vbo_ = &lg;
+    vready_ = 0;
     timing_.route_ms = ms_since(tr);              // the host's logits read, copy and argmax
     timing_.lmhead_ms = ms_since(t1);
     pos_ += static_cast<int>(n);
     timing_.total_ms = ms_since(t0);
+}
+
+const std::vector<float>& Core::verify_logits(size_t i) const {
+    if (i >= vlogits_.size()) throw std::out_of_range("open_qwen36: verify_logits(" + std::to_string(i) + ")");
+    if (!(vready_ >> i & 1u)) {
+        std::memcpy(vlogits_[i].data(), vbo_->map<const uint8_t*>() + i * man_.vocab * 4, man_.vocab * 4);
+        vready_ |= 1u << i;
+    }
+    return vlogits_[i];
 }
 
 void Core::accept(size_t m) {
