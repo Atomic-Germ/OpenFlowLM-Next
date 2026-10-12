@@ -796,6 +796,50 @@ def ms_cache_snapshot(repo_id):
     return None
 
 
+def reconcile_gguf_depth(target, kdir):
+    """Set config.json's depth to what the kernels were built for.
+
+    A Qwen3.5-family GGUF's `block_count` counts a trailing block the trunk does not
+    use, and the source config usually counts it too -- so a config fetched from the
+    base repo declares one layer more than any kernel set has. The extra block has
+    several names (multi-token prediction, the NextN head, dspark) and which one it is
+    does not matter: the kernel set's own depth is the ground truth, because that is
+    what the pool offsets, the layer-type list and the program were laid out for.
+
+    So the depth comes from the kernel manifest rather than from a subtraction, which
+    is also q4nx-build's rule for the same situation ("set the depth to what the
+    container ACTUALLY holds ... a source config may already exclude the MTP block,
+    in which case subtracting again is wrong"). Reading the number we are about to run
+    against cannot go stale; guessing an arithmetic rule can. A config that already
+    agrees is left alone.
+    """
+    cfg_path = Path(target) / "config.json"
+    if not kdir or not cfg_path.is_file():
+        return
+    try:
+        want = load_json(kdir / "manifest.json")["hf_config_check"]["num_hidden_layers"]
+        cfg = load_json(cfg_path)
+        # A multimodal config nests the language model under `text_config`, and the
+        # engine reads the depth from there. Patching the top level would be silently
+        # inert -- the file would change and the check would keep failing.
+        holder = cfg
+        if "num_hidden_layers" not in cfg and isinstance(cfg.get("text_config"), dict):
+            holder = cfg["text_config"]
+        have = holder.get("num_hidden_layers")
+        if have is None or have == want:
+            return
+        holder["num_hidden_layers"] = int(want)
+        if int(have) > int(want):
+            log(f"[INFO] config.json num_hidden_layers {have} -> {want} (the kernel "
+                "set's depth; the extra trailing block is not converted)")
+        else:
+            log(f"[WARN] config.json num_hidden_layers {have} but the kernel set was "
+                f"built for {want}; raising the config to match")
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError, KeyError, TypeError) as ex:
+        log(f"[WARN] could not reconcile config.json depth with the kernel set: {ex}")
+
+
 def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     """FLM reads eos_token_id (array) / bos_token_id from tokenizer_config.json;
     stock HF repos keep them in generation_config.json -- merge them over."""
@@ -2548,6 +2592,8 @@ def main():
                 else:
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
+    if gguf_mode:
+        reconcile_gguf_depth(target, kdir)
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
     if missing:
         if gguf_mode and missing == ["config.json"]:
