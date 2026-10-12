@@ -15,10 +15,10 @@
 namespace vdn {
 constexpr unsigned kD = 128, kL = 32, kRows = 128, kElemRows = 17;
 constexpr unsigned BLK = 0, BLK_BYTES = 2 * kRows * kL * 4;   // half a head's S: [quarter plane][row][32 f32]
-constexpr unsigned RS = 1600, R_KH = 0, R_KL = 256, R_QH = 512, R_QL = 768, R_V = 1024, R_SC = 1536;
-constexpr unsigned REC = BLK + BLK_BYTES;   // per position: k, q as bf16 hi / lo, v, decay / beta
-// T pass 1 sums, TN the next position's, DLT delta, O o; the slot past the last record is read, never used
-constexpr unsigned T = REC + (VDN_NPOS + 1) * RS, TN = T + 256, DLT = TN + 256, O = DLT + 256;
+constexpr unsigned RS = 1664, R_KH = 0, R_KL = 256, R_QH = 512, R_QL = 768, R_V = 1024, R_SC = 1536, R_SCL = 1600;
+constexpr unsigned REC = BLK + BLK_BYTES;   // per position: k, q as bf16 hi / lo, v, [decay, beta] hi and lo
+// T pass 1 sums, TN the next position's, DLT delta, O o (raw: the post core scales it)
+constexpr unsigned T = REC + VDN_NPOS * RS, TN = T + 256, DLT = TN + 256, O = DLT + 256;
 constexpr unsigned BYTES = O + VDN_NPOS * 512;
 
 using vf = aie::vector<float, kL>;
@@ -37,6 +37,13 @@ inline __attribute__((always_inline)) acc mac3(acc a, const vb &h, const vb &l, 
   a = aie::mac(a, l, sh);
   return a;
 }
+// mac3 with the scalar negated: a - x y is a + x (-y) exactly, and the split of -s is minus the split of s
+inline __attribute__((always_inline)) acc msc3(acc a, const vb &h, const vb &l, bfloat16 sh, bfloat16 sl) {
+  a = aie::msc(a, h, sh);
+  a = aie::msc(a, h, sl);
+  a = aie::msc(a, l, sh);
+  return a;
+}
 // dnx_row_update's S'[i] = decay * S[i] + k[i] * delta, in its order
 inline __attribute__((always_inline)) vf upd(const vf &x, bfloat16 dh, bfloat16 dl, const vb &deh, const vb &del,
                                              bfloat16 kh, bfloat16 kl) {
@@ -44,12 +51,6 @@ inline __attribute__((always_inline)) vf upd(const vf &x, bfloat16 dh, bfloat16 
   split(x, h, l);
   acc s = mac3(aie::zeros<accfloat, kL>(), h, l, dh, dl);
   return mac3(s, deh, del, kh, kl).template to_vector<float>();
-}
-inline __attribute__((always_inline)) void split_s(float s, bfloat16 *out2) {
-  vb h, l;
-  split(aie::broadcast<float, kL>(s), h, l);
-  out2[0] = h[0];
-  out2[1] = l[0];
 }
 }  // namespace vdn
 
@@ -73,15 +74,10 @@ inline __attribute__((noinline)) void vdn_rec_impl(const float *__restrict e, ui
     aie::store_v(ql + j, l);
     aie::store_v(v + j, aie::load_v<kL>(e + 2 * kD + j));
   }
-  bfloat16 *__restrict sc = (bfloat16 *)(r + R_SC);
-  const float decay = e[384];
-  vf x = aie::zeros<float, kL>();
-  x[0] = decay;
-  x[1] = -decay;
-  x[2] = e[385];
   vb h, l;
-  split(x, h, l);
-  sc[0] = h[0], sc[1] = l[0], sc[2] = h[1], sc[3] = l[1], sc[4] = h[2], sc[5] = l[2];
+  split(aie::load_v<kL>(e + 384), h, l);                   // [decay, beta, ...]
+  aie::store_v((bfloat16 *)(r + R_SC), h);
+  aie::store_v((bfloat16 *)(r + R_SCL), l);
 }
 
 // element ei: quarter plane ei / 8, rows 17 (ei % 8) ..; position 0's pass 1 rides on the copy
@@ -116,7 +112,7 @@ inline __attribute__((always_inline)) void rows2(const bfloat16 *__restrict rk, 
                                                  const bfloat16 *__restrict dlh, float *__restrict blk,
                                                  float *__restrict o, float *__restrict tn, float *__restrict y0,
                                                  float *__restrict y1) {
-  const bfloat16 ddh = sc[0], ddl = sc[1];
+  const bfloat16 ddh = sc[0], ddl = sc[kL];
   const bfloat16 k0h = rk[R_KH / 2], k1h = rk[R_KH / 2 + 1], k0l = rk[R_KL / 2], k1l = rk[R_KL / 2 + 1];
   const bfloat16 q0h = rk[R_QH / 2], q1h = rk[R_QH / 2 + 1], q0l = rk[R_QL / 2], q1l = rk[R_QL / 2 + 1];
   const bfloat16 n0h = rk[(RS + R_KH) / 2], n1h = rk[(RS + R_KH) / 2 + 1];
@@ -149,9 +145,9 @@ inline __attribute__((always_inline)) void rows2(const bfloat16 *__restrict rk, 
 }
 }  // namespace vdn
 
-// the last position's TN reads past its record: its result is never used
-inline __attribute__((noinline)) void vdn_row_impl(uint8_t *__restrict tab, float *__restrict y0, float *__restrict y1,
-                                                   unsigned p, unsigned r2, unsigned h) {
+// the last position's TN reads T's bytes as k': its result is never used
+inline __attribute__((noinline)) void vdn_row_impl(uint8_t *__restrict tab, float *__restrict y, unsigned p, unsigned r2,
+                                                   unsigned h) {
   using namespace vdn;
   aie::set_rounding(aie::rounding_mode::conv_even);
   const uint8_t *__restrict rp = tab + REC + p * RS;
@@ -168,10 +164,10 @@ inline __attribute__((noinline)) void vdn_row_impl(uint8_t *__restrict tab, floa
       split(aie::load_v<kL>(t + j), th, tl);
       acc a;
       a.from_vector(aie::load_v<kL>(v + j));
-      a = mac3(a, th, tl, sc[2], sc[3]);
+      a = msc3(a, th, tl, sc[0], sc[kL]);
       vb uh, ul;
       split(a.template to_vector<float>(), uh, ul);
-      acc d = mac3(aie::zeros<accfloat, kL>(), uh, ul, sc[4], sc[5]);
+      acc d = mac3(aie::zeros<accfloat, kL>(), uh, ul, sc[1], sc[kL + 1]);
       vb dh, dl;
       split(d.template to_vector<float>(), dh, dl);
       aie::store_v(dlh + j, dh);
@@ -180,24 +176,10 @@ inline __attribute__((noinline)) void vdn_row_impl(uint8_t *__restrict tab, floa
       aie::store_v(tn + j, aie::zeros<float, kL>());
     }
   }
-  rows2((const bfloat16 *)rp + 2 * r2, sc, dlh, (float *)(tab + BLK) + 2 * r2 * kL, o, tn, y0, y1);
+  rows2((const bfloat16 *)rp + 2 * r2, sc, dlh, (float *)(tab + BLK) + 2 * r2 * kL, o, tn, y, y + 64);
   if (r2 == kRows / 2 - 1) {
     float *__restrict t = (float *)(tab + T);
 #pragma clang loop unroll(disable)
     for (unsigned j = 0; j < 64; j += kL) aie::store_v(t + j, aie::load_v<kL>(tn + j));
-  }
-}
-
-inline __attribute__((noinline)) void vdn_ofin_impl(const uint8_t *__restrict tab, float *__restrict ye, unsigned i) {
-  using namespace vdn;
-  aie::set_rounding(aie::rounding_mode::conv_even);
-  const float *__restrict o = (const float *)(tab + O) + i * 64;
-  bfloat16 ii[2];
-  split_s(0.088388347648318f, ii);
-#pragma clang loop unroll(disable)
-  for (unsigned j = 0; j < 64; j += kL) {
-    vb h, l;
-    split(aie::load_v<kL>(o + j), h, l);
-    aie::store_v(ye + j, mac3(aie::zeros<accfloat, kL>(), h, l, ii[0], ii[1]).template to_vector<float>());
   }
 }

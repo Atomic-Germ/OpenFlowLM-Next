@@ -291,6 +291,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (int l = 0; l < nl_; ++l)
             for (const auto& s : man_.verify.programs.at(types_[l]->name)) wanted[s.kernel] = true;
         for (const auto& s : man_.verify.tail) wanted[s.kernel] = true;
+        for (const auto& [n, st] : man_.verify.narrow) {
+            for (int l = 0; l < nl_; ++l)
+                for (const auto& s : st.programs.at(types_[l]->name)) wanted[s.kernel] = true;
+            for (const auto& s : st.tail) wanted[s.kernel] = true;
+        }
         vlogits_.assign(vw_, std::vector<float>(man_.vocab, 0.f));
     }
     for (const auto& [name, d] : man_.kernels)
@@ -422,7 +427,7 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
                                           static_cast<unsigned>(man_.verify.width + 1));
     } else if (d.patch == "attnposv") {
         if (!man_.verify.width) throw std::runtime_error("open_qwen36: " + name + " wants attnposv but the manifest has no verify block");
-        unsigned nq = static_cast<unsigned>(man_.verify.width);
+        unsigned nq = static_cast<unsigned>(d.nq ? d.nq : man_.verify.width);
         if (const char* env = std::getenv("OFLM_OPEN_ATTNV_NQ")) nq = static_cast<unsigned>(std::atoi(env));   // bring-up only
         k.attnv = stream_patch::attnv_table(k.words, name, nq, man_.attn);
         k.geom = man_.attn;
@@ -2980,9 +2985,11 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
         throw std::runtime_error("open_qwen36: verify past the context capacity " + std::to_string(cfg_.max_ctx));
     for (size_t j = 0; j < n; ++j)
         if (ids[j] < 0 || static_cast<size_t>(ids[j]) >= man_.vocab) throw std::runtime_error("open_qwen36: token id out of range");
-    if (n != vw_)
-        throw std::runtime_error("open_qwen36: the verify image runs exactly " + std::to_string(vw_) +
-                                 " positions; use verify(ids, 1) for one");
+    const VerifyStreams* narrow = n == vw_ ? nullptr : man_.verify.streams(n);
+    if (n != vw_ && !narrow)
+        throw std::runtime_error("open_qwen36: the kernel set has no " + std::to_string(n) + "-position verify streams");
+    const auto& vprograms = narrow ? narrow->programs : man_.verify.programs;
+    const auto& vtail = narrow ? narrow->tail : man_.verify.tail;
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
     xrt::bo& vx = buffer(man_.verify.xres, 0);
@@ -3004,7 +3011,7 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
     for (int l = 0; l < nl_; ++l) {
         if (verify_stop_ >= 0 && l >= verify_stop_) break;     // bring-up: a prefix of the walk, no tail
         if (verify_from_ > 0 && l < verify_from_) continue;      // bring-up: start the walk at a later layer
-        const std::vector<Step>& prog = man_.verify.programs.at(types_[l]->name);
+        const std::vector<Step>& prog = vprograms.at(types_[l]->name);
         for (const Step& s : prog) {
             Inflight cur = start_run(kerns_.at(s.kernel), s.args, l);
             timing_.dispatch_ms += cur.submit_ms;
@@ -3017,7 +3024,7 @@ void Core::verify(const int* ids, size_t n, int* argmax_out) {
         }
     }
     auto t1 = std::chrono::steady_clock::now();
-    for (const Step& s : man_.verify.tail) {
+    for (const Step& s : vtail) {
         if (verify_stop_ >= 0) break;
         Inflight cur = start_run(kerns_.at(s.kernel), s.args, 0);
         if (prev.active()) {
