@@ -82,7 +82,11 @@ PackOp parse_op(const json& j, const std::string& where) {
     if (p.op == "std_perm" || p.op == "std_perm_gguf" || p.op == "q8_perm" || p.op == "bf16_gemm")
         need_all({{"nch", p.nch}, {"in_dim", p.in_dim}});
     else if (p.op == "lmhead_q8_gguf")
-        need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"chunk_bytes", p.chunk_bytes}});
+        // No nch: the chunk count comes from the tensor's own dims, the way lmhead_q8
+        // derives it from the file length. Requiring it here would put a number in the
+        // manifest that the engine then has to agree with the GGUF, and a disagreement
+        // is silent -- the pool would be filled to the wrong length.
+        need_all({{"in_dim", p.in_dim}, {"chunk_bytes", p.chunk_bytes}});
     else if (p.op == "std_fuse") need_all({{"nch", p.nch}, {"in_dim", p.in_dim}, {"src_dim", p.src_dim}, {"rg", p.rg}});
     else if (p.op == "transpose" || p.op == "transpose_banked")
         need_all({{"rows", p.rows}, {"cols", p.cols}, {"elem", p.elem}});
@@ -687,6 +691,16 @@ void Manifest::check_model(const json& config, const std::string& where) const {
                 int iv = config["full_attention_interval"].get<int>(), n = config["num_hidden_layers"].get<int>();
                 if (iv <= 0) fail(where, "config.json full_attention_interval must be positive");
                 for (int l = 0; l < n; ++l) got.push_back((l + 1) % iv == 0 ? "full_attention" : "linear_attention");
+            } else if (hf_config_defaults.contains("layer_types")) {
+                // Neither the explicit list nor the interval. The manifest names what the
+                // kernel set was built for, which is the same contract the sibling keys
+                // below use: an absent key means its default when the manifest declares
+                // one. Without this a GGUF-sourced Qwen3.5 config -- a stock HF config,
+                // which carries neither -- is refused for a shape we can state exactly,
+                // and the hybrid's attention pattern is the one thing a GGUF cannot
+                // invent. A config that DOES carry either form is still compared, so a
+                // model whose mix differs from the kernels it would run is refused.
+                got = hf_config_defaults["layer_types"].get<std::vector<std::string>>();
             } else {
                 lacks("layer_types");
             }

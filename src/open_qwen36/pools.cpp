@@ -756,9 +756,22 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const size_t nk = op.in_dim / 256, per_band = 4 * nk;
         if (!nk) fail("lmhead_q8_gguf " + name + ": in_dim " + std::to_string(op.in_dim) +
                       " is under one 256-wide k-tile");
-        const uint64_t out_dim = op.nch / nk * 32;
+        // The chunk count from the tensor's own dims ([cols, rows], fastest first), not
+        // from the manifest: lmhead_q8 derives its own the same way from the file length,
+        // and a manifest that disagreed with the GGUF would fill the pool to the wrong
+        // length without any error.
+        const auto& tinfo = g.tensor(src);
+        if (tinfo.dims.size() != 2 || tinfo.dims[0] != op.in_dim)
+            fail("lmhead_q8_gguf " + name + ": the GGUF tensor is [" +
+                 std::to_string(tinfo.dims.size() == 2 ? tinfo.dims[1] : 0) + ", " +
+                 std::to_string(tinfo.dims.size() == 2 ? tinfo.dims[0] : 0) +
+                 "], the plan packs [" + std::to_string(op.nch * 32 / nk) + ", " +
+                 std::to_string(op.in_dim) + "]");
+        const uint64_t out_dim = tinfo.dims[1];
         std::vector<float> rowbuf(op.in_dim);
-        for (size_t k = 0; k < op.nch; ++k) {
+        const size_t nch = out_dim / 32 * nk;
+        bounds(op, nch * CH8, dst_bytes);
+        for (size_t k = 0; k < nch; ++k) {
             uint8_t* d = dst + op.dst + k * CH8;
             const size_t s = k / per_band, r = k % per_band;
             const size_t fch = (4 * s + r % 4) * nk + r / 4;

@@ -122,7 +122,44 @@
    "full_attention"
   ]
  },
- "hf_config_defaults": {},
+ "hf_config_defaults": {
+  "layer_types": [
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention",
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "full_attention"
+  ],
+  "linear_num_value_heads": 32,
+  "head_dim": 256
+ },
  "layout": {
   "hidden": 4096,
   "vocab": 248320,
@@ -1493,7 +1530,44 @@
     "full_attention"
    ]
   },
-  "hf_config_defaults": {},
+  "hf_config_defaults": {
+   "layer_types": [
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention"
+   ],
+   "linear_num_value_heads": 32,
+   "head_dim": 256
+  },
   "layout": {
    "hidden": 4096,
    "vocab": 248320,
@@ -1577,9 +1651,9 @@
   ],
   "contexts": {
    "ln": "ln/final.xclbin",
-   "lm": "lm_head_q8/final.xclbin",
-   "lx": "lx/final.xclbin",
-   "ax": "ax/final.xclbin",
+   "lm": "lm_head_q8_f32/final.xclbin",
+   "lx": "lx_f32/final.xclbin",
+   "ax": "ax_f32/final.xclbin",
    "ag": "ag_s256/final.xclbin",
    "gemm": "gemm_n4096_k4096/final.xclbin"
   },
@@ -1591,19 +1665,19 @@
    },
    "lm": {
     "context": "lm",
-    "insts": "lm_head_q8/insts.bin",
-    "build": "lm_head_q8"
+    "insts": "lm_head_q8_f32/insts.bin",
+    "build": "lm_head_q8_f32"
    },
    "lx": {
     "context": "lx",
-    "insts": "lx/insts.bin",
-    "build": "lx"
+    "insts": "lx_f32/insts.bin",
+    "build": "lx_f32"
    },
    "ax": {
     "context": "ax",
-    "insts": "ax/insts.bin",
+    "insts": "ax_f32/insts.bin",
     "patch": "attnpos",
-    "build": "ax"
+    "build": "ax_f32"
    },
    "ag_s256": {
     "context": "ag",

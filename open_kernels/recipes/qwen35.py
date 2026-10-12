@@ -267,10 +267,20 @@ def gemm_route(spec: ModelSpec) -> dict | None:
 # ---- the step program: ONE run per layer type (nothing is routed, so no part split)
 def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     L = layout(spec)
+    # The set NAME, not just the chunk format, follows the quant: the f32-scale twin is
+    # a different kernel set that happens to share the design, and the contexts have to
+    # point at it. Without this the gguf section below names the q4_1 xclbins, so a
+    # GGUF model would load the twin's manifest and then run the q4_1 kernels over
+    # 6144-byte chunks -- silently wrong output, no error anywhere. dense.py's dx_set /
+    # lm_set are the same rule.
+    f32 = spec.quant == "q4_1_f32"
+    lm_set = "lm_head_q8_f32" if f32 else "lm_head_q8"
+    lx_set = "lx_f32" if f32 else "lx"
+    ax_set = "ax_f32" if f32 else "ax"
     out: dict = {
-        "contexts": {"ln": "ln/final.xclbin", "lm": "lm_head_q8/final.xclbin"},
+        "contexts": {"ln": "ln/final.xclbin", "lm": f"{lm_set}/final.xclbin"},
         "kernels": {"ln": {"context": "ln", "insts": "ln/insts.bin", "build": "ln"},
-                    "lm": {"context": "lm", "insts": "lm_head_q8/insts.bin", "build": "lm_head_q8"}},
+                    "lm": {"context": "lm", "insts": f"{lm_set}/insts.bin", "build": lm_set}},
         "layer_types": {},
         "tail": [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
@@ -282,8 +292,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_linear:
         args = ["pool", "xres", "consts", "state", "act"]
         check_buffer_args("lx", args)
-        out["contexts"]["lx"] = "lx/final.xclbin"
-        out["kernels"]["lx"] = {"context": "lx", "insts": "lx/insts.bin", "build": "lx"}
+        out["contexts"]["lx"] = f"{lx_set}/final.xclbin"
+        out["kernels"]["lx"] = {"context": "lx", "insts": f"{lx_set}/insts.bin", "build": lx_set}
         out["layer_types"][LINEAR] = {
             "buffers": {"consts": L.C_BYTES, "act": L.A_BYTES,
                         "state": {"kind": "linear", "bytes": L.STATE_BYTES}},
@@ -292,8 +302,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     if spec.has_full:
         args = ["pool", "xres", "consts", "state", "act", "ptab"]
         check_buffer_args("ax", args)
-        out["contexts"]["ax"] = "ax/final.xclbin"
-        out["kernels"]["ax"] = {"context": "ax", "insts": "ax/insts.bin", "patch": "attnpos", "build": "ax"}
+        out["contexts"]["ax"] = f"{ax_set}/final.xclbin"
+        out["kernels"]["ax"] = {"context": "ax", "insts": f"{ax_set}/insts.bin", "patch": "attnpos", "build": ax_set}
         out["layer_types"][FULL] = {
             "buffers": {"consts": L.CA_BYTES, "act": L.AA_BYTES,
                         "state": {"kind": "kv", "row": L.KV_ROW}},
@@ -318,6 +328,34 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
                        "layer_types": f32["layer_types"], "tail": f32["tail"],
                        "globals": f32["globals"]}
     return out
+
+
+def hf_config_defaults(spec: ModelSpec) -> dict:
+    """`layer_types` for a config that omits it.
+
+    Qwen3.5 is a hybrid: DeltaNet linear-attention layers with a full-attention one
+    every `full_attention_interval`. Newer HF configs spell that out in `layer_types`;
+    an older or hand-edited one does not, and the engine then refuses the model with
+    "config.json lacks 'layer_types'" -- the shape is exactly what the kernel set was
+    built for, and absence is not evidence of anything else. So say what it means, which
+    is this set's own mix. A config that DOES carry `layer_types` is still compared
+    against it, so a model whose attention pattern differs from the kernels it would run
+    is refused exactly as before.
+    """
+    # Every key here is one a STOCK HF config does not carry. `hidden_size`,
+    # `num_attention_heads` and the rest are the config's own vocabulary and are always
+    # present -- a config missing them is a different model, not an older one. These are
+    # the fields the kernel set was built from and the config is not obliged to state:
+    # the hybrid's attention mix, and the DeltaNet value-head geometry, which no stock
+    # Qwen3.5 config exposes (the arch is too new for transformers to model it). Each is
+    # exactly what the kernels assume, so an absent key means its default rather than a
+    # refusal -- and a config that DOES carry one is still compared, so a model whose
+    # geometry differs from the kernels it would run is still refused.
+    return {
+        "layer_types": list(spec.layer_types),
+        "linear_num_value_heads": spec.lin_value_heads,
+        "head_dim": spec.head_dim,
+    }
 
 
 def hf_config_check(spec: ModelSpec) -> dict:
