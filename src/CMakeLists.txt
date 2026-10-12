@@ -299,6 +299,7 @@ if(NOT OFLM_USE_HRX)
     # xrt::hw_context / xrt::kernel directly, like the open embedding backend.
     list(APPEND SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/q4nx_file.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/gguf_file.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/manifest.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/pools.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_qwen36/core.cpp"
@@ -1470,6 +1471,14 @@ if(MSVC)
 endif()
 add_test(NAME bench_embed
          COMMAND benchmark_embed_test "${CMAKE_CURRENT_SOURCE_DIR}/model_list.json")
+
+# src/test holds two kinds of tests. The per-model NPU ones need a device and
+# the prebuilt engine libraries, so they are built standalone and are NOT added
+# here. The host-only ones (device registry, npu_platform helpers, downloader
+# pinning) need neither, and were standalone projects that nothing added -- so
+# they never built and never ran anywhere, CI included. src/test/CMakeLists.txt
+# adds exactly those three.
+add_subdirectory(test)
 
 # OPEN-DIFFUSION-TOKENS: `oflm image`'s prompt path against klein_pipeline.token_ids'
 # goldens. It needs the installed model's tokenizer.json and fails naming the path

@@ -2,6 +2,21 @@
 
 include(CMakeParseArguments)
 
+# ————————————————————————————————————————————————————————————————
+# Host-only unit tests
+# ————————————————————————————————————————————————————————————————
+# These need no NPU, no prebuilt engine library and no network, so they are
+# added to the ROOT build's test graph. They used to be standalone projects
+# that nothing ever added, and CI only configures and runs ctest from the root
+# build -- so they built nowhere and their assertions ran nowhere.
+#
+# The per-model NPU tests in this directory are deliberately NOT added: they
+# need a device and the prebuilt engine libs, and are still built standalone
+# through their own common.mk / CMakeLists.txt.
+add_subdirectory(npu_platform)
+add_subdirectory(model_backend)
+add_subdirectory(downloader_pinning)
+
 function(npu_test_setup)
     # Set build type to Release
     set(CMAKE_BUILD_TYPE Release PARENT_SCOPE)

@@ -201,6 +201,11 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
     return false;
 }
 
+// Health probes should not produce request or connection lifecycle logs.
+static bool is_healthcheck(const http::request<http::string_body>& req) {
+    return req.method() == http::verb::get && req.target() == "/api/version";
+}
+
 ///@brief HttpSession class implementation
 ///@param socket the socket
 ///@param server the server
@@ -213,8 +218,6 @@ HttpSession::HttpSession(tcp::socket socket, WebServer& server)
     // Avoid abortive close that can lead to client-side broken pipe on large uploads
     socket_.set_option(tcp::socket::linger(false, 0));
     
-    // Debug: Log TCP connection formation
-    header_print("🔗 ", "TCP connection established - Remote: " + socket_.remote_endpoint().address().to_string() + ":" + std::to_string(socket_.remote_endpoint().port()));
 }
 
 ///@brief start
@@ -227,10 +230,12 @@ void HttpSession::close_connection() {
     boost::system::error_code ec;
     
     // Debug: Log TCP connection disconnection
-    try {
-        header_print("🔒 ", "TCP connection closing - Remote: " + socket_.remote_endpoint().address().to_string() + ":" + std::to_string(socket_.remote_endpoint().port()));
-    } catch (const std::exception& e) {
-        header_print("🔒 ", "TCP connection closing - Remote endpoint unavailable");
+    if (!is_healthcheck(req_)) {
+        try {
+            header_print("🔒 ", "TCP connection closing - Remote: " + socket_.remote_endpoint().address().to_string() + ":" + std::to_string(socket_.remote_endpoint().port()));
+        } catch (const std::exception& e) {
+            header_print("🔒 ", "TCP connection closing - Remote endpoint unavailable");
+        }
     }
     socket_.shutdown(tcp::socket::shutdown_both, ec);
     server_.active_connections_.fetch_sub(1);
@@ -247,9 +252,13 @@ void HttpSession::read_request(bool cors) {
     http::async_read(self->socket_, self->buffer_, *parser,
         [self, parser, cors](beast::error_code ec, std::size_t bytes_transferred) {
             if (!ec) {
-                header_print("TCP", "Read " + std::to_string(bytes_transferred) + " bytes from socket");
                 // Move the parsed message into our request object
                 self->req_ = parser->release();
+                if (!is_healthcheck(self->req_)) {
+                    // The request target is only known after reading the request.
+                    header_print("🔗 ", "TCP connection established - Remote: " + self->socket_.remote_endpoint().address().to_string() + ":" + std::to_string(self->socket_.remote_endpoint().port()));
+                    header_print("TCP", "Read " + std::to_string(bytes_transferred) + " bytes from socket");
+                }
                 self->handle_request(cors);
                 return;
             }
@@ -269,10 +278,12 @@ void HttpSession::read_request(bool cors) {
             }
 
             // Connection closed or other error, decrement connection counter
-            try {
-                header_print("🔒 ", "TCP connection closed - Remote: " + self->socket_.remote_endpoint().address().to_string() + ":" + std::to_string(self->socket_.remote_endpoint().port()));
-            } catch (...) {
-                header_print("🔒 ", "TCP connection closed - Remote endpoint unavailable");
+            if (!is_healthcheck(self->req_)) {
+                try {
+                    header_print("🔒 ", "TCP connection closed - Remote: " + self->socket_.remote_endpoint().address().to_string() + ":" + std::to_string(self->socket_.remote_endpoint().port()));
+                } catch (...) {
+                    header_print("🔒 ", "TCP connection closed - Remote endpoint unavailable");
+                }
             }
             self->server_.active_connections_.fetch_sub(1);
         });
@@ -352,7 +363,9 @@ void HttpSession::write_response() {
     //    }
     //}
 
-    std::cout << "================================================" << std::endl;
+    if (!is_healthcheck(req_)) {
+        std::cout << "================================================" << std::endl;
+    }
 
     res_.set("Access-Control-Allow-Origin", "*");
     res_.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -364,11 +377,13 @@ void HttpSession::write_response() {
             self->socket_.shutdown(tcp::socket::shutdown_both, ec);
             // Decrement connection counter for non-keep-alive connections
             self->server_.active_connections_.fetch_sub(1);
-            try {
-                header_print("🔒 ", "TCP connection closed - Remote: " + self->socket_.remote_endpoint().address().to_string() + ":" + std::to_string(self->socket_.remote_endpoint().port()));
-            }
-            catch (...) {
-                header_print("🔒 ", "TCP connection closed - Remote endpoint unavailable");
+            if (!is_healthcheck(self->req_)) {
+                try {
+                    header_print("🔒 ", "TCP connection closed - Remote: " + self->socket_.remote_endpoint().address().to_string() + ":" + std::to_string(self->socket_.remote_endpoint().port()));
+                }
+                catch (...) {
+                    header_print("🔒 ", "TCP connection closed - Remote endpoint unavailable");
+                }
             }
 
         });
@@ -667,12 +682,14 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
     tcp::socket& socket,
     std::shared_ptr<HttpSession> session) {
     // Log request details
-    std::cout << "================================================" << std::endl;
-    header_print("⬇️ ", "Incoming Request: " << req.method_string());
-    header_print("LOG", "Time stamp: " << get_current_time_string()); // hh:mm:ss mm:dd:yyyy
-    header_print("LOG", "Target: " << req.target());
-    header_print("LOG", "Version: " << req.version());
-    header_print("LOG", "Keep-Alive: " << req.keep_alive());
+    if (!is_healthcheck(req)) {
+        std::cout << "================================================" << std::endl;
+        header_print("⬇️ ", "Incoming Request: " << req.method_string());
+        header_print("LOG", "Time stamp: " << get_current_time_string()); // hh:mm:ss mm:dd:yyyy
+        header_print("LOG", "Target: " << req.target());
+        header_print("LOG", "Version: " << req.version());
+        header_print("LOG", "Keep-Alive: " << req.keep_alive());
+    }
     json request_json_log;
     bool is_json = false;
     try {
@@ -686,7 +703,9 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
             is_json = content_type.find("multipart/form-data") == std::string::npos;
             if (is_json) {
                 json request_json_log = json::parse(req.body());
-                brief_print_message_request(request_json_log);
+                if (!is_healthcheck(req)) {
+                    brief_print_message_request(request_json_log);
+                }
             }
         }
     }

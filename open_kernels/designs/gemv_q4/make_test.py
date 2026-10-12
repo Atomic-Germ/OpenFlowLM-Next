@@ -32,6 +32,9 @@ from ml_dtypes import bfloat16
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent))
 from q4_1_pack import CH, pack_q4_1_pool, pool_reference, random_q4_1_blocks  # noqa: E402
+from gguf_pool import (CH_Q4, chunk_geometry as gg_chunk_geometry,  # noqa: E402
+                       dequant_q4_chunk, pack_q4_pool as gg_pack_pool,
+                       random_q4_blocks as gg_random_blocks)
 
 S = 32 * CH                       # one expert stripe (128 rows x 2048)
 REGIONS = {                       # name: (pool offset, N, K, RS)
@@ -76,6 +79,9 @@ def main() -> int:
     ap.add_argument("--x", default="random", help="random | ones | onehot:K | act:FILE")
     ap.add_argument("--runs", type=int, default=2, help="`run` lines in the cfg (timing)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--layout", default="q4nx", choices=["q4nx", "gguf"],
+                    help="q4nx: bf16-scale chunks (q4_1_pack); gguf: the direct-GGUF "
+                         "f32-scale chunks (gguf_pool), built with GEMV_SCALES_F32=1")
     a = ap.parse_args()
 
     _, n, k, rs = REGIONS[a.region]
@@ -88,8 +94,12 @@ def main() -> int:
     else:
         if a.bands:
             n = a.bands * 32 * rs
-        blocks = random_q4_1_blocks(n, k, np.random.default_rng(a.seed))
-        w = pack_q4_1_pool(blocks, rs)
+        if a.layout == "gguf":
+            blocks = gg_random_blocks(n, k, np.random.default_rng(a.seed))
+            w = gg_pack_pool(blocks, rs)
+        else:
+            blocks = random_q4_1_blocks(n, k, np.random.default_rng(a.seed))
+            w = pack_q4_1_pool(blocks, rs)
     nbytes = len(w)
 
     if a.x == "ones":
@@ -103,14 +113,32 @@ def main() -> int:
     else:
         x = np.random.default_rng(a.seed).standard_normal(k).astype(np.float32).astype(bfloat16)
 
-    ref = pool_reference(w, x, n, k, rs)
+    if a.layout == "gguf":
+        nch, _, rows0, cols0 = gg_chunk_geometry(n, k, rs)
+        pool = np.frombuffer(w, np.uint8).reshape(nch, CH_Q4)
+        xf = x.astype(np.float64)
+        y = np.zeros(n, np.float64)
+        for c in range(nch):
+            # the kernel RNE-rounds the f32 scales to bf16 for its bf16 MACs --
+            # the same rounding a q4nx container bakes into the file -- so the
+            # reference narrows them the same way before dequantizing
+            ch = pool[c].copy()
+            for lo, hi in ((0, 1024), (1024, 2048)):
+                narrow = ch[lo:hi].view(np.float32).astype(bfloat16).astype(np.float32)
+                ch[lo:hi] = narrow.view(np.uint8).reshape(hi - lo)
+            y[rows0[c]:rows0[c] + 32] += dequant_q4_chunk(ch).astype(np.float64) @ xf[cols0[c]:cols0[c] + 256]
+        ref = y.astype(np.float32)
+    else:
+        ref = pool_reference(w, x, n, k, rs)
     tag = a.region if not a.region.startswith("exp_") else f"{a.region}{a.expert}"
+    if a.layout == "gguf":
+        tag += "_gguf"
+    build = f"{a.region}_gguf" if a.layout == "gguf" else a.region
     if a.source == "captured":
         tag += "_cap"
     (HERE / f"w_{tag}.bin").write_bytes(w.tobytes())
     (HERE / f"x_{tag}.bin").write_bytes(x.tobytes())
     (HERE / f"ref_{tag}.bin").write_bytes(ref.tobytes())
-    build = a.region                     # builds are per shape, shared across experts/sources
     cfg = ["device",
            f"xclbin G build_{build}/final.xclbin",
            f"kernelx k G build_{build}/insts.bin",

@@ -36,6 +36,7 @@ EXPECTED = {
     "granite42-3b": "Granite-4.2-3B-NPU2",
     "qwen25-3b": "Qwen2.5-3B-Instruct-NPU2",
     "qwen3-4b": "Qwen3-4B-NPU2",
+    "qwen3-8b": "Qwen3-8B-NPU2",
 }
 
 

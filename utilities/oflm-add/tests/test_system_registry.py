@@ -40,46 +40,38 @@ def test_an_explicit_list_that_is_not_there_is_refused_by_path(nothing_on_path, 
     assert str(missing) in str(e.value)
 
 
-def test_the_released_engine_is_called_flm(monkeypatch, tmp_path):
-    """The install on disk is flm.exe; looking only for `oflm` misses it."""
+def test_the_engine_dir_is_detected_via_oflm(monkeypatch, tmp_path):
+    """The engine is oflm; its install dir carries the official model_list.json."""
     write_list(tmp_path / "model_list.json")
     monkeypatch.setattr(oflm_add, "SYSTEM_LIST_CANDIDATES", [])
     monkeypatch.setattr(oflm_add.shutil, "which",
-                        lambda n: str(tmp_path / "flm.exe") if n == "flm" else None)
+                        lambda n: str(tmp_path / "oflm") if n == "oflm" else None)
     assert oflm_add.find_system_model_list() == tmp_path / "model_list.json"
 
 
-def test_a_checkout_oflm_wins_over_an_installed_flm(monkeypatch, tmp_path):
-    build, inst = tmp_path / "build", tmp_path / "inst"
-    write_list(build / "model_list.json")
-    write_list(inst / "model_list.json")
-    monkeypatch.setattr(oflm_add, "SYSTEM_LIST_CANDIDATES", [])
-    monkeypatch.setattr(oflm_add.shutil, "which", lambda n: str(
-        (build if n == "oflm" else inst) / f"{n}.exe"))
-    assert oflm_add.find_system_model_list() == build / "model_list.json"
-
-
-def test_the_xclbin_root_finds_an_installed_flm_too(monkeypatch, tmp_path):
+def test_the_xclbin_root_finds_the_oflm_install(monkeypatch, tmp_path):
     (tmp_path / "xclbins").mkdir()
     monkeypatch.setattr(oflm_add, "SYSTEM_XCLBIN_PREFIXES", [])
     monkeypatch.setattr(oflm_add.shutil, "which",
-                        lambda n: str(tmp_path / "flm.exe") if n == "flm" else None)
+                        lambda n: str(tmp_path / "oflm") if n == "oflm" else None)
     assert oflm_add.find_system_xclbin_root() == tmp_path / "xclbins"
 
 
 def test_the_refusal_names_the_paths_it_tried(monkeypatch, tmp_path):
-    """The old message named two directories that were never looked at."""
+    """The refusal has to name what it did look at, and the way out."""
     monkeypatch.setattr(oflm_add, "SYSTEM_LIST_CANDIDATES", [str(tmp_path / "share" / "model_list.json")])
     monkeypatch.setattr(oflm_add.shutil, "which",
-                        lambda n: str(tmp_path / n / f"{n}.exe") if n == "flm" else None)
+                        lambda n: str(tmp_path / n / "oflm") if n == "oflm" else None)
     with pytest.raises(SystemExit) as e:
         oflm_add.find_system_model_list()
     msg = str(e.value)
     assert str(tmp_path / "share" / "model_list.json") in msg
-    assert str(tmp_path / "flm" / "model_list.json") in msg
+    assert str(tmp_path / "oflm" / "model_list.json") in msg
     assert "--system-list" in msg
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="junction fallback is Windows-only (_winapi.CreateJunction)")
 def test_the_xclbin_link_falls_back_to_a_junction(monkeypatch, tmp_path):
     """Windows only grants the symlink privilege to admins and developer mode.
     link_open_kernels already handles that; the xclbins link did not."""
