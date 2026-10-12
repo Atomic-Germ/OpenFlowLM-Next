@@ -337,15 +337,9 @@ def gguf_arch_families() -> dict[str, str]:
     The literal below is only a fallback for when the recipes are not importable.
     """
     try:
-        from pathlib import Path as _Path
-        import sys as _sys
-        for cand in (_Path(__file__).resolve().parents[3] / "open_kernels",
-                     _Path("/opt/openflowlm/share/oflm/open_kernels")):
-            if cand.is_dir():
-                _sys.path.insert(0, str(cand))
-                break
-        from recipes.spec import GGUF_FAMILIES as _GF, _FAMILY_OF as _FO
-        derived = {arch: _FO[builder] for arch, builder in _GF.items()}
+        _rs = _recipes_spec()
+        derived = {arch: _rs._FAMILY_OF[builder]
+                   for arch, builder in _rs.GGUF_FAMILIES.items()}
         # The recipes win where they speak; the literal fills the gaps (the
         # embedding tower has no per-arch builder, it rides the bf16 kernels).
         return {**GGUF_ARCH_FAMILIES, **derived}
@@ -1402,13 +1396,7 @@ def gguf_spec_hash(gguf_source: str | None):
         return None, "could not read the GGUF metadata"
     kv, _tensors = inv
     try:
-        import sys as _sys
-        from pathlib import Path as _Path
-        _root = _Path(__file__).resolve().parents[3] / "open_kernels"
-        if str(_root) not in _sys.path:
-            _sys.path.insert(0, str(_root))
-        from recipes.spec import ModelSpec as _MS
-        return _MS.from_gguf_metadata(kv).spec_hash(), None
+        return _recipes_spec().ModelSpec.from_gguf_metadata(kv).kernel_hash(), None
     except Exception as exc:                                    # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -1449,14 +1437,103 @@ def kernel_set_spec_hash(kernel_dir):
         return None
 
 
-def find_open_kernels(spec_hash, roots, dir_name):
-    """The installed open kernel set whose manifest matches `spec_hash`.
+def gguf_issue_routing(why):
+    """Where to file when a GGUF-direct install cannot run, or runs wrong.
+
+    The question "whose bug is this?" has one honest answer, and it is not
+    "report it upstream": the same symptom has two different owners depending
+    on a fact the user can check in a minute. Run the model on the CPU reference
+    (`oflm chat --device cpu --npu 0`, or llama.cpp directly against the same
+    GGUF). If the CPU output is wrong too, the file or the conversion is the
+    maintainer's, and the report belongs on the GGUF's own HF repo. If the CPU
+    output is right and the NPU's is not, the kernels are ours, and the report
+    belongs here.
+
+    `why` is the refusal reason, which narrows it further: a shape we have
+    never built is a build request rather than either kind of bug, and saying
+    so is more useful than sending anyone to file a bug.
+    """
+    if "not supported by the open kernels" in why or "vision projector" in why:
+        # Not a failure anyone should report: the file was skipped for a
+        # documented reason and the message already says what to do instead.
+        return None
+    if "no installed open kernel set is built for this model's shape" in why:
+        return ("No kernel set has ever been built for this shape. That is a "
+                "build request, not a bug: open an issue at "
+                "github.com/Atomic-Germ/OpenFlowLM-GGUF with the model's "
+                "`config.json` and we will generate its spec.")
+    if "has no GGUF-direct build" in why:
+        return ("The kernels for this exact shape are installed; only the "
+                "GGUF-direct (f32-scale) build is missing. That is ours to "
+                "build -- no new kernels and no change to the model are needed. "
+                "Mention it at github.com/Atomic-Germ/OpenFlowLM-GGUF, or "
+                "point --open-kernels at a set you built yourself.")
+    return ("If it runs but the output is wrong, compare against the CPU "
+            "reference before filing: `oflm chat --device cpu --npu 0` (or "
+            "llama.cpp on the same GGUF). Wrong there too means the GGUF or "
+            "its conversion is at fault -- report it on the model's own "
+            "HuggingFace repo. Right there but wrong on the NPU means our "
+            "kernels are wrong -- report it at "
+            "github.com/Atomic-Germ/OpenFlowLM-GGUF/issues, quoting the "
+            "model id and the quant.")
+
+
+def _recipes_spec():
+    """The open_kernels recipe package, wherever this install finds it.
+
+    oflm-add is installed under share/oflm next to open_kernels and also runs
+    from a source tree, so the path is discovered rather than assumed. One
+    helper, because three call sites had each grown their own copy.
+    """
+    from pathlib import Path as _Path
+    import sys as _sys
+    try:
+        import recipes.spec as _rs                              # type: ignore
+        return _rs
+    except ImportError:
+        pass
+    for cand in (_Path(__file__).resolve().parents[3] / "open_kernels",
+                 _Path("/opt/openflowlm/share/oflm/open_kernels")):
+        if cand.is_dir():
+            _sys.path.insert(0, str(cand))
+            break
+    import recipes.spec as _rs                                  # type: ignore
+    return _rs
+
+
+def kernel_set_kernel_hash(kernel_dir):
+    """What a kernel set is BUILT to fit, or None.
+
+    `kernel_hash`, not `spec_hash`. The two differ only by `real_vocab`, which
+    sizes nothing (lm_rows rounds `spec.vocab`; real_vocab only bounds which
+    ids have logits) and which a GGUF cannot state anyway, because llama.cpp
+    pads vocab_size -- a Qwen3.5-9B file claims 248320 while its container's
+    tokenizer holds 248070 ids. Matching on the identity hash therefore never
+    matches a GGUF to any manifest, which would leave every custom fine-tune
+    unable to find the kernels its own shape calls for.
+    """
+    try:
+        data = load_json(Path(kernel_dir) / "manifest.json")
+        block = data.get("spec")
+        if isinstance(block, dict):
+            return _recipes_spec().ModelSpec.from_dict(block).kernel_hash()
+        # A manifest with no embedded spec block carries only spec_hash, and a
+        # spec_hash is not comparable with a kernel_hash. Fall back to it rather
+        # than reporting the set as unmatched: it is at least the identity match
+        # older callers made, and refusing to look would strand those manifests.
+        return data.get("spec_hash")
+    except Exception:
+        return None
+
+
+def find_open_kernels(want_hash, roots, dir_name):
+    """The installed open kernel set whose kernels match `want_hash` (a kernel_hash).
 
     Roots are xclbins directories (<root>/<model>/open_kernels). A set sitting
     under this model's own name wins; otherwise the first match in root order.
     Returns (Path, source model name) or (None, None).
     """
-    if not spec_hash:
+    if not want_hash:
         return None, None
     matches = []
     for root in roots:
@@ -1466,7 +1543,7 @@ def find_open_kernels(spec_hash, roots, dir_name):
             k = model / "open_kernels"
             if not (k / "manifest.json").is_file():
                 continue
-            if kernel_set_spec_hash(k) == spec_hash:
+            if kernel_set_kernel_hash(k) == want_hash:
                 matches.append((k, model.name))
     for k, name in matches:
         if name == dir_name:
@@ -2255,21 +2332,22 @@ def main():
                 # spec_hash is the same key the open kernels already publish.
                 kdir, found = find_open_kernels(
                     want_hash, [sys_xcl] if sys_xcl else [], dir_name)
-                if kdir is not None and manifest_supports_gguf(kdir / "manifest.json"):
+                if kdir is None:
+                    why = ("no installed open kernel set is built for this model's shape"
+                           if want_hash else "no installed kernel set matched this model")
+                elif not manifest_supports_gguf(kdir / "manifest.json"):
+                    # A shape DID match; it just has no f32-scale twin built yet.
+                    # Say so -- "build the twin for this shape" and "you have the
+                    # wrong kernels" call for completely different work.
+                    why = (f"{found} matches this model's shape but has no GGUF-direct "
+                           "build (its open_kernels manifest has no 'gguf' section)")
+                    kdir = None
+                else:
+                    why = None
                     if found and found != xclbin_source:
                         log(f"[INFO] kernels by shape: {found} "
-                            f"(spec {want_hash[:19]}); not {xclbin_source or 'any name match'}")
+                            f"({want_hash[:19]}), not {xclbin_source or 'any name match'}")
                     xclbin_source = found
-                    why = None
-                else:
-                    why = ("no installed open kernel set has this model's spec "
-                           f"{want_hash[:19]}" if want_hash else
-                           "no installed kernel set matched this model")
-                    kdir = None
-                    if kdir is not None and not manifest_supports_gguf(kdir / "manifest.json"):
-                        why = (f"{found} has no GGUF-direct build "
-                               "(its open_kernels manifest has no 'gguf' section)")
-                        kdir = None
             if not kdir:
                 gguf_skip = (
                     f"{why or 'no GGUF-direct kernel set matched this model'}; "
@@ -2311,6 +2389,12 @@ def main():
         elif gguf_refused:
             print(f"weights        : safetensors (GGUF present but not usable: "
                   + "; ".join(sorted(set(gguf_refused.values()))) + ")")
+            # The user is about to type `oflm chat` and get something that is
+            # not this model. Say now where a report would go, while they still
+            # know which GGUF they picked.
+            for hint in sorted({gguf_issue_routing(w) for w in
+                                gguf_refused.values()} - {None}):
+                print(f"if that is wrong: {hint}")
         probe = args.open_kernels or (local_dir if local_dir else None)
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")
@@ -2329,6 +2413,14 @@ def main():
         log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
         for n, why in sorted(gguf_refused.items()):
             log(f"[INFO]   skipping {n}: {why}")
+        # Once, not per file: the routing is the same for every refusal, and
+        # repeating it five times buries the line that names the model.
+        # One line per distinct KIND of refusal, not per file: the reasons are
+        # few and the routing differs between them, so collapsing them to one
+        # would either advise the wrong tracker or bury the right one.
+        for hint in sorted({gguf_issue_routing(w)
+                            for w in gguf_refused.values()} - {None}):
+            log(f"[INFO]   {hint}")
     if local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")

@@ -149,3 +149,41 @@ def test_override_without_a_manifest_is_refused(tmp_path, model_dir):
     empty.mkdir()
     with pytest.raises(SystemExit):
         oflm_add.setup_open_kernels(model_dir, model_dir.name, [], override=empty)
+
+
+def test_issue_routing_distinguishes_our_bug_from_the_maintainers():
+    """A GGUF-direct refusal has no single right tracker, and guessing sends
+    every report to the wrong project.
+
+    The discriminator is one the user can check in a minute: run the same GGUF
+    on the CPU reference. Wrong there too and the file or its conversion is at
+    fault, which is the model's own repo; right there and the kernels are wrong,
+    which is ours. A shape nobody ever built is neither -- it is a build
+    request, and telling someone to file a bug for it wastes their time.
+
+    Quant and mmproj rejections get no routing at all: they are documented
+    instructions, not failures, and a "where do I report this" line under them
+    would invite noise.
+    """
+    from oflm_add import gguf_issue_routing
+
+    never_built = gguf_issue_routing(
+        "no installed open kernel set is built for this model's shape")
+    assert "build request" in never_built
+    assert "issues" not in never_built, "a build request is not a bug report"
+
+    missing_twin = gguf_issue_routing(
+        "Qwen3.5-9B-NPU2 matches this model's shape but has no GGUF-direct "
+        "build (its open_kernels manifest has no 'gguf' section)")
+    assert "already installed" in missing_twin or "installed" in missing_twin
+    assert "Atomic-Germ" in missing_twin, "building a twin is our work"
+    assert "HuggingFace" not in missing_twin
+
+    wrong_output = gguf_issue_routing("some unforeseen reason")
+    assert "--device cpu" in wrong_output, "must give the discriminator step"
+    assert "HuggingFace" in wrong_output and "Atomic-Germ" in wrong_output
+
+    assert gguf_issue_routing(
+        "quant Q5_K_M not supported by the open kernels (have Q4_1/...)") is None
+    assert gguf_issue_routing(
+        "vision projector (mmproj), not the language model") is None

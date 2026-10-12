@@ -66,6 +66,60 @@ def test_matrix_slugs_are_unique_and_nameable():
         assert is_safe_dir_name(model), f"{slug}: {model!r} is not a safe directory name"
 
 
+def test_a_gguf_derives_the_shape_its_kernels_were_built_for():
+    """The point of the normalisation: a GGUF and an installed manifest describe
+    the same model and must hash the same.
+
+    Three things stood between them. The GGUF carries the MTP/NextN block the
+    packer never converts (33 layers against the kernels' 32). `norm_eps` comes
+    back from the GGUF's f32 as 9.999999974752427e-07 where the container had
+    1e-06, and `spec_hash` hashes the float. And `real_vocab` is the tokenizer's
+    id count, which llama.cpp's padded `vocab_size` cannot express -- so it is
+    excluded from `kernel_hash`, which is the hash that asks "will these kernels
+    fit", as distinct from `spec_hash`, which asks "is this the same model".
+
+    Without all three, no GGUF ever matches any kernel set and a custom
+    fine-tune of a model we already ship cannot be installed.
+    """
+    import json
+
+    from recipes.spec import ModelSpec
+    sys.path.insert(0, str(REPO / "open_kernels"))
+    md = {
+        "general.architecture": "qwen35",
+        "qwen35.block_count": 33,                 # 32 trunk + 1 NextN/MTP block
+        "qwen35.nextn_predict_layers": 1,
+        "qwen35.embedding_length": 4096,
+        "qwen35.feed_forward_length": 12288,
+        "qwen35.attention.head_count": 16,
+        "qwen35.attention.head_count_kv": 4,
+        "qwen35.attention.key_length": 256,
+        "qwen35.attention.value_length": 256,
+        "qwen35.vocab_size": 248320,
+        "qwen35.full_attention_interval": 4,
+        "qwen35.ssm.conv_kernel": 4,
+        "qwen35.ssm.state_size": 128,
+        "qwen35.ssm.group_count": 16,
+        "qwen35.ssm.time_step_rank": 32,
+        "qwen35.ssm.inner_size": 4096,
+        "qwen35.rope.dimension_count": 64,
+        "qwen35.rope.freq_base": 10000000.0,
+        # as it comes back out of the GGUF's f32, not the container's 1e-06
+        "qwen35.attention.layer_norm_rms_epsilon": 9.999999974752427e-07,
+    }
+    from_gguf = ModelSpec.from_gguf_metadata(md)
+
+    assert from_gguf.num_layers == 32, "the MTP block is not in the trunk"
+    assert from_gguf.norm_eps == 1e-06
+
+    # The same model as a container describes it: 32 layers, exact epsilon, and
+    # the true vocabulary, which only tokenizer.json knows.
+    container = json.loads(
+        (SPECS / "qwen35-9b.json").read_text(encoding="utf-8"))
+    assert container["num_layers"] == 32
+    assert from_gguf.kernel_hash() == ModelSpec.from_dict(container).kernel_hash()
+
+
 @pytest.mark.parametrize("path", specs(), ids=lambda p: p.stem)
 def test_model_name_matches_the_spec(path: Path):
     spec = json.loads(path.read_text(encoding="utf-8"))

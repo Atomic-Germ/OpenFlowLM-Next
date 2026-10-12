@@ -269,6 +269,33 @@ class ModelSpec:
         d.pop("extra", None)
         return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
+    def kernel_hash(self) -> str:
+        """Hash of only what the KERNELS are built from -- `spec_hash` without
+        `real_vocab`.
+
+        The two answer different questions. `spec_hash` is identity: this model,
+        these exact hyperparameters, and it must move if a container's tokenizer
+        says the true vocabulary is 248070 rather than the padded 248320.
+
+        `kernel_hash` is "will a kernel set built from that spec fit this
+        model", and `real_vocab` is not part of the answer: `lm_rows` rounds
+        `spec.vocab` to a band and sizes every head and buffer from it, while
+        `real_vocab` only bounds which ids have logits (dense.py's lm_rows says
+        so in as many words). A GGUF cannot know it either -- llama.cpp pads
+        `vocab_size`, so a Qwen3.5-9B file claims 248320 while the container's
+        tokenizer holds 248070 ids.
+
+        Which is what makes a custom fine-tune findable. Comparing full
+        spec_hashes across a GGUF and an installed manifest never matches,
+        because the two are answering about different things; comparing kernel
+        hashes does, so a tune the maintainers never named still reaches the
+        kernels its shape calls for.
+        """
+        d = self.to_dict()
+        d.pop("extra", None)
+        d.pop("real_vocab", None)
+        return "sha256:" + hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
     # ---- sources
     @classmethod
     def from_hf_config(cls, cfg: Mapping[str, Any], real_vocab: int | None = None) -> "ModelSpec":
@@ -295,6 +322,35 @@ def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
     if key not in d:
         raise SpecError(f"{what} lacks {key!r}")
     return d[key]
+
+
+def _trunk_layers(md: Mapping[str, Any], a: str) -> int:
+    """Layer count of the MODEL's trunk, dropping any NextN / MTP block.
+
+    A Qwen3.5-family GGUF writes `block_count` 33 for a 32-layer trunk plus one
+    extra block trained for multi-token prediction. The packer never converts
+    that block (`mtp_dropped`; the open kernels have no speculative path), so a
+    spec derived from the GGUF has to describe the trunk or its shape will never
+    match a built kernel set -- a custom fine-tune of a shipped model would find
+    no kernels even though it is shape-identical to one we already built.
+    """
+    n = _need(md, f"{a}.block_count", "GGUF metadata")
+    n -= int(md.get(f"{a}.nextn_predict_layers", 0) or 0)
+    if n <= 0:
+        raise SpecError(f"{a}: block_count {n} after dropping the NextN block")
+    return n
+
+
+def _norm_eps(md: Mapping[str, Any], a: str, default: float = 1e-6) -> float:
+    """RMS norm epsilon, at the precision a config actually carries.
+
+    A GGUF stores this as f32, so reading it back gives 9.999999974752427e-07
+    where the container had 1e-06. `spec_hash` hashes the float, so the two
+    would never agree. Rounding to the precision the value is specified to is
+    the difference between matching and not.
+    """
+    v = md.get(f"{a}.attention.layer_norm_rms_epsilon", default)
+    return float(f"{float(v):.3g}")
 
 
 # The scaling keys a llama3-style rope block carries, whichever config shape it
@@ -439,7 +495,7 @@ def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -479,7 +535,7 @@ def _qwen36moe_gguf(md: Mapping[str, Any]) -> ModelSpec:
         experts_per_tok=k("expert_used_count"),
         moe_intermediate=k("expert_feed_forward_length"),
         shared_expert_intermediate=md.get(f"{a}.expert_shared_feed_forward_length", 0),
-        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        norm_eps=_norm_eps(md, a),
         quant="q4_1",
         extra={"architecture": a, "source": "gguf"},
     )
@@ -872,7 +928,7 @@ def _qwen3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -895,7 +951,7 @@ def _qwen3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         qk_norm=True,
         attn_gate=False,
         intermediate=k("feed_forward_length"),
-        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        norm_eps=_norm_eps(md, a),
         quant="q4_1",
         extra={"architecture": a, "source": "gguf"},
     )
@@ -947,7 +1003,7 @@ def _llama3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     heads = k("attention.head_count")
     hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
     vocab = md.get(f"{a}.vocab_size")
@@ -1110,7 +1166,7 @@ def _hunyuan_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     heads = k("attention.head_count")
     hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
     vocab = md.get(f"{a}.vocab_size")
@@ -1214,7 +1270,7 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -1244,7 +1300,7 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         intermediate=k("feed_forward_length"),
         activation="gelu_tanh",
         sandwich_norms=True,
-        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        norm_eps=_norm_eps(md, a),
         quant="q4_1",
         extra={"architecture": a, "source": "gguf"},
     )
@@ -1357,7 +1413,7 @@ def _granite_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     heads = k("attention.head_count")
     hd = md.get(f"{a}.attention.key_length", k("embedding_length") // heads)
     vocab = md.get(f"{a}.vocab_size")
@@ -1466,7 +1522,7 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
     def k(name: str):
         return _need(md, f"{a}.{name}", "GGUF metadata")
 
-    n = k("block_count")
+    n = _trunk_layers(md, a)
     hd = k("attention.key_length")
     vocab = md.get(f"{a}.vocab_size")
     if vocab is None:
@@ -1496,7 +1552,7 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         intermediate=k("feed_forward_length"),
         activation="gelu_tanh",
         sandwich_norms=True,
-        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        norm_eps=_norm_eps(md, a),
         quant="q4_1",
         extra={"architecture": a, "source": "gguf"},
     )

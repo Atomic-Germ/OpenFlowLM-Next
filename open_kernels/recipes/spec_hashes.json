@@ -10,6 +10,8 @@
  "lfm2.5-it-1.2b.json": "sha256:71f56e8cb363850ef7ffc5e4110a7ab7bf76cf6f9f0f2e045d44401db3a5eff0",
  "lfm2.5-tk-1.2b.json": "sha256:71f56e8cb363850ef7ffc5e4110a7ab7bf76cf6f9f0f2e045d44401db3a5eff0",
  "llama31-8b.json": "sha256:e4baa37e429635bc133b50b9bdac750abb02e6ce58c0d10efcb06bc2bd29a4bb",
+ "llama32-1b.json": "sha256:131a7093af07c5af73222e02979def3fcf66e28ef05a77ba7d35a61240fbf96b",
+ "llama32-3b.json": "sha256:557fcf71747d606e5bc23aaf26ea287f46d06fe58c70ace11d465ae7b9c5c427",
  "minicpm5-2b.json": "sha256:3297b81a61cb0beb690fd0c8c34515be2bc08c089de26441ab463cccae994974",
  "phi4-mini-4b.json": "sha256:76d8c86eaad5a6e5f5853a47a293cf196dc971455df8d9406d8fbcdbda3f4860",
  "qwen25-3b.json": "sha256:e32bfd7e950ccd7b304aa530cb87d2fe903a41c4e3df9e634588354dfd4a8953",
