@@ -79,6 +79,19 @@ AB_LANES = 32                # dn_glue.h's kV: the lanes of one alpha/beta W row
                              # W element stays 64 rows x 32 bf16 = 4 KB (see glue_ab_tile).
 
 
+def pool_quant(spec: ModelSpec) -> str:
+    """The q4 chunk layout this spec's pools hold.
+
+    A spec's `quant` is either one format for the whole model ("q4_1") or a
+    role->format mapping (a mixed container, OPEN-QUANT-Q8: `attn`/`linear` at q8,
+    the rest q4_1). Both pools are the SAME q4 tile, so a mixed spec keeps the
+    ordinary q4 base layout -- and a mixed spec is never a GGUF-direct one, since
+    the twins come from a q4_1 spec with the single format swapped. That is what
+    keeps this from having to reason about a dict of formats at every call site.
+    """
+    return "q4_1_f32" if spec.quant == "q4_1_f32" else "q4_1"
+
+
 def chunk_bytes(quant: str) -> int:
     """The q4 pool chunk bytes for a scale layout: q4nx bf16 (5120) or GGUF-direct f32 (6144)."""
     if quant == "q4_1":
@@ -90,10 +103,20 @@ def chunk_bytes(quant: str) -> int:
 
 
 def q8_chunk_bytes(quant: str) -> int:
-    """The lm_head q8 chunk bytes: q4nx bf16 scales (8704) or GGUF-direct f32 (9216)."""
-    if quant in ("q4_1", "q4_1_f32", "q8_0"):
+    """The lm_head q8 chunk bytes: a q4nx container's bf16 scales (8704) or the
+    GGUF-direct f32 scales (9216).
+
+    The scale width follows the SOURCE, not the code width: qwen35's head is int8
+    whatever the pool's q4 format is, so `q4_1` and `q8_0` (both read out of a q4nx
+    container) share 8704 while the two `_f32` quants -- the GGUF-direct twins --
+    share 9216. This used to return 8704 for `q4_1_f32` as well, which is right
+    for the pool chunks and wrong here: the f32 twin's head is compiled with
+    LMHEAD_SCALES_F32 and indexes a 9216-byte tile, so a manifest declaring 8704
+    would have the engine stride through its own scales.
+    """
+    if quant in ("q4_1", "q8_0"):
         return Q8_CHUNK
-    if quant == "q8_0_f32":
+    if quant in ("q4_1_f32", "q8_0_f32"):
         return Q8_CHUNK_F32
     raise OpRangeError(f"quant={quant!r}: no open q8 pool chunk layout")
 
@@ -454,7 +477,7 @@ DN_SCRATCH_FLOATS = 1280               # `ds` (dnx.h)
 FFN_MS_FLOATS = 2 * BAND_ROWS          # `ms` for the dense tail: u[64] | g[64]
 
 
-def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int:
+def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL, quant: str = "q4_1") -> int:
     """A main core's L1 bytes for a given scratch layout.
 
     Every main core carries the same six things and nothing else
@@ -465,7 +488,7 @@ def core_l1(tab: int, ms_floats: int, ds_floats: int, pc: int = PER_CALL) -> int
     shared -- two copies of a budget drift, and the one that drifts is the one no shipped
     model exercises."""
     return (tab + ms_floats * 4 + ds_floats * 4
-            + 2 * pc * CHUNK + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
+            + 2 * pc * chunk_bytes(quant) + 2 * ELEM + 2 * BAND_ROWS * 4 + STACK)
 
 
 def per_call(spec: ModelSpec, ffn: str = "moe") -> int:
@@ -544,10 +567,15 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
         return _common_dense(spec)
     n = LIMITS["n_cols"]
     hid, ff, ne = spec.hidden, spec.moe_intermediate, spec.experts_per_tok
-    stripe = q4_bytes(128, hid)                     # 128 rows x HID: one up (or gate) stripe, RS=4
-    half = q4_bytes(BAND_ROWS, hid)                 # 64 rows x HID
-    down_band = q4_bytes(128, ff)                   # 128 rows x FF, RS=4
-    up_bytes = q4_bytes(ff, hid)                    # one expert's up (= gate = down)
+    # Every pool size below is the spec's q4 chunk (q4nx 5120 or GGUF-direct f32 6144);
+    # see _common_dense for why the constant would be wrong for the twin.
+    q = pool_quant(spec)
+    CH = chunk_bytes(q)
+    call_bytes = PER_CALL * CH
+    stripe = q4_bytes(128, hid, q)                  # 128 rows x HID: one up (or gate) stripe, RS=4
+    half = q4_bytes(BAND_ROWS, hid, q)              # 64 rows x HID
+    down_band = q4_bytes(128, ff, q)                # 128 rows x FF, RS=4
+    up_bytes = q4_bytes(ff, hid, q)                 # one expert's up (= gate = down)
     rows_pc, hid_pc = hid // n, ff // n
     # ms scratch (floats): rw[32] | xr[rows_pc] | acc[rows_pc] | u[hid_pc] | g[hid_pc] | yd[rows_pc]
     ms_rw, ms_xr = 0, 32
@@ -576,7 +604,7 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
             f"reservation. `tab` is sized for the WIDEST K a core prepares, which collapses "
             f"to the hidden itself on a family with neither linear-attention nor "
             f"full-attention layers (OPEN-MOE-WIDE-FF).")
-    l1 = core_l1(tab, ms_floats, DN_SCRATCH_FLOATS)
+    l1 = core_l1(tab, ms_floats, DN_SCRATCH_FLOATS, PER_CALL, q)
     if l1 > L1_BUDGET:
         raise OpRangeError(
             f"moe: a main core's scratch comes to {l1} B against a {L1_BUDGET} B budget, "
@@ -584,19 +612,19 @@ def common(spec: ModelSpec, ffn: str = "moe") -> Common:
             f"{DN_SCRATCH_FLOATS * 4} B of ds. Program memory only aiecc can measure, but "
             f"L1 is arithmetic, and until now nothing computed it for this tail.")
     dn_dim = spec.lin_value_dim if spec.has_linear else 0
-    dn_rows = CALL_BYTES // (dn_dim * 4) if dn_dim else 0      # S rows per streamed 10 KB element
+    dn_rows = call_bytes // (dn_dim * 4) if dn_dim else 0      # S rows per streamed 10 KB element
     dn_slices = roundup(dn_dim, dn_rows) // dn_rows if dn_dim else 0
     return Common(
         N_CORES=n, HID=hid, FF=ff, NE=ne, NX=ne + 1,
-        TILE=CHUNK, PER_CALL=PER_CALL, CALL_BYTES=CALL_BYTES,
-        STRIPE=stripe, HALF=half, PAIR=2 * CHUNK, DOWN_BAND=down_band, UP_BYTES=up_bytes,
+        TILE=CH, PER_CALL=PER_CALL, CALL_BYTES=call_bytes,
+        STRIPE=stripe, HALF=half, PAIR=2 * CH, DOWN_BAND=down_band, UP_BYTES=up_bytes,
         DOWN_PER_CORE=rows_pc // 128,
-        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=3,
+        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid, q), BAND32=band_bytes(2 * hid, q), N_HDR=3,
         MS_FLOATS=ms_floats, DS_FLOATS=1280, TAB_BYTES=tab, H_TAB_OFF=h_tab, KWIDE=wide,
         MS_RW=ms_rw, MS_XR=ms_xr, MS_ACC=ms_acc, MS_U=ms_u, MS_G=ms_g, MS_YD=ms_yd,
         ROWS_PC=rows_pc, HID_PC=hid_pc,
         STRIPES_PER_PROJ=ff // 128, CORES_PER_STRIPE=n // (ff // 128),
-        UP_ELEMS=half // CALL_BYTES, DOWN_ELEMS=(rows_pc // 128) * down_band // CALL_BYTES,
+        UP_ELEMS=half // call_bytes, DOWN_ELEMS=(rows_pc // 128) * down_band // call_bytes,
         OUT_ELEMS=rows_pc // BAND_ROWS,
         W_ELEMS=hid * spec.num_experts * 2 // ELEM,
         DN_ROWS=dn_rows, DN_SLICES=dn_slices, DN_HEADS_PC=(spec.lin_value_heads // n) if dn_dim else 0,
@@ -622,14 +650,20 @@ def _common_dense(spec: ModelSpec) -> Common:
     n = LIMITS["n_cols"]
     hid, ff = spec.hidden, spec.intermediate
     pc = per_call(spec, "dense")
-    call_bytes = pc * CHUNK
+    # The q4 chunk these pools hold: q4nx bf16 (5120) or GGUF-direct f32 (6144). TILE,
+    # CALL_BYTES and PAIR are all that chunk's size, so the f32 twin's DMA sizes and its
+    # stack budget follow from the spec's quant rather than from a constant -- reading
+    # 5120 here would under-fill every w element of the twin and mis-budget its stack.
+    CH = chunk_bytes(pool_quant(spec))
+    call_bytes = pc * CH
     wide = kwide(spec, "dense")
     dn_rows, dn_slices, dn_pad, dn_heads_pc, dn_dim = _dn_geometry(spec, call_bytes, n)
     return Common(
         N_CORES=n, HID=hid, FF=ff, NE=0, NX=0,
-        TILE=CHUNK, PER_CALL=pc, CALL_BYTES=call_bytes,
-        STRIPE=0, HALF=0, PAIR=2 * CHUNK, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
-        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid), BAND32=band_bytes(2 * hid), N_HDR=0,
+        TILE=CH, PER_CALL=pc, CALL_BYTES=call_bytes,
+        STRIPE=0, HALF=0, PAIR=2 * CH, DOWN_BAND=0, UP_BYTES=0, DOWN_PER_CORE=0,
+        BAND_ROWS=BAND_ROWS, BAND16=band_bytes(hid, pool_quant(spec)),
+        BAND32=band_bytes(2 * hid, pool_quant(spec)), N_HDR=0,
         MS_FLOATS=FFN_MS_FLOATS, DS_FLOATS=DN_SCRATCH_FLOATS if dn_dim else 0,
         TAB_BYTES=tab_bytes(wide), H_TAB_OFF=0, KWIDE=wide,
         MS_RW=0, MS_XR=0, MS_ACC=0, MS_U=0, MS_G=BAND_ROWS, MS_YD=0,
@@ -1006,9 +1040,18 @@ def pack_plan(spec: ModelSpec) -> dict:
         {"op": "std_perm", "tensor": pre + "mlp.share_down_exps_proj.weight", "dst": L.POOL_SHARE_DOWN,
          "nch": q4_chunks(hid, ff), "in_dim": ff},
     ]
-    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK, "layer_types": {},
-                  "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                              "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight", "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]},
+    # The pool chunk and the head's chunk are the SPEC's, not the q4nx defaults: a
+    # GGUF-direct manifest declares 6144 / 9216 and the engine reads its offsets off
+    # these keys, so a hardcoded 5120 would have it stride through the twin wrong.
+    ch, ch8 = chunk_bytes(pool_quant(spec)), q8_chunk_bytes(pool_quant(spec))
+    # See qwen35.pack_plan: a q4nx container's head is already in pool order (lmhead_q8),
+    # a GGUF's is a K-quant matrix that must be requantized into the tile (lmhead_q8_gguf).
+    lmop = {"op": "lmhead_q8_gguf", "tensor": "lm_head.weight",
+            "chunk_bytes": ch8, "in_dim": hid, "dst": 0} if spec.quant == "q4_1_f32" \
+        else {"op": "lmhead_q8", "tensor": "lm_head.weight",
+              "chunk_bytes": ch8, "in_dim": hid, "dst": 0}
+    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": ch, "layer_types": {},
+                  "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES, "ops": [lmop]},
                   "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
                   "norm": {"tensor": "model.norm.weight", "bytes": hid * 2}}
     if spec.has_linear:
@@ -1125,7 +1168,7 @@ def bf16_weight(ops: list[dict]) -> dict:
     return {"from": "pack", "pack": pack}
 
 
-def gemm_weight(ops: list[dict], idxs: list[int]) -> dict:
+def gemm_weight(ops: list[dict], idxs: list[int], ch: int = CHUNK) -> dict:
     """The route's weight buffer for pack ops `idxs` of a layer type's plan: the ops in place
     when they are q4_1 (what is packed is already the band law the GEMM reads), or, when the
     container stores them at q8, their exact q4_1 split -- every op's hi half, then every op's
@@ -1148,7 +1191,7 @@ def gemm_weight(ops: list[dict], idxs: list[int]) -> dict:
                 op["chunk0"] = o["chunk0"]
             op.update(nch=o["nch"] // 2, in_dim=o["in_dim"], dst=dst, split=part)
             pack.append(op)
-            dst += op["nch"] * CHUNK
+            dst += op["nch"] * ch
     return {"from": "pack", "pack": pack}
 
 
@@ -1181,7 +1224,8 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
     bf16 = bf16_route(spec, dense) and not q8_split
 
     def weight(ops: list[dict], idxs: list[int]) -> dict:
-        return bf16_weight([ops[i] for i in idxs]) if bf16 else gemm_weight(ops, idxs)
+        return bf16_weight([ops[i] for i in idxs]) if bf16 else gemm_weight(
+            ops, idxs, chunk_bytes(pool_quant(spec)))
 
     def ctx(N: int, K: int, fmt: str = "q4_1") -> str:
         if N % 256 or K % 256:
@@ -1242,9 +1286,10 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
         # up and gate are the pool's first two ops, contiguous and both std_perm, so one GEMM
         # gives [up | gate] -- the layout the shared expert's up|gate GEMM already has
         pool = plan[lt]["pool"]
+        ch = chunk_bytes(pool_quant(spec))
         w = {"gffn_ug_w": gemm_weight(pool, [_op_index(pool, "mlp.up_proj.weight"),
-                                             _op_index(pool, "mlp.gate_proj.weight")]),
-             "gffn_down_w": gemm_weight(pool, [_op_index(pool, "mlp.down_proj.weight")])}
+                                             _op_index(pool, "mlp.gate_proj.weight")], ch),
+             "gffn_down_w": gemm_weight(pool, [_op_index(pool, "mlp.down_proj.weight")], ch)}
         return {"ffn_program": [run(2 * ff, hid, "gffn_ug_w", w), run(hid, ff, "gffn_down_w", w)],
                 "ffn_weights": w}
 
@@ -1282,7 +1327,7 @@ def gemm_route(spec: ModelSpec, ffn: str = "moe", plan: dict | None = None, q8_s
             nq = q4_chunks(hid, vw)
             op = {"op": "std_perm", "tensor": consts[out_i]["tensor"], "nch": nq, "in_dim": vw}
             gout = {"from": "pack", "pack": [{**op, "dst": 0, "split": "hi"},
-                                             {**op, "dst": nq * CHUNK, "split": "lo"}]}
+                                             {**op, "dst": nq * chunk_bytes(pool_quant(spec)), "split": "lo"}]}
         else:
             gout = {"from": "consts", "ops": [out_i]}
         m0, m1, m2 = moe_of(LINEAR, L.A_XM, L.A_ROUT, L.A_RES)
@@ -1471,8 +1516,9 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L, C = R.layout, R.common
     return {
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
-        "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
-        "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,
+        "chunk_bytes": chunk_bytes(pool_quant(spec)), "pool_bytes": L.POOL_BYTES,
+        "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
+        "lmhead_chunk_bytes": q8_chunk_bytes(pool_quant(spec)),
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,
         "rope_inv_freq": spec.rope_inv_freq(),
         "rout_idx_off": ROUT_IDX_OFF,

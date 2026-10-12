@@ -94,6 +94,15 @@ BAND16, BAND32 = C.BAND16, C.BAND32   # K=HID / K=2*HID band bytes
 N_HDR = C.N_HDR
 ROWS_PC, HID_PC = C.ROWS_PC, C.HID_PC # MoE rows per core, hidden per core
 OS = ["-Os"]                          # main-core kernels: size over speed (the GEMV is DMA-bound)
+# The GGUF-direct f32-scale twin. The pool chunks carry their block scales as f32 rather
+# than bf16 (gemv_q4.h's GEMV_Q4_SCALES_F32), so the GEMV bodies differ and their entry
+# symbols are prefixed (GEMV_Q4_PREFIX) to let both variants coexist in one ELF. The flag
+# arrives in the environment from the recipe's builds() entry; the spec swap to q4_1_f32
+# happens in load.py's current_spec, so everything downstream -- the band law, the element
+# sizes, the stack budget -- reads the twin's own 6144-byte chunk without a second code path.
+F32 = int(os.environ.get("GEMV_SCALES_F32", 0)) and SPEC.quant == "q4_1_f32"
+GEMV_DEF = ["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if F32 else []
+GSYM = "gemv_q4s32" if F32 else "gemv_q4"     # the q4 entry-symbol prefix, for the MLIR side
 # timing-only ablation (output garbage): LX_NULL_GEMV=1 compiles the q4 / q8 GEMV tile body
 # to a zero store -- the GEMV twin of LX_NULL_DN below -- and leaves every stream, fifo and
 # DMA (so insts.bin) exactly as it was, to tell a stream limit from a compute one.
@@ -216,8 +225,14 @@ def kernels(inc, t):
     nb = ELEM // 2 // 32                                            # bf16 blocks of 32 per 4 KB element
 
     def ef(sym, args, flags=None):
-        return ExternalFunction(sym, source_file=str(HERE / f"{sym}.cc"), arg_types=args, include_dirs=inc,
-                                compile_flags=OS if flags is None else flags)
+        # A q4 GEMV entry takes the twin's symbol but NOT a twin file name: the TU is the
+        # same source compiled with GEMV_Q4_SCALES_F32 and the prefixed GEMV_Q4_WRAP, so
+        # `gemv_q4_gy.cc` yields both `gemv_q4_gy` and `gemv_q4s32_gy` and one file serves
+        # both builds. The q8 entries are format-independent and keep their names.
+        name = f"{GSYM}{sym[8:]}" if (F32 and sym.startswith("gemv_q4")) else sym
+        f = (OS if flags is None else flags) + GEMV_DEF
+        return ExternalFunction(name, source_file=str(HERE / f"{name}.cc"), arg_types=args,
+                                include_dirs=inc, compile_flags=f)
 
     def dnf(sym, args):
         return ef(sym, args, OS + DN_FLAGS)

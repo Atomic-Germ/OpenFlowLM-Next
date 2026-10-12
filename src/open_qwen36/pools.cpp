@@ -99,6 +99,8 @@ const uint8_t* raw(const WeightFile& m, const std::string& name, size_t need, si
 }
 
 constexpr size_t Q8_CHUNK = 8704;    // 256 bf16 scales then 8192 int8 codes
+constexpr size_t Q8_CHUNK_F32 = 9216; // 256 f32 scales then the same 8192 int8 codes
+                                    // (the GGUF-direct head tile; lm_head_q8.h LMHEAD_SCALES_F32)
 constexpr size_t Q4_CHUNK = 5120;    // 256 bf16 d, 256 bf16 m, then 4096 B of nibbles
 constexpr size_t Q4_HALF = 2560;     // GPT-OSS's chunk: the same layout over 32 rows x 128 columns
 constexpr size_t Q4K_CHUNK = 4736;   // 256 uint8 scales, 256 uint8 mins, 4096 B of nibbles, 32 bf16 S, 32 bf16 M
@@ -710,6 +712,68 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             if (n > op.cap) fail(name + " is " + std::to_string(n) + " B, its slot holds " + std::to_string(op.cap));
             bounds(op, n, dst_bytes);
             std::memcpy(dst + op.dst, src, n);
+        }
+    } else if (op.op == "lmhead_q8_gguf") {
+        // A GGUF lm_head into the pool's q8 tiles with f32 scales -- the lm_head's twin of
+        // std_perm_gguf, which can only produce q4 tiles and so cannot feed this head.
+        //
+        // Qwen3.5 / Qwen3.6 store lm_head at q8 (int8 codes), so the twin's head tile is
+        // 9216 B: 1024 B of f32 block scales then 8192 B of int8, against the q4nx build's
+        // 8704 B of bf16 scales and the same codes. A GGUF holds the head as K-quants
+        // (Q6_K for a Q6_K file), so each 32-wide block is dequantized to exact f32 and
+        // requantized to int8 with an f32 scale -- the same "convert per row, requantize to
+        // the pool's own law" rule std_perm_gguf follows for the q4 side, and the same
+        // conversion q4nx-build does offline.
+        //
+        // Layout, from lm_head_q8.h: kScaleBytes = 32 rows x 8 k-blocks of f32, then the
+        // codes as two 4096 B row quarters -- rows 0..15 then 16..31 -- each byte at
+        // k * 16 + r for the chunk's 256-wide K. The pool order is the 128-row supertile
+        // one the lmhead_q8 op below also walks: nk = K / 256, per_band = 4 * nk, and pool
+        // chunk k comes from file chunk (4 * (k / per_band) + k % 4) * nk + (k % per_band) / 4.
+        const std::string name = with_layer(op.tensor, layer);
+        const size_t CH8 = op.chunk_bytes;
+        if (!op.in_dim) fail("lmhead_q8_gguf " + name + " without in_dim");
+        if (CH8 != Q8_CHUNK_F32)
+            fail("lmhead_q8_gguf " + name + ": chunk_bytes " + std::to_string(CH8) +
+                 "; the GGUF-direct head tile is " + std::to_string(Q8_CHUNK_F32) +
+                 " (f32 scales). A 8704 tile is the q4nx build's bf16 layout, which this op does not write.");
+        const GgufFile& g = dynamic_cast<const GgufFile&>(m);
+        const size_t nk = op.in_dim / 256, per_band = 4 * nk;
+        if (!nk) fail("lmhead_q8_gguf " + name + ": in_dim " + std::to_string(op.in_dim) +
+                      " is under one 256-wide k-tile");
+        const size_t nb = op.in_dim / 32;                  // 32-wide blocks per row
+        const uint64_t out_dim = op.nch / nk * 32;
+        std::vector<float> rowbuf(op.in_dim);
+        for (size_t k = 0; k < op.nch; ++k) {
+            uint8_t* d = dst + op.dst + k * CH8;
+            const size_t s = k / per_band, r = k % per_band;
+            const size_t fch = (4 * s + r % 4) * nk + r / 4;
+            const size_t row0 = 32 * (fch / nk);           // this chunk's first output row
+            const size_t kt0 = fch % nk;                   // its 256-wide k-tile
+            std::memset(d, 0, CH8);                        // padded rows/columns stay zeroed
+            float* scales = reinterpret_cast<float*>(d);
+            uint8_t* codes = d + 1024;
+            for (size_t row = 0; row < 32; ++row) {
+                if (row0 + row >= out_dim) break;
+                g.embed_row(name, row0 + row, op.in_dim, rowbuf.data());
+                const bool hi = row >= 16;                  // second 4096 B row quarter
+                const size_t rl = row & 15;
+                for (size_t kb = 0; kb < 8; ++kb) {
+                    const size_t b0 = (kt0 * 8 + kb) * 32; // this block's 32 values
+                    if (b0 + 32 > op.in_dim) break;
+                    float amax = 0.f;
+                    for (size_t i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(rowbuf[b0 + i]));
+                    const float sc = amax > 0.f ? amax / 127.f : 0.f;
+                    scales[kb * 32 + row] = sc;
+                    if (sc <= 0.f) continue;
+                    const float inv = 127.f / amax;
+                    for (size_t i = 0; i < 32; ++i) {
+                        const long q = std::lround(rowbuf[b0 + i] * inv);
+                        codes[(hi ? 4096 : 0) + (b0 - kt0 * 256 + i) * 16 + rl] =
+                            static_cast<uint8_t>(q < -127 ? -127 : q > 127 ? 127 : q);
+                    }
+                }
+            }
         }
     } else if (op.op == "lmhead_q8") {
         // 128-row supertile order. nk = K / 256 k-tiles, a band is 4 row quarters x nk k-tiles,

@@ -73,7 +73,12 @@ def test_a_mixed_qwen35_spec_generates_the_folded_entry_and_not_the_pair(unvalid
     assert "gemv_q8_gy.cc" in fs                      # the q8 projection still has its own body
     assert "gemv_q8_gms.cc" not in fs                 # the FFN is q4_1 here
     body = fs[FOLD]
-    assert "void gemv_q4_gyms(" in body
+    # The entry is named through GEMV_Q4_WRAP so the f32-scale twin can emit the same
+    # TU under its own prefix (gemv_q4s32_gyms) and both can sit in one ELF. What the
+    # default GEMV_Q4_PREFIX expands to is gemv_q4, so the q4_1 symbol is unchanged --
+    # assert the macro and the prefix together rather than the expanded text.
+    assert "#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)" in body
+    assert "void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, yms)(" in body
     assert "(dst < 0) ? y : ms + dst" in body
 
 

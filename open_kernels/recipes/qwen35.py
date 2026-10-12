@@ -39,12 +39,14 @@ path, so a request carrying one routes to the closed engine.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from . import qwen36moe as M
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
-from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, Q8_CHUNK, Recipe, ab_lanes, ffn_geometry, mixed_check,
-                        per_call, proj_op, q4_chunks, quant_check, require_gemv, roundup)
+from .qwen36moe import (BAND_ROWS, ELEM, Recipe, ab_lanes, chunk_bytes, ffn_geometry,
+                         mixed_check, per_call, proj_op, q4_chunks, q8_chunk_bytes,
+                         quant_check, require_gemv, roundup)
 from .spec import FULL, LINEAR, ModelSpec
 
 FAMILY = "qwen35"
@@ -166,10 +168,19 @@ def pack_plan(spec: ModelSpec) -> dict:
         proj_op(spec, "ffn", pre + "mlp.gate_proj.weight", L.POOL_FFN_GATE, ff, hid, hid),
         proj_op(spec, "ffn", pre + "mlp.down_proj.weight", L.POOL_FFN_DOWN, hid, ff, ff),
     ]
-    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": CHUNK, "layer_types": {},
-                  "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                              "ops": [{"op": "lmhead_q8", "tensor": "lm_head.weight",
-                                       "chunk_bytes": Q8_CHUNK, "in_dim": hid, "dst": 0}]},
+    # The spec's chunk, not the q4nx default: a GGUF-direct manifest declares 6144 /
+    # 9216 and the engine strides its offsets off these keys (see qwen36moe.pack_plan).
+    ch, ch8 = chunk_bytes(M.pool_quant(spec)), q8_chunk_bytes(M.pool_quant(spec))
+    # The head's pool op. A q4nx container ships the head already in the pool's q8 tile
+    # order, so it is a straight permutation (lmhead_q8); a GGUF ships it as a K-quant
+    # matrix, which has to be dequantized and requantized into the same tile -- the head's
+    # twin of std_perm_gguf, which can only write q4 tiles and so cannot feed a q8 head.
+    lmop = {"op": "lmhead_q8_gguf", "tensor": "lm_head.weight",
+            "chunk_bytes": ch8, "in_dim": hid, "dst": 0} if spec.quant == "q4_1_f32" \
+        else {"op": "lmhead_q8", "tensor": "lm_head.weight",
+              "chunk_bytes": ch8, "in_dim": hid, "dst": 0}
+    plan: dict = {"pool_bytes": L.POOL_BYTES, "chunk_bytes": ch, "layer_types": {},
+                  "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES, "ops": [lmop]},
                   "embed": {"tensor": "model.embed_tokens.weight", "dim": hid},
                   "norm": {"tensor": "model.norm.weight", "bytes": hid * 2}}
     if spec.has_linear:
@@ -294,6 +305,18 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+    if spec.quant == "q4_1":
+        # The GGUF-direct f32-scale twin. Qwen3.5 is the family custom finetunes arrive in
+        # (Ornith and its relatives are shape-identical to the 9B we ship), and without this
+        # section `oflm add` refuses them for want of a twin -- see dense.py's identical
+        # block, which this one exists so that a fine-tune of a shipped dense model and a
+        # fine-tune of a shipped Qwen3.5 both install the same way. The engine swaps the
+        # whole view in when it finds model.gguf (core.cpp), so the layer programs here are
+        # the ONLY difference: same schedule, f32-scale pool chunks.
+        f32 = programs(replace(spec, quant="q4_1_f32"), max_ctx)
+        out["gguf"] = {"contexts": f32["contexts"], "kernels": f32["kernels"],
+                       "layer_types": f32["layer_types"], "tail": f32["tail"],
+                       "globals": f32["globals"]}
     return out
 
 
@@ -310,8 +333,9 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L = layout(spec, max_ctx)
     return {
         "hidden": spec.hidden, "vocab": spec.vocab, "real_vocab": spec.real_vocab,
-        "chunk_bytes": CHUNK, "pool_bytes": L.POOL_BYTES,
-        "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES, "lmhead_chunk_bytes": Q8_CHUNK,
+        "chunk_bytes": chunk_bytes(M.pool_quant(spec)), "pool_bytes": L.POOL_BYTES,
+        "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
+        "lmhead_chunk_bytes": q8_chunk_bytes(M.pool_quant(spec)),
         "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim,
         "rope_theta": spec.rope_theta, "rope_inv_freq": spec.rope_inv_freq(),
     }
@@ -341,6 +365,25 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
+    # The f32-scale twins of the two whole-layer designs and of the head. Same designs,
+    # same schedule, different chunk width: GEMV_SCALES_F32 / LMHEAD_SCALES_F32 swap the
+    # pool chunks' scale plane for f32 (gemv_q4.h, lm_head_q8.h) and prefix the entry
+    # symbols so both variants can sit in one ELF. Without these three the manifest's
+    # gguf section names contexts that were never built.
+    if spec.quant == "q4_1":
+        fs = f"layer_x/build_{spec.family}_lx_h{spec.hidden}_f32"
+        fa = f"layer_x/build_{spec.family}_ax_h{spec.hidden}_f32"
+        fh = f"lm_head_q8/build_{spec.vocab}_k{spec.hidden}_f32"
+        f32env = {"GEMV_SCALES_F32": "1", "LMHEAD_SCALES_F32": "1"}
+        if spec.has_linear:
+            b["lx_f32"] = {"design": "layer_x/lx.py", "build_dir": fs,
+                           "env": {"LX_PART": "0", **f32env}}
+        if spec.has_full:
+            b["ax_f32"] = {"design": "layer_x/ax.py", "build_dir": fa,
+                           "env": {"AX_PART": "0", **f32env}}
+        b["lm_head_q8_f32"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": fh,
+                               "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
+                                       "LMHEAD_CORES": str(n), "LMHEAD_SCALES_F32": "1"}}
     return b
 
 

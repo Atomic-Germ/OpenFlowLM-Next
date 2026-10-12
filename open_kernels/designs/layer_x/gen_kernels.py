@@ -62,10 +62,12 @@ def q4_gyms(pc: int, ms_u: int, ms_g: int) -> str:
     spec: an all-q4_1 or an all-q8 spec keeps today's entries and does not move."""
     return f'''#define GEMV_PER_CALL {pc}
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 // The folded q4_1 band entry (mixed-format cores only): dst < 0 -> the band's y element,
 // dst >= 0 -> the act scratch at ms + dst (the up band at {ms_u}, the gate band at {ms_g}).
 extern "C" {{
-void gemv_q4_gyms(const uint8_t *__restrict t, const uint8_t *__restrict tab,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, yms)(const uint8_t *__restrict t, const uint8_t *__restrict tab,
                   float *__restrict y, float *__restrict ms,
                   int32_t group, int32_t per_band, int32_t dst) {{
   float *__restrict d = (dst < 0) ? y : ms + dst;
@@ -92,6 +94,49 @@ def mixed(R) -> bool:
 # translation-unit set (and its build key) never gains a file it does not compile.
 Q8_FILES = ("gemv_q8_gy.cc", "gemv_q8_gms.cc")
 FOLD_FILES = ("gemv_q4_gyms.cc",)
+
+# The weight-reading q4 entries -- the TUs whose BODY depends on the pool chunk's scale
+# width. The activation-table preps (`dense_prep*`, `gemv_q4_prep_*`) are format-independent:
+# they read activations, never a scale, so the twin compiles them unchanged and keeps their
+# names. A file absent from this set is one both builds can share.
+Q4_ENTRY_FILES = ("gemv_q4_gy.cc", "gemv_q4_gms.cc", "gemv_q4_gyms.cc",
+                  "gemv_q4_gup.cc", "gemv_q4_gdown.cc")
+F32_DEFS = ("#define GEMV_Q4_SCALES_F32 1\n"
+            "#define GEMV_Q4_PREFIX gemv_q4s32\n")
+
+
+def _is_q4_entry(name: str) -> bool | None:
+    """True for a q4_1 weight entry, False for its f32 twin, None for neither."""
+    if name in Q4_ENTRY_FILES:
+        return True
+    if name in ("gemv_q4s32_" + n[len("gemv_q4_"):] for n in Q4_ENTRY_FILES):
+        return False
+    return None
+
+
+def f32_variant(fs: dict[str, str], f32: bool) -> dict[str, str]:
+    """The f32-scale twin's translation units, under their own names.
+
+    The twin cannot reuse the q4_1 files: these bodies read the pool chunk's scale
+    plane, whose width is 512 B of bf16 in one build and 1024 B of f32 in the other, and
+    several of them bake a chunk-derived constant (a band's per_band, the routed stripe
+    halves) into the source rather than taking it as an argument. So the twin gets its
+    own TU per entry, named for the prefixed symbol and carrying the defines IN ITS
+    SOURCE -- self-contained, exactly as designs/gemv_q4/gemv_q4.py's ensure_entry_points
+    writes them, so the pair can sit in one ELF and one checkout at once. Every other TU
+    (the preps, the DeltaNet, the q8 entries) is format-independent and shared verbatim.
+    """
+    if not f32:
+        return fs
+    out: dict[str, str] = {}
+    for name, src in fs.items():
+        if name not in Q4_ENTRY_FILES:
+            out[name] = src
+            continue
+        twin = "gemv_q4s32_" + name[len("gemv_q4_"):]
+        head, sep, body = src.partition('#include "gemv_q4.h"\n')
+        out[twin] = head + sep + F32_DEFS + body
+    return out
 
 
 DNX = {
@@ -158,11 +203,13 @@ def dense_files(R) -> dict[str, str]:
     C, F = R.common, R.ffn
     hdr = f'''#define GEMV_PER_CALL {C.PER_CALL}
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 '''
     out = {
         "gemv_q4_gy.cc": hdr + '''// A band into its y element: runtime band law (per_band chunks, row split rs).
 extern "C" {
-void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, y)(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
                 int32_t group, int32_t per_band, int32_t rs) {
   gemv_q4_pool_group_rt(t, tab, (unsigned)group, y, (unsigned)per_band, (unsigned)rs);
 }
@@ -170,7 +217,7 @@ void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, floa
 ''',
         "gemv_q4_gms.cc": hdr + f'''// A 64-row band into the act scratch at ms + dst (the up band at {F.MS_U}, the gate band at {F.MS_G}).
 extern "C" {{
-void gemv_q4_gms(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, ms)(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
                  int32_t group, int32_t per_band, int32_t dst) {{
   gemv_q4_pool_group_rt(t, tab, (unsigned)group, ms + dst, (unsigned)per_band, 2);
 }}
@@ -194,6 +241,8 @@ void dense_act(const float *__restrict ms, float *__restrict h) {{
         "dense_prep.cc": '''// Element i of a bf16 activation of K values (2048 per 4 KB element) into the table: blocks
 // [64 i, min(64 i + 64, K/32)).
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 
 extern "C" {
 void dense_prep(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {
@@ -206,6 +255,8 @@ void dense_prep(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K
         "dense_prep_f32.cc": '''// Element i of an fp32 activation of K values (1024 per 4 KB element; the fifo types it as bf16)
 // into the table: blocks [32 i, min(32 i + 32, K/32)).
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 
 extern "C" {
 void dense_prep_f32(const bfloat16 *__restrict e, uint8_t *__restrict tab, int32_t K, int32_t i) {
@@ -241,12 +292,14 @@ def files(R) -> dict[str, str]:
     g_sdown = Q.band_bytes(ff) // C.CALL_BYTES    # elements per shared down band
     gemv_hdr = f'''#define GEMV_PER_CALL {C.PER_CALL}
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 '''
     out = {
         # ---- q4 GEMV entry points: runtime group / band law, PER_CALL chunks per element
         "gemv_q4_gy.cc": gemv_hdr + f'''// A projection band into its y element: (per_band, rs) = ({pb_hid}, 2) K={hid}, ({pb_wide}, 2) K={kw}.
 extern "C" {{
-void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, y)(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
                 int32_t group, int32_t per_band, int32_t rs) {{
   gemv_q4_pool_group_rt(t, tab, (unsigned)group, y, (unsigned)per_band, (unsigned)rs);
 }}
@@ -255,7 +308,7 @@ void gemv_q4_gy(const uint8_t *__restrict t, const uint8_t *__restrict tab, floa
         "gemv_q4_gup.cc": gemv_hdr + f'''// MoE up (band 0) / gate (band 1): 64-row K={hid} bands (the routed stripe halves through the
 // strided tap, the shared expert's band as it lies) into ms[{C.MS_U} + {C.HID_PC} band ..].
 extern "C" {{
-void gemv_q4_gup(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, up)(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
                  int32_t group, int32_t band) {{
   gemv_q4_pool_group_rt(t, tab, (unsigned)group, ms + {C.MS_U} + {C.HID_PC} * band, {pb_hid}, 2);
 }}
@@ -264,7 +317,7 @@ void gemv_q4_gup(const uint8_t *__restrict t, const uint8_t *__restrict tab, flo
         "gemv_q4_gdown.cc": gemv_hdr + f'''// MoE down, element j of {C.DOWN_ELEMS}, into ms[{C.MS_YD} ..] (the core's {C.ROWS_PC} rows) against h's table at tab + {C.H_TAB_OFF}:
 // routed slots: {C.DOWN_PER_CORE} 128-row RS=4 bands of {g_down} elements; the shared expert: {C.ROWS_PC // 64} 64-row RS=2 bands of {g_sdown}.
 extern "C" {{
-void gemv_q4_gdown(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
+void GEMV_Q4_WRAP(GEMV_Q4_PREFIX, down)(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict ms,
                    int32_t j, int32_t slot) {{
   if (slot < {ne})
     gemv_q4_pool_group_rt(t, tab + {C.H_TAB_OFF}, (unsigned)(j % {g_down}), ms + {C.MS_YD} + 128 * (j / {g_down}), {pb_down}, 4);
@@ -275,6 +328,8 @@ void gemv_q4_gdown(const uint8_t *__restrict t, const uint8_t *__restrict tab, f
 ''',
         f"gemv_q4_prep_k{kw}_b0n{nb}.cc": f'''// og (bf16[{kw}]) arrives as two 4 KB act elements: blocks 0..{nb - 1} from the first.
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 
 extern "C" {{
 GEMV_Q4_PREP_BLOCKS_ENTRY({kw}, 0, {nb})
@@ -282,6 +337,8 @@ GEMV_Q4_PREP_BLOCKS_ENTRY({kw}, 0, {nb})
 ''',
         f"gemv_q4_prep_k{kw}_b{nb}n{nb}.cc": f'''// og (bf16[{kw}]) arrives as two 4 KB act elements: blocks {nb}..{2 * nb - 1} from the second.
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 
 extern "C" {{
 GEMV_Q4_PREP_BLOCKS_ENTRY({kw}, {nb}, {nb})
@@ -290,6 +347,8 @@ GEMV_Q4_PREP_BLOCKS_ENTRY({kw}, {nb}, {nb})
         "gemv_q4_prep_h.cc": f'''// the expert hidden h (f32[{ff}], assembled in DDR from the cores' parts) -> bf16 -> its table
 // at tab + {C.H_TAB_OFF} (past xm's K={hid} table).
 #include "gemv_q4.h"
+#define GEMV_Q4_WRAP__(PFX, NAME) PFX##_g##NAME
+#define GEMV_Q4_WRAP(PFX, NAME) GEMV_Q4_WRAP__(PFX, NAME)
 
 extern "C" {{
 void gemv_q4_prep_h(const float *__restrict hf, uint8_t *__restrict tab) {{
@@ -406,7 +465,7 @@ STALE = ["gemv_q4_p2b16r2_g.cc", "gemv_q4_p2b16r2_gu.cc", "gemv_q4_p2b32r2_g.cc"
 
 def generate(R, out: Path = HERE) -> int:
     """Write the TUs for recipe R into `out` (only files whose text changed); returns the count."""
-    fs = files(R)
+    fs = f32_variant(files(R), R.spec.quant == "q4_1_f32")
     for name, src in fs.items():
         p = out / name
         if not p.is_file() or p.read_text(encoding="utf-8") != src:
@@ -414,6 +473,13 @@ def generate(R, out: Path = HERE) -> int:
     gone = list(STALE) + [n for n in Q8_FILES + FOLD_FILES if n not in fs]
     if mixed(R):                      # the folded entry replaces the pair on disk too
         gone += [n for n in ("gemv_q4_gy.cc", "gemv_q4_gms.cc") if n not in fs]
+    # The OTHER variant's q4 entries are never stale. One kernel set carries the base
+    # spec's TUs and its `*_f32` twin's side by side -- both ship in the same xclbin
+    # directory and the exporter builds both out of this one checkout -- so a generate
+    # for one quant must leave the other's files alone. Deleting them would leave the
+    # second build with an ExternalFunction whose source_file no longer exists.
+    twin = R.spec.quant == "q4_1_f32"
+    gone = [n for n in gone if _is_q4_entry(n) is not twin or n in fs]
     for name in gone:
         p = out / name
         if p.is_file():

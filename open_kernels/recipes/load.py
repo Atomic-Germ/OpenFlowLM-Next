@@ -40,7 +40,17 @@ def default_spec() -> ModelSpec:
 
 def current_spec() -> ModelSpec:
     p = os.environ.get("OPEN_KERNELS_SPEC")
-    return load_spec(Path(p)) if p else default_spec()
+    spec = load_spec(Path(p)) if p else default_spec()
+    # The GGUF-direct f32-scale twin is built by re-running the SAME designs against the
+    # same spec with one weight format changed, so the swap belongs here rather than in
+    # each design: everything downstream -- the band law, the 6144-byte element size, the
+    # L1 stack budget, the generated TUs' chunk-derived constants -- then reads the twin's
+    # own chunk with no second code path, exactly as designs/dense/dx.py does locally.
+    # A design that is already looking at a f32 spec (its build wrote one) is left alone.
+    if int(os.environ.get("GEMV_SCALES_F32", 0)) and spec.quant != "q4_1_f32":
+        from dataclasses import replace
+        spec = replace(spec, quant="q4_1_f32")
+    return spec
 
 
 def tokenizer_vocab(tokenizer_json: Path) -> int | None:

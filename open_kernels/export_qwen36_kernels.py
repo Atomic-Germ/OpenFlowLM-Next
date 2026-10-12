@@ -47,6 +47,7 @@ import json
 import os
 import shutil
 import struct
+from dataclasses import replace
 import subprocess
 import sys
 import time
@@ -287,7 +288,15 @@ def main() -> int:
         gspec = importlib.util.spec_from_file_location("gen_kernels", gen_dir)
         gen = importlib.util.module_from_spec(gspec)
         gspec.loader.exec_module(gen)
+        # Both quant variants' TUs, because one kernel set carries the q4_1 designs AND
+        # their f32-scale twins side by side: the twin's weight-reading entries are
+        # separate files (they bake chunk-derived constants and read a different scale
+        # plane) and live in the same checkout as the base ones. Generating only the
+        # base spec's would leave the `*_f32` builds pointing at sources that do not
+        # exist. gen_kernels.generate never deletes the other variant's files.
         gen.generate(F.recipe(spec))
+        if any(n.endswith("_f32") for n in names):
+            gen.generate(F.recipe(replace(spec, quant="q4_1_f32")))
     # Build the requested sets in parallel, then copy outputs in deterministic order.
     bdirs: dict[str, Path] = {}
     if a.no_build:
