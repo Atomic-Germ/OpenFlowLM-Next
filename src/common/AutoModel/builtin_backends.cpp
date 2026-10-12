@@ -53,6 +53,14 @@ void register_builtin_backends(BackendRegistry& registry) {
     RegisterOflmNpu<qwen3vl_npu>(registry, "qwen3vl");
     RegisterOflmNpu<qwen3_5vl_npu>(registry, "qwen3.5");
     RegisterOflmNpu<qwen3_6_moe_npu>(registry, "qwen3.6-moe");
+    // The GGUF-direct Qwen3.5 route. `qwen3.5` above is the VL engine, which reads a
+    // safetensors checkpoint; a Qwen3.5-9B-GGUF finetune (a distillation, a custom
+    // tune -- Ornith, Qwen3.8-Distill) has no safetensors at all, only model.gguf, and
+    // open_qwen36/core.cpp is the one engine that reads a GGUF pool. So it needs its own
+    // key rather than being folded into "qwen3.5", which is taken. Same variant-key
+    // idiom as qwen3-it / qwen3-tk / lfm2.5-tk: two engines, two spellings, one per
+    // weight format.
+    RegisterOflmNpu<qwen3_6_moe_npu>(registry, "qwen3.5-npu2");
     RegisterOflmNpu<gemma_npu>(registry, "gemma3");
     RegisterOflmNpu<gemma_text_npu>(registry, "gemma3-text");
     RegisterOflmNpu<gemma4e_npu>(registry, "gemma4e");

@@ -55,6 +55,10 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
         {"qwen3-tk", SupportedModelFamily::qwen3_tk},
         {"qwen3vl", SupportedModelFamily::qwen3vl},
         {"qwen3.5", SupportedModelFamily::qwen3_5},
+        // The GGUF-direct Qwen3.5 route (builtin_backends.cpp registers it against
+        // open_qwen36): same family, same kernels, safetensors-free. Distinct from
+        // "qwen3.5" above, which is the VL engine and needs a safetensors checkpoint.
+        {"qwen3.5-npu2", SupportedModelFamily::qwen3_6_moe},
         {"qwen3.5-omni", SupportedModelFamily::qwen3_5_omni},
         {"qwen3.6-moe", SupportedModelFamily::qwen3_6_moe},
         // Qwen's own name for the 27B, whose architecture is still Qwen3.5 (the open

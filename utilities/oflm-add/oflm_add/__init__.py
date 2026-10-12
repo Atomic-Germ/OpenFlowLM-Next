@@ -636,7 +636,7 @@ def resolve_official(system_registry, dir_name, family, size):
     return None, None
 
 
-def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
+def derive_family(system_registry, dir_name, explicit=None, base_entry=None, gguf=False):
     if explicit:
         # Lower-cased: every family this program compares against (FAMILY_ALIASES,
         # GGUF_CAPABLE_FAMILIES, the registry's own values) is lower case, and
@@ -651,7 +651,9 @@ def derive_family(system_registry, dir_name, explicit=None, base_entry=None):
     lower = dir_name.lower()
     for prefix, family in FAMILY_ALIASES:
         if lower.startswith(prefix.lower()):
-            return family
+            # Same redirect as the arch path: a GGUF-direct Qwen3.5 is not the VL
+            # engine's model, it is open_qwen36's, and needs its own registry key.
+            return "qwen3.5-npu2" if (gguf and family == "qwen3.5") else family
     raise SystemExit(
         f"Could not determine details.family for '{dir_name}'. "
         "Pass --family (e.g. qwen3.5, qwen3.6-moe, nanbeige, llama3, ...)."
@@ -1899,7 +1901,14 @@ def family_from_gguf_arch(gguf_source):
     # layer, and a custom GGUF wrote the recipe's spelling into details.family, so
     # `oflm run` refused it with "family 'qwen35', which this build has no engine for" --
     # the file installed, downloaded and linked correctly and then would not start.
-    return RECIPE_TO_RUNTIME_FAMILY.get(fam, fam)
+    fam = RECIPE_TO_RUNTIME_FAMILY.get(fam, fam)
+    # A GGUF-direct Qwen3.5 takes the OTHER Qwen3.5 engine. "qwen3.5" is the VL engine,
+    # which reads safetensors; only open_qwen36 reads a GGUF pool. Same shape, same
+    # kernels, different weight format -- so it gets its own registry key rather than
+    # being filed under the VL family and failing on a missing model.safetensors.
+    if fam == "qwen3.5":
+        return "qwen3.5-npu2"
+    return fam
 
 
 def family_from_config_dict(cfg):
@@ -2242,7 +2251,7 @@ def main():
         return peeked
 
     try:
-        family = derive_family(system_registry, dir_name, args.family)
+        family = derive_family(system_registry, dir_name, args.family, gguf=gguf_mode)
     except SystemExit:
         # No name marker, and no official entry can supply the family yet
         # (that matching happens below). Climb the content instead, cheapest
