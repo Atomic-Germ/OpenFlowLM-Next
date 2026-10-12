@@ -42,9 +42,11 @@
 #include "xrt/xrt_kernel.h"
 
 #include "open_qwen36/block_host.hpp"
+#include "open_qwen36/gguf_file.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/weight_file.hpp"
 #include "stream_patch.hpp"
 
 namespace open_qwen36 {
@@ -56,6 +58,7 @@ struct CoreConfig {
     size_t max_ctx = 4096;   ///< KV rows per attention layer and RoPE records: the context capacity
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
+    std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
 };
 
 /// Everything a request needs to be resumed later (the app's checkpoint/restore).
@@ -108,6 +111,12 @@ struct StepTiming {
     double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
     double qkv_scatter_ms = 0;  ///< Stage 2.5 Gate A: y_qkv3 columns into gact Q/K/V rows + the device sync (used to sit inside gemm_tr_ms)
 };
+
+/// The config.json fields a manifest checks, derived from a GGUF's metadata
+/// (the llama-family `<arch>.embedding_length` keys). A key the model does not
+/// carry is refused by name; families whose config carries GGUF-invisible
+/// fields (Granite's folded multipliers) need their config.json.
+nlohmann::json derive_config(const GgufFile& g);
 
 class Core {
 public:
@@ -254,7 +263,7 @@ public:
     const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
     // OPEN-DECODE-ROWS: step_rows writes the L rows' KV but does not move the position; the caller seeks.
-    size_t rows_l() const { return man_.rows.l; }
+    size_t rows_l() const { return gguf_ ? 0 : man_.rows.l; }  // the rows kernels read bf16-scale pools only
     // draft: the OPEN-UNO-LORA pass, the LoRA on every row but row 0.
     void step_rows(const int* ids, int* argmax, bool want_logits = false, bool draft = false);
     bool has_draft() const { return !lora_.empty(); }
@@ -272,8 +281,11 @@ public:
     bool is_attention_layer(int l) const { return types_[l]->state_kind == "kv"; }
     const StepTiming& last_timing() const { return timing_; }
     const Manifest& manifest() const { return man_; }
-    size_t vocab() const { return man_.vocab; }
-    size_t real_vocab() const { return man_.real_vocab; }
+    /// The selected weights view: the manifest itself (q4nx) or its GGUF-direct twin.
+    const Manifest& weights() const { return w_ ? *w_ : man_; }
+    bool is_gguf() const { return gguf_; }
+    size_t vocab() const { return weights().vocab; }
+    size_t real_vocab() const { return weights().real_vocab; }
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
@@ -281,7 +293,7 @@ public:
     /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
 
-    const Q4nxFile& file() const { return *file_; }
+    const WeightFile& file() const { return *file_; }
 
 private:
     struct Kern {
@@ -301,7 +313,9 @@ private:
 
     CoreConfig cfg_;
     Manifest man_;
-    std::unique_ptr<Q4nxFile> file_;
+    const Manifest* w_ = nullptr;              ///< the weights view (man_ or man_.gguf.get())
+    bool gguf_ = false;                        ///< the weights are a GGUF (model.gguf)
+    std::unique_ptr<WeightFile> file_;
     int nl_ = 0;
     std::vector<const LayerType*> types_;      ///< per layer
 
@@ -357,6 +371,7 @@ private:
 
     // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
+    std::string prefill_route_;  ///< "fast" | "lean" on a set that carries both, "" on a set with one route
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool layer_major_on_ = true; ///< the whole prompt through each layer before the next (OFLM_OPEN_LAYER_MAJOR=0 off)
@@ -368,6 +383,7 @@ private:
     void apply_thread_budget() const;
     bool moe_redispatch_ = false;  ///< OFLM_OPEN_MOE_REDISPATCH: run each MoE pass twice and print both
     std::vector<float> gout_, sg_ug_, sg_y_;   ///< the block route's GEMM outputs, kept across layers
+    std::map<std::string, std::vector<float>> split_y_;   ///< a split step's hi + lo, per y global (gemm_run)
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
@@ -491,8 +507,9 @@ private:
     void load_kernel(const std::string& name, const KernelDesc& d);
     xrt::bo alloc(size_t bytes, const uint8_t* init = nullptr, size_t init_bytes = 0);
     xrt::bo& buffer(const std::string& name, int layer);
-    void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
+void step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                    const float* deepstack = nullptr, int n_deepstack = 0);
+    void embedding_row(size_t token, float* out) const;
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);

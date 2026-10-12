@@ -192,6 +192,7 @@ def test_no_shipped_models_hash_moved():
         "k2-horizon-3.7b.json": "sha256:18952d15a05780550c7d469b728fd6c686b6cb4c23635257e82c842aecd8e50a",
         "k2-horizon-7b.json": "sha256:d6ee7f414ae5095551075722947ce8122f01b2d1e8c5be7c721ea5f0ba1b9778",
         "qwen35-27b.json": "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458",
+        "qwen3-8b.json": "sha256:04374f23aede126f34237de4e298a9d385dd36eb6041723032de14884648bab5",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

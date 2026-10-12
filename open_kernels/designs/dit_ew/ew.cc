@@ -159,7 +159,11 @@ static inline VF16 mulf(VF16 a, VF16 b) { return aie::mul(a, b).template to_vect
 
 // RoPE factors for global token g of the joint [text; image] sequence: text token l:
 // axis 3 (dims 96-127) by l; image token k: axis 1 by k / grid_w, axis 2 by k % grid_w.
-// Other axes are the identity. Once per token; the fp32 work here is 128 values.
+// Other axes are the identity. An edit appends one reference image of the same grid
+// (klein's [text | generated | reference]): image token k >= grid_w^2 is reference token
+// k - grid_w^2, whose axis 0 turns by REF_T (diffusers' t = 10 for the first reference).
+// Once per token; the fp32 work here is 128 values.
+constexpr int REF_T = 10;
 static __attribute__((noinline)) void rope_token(const float *__restrict tab, int g, int n_txt, int grid_w) {
   const VF16 one = aie::broadcast<float, 16>(1.0f), zero = aie::zeros<float, 16>();
   for (int a = 0; a < 4; a++)
@@ -172,7 +176,13 @@ static __attribute__((noinline)) void rope_token(const float *__restrict tab, in
     // cos(a+b) = ca cb - sa sb;  sin(a+b) = sa cb + ca sb
     rope_axis(3, aie::sub(mulf(ca, cb), mulf(sa, sb)), aie::add(mulf(sa, cb), mulf(ca, sb)));
   } else {
-    const int k = g - n_txt, h = k / grid_w, w = k - h * grid_w;
+    int k = g - n_txt;
+    if (k >= grid_w * grid_w) {
+      k -= grid_w * grid_w;
+      const float *pt = tab + ROPE_FINE + REF_T * 32;
+      rope_axis(0, aie::load_v<16>(pt), aie::load_v<16>(pt + 16));
+    }
+    const int h = k / grid_w, w = k - h * grid_w;
     const float *ph = tab + ROPE_FINE + h * 32, *pw = tab + ROPE_FINE + w * 32;
     rope_axis(1, aie::load_v<16>(ph), aie::load_v<16>(ph + 16));
     rope_axis(2, aie::load_v<16>(pw), aie::load_v<16>(pw + 16));

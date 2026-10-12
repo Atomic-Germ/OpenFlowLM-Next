@@ -4,6 +4,7 @@
 //   block_host_test.exe <dir>
 // Every stage runs on the fixture's inputs and is compared with the numpy result written
 // beside them (f32 arrays; inv_freq f64; idx i32). No XRT, no model.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -69,6 +70,129 @@ std::vector<float> from_bf16(const std::vector<uint16_t>& v) {
     return o;
 }
 
+float bf16r(float x) { return bf16_to_f32(f32_to_bf16(x)); }
+float silu(float x) { return x / (1.0f + std::exp(-x)); }
+float sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
+float softplus(float x) { return x > 0 ? x + std::log1p(std::exp(-x)) : std::log1p(std::exp(x)); }
+
+void rms_vec(const float* x, size_t d, const float* w, double eps, float* out) {
+    double ss = 0;
+    for (size_t j = 0; j < d; ++j) ss += static_cast<double>(x[j]) * x[j];
+    const float r = static_cast<float>(1.0 / std::sqrt(ss / static_cast<double>(d) + eps));
+    for (size_t j = 0; j < d; ++j) out[j] = x[j] * r * w[j];
+}
+
+// block_host.cpp's deltanet_block with no intrinsics anywhere: the oracle its AVX2 conv and
+// alpha / beta loops have to match bit for bit.
+void deltanet_scalar(const host::DeltaGeom& g, const float* qkv, const float* z, const float* xn,
+                     const float* convw, const float* Wa, const float* Wb, const float* A, const float* dtb,
+                     const float* nw, uint16_t* conv_state, float* S, float* og) {
+    const size_t dim = g.head_dim, key_w = g.key_heads * dim, vw = g.value_heads * dim, nch = 2 * key_w + vw;
+    const size_t grp = g.value_heads / g.key_heads, R = g.t_real, pre = g.taps - 1;
+    const float inv_sqrt = 1.0f / std::sqrt(static_cast<float>(dim));
+    std::fill(og, og + g.T * vw, 0.f);
+
+    std::vector<float> carry(pre * nch);
+    for (size_t i = 0; i < carry.size(); ++i) carry[i] = bf16_to_f32(conv_state[i]);
+    std::vector<float> Q(R * key_w), Kk(R * key_w), V(R * vw), decay(R * g.value_heads), beta(R * g.value_heads);
+    std::vector<float> c(nch), al(g.lanes), be(g.lanes);
+    for (size_t t = 0; t < R; ++t) {
+        std::fill(c.begin(), c.end(), 0.f);
+        for (size_t r = 0; r < g.taps; ++r) {
+            const long long s = static_cast<long long>(t) - static_cast<long long>(pre) + static_cast<long long>(r);
+            const float* cw = convw + r * nch;
+            if (s < 0) {
+                const float* v = carry.data() + (static_cast<size_t>(s) + pre) * nch;
+                for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * v[j];
+            } else {
+                const float* v = qkv + static_cast<size_t>(s) * nch;
+                for (size_t j = 0; j < nch; ++j) c[j] += cw[j] * bf16r(v[j]);
+            }
+        }
+        for (size_t j = 0; j < nch; ++j) c[j] = silu(c[j]);
+        for (size_t hh = 0; hh < g.key_heads; ++hh)
+            for (int which = 0; which < 2; ++which) {
+                const float* src = c.data() + which * key_w + hh * dim;
+                float* dst = (which ? Kk : Q).data() + t * key_w + hh * dim;
+                double ss = 0;
+                for (size_t j = 0; j < dim; ++j) ss += static_cast<double>(src[j]) * src[j];
+                const float r = static_cast<float>(1.0 / std::sqrt(ss + 1e-6));
+                for (size_t j = 0; j < dim; ++j) dst[j] = src[j] * r;
+            }
+        std::copy(c.begin() + 2 * key_w, c.end(), V.begin() + t * vw);
+        const float* x = xn + t * g.hid;
+        for (size_t h = 0; h < g.lanes; ++h) {
+            float a = 0.f, b = 0.f;
+            for (size_t i = 0; i < g.hid; ++i) {
+                a += x[i] * Wa[i * g.lanes + h];
+                b += x[i] * Wb[i * g.lanes + h];
+            }
+            al[h] = a;
+            be[h] = b;
+        }
+        for (size_t h = 0; h < g.value_heads; ++h) {
+            decay[t * g.value_heads + h] = std::exp(A[h] * softplus(al[h] + dtb[h]));
+            beta[t * g.value_heads + h] = sigmoid(be[h]);
+        }
+    }
+    for (size_t r = 0; r < pre; ++r) {
+        const long long s = static_cast<long long>(R) - static_cast<long long>(pre) + static_cast<long long>(r);
+        if (s < 0) {
+            std::copy(conv_state + (R + r) * nch, conv_state + (R + r + 1) * nch, conv_state + r * nch);
+        } else {
+            const float* row = qkv + static_cast<size_t>(s) * nch;
+            for (size_t j = 0; j < nch; ++j) conv_state[r * nch + j] = f32_to_bf16(row[j]);
+        }
+    }
+    std::vector<float> tv(dim), delta(dim), o(dim), on(dim);
+    for (size_t h = 0; h < g.value_heads; ++h) {
+        float* Sh = S + h * g.s_rows * dim;
+        for (size_t t = 0; t < R; ++t) {
+            const float* kk = Kk.data() + t * key_w + (h / grp) * dim;
+            const float* qq = Q.data() + t * key_w + (h / grp) * dim;
+            const float* v = V.data() + t * vw + h * dim;
+            const float dc = decay[t * g.value_heads + h], bt = beta[t * g.value_heads + h];
+            std::fill(tv.begin(), tv.end(), 0.f);
+            for (size_t i = 0; i < dim; ++i) {
+                const float* Si = Sh + i * dim;
+                const float ki = kk[i];
+                for (size_t j = 0; j < dim; ++j) tv[j] += ki * (Si[j] * dc);
+            }
+            for (size_t j = 0; j < dim; ++j) delta[j] = bt * (v[j] - tv[j]);
+            std::fill(o.begin(), o.end(), 0.f);
+            for (size_t i = 0; i < dim; ++i) {
+                float* Si = Sh + i * dim;
+                const float ki = kk[i], qi = qq[i];
+                for (size_t j = 0; j < dim; ++j) {
+                    const float s = Si[j] * dc + ki * delta[j];
+                    Si[j] = s;
+                    o[j] += s * qi;
+                }
+            }
+            for (size_t j = 0; j < dim; ++j) o[j] *= inv_sqrt;
+            rms_vec(o.data(), dim, nw, g.eps, on.data());
+            float* out = og + t * vw + h * dim;
+            const float* zz = z + t * vw + h * dim;
+            for (size_t j = 0; j < dim; ++j) out[j] = on[j] * silu(zz[j]);
+        }
+    }
+}
+
+// A float built bit by bit so the dropped half decides the bf16 round: lo 0x8000 is an exact
+// tie, settled by bit 16 alone -- odd at i % 8 == 1 (up), even at i % 8 == 2 (down).
+float round_probe(size_t i) {
+    static const uint16_t lo[] = {0x0000, 0x8000, 0x8000, 0x7FFF, 0x8001, 0xFFFF, 0x4000, 0xC000};
+    const uint32_t u = (i % 3 == 0 ? 0x80000000u : 0u) | (static_cast<uint32_t>(124 + i % 9) << 23) |
+                       (static_cast<uint32_t>((i * 37) % 128) << 16) | lo[i % 8];
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+
+float spread(size_t i, float amp, float off) {
+    return amp * (static_cast<float>((i * 7919) % 2003) / 1001.f - 1.f) + off;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -111,6 +235,57 @@ int main(int argc, char** argv) {
         bool zero_tail = true;
         for (size_t i = t_real * g.value_heads * g.head_dim; i < og.size(); ++i) zero_tail = zero_tail && og[i] == 0.f;
         check(zero_tail, "deltanet_block: og past t_real is zero");
+    }
+
+    // ---- the DeltaNet stage against the obvious scalar loops, bit for bit
+    // Its conv (over the bf16 round trip) and its alpha / beta projection run as AVX2 where
+    // the width fits, and the claim is that they are the scalar form's bits exactly. The
+    // fixture above cannot hold them to that: it compares against a tolerance, and the
+    // model's own widths are multiples of 8 and 16, so no vector remainder ever runs. These
+    // widths leave one, drop below one 16-lane group, and feed the conv exact bf16 ties.
+    // value_heads runs past lane 16 on purpose: lanes past it are padding nothing reads, so a
+    // lane count alone would leave the projection's scalar tail with no way to reach og.
+    {
+        struct Case { size_t key_heads, value_heads, head_dim, taps, hid, lanes, s_rows, T, t_real; };
+        static const Case cases[] = {
+            {1, 19, 5, 4, 7, 19, 6, 6, 5},   // nch 105: one channel past the last 8-wide step; three lanes past the group
+            {2, 4, 3, 4, 9, 4, 3, 4, 2},     // nch 24: no remainder; lanes 4: the projection all scalar; t_real < taps - 1
+            {1, 19, 3, 4, 11, 32, 4, 5, 5},  // nch 63: seven past the step; lanes 32: two whole groups, no remainder
+        };
+        for (const auto& cse : cases) {
+            host::DeltaGeom g;
+            g.T = cse.T; g.t_real = cse.t_real; g.hid = cse.hid;
+            g.key_heads = cse.key_heads; g.value_heads = cse.value_heads; g.head_dim = cse.head_dim;
+            g.taps = cse.taps; g.lanes = cse.lanes; g.s_rows = cse.s_rows;
+            const size_t dim = g.head_dim, vw = g.value_heads * dim, nch = 2 * g.key_heads * dim + vw;
+            std::vector<float> qkv(g.T * nch), z(g.T * vw), xn(g.T * g.hid), convw(g.taps * nch);
+            std::vector<float> Wa(g.hid * g.lanes), Wb(g.hid * g.lanes), A(g.value_heads), dtb(g.value_heads), nw(dim);
+            for (size_t i = 0; i < qkv.size(); ++i) qkv[i] = round_probe(i);
+            for (size_t i = 0; i < z.size(); ++i) z[i] = spread(i + 1, 1.5f, 0.f);
+            for (size_t i = 0; i < xn.size(); ++i) xn[i] = spread(i + 2, 1.0f, 0.f);
+            for (size_t i = 0; i < convw.size(); ++i) convw[i] = spread(i + 3, 0.4f, 0.f);
+            for (size_t i = 0; i < Wa.size(); ++i) Wa[i] = spread(i + 4, 0.3f, 0.f);
+            for (size_t i = 0; i < Wb.size(); ++i) Wb[i] = spread(i + 5, 0.3f, 0.f);
+            for (size_t i = 0; i < A.size(); ++i) A[i] = spread(i + 6, 0.4f, -0.5f);
+            for (size_t i = 0; i < dtb.size(); ++i) dtb[i] = spread(i + 7, 0.5f, 0.f);
+            for (size_t i = 0; i < nw.size(); ++i) nw[i] = spread(i + 8, 0.2f, 1.f);
+            std::vector<uint16_t> st0((g.taps - 1) * nch);
+            for (size_t i = 0; i < st0.size(); ++i) st0[i] = f32_to_bf16(spread(i + 9, 0.6f, 0.f));
+            std::vector<float> S0(g.value_heads * g.s_rows * dim);
+            for (size_t i = 0; i < S0.size(); ++i) S0[i] = spread(i + 10, 0.2f, 0.f);
+
+            auto st_v = st0, st_r = st0;
+            auto S_v = S0, S_r = S0;
+            std::vector<float> og_v(g.T * vw, 3.f), og_r(g.T * vw, 7.f);
+            host::deltanet_block(g, qkv.data(), z.data(), xn.data(), convw.data(), Wa.data(), Wb.data(), A.data(),
+                                 dtb.data(), nw.data(), st_v.data(), S_v.data(), og_v.data());
+            deltanet_scalar(g, qkv.data(), z.data(), xn.data(), convw.data(), Wa.data(), Wb.data(), A.data(),
+                            dtb.data(), nw.data(), st_r.data(), S_r.data(), og_r.data());
+            const bool same = std::memcmp(og_v.data(), og_r.data(), og_v.size() * sizeof(float)) == 0 &&
+                              std::memcmp(S_v.data(), S_r.data(), S_v.size() * sizeof(float)) == 0 && st_v == st_r;
+            check(same, "deltanet_block: the scalar loops' bits exactly, at nch " + std::to_string(nch) +
+                            " and lanes " + std::to_string(g.lanes));
+        }
     }
 
     // ---- the attention stage
