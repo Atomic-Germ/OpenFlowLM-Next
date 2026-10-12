@@ -344,22 +344,23 @@ def role_gemv_bands(win, yout, B, K, role, nbands, KK):
 
 
 # ---- the dense FFN tail on one main core (ffn="dense"; designs/dense/dx.py steps 6-7)
-def prep_bands(win, xin, yout, B, K, kk, n_elems, nbands, role="attn"):
+def prep_bands(win, xin, yout, B, K, kk, n_elems, nbands, role="attn", fp32=False):
     """Prepare the KK-wide activation from `n_elems` 4 KB x elements (the kernel derives
     each element's block range from its index, so no arithmetic on the loop variable),
     then run `nbands` bands of it at `role`'s weight format. The dense counterpart of the
     MoE's fixed prep entries."""
     tab = B["tab"]
+    prep = K["prepf"] if fp32 else K["prep"]
     if n_elems > X_DEPTH:
-        prep_stream(xin, K["prep"], tab, kk, n_elems)
+        prep_stream(xin, prep, tab, kk, n_elems)
         role_gemv_bands(win, yout, B, K, role, nbands, kk)
         return
     xe = xin.acquire(n_elems)
     if n_elems == 1:
-        K["prep"](xe, tab, kk, 0)
+        prep(xe, tab, kk, 0)
     else:
         for i in range(n_elems):
-            K["prep"](xe[i], tab, kk, i)
+            prep(xe[i], tab, kk, i)
     role_gemv_bands(win, yout, B, K, role, nbands, kk)
     xin.release(n_elems)
 

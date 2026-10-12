@@ -72,6 +72,7 @@ if DENSE and PART:
     sys.exit("ax.py: the dense tail is one instruction stream; AX_PART must be 0")
 XN_ELEMS = X.FFN.XN_ELEMS if DENSE else 1               # 4 KB x elements the xn arrives in
 OG_ELEMS = D.OG_ELEMS
+OG_ITEM_BYTES = 4 if D.KV_PAIR else 2
 # The attention cores (their flags, kernels, bodies, fifos) and this layer's part-0 host
 # sequence live in xlayer.py, shared with the merged image (ux.py).
 ACORES, NHL = XL.ACORES, XL.NHL
@@ -107,7 +108,7 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
         if DENSE:
             # ONE stream: q | gate | k | v, the o projection, then the dense FFN tail.
             X.prep_bands(win, xin, yout, B, K, HID, XN_ELEMS, 2 * Q_PC + 2 * KV_PC, "attn")
-            X.prep_bands(win, xin, yout, B, K, O_K, OG_ELEMS, O_PC, "attn")
+            X.prep_bands(win, xin, yout, B, K, O_K, OG_ELEMS, O_PC, "attn", fp32=D.KV_PAIR)
             X.ffn_body(win, xin, yout, B, K)
             return
         xe = xin.acquire(1)                                     # xn
@@ -147,9 +148,9 @@ def ax(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, pa
             py.drain(y_conss[c], a_act, bt(AA_BYTES, *y_regions(c)[3]))
         pa_out, pa_in = Pipeline(3), Pipeline(3)
         pa_out.drain(aout_c, a_kv, bt(KV_BYTES, KV_ROW, KV_ROW))        # the new row [k' | v'] (attnpos)
-        pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, NHL * HD * 2))
+        pa_out.drain(aout_c, a_act, bt(AA_BYTES, AA_OG, NHL * HD * OG_ITEM_BYTES))
         for c in range(1, ACORES):                                      # heads NHL*c ..
-            pa_out.drain(og_cs[c - 1], a_act, bt(AA_BYTES, AA_OG + c * NHL * HD * 2, NHL * HD * 2))
+            pa_out.drain(og_cs[c - 1], a_act, bt(AA_BYTES, AA_OG + c * NHL * HD * OG_ITEM_BYTES, NHL * HD * OG_ITEM_BYTES))
         pa_in.fill(ain_p, a_consts, bt(CA_BYTES, CA_META, D.E_A))       # [qn | kn]
         pa_in.fill(ain_p, a_ptab, bt(PTAB_BYTES, PTAB_ROW, PTAB_ROW))   # the position record (attnpos)
         py.finish(*y_conss)                                       # q, gate, k, v are in DDR

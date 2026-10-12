@@ -371,6 +371,8 @@ if A is not None:
     from recipes.attnknobs import probe_env  # noqa: E402
     ATTN_FLAGS = [f"-DATTN_NH={NH}", f"-DATTN_KVH={KVH}", f"-DATTN_HD={HD}", f"-DATTN_ROT={A.ROT}", "-DATTN_GATE=1",
                   f"-DATTN_VEXP={A.VEXP}", f"-DATTN_NHL={A.NHL}"]
+    if A.KV_PAIR:
+        ATTN_FLAGS.append("-DATTN_KV_PAIR=1")
     if A.RB > 1:                                           # attn.h defaults it to 1; adding the flag
         ATTN_FLAGS.append(f"-DATTN_RB={A.RB}")             # would change every other family's build line
     if A.BLOCK:                                            # the single-row path retired: see attn.h
@@ -400,6 +402,7 @@ def attn_types():
     a["u8_1k"] = np.ndarray[(A.E_A,), np.dtype[np.uint8]]    # one cache-row half: HPE f32 heads in, HPO bf16 og out
     a["b256"] = np.ndarray[(HD,), np.dtype[bfloat16]]
     a["b512"] = np.ndarray[(KVW,), np.dtype[bfloat16]]
+    a["kv"] = np.ndarray[(2 * KVW,), np.dtype[bfloat16]] if A.KV_PAIR else a["b512"]
     a["f64"] = np.ndarray[(A.ROT,), np.dtype[np.float32]]           # cos | sin of the rotated dims
     a["f256"] = np.ndarray[(HD,), np.dtype[np.float32]]
     f4096 = np.ndarray[(QW,), np.dtype[np.float32]]
@@ -422,16 +425,19 @@ def attn_kernels(inc, a):
     h0_arg = [np.int32] if ACORES > 1 else []                  # only a split needs the head offset
     f_meta = af("attn_meta", [u8_1k, u8_1k, b256, b256, f64, pb_ty])
     f_q = af("attn_q", [u8_1k, b256, f64, fq, np.int32])
-    f_k = af("attn_k", [u8_1k, b256, f64, f256, b512, np.int32])
-    f_v = af("attn_v", [u8_1k, b512, np.int32])
+    f_k = af("attn_pair_k" if A.KV_PAIR else "attn_k", [u8_1k, b256, f64, f256, a["kv"], np.int32])
+    f_v = af("attn_pair_v" if A.KV_PAIR else "attn_v", [u8_1k, a["kv"], np.int32])
     f_init = af("attn_init", [foacc, fml])
-    f_step = af("attn_step", [u8_1k, u8_1k, fq, foacc, fml, pb_ty] + h0_arg) if not BLOCK else None
-    f_stepn = af("attn_step_new", [b512, b512, fq, foacc, fml] + h0_arg) if not BLOCK else None
+    f_step = af("attn_pair_step" if A.KV_PAIR else "attn_step",
+                [u8_1k] * (4 if A.KV_PAIR else 2) + [fq, foacc, fml, pb_ty] + h0_arg) if not BLOCK else None
+    f_stepn = af("attn_pair_step_new" if A.KV_PAIR else "attn_step_new",
+                 [a["kv"], a["kv"], fq, foacc, fml] + h0_arg) if not BLOCK else None
     f_stepb = af("attn_stepb", [u8_1k] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg) if RB > 1 else None
     # The peeled last block: RB - 1 fifo rows and the new position's k'/v' from core scratch.
     f_stepbn = (af("attn_stepb_new", [u8_1k] * (2 * (RB - 1)) + [b512, b512, fq, foacc, fml, pb_ty] + h0_arg)
                 if BLOCK else None)
-    f_fin = af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32])
+    f_fin = (af("attn_pair_fin", [foacc, fml, u8_1k, b512, np.int32]) if A.KV_PAIR else
+             af("attn_fin", [foacc, fml, u8_1k, u8_1k, b512, np.int32]))
     return ([f_meta, f_q, f_k, f_v, f_init, f_fin, f_stepb, f_stepbn] if BLOCK else
             [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else []))
 
@@ -445,8 +451,47 @@ def attn_fifos(a):
     return of_ain, of_aout, of_og
 
 
+def _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+               fm, fq, fk, fv, fi, fs, fsn, ff, c):
+    """Four cache planes and FP32 OG travel through the same EA-byte FIFOs."""
+    e = ain.acquire(2)
+    fm(e[0], e[1], qn, kn, cs, pb)
+    ain.release(2)
+    for h in range_(A.Q_AIN_ELEMS):
+        e = ain.acquire(1); fq(e, qn, cs, qs, h); ain.release(1)
+    for h in range_(A.K_AIN_ELEMS):
+        e = ain.acquire(1); fk(e, kn, cs, tmp, kout, h); ain.release(1)
+    for h in range_(A.K_AIN_ELEMS):
+        e = ain.acquire(1); fv(e, vout, h); ain.release(1)
+    if aout is not None:
+        for plane in range_(2):
+            e = aout.acquire(1)
+            for j in range_(KVW): e[j] = kout[plane * KVW + j]
+            aout.release(1)
+        for plane in range_(2):
+            e = aout.acquire(1)
+            for j in range_(KVW): e[j] = vout[plane * KVW + j]
+            aout.release(1)
+    fi(oacc, ml)
+    for _ in range_(pb[1]):
+        e = ain.acquire(4)
+        fs(e[0], e[1], e[2], e[3], qs, oacc, ml, pb, c * NHL)
+        ain.release(4)
+    fsn(kout, vout, qs, oacc, ml, c * NHL)
+    for _ in range(c * N_OG): ain.acquire(1); ain.release(1)
+    for hp in range_(N_OG):
+        g = ain.acquire(1); o = ogout.acquire(1)
+        ff(oacc, ml, g, o, hp)
+        ogout.release(1); ain.release(1)
+    for _ in range((ACORES - 1 - c) * N_OG): ain.acquire(1); ain.release(1)
+
+
 def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
           fm, fq, fk, fv, fi, fs, fsn, ff, fsb, fsbn, c):
+    if A.KV_PAIR:
+        _attn_pair(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
+                   fm, fq, fk, fv, fi, fs, fsn, ff, c)
+        return
     h0 = c * NHL
     e = ain.acquire(2)                                      # [qn | kn], the position record
     fm(e[0], e[1], qn, kn, cs, pb)
@@ -568,8 +613,8 @@ def attn_workers(of_ain, of_aout, of_og, a, afns):
     def abufs(c):
         s = "" if c == 0 else str(c)
         return [Buffer(a["b256"], name=f"qn{s}"), Buffer(a["b256"], name=f"kn{s}"), Buffer(a["f64"], name=f"cs{s}"),
-                Buffer(a["fq"], name=f"qs{s}"), Buffer(a["f256"], name=f"tmp{s}"), Buffer(a["b512"], name=f"kout{s}"),
-                Buffer(a["b512"], name=f"vout{s}"), Buffer(a["foacc"], name=f"oacc{s}"),
+                Buffer(a["fq"], name=f"qs{s}"), Buffer(a["f256"], name=f"tmp{s}"), Buffer(a["kv"], name=f"kout{s}"),
+                Buffer(a["kv"], name=f"vout{s}"), Buffer(a["foacc"], name=f"oacc{s}"),
                 Buffer(a["fml"], name=f"ml{s}"), Buffer(a["pb"], name=f"pb{s}")]
 
     workers = [Worker(attn_body, fn_args=[of_ain.cons(), of_aout.prod()] + abufs(0) + afns,

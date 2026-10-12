@@ -103,7 +103,9 @@ def compare_heads(got, ref):
     return rows
 
 
-def read_attention(path, offsets, heads, kv_heads, dim):
+def read_attention(path, offsets, heads, kv_heads, dim, output_dtype="bfloat16"):
+    if output_dtype not in ("bfloat16", "float32"):
+        raise ValueError("unsupported attention output dtype")
     data = path.read_bytes()
     if len(data) != offsets.AA_BYTES:
         raise ValueError(f'{path.name}: wrong act buffer bytes')
@@ -125,7 +127,7 @@ def read_attention(path, offsets, heads, kv_heads, dim):
                 gate=region(offsets.AA_QG + qw * 4, qw, np.float32),
                 k=region(offsets.AA_KVN, kw, np.float32),
                 v=region(offsets.AA_KVN + kw * 4, kw, np.float32),
-                og=region(offsets.AA_OG, qw, np.uint16))
+                og=region(offsets.AA_OG, qw, np.float32 if output_dtype == "float32" else np.uint16))
 
 
 def check(model_dir, kernel_dir, out, layers=None):
@@ -156,7 +158,8 @@ def check(model_dir, kernel_dir, out, layers=None):
         captures = []
         for token in range(meta['tokens']):
             path = out / f'y_act{layer}{sfx(token)}.bin'
-            captures.append(read_attention(path, offsets, spec.num_heads, spec.num_kv_heads, spec.head_dim))
+            captures.append(read_attention(path, offsets, spec.num_heads, spec.num_kv_heads, spec.head_dim,
+                                           selected.get("layout", {}).get("attn_output_dtype", "bfloat16")))
             hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
         a = {n: np.stack([c[n] for c in captures]) for n in captures[0]}
         ref = attention_reference(a['q'], a['k'], a['v'], a['gate'], *norms,
