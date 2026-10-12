@@ -240,7 +240,7 @@ def main() -> int:
             a.no_build = True
 
     # ---- the whole-layer designs' kernel TUs for this spec, then the builds
-    if not a.no_build:
+    if not a.no_build and F.GEN_KERNELS:
         os.environ["OPEN_KERNELS_SPEC"] = str(spec_file)
         gen_dir = HERE / F.GEN_KERNELS
         import importlib.util

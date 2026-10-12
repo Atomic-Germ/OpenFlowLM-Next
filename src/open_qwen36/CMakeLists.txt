@@ -34,7 +34,8 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp
+               dflash2.cpp dflash2_host.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
@@ -62,7 +63,11 @@ target_include_directories(spec_test PRIVATE ${_inc})
 add_executable(verify_slots_test verify_slots_test.cpp)
 target_include_directories(verify_slots_test PRIVATE ${_inc})
 
-foreach(t open_qwen36_cli manifest_test vit_test block_host_test spec_test verify_slots_test)
+# dflash2_test (no XRT): the DFlash 2 drafter's selector walk and gemv_t2n's host tables (OPEN-DRAFT-DFLASH2)
+add_executable(dflash2_test dflash2_test.cpp dflash2_host.cpp)
+target_include_directories(dflash2_test PRIVATE ${_inc})
+
+foreach(t open_qwen36_cli manifest_test vit_test block_host_test spec_test verify_slots_test dflash2_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -75,6 +80,7 @@ add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
 add_test(NAME OPEN-DECODE-SPECULATIVE-VERIFY COMMAND verify_slots_test)
+add_test(NAME OPEN-DRAFT-DFLASH2-WALK COMMAND dflash2_test)
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"

@@ -383,9 +383,116 @@ def gate(a):
     print(f"TOTAL {same}/{tot} drafts identical ({same / max(1, tot):.4f}); {len(mism)} mismatches, {tie} near-tie (< {a.tie})")
 
 
+def run_steps(a, pid):
+    hdr, rows = load_run(a.run, pid, None)
+    steps = list(range(0, len(rows), a.stride))
+    if a.max_steps:
+        steps = steps[:a.max_steps]
+    return hdr, rows, steps
+
+
+def drafts(a):
+    """Reference drafts for the NPU gate: one 7-token walk (8-row block) per step, as the engine runs it."""
+    torch.set_num_threads(a.threads)
+    tgt = Target(a.target, a.device)
+    dr = Drafter(a.drafter, a.device)
+    nt = len(dr.taps) * tgt.n_embd
+    with open(a.out, "w") as out:
+        for pid in a.pids:
+            hdr, rows, steps = run_steps(a, pid)
+            n0 = hdr["prompt_n"] - 1
+            taps = np.fromfile(Path(a.run) / f"{pid}.taps", np.float32).reshape(-1, nt)
+            steps = [s for s in steps if n0 + s <= len(taps)]
+            last = n0 + steps[-1]
+            with torch.no_grad():
+                cache_all = dr.encode(torch.from_numpy(taps[:last]).to(dr.device), torch.arange(last, device=dr.device))
+            for s in steps:
+                p0 = n0 + s
+                anchor = hdr["prompt_ids"][-1] if s == 0 else rows[s - 1]["g"]
+                lo = max(0, p0 - dr.n_swa + 1) if dr.n_swa else 0
+                cache = [(K[lo:p0], V[lo:p0]) for K, V in cache_all]
+                with torch.no_grad():
+                    d, lat = dr.draft(tgt, anchor, p0, 7, cache, torch.arange(lo, p0, device=dr.device))
+                lat = lat.numpy()
+                m, pr = [], 0
+                for i in range(7):
+                    m.append(margin(lat[i], pr))
+                    pr = int(np.where(lat[i, :TOP_K].astype(int) == d[i])[0][0])
+                out.write(json.dumps({"pid": pid, "s": s, "p0": p0, "d": d, "m": m,
+                                      "c1": [int(c) for c in lat[0, :TOP_K]]}) + "\n")
+            out.flush()
+            print(f"{pid}: {len(steps)} reference drafts", flush=True)
+
+
+def accepted(d, g, s, k):
+    """Teacher-forced tokens a verify pass keeps: the drafts that match the target's next tokens, plus one."""
+    n = 0
+    while n < k and s + n < len(g) and d[n] == g[s + n]:
+        n += 1
+    return n + 1
+
+
+def compare(a):
+    """NPU drafts against reference drafts on the same taps: agreement at each k (near-ties excepted) and tokens/pass."""
+    def load(p):
+        out = {}
+        for line in Path(p).read_text().splitlines():
+            r = json.loads(line)
+            out[(r["pid"], r["s"])] = r
+        return out
+    npu, ref = load(a.npu), load(a.ref)
+    keys = sorted(set(npu) & set(ref))
+    gs = {pid: [r["g"] for r in load_run(a.run, pid, None)[1]] for pid in {k[0] for k in keys}}
+    report = {}
+    for k in a.k:
+        same = tie = 0
+        tp_n = tp_r = 0
+        mism = []
+        for key in keys:
+            dn, dr_ = npu[key]["d"][:k], ref[key]["d"][:k]
+            g = gs[key[0]]
+            tp_n += accepted(dn, g, key[1], k)
+            tp_r += accepted(dr_, g, key[1], k)
+            if dn == dr_:
+                same += 1
+                continue
+            i = next(j for j in range(k) if dn[j] != dr_[j])
+            m = min(ref[key]["m"][i], npu[key]["m"][i])
+            near = m < a.tie or (i == 0 and dn[0] not in ref[key]["c1"])
+            tie += near
+            mism.append({"pid": key[0], "s": key[1], "row": i + 1, "npu": dn[i], "ref": dr_[i], "margin": m, "near_tie": near})
+        n = len(keys)
+        report[k] = {"steps": n, "identical": same, "near_tie_mismatches": tie, "other_mismatches": len(mism) - tie,
+                     "agreement": same / max(1, n), "agreement_excl_ties": (same + tie) / max(1, n),
+                     "tokens_per_pass_npu": tp_n / max(1, n), "tokens_per_pass_ref": tp_r / max(1, n),
+                     "tokens_per_pass_rel": (tp_n - tp_r) / max(1, tp_r), "mismatches": mism}
+        print(f"k={k}: {same}/{n} identical ({same / max(1, n):.4f}), {tie} near-tie (< {a.tie}), "
+              f"{len(mism) - tie} other; tokens/pass NPU {tp_n / max(1, n):.4f} vs reference {tp_r / max(1, n):.4f} "
+              f"({100 * (tp_n - tp_r) / max(1, tp_r):+.2f}%)")
+    if a.out:
+        Path(a.out).write_text(json.dumps(report, indent=1))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
+    d = sp.add_parser("drafts")
+    d.add_argument("--run", required=True)
+    d.add_argument("--drafter", required=True)
+    d.add_argument("--target", required=True)
+    d.add_argument("--pids", nargs="+", required=True)
+    d.add_argument("--stride", type=int, default=2)
+    d.add_argument("--max-steps", type=int, default=0)
+    d.add_argument("--threads", type=int, default=8)
+    d.add_argument("--device", default="cpu")
+    d.add_argument("--out", required=True)
+    c = sp.add_parser("compare")
+    c.add_argument("--run", required=True)
+    c.add_argument("--npu", required=True)
+    c.add_argument("--ref", required=True)
+    c.add_argument("--k", type=int, nargs="+", default=[3, 7])
+    c.add_argument("--tie", type=float, default=0.1)
+    c.add_argument("--out")
     g = sp.add_parser("gate")
     g.add_argument("--run", required=True)
     g.add_argument("--key", required=True)
@@ -402,6 +509,10 @@ def main():
     a = ap.parse_args()
     if a.cmd == "gate":
         gate(a)
+    elif a.cmd == "drafts":
+        drafts(a)
+    elif a.cmd == "compare":
+        compare(a)
 
 
 if __name__ == "__main__":
