@@ -107,7 +107,8 @@ def pack(a):
             cls[r["id"]] = r["cls"]
     fi = open(out / "ids.bin", "wb")
     ff = open(out / "feat.bin", "wb")
-    seqs, ids_off, feat_off, dim = [], 0, 0, None
+    fl = open(out / "lab.bin", "wb")
+    seqs, ids_off, feat_off, lab_off, dim = [], 0, 0, 0, None
     for n, p in enumerate(files):
         n_prompt, n_ids, first_pos, ids, taps = read_bin(p)
         if n_ids - n_prompt < 9:
@@ -125,13 +126,21 @@ def pack(a):
         dim = f.shape[1]
         fi.write(ids.astype(np.int32).tobytes())
         ff.write(f.astype(np.float16).tobytes())
-        seqs.append(dict(id=p.stem, cls=cls.get(p.stem, "?"), n_prompt=n_prompt, n_ids=n_ids, first_pos=first_pos,
-                         n_rows=int(f.shape[0]), ids_off=ids_off, feat_off=feat_off))
+        seq = dict(id=p.stem, cls=cls.get(p.stem, "?"), n_prompt=n_prompt, n_ids=n_ids, first_pos=first_pos,
+                   n_rows=int(f.shape[0]), ids_off=ids_off, feat_off=feat_off)
+        labf = p.with_suffix(".lab")
+        if labf.exists():   # teacher-forced text: the target's argmax after positions n_prompt-1 .. n_ids-2
+            lab = np.fromfile(labf, np.int32)
+            assert len(lab) == n_ids - n_prompt, p
+            fl.write(lab.tobytes())
+            seq.update(lab_off=lab_off, n_lab=int(len(lab)))
+            lab_off += len(lab)
+        seqs.append(seq)
         ids_off += n_ids
         feat_off += f.size
         if n % 50 == 0:
             print(f"{n}/{len(files)} {p.stem} rows {f.shape[0]}", flush=True)
-    fi.close(); ff.close()
+    fi.close(); ff.close(); fl.close()
     gen = sum(s["n_ids"] - s["n_prompt"] for s in seqs)
     (out / "index.json").write_text(json.dumps(dict(feat_dim=dim, feat=a.feat, seqs=seqs)))
     print(f"packed {len(seqs)} sequences, {gen} generated tokens, {feat_off // max(1, dim)} feature rows, dim {dim}")

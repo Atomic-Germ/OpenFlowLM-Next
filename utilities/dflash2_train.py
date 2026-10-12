@@ -87,7 +87,7 @@ class TernaryLinear(torch.nn.Module):
 
 
 class Drafter(torch.nn.Module):
-    def __init__(self, sd, cfg, quant=True, train_fc=False, dtype=torch.float32, device="cpu"):
+    def __init__(self, sd, cfg, quant=True, train_fc=False, dtype=torch.float32, device="cpu", fp_kinds=()):
         super().__init__()
         self.cfg = cfg
         self.eps = cfg["eps"]
@@ -97,7 +97,7 @@ class Drafter(torch.nn.Module):
         for ly in sd["layers"]:
             m = torch.nn.Module()
             for k in TERNARY_KINDS:
-                setattr(m, k, TernaryLinear(rot(ly[k].float()), quant, dtype))
+                setattr(m, k, TernaryLinear(rot(ly[k].float()), quant and k not in fp_kinds, dtype))
             for k in ("attn_norm", "ffn_norm", "q_norm", "k_norm", "attn_cb", "ffn_cb"):
                 setattr(m, k, torch.nn.Parameter(ly[k].float().clone()))
             self.layers.append(m)
@@ -105,7 +105,7 @@ class Drafter(torch.nn.Module):
         self.sel_hidden = torch.nn.Parameter(sd["sel_hidden"].float().clone())
         self.train_fc = train_fc
         if train_fc:
-            self.fc = TernaryLinear(rot(sd["fc"].float()), quant, dtype)
+            self.fc = TernaryLinear(rot(sd["fc"].float()), quant and "fc" not in fp_kinds, dtype)
             self.enc_norm = torch.nn.Parameter(sd["enc_norm"].float().clone())
         self.register_buffer("sel_prev", sd["sel_prev"].to(torch.bfloat16), persistent=False)
         self.register_buffer("sel_next", sd["sel_next"].to(torch.bfloat16), persistent=False)
@@ -227,13 +227,19 @@ class Data:
         self.ids = np.memmap(d / "ids.bin", np.int32, "r")
         self.feat_dim = self.idx["feat_dim"]
         self.feat = np.memmap(d / "feat.bin", np.float16, "r")
+        self.lab = np.memmap(d / "lab.bin", np.int32, "r") if (d / "lab.bin").exists() else None
         self.seqs = self.idx["seqs"]
 
     def get(self, i):
+        """-> (meta, ids, features, A) with A[p - (n_prompt - 1)] the target's greedy token after position p."""
         s = self.seqs[i]
         ids = np.asarray(self.ids[s["ids_off"]:s["ids_off"] + s["n_ids"]])
         f = np.asarray(self.feat[s["feat_off"]:s["feat_off"] + s["n_rows"] * self.feat_dim]).reshape(s["n_rows"], self.feat_dim)
-        return s, ids, f
+        if s.get("n_lab", 0):
+            A = np.asarray(self.lab[s["lab_off"]:s["lab_off"] + s["n_lab"]])
+        else:
+            A = ids[s["n_prompt"]:]
+        return s, ids, f, A
 
 
 def anchors_for(s, stride, rng):
@@ -246,7 +252,7 @@ def anchors_for(s, stride, rng):
     return list(range(lo + off, hi + 1, stride))
 
 
-def make_batch(dr, tgt, s, ids, f, anchors, device, mask_id, dtype):
+def make_batch(dr, tgt, s, ids, f, anchors, device, mask_id, dtype, A=None):
     a = torch.tensor(anchors, device=device)
     lo = max(s["first_pos"], min(anchors) - dr.cfg["n_swa"] + 1)
     hi = max(anchors)
@@ -256,16 +262,25 @@ def make_batch(dr, tgt, s, ids, f, anchors, device, mask_id, dtype):
     toks = torch.full((len(anchors), BLOCK), mask_id, dtype=torch.long)
     toks[:, 0] = torch.from_numpy(ids[anchors].astype(np.int64))
     emb = tgt.emb[toks.to(device)].to(dtype)
-    labels = torch.from_numpy(np.stack([ids[x + 1:x + BLOCK] for x in anchors]).astype(np.int64)).to(device)
-    return g, ctx_pos, emb, a, labels, toks[:, 0].to(device)
+    if A is None:
+        A = ids[s["n_prompt"]:]
+    base = s["n_prompt"] - 1
+    lab = np.stack([A[x - base:x - base + BLOCK - 1] for x in anchors]).astype(np.int64)
+    # teacher-forced text: row j is greedy-consistent only while the text so far equals the target's greedy tokens
+    agree = np.stack([ids[x + 1:x + BLOCK - 1] == A[x - base:x - base + BLOCK - 2] for x in anchors])
+    valid = np.concatenate([np.ones((len(anchors), 1), bool), np.cumprod(agree, 1).astype(bool)], 1)
+    labels = torch.from_numpy(lab).to(device)
+    return g, ctx_pos, emb, a, labels, toks[:, 0].to(device), torch.from_numpy(valid).to(device)
 
 
-def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w):
+def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w, valid=None):
     A = hn.shape[0]
+    if valid is None:
+        valid = torch.ones(A, BLOCK - 1, dtype=torch.bool, device=hn.device)
     rows = hn[:, 1:].reshape(-1, hn.shape[-1])
     logits = (rows @ tgt.head.T.to(rows.dtype)).float()
     ce = F.cross_entropy(logits, labels.reshape(-1), reduction="none").view(A, BLOCK - 1)
-    l_ce = (ce * wpos).sum(1).mean()
+    l_ce = (ce * wpos * valid).sum(1).mean()
     stats = dict(ce=float(ce.detach().mean()), top1=float((logits.detach().argmax(-1) == labels.reshape(-1)).float().mean()))
     if lat_w <= 0:
         return l_ce, stats
@@ -280,7 +295,7 @@ def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w):
     hit = cand == labels[..., None]
     has = hit.any(-1)
     prev_in = torch.cat([torch.ones(A, 1, dtype=torch.bool, device=hn.device), has[:, :-1]], 1)
-    ok = has & prev_in
+    ok = has & prev_in & valid
     tgt_slot = hit.float().argmax(-1)
     lce = F.cross_entropy(score.view(-1, TOP_K), tgt_slot.view(-1), reduction="none").view(A, BLOCK - 1)
     l_lat = (lce * ok * wpos).sum(1).mean()
@@ -324,11 +339,11 @@ def evaluate(dr, tgt, data, seq_ids, device, mask_id, dtype, max_anchors=4000):
     rng = random.Random(7)
     with torch.no_grad():
         for i in seq_ids:
-            s, ids, f = data.get(i)
+            s, ids, f, A = data.get(i)
             an = anchors_for(s, 4, rng)
             for c in range(0, len(an), 64):
                 ch = an[c:c + 64]
-                g, ctx_pos, emb, a, labels, atok = make_batch(dr, tgt, s, ids, f, ch, device, mask_id, dtype)
+                g, ctx_pos, emb, a, labels, atok, _ = make_batch(dr, tgt, s, ids, f, ch, device, mask_id, dtype, A)
                 with torch.autocast(device.type, dtype=dtype, enabled=True):
                     hn = dr(dr.features(g), ctx_pos, emb, a)
                 r, _ = walk_accept(dr, tgt, hn, labels, atok)
@@ -366,15 +381,18 @@ def train(a):
     cfg = sd["cfg"]
     data = Data(a.data)
     tgt = Target(a.target, device)
-    dr = Drafter(sd, cfg, quant=not a.no_quant, train_fc=data.feat_dim != cfg["n_embd"], device=device).to(device)
+    dr = Drafter(sd, cfg, quant=not a.no_quant, train_fc=data.feat_dim != cfg["n_embd"], device=device,
+                 fp_kinds=tuple(a.fp.split(",")) if a.fp else ()).to(device)
     if a.eval_only:
         dr.requires_grad_(False)
     del sd
     n_seq = len(data.seqs)
     order = list(range(n_seq))
     rng.shuffle(order)
-    n_val = max(1, int(n_seq * a.val_frac))
-    val, trn = order[:n_val], order[n_val:]
+    own = [i for i in order if not data.seqs[i].get("n_lab", 0)]   # validate on the target's own generations only
+    n_val = max(1, int(len(own) * a.val_frac))
+    val = own[:n_val]
+    trn = [i for i in order if i not in set(val)]
     params = [p for p in dr.parameters() if p.requires_grad]
     opt = None if a.eval_only else torch.optim.AdamW(params, lr=a.lr, betas=(0.9, 0.95), weight_decay=0.0, eps=1e-8,
                                                      fused=device.type == "cuda")
@@ -409,11 +427,11 @@ def train(a):
     acc_stats = []
     for mb in range(0, total_steps * a.accum):
         i, an = work[mb]
-        s, ids, f = data.get(i)
-        g, ctx_pos, emb, aa, labels, atok = make_batch(dr, tgt, s, ids, f, an, device, cfg["mask_id"], dtype)
+        s, ids, f, A = data.get(i)
+        g, ctx_pos, emb, aa, labels, atok, valid = make_batch(dr, tgt, s, ids, f, an, device, cfg["mask_id"], dtype, A)
         with torch.autocast(device.type, dtype=dtype, enabled=True):
             hn = dr(dr.features(g), ctx_pos, emb, aa)
-        loss, st = losses(dr, tgt, hn, labels, atok, wpos, a.lat_w)
+        loss, st = losses(dr, tgt, hn, labels, atok, wpos, a.lat_w, valid)
         (loss / a.accum).backward()
         acc_stats.append(st)
         if (mb + 1) % a.accum:
@@ -467,6 +485,7 @@ def main():
     ap.add_argument("--no-quant", action="store_true")
     ap.add_argument("--eval-only", action="store_true")
     ap.add_argument("--max-steps", type=int, default=0)
+    ap.add_argument("--fp", default="", help="kinds kept unquantized (ablation), e.g. fc,wk,wv")
     a = ap.parse_args()
     Path(a.out).mkdir(parents=True, exist_ok=True)
     train(a)
