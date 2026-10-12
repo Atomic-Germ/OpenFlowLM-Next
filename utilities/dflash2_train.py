@@ -195,14 +195,15 @@ class Target:
         z = np.load(path)
         signs = torch.from_numpy(z["signs"]).float()
         H = hadamard(HB)
-        self.emb = torch.empty(z["emb_s"].shape[0], 5120, dtype=dtype)
-        self.head = torch.empty(z["out_s"].shape[0], 5120, dtype=dtype)
+        n = z["emb_s"].shape[1] * G
+        self.emb = torch.empty(z["emb_s"].shape[0], n, dtype=dtype)
+        self.head = torch.empty(z["out_s"].shape[0], n, dtype=dtype)
         for name, dst, kind in (("emb", self.emb, "inv"), ("out", self.head, "fwd")):
             codes, s = z[name + "_codes"], z[name + "_s"]
             for r0 in range(0, codes.shape[0], 8192):
-                w = torch.from_numpy(unpack2(codes[r0:r0 + 8192], 5120)).float() - 1
-                w = (w.view(w.shape[0], -1, G) * torch.from_numpy(s[r0:r0 + 8192]).float()[..., None]).view(w.shape[0], 5120)
-                w = (w.view(-1, HB) @ H).view(w.shape[0], 5120)
+                w = torch.from_numpy(unpack2(codes[r0:r0 + 8192], n)).float() - 1
+                w = (w.view(w.shape[0], -1, G) * torch.from_numpy(s[r0:r0 + 8192]).float()[..., None]).view(w.shape[0], n)
+                w = (w.view(-1, HB) @ H).view(w.shape[0], n)
                 dst[r0:r0 + w.shape[0]] = (w * signs).to(dtype)    # emb: s*(H z); head: (W H) diag(s)
         self.emb = self.emb.to(device)
         self.head = self.head.to(device)
@@ -265,7 +266,7 @@ def losses(dr, tgt, hn, labels, anchor_tok, wpos, lat_w):
     logits = (rows @ tgt.head.T.to(rows.dtype)).float()
     ce = F.cross_entropy(logits, labels.reshape(-1), reduction="none").view(A, BLOCK - 1)
     l_ce = (ce * wpos).sum(1).mean()
-    stats = dict(ce=float(ce.mean()), top1=float((logits.argmax(-1) == labels.reshape(-1)).float().mean()))
+    stats = dict(ce=float(ce.detach().mean()), top1=float((logits.detach().argmax(-1) == labels.reshape(-1)).float().mean()))
     if lat_w <= 0:
         return l_ce, stats
     lg = logits.view(A, BLOCK - 1, -1)
@@ -401,6 +402,8 @@ def train(a):
         rng.shuffle(ep_items)
         work += ep_items
     total_steps = len(work) // a.accum
+    if a.max_steps:
+        total_steps = min(total_steps, a.max_steps)
     print(f"{n_seq} seqs ({len(trn)} train, {len(val)} val), {len(work)} micro-batches, {total_steps} steps", flush=True)
     step = 0
     acc_stats = []
@@ -463,6 +466,7 @@ def main():
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--no-quant", action="store_true")
     ap.add_argument("--eval-only", action="store_true")
+    ap.add_argument("--max-steps", type=int, default=0)
     a = ap.parse_args()
     Path(a.out).mkdir(parents=True, exist_ok=True)
     train(a)
