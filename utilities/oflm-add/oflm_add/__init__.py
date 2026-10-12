@@ -316,6 +316,17 @@ FAMILY_ALIASES = [
     ("gte", "gte"),
 ]
 
+# Recipe family -> the spelling builtin_backends.cpp registers. The recipes name a
+# family after the SPEC ("qwen35", no dot, so it is a legal directory name); the
+# engine keys it after model_list.json ("qwen3.5"). Everything that reads a spec
+# wants the first, everything that starts the engine wants the second, and a custom
+# GGUF install crosses from one to the other in a single manifest field.
+RECIPE_TO_RUNTIME_FAMILY = {
+    "qwen35": "qwen3.5",
+    "qwen36moe": "qwen3.6-moe",
+    "lfm2": "lfm2",
+}
+
 # GGUF general.architecture -> runtime details.family, consulted when the repo
 # name matches no FAMILY_ALIASES prefix. The name alias above covers the known
 # embedding-gemma hosts, but any other repo serving a gemma-embedding GGUF
@@ -924,6 +935,18 @@ def readme_base_chain(repo_id, modelscope=False, max_depth=3):
         frontier = nxt
         if not frontier:
             break
+    # A quant repo that declares no `base_model:` is the common case, not an
+    # exception: the uploader often writes a card with no YAML beyond
+    # library_name/license/pipeline_tag. The `-GGUF` suffix is the same signal
+    # q4nx-build reads (`_imatrix_sibling_repo`: a `-GGUF` repo is a quantized
+    # copy of the sibling of the same name), and the sibling is where the
+    # config.json lives. Without this the chain comes back empty and the install
+    # silently proceeds with no config at all.
+    if not ordered and repo_id and repo_id.endswith("-GGUF"):
+        sib = repo_id[: -len("-GGUF")]
+        if sib and sib != repo_id:
+            ordered.append(sib)
+            ordered.extend(readme_base_chain(sib, modelscope, max_depth - 1))
     return ordered
 
 
@@ -1870,7 +1893,13 @@ def family_from_gguf_arch(gguf_source):
     arch = inv[0].get("general.architecture") if inv else None
     if not arch:
         return None
-    return gguf_arch_families().get(str(arch).strip().lower())
+    fam = gguf_arch_families().get(str(arch).strip().lower())
+    # The recipes name a family the way the SPEC does ("qwen35"); the engine registry
+    # keys it the way model_list.json does ("qwen3.5"). Both are right about their own
+    # layer, and a custom GGUF wrote the recipe's spelling into details.family, so
+    # `oflm run` refused it with "family 'qwen35', which this build has no engine for" --
+    # the file installed, downloaded and linked correctly and then would not start.
+    return RECIPE_TO_RUNTIME_FAMILY.get(fam, fam)
 
 
 def family_from_config_dict(cfg):
@@ -2330,8 +2359,13 @@ def main():
                 # family "qwen3.5" while the GGUF header derives "qwen35", so
                 # the two never met and the model got no kernels at all. The
                 # spec_hash is the same key the open kernels already publish.
+                # The USER xclbin dir is searched too, not just the system one. A user
+                # who built a kernel set themselves -- or whose oflm ships one the
+                # system root predates -- otherwise could never satisfy this gate: the
+                # twin they built sat right there, and the system root still answered
+                # first. Same roots, same order as the safetensors path above.
                 kdir, found = find_open_kernels(
-                    want_hash, [sys_xcl] if sys_xcl else [], dir_name)
+                    want_hash, [user_xclbin_dir(args.xclbin_dir), sys_xcl], dir_name)
                 if kdir is None:
                     why = ("no installed open kernel set is built for this model's shape"
                            if want_hash else "no installed kernel set matched this model")

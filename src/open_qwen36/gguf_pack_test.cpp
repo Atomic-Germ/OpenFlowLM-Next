@@ -354,6 +354,91 @@ int main() {
         if (bad0) return 1;
     }
 
+    // ---- lmhead_q8_gguf: the pool tile dequantizes back to the GGUF's own values.
+    //
+    // Two things are being proven, and neither is reachable from the recipe tests.
+    //
+    // The TIED case: this GGUF has no output.weight (write_gguf stores only
+    // token_embd.weight), which is what most published GGUFs of these families look
+    // like -- llama.cpp drops the head when it is tied to the embedding. An op that
+    // looked lm_head.weight up by name would fail on every one of them. It must fall
+    // back to the embedding and produce the same tile it would have written had the
+    // tensor been spelled out.
+    //
+    // The LAYOUT: 1024 B of f32 scales (256 of them, indexed kb * 32 + r), then the
+    // codes as two 4096 B row quarters at k * 16 + r, in the 128-row supertile order.
+    // Reading the tile back with those exact rules and comparing against embed_row is
+    // the only check that catches a transposed scale plane or an off-by-one row
+    // quarter -- both of which compile cleanly and produce plausible garbage.
+    {
+        const size_t K = 256, ROWS = 32;                  // one chunk: 32 rows x a 256 k-tile
+        PackOp h;
+        h.op = "lmhead_q8_gguf";
+        h.tensor = "lm_head.weight";                     // NOT present in this tied GGUF
+        h.in_dim = K;
+        h.nch = ROWS * K / (32 * 256);
+        h.chunk_bytes = 9216;
+        std::vector<uint8_t> tile(9216, 0);
+        pools::apply(h, g, 0, tile.data(), tile.size(), 9216);
+
+        const float* scales = reinterpret_cast<const float*>(tile.data());
+        size_t bad = 0;
+        double worst = 0.0;
+        std::vector<float> row(K);
+        for (size_t r = 0; r < ROWS; ++r) {
+            // The head IS the embedding here: read the SAME tensor the fallback chose.
+            if (r < 32) g.embed_row("token_embd.weight", r, K, row.data());
+            for (size_t kb = 0; kb < 8; ++kb) {
+                float amax = 0.f;
+                for (size_t i = 0; i < 32; ++i)
+                    amax = std::max(amax, std::fabs(row[kb * 32 + i]));
+                const float want_sc = amax > 0.f ? amax / 127.f : 0.f;
+                const float got_sc = scales[kb * 32 + r];
+                if (got_sc != want_sc) ++bad;
+                for (size_t i = 0; i < 32; ++i) {
+                    // row quarter: rows 0..15 at +0, 16..31 at +4096; byte at k*16 + r
+                    const size_t off = (r >= 16 ? 4096 : 0) + (kb * 32 + i) * 16 + (r & 15);
+                    // SIGNED: the tile stores int8, so a value of -0.15 is the byte
+                    // 0xF7. Reading it as uint8 makes the block read back 4.07, which
+                    // looks exactly like a transposed plane and is not.
+                    const int q = static_cast<int8_t>(tile[1024 + off]);
+                    const float got = static_cast<float>(q) * want_sc;
+                    const double d = std::fabs(got - row[kb * 32 + i]);
+                    if (d > worst) worst = d;
+                }
+            }
+        }
+        if (bad) {
+            std::printf("FAIL lmhead_q8_gguf scales (%zu wrong)\n", bad);
+            return 1;
+        }
+        std::printf("ok    lmhead_q8_gguf tied->embedding, f32 scales (%zu rows)\n", ROWS);
+        // int8 requantization: the codes carry amax/127, so the worst error on a block
+        // is half a step. Anything larger means the tile was read back wrongly.
+        if (worst > 0.5f * (std::fabs(row[0]) + 1e-6f) && worst > 1e-3f) {
+            std::printf("FAIL lmhead_q8_gguf codes (worst |diff| %g)\n", worst);
+            return 1;
+        }
+        std::printf("ok    lmhead_q8_gguf codes (worst |diff| %.3g)\n", worst);
+
+        // The q4nx tile width must be refused rather than written: 8704 is bf16 scales,
+        // and writing it here would feed an f32 kernel a tile it cannot read.
+        PackOp wrong = h;
+        wrong.chunk_bytes = 8704;
+        bool refused = false;
+        try {
+            std::vector<uint8_t> bad_tile(8704, 0);
+            pools::apply(wrong, g, 0, bad_tile.data(), bad_tile.size(), 8704);
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        if (!refused) {
+            std::printf("FAIL lmhead_q8_gguf accepted a 8704 tile\n");
+            return 1;
+        }
+        std::printf("ok    lmhead_q8_gguf refuses the q4nx 8704 tile\n");
+    }
+
     // ---- pack_norm: f32 -> bf16 (RNE)
     {
         std::vector<uint8_t> nb(norm.size() * 2);
