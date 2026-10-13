@@ -97,6 +97,9 @@ def main():
     if len(got) == 1 and "error" in got[0] and got[0]["error"].startswith("parse:"):
         print("minja cannot parse the template:", got[0]["error"][:2000])
         return 1
+    if len(got) != len(cases):
+        print(f"minja returned {len(got)} results for {len(cases)} cases")
+        return 1
     bad = 0
     for i, (case, m) in enumerate(zip(cases, got)):
         h = hf_render(tokenizer, case)
