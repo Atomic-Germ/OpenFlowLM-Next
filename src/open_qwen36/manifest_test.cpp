@@ -248,12 +248,12 @@ int main(int argc, char** argv) {
     refused(m, bad, "num_hidden_layers", "a 24-layer slice config is refused (the manifest is the 40-layer set)");
 
     // ---- a broken manifest
-    json j = json::parse(std::string("{\"manifest_version\": 4}"));
+    json j = json::parse(std::string("{\"manifest_version\": 5}"));
     try {
         Manifest::parse(j, "broken");
-        check(false, "manifest_version 4 is refused");
+        check(false, "manifest_version 5 is refused");
     } catch (const std::runtime_error& e) {
-        check(std::string(e.what()).find("manifest_version 4") != std::string::npos, std::string("manifest_version 4 is refused: ") + e.what());
+        check(std::string(e.what()).find("manifest_version 5") != std::string::npos, std::string("manifest_version 5 is refused: ") + e.what());
     }
     // OPEN-MANIFEST: the bf16 GEMM pool op needs version 3, and one weight reads one format
     auto bf16_weight = [](json& j, int version, bool mixed) {
@@ -275,6 +275,33 @@ int main(int argc, char** argv) {
         bool ok = true;
         try { Manifest::parse(g, "q8 gemm"); } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
         check(ok, "a version 3 manifest with a bf16_gemm weight loads");
+    }
+    // OPEN-PREFILL-BFP16: the bfp16 pack op and step format need version 4
+    auto bfp16_weight = [](json& j, int version, const char* fmt) {
+        j["manifest_version"] = version;
+        json op = {{"op", "bfp16_gemm"}, {"tensor", "model.layer.{l}.linear_attn.ssm_out_proj.weight"},
+                   {"nch", 1024}, {"in_dim", 4096}, {"dst", 0}, {"row0", 0}, {"n_total", 4096}};
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"] = {{"from", "pack"}, {"pack", json::array({op})}};
+        if (*fmt) {
+            auto& st = j["layer_types"]["linear_attention"]["gemm_block"]["program"][1];
+            st["fmt"] = fmt;
+            if (std::string(fmt) == "bfp16") st["n_pad"] = 4096;
+        }
+    };
+    refused_manifest(argv[1], "needs version 4", "a bfp16_gemm weight in a version 3 manifest is refused at load",
+                     [&](json& j) { bfp16_weight(j, 3, ""); });
+    refused_manifest(argv[1], "fmt 'int4'", "an unknown step format is refused at load", [&](json& j) { bfp16_weight(j, 4, "int4"); });
+    {
+        std::ifstream f(argv[1]);
+        json g = json::parse(f);
+        bfp16_weight(g, 4, "bfp16");
+        bool ok = true;
+        try {
+            Manifest m4 = Manifest::parse(g, "bfp16");
+            ok = m4.layer_types.at("linear_attention").gemm_block.program[1].fmt == "bfp16" &&
+                 m4.layer_types.at("linear_attention").gemm_block.program[1].n_pad == 4096;
+        } catch (const std::runtime_error& e) { ok = false; std::printf("      %s\n", e.what()); }
+        check(ok, "a version 4 manifest with a bfp16 step and a bfp16_gemm weight loads");
     }
     // OPEN-PREFILL-MODE: a whole route the engine loads in place of gemm_block, and drops otherwise
     auto with_lean = [](json& j) {
@@ -683,7 +710,7 @@ int main(int argc, char** argv) {
                 check(false, std::string("qwen35: a split out projection parses: ") + e.what());
             }
         }
-        refused_manifest(argv[5], "std_perm or bf16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
+        refused_manifest(argv[5], "std_perm, bf16_gemm or bfp16_gemm ops", "qwen35: a packed weight that is not std_perm is refused",
                          [&](json& j) {
                              split_out(j);
                              json& o = j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["pack"][1];

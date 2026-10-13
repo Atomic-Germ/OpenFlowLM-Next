@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "open_qwen36/bfp16.hpp"
+
 namespace open_qwen36 {
 namespace host {
 
@@ -36,6 +38,11 @@ void transpose_parts(const float* y, size_t T, const TransposePart* parts, size_
 /// x [T, K] fp32 -> the GEMM's tiled bf16 activation layout ([K, T] "k,n" order, 64 x 32
 /// tiles of 8 x 8 MAC sub-tiles, gemm_q4_prefill.py); out holds K * T bf16 bits.
 void tile_x(const float* x, size_t T, size_t K, uint16_t* out);
+
+/// x [T, K] fp32 -> the A operand, T * K / 8 * 9 bytes. T a multiple of m * rows, K of k.
+void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint8_t* out);
+/// The kernel's c-tiled fp32 output of an M x N product -> y [n_real, M] (the GEMM's own [N, T] order).
+void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y);
 
 struct DeltaGeom {
     size_t T = 0, t_real = 0, hid = 0;

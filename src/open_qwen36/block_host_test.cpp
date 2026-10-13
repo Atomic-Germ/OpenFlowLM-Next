@@ -423,6 +423,35 @@ int main(int argc, char** argv) {
         check(ok, "transpose: [N, T] -> [T, N]");
     }
 
+    // ---- OPEN-PREFILL-BFP16: the activation packer matches the NumPy one, and the output untile inverts the kernel's order
+    {
+        const size_t T2 = 256, K2 = 128;
+        std::vector<float> x(T2 * K2);
+        for (size_t r = 0; r < T2; ++r)
+            for (size_t c = 0; c < K2; ++c) x[r * K2 + c] = static_cast<float>(static_cast<int>((r * 37 + c * 11) % 251) - 125) / 16.f * (1 + (c / 8) % 5);
+        std::vector<uint8_t> a(T2 * K2 / 8 * BFP16_BLOCK_BYTES);
+        host::bfp16_pack_a(x.data(), T2, K2, Bfp16Tiling{}, a.data());
+        uint64_t h = 1469598103934665603ull;
+        for (uint8_t b : a) h = (h ^ b) * 1099511628211ull;
+        std::printf("      bfp16_pack_a fnv1a = 0x%016llx\n", static_cast<unsigned long long>(h));
+        check(h == 0x8b24e0b36ad1f427ull, "bfp16_pack_a: byte-identical to the NumPy packer");
+
+        const size_t M = 512, N = 2048, rb = 256, J = N / 1024;
+        std::vector<float> c(M * N), un(N * M);
+        for (size_t col = 0; col < 8; ++col)
+            for (size_t rbi = 0; rbi < M / rb; ++rbi)
+                for (size_t t = 0; t < J; ++t)
+                    for (size_t rr = 0; rr < rb; ++rr)
+                        for (size_t j = 0; j < 128; ++j)
+                            c[((col * (M / rb) + rbi) * J + t) * rb * 128 + rr * 128 + j] =
+                                static_cast<float>((rbi * rb + rr) * N + (col + 8 * t) * 128 + j);
+        host::bfp16_untile_c(c.data(), M, N, Bfp16Tiling{}, 1920, un.data());
+        bool ok = true;
+        for (size_t n = 0; n < 1920; ++n)
+            for (size_t r = 0; r < M; ++r) ok = ok && un[n * M + r] == static_cast<float>(r * N + n);
+        check(ok, "bfp16_untile_c: the c-tiled output back to [N, T], padding rows dropped");
+    }
+
     std::printf("%s\n", failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

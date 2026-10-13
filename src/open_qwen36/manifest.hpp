@@ -44,6 +44,8 @@ struct PackOp {
                                                                         ///< "lo", one half of its exact q4_1
                                                                         ///< split ("" = the whole tensor)
     std::string via;                                                    ///< bf16_gemm: "q4_1" reads a q8 source as the q4 ops do
+    uint64_t row0 = 0, n_total = 0;                                     ///< bfp16_gemm: this tensor's first row in the stacked
+                                                                        ///< weight, and the weight's padded row count
     uint64_t dst_rows = 0;                                              ///< transpose: pad the
                                                                         ///< destination row to this
                                                                         ///< many values, tail zeroed
@@ -56,6 +58,9 @@ struct Step {
     std::string kernel;
     std::vector<std::string> args;           ///< run: buffer names (per-layer: pool consts act state; else globals)
     uint64_t act_off = 0;                    ///< moeroute2: the router record's offset in `act`
+    std::string fmt;                         ///< run, block route: "" = the q4_1 / bf16 GEMMs, "bfp16" = gemm_bfp16
+                                             ///< (x packed bfp16, y c-tiled with `n_pad` rows)
+    uint64_t n_pad = 0;                      ///< fmt bfp16: the weight's rows padded to a whole number of tile groups
     bool split = false;                      ///< run, block route: the weight is a q8 projection's exact q4_1
                                              ///< split, [hi | lo]; the GEMM runs twice the rows and the halves add
 };
