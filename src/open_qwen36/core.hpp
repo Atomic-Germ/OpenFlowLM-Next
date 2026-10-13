@@ -44,6 +44,7 @@
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/tap_ring.hpp"
 #include "stream_patch.hpp"
 #include "open_qwen36/verify_slots.hpp"
 
@@ -272,6 +273,16 @@ public:
 
     const Q4nxFile& file() const { return *file_; }
 
+    /// OPEN-DECODE-TAPS: keep the residual after each of `layers` (0-based, caller's order) for the last `window` positions; empty = off.
+    void set_taps(const std::vector<int>& layers, size_t window = 2048);
+    size_t tap_count() const { return tap_layers_.size(); }
+    /// Floats per position: tap_count() * hidden, the taps back to back.
+    size_t tap_width() const { return tap_ring_.width(); }
+    /// Position `pos`'s taps (f32, valid until the next pass), or nullptr: off, never run, out of the window, or a row accept() dropped.
+    const float* tap_row(long pos) const { return tap_ring_.row(pos); }
+    /// Bring-up: the decode buffer after the last step, f32 [hidden].
+    void read_residual(float* dst);
+
 private:
     struct Kern {
         std::string name;
@@ -442,6 +453,12 @@ private:
     bool route_sentinel_ = true;
     uint64_t route_reads_ = 0, route_late_ = 0;
     void arm_route_records();
+
+    // ---- taps (OPEN-DECODE-TAPS)
+    std::vector<int> tap_layers_;              ///< in the caller's order
+    std::vector<int> tap_index_;               ///< per layer: its place in tap_layers_, or -1
+    TapRing tap_ring_;
+    bool tap_on(int l) const { return !tap_index_.empty() && tap_index_[l] >= 0; }
 
     xrt::hw_context& context(const std::string& name);
     void load_kernel(const std::string& name, const KernelDesc& d);

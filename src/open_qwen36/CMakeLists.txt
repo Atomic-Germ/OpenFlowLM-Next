@@ -62,7 +62,11 @@ target_include_directories(spec_test PRIVATE ${_inc})
 add_executable(verify_slots_test verify_slots_test.cpp)
 target_include_directories(verify_slots_test PRIVATE ${_inc})
 
-foreach(t open_qwen36_cli manifest_test vit_test block_host_test spec_test verify_slots_test)
+# taps_test (no XRT): the tap ring's window, drop and prefill behaviour
+add_executable(taps_test taps_test.cpp)
+target_include_directories(taps_test PRIVATE ${_inc})
+
+foreach(t open_qwen36_cli manifest_test vit_test block_host_test spec_test verify_slots_test taps_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -75,6 +79,7 @@ add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
 add_test(NAME OPEN-DECODE-SPECULATIVE-VERIFY COMMAND verify_slots_test)
+add_test(NAME OPEN-DECODE-TAPS COMMAND taps_test)
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"

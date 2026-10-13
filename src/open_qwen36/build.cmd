@@ -54,6 +54,13 @@ if errorlevel 1 goto :clfail
 set "WHICH=verify_slots_test"
 out\verify_slots_test.exe
 if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] taps_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" taps_test.cpp /Fe:out\taps_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=taps_test"
+out\taps_test.exe
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^
