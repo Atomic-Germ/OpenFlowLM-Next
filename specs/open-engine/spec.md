@@ -3513,7 +3513,9 @@ projection, in one visit to the attention context per layer instead of two
 context changes per block. DeltaNet still runs block by block in position order,
 and each block's attention window is explicit, so every block's arithmetic is
 unchanged and the output is **byte-identical** to the block-at-a-time
-layer-major order. `OFLM_OPEN_STAGE_MAJOR=0` keeps that order, for the A/B.
+layer-major order. `OFLM_OPEN_STAGE_MAJOR=0` keeps that order, for the A/B. A rotated-basis
+(OPEN-HADAMARD) or token-major (OPEN-GEMM-T2) route never runs stage-major: `gemm_phase` tiles x
+plainly and reads y N-major, and those routes' transforms live in `gemm_run`.
 
 **Acceptance criteria (unit):**
 - The 35B emission as `test_prefill_batch.py` asserts it: `linear` runs `gemm_n12288_k2048` (qkv|z, pool ops 5 and 6) then `gemm_n2048_k4096` (out, consts op 10); `full` runs `gemm_n9216_k2048` (q, k, v, gate: pool ops 5-8) then `gemm_n2048_k4096` (o, pool op 9); one context `gemm` for every GEMM shape, plus `mx`; kernels `mx_linear` / `mx_full` with the moeroute2 patch; globals `gemm_x_k{K}` = K·T·2 and `gemm_y_n{N}` = N·T·4 bytes. A spec with `attn`, `linear` and `linear_out` at q8 (the published 35B container) emits, as its `lean` variant (OPEN-PREFILL-MODE), the route with `gqkvz_w`, `gqkvg_w`, `go_w` and `gout_w` as hi-then-lo split packs of the same tensors the sequential kernels read as `q8_perm` (half the q8 op's half-tile count, the fused `q_proj`'s gate half keeping its chunk offset), the steps on `gemm_n24576_k2048`, `gemm_n18432_k2048` and `gemm_n4096_k4096` with `split: true` (the out step via `out_split`), and the shared expert's q4_1 weights unchanged; a weight mixing q8 and q4_1 ops is refused. A q4_1 spec emits no `split` anywhere, and its manifest is byte-identical to the one before splits existed apart from the build key.
