@@ -63,7 +63,6 @@ the NPU, so it is a **manual** procedure in the spec, not a test.
   default route.
 - The default route's output is unchanged.
 
-## Not verified
+## Verification outcome
 
-- No K2 model is installed here, so K2 still working is covered only by the unit test. The
-  PR will say so.
+- K2-Horizon-3.7B was verified on hardware: both host-attention flags ran and matched the default route's 24-token output.
