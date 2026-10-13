@@ -34,7 +34,7 @@ def make(a) -> None:
     build = Path(a.build).resolve()
     cfg = ["device", f"xclbin G {build / 'final.xclbin'}", f"kernelx k G {build / 'insts.bin'}",
            f"buf a {a.M * a.K // 8 * 9} a.bin", f"buf b {a.N * a.K // 8 * 9} b.bin", f"buf c {a.M * a.N * 4}"]
-    cfg += ["run k a b c"] * a.repeat + [f"dump c c.bin {a.M * a.N * 4}", ""]
+    cfg += ["run k b a c"] * a.repeat + [f"dump c c.bin {a.M * a.N * 4}", ""]
     (out / "run.cfg").write_text("\n".join(cfg))
 
 

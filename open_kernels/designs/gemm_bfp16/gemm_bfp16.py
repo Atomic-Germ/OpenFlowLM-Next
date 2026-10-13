@@ -1,5 +1,7 @@
 r"""gemm_bfp16: whole-array bfp16 x bfp16 -> fp32 GEMM, C[M, N] = A[M, K] @ B[N, K]^T, one xclbin for every shape.
 
+Buffer arguments: B (weights), A (activations), C -- the engine's weight, x, y order.
+
 Derived from ggml-xdna's kernels/bfp16_gemm/designs/whole_array_bfp_rtp.py (Cyrus Attoun,
 https://github.com/Cyronius/ggml-xdna), itself derived from mlir-aie v1.4.2's block_datatypes
 whole_array example (Apache-2.0 WITH LLVM-exception, Copyright (C) Advanced Micro Devices, Inc.).
@@ -49,7 +51,7 @@ def check_shape(M: int, K: int, N: int, m: int, k: int, n: int) -> str | None:
 
 @iron.jit(aiecc_flags=["--dynamic-objFifos"])
 def gemm_bfp16(
-    A: In, B: In, C: Out, *,
+    B: In, A: In, C: Out, *,
     gm: CompileTime[int], gk: CompileTime[int], gn: CompileTime[int],
     tm: CompileTime[int] = 64, tk: CompileTime[int] = 64, tn: CompileTime[int] = 128,
 ):
@@ -146,7 +148,7 @@ def gemm_bfp16(
     n_rb = gm // tm // n_aie_rows
     n_taps = (n_rb // min(tb_max_n_rows // 2, n_rb)) * n_aie_cols
 
-    def sequence(a, b, c, A_prods, B_prods, C_conses):
+    def sequence(b, a, c, A_prods, B_prods, C_conses):
         for row in rtps:
             for rtp in row:
                 rtp[0] = gk // tk - 1
@@ -173,7 +175,7 @@ def gemm_bfp16(
                     tg = TaskGroup()
         tg.finish()
 
-    rt = Runtime(sequence, [A_ty, B_ty, C_ty, [f.prod() for f in A_l3l2], [f.prod() for f in B_l3l2],
+    rt = Runtime(sequence, [B_ty, A_ty, C_ty, [f.prod() for f in A_l3l2], [f.prod() for f in B_l3l2],
                             [f.cons() for f in C_l2l3]])
     return Program(iron.get_current_device(), rt, workers=[w for row in workers for w in row]).resolve_program()
 
