@@ -333,3 +333,14 @@ numerical failures return exit 1. This does not validate independent whole-model
 state, source-tensor conversion, linear attention, or LM-head accuracy. Passing
 local gates cannot override a failed full-chain residual gate. No new NPU run
 or full-model residency is required.
+
+`utilities/attention-entry-replay/` tests FP32 entry norm and direct FP32
+Q/gate/K/V preparation in a private full-ax design. Its appended scratch region
+is explicitly experimental; no production manifest is rewritten. It reuses one
+weight pool and retains K/V history across forced input positions. The BF16
+control must reproduce production activation/residual bytes and oracle results.
+Use the [FP32 entry replay skill](../../.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md)
+for build, resource audit, prepare/run/score and controlled comparison commands.
+The experiment shares the production checker's unrounded `score_layer` oracle.
+Passing it requires subsequent ABI integration and a new full-depth run before
+making claims about whole-model residual or runtime accuracy.

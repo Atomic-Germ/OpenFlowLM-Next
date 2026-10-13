@@ -87,6 +87,53 @@ def read_boundaries(path, offsets, hidden):
     return result
 
 
+def score_layer(spec, model, layer, inputs, captures):
+    """Shared unrounded oracle for production captures and explicitly labelled experiments."""
+    if not inputs or len(inputs) != len(captures):
+        raise ValueError('incomplete position coverage')
+    qw, kw, hid = spec.attn_q_width, spec.attn_kv_width, spec.hidden
+    results, weight_hashes = [], {}
+
+    def record(name, w):
+        weight_hashes[name] = hashlib.sha256(w.astype('<f8', copy=False).tobytes()).hexdigest()
+        return w
+
+    pre = f'model.layers.{layer}.'
+    name = pre+'input_layernorm.weight'
+    norm = record(name, model.bf16(name).astype(np.float64))
+    weights = {}
+    for role, rows in [('q', 2*qw), ('k', kw), ('v', kw)]:
+        name = pre+f'self_attn.{role}_proj.weight'
+        w = record(name, model.matmul_w(name, rows, hid).astype(np.float64))
+        if role == 'q':
+            weights['q'], weights['gate'] = w[:qw], w[qw:]
+        else:
+            weights[role] = w
+    projected = []
+    for token, (x, c) in enumerate(zip(inputs, captures)):
+        entry = compare_entry(x, norm, weights, c['xn'], {k:c[k].ravel() for k in ROLES}, spec.norm_eps)
+        exact_norm = x / np.sqrt(np.mean(x*x) + spec.norm_eps) * norm
+        projected.append({k:(w @ exact_norm).reshape(-1, spec.head_dim) for k,w in weights.items()})
+        results.append(dict(layer=layer, token=token, entry=entry))
+    del weights, w
+    norms = []
+    for role in ('q', 'k'):
+        name = pre+f'self_attn.{role}_norm.weight'
+        norms.append(record(name, model.bf16(name).astype(np.float64)))
+    ref_og = attention_reference(*(np.stack([p[k] for p in projected]) for k in ROLES if k != 'gate'),
+                                 np.stack([p['gate'] for p in projected]), *norms,
+                                 spec.norm_eps, spec.rotary_dim, spec.rope_inv_freq())
+    name = pre+'self_attn.o_proj.weight'
+    wo = record(name, model.matmul_w(name, hid, qw).astype(np.float64))
+    for token, (c, x) in enumerate(zip(captures, inputs)):
+        row = results[token]
+        row['output'] = compare_output(x, c['og'].ravel(), wo, c['out'], c['res'])
+        row['sublayer'] = compare_output(x, ref_og[token].ravel(), wo, c['out'], c['res'])
+        row['passed'] = all(row[k]['passed'] for k in ('entry', 'output', 'sublayer'))
+    del wo
+    return results, weight_hashes
+
+
 def check(model_dir, kernel_dir, out, layers=None):
     spec = spec_from_model_dir(model_dir)
     # The unsplit closing norm overwrites AA_XN; never treat that as entry norm.
@@ -105,58 +152,21 @@ def check(model_dir, kernel_dir, out, layers=None):
         raise ValueError('layers must be distinct covered full-attention indices')
     offsets = layout(spec, max_ctx=meta['max_ctx'])
     model = Q4NX(model_dir/'model.q4nx')
-    qw, kw, hid = spec.attn_q_width, spec.attn_kv_width, spec.hidden
     results, hashes, weight_hashes = [], {}, {}
-
-    def pin(path):
-        hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
-
-    def record(name, w):
-        weight_hashes[name] = hashlib.sha256(w.astype('<f8', copy=False).tobytes()).hexdigest()
-        return w
-
     for layer in layers:
-        pre = f'model.layers.{layer}.'
-        name = pre+'input_layernorm.weight'
-        norm = record(name, model.bf16(name).astype(np.float64))
-        weights = {}
-        for role, rows in [('q', 2*qw), ('k', kw), ('v', kw)]:
-            name = pre+f'self_attn.{role}_proj.weight'
-            w = record(name, model.matmul_w(name, rows, hid).astype(np.float64))
-            if role == 'q':
-                weights['q'], weights['gate'] = w[:qw], w[qw:]
-            else:
-                weights[role] = w
-        captures, inputs, projected = [], [], []
+        captures, inputs = [], []
         for token in range(meta['tokens']):
             suffix = sfx(token)
             inp = out/(f'y_res{layer-1}{suffix}.bin' if layer else f'xres{token}.bin')
             path = out/f'y_act{layer}{suffix}.bin'
-            x = read_capture(inp, hid)
+            inputs.append(read_capture(inp, spec.hidden))
             c = read_attention(path, offsets, spec.num_heads, spec.num_kv_heads, spec.head_dim,
                                selected.get('layout', {}).get('attn_output_dtype', 'bfloat16'))
-            c.update(read_boundaries(path, offsets, hid))
-            entry = compare_entry(x, norm, weights, c['xn'], {k:c[k].ravel() for k in ROLES}, spec.norm_eps)
-            exact_norm = x / np.sqrt(np.mean(x*x) + spec.norm_eps) * norm
-            projected.append({k:(w @ exact_norm).reshape(-1, spec.head_dim) for k,w in weights.items()})
-            results.append(dict(layer=layer, token=token, entry=entry))
-            captures.append(c); inputs.append(x); pin(inp); pin(path)
-        del weights, w
-        norms = []
-        for role in ('q', 'k'):
-            name = pre+f'self_attn.{role}_norm.weight'
-            norms.append(record(name, model.bf16(name).astype(np.float64)))
-        ref_og = attention_reference(*(np.stack([p[k] for p in projected]) for k in ROLES if k != 'gate'),
-                                     np.stack([p['gate'] for p in projected]), *norms,
-                                     spec.norm_eps, spec.rotary_dim, spec.rope_inv_freq())
-        name = pre+'self_attn.o_proj.weight'
-        wo = record(name, model.matmul_w(name, hid, qw).astype(np.float64))
-        for token, (c, x) in enumerate(zip(captures, inputs)):
-            row = results[-meta['tokens']+token]
-            row['output'] = compare_output(x, c['og'].ravel(), wo, c['out'], c['res'])
-            row['sublayer'] = compare_output(x, ref_og[token].ravel(), wo, c['out'], c['res'])
-            row['passed'] = all(row[k]['passed'] for k in ('entry', 'output', 'sublayer'))
-        del wo
+            c.update(read_boundaries(path, offsets, spec.hidden))
+            captures.append(c)
+            for f in (inp, path):hashes[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+        rows, weights = score_layer(spec, model, layer, inputs, captures)
+        results.extend(rows);weight_hashes.update(weights)
     return dict(version=1, passed=all(r['passed'] for r in results),
                 scope=__doc__.strip(), layers=layers, tokens=meta['tokens'], maxrel_bound=MAXREL,
                 spec_hash=selected['spec_hash'], build_key=selected['build_key'],

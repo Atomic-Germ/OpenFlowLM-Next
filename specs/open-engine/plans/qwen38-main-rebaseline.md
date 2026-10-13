@@ -13,6 +13,12 @@ through one shared BO while retaining every layer state. Resident-runtime
 identity/reset for this export remains untested because available memory is
 below the full-load requirement. This is not complete model support.
 
+A controlled FP32 attention-entry replay now passes **48/48 cases**, reducing
+worst composed branch error from **0.0236300737 to 0.0005290482**. The BF16
+control reproduces all 96 retained captures byte for byte and the same ten
+local failures. Production integration and new full-depth validation remain
+pending; this isolated result does not change the export acceptance above.
+
 ## Stage 1: complete decode comparison
 
 - Added manifest-derived fixture metadata with the expected token/layer counts,
@@ -928,3 +934,61 @@ export audit and the repeated full-chain comparison. The export's failure marker
 remains in place. Next: an isolated FP32-entry-norm versus BF16-control replay
 on matching inputs/history, then integration only if the local gates improve.
 Resident runtime/reset, DeltaNet state, LM head, prefill and serving remain open.
+
+## Stage 5c9: controlled FP32 attention-entry replay
+
+Added `utilities/attention-entry-replay/` to test the entry-precision hypothesis
+on all 16 full-attention layers × three positions. The BF16 control pins copies
+of the retained production ax binaries. The candidate builds a private full ax
+with FP32 entry RMSNorm (`ln_nr32`) and direct FP32 Q/gate/K/V table preparation.
+It appends 20480 bytes of norm scratch after the original 266240-byte act buffer;
+other offsets, weights, paired attention and FFN stages are unchanged. Exact
+source anchors and independent experiment/source/binary hashes prevent accidental
+reuse after source drift. Production recipes and manifests are not modified.
+
+Both variants receive the same retained incoming residuals, constants and weight
+pools. State/act are reset between layers and K/V history is retained across
+positions. Each completes **48 NPU dispatches**. Control reproduces all **96
+activation/residual captures byte for byte**, including its ten branch failures.
+The shared `attention_projections.score_layer` oracle preserves all independent
+FP64 math and the strict normalized max-error threshold **<0.005**.
+
+| Primary gate | BF16 control worst | FP32 candidate worst |
+|---|---:|---:|
+| Entry norm | 0.0030703652 | 0.0000103846 |
+| Q projection | 0.0045171202 | 0.0001849842 |
+| Gate projection | 0.0026948500 | 0.0002755196 |
+| K projection | 0.0036089342 | 0.0002652475 |
+| V projection | 0.0029681746 | 0.0002784229 |
+| Output projection from captured attention | 0.0002811151 | 0.0001703476 |
+| Composed attention branch output | **0.0236300737** | **0.0005290482** |
+| Composed post-attention residual | 0.0023039741 | 0.0000867198 |
+
+The FP32 candidate passes **48/48 cases**, removing all **10 local failures**.
+The control score returns exit 1 as expected; candidate scoring returns exit 0.
+Final comparison passes with **185 identical common input hashes**, matching
+effective weights and exact reproduction of the retained control oracle results.
+This establishes the local correction on forced retained inputs. It does not
+establish full-model propagation or prove that all three full-chain residual
+failures disappear when layers receive corrected upstream outputs.
+
+Candidate program memory: all 15 compute cores fit 16384 bytes, maximum
+**13760**; GEMV cores **9824**, norm helper **3600**. Compiler-assigned L1 buffer
+end reaches **59920/65536 bytes**, including reserved stack space; the **6144-byte
+stack is unchanged**. Data BO sizes total **254085120 bytes** (~242.31 MiB),
+using one reused layer pool. Native Python 3.14 / mlir-aie 1.4.2 /
+Peano 21.0.0.2026080301+c9c5ecb7; the retained native harness runs on XDNA2.
+No full-model residency was required.
+
+TDD adds eight replay/config/provenance/comparison tests, with recorded red then
+green results. The existing 33 projection tests cover the extracted shared oracle.
+Full suite: **1090 passed, 47 skipped**. Artifacts and logs are in
+`Models/qwen38-27b/attention-entry-replay/`; build/resource metadata pins generated
+designs, binaries and core ELF evidence. Candidate source hash:
+`fcbd7273f296c66ed434ee19da637291286dc6a36408dadef7983d76901b35e5`.
+
+Reproduction: [FP32 entry replay skill](../../../.opencode/skill/open-qwen38-fp32-attention-entry/SKILL.md).
+Next integrate the entry dtype/scratch/stream ABI into production, build a fresh
+complete export and repeat full-depth gates. The retained production export's
+three residual failures and failure marker remain unchanged; resident runtime/
+reset, independent state/LM-head, prefill and serving acceptance remain open.
