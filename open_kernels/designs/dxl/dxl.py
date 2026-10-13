@@ -73,7 +73,8 @@ if os.environ.get("LX_NULL_GEMV") == "1":    # probe only (attnknobs.PROBE_VARS 
     GL_FLAGS.append("-DGEMV_NULL")
 NULL_PREP = os.environ.get("DXL_NULL_PREP") == "1"     # probes: the stream and fifos unchanged, the arithmetic gone
 NULL_LN = os.environ.get("DXL_NULL_LN") == "1"
-W_DEPTH = int(os.environ.get("DXL_WDEPTH", 2))
+# a deeper weight fifo prefetches through the activation prep; only where L1 holds the extra chunks
+W_DEPTH = int(os.environ.get("DXL_WDEPTH", 4 if DXR._main_l1(LR, X.YB, X.BP, G.KV_PC, X.TAB_K) + 2 * CHUNK <= DXR.L1_BUDGET else 2))
 # fewer accumulator spills in the tile loop (154 -> 140 bundles a k-block); scheduling only, no arithmetic
 GEMV_SCHED = ["-mllvm", "-aie-aggressive-realloc", "-mllvm", "-aie-gpr-realloc"]
 

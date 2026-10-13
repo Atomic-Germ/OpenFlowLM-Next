@@ -1500,6 +1500,20 @@ the 40 layers, noise ids `[1, 100256)`) shall run the cycle of OPEN-UNO-DECODE, 
 - A cycle costs 3.2-3.3 decode steps. K2's adapter commits 3.47 tokens a cycle and gains 1.11x; this one commits
   fewer at four rows, so the cycle does not pay yet.
 
+**Result 2026-10-13 (dxl tile scheduling, weight fifo depth 4; measured with FrameServer's idle NPU context present and normal host CPU load, no timing gate):**
+
+| prompt | tokens a cycle | Uno | plain decode | cycle / step | speedup |
+|---|---|---|---|---|---|
+| chat | 2.42 | 16.90 tok/s | 19.03 | 2.73 | 0.89x |
+| chat2 | 2.61 | 18.34 | 19.17 | 2.73 | 0.96x |
+| code | 3.20 | 22.36 | 19.11 | 2.73 | 1.17x |
+| code2 | 3.20 | 22.55 | 19.03 | 2.70 | 1.18x |
+| math | 3.76 | 26.46 | 18.99 | 2.70 | 1.39x |
+| reason | 3.46 | 24.24 | 18.89 | 2.70 | 1.28x |
+
+- All six identical to decode; geometric-mean speedup 1.13x. `--rows-check 17`: ROWS PASS on Granite and K2-3.7B.
+- Verify pass 67.0 -> 64.2 ms; the cycle is 2.7-2.73 decode steps (was 2.88). Nulling the GEMV leaves 57 ms and the prep 61 ms, so 10 and 6 ms of core compute are still exposed.
+
 ### OPEN-FAMILY-QWEN35: Qwen3.5 dense on the open kernels
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen35.py`, `spec.py`, `qwen36moe.py`,
 `designs/layer_x/lx.py`, `ax.py`, `xcommon.py`, `dnx.h`, `designs/dn_glue/glue_copy_e.cc`,
