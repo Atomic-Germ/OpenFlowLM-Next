@@ -1807,6 +1807,21 @@ is not already listed, keeping the tokenizer's own ids first.
 - every generation id already listed → the file is left as it was.
 - no `generation_config.json`, or one without `eos_token_id` → unchanged.
 
+### OPEN-CONVERT-FAMILY-TAG: a converted K2 config is tagged with its family
+**Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/model_assets.py`)
+**Verification:** test
+**External tests:** `utilities/q4nx-build/tests/test_oflm_family.py`
+
+`oflm add` finds a renamed or fine-tuned repository through the `oflm-family` tag in its README,
+which q4nx-build derives from the generated `config.json`'s `model_type`. K2-Horizon publishes
+`model_type: k2_horizon`; without a mapping to the `k2` family the tag was omitted and such a
+repository could not be linked to the K2 kernels. `oflm_family_of()` shall map `k2_horizon`
+(case-insensitively) to `k2` and return `None` for a `model_type` it does not know.
+
+**Acceptance criteria:**
+- `{"model_type": "k2_horizon"}` → `k2`; `"K2_Horizon"` → `k2`.
+- `{"model_type": "no_such_arch"}` → `None`.
+
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
 `designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `model/dense_probe.py`,

@@ -415,10 +415,14 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
     if (this->is_eos(seed)) return result;
     this->profiler_list[DECODING_TIME].reset();
     this->profiler_list[TKOEN_DECODE_TIME].reset();
+    if (this->total_tokens >= this->MAX_L) {
+        header_print("WARNING", "Max length reached, stopping generation...");
+        meta_info.stop_reason = MAX_LENGTH_REACHED;
+        return result;
+    }
     std::vector<int> committed;
     bool done = false;
-    // a cycle writes up to L + 1 positions past the seed; stop cycling short of the capacity
-    while (!done && this->total_tokens + 8 < this->MAX_L) {
+    while (!done && this->total_tokens < this->MAX_L) {
         if (is_cancelled()) {
             reason = CANCEL_DETECTED;
             buffer_.clear();
@@ -428,9 +432,20 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
             break;
         }
         committed.clear();
+        // a cycle writes up to L + 1 positions past the seed; with less room left, decode one token at a time
+        const bool plain = this->total_tokens + 8 >= this->MAX_L;
+        int p = 0;
         this->profiler_list[DECODING_TIME].start();
-        const int p = eng->uno_cycle(seed, committed);
-        this->profiler_list[DECODING_TIME].stop(static_cast<int>(committed.size()));
+        if (plain) {
+            buffer<bf16> y = this->lm_engine->forward(seed);
+            this->profiler_list[DECODING_TIME].stop(1);
+            this->profiler_list[SAMPLING_TIME].start();
+            committed.push_back(this->sampler->sample(y));
+            this->profiler_list[SAMPLING_TIME].stop(1);
+        } else {
+            p = eng->uno_cycle(seed, committed);
+            this->profiler_list[DECODING_TIME].stop(static_cast<int>(committed.size()));
+        }
         for (size_t i = 0; i < committed.size(); ++i) {
             const int t = committed[i];
             this->total_tokens++;
@@ -446,7 +461,9 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
             const bool last = i + 1 == committed.size();
             if (this->is_eos(t)) {
                 // token i sits at p + 1 + i; all but the cycle's last are already cached
-                if (this->forward_on_eos) {
+                if (plain) {
+                    if (this->forward_on_eos) this->lm_engine->forward(t);
+                } else if (this->forward_on_eos) {
                     if (last) this->lm_engine->forward(t);
                     else eng->uno_seek(p + 2 + static_cast<int>(i));
                 } else {
@@ -457,7 +474,7 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
             }
             if ((length_limit > 0) && (meta_info.generated_tokens >= length_limit)) {
                 reason = MAX_LENGTH_REACHED;
-                eng->uno_seek(p + 1 + static_cast<int>(i));     // as plain decode: the last emitted token uncached
+                if (!plain) eng->uno_seek(p + 1 + static_cast<int>(i));     // as plain decode: the last emitted token uncached
                 done = true;
                 break;
             }
@@ -465,8 +482,11 @@ std::string AutoModel::_shared_generate_uno(chat_meta_info_t& meta_info, int len
         }
     }
     meta_info.decoding_duration = (uint64_t)(time_utils::cast_to_us(this->profiler_list[DECODING_TIME].get_total_time()).first) * 1e3;
+    if (!done && reason != CANCEL_DETECTED) {
+        reason = MAX_LENGTH_REACHED;
+        header_print("WARNING", "Max length reached, stopping generation...");
+    }
     meta_info.stop_reason = reason;
-    if (!done && reason != CANCEL_DETECTED) header_print("WARNING", "Max length reached, stopping generation...");
     std::cout << std::endl;
     header_print("OFLM", "Model RAW Output: \n" + result);
     return result;

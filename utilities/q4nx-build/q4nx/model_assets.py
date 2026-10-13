@@ -654,7 +654,7 @@ _OFLM_FAMILY_OF_MODEL_TYPE = {
     "gemma3": "gemma3", "gemma3_text": "gemma3", "gemma3_text_only": "gemma3",
     "gemma4_text": "gemma4", "gemma4": "gemma4",
     "hunyuan_v1_dense": "hunyuan", "granite": "granite",
-    "phi3": "phi3", "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss",
+    "phi3": "phi3", "phi4": "phi4", "lfm2": "lfm2", "gpt_oss": "gpt-oss", "k2_horizon": "k2",
 }
 
 # Tags every OFLM conversion carries. `npu2`/`q4nx` say what the file IS;
