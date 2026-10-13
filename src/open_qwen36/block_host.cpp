@@ -13,6 +13,7 @@
 #include <omp.h>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -163,6 +164,25 @@ void tile_x(const float* x, size_t T, size_t K, uint16_t* out) {
                         for (size_t t = 0; t < MAC; ++t)
                             *w++ = f32_to_bf16(x[(nb * TN + ti * MAC + t) * K + kb * TK + si * MAC + s]);
         }
+}
+
+void bfp16_pack_a(const float* x, size_t T, size_t K, const Bfp16Tiling& t, uint8_t* out) {
+    if (T % (t.m * t.rows) || K % t.k) throw std::runtime_error("open_qwen36: bfp16_pack_a: T or K does not tile");
+#pragma omp parallel for
+    for (long long r = 0; r < static_cast<long long>(T); ++r)
+        for (size_t cb = 0; cb < K / 8; ++cb)
+            bfp16_encode_block(x + static_cast<size_t>(r) * K + cb * 8, out + bfp16_a_offset(static_cast<size_t>(r), cb, K, t));
+}
+
+void bfp16_untile_c(const float* c, size_t M, size_t N, const Bfp16Tiling& t, size_t n_real, float* y) {
+    const size_t rb = t.m * t.rows, blk = rb * t.n, J = N / (t.n * t.cols);
+#pragma omp parallel for
+    for (long long nn = 0; nn < static_cast<long long>(n_real); ++nn) {
+        const size_t n = static_cast<size_t>(nn), ct = n / t.n, j = n % t.n;
+        const float* base = c + (ct % t.cols) * (M * N / t.cols) + (ct / t.cols) * blk + j;
+        float* o = y + n * M;
+        for (size_t r = 0; r < M; ++r) o[r] = base[(r / rb) * J * blk + (r % rb) * t.n];
+    }
 }
 
 void deltanet_block(const DeltaGeom& g, const float* qkv, const float* z, const float* xn, const float* convw,

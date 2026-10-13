@@ -36,6 +36,8 @@ the 27B these rules give the sizes ax.py uses (4096 / 4096 / 1024).
 """
 from __future__ import annotations
 
+import copy
+
 import os
 
 from dataclasses import dataclass, replace
@@ -587,6 +589,71 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     return out
 
 
+# The bfp16 block prefill route (OPEN-PREFILL-BFP16): the same five GEMMs on designs/gemm_bfp16 with the weights
+# repacked from the container's q4_1 to bfp16 at load. Only a family whose route has run on hardware gets one.
+BFP16_FAMILIES = ("granite",)
+BFP16_ROWS = 1024       # gemm_bfp16's n * 8 columns: a weight's rows are padded to a whole number of these
+
+
+def bfp16_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
+    """`gemm_route`'s five steps on gemm_bfp16, as the `bfp16` variant of the route (the user picks it with
+    OFLM_OPEN_PREFILL_MODE=bfp16), plus its contexts / kernels / globals / builds; None when the spec has no q4_1
+    route or its family is not in BFP16_FAMILIES."""
+    if spec.family not in BFP16_FAMILIES:
+        return None
+    base = gemm_route(spec, max_ctx)
+    if not base:
+        return None
+    T = GEMM_T
+    plans = pack_plan(spec)["layer_types"]
+    out: dict = {"contexts": {}, "kernels": {}, "globals": {}, "builds": {}, "layer_types": {}}
+    qh = spec.quant_hash()
+    sfx = f"_q{qh}" if qh else ""
+    names = {"gqkv3_w": ["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight"],
+             "go_w": ["self_attn.o_proj.weight"], "ggate_w": ["mlp.gate_proj.weight"],
+             "gup_w": ["mlp.up_proj.weight"], "gdown_w": ["mlp.down_proj.weight"]}
+    for lt, gb in base["layer_types"].items():
+        pool = plans[lt]["pool"]
+        gb = copy.deepcopy(gb)
+        weights, pad_of = {}, {}
+        for wname, suffixes in names.items():
+            ops, row0 = [], 0
+            idx = [_op_index(pool, s_) for s_ in suffixes]
+            rows = [pool[i]["nch"] // (pool[i]["in_dim"] // 256) * 32 for i in idx]
+            n_pad = -(-sum(rows) // BFP16_ROWS) * BFP16_ROWS
+            for i, r in zip(idx, rows):
+                o = pool[i]
+                op = {"op": "bfp16_gemm", "tensor": o["tensor"], "nch": o["nch"], "in_dim": o["in_dim"],
+                      "dst": 0, "row0": row0, "n_total": n_pad}
+                if "chunk0" in o:
+                    op["chunk0"] = o["chunk0"]
+                ops.append(op)
+                row0 += r
+            if any(o["in_dim"] % 64 for o in map(pool.__getitem__, idx)):
+                raise OpRangeError(f"bfp16 route: {wname} has a K that is not a multiple of 64")
+            weights[wname] = {"from": "pack", "pack": ops}
+            pad_of[wname] = n_pad
+        gb["weights"] = weights
+        steps = []
+        for st in gb["program"]:
+            wname = st["args"][0]
+            K = int(st["args"][1].removeprefix("gemm_x_k"))
+            n_pad = pad_of[wname]
+            kname = f"gemm_bfp16_n{n_pad}_k{K}"
+            steps.append({"op": "run", "kernel": kname, "args": [wname, f"gbfp_x_k{K}", f"gbfp_y_n{n_pad}"],
+                          "fmt": "bfp16", "n_pad": n_pad})
+            out["contexts"].setdefault("gemmbfp", f"{kname}/final.xclbin")
+            out["kernels"][kname] = {"context": "gemmbfp", "insts": f"{kname}/insts.bin", "build": kname}
+            out["globals"][f"gbfp_x_k{K}"] = T * K // 8 * 9
+            out["globals"][f"gbfp_y_n{n_pad}"] = n_pad * T * 4
+            out["builds"][kname] = {"design": "gemm_bfp16/gemm_bfp16.py",
+                                    "build_dir": f"gemm_bfp16/build_n{n_pad}_k{K}_m{T}{sfx}",
+                                    "env": {"GB_M": str(T), "GB_K": str(K), "GB_N": str(n_pad)}}
+        gb["program"] = steps
+        out["layer_types"][lt] = gb
+    return out
+
+
 def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     """One design serves every dense layer type; a layer type with a sliding window gets its own
     kernel entry (the same instruction stream, its own instruction BO, patched with its window)
@@ -650,6 +717,12 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
             out[k].update(r[k])
         for lt, gb in r["layer_types"].items():
             out["layer_types"][lt]["gemm_block"] = gb
+        bf = bfp16_route(spec, max_ctx)
+        if bf:
+            for k in ("contexts", "kernels", "globals"):
+                out[k].update(bf[k])
+            for lt, gb in bf["layer_types"].items():
+                out["layer_types"][lt].setdefault("gemm_block_variants", {})["bfp16"] = gb
     rr = None if f32 else rows_route(spec)
     if rr:
         out["contexts"].update(rr["contexts"])
@@ -731,6 +804,9 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     r = gemm_route(spec)
     if r:
         b.update(r["builds"])
+        bf = bfp16_route(spec)
+        if bf:
+            b.update(bf["builds"])
     rr = rows_route(spec)
     if rr:
         b.update(rr["builds"])
@@ -837,6 +913,7 @@ KERNEL_SOURCES = [
     "designs/lm_head_q4/*.py",
     # the block prefill route's GEMM (gemm_route); dx_attn.py is already in designs/dense/*.py
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
+    "designs/gemm_bfp16/*.py", "designs/gemm_bfp16/*.cc",
     "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
     "include/vecmath.h", "include/scalar_fp.h", "ironutil.py", "build_design.py",
 ]
